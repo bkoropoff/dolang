@@ -1,0 +1,31 @@
+import http
+import http.mock
+import std:
+  - RuntimeError
+import test:
+  - assert
+  - assert_eq
+  - test
+
+#[test]
+def redirect_loop_error()
+  http.mock.Server do |server|
+    server.mock
+      - method: GET
+        path: /redirect-loop
+        respond:
+          status: 302
+          headers:
+            location: /redirect-loop
+      do |_handle|
+        let redirect_caught = try
+          http.get (server.url / "/redirect-loop")
+          false
+        catch err
+          assert (type err http.Error)
+          assert (type err RuntimeError)
+          assert_eq ((err.url).path) "/redirect-loop"
+          assert ((str err).contains "redirect")
+          true
+
+        assert $redirect_caught

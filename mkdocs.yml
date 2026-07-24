@@ -129,6 +129,10 @@ nav:
       - api/http/event.md
       - api/http/response.md
       - api/http/status.md
+    - http-mock:
+      - api/http-mock/index.md
+      - api/http-mock/server.md
+      - api/http-mock/mock.md
     - json: api/json.md
     - patch:
       - api/patch/index.md

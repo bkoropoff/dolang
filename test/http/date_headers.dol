@@ -1,0 +1,36 @@
+import http
+import http.mock
+import time:
+  - DateTime
+import test:
+  - assert
+  - assert_eq
+  - test
+
+#[test]
+def date_header_roundtrip()
+  let sent = DateTime.from_unix(1000)
+
+  http.mock.Server do |server|
+    server.mock
+      - method: GET
+        path: /date-headers
+        headers:
+          "if-modified-since": Thu, 01 Jan 1970 00:16:40 GMT
+        respond:
+          status: 200
+          headers:
+            "last-modified": Thu, 01 Jan 1970 00:16:40 GMT
+            "x-test": ok
+      - method: GET
+        path: /date-headers
+        respond:
+          status: 400
+      do |_handle|
+        http.get (server.url / "/date-headers") headers: {"if-modified-since": sent} do |res|
+          assert_eq $res.status 200
+          let headers = res.headers
+          assert (type headers["last-modified"] DateTime)
+          assert_eq $headers["last-modified"].unix_secs 1000.0
+          assert_eq $headers["last-modified"].unix_nanos 1000000000000
+          assert_eq $headers["x-test"] "ok"

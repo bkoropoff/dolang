@@ -1,0 +1,92 @@
+import
+  http
+  http.mock
+  std:
+    - TypeError
+import test:
+  - assert
+  - assert_eq
+  - test
+
+def assert_err func type: ty :msg ...rest
+  let res = try
+    func ...rest
+    false
+  catch e
+    assert (type e ty)
+    assert_eq (str e) $msg
+    true
+  assert $res
+
+#[test]
+def cookie_jar_session()
+  http.mock.Server do |server|
+    server.mock
+      - method: GET
+        path: /login
+        respond:
+          status: 200
+          headers:
+            "set-cookie": "session=abc; Path=/; HttpOnly"
+      - method: GET
+        path: /session
+        headers:
+          cookie: session=abc
+        respond:
+          status: 200
+          body: ok
+      - name: session-unauthorized
+        method: GET
+        path: /session
+        respond:
+          status: 401
+      do |_handle|
+        let jarred = http.Client cookies: true
+        jarred.get (server.url / "/login") do |res|
+          assert_eq $res.status 200
+          let set_cookie = (res.headers)["set-cookie"]
+          assert ((str set_cookie).contains "session=abc")
+
+        jarred.get (server.url / "/session") do |res|
+          assert_eq $res.status 200
+          assert_eq (res.text()) ok
+
+        let plain = http.Client()
+        plain.get (server.url / "/login")
+        let plain_missing_session = try
+          plain.get (server.url / "/session")
+          false
+        catch e
+          assert (type e http.Status)
+          assert_eq $e.status 401
+          true
+        assert $plain_missing_session
+
+        let first = http.Client cookies: true
+        let second = http.Client cookies: true
+        first.get (server.url / "/login")
+        let isolated_clients = try
+          second.get (server.url / "/session")
+          false
+        catch e
+          assert (type e http.Status)
+          assert_eq $e.status 401
+          true
+        assert $isolated_clients
+        second.get (server.url / "/login")
+        second.get (server.url / "/session") do |res|
+          assert_eq $res.status 200
+
+        http.get (server.url / "/login")
+        let top_level_stateless = try
+          http.get (server.url / "/session")
+          false
+        catch e
+          assert (type e http.Status)
+          assert_eq $e.status 401
+          true
+        assert $top_level_stateless
+
+#[test]
+def cookies_kwarg_type_error()
+  assert_err $http.Client cookies: 1 type: $TypeError msg: "type error: cookies: expected bool"

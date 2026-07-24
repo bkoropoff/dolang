@@ -1,0 +1,139 @@
+import http
+import http.mock
+import std:
+  - RuntimeError
+import test:
+  - assert
+  - assert_eq
+  - test
+
+#[test]
+def not_found_error()
+  http.mock.Server do |server|
+    server.mock
+      - method: GET
+        path: /not-found
+        respond:
+          status: 404
+          headers:
+            "x-error": missing
+          body: missing
+      do |_handle|
+        let caught = try
+          http.get (server.url / "/not-found")
+          false
+        catch err
+          assert (type err http.Status)
+          assert (type err http.Error)
+          assert (type err RuntimeError)
+          assert_eq $err.status 404
+          assert_eq $err.headers["x-error"] "missing"
+          assert_eq (err.text()) "missing"
+          assert_eq $err.truncated false
+          true
+        assert $caught
+
+#[test]
+def server_error_json()
+  http.mock.Server do |server|
+    server.mock
+      - method: GET
+        path: /error
+        respond:
+          status: 500
+          headers:
+            "x-error": boom
+          json: {error: "boom"}
+      do |_handle|
+        let caught = try
+          http.get (server.url / "/error")
+          false
+        catch err
+          assert (type err http.Status)
+          assert_eq $err.status 500
+          assert_eq $err.headers["x-error"] "boom"
+          let data = err.json()
+          assert_eq $data["error"] "boom"
+          assert_eq $err.truncated false
+          true
+        assert $caught
+
+#[test]
+def not_modified()
+  http.mock.Server do |server|
+    server.mock
+      - method: GET
+        path: /not-modified
+        respond:
+          status: 304
+      do |_handle|
+        let caught = try
+          http.get (server.url / "/not-modified")
+          false
+        catch err
+          assert (type err http.Status)
+          assert_eq $err.status 304
+          assert_eq $err.truncated false
+          true
+        assert $caught
+
+#[test]
+def truncated_body()
+  http.mock.Server do |server|
+    server.mock
+      - method: GET
+        path: /large-error
+        respond:
+          status: 500
+          body: $ "x".repeat(70000)
+      do |_handle|
+        let caught = try
+          http.get (server.url / "/large-error")
+          false
+        catch err
+          assert (type err http.Status)
+          assert_eq $err.status 500
+          assert_eq $err.truncated true
+          assert_eq (err.body().len) 65536
+          assert_eq (err.text().len) 65536
+          true
+        assert $caught
+
+#[test]
+def status_ignore_policy()
+  http.mock.Server do |server|
+    server.mock
+      - method: GET
+        path: /not-found
+        respond:
+          status: 404
+          body: missing
+      - method: GET
+        path: /get
+        respond:
+          status: 200
+          body: "{\"status\":\"ok\"}"
+      - method: GET
+        path: /error
+        respond:
+          status: 500
+      do |_handle|
+        http.get (server.url / "/not-found") status: :IGNORE: do |res|
+          assert_eq $res.status 404
+          let caught = try
+            res.throw_for_status()
+            false
+          catch err
+            assert (type err http.Status)
+            assert_eq $err.status 404
+            assert_eq (err.text()) "missing"
+            true
+          assert $caught
+
+        http.get (server.url / "/get") status: :IGNORE: do |res|
+          assert_eq (res.throw_for_status()) nil
+          assert_eq $res.status 200
+          assert_eq (res.text()) "{\"status\":\"ok\"}"
+
+        let ignored = http.get (server.url / "/error") status: IGNORE
+        assert_eq $ignored.status 500

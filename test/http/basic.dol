@@ -1,0 +1,96 @@
+import http
+import http.mock
+import test:
+  - assert
+  - assert_eq
+  - test
+
+#[test]
+def get_request()
+  http.mock.Server do |server|
+    server.mock
+      - method: GET
+        path: /get
+        respond:
+          status: 200
+          body: "{\"status\":\"ok\"}"
+      do |_handle|
+        http.get (server.url / "/get") do |res|
+          assert_eq $res.status 200
+          let body = res.text()
+          assert (body.len > 0)
+
+#[test]
+def redirect_follows()
+  http.mock.Server do |server|
+    server.mock
+      - method: GET
+        path: /redirect
+        respond:
+          status: 302
+          headers:
+            location: /get
+      do |_h1|
+        server.mock
+          - method: GET
+            path: /get
+            respond:
+              status: 200
+          do |_h2|
+            http.get (server.url / "/redirect") do |res|
+              assert_eq $res.url.path /get
+
+#[test]
+def post_request()
+  http.mock.Server do |server|
+    server.mock
+      - method: POST
+        path: /post
+        respond:
+          status: 201
+      do |_handle|
+        http.post (server.url / "/post") do |res|
+          assert_eq $res.status 201
+
+#[test]
+def not_found_ignored()
+  http.mock.Server do |server|
+    http.get (server.url / "/not-found") status: :IGNORE: do |res|
+      assert_eq $res.status 404
+
+#[test]
+def custom_header()
+  http.mock.Server do |server|
+    server.mock
+      - method: GET
+        path: /headers
+        respond:
+          status: 200
+          headers:
+            "x-custom": test-value
+      do |_handle|
+        http.get (server.url / "/headers") do |res|
+          assert_eq $res.status 200
+          let headers = res.headers
+          let custom = headers["x-custom"]
+          assert_eq $custom "test-value"
+
+#[test]
+def json_body()
+  http.mock.Server do |server|
+    server.mock
+      - method: GET
+        path: /api/users
+        respond:
+          status: 200
+          json:
+            - {name: "alice"}
+            - {name: "bob"}
+      do |_handle|
+        http.get (server.url / "/api/users") do |res|
+          assert_eq $res.status 200
+          let data = res.json()
+          let user0 = data[0]
+          let user1 = data[1]
+          assert_eq $user0["name"] "alice"
+          assert_eq $user1["name"] "bob"

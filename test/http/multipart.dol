@@ -1,0 +1,262 @@
+import fs:
+  - open
+  - with_temp_dir
+import http
+import http.mock
+import test:
+  - assert
+  - assert_eq
+  - test
+
+# Minimal multipart/form-data parser, just enough to verify what
+# dolang-ext-http's client actually put on the wire — not a general-purpose
+# parser. Operates on the raw request body/headers captured by
+# `Mock.received()`.
+
+def trim_quotes value
+  if ((value.starts_with "\"") && (value.ends_with "\""))
+    value[1..-1]
+  else
+    value
+
+def parse_content_disposition value
+  let name = nil
+  let filename = nil
+  for piece = [...(value.split ";")][1..]
+    let trimmed = piece.trim()
+    if (trimmed.starts_with "name=")
+      name = (trim_quotes (trimmed.without_prefix "name="))
+    else if (trimmed.starts_with "filename=")
+      filename = (trim_quotes (trimmed.without_prefix "filename="))
+  return
+    - $name
+    - $filename
+
+def parse_boundary content_type
+  for segment = (content_type.split ";")
+    let trimmed = segment.trim()
+    if (trimmed.starts_with "boundary=")
+      return (trim_quotes (trimmed.without_prefix "boundary="))
+  nil
+
+def parse_multipart body boundary
+  let marker = (bin "--$boundary")
+  let _preamble rest = (body.split marker limit: 1)
+  let parts = []
+  while (!(rest.starts_with b"--"))
+    rest = (rest.without_prefix b"\r\n")
+    let headers_raw after_headers = (rest.split b"\r\n\r\n" limit: 1)
+    let part_body_raw rest_after = (after_headers.split marker limit: 1)
+    let part_body = (part_body_raw.without_suffix b"\r\n")
+    rest = rest_after
+
+    let name = nil
+    let filename = nil
+    let content_type = nil
+    for line = (str headers_raw).split "\r\n"
+      if (line.starts_with "Content-Disposition: ")
+        let parsed = (parse_content_disposition (line.without_prefix "Content-Disposition: "))
+        name = parsed[0]
+        filename = parsed[1]
+      else if (line.starts_with "Content-Type: ")
+        content_type = (line.without_prefix "Content-Type: ")
+
+    let part = {"name": name, "filename": filename, "content_type": content_type, "body": part_body}
+    parts.push $part
+
+  parts
+
+def parts_of handle
+  let requests = handle.received()
+  let last = requests[-1]
+  let content_type = last.headers["content-type"]
+  let boundary = (parse_boundary content_type)
+  (parse_multipart last.body boundary)
+
+#[test]
+def string_body_parts_round_trip()
+  http.mock.Server do |server|
+    server.mock
+      - method: POST
+        path: /multipart-basic
+        respond:
+          status: 201
+          body: basic
+      do |handle|
+        http.post (server.url / "/multipart-basic")
+          multipart:
+            - name: metadata
+              body: r#"{"kind":"report"}"#
+              content_type: application/json
+            - name: note
+              body: hello world
+          do |res|
+            assert_eq $res.status 201
+            assert_eq $res.text() "basic"
+
+        let parts = (parts_of handle)
+        assert_eq $parts.len 2
+        assert_eq $parts[0]["name"] "metadata"
+        assert_eq $parts[0]["content_type"] "application/json"
+        assert_eq (str parts[0]["body"]) r#"{"kind":"report"}"#
+        assert_eq $parts[1]["name"] "note"
+        assert_eq $parts[1]["filename"] nil
+        assert_eq (str parts[1]["body"]) "hello world"
+
+#[test]
+def json_body_parts_round_trip()
+  http.mock.Server do |server|
+    server.mock
+      - method: POST
+        path: /multipart-basic
+        respond:
+          status: 201
+          body: basic
+      do |handle|
+        http.post (server.url / "/multipart-basic")
+          multipart:
+            - name: metadata
+              json:
+                kind: report
+            - name: explicit
+              json:
+                kind: explicit
+              content_type: application/vnd.api+json
+          do |res|
+            assert_eq $res.status 201
+            assert_eq $res.text() "basic"
+
+        let parts = (parts_of handle)
+        assert_eq $parts.len 2
+        assert_eq $parts[0]["name"] "metadata"
+        assert_eq $parts[1]["name"] "explicit"
+        assert_eq $parts[1]["content_type"] "application/vnd.api+json"
+        assert_eq (str parts[1]["body"]) r#"{"kind":"explicit"}"#
+
+#[test]
+def binary_body_parts_round_trip()
+  http.mock.Server do |server|
+    server.mock
+      - method: POST
+        path: /multipart-binary
+        respond:
+          status: 201
+          body: binary
+      do |handle|
+        http.post (server.url / "/multipart-binary")
+          multipart:
+            - name: note
+              body: hello
+            - name: payload
+              filename: payload.bin
+              content_type: application/octet-stream
+              body: b"\x00\x01hello\xff"
+          do |res|
+            assert_eq $res.status 201
+            assert_eq $res.text() "binary"
+
+        let parts = (parts_of handle)
+        assert_eq $parts.len 2
+        assert_eq $parts[0]["name"] "note"
+        assert_eq (str parts[0]["body"]) "hello"
+        assert_eq $parts[1]["name"] "payload"
+        assert_eq $parts[1]["filename"] "payload.bin"
+        assert_eq $parts[1]["content_type"] "application/octet-stream"
+        assert_eq $parts[1]["body"] b"\x00\x01hello\xff"
+
+#[test]
+def file_backed_part_round_trips()
+  http.mock.Server do |server|
+    server.mock
+      - method: POST
+        path: /multipart-file
+        respond:
+          status: 201
+          body: file
+      do |handle|
+        with_temp_dir do |dir|
+          let path = (dir / "report.txt")
+          open $path wb do |file|
+            file.write b"file-backed upload"
+
+          open $path rb do |file|
+            let file_parts =
+              - name: file
+                filename: report.txt
+                content_type: text/plain
+                body: $file
+
+            http.post (server.url / "/multipart-file") multipart: $file_parts do |res|
+              assert_eq $res.status 201
+              assert_eq $res.text() "file"
+
+        let parts = (parts_of handle)
+        assert_eq $parts.len 1
+        assert_eq $parts[0]["name"] "file"
+        assert_eq $parts[0]["filename"] "report.txt"
+        assert_eq $parts[0]["content_type"] "text/plain"
+        assert_eq (str parts[0]["body"]) "file-backed upload"
+
+#[test]
+def body_and_multipart_are_mutually_exclusive()
+  http.mock.Server do |server|
+    server.mock
+      - method: POST
+        path: /multipart-basic
+        respond:
+          status: 201
+      do |_handle|
+        let caught = try
+          http.post (server.url / "/multipart-basic")
+            body: "oops"
+            multipart:
+              - name: value
+                body: ok
+          false
+        catch err
+          assert_eq (str err) "at most one of `body`, `lines`, `json`, or `multipart` arguments may be specified"
+          true
+        assert $caught
+
+#[test]
+def multipart_and_manual_content_type_are_mutually_exclusive()
+  http.mock.Server do |server|
+    server.mock
+      - method: POST
+        path: /multipart-basic
+        respond:
+          status: 201
+      do |_handle|
+        let caught = try
+          http.post (server.url / "/multipart-basic")
+            headers: {"content-type": "multipart/form-data"}
+            multipart:
+              - name: value
+                body: ok
+          false
+        catch err
+          assert_eq (str err) "multipart requests must not set content-type manually"
+          true
+        assert $caught
+
+#[test]
+def multipart_part_body_and_json_are_mutually_exclusive()
+  http.mock.Server do |server|
+    server.mock
+      - method: POST
+        path: /multipart-basic
+        respond:
+          status: 201
+      do |_handle|
+        let caught = try
+          http.post (server.url / "/multipart-basic")
+            multipart:
+              - name: value
+                body: ok
+                json:
+                  kind: nope
+          false
+        catch err
+          assert_eq (str err) "multipart part may specify at most one of `body` or `json`"
+          true
+        assert $caught

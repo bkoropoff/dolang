@@ -18,6 +18,8 @@ extern crate dolang_ext_digest;
 extern crate dolang_ext_glob;
 #[cfg(feature = "http")]
 extern crate dolang_ext_http;
+#[cfg(feature = "http_mock")]
+extern crate dolang_ext_http_mock;
 #[cfg(feature = "json")]
 extern crate dolang_ext_json;
 #[cfg(feature = "patch")]

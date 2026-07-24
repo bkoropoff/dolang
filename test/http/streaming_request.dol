@@ -1,0 +1,76 @@
+import http
+import http.mock
+import test:
+  - assert_eq
+  - test
+
+class RequestBody
+  pub field value = "custom body"
+
+  def (str) self
+    self.value
+
+#[test]
+def string_and_binary_bodies_are_sent_as_is()
+  http.mock.Server do |server|
+    server.mock
+      - method: POST
+        path: /post
+        respond: do |req|
+          let resp =
+            status: 201
+            body: $req.body
+          resp
+      do |_handle|
+        # Backward compatibility with string body
+        http.post (server.url / "/post") body: "simple string" do |res|
+          assert_eq $res.status 201
+          assert_eq $res.text() "simple string"
+
+        # Backward compatibility with binary body
+        http.post (server.url / "/post") body: b"hello" do |res|
+          assert_eq $res.status 201
+          assert_eq $res.text() "hello"
+
+#[test]
+def array_bodies_stream_without_delimiters()
+  http.mock.Server do |server|
+    server.mock
+      - method: POST
+        path: /post
+        respond: do |req|
+          let resp =
+            status: 201
+            body: $req.body
+          resp
+      do |_handle|
+        # Streaming from array of strings using body (no delimiters added)
+        http.post (server.url / "/post") body: ["hello", "world"] do |res|
+          assert_eq $res.status 201
+          assert_eq $res.text() "helloworld"
+
+        # Streaming values formatted through the public runtime sink API
+        http.post (server.url / "/post") body: [RequestBody()] do |res|
+          assert_eq $res.status 201
+          assert_eq $res.text() "custom body"
+
+        # Streaming from array of binary data (no delimiters)
+        http.post (server.url / "/post") body: [b"hello", b"world"] do |res|
+          assert_eq $res.status 201
+          assert_eq $res.text() "helloworld"
+
+#[test]
+def lines_parameter_adds_newlines_between_items()
+  http.mock.Server do |server|
+    server.mock
+      - method: POST
+        path: /post
+        respond: do |req|
+          let resp =
+            status: 201
+            body: $req.body
+          resp
+      do |_handle|
+        http.post (server.url / "/post") lines: ["hello", "world"] do |res|
+          assert_eq $res.status 201
+          assert_eq $res.text() "hello\nworld\n"
