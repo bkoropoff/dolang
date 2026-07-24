@@ -821,8 +821,13 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
         )
         .function("spawn", async move |strand, args, mut out| {
             let ([mut callable], []) = unpack!(strand, args, 1, 0)?;
-            let handle =
-                strand.spawn_background_raw(callable.take(), InterruptToken::new(), None)?;
+            let handle = strand.spawn_background_raw(
+                callable.take(),
+                InterruptToken::new(),
+                None,
+                None,
+                async move |strand, arg, out| call!(strand, arg, out).await,
+            )?;
             out.store(Value::from_object(handle));
             Ok(())
         })
@@ -851,16 +856,9 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
                 callable.take(),
                 InterruptToken::new(),
                 Some((input_receiver, output_sender)),
+                Some((input_sender, output_receiver)),
+                async move |strand, arg, out| call!(strand, arg, out).await,
             )?;
-
-            // Wire up the handle-facing channel ends
-            {
-                let mut h = handle
-                    .borrow_mut()
-                    .expect("fresh handle is always borrowable");
-                h.stream_input = input_sender;
-                h.stream_output = output_receiver;
-            }
 
             out.store(Value::from_object(handle));
             Ok(())
