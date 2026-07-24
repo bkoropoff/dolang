@@ -69,7 +69,6 @@ pub(crate) struct Program<'v> {
     /// Safety: this roots symbols used by above fields, which are thus implicitly self-referential
     #[allow(dead_code)]
     pub(crate) symroots: Vec<GcObj<'v, SymObj>>,
-    pub(crate) id: u32,
 }
 
 impl<'v> Program<'v> {

@@ -738,7 +738,7 @@ impl<'v, 's> Strand<'v, 's> {
                 e.push_backtrace(
                     inner,
                     UnwindEntry::Do {
-                        loaded_id: frame.program.id,
+                        program: frame.program.clone(),
                         function_index: frame.func as u32,
                         pc: frame.pc as u32,
                     },
@@ -790,7 +790,7 @@ impl<'v, 's> Strand<'v, 's> {
                 e.push_backtrace(
                     inner,
                     UnwindEntry::Do {
-                        loaded_id: frame.program.id,
+                        program: frame.program.clone(),
                         function_index: frame.func as u32,
                         pc: frame.pc as u32,
                     },
@@ -840,9 +840,7 @@ impl<'v, 's> Strand<'v, 's> {
     }
 
     pub fn error_backtrace(&self) -> Option<impl ExactSizeIterator<Item = impl frame::Frame> + '_> {
-        self.inner
-            .handled_backtrace()
-            .map(|entries| OwnedBacktraceIter::new(self.inner.vm(), entries))
+        self.inner.handled_backtrace().map(OwnedBacktraceIter::new)
     }
 
     pub(crate) fn backtrace_entries(&self) -> Vec<UnwindEntry<'v>> {
@@ -853,7 +851,7 @@ impl<'v, 's> Strand<'v, 's> {
                 frame::Ptr::Do(frame) => {
                     let frame = unsafe { frame.as_ref() };
                     out.push(UnwindEntry::Do {
-                        loaded_id: frame.program.id,
+                        program: frame.program.clone(),
                         function_index: frame.func as u32,
                         pc: frame.pc as u32,
                     });
