@@ -14,6 +14,7 @@ doctest = false
 [dependencies]
 dolang = { path = "../dolang", version = "0.1.1" }
 dolang-ext-shell = { path = "../dolang-ext-shell", version = "0.1.1" }
+annotate-snippets = "0.12.10"
 
 [features]
 debug = ["dolang/debug"]
