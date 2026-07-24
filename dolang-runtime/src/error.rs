@@ -5,6 +5,7 @@ use std::{
     fmt::{self, Debug, Formatter},
     marker::PhantomData,
     mem,
+    ops::ControlFlow,
     ptr::NonNull,
     result, slice,
 };
@@ -84,7 +85,7 @@ pub enum ErrorKind {
 #[derive(Clone)]
 pub(crate) enum UnwindEntry<'v> {
     Do {
-        loaded_id: u32,
+        program: Gc<'v, Program<'v>>,
         function_index: u32,
         pc: u32,
     },
@@ -95,12 +96,18 @@ pub(crate) enum UnwindEntry<'v> {
     },
 }
 
+impl<'v> UnwindEntry<'v> {
+    pub(crate) fn accept(&self, visit: &mut dyn gc::arena::Visit) -> ControlFlow<()> {
+        match self {
+            UnwindEntry::Do { program, .. } => program.accept(visit),
+            UnwindEntry::Native { .. } => ControlFlow::Continue(()),
+        }
+    }
+}
+
 struct ErrorMeta<'v> {
     pub(crate) vm: &'v Vm<'v>,
     pub(crate) backtrace: Vec<UnwindEntry<'v>>,
-    // Keep loading modules from being unloaded until the backtrace
-    // can be examined
-    pub(crate) sticky: Vec<Gc<'v, Program<'v>>>,
 }
 
 impl<'v> ErrorMeta<'v> {
@@ -108,7 +115,6 @@ impl<'v> ErrorMeta<'v> {
         Self {
             vm,
             backtrace: Default::default(),
-            sticky: Default::default(),
         }
     }
 }
@@ -116,15 +122,14 @@ impl<'v> ErrorMeta<'v> {
 pub(crate) type ErrorPair<'v> = (Value<'v>, Vec<UnwindEntry<'v>>);
 
 impl<'v> UnwindEntry<'v> {
-    pub(crate) fn source(&self, vm: &Vm<'v>) -> Option<(Cow<'_, str>, u32)> {
+    pub(crate) fn source(&self) -> Option<(Cow<'_, str>, u32)> {
         match self {
             UnwindEntry::Do {
-                loaded_id,
+                program,
                 function_index,
                 pc,
             } => {
-                let loaded = vm.loaded_for_id(*loaded_id)?;
-                if let Some(debug) = loaded.funcdebugs.get(*function_index as usize) {
+                if let Some(debug) = program.funcdebugs.get(*function_index as usize) {
                     let pc = *pc as usize - 1;
                     let sourcemap = &debug.sourcemap;
                     let index = match sourcemap.binary_search_by_key(&pc, |e| e.0) {
@@ -132,7 +137,7 @@ impl<'v> UnwindEntry<'v> {
                         Err(i) => i - 1,
                     };
                     let entry = &sourcemap[index];
-                    let file = &loaded.debug_strtab()[entry.2.clone()];
+                    let file = &program.debug_strtab()[entry.2.clone()];
                     Some((Cow::Owned(file.to_owned()), entry.1))
                 } else {
                     None
@@ -142,26 +147,20 @@ impl<'v> UnwindEntry<'v> {
         }
     }
 
-    pub(crate) fn receiver(&self, vm: &Vm<'v>) -> Cow<'_, str> {
+    pub(crate) fn receiver(&self) -> Cow<'_, str> {
         match self {
             UnwindEntry::Do {
-                loaded_id,
+                program,
                 function_index,
                 ..
-            } => {
-                let loaded = match vm.loaded_for_id(*loaded_id) {
-                    Some(loaded) => loaded,
-                    None => return Cow::Borrowed("<unloaded>"),
-                };
-                Cow::Owned(
-                    loaded
-                        .funcdebugs
-                        .get(*function_index as usize)
-                        .map(|debug| &loaded.debug_strtab()[debug.name.clone()])
-                        .unwrap_or(if *function_index == 0 { "<main>" } else { "?" })
-                        .to_owned(),
-                )
-            }
+            } => Cow::Owned(
+                program
+                    .funcdebugs
+                    .get(*function_index as usize)
+                    .map(|debug| &program.debug_strtab()[debug.name.clone()])
+                    .unwrap_or(if *function_index == 0 { "<main>" } else { "?" })
+                    .to_owned(),
+            ),
             UnwindEntry::Native { receiver, .. } => Cow::Borrowed(receiver.as_ref()),
         }
     }
@@ -173,18 +172,12 @@ impl<'v> UnwindEntry<'v> {
         }
     }
 
-    pub(crate) fn module(&self, vm: &Vm<'v>) -> Cow<'_, str> {
+    pub(crate) fn module(&self) -> Cow<'_, str> {
         match self {
-            UnwindEntry::Do { loaded_id, .. } => {
-                let loaded = match vm.loaded_for_id(*loaded_id) {
-                    Some(loaded) => loaded,
-                    None => return Cow::Borrowed("<program>"),
-                };
-                match &loaded.module_name {
-                    Some(range) => Cow::Owned(loaded.debug_strtab()[range.clone()].to_owned()),
-                    None => Cow::Borrowed("<program>"),
-                }
-            }
+            UnwindEntry::Do { program, .. } => match &program.module_name {
+                Some(range) => Cow::Owned(program.debug_strtab()[range.clone()].to_owned()),
+                None => Cow::Borrowed("<program>"),
+            },
             UnwindEntry::Native { module, .. } => Cow::Borrowed(module.as_ref()),
         }
     }
@@ -257,20 +250,19 @@ pub struct Error<'v, 's> {
 }
 
 /// Entry in an error backtrace
-pub struct BacktraceEntry<'v, 'a>(&'a Vm<'v>, &'a UnwindEntry<'v>);
+pub struct BacktraceEntry<'v, 'a>(&'a UnwindEntry<'v>);
 
 impl<'v, 'a> BacktraceEntry<'v, 'a> {
     /// Source and line number of the error.
     ///
     /// This may not be available if:
     /// - The entry represents a native function
-    /// - The corresponding module has since been unloaded
     /// - Debug information was not available
     ///
     /// Note that the filename may be a lossy approximation of the native path
     /// on the system on which the code was originally compiled to bytecode.
     pub fn source(&self) -> Option<(Cow<'_, str>, u32)> {
-        self.1.source(self.0)
+        self.0.source()
     }
 
     /// Call or method call receiver
@@ -280,22 +272,21 @@ impl<'v, 'a> BacktraceEntry<'v, 'a> {
     ///
     /// - Anonymous functions
     /// - Some native functions
-    /// - Functions in subsequently unloaded modules
     /// - The top level of a module or script
     /// - Functions for which debug information was unavailable
     pub fn receiver(&self) -> Cow<'_, str> {
-        self.1.receiver(self.0)
+        self.0.receiver()
     }
 
     /// Method.  Will be `None` if this entry is an ordinary function call.
     /// Certain method names corresponding to internal operations are synthetic.
     pub fn method(&self) -> Option<Cow<'_, str>> {
-        self.1.method()
+        self.0.method()
     }
 
     /// Module name.  This may be synthetic in some cases.
     pub fn module(&self) -> Cow<'_, str> {
-        self.1.module(self.0)
+        self.0.module()
     }
 }
 
@@ -318,15 +309,15 @@ impl<'v, 'a> Frame for BacktraceEntry<'v, 'a> {
 }
 
 /// Iterator over backtrace entries
-pub struct BacktraceIter<'v, 'a>(Option<&'a Vm<'v>>, slice::Iter<'a, UnwindEntry<'v>>);
+pub struct BacktraceIter<'v, 'a>(slice::Iter<'a, UnwindEntry<'v>>);
 
 impl<'v, 'a> BacktraceIter<'v, 'a> {
-    pub(crate) fn new(vm: &'a Vm<'v>, iter: slice::Iter<'a, UnwindEntry<'v>>) -> Self {
-        Self(Some(vm), iter)
+    pub(crate) fn new(iter: slice::Iter<'a, UnwindEntry<'v>>) -> Self {
+        Self(iter)
     }
 
     pub(crate) fn empty() -> Self {
-        Self(None, [].iter())
+        Self([].iter())
     }
 }
 
@@ -334,34 +325,31 @@ impl<'v, 'a> Iterator for BacktraceIter<'v, 'a> {
     type Item = BacktraceEntry<'v, 'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.1
-            .next()
-            .map(|e| BacktraceEntry(self.0.expect("backtrace VM missing"), e))
+        self.0.next().map(BacktraceEntry)
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        self.1.size_hint()
+        self.0.size_hint()
     }
 }
 
 impl<'v, 'a> ExactSizeIterator for BacktraceIter<'v, 'a> {
     fn len(&self) -> usize {
-        self.1.len()
+        self.0.len()
     }
 }
 
-pub(crate) struct OwnedBacktraceEntry<'v, 'a> {
-    vm: &'a Vm<'v>,
+pub(crate) struct OwnedBacktraceEntry<'v> {
     entry: UnwindEntry<'v>,
 }
 
-impl<'v, 'a> Frame for OwnedBacktraceEntry<'v, 'a> {
+impl<'v> Frame for OwnedBacktraceEntry<'v> {
     fn source(&self) -> Option<(Cow<'_, str>, u32)> {
-        self.entry.source(self.vm)
+        self.entry.source()
     }
 
     fn receiver(&self) -> Cow<'_, str> {
-        self.entry.receiver(self.vm)
+        self.entry.receiver()
     }
 
     fn method(&self) -> Option<Cow<'_, str>> {
@@ -369,31 +357,29 @@ impl<'v, 'a> Frame for OwnedBacktraceEntry<'v, 'a> {
     }
 
     fn module(&self) -> Cow<'_, str> {
-        self.entry.module(self.vm)
+        self.entry.module()
     }
 }
 
-pub(crate) struct OwnedBacktraceIter<'v, 'a> {
-    vm: &'a Vm<'v>,
+pub(crate) struct OwnedBacktraceIter<'v> {
     entries: std::vec::IntoIter<UnwindEntry<'v>>,
 }
 
-impl<'v, 'a> OwnedBacktraceIter<'v, 'a> {
-    pub(crate) fn new(vm: &'a Vm<'v>, entries: Vec<UnwindEntry<'v>>) -> Self {
+impl<'v> OwnedBacktraceIter<'v> {
+    pub(crate) fn new(entries: Vec<UnwindEntry<'v>>) -> Self {
         Self {
-            vm,
             entries: entries.into_iter(),
         }
     }
 }
 
-impl<'v, 'a> Iterator for OwnedBacktraceIter<'v, 'a> {
-    type Item = OwnedBacktraceEntry<'v, 'a>;
+impl<'v> Iterator for OwnedBacktraceIter<'v> {
+    type Item = OwnedBacktraceEntry<'v>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.entries
             .next()
-            .map(|entry| OwnedBacktraceEntry { vm: self.vm, entry })
+            .map(|entry| OwnedBacktraceEntry { entry })
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -401,7 +387,7 @@ impl<'v, 'a> Iterator for OwnedBacktraceIter<'v, 'a> {
     }
 }
 
-impl<'v, 'a> ExactSizeIterator for OwnedBacktraceIter<'v, 'a> {
+impl<'v> ExactSizeIterator for OwnedBacktraceIter<'v> {
     fn len(&self) -> usize {
         self.entries.len()
     }
@@ -725,7 +711,6 @@ impl<'v, 's> Error<'v, 's> {
                 if left.get().repr_eq(strand, &right.get()) =>
             {
                 left_bt.backtrace.extend(right_bt.backtrace);
-                left_bt.sticky.extend(right_bt.sticky);
                 Self {
                     inner: Variant::Boxed(left, left_bt),
                     phantom: PhantomData,
@@ -850,7 +835,7 @@ impl<'v, 's> Error<'v, 's> {
     /// Use [`Strand::backtrace`](crate::strand::Strand::backtrace) to continue the trace in that case.
     pub fn backtrace<'a>(&'a self) -> impl ExactSizeIterator<Item = impl Frame> + 'a {
         match &self.inner {
-            Variant::Boxed(_, info) => BacktraceIter::new(info.vm, info.backtrace.iter()),
+            Variant::Boxed(_, info) => BacktraceIter::new(info.backtrace.iter()),
             _ => BacktraceIter::empty(),
         }
     }
@@ -899,7 +884,6 @@ impl<'v, 's> Error<'v, 's> {
                 Box::new(ErrorMeta {
                     vm: strand.inner.vm(),
                     backtrace,
-                    sticky: Vec::new(),
                 }),
             ),
             phantom: PhantomData,
@@ -943,7 +927,6 @@ impl<'v, 's> Error<'v, 's> {
                 Box::new(ErrorMeta {
                     vm: strand.vm(),
                     backtrace,
-                    sticky: Vec::new(),
                 }),
             ),
             phantom: PhantomData,
@@ -958,18 +941,6 @@ impl<'v, 's> Error<'v, 's> {
             match &mut self.inner {
                 Variant::Boxed(_, info) => {
                     info.backtrace.push(entry);
-                    break;
-                }
-                _ => self.expand(inner),
-            }
-        }
-    }
-
-    pub(crate) fn push_sticky(&mut self, inner: &'s StrandInner<'v>, sticky: Gc<'v, Program<'v>>) {
-        loop {
-            match &mut self.inner {
-                Variant::Boxed(_, info) => {
-                    info.sticky.push(sticky);
                     break;
                 }
                 _ => self.expand(inner),

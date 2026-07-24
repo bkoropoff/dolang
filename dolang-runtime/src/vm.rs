@@ -1,7 +1,7 @@
 use std::{
     any::TypeId,
     borrow::Cow,
-    cell::{Cell, RefCell},
+    cell::RefCell,
     collections::{HashMap, hash_map::Entry},
     future::Future,
     marker::PhantomData,
@@ -24,7 +24,7 @@ use crate::{
     bytecode::file,
     error::{Error, Result},
     frame::{CallFrame, Native},
-    gc::{self, Gc, Weak, arena::Arena},
+    gc::{self, Gc, arena::Arena},
     object::{
         BuiltinTypes, Singletons, TypeTable,
         function::NativeFunction,
@@ -123,9 +123,7 @@ type ChannelFactory<'v> = dyn for<'s> Fn(&mut Strand<'v, 's>, Slot<'v, '_>, Slot
 /// - [`Builder`]
 /// - [`Strand`]
 pub struct Vm<'v> {
-    pub(crate) loaded: RefCell<Vec<Weak<'v, Program<'v>>>>,
     pub(crate) import_cache: RefCell<HashMap<String, ImportCacheEntry<'v>>>,
-    pub(crate) next_loaded_id: Cell<u32>,
     pub(crate) native_modules: HashMap<&'v str, Value<'v>>,
     pub(crate) importers: Vec<Value<'v>>,
     pub(crate) pipe_handler: Option<Box<ChannelFactory<'v>>>,
@@ -155,7 +153,6 @@ pub struct Vm<'v> {
 impl<'v> Drop for Vm<'v> {
     fn drop(&mut self) {
         // Drop things in a safe order
-        self.loaded.get_mut().clear();
         self.import_cache.get_mut().clear();
         self.native_modules.clear();
         self.importers.clear();
@@ -245,17 +242,6 @@ impl<'v> Vm<'v> {
 
     pub(crate) fn sym_gc(&self) {
         self.symtab.gc()
-    }
-
-    pub(crate) fn loaded_for_id(&self, id: u32) -> Option<Gc<'v, Program<'v>>> {
-        for loaded in self.loaded.borrow().iter() {
-            if let Some(loaded) = loaded.upgrade()
-                && loaded.id == id
-            {
-                return Some(loaded);
-            }
-        }
-        None
     }
 
     pub(crate) fn builtin_types(&self) -> &BuiltinTypes<'v> {
@@ -470,9 +456,6 @@ impl<'v> Vm<'v> {
             })
             .collect();
 
-        let id = self.next_loaded_id.get();
-        self.next_loaded_id.set(id + 1);
-
         let loaded = Gc::new(
             self.arena(),
             Program {
@@ -486,11 +469,9 @@ impl<'v> Vm<'v> {
                 debugbintab,
                 funcdebugs,
                 module_name,
-                id,
             },
         );
 
-        self.loaded.borrow_mut().push(Gc::downgrade(&loaded));
         Ok(loaded)
     }
 }
@@ -801,8 +782,6 @@ impl Builder<'static> {
                 types,
                 symtab,
                 symroots: Default::default(),
-                loaded: Default::default(),
-                next_loaded_id: Default::default(),
                 state: Default::default(),
                 native_modules: Default::default(),
                 importers: Default::default(),
@@ -1145,16 +1124,9 @@ impl Bytecode {
         let loaded = strand
             .load_bytecode(self)
             .map_err(|e| Error::bytecode(strand, e))?;
-        let mut frame = unsafe { CallFrame::new(loaded.clone(), 0, None, None) };
-        match strand
+        let mut frame = unsafe { CallFrame::new(loaded, 0, None, None) };
+        strand
             .run(strand.inner, &mut frame, Slot::from_output(&mut out))
             .await
-        {
-            Ok(()) => Ok(()),
-            Err(mut e) => {
-                e.push_sticky(strand.inner, loaded);
-                Err(e)
-            }
-        }
     }
 }

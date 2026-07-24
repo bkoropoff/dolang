@@ -38,7 +38,7 @@ pub(crate) fn iter_from_value<'v, 'a>(
     value: &'a Value<'v>,
 ) -> Option<BacktraceIter<'v, 'a>> {
     let backtrace = value.downcast_ref(vm.builtin_types().backtrace)?;
-    Some(BacktraceIter::new(vm, backtrace.get().entries.iter()))
+    Some(BacktraceIter::new(backtrace.get().entries.iter()))
 }
 
 pub(crate) struct Backtrace<'v> {
@@ -50,7 +50,10 @@ unsafe impl<'v> Collect for Backtrace<'v> {
     const IMMUTABLE: bool = true;
     type Annex = ();
 
-    fn accept(&self, _visit: &mut dyn Visit) -> ControlFlow<()> {
+    fn accept(&self, visit: &mut dyn Visit) -> ControlFlow<()> {
+        for entry in &self.entries {
+            entry.accept(visit)?;
+        }
         ControlFlow::Continue(())
     }
 
@@ -139,7 +142,10 @@ unsafe impl<'v> Collect for Iter<'v> {
     const IMMUTABLE: bool = false;
     type Annex = ();
 
-    fn accept(&self, _visit: &mut dyn Visit) -> ControlFlow<()> {
+    fn accept(&self, visit: &mut dyn Visit) -> ControlFlow<()> {
+        for entry in &self.entries[self.index..] {
+            entry.accept(visit)?;
+        }
         ControlFlow::Continue(())
     }
 
@@ -195,8 +201,8 @@ unsafe impl<'v> Collect for Frame<'v> {
     const IMMUTABLE: bool = true;
     type Annex = ();
 
-    fn accept(&self, _visit: &mut dyn Visit) -> ControlFlow<()> {
-        ControlFlow::Continue(())
+    fn accept(&self, visit: &mut dyn Visit) -> ControlFlow<()> {
+        self.entry.accept(visit)
     }
 
     fn clear(&mut self) {
@@ -229,12 +235,12 @@ impl<'v> Protocol<'v> for Frame<'v> {
     ) -> Result<'v, 's, ()> {
         match field.tag() {
             sym::MODULE => {
-                let module = this.get().entry.module(strand);
+                let module = this.get().entry.module();
                 Output::set(strand, out, module.as_ref());
                 Ok(())
             }
             sym::RECEIVER => {
-                let receiver = this.get().entry.receiver(strand);
+                let receiver = this.get().entry.receiver();
                 Output::set(strand, out, receiver.as_ref());
                 Ok(())
             }
@@ -247,7 +253,7 @@ impl<'v> Protocol<'v> for Frame<'v> {
                 Ok(())
             }
             sym::SOURCE => {
-                if let Some((source, _)) = this.get().entry.source(strand) {
+                if let Some((source, _)) = this.get().entry.source() {
                     Output::set(strand, out, source.as_ref());
                 } else {
                     out.store(Value::NIL);
@@ -255,7 +261,7 @@ impl<'v> Protocol<'v> for Frame<'v> {
                 Ok(())
             }
             sym::LINE => {
-                if let Some((_, line)) = this.get().entry.source(strand) {
+                if let Some((_, line)) = this.get().entry.source() {
                     Output::set(strand, out, line);
                 } else {
                     out.store(Value::NIL);
