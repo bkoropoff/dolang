@@ -9,6 +9,8 @@ use dolang::{
     extension::CompilerExt,
 };
 
+mod render;
+
 #[derive(Clone, Copy, Debug)]
 pub enum CompileMode {
     Module,
@@ -103,32 +105,20 @@ pub fn bundle(spec: &Bundle<'_>) {
         let mut bytecode = Vec::new();
         let mut had_error = false;
         let mut had_warning = false;
+        let compiler_path_str = compiler_path.display().to_string();
         compiler
             .compile(
                 &mut bytecode,
                 &mut |diag: dolang::compile::Diag| -> ControlFlow<()> {
-                    let line = diag.span().start().line_number();
                     match diag.severity() {
-                        Severity::Error => {
-                            had_error = true;
-                            eprintln!(
-                                "error:{}:{}: {}",
-                                compiler_path.display(),
-                                line,
-                                diag.message()
-                            );
-                        }
-                        Severity::Warning => {
-                            had_warning = true;
-                            eprintln!(
-                                "warning:{}:{}: {}",
-                                compiler_path.display(),
-                                line,
-                                diag.message()
-                            );
-                        }
+                        Severity::Error => had_error = true,
+                        Severity::Warning => had_warning = true,
                         _ => {}
                     }
+                    eprintln!(
+                        "{}",
+                        render::render_diag(&compiler_path_str, &source, &diag)
+                    );
                     ControlFlow::Continue(())
                 },
             )

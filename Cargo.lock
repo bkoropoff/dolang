@@ -1020,6 +1020,7 @@ version = "0.1.1"
 name = "dolang-private-bundle"
 version = "0.1.1"
 dependencies = [
+ "annotate-snippets",
  "dolang",
  "dolang-ext-shell",
 ]
