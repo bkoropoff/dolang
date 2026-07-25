@@ -5,7 +5,7 @@ use dolang::runtime::object::fmt;
 use dolang::runtime::{
     Args, Error, Instance, Object, Output, Result, Slot, State, Strand, Type, Value,
     error::ResultExt,
-    object::{ArrayLike, ArrayView, DictLike, DictView, DictViewSink, TypeBuilder},
+    object::{ArrayLike, ArrayView, Cast, DictLike, DictView, DictViewSink, TypeBuilder},
     unpack,
     value::{Nil, Str},
     vm::Builder,
@@ -22,7 +22,7 @@ pub(crate) struct UrlAnnex<'v> {
 }
 
 enum UrlOrStr<'v, 'a> {
-    Url(Instance<'v, 'a, Url>),
+    Url(Cast<'v, 'a, Url>),
     Str(Str<'v, 'a>),
 }
 
@@ -32,7 +32,7 @@ impl<'v, 'a> UrlOrStr<'v, 'a> {
         global: State<'v, Global<'v>>,
         value: &'a Value<'v>,
     ) -> Result<'v, 's, Self> {
-        if let Some(url) = global.types.url.downcast(value) {
+        if let Some(url) = global.types.url.cast(value) {
             Ok(Self::Url(url))
         } else if let Some(str) = value.as_str(strand) {
             Ok(Self::Str(str))
@@ -43,7 +43,9 @@ impl<'v, 'a> UrlOrStr<'v, 'a> {
 
     fn to_url<'s>(&self, strand: &mut Strand<'v, 's>) -> Result<'v, 's, url::Url> {
         match self {
-            Self::Url(url) => Ok(url.annex().inner.clone()),
+            Self::Url(url) => {
+                Ok(url.enter_sync(strand, |_strand, inst| inst.annex().inner.clone()))
+            }
             Self::Str(str) => strand
                 .access(|x| url::Url::parse(str.as_str(x)))
                 .into_do(strand),
@@ -356,8 +358,10 @@ impl<'v> Object<'v> for Url {
         strand: &'a mut Strand<'v, 's>,
         other: &Value<'v>,
     ) -> Result<'v, 's, bool> {
-        if let Some(other) = this.annex().global.types.url.downcast(other) {
-            Ok(this.annex().inner == other.annex().inner)
+        if let Some(other) = this.annex().global.types.url.cast(other) {
+            Ok(other.enter_sync(strand, |_strand, other| {
+                this.annex().inner == other.annex().inner
+            }))
         } else {
             Err(Error::not_supported(strand))
         }
@@ -377,8 +381,10 @@ impl<'v> Object<'v> for Url {
         strand: &'a mut Strand<'v, 's>,
         other: &Value<'v>,
     ) -> Result<'v, 's, bool> {
-        if let Some(other) = this.annex().global.types.url.downcast(other) {
-            Ok(this.annex().inner < other.annex().inner)
+        if let Some(other) = this.annex().global.types.url.cast(other) {
+            Ok(other.enter_sync(strand, |_strand, other| {
+                this.annex().inner < other.annex().inner
+            }))
         } else {
             Err(Error::not_supported(strand))
         }

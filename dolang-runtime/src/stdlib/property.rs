@@ -28,8 +28,10 @@ impl<'v> Object<'v> for Getter {
     ) -> Result<'v, 's, ()> {
         let ([func], []) = unpack!(strand, args, 1, 0)?;
         this.create(strand, Getter, &mut out);
-        let mut borrow = this.downcast(&out).unwrap().borrow_mut_unwrap();
-        Output::set(strand, Mut::slot_mut::<0>(&mut borrow), func);
+        this.cast(&out).unwrap().enter_sync(strand, |strand, inst| {
+            let mut borrow = inst.borrow_mut_unwrap();
+            Output::set(strand, Mut::slot_mut::<0>(&mut borrow), func);
+        });
         Ok(())
     }
 
@@ -65,8 +67,10 @@ impl<'v> Object<'v> for Setter {
     ) -> Result<'v, 's, ()> {
         let ([func], []) = unpack!(strand, args, 1, 0)?;
         this.create(strand, Setter, &mut out);
-        let mut borrow = this.downcast(&out).unwrap().borrow_mut_unwrap();
-        Output::set(strand, Mut::slot_mut::<0>(&mut borrow), func);
+        this.cast(&out).unwrap().enter_sync(strand, |strand, inst| {
+            let mut borrow = inst.borrow_mut_unwrap();
+            Output::set(strand, Mut::slot_mut::<0>(&mut borrow), func);
+        });
         Ok(())
     }
 

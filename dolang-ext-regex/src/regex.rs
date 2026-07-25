@@ -81,14 +81,16 @@ impl<'v> Object<'v> for Regex {
                         );
 
                         // Store haystack GC object in slot 0 of the Captures object
-                        let mut captures = annex
+                        annex
                             .global
                             .types
                             .captures
-                            .downcast(&out)
+                            .cast(&out)
                             .unwrap()
-                            .borrow_mut_unwrap();
-                        Output::set(strand, Mut::slot_mut::<0>(&mut captures), haystack_value);
+                            .enter_sync(strand, |strand, inst| {
+                                let mut captures = inst.borrow_mut_unwrap();
+                                Output::set(strand, Mut::slot_mut::<0>(&mut captures), haystack_value);
+                            });
                     }
                     None => {
                         Output::set(strand, out, Nil);
@@ -127,15 +129,17 @@ impl<'v> Object<'v> for Regex {
                 );
 
                 // Store regex instance in slot 0 and haystack in slot 1 of the Find object
-                let mut iter = annex
+                annex
                     .global
                     .types
                     .find
-                    .downcast(&out)
+                    .cast(&out)
                     .unwrap()
-                    .borrow_mut_unwrap();
-                Output::set(strand, Mut::slot_mut::<0>(&mut iter), this);
-                Output::set(strand, Mut::slot_mut::<1>(&mut iter), haystack_value);
+                    .enter_sync(strand, |strand, inst| {
+                        let mut iter = inst.borrow_mut_unwrap();
+                        Output::set(strand, Mut::slot_mut::<0>(&mut iter), this);
+                        Output::set(strand, Mut::slot_mut::<1>(&mut iter), haystack_value);
+                    });
                 Ok(())
             })
             .method_with_slots(
@@ -205,19 +209,20 @@ impl<'v> Object<'v> for Regex {
                                 &mut caps_slot,
                             );
                             // Store haystack in Captures slot 0
-                            let mut captures_mut = annex
+                            annex
                                 .global
                                 .types
                                 .captures
-                                .downcast(&caps_slot)
+                                .cast(&caps_slot)
                                 .unwrap()
-                                .borrow_mut_unwrap();
-                            Output::set(
-                                strand,
-                                Mut::slot_mut::<0>(&mut captures_mut),
-                                &haystack_value,
-                            );
-                            drop(captures_mut);
+                                .enter_sync(strand, |strand, inst| {
+                                    let mut captures_mut = inst.borrow_mut_unwrap();
+                                    Output::set(
+                                        strand,
+                                        Mut::slot_mut::<0>(&mut captures_mut),
+                                        &haystack_value,
+                                    );
+                                });
 
                             // Call the replacement function with the Captures
                             call!(strand, &replacement, &mut cb_out, &caps_slot).await?;
@@ -328,15 +333,17 @@ impl<'v> Object<'v> for Regex {
                 );
 
                 // Store regex in slot 0, haystack in slot 1
-                let mut borrow = annex
+                annex
                     .global
                     .types
                     .split
-                    .downcast(&out)
+                    .cast(&out)
                     .unwrap()
-                    .borrow_mut_unwrap();
-                Output::set(strand, Mut::slot_mut::<0>(&mut borrow), this);
-                Output::set(strand, Mut::slot_mut::<1>(&mut borrow), haystack_value);
+                    .enter_sync(strand, |strand, inst| {
+                        let mut borrow = inst.borrow_mut_unwrap();
+                        Output::set(strand, Mut::slot_mut::<0>(&mut borrow), this);
+                        Output::set(strand, Mut::slot_mut::<1>(&mut borrow), haystack_value);
+                    });
                 Ok(())
             })
             .method("rsplit", async move |this, strand, args, mut out| {
@@ -394,15 +401,17 @@ impl<'v> Object<'v> for Regex {
                 );
 
                 // Store regex in slot 0, haystack in slot 1
-                let mut borrow = annex
+                annex
                     .global
                     .types
                     .split
-                    .downcast(&out)
+                    .cast(&out)
                     .unwrap()
-                    .borrow_mut_unwrap();
-                Output::set(strand, Mut::slot_mut::<0>(&mut borrow), this);
-                Output::set(strand, Mut::slot_mut::<1>(&mut borrow), haystack_value);
+                    .enter_sync(strand, |strand, inst| {
+                        let mut borrow = inst.borrow_mut_unwrap();
+                        Output::set(strand, Mut::slot_mut::<0>(&mut borrow), this);
+                        Output::set(strand, Mut::slot_mut::<1>(&mut borrow), haystack_value);
+                    });
                 Ok(())
             })
     }
@@ -482,18 +491,20 @@ impl<'v> Object<'v> for Captures<'v> {
                 );
 
                 // Store haystack in slot 0 of the Match object
-                let mut match_borrow = annex
+                annex
                     .global
                     .types
                     .match_
-                    .downcast(&out)
+                    .cast(&out)
                     .unwrap()
-                    .borrow_mut_unwrap();
-                Output::set(
-                    strand,
-                    Mut::slot_mut::<0>(&mut match_borrow),
-                    Ref::slot::<0>(&borrow),
-                );
+                    .enter_sync(strand, |strand, inst| {
+                        let mut match_borrow = inst.borrow_mut_unwrap();
+                        Output::set(
+                            strand,
+                            Mut::slot_mut::<0>(&mut match_borrow),
+                            Ref::slot::<0>(&borrow),
+                        );
+                    });
 
                 Ok(())
             }
@@ -632,17 +643,16 @@ impl<'v> Object<'v> for Find<'v> {
                 );
 
                 // Copy haystack from Find slot 1 to Captures slot 0
-                let mut captures_mut = annex
-                    .global
-                    .types
-                    .captures
-                    .downcast(&out)
-                    .unwrap()
-                    .borrow_mut_unwrap();
-                Output::set(
+                annex.global.types.captures.cast(&out).unwrap().enter_sync(
                     strand,
-                    Mut::slot_mut::<0>(&mut captures_mut),
-                    Mut::slot::<1>(&borrow),
+                    |strand, inst| {
+                        let mut captures_mut = inst.borrow_mut_unwrap();
+                        Output::set(
+                            strand,
+                            Mut::slot_mut::<0>(&mut captures_mut),
+                            Mut::slot::<1>(&borrow),
+                        );
+                    },
                 );
                 Ok(true)
             }

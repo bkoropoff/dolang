@@ -101,8 +101,14 @@ fn create_node_inner<'v, 's>(
     state
         .node_type
         .create_with_annex(strand, Node { tag, attrs }, NodeAnnex, &mut *out);
-    let mut borrow = state.node_type.downcast(&*out).unwrap().borrow_mut_unwrap();
-    Output::set(strand, Mut::slot_mut::<CHILDREN>(&mut borrow), Empty::Array);
+    state
+        .node_type
+        .cast(&*out)
+        .unwrap()
+        .enter_sync(strand, |strand, inst| {
+            let mut borrow = inst.borrow_mut_unwrap();
+            Output::set(strand, Mut::slot_mut::<CHILDREN>(&mut borrow), Empty::Array);
+        });
     Ok(())
 }
 
@@ -120,55 +126,61 @@ fn parse_element<'v, 's>(
         // Obtain a shared borrow of the node to access the children array.
         // Ref<'v, 'a, Node> does not borrow from `strand`, so it can be held
         // across strand method calls throughout the loop.
-        let inst = state.node_type.downcast(&*out).unwrap();
-        let borrow = inst.borrow(strand)?;
-        let arr = Ref::slot::<CHILDREN>(&borrow).as_array(strand).unwrap();
+        state
+            .node_type
+            .cast(&*out)
+            .unwrap()
+            .enter_sync(strand, |strand, inst| {
+                let borrow = inst.borrow(strand)?;
+                let arr = Ref::slot::<CHILDREN>(&borrow).as_array(strand).unwrap();
 
-        loop {
-            match reader.read_event().into_do(strand)? {
-                Event::Start(e) => {
-                    let e = e.into_owned();
-                    parse_element(strand, reader, &e, state, &mut child)?;
-                    arr.push(strand, &mut child)?
-                }
-                Event::Empty(e) => {
-                    let e = e.into_owned();
-                    create_node(strand, &e, state, &mut child)?;
-                    arr.push(strand, &mut child)?
-                }
-                Event::Text(t) => {
-                    let text = t
-                        .xml_content(XmlVersion::Implicit1_0)
-                        .into_do(strand)?
-                        .into_owned();
-                    if !text.is_empty() {
-                        arr.push(strand, text.as_str())?;
+                loop {
+                    match reader.read_event().into_do(strand)? {
+                        Event::Start(e) => {
+                            let e = e.into_owned();
+                            parse_element(strand, reader, &e, state, &mut child)?;
+                            arr.push(strand, &mut child)?
+                        }
+                        Event::Empty(e) => {
+                            let e = e.into_owned();
+                            create_node(strand, &e, state, &mut child)?;
+                            arr.push(strand, &mut child)?
+                        }
+                        Event::Text(t) => {
+                            let text = t
+                                .xml_content(XmlVersion::Implicit1_0)
+                                .into_do(strand)?
+                                .into_owned();
+                            if !text.is_empty() {
+                                arr.push(strand, text.as_str())?;
+                            }
+                        }
+                        Event::CData(cd) => {
+                            let text = str::from_utf8(cd.as_ref()).into_do(strand)?.to_owned();
+                            if !text.is_empty() {
+                                arr.push(strand, text.as_str())?;
+                            }
+                        }
+                        Event::GeneralRef(ent) => {
+                            if let Some(text) =
+                                resolve_predefined_entity(&ent.decode().into_do(strand)?)
+                                && !text.is_empty()
+                            {
+                                arr.push(strand, text)?;
+                            } else {
+                                return Err(Error::runtime(
+                                    strand,
+                                    "non-predefined entities not supported",
+                                ));
+                            }
+                        }
+                        Event::End(_) | Event::Eof => break,
+                        _ => {}
                     }
                 }
-                Event::CData(cd) => {
-                    let text = str::from_utf8(cd.as_ref()).into_do(strand)?.to_owned();
-                    if !text.is_empty() {
-                        arr.push(strand, text.as_str())?;
-                    }
-                }
-                Event::GeneralRef(ent) => {
-                    if let Some(text) = resolve_predefined_entity(&ent.decode().into_do(strand)?)
-                        && !text.is_empty()
-                    {
-                        arr.push(strand, text)?;
-                    } else {
-                        return Err(Error::runtime(
-                            strand,
-                            "non-predefined entities not supported",
-                        ));
-                    }
-                }
-                Event::End(_) | Event::Eof => break,
-                _ => {}
-            }
-        }
 
-        Ok(())
+                Ok(())
+            })
     })
 }
 
@@ -179,32 +191,34 @@ fn serialize_node<'v, 's>(
     value: &Value<'v>,
     state: State<'v, Global<'v>>,
 ) -> Result<'v, 's, ()> {
-    if let Some(inst) = state.node_type.downcast(value) {
-        strand.with_slots_sync(|strand, [mut child]| {
-            let borrow = inst.borrow(strand)?;
-            let tag = borrow.tag.clone();
-            let attrs = borrow.attrs.clone();
-            let arr = Ref::slot::<CHILDREN>(&borrow).as_array(strand).unwrap();
+    if let Some(cast) = state.node_type.cast(value) {
+        cast.enter_sync(strand, |strand, inst| {
+            strand.with_slots_sync(|strand, [mut child]| {
+                let borrow = inst.borrow(strand)?;
+                let tag = borrow.tag.clone();
+                let attrs = borrow.attrs.clone();
+                let arr = Ref::slot::<CHILDREN>(&borrow).as_array(strand).unwrap();
 
-            let mut start = BytesStart::new(tag.as_str());
-            for (k, v) in &attrs {
-                let escaped_v = escape(v.as_str());
-                start.push_attribute((k.as_str(), escaped_v.as_ref()));
-            }
-            writer
-                .write_event(Event::Start(start.to_owned()))
-                .into_do(strand)?;
-
-            let len = arr.len(strand)?;
-            for i in 0..len {
-                if arr.get(strand, i, &mut child)? {
-                    serialize_node(strand, writer, &child, state)?;
+                let mut start = BytesStart::new(tag.as_str());
+                for (k, v) in &attrs {
+                    let escaped_v = escape(v.as_str());
+                    start.push_attribute((k.as_str(), escaped_v.as_ref()));
                 }
-            }
+                writer
+                    .write_event(Event::Start(start.to_owned()))
+                    .into_do(strand)?;
 
-            writer
-                .write_event(Event::End(BytesEnd::new(tag.as_str())))
-                .into_do(strand)
+                let len = arr.len(strand)?;
+                for i in 0..len {
+                    if arr.get(strand, i, &mut child)? {
+                        serialize_node(strand, writer, &child, state)?;
+                    }
+                }
+
+                writer
+                    .write_event(Event::End(BytesEnd::new(tag.as_str())))
+                    .into_do(strand)
+            })
         })
     } else {
         let str = value

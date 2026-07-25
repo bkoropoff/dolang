@@ -136,7 +136,9 @@ pub(crate) fn path_with_entry<'v, 's>(
     let entry = global
         .types
         .dir_entry
-        .downcast(entry)
+        .cast(entry)
         .ok_or_else(|| Error::not_supported(strand))?;
-    Ok(path.join(entry.annex().name.as_str()))
+    Ok(entry.enter_sync(strand, |_strand, entry| {
+        path.join(entry.annex().name.as_str())
+    }))
 }

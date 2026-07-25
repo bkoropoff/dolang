@@ -200,8 +200,10 @@ fn coerce_sleep_duration<'v, 's>(
     global: State<'v, Global<'v>>,
     value: Slot<'v, '_>,
 ) -> Result<'v, 's, std::time::Duration> {
-    if let Some(duration) = global.types.duration.downcast(&value) {
-        return duration.annex().to_std_duration(strand);
+    if let Some(duration) = global.types.duration.cast(&value) {
+        return duration.enter_sync(strand, |strand, duration| {
+            duration.annex().to_std_duration(strand)
+        });
     }
 
     if let Some(i) = value.as_int(strand) {
@@ -237,9 +239,9 @@ pub(crate) fn datetime_to_unix_nanos<'v, 's>(
     value: &dolang::runtime::Value<'v>,
 ) -> Result<'v, 's, i128> {
     let datetime = date_time
-        .downcast(value)
+        .cast(value)
         .ok_or_else(|| Error::type_error(strand, "expected DateTime"))?;
-    Ok(datetime.annex().total_nanos())
+    Ok(datetime.enter_sync(strand, |_strand, datetime| datetime.annex().total_nanos()))
 }
 
 pub(crate) fn create_datetime<'v, 's>(
@@ -358,8 +360,10 @@ impl<'v> Object<'v> for DateTime {
         other: &dolang::runtime::Value<'v>,
     ) -> Result<'v, 's, bool> {
         let global = strand.state::<Global<'v>>();
-        if let Some(other) = global.types.date_time.downcast(other) {
-            Ok(this.annex().total_nanos == other.annex().total_nanos)
+        if let Some(other) = global.types.date_time.cast(other) {
+            Ok(other.enter_sync(strand, |_strand, other| {
+                this.annex().total_nanos == other.annex().total_nanos
+            }))
         } else {
             Err(Error::not_supported(strand))
         }
@@ -371,8 +375,10 @@ impl<'v> Object<'v> for DateTime {
         other: &dolang::runtime::Value<'v>,
     ) -> Result<'v, 's, bool> {
         let global = strand.state::<Global<'v>>();
-        if let Some(other) = global.types.date_time.downcast(other) {
-            Ok(this.annex().total_nanos < other.annex().total_nanos)
+        if let Some(other) = global.types.date_time.cast(other) {
+            Ok(other.enter_sync(strand, |_strand, other| {
+                this.annex().total_nanos < other.annex().total_nanos
+            }))
         } else {
             Err(Error::not_supported(strand))
         }
@@ -385,16 +391,18 @@ impl<'v> Object<'v> for DateTime {
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
         let global = strand.state::<Global<'v>>();
-        if let Some(other) = global.types.date_time.downcast(other) {
-            let left = this.annex().total_nanos;
-            let right = other.annex().total_nanos;
-            global.types.duration.create_with_annex(
-                strand,
-                Duration,
-                DurationAnnex::from_total_nanos(left - right),
-                out,
-            );
-            Ok(())
+        if let Some(other) = global.types.date_time.cast(other) {
+            other.enter_sync(strand, |strand, other| {
+                let left = this.annex().total_nanos;
+                let right = other.annex().total_nanos;
+                global.types.duration.create_with_annex(
+                    strand,
+                    Duration,
+                    DurationAnnex::from_total_nanos(left - right),
+                    out,
+                );
+                Ok(())
+            })
         } else {
             Err(Error::not_supported(strand))
         }
@@ -444,8 +452,10 @@ impl<'v> Object<'v> for Duration {
         other: &dolang::runtime::Value<'v>,
     ) -> Result<'v, 's, bool> {
         let global = strand.state::<Global<'v>>();
-        if let Some(other) = global.types.duration.downcast(other) {
-            Ok(this.annex().total_nanos == other.annex().total_nanos)
+        if let Some(other) = global.types.duration.cast(other) {
+            Ok(other.enter_sync(strand, |_strand, other| {
+                this.annex().total_nanos == other.annex().total_nanos
+            }))
         } else {
             Err(Error::not_supported(strand))
         }
@@ -457,8 +467,10 @@ impl<'v> Object<'v> for Duration {
         other: &dolang::runtime::Value<'v>,
     ) -> Result<'v, 's, bool> {
         let global = strand.state::<Global<'v>>();
-        if let Some(other) = global.types.duration.downcast(other) {
-            Ok(this.annex().total_nanos < other.annex().total_nanos)
+        if let Some(other) = global.types.duration.cast(other) {
+            Ok(other.enter_sync(strand, |_strand, other| {
+                this.annex().total_nanos < other.annex().total_nanos
+            }))
         } else {
             Err(Error::not_supported(strand))
         }

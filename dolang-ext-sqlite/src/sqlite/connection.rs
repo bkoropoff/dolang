@@ -179,7 +179,7 @@ impl ConnectionAnnex<'_> {
                         && let Err(e) = &mut res
                     {
                         e.get_value(strand, &mut tmp);
-                        if global.types.busy.downcast(&tmp).is_some() {
+                        if global.types.busy.cast(&tmp).is_some() {
                             let jitter = random_u32() % (wait / 2 + 1);
                             tokio::time::sleep(Duration::from_millis((wait + jitter).into())).await;
                             wait = self.busy_max_wait.min(wait * 2);
@@ -328,7 +328,7 @@ impl<'v> Object<'v> for Connection {
                                 && let Err(e) = &mut res
                             {
                                 e.get_value(strand, &mut tmp);
-                                if global.types.busy.downcast(&tmp).is_some() {
+                                if global.types.busy.cast(&tmp).is_some() {
                                     let jitter = random_u32() % (wait / 2 + 1);
                                     tokio::time::sleep(Duration::from_millis(
                                         (wait + jitter).into(),
@@ -368,18 +368,18 @@ fn wrap_statement<'v, 's>(
     );
 
     // Store the connection object in slot 0 of the statement
-    Output::set(
-        strand,
-        Mut::slot_mut::<0>(
-            &mut global
-                .types
-                .statement
-                .downcast(&wrapper)
-                .unwrap()
-                .borrow_mut_unwrap(),
-        ),
-        this,
-    );
+    global
+        .types
+        .statement
+        .cast(&wrapper)
+        .unwrap()
+        .enter_sync(strand, |strand, inst| {
+            Output::set(
+                strand,
+                Mut::slot_mut::<0>(&mut inst.borrow_mut_unwrap()),
+                this,
+            );
+        });
 }
 
 async fn create_statement<'v, 's>(
@@ -441,19 +441,19 @@ async fn transact<'v, 's, 'a>(
             );
 
             // Store the connection object in slot 0
-            Output::set(
-                strand,
-                Mut::slot_mut::<0>(
-                    &mut annex
-                        .global
-                        .types
-                        .transaction
-                        .downcast(&wrapper)
-                        .unwrap()
-                        .borrow_mut_unwrap(),
-                ),
-                this,
-            );
+            annex
+                .global
+                .types
+                .transaction
+                .cast(&wrapper)
+                .unwrap()
+                .enter_sync(strand, |strand, inst| {
+                    Output::set(
+                        strand,
+                        Mut::slot_mut::<0>(&mut inst.borrow_mut_unwrap()),
+                        this,
+                    );
+                });
 
             // Call the block with the transaction handle
             call!(strand, &block, out, &wrapper).await
@@ -481,44 +481,48 @@ impl<'v> Object<'v> for Transaction {
             .method("commit", async move |this, strand, args, _out| {
                 let annex = this.annex();
                 let borrow = this.borrow(strand)?;
-                let conn = annex
+                annex
                     .global
                     .types
                     .connection
-                    .downcast(Ref::slot::<0>(&borrow))
-                    .unwrap();
+                    .cast(Ref::slot::<0>(&borrow))
+                    .unwrap()
+                    .enter(strand, async move |strand, conn| {
+                        if conn.annex().epoch.get() != annex.epoch {
+                            return Err(Error::concurrency_msg(strand, "stale transaction"));
+                        }
 
-                if conn.annex().epoch.get() != annex.epoch {
-                    return Err(Error::concurrency_msg(strand, "stale transaction"));
-                }
+                        let ([], []) = unpack!(strand, args, 0, 0)?;
 
-                let ([], []) = unpack!(strand, args, 0, 0)?;
-
-                conn.annex().in_transaction.set(false);
-                conn.annex().bump_epoch();
-                conn.annex().exec(strand, "COMMIT").await?;
-                Ok(())
+                        conn.annex().in_transaction.set(false);
+                        conn.annex().bump_epoch();
+                        conn.annex().exec(strand, "COMMIT").await?;
+                        Ok(())
+                    })
+                    .await
             })
             .method("rollback", async move |this, strand, args, _out| {
                 let annex = this.annex();
                 let borrow = this.borrow(strand)?;
-                let conn = annex
+                annex
                     .global
                     .types
                     .connection
-                    .downcast(Ref::slot::<0>(&borrow))
-                    .unwrap();
+                    .cast(Ref::slot::<0>(&borrow))
+                    .unwrap()
+                    .enter(strand, async move |strand, conn| {
+                        if conn.annex().epoch.get() != annex.epoch {
+                            return Err(Error::concurrency_msg(strand, "stale transaction"));
+                        }
 
-                if conn.annex().epoch.get() != annex.epoch {
-                    return Err(Error::concurrency_msg(strand, "stale transaction"));
-                }
+                        let ([], []) = unpack!(strand, args, 0, 0)?;
 
-                let ([], []) = unpack!(strand, args, 0, 0)?;
-
-                conn.annex().in_transaction.set(false);
-                conn.annex().bump_epoch();
-                conn.annex().exec(strand, "ROLLBACK").await?;
-                Ok(())
+                        conn.annex().in_transaction.set(false);
+                        conn.annex().bump_epoch();
+                        conn.annex().exec(strand, "ROLLBACK").await?;
+                        Ok(())
+                    })
+                    .await
             })
     }
 }

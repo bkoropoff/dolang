@@ -31,8 +31,8 @@ pub use error::{Error, Result};
 /// Native objects
 pub mod object {
     pub use dolang_runtime::object::native::{
-        Instance, Mut, Object, Ref, Spread, SpreadContext, Type, TypeBuilder, TypeMut, TypeRef,
-        Unpack, UnpackItem,
+        Cast, Instance, Mut, Object, Ref, Spread, SpreadContext, Type, TypeBuilder, TypeMut,
+        TypeRef, Unpack, UnpackItem,
     };
     pub use dolang_runtime::object::{
         array_view::{ArrayLike, ArrayView},

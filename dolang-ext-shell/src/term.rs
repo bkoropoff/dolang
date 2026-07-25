@@ -574,17 +574,19 @@ fn append_value<'v, 's>(
     argument: bool,
     value: &Value<'v>,
 ) -> Result<'v, 's, ()> {
-    if let Some(text) = global.types.text.downcast(value) {
-        let borrow = text.borrow(strand)?;
-        let text = Ref::slot::<0>(&borrow).as_str(strand).unwrap().pin();
-        let mode = if ansi {
-            FilterMode::Child(parent)
-        } else {
-            FilterMode::Plain
-        };
-        let mut filter = Filter::new(out, mode);
-        filter.write_str(strand, &text)?;
-        filter.finish(strand)
+    if let Some(text) = global.types.text.cast(value) {
+        text.enter_sync(strand, |strand, text| {
+            let borrow = text.borrow(strand)?;
+            let text = Ref::slot::<0>(&borrow).as_str(strand).unwrap().pin();
+            let mode = if ansi {
+                FilterMode::Child(parent)
+            } else {
+                FilterMode::Plain
+            };
+            let mut filter = Filter::new(out, mode);
+            filter.write_str(strand, &text)?;
+            filter.finish(strand)
+        })
     } else {
         let mut filter = Filter::new(out, FilterMode::Plain);
         if argument {
@@ -730,8 +732,14 @@ fn create_text<'v>(
     mut out: Slot<'v, '_>,
 ) {
     global.types.text.create(strand, Text, &mut out);
-    let this = global.types.text.downcast(&out).unwrap();
-    text.finish(strand, Mut::slot_mut::<0>(&mut this.borrow_mut_unwrap()));
+    global
+        .types
+        .text
+        .cast(&out)
+        .unwrap()
+        .enter_sync(strand, |strand, this| {
+            text.finish(strand, Mut::slot_mut::<0>(&mut this.borrow_mut_unwrap()));
+        });
 }
 
 fn create_preformatted_text<'v, 's>(

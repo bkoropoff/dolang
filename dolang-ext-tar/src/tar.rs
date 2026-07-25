@@ -263,35 +263,46 @@ async fn append_metadata_only_entry<'v, 's>(
     append_result.into_do(strand)
 }
 
+/// Validates that the reader-backed entry `$this` is still active, binds
+/// `$entry` to a borrow of the underlying reader state, and evaluates
+/// `$body` (which sees `$entry` and a reborrow of `$strand`) inside that
+/// scope. `$body` must evaluate to a `Result<'v, 's, ()>`.
 macro_rules! active_entry {
-    ($this:expr, $strand:expr, $entry:ident) => {
+    ($this:expr, $strand:ident, $entry:ident, $body:block) => {{
         let child = $this.borrow($strand)?;
-        let reader = $this
+        $this
             .annex()
             .types
             .reader
-            .downcast(Ref::slot::<0>(&child))
-            .ok_or_else(|| Error::state_error($strand, "tar entry is invalid"))?;
-        let $entry = reader.borrow($strand)?;
-        if $entry.generation != child.generation {
-            return Err(Error::state_error($strand, "tar entry is no longer active"));
-        }
-    };
+            .cast(Ref::slot::<0>(&child))
+            .ok_or_else(|| Error::state_error($strand, "tar entry is invalid"))?
+            .enter_sync($strand, |$strand, reader_inst| {
+                let $entry = reader_inst.borrow($strand)?;
+                if $entry.generation != child.generation {
+                    return Err(Error::state_error($strand, "tar entry is no longer active"));
+                }
+                $body
+            })
+    }};
 }
 
 macro_rules! validate_entry_writer {
-    ($this:expr, $strand:expr) => {{
+    ($this:expr, $strand:ident) => {{
         let child = $this.borrow($strand)?;
-        let writer = $this
+        $this
             .annex()
             .types
             .writer
-            .downcast(Ref::slot::<0>(&child))
-            .ok_or_else(|| Error::state_error($strand, "tar entry writer is invalid"))?;
-        let parent = writer.borrow($strand)?;
-        if !parent.active || parent.generation != child.generation || child.stream.is_none() {
-            return Err(Error::state_error($strand, "tar entry writer is closed"));
-        }
+            .cast(Ref::slot::<0>(&child))
+            .ok_or_else(|| Error::state_error($strand, "tar entry writer is invalid"))?
+            .enter_sync($strand, |$strand, writer_inst| {
+                let parent = writer_inst.borrow($strand)?;
+                if !parent.active || parent.generation != child.generation || child.stream.is_none()
+                {
+                    return Err(Error::state_error($strand, "tar entry writer is closed"));
+                }
+                Ok(())
+            })?
     }};
 }
 
@@ -346,9 +357,15 @@ impl<'v> Object<'v> for TarReader {
             global,
             Slot::reborrow(&mut out),
         );
-        let entry = global.types.entry.downcast(&out).unwrap();
-        let mut entry_borrow = entry.borrow_mut_unwrap();
-        Output::set(strand, Mut::slot_mut::<0>(&mut entry_borrow), this);
+        global
+            .types
+            .entry
+            .cast(&out)
+            .unwrap()
+            .enter_sync(strand, |strand, entry| {
+                let mut entry_borrow = entry.borrow_mut_unwrap();
+                Output::set(strand, Mut::slot_mut::<0>(&mut entry_borrow), this);
+            });
         Ok(true)
     }
 }
@@ -365,187 +382,205 @@ impl<'v> Object<'v> for TarEntry {
         builder
             .supertype(TypeObject::Iter)
             .get("path", |this, strand, out| {
-                active_entry!(this, strand, borrow);
-                let bytes = borrow
-                    .current
-                    .as_ref()
-                    .unwrap()
-                    .path_bytes()
-                    .into_do(strand)?;
-                let path = str::from_utf8(&bytes).into_do(strand)?;
-                dolang_ext_shell::unix_path(strand, path, out)
+                active_entry!(this, strand, borrow, {
+                    let bytes = borrow
+                        .current
+                        .as_ref()
+                        .unwrap()
+                        .path_bytes()
+                        .into_do(strand)?;
+                    let path = str::from_utf8(&bytes).into_do(strand)?;
+                    dolang_ext_shell::unix_path(strand, path, out)
+                })
             })
             .get("type", |this, strand, out| {
-                active_entry!(this, strand, borrow);
-                let ty = borrow.current.as_ref().unwrap().header().entry_type();
-                Output::set(strand, out, entry_type_sym(*this.annex(), ty));
-                Ok(())
+                active_entry!(this, strand, borrow, {
+                    let ty = borrow.current.as_ref().unwrap().header().entry_type();
+                    Output::set(strand, out, entry_type_sym(*this.annex(), ty));
+                    Ok(())
+                })
             })
             .get("size", |this, strand, out| {
-                active_entry!(this, strand, borrow);
-                let value = borrow
-                    .current
-                    .as_ref()
-                    .unwrap()
-                    .header()
-                    .size()
-                    .into_do(strand)?;
-                Output::set(strand, out, value);
-                Ok(())
+                active_entry!(this, strand, borrow, {
+                    let value = borrow
+                        .current
+                        .as_ref()
+                        .unwrap()
+                        .header()
+                        .size()
+                        .into_do(strand)?;
+                    Output::set(strand, out, value);
+                    Ok(())
+                })
             })
             .get("mode", |this, strand, out| {
-                active_entry!(this, strand, borrow);
-                let value = borrow
-                    .current
-                    .as_ref()
-                    .unwrap()
-                    .header()
-                    .mode()
-                    .into_do(strand)?;
-                Output::set(strand, out, value);
-                Ok(())
+                active_entry!(this, strand, borrow, {
+                    let value = borrow
+                        .current
+                        .as_ref()
+                        .unwrap()
+                        .header()
+                        .mode()
+                        .into_do(strand)?;
+                    Output::set(strand, out, value);
+                    Ok(())
+                })
             })
             .get("uid", |this, strand, out| {
-                active_entry!(this, strand, borrow);
-                let value = borrow
-                    .current
-                    .as_ref()
-                    .unwrap()
-                    .header()
-                    .uid()
-                    .into_do(strand)?;
-                Output::set(strand, out, value);
-                Ok(())
+                active_entry!(this, strand, borrow, {
+                    let value = borrow
+                        .current
+                        .as_ref()
+                        .unwrap()
+                        .header()
+                        .uid()
+                        .into_do(strand)?;
+                    Output::set(strand, out, value);
+                    Ok(())
+                })
             })
             .get("gid", |this, strand, out| {
-                active_entry!(this, strand, borrow);
-                let value = borrow
-                    .current
-                    .as_ref()
-                    .unwrap()
-                    .header()
-                    .gid()
-                    .into_do(strand)?;
-                Output::set(strand, out, value);
-                Ok(())
+                active_entry!(this, strand, borrow, {
+                    let value = borrow
+                        .current
+                        .as_ref()
+                        .unwrap()
+                        .header()
+                        .gid()
+                        .into_do(strand)?;
+                    Output::set(strand, out, value);
+                    Ok(())
+                })
             })
             .get("mtime", |this, strand, out| {
-                active_entry!(this, strand, borrow);
-                let seconds = borrow
-                    .current
-                    .as_ref()
-                    .unwrap()
-                    .header()
-                    .mtime()
-                    .into_do(strand)?;
-                dolang_ext_shell::datetime(
-                    strand,
-                    SystemTime::UNIX_EPOCH + Duration::from_secs(seconds),
-                    out,
-                )
-                .into_do(strand)
+                active_entry!(this, strand, borrow, {
+                    let seconds = borrow
+                        .current
+                        .as_ref()
+                        .unwrap()
+                        .header()
+                        .mtime()
+                        .into_do(strand)?;
+                    dolang_ext_shell::datetime(
+                        strand,
+                        SystemTime::UNIX_EPOCH + Duration::from_secs(seconds),
+                        out,
+                    )
+                    .into_do(strand)
+                })
             })
             .get("user_name", |this, strand, out| {
-                active_entry!(this, strand, borrow);
-                match borrow
-                    .current
-                    .as_ref()
-                    .unwrap()
-                    .username()
-                    .into_do(strand)?
-                {
-                    Some(value) => Output::set(strand, out, value),
-                    None => Output::set(strand, out, Nil),
-                }
-                Ok(())
+                active_entry!(this, strand, borrow, {
+                    match borrow
+                        .current
+                        .as_ref()
+                        .unwrap()
+                        .username()
+                        .into_do(strand)?
+                    {
+                        Some(value) => Output::set(strand, out, value),
+                        None => Output::set(strand, out, Nil),
+                    }
+                    Ok(())
+                })
             })
             .get("group_name", |this, strand, out| {
-                active_entry!(this, strand, borrow);
-                match borrow
-                    .current
-                    .as_ref()
-                    .unwrap()
-                    .groupname()
-                    .into_do(strand)?
-                {
-                    Some(value) => Output::set(strand, out, value),
-                    None => Output::set(strand, out, Nil),
-                }
-                Ok(())
+                active_entry!(this, strand, borrow, {
+                    match borrow
+                        .current
+                        .as_ref()
+                        .unwrap()
+                        .groupname()
+                        .into_do(strand)?
+                    {
+                        Some(value) => Output::set(strand, out, value),
+                        None => Output::set(strand, out, Nil),
+                    }
+                    Ok(())
+                })
             })
             .get("link_name", |this, strand, out| {
-                active_entry!(this, strand, borrow);
-                match borrow
-                    .current
-                    .as_ref()
-                    .unwrap()
-                    .link_name_bytes()
-                    .into_do(strand)?
-                {
-                    Some(value) => {
-                        let value = str::from_utf8(&value).into_do(strand)?;
-                        dolang_ext_shell::unix_path(strand, value, out)?
+                active_entry!(this, strand, borrow, {
+                    match borrow
+                        .current
+                        .as_ref()
+                        .unwrap()
+                        .link_name_bytes()
+                        .into_do(strand)?
+                    {
+                        Some(value) => {
+                            let value = str::from_utf8(&value).into_do(strand)?;
+                            dolang_ext_shell::unix_path(strand, value, out)?
+                        }
+                        None => Output::set(strand, out, Nil),
                     }
-                    None => Output::set(strand, out, Nil),
-                }
-                Ok(())
+                    Ok(())
+                })
             })
             .get("device_major", |this, strand, out| {
-                active_entry!(this, strand, borrow);
-                match borrow
-                    .current
-                    .as_ref()
-                    .unwrap()
-                    .header()
-                    .device_major()
-                    .into_do(strand)?
-                {
-                    Some(value) => Output::set(strand, out, value),
-                    None => Output::set(strand, out, Nil),
-                }
-                Ok(())
+                active_entry!(this, strand, borrow, {
+                    match borrow
+                        .current
+                        .as_ref()
+                        .unwrap()
+                        .header()
+                        .device_major()
+                        .into_do(strand)?
+                    {
+                        Some(value) => Output::set(strand, out, value),
+                        None => Output::set(strand, out, Nil),
+                    }
+                    Ok(())
+                })
             })
             .get("device_minor", |this, strand, out| {
-                active_entry!(this, strand, borrow);
-                match borrow
-                    .current
-                    .as_ref()
-                    .unwrap()
-                    .header()
-                    .device_minor()
-                    .into_do(strand)?
-                {
-                    Some(value) => Output::set(strand, out, value),
-                    None => Output::set(strand, out, Nil),
-                }
-                Ok(())
+                active_entry!(this, strand, borrow, {
+                    match borrow
+                        .current
+                        .as_ref()
+                        .unwrap()
+                        .header()
+                        .device_minor()
+                        .into_do(strand)?
+                    {
+                        Some(value) => Output::set(strand, out, value),
+                        None => Output::set(strand, out, Nil),
+                    }
+                    Ok(())
+                })
             })
             .method("read", async move |this, strand, args, out| {
                 let ([size], []) = unpack!(strand, args, 1, 0)?;
                 let size = usize::try_from(nonnegative_u64(strand, size, "size")?)
                     .map_err(|_| Error::overflow(strand))?;
                 let child = this.borrow(strand)?;
-                let reader = this
-                    .annex()
+                let generation = child.generation;
+                this.annex()
                     .types
                     .reader
-                    .downcast(Ref::slot::<0>(&child))
-                    .ok_or_else(|| Error::state_error(strand, "tar entry is invalid"))?;
-                let mut borrow = reader.borrow_mut(strand)?;
-                if borrow.generation != child.generation {
-                    return Err(Error::state_error(strand, "tar entry is no longer active"));
-                }
-                let mut data = vec![0; size];
-                let count = borrow
-                    .current
-                    .as_mut()
-                    .unwrap()
-                    .read(&mut data)
+                    .cast(Ref::slot::<0>(&child))
+                    .ok_or_else(|| Error::state_error(strand, "tar entry is invalid"))?
+                    .enter(strand, async move |strand, reader| {
+                        let mut borrow = reader.borrow_mut(strand)?;
+                        if borrow.generation != generation {
+                            return Err(Error::state_error(
+                                strand,
+                                "tar entry is no longer active",
+                            ));
+                        }
+                        let mut data = vec![0; size];
+                        let count = borrow
+                            .current
+                            .as_mut()
+                            .unwrap()
+                            .read(&mut data)
+                            .await
+                            .into_do(strand)?;
+                        data.truncate(count);
+                        Output::set(strand, out, data.as_slice());
+                        Ok(())
+                    })
                     .await
-                    .into_do(strand)?;
-                data.truncate(count);
-                Output::set(strand, out, data.as_slice());
-                Ok(())
             })
     }
 
@@ -564,30 +599,33 @@ impl<'v> Object<'v> for TarEntry {
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, bool> {
         let child = this.borrow(strand)?;
-        let reader = this
-            .annex()
+        let generation = child.generation;
+        this.annex()
             .types
             .reader
-            .downcast(Ref::slot::<0>(&child))
-            .ok_or_else(|| Error::state_error(strand, "tar entry is invalid"))?;
-        let mut borrow = reader.borrow_mut(strand)?;
-        if borrow.generation != child.generation {
-            return Err(Error::state_error(strand, "tar entry is no longer active"));
-        }
-        let mut data = vec![0; CHUNK_SIZE];
-        let count = borrow
-            .current
-            .as_mut()
-            .unwrap()
-            .read(&mut data)
+            .cast(Ref::slot::<0>(&child))
+            .ok_or_else(|| Error::state_error(strand, "tar entry is invalid"))?
+            .enter(strand, async move |strand, reader| {
+                let mut borrow = reader.borrow_mut(strand)?;
+                if borrow.generation != generation {
+                    return Err(Error::state_error(strand, "tar entry is no longer active"));
+                }
+                let mut data = vec![0; CHUNK_SIZE];
+                let count = borrow
+                    .current
+                    .as_mut()
+                    .unwrap()
+                    .read(&mut data)
+                    .await
+                    .into_do(strand)?;
+                if count == 0 {
+                    return Ok(false);
+                }
+                data.truncate(count);
+                Output::set(strand, out, data.as_slice());
+                Ok(true)
+            })
             .await
-            .into_do(strand)?;
-        if count == 0 {
-            return Ok(false);
-        }
-        data.truncate(count);
-        Output::set(strand, out, data.as_slice());
-        Ok(true)
     }
 }
 
@@ -742,10 +780,11 @@ impl<'v> Object<'v> for TarWriter {
                         global,
                         &mut handle,
                     );
-                    let handle_obj = global.types.entry_writer.downcast(&handle).unwrap();
-                    let mut handle_borrow = handle_obj.borrow_mut_unwrap();
-                    Output::set(strand, Mut::slot_mut::<0>(&mut handle_borrow), this);
-                    drop(handle_borrow);
+                    let handle_cast = global.types.entry_writer.cast(&handle).unwrap();
+                    handle_cast.enter_sync(strand, |strand, handle_obj| {
+                        let mut handle_borrow = handle_obj.borrow_mut_unwrap();
+                        Output::set(strand, Mut::slot_mut::<0>(&mut handle_borrow), this);
+                    });
 
                     let append = async move {
                         let result = native_builder
@@ -755,13 +794,15 @@ impl<'v> Object<'v> for TarWriter {
                     };
                     let invoke = async {
                         let result = call!(strand, block, out, &handle).await;
-                        let written = {
-                            let mut handle_borrow = handle_obj.borrow_mut(strand)?;
-                            if let Some(mut stream) = handle_borrow.stream.take() {
-                                let _ = stream.shutdown().await;
-                            }
-                            handle_borrow.written
-                        };
+                        let written = handle_cast
+                            .enter(strand, async move |strand, handle_obj| {
+                                let mut handle_borrow = handle_obj.borrow_mut(strand)?;
+                                if let Some(mut stream) = handle_borrow.stream.take() {
+                                    let _ = stream.shutdown().await;
+                                }
+                                Ok(handle_borrow.written)
+                            })
+                            .await?;
                         Ok((result, written))
                     };
                     let ((native_builder, append_result), invoke_result) =
@@ -952,11 +993,16 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                         &mut reader,
                     );
                     let result = call!(strand, block, out, &reader).await;
-                    let reader_obj = global.types.reader.downcast(&reader).unwrap();
-                    let mut borrow = reader_obj.borrow_mut(strand)?;
-                    borrow.current = None;
-                    borrow.closed = true;
-                    borrow.generation = borrow.generation.wrapping_add(1);
+                    global.types.reader.cast(&reader).unwrap().enter_sync(
+                        strand,
+                        |strand, reader_obj| {
+                            let mut borrow = reader_obj.borrow_mut(strand)?;
+                            borrow.current = None;
+                            borrow.closed = true;
+                            borrow.generation = borrow.generation.wrapping_add(1);
+                            Ok(())
+                        },
+                    )?;
                     result
                 })
                 .await
@@ -991,11 +1037,14 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                         &mut writer,
                     );
                     let result = call!(strand, block, out, &writer).await;
-                    let writer_obj = global.types.writer.downcast(&writer).unwrap();
-                    let (builder, poisoned, active) = {
-                        let mut borrow = writer_obj.borrow_mut(strand)?;
-                        (borrow.builder.take(), borrow.poisoned, borrow.active)
-                    };
+                    let (builder, poisoned, active) =
+                        global.types.writer.cast(&writer).unwrap().enter_sync(
+                            strand,
+                            |strand, writer_obj| {
+                                let mut borrow = writer_obj.borrow_mut(strand)?;
+                                Ok((borrow.builder.take(), borrow.poisoned, borrow.active))
+                            },
+                        )?;
                     let cleanup = if active || poisoned {
                         Err(Error::state_error(
                             strand,

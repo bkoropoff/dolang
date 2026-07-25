@@ -932,11 +932,13 @@ impl<'v> Object<'v> for Server {
                         thread: Some(thread),
                     };
                     this.create_with_annex(strand, value, ServerAnnex { global }, &mut handle);
-                    {
-                        let instance = this.downcast(&handle).unwrap();
-                        let mut borrow = instance.borrow_mut(strand)?;
-                        Output::set(strand, Mut::slot_mut::<0>(&mut borrow), Empty::Array);
-                    }
+                    this.cast(&handle)
+                        .unwrap()
+                        .enter_sync(strand, |strand, instance| {
+                            let mut borrow = instance.borrow_mut(strand)?;
+                            Output::set(strand, Mut::slot_mut::<0>(&mut borrow), Empty::Array);
+                            Ok(())
+                        })?;
                     let res = call!(strand, func, out, &handle).await;
                     let _ = strand
                         .with_interrupt_mask(true, async move |strand| {
@@ -958,11 +960,13 @@ impl<'v> Object<'v> for Server {
                 ServerAnnex { global },
                 Slot::reborrow(&mut out),
             );
-            {
-                let instance = this.downcast(&out).unwrap();
-                let mut borrow = instance.borrow_mut(strand)?;
-                Output::set(strand, Mut::slot_mut::<0>(&mut borrow), Empty::Array);
-            }
+            this.cast(&out)
+                .unwrap()
+                .enter_sync(strand, |strand, instance| {
+                    let mut borrow = instance.borrow_mut(strand)?;
+                    Output::set(strand, Mut::slot_mut::<0>(&mut borrow), Empty::Array);
+                    Ok(())
+                })?;
             Ok(())
         }
     }
@@ -1132,31 +1136,49 @@ impl<'v> Object<'v> for Server {
                                     &mut item,
                                 );
                                 if any_callback {
-                                    let instance = global.types.mock.downcast(&item).unwrap();
-                                    let mut mock_borrow = instance.borrow_mut(strand)?;
-                                    Output::set(
+                                    global.types.mock.cast(&item).unwrap().enter_sync(
                                         strand,
-                                        Mut::slot_mut::<1>(&mut mock_borrow),
-                                        &cb_handle,
-                                    );
+                                        |strand, instance| {
+                                            let mut mock_borrow = instance.borrow_mut(strand)?;
+                                            Output::set(
+                                                strand,
+                                                Mut::slot_mut::<1>(&mut mock_borrow),
+                                                &cb_handle,
+                                            );
+                                            Ok(())
+                                        },
+                                    )?;
                                 }
 
                                 let result = call!(strand, block, out, &item).await;
 
                                 let verify_result = strand
                                     .with_interrupt_mask(true, async |strand| {
-                                        let instance = global.types.mock.downcast(&item).unwrap();
-                                        let entries = std::mem::take(
-                                            &mut instance.borrow_mut(strand)?.entries,
-                                        );
+                                        let entries =
+                                            global.types.mock.cast(&item).unwrap().enter_sync(
+                                                strand,
+                                                |strand, instance| {
+                                                    Ok(std::mem::take(
+                                                        &mut instance.borrow_mut(strand)?.entries,
+                                                    ))
+                                                },
+                                            )?;
                                         verify_all(strand, entries).await
                                     })
                                     .await;
 
                                 let cancel_result = strand
                                     .with_interrupt_mask(true, async |strand| {
-                                        let instance = global.types.mock.downcast(&item).unwrap();
-                                        cancel_callback_strand(strand, instance, global).await
+                                        global
+                                            .types
+                                            .mock
+                                            .cast(&item)
+                                            .unwrap()
+                                            .enter(strand, async |strand, instance| {
+                                                cancel_callback_strand(strand, instance, global)
+                                                    .await
+                                            })
+                                            .await
                                     })
                                     .await;
 
@@ -1176,18 +1198,25 @@ impl<'v> Object<'v> for Server {
                                     global,
                                     &mut item,
                                 );
-                                {
-                                    let instance = global.types.mock.downcast(&item).unwrap();
-                                    let mut mock_borrow = instance.borrow_mut(strand)?;
-                                    Output::set(strand, Mut::slot_mut::<0>(&mut mock_borrow), this);
-                                    if any_callback {
+                                global.types.mock.cast(&item).unwrap().enter_sync(
+                                    strand,
+                                    |strand, instance| {
+                                        let mut mock_borrow = instance.borrow_mut(strand)?;
                                         Output::set(
                                             strand,
-                                            Mut::slot_mut::<1>(&mut mock_borrow),
-                                            &cb_handle,
+                                            Mut::slot_mut::<0>(&mut mock_borrow),
+                                            this,
                                         );
-                                    }
-                                }
+                                        if any_callback {
+                                            Output::set(
+                                                strand,
+                                                Mut::slot_mut::<1>(&mut mock_borrow),
+                                                &cb_handle,
+                                            );
+                                        }
+                                        Ok(())
+                                    },
+                                )?;
                                 {
                                     let server_borrow = this.borrow(strand)?;
                                     let array = Ref::slot::<0>(&server_borrow)
@@ -1316,12 +1345,15 @@ impl<'v> Object<'v> for MockObject {
                         Output::set(strand, &mut server, Ref::slot::<0>(&borrow));
                     }
                     if !server.is_nil()
-                        && let Some(server) = global.types.server.downcast(&server)
+                        && let Some(server) = global.types.server.cast(&server)
                     {
-                        let server_borrow = server.borrow(strand)?;
-                        if let Some(array) = Ref::slot::<0>(&server_borrow).as_array(strand) {
-                            remove_identical(strand, &array, this)?;
-                        }
+                        server.enter_sync(strand, |strand, server| {
+                            let server_borrow = server.borrow(strand)?;
+                            if let Some(array) = Ref::slot::<0>(&server_borrow).as_array(strand) {
+                                remove_identical(strand, &array, this)?;
+                            }
+                            Ok(())
+                        })?;
                     }
                     Ok(())
                 })

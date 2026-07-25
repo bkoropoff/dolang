@@ -114,12 +114,11 @@ impl<'v> Object<'v> for Statement {
         if borrow.is_query_active() {
             borrow.query = QueryState::None;
             // Release borrow on connection
-            global
+            let _ = global
                 .types
                 .connection
-                .downcast(Mut::slot::<0>(&borrow))
-                .unwrap()
-                .annex();
+                .cast(Mut::slot::<0>(&borrow))
+                .unwrap();
             // Finalize statement
             let raw = annex.raw.get();
             if !raw.is_null() {
@@ -157,18 +156,18 @@ impl<'v> Object<'v> for Statement {
                         &mut wrapper,
                     );
 
-                    Output::set(
-                        strand,
-                        Mut::slot_mut::<0>(
-                            &mut global
-                                .types
-                                .rows
-                                .downcast(&wrapper)
-                                .unwrap()
-                                .borrow_mut_unwrap(),
-                        ),
-                        this,
-                    );
+                    global
+                        .types
+                        .rows
+                        .cast(&wrapper)
+                        .unwrap()
+                        .enter_sync(strand, |strand, inst| {
+                            Output::set(
+                                strand,
+                                Mut::slot_mut::<0>(&mut inst.borrow_mut_unwrap()),
+                                this,
+                            );
+                        });
 
                     Output::set(strand, out, wrapper);
                     Ok(())
@@ -181,38 +180,45 @@ impl<'v> Object<'v> for Statement {
                     let mut borrow = this.borrow_mut(strand)?;
 
                     Output::set(strand, &mut conn, Mut::slot::<0>(&borrow));
-                    let conn = annex.global.types.connection.downcast(&conn).unwrap();
-                    if conn.annex().raw.get().is_null() {
-                        return Err(Error::state_error(strand, "connection closed"));
-                    }
+                    let affected = annex
+                        .global
+                        .types
+                        .connection
+                        .cast(&conn)
+                        .unwrap()
+                        .enter(strand, async move |strand, conn| {
+                            if conn.annex().raw.get().is_null() {
+                                return Err(Error::state_error(strand, "connection closed"));
+                            }
 
-                    let raw = annex.raw.get();
-                    if raw.is_null() {
-                        return Err(Error::state_error(strand, "statement closed"));
-                    }
+                            let raw = annex.raw.get();
+                            if raw.is_null() {
+                                return Err(Error::state_error(strand, "statement closed"));
+                            }
 
-                    borrow.query = QueryState::None;
-                    drop(borrow);
-                    annex.bump_epoch();
-                    unsafe { bind_keyword_params(strand, raw, args)? };
+                            borrow.query = QueryState::None;
+                            drop(borrow);
+                            annex.bump_epoch();
+                            unsafe { bind_keyword_params(strand, raw, args)? };
 
-                    // Execute to completion
-                    let affected = conn
-                        .annex()
-                        .busy_retry(strand, async move |strand| {
-                            let raw = AssertSend(raw);
+                            // Execute to completion
                             conn.annex()
-                                .with_raw(strand, move |_| unsafe {
-                                    let raw = raw.into_inner();
-                                    let mut rc = sqlite3_step(raw);
-                                    while rc == SQLITE_ROW {
-                                        rc = sqlite3_step(raw);
-                                    }
-                                    if rc == SQLITE_DONE {
-                                        Ok(sqlite3_changes(sqlite3_db_handle(raw)))
-                                    } else {
-                                        Err(rc)
-                                    }
+                                .busy_retry(strand, async move |strand| {
+                                    let raw = AssertSend(raw);
+                                    conn.annex()
+                                        .with_raw(strand, move |_| unsafe {
+                                            let raw = raw.into_inner();
+                                            let mut rc = sqlite3_step(raw);
+                                            while rc == SQLITE_ROW {
+                                                rc = sqlite3_step(raw);
+                                            }
+                                            if rc == SQLITE_DONE {
+                                                Ok(sqlite3_changes(sqlite3_db_handle(raw)))
+                                            } else {
+                                                Err(rc)
+                                            }
+                                        })
+                                        .await
                                 })
                                 .await
                         })

@@ -331,6 +331,66 @@ impl<'v, 'a, T: Object<'v>> Clone for Instance<'v, 'a, T> {
 
 impl<'v, 'a, T: Object<'v>> Copy for Instance<'v, 'a, T> {}
 
+/// Witness that a [`Value`] has dynamic type `T`, obtained from [`Type::downcast`].
+///
+/// Use [`Cast::enter`]/[`Cast::enter_sync`] to obtain an [`Instance`] for a
+/// bounded scope.
+#[must_use]
+pub struct Cast<'v, 'a, T: Object<'v>> {
+    receiver: gc::Borrow<'v, 'a, protocol::Header, ObjectWrap<'v, T>>,
+}
+
+impl<'v, 'a, T: Object<'v>> Clone for Cast<'v, 'a, T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<'v, 'a, T: Object<'v>> Copy for Cast<'v, 'a, T> {}
+
+impl<'v, 'a, T: Object<'v>> Cast<'v, 'a, T> {
+    #[inline]
+    fn enter_impl<'x>(&self) -> Instance<'v, 'x, T>
+    where
+        'a: 'x,
+    {
+        Instance {
+            receiver: self.receiver,
+            delegator: None,
+        }
+    }
+
+    /// Obtain an [`Instance`] for the duration of `f`.
+    #[inline]
+    pub async fn enter<'s, R>(
+        self,
+        strand: &mut Strand<'v, 's>,
+        f: impl for<'x> AsyncFnOnce(&mut Strand<'v, 's>, Instance<'v, 'x, T>) -> R,
+    ) -> R {
+        f(strand, self.enter_impl()).await
+    }
+
+    /// Synchronous counterpart to [`Cast::enter`], for call sites that don't need
+    /// to hold the instance across an `.await`.
+    #[inline]
+    pub fn enter_sync<'s, R>(
+        self,
+        strand: &mut Strand<'v, 's>,
+        f: impl for<'x> FnOnce(&mut Strand<'v, 's>, Instance<'v, 'x, T>) -> R,
+    ) -> R {
+        f(strand, self.enter_impl())
+    }
+
+    /// [`Cast::enter_sync`] without a `strand` argument, for the rare contexts —
+    /// namely [`Object::finalize`] — that have no live [`Strand`] available.
+    /// May be more expensive.
+    #[inline]
+    pub fn enter_finalize<R>(self, f: impl for<'x> FnOnce(Instance<'v, 'x, T>) -> R) -> R {
+        f(self.enter_impl())
+    }
+}
+
 /// Borrow of [`Object`] trait receiver.
 pub struct Ref<'v, 'a, T: Object<'v>>(gc::Ref<'v, 'a, protocol::Header, ObjectWrap<'v, T>>);
 
@@ -2170,9 +2230,12 @@ impl<'v, T: Object<'v>> Type<'v, T> {
         Slot::from_output(&mut out).store(self.create_raw(vm, value, annex))
     }
 
-    /// Downcast value to [`Instance`]
-    pub fn downcast<'a>(&self, value: &'a Value<'v>) -> Option<Instance<'v, 'a, T>> {
-        value.downcast_ref(self.vtbl).map(Instance::new)
+    /// Check whether `value` has dynamic type `T`, returning a witness suitable to obtain an
+    /// [`Instance`].
+    pub fn cast<'a>(&self, value: &'a Value<'v>) -> Option<Cast<'v, 'a, T>> {
+        value
+            .downcast_ref(self.vtbl)
+            .map(|receiver| Cast { receiver })
     }
 
     /// Reconstructs a `Type<'v,T>` from a raw type object GC header.

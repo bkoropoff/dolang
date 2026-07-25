@@ -38,8 +38,8 @@ fn program_name_from_value<'v, 's>(
     global: State<'v, Global<'v>>,
     value: &Value<'v>,
 ) -> Result<'v, 's, String> {
-    if global.types.unix_path.downcast(value).is_some()
-        || global.types.windows_path.downcast(value).is_some()
+    if global.types.unix_path.cast(value).is_some()
+        || global.types.windows_path.cast(value).is_some()
     {
         let path = path_from_value(strand, global, value)?;
         let path = if path.is_absolute() {
@@ -219,15 +219,20 @@ async fn configure_direct_input<'v, 's>(
         command.stdin_null();
         return Ok(true);
     }
-    if global.types.stdin.downcast(input).is_some() {
+    if global.types.stdin.cast(input).is_some() {
         command.stdin_inherit().into_sys(strand)?;
         return Ok(true);
     }
-    if let Some(file) = global.types.file.downcast(input)
-        && let Some(stdio) = File::command_recv(file, strand).await?
-    {
-        command.stdin(stdio).into_sys(strand)?;
-        return Ok(true);
+    if let Some(file) = global.types.file.cast(input) {
+        let stdio = file
+            .enter(strand, async |strand, inst| {
+                File::command_recv(inst, strand).await
+            })
+            .await?;
+        if let Some(stdio) = stdio {
+            command.stdin(stdio).into_sys(strand)?;
+            return Ok(true);
+        }
     }
     Ok(false)
 }
@@ -242,18 +247,23 @@ async fn configure_direct_output<'v, 's>(
         command.stdout_null();
         return Ok(true);
     }
-    if global.types.stdout.downcast(output).is_some() {
+    if global.types.stdout.cast(output).is_some() {
         if global.terminal.redirected.get() && global.terminal.stdout_is_terminal {
             return Ok(false);
         }
         command.stdout_inherit().into_sys(strand)?;
         return Ok(true);
     }
-    if let Some(file) = global.types.file.downcast(output)
-        && let Some(stdio) = File::command_send(file, strand).await?
-    {
-        command.stdout(stdio).into_sys(strand)?;
-        return Ok(true);
+    if let Some(file) = global.types.file.cast(output) {
+        let stdio = file
+            .enter(strand, async |strand, inst| {
+                File::command_send(inst, strand).await
+            })
+            .await?;
+        if let Some(stdio) = stdio {
+            command.stdout(stdio).into_sys(strand)?;
+            return Ok(true);
+        }
     }
     Ok(false)
 }
@@ -268,18 +278,23 @@ async fn configure_direct_stderr<'v, 's>(
         command.stderr_null();
         return Ok(true);
     }
-    if global.types.stdout.downcast(stderr).is_some() {
+    if global.types.stdout.cast(stderr).is_some() {
         if global.terminal.redirected.get() && global.terminal.stdout_is_terminal {
             return Ok(false);
         }
         command.stderr_inherit_stdout().into_sys(strand)?;
         return Ok(true);
     }
-    if let Some(file) = global.types.file.downcast(stderr)
-        && let Some(stdio) = File::command_send(file, strand).await?
-    {
-        command.stderr(stdio).into_sys(strand)?;
-        return Ok(true);
+    if let Some(file) = global.types.file.cast(stderr) {
+        let stdio = file
+            .enter(strand, async |strand, inst| {
+                File::command_send(inst, strand).await
+            })
+            .await?;
+        if let Some(stdio) = stdio {
+            command.stderr(stdio).into_sys(strand)?;
+            return Ok(true);
+        }
     }
     Ok(false)
 }
@@ -596,13 +611,17 @@ async fn run<'v, 's>(
         } else if stdout_direct {
             if output.is_nil() || output.eq(strand, Singleton::IterNull) {
                 command.stderr_null();
-            } else if global.types.stdout.downcast(output).is_some() {
+            } else if global.types.stdout.cast(output).is_some() {
                 command.stderr_inherit_stdout().into_sys(strand)?;
             } else {
-                if let Some(file) = global.types.file.downcast(output) {
-                    command
-                        .stderr(File::command_send(file, strand).await?.unwrap())
-                        .into_sys(strand)?;
+                if let Some(file) = global.types.file.cast(output) {
+                    let stdio = file
+                        .enter(strand, async |strand, inst| {
+                            File::command_send(inst, strand).await
+                        })
+                        .await?
+                        .unwrap();
+                    command.stderr(stdio).into_sys(strand)?;
                 } else {
                     unreachable!("stdout direct path should have been direct-fd capable")
                 }

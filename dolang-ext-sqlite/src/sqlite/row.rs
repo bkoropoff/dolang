@@ -63,13 +63,15 @@ impl<'v> Object<'v> for Rows {
             .global
             .types
             .statement
-            .downcast(Ref::slot::<0>(&borrow))
+            .cast(Ref::slot::<0>(&borrow))
             .unwrap();
-        if let Ok(mut stmt_borrow) = stmt.borrow_mut(strand)
-            && let QueryState::Active { ref mut owned, .. } = stmt_borrow.query
-        {
-            *owned = true;
-        }
+        stmt.enter_sync(strand, |strand, stmt| {
+            if let Ok(mut stmt_borrow) = stmt.borrow_mut(strand)
+                && let QueryState::Active { ref mut owned, .. } = stmt_borrow.query
+            {
+                *owned = true;
+            }
+        });
         drop(borrow);
         for item in unpack.iter() {
             match item {
@@ -104,13 +106,15 @@ impl<'v> Object<'v> for Rows {
             .global
             .types
             .statement
-            .downcast(Ref::slot::<0>(&borrow))
+            .cast(Ref::slot::<0>(&borrow))
             .unwrap();
-        if let Ok(mut stmt_borrow) = stmt.borrow_mut(strand)
-            && let QueryState::Active { ref mut owned, .. } = stmt_borrow.query
-        {
-            *owned = true;
-        }
+        stmt.enter_sync(strand, |strand, stmt| {
+            if let Ok(mut stmt_borrow) = stmt.borrow_mut(strand)
+                && let QueryState::Active { ref mut owned, .. } = stmt_borrow.query
+            {
+                *owned = true;
+            }
+        });
         drop(borrow);
 
         strand
@@ -134,95 +138,102 @@ impl<'v> Object<'v> for Rows {
             .global
             .types
             .statement
-            .downcast(Ref::slot::<0>(&borrow))
+            .cast(Ref::slot::<0>(&borrow))
             .unwrap();
 
         // Validate epoch
-        if stmt.annex().epoch.get() != annex.epoch {
+        if stmt.enter_sync(strand, |_strand, stmt| {
+            stmt.annex().epoch.get() != annex.epoch
+        }) {
             return Err(Error::concurrency_msg(
                 strand,
                 "iterator invalidated by statement reuse",
             ));
         }
 
-        strand
-            .with_slots(async move |strand, [mut conn]| {
-                let stmt_borrow = stmt.borrow(strand)?;
-                let owned = matches!(&stmt_borrow.query, QueryState::Active { owned: true, .. });
+        stmt.enter(strand, async move |strand, stmt| {
+            strand
+                .with_slots(async move |strand, [mut conn]| {
+                    let stmt_borrow = stmt.borrow(strand)?;
+                    let owned =
+                        matches!(&stmt_borrow.query, QueryState::Active { owned: true, .. });
 
-                Output::set(strand, &mut conn, Ref::slot::<0>(&stmt_borrow));
-                drop(stmt_borrow);
-                let conn = annex.global.types.connection.downcast(&conn).unwrap();
+                    Output::set(strand, &mut conn, Ref::slot::<0>(&stmt_borrow));
+                    drop(stmt_borrow);
+                    let conn = annex.global.types.connection.cast(&conn).unwrap();
 
-                let raw = stmt.annex().raw.get();
-                if raw.is_null() {
-                    return Err(Error::state_error(strand, "statement closed"));
-                }
+                    let raw = stmt.annex().raw.get();
+                    if raw.is_null() {
+                        return Err(Error::state_error(strand, "statement closed"));
+                    }
 
-                let row_epoch = stmt.annex().bump_row_epoch();
+                    let row_epoch = stmt.annex().bump_row_epoch();
 
-                // Step to next row
-                let raw = AssertSend(raw);
-                let has_row = conn
-                    .annex()
-                    .busy_retry(strand, async move |strand| {
-                        conn.annex()
-                            .with_raw(strand, move |_| {
-                                let rc = unsafe { sqlite3_step(raw.into_inner()) };
-                                Ok(rc == SQLITE_ROW)
+                    // Step to next row
+                    let raw = AssertSend(raw);
+                    let has_row = conn
+                        .enter(strand, async move |strand, conn| {
+                            conn.annex()
+                                .busy_retry(strand, async move |strand| {
+                                    conn.annex()
+                                        .with_raw(strand, move |_| {
+                                            let rc = unsafe { sqlite3_step(raw.into_inner()) };
+                                            Ok(rc == SQLITE_ROW)
+                                        })
+                                        .await
+                                })
+                                .await
+                        })
+                        .await?;
+
+                    if has_row {
+                        let data = if owned {
+                            // Copy row data
+                            let bool_columns = &stmt.annex().bool_columns;
+                            let values: Vec<_> = unsafe {
+                                let count = sqlite3_column_count(raw.into_inner());
+                                (0..count)
+                                    .map(|i| column_to_value(raw.into_inner(), i, bool_columns))
+                                    .collect()
+                            };
+                            RowData::Owned(values.into_boxed_slice())
+                        } else {
+                            RowData::Ref(row_epoch)
+                        };
+
+                        strand
+                            .with_slots(async |strand, [mut wrapper]| {
+                                annex.global.types.row.create_with_annex(
+                                    strand,
+                                    Row,
+                                    RowAnnex {
+                                        global: annex.global,
+                                        epoch: annex.epoch,
+                                        data,
+                                    },
+                                    &mut wrapper,
+                                );
+
+                                annex.global.types.row.cast(&wrapper).unwrap().enter_sync(
+                                    strand,
+                                    |strand, row| {
+                                        let mut row = row.borrow_mut_unwrap();
+                                        Output::set(strand, Mut::slot_mut::<0>(&mut row), stmt);
+                                    },
+                                );
+
+                                Output::set(strand, out, wrapper);
+                                Ok(true)
                             })
                             .await
-                    })
-                    .await?;
-
-                if has_row {
-                    let data = if owned {
-                        // Copy row data
-                        let bool_columns = &stmt.annex().bool_columns;
-                        let values: Vec<_> = unsafe {
-                            let count = sqlite3_column_count(raw.into_inner());
-                            (0..count)
-                                .map(|i| column_to_value(raw.into_inner(), i, bool_columns))
-                                .collect()
-                        };
-                        RowData::Owned(values.into_boxed_slice())
                     } else {
-                        RowData::Ref(row_epoch)
-                    };
-
-                    strand
-                        .with_slots(async |strand, [mut wrapper]| {
-                            annex.global.types.row.create_with_annex(
-                                strand,
-                                Row,
-                                RowAnnex {
-                                    global: annex.global,
-                                    epoch: annex.epoch,
-                                    data,
-                                },
-                                &mut wrapper,
-                            );
-
-                            let mut row = annex
-                                .global
-                                .types
-                                .row
-                                .downcast(&wrapper)
-                                .unwrap()
-                                .borrow_mut_unwrap();
-                            Output::set(strand, Mut::slot_mut::<0>(&mut row), stmt);
-                            drop(row);
-
-                            Output::set(strand, out, wrapper);
-                            Ok(true)
-                        })
-                        .await
-                } else {
-                    stmt.borrow_mut(strand)?.query = QueryState::None;
-                    Ok(false)
-                }
-            })
-            .await
+                        stmt.borrow_mut(strand)?.query = QueryState::None;
+                        Ok(false)
+                    }
+                })
+                .await
+        })
+        .await
     }
 }
 
@@ -380,67 +391,67 @@ impl<'v> Object<'v> for Row {
             .global
             .types
             .statement
-            .downcast(Ref::slot::<0>(&borrow))
+            .cast(Ref::slot::<0>(&borrow))
             .unwrap();
 
-        let stmt_annex = stmt.annex();
-        if stmt_annex.epoch.get() != annex.epoch {
-            return Err(Error::concurrency_msg(
-                strand,
-                "iterator invalidated by statement reuse",
-            ));
-        }
-
-        let raw = stmt_annex.raw.get();
-        if raw.is_null() {
-            return Err(Error::state_error(strand, "statement closed"));
-        }
-
-        let count = unsafe { sqlite3_column_count(raw) } as usize;
-        let mut consumed = vec![false; count];
-
-        unsafe {
-            let rest_slot =
-                unpack_row(strand, &annex, &stmt_annex, raw, &mut unpack, &mut consumed)?;
-
-            if let Some(slot) = rest_slot {
-                // Create RowIter with remaining columns
-                strand
-                    .with_slots(async |strand, [mut wrapper]| {
-                        annex.global.types.row_iter.create_with_annex(
-                            strand,
-                            RowIter {
-                                consumed,
-                                current: 0,
-                            },
-                            RowIterAnnex {
-                                global: annex.global,
-                            },
-                            &mut wrapper,
-                        );
-
-                        // Store reference to Row in slot 0
-                        Output::set(
-                            strand,
-                            Mut::slot_mut::<0>(
-                                &mut annex
-                                    .global
-                                    .types
-                                    .row_iter
-                                    .downcast(&wrapper)
-                                    .unwrap()
-                                    .borrow_mut_unwrap(),
-                            ),
-                            this,
-                        );
-
-                        Output::set(strand, slot, wrapper);
-                        Ok(())
-                    })
-                    .await?;
+        stmt.enter(strand, async move |strand, stmt| {
+            let stmt_annex = stmt.annex();
+            if stmt_annex.epoch.get() != annex.epoch {
+                return Err(Error::concurrency_msg(
+                    strand,
+                    "iterator invalidated by statement reuse",
+                ));
             }
-        }
-        Ok(())
+
+            let raw = stmt_annex.raw.get();
+            if raw.is_null() {
+                return Err(Error::state_error(strand, "statement closed"));
+            }
+
+            let count = unsafe { sqlite3_column_count(raw) } as usize;
+            let mut consumed = vec![false; count];
+
+            unsafe {
+                let rest_slot =
+                    unpack_row(strand, &annex, &stmt_annex, raw, &mut unpack, &mut consumed)?;
+
+                if let Some(slot) = rest_slot {
+                    // Create RowIter with remaining columns
+                    strand
+                        .with_slots(async |strand, [mut wrapper]| {
+                            annex.global.types.row_iter.create_with_annex(
+                                strand,
+                                RowIter {
+                                    consumed,
+                                    current: 0,
+                                },
+                                RowIterAnnex {
+                                    global: annex.global,
+                                },
+                                &mut wrapper,
+                            );
+
+                            // Store reference to Row in slot 0
+                            annex
+                                .global
+                                .types
+                                .row_iter
+                                .cast(&wrapper)
+                                .unwrap()
+                                .enter_sync(strand, |strand, row_iter| {
+                                    let mut row_iter = row_iter.borrow_mut_unwrap();
+                                    Output::set(strand, Mut::slot_mut::<0>(&mut row_iter), this);
+                                });
+
+                            Output::set(strand, slot, wrapper);
+                            Ok(())
+                        })
+                        .await?;
+                }
+            }
+            Ok(())
+        })
+        .await
     }
 
     fn index<'a, 's>(
@@ -455,43 +466,45 @@ impl<'v> Object<'v> for Row {
             .global
             .types
             .statement
-            .downcast(Ref::slot::<0>(&borrow))
+            .cast(Ref::slot::<0>(&borrow))
             .unwrap();
 
-        let stmt_annex = stmt.annex();
-        if stmt_annex.epoch.get() != annex.epoch {
-            return Err(Error::concurrency_msg(
-                strand,
-                "iterator invalidated by statement reuse",
-            ));
-        }
-
-        let raw = stmt_annex.raw.get();
-        if raw.is_null() {
-            return Err(Error::state_error(strand, "statement closed"));
-        }
-
-        unsafe {
-            let idx = if let Ok(i) = index.to_i64(strand) {
-                i as i32
-            } else if let Some(name) = index.as_str(strand) {
-                strand.access(|x| column_for_name(raw, name.as_str(x)))
-            } else {
-                return Err(Error::type_error(
+        stmt.enter_sync(strand, move |strand, stmt| {
+            let stmt_annex = stmt.annex();
+            if stmt_annex.epoch.get() != annex.epoch {
+                return Err(Error::concurrency_msg(
                     strand,
-                    "expected int or str for column key",
+                    "iterator invalidated by statement reuse",
                 ));
-            };
-
-            if idx < 0 {
-                return Err(Error::index(strand));
             }
 
-            if !get(strand, &annex, &stmt_annex, raw, idx, out)? {
-                return Err(Error::index(strand));
+            let raw = stmt_annex.raw.get();
+            if raw.is_null() {
+                return Err(Error::state_error(strand, "statement closed"));
             }
-        }
-        Ok(())
+
+            unsafe {
+                let idx = if let Ok(i) = index.to_i64(strand) {
+                    i as i32
+                } else if let Some(name) = index.as_str(strand) {
+                    strand.access(|x| column_for_name(raw, name.as_str(x)))
+                } else {
+                    return Err(Error::type_error(
+                        strand,
+                        "expected int or str for column key",
+                    ));
+                };
+
+                if idx < 0 {
+                    return Err(Error::index(strand));
+                }
+
+                if !get(strand, &annex, &stmt_annex, raw, idx, out)? {
+                    return Err(Error::index(strand));
+                }
+            }
+            Ok(())
+        })
     }
 }
 
@@ -536,46 +549,51 @@ impl<'v> Object<'v> for RowIter {
                 let annex = this.annex();
                 let mut borrow = this.borrow_mut(strand)?;
                 Output::set(strand, &mut row, Mut::slot::<0>(&borrow));
-                let row = annex.global.types.row.downcast(&row).unwrap();
+                let row = annex.global.types.row.cast(&row).unwrap();
 
-                let row_annex = row.annex();
-                let row_borrow = row.borrow(strand)?;
-                let stmt = row_annex
-                    .global
-                    .types
-                    .statement
-                    .downcast(Ref::slot::<0>(&row_borrow))
-                    .unwrap();
+                row.enter(strand, async move |strand, row| {
+                    let row_annex = row.annex();
+                    let row_borrow = row.borrow(strand)?;
+                    let stmt = row_annex
+                        .global
+                        .types
+                        .statement
+                        .cast(Ref::slot::<0>(&row_borrow))
+                        .unwrap();
 
-                let stmt_annex = stmt.annex();
-                if stmt_annex.epoch.get() != row_annex.epoch {
-                    return Err(Error::concurrency_msg(
-                        strand,
-                        "iterator invalidated by statement reuse",
-                    ));
-                }
+                    stmt.enter_sync(strand, move |strand, stmt| {
+                        let stmt_annex = stmt.annex();
+                        if stmt_annex.epoch.get() != row_annex.epoch {
+                            return Err(Error::concurrency_msg(
+                                strand,
+                                "iterator invalidated by statement reuse",
+                            ));
+                        }
 
-                let raw = stmt_annex.raw.get();
-                if raw.is_null() {
-                    return Err(Error::state_error(strand, "statement closed"));
-                }
+                        let raw = stmt_annex.raw.get();
+                        if raw.is_null() {
+                            return Err(Error::state_error(strand, "statement closed"));
+                        }
 
-                unsafe {
-                    let rest_slot = unpack_row(
-                        strand,
-                        &row_annex,
-                        &stmt_annex,
-                        raw,
-                        &mut unpack,
-                        &mut borrow.consumed,
-                    )?;
+                        unsafe {
+                            let rest_slot = unpack_row(
+                                strand,
+                                &row_annex,
+                                &stmt_annex,
+                                raw,
+                                &mut unpack,
+                                &mut borrow.consumed,
+                            )?;
 
-                    if let Some(slot) = rest_slot {
-                        // For Rest in RowIter, just set self again
-                        Output::set(strand, slot, this);
-                    }
-                }
-                Ok(())
+                            if let Some(slot) = rest_slot {
+                                // For Rest in RowIter, just set self again
+                                Output::set(strand, slot, this);
+                            }
+                        }
+                        Ok(())
+                    })
+                })
+                .await
             })
             .await
     }
@@ -590,54 +608,59 @@ impl<'v> Object<'v> for RowIter {
                 let annex = this.annex();
                 let mut borrow = this.borrow_mut(strand)?;
                 Output::set(strand, &mut row, Mut::slot::<0>(&borrow));
-                let row = annex.global.types.row.downcast(&row).unwrap();
+                let row = annex.global.types.row.cast(&row).unwrap();
 
-                let row_annex = row.annex();
-                let row_borrow = row.borrow(strand)?;
-                let stmt = row_annex
-                    .global
-                    .types
-                    .statement
-                    .downcast(Ref::slot::<0>(&row_borrow))
-                    .unwrap();
+                row.enter(strand, async move |strand, row| {
+                    let row_annex = row.annex();
+                    let row_borrow = row.borrow(strand)?;
+                    let stmt = row_annex
+                        .global
+                        .types
+                        .statement
+                        .cast(Ref::slot::<0>(&row_borrow))
+                        .unwrap();
 
-                let stmt_annex = stmt.annex();
-                if stmt_annex.epoch.get() != row_annex.epoch {
-                    return Err(Error::concurrency_msg(
-                        strand,
-                        "iterator invalidated by statement reuse",
-                    ));
-                }
-
-                let raw = stmt_annex.raw.get();
-                if raw.is_null() {
-                    return Err(Error::state_error(strand, "statement closed"));
-                }
-
-                // Find next unconsumed column
-                let current = borrow.current;
-                for (i, con) in borrow.consumed[current..].iter_mut().enumerate() {
-                    if !*con {
-                        unsafe {
-                            // Get the column value
-                            let found = get(
+                    stmt.enter_sync(strand, move |strand, stmt| {
+                        let stmt_annex = stmt.annex();
+                        if stmt_annex.epoch.get() != row_annex.epoch {
+                            return Err(Error::concurrency_msg(
                                 strand,
-                                &row_annex,
-                                &stmt_annex,
-                                raw,
-                                (current + i) as i32,
-                                Slot::reborrow(&mut out),
-                            )?;
-                            debug_assert!(found);
-                            *con = true;
-                            borrow.current = current + i + 1;
-                            return Ok(true);
+                                "iterator invalidated by statement reuse",
+                            ));
                         }
-                    }
-                }
-                borrow.current = borrow.consumed.len();
 
-                Ok(false)
+                        let raw = stmt_annex.raw.get();
+                        if raw.is_null() {
+                            return Err(Error::state_error(strand, "statement closed"));
+                        }
+
+                        // Find next unconsumed column
+                        let current = borrow.current;
+                        for (i, con) in borrow.consumed[current..].iter_mut().enumerate() {
+                            if !*con {
+                                unsafe {
+                                    // Get the column value
+                                    let found = get(
+                                        strand,
+                                        &row_annex,
+                                        &stmt_annex,
+                                        raw,
+                                        (current + i) as i32,
+                                        Slot::reborrow(&mut out),
+                                    )?;
+                                    debug_assert!(found);
+                                    *con = true;
+                                    borrow.current = current + i + 1;
+                                    return Ok(true);
+                                }
+                            }
+                        }
+                        borrow.current = borrow.consumed.len();
+
+                        Ok(false)
+                    })
+                })
+                .await
             })
             .await
     }

@@ -79,9 +79,11 @@ pub(crate) fn path_with_stream<'v, 's>(
     let stream = global
         .types
         .stream_entry
-        .downcast(stream)
+        .cast(stream)
         .ok_or_else(|| Error::not_supported(strand))?;
-    Ok(stream_path(path, &stream.annex().inner))
+    Ok(stream.enter_sync(strand, |_strand, stream| {
+        stream_path(path, &stream.annex().inner)
+    }))
 }
 
 pub(crate) async fn path_list<'v, 's>(
