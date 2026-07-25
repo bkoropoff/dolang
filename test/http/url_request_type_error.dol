@@ -2,6 +2,10 @@ import
   std:
     - TypeError
   http
+import test:
+  - assert
+  - assert_eq
+  - test
 
 def assert_err func type: ty :msg ...rest
   let res = try
@@ -13,4 +17,6 @@ def assert_err func type: ty :msg ...rest
     true
   assert $res
 
-assert_err $http.get 1 type: $TypeError msg: "type error: expected Url or str"
+#[test]
+def get_rejects_non_url()
+  assert_err $http.get 1 type: $TypeError msg: "type error: expected Url or str"

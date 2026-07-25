@@ -1,0 +1,235 @@
+import http
+import http.mock
+import test:
+  - assert
+  - assert_eq
+  - test
+
+#[test]
+def expect_satisfied()
+  http.mock.Server do |server|
+    server.mock
+      - method: GET
+        path: /counted
+        expect: 2
+        respond:
+          status: 200
+      do |_handle|
+        http.get (server.url / "/counted")
+        http.get (server.url / "/counted")
+
+#[test]
+def expect_satisfied_range()
+  http.mock.Server do |server|
+    server.mock
+      - method: GET
+        path: /counted
+        expect: (1..3)
+        respond:
+          status: 200
+      do |_handle|
+        http.get (server.url / "/counted")
+        http.get (server.url / "/counted")
+
+#[test]
+def expect_violated()
+  http.mock.Server do |server|
+    let caught = try
+      server.mock
+        - method: GET
+          path: /counted
+          expect: 2
+          respond:
+            status: 200
+        do |_handle|
+          http.get (server.url / "/counted")
+      false
+    catch err
+      assert ((str err).contains "expected")
+      true
+    assert $caught
+
+#[test]
+def scoped_mock_unmounts_after_block()
+  http.mock.Server do |server|
+    server.mock
+      - method: GET
+        path: /scoped
+        respond:
+          status: 200
+      do |_handle|
+        let resp = http.get (server.url / "/scoped")
+        assert_eq $resp.status 200
+
+    let after = http.get (server.url / "/scoped") status: :IGNORE:
+    assert_eq $after.status 404
+
+#[test]
+def persistent_mock_survives_and_unmounts()
+  http.mock.Server do |server|
+    let handle = server.mock
+      - method: GET
+        path: /persist
+        respond:
+          status: 200
+          body: persisted
+
+    let resp = http.get (server.url / "/persist")
+    assert_eq (resp.text()) "persisted"
+
+    handle.unmount()
+    let after = http.get (server.url / "/persist") status: :IGNORE:
+    assert_eq $after.status 404
+
+#[test]
+def received_reports_request_details()
+  http.mock.Server do |server|
+    server.mock
+      - method: POST
+        path: /echo
+        respond:
+          status: 200
+      do |handle|
+        http.post (server.url / "/echo") headers: {"x-trace": "abc"} body: hello
+
+        let requests = handle.received()
+        assert_eq $requests.len 1
+        let req = requests[0]
+        assert_eq $req.method "POST"
+        assert ((str req.url).contains "/echo")
+        assert_eq $req.headers["x-trace"] "abc"
+        assert_eq (str req.body) hello
+
+#[test]
+def path_regex_matches()
+  http.mock.Server do |server|
+    server.mock
+      - path_regex: r"^/users/\d+$"
+        respond:
+          status: 200
+      do |_handle|
+        let ok = http.get (server.url / "/users/42")
+        assert_eq $ok.status 200
+        let bad = http.get (server.url / "/users/abc") status: :IGNORE:
+        assert_eq $bad.status 404
+
+#[test]
+def path_regex_invalid_pattern_is_catchable()
+  http.mock.Server do |server|
+    let caught = try
+      server.mock
+        - path_regex: "("
+          respond:
+            status: 200
+      false
+    catch _
+      true
+    assert $caught
+
+#[test]
+def default_matches_any_request()
+  http.mock.Server do |server|
+    server.mock
+      - name: catch-all
+        respond:
+          status: 200
+      do |_handle|
+        let a = http.get (server.url / "/anything")
+        assert_eq $a.status 200
+        let b = http.post (server.url / "/whatever")
+        assert_eq $b.status 200
+
+#[test]
+def respond_callback_builds_dynamic_response()
+  http.mock.Server do |server|
+    server.mock
+      - method: POST
+        path: /echo
+        respond: do |req|
+          let resp =
+            status: 200
+            body: "echo:$(str req.body)"
+          resp
+      do |_handle|
+        let resp = http.post (server.url / "/echo") body: hello
+        assert_eq (resp.text()) "echo:hello"
+
+#[test]
+def match_callback_gates_on_request()
+  http.mock.Server do |server|
+    server.mock
+      - match: do |req|
+          (req.method == "GET")
+        respond:
+          status: 200
+          body: matched
+      do |_handle|
+        let ok = http.get (server.url / "/gated")
+        assert_eq (ok.text()) "matched"
+        let bad = http.post (server.url / "/gated") status: :IGNORE:
+        assert_eq $bad.status 404
+
+#[test]
+def match_and_respond_callbacks_see_request_details()
+  http.mock.Server do |server|
+    server.mock
+      - match: do |req|
+          (req.headers["x-trace"] == "abc")
+        respond: do |req|
+          let resp =
+            status: 200
+            body: (str req.headers["x-trace"])
+          resp
+      do |_handle|
+        let resp = http.get (server.url / "/anything") headers: {"x-trace": "abc"}
+        assert_eq (resp.text()) "abc"
+        let miss = http.get (server.url / "/anything") status: :IGNORE:
+        assert_eq $miss.status 404
+
+#[test]
+def callback_mock_unmounts_with_scope()
+  http.mock.Server do |server|
+    server.mock
+      - match: do |_req|
+          true
+        respond:
+          status: 200
+      do |_handle|
+        let resp = http.get (server.url / "/anything")
+        assert_eq $resp.status 200
+
+    let after = http.get (server.url / "/anything") status: :IGNORE:
+    assert_eq $after.status 404
+
+#[test]
+def persistent_callback_mock_survives_and_unmounts()
+  http.mock.Server do |server|
+    let handle = server.mock
+      - respond: do |_req|
+          let resp =
+            status: 200
+            body: persisted
+          resp
+
+    let resp = http.get (server.url / "/persist")
+    assert_eq (resp.text()) "persisted"
+
+    handle.unmount()
+    let after = http.get (server.url / "/persist") status: :IGNORE:
+    assert_eq $after.status 404
+
+#[test]
+def url_composes_absolute_and_relative_paths()
+  http.mock.Server do |server|
+    server.mock
+      - path: /root
+        respond:
+          status: 200
+      do |_handle|
+        # Absolute-path form (leading `/`) replaces the whole path.
+        let absolute = http.get (server.url / "/root")
+        assert_eq $absolute.status 200
+        # Relative segment form appends onto the base path, which is
+        # already `/` for a fresh mock server.
+        let relative = http.get (server.url / "root")
+        assert_eq $relative.status 200

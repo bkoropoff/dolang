@@ -1,0 +1,32 @@
+import http
+import http.mock
+import test:
+  - assert_eq
+  - test
+
+#[test]
+def url_object_as_request_target()
+  http.mock.Server do |server|
+    server.mock
+      - method: GET
+        path: /get
+        respond:
+          status: 200
+      - method: GET
+        path: /headers
+        respond:
+          status: 200
+          headers:
+            "x-custom": test-value
+      do |_handle|
+        let base = server.url
+        let get_url = (base / "get")
+
+        http.get $get_url do |res|
+          assert_eq $res.status 200
+
+        let client = http.Client()
+        client.get $(base / "headers") do |res|
+          assert_eq $res.status 200
+          assert_eq $res.headers["x-custom"] "test-value"
+        client.close()

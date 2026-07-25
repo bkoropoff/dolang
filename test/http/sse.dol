@@ -1,0 +1,87 @@
+import http
+import http.mock
+import std:
+  - hash
+import test:
+  - assert_eq
+  - test
+
+def assert_err msg block
+  let actual = try
+    block()
+    nil
+  catch err
+    err
+
+  assert_eq (str actual) $msg
+
+#[test]
+def events_identity_and_hash()
+  http.mock.Server do |server|
+    server.mock
+      - method: GET
+        path: /events
+        respond:
+          status: 200
+          headers:
+            "content-type": text/event-stream
+          body: b": keep-alive\r\nevent: token\r\nid: msg-1\r\nretry: 1500\r\ndata: hello\r\ndata: world\r\n\r\ndata: plain\n\nevent:\n: comment\nignored: nope\ndata: defaulted\n\ndata: tail"
+      do |_handle|
+        let first = http.get (server.url / "/events") do |res|
+          [...res.events()][0]
+        let same_first = http.get (server.url / "/events") do |res|
+          [...res.events()][0]
+
+        assert_eq $first $same_first
+        assert_eq (hash first) (hash same_first)
+        let first_dict = {}
+        first_dict[first] = "seen"
+        assert_eq $first_dict[same_first] "seen"
+
+        http.get (server.url / "/events") do |res|
+          let events =
+            for event = res.events()
+              - type: $event.type
+                data: $event.data
+                id: $event.id
+                retry: $event.retry
+
+          let expected =
+            - type: "token"
+              data: "hello\nworld"
+              id: "msg-1"
+              retry: 1500
+            - type: "message"
+              data: "plain"
+              id: nil
+              retry: nil
+            - type: "message"
+              data: "defaulted"
+              id: nil
+              retry: nil
+            - type: "message"
+              data: "tail"
+              id: nil
+              retry: nil
+
+          for e x = events.iter().zip(expected)
+            assert_eq $e $x
+
+        let closed = http.get (server.url / "/events")
+        closed.close()
+        assert_err "state error: closed" do closed.events()
+
+#[test]
+def invalid_utf8_event()
+  http.mock.Server do |server|
+    server.mock
+      - method: GET
+        path: /events-invalid
+        respond:
+          status: 200
+          headers:
+            "content-type": text/event-stream
+          body: b"data: \xff\n"
+      do |_handle|
+        let invalid = http.get (server.url / "/events-invalid")
+        assert_err "invalid UTF-8" do invalid.events().next()
