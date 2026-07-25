@@ -194,6 +194,66 @@ echo items.len
 echo $items.len
 ```
 
+#### `$name` Inside a String Literal Does Not Chain
+
+Inside a `"..."` string, `$name` interpolates **only the bare identifier**.
+It does not extend to field access, indexing, or calls the way `$` does in
+argument/implicit-expression position. Anything beyond a bare name needs the
+parenthesized `$(...)` form:
+
+```
+# WRONG — interpolates $server, then appends the literal text ".uri/hello"
+echo "$server.uri/hello"
+
+# RIGHT — $(...) evaluates the full expression
+echo "$(server.uri)/hello"
+```
+
+This compiles fine either way, so the bug only shows up at runtime (e.g. as
+a wrong URL or a stray literal suffix) — there is no parse error to catch it.
+
+This is a deliberate consequence of the shell-like design, not an
+inconsistency to "fix": at statement level, whitespace separates tokens, so
+`$foo.bar` unambiguously ends where the next space is. Inside a string,
+whitespace is just another character — there's no delimiter to stop an
+interpolation from *looking* like it should keep chaining. If `$name` chained
+freely, `"$basename.txt"` would try to resolve a field/property named `txt`
+on `$basename` instead of doing the obviously-intended thing (interpolate
+`$basename`, then append the literal `.txt`). Restricting bare `$name` to
+just the identifier keeps that common case unsurprising, at the cost of
+requiring `$(...)` for anything more complex.
+
+#### Vertical/Keyword-Argument *Values* Are Still Statement Level
+
+A bareword on the **value** side of a vertical key item, dash item, or
+keyword argument is a literal string, not a variable reference — the same
+"statement level is shell-like by default" rule from the top of this section
+applies there too, and it's easy to forget once you're several nested calls
+deep:
+
+```
+let name = alice
+
+# WRONG — pushes the literal string "name", not the value of $name
+parts.push
+  - name
+
+# WRONG — dict value is the literal string "name", not $name's value
+let d =
+  key: name
+
+# RIGHT — $ introduces the variable in a value position same as anywhere else
+parts.push
+  - $name
+
+let d =
+  key: $name
+```
+
+No compile error results — the literal string is often plausible-looking
+(e.g. `"name"`), so this tends to surface as a confusing assertion failure
+rather than an obvious syntax mistake.
+
 #### Expression-Level `if` (Does Not Exist)
 
 There is no expression-level `if`/`else`. `if` is always a statement with an
@@ -428,6 +488,20 @@ let data =
 let doubled =
   for i = [1, 2, 3]
     - (i * 2)
+```
+
+Bare keys are symbols (`sym`) and must be valid identifiers. If you want a
+string key, it must be quoted. An invalid bare key may parse as a string
+literal instead:
+
+```
+# WRONG — `x-custom` isn't an identifier, so this doesn't parse as a key item
+let headers =
+  x-custom: value
+
+# RIGHT
+let headers =
+  "x-custom": value
 ```
 
 ### `$` as Low-Precedence Call
@@ -863,6 +937,18 @@ fn build<'a>(mut builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self
         })
 }
 ```
+
+Bareword Do-side dict/vertical-layout keys (`method: GET`, unquoted identifier
+keys generally) compile to `Sym` values, not `Str` — even though they look
+like plain text. Looking one up from Rust with a raw `&str` via
+`Dict::get(strand, "method", ...)` silently returns not-found, since `Str`
+and `Sym` are distinct key types. Always look up a known bareword key with a
+pre-interned `Sym` (`builder.sym("method")`), never a raw `&str`. Quoted keys
+(`"x-custom": v`) produce real `Str` keys, so a dict built from a mix of
+bareword and quoted keys may have mixed `Str`/`Sym` key types — this only
+matters for `Dict::get()` with a fixed expected key, not for generic
+iteration (`Dict::pairs()` + `.to_string(strand)` stringifies either kind the
+same way).
 
 ### Argument Unpacking (`unpack!`)
 
