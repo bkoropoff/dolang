@@ -36,19 +36,19 @@ def yield()
   sleep 0.01
 
 #[agent.test]
-def echo()
+def echo_sub()
   let res = sub $echo hello world
   assert_eq $res "hello world"
 
 #[agent.test]
-def cat()
+def cat_file()
   let path = Path "fixture.txt"
   path.write "[package]\nname = fixture\n"
   let content = sub $cat $path
   assert (content.starts_with "[package]")
 
 #[agent.test]
-def grep()
+def grep_file()
   let path = Path "fixture.toml"
   path.write |
     [package]
@@ -65,7 +65,7 @@ def grep()
     - "[dependencies.dolang-shell-vfs]"
 
 #[agent.test]
-def pipeline()
+def pipeline_grep()
   let path = Path "fixture.toml"
   path.write |
     [package]

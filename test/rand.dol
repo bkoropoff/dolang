@@ -45,7 +45,7 @@ def int_invalid_args()
   assert_eq (str end_type_err) "type error: expected `int`"
 
 #[test]
-def string()
+def string_func()
   assert_eq (string 0 alphabet: "abc") ""
 
   let token = string 8
@@ -79,7 +79,7 @@ def string_invalid_args()
   assert_eq (str alpha_type_err) "type error: expected `str`"
 
 #[test]
-def pick()
+def pick_func()
   let items = [10, 20, 30]
   for _ = range 50
     assert (items.contains (pick items))

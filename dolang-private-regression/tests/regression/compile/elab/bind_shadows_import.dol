@@ -1,0 +1,12 @@
+import math:
+  - add
+# warning: unused variable
+#   --> bind_shadows_import.dol:LL:LL
+#    |
+# LL |   - add
+#    |     ^^^
+
+def add x y
+  (x - y)
+
+assert_eq (add 2 2) 0

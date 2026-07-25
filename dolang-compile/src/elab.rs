@@ -1813,7 +1813,7 @@ impl<'a> Elaborater<'a> {
         Ok(())
     }
 
-    fn visit_import(&mut self, scope: &mut Scope<'_>, import: &mut Import) -> Result<()> {
+    fn visit_import_pre(&mut self, scope: &mut Scope<'_>, import: &mut Import) -> Result<()> {
         for element in import.0.iter_mut() {
             match element {
                 ImportElement::ModuleAsIs {
@@ -1882,6 +1882,11 @@ impl<'a> Elaborater<'a> {
                 }
             }
         }
+        Ok(())
+    }
+
+    fn visit_import(&mut self, _scope: &mut Scope<'_>, _import: &mut Import) -> Result<()> {
+        // Everything was actually done in _pre
         Ok(())
     }
 
@@ -2217,6 +2222,7 @@ impl<'a> Elaborater<'a> {
                         origin,
                     });
                 }
+                Stmt::Import(import) => self.visit_import_pre(scope, import)?,
                 _ => {}
             }
         }

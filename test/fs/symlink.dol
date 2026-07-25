@@ -15,7 +15,7 @@ import agent
     - Path
 
 #[agent.test]
-def symlink_file()
+def symlink_file_basic()
   let target = Path "target.txt"
   let link = Path "link.txt"
 
