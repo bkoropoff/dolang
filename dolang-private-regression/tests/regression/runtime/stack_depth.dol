@@ -9,12 +9,12 @@ import
     - assert_err
 
 let scoped_parent = if DEBUG
-  60
+  120
 else
   900
 
 let scoped_child = if DEBUG
-  20
+  40
 else
   200
 
