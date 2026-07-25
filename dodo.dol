@@ -121,7 +121,7 @@ class Spec
       ...self.#extra ...rest
 
   pub def cargo_vfs self ...rest
-    self.cargo build --bin dolang-vfs
+    self.cargo build --bin dolang-vfs --bin dolang-private-polyfill
     self.cargo ...rest
 
 def default_shell_tests()
@@ -282,6 +282,7 @@ return $
           --all-features
       spec.cargo llvm-cov clean
       spec.cargo llvm-cov --no-report run --ignore-run-fail --bin dolang-vfs
+      spec.cargo llvm-cov --no-report run --ignore-run-fail --bin dolang-private-polyfill
       env
         DO_EXPORT_DOT: $Path("dot").absolute()
         VFS: (spec.bin "dolang-vfs")
