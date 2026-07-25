@@ -1,4 +1,4 @@
-import agent tar transfer zip
+import agent http http.mock tar transfer zip
   fs:
     - Path
     - UnixPath
@@ -23,6 +23,96 @@ def local_get_and_put()
 def policy_is_reserved()
   assert_throws $ValueError do
     transfer.get "source.bin" policy: :OFFLINE:
+
+#[agent.test]
+def http_get_downloads_and_caches()
+  http.mock.Server do |server|
+    server.mock
+      - method: GET
+        path: /file.bin
+        respond:
+          status: 200
+          body: hello
+      do |_handle|
+        let result = transfer.get (server.url / "/file.bin") cache: (Path "cache")
+        assert_eq $result.read() hello
+
+#[agent.test]
+def http_get_revalidates_with_etag()
+  http.mock.Server do |server|
+    server.mock
+      - method: GET
+        path: /versioned.bin
+        headers:
+          "if-none-match": v1
+        respond:
+          status: 304
+      - method: GET
+        path: /versioned.bin
+        respond:
+          status: 200
+          headers:
+            etag: v1
+          body: hello
+      do |handle|
+        let cache = Path "cache"
+        let first = transfer.get (server.url / "/versioned.bin") cache: $cache
+        assert_eq $first.read() hello
+        let second = transfer.get (server.url / "/versioned.bin") cache: $cache
+        assert_eq $second.read() hello
+        assert_eq $second $first
+
+        let requests = handle.received()
+        assert_eq $requests.len 2
+        # `.received()` orders most-recent-first (wiremock's own convention).
+        assert_eq (requests[0].headers.get "if-none-match") "v1"
+
+#[agent.test]
+def http_get_verifies_digest()
+  http.mock.Server do |server|
+    server.mock
+      - method: GET
+        path: /digest.bin
+        respond:
+          status: 200
+          body: hello
+      do |_handle|
+        let good = "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        let result = transfer.get (server.url / "/digest.bin") cache: (Path "cache") digest: $good
+        assert_eq $result.read() hello
+
+        let bad = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        assert_throws $ValueError do
+          transfer.get (server.url / "/digest.bin") cache: (Path "cache2") digest: $bad
+
+#[agent.test]
+def http_put_uploads_local_file()
+  Path("upload.bin").write b"payload-bytes"
+  http.mock.Server do |server|
+    server.mock
+      - method: PUT
+        path: /upload
+        respond:
+          status: 201
+      do |handle|
+        transfer.put "upload.bin" (server.url / "/upload")
+        let requests = handle.received()
+        assert_eq $requests.len 1
+        assert_eq $requests[0].method "PUT"
+        assert_eq (str requests[0].body) "payload-bytes"
+
+#[agent.test]
+def http_put_propagates_error_on_failure_status()
+  Path("upload.bin").write b"payload-bytes"
+  http.mock.Server do |server|
+    server.mock
+      - method: PUT
+        path: /upload
+        respond:
+          status: 500
+      do |_handle|
+        assert_throws $http.Error do
+          transfer.put "upload.bin" (server.url / "/upload")
 
 #[agent.test]
 def archive_round_trips()
