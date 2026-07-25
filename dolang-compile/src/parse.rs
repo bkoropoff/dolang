@@ -2813,21 +2813,15 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_rhs(&mut self, scope: &mut Scope) -> Result<PrimStmt> {
-        if let Some(token!(TokenInfo::Indent)) = self.peek()? {
-            self.advance();
-            let res = PrimStmt::Expr(self.parse_data(scope, vec![])?);
-            Ok(res)
-        } else {
-            self.expect(scope, &[ExpectKind::ArgSep])?;
-            match self.peek()? {
-                Some(token!(TokenInfo::Keyword(Keyword::If))) => {
-                    Ok(PrimStmt::If(self.parse_if(scope)?))
-                }
-                Some(token!(TokenInfo::Keyword(Keyword::Try))) => {
-                    Ok(PrimStmt::Try(self.parse_try(scope)?))
-                }
-                _ => Ok(PrimStmt::Expr(self.parse_cmd_or_expr(scope, true)?)),
+        self.expect(scope, &[ExpectKind::ArgSep])?;
+        match self.peek()? {
+            Some(token!(TokenInfo::Keyword(Keyword::If))) => {
+                Ok(PrimStmt::If(self.parse_if(scope)?))
             }
+            Some(token!(TokenInfo::Keyword(Keyword::Try))) => {
+                Ok(PrimStmt::Try(self.parse_try(scope)?))
+            }
+            _ => Ok(PrimStmt::Expr(self.parse_cmd_or_expr(scope, true)?)),
         }
     }
 
@@ -4362,10 +4356,6 @@ impl<'a> Parser<'a> {
                 let span = *span;
                 self.advance();
                 let expr = match self.peek()? {
-                    Some(token!(Indent)) => {
-                        self.advance();
-                        Some(self.parse_data(scope, vec![])?)
-                    }
                     Some(token!(ArgSep)) => {
                         self.advance();
                         Some(self.parse_cmd_or_expr(scope, true)?)
@@ -4376,7 +4366,7 @@ impl<'a> Parser<'a> {
                         return Err(self.syntax_error(
                             scope,
                             token,
-                            "expected space or indentation after `return`",
+                            "expected space after `return`",
                         ));
                     }
                 };

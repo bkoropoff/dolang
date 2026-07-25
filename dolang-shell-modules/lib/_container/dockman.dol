@@ -21,14 +21,14 @@ let SOCKET_SPINS = 10
 let SOCKET_SLEEPS = 100
 let SOCKET_SLEEP = 0.10
 
-let SAVE_FORMATS =
+let SAVE_FORMATS = $
   DOCKER_ARCHIVE: docker-archive
   OCI_ARCHIVE: oci-archive
   OCI_DIR: oci-dir
   DOCKER_DIR: docker-dir
   DIR: dir
 
-let CONTAINER_STATES =
+let CONTAINER_STATES = $
   "created": :CREATED:
   "running": :RUNNING:
   "paused": :PAUSED:
@@ -37,7 +37,7 @@ let CONTAINER_STATES =
   "exited": :EXITED:
   "dead": :DEAD:
 
-let MOUNT_TYPES =
+let MOUNT_TYPES = $
   "bind": :BIND:
   "volume": :VOLUME:
   "tmpfs": :TMPFS:
@@ -45,41 +45,41 @@ let MOUNT_TYPES =
   "npipe": :NPIPE:
   "cluster": :CLUSTER:
 
-let PORT_PROTOCOLS =
+let PORT_PROTOCOLS = $
   "tcp": :TCP:
   "udp": :UDP:
   "sctp": :SCTP:
 
-let INVALID_IMAGE_REFERENCE_ERRORS =
+let INVALID_IMAGE_REFERENCE_ERRORS = $
   - INVALID REFERENCE FORMAT
 
-let REGISTRY_AUTH_ERRORS =
+let REGISTRY_AUTH_ERRORS = $
   - UNAUTHORIZED
   - AUTHENTICATION REQUIRED
   - REQUESTED ACCESS TO THE RESOURCE IS DENIED
   - DENIED
 
-let NO_IMAGE_ERRORS =
+let NO_IMAGE_ERRORS = $
   - NO SUCH IMAGE
   - IMAGE NOT KNOWN
   - DOES NOT EXIST LOCALLY
   - MANIFEST UNKNOWN
   - NOT FOUND
 
-let ARCHIVE_ERRORS =
+let ARCHIVE_ERRORS = $
   - ARCHIVE
   - TAR
   - PAYLOAD
   - NO SUCH FILE
   - CANNOT OPEN
 
-let PUSH_NO_IMAGE_ERRORS =
+let PUSH_NO_IMAGE_ERRORS = $
   - TAG DOES NOT EXIST
   - DOES NOT EXIST LOCALLY
   - IMAGE NOT KNOWN
   - NO SUCH IMAGE
 
-let NO_CONTAINER_ERRORS =
+let NO_CONTAINER_ERRORS = $
   - NO SUCH CONTAINER
   - NO CONTAINER WITH NAME OR ID
   - CONTAINER NOT KNOWN
@@ -503,7 +503,7 @@ pub def mount_args mounts
       source = str $ cache_dir (id || target)
       type = "bind"
     if (type == "bind")
-      let parts =
+      let parts = $
         if readonly
           - ro
         else
@@ -516,7 +516,7 @@ pub def mount_args mounts
           - Z
       args.push -v $source:$target:$(",".join parts)
     else
-      let parts =
+      let parts = $
         - type=$type
         if target
           - target=$target
@@ -762,7 +762,7 @@ pub class Builder
     let spec = {...args}
     let tags = [...spec.values :tag:]
     spec.delete :tag:
-    let steps =
+    let steps = $
       run: $self.#step_run
       add: $self.#step_add
       patch: $self.#step_patch

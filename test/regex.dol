@@ -54,7 +54,7 @@ def split_delimiter_edges()
 #[test]
 def split_iter_unpack()
   let re = Regex r"\s+"
-  let collected =
+  let collected = $
     for part = re.split "hello world foo"
       - $part
   assert_eq $collected ["hello", "world", "foo"]

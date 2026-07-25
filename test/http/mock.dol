@@ -145,11 +145,9 @@ def respond_callback_builds_dynamic_response()
     server.mock
       - method: POST
         path: /echo
-        respond: do |req|
-          let resp =
-            status: 200
-            body: "echo:$(str req.body)"
-          resp
+        respond: do |req| $
+          status: 200
+          body: "echo:$(str req.body)"
       do |_handle|
         let resp = http.post (server.url / "/echo") body: hello
         assert_eq (resp.text()) "echo:hello"
@@ -175,11 +173,9 @@ def match_and_respond_callbacks_see_request_details()
     server.mock
       - match: do |req|
           (req.headers["x-trace"] == "abc")
-        respond: do |req|
-          let resp =
-            status: 200
-            body: (str req.headers["x-trace"])
-          resp
+        respond: do |req| $
+          status: 200
+          body: (str req.headers["x-trace"])
       do |_handle|
         let resp = http.get (server.url / "/anything") headers: {"x-trace": "abc"}
         assert_eq (resp.text()) "abc"
@@ -205,11 +201,9 @@ def callback_mock_unmounts_with_scope()
 def persistent_callback_mock_survives_and_unmounts()
   http.mock.Server do |server|
     let handle = server.mock
-      - respond: do |_req|
-          let resp =
-            status: 200
-            body: persisted
-          resp
+      - respond: do |_req| $
+          status: 200
+          body: persisted
 
     let resp = http.get (server.url / "/persist")
     assert_eq (resp.text()) "persisted"

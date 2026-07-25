@@ -1,11 +1,11 @@
-let data =
+let data = $
   - 1
   ...[2, 3]
   - 4
 assert_eq $data [1, ...[2, 3], 4]
 assert_eq $data [1, 2, 3, 4]
 
-data =
+data = $
   - 1
   foo: bar
   ...{bar: 42}

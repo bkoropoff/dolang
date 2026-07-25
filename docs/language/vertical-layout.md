@@ -8,8 +8,7 @@ indented block in the following contexts:
 - In the middle of a command (but not `if`/`while` conditions, or `for`/`bind`
   scrutinees; in these contexts, indentation is reserved for the body of the
   statement form)
-- Immediately after `=` in a `let` or assignment statement, or immediately
-  after `return` (constructs an array or dictionary)
+- After a `$` at statement level
 
 ## Dash Items
 
@@ -69,28 +68,28 @@ func
 
 ## Vertical Data
 
-In non-argument contexts, vertical layout defines an array or dictionary:
+`$` followed by indentation introduces an array or dictionary:
 
 ```
 # Vertical array
-let items =
+let items = $
   - 1
   - 2
   - 3
 
 # A vertical dictionary will result if at least one key is present
-return
+return $
   host: localhost
   port: 8080
 
 # Vertical dictionary with implicit integer keys
-let config =
+let config = $
   name: Bob
   - false # integer key 0
   - 42 # integer key 1
 
 # Nested
-let data =
+let data = $
   name: Example Student
   scores:
     - 95
@@ -99,13 +98,19 @@ let data =
   address:
     city: Anytown
     zip: "00000"
+
+# As an argument (a single array argument, instead of 3 string arguments)
+echo $
+  - a
+  - b
+  - c
 ```
 
 A dictionary results if any keys are present; otherwise, an array is
 constructed.
 
-In a vertical argument context, further indentation will introduce an array or
-dictionary as an argument:
+In a vertical context, further indentation will introduce an array or
+dictionary as an argument without `$`:
 
 ```
 my_func
@@ -142,7 +147,7 @@ some_func
 Within vertical layout, `for` generates variadic items or arguments
 
 ```
-let doubled =
+let doubled = $
   for i = [1, 2, 3]
     - (i * 2)
 ```
@@ -152,19 +157,19 @@ let doubled =
 `if` introduces conditional items or arguments in vertical layout:
 
 ```
-let items =
+let items = $
   - always_here
   if include_extra
     - extra_item
   - also_always_here
 
-let foo =
+let foo = $
   if true
     - 1
     - 2
 assert_eq $foo [1, 2]
 
-let bar =
+let bar = $
   if false
     - 1
     - 2
@@ -177,7 +182,7 @@ Use `...` to spread in vertical layout. It must not be preceded by `-`.
 
 ```
 let extras = [4, 5, 6]
-let all =
+let all = $
   - 1
   - 2
   - 3

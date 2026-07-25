@@ -1,4 +1,4 @@
-let bar =
+let bar = $
   a: 42
   b: 2.5
   42: a

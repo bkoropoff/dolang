@@ -98,11 +98,9 @@ callback that returns one — built dynamically from the matched request
 server.mock
   - method: POST
     path: /echo
-    respond: do |req|
-      let resp =
-        status: 200
-        body: $req.body
-      resp
+    respond: do |req| $
+      status: 200
+      body: $req.body
 ```
 
 A trailing `do` block scopes the mocks it registers to the block's duration —

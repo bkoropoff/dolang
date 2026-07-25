@@ -232,21 +232,21 @@ applies there too, and it's easy to forget once you're several nested calls
 deep:
 
 ```
-let name = alice
+let name = "Alice"
 
 # WRONG — pushes the literal string "name", not the value of $name
 parts.push
   - name
 
 # WRONG — dict value is the literal string "name", not $name's value
-let d =
+let d = $
   key: name
 
 # RIGHT — $ introduces the variable in a value position same as anywhere else
 parts.push
   - $name
 
-let d =
+let d = $
   key: $name
 ```
 
@@ -285,7 +285,7 @@ are a statement-level construct. They cannot appear inside `()`, `[]`, or `{}`.
 #   x * 2)
 
 # RIGHT — for at statement level with result
-let result =
+let result = $
   for x = items
     - (x * 2)
 
@@ -457,7 +457,7 @@ let raw = r|
 
 ### Vertical Layout
 
-Indented blocks under commands become arguments; under `let`/`return` they
+Indented blocks under commands become arguments; after `$` they
 construct data:
 
 ```
@@ -467,25 +467,25 @@ compile_sources
   - bar.c
 
 # Vertical data (array)
-let items =
+let items = $
   - 1
   - 2
   - 3
 
 # Vertical data (dict — at least one key present)
-let config =
+let config = $
   host: localhost
   port: 8080
 
 # Nested
-let data =
+let data = $
   name: Alice
   scores:
     - 95
     - 87
 
 # for/if in vertical layout
-let doubled =
+let doubled = $
   for i = [1, 2, 3]
     - (i * 2)
 ```
@@ -496,11 +496,11 @@ literal instead:
 
 ```
 # WRONG — `x-custom` isn't an identifier, so this doesn't parse as a key item
-let headers =
+let headers = $
   x-custom: value
 
 # RIGHT
-let headers =
+let headers = $
   "x-custom": value
 ```
 

@@ -49,7 +49,7 @@ def clean_container name block
 
 #[test]
 def read_ubuntu_release()
-  let overrides =
+  let overrides = $
     TEST_DOLANG_CONTAINER_SET: "value"
     TEST_DOLANG_CONTAINER_UNSET: nil
   let release = runtime.with ubuntu:24.04 cd: /tmp env: $overrides do
@@ -75,7 +75,7 @@ def read_fedora_packages()
 
 #[test]
 def run_direct_command()
-  let overrides =
+  let overrides = $
     TEST_DOLANG_CONTAINER_SET: value
     TEST_DOLANG_CONTAINER_UNSET: nil
   let script = r#"printf "%s\n%s\n%s\n" "$PWD" "$TEST_DOLANG_CONTAINER_SET" "${TEST_DOLANG_CONTAINER_UNSET-unset}"; cat /etc/os-release"#

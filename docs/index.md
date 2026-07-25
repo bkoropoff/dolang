@@ -54,7 +54,7 @@ let total = (price * tax_rate + shipping)
 data language.
 
 ```
-let config =
+let config = $
   host: localhost
   port: 8080
   features:
@@ -81,7 +81,7 @@ Structured data and executable blocks use the same syntax and runtime:
 ```
 import progress podman
 
-let PACKAGES =
+let PACKAGES = $
   - gcc
   - node
 

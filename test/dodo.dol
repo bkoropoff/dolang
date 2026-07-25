@@ -14,7 +14,7 @@ def run_reuses_loaded_rules_when_reentered()
 
       fs.append "loads" x
 
-      return
+      return $
         inner:
           do |_args| nil
         outer:

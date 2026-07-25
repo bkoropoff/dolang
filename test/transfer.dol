@@ -125,7 +125,7 @@ def archive_round_trips()
   if (os_info().family != :WINDOWS:)
     symlink_file (Path "../hello.txt") (source / "nested/link")
 
-  let formats =
+  let formats = $
     - [:TAR:, "archive.tar"]
     - [:TAR_GZIP:, "archive.tar.gz"]
     - [:TAR_ZSTD:, "archive.tar.zst"]
