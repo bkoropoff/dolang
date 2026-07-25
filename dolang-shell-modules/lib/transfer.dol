@@ -3,6 +3,8 @@ import digest fs http json progress security shell std sys tar zip
     - Path
     - UnixPath
     - with_temp_dir
+  regex:
+    - Regex
   time:
     - DateTime
   url:
@@ -14,6 +16,8 @@ let DIGESTS =
   "sha1": $digest.Sha1
   "sha256": $digest.Sha256
   "sha512": $digest.Sha512
+
+let HEX_DIGEST = Regex r"^[0-9a-f]+$"
 
 def parse_location value
   if (type value Url || type value Path)
@@ -64,12 +68,12 @@ def digest_spec spec
   let parts = [...spec.lower().split ":" limit: 1]
   if (parts.len != 2)
     throw std.ValueError "digest: expected `algorithm:hex`"
-  let algorithm expected = parts[0]
+  let algorithm expected = parts
   let constructor = DIGESTS.get $algorithm else: do
     throw std.ValueError "digest: unsupported algorithm: $algorithm"
   let expected_len = (constructor().digest().len * 2)
   if (expected.len != expected_len ||
-      !expected.iter().all(do |c| "0123456789abcdef".contains c))
+      !HEX_DIGEST.match(expected))
     throw std.ValueError "digest: invalid $algorithm hex value"
   record :algorithm :expected :constructor
 
@@ -146,8 +150,11 @@ class Cache
   field root = nil
   field client = http.Client()
 
-  def (init) self app
-    self.#root = (fs.cache_dir app: (normalize_app app) / "transfer")
+  def (init) self app cache
+    self.#root = if (cache != nil)
+      Path cache
+    else
+      (fs.cache_dir app: (normalize_app app) / "transfer")
 
   def entry self url
     let identity = str(normalized_url url)
@@ -187,8 +194,7 @@ class Cache
         finally
           tmp.remove ignore: true
 
-        let updated =
-          (response_metadata(identity, response, payload, digest_info, metadata))
+        let updated = (response_metadata(identity, response, payload, digest_info, metadata))
         write_metadata (entry / "metadata.json") $updated
         payload
 
@@ -224,15 +230,21 @@ class Cache
 # SHA-1, SHA-256, and SHA-512. A previously verified digest-pinned entry is
 # returned without contacting the server.
 #
+# `cache` overrides the cache location with an explicit directory, bypassing
+# `app`/`fs.cache_dir` entirely. Mainly useful for tests that want an
+# isolated, disposable cache root.
+#
 # `policy` is reserved and must be `nil`.
-pub def get source :app = nil :digest = nil :policy = nil
+pub def get source :app = nil :digest = nil :policy = nil :cache = nil
   if (policy != nil)
     throw std.ValueError "policy: reserved; expected nil"
+  if (app != nil && cache != nil)
+    throw std.ValueError "app: not valid together with cache"
   source = parse_location $source
   if (type source Path)
     return source
 
-  (Cache app).get(source, digest)
+  (Cache app cache).get(source, digest)
 
 def put_path source destination
   destination.parent.create_dir all: true
@@ -251,12 +263,9 @@ def put_url source destination headers
       let track = do |chunk|
         indicator.delta $chunk.len
         chunk
-      let chunks = (file.iter().map track)
+      let chunks = (file.map track)
       let response = http.put(destination, headers: (headers || {}), body: chunks)
-      try
-        response.throw_for_status()
-      finally
-        response.close()
+      response.close()
   nil
 
 # Copies or uploads `source` to `destination`.

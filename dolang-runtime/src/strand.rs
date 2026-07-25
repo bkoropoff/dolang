@@ -350,7 +350,7 @@ impl<'v> Drop for StrandInner<'v> {
 
 const ARENA_DEFAULT_SIZE: usize = 1024 * 16;
 #[cfg(debug_assertions)]
-const MAX_CALL_DEPTH: u32 = 64;
+const MAX_CALL_DEPTH: u32 = 128;
 #[cfg(not(debug_assertions))]
 const MAX_CALL_DEPTH: u32 = 1000;
 
