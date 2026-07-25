@@ -6,7 +6,7 @@ import sys admin dodo
     - with_temp_dir
     - symlink_file
 
-let MIRI_CRATES =
+let MIRI_CRATES = $
   - dolang-bytecode
   - dolang-compile
   - dolang-runtime
@@ -14,17 +14,17 @@ let MIRI_CRATES =
   - dolang
   - dolang-private-regression
 
-let COV_IGNORE =
+let COV_IGNORE = $
   - dolang-private-util/src/hashbrown
   - dolang-private-doc
   - dolang-private-highlight
   - dolang-private-build
 
-let MKDOCS_BINS =
+let MKDOCS_BINS = $
   - dolang-highlight
   - dolang-doc
 
-let PUBLISH_CRATES =
+let PUBLISH_CRATES = $
   - dolang-rpc
   - dolang-private-build
   - dolang-private-util
@@ -59,7 +59,7 @@ let PUBLISH_CRATES =
   - dolang-shell-modules
   - dolang-shell
 
-let TARGETS =
+let TARGETS = $
   "x86_64-linux":
     tuple: x86_64-unknown-linux-gnu
   "x86_64-windows":
@@ -175,7 +175,7 @@ def install_bin_symlink spec bin_dir from to
   tmp.rename $dst
   echo "link: $dst -> $src"
 
-return
+return $
   common:
     - opt: target
       help: target platform
