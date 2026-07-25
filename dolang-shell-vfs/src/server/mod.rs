@@ -850,14 +850,14 @@ impl Connection {
         let result = async {
             let stdio = self.retained_stdio_recv(context, stdio)?;
             let mut data = vec![0; len];
-            let len = stdio
+            let got_len = stdio
                 .0
                 .lock()
                 .await
                 .read(&mut data)
                 .await
                 .map_err(wire_error)?;
-            data.truncate(len);
+            data.truncate(got_len);
             Ok(data)
         }
         .await;

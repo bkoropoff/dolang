@@ -714,8 +714,12 @@ fn wire_io(error: crate::protocol::WireError) -> io::Error {
 }
 
 impl Client {
-    fn is_same_vfs(&self, other: &Self) -> bool {
+    pub(crate) fn is_same_vfs(&self, other: &Self) -> bool {
         self.rpc.is_same_session(&other.rpc) && self.vfs == other.vfs
+    }
+
+    pub(crate) fn mode(&self) -> SessionMode {
+        self.mode
     }
 
     /// Starts an opaque-only VFS client on a bidirectional byte stream.
@@ -1380,6 +1384,10 @@ impl Drop for RemoteStdioSend {
 }
 
 impl RemoteStdioSend {
+    pub(crate) fn client(&self) -> &Client {
+        &self.client
+    }
+
     pub(crate) fn disarm_cleanup(&mut self) {
         self.stdio.take();
     }
@@ -1427,6 +1435,10 @@ impl Drop for RemoteStdioRecv {
 }
 
 impl RemoteStdioRecv {
+    pub(crate) fn client(&self) -> &Client {
+        &self.client
+    }
+
     pub(crate) fn disarm_cleanup(&mut self) {
         self.stdio.take();
     }

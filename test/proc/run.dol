@@ -1,12 +1,15 @@
-import agent proc sys sys.unix sys.windows
+import agent proc sys sys.unix sys.windows _vfs
   test:
     - assert
     - assert_eq
     - assert_type
     - assert_throws
     - skip
+    - test
   fs:
     - Path
+    - open
+    - with_temp_dir
   strand:
     - pipeline
     - each
@@ -15,6 +18,8 @@ import agent proc sys sys.unix sys.windows
     - echo
     - cat
     - grep
+  shell:
+    - Vfs
   std:
     - FieldError
     - nulliter
@@ -25,6 +30,7 @@ import agent proc sys sys.unix sys.windows
     - io_mode
 
 let is_windows = (sys.os_info().family == :WINDOWS:)
+let vfs_bin = _vfs.bin()
 
 class Rendered
   pub field value = "rendered"
@@ -226,3 +232,83 @@ def proc_error_is_caught_by_runtime_error()
   else
     assert_throws $RuntimeError do
       run sh -c "exit 7"
+
+# The tests below exercise process stdio crossing VFS domains (host/direct
+# vs. one or more independent remote VFS sessions). They manage domains
+# explicitly with `Vfs`, so they cannot be `agent.test` (which parameterizes
+# a single domain per run) and instead register directly with `test`.
+
+def with_remote_vfs block
+  let vfs = Vfs do run $vfs_bin --stdio
+  try
+    vfs.with $block
+  finally
+    vfs.stop()
+
+#[test]
+def cross_domain_pipeline_relays_between_host_and_remote_vfs()
+  let res = sub do pipeline
+    do echo "foo"
+    do with_remote_vfs do
+      yield()
+      cat()
+  assert_eq $res foo
+
+#[test]
+def cross_domain_pipeline_relays_between_two_remote_vfs()
+  # Both sessions must stay open for the whole pipeline, not just the
+  # lexical extent of "their" stage: pipeline stages run concurrently, and
+  # a stage that loses the pipe negotiation race attaches its relay to the
+  # *other* stage's child, so it can still be reading/writing through this
+  # session after "its own" stage has already finished.
+  let vfs_a = Vfs do run $vfs_bin --stdio
+  try
+    let vfs_b = Vfs do run $vfs_bin --stdio
+    try
+      let res = sub do pipeline
+        do vfs_a.with do echo "foo"
+        do vfs_b.with do
+          yield()
+          cat()
+      assert_eq $res foo
+    finally
+      vfs_b.stop()
+  finally
+    vfs_a.stop()
+
+#[test]
+def cross_domain_redirects_host_file_into_remote_process_stdin()
+  with_temp_dir do |dir|
+    let path = (dir / "input.txt")
+    open $path w do |file| file.write "remote-input\n"
+
+    let input = open $path r
+    let res = with_remote_vfs do sub $cat stdin: $input
+    assert_eq $res "remote-input"
+
+#[test]
+def cross_domain_redirects_remote_process_stdout_into_host_file()
+  with_temp_dir do |dir|
+    let path = (dir / "output.txt")
+    open $path w do |output|
+      with_remote_vfs do echo "remote-stdout" stdout: $output
+    open $path r do |file| assert_eq (file.read().trim_end "\r\n") "remote-stdout"
+
+#[test]
+def cross_domain_redirects_remote_file_into_host_process_stdin()
+  with_temp_dir do |dir|
+    let path = (dir / "input.txt")
+    path.write "remote-input\n"
+    with_remote_vfs do open $path r do |input| 
+      shell.with_host do
+        let res = sub $cat stdin: $input
+        assert_eq $res "remote-input"
+
+#[test]
+def cross_domain_redirects_host_process_stdout_into_remote_file()
+  with_temp_dir do |dir|
+    let path = (dir / "output.txt")
+    with_remote_vfs do open $path w do |output|
+      echo "remote-stdout" stdout: $output
+      output.close()
+    assert_eq (path.read().trim_end "\r\n") "remote-stdout"
