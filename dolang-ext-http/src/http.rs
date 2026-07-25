@@ -1311,10 +1311,14 @@ impl<'v> Object<'v> for Response {
                         .chunk_iter
                         .create_with_annex(strand, ChunkIter, global, &mut iter);
                     // Store the response object in slot 0 of the iterator
-                    let iterator = global.types.chunk_iter.downcast(&iter).unwrap();
-                    let mut iter_borrow = iterator.borrow_mut(strand)?;
-                    Output::set(strand, Mut::slot_mut::<0>(&mut iter_borrow), this);
-                    drop(iter_borrow);
+                    global.types.chunk_iter.cast(&iter).unwrap().enter_sync(
+                        strand,
+                        |strand, iterator| {
+                            let mut iter_borrow = iterator.borrow_mut(strand)?;
+                            Output::set(strand, Mut::slot_mut::<0>(&mut iter_borrow), this);
+                            Ok(())
+                        },
+                    )?;
                     Output::set(strand, out, iter);
                     Ok(())
                 },
@@ -1337,10 +1341,14 @@ impl<'v> Object<'v> for Response {
                         global,
                         &mut iter,
                     );
-                    let iterator = global.types.event_iter.downcast(&iter).unwrap();
-                    let mut iter_borrow = iterator.borrow_mut(strand)?;
-                    Output::set(strand, Mut::slot_mut::<0>(&mut iter_borrow), this);
-                    drop(iter_borrow);
+                    global.types.event_iter.cast(&iter).unwrap().enter_sync(
+                        strand,
+                        |strand, iterator| {
+                            let mut iter_borrow = iterator.borrow_mut(strand)?;
+                            Output::set(strand, Mut::slot_mut::<0>(&mut iter_borrow), this);
+                            Ok(())
+                        },
+                    )?;
                     Output::set(strand, out, iter);
                     Ok(())
                 },
@@ -1360,10 +1368,14 @@ impl<'v> Object<'v> for Response {
                     &mut iter,
                 );
                 // Store the response object in slot 0 of the iterator
-                let iterator = global.types.line_iter.downcast(&iter).unwrap();
-                let mut iter_borrow = iterator.borrow_mut(strand)?;
-                Output::set(strand, Mut::slot_mut::<0>(&mut iter_borrow), this);
-                drop(iter_borrow);
+                global.types.line_iter.cast(&iter).unwrap().enter_sync(
+                    strand,
+                    |strand, iterator| {
+                        let mut iter_borrow = iterator.borrow_mut(strand)?;
+                        Output::set(strand, Mut::slot_mut::<0>(&mut iter_borrow), this);
+                        Ok(())
+                    },
+                )?;
                 Output::set(strand, out, iter);
                 Ok(())
             })
@@ -1412,26 +1424,28 @@ impl<'v> Object<'v> for ChunkIter {
                 // Get the response object from slot 0
                 Output::set(strand, &mut response, Ref::slot::<0>(&borrow));
                 drop(borrow);
-                let response = global
+                global
                     .types
                     .response
-                    .downcast(&response)
-                    .ok_or_else(|| Error::state_error(strand, "invalid response reference"))?;
+                    .cast(&response)
+                    .ok_or_else(|| Error::state_error(strand, "invalid response reference"))?
+                    .enter(strand, async move |strand, response| {
+                        // Borrow the response mutably to call chunk()
+                        let mut response_borrow = response.borrow_mut(strand)?;
+                        let inner = response_borrow
+                            .inner
+                            .as_mut()
+                            .ok_or_else(|| Error::state_error(strand, "closed"))?;
 
-                // Borrow the response mutably to call chunk()
-                let mut response_borrow = response.borrow_mut(strand)?;
-                let inner = response_borrow
-                    .inner
-                    .as_mut()
-                    .ok_or_else(|| Error::state_error(strand, "closed"))?;
-
-                match inner.chunk().await.into_http(strand)? {
-                    Some(chunk) => {
-                        Output::set(strand, out, chunk.as_ref());
-                        Ok(true)
-                    }
-                    None => Ok(false),
-                }
+                        match inner.chunk().await.into_http(strand)? {
+                            Some(chunk) => {
+                                Output::set(strand, out, chunk.as_ref());
+                                Ok(true)
+                            }
+                            None => Ok(false),
+                        }
+                    })
+                    .await
             })
             .await
     }
@@ -1502,18 +1516,21 @@ impl<'v> Object<'v> for LineIter<'v> {
                     let borrow = this.borrow(strand)?;
                     Output::set(strand, &mut response, Ref::slot::<0>(&borrow));
                     drop(borrow);
-                    let response =
-                        global.types.response.downcast(&response).ok_or_else(|| {
-                            Error::state_error(strand, "invalid response reference")
-                        })?;
+                    global
+                        .types
+                        .response
+                        .cast(&response)
+                        .ok_or_else(|| Error::state_error(strand, "invalid response reference"))?
+                        .enter(strand, async move |strand, response| {
+                            let mut response_borrow = response.borrow_mut(strand)?;
+                            let inner = response_borrow
+                                .inner
+                                .as_mut()
+                                .ok_or_else(|| Error::state_error(strand, "closed"))?;
 
-                    let mut response_borrow = response.borrow_mut(strand)?;
-                    let inner = response_borrow
-                        .inner
-                        .as_mut()
-                        .ok_or_else(|| Error::state_error(strand, "closed"))?;
-
-                    inner.chunk().await.into_http(strand)
+                            inner.chunk().await.into_http(strand)
+                        })
+                        .await
                 })
                 .await?;
 

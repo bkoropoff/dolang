@@ -374,12 +374,18 @@ impl<'v> Object<'v> for Vfs {
                         },
                         &mut out,
                     );
-                    let this = global.types.vfs.downcast(&out).unwrap();
-                    Output::set(
-                        strand,
-                        Mut::slot_mut::<0>(&mut this.borrow_mut_unwrap()),
-                        &stream,
-                    );
+                    global
+                        .types
+                        .vfs
+                        .cast(&out)
+                        .unwrap()
+                        .enter_sync(strand, |strand, this| {
+                            Output::set(
+                                strand,
+                                Mut::slot_mut::<0>(&mut this.borrow_mut_unwrap()),
+                                &stream,
+                            );
+                        });
                     Ok(())
                 },
             )

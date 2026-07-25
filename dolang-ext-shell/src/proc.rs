@@ -116,13 +116,18 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 .output(&cap)
                 .enter(async move |strand| func.call(strand, rest, tmp).await)
                 .await?;
-            let capture = capture_ty.downcast(&cap).unwrap().borrow(strand)?;
-            let mut value = capture.0.as_str();
-            if trim {
-                value = value.trim_end_matches(['\r', '\n'])
-            }
-            Output::set(strand, out, value);
-            Ok(())
+            capture_ty
+                .cast(&cap)
+                .unwrap()
+                .enter_sync(strand, |strand, inst| {
+                    let capture = inst.borrow(strand)?;
+                    let mut value = capture.0.as_str();
+                    if trim {
+                        value = value.trim_end_matches(['\r', '\n'])
+                    }
+                    Output::set(strand, out, value);
+                    Ok(())
+                })
         })
         .value("Error", global.types.proc_error)
         .commit();

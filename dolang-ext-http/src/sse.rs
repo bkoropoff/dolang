@@ -192,13 +192,15 @@ impl<'v> Object<'v> for Event {
         other: &dolang::runtime::Value<'v>,
     ) -> Result<'v, 's, bool> {
         let global = strand.state::<Global<'v>>();
-        if let Some(other) = global.types.event.downcast(other) {
-            let this = this.annex();
-            let other = other.annex();
-            Ok(this.event_type == other.event_type
-                && this.data == other.data
-                && this.id == other.id
-                && this.retry == other.retry)
+        if let Some(other) = global.types.event.cast(other) {
+            Ok(other.enter_sync(strand, |_strand, other| {
+                let this = this.annex();
+                let other = other.annex();
+                this.event_type == other.event_type
+                    && this.data == other.data
+                    && this.id == other.id
+                    && this.retry == other.retry
+            }))
         } else {
             Err(Error::not_supported(strand))
         }
@@ -269,17 +271,21 @@ impl<'v> Object<'v> for EventIter {
                     Output::set(strand, &mut response, Ref::slot::<0>(&borrow));
                     drop(borrow);
                     let response =
-                        global.types.response.downcast(&response).ok_or_else(|| {
+                        global.types.response.cast(&response).ok_or_else(|| {
                             Error::state_error(strand, "invalid response reference")
                         })?;
 
-                    let mut response_borrow = response.borrow_mut(strand)?;
-                    let inner = response_borrow
-                        .inner
-                        .as_mut()
-                        .ok_or_else(|| Error::state_error(strand, "closed"))?;
+                    response
+                        .enter(strand, async move |strand, response| {
+                            let mut response_borrow = response.borrow_mut(strand)?;
+                            let inner = response_borrow
+                                .inner
+                                .as_mut()
+                                .ok_or_else(|| Error::state_error(strand, "closed"))?;
 
-                    inner.chunk().await.into_http(strand)
+                            inner.chunk().await.into_http(strand)
+                        })
+                        .await
                 })
                 .await?;
 

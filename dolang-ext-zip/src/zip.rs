@@ -283,10 +283,13 @@ impl<'v> Object<'v> for Archive {
                         global,
                         &mut file,
                     );
-                    let file_obj = global.types.file.downcast(&file).unwrap();
-                    let mut file_borrow = file_obj.borrow_mut_unwrap();
-                    Output::set(strand, Mut::slot_mut::<0>(&mut file_borrow), this);
-                    drop(file_borrow);
+                    global.types.file.cast(&file).unwrap().enter_sync(
+                        strand,
+                        |strand, file_obj| {
+                            let mut file_borrow = file_obj.borrow_mut_unwrap();
+                            Output::set(strand, Mut::slot_mut::<0>(&mut file_borrow), this);
+                        },
+                    );
 
                     if let Some(block) = block {
                         let result = call!(strand, block, out, &file).await;
@@ -434,26 +437,27 @@ fn with_entry<'v, 's, R>(
 ) -> Result<'v, 's, R> {
     let annex = this.annex();
     let borrow = this.borrow(strand)?;
-    let archive = annex
+    annex
         .global
         .types
         .archive
-        .downcast(Ref::slot::<0>(&borrow))
-        .expect("Entry always roots its Archive in slot 0");
-
-    let archive_annex = archive.annex();
-    if archive_annex.closed.get() {
-        return Err(Error::state_error(strand, "archive closed"));
-    }
-    let entries = archive_annex
-        .entries
-        .as_ref()
-        .expect("Entry can only exist for a read-mode archive");
-    let entry = entries
-        .entries()
-        .get(annex.index)
-        .expect("entry count is fixed for the archive's lifetime");
-    f(strand, entry)
+        .cast(Ref::slot::<0>(&borrow))
+        .expect("Entry always roots its Archive in slot 0")
+        .enter_sync(strand, |strand, archive| {
+            let archive_annex = archive.annex();
+            if archive_annex.closed.get() {
+                return Err(Error::state_error(strand, "archive closed"));
+            }
+            let entries = archive_annex
+                .entries
+                .as_ref()
+                .expect("Entry can only exist for a read-mode archive");
+            let entry = entries
+                .entries()
+                .get(annex.index)
+                .expect("entry count is fixed for the archive's lifetime");
+            f(strand, entry)
+        })
 }
 
 fn compression_sym<'v>(
@@ -581,51 +585,62 @@ impl<'v> Object<'v> for Entry {
                     let index = annex.index;
 
                     let borrow = this.borrow(strand)?;
-                    let archive = global
+                    global
                         .types
                         .archive
-                        .downcast(Ref::slot::<0>(&borrow))
-                        .expect("Entry always roots its Archive in slot 0");
-                    let archive_annex = archive.annex();
+                        .cast(Ref::slot::<0>(&borrow))
+                        .expect("Entry always roots its Archive in slot 0")
+                        .enter(strand, async move |strand, archive| {
+                            let archive_annex = archive.annex();
 
-                    if archive_annex.is_file_open() {
-                        return Err(Error::concurrency(strand));
-                    }
-                    let inner = unsafe {
-                        archive_annex
-                            .inner_mut()
-                            .as_mut()
-                            .ok_or_else(|| Error::state_error(strand, "archive closed"))?
-                    };
-                    let ArchiveInner::Read(zip_archive) = inner else {
-                        unreachable!("Entry can only exist for a read-mode archive")
-                    };
-                    let file_inner = open_read_entry_by_index(strand, zip_archive, index).await?;
+                            if archive_annex.is_file_open() {
+                                return Err(Error::concurrency(strand));
+                            }
+                            let inner = unsafe {
+                                archive_annex
+                                    .inner_mut()
+                                    .as_mut()
+                                    .ok_or_else(|| Error::state_error(strand, "archive closed"))?
+                            };
+                            let ArchiveInner::Read(zip_archive) = inner else {
+                                unreachable!("Entry can only exist for a read-mode archive")
+                            };
+                            let file_inner =
+                                open_read_entry_by_index(strand, zip_archive, index).await?;
 
-                    archive_annex.file_open.set(true);
-                    global.types.file.create_with_annex(
-                        strand,
-                        File::new(file_inner),
-                        global,
-                        &mut file,
-                    );
-                    let file_obj = global.types.file.downcast(&file).unwrap();
-                    let mut file_borrow = file_obj.borrow_mut_unwrap();
-                    Output::set(strand, Mut::slot_mut::<0>(&mut file_borrow), archive);
-                    drop(file_borrow);
+                            archive_annex.file_open.set(true);
+                            global.types.file.create_with_annex(
+                                strand,
+                                File::new(file_inner),
+                                global,
+                                &mut file,
+                            );
+                            global.types.file.cast(&file).unwrap().enter_sync(
+                                strand,
+                                |strand, file_obj| {
+                                    let mut file_borrow = file_obj.borrow_mut_unwrap();
+                                    Output::set(
+                                        strand,
+                                        Mut::slot_mut::<0>(&mut file_borrow),
+                                        archive,
+                                    );
+                                },
+                            );
 
-                    if let Some(block) = block {
-                        let result = call!(strand, block, out, &file).await;
-                        let close_result = strand
-                            .with_interrupt_mask(true, async move |strand| {
-                                method!(strand, &file, close, &mut tmp).await
-                            })
-                            .await;
-                        result.and(close_result)
-                    } else {
-                        Output::set(strand, out, file);
-                        Ok(())
-                    }
+                            if let Some(block) = block {
+                                let result = call!(strand, block, out, &file).await;
+                                let close_result = strand
+                                    .with_interrupt_mask(true, async move |strand| {
+                                        method!(strand, &file, close, &mut tmp).await
+                                    })
+                                    .await;
+                                result.and(close_result)
+                            } else {
+                                Output::set(strand, out, file);
+                                Ok(())
+                            }
+                        })
+                        .await
                 },
             )
     }
@@ -669,9 +684,15 @@ impl<'v> ArrayLike<'v> for Entries {
             .types
             .entry
             .create_with_annex(strand, Entry, EntryAnnex { global, index }, &mut out);
-        let entry_obj = global.types.entry.downcast(&out).unwrap();
-        let mut entry_borrow = entry_obj.borrow_mut_unwrap();
-        Output::set(strand, Mut::slot_mut::<0>(&mut entry_borrow), this);
+        global
+            .types
+            .entry
+            .cast(&out)
+            .unwrap()
+            .enter_sync(strand, |strand, entry_obj| {
+                let mut entry_borrow = entry_obj.borrow_mut_unwrap();
+                Output::set(strand, Mut::slot_mut::<0>(&mut entry_borrow), this);
+            });
         Ok(())
     }
 }
@@ -703,12 +724,12 @@ impl<'v> Object<'v> for File {
         }
 
         let borrow = this.borrow_unwrap();
-        let archive = global
+        global
             .types
             .archive
-            .downcast(Ref::slot::<0>(&borrow))
-            .unwrap();
-        archive.annex().file_open.set(false);
+            .cast(Ref::slot::<0>(&borrow))
+            .unwrap()
+            .enter_finalize(|archive| archive.annex().file_open.set(false));
     }
 
     fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
@@ -770,20 +791,22 @@ impl<'v> Object<'v> for File {
                 };
 
                 let borrow = this.borrow(strand)?;
-                let archive = global
+                global
                     .types
                     .archive
-                    .downcast(Ref::slot::<0>(&borrow))
-                    .ok_or_else(|| Error::state_error(strand, "invalid archive reference"))?;
-
-                let result = match inner {
-                    FileInner::Write(entry) => {
-                        EntrySeekableWriter::close(*entry).await.into_do(strand)
-                    }
-                    FileInner::Read { .. } => Ok(()),
-                };
-                archive.annex().file_open.set(false);
-                result
+                    .cast(Ref::slot::<0>(&borrow))
+                    .ok_or_else(|| Error::state_error(strand, "invalid archive reference"))?
+                    .enter(strand, async move |strand, archive| {
+                        let result = match inner {
+                            FileInner::Write(entry) => {
+                                EntrySeekableWriter::close(*entry).await.into_do(strand)
+                            }
+                            FileInner::Read { .. } => Ok(()),
+                        };
+                        archive.annex().file_open.set(false);
+                        result
+                    })
+                    .await
             })
     }
 }

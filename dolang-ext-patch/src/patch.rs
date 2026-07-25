@@ -157,13 +157,15 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 },
                 &mut out,
             );
-            let mut borrow = global
+            global
                 .types
                 .patch_iter
-                .downcast(&out)
+                .cast(&out)
                 .unwrap()
-                .borrow_mut_unwrap();
-            Output::set(strand, Mut::slot_mut::<0>(&mut borrow), input);
+                .enter_sync(strand, |strand, inst| {
+                    let mut borrow = inst.borrow_mut_unwrap();
+                    Output::set(strand, Mut::slot_mut::<0>(&mut borrow), input);
+                });
             Ok(())
         })
         .function("diff", async move |strand, args, mut out| {
@@ -216,14 +218,16 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 },
                 &mut out,
             );
-            let mut borrow = global
+            global
                 .types
                 .patch
-                .downcast(&out)
+                .cast(&out)
                 .unwrap()
-                .borrow_mut_unwrap();
-            Output::set(strand, Mut::slot_mut::<0>(&mut borrow), before);
-            Output::set(strand, Mut::slot_mut::<1>(&mut borrow), after);
+                .enter_sync(strand, |strand, inst| {
+                    let mut borrow = inst.borrow_mut_unwrap();
+                    Output::set(strand, Mut::slot_mut::<0>(&mut borrow), before);
+                    Output::set(strand, Mut::slot_mut::<1>(&mut borrow), after);
+                });
             Ok(())
         })
         .function_with_slots(
@@ -231,18 +235,23 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             async move |strand, args, out, [mut input, mut item]| {
                 let ([value], []) = unpack!(strand, args, 1, 0)?;
 
-                let bytes = if let Some(patch) = global.types.patch.downcast(&value) {
-                    let borrow = patch.borrow(strand)?;
-                    encode_payload(strand, &borrow.payload)?
+                let bytes = if let Some(patch) = global.types.patch.cast(&value) {
+                    patch.enter_sync(strand, |strand, patch| {
+                        let borrow = patch.borrow(strand)?;
+                        encode_payload(strand, &borrow.payload)
+                    })?
                 } else {
                     value.iter(strand, &mut input).await?;
                     let mut bytes = Vec::new();
                     while input.next(strand, &mut item).await? {
-                        let patch = global.types.patch.downcast(&item).ok_or_else(|| {
+                        let patch = global.types.patch.cast(&item).ok_or_else(|| {
                             Error::type_error(strand, "expected iterable of `Patch`")
                         })?;
-                        let borrow = patch.borrow(strand)?;
-                        bytes.extend(encode_payload(strand, &borrow.payload)?);
+                        let chunk = patch.enter_sync(strand, |strand, patch| {
+                            let borrow = patch.borrow(strand)?;
+                            encode_payload(strand, &borrow.payload)
+                        })?;
+                        bytes.extend(chunk);
                     }
                     bytes
                 };
@@ -461,18 +470,20 @@ impl<'v> Object<'v> for PatchIter<'v> {
             },
             &mut out,
         );
-        let mut patch = global
+        global
             .types
             .patch
-            .downcast(&out)
+            .cast(&out)
             .unwrap()
-            .borrow_mut_unwrap();
-        Output::set(
-            strand,
-            Mut::slot_mut::<0>(&mut patch),
-            Mut::slot::<0>(&borrow),
-        );
-        Output::set(strand, Mut::slot_mut::<1>(&mut patch), Nil);
+            .enter_sync(strand, |strand, inst| {
+                let mut patch = inst.borrow_mut_unwrap();
+                Output::set(
+                    strand,
+                    Mut::slot_mut::<0>(&mut patch),
+                    Mut::slot::<0>(&borrow),
+                );
+                Output::set(strand, Mut::slot_mut::<1>(&mut patch), Nil);
+            });
         Ok(true)
     }
 }

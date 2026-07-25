@@ -59,12 +59,15 @@ pub(crate) fn parse_name<'v, 's>(
     value: &Value<'v>,
     namespace: Option<Slot<'v, '_>>,
 ) -> Result<'v, 's, (String, Option<String>)> {
-    if let Some(entry) = global.types.xattr_entry.downcast(value) {
+    if let Some(entry) = global.types.xattr_entry.cast(value) {
         if namespace.is_some() {
             return Err(Error::unexpected_key(strand, global.syms.namespace));
         }
-        let entry = &entry.annex().inner;
-        return Ok((entry.name.clone(), entry.namespace.clone()));
+        let (name, namespace) = entry.enter_sync(strand, |_strand, entry| {
+            let entry = &entry.annex().inner;
+            (entry.name.clone(), entry.namespace.clone())
+        });
+        return Ok((name, namespace));
     }
 
     let name = util::string(strand, value, "name")?;

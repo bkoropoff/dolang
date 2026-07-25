@@ -271,54 +271,55 @@ fn create_diagnostic<'v, 's>(
         &mut *out,
     );
 
-    {
-        let mut borrow = global
-            .types
-            .diagnostic
-            .downcast(&*out)
-            .unwrap()
-            .borrow_mut_unwrap();
-        Output::set(
-            strand,
-            Mut::slot_mut::<DIAG_ANNOTATIONS>(&mut borrow),
-            Empty::Array,
-        );
-        Output::set(
-            strand,
-            Mut::slot_mut::<DIAG_NOTES>(&mut borrow),
-            Empty::Array,
-        );
-        Output::set(
-            strand,
-            Mut::slot_mut::<DIAG_PATCHES>(&mut borrow),
-            Empty::Array,
-        );
-        Output::set(strand, Mut::slot_mut::<DIAG_SOURCE>(&mut borrow), source);
-    }
+    global
+        .types
+        .diagnostic
+        .cast(&*out)
+        .unwrap()
+        .enter_sync(strand, |strand, inst| {
+            {
+                let mut borrow = inst.borrow_mut_unwrap();
+                Output::set(
+                    strand,
+                    Mut::slot_mut::<DIAG_ANNOTATIONS>(&mut borrow),
+                    Empty::Array,
+                );
+                Output::set(
+                    strand,
+                    Mut::slot_mut::<DIAG_NOTES>(&mut borrow),
+                    Empty::Array,
+                );
+                Output::set(
+                    strand,
+                    Mut::slot_mut::<DIAG_PATCHES>(&mut borrow),
+                    Empty::Array,
+                );
+                Output::set(strand, Mut::slot_mut::<DIAG_SOURCE>(&mut borrow), source);
+            }
 
-    let inst = global.types.diagnostic.downcast(&*out).unwrap();
-    let borrow = inst.borrow(strand)?;
-    let annotations = Ref::slot::<DIAG_ANNOTATIONS>(&borrow)
-        .as_array(strand)
-        .unwrap();
-    let notes = Ref::slot::<DIAG_NOTES>(&borrow).as_array(strand).unwrap();
-    let patches = Ref::slot::<DIAG_PATCHES>(&borrow).as_array(strand).unwrap();
+            let borrow = inst.borrow(strand)?;
+            let annotations = Ref::slot::<DIAG_ANNOTATIONS>(&borrow)
+                .as_array(strand)
+                .unwrap();
+            let notes = Ref::slot::<DIAG_NOTES>(&borrow).as_array(strand).unwrap();
+            let patches = Ref::slot::<DIAG_PATCHES>(&borrow).as_array(strand).unwrap();
 
-    strand.with_slots_sync(|strand, [mut item]| {
-        for annotation in inst.annex().diag.annotations() {
-            create_annotation(global, strand, annotation, Slot::reborrow(&mut item));
-            annotations.push(strand, &mut item)?;
-        }
-        for note in inst.annex().diag.notes() {
-            create_note(global, strand, note, Slot::reborrow(&mut item));
-            notes.push(strand, &mut item)?;
-        }
-        for patch in inst.annex().diag.patches() {
-            create_patch(global, strand, patch, Slot::reborrow(&mut item));
-            patches.push(strand, &mut item)?;
-        }
-        Ok(())
-    })
+            strand.with_slots_sync(|strand, [mut item]| {
+                for annotation in inst.annex().diag.annotations() {
+                    create_annotation(global, strand, annotation, Slot::reborrow(&mut item));
+                    annotations.push(strand, &mut item)?;
+                }
+                for note in inst.annex().diag.notes() {
+                    create_note(global, strand, note, Slot::reborrow(&mut item));
+                    notes.push(strand, &mut item)?;
+                }
+                for patch in inst.annex().diag.patches() {
+                    create_patch(global, strand, patch, Slot::reborrow(&mut item));
+                    patches.push(strand, &mut item)?;
+                }
+                Ok(())
+            })
+        })
 }
 
 fn create_result<'v, 's>(
@@ -337,35 +338,36 @@ fn create_result<'v, 's>(
         &mut *out,
     );
 
-    {
-        let mut borrow = global
-            .types
-            .result
-            .downcast(&*out)
-            .unwrap()
-            .borrow_mut_unwrap();
-        Output::set(
-            strand,
-            Mut::slot_mut::<RESULT_DIAGNOSTICS>(&mut borrow),
-            Empty::Array,
-        );
-        Output::set(strand, Mut::slot_mut::<RESULT_SOURCE>(&mut borrow), source);
-    }
+    global
+        .types
+        .result
+        .cast(&*out)
+        .unwrap()
+        .enter_sync(strand, |strand, inst| {
+            {
+                let mut borrow = inst.borrow_mut_unwrap();
+                Output::set(
+                    strand,
+                    Mut::slot_mut::<RESULT_DIAGNOSTICS>(&mut borrow),
+                    Empty::Array,
+                );
+                Output::set(strand, Mut::slot_mut::<RESULT_SOURCE>(&mut borrow), source);
+            }
 
-    let inst = global.types.result.downcast(&*out).unwrap();
-    let borrow = inst.borrow(strand)?;
-    let diagnostics_out = Ref::slot::<RESULT_DIAGNOSTICS>(&borrow)
-        .as_array(strand)
-        .unwrap();
-    let source = Ref::slot::<RESULT_SOURCE>(&borrow);
+            let borrow = inst.borrow(strand)?;
+            let diagnostics_out = Ref::slot::<RESULT_DIAGNOSTICS>(&borrow)
+                .as_array(strand)
+                .unwrap();
+            let source = Ref::slot::<RESULT_SOURCE>(&borrow);
 
-    strand.with_slots_sync(|strand, [mut item]| {
-        for diag in diagnostics {
-            create_diagnostic(global, strand, path, source, diag, &mut item)?;
-            diagnostics_out.push(strand, &mut item)?;
-        }
-        Ok(())
-    })
+            strand.with_slots_sync(|strand, [mut item]| {
+                for diag in diagnostics {
+                    create_diagnostic(global, strand, path, source, diag, &mut item)?;
+                    diagnostics_out.push(strand, &mut item)?;
+                }
+                Ok(())
+            })
+        })
 }
 
 fn apply_prelude_module_items<'v, 's>(
@@ -716,8 +718,10 @@ impl<'v> Object<'v> for Span {
         strand: &'a mut Strand<'v, 's>,
         other: &Value<'v>,
     ) -> Result<'v, 's, bool> {
-        if let Some(other) = this.annex().global.types.span.downcast(other) {
-            Ok(this.annex().span == other.annex().span)
+        if let Some(other) = this.annex().global.types.span.cast(other) {
+            Ok(other.enter_sync(strand, |_strand, other| {
+                this.annex().span == other.annex().span
+            }))
         } else {
             Err(Error::not_supported(strand))
         }
@@ -737,8 +741,10 @@ impl<'v> Object<'v> for Span {
         strand: &'a mut Strand<'v, 's>,
         other: &Value<'v>,
     ) -> Result<'v, 's, bool> {
-        if let Some(other) = this.annex().global.types.span.downcast(other) {
-            Ok(this.annex().span < other.annex().span)
+        if let Some(other) = this.annex().global.types.span.cast(other) {
+            Ok(other.enter_sync(strand, |_strand, other| {
+                this.annex().span < other.annex().span
+            }))
         } else {
             Err(Error::not_supported(strand))
         }
@@ -773,8 +779,10 @@ impl<'v> Object<'v> for Pos {
         strand: &'a mut Strand<'v, 's>,
         other: &Value<'v>,
     ) -> Result<'v, 's, bool> {
-        if let Some(other) = strand.state::<Global<'v>>().types.pos.downcast(other) {
-            Ok(this.annex().pos == other.annex().pos)
+        if let Some(other) = strand.state::<Global<'v>>().types.pos.cast(other) {
+            Ok(other.enter_sync(strand, |_strand, other| {
+                this.annex().pos == other.annex().pos
+            }))
         } else {
             Err(Error::not_supported(strand))
         }
@@ -794,8 +802,10 @@ impl<'v> Object<'v> for Pos {
         strand: &'a mut Strand<'v, 's>,
         other: &Value<'v>,
     ) -> Result<'v, 's, bool> {
-        if let Some(other) = strand.state::<Global<'v>>().types.pos.downcast(other) {
-            Ok(this.annex().pos < other.annex().pos)
+        if let Some(other) = strand.state::<Global<'v>>().types.pos.cast(other) {
+            Ok(other.enter_sync(strand, |_strand, other| {
+                this.annex().pos < other.annex().pos
+            }))
         } else {
             Err(Error::not_supported(strand))
         }

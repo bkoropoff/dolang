@@ -81,14 +81,20 @@ pub(crate) fn create_sid<'v>(
         .types
         .sid
         .create_with_annex(strand, Sid, sid, &mut *out);
-    let this = global.types.sid.downcast(&*out).unwrap();
-    let annex = this.annex();
-    let sub_authorities = annex.sub_authorities();
-    Output::set(
-        strand,
-        Mut::slot_mut::<0>(&mut this.borrow_mut_unwrap()),
-        AsTuple::new(sub_authorities.iter().copied()),
-    );
+    global
+        .types
+        .sid
+        .cast(&*out)
+        .unwrap()
+        .enter_sync(strand, |strand, this| {
+            let annex = this.annex();
+            let sub_authorities = annex.sub_authorities();
+            Output::set(
+                strand,
+                Mut::slot_mut::<0>(&mut this.borrow_mut_unwrap()),
+                AsTuple::new(sub_authorities.iter().copied()),
+            );
+        });
 }
 
 fn sid_from_value<'v, 's>(
@@ -125,13 +131,14 @@ impl<'v> Object<'v> for Sid {
         let ([value], []) = unpack!(strand, args, 1, 0)?;
         let sid = sid_from_value(strand, &value)?;
         this.create_with_annex(strand, Sid, sid, &mut out);
-        let this = this.downcast(&out).unwrap();
-        let annex = this.annex();
-        Output::set(
-            strand,
-            Mut::slot_mut::<0>(&mut this.borrow_mut_unwrap()),
-            AsTuple::new(annex.sub_authorities().iter().copied()),
-        );
+        this.cast(&out).unwrap().enter_sync(strand, |strand, this| {
+            let annex = this.annex();
+            Output::set(
+                strand,
+                Mut::slot_mut::<0>(&mut this.borrow_mut_unwrap()),
+                AsTuple::new(annex.sub_authorities().iter().copied()),
+            );
+        });
         Ok(())
     }
 
@@ -268,10 +275,10 @@ impl<'v> Object<'v> for Guid {
         other: &Value<'v>,
     ) -> Result<'v, 's, bool> {
         let global = strand.state::<Global<'v>>();
-        let Some(other) = global.types.guid.downcast(other) else {
+        let Some(other) = global.types.guid.cast(other) else {
             return Err(Error::not_supported(strand));
         };
-        Ok(*this.annex() == *other.annex())
+        Ok(other.enter_sync(strand, |_strand, other| *this.annex() == *other.annex()))
     }
 
     fn hash<'a, 's>(
@@ -307,12 +314,18 @@ fn create_acl<'v>(
         .types
         .acl
         .create_with_annex(strand, Acl, AclAnnex::Component(component), &mut *out);
-    let acl = global.types.acl.downcast(&*out).unwrap();
-    Output::set(
-        strand,
-        Mut::slot_mut::<0>(&mut acl.borrow_mut_unwrap()),
-        descriptor,
-    );
+    global
+        .types
+        .acl
+        .cast(&*out)
+        .unwrap()
+        .enter_sync(strand, |strand, acl| {
+            Output::set(
+                strand,
+                Mut::slot_mut::<0>(&mut acl.borrow_mut_unwrap()),
+                descriptor,
+            );
+        });
 }
 
 fn with_acl<'v, 's, T>(
@@ -328,16 +341,19 @@ fn with_acl<'v, 's, T>(
     let descriptor = global
         .types
         .sec_desc
-        .downcast(Ref::slot::<0>(&borrow))
+        .cast(Ref::slot::<0>(&borrow))
         .expect("Acl root is a SecDesc");
-    let descriptor = descriptor.annex();
-    let acl = match &*this.annex() {
-        AclAnnex::Component(AclComponent::Dacl) => descriptor.dacl(),
-        AclAnnex::Component(AclComponent::Sacl) => descriptor.sacl(),
-        AclAnnex::Owned(_) => unreachable!(),
-    }
-    .expect("Acl component is non-null");
-    Ok(f(acl))
+    let value = descriptor.enter_sync(strand, |_strand, descriptor| {
+        let descriptor = descriptor.annex();
+        let acl = match &*this.annex() {
+            AclAnnex::Component(AclComponent::Dacl) => descriptor.dacl(),
+            AclAnnex::Component(AclComponent::Sacl) => descriptor.sacl(),
+            AclAnnex::Owned(_) => unreachable!(),
+        }
+        .expect("Acl component is non-null");
+        f(acl)
+    });
+    Ok(value)
 }
 
 struct AclAces;
@@ -364,12 +380,18 @@ impl<'v> ArrayLike<'v> for AclAces {
             .types
             .ace
             .create_with_annex(strand, Ace, AceAnnex::InAcl(index), &mut out);
-        let ace = global.types.ace.downcast(&out).unwrap();
-        Output::set(
-            strand,
-            Mut::slot_mut::<0>(&mut ace.borrow_mut_unwrap()),
-            this,
-        );
+        global
+            .types
+            .ace
+            .cast(&out)
+            .unwrap()
+            .enter_sync(strand, |strand, ace| {
+                Output::set(
+                    strand,
+                    Mut::slot_mut::<0>(&mut ace.borrow_mut_unwrap()),
+                    this,
+                );
+            });
         Ok(())
     }
 }
@@ -403,10 +425,13 @@ impl<'v> Object<'v> for Acl {
         iterable.iter(strand, &mut out).await?;
         let mut aces = Vec::new();
         while out.next(strand, &mut iterable).await? {
-            let ace = global.types.ace.downcast(&iterable).ok_or_else(|| {
+            let ace = global.types.ace.cast(&iterable).ok_or_else(|| {
                 Error::type_error(strand, "Acl: iterable must contain security.windows.Ace")
             })?;
-            aces.push(with_ace(ace, strand, VfsAce::to_owned)?);
+            let value = ace.enter_sync(strand, |strand, ace| {
+                with_ace(ace, strand, VfsAce::to_owned)
+            })?;
+            aces.push(value);
         }
         let acl = VfsAclBuf::from_aces(&aces, revision)
             .map_err(|error| Error::value(strand, error.to_string()))?;
@@ -494,8 +519,8 @@ fn ace_options<'v, 's>(
         global
             .types
             .guid
-            .downcast(value)
-            .map(|value| *value.annex())
+            .cast(value)
+            .map(|value| value.enter_sync(strand, |_strand, value| *value.annex()))
             .ok_or_else(|| Error::type_error(strand, format!("{name}: expected sys.windows.Guid")))
     };
     Ok(AceBuildOptions {
@@ -538,18 +563,20 @@ fn with_ace<'v, 's, T>(
     let acl = global
         .types
         .acl
-        .downcast(Ref::slot::<0>(&borrow))
+        .cast(Ref::slot::<0>(&borrow))
         .expect("Ace root is an Acl");
     let index = match &*this.annex() {
         AceAnnex::InAcl(index) => *index,
         AceAnnex::Owned(_) => unreachable!(),
     };
-    with_acl(acl, strand, |acl| {
-        let ace = acl
-            .aces()
-            .nth(index)
-            .expect("Ace array index was normalized");
-        f(ace)
+    acl.enter_sync(strand, |strand, acl| {
+        with_acl(acl, strand, |acl| {
+            let ace = acl
+                .aces()
+                .nth(index)
+                .expect("Ace array index was normalized");
+            f(ace)
+        })
     })
 }
 
@@ -626,7 +653,7 @@ impl<'v> Object<'v> for Ace {
                     application_data = None
                 )?;
                 let global = strand.state::<Global<'v>>();
-                let sid = global.types.sid.downcast(&sid).ok_or_else(|| {
+                let sid = global.types.sid.cast(&sid).ok_or_else(|| {
                     Error::type_error(strand, "sid: expected security.windows.Sid")
                 })?;
                 let mask = ace_u32(strand, &mask, "mask")?;
@@ -639,8 +666,10 @@ impl<'v> Object<'v> for Ace {
                     callback_value.as_deref(),
                     application_value.as_deref(),
                 )?;
-                let ace = VfsAceBuf::allow(&sid.annex(), mask, options)
-                    .map_err(|error| Error::value(strand, error.to_string()))?;
+                let ace = sid.enter_sync(strand, |strand, sid| {
+                    VfsAceBuf::allow(&sid.annex(), mask, options)
+                        .map_err(|error| Error::value(strand, error.to_string()))
+                })?;
                 this.create_with_annex(strand, Ace, AceAnnex::Owned(ace), out);
                 Ok(())
             })
@@ -666,7 +695,7 @@ impl<'v> Object<'v> for Ace {
                     application_data = None
                 )?;
                 let global = strand.state::<Global<'v>>();
-                let sid = global.types.sid.downcast(&sid).ok_or_else(|| {
+                let sid = global.types.sid.cast(&sid).ok_or_else(|| {
                     Error::type_error(strand, "sid: expected security.windows.Sid")
                 })?;
                 let mask = ace_u32(strand, &mask, "mask")?;
@@ -679,8 +708,10 @@ impl<'v> Object<'v> for Ace {
                     callback_value.as_deref(),
                     application_value.as_deref(),
                 )?;
-                let ace = VfsAceBuf::deny(&sid.annex(), mask, options)
-                    .map_err(|error| Error::value(strand, error.to_string()))?;
+                let ace = sid.enter_sync(strand, |strand, sid| {
+                    VfsAceBuf::deny(&sid.annex(), mask, options)
+                        .map_err(|error| Error::value(strand, error.to_string()))
+                })?;
                 this.create_with_annex(strand, Ace, AceAnnex::Owned(ace), out);
                 Ok(())
             })
@@ -708,7 +739,7 @@ impl<'v> Object<'v> for Ace {
                     application_data = None
                 )?;
                 let global = strand.state::<Global<'v>>();
-                let sid = global.types.sid.downcast(&sid).ok_or_else(|| {
+                let sid = global.types.sid.cast(&sid).ok_or_else(|| {
                     Error::type_error(strand, "sid: expected security.windows.Sid")
                 })?;
                 let mask = ace_u32(strand, &mask, "mask")?;
@@ -723,8 +754,10 @@ impl<'v> Object<'v> for Ace {
                     callback_value.as_deref(),
                     application_value.as_deref(),
                 )?;
-                let ace = VfsAceBuf::audit(&sid.annex(), mask, successful, failed, options)
-                    .map_err(|error| Error::value(strand, error.to_string()))?;
+                let ace = sid.enter_sync(strand, |strand, sid| {
+                    VfsAceBuf::audit(&sid.annex(), mask, successful, failed, options)
+                        .map_err(|error| Error::value(strand, error.to_string()))
+                })?;
                 this.create_with_annex(strand, Ace, AceAnnex::Owned(ace), out);
                 Ok(())
             })
@@ -926,8 +959,10 @@ fn update_sid<'v, 's>(
                 global
                     .types
                     .sid
-                    .downcast(value)
-                    .map(|value| Some((*value.annex()).clone()))
+                    .cast(value)
+                    .map(|value| {
+                        value.enter_sync(strand, |_strand, value| Some((*value.annex()).clone()))
+                    })
                     .ok_or_else(|| {
                         Error::type_error(
                             strand,
@@ -950,13 +985,15 @@ fn update_acl<'v, 's>(
             if value.is_nil() {
                 Ok(None)
             } else {
-                let value = global.types.acl.downcast(value).ok_or_else(|| {
+                let value = global.types.acl.cast(value).ok_or_else(|| {
                     Error::type_error(
                         strand,
                         format!("{name}: expected security.windows.Acl or nil"),
                     )
                 })?;
-                with_acl(value, strand, |acl| Some(acl.to_owned()))
+                value.enter_sync(strand, |strand, value| {
+                    with_acl(value, strand, |acl| Some(acl.to_owned()))
+                })
             }
         })
         .transpose()
@@ -1051,8 +1088,8 @@ pub(crate) fn sec_desc_from_value<'v, 's>(
     global
         .types
         .sec_desc
-        .downcast(value)
-        .map(|value| value.annex().clone())
+        .cast(value)
+        .map(|value| value.enter_sync(strand, |_strand, value| value.annex().clone()))
         .ok_or_else(|| Error::type_error(strand, "expected security.windows.SecDesc"))
 }
 
@@ -1562,8 +1599,8 @@ impl<'v> Object<'v> for SidName {
                     return Err(Error::not_supported(strand));
                 }
                 let vfs = global.local.get(strand).vfs();
-                let name = if let Some(sid) = global.types.sid.downcast(&value) {
-                    let sid = sid.annex().clone();
+                let name = if let Some(sid) = global.types.sid.cast(&value) {
+                    let sid = sid.enter_sync(strand, |_strand, sid| sid.annex().clone());
                     error::io_result(strand, vfs.sid_name(&sid).await)?
                 } else if let Some(value) = value.as_str(strand) {
                     let value = value.to_string();
@@ -1680,12 +1717,18 @@ impl<'v> ArrayLike<'v> for TokenGroups {
                 .types
                 .token_group
                 .create_with_annex(strand, TokenGroup, token_group, &mut out);
-            let group = global.types.token_group.downcast(&out).unwrap();
-            Output::set(
-                strand,
-                Mut::slot_mut::<0>(&mut group.borrow_mut_unwrap()),
-                &sid,
-            );
+            global
+                .types
+                .token_group
+                .cast(&out)
+                .unwrap()
+                .enter_sync(strand, |strand, group| {
+                    Output::set(
+                        strand,
+                        Mut::slot_mut::<0>(&mut group.borrow_mut_unwrap()),
+                        &sid,
+                    );
+                });
             Ok(())
         })
     }
@@ -1781,11 +1824,15 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                     .types
                     .unix_identity
                     .create_with_annex(strand, Identity, info, &mut out);
-                let this = global.types.unix_identity.downcast(&out).unwrap();
-                Output::set(
+                global.types.unix_identity.cast(&out).unwrap().enter_sync(
                     strand,
-                    Mut::slot_mut::<0>(&mut this.borrow_mut_unwrap()),
-                    &tmp,
+                    |strand, this| {
+                        Output::set(
+                            strand,
+                            Mut::slot_mut::<0>(&mut this.borrow_mut_unwrap()),
+                            &tmp,
+                        );
+                    },
                 );
                 Ok(())
             },
@@ -1804,31 +1851,36 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                     info.clone(),
                     &mut out,
                 );
-                let this = global.types.token_info.downcast(&out).unwrap();
+                global
+                    .types
+                    .token_info
+                    .cast(&out)
+                    .unwrap()
+                    .enter_sync(strand, |strand, this| {
+                        for (slot, value) in [
+                            (0, info.user_sid.clone()),
+                            (1, info.owner_sid.clone()),
+                            (2, info.primary_group_sid.clone()),
+                        ] {
+                            create_sid(strand, global, value, &mut sid);
+                            let mut borrow = this.borrow_mut_unwrap();
+                            match slot {
+                                0 => Output::set(strand, Mut::slot_mut::<0>(&mut borrow), &sid),
+                                1 => Output::set(strand, Mut::slot_mut::<1>(&mut borrow), &sid),
+                                2 => Output::set(strand, Mut::slot_mut::<2>(&mut borrow), &sid),
+                                _ => unreachable!(),
+                            }
+                        }
 
-                for (slot, value) in [
-                    (0, info.user_sid.clone()),
-                    (1, info.owner_sid.clone()),
-                    (2, info.primary_group_sid.clone()),
-                ] {
-                    create_sid(strand, global, value, &mut sid);
-                    let mut borrow = this.borrow_mut_unwrap();
-                    match slot {
-                        0 => Output::set(strand, Mut::slot_mut::<0>(&mut borrow), &sid),
-                        1 => Output::set(strand, Mut::slot_mut::<1>(&mut borrow), &sid),
-                        2 => Output::set(strand, Mut::slot_mut::<2>(&mut borrow), &sid),
-                        _ => unreachable!(),
-                    }
-                }
-
-                if let Some(logon_sid) = info.logon_sid().cloned() {
-                    create_sid(strand, global, logon_sid, &mut sid);
-                    Output::set(
-                        strand,
-                        Mut::slot_mut::<3>(&mut this.borrow_mut_unwrap()),
-                        &sid,
-                    );
-                }
+                        if let Some(logon_sid) = info.logon_sid().cloned() {
+                            create_sid(strand, global, logon_sid, &mut sid);
+                            Output::set(
+                                strand,
+                                Mut::slot_mut::<3>(&mut this.borrow_mut_unwrap()),
+                                &sid,
+                            );
+                        }
+                    });
                 Ok(())
             },
         )

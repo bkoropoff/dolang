@@ -98,11 +98,13 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>) {
             let pin = unsafe { s.pin().into_static_unchecked() };
             let shlex = Shlex::new(unsafe { mem::transmute::<&str, &'static str>(&*pin) });
             iter.create(strand, Iter { shlex, _pin: pin }, &mut out);
-            Output::set(
-                strand,
-                Mut::slot_mut::<0>(&mut iter.downcast(&out).unwrap().borrow_mut_unwrap()),
-                arg,
-            );
+            iter.cast(&out).unwrap().enter_sync(strand, |strand, inst| {
+                Output::set(
+                    strand,
+                    Mut::slot_mut::<0>(&mut inst.borrow_mut_unwrap()),
+                    arg,
+                );
+            });
             Ok(())
         })
         .function_with_slots(

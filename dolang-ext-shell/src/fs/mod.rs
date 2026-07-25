@@ -659,9 +659,9 @@ fn parse_ownership_identity<'v, 's>(
         Ok(dolang_shell_vfs::OwnershipIdentity::Id(value))
     } else if let Some(value) = value.as_str(strand) {
         Ok(dolang_shell_vfs::OwnershipIdentity::Name(value.to_string()))
-    } else if let Some(value) = global.types.sid.downcast(value) {
+    } else if let Some(value) = global.types.sid.cast(value) {
         Ok(dolang_shell_vfs::OwnershipIdentity::Sid(
-            value.annex().clone(),
+            value.enter_sync(strand, |_strand, value| value.annex().clone()),
         ))
     } else {
         Err(Error::type_error(

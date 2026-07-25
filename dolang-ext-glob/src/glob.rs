@@ -4,7 +4,7 @@ use dolang::runtime::object::fmt;
 
 use dolang::runtime::{
     Args, Error, Instance, Object, Output, Result, Slot, State, Strand, Type, Value,
-    object::TypeBuilder,
+    object::{Cast, TypeBuilder},
     unpack,
     value::{Str, View},
     vm::Builder,
@@ -31,7 +31,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
 }
 
 enum PatternArg<'v, 'a> {
-    Glob(Instance<'v, 'a, Glob>),
+    Glob(Cast<'v, 'a, Glob>),
     Str(String),
 }
 
@@ -41,7 +41,7 @@ impl<'v, 'a> PatternArg<'v, 'a> {
         global: State<'v, Global<'v>>,
         value: &'a Value<'v>,
     ) -> Result<'v, 's, Self> {
-        if let Some(glob) = global.types.glob.downcast(value) {
+        if let Some(glob) = global.types.glob.cast(value) {
             Ok(Self::Glob(glob))
         } else {
             match value.view(strand.vm()) {
@@ -60,7 +60,9 @@ impl<'v, 'a> PatternArg<'v, 'a> {
         value: Str<'v, '_>,
     ) -> Result<'v, 's, bool> {
         Ok(match self {
-            Self::Glob(glob) => strand.access(|x| glob.annex().glob.is_match(value.as_str(x))),
+            Self::Glob(glob) => glob.enter_sync(strand, |strand, inst| {
+                strand.access(|x| inst.annex().glob.is_match(value.as_str(x)))
+            }),
             Self::Str(pattern) => {
                 let glob = compile(pattern, strand)?;
                 strand.access(|x| glob.is_match(value.as_str(x)))

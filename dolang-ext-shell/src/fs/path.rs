@@ -49,10 +49,10 @@ pub(crate) fn path_from_value<'v, 's>(
     global: State<'v, Global<'v>>,
     value: &Value<'v>,
 ) -> Result<'v, 's, Utf8TypedPathBuf> {
-    let path = if let Some(path) = global.types.unix_path.downcast(value) {
-        Ok(path.annex().inner.clone())
-    } else if let Some(path) = global.types.windows_path.downcast(value) {
-        Ok(path.annex().typed_path_buf())
+    let path = if let Some(path) = global.types.unix_path.cast(value) {
+        Ok(path.enter_sync(strand, |_strand, inst| inst.annex().inner.clone()))
+    } else if let Some(path) = global.types.windows_path.cast(value) {
+        Ok(path.enter_sync(strand, |_strand, inst| inst.annex().typed_path_buf()))
     } else if let Some(str) = value.as_str(strand) {
         let target = target_path_type(strand, global);
         Ok(strand.access(|x| match target {
@@ -114,10 +114,10 @@ fn any_path_from_value<'v, 's>(
     global: State<'v, Global<'v>>,
     value: &Value<'v>,
 ) -> Result<'v, 's, Utf8TypedPathBuf> {
-    if let Some(path) = global.types.unix_path.downcast(value) {
-        Ok(path.annex().inner.clone())
-    } else if let Some(path) = global.types.windows_path.downcast(value) {
-        Ok(path.annex().typed_path_buf())
+    if let Some(path) = global.types.unix_path.cast(value) {
+        Ok(path.enter_sync(strand, |_strand, inst| inst.annex().inner.clone()))
+    } else if let Some(path) = global.types.windows_path.cast(value) {
+        Ok(path.enter_sync(strand, |_strand, inst| inst.annex().typed_path_buf()))
     } else if let Some(value) = value.as_str(strand) {
         let target = target_path_type(strand, global);
         Ok(strand.access(|x| match target {
@@ -129,18 +129,19 @@ fn any_path_from_value<'v, 's>(
     }
 }
 
-fn path_object_from_value<'v>(
+fn path_object_from_value<'v, 's>(
+    strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
     value: &Value<'v>,
 ) -> Option<Utf8TypedPathBuf> {
-    if let Some(path) = global.types.unix_path.downcast(value) {
-        Some(path.annex().inner.clone())
+    if let Some(path) = global.types.unix_path.cast(value) {
+        Some(path.enter_sync(strand, |_strand, inst| inst.annex().inner.clone()))
     } else {
         global
             .types
             .windows_path
-            .downcast(value)
-            .map(|path| path.annex().typed_path_buf())
+            .cast(value)
+            .map(|path| path.enter_sync(strand, |_strand, inst| inst.annex().typed_path_buf()))
     }
 }
 
@@ -149,8 +150,8 @@ fn is_path_value<'v>(
     global: State<'v, Global<'v>>,
     value: &Value<'v>,
 ) -> bool {
-    global.types.unix_path.downcast(value).is_some()
-        || global.types.windows_path.downcast(value).is_some()
+    global.types.unix_path.cast(value).is_some()
+        || global.types.windows_path.cast(value).is_some()
         || value.as_str(strand).is_some()
 }
 
@@ -1184,7 +1185,7 @@ macro_rules! impl_concrete_path {
             ) -> Result<'v, 's, bool> {
                 let borrow = this.annex();
                 let global = borrow.global;
-                if let Some(other) = path_object_from_value(global, other) {
+                if let Some(other) = path_object_from_value(strand, global, other) {
                     Ok(borrow.typed_path_buf() == other)
                 } else {
                     Err(Error::not_supported(strand))
@@ -1207,7 +1208,7 @@ macro_rules! impl_concrete_path {
             ) -> Result<'v, 's, bool> {
                 let borrow = this.annex();
                 let global = borrow.global;
-                if let Some(other) = path_object_from_value(global, other) {
+                if let Some(other) = path_object_from_value(strand, global, other) {
                     Ok(borrow.typed_path_buf() < other)
                 } else {
                     Err(Error::not_supported(strand))

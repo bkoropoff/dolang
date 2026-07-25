@@ -537,11 +537,11 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             global
                 .types
                 .indicator
-                .downcast(&slot)
+                .cast(&slot)
                 .unwrap()
-                .annex()
-                .closed
-                .set(true);
+                .enter_sync(strand, |_strand, inst| {
+                    inst.annex().closed.set(true);
+                });
 
             // Clean up multi-progress state if we were inside progress.with
             if let Some(ms) = multi_state {

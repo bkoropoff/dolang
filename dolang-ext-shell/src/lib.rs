@@ -31,7 +31,7 @@ use std::{
 use std::{io::stderr, os::fd::AsFd};
 
 pub use crate::global::ProgramSource;
-use dolang::runtime::{Error, Output, Result, Strand, Value, Vm};
+use dolang::runtime::{Error, Output, Result, Strand, Value};
 #[cfg(unix)]
 use dolang_shell_vfs::Client;
 pub use dolang_shell_vfs::FileHandle;
@@ -71,13 +71,16 @@ pub async fn flush<'v, 's>(strand: &mut Strand<'v, 's>, stdout: &Value<'v>) -> R
     let stdout = global
         .types
         .stdout
-        .downcast(stdout)
+        .cast(stdout)
         .ok_or_else(|| Error::type_error(strand, "stdout sink: expected shell.Stdout"))?;
     stdout
-        .borrow_mut(strand)?
-        .flush()
-        .await
-        .map_err(|error| Error::runtime(strand, error))?;
+        .enter(strand, async |strand, inst| {
+            inst.borrow_mut(strand)?
+                .flush()
+                .await
+                .map_err(|error| Error::runtime(strand, error))
+        })
+        .await?;
     global
         .terminal
         .writer
@@ -88,10 +91,13 @@ pub async fn flush<'v, 's>(strand: &mut Strand<'v, 's>, stdout: &Value<'v>) -> R
         .map_err(|error| Error::runtime(strand, error))
 }
 
-pub fn as_datetime<'v>(vm: &Vm<'v>, value: &Value<'v>) -> Option<std::time::SystemTime> {
-    let global = vm.state::<Global<'v>>();
-    let datetime = global.types.date_time.downcast(value)?;
-    datetime.annex().to_system_time().ok()
+pub fn as_datetime<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    value: &Value<'v>,
+) -> Option<std::time::SystemTime> {
+    let global = strand.state::<Global<'v>>();
+    let datetime = global.types.date_time.cast(value)?;
+    datetime.enter_sync(strand, |_strand, inst| inst.annex().to_system_time().ok())
 }
 
 pub fn datetime<'v>(
@@ -137,29 +143,35 @@ pub async fn set_program<'v, 's>(
     Ok(())
 }
 
-pub fn as_path<'v, 'a>(vm: &Vm<'v>, value: &'a Value<'v>) -> Option<PathBuf> {
-    let global = vm.state::<Global<'v>>();
-    if let Some(path) = global.types.unix_path.downcast(value) {
-        dolang_shell_vfs::native_path(path.annex().inner.to_path()).ok()
-    } else if let Some(path) = global.types.windows_path.downcast(value) {
-        dolang_shell_vfs::native_path(path.annex().typed_path_buf().to_path()).ok()
+pub fn as_path<'v, 's>(strand: &mut Strand<'v, 's>, value: &Value<'v>) -> Option<PathBuf> {
+    let global = strand.state::<Global<'v>>();
+    if let Some(path) = global.types.unix_path.cast(value) {
+        path.enter_sync(strand, |_strand, inst| {
+            dolang_shell_vfs::native_path(inst.annex().inner.to_path()).ok()
+        })
+    } else if let Some(path) = global.types.windows_path.cast(value) {
+        path.enter_sync(strand, |_strand, inst| {
+            dolang_shell_vfs::native_path(inst.annex().typed_path_buf().to_path()).ok()
+        })
     } else {
-        value.as_str(vm).map(|s| PathBuf::from(s.to_string()))
+        value.as_str(strand).map(|s| PathBuf::from(s.to_string()))
     }
 }
 
 /// Downcast a Do value to a Unix path.
-pub fn as_unix_path<'v>(
-    vm: &Vm<'v>,
+pub fn as_unix_path<'v, 's>(
+    strand: &mut Strand<'v, 's>,
     value: &Value<'v>,
 ) -> Option<dolang_shell_vfs::Utf8UnixPathBuf> {
-    let global = vm.state::<Global<'v>>();
-    let path = global.types.unix_path.downcast(value)?;
-    let annex = path.annex();
-    match &annex.inner {
-        dolang_shell_vfs::Utf8TypedPathBuf::Unix(path) => Some(path.clone()),
-        dolang_shell_vfs::Utf8TypedPathBuf::Windows(_) => None,
-    }
+    let global = strand.state::<Global<'v>>();
+    let path = global.types.unix_path.cast(value)?;
+    path.enter_sync(strand, |_strand, inst| {
+        let annex = inst.annex();
+        match &annex.inner {
+            dolang_shell_vfs::Utf8TypedPathBuf::Unix(path) => Some(path.clone()),
+            dolang_shell_vfs::Utf8TypedPathBuf::Windows(_) => None,
+        }
+    })
 }
 
 /// Construct a Do `fs.UnixPath` value.

@@ -641,8 +641,13 @@ impl<'v> Object<'v> for File<'v> {
                         let result = call!(strand, block, out, &guard).await;
                         let cleanup = strand
                             .with_interrupt_mask(true, async move |strand| {
-                                let guard = lock_type.downcast(&guard).unwrap();
-                                FileLockObject::release(guard, strand).await
+                                lock_type
+                                    .cast(&guard)
+                                    .unwrap()
+                                    .enter(strand, async move |strand, guard| {
+                                        FileLockObject::release(guard, strand).await
+                                    })
+                                    .await
                             })
                             .await;
                         match (result, cleanup) {
@@ -689,8 +694,13 @@ impl<'v> Object<'v> for File<'v> {
                         let result = call!(strand, block, out, &guard).await;
                         let cleanup = strand
                             .with_interrupt_mask(true, async move |strand| {
-                                let guard = lock_type.downcast(&guard).unwrap();
-                                FileLockObject::release(guard, strand).await
+                                lock_type
+                                    .cast(&guard)
+                                    .unwrap()
+                                    .enter(strand, async move |strand, guard| {
+                                        FileLockObject::release(guard, strand).await
+                                    })
+                                    .await
                             })
                             .await;
                         match (result, cleanup) {

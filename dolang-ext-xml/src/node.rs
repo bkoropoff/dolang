@@ -140,8 +140,10 @@ impl<'v> Object<'v> for Node {
             NodeAnnex,
             &mut out,
         );
-        let mut borrow = this.downcast(&out).unwrap().borrow_mut_unwrap();
-        Output::set(strand, Mut::slot_mut::<CHILDREN>(&mut borrow), Empty::Array);
+        this.cast(&out).unwrap().enter_sync(strand, |strand, inst| {
+            let mut borrow = inst.borrow_mut_unwrap();
+            Output::set(strand, Mut::slot_mut::<CHILDREN>(&mut borrow), Empty::Array);
+        });
         Ok(())
     }
 
@@ -234,21 +236,20 @@ impl<'v> Object<'v> for Node {
                 global
                     .traverse_iter_type
                     .create(strand, TraverseIter, &mut out);
-                let mut borrow = global
+                global
                     .traverse_iter_type
-                    .downcast(&out)
+                    .cast(&out)
                     .unwrap()
-                    .borrow_mut_unwrap();
-                Output::set(strand, Mut::slot_mut::<STACK>(&mut borrow), Empty::Array);
-                drop(borrow);
-                let borrow = global
-                    .traverse_iter_type
-                    .downcast(&out)
-                    .unwrap()
-                    .borrow(strand)?;
-                let stack = Ref::slot::<STACK>(&borrow).as_array(strand).unwrap();
-                stack.push(strand, this)?;
-                Ok(())
+                    .enter_sync(strand, |strand, inst| {
+                        {
+                            let mut borrow = inst.borrow_mut_unwrap();
+                            Output::set(strand, Mut::slot_mut::<STACK>(&mut borrow), Empty::Array);
+                        }
+                        let borrow = inst.borrow(strand)?;
+                        let stack = Ref::slot::<STACK>(&borrow).as_array(strand).unwrap();
+                        stack.push(strand, this)?;
+                        Ok(())
+                    })
             })
     }
 }
@@ -291,16 +292,19 @@ impl<'v> Object<'v> for TraverseIter {
                 return Ok(false);
             }
             // If it's a Node, push its children in reverse so first child is next.
-            if let Some(node_inst) = global.node_type.downcast(&out) {
-                let node_borrow = node_inst.borrow(strand)?;
-                let children = Ref::slot::<CHILDREN>(&node_borrow)
-                    .as_array(strand)
-                    .unwrap();
-                let children_len = children.len(strand)?;
-                for i in (0..children_len).rev() {
-                    children.get(strand, i, &mut tmp)?;
-                    stack.push(strand, &mut tmp)?;
-                }
+            if let Some(node_cast) = global.node_type.cast(&out) {
+                node_cast.enter_sync(strand, |strand, node_inst| {
+                    let node_borrow = node_inst.borrow(strand)?;
+                    let children = Ref::slot::<CHILDREN>(&node_borrow)
+                        .as_array(strand)
+                        .unwrap();
+                    let children_len = children.len(strand)?;
+                    for i in (0..children_len).rev() {
+                        children.get(strand, i, &mut tmp)?;
+                        stack.push(strand, &mut tmp)?;
+                    }
+                    Ok(())
+                })?;
             }
             Ok(true)
         })

@@ -26,9 +26,14 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>, global: State<'v, Global<
                             let handler = global
                                 .types
                                 .import_handler
-                                .downcast(&key)
+                                .cast(&key)
                                 .expect("load handler registry key must be an ImportHandler");
-                            handler.borrow_mut(strand)?.loaded.insert(name.to_owned());
+                            handler
+                                .enter(strand, async |strand, inst| {
+                                    inst.borrow_mut(strand)?.loaded.insert(name.to_owned());
+                                    Ok(())
+                                })
+                                .await?;
                             return Ok(());
                         }
                         Err(e) if e.kind() == ErrorKind::Import => (),
