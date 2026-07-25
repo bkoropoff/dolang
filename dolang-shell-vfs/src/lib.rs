@@ -10,7 +10,10 @@ use std::{
     pin::Pin,
     task::{Context, Poll},
 };
-use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
+use tokio::{
+    io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf},
+    task::JoinHandle,
+};
 pub use typed_path::{
     PathType, Utf8TypedPath, Utf8TypedPathBuf, Utf8UnixPath, Utf8UnixPathBuf, Utf8WindowsPath,
     Utf8WindowsPathBuf, Utf8WindowsPrefix,
@@ -1592,30 +1595,176 @@ impl OpenOptions for AnyOpenOptions<'_> {
     }
 }
 
-pub enum AnyCommand<'a> {
+enum AnyCommandInner<'a> {
     Client(client::CommandBuilder<'a>),
     Direct(direct::DirectCommand<'a>),
 }
 
-pub enum AnyChild {
+/// Builds a process to spawn, relaying stdio across VFS domains when a
+/// given endpoint cannot be consumed directly by the spawn target.
+pub struct AnyCommand<'a> {
+    inner: AnyCommandInner<'a>,
+    vfs: AnyVfs,
+    stdin: Option<StdioRecv>,
+    stdout: Option<StdioSend>,
+    stderr: Option<StdioSend>,
+}
+
+enum AnyChildInner {
     Client(client::ClientChild),
     Direct(Box<direct::DirectChild>),
 }
 
-impl Child for AnyChild {
-    async fn wait(&mut self) -> crate::Result<ProcessStatus> {
-        match self {
-            Self::Client(child) => child.wait().await,
-            Self::Direct(child) => child.wait().await,
+/// Tasks pumping bytes between a foreign-domain stdio endpoint and a pipe
+/// created in the spawn target's own domain, not yet started.
+///
+/// Relay tasks are only started once the underlying process has actually
+/// been spawned, so a failure setting up the spawn itself just drops the
+/// held endpoints (triggering their own best-effort cleanup) instead of
+/// leaking a running task.
+#[derive(Default)]
+struct PendingRelays {
+    inputs: Vec<(StdioRecv, StdioSend)>,
+    outputs: Vec<(StdioRecv, StdioSend)>,
+}
+
+impl PendingRelays {
+    fn start(self) -> ActiveRelays {
+        let spawn_all = |pairs: Vec<(StdioRecv, StdioSend)>| {
+            pairs
+                .into_iter()
+                .map(|(src, dst)| tokio::spawn(pipe::relay(src, dst)))
+                .collect()
+        };
+        ActiveRelays {
+            inputs: spawn_all(self.inputs),
+            outputs: spawn_all(self.outputs),
+        }
+    }
+}
+
+#[derive(Default)]
+struct ActiveRelays {
+    inputs: Vec<JoinHandle<()>>,
+    outputs: Vec<JoinHandle<()>>,
+}
+
+impl ActiveRelays {
+    fn abort_inputs(&mut self) {
+        for handle in self.inputs.drain(..) {
+            handle.abort();
         }
     }
 
-    async fn terminate(self) -> crate::Result<ProcessStatus> {
-        match self {
-            Self::Client(child) => child.terminate().await,
-            Self::Direct(child) => (*child).terminate().await,
+    /// Waits for output relays to finish flushing everything the child
+    /// already produced before it exited. Input relays are aborted instead
+    /// of awaited, since no further input can matter once the child is gone.
+    ///
+    /// Once the child has exited, its end of each output pipe is closed, so
+    /// the relay's copy loop reaches EOF and returns on its own; this just
+    /// ensures the caller can't observe a partially-relayed destination.
+    async fn finish(&mut self) {
+        self.abort_inputs();
+        for handle in self.outputs.drain(..) {
+            let _ = handle.await;
         }
     }
+
+    /// Aborts every relay task without waiting, for use when giving up on
+    /// the child without having confirmed it actually exited (e.g. `Drop`).
+    fn abandon(&mut self) {
+        self.abort_inputs();
+        for handle in self.outputs.drain(..) {
+            handle.abort();
+        }
+    }
+}
+
+impl Drop for ActiveRelays {
+    fn drop(&mut self) {
+        self.abandon();
+    }
+}
+
+/// A spawned process, possibly relaying stdio across VFS domains.
+pub struct AnyChild {
+    inner: AnyChildInner,
+    relays: ActiveRelays,
+}
+
+impl Child for AnyChild {
+    async fn wait(&mut self) -> crate::Result<ProcessStatus> {
+        let status = match &mut self.inner {
+            AnyChildInner::Client(child) => child.wait().await,
+            AnyChildInner::Direct(child) => child.wait().await,
+        }?;
+        self.relays.finish().await;
+        Ok(status)
+    }
+
+    async fn terminate(mut self) -> crate::Result<ProcessStatus> {
+        self.relays.abort_inputs();
+        let result = match self.inner {
+            AnyChildInner::Client(child) => child.terminate().await,
+            AnyChildInner::Direct(child) => (*child).terminate().await,
+        };
+        self.relays.finish().await;
+        result
+    }
+}
+
+/// Returns whether `stdio` can be handed directly to a process spawned in
+/// `target`'s domain without relaying.
+fn is_direct_recv(target: &AnyVfs, stdio: &StdioRecv) -> bool {
+    match (target, stdio) {
+        (AnyVfs::Direct(_), StdioRecv::Native(_)) => true,
+        (AnyVfs::Client(client), StdioRecv::Remote(remote)) => client.is_same_vfs(remote.client()),
+        (AnyVfs::Client(client), StdioRecv::Native(_)) => client.mode() == SessionMode::Native,
+        _ => false,
+    }
+}
+
+/// Returns whether `stdio` can be handed directly to a process spawned in
+/// `target`'s domain without relaying.
+fn is_direct_send(target: &AnyVfs, stdio: &StdioSend) -> bool {
+    match (target, stdio) {
+        (AnyVfs::Direct(_), StdioSend::Native(_)) => true,
+        (AnyVfs::Client(client), StdioSend::Remote(remote)) => client.is_same_vfs(remote.client()),
+        (AnyVfs::Client(client), StdioSend::Native(_)) => client.mode() == SessionMode::Native,
+        _ => false,
+    }
+}
+
+/// Classifies a stdin endpoint for a process about to be spawned in
+/// `target`'s domain, creating a relay pipe and queuing a pump task in
+/// `relays` if the endpoint cannot be consumed directly.
+async fn classify_recv(
+    target: &AnyVfs,
+    stdio: StdioRecv,
+    relays: &mut PendingRelays,
+) -> crate::Result<StdioRecv> {
+    if is_direct_recv(target, &stdio) {
+        return Ok(stdio);
+    }
+    let (send, recv) = target.pipe().await?;
+    relays.inputs.push((stdio, send));
+    Ok(recv)
+}
+
+/// Classifies a stdout/stderr endpoint for a process about to be spawned in
+/// `target`'s domain, creating a relay pipe and queuing a pump task in
+/// `relays` if the endpoint cannot be consumed directly.
+async fn classify_send(
+    target: &AnyVfs,
+    stdio: StdioSend,
+    relays: &mut PendingRelays,
+) -> crate::Result<StdioSend> {
+    if is_direct_send(target, &stdio) {
+        return Ok(stdio);
+    }
+    let (send, recv) = target.pipe().await?;
+    relays.outputs.push((recv, stdio));
+    Ok(send)
 }
 
 impl<'a> Command for AnyCommand<'a> {
@@ -1624,11 +1773,11 @@ impl<'a> Command for AnyCommand<'a> {
     type StdioRecv = StdioRecv;
 
     fn arg(&mut self, arg: &str) -> &mut Self {
-        match self {
-            Self::Client(builder) => {
+        match &mut self.inner {
+            AnyCommandInner::Client(builder) => {
                 builder.arg(arg);
             }
-            Self::Direct(builder) => {
+            AnyCommandInner::Direct(builder) => {
                 builder.arg(arg);
             }
         }
@@ -1636,11 +1785,11 @@ impl<'a> Command for AnyCommand<'a> {
     }
 
     fn env(&mut self, key: &str, val: &str) -> &mut Self {
-        match self {
-            Self::Client(builder) => {
+        match &mut self.inner {
+            AnyCommandInner::Client(builder) => {
                 builder.env(key, val);
             }
-            Self::Direct(builder) => {
+            AnyCommandInner::Direct(builder) => {
                 builder.env(key, val);
             }
         }
@@ -1648,11 +1797,11 @@ impl<'a> Command for AnyCommand<'a> {
     }
 
     fn env_remove(&mut self, key: &str) -> &mut Self {
-        match self {
-            Self::Client(builder) => {
+        match &mut self.inner {
+            AnyCommandInner::Client(builder) => {
                 builder.env_remove(key);
             }
-            Self::Direct(builder) => {
+            AnyCommandInner::Direct(builder) => {
                 builder.env_remove(key);
             }
         }
@@ -1660,11 +1809,11 @@ impl<'a> Command for AnyCommand<'a> {
     }
 
     fn current_dir(&mut self, dir: Utf8TypedPath<'_>) -> &mut Self {
-        match self {
-            Self::Client(builder) => {
+        match &mut self.inner {
+            AnyCommandInner::Client(builder) => {
                 builder.current_dir(dir);
             }
-            Self::Direct(builder) => {
+            AnyCommandInner::Direct(builder) => {
                 builder.current_dir(dir);
             }
         }
@@ -1672,35 +1821,22 @@ impl<'a> Command for AnyCommand<'a> {
     }
 
     fn stdin(&mut self, stdio: StdioRecv) -> io::Result<&mut Self> {
-        match self {
-            Self::Client(builder) => {
-                builder.stdin(stdio)?;
-            }
-            Self::Direct(builder) => {
-                builder.stdin(stdio)?;
-            }
-        }
+        self.stdin = Some(stdio);
         Ok(self)
     }
 
     fn stdout(&mut self, stdio: StdioSend) -> io::Result<&mut Self> {
-        match self {
-            Self::Client(builder) => {
-                builder.stdout(stdio)?;
-            }
-            Self::Direct(builder) => {
-                builder.stdout(stdio)?;
-            }
-        }
+        self.stdout = Some(stdio);
         Ok(self)
     }
 
     fn stdin_inherit(&mut self) -> io::Result<&mut Self> {
-        match self {
-            Self::Client(builder) => {
+        self.stdin = None;
+        match &mut self.inner {
+            AnyCommandInner::Client(builder) => {
                 builder.stdin_inherit()?;
             }
-            Self::Direct(builder) => {
+            AnyCommandInner::Direct(builder) => {
                 builder.stdin_inherit()?;
             }
         }
@@ -1708,11 +1844,12 @@ impl<'a> Command for AnyCommand<'a> {
     }
 
     fn stdout_inherit(&mut self) -> io::Result<&mut Self> {
-        match self {
-            Self::Client(builder) => {
+        self.stdout = None;
+        match &mut self.inner {
+            AnyCommandInner::Client(builder) => {
                 builder.stdout_inherit()?;
             }
-            Self::Direct(builder) => {
+            AnyCommandInner::Direct(builder) => {
                 builder.stdout_inherit()?;
             }
         }
@@ -1720,11 +1857,12 @@ impl<'a> Command for AnyCommand<'a> {
     }
 
     fn stdin_null(&mut self) -> &mut Self {
-        match self {
-            Self::Client(builder) => {
+        self.stdin = None;
+        match &mut self.inner {
+            AnyCommandInner::Client(builder) => {
                 builder.stdin_null();
             }
-            Self::Direct(builder) => {
+            AnyCommandInner::Direct(builder) => {
                 builder.stdin_null();
             }
         }
@@ -1732,11 +1870,12 @@ impl<'a> Command for AnyCommand<'a> {
     }
 
     fn stdout_null(&mut self) -> &mut Self {
-        match self {
-            Self::Client(builder) => {
+        self.stdout = None;
+        match &mut self.inner {
+            AnyCommandInner::Client(builder) => {
                 builder.stdout_null();
             }
-            Self::Direct(builder) => {
+            AnyCommandInner::Direct(builder) => {
                 builder.stdout_null();
             }
         }
@@ -1744,23 +1883,17 @@ impl<'a> Command for AnyCommand<'a> {
     }
 
     fn stderr(&mut self, stdio: StdioSend) -> io::Result<&mut Self> {
-        match self {
-            Self::Client(builder) => {
-                builder.stderr(stdio)?;
-            }
-            Self::Direct(builder) => {
-                builder.stderr(stdio)?;
-            }
-        }
+        self.stderr = Some(stdio);
         Ok(self)
     }
 
     fn stderr_inherit(&mut self) -> io::Result<&mut Self> {
-        match self {
-            Self::Client(builder) => {
+        self.stderr = None;
+        match &mut self.inner {
+            AnyCommandInner::Client(builder) => {
                 builder.stderr_inherit()?;
             }
-            Self::Direct(builder) => {
+            AnyCommandInner::Direct(builder) => {
                 builder.stderr_inherit()?;
             }
         }
@@ -1768,11 +1901,12 @@ impl<'a> Command for AnyCommand<'a> {
     }
 
     fn stderr_inherit_stdout(&mut self) -> io::Result<&mut Self> {
-        match self {
-            Self::Client(builder) => {
+        self.stderr = None;
+        match &mut self.inner {
+            AnyCommandInner::Client(builder) => {
                 builder.stderr_inherit_stdout()?;
             }
-            Self::Direct(builder) => {
+            AnyCommandInner::Direct(builder) => {
                 builder.stderr_inherit_stdout()?;
             }
         }
@@ -1780,22 +1914,65 @@ impl<'a> Command for AnyCommand<'a> {
     }
 
     fn stderr_null(&mut self) -> &mut Self {
-        match self {
-            Self::Client(builder) => {
+        self.stderr = None;
+        match &mut self.inner {
+            AnyCommandInner::Client(builder) => {
                 builder.stderr_null();
             }
-            Self::Direct(builder) => {
+            AnyCommandInner::Direct(builder) => {
                 builder.stderr_null();
             }
         }
         self
     }
 
-    async fn spawn(self) -> crate::Result<Self::Child> {
-        match self {
-            Self::Client(builder) => builder.spawn().await.map(AnyChild::Client),
-            Self::Direct(builder) => builder.spawn().await.map(Box::new).map(AnyChild::Direct),
+    async fn spawn(mut self) -> crate::Result<Self::Child> {
+        let mut relays = PendingRelays::default();
+        if let Some(stdio) = self.stdin.take() {
+            let stdio = classify_recv(&self.vfs, stdio, &mut relays).await?;
+            match &mut self.inner {
+                AnyCommandInner::Client(builder) => {
+                    builder.stdin(stdio)?;
+                }
+                AnyCommandInner::Direct(builder) => {
+                    builder.stdin(stdio)?;
+                }
+            }
         }
+        if let Some(stdio) = self.stdout.take() {
+            let stdio = classify_send(&self.vfs, stdio, &mut relays).await?;
+            match &mut self.inner {
+                AnyCommandInner::Client(builder) => {
+                    builder.stdout(stdio)?;
+                }
+                AnyCommandInner::Direct(builder) => {
+                    builder.stdout(stdio)?;
+                }
+            }
+        }
+        if let Some(stdio) = self.stderr.take() {
+            let stdio = classify_send(&self.vfs, stdio, &mut relays).await?;
+            match &mut self.inner {
+                AnyCommandInner::Client(builder) => {
+                    builder.stderr(stdio)?;
+                }
+                AnyCommandInner::Direct(builder) => {
+                    builder.stderr(stdio)?;
+                }
+            }
+        }
+        let inner = match self.inner {
+            AnyCommandInner::Client(builder) => builder.spawn().await.map(AnyChildInner::Client),
+            AnyCommandInner::Direct(builder) => builder
+                .spawn()
+                .await
+                .map(Box::new)
+                .map(AnyChildInner::Direct),
+        }?;
+        Ok(AnyChild {
+            inner,
+            relays: relays.start(),
+        })
     }
 }
 
@@ -1899,9 +2076,16 @@ impl Vfs for AnyVfs {
     }
 
     fn command(&self, program: Utf8TypedPath<'_>) -> Self::Command<'_> {
-        match self {
-            Self::Client(client) => AnyCommand::Client(client.command(program)),
-            Self::Direct(direct) => AnyCommand::Direct(direct.command(program)),
+        let inner = match self {
+            Self::Client(client) => AnyCommandInner::Client(client.command(program)),
+            Self::Direct(direct) => AnyCommandInner::Direct(direct.command(program)),
+        };
+        AnyCommand {
+            inner,
+            vfs: self.clone(),
+            stdin: None,
+            stdout: None,
+            stderr: None,
         }
     }
 

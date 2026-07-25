@@ -8,7 +8,7 @@ use std::{
 use dolang_rpc::DefaultHandle;
 use tokio::{
     fs::File,
-    io::{AsyncRead, AsyncWrite, ReadBuf},
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf},
 };
 
 #[cfg(unix)]
@@ -67,6 +67,16 @@ pub enum NativeStdioRecv {
         ready: Option<(Vec<u8>, usize)>,
     },
     File(File),
+}
+
+/// Pumps bytes from `src` to `dst` until EOF or error, then shuts `dst` down.
+pub(crate) async fn relay<R, W>(mut src: R, mut dst: W)
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let _ = tokio::io::copy(&mut src, &mut dst).await;
+    let _ = dst.shutdown().await;
 }
 
 pub(crate) fn pipe() -> io::Result<(StdioSend, StdioRecv)> {
