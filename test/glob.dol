@@ -12,7 +12,7 @@ import
     - TypeError
 
 #[test]
-def matches()
+def matches_free()
   let png = Glob "**/*.png"
   assert (matches "**/*.png" "images/logo.png")
   assert (!matches "**/*.png" "images/logo.jpg")
