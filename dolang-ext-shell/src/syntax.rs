@@ -66,7 +66,7 @@ fn token_style(token: Token, origin: Option<&Origin>, context: Context) -> Optio
 
 fn push_sanitized(out: &mut String, value: &str) {
     for ch in value.chars() {
-        if ch == '\t' || !ch.is_control() {
+        if ch == '\t' || ch == '\n' || ch == '\r' || !ch.is_control() {
             out.push(ch);
         } else {
             out.push('\u{fffd}');
