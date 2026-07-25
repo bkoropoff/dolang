@@ -73,7 +73,7 @@ echo "Building on $kernel, branch $branch"
 ```
 import progress podman
 
-let PACKAGES =
+let PACKAGES = $
   - gcc
   - node
 

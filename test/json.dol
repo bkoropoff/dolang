@@ -69,7 +69,7 @@ def round_trip_objects()
 
 #[test]
 def round_trip_mixed()
-  let complex =
+  let complex = $
     users:
       - name: alice
         age: 30

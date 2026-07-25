@@ -28,7 +28,7 @@ def parse_content_disposition value
       name = (trim_quotes (trimmed.without_prefix "name="))
     else if (trimmed.starts_with "filename=")
       filename = (trim_quotes (trimmed.without_prefix "filename="))
-  return
+  return $
     - $name
     - $filename
 
@@ -180,7 +180,7 @@ def file_backed_part_round_trips()
             file.write b"file-backed upload"
 
           open $path rb do |file|
-            let file_parts =
+            let file_parts = $
               - name: file
                 filename: report.txt
                 content_type: text/plain

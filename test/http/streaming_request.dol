@@ -16,11 +16,9 @@ def string_and_binary_bodies_are_sent_as_is()
     server.mock
       - method: POST
         path: /post
-        respond: do |req|
-          let resp =
-            status: 201
-            body: $req.body
-          resp
+        respond: do |req| $
+          status: 201
+          body: $req.body
       do |_handle|
         # Backward compatibility with string body
         http.post (server.url / "/post") body: "simple string" do |res|
@@ -38,11 +36,9 @@ def array_bodies_stream_without_delimiters()
     server.mock
       - method: POST
         path: /post
-        respond: do |req|
-          let resp =
-            status: 201
-            body: $req.body
-          resp
+        respond: do |req| $
+          status: 201
+          body: $req.body
       do |_handle|
         # Streaming from array of strings using body (no delimiters added)
         http.post (server.url / "/post") body: ["hello", "world"] do |res|
@@ -65,11 +61,9 @@ def lines_parameter_adds_newlines_between_items()
     server.mock
       - method: POST
         path: /post
-        respond: do |req|
-          let resp =
-            status: 201
-            body: $req.body
-          resp
+        respond: do |req| $
+          status: 201
+          body: $req.body
       do |_handle|
         http.post (server.url / "/post") lines: ["hello", "world"] do |res|
           assert_eq $res.status 201

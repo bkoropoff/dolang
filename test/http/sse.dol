@@ -39,14 +39,14 @@ def events_identity_and_hash()
         assert_eq $first_dict[same_first] "seen"
 
         http.get (server.url / "/events") do |res|
-          let events =
+          let events = $
             for event = res.events()
               - type: $event.type
                 data: $event.data
                 id: $event.id
                 retry: $event.retry
 
-          let expected =
+          let expected = $
             - type: "token"
               data: "hello\nworld"
               id: "msg-1"

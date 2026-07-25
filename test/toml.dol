@@ -68,7 +68,7 @@ def symbol_keys_stringify()
 
 #[test]
 def round_trip_nested_structures()
-  let nested =
+  let nested = $
     service:
       host: localhost
       ports:

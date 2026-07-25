@@ -7,13 +7,13 @@ import
     - stream
 
 def receivers bt
-  let out =
+  let out = $
     for frame = bt
       - $frame.receiver
   out
 
 def frame_info bt
-  let out =
+  let out = $
     for frame = bt
       - [frame.module, frame.receiver, frame.method, frame.source != nil, frame.line != nil]
   out

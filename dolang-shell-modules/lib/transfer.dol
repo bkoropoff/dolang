@@ -10,7 +10,7 @@ import digest fs http json progress security shell std sys tar zip
   url:
     - Url
 
-let DIGESTS =
+let DIGESTS = $
   "blake3": $digest.Blake3
   "md5": $digest.Md5
   "sha1": $digest.Sha1
@@ -134,7 +134,7 @@ def response_metadata identity response payload digest_info old
     verified[digest_info.algorithm] = digest_info.expected
   let now = DateTime.now().rfc3339()
   let modified = (headers.get "last-modified")
-  return
+  return $
     version: 1
     url: $identity
     final_url: (str response.url)
@@ -393,7 +393,7 @@ def filesystem_metadata path kind options
         metadata.user.lookup().qualified_name
     catch sys.NotFoundError: _
       nil
-  return
+  return $
     mode: (options.get(mode_key) || (unix && (metadata.mode & 0o7777)) || default_mode)
     uid: (options.get(:uid:) || (unix && metadata.uid) || 0)
     gid: (options.get(:gid:) || (unix && metadata.gid) || 0)

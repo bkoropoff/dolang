@@ -33,9 +33,7 @@ callback:
 ```
 server.mock
   - path: /echo
-    respond: do |req|
-      let resp =
-        status: 200
-        body: $req.body
-      resp
+    respond: do |req| $
+      status: 200
+      body: $req.body
 ```

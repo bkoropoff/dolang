@@ -50,13 +50,13 @@ pub def env_args cd overrides
       unsets.push -u $k
     else
       sets.push "$k=$v"
-  return
+  return $
     if cd
       -C $cd
     ...unsets ...sets
 
 pub def vfs_args cd overrides
-  return
+  return $
     if cd
       --cd $cd
     for k v = env_pairs $overrides

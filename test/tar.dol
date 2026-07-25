@@ -63,7 +63,7 @@ def check_archive path compression
 
 #[agent.test]
 def round_trip_compression_formats()
-  let formats =
+  let formats = $
     - [:NONE:, "tar"]
     - [:GZIP:, "tar.gz"]
     - [:ZSTD:, "tar.zst"]
@@ -74,7 +74,7 @@ def round_trip_compression_formats()
 
 #[agent.test]
 def compression_is_inferred_from_extension()
-  let formats =
+  let formats = $
     - [:NONE:, "tar"]
     - [:GZIP:, "tar.gz"]
     - [:GZIP:, "tgz"]
