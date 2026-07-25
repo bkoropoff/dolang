@@ -26,7 +26,7 @@ impl<'v> ArrayLike<'v> for Children {
     const MODULE: &'v str = "xml";
     const NAME: &'v str = "Children";
 
-    fn len(this: Instance<'v, '_, Node>, strand: &mut Strand<'v, '_>) -> usize {
+    fn len(&self, this: Instance<'v, '_, Node>, strand: &mut Strand<'v, '_>) -> usize {
         Ref::slot::<CHILDREN>(&this.borrow_unwrap())
             .as_array(strand)
             .unwrap()
@@ -35,6 +35,7 @@ impl<'v> ArrayLike<'v> for Children {
     }
 
     fn get<'a, 's>(
+        &self,
         this: Instance<'v, '_, Node>,
         strand: &'a mut Strand<'v, 's>,
         index: usize,
@@ -56,16 +57,23 @@ impl<'v> DictLike<'v> for Attrs {
     const MODULE: &'v str = "xml";
     const NAME: &'v str = "Attrs";
 
-    fn len(this: Instance<'v, '_, Node>, _strand: &mut Strand<'v, '_>) -> usize {
+    fn len(&self, this: Instance<'v, '_, Node>, _strand: &mut Strand<'v, '_>) -> usize {
         this.borrow_unwrap().attrs.len()
     }
 
     fn get<'a, 's>(
+        &self,
         this: Instance<'v, '_, Node>,
         strand: &'a mut Strand<'v, 's>,
         key: &Value<'v>,
+        instance: i64,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, bool> {
+        // Attribute names are unique per element, so there is never more
+        // than one value to select among.
+        if !matches!(instance, 0 | -1) {
+            return Ok(false);
+        }
         let Some(key) = key.as_str(strand) else {
             return Ok(false);
         };
@@ -81,6 +89,7 @@ impl<'v> DictLike<'v> for Attrs {
     }
 
     fn set<'a, 's>(
+        &self,
         this: Instance<'v, '_, Node>,
         strand: &'a mut Strand<'v, 's>,
         key: Slot<'v, 'a>,
@@ -90,6 +99,7 @@ impl<'v> DictLike<'v> for Attrs {
     }
 
     fn flatten<'s>(
+        &self,
         this: Instance<'v, '_, Node>,
         strand: &mut Strand<'v, 's>,
         sink: &mut DictViewSink<'v, '_>,
@@ -203,11 +213,11 @@ impl<'v> Object<'v> for Node {
                 Ok(())
             })
             .get("attrs", |this, strand, out| {
-                Output::set(strand, out, DictView::<Attrs>::new(this));
+                Output::set(strand, out, DictView::new(this, Attrs));
                 Ok(())
             })
             .get("children", |this, strand, out| {
-                Output::set(strand, out, ArrayView::<Children>::new(this));
+                Output::set(strand, out, ArrayView::new(this, Children));
                 Ok(())
             })
             .method("push", async move |this, strand, args, out| {

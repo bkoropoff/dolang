@@ -24,7 +24,12 @@ The HTTP status code.
 
 ### `headers`
 
-The saved response headers as a [`dict`](../std/dict.md).
+A dict-like view of the response headers. See
+[`Response.headers`](./response.md#headers) for details.
+
+#### Type
+
+[`dict`](../std/dict.md)-like
 
 ### `url`
 

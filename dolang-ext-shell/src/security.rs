@@ -348,11 +348,12 @@ impl<'v> ArrayLike<'v> for AclAces {
     const MODULE: &'v str = "security.windows";
     const NAME: &'v str = "AclAces";
 
-    fn len(this: Instance<'v, '_, Acl>, strand: &mut Strand<'v, '_>) -> usize {
+    fn len(&self, this: Instance<'v, '_, Acl>, strand: &mut Strand<'v, '_>) -> usize {
         with_acl(this, strand, |acl| usize::from(acl.ace_count())).unwrap()
     }
 
     fn get<'a, 's>(
+        &self,
         this: Instance<'v, '_, Acl>,
         strand: &'a mut Strand<'v, 's>,
         index: usize,
@@ -431,7 +432,7 @@ impl<'v> Object<'v> for Acl {
                 Ok(())
             })
             .get("aces", |this, strand, out| {
-                Output::set(strand, out, ArrayView::<AclAces>::new(this));
+                Output::set(strand, out, ArrayView::new(this, AclAces));
                 Ok(())
             })
             .method("to_bin", async move |this, strand, args, out| {
@@ -1655,11 +1656,12 @@ impl<'v> ArrayLike<'v> for TokenGroups {
     const MODULE: &'v str = "security.windows";
     const NAME: &'v str = "TokenGroups";
 
-    fn len(this: Instance<'v, '_, Self::Object>, _strand: &mut Strand<'v, '_>) -> usize {
+    fn len(&self, this: Instance<'v, '_, Self::Object>, _strand: &mut Strand<'v, '_>) -> usize {
         this.annex().groups.len()
     }
 
     fn get<'a, 's>(
+        &self,
         this: Instance<'v, '_, Self::Object>,
         strand: &'a mut Strand<'v, 's>,
         index: usize,
@@ -1719,7 +1721,7 @@ impl<'v> Object<'v> for TokenInfo {
                 Ok(())
             })
             .get("groups", |this, strand, out| {
-                Output::set(strand, out, ArrayView::<TokenGroups>::new(this));
+                Output::set(strand, out, ArrayView::new(this, TokenGroups));
                 Ok(())
             })
             .get("logon_sid", |this, strand, out| {

@@ -409,11 +409,12 @@ impl<'v, T: ConcretePath<'v>> ArrayLike<'v> for Components<T> {
     const MODULE: &'v str = "fs";
     const NAME: &'v str = "PathComponents";
 
-    fn len(this: Instance<'v, '_, T>, _strand: &mut Strand<'v, '_>) -> usize {
+    fn len(&self, this: Instance<'v, '_, T>, _strand: &mut Strand<'v, '_>) -> usize {
         this.annex().as_path().components().count()
     }
 
     fn get<'a, 's>(
+        &self,
         this: Instance<'v, '_, T>,
         strand: &'a mut Strand<'v, 's>,
         index: usize,
@@ -1072,7 +1073,11 @@ macro_rules! impl_concrete_path {
                 };
                 builder
                     .get("components", |this, strand, out| {
-                        Output::set(strand, out, ArrayView::<Components<$path>>::new(this));
+                        Output::set(
+                            strand,
+                            out,
+                            ArrayView::new(this, Components(PhantomData::<$path>)),
+                        );
                         Ok(())
                     })
                     .method("glob", async move |this, strand, args, out| {

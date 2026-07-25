@@ -13,7 +13,7 @@ use dolang::runtime::{
     Value, call,
     error::{ErrorKind, ResultExt as _},
     method,
-    object::{Mut, Ref, TypeBuilder},
+    object::{DictLike, DictView, DictViewSink, Mut, Ref, TypeBuilder},
     unpack,
     value::{BinEmbryo, Empty, TypeObject, View},
     vm::Builder,
@@ -130,24 +130,148 @@ fn header_value_from_slot<'v, 's>(
     HeaderValue::from_bytes(value.to_string(strand)?.as_bytes()).into_do(strand)
 }
 
-fn output_headers<'v, 's>(
+fn header_value_or_datetime<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    value: &HeaderValue,
+    mut out: Slot<'v, '_>,
+) -> Result<'v, 's, ()> {
+    let value_str = header_value_to_str(value);
+    if let Ok(time) = httpdate::parse_http_date(value_str.as_ref()) {
+        datetime(strand, time, &mut out).map_err(|err| Error::runtime(strand, err))
+    } else {
+        Output::set(strand, &mut out, value_str.as_ref());
+        Ok(())
+    }
+}
+
+fn header_get<'v, 'a, 's>(
+    strand: &'a mut Strand<'v, 's>,
+    headers: &HeaderMap,
+    key: &Value<'v>,
+    instance: i64,
+    out: Slot<'v, 'a>,
+) -> Result<'v, 's, bool> {
+    let Some(key) = key.as_str(strand) else {
+        return Ok(false);
+    };
+    let Some(name) = strand.access(|x| HeaderName::from_bytes(key.as_str(x).as_bytes()).ok())
+    else {
+        return Ok(false);
+    };
+    let mut values = headers.get_all(&name).iter();
+    let found = if instance >= 0 {
+        values.nth(instance as usize)
+    } else {
+        let values: Vec<_> = values.collect();
+        let index = values.len().checked_sub(instance.unsigned_abs() as usize);
+        index.and_then(|index| values.get(index).copied())
+    };
+    match found {
+        Some(value) => {
+            header_value_or_datetime(strand, value, out)?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
+fn header_flatten<'v, 's>(
     strand: &mut Strand<'v, 's>,
     headers: &HeaderMap,
-    mut out: Slot<'v, '_>,
-    mut tmp: Slot<'v, '_>,
+    sink: &mut DictViewSink<'v, '_>,
 ) -> Result<'v, 's, ()> {
-    Output::set(strand, &mut out, Empty::Dict);
-    let dict = out.as_dict(strand).unwrap();
     for (name, value) in headers {
-        let value_str = header_value_to_str(value);
-        if let Ok(time) = httpdate::parse_http_date(value_str.as_ref()) {
-            datetime(strand, time, &mut tmp).map_err(|err| Error::runtime(strand, err))?;
-            dict.insert(strand, name.as_str(), &tmp, false)?;
-        } else {
-            dict.insert(strand, name.as_str(), value_str.as_ref(), false)?;
-        }
+        strand.with_slots_sync(|strand, [mut tmp]| {
+            header_value_or_datetime(strand, value, Slot::reborrow(&mut tmp))?;
+            sink.push(strand, name.as_str(), &tmp);
+            Ok(())
+        })?;
     }
     Ok(())
+}
+
+/// Lazy [`DictView`] projection over a [`StatusAnnex`]'s headers.
+struct StatusHeaders;
+
+impl<'v> DictLike<'v> for StatusHeaders {
+    type Object = StatusObject;
+    const MODULE: &'v str = "http";
+    const NAME: &'v str = "Headers";
+
+    fn len(&self, this: Instance<'v, '_, StatusObject>, _strand: &mut Strand<'v, '_>) -> usize {
+        this.annex().headers.iter().count()
+    }
+
+    fn get<'a, 's>(
+        &self,
+        this: Instance<'v, '_, StatusObject>,
+        strand: &'a mut Strand<'v, 's>,
+        key: &Value<'v>,
+        instance: i64,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, bool> {
+        header_get(strand, &this.annex().headers, key, instance, out)
+    }
+
+    fn flatten<'s>(
+        &self,
+        this: Instance<'v, '_, StatusObject>,
+        strand: &mut Strand<'v, 's>,
+        sink: &mut DictViewSink<'v, '_>,
+    ) -> Result<'v, 's, ()> {
+        header_flatten(strand, &this.annex().headers, sink)
+    }
+}
+
+/// Lazy [`DictView`] projection over a [`Response`]'s headers.
+struct ResponseHeaders;
+
+impl<'v> DictLike<'v> for ResponseHeaders {
+    type Object = Response;
+    const MODULE: &'v str = "http";
+    const NAME: &'v str = "Headers";
+
+    fn len(&self, this: Instance<'v, '_, Response>, strand: &mut Strand<'v, '_>) -> usize {
+        this.borrow(strand)
+            .ok()
+            .and_then(|borrow| {
+                borrow
+                    .inner
+                    .as_ref()
+                    .map(|inner| inner.headers().iter().count())
+            })
+            .unwrap_or(0)
+    }
+
+    fn get<'a, 's>(
+        &self,
+        this: Instance<'v, '_, Response>,
+        strand: &'a mut Strand<'v, 's>,
+        key: &Value<'v>,
+        instance: i64,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, bool> {
+        let borrow = this.borrow(strand)?;
+        let inner = borrow
+            .inner
+            .as_ref()
+            .ok_or_else(|| Error::state_error(strand, "closed"))?;
+        header_get(strand, inner.headers(), key, instance, out)
+    }
+
+    fn flatten<'s>(
+        &self,
+        this: Instance<'v, '_, Response>,
+        strand: &mut Strand<'v, 's>,
+        sink: &mut DictViewSink<'v, '_>,
+    ) -> Result<'v, 's, ()> {
+        let borrow = this.borrow(strand)?;
+        let inner = borrow
+            .inner
+            .as_ref()
+            .ok_or_else(|| Error::state_error(strand, "closed"))?;
+        header_flatten(strand, inner.headers(), sink)
+    }
 }
 
 fn status_message(status: reqwest::StatusCode, url: Option<&url::Url>) -> String {
@@ -331,8 +455,8 @@ impl<'v> Object<'v> for StatusObject {
                 Output::set(strand, out, i64::from(this.annex().status));
                 Ok(())
             })
-            .get_with_slots("headers", |this, strand, out, [mut tmp]| {
-                output_headers(strand, &this.annex().headers, out, Slot::reborrow(&mut tmp))?;
+            .get("headers", |this, strand, out| {
+                Output::set(strand, out, DictView::new(this, StatusHeaders));
                 Ok(())
             })
             .get("truncated", |this, strand, out| {
@@ -854,16 +978,6 @@ async fn request<'v, 's>(
                 .types
                 .response
                 .create_with_annex(st, response, global, &mut value);
-            let response = global.types.response.downcast(&value).unwrap();
-            let mut borrow = response.borrow_mut(st).unwrap();
-            output_headers(
-                st,
-                borrow.inner.as_ref().unwrap().headers(),
-                Slot::reborrow(&mut iter),
-                Slot::reborrow(&mut tmp),
-            )?;
-            Output::set(st, Mut::slot_mut::<0>(&mut borrow), iter);
-            drop(borrow);
             if let Some(thunk) = thunk {
                 let res = call!(st, thunk, out, &value).await;
                 let _ = st
@@ -1074,7 +1188,6 @@ impl Response {
 impl<'v> Object<'v> for Response {
     const NAME: &'v str = "Response";
     const MODULE: &'v str = "http";
-    const SLOTS: usize = 1;
     type Annex = State<'v, Global<'v>>;
     type Type = ();
     type TypeAnnex = ();
@@ -1139,17 +1252,8 @@ impl<'v> Object<'v> for Response {
                 );
                 Ok(())
             })
-            .get_with_slots("headers", move |this, strand, out, [mut tmp]| {
-                let borrow = this.borrow(strand)?;
-                if borrow.inner.is_none() {
-                    return Err(Error::state_error(strand, "closed"));
-                }
-                output_headers(
-                    strand,
-                    borrow.inner.as_ref().unwrap().headers(),
-                    out,
-                    Slot::reborrow(&mut tmp),
-                )?;
+            .get("headers", |this, strand, out| {
+                Output::set(strand, out, DictView::new(this, ResponseHeaders));
                 Ok(())
             })
             .method("body", async move |this, strand, args, out| {

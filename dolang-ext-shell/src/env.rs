@@ -20,7 +20,7 @@ impl<'v> DictLike<'v> for EnvView {
     const MODULE: &'v str = "shell";
     const NAME: &'v str = "Env";
 
-    fn len(this: Instance<'v, '_, Env<'v>>, strand: &mut Strand<'v, '_>) -> usize {
+    fn len(&self, this: Instance<'v, '_, Env<'v>>, strand: &mut Strand<'v, '_>) -> usize {
         this.borrow_unwrap()
             .global
             .local
@@ -31,11 +31,17 @@ impl<'v> DictLike<'v> for EnvView {
     }
 
     fn get<'a, 's>(
+        &self,
         this: Instance<'v, '_, Env<'v>>,
         strand: &'a mut Strand<'v, 's>,
         key: &Value<'v>,
+        instance: i64,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, bool> {
+        // Environment variables are single-valued.
+        if !matches!(instance, 0 | -1) {
+            return Ok(false);
+        }
         let Some(key) = key.as_str(strand) else {
             return Ok(false);
         };
@@ -50,6 +56,7 @@ impl<'v> DictLike<'v> for EnvView {
     }
 
     fn set<'a, 's>(
+        &self,
         this: Instance<'v, '_, Env<'v>>,
         strand: &'a mut Strand<'v, 's>,
         key: Slot<'v, 'a>,
@@ -59,6 +66,7 @@ impl<'v> DictLike<'v> for EnvView {
     }
 
     fn flatten<'s>(
+        &self,
         this: Instance<'v, '_, Env<'v>>,
         strand: &mut Strand<'v, 's>,
         sink: &mut DictViewSink<'v, '_>,
@@ -144,7 +152,7 @@ impl<'v> Object<'v> for Env<'v> {
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        DictView::<EnvView>::input(this, strand, out)
+        DictView::input(this, &EnvView, strand, out)
     }
 
     async fn spread<'a, 's>(
@@ -153,7 +161,7 @@ impl<'v> Object<'v> for Env<'v> {
         context: SpreadContext,
         sink: &'a mut dyn Spread<'v, 's>,
     ) -> Result<'v, 's, ()> {
-        DictView::<EnvView>::spread(this, strand, context, sink)
+        DictView::spread(this, &EnvView, strand, context, sink)
     }
 
     async fn unpack<'a, 's>(
@@ -161,7 +169,7 @@ impl<'v> Object<'v> for Env<'v> {
         strand: &'a mut Strand<'v, 's>,
         unpack: Unpack<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        DictView::<EnvView>::unpack(this, strand, unpack)
+        DictView::unpack(this, &EnvView, strand, unpack)
     }
 
     async fn call<'a, 's>(

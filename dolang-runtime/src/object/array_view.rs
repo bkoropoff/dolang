@@ -1,6 +1,6 @@
 //! Lazy array-like projections over native objects.
 
-use std::{marker::PhantomData, ops::ControlFlow, ptr};
+use std::{cell::Cell, ops::ControlFlow};
 
 use dolang_bytecode::Variadic;
 
@@ -11,7 +11,7 @@ use crate::{
     object::{
         array, index, iter,
         native::{Instance, Object},
-        protocol::{Protocol, Recv, Spread, SpreadContext},
+        protocol::{GcObj, Protocol, Recv, Spread, SpreadContext},
         range,
     },
     sig::{Unpack, UnpackKeyKind},
@@ -25,16 +25,20 @@ use crate::{
 /// Implements a lazy array-like projection over a native object.
 ///
 /// Implement this trait on a marker type. Different marker types may expose
-/// different views of the same [`Object`].
+/// different views of the same [`Object`]. Methods take `&self` (rather than
+/// being purely associated functions on a zero-sized marker) so a view can
+/// be parametrized by a runtime value if needed — e.g. a view scoped to one
+/// sub-range or filtered by some predicate captured at construction time.
 pub trait ArrayLike<'v>: 'v {
     type Object: Object<'v>;
 
     const MODULE: &'v str;
     const NAME: &'v str;
 
-    fn len(this: Instance<'v, '_, Self::Object>, strand: &mut Strand<'v, '_>) -> usize;
+    fn len(&self, this: Instance<'v, '_, Self::Object>, strand: &mut Strand<'v, '_>) -> usize;
 
     fn get<'a, 's>(
+        &self,
         this: Instance<'v, '_, Self::Object>,
         strand: &'a mut Strand<'v, 's>,
         index: usize,
@@ -42,6 +46,7 @@ pub trait ArrayLike<'v>: 'v {
     ) -> Result<'v, 's, ()>;
 
     fn set<'a, 's>(
+        &self,
         _this: Instance<'v, '_, Self::Object>,
         strand: &'a mut Strand<'v, 's>,
         _index: usize,
@@ -54,14 +59,18 @@ pub trait ArrayLike<'v>: 'v {
 /// Input wrapper that creates a lazy array view of a native object.
 pub struct ArrayView<'v, 'a, I: ArrayLike<'v>> {
     owner: Instance<'v, 'a, I::Object>,
-    marker: PhantomData<I>,
+    // `Option` so `input_take` can steal `view` out rather than requiring
+    // `I: Clone`. Using an `ArrayView` more than once (it's meant to be
+    // constructed and immediately handed to `Output::set`/`Value::from_input`)
+    // is a programming error, not something to recover from.
+    view: Option<I>,
 }
 
 impl<'v, 'a, I: ArrayLike<'v>> ArrayView<'v, 'a, I> {
-    pub fn new(owner: Instance<'v, 'a, I::Object>) -> Self {
+    pub fn new(owner: Instance<'v, 'a, I::Object>, view: I) -> Self {
         Self {
             owner,
-            marker: PhantomData,
+            view: Some(view),
         }
     }
 }
@@ -70,12 +79,13 @@ impl<'v, I: ArrayLike<'v>> Input<'v> for ArrayView<'v, '_, I> {
     #[allow(private_interfaces)]
     fn input_take<'a>(&'a mut self, vm: &'a Vm<'v>, _: Sealed) -> InputBy<'v, 'a> {
         let owner = Value::from_input(vm, self.owner);
-        let value = crate::object::protocol::GcObj::new(
+        let view = self.view.take().expect("ArrayView used more than once");
+        let value = GcObj::new(
             vm.arena(),
             vm.builtin_types().array_view,
             View {
                 owner,
-                glue: Box::new(Glue::<I>(PhantomData)),
+                glue: Box::new(Glue(view)),
             },
         );
         InputBy::Value(Value::from_object(value), None)
@@ -83,7 +93,6 @@ impl<'v, I: ArrayLike<'v>> Input<'v> for ArrayView<'v, '_, I> {
 }
 
 trait ArrayViewGlue<'v>: 'v {
-    fn clone_box(&self) -> Box<dyn ArrayViewGlue<'v> + 'v>;
     fn module(&self) -> &'v str;
     fn name(&self) -> &'v str;
     fn len(&self, owner: &Value<'v>, strand: &mut Strand<'v, '_>) -> usize;
@@ -103,12 +112,9 @@ trait ArrayViewGlue<'v>: 'v {
     ) -> Result<'v, 's, ()>;
 }
 
-struct Glue<I>(PhantomData<I>);
+struct Glue<I>(I);
 
 impl<'v, I: ArrayLike<'v>> ArrayViewGlue<'v> for Glue<I> {
-    fn clone_box(&self) -> Box<dyn ArrayViewGlue<'v> + 'v> {
-        Box::new(Self(PhantomData))
-    }
     fn module(&self) -> &'v str {
         I::MODULE
     }
@@ -117,7 +123,8 @@ impl<'v, I: ArrayLike<'v>> ArrayViewGlue<'v> for Glue<I> {
     }
     fn len(&self, owner: &Value<'v>, strand: &mut Strand<'v, '_>) -> usize {
         // SAFETY: ArrayView::input_take pairs this glue with an I::Object value.
-        I::len(unsafe { Instance::from_value_unchecked(owner) }, strand)
+        self.0
+            .len(unsafe { Instance::from_value_unchecked(owner) }, strand)
     }
     fn get<'a, 's>(
         &self,
@@ -127,7 +134,7 @@ impl<'v, I: ArrayLike<'v>> ArrayViewGlue<'v> for Glue<I> {
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
         // SAFETY: ArrayView::input_take pairs this glue with an I::Object value.
-        I::get(
+        self.0.get(
             unsafe { Instance::from_value_unchecked(owner) },
             strand,
             index,
@@ -142,7 +149,7 @@ impl<'v, I: ArrayLike<'v>> ArrayViewGlue<'v> for Glue<I> {
         value: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
         // SAFETY: ArrayView::input_take pairs this glue with an I::Object value.
-        I::set(
+        self.0.set(
             unsafe { Instance::from_value_unchecked(owner) },
             strand,
             index,
@@ -156,10 +163,15 @@ pub(crate) struct View<'v> {
     glue: Box<dyn ArrayViewGlue<'v> + 'v>,
 }
 
+/// Holds a strong reference to the parent [`View`] rather than duplicating
+/// its `owner`/glue. `View` is immutable (`Collect::IMMUTABLE`), so reading
+/// through `parent` needs no runtime borrow check — see its `Deref` impl.
+/// `index` is a `Cell` so `Iter` itself can be declared immutable too (it's
+/// only ever mutated in place, never replaced), giving the same check-free
+/// `.get()` access as `View`.
 pub(crate) struct Iter<'v> {
-    owner: Value<'v>,
-    glue: Box<dyn ArrayViewGlue<'v> + 'v>,
-    index: usize,
+    parent: GcObj<'v, View<'v>>,
+    index: Cell<usize>,
 }
 
 unsafe impl<'v> Collect for View<'v> {
@@ -176,13 +188,15 @@ unsafe impl<'v> Collect for View<'v> {
 
 unsafe impl<'v> Collect for Iter<'v> {
     const CYCLIC: bool = true;
-    const IMMUTABLE: bool = false;
+    const IMMUTABLE: bool = true;
     type Annex = ();
     fn accept(&self, visit: &mut dyn Visit) -> ControlFlow<()> {
-        self.owner.accept(visit)
+        self.parent.accept(visit)
     }
     fn clear(&mut self) {
-        self.owner.clear()
+        // `Iter` is immutable, so it can't be the thing responsible for
+        // breaking a reference cycle running through `parent` — some other,
+        // mutable link in the cycle has to do that instead.
     }
 }
 
@@ -218,12 +232,12 @@ impl<'v> Protocol<'v> for View<'v> {
         strand: &mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        let borrow = this.borrow(strand)?;
-        debug(borrow.glue.module(), borrow.glue.name(), strand, w)
+        let view = this.get();
+        debug(view.glue.module(), view.glue.name(), strand, w)
     }
     fn op_bool<'a, 's>(this: Recv<'v, 'a, Self>, strand: &mut Strand<'v, 's>) -> bool {
-        let borrow = this.borrow(strand).expect("conflicting borrow");
-        borrow.glue.len(&borrow.owner, strand) != 0
+        let view = this.get();
+        view.glue.len(&view.owner, strand) != 0
     }
     fn op_eq<'a, 's>(
         this: Recv<'v, 'a, Self>,
@@ -232,9 +246,7 @@ impl<'v> Protocol<'v> for View<'v> {
     ) -> Result<'v, 's, Value<'v>> {
         let equal = other
             .downcast_ref(strand.builtin_types().array_view)
-            .is_some_and(|other| {
-                ptr::eq(this.as_header().as_ptr(), other.into_raw().cast().as_ptr())
-            });
+            .is_some_and(|other| this.as_header() == other.into_raw().cast());
         Ok(Value::from_bool(equal))
     }
     fn op_index<'a, 's>(
@@ -243,8 +255,8 @@ impl<'v> Protocol<'v> for View<'v> {
         index: &Value<'v>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        let borrow = this.borrow(strand)?;
-        let len = borrow.glue.len(&borrow.owner, strand);
+        let view = this.get();
+        let len = view.glue.len(&view.owner, strand);
         if let Some(slice) = range::slice(index, strand, len)? {
             let indices: Box<dyn Iterator<Item = usize>> = match slice {
                 range::Slice::Contiguous { start, end } => {
@@ -258,16 +270,15 @@ impl<'v> Protocol<'v> for View<'v> {
             let mut array = array::Array::new();
             for index in indices {
                 let mut value = Value::NIL;
-                borrow
-                    .glue
-                    .get(&borrow.owner, strand, index, Slot::new(&mut value))?;
+                view.glue
+                    .get(&view.owner, strand, index, Slot::new(&mut value))?;
                 array.inner.push(value);
             }
             strand.builtin_types().array.create(strand, array, out);
             return Ok(());
         }
         let index = normalize(strand, index, len)?;
-        borrow.glue.get(&borrow.owner, strand, index, out)
+        view.glue.get(&view.owner, strand, index, out)
     }
     fn op_assign<'a, 's>(
         this: Recv<'v, 'a, Self>,
@@ -275,10 +286,10 @@ impl<'v> Protocol<'v> for View<'v> {
         index: Slot<'v, 'a>,
         value: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        let borrow = this.borrow(strand)?;
-        let len = borrow.glue.len(&borrow.owner, strand);
+        let view = this.get();
+        let len = view.glue.len(&view.owner, strand);
         let index = normalize(strand, &index, len)?;
-        borrow.glue.set(&borrow.owner, strand, index, value)
+        view.glue.set(&view.owner, strand, index, value)
     }
     fn op_get<'a, 's>(
         this: Recv<'v, 'a, Self>,
@@ -287,8 +298,8 @@ impl<'v> Protocol<'v> for View<'v> {
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
         if field.tag() == sym::LEN {
-            let borrow = this.borrow(strand)?;
-            let len = borrow.glue.len(&borrow.owner, strand);
+            let view = this.get();
+            let len = view.glue.len(&view.owner, strand);
             Output::set(strand, out, len);
             Ok(())
         } else {
@@ -315,13 +326,11 @@ impl<'v> Protocol<'v> for View<'v> {
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        let borrow = this.borrow(strand)?;
         strand.builtin_types().array_view_iter.create(
             strand,
             Iter {
-                owner: borrow.owner.dup(),
-                glue: borrow.glue.clone_box(),
-                index: 0,
+                parent: this.to_strong(),
+                index: Cell::new(0),
             },
             out,
         );
@@ -333,13 +342,12 @@ impl<'v> Protocol<'v> for View<'v> {
         _context: SpreadContext,
         sink: &'a mut dyn Spread<'v, 's>,
     ) -> Result<'v, 's, ()> {
-        let borrow = this.borrow(strand)?;
-        let len = borrow.glue.len(&borrow.owner, strand);
+        let view = this.get();
+        let len = view.glue.len(&view.owner, strand);
         let mut value = Value::NIL;
         for index in 0..len {
-            borrow
-                .glue
-                .get(&borrow.owner, strand, index, Slot::new(&mut value))?;
+            view.glue
+                .get(&view.owner, strand, index, Slot::new(&mut value))?;
             sink.positional(strand, Slot::new(&mut value))?;
         }
         Ok(())
@@ -350,15 +358,14 @@ impl<'v> Protocol<'v> for View<'v> {
         sig: &'a Unpack<'v, 'a>,
         mut out: Slots<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        let borrow = this.borrow(strand)?;
-        let consumed = unpack_from(strand, sig, &mut out, &borrow.owner, &*borrow.glue, 0)?;
+        let view = this.get();
+        let consumed = unpack_from(strand, sig, &mut out, &view.owner, &*view.glue, 0)?;
         if sig.variadic == Variadic::Capture {
             strand.builtin_types().array_view_iter.create(
                 strand,
                 Iter {
-                    owner: borrow.owner.dup(),
-                    glue: borrow.glue.clone_box(),
-                    index: consumed,
+                    parent: this.to_strong(),
+                    index: Cell::new(consumed),
                 },
                 out.at(sig.len() - 1),
             );
@@ -380,8 +387,8 @@ impl<'v> Protocol<'v> for Iter<'v> {
         strand: &mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        let borrow = this.borrow(strand)?;
-        debug(borrow.glue.module(), borrow.glue.name(), strand, w)
+        let view = &*this.get().parent;
+        debug(view.glue.module(), view.glue.name(), strand, w)
     }
     async fn op_iter<'a, 's>(
         this: Recv<'v, 'a, Self>,
@@ -396,13 +403,14 @@ impl<'v> Protocol<'v> for Iter<'v> {
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, bool> {
-        let mut borrow = this.borrow_mut(strand)?;
-        if borrow.index >= borrow.glue.len(&borrow.owner, strand) {
+        let iter = this.get();
+        let view = &*iter.parent;
+        let index = iter.index.get();
+        if index >= view.glue.len(&view.owner, strand) {
             return Ok(false);
         }
-        let index = borrow.index;
-        borrow.glue.get(&borrow.owner, strand, index, out)?;
-        borrow.index += 1;
+        view.glue.get(&view.owner, strand, index, out)?;
+        iter.index.set(index + 1);
         Ok(true)
     }
     async fn op_unpack<'a, 's>(
@@ -411,16 +419,17 @@ impl<'v> Protocol<'v> for Iter<'v> {
         sig: &'a Unpack<'v, 'a>,
         mut out: Slots<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        let mut borrow = this.borrow_mut(strand)?;
+        let iter = this.get();
+        let view = &*iter.parent;
         let consumed = unpack_from(
             strand,
             sig,
             &mut out,
-            &borrow.owner,
-            &*borrow.glue,
-            borrow.index,
+            &view.owner,
+            &*view.glue,
+            iter.index.get(),
         )?;
-        borrow.index += consumed;
+        iter.index.set(iter.index.get() + consumed);
         if sig.variadic == Variadic::Capture {
             Output::set(strand, out.at(sig.len() - 1), &this);
         }

@@ -1,11 +1,12 @@
 //! Lazy dictionary-like projections over native objects.
 
-use std::{marker::PhantomData, ops::ControlFlow, ptr};
+use std::ops::ControlFlow;
 
 use dolang_bytecode::Variadic;
 
 use crate::{
-    arg::Args,
+    arg::{Arg, Args},
+    call,
     error::{Error, Result},
     gc::{Collect, arena::Visit},
     object::{
@@ -17,7 +18,8 @@ use crate::{
     strand::Strand,
     sym,
     sym::Sym,
-    value::{Input, InputBy, Output, Slot, Slots, TypeObject, Value, private::Sealed},
+    unpack,
+    value::{Empty, Input, InputBy, Output, Slot, Slots, TypeObject, Value, private::Sealed},
     vm::Vm,
 };
 
@@ -41,23 +43,40 @@ impl<'v> DictViewSink<'v, '_> {
 }
 
 /// Implements a lazy dictionary-like projection over a native object.
+///
+/// Implement this trait on a marker type. Different marker types may expose
+/// different views of the same [`Object`]. Methods take `&self` (rather than
+/// being purely associated functions on a zero-sized marker) so a view can
+/// be parametrized by a runtime value if needed.
 pub trait DictLike<'v>: 'v {
     type Object: Object<'v>;
 
     const MODULE: &'v str;
     const NAME: &'v str;
 
-    fn len(this: Instance<'v, '_, Self::Object>, strand: &mut Strand<'v, '_>) -> usize;
+    fn len(&self, this: Instance<'v, '_, Self::Object>, strand: &mut Strand<'v, '_>) -> usize;
 
-    /// Writes the first value for `key` and returns whether it was present.
+    /// Writes the value for `key` to `out` and returns whether it was
+    /// present. When multiple values exist for the same key, `instance`
+    /// selects which one, using the same negative-from-the-end indexing
+    /// convention as [`Dict::get`]'s own `instance` parameter — `-1` (the
+    /// default for plain `[]` indexing) selects the last (most-recently-seen)
+    /// value. Implementations that never have more than one value per key
+    /// only need to handle `0`/`-1` and can return `Ok(false)` for anything
+    /// else.
+    ///
+    /// [`Dict::get`]: crate::value::view::Dict::get
     fn get<'a, 's>(
+        &self,
         this: Instance<'v, '_, Self::Object>,
         strand: &'a mut Strand<'v, 's>,
         key: &Value<'v>,
+        instance: i64,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, bool>;
 
     fn set<'a, 's>(
+        &self,
         _this: Instance<'v, '_, Self::Object>,
         strand: &'a mut Strand<'v, 's>,
         _key: Slot<'v, 'a>,
@@ -67,33 +86,92 @@ pub trait DictLike<'v>: 'v {
     }
 
     fn flatten<'s>(
+        &self,
         this: Instance<'v, '_, Self::Object>,
         strand: &mut Strand<'v, 's>,
         sink: &mut DictViewSink<'v, '_>,
     ) -> Result<'v, 's, ()>;
+
+    /// Writes an array of every distinct key (first-seen order, no
+    /// duplicates) to `out`. Default implementation flattens and
+    /// deduplicates — override if there's a cheaper way to enumerate unique
+    /// keys for this particular projection.
+    fn keys<'s>(
+        &self,
+        this: Instance<'v, '_, Self::Object>,
+        strand: &mut Strand<'v, 's>,
+        mut out: Slot<'v, '_>,
+    ) -> Result<'v, 's, ()> {
+        let expected = self.len(this, strand);
+        let mut pairs = Vec::with_capacity(expected);
+        self.flatten(this, strand, &mut DictViewSink { pairs: &mut pairs })?;
+        Output::set(strand, &mut out, Empty::Array);
+        let array = out.as_array(strand).unwrap();
+        let mut seen: Vec<Value<'v>> = Vec::with_capacity(pairs.len());
+        for (key, _) in pairs {
+            if !seen
+                .iter()
+                .any(|seen| seen.op_eq(strand, &key).to_bool(strand))
+            {
+                array.push(strand, &key)?;
+                seen.push(key);
+            }
+        }
+        Ok(())
+    }
+
+    /// Writes an array of every value stored for `key`, in insertion order,
+    /// to `out`. Default implementation never flattens: it just calls
+    /// [`get`](Self::get) at increasing non-negative instances (`0`, `1`,
+    /// `2`, ...) until one comes back not-found.
+    fn values<'s>(
+        &self,
+        this: Instance<'v, '_, Self::Object>,
+        strand: &mut Strand<'v, 's>,
+        key: &Value<'v>,
+        mut out: Slot<'v, '_>,
+    ) -> Result<'v, 's, ()> {
+        Output::set(strand, &mut out, Empty::Array);
+        let array = out.as_array(strand).unwrap();
+        let mut instance = 0i64;
+        loop {
+            let mut tmp = Value::NIL;
+            if !self.get(this, strand, key, instance, Slot::new(&mut tmp))? {
+                break;
+            }
+            array.push(strand, &tmp)?;
+            instance += 1;
+        }
+        Ok(())
+    }
 }
 
 /// Input wrapper that creates a dictionary view of a native object.
 pub struct DictView<'v, 'a, I: DictLike<'v>> {
     owner: Instance<'v, 'a, I::Object>,
-    marker: PhantomData<I>,
+    // `Option` so `input_take` can steal `view` out rather than requiring
+    // `I: Clone`. Using a `DictView` more than once (it's meant to be
+    // constructed and immediately handed to `Output::set`/`Value::from_input`)
+    // is a programming error, not something to recover from.
+    view: Option<I>,
 }
 
 impl<'v, 'a, I: DictLike<'v>> DictView<'v, 'a, I> {
-    pub fn new(owner: Instance<'v, 'a, I::Object>) -> Self {
+    pub fn new(owner: Instance<'v, 'a, I::Object>, view: I) -> Self {
         Self {
             owner,
-            marker: PhantomData,
+            view: Some(view),
         }
     }
 
     /// Implements [`Object::input`] directly without constructing a view object.
     pub fn input<'s>(
         owner: Instance<'v, '_, I::Object>,
+        view: &I,
         strand: &mut Strand<'v, 's>,
         out: impl Output<'v>,
     ) -> Result<'v, 's, ()> {
-        let pairs = flatten::<I>(owner, strand)?;
+        let pairs = flatten(view, owner, strand)?;
         strand
             .builtin_types()
             .dict_view_iter
@@ -104,21 +182,23 @@ impl<'v, 'a, I: DictLike<'v>> DictView<'v, 'a, I> {
     /// Implements [`Object::spread`] directly without constructing a view object.
     pub fn spread<'s>(
         owner: Instance<'v, '_, I::Object>,
+        view: &I,
         strand: &mut Strand<'v, 's>,
         context: SpreadContext,
         sink: &mut dyn Spread<'v, 's>,
     ) -> Result<'v, 's, ()> {
-        let pairs = flatten::<I>(owner, strand)?;
+        let pairs = flatten(view, owner, strand)?;
         spread_pairs(strand, pairs, context, sink)
     }
 
     /// Implements [`Object::unpack`] directly without constructing a view object.
     pub fn unpack<'s>(
         owner: Instance<'v, '_, I::Object>,
+        view: &I,
         strand: &mut Strand<'v, 's>,
         unpack: Unpack<'v, '_>,
     ) -> Result<'v, 's, ()> {
-        let pairs = flatten::<I>(owner, strand)?;
+        let pairs = flatten(view, owner, strand)?;
         unpack_pairs(strand, pairs, unpack)
     }
 }
@@ -127,12 +207,13 @@ impl<'v, I: DictLike<'v>> Input<'v> for DictView<'v, '_, I> {
     #[allow(private_interfaces)]
     fn input_take<'a>(&'a mut self, vm: &'a Vm<'v>, _: Sealed) -> InputBy<'v, 'a> {
         let owner = Value::from_input(vm, self.owner);
+        let view = self.view.take().expect("DictView used more than once");
         let value = GcObj::new(
             vm.arena(),
             vm.builtin_types().dict_view,
             View {
                 owner,
-                glue: Box::new(Glue::<I>(PhantomData)),
+                glue: Box::new(Glue(view)),
             },
         );
         InputBy::Value(Value::from_object(value), None)
@@ -148,6 +229,7 @@ trait DictViewGlue<'v>: 'v {
         owner: &Value<'v>,
         strand: &'a mut Strand<'v, 's>,
         key: &Value<'v>,
+        instance: i64,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, bool>;
     fn set<'a, 's>(
@@ -163,9 +245,22 @@ trait DictViewGlue<'v>: 'v {
         strand: &mut Strand<'v, 's>,
         pairs: &mut Vec<(Value<'v>, Value<'v>)>,
     ) -> Result<'v, 's, ()>;
+    fn keys<'s>(
+        &self,
+        owner: &Value<'v>,
+        strand: &mut Strand<'v, 's>,
+        out: Slot<'v, '_>,
+    ) -> Result<'v, 's, ()>;
+    fn values<'s>(
+        &self,
+        owner: &Value<'v>,
+        strand: &mut Strand<'v, 's>,
+        key: &Value<'v>,
+        out: Slot<'v, '_>,
+    ) -> Result<'v, 's, ()>;
 }
 
-struct Glue<I>(PhantomData<I>);
+struct Glue<I>(I);
 
 impl<'v, I: DictLike<'v>> DictViewGlue<'v> for Glue<I> {
     fn module(&self) -> &'v str {
@@ -175,19 +270,22 @@ impl<'v, I: DictLike<'v>> DictViewGlue<'v> for Glue<I> {
         I::NAME
     }
     fn len(&self, owner: &Value<'v>, strand: &mut Strand<'v, '_>) -> usize {
-        I::len(unsafe { Instance::from_value_unchecked(owner) }, strand)
+        self.0
+            .len(unsafe { Instance::from_value_unchecked(owner) }, strand)
     }
     fn get<'a, 's>(
         &self,
         owner: &Value<'v>,
         strand: &'a mut Strand<'v, 's>,
         key: &Value<'v>,
+        instance: i64,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, bool> {
-        I::get(
+        self.0.get(
             unsafe { Instance::from_value_unchecked(owner) },
             strand,
             key,
+            instance,
             out,
         )
     }
@@ -198,7 +296,7 @@ impl<'v, I: DictLike<'v>> DictViewGlue<'v> for Glue<I> {
         key: Slot<'v, 'a>,
         value: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        I::set(
+        self.0.set(
             unsafe { Instance::from_value_unchecked(owner) },
             strand,
             key,
@@ -211,10 +309,36 @@ impl<'v, I: DictLike<'v>> DictViewGlue<'v> for Glue<I> {
         strand: &mut Strand<'v, 's>,
         pairs: &mut Vec<(Value<'v>, Value<'v>)>,
     ) -> Result<'v, 's, ()> {
-        I::flatten(
+        self.0.flatten(
             unsafe { Instance::from_value_unchecked(owner) },
             strand,
             &mut DictViewSink { pairs },
+        )
+    }
+    fn keys<'s>(
+        &self,
+        owner: &Value<'v>,
+        strand: &mut Strand<'v, 's>,
+        out: Slot<'v, '_>,
+    ) -> Result<'v, 's, ()> {
+        self.0.keys(
+            unsafe { Instance::from_value_unchecked(owner) },
+            strand,
+            out,
+        )
+    }
+    fn values<'s>(
+        &self,
+        owner: &Value<'v>,
+        strand: &mut Strand<'v, 's>,
+        key: &Value<'v>,
+        out: Slot<'v, '_>,
+    ) -> Result<'v, 's, ()> {
+        self.0.values(
+            unsafe { Instance::from_value_unchecked(owner) },
+            strand,
+            key,
+            out,
         )
     }
 }
@@ -258,12 +382,13 @@ unsafe impl<'v> Collect for Iter<'v> {
 }
 
 fn flatten<'v, 's, I: DictLike<'v>>(
+    view: &I,
     owner: Instance<'v, '_, I::Object>,
     strand: &mut Strand<'v, 's>,
 ) -> Result<'v, 's, Vec<(Value<'v>, Value<'v>)>> {
-    let expected = I::len(owner, strand);
+    let expected = view.len(owner, strand);
     let mut pairs = Vec::with_capacity(expected);
-    I::flatten(owner, strand, &mut DictViewSink { pairs: &mut pairs })?;
+    view.flatten(owner, strand, &mut DictViewSink { pairs: &mut pairs })?;
     if pairs.len() != expected {
         return Err(Error::runtime(
             strand,
@@ -479,11 +604,11 @@ impl<'v> Protocol<'v> for View<'v> {
         strand: &mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        let view = this.borrow(strand)?;
+        let view = this.get();
         debug(view.glue.module(), view.glue.name(), strand, w)
     }
     fn op_bool<'a, 's>(this: Recv<'v, 'a, Self>, strand: &mut Strand<'v, 's>) -> bool {
-        let view = this.borrow(strand).expect("conflicting borrow");
+        let view = this.get();
         view.glue.len(&view.owner, strand) != 0
     }
     fn op_eq<'a, 's>(
@@ -491,13 +616,10 @@ impl<'v> Protocol<'v> for View<'v> {
         strand: &mut Strand<'v, 's>,
         other: &Value<'v>,
     ) -> Result<'v, 's, Value<'v>> {
-        Ok(Value::from_bool(
-            other
-                .downcast_ref(strand.builtin_types().dict_view)
-                .is_some_and(|other| {
-                    ptr::eq(this.as_header().as_ptr(), other.into_raw().cast().as_ptr())
-                }),
-        ))
+        let equal = other
+            .downcast_ref(strand.builtin_types().dict_view)
+            .is_some_and(|other| this.as_header() == other.into_raw().cast());
+        Ok(Value::from_bool(equal))
     }
     fn op_index<'a, 's>(
         this: Recv<'v, 'a, Self>,
@@ -505,8 +627,8 @@ impl<'v> Protocol<'v> for View<'v> {
         key: &Value<'v>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        let view = this.borrow(strand)?;
-        if view.glue.get(&view.owner, strand, key, out)? {
+        let view = this.get();
+        if view.glue.get(&view.owner, strand, key, -1, out)? {
             Ok(())
         } else {
             Err(Error::index(strand))
@@ -518,7 +640,7 @@ impl<'v> Protocol<'v> for View<'v> {
         key: Slot<'v, 'a>,
         value: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        let view = this.borrow(strand)?;
+        let view = this.get();
         view.glue.set(&view.owner, strand, key, value)
     }
     fn op_get<'a, 's>(
@@ -528,7 +650,7 @@ impl<'v> Protocol<'v> for View<'v> {
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
         if field.tag() == sym::LEN {
-            let view = this.borrow(strand)?;
+            let view = this.get();
             let len = view.glue.len(&view.owner, strand);
             Output::set(strand, out, len);
             Ok(())
@@ -552,8 +674,8 @@ impl<'v> Protocol<'v> for View<'v> {
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         method: Sym<'v, 'a>,
-        args: Args<'v, 'a>,
-        out: Slot<'v, 'a>,
+        mut args: Args<'v, 'a>,
+        mut out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
         if method.tag() == sym::LEN {
             return Err(Error::type_error(
@@ -561,9 +683,67 @@ impl<'v> Protocol<'v> for View<'v> {
                 "dictionary view len is a field, not a method",
             ));
         }
+        if method.tag() == sym::GET {
+            // Implemented directly against the glue, unlike every other
+            // method below, so a lookup never needs to flatten/snapshot the
+            // whole view into a real `Dict` first — the entire point of a
+            // lazy projection.
+            let default_key = Sym::well_known(sym::DEFAULT);
+            let else_key = Sym::well_known(sym::ELSE);
+            let ([key], [instance, default, or_else]) =
+                unpack!(strand, args, 1, 1, default_key = None, else_key = None)?;
+            if default.is_some() && or_else.is_some() {
+                return Err(Error::unexpected_key(strand, else_key));
+            }
+            let instance = match instance {
+                Some(s) => s.to_i64(strand).map_err(|_| Error::index(strand))?,
+                None => -1,
+            };
+            let found = {
+                let view = this.get();
+                view.glue.get(
+                    &view.owner,
+                    strand,
+                    &key,
+                    instance,
+                    Slot::reborrow(&mut out),
+                )?
+            };
+            return if found {
+                Ok(())
+            } else if let Some(mut default) = default {
+                out.store(default.take());
+                Ok(())
+            } else if let Some(or_else) = or_else {
+                call!(strand, or_else, out).await
+            } else {
+                out.store(Value::NIL);
+                Ok(())
+            };
+        }
+        if method.tag() == sym::KEYS {
+            let ([], []) = unpack!(strand, args, 0, 0)?;
+            let view = this.get();
+            return view.glue.keys(&view.owner, strand, out);
+        }
+        if method.tag() == sym::VALUES && args.len() > 0 {
+            // Only handled lazily when a key is given; `.values()` with no
+            // key (every value, unfiltered) falls through to the generic
+            // flatten-based path below, same as every other method here.
+            if args.len() > 1 {
+                return Err(Error::unexpected_positional(strand, 1));
+            }
+            let key = match args.next() {
+                Some(Arg::Pos(slot)) => Value::from_input(strand, slot),
+                Some(Arg::Key(key, _)) => return Err(Error::unexpected_key(strand, key)),
+                None => unreachable!(),
+            };
+            let view = this.get();
+            return view.glue.values(&view.owner, strand, &key, out);
+        }
         let pairs = {
-            let view = this.borrow(strand)?;
-            flatten_glue(&view, strand)?
+            let view = this.get();
+            flatten_glue(view, strand)?
         };
         snapshot_dict(strand, pairs)?
             .op_mcall(strand, method, args, out)
@@ -574,10 +754,7 @@ impl<'v> Protocol<'v> for View<'v> {
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        let pairs = {
-            let view = this.borrow(strand)?;
-            flatten_glue(&view, strand)?
-        };
+        let pairs = flatten_glue(this.get(), strand)?;
         strand
             .builtin_types()
             .dict_view_iter
@@ -590,10 +767,7 @@ impl<'v> Protocol<'v> for View<'v> {
         context: SpreadContext,
         sink: &'a mut dyn Spread<'v, 's>,
     ) -> Result<'v, 's, ()> {
-        let pairs = {
-            let view = this.borrow(strand)?;
-            flatten_glue(&view, strand)?
-        };
+        let pairs = flatten_glue(this.get(), strand)?;
         spread_pairs(strand, pairs, context, sink)
     }
     async fn op_unpack<'a, 's>(
@@ -602,10 +776,7 @@ impl<'v> Protocol<'v> for View<'v> {
         sig: &'a sig::Unpack<'v, 'a>,
         out: Slots<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        let pairs = {
-            let view = this.borrow(strand)?;
-            flatten_glue(&view, strand)?
-        };
+        let pairs = flatten_glue(this.get(), strand)?;
         unpack_sig_pairs(strand, pairs, sig, out)
     }
     fn op_type<'a, 's>(
