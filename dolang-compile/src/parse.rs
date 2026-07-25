@@ -2613,28 +2613,47 @@ impl<'a> Parser<'a> {
             }
             Some(token!(Key)) => {
                 let span = self.advance();
-                if let Some(token!(ArgSep)) = self.peek()? {
-                    self.advance();
-                    // Parse first item on this line
-                    let arg = Arg::Key(Key {
-                        expr: self.parse_cmd_vert_line_expr(scope)?,
-                        key_span: span,
-                        colon_span: span.after_right_char(),
-                        delim_span: None,
-                    });
-                    // Parse any trailer
-                    let expr = self.parse_data(scope, vec![arg])?;
-                    // This consumed remainder of this indentation scope, so exit early
-                    return Ok(Arg::Pos(Single {
-                        expr,
-                        delim_span: Some(minus_span),
-                    }));
-                } else {
-                    self.parse_implicit_concat(
+                match self.peek()? {
+                    Some(token!(Indent)) => {
+                        // Starting a dict and then immediately defining a vertical data value for the
+                        // key
+                        self.advance();
+                        let arg = Arg::Key(Key {
+                            key_span: span,
+                            colon_span: span.after_right_char(),
+                            expr: self.parse_data(scope, vec![])?,
+                            delim_span: None,
+                        });
+                        // Parse any trailer
+                        let expr = self.parse_data(scope, vec![arg])?;
+                        // This consumed remainder of this indentation scope, so exit early
+                        return Ok(Arg::Pos(Single {
+                            expr,
+                            delim_span: Some(minus_span),
+                        }));
+                    }
+                    Some(token!(ArgSep)) => {
+                        self.advance();
+                        // Parse first item on this line
+                        let arg = Arg::Key(Key {
+                            expr: self.parse_cmd_vert_line_expr(scope)?,
+                            key_span: span,
+                            colon_span: span.after_right_char(),
+                            delim_span: None,
+                        });
+                        // Parse any trailer
+                        let expr = self.parse_data(scope, vec![arg])?;
+                        // This consumed remainder of this indentation scope, so exit early
+                        return Ok(Arg::Pos(Single {
+                            expr,
+                            delim_span: Some(minus_span),
+                        }));
+                    }
+                    _ => self.parse_implicit_concat(
                         scope,
                         Some(Expr::Literal(span | span.after_right_char())),
                         UnquotedMode::Data,
-                    )?
+                    )?,
                 }
             }
             _ => self.parse_cmd_vert_line_expr(scope)?,
