@@ -3425,6 +3425,14 @@ impl<'a> Parser<'a> {
                 self.expect(scope, &[ExpectKind::Indent])?;
                 return self.parse_heredoc(scope, intro_span, strip, true);
             }
+            Some(token!(TokenInfo::Dollar)) if allow_trailing => {
+                let dollar_span = self.advance();
+                self.expect(scope, &[ExpectKind::Indent])?;
+                return Ok(Expr::Group {
+                    expr: Box::new(self.parse_data(scope, vec![])?),
+                    delim: Some(GroupDelim::Dollar(dollar_span)),
+                });
+            }
             _ => {}
         }
 
@@ -4389,6 +4397,14 @@ impl<'a> Parser<'a> {
             Some(token!(Keyword(Do))) => Ok(Stmt::Prim(PrimStmt::Expr(
                 self.parse_do_block(scope, true)?,
             ))),
+            Some(token!(TokenInfo::Dollar)) => {
+                let dollar_span = self.advance();
+                self.expect(scope, &[ExpectKind::Indent])?;
+                Ok(Stmt::Prim(PrimStmt::Expr(Expr::Group {
+                    expr: Box::new(self.parse_data(scope, vec![])?),
+                    delim: Some(GroupDelim::Dollar(dollar_span)),
+                })))
+            }
             Some(..) => {
                 // Parse expression and check for assignment
                 let arg0 = self.parse_cmd_arg0(scope)?;
