@@ -1,0 +1,17 @@
+[package]
+name = "dolang-private-polyfill"
+version = "0.1.1"
+description = "Minimal cross-platform stdio utilities for Do language shell tests."
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "dolang-private-polyfill"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+regex = "1.11"
