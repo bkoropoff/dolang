@@ -377,6 +377,20 @@ impl<'v, 'a> Array<'v, 'a> {
             None => Ok(false),
         }
     }
+
+    /// Remove the element at `index`, shifting later elements down. Returns
+    /// `false` if out of bounds.
+    pub fn delete<'s>(&self, strand: &mut Strand<'v, 's>, index: usize) -> Result<'v, 's, bool> {
+        let mut borrow = match self.0.borrow_mut() {
+            Some(b) => b,
+            None => return Err(Error::concurrency(strand)),
+        };
+        if index >= borrow.inner.len() {
+            return Ok(false);
+        }
+        borrow.inner.remove(index);
+        Ok(true)
+    }
 }
 
 /// Dict view

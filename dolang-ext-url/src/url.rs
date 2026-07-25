@@ -58,7 +58,7 @@ impl<'v> ArrayLike<'v> for Segments {
     const MODULE: &'v str = "url";
     const NAME: &'v str = "Segments";
 
-    fn len(this: Instance<'v, '_, Url>, _strand: &mut Strand<'v, '_>) -> usize {
+    fn len(&self, this: Instance<'v, '_, Url>, _strand: &mut Strand<'v, '_>) -> usize {
         this.annex()
             .inner
             .path_segments()
@@ -68,6 +68,7 @@ impl<'v> ArrayLike<'v> for Segments {
     }
 
     fn get<'a, 's>(
+        &self,
         this: Instance<'v, '_, Url>,
         strand: &'a mut Strand<'v, 's>,
         index: usize,
@@ -93,25 +94,40 @@ impl<'v> DictLike<'v> for Query {
     const MODULE: &'v str = "url";
     const NAME: &'v str = "Query";
 
-    fn len(this: Instance<'v, '_, Url>, _strand: &mut Strand<'v, '_>) -> usize {
+    fn len(&self, this: Instance<'v, '_, Url>, _strand: &mut Strand<'v, '_>) -> usize {
         this.annex().inner.query_pairs().count()
     }
 
     fn get<'a, 's>(
+        &self,
         this: Instance<'v, '_, Url>,
         strand: &'a mut Strand<'v, 's>,
         key: &Value<'v>,
+        instance: i64,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, bool> {
         let Some(key) = key.as_str(strand) else {
             return Ok(false);
         };
+        // Query strings can repeat a key; only the matching pairs (not the
+        // whole query string) are ever collected, and only when `instance`
+        // needs to count from the end.
         let found = strand.access(|x| {
-            this.annex()
+            let annex = this.annex();
+            let mut matches = annex
                 .inner
                 .query_pairs()
-                .find(|(candidate, _)| candidate == key.as_str(x))
-                .map(|(_, value)| value.into_owned())
+                .filter(|(candidate, _)| candidate == key.as_str(x))
+                .map(|(_, value)| value.into_owned());
+            if instance >= 0 {
+                matches.nth(instance as usize)
+            } else {
+                let matches: Vec<_> = matches.collect();
+                let index = matches
+                    .len()
+                    .checked_sub(instance.unsigned_abs() as usize)?;
+                matches.into_iter().nth(index)
+            }
         });
         if let Some(value) = found {
             Output::set(strand, out, value.as_str());
@@ -122,6 +138,7 @@ impl<'v> DictLike<'v> for Query {
     }
 
     fn flatten<'s>(
+        &self,
         this: Instance<'v, '_, Url>,
         strand: &mut Strand<'v, 's>,
         sink: &mut DictViewSink<'v, '_>,
@@ -278,11 +295,11 @@ impl<'v> Object<'v> for Url {
                 Ok(())
             })
             .get("segments", |this, strand, out| {
-                Output::set(strand, out, ArrayView::<Segments>::new(this));
+                Output::set(strand, out, ArrayView::new(this, Segments));
                 Ok(())
             })
             .get("query", |this, strand, out| {
-                Output::set(strand, out, DictView::<Query>::new(this));
+                Output::set(strand, out, DictView::new(this, Query));
                 Ok(())
             })
             .method("with_query_raw", async move |this, strand, args, out| {

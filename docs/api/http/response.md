@@ -33,15 +33,14 @@ echo $response.status  # 200 for success
 
 ### `headers`
 
-The response headers as a [`dict`](../std/dict.md). Duplicate keys can be
-fetched via iteration, unpacking, or the `pop` or `get` methods.
+A dict-like view over the response headers.
 
 Header values are usually returned as strings. If a header value parses as an
 HTTP-date, it is returned as a [`DateTime`](../time/datetime.md) instead.
 
 #### Type
 
-[`dict`](../std/dict.md)
+[`dict`](../std/dict.md)-like
 
 ```
 

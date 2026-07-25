@@ -28,8 +28,6 @@ use crate::{
     vm::{Alloc, Vm},
 };
 
-use crate::call;
-
 pub(crate) type InterruptId = u64;
 
 struct InterruptInner {
@@ -1134,30 +1132,54 @@ impl<'v, 's> Strand<'v, 's> {
         }
     }
 
-    /// Spawn a background strand that calls `callable` and returns a `Handle`.
+    /// Spawn a background strand that runs `f` and returns a `Handle`.
     ///
     /// The background strand runs independently of the spawning strand and is managed
     /// by the VM's event loop. The returned `Handle` can be used to join, cancel,
     /// or check completion of the background strand.
     ///
+    /// `arg` is an arbitrary GC value handed to `f` as its second parameter and kept
+    /// rooted for the lifetime of the background strand (so it stays alive even before
+    /// `f` starts running, e.g. while the future is queued in the spawn channel). Most
+    /// callers pass a Do callable here and invoke it with `call!` inside `f`, but `f` is
+    /// free to do anything with `arg` (or ignore it) — it's a plain Rust `AsyncFnOnce`,
+    /// not hard-coded to a single call convention. `f` writes its result into `out`,
+    /// exactly like the receiver of `call!`.
+    ///
     /// If `stream` is `Some((strand_input, strand_output))`, the strand's input and output
-    /// iterators are set to those values before the callable runs, and both are closed when
-    /// the callable returns (regardless of success or failure).
+    /// iterators are set to those values before `f` runs, and both are closed when
+    /// `f` returns (regardless of success or failure).
+    ///
+    /// If `handle_stream` is `Some((handle_input, handle_output))`, the returned handle's
+    /// own iterable/sinkable channel ends (the caller-facing side, as opposed to `stream`'s
+    /// strand-facing side) are set to those values before it's returned.
     ///
     /// Returns an error if the spawn channel is not available (e.g. the VM is shutting down).
-    pub(crate) fn spawn_background_raw(
+    pub(crate) fn spawn_background_raw<F>(
         &mut self,
-        callable: Value<'v>,
+        arg: Value<'v>,
         interrupt: InterruptToken<'v>,
         stream: Option<(Value<'v>, Value<'v>)>,
-    ) -> Result<'v, 's, GcObj<'v, Handle<'v>>> {
+        handle_stream: Option<(Value<'v>, Value<'v>)>,
+        f: F,
+    ) -> Result<'v, 's, GcObj<'v, Handle<'v>>>
+    where
+        F: for<'ss> AsyncFnOnce(
+                &mut Strand<'v, 'ss>,
+                &Value<'v>,
+                Slot<'v, '_>,
+            ) -> Result<'v, 'ss, ()>
+            + 'v,
+    {
         let close_on_exit = stream.is_some();
 
         // Create StrandInner
         let mut inner =
             StrandInner::derived(self, Some(interrupt.clone()), InheritKind::Background);
         inner.call_depth.set(0);
-        inner.start = callable;
+        // Keeps `arg` rooted (via `scan_stack`) for as long as the strand exists,
+        // including before `f` first runs.
+        inner.start = arg;
 
         // Set strand-side I/O if this is a stream strand
         if let Some((recv, send)) = stream {
@@ -1175,6 +1197,15 @@ impl<'v, 's> Strand<'v, 's> {
             vm.builtin_types().strand_handle,
             Handle::new(inner.clone(), interrupt),
         );
+
+        // Wire up the handle-facing channel ends, if this is a stream strand.
+        if let Some((handle_input, handle_output)) = handle_stream {
+            let mut h = handle
+                .borrow_mut()
+                .expect("fresh handle is always borrowable");
+            h.stream_input = handle_input;
+            h.stream_output = handle_output;
+        }
 
         // Create weak ref for the future (doesn't participate in cycles)
         let weak_handle = GcObj::downgrade(&handle);
@@ -1195,7 +1226,9 @@ impl<'v, 's> Strand<'v, 's> {
 
             strand
                 .with_slots(async |strand, [mut out, mut tmp]| {
-                    let result = match call!(strand, &inner.start, &mut out).await {
+                    let result = strand.pin_future_call(async |strand|
+                        f(strand, &inner.start, Slot::reborrow(&mut out)).await).await;
+                    let result = match result {
                         Ok(()) => Completion::Ok(out.take()),
                         Err(e) => Completion::Err(e.into_pair(strand)),
                     };
@@ -1247,6 +1280,44 @@ impl<'v, 's> Strand<'v, 's> {
         }
 
         Ok(handle)
+    }
+
+    /// Spawn a background strand that runs `f`, independent of this strand and managed
+    /// by the VM's event loop.
+    ///
+    /// `arg` is an arbitrary value handed to `f` as its second parameter and kept rooted
+    /// for the lifetime of the background strand (so it stays alive even before `f` starts
+    /// running).
+    ///
+    /// The resulting handle is written to `out` — store it somewhere reachable (e.g. a
+    /// [`Slot`] your extension owns) to keep the background strand rooted; it is a full
+    /// `strand.Strand` handle with `join`/`cancel`/`wait` operations.
+    ///
+    /// Returns an error if the VM is shutting down.
+    ///
+    /// `interrupt` defaults (when `None`) to a fresh token.
+    pub fn spawn_background<F>(
+        &mut self,
+        arg: impl Input<'v>,
+        interrupt: Option<&InterruptToken<'v>>,
+        mut out: impl Output<'v>,
+        f: F,
+    ) -> Result<'v, 's, ()>
+    where
+        F: for<'ss> AsyncFnOnce(
+                &mut Strand<'v, 'ss>,
+                &Value<'v>,
+                Slot<'v, '_>,
+            ) -> Result<'v, 'ss, ()>
+            + 'v,
+    {
+        let arg = Value::from_input(self, arg);
+        let interrupt = interrupt
+            .map(|t| t.nested())
+            .unwrap_or_else(InterruptToken::new);
+        let handle = self.spawn_background_raw(arg, interrupt, None, None, f)?;
+        Output::set(self, &mut out, &Value::from_object(handle));
+        Ok(())
     }
 
     /// Get the interrupt token for this strand

@@ -214,7 +214,7 @@ impl<'v> Object<'v> for Archive {
                     return Err(Error::state_error(strand, "archive closed"));
                 }
 
-                Output::set(strand, out, ArrayView::<Entries>::new(this));
+                Output::set(strand, out, ArrayView::new(this, Entries));
                 Ok(())
             })
             .method_with_slots(
@@ -638,7 +638,7 @@ impl<'v> ArrayLike<'v> for Entries {
     const MODULE: &'v str = "zip";
     const NAME: &'v str = "Entries";
 
-    fn len(this: Instance<'v, '_, Archive>, _strand: &mut Strand<'v, '_>) -> usize {
+    fn len(&self, this: Instance<'v, '_, Archive>, _strand: &mut Strand<'v, '_>) -> usize {
         let annex = this.annex();
         if annex.closed.get() {
             return 0;
@@ -650,6 +650,7 @@ impl<'v> ArrayLike<'v> for Entries {
     }
 
     fn get<'a, 's>(
+        &self,
         this: Instance<'v, '_, Archive>,
         strand: &'a mut Strand<'v, 's>,
         index: usize,
