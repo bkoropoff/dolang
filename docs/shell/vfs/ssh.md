@@ -38,6 +38,47 @@ must pass through or interpret those trailing `dolang-vfs` arguments.
 `ssh.with` stops the VFS session when the block returns or throws. Prefer it to
 constructing a stream-backed `Vfs` manually.
 
+## Running a Script over SSH
+
+The bundled `ssh` entrypoint compiles a local script and runs it with an SSH
+VFS context:
+
+```
+dolang -m ssh --batch --user builder build.example.com build.dol release
+```
+
+The destination and script follow the SSH options. Every argument after the
+script path is passed through unchanged, including arguments beginning with
+`-`. Inside the target script, `shell.program` is the script path and
+`shell.args` contains only those trailing arguments.
+
+The entrypoint accepts the connection options documented below using
+hyphenated command-line names, such as `--identity`, `--jump`,
+`--connect-timeout`, and `--host-key accept-new`. Repeated identities and jump
+hosts preserve their order.
+
+Use `--command` with a shell-quoted string to replace the remote VFS launcher:
+
+```
+dolang -m ssh --command "sudo -n /opt/dolang-vfs" host script.dol
+```
+
+The string is split into arguments locally; it is not run through a remote
+shell. `--cd` selects the initial remote directory. Remote environment
+overrides may be repeated:
+
+```
+dolang -m ssh \
+  --env MODE=release \
+  --env HOME \
+  --unset-env DEBUG \
+  host script.dol
+```
+
+`NAME=VALUE` sets a value, while a bare `NAME` inherits its local value.
+`--unset-env` takes precedence when the same name is also passed with
+`--env`. Run `dolang -m ssh --help` for the complete option list.
+
 Authentication is delegated to the user's `ssh` executable, configuration,
 agent, and credential providers. Do does not replace or weaken that setup.
 

@@ -1,0 +1,86 @@
+import _vfs sys
+  fs:
+    - with_temp_dir
+  shell:
+    - exe
+  test:
+    - assert_eq
+    - skip
+    - test
+
+if (sys.os_info().family == :WINDOWS:)
+  skip "requires a Unix SSH shim"
+
+#[test]
+def runs_script_in_remote_vfs()
+  with_temp_dir do |dir|
+    let ssh = (dir / "ssh")
+    let script = (dir / "script.dol")
+    let marker = (dir / "marker")
+    let remote_dir = (dir / "remote")
+    remote_dir.create_dir()
+
+    ssh.write r|
+      #!/bin/sh
+      set -eu
+
+      while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
+          shift
+      done
+      shift
+      shift
+      exec "$@"
+    ssh.set_metadata mode: 0o755
+
+    script.write r|
+      import shell
+        fs:
+          - Path
+
+      let marker = Path $shell.args[0]
+      marker.write |
+        program=$(shell.program)
+        args=$(shell.args.len)
+        plain=$(shell.args[1])
+        option=$(shell.args[2])
+        set=$(shell.env.get "TEST_DOLANG_SSH_SET")
+        inherit=$(shell.env.get "TEST_DOLANG_SSH_INHERIT")
+        unset=$(shell.env.get "TEST_DOLANG_SSH_UNSET")
+      (Path "cwd-marker").write remote
+
+    let path = "$dir:$(shell.env["PATH"])"
+    env
+      PATH: $path
+      TEST_DOLANG_SSH_INHERIT: local
+      TEST_DOLANG_SSH_UNSET: present
+      do
+        run $exe -m ssh
+          --user alice
+          --port 2222
+          --identity id-a
+          --identity id-b
+          --identities-only
+          --forward-agent
+          --jump jump-a
+          --jump jump-b
+          --connect-timeout 10
+          --keepalive-interval 15
+          --keepalive-count 4
+          --batch
+          --host-key accept-new
+          --command $(_vfs.bin())
+          --cd $remote_dir
+          --env TEST_DOLANG_SSH_SET=value
+          --env TEST_DOLANG_SSH_INHERIT
+          --unset-env TEST_DOLANG_SSH_UNSET
+          example $script $marker plain --target-option
+
+    assert_eq $marker.read() |
+      program=$script
+      args=3
+      plain=plain
+      option=--target-option
+      set=value
+      inherit=local
+      unset=nil
+    assert_eq $(remote_dir / "cwd-marker").read() remote
