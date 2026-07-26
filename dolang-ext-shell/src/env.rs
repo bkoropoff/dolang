@@ -147,12 +147,12 @@ impl<'v> Object<'v> for Env<'v> {
         })
     }
 
-    async fn input<'a, 's>(
+    async fn iter<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        DictView::input(this, &EnvView, strand, out)
+        DictView::iter(this, &EnvView, strand, out)
     }
 
     async fn spread<'a, 's>(

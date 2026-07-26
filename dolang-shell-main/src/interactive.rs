@@ -59,7 +59,7 @@ impl<'v> Object<'v> for DynamicPrelude<'v> {
         this.borrow(strand)?.root.assign(strand, field, value)
     }
 
-    async fn input<'a, 's>(
+    async fn iter<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,

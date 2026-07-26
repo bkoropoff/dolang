@@ -10,10 +10,10 @@ use dolang::runtime::object::fmt;
 use dolang::{
     compile::Compiler,
     runtime::{
-        Arg, Error, Instance, Object, Output, Result, Slot, State, Strand, method,
+        Arg, Error, Instance, Object, Output, Result, Slot, State, Strand, call, method,
         object::{Mut, TypeBuilder},
         unpack,
-        value::{Empty, Nil, TypeObject},
+        value::{Nil, TypeObject},
         vm::Builder,
     },
 };
@@ -24,8 +24,9 @@ use crate::{
     error::{ErrorExt, ResultExt as _},
     fs::path::{PathAnnex, create_path_annex, path_from_value},
     global::{Global, ProgramSource},
-    local::Env as LocalEnv,
+    local::{Env as LocalEnv, ProgramOverride},
     pipe_channel,
+    shell_args::Args as ShellArgs,
 };
 use dolang::runtime::value::View;
 use dolang_shell_vfs::{
@@ -120,7 +121,7 @@ impl<'v> Object<'v> for Stdin {
         builder.supertype(TypeObject::Iter)
     }
 
-    async fn input<'a, 's>(
+    async fn iter<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,
@@ -180,7 +181,7 @@ impl<'v> Object<'v> for Stdout {
         builder.supertype(TypeObject::Sink)
     }
 
-    async fn output<'a, 's>(
+    async fn sink<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,
@@ -241,7 +242,7 @@ impl<'v> Object<'v> for Stderr {
         builder.supertype(TypeObject::Sink)
     }
 
-    async fn output<'a, 's>(
+    async fn sink<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,
@@ -578,6 +579,9 @@ pub(crate) fn configure_compiler<'a>(compiler: &mut Compiler<'a>) {
 
 pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Global<'v>>) {
     let env_ty = builder.register_type::<EnvObject>();
+    let args_ty = builder.register_type::<ShellArgs>();
+    let args_sym = builder.sym("args");
+    let program_sym = builder.sym("program");
 
     builder
         .module("shell")
@@ -595,26 +599,88 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 Err(Error::abort(strand, Exit { code }))
             },
         )
-        .get("args", move |strand, mut out| {
-            Output::set(strand, &mut out, Empty::Array);
-            let array = out.as_array(strand).unwrap();
-            for arg in global.args.borrow().iter() {
-                array.push(strand, arg.as_str())?;
-            }
+        .get("args", move |strand, out| {
+            let invocation = global.local.get(strand).invocation();
+            let args = invocation
+                .args
+                .unwrap_or_else(|| global.args.borrow().clone());
+            args_ty.create_with_annex(strand, ShellArgs, args, out);
             Ok(())
         })
         .get("program", move |strand, out| {
-            match global.program.borrow().as_ref() {
-                Some(ProgramSource::Path(path)) => {
-                    let path = dolang_shell_vfs::typed_path(path.clone()).into_sys(strand)?;
+            let invocation = global.local.get(strand).invocation();
+            match invocation.program {
+                Some(ProgramOverride::Path(path)) => {
                     let annex = PathAnnex::try_new(strand, path, global)?;
                     create_path_annex(strand, annex, out);
                 }
-                Some(ProgramSource::Module(name)) => Output::set(strand, out, name.as_str()),
-                None => Output::set(strand, out, Nil),
+                Some(ProgramOverride::Module(name)) => Output::set(strand, out, name.as_ref()),
+                None => match global.program.borrow().as_ref() {
+                    Some(ProgramSource::Path(path)) => {
+                        let path = dolang_shell_vfs::typed_path(path.clone()).into_sys(strand)?;
+                        let annex = PathAnnex::try_new(strand, path, global)?;
+                        create_path_annex(strand, annex, out);
+                    }
+                    Some(ProgramSource::Module(name)) => Output::set(strand, out, name.as_str()),
+                    None => Output::set(strand, out, Nil),
+                },
             }
             Ok(())
         })
+        .function_with_slots(
+            "with_override",
+            async move |strand, args, out, [mut iter, mut item]| {
+                let ([func], [args, program]) =
+                    unpack!(strand, args, 1, 0, args_sym = None, program_sym = None)?;
+
+                let args = if let Some(args) = args {
+                    let mut values = Vec::new();
+                    args.iter(strand, &mut iter).await?;
+                    while iter.next(strand, &mut item).await? {
+                        values.push(item.to_arg(strand)?.into_boxed_str());
+                    }
+                    Some(values.into())
+                } else {
+                    None
+                };
+
+                let program = if let Some(program) = program {
+                    if let Some(name) = program.as_str(strand) {
+                        Some(ProgramOverride::Module(name.to_string().into_boxed_str()))
+                    } else if let Some(path) = global.types.unix_path.cast(&program) {
+                        Some(ProgramOverride::Path(
+                            path.enter_sync(strand, |_strand, path| path.annex().typed_path_buf()),
+                        ))
+                    } else if let Some(path) = global.types.windows_path.cast(&program) {
+                        Some(ProgramOverride::Path(
+                            path.enter_sync(strand, |_strand, path| path.annex().typed_path_buf()),
+                        ))
+                    } else {
+                        return Err(Error::type_error(
+                            strand,
+                            "program: expected fs.Path or str",
+                        ));
+                    }
+                } else {
+                    None
+                };
+
+                let local = global.local.get(strand);
+                let original = local.invocation();
+                let mut invocation = original.clone();
+                if let Some(args) = args {
+                    invocation.args = Some(args);
+                }
+                if let Some(program) = program {
+                    invocation.program = Some(program);
+                }
+                local.replace_invocation(invocation);
+
+                let result = call!(strand, &func, out).await;
+                global.local.get(strand).replace_invocation(original);
+                result
+            },
+        )
         .object("env", env_ty, EnvObject { global })
         .get("exe", move |strand, out| {
             let annex = PathAnnex::new(

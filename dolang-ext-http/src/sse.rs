@@ -232,7 +232,7 @@ impl<'v> Object<'v> for EventIter {
         builder.supertype(TypeObject::Iter)
     }
 
-    async fn input<'a, 's>(
+    async fn iter<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,

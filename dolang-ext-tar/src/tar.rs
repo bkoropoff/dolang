@@ -323,7 +323,7 @@ impl<'v> Object<'v> for TarReader {
             })
     }
 
-    async fn input<'a, 's>(
+    async fn iter<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,
@@ -584,7 +584,7 @@ impl<'v> Object<'v> for TarEntry {
             })
     }
 
-    async fn input<'a, 's>(
+    async fn iter<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,
@@ -674,7 +674,7 @@ impl<'v> Object<'v> for TarEntryWriter {
         )
     }
 
-    async fn output<'a, 's>(
+    async fn sink<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,

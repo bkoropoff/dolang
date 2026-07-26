@@ -673,6 +673,15 @@ pub trait Object<'v>: Sized + 'v {
         crate::fmt!(strand, w, "<{}.{}>", Self::MODULE, Self::NAME)
     }
 
+    /// Implements boolean conversion.
+    ///
+    /// # Default
+    /// Native objects are truthy.
+    #[allow(unused_variables)]
+    fn bool<'a, 's>(this: Instance<'v, 'a, Self>, strand: &mut Strand<'v, 's>) -> bool {
+        true
+    }
+
     /// Implements Do call (`func arg...`) operations.
     /// # Default
     /// Returns a type error
@@ -776,7 +785,7 @@ pub trait Object<'v>: Sized + 'v {
     /// # Default
     /// Returns a type error
     #[allow(unused_variables)]
-    fn input<'a, 's>(
+    fn iter<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,
@@ -805,12 +814,12 @@ pub trait Object<'v>: Sized + 'v {
         )))
     }
 
-    /// Implements Do output iteration (`output`), setting `out` to an
+    /// Implements Do sink outputsetting `out` to a
     /// sink object which should implement [`Object::put`]
     /// # Default
     /// Returns a type error
     #[allow(unused_variables)]
-    fn output<'a, 's>(
+    fn sink<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,
@@ -1355,6 +1364,10 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
         )
     }
 
+    fn op_bool<'a, 's>(this: Recv<'v, 'a, Self>, strand: &mut Strand<'v, 's>) -> bool {
+        T::bool(Instance::new(this.receiver), strand)
+    }
+
     async fn op_call<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &mut Strand<'v, 's>,
@@ -1580,7 +1593,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Cow::Borrowed(T::MODULE),
             Cow::Borrowed(T::NAME),
             Some(Cow::Borrowed("(iter)")),
-            async |strand| T::input(Instance::new(this.receiver), strand, out).await,
+            async |strand| T::iter(Instance::new(this.receiver), strand, out).await,
         )
         .await
     }
@@ -1610,7 +1623,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Cow::Borrowed(T::MODULE),
             Cow::Borrowed(T::NAME),
             Some(Cow::Borrowed("(sink)")),
-            async |strand| T::output(Instance::new(this.receiver), strand, out).await,
+            async |strand| T::sink(Instance::new(this.receiver), strand, out).await,
         )
         .await
     }

@@ -10,7 +10,7 @@ use crate::{
     gc::{Collect, arena::Visit},
     object::{
         array, index, iter,
-        native::{Instance, Object},
+        native::{Instance, Object, Unpack as NativeUnpack, UnpackItem},
         protocol::{GcObj, Protocol, Recv, Spread, SpreadContext},
         range,
     },
@@ -73,6 +73,76 @@ impl<'v, 'a, I: ArrayLike<'v>> ArrayView<'v, 'a, I> {
             view: Some(view),
         }
     }
+
+    /// Implements [`Object::index`] directly without exposing a view object.
+    pub fn index<'s>(
+        owner: Instance<'v, '_, I::Object>,
+        view: I,
+        strand: &mut Strand<'v, 's>,
+        index: &Value<'v>,
+        out: Slot<'v, '_>,
+    ) -> Result<'v, 's, ()> {
+        let owner = Value::from_input(strand, owner);
+        index_from(&owner, &Glue(view), strand, index, out)
+    }
+
+    /// Implements [`Object::iter`] directly without exposing a view object.
+    pub fn iter<'s>(
+        owner: Instance<'v, '_, I::Object>,
+        view: I,
+        strand: &mut Strand<'v, 's>,
+        out: impl Output<'v>,
+    ) -> Result<'v, 's, ()> {
+        let parent = create_view(owner, view, strand);
+        strand.builtin_types().array_view_iter.create(
+            strand,
+            Iter {
+                parent,
+                index: 0.into(),
+            },
+            out,
+        );
+        Ok(())
+    }
+
+    /// Implements [`Object::spread`] directly without exposing a view object.
+    pub fn spread<'s>(
+        owner: Instance<'v, '_, I::Object>,
+        view: I,
+        strand: &mut Strand<'v, 's>,
+        context: SpreadContext,
+        sink: &mut dyn Spread<'v, 's>,
+    ) -> Result<'v, 's, ()> {
+        let owner = Value::from_input(strand, owner);
+        spread_from(&owner, &Glue(view), strand, context, sink)
+    }
+
+    /// Implements [`Object::unpack`] directly without exposing a view object.
+    pub fn unpack<'s>(
+        owner: Instance<'v, '_, I::Object>,
+        view: I,
+        strand: &mut Strand<'v, 's>,
+        unpack: NativeUnpack<'v, '_>,
+    ) -> Result<'v, 's, ()> {
+        let parent = create_view(owner, view, strand);
+        unpack_native(strand, parent, unpack)
+    }
+}
+
+fn create_view<'v, I: ArrayLike<'v>>(
+    owner: Instance<'v, '_, I::Object>,
+    view: I,
+    strand: &Strand<'v, '_>,
+) -> GcObj<'v, View<'v>> {
+    let owner = Value::from_input(strand, owner);
+    GcObj::new(
+        strand.vm().arena(),
+        strand.builtin_types().array_view,
+        View {
+            owner,
+            glue: Box::new(Glue(view)),
+        },
+    )
 }
 
 impl<'v, I: ArrayLike<'v>> Input<'v> for ArrayView<'v, '_, I> {
@@ -256,29 +326,7 @@ impl<'v> Protocol<'v> for View<'v> {
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
         let view = this.get();
-        let len = view.glue.len(&view.owner, strand);
-        if let Some(slice) = range::slice(index, strand, len)? {
-            let indices: Box<dyn Iterator<Item = usize>> = match slice {
-                range::Slice::Contiguous { start, end } => {
-                    if start > end {
-                        return Err(Error::index(strand));
-                    }
-                    Box::new(start..end)
-                }
-                range::Slice::Stepped(indices) => Box::new(indices.into_iter()),
-            };
-            let mut array = array::Array::new();
-            for index in indices {
-                let mut value = Value::NIL;
-                view.glue
-                    .get(&view.owner, strand, index, Slot::new(&mut value))?;
-                array.inner.push(value);
-            }
-            strand.builtin_types().array.create(strand, array, out);
-            return Ok(());
-        }
-        let index = normalize(strand, index, len)?;
-        view.glue.get(&view.owner, strand, index, out)
+        index_from(&view.owner, &*view.glue, strand, index, out)
     }
     fn op_assign<'a, 's>(
         this: Recv<'v, 'a, Self>,
@@ -339,18 +387,11 @@ impl<'v> Protocol<'v> for View<'v> {
     async fn op_spread<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        _context: SpreadContext,
+        context: SpreadContext,
         sink: &'a mut dyn Spread<'v, 's>,
     ) -> Result<'v, 's, ()> {
         let view = this.get();
-        let len = view.glue.len(&view.owner, strand);
-        let mut value = Value::NIL;
-        for index in 0..len {
-            view.glue
-                .get(&view.owner, strand, index, Slot::new(&mut value))?;
-            sink.positional(strand, Slot::new(&mut value))?;
-        }
-        Ok(())
+        spread_from(&view.owner, &*view.glue, strand, context, sink)
     }
     async fn op_unpack<'a, 's>(
         this: Recv<'v, 'a, Self>,
@@ -459,6 +500,105 @@ impl<'v> Protocol<'v> for Iter<'v> {
     ) {
         Output::set(strand, out, &strand.singletons().input_iter)
     }
+}
+
+fn index_from<'v, 's>(
+    owner: &Value<'v>,
+    glue: &(dyn ArrayViewGlue<'v> + '_),
+    strand: &mut Strand<'v, 's>,
+    index: &Value<'v>,
+    out: Slot<'v, '_>,
+) -> Result<'v, 's, ()> {
+    let len = glue.len(owner, strand);
+    if let Some(slice) = range::slice(index, strand, len)? {
+        let indices: Box<dyn Iterator<Item = usize>> = match slice {
+            range::Slice::Contiguous { start, end } => {
+                if start > end {
+                    return Err(Error::index(strand));
+                }
+                Box::new(start..end)
+            }
+            range::Slice::Stepped(indices) => Box::new(indices.into_iter()),
+        };
+        let mut array = array::Array::new();
+        for index in indices {
+            let mut value = Value::NIL;
+            glue.get(owner, strand, index, Slot::new(&mut value))?;
+            array.inner.push(value);
+        }
+        strand.builtin_types().array.create(strand, array, out);
+        return Ok(());
+    }
+    let index = normalize(strand, index, len)?;
+    glue.get(owner, strand, index, out)
+}
+
+fn spread_from<'v, 's>(
+    owner: &Value<'v>,
+    glue: &(dyn ArrayViewGlue<'v> + '_),
+    strand: &mut Strand<'v, 's>,
+    _context: SpreadContext,
+    sink: &mut dyn Spread<'v, 's>,
+) -> Result<'v, 's, ()> {
+    let len = glue.len(owner, strand);
+    let mut value = Value::NIL;
+    for index in 0..len {
+        glue.get(owner, strand, index, Slot::new(&mut value))?;
+        sink.positional(strand, Slot::new(&mut value))?;
+    }
+    Ok(())
+}
+
+fn unpack_native<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    parent: GcObj<'v, View<'v>>,
+    mut unpack: NativeUnpack<'v, '_>,
+) -> Result<'v, 's, ()> {
+    let mut position = 0usize;
+    for item in unpack.iter() {
+        match item {
+            UnpackItem::Pos { slot, default } => {
+                let view = &*parent;
+                if position < view.glue.len(&view.owner, strand) {
+                    view.glue.get(&view.owner, strand, position, slot)?;
+                } else if let Some(default) = default {
+                    Output::set(strand, slot, default);
+                } else {
+                    return Err(Error::missing_positional(strand, position));
+                }
+                position += 1;
+            }
+            UnpackItem::SymKey { key, slot, default } => {
+                if let Some(default) = default {
+                    Output::set(strand, slot, default);
+                } else {
+                    return Err(Error::missing_key(strand, key));
+                }
+            }
+            UnpackItem::ConstKey { key, slot, default } => {
+                if let Some(default) = default {
+                    Output::set(strand, slot, default);
+                } else {
+                    return Err(Error::missing_key(strand, key));
+                }
+            }
+            UnpackItem::Rest { slot } => {
+                strand.builtin_types().array_view_iter.create(
+                    strand,
+                    Iter {
+                        parent: parent.clone(),
+                        index: position.into(),
+                    },
+                    slot,
+                );
+            }
+        }
+    }
+    let view = &*parent;
+    if unpack.exhaustive() && position < view.glue.len(&view.owner, strand) {
+        return Err(Error::unexpected_positional(strand, position));
+    }
+    Ok(())
 }
 
 fn unpack_from<'v, 's>(
