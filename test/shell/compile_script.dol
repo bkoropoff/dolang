@@ -1,0 +1,19 @@
+import load
+  _shell:
+    - compile_script
+  fs:
+    - with_temp_dir
+  test:
+    - assert_eq
+    - assert_type
+    - test
+
+#[test]
+def compiles_a_script_to_bytecode()
+  with_temp_dir do |dir|
+    let script = (dir / "script.dol")
+    script.write "(40 + 2)\n"
+
+    let bytecode = compile_script $script
+    assert_type $bin $bytecode
+    assert_eq (load.run bytecode) 42

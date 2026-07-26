@@ -62,10 +62,12 @@ the module name instead. In the REPL, `shell.program` is `nil`.
 ```
 dolang -m dodo --list
 dolang -m test -- test
+dolang -m ssh build.example.com build.dol
 ```
 
 Installed aliases such as `dodo` and `dolang-test` select the corresponding
-entrypoint implicitly when available.
+entrypoint implicitly when available. The [`ssh` entrypoint](./vfs/ssh.md)
+compiles a local script and executes it through a remote VFS context.
 
 ### Companion Programs
 

@@ -1,0 +1,171 @@
+import _shell args load shell shlex ssh
+  fs:
+    - Path
+
+def parse_port value
+  let port = try
+    int $value
+  catch std.RuntimeError: _
+    throw args.Error "--port expects an integer"
+  if (port < 1 || port > 65535)
+    throw args.Error "--port must be between 1 and 65535"
+  port
+
+def parse_nonnegative option value
+  let number = try
+    int $value
+  catch std.RuntimeError: _
+    throw args.Error "$option expects an integer"
+  if (number < 0)
+    throw args.Error "$option must be non-negative"
+  number
+
+def parse_connect_timeout value
+  parse_nonnegative --connect-timeout $value
+
+def parse_keepalive_interval value
+  parse_nonnegative --keepalive-interval $value
+
+def parse_keepalive_count value
+  parse_nonnegative --keepalive-count $value
+
+def parse_host_key value
+  if (value == "default")
+    :DEFAULT:
+  else if (value == "strict")
+    :STRICT:
+  else if (value == "accept-new")
+    :ACCEPT_NEW:
+  else
+    throw args.Error "--host-key expects default, strict, or accept-new"
+
+def parse_command value
+  let command = try
+    [...(shlex.split value)]
+  catch std.RuntimeError: _
+    throw args.Error "--command contains invalid shell quoting"
+  if (command.len == 0)
+    throw args.Error "--command must not be empty"
+  command
+
+def parse_env sets unsets
+  let overrides = {}
+  for spec = sets
+    let name value = if spec.contains "="
+      spec.split "=" limit: 1
+    else
+      [spec, :INHERIT:]
+    if (name.len == 0)
+      throw args.Error "--env expects a non-empty name"
+    overrides[name] = value
+
+  for name = unsets
+    if (name.len == 0 || name.contains "=")
+      throw args.Error "--unset-env expects a non-empty name without '='"
+    overrides[name] = nil
+  overrides
+
+args.with
+  help: Compile a local Do script and run it through an SSH VFS.
+  - opt: user
+    short: l
+    default: nil
+    meta: USER
+    help: Remote user
+  - opt: port
+    short: p
+    type: $parse_port
+    default: nil
+    meta: PORT
+    help: SSH server port
+  - opt: identity
+    short: i
+    type: $Path
+    collect: true
+    meta: PATH
+    help: Identity file; may be repeated
+  - flag: identities-only
+    help: Restrict authentication to configured identities
+  - flag: forward-agent
+    short: A
+    help: Forward the authentication agent
+  - opt: jump
+    short: J
+    collect: true
+    meta: HOST
+    help: Jump host; may be repeated
+  - opt: connect-timeout
+    type: $parse_connect_timeout
+    default: nil
+    meta: SECONDS
+    help: Connection timeout
+  - opt: keepalive-interval
+    type: $parse_keepalive_interval
+    default: nil
+    meta: SECONDS
+    help: Protocol keepalive interval
+  - opt: keepalive-count
+    type: $parse_keepalive_count
+    default: nil
+    meta: COUNT
+    help: Unanswered keepalives allowed
+  - flag: batch
+    help: Disable interactive prompts
+  - opt: host-key
+    type: $parse_host_key
+    default: :DEFAULT:
+    meta: POLICY
+    help: Host-key policy: default, strict, or accept-new
+  - opt: command
+    type: $parse_command
+    default: ["dolang-vfs"]
+    meta: COMMAND
+    help: Remote VFS launcher command
+  - opt: cd
+    type: $Path
+    default: nil
+    meta: PATH
+    help: Initial remote working directory
+  - opt: env
+    collect: true
+    meta: NAME[=VALUE]
+    help: Set or inherit a remote environment variable; may be repeated
+  - opt: unset-env
+    collect: true
+    meta: NAME
+    help: Unset a remote environment variable; may be repeated
+  - arg: host
+    help: SSH destination
+  - arg: script
+    type: $Path
+    divider: true
+    help: Local Do script
+  - arg: script-args
+    collect: true
+    help: Arguments passed to the target script
+  do |p|
+    let remote_env = parse_env $p.env $p.unset_env
+    let bytecode = _shell.compile_script $p.script
+
+    ssh.with $p.host
+      user: $p.user
+      port: $p.port
+      identities_only: $p.identities_only
+      forward_agent: $p.forward_agent
+      connect_timeout: $p.connect_timeout
+      keepalive_interval: $p.keepalive_interval
+      keepalive_count: $p.keepalive_count
+      batch: $p.batch
+      host_key: $p.host_key
+      command: $p.command
+      cd: $p.cd
+      env: $remote_env
+      for identity = p.identity
+        identity: $identity
+      for jump = p.jump
+        jump: $jump
+      do
+        shell.with_override
+          program: $p.script
+          args: $p.script_args
+          do load.run $bytecode

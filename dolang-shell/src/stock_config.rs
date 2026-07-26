@@ -26,5 +26,6 @@ mod tests {
         let config = StockConfig;
         assert!(config.bundled_entrypoint("test").is_some());
         assert!(config.bundled_entrypoint("dodo").is_some());
+        assert!(config.bundled_entrypoint("ssh").is_some());
     }
 }
