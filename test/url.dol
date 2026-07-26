@@ -82,6 +82,22 @@ def append()
   assert_eq $href.name "path"
 
 #[test]
+def segments_are_immutable()
+  let segments = (Url "https://example.com/a/b").segments
+  assert_throws $ImmutableError do
+    segments[0] = "changed"
+  assert_throws $ImmutableError do
+    segments.push "c"
+  assert_throws $ImmutableError do
+    segments.insert 0 "c"
+  assert_throws $ImmutableError do
+    segments.pop()
+  assert_throws $ImmutableError do
+    segments.delete 0
+  assert_throws $ImmutableError do
+    segments.clear()
+
+#[test]
 def name_nil()
   let bare = Url "https://example.com"
   assert_eq $bare.name nil

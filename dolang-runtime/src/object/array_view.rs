@@ -5,11 +5,12 @@ use std::{cell::Cell, ops::ControlFlow};
 use dolang_bytecode::Variadic;
 
 use crate::{
-    arg::Args,
+    arg::{Arg, Args},
+    call,
     error::{Error, Result},
-    gc::{Collect, arena::Visit},
+    gc::{self, Collect, arena::Visit},
     object::{
-        array, index, iter,
+        BoundMethod, array, index, iter,
         native::{Instance, Object, Unpack as NativeUnpack, UnpackItem},
         protocol::{GcObj, Protocol, Recv, Spread, SpreadContext},
         range,
@@ -18,6 +19,7 @@ use crate::{
     strand::Strand,
     sym,
     sym::Sym,
+    unpack,
     value::{Input, InputBy, Output, Slot, Slots, TypeObject, Value, private::Sealed},
     vm::Vm,
 };
@@ -51,6 +53,52 @@ pub trait ArrayLike<'v>: 'v {
         strand: &'a mut Strand<'v, 's>,
         _index: usize,
         _value: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        Err(Error::immutable(strand))
+    }
+
+    fn push<'a, 's>(
+        &self,
+        _this: Instance<'v, '_, Self::Object>,
+        strand: &'a mut Strand<'v, 's>,
+        _values: &mut [Slot<'v, 'a>],
+    ) -> Result<'v, 's, ()> {
+        Err(Error::immutable(strand))
+    }
+
+    fn insert<'a, 's>(
+        &self,
+        _this: Instance<'v, '_, Self::Object>,
+        strand: &'a mut Strand<'v, 's>,
+        _index: usize,
+        _values: &mut [Slot<'v, 'a>],
+    ) -> Result<'v, 's, ()> {
+        Err(Error::immutable(strand))
+    }
+
+    fn pop<'a, 's>(
+        &self,
+        _this: Instance<'v, '_, Self::Object>,
+        strand: &'a mut Strand<'v, 's>,
+        _index: usize,
+        _out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        Err(Error::immutable(strand))
+    }
+
+    fn delete<'s>(
+        &self,
+        _this: Instance<'v, '_, Self::Object>,
+        strand: &mut Strand<'v, 's>,
+        _index: usize,
+    ) -> Result<'v, 's, ()> {
+        Err(Error::immutable(strand))
+    }
+
+    fn clear<'s>(
+        &self,
+        _this: Instance<'v, '_, Self::Object>,
+        strand: &mut Strand<'v, 's>,
     ) -> Result<'v, 's, ()> {
         Err(Error::immutable(strand))
     }
@@ -180,6 +228,33 @@ trait ArrayViewGlue<'v>: 'v {
         index: usize,
         value: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()>;
+    fn push<'a, 's>(
+        &self,
+        owner: &Value<'v>,
+        strand: &'a mut Strand<'v, 's>,
+        values: &mut [Slot<'v, 'a>],
+    ) -> Result<'v, 's, ()>;
+    fn insert<'a, 's>(
+        &self,
+        owner: &Value<'v>,
+        strand: &'a mut Strand<'v, 's>,
+        index: usize,
+        values: &mut [Slot<'v, 'a>],
+    ) -> Result<'v, 's, ()>;
+    fn pop<'a, 's>(
+        &self,
+        owner: &Value<'v>,
+        strand: &'a mut Strand<'v, 's>,
+        index: usize,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()>;
+    fn delete<'s>(
+        &self,
+        owner: &Value<'v>,
+        strand: &mut Strand<'v, 's>,
+        index: usize,
+    ) -> Result<'v, 's, ()>;
+    fn clear<'s>(&self, owner: &Value<'v>, strand: &mut Strand<'v, 's>) -> Result<'v, 's, ()>;
 }
 
 struct Glue<I>(I);
@@ -226,6 +301,62 @@ impl<'v, I: ArrayLike<'v>> ArrayViewGlue<'v> for Glue<I> {
             value,
         )
     }
+    fn push<'a, 's>(
+        &self,
+        owner: &Value<'v>,
+        strand: &'a mut Strand<'v, 's>,
+        values: &mut [Slot<'v, 'a>],
+    ) -> Result<'v, 's, ()> {
+        self.0.push(
+            unsafe { Instance::from_value_unchecked(owner) },
+            strand,
+            values,
+        )
+    }
+    fn insert<'a, 's>(
+        &self,
+        owner: &Value<'v>,
+        strand: &'a mut Strand<'v, 's>,
+        index: usize,
+        values: &mut [Slot<'v, 'a>],
+    ) -> Result<'v, 's, ()> {
+        self.0.insert(
+            unsafe { Instance::from_value_unchecked(owner) },
+            strand,
+            index,
+            values,
+        )
+    }
+    fn pop<'a, 's>(
+        &self,
+        owner: &Value<'v>,
+        strand: &'a mut Strand<'v, 's>,
+        index: usize,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        self.0.pop(
+            unsafe { Instance::from_value_unchecked(owner) },
+            strand,
+            index,
+            out,
+        )
+    }
+    fn delete<'s>(
+        &self,
+        owner: &Value<'v>,
+        strand: &mut Strand<'v, 's>,
+        index: usize,
+    ) -> Result<'v, 's, ()> {
+        self.0.delete(
+            unsafe { Instance::from_value_unchecked(owner) },
+            strand,
+            index,
+        )
+    }
+    fn clear<'s>(&self, owner: &Value<'v>, strand: &mut Strand<'v, 's>) -> Result<'v, 's, ()> {
+        self.0
+            .clear(unsafe { Instance::from_value_unchecked(owner) }, strand)
+    }
 }
 
 pub(crate) struct View<'v> {
@@ -247,13 +378,45 @@ pub(crate) struct Iter<'v> {
 unsafe impl<'v> Collect for View<'v> {
     const CYCLIC: bool = true;
     const IMMUTABLE: bool = true;
-    type Annex = ();
+    type Annex = ViewAnnex;
     fn accept(&self, visit: &mut dyn Visit) -> ControlFlow<()> {
         self.owner.accept(visit)
     }
     fn clear(&mut self) {
         self.owner.clear()
     }
+}
+
+#[derive(Default)]
+pub(crate) struct ViewAnnex(Cell<bool>);
+
+impl gc::Annex for ViewAnnex {
+    fn accept(&self, _visit: &mut dyn Visit) -> ControlFlow<()> {
+        ControlFlow::Continue(())
+    }
+
+    fn clear(&self) {}
+}
+
+struct MutationGuard<'a>(&'a Cell<bool>);
+
+impl<'a> MutationGuard<'a> {
+    fn try_new(busy: &'a Cell<bool>) -> Option<Self> {
+        (!busy.replace(true)).then_some(Self(busy))
+    }
+}
+
+impl Drop for MutationGuard<'_> {
+    fn drop(&mut self) {
+        self.0.set(false);
+    }
+}
+
+fn mutation_guard<'a, 'v, 's>(
+    busy: &'a Cell<bool>,
+    strand: &mut Strand<'v, 's>,
+) -> Result<'v, 's, MutationGuard<'a>> {
+    MutationGuard::try_new(busy).ok_or_else(|| Error::concurrency(strand))
 }
 
 unsafe impl<'v> Collect for Iter<'v> {
@@ -286,6 +449,17 @@ fn normalize<'v, 's>(
 ) -> Result<'v, 's, usize> {
     let index = value.to_i64(strand).map_err(|_| Error::index(strand))?;
     index::element(len, index).ok_or_else(|| Error::index(strand))
+}
+
+fn positional<'v, 'a, 's>(
+    strand: &mut Strand<'v, 's>,
+    args: Args<'v, 'a>,
+) -> Result<'v, 's, Vec<Slot<'v, 'a>>> {
+    args.map(|arg| match arg {
+        Arg::Pos(slot) => Ok(slot),
+        Arg::Key(key, _) => Err(Error::unexpected_key(strand, key)),
+    })
+    .collect()
 }
 
 impl<'v> Protocol<'v> for View<'v> {
@@ -334,6 +508,7 @@ impl<'v> Protocol<'v> for View<'v> {
         index: Slot<'v, 'a>,
         value: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
+        let _guard = mutation_guard(&this.annex().0, strand)?;
         let view = this.get();
         let len = view.glue.len(&view.owner, strand);
         let index = normalize(strand, &index, len)?;
@@ -345,13 +520,18 @@ impl<'v> Protocol<'v> for View<'v> {
         field: Sym<'v, 'a>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        if field.tag() == sym::LEN {
-            let view = this.get();
-            let len = view.glue.len(&view.owner, strand);
-            Output::set(strand, out, len);
-            Ok(())
-        } else {
-            iter::iterable_get(strand, &this, field, out)
+        match field.tag() {
+            sym::LEN => {
+                let view = this.get();
+                let len = view.glue.len(&view.owner, strand);
+                Output::set(strand, out, len);
+                Ok(())
+            }
+            sym::PUSH | sym::INSERT | sym::POP | sym::DELETE | sym::CLEAR => {
+                BoundMethod::create(strand, &this, field, out);
+                Ok(())
+            }
+            _ => iter::iterable_get(strand, &this, field, out),
         }
     }
     async fn op_mcall<'a, 's>(
@@ -359,15 +539,89 @@ impl<'v> Protocol<'v> for View<'v> {
         strand: &'a mut Strand<'v, 's>,
         method: Sym<'v, 'a>,
         args: Args<'v, 'a>,
-        out: Slot<'v, 'a>,
+        mut out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        if method.tag() == sym::LEN {
-            return Err(Error::type_error(
+        match method.tag() {
+            sym::PUSH => {
+                let mut values = positional(strand, args)?;
+                let _guard = mutation_guard(&this.annex().0, strand)?;
+                let view = this.get();
+                view.glue.push(&view.owner, strand, values.as_mut_slice())
+            }
+            sym::INSERT => {
+                let mut values = positional(strand, args)?;
+                if values.is_empty() {
+                    return Err(Error::missing_positional(strand, 0));
+                }
+                let index = values.remove(0);
+                if values.is_empty() {
+                    return Err(Error::missing_positional(strand, 1));
+                }
+                let _guard = mutation_guard(&this.annex().0, strand)?;
+                let view = this.get();
+                let len = view.glue.len(&view.owner, strand);
+                let index = index.to_i64(strand).map_err(|_| Error::index(strand))?;
+                let index = index::position(len, index).ok_or_else(|| Error::index(strand))?;
+                view.glue
+                    .insert(&view.owner, strand, index, values.as_mut_slice())
+            }
+            sym::POP => {
+                let default = Sym::well_known(sym::DEFAULT);
+                let else_key = Sym::well_known(sym::ELSE);
+                let ([], [index, default, or_else]) =
+                    unpack!(strand, args, 0, 1, default = None, else_key = None)?;
+                if default.is_some() && or_else.is_some() {
+                    return Err(Error::unexpected_key(strand, else_key));
+                }
+                let guard = mutation_guard(&this.annex().0, strand)?;
+                let view = this.get();
+                let len = view.glue.len(&view.owner, strand);
+                let index = match index {
+                    Some(index) => {
+                        let index = index.to_i64(strand).map_err(|_| Error::index(strand))?;
+                        index::element(len, index)
+                    }
+                    None => len.checked_sub(1),
+                };
+                if let Some(index) = index {
+                    return view.glue.pop(&view.owner, strand, index, out);
+                }
+                drop(guard);
+                if let Some(mut default) = default {
+                    out.store(default.take());
+                } else if let Some(or_else) = or_else {
+                    call!(strand, or_else, out).await?;
+                } else {
+                    return Err(Error::index(strand));
+                }
+                Ok(())
+            }
+            sym::DELETE => {
+                let ([index], []) = unpack!(strand, args, 1, 0)?;
+                let _guard = mutation_guard(&this.annex().0, strand)?;
+                let view = this.get();
+                let len = view.glue.len(&view.owner, strand);
+                let index = index.to_i64(strand).map_err(|_| Error::index(strand))?;
+                if let Some(index) = index::element(len, index) {
+                    view.glue.delete(&view.owner, strand, index)?;
+                    Output::set(strand, out, true);
+                } else {
+                    Output::set(strand, out, false);
+                }
+                Ok(())
+            }
+            sym::CLEAR => {
+                let ([], []) = unpack!(strand, args, 0, 0)?;
+                let _guard = mutation_guard(&this.annex().0, strand)?;
+                let view = this.get();
+                view.glue.clear(&view.owner, strand)
+            }
+            sym::LEN => Err(Error::type_error(
                 strand,
                 "array view len is a field, not a method",
-            ));
+            )),
+            _ => iter::iterable_mcall(strand, &this, method, args, out).await,
         }
-        iter::iterable_mcall(strand, &this, method, args, out).await
     }
     async fn op_iter<'a, 's>(
         this: Recv<'v, 'a, Self>,
@@ -637,4 +891,20 @@ fn unpack_from<'v, 's>(
         }
     }
     Ok(min + sig.keys.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::MutationGuard;
+
+    #[test]
+    fn mutation_guard_rejects_reentry_and_resets() {
+        let busy = Cell::new(false);
+        let guard = MutationGuard::try_new(&busy).unwrap();
+        assert!(MutationGuard::try_new(&busy).is_none());
+        drop(guard);
+        assert!(MutationGuard::try_new(&busy).is_some());
+    }
 }

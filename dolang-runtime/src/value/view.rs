@@ -355,6 +355,41 @@ impl<'v, 'a> Array<'v, 'a> {
         Ok(())
     }
 
+    /// Append values from rooted slots. Briefly takes an exclusive interior borrow.
+    pub fn push_all<'s>(
+        &self,
+        strand: &mut Strand<'v, 's>,
+        values: &mut [Slot<'v, '_>],
+    ) -> Result<'v, 's, ()> {
+        let mut borrow = match self.0.borrow_mut() {
+            Some(b) => b,
+            None => return Err(Error::concurrency(strand)),
+        };
+        borrow.inner.extend(values.iter_mut().map(Slot::take));
+        Ok(())
+    }
+
+    /// Insert values at `index`, shifting later elements up. Returns `false`
+    /// if `index` is not a valid insertion position.
+    pub fn insert<'s>(
+        &self,
+        strand: &mut Strand<'v, 's>,
+        index: usize,
+        values: &mut [Slot<'v, '_>],
+    ) -> Result<'v, 's, bool> {
+        let mut borrow = match self.0.borrow_mut() {
+            Some(b) => b,
+            None => return Err(Error::concurrency(strand)),
+        };
+        if index > borrow.inner.len() {
+            return Ok(false);
+        }
+        borrow
+            .inner
+            .splice(index..index, values.iter_mut().map(Slot::take));
+        Ok(true)
+    }
+
     /// Remove and write the last element to `out`. Returns `false` if empty.
     pub fn pop<'s>(
         &self,
@@ -378,6 +413,28 @@ impl<'v, 'a> Array<'v, 'a> {
         }
     }
 
+    /// Remove and write the element at `index` to `out`. Returns `false` if
+    /// out of bounds.
+    pub fn pop_at<'s>(
+        &self,
+        strand: &mut Strand<'v, 's>,
+        index: usize,
+        out: impl Output<'v>,
+    ) -> Result<'v, 's, bool> {
+        let val = {
+            let mut borrow = match self.0.borrow_mut() {
+                Some(b) => b,
+                None => return Err(Error::concurrency(strand)),
+            };
+            if index >= borrow.inner.len() {
+                return Ok(false);
+            }
+            borrow.inner.remove(index)
+        };
+        Output::set(strand, out, &val);
+        Ok(true)
+    }
+
     /// Remove the element at `index`, shifting later elements down. Returns
     /// `false` if out of bounds.
     pub fn delete<'s>(&self, strand: &mut Strand<'v, 's>, index: usize) -> Result<'v, 's, bool> {
@@ -390,6 +447,16 @@ impl<'v, 'a> Array<'v, 'a> {
         }
         borrow.inner.remove(index);
         Ok(true)
+    }
+
+    /// Remove all elements.
+    pub fn clear<'s>(&self, strand: &mut Strand<'v, 's>) -> Result<'v, 's, ()> {
+        let mut borrow = match self.0.borrow_mut() {
+            Some(b) => b,
+            None => return Err(Error::concurrency(strand)),
+        };
+        borrow.inner.clear();
+        Ok(())
     }
 }
 
