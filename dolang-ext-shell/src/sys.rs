@@ -74,6 +74,7 @@ impl<'v> Object<'v> for CpuInfo {
 pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Global<'v>>) {
     let linux = builder.sym("LINUX");
     let macos = builder.sym("MACOS");
+    let freebsd = builder.sym("FREEBSD");
     let windows = builder.sym("WINDOWS");
     let unix = builder.sym("UNIX");
     let x86_64 = builder.sym("X86_64");
@@ -85,6 +86,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             let ([], []) = unpack!(strand, args, 0, 0)?;
             let target = global.local.get(strand).target();
             let os = match &target.operating_system {
+                OperatingSystem::FreeBsd => freebsd,
                 OperatingSystem::Linux => linux,
                 OperatingSystem::Macos => macos,
                 OperatingSystem::Windows => windows,

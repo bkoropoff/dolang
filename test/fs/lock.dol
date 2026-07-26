@@ -3,6 +3,7 @@ import agent strand sys
     - assert
     - assert_eq
     - assert_throws
+    - skip
   fs:
     - open
   std:
@@ -13,6 +14,8 @@ import agent strand sys
 
 #[agent.test]
 def scoped_file_locks()
+  if (sys.os_info().os == :FREEBSD:)
+    skip "requires byte-range locks"
   let path = "file_lock.bin"
   open $path w+ do |first|
     open $path r+ do |second|
@@ -75,13 +78,13 @@ def cancellation_awaits_unlock()
     open $path r+ do |second|
       let acquired_send acquired_recv = strand.channel()
       let worker = strand.spawn do
-        first.lock (0..10) do |_|
+        first.lock (..) do |_|
           acquired_send.put true
           sleep 10000
       acquired_recv.next()
       worker.cancel()
       assert_throws $CanceledError do worker.join()
-      second.try_lock (0..10) do |guard|
+      second.try_lock (..) do |guard|
         assert $guard.held
 
 #[agent.test]
@@ -89,8 +92,8 @@ def closing_file_releases_scoped_locks()
   let path = "closed_file_lock.bin"
   open $path w+ do |first|
     open $path r+ do |second|
-      first.lock (0..10) do |guard|
+      first.lock (..) do |guard|
         first.close()
         guard.release()
-      second.try_lock (0..10) do |guard|
+      second.try_lock (..) do |guard|
         assert $guard.held

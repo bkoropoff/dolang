@@ -10,6 +10,7 @@ mod generated;
 
 pub(crate) struct ErrorCode;
 pub(crate) struct Errno;
+pub(crate) struct FreeBsdErrno;
 pub(crate) struct LinuxErrno;
 pub(crate) struct MacosErrno;
 pub(crate) struct WinError;
@@ -53,6 +54,7 @@ pub(crate) fn system_code_name(
     raw: i32,
 ) -> Option<&'static str> {
     match operating_system {
+        OperatingSystem::FreeBsd => lookup(generated::FREEBSD_ERRNO, raw),
         OperatingSystem::Linux => lookup(generated::LINUX_ERRNO, raw),
         OperatingSystem::Macos => lookup(generated::MACOS_ERRNO, raw),
         OperatingSystem::Windows => lookup(generated::WIN_ERROR, raw as u32),
@@ -74,8 +76,10 @@ impl<'v, T: CodeType<'v>> Object<'v> for CodeObject<T> {
         if T::ERRNO {
             let linux = builder.sym("LINUX");
             let macos = builder.sym("MACOS");
+            let freebsd = builder.sym("FREEBSD");
             builder = builder.get("os", move |this, strand, out| {
                 let os = match this.annex().operating_system {
+                    Some(OperatingSystem::FreeBsd) => freebsd,
                     Some(OperatingSystem::Linux) => linux,
                     Some(OperatingSystem::Macos) => macos,
                     Some(OperatingSystem::Windows) | None => unreachable!("invalid errno OS"),
@@ -119,6 +123,18 @@ impl<'v> CodeType<'v> for Errno {
     const NAME: &'v str = "Errno";
     const MODULE: &'v str = "sys.unix";
     const ERRNO: bool = true;
+}
+
+impl<'v> CodeType<'v> for FreeBsdErrno {
+    const NAME: &'v str = "Errno";
+    const MODULE: &'v str = "sys.freebsd";
+    const ERRNO: bool = true;
+
+    fn name(value: i64) -> Option<&'static str> {
+        i32::try_from(value)
+            .ok()
+            .and_then(|value| lookup(generated::FREEBSD_ERRNO, value))
+    }
 }
 
 impl<'v> CodeType<'v> for LinuxErrno {
@@ -186,6 +202,13 @@ pub(crate) fn create_system_code<'v, 's>(
 ) {
     let global = strand.state::<Global<'v>>();
     match operating_system {
+        OperatingSystem::FreeBsd => create(
+            strand,
+            global.types.freebsd_errno,
+            operating_system,
+            raw,
+            out,
+        ),
         OperatingSystem::Linux => {
             create(strand, global.types.linux_errno, operating_system, raw, out)
         }
@@ -200,12 +223,15 @@ pub(crate) fn create_system_code<'v, 's>(
 
 #[cfg(test)]
 mod tests {
-    use super::{CodeType, LinuxErrno, MacosErrno, WinError};
+    use super::{CodeType, FreeBsdErrno, LinuxErrno, MacosErrno, WinError};
 
     #[test]
     fn known_names_are_platform_specific() {
         assert_eq!(LinuxErrno::name(2), Some("ENOENT"));
         assert_eq!(LinuxErrno::name(11), Some("EAGAIN"));
+        assert_eq!(FreeBsdErrno::name(2), Some("ENOENT"));
+        assert_eq!(FreeBsdErrno::name(35), Some("EAGAIN"));
+        assert_eq!(FreeBsdErrno::name(93), Some("ENOTCAPABLE"));
         assert_eq!(MacosErrno::name(2), Some("ENOENT"));
         assert_eq!(MacosErrno::name(35), Some("EAGAIN"));
         assert_eq!(WinError::name(2), Some("ERROR_FILE_NOT_FOUND"));
@@ -214,6 +240,7 @@ mod tests {
     #[test]
     fn unknown_names_use_no_lookup_result() {
         assert_eq!(LinuxErrno::name(i64::MAX), None);
+        assert_eq!(FreeBsdErrno::name(i64::MAX), None);
         assert_eq!(MacosErrno::name(i64::MAX), None);
         assert_eq!(WinError::name(i64::MAX), None);
     }

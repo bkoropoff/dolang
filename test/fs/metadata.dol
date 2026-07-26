@@ -270,6 +270,38 @@ def fs_basic()
   remove $test_path
 
 #[agent.test]
+def freebsd_attrs()
+  if (sys.os_info().os != :FREEBSD:)
+    skip "requires FreeBSD"
+  let test_path = "test_metadata_freebsd_attrs.txt"
+  open $test_path w do |f|
+    f.write "freebsd attrs test"
+
+  let meta = metadata $test_path
+  assert_type $Metadata $meta
+  assert_type $int $meta.freebsd_attrs
+  assert_type $bool $meta.readonly
+  assert_type $bool $meta.hidden
+  assert_type $bool $meta.system
+  assert_type $bool $meta.archive
+  assert_type $bool $meta.reparse_point
+  assert_type $bool $meta.compressed
+  assert_type $bool $meta.offline
+  assert_type $bool $meta.immutable
+  assert_type $bool $meta.append_only
+  assert_type $bool $meta.no_dump
+  assert_type $bool $meta.opaque
+
+  set_metadata $test_path no_dump: true
+  let no_dump_meta = metadata $test_path
+  assert_eq $no_dump_meta.no_dump true
+  Path(test_path).set_metadata no_dump: false
+  let normal_meta = Path(test_path).metadata()
+  assert_eq $normal_meta.no_dump false
+
+  remove $test_path
+
+#[agent.test]
 def unix_raw()
   if (sys.os_info().family == :WINDOWS:)
     skip "requires non-Windows"
@@ -286,6 +318,8 @@ def unix_raw()
   assert_type $int $meta.files_available
   if (sys.os_info().os == :LINUX:)
     assert_type $int $meta.linux_attrs
+  else if (sys.os_info().os == :FREEBSD:)
+    assert_type $int $meta.freebsd_attrs
   else
     assert_type $int $meta.macos_attrs
   assert_type $int $meta.name_max

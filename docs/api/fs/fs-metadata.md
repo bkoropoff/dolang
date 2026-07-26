@@ -59,6 +59,10 @@ Free file nodes available to unprivileged users.
 
 Filesystem fragment size in bytes.
 
+### `freebsd_attrs`
+
+Raw FreeBSD filesystem mount attribute mask.
+
 ### `linux_attrs`
 
 Raw Linux filesystem mount attribute mask.

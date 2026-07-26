@@ -1,10 +1,10 @@
 use dolang::runtime::{
-    Object, Output, Result, State, Strand, Sym,
+    Error, Object, Output, Result, State, Strand, Sym,
     object::{Instance, TypeBuilder},
 };
 use dolang_shell_vfs::{FileType, Metadata as VfsMetadata};
 
-use crate::{global::Global, time::create_datetime, util};
+use crate::{fs::attrs, global::Global, time::create_datetime, util};
 
 const NANOS_PER_SEC_I128: i128 = 1_000_000_000;
 
@@ -45,6 +45,7 @@ fn write_timestamp<'v, 's>(
     create_datetime(strand, global, timestamp_nanos(secs, nanos), out)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn attr_field<'v, 's>(
     strand: &mut Strand<'v, 's>,
     this: Instance<'v, '_, Metadata>,
@@ -53,11 +54,12 @@ fn attr_field<'v, 's>(
     windows: u32,
     linux: u32,
     macos: u32,
+    freebsd: u32,
 ) -> Result<'v, 's, ()> {
-    match crate::fs::attrs::flag(&this.annex().inner, windows, linux, macos) {
-        crate::fs::attrs::Flag::Inapplicable => Err(dolang::runtime::Error::field(strand, sym)),
-        crate::fs::attrs::Flag::Unavailable => Ok(()),
-        crate::fs::attrs::Flag::Value(value) => {
+    match attrs::flag(&this.annex().inner, windows, linux, macos, freebsd) {
+        attrs::Flag::Inapplicable => Err(Error::field(strand, sym)),
+        attrs::Flag::Unavailable => Ok(()),
+        attrs::Flag::Value(value) => {
             Output::set(strand, out, value);
             Ok(())
         }
@@ -99,6 +101,7 @@ impl<'v> Object<'v> for Metadata {
         let blksize = builder.sym("blksize");
         let blocks = builder.sym("blocks");
         let win_attrs = builder.sym("win_attrs");
+        let freebsd_attrs = builder.sym("freebsd_attrs");
         let linux_attrs = builder.sym("linux_attrs");
         let macos_attrs = builder.sym("macos_attrs");
         let user = builder.sym("user");
@@ -224,10 +227,18 @@ impl<'v> Object<'v> for Metadata {
             .get("win_attrs", move |this, strand, out| {
                 util::option_field(strand, this.annex().inner.win_attrs(), win_attrs, out)
             })
+            .get("freebsd_attrs", move |this, strand, out| {
+                util::option_field(
+                    strand,
+                    this.annex().inner.freebsd_attrs(),
+                    freebsd_attrs,
+                    out,
+                )
+            })
             .get("user", move |this, strand, mut out| {
                 let annex = this.annex();
                 let Some(value) = annex.inner.windows().and_then(|value| value.user.clone()) else {
-                    return Err(dolang::runtime::Error::field(strand, user));
+                    return Err(Error::field(strand, user));
                 };
                 crate::security::create_sid(strand, annex.global, value, &mut out);
                 Ok(())
@@ -236,7 +247,7 @@ impl<'v> Object<'v> for Metadata {
                 let annex = this.annex();
                 let Some(value) = annex.inner.windows().and_then(|value| value.group.clone())
                 else {
-                    return Err(dolang::runtime::Error::field(strand, group));
+                    return Err(Error::field(strand, group));
                 };
                 crate::security::create_sid(strand, annex.global, value, &mut out);
                 Ok(())
@@ -252,7 +263,7 @@ impl<'v> Object<'v> for Metadata {
                         }
                         Ok(())
                     }
-                    _ => Err(dolang::runtime::Error::field(strand, linux_attrs)),
+                    _ => Err(Error::field(strand, linux_attrs)),
                 }
             })
             .get("macos_attrs", move |this, strand, out| {
@@ -264,9 +275,10 @@ impl<'v> Object<'v> for Metadata {
                     this,
                     out,
                     readonly,
-                    crate::fs::attrs::windows::READONLY,
+                    attrs::windows::READONLY,
                     0,
                     0,
+                    attrs::freebsd::READONLY,
                 )
             })
             .get("hidden", move |this, strand, out| {
@@ -275,9 +287,10 @@ impl<'v> Object<'v> for Metadata {
                     this,
                     out,
                     hidden,
-                    crate::fs::attrs::windows::HIDDEN,
+                    attrs::windows::HIDDEN,
                     0,
-                    crate::fs::attrs::macos::HIDDEN,
+                    attrs::macos::HIDDEN,
+                    attrs::freebsd::HIDDEN,
                 )
             })
             .get("system", move |this, strand, out| {
@@ -286,9 +299,10 @@ impl<'v> Object<'v> for Metadata {
                     this,
                     out,
                     system,
-                    crate::fs::attrs::windows::SYSTEM,
+                    attrs::windows::SYSTEM,
                     0,
                     0,
+                    attrs::freebsd::SYSTEM,
                 )
             })
             .get("archive", move |this, strand, out| {
@@ -297,9 +311,10 @@ impl<'v> Object<'v> for Metadata {
                     this,
                     out,
                     archive,
-                    crate::fs::attrs::windows::ARCHIVE,
+                    attrs::windows::ARCHIVE,
                     0,
                     0,
+                    attrs::freebsd::ARCHIVE,
                 )
             })
             .get("reparse_point", move |this, strand, out| {
@@ -308,9 +323,10 @@ impl<'v> Object<'v> for Metadata {
                     this,
                     out,
                     reparse_point,
-                    crate::fs::attrs::windows::REPARSE_POINT,
+                    attrs::windows::REPARSE_POINT,
                     0,
                     0,
+                    attrs::freebsd::REPARSE_POINT,
                 )
             })
             .get("compressed", move |this, strand, out| {
@@ -319,9 +335,10 @@ impl<'v> Object<'v> for Metadata {
                     this,
                     out,
                     compressed,
-                    crate::fs::attrs::windows::COMPRESSED,
-                    crate::fs::attrs::linux::COMPRESSED,
-                    crate::fs::attrs::macos::COMPRESSED,
+                    attrs::windows::COMPRESSED,
+                    attrs::linux::COMPRESSED,
+                    attrs::macos::COMPRESSED,
+                    attrs::freebsd::COMPRESSED,
                 )
             })
             .get("encrypted", move |this, strand, out| {
@@ -330,7 +347,8 @@ impl<'v> Object<'v> for Metadata {
                     this,
                     out,
                     encrypted,
-                    crate::fs::attrs::windows::ENCRYPTED,
+                    attrs::windows::ENCRYPTED,
+                    0,
                     0,
                     0,
                 )
@@ -341,7 +359,8 @@ impl<'v> Object<'v> for Metadata {
                     this,
                     out,
                     temporary,
-                    crate::fs::attrs::windows::TEMPORARY,
+                    attrs::windows::TEMPORARY,
+                    0,
                     0,
                     0,
                 )
@@ -352,9 +371,10 @@ impl<'v> Object<'v> for Metadata {
                     this,
                     out,
                     offline,
-                    crate::fs::attrs::windows::OFFLINE,
+                    attrs::windows::OFFLINE,
                     0,
                     0,
+                    attrs::freebsd::OFFLINE,
                 )
             })
             .get("not_content_indexed", move |this, strand, out| {
@@ -363,7 +383,8 @@ impl<'v> Object<'v> for Metadata {
                     this,
                     out,
                     not_content_indexed,
-                    crate::fs::attrs::windows::NOT_CONTENT_INDEXED,
+                    attrs::windows::NOT_CONTENT_INDEXED,
+                    0,
                     0,
                     0,
                 )
@@ -375,8 +396,9 @@ impl<'v> Object<'v> for Metadata {
                     out,
                     immutable,
                     0,
-                    crate::fs::attrs::linux::IMMUTABLE,
-                    crate::fs::attrs::macos::IMMUTABLE,
+                    attrs::linux::IMMUTABLE,
+                    attrs::macos::IMMUTABLE,
+                    attrs::freebsd::IMMUTABLE,
                 )
             })
             .get("append_only", move |this, strand, out| {
@@ -386,8 +408,9 @@ impl<'v> Object<'v> for Metadata {
                     out,
                     append_only,
                     0,
-                    crate::fs::attrs::linux::APPEND_ONLY,
-                    crate::fs::attrs::macos::APPEND_ONLY,
+                    attrs::linux::APPEND_ONLY,
+                    attrs::macos::APPEND_ONLY,
+                    attrs::freebsd::APPEND_ONLY,
                 )
             })
             .get("no_dump", move |this, strand, out| {
@@ -397,20 +420,13 @@ impl<'v> Object<'v> for Metadata {
                     out,
                     no_dump,
                     0,
-                    crate::fs::attrs::linux::NO_DUMP,
-                    crate::fs::attrs::macos::NO_DUMP,
+                    attrs::linux::NO_DUMP,
+                    attrs::macos::NO_DUMP,
+                    attrs::freebsd::NO_DUMP,
                 )
             })
             .get("no_atime", move |this, strand, out| {
-                attr_field(
-                    strand,
-                    this,
-                    out,
-                    no_atime,
-                    0,
-                    crate::fs::attrs::linux::NO_ATIME,
-                    0,
-                )
+                attr_field(strand, this, out, no_atime, 0, attrs::linux::NO_ATIME, 0, 0)
             })
             .get("no_copy_on_write", move |this, strand, out| {
                 attr_field(
@@ -419,31 +435,16 @@ impl<'v> Object<'v> for Metadata {
                     out,
                     no_copy_on_write,
                     0,
-                    crate::fs::attrs::linux::NO_COPY_ON_WRITE,
+                    attrs::linux::NO_COPY_ON_WRITE,
+                    0,
                     0,
                 )
             })
             .get("dir_sync", move |this, strand, out| {
-                attr_field(
-                    strand,
-                    this,
-                    out,
-                    dir_sync,
-                    0,
-                    crate::fs::attrs::linux::DIR_SYNC,
-                    0,
-                )
+                attr_field(strand, this, out, dir_sync, 0, attrs::linux::DIR_SYNC, 0, 0)
             })
             .get("casefold", move |this, strand, out| {
-                attr_field(
-                    strand,
-                    this,
-                    out,
-                    casefold,
-                    0,
-                    crate::fs::attrs::linux::CASEFOLD,
-                    0,
-                )
+                attr_field(strand, this, out, casefold, 0, attrs::linux::CASEFOLD, 0, 0)
             })
             .get("data_journaling", move |this, strand, out| {
                 attr_field(
@@ -452,7 +453,8 @@ impl<'v> Object<'v> for Metadata {
                     out,
                     data_journaling,
                     0,
-                    crate::fs::attrs::linux::DATA_JOURNALING,
+                    attrs::linux::DATA_JOURNALING,
+                    0,
                     0,
                 )
             })
@@ -463,7 +465,8 @@ impl<'v> Object<'v> for Metadata {
                     out,
                     no_compress,
                     0,
-                    crate::fs::attrs::linux::NO_COMPRESS,
+                    attrs::linux::NO_COMPRESS,
+                    0,
                     0,
                 )
             })
@@ -474,7 +477,8 @@ impl<'v> Object<'v> for Metadata {
                     out,
                     project_inherit,
                     0,
-                    crate::fs::attrs::linux::PROJECT_INHERIT,
+                    attrs::linux::PROJECT_INHERIT,
+                    0,
                     0,
                 )
             })
@@ -485,12 +489,13 @@ impl<'v> Object<'v> for Metadata {
                     out,
                     secure_delete,
                     0,
-                    crate::fs::attrs::linux::SECURE_DELETE,
+                    attrs::linux::SECURE_DELETE,
+                    0,
                     0,
                 )
             })
             .get("sync", move |this, strand, out| {
-                attr_field(strand, this, out, sync, 0, crate::fs::attrs::linux::SYNC, 0)
+                attr_field(strand, this, out, sync, 0, attrs::linux::SYNC, 0, 0)
             })
             .get("no_tail_merge", move |this, strand, out| {
                 attr_field(
@@ -499,31 +504,16 @@ impl<'v> Object<'v> for Metadata {
                     out,
                     no_tail_merge,
                     0,
-                    crate::fs::attrs::linux::NO_TAIL_MERGE,
+                    attrs::linux::NO_TAIL_MERGE,
+                    0,
                     0,
                 )
             })
             .get("top_dir", move |this, strand, out| {
-                attr_field(
-                    strand,
-                    this,
-                    out,
-                    top_dir,
-                    0,
-                    crate::fs::attrs::linux::TOP_DIR,
-                    0,
-                )
+                attr_field(strand, this, out, top_dir, 0, attrs::linux::TOP_DIR, 0, 0)
             })
             .get("undelete", move |this, strand, out| {
-                attr_field(
-                    strand,
-                    this,
-                    out,
-                    undelete,
-                    0,
-                    crate::fs::attrs::linux::UNDELETE,
-                    0,
-                )
+                attr_field(strand, this, out, undelete, 0, attrs::linux::UNDELETE, 0, 0)
             })
             .get("direct_access", move |this, strand, out| {
                 attr_field(
@@ -532,7 +522,8 @@ impl<'v> Object<'v> for Metadata {
                     out,
                     direct_access,
                     0,
-                    crate::fs::attrs::linux::DIRECT_ACCESS,
+                    attrs::linux::DIRECT_ACCESS,
+                    0,
                     0,
                 )
             })
@@ -543,7 +534,8 @@ impl<'v> Object<'v> for Metadata {
                     out,
                     extent_format,
                     0,
-                    crate::fs::attrs::linux::EXTENT_FORMAT,
+                    attrs::linux::EXTENT_FORMAT,
+                    0,
                     0,
                 )
             })
@@ -555,7 +547,8 @@ impl<'v> Object<'v> for Metadata {
                     opaque,
                     0,
                     0,
-                    crate::fs::attrs::macos::OPAQUE,
+                    attrs::macos::OPAQUE,
+                    attrs::freebsd::OPAQUE,
                 )
             })
     }

@@ -452,11 +452,11 @@ case from the requested name.
 
 #### Parameters
 
-| Name        | Type                                            | Description                                                      |
-| ----------- | ----------------------------------------------- | ---------------------------------------------------------------- |
-| `path`      | [`str`](../std/str.md)\|[`Path`](path.md)       | Path to query                                                    |
-| `namespace` | [`str`](../std/str.md)\|[`sym`](../std/sym.md)? | Namespace to query; Linux accepts `:ANY:` to list all namespaces |
-| `resolve`   | `:TARGET:`\|`:LINK:`                            | Resolution mode (see [above](#resolution-modes))                 |
+| Name        | Type                                            | Description                                                                                              |
+| ----------- | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `path`      | [`str`](../std/str.md)\|[`Path`](path.md)       | Path to query                                                                                            |
+| `namespace` | [`str`](../std/str.md)\|[`sym`](../std/sym.md)? | Namespace to query; `:USER:` and `:SYSTEM:` name well-known namespaces, and `:ANY:` lists all namespaces |
+| `resolve`   | `:TARGET:`\|`:LINK:`                            | Resolution mode (see [above](#resolution-modes))                                                         |
 
 #### Returns
 
@@ -502,7 +502,7 @@ Gets an extended attribute value.
 | ----------- | ------------------------------------------------------ | ------------------------------------------------ |
 | `path`      | [`str`](../std/str.md)\|[`Path`](path.md)              | Path to query                                    |
 | `name`      | [`str`](../std/str.md)\|[`XattrEntry`](xattr-entry.md) | Attribute name or entry from `xattrs`            |
-| `namespace` | [`str`](../std/str.md)?                                | Namespace to query                               |
+| `namespace` | [`str`](../std/str.md)\|[`sym`](../std/sym.md)?        | Namespace to query                               |
 | `resolve`   | `:TARGET:`\|`:LINK:`                                   | Resolution mode (see [above](#resolution-modes)) |
 
 #### Returns
@@ -527,7 +527,7 @@ storing an empty value.
 | `path`      | [`str`](../std/str.md)\|[`Path`](path.md)              | Path to update                                   |
 | `name`      | [`str`](../std/str.md)\|[`XattrEntry`](xattr-entry.md) | Attribute name or entry from `xattrs`            |
 | `value`     | [`str`](../std/str.md)\|[`bin`](../std/bin.md)         | Attribute bytes; strings use UTF-8               |
-| `namespace` | [`str`](../std/str.md)?                                | Namespace to update                              |
+| `namespace` | [`str`](../std/str.md)\|[`sym`](../std/sym.md)?        | Namespace to update                              |
 | `resolve`   | `:TARGET:`\|`:LINK:`                                   | Resolution mode (see [above](#resolution-modes)) |
 
 ```
@@ -545,7 +545,7 @@ Removes an extended attribute.
 | ----------- | ------------------------------------------------------ | ------------------------------------------------ |
 | `path`      | [`str`](../std/str.md)\|[`Path`](path.md)              | Path to update                                   |
 | `name`      | [`str`](../std/str.md)\|[`XattrEntry`](xattr-entry.md) | Attribute name or entry from `xattrs`            |
-| `namespace` | [`str`](../std/str.md)?                                | Namespace to update                              |
+| `namespace` | [`str`](../std/str.md)\|[`sym`](../std/sym.md)?        | Namespace to update                              |
 | `resolve`   | `:TARGET:`\|`:LINK:`                                   | Resolution mode (see [above](#resolution-modes)) |
 
 ```

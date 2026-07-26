@@ -7,7 +7,9 @@ use std::{
 use crate::{FileLockBehavior, FileLockMode, FileLockRange, FileLockRequest};
 
 #[cfg(unix)]
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
+use std::os::fd::OwnedFd;
 #[cfg(windows)]
 use std::os::windows::io::{AsRawHandle, OwnedHandle};
 
@@ -277,7 +279,7 @@ impl Drop for ArmedLock {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "freebsd")))]
 impl ArmedLock {
     fn acquire_unix(handle: NativeHandle, request: FileLockRequest) -> io::Result<Option<Self>> {
         let start = libc::off_t::try_from(request.range.start)
@@ -316,6 +318,42 @@ impl ArmedLock {
     }
 }
 
+#[cfg(target_os = "freebsd")]
+impl ArmedLock {
+    fn acquire_unix(handle: NativeHandle, request: FileLockRequest) -> io::Result<Option<Self>> {
+        if request.range.start != 0 || request.range.end.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "byte-range locks are not supported on FreeBSD",
+            ));
+        }
+        let mut operation = match request.mode {
+            FileLockMode::Exclusive => libc::LOCK_EX,
+            FileLockMode::Shared => libc::LOCK_SH,
+        };
+        if request.behavior == FileLockBehavior::Try {
+            operation |= libc::LOCK_NB;
+        }
+        let result = unsafe { libc::flock(handle.as_raw_fd(), operation) };
+        if result == -1 {
+            let error = io::Error::last_os_error();
+            if request.behavior == FileLockBehavior::Try
+                && matches!(
+                    error.raw_os_error(),
+                    Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN
+                )
+            {
+                return Ok(None);
+            }
+            return Err(error);
+        }
+        Ok(Some(Self {
+            handle: Some(handle),
+            range: request.range,
+        }))
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn ofd_command(behavior: FileLockBehavior) -> libc::c_int {
     match behavior {
@@ -334,7 +372,7 @@ fn ofd_command(behavior: FileLockBehavior) -> libc::c_int {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "freebsd")))]
 fn unlock(handle: &NativeHandle, range: FileLockRange) -> io::Result<()> {
     if range.is_empty() {
         return Ok(());
@@ -359,6 +397,22 @@ fn unlock(handle: &NativeHandle, range: FileLockRange) -> io::Result<()> {
             &lock,
         )
     };
+    if result == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "freebsd")]
+fn unlock(handle: &NativeHandle, range: FileLockRange) -> io::Result<()> {
+    if range.start != 0 || range.end.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "byte-range locks are not supported on FreeBSD",
+        ));
+    }
+    let result = unsafe { libc::flock(handle.as_raw_fd(), libc::LOCK_UN) };
     if result == -1 {
         Err(io::Error::last_os_error())
     } else {

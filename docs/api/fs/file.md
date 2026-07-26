@@ -268,9 +268,9 @@ case from the requested name.
 
 #### Parameters
 
-| Name        | Type                                            | Description                                                      |
-| ----------- | ----------------------------------------------- | ---------------------------------------------------------------- |
-| `namespace` | [`str`](../std/str.md)\|[`sym`](../std/sym.md)? | Namespace to query; Linux accepts `:ANY:` to list all namespaces |
+| Name        | Type                                            | Description                                                                                              |
+| ----------- | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `namespace` | [`str`](../std/str.md)\|[`sym`](../std/sym.md)? | Namespace to query; `:USER:` and `:SYSTEM:` name well-known namespaces, and `:ANY:` lists all namespaces |
 
 #### Returns
 
@@ -309,7 +309,7 @@ Gets an extended attribute value.
 | Name        | Type                                                   | Description                           |
 | ----------- | ------------------------------------------------------ | ------------------------------------- |
 | `name`      | [`str`](../std/str.md)\|[`XattrEntry`](xattr-entry.md) | Attribute name or entry from `xattrs` |
-| `namespace` | [`str`](../std/str.md)?                                | Namespace to query                    |
+| `namespace` | [`str`](../std/str.md)\|[`sym`](../std/sym.md)?        | Namespace to query                    |
 
 #### Returns
 
@@ -333,7 +333,7 @@ storing an empty value.
 | ----------- | ------------------------------------------------------ | ------------------------------------- |
 | `name`      | [`str`](../std/str.md)\|[`XattrEntry`](xattr-entry.md) | Attribute name or entry from `xattrs` |
 | `value`     | [`str`](../std/str.md)\|[`bin`](../std/bin.md)         | Attribute bytes; strings use UTF-8    |
-| `namespace` | [`str`](../std/str.md)?                                | Namespace to update                   |
+| `namespace` | [`str`](../std/str.md)\|[`sym`](../std/sym.md)?        | Namespace to update                   |
 
 ```
 open data.txt r+ do |file|
@@ -349,7 +349,7 @@ Removes an extended attribute.
 | Name        | Type                                                   | Description                           |
 | ----------- | ------------------------------------------------------ | ------------------------------------- |
 | `name`      | [`str`](../std/str.md)\|[`XattrEntry`](xattr-entry.md) | Attribute name or entry from `xattrs` |
-| `namespace` | [`str`](../std/str.md)?                                | Namespace to update                   |
+| `namespace` | [`str`](../std/str.md)\|[`sym`](../std/sym.md)?        | Namespace to update                   |
 
 ```
 open data.txt r+ do |file|

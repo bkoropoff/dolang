@@ -16,11 +16,11 @@ for attr = xattrs "data.txt"
   echo $attr.name
 ```
 
-### Linux
+### Linux and FreeBSD
 
 #### `namespace`
 
-Linux extended attribute namespace, such as `user`.
+Extended attribute namespace, such as `user`.
 
 ```
 for attr = xattrs "data.txt" namespace: :ANY:

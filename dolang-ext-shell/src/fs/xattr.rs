@@ -72,9 +72,30 @@ pub(crate) fn parse_name<'v, 's>(
 
     let name = util::string(strand, value, "name")?;
     let namespace = namespace
-        .map(|namespace| util::string(strand, &namespace, "namespace"))
+        .map(|namespace| parse_named_namespace(strand, global, &namespace))
         .transpose()?;
     Ok((name, namespace))
+}
+
+pub(crate) fn parse_named_namespace<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    namespace: &Value<'v>,
+) -> Result<'v, 's, String> {
+    if let Some(sym) = namespace.as_sym(strand) {
+        if sym == global.syms.namespace_user {
+            Ok("user".to_owned())
+        } else if sym == global.syms.namespace_system {
+            Ok("system".to_owned())
+        } else {
+            Err(Error::value(
+                strand,
+                "namespace: expected str, :USER:, or :SYSTEM:",
+            ))
+        }
+    } else {
+        util::string(strand, namespace, "namespace")
+    }
 }
 
 pub(crate) async fn path_list<'v, 's>(
@@ -93,8 +114,15 @@ pub(crate) async fn path_list<'v, 's>(
             if let Some(sym) = namespace.as_sym(strand) {
                 if sym == global.syms.any {
                     XattrNamespace::Any
+                } else if sym == global.syms.namespace_user {
+                    XattrNamespace::Named("user")
+                } else if sym == global.syms.namespace_system {
+                    XattrNamespace::Named("system")
                 } else {
-                    return Err(Error::value(strand, "namespace: expected str or :ANY:"));
+                    return Err(Error::value(
+                        strand,
+                        "namespace: expected str, :ANY:, :USER:, or :SYSTEM:",
+                    ));
                 }
             } else if let Some(namespace) = namespace.as_str(strand) {
                 namespace_buf = namespace.to_string();

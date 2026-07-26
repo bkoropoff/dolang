@@ -67,6 +67,7 @@ async fn open_lock_file(direct: &Direct, path: &Path) -> dolang_shell_vfs::Direc
         .unwrap()
 }
 
+#[cfg(not(target_os = "freebsd"))]
 #[tokio::test]
 async fn byte_range_locks_contend_and_release() {
     let direct = Direct::default();
@@ -121,6 +122,28 @@ async fn byte_range_locks_contend_and_release() {
             .unwrap()
             .is_some()
     );
+}
+
+#[cfg(target_os = "freebsd")]
+#[tokio::test]
+async fn byte_range_locks_are_rejected() {
+    let direct = Direct::default();
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("byte-range-locks");
+    let file = open_lock_file(&direct, &path).await;
+
+    for (start, end) in [(0, Some(10)), (1, None)] {
+        let error = file
+            .lock(lock_request(
+                start,
+                end,
+                FileLockMode::Exclusive,
+                FileLockBehavior::Try,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    }
 }
 
 #[tokio::test]

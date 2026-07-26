@@ -34,6 +34,20 @@ pub(crate) mod linux {
     pub(crate) const CASEFOLD: u32 = 0x4000_0000;
 }
 
+pub(crate) mod freebsd {
+    pub(crate) const NO_DUMP: u32 = 0x0000_0001;
+    pub(crate) const IMMUTABLE: u32 = 0x0000_0002;
+    pub(crate) const APPEND_ONLY: u32 = 0x0000_0004;
+    pub(crate) const OPAQUE: u32 = 0x0000_0008;
+    pub(crate) const COMPRESSED: u32 = 0x0000_0020;
+    pub(crate) const SYSTEM: u32 = 0x0000_0080;
+    pub(crate) const OFFLINE: u32 = 0x0000_0200;
+    pub(crate) const REPARSE_POINT: u32 = 0x0000_0400;
+    pub(crate) const ARCHIVE: u32 = 0x0000_0800;
+    pub(crate) const READONLY: u32 = 0x0000_1000;
+    pub(crate) const HIDDEN: u32 = 0x0000_8000;
+}
+
 pub(crate) mod macos {
     pub(crate) const NO_DUMP: u32 = 0x0000_0001;
     pub(crate) const IMMUTABLE: u32 = 0x0000_0002;
@@ -49,10 +63,17 @@ pub(crate) enum Flag {
     Value(bool),
 }
 
-pub(crate) fn flag(metadata: &Metadata, windows: u32, linux: u32, macos: u32) -> Flag {
+pub(crate) fn flag(
+    metadata: &Metadata,
+    windows: u32,
+    linux: u32,
+    macos: u32,
+    freebsd: u32,
+) -> Flag {
     let (value, mask) = match &metadata.family {
         MetadataFamily::Windows(metadata) => (Some(metadata.attrs), windows),
         MetadataFamily::Unix(metadata) => match metadata.platform {
+            UnixMetadataPlatform::FreeBsd { attrs } => (Some(attrs), freebsd),
             UnixMetadataPlatform::Linux { attrs } => (attrs, linux),
             UnixMetadataPlatform::Macos { attrs } => (Some(attrs), macos),
         },
