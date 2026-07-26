@@ -849,9 +849,9 @@ impl<'v> Object<'v> for File<'v> {
                 xattr::create_xattr_iter(strand, global, entries, out)
             })
             .method("xattr", async move |this, strand, args, out| {
-                let ([name], []) = unpack!(strand, args, 1, 0)?;
+                let ([name], [namespace]) = unpack!(strand, args, 1, 0, namespace = None)?;
                 let global = this.annex().global;
-                let (name, namespace) = xattr::parse_name(strand, global, &name, None)?;
+                let (name, namespace) = xattr::parse_name(strand, global, &name, namespace)?;
                 let value = {
                     let mut borrow = this.borrow_mut(strand)?;
                     let file = borrow
@@ -879,9 +879,9 @@ impl<'v> Object<'v> for File<'v> {
                 stream::create_stream_iter(strand, global, entries, out)
             })
             .method("set_xattr", async move |this, strand, args, _out| {
-                let ([name, value], []) = unpack!(strand, args, 2, 0)?;
+                let ([name, value], [namespace]) = unpack!(strand, args, 2, 0, namespace = None)?;
                 let global = this.annex().global;
-                let (name, namespace) = xattr::parse_name(strand, global, &name, None)?;
+                let (name, namespace) = xattr::parse_name(strand, global, &name, namespace)?;
                 let value = util::bytes(strand, &value, "value")?;
                 let mut borrow = this.borrow_mut(strand)?;
                 let file = borrow
@@ -893,9 +893,9 @@ impl<'v> Object<'v> for File<'v> {
                     .into_sys(strand)
             })
             .method("remove_xattr", async move |this, strand, args, _out| {
-                let ([name], []) = unpack!(strand, args, 1, 0)?;
+                let ([name], [namespace]) = unpack!(strand, args, 1, 0, namespace = None)?;
                 let global = this.annex().global;
-                let (name, namespace) = xattr::parse_name(strand, global, &name, None)?;
+                let (name, namespace) = xattr::parse_name(strand, global, &name, namespace)?;
                 let mut borrow = this.borrow_mut(strand)?;
                 let file = borrow
                     .file
