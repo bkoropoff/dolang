@@ -102,6 +102,40 @@ def round_trip_nested_and_escaped_content()
   assert_eq $"".join(parsed.children) "a < b & c > d"
 
 #[test]
+def children_are_mutable()
+  let root = Node "root"
+  let children = root.children
+  let a = Node "a"
+  let b = Node "b"
+  let c = Node "c"
+  let d = Node "d"
+
+  children.push $a $d
+  children.insert 1 $b $c
+  assert_eq $children[0].tag "a"
+  assert_eq $children[1].tag "b"
+  assert_eq $children[2].tag "c"
+  assert_eq $children[3].tag "d"
+
+  let before_last = Node "before-last"
+  children.insert -1 $before_last
+  assert_eq $children[3].tag "before-last"
+  assert_eq $children[4].tag "d"
+
+  children[2] = "text"
+  assert_eq $children[2] "text"
+  assert_eq $children.pop(1).tag "b"
+  assert_eq $children.pop().tag "d"
+  assert (children.delete -1)
+  assert (!(children.delete 99))
+  assert_eq $to_str(root) "<root><a></a>text</root>"
+
+  children.clear()
+  assert_eq $children.len 0
+  assert_eq (children.pop default: "empty") "empty"
+  assert_eq (children.pop else: do "computed") "computed"
+
+#[test]
 def attrs_and_tag_are_mutable()
   let el = from_str r#"<foo x="1" y="2"/>"#
   let a = {...el.attrs}

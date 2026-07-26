@@ -65,7 +65,7 @@ let attrs = {...el.attrs}
 
 ### `children`
 
-Immutable array-like view of the node's children.
+Mutable array-like view of the node's children.
 
 #### Returns
 
@@ -76,6 +76,16 @@ An iterator yielding child nodes (which may be `Node` or
 let el = from_str "<root><a/><b/></root>"
 for child = el.children
   echo $child.tag
+```
+
+The view supports indexed assignment and the [`array`](../std/array.md)
+mutation methods `push`, `insert`, `pop`, `delete`, and `clear`.
+
+```
+let el = from_str "<root><second/></root>"
+el.children.insert 0 (Node "first")
+el.children[1] = "text"
+assert_eq $el.children.pop() "text"
 ```
 
 ## Methods

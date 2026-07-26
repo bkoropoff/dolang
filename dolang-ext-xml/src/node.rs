@@ -48,6 +48,88 @@ impl<'v> ArrayLike<'v> for Children {
         debug_assert!(found);
         Ok(())
     }
+
+    fn set<'a, 's>(
+        &self,
+        this: Instance<'v, '_, Node>,
+        strand: &'a mut Strand<'v, 's>,
+        index: usize,
+        value: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        let found = Ref::slot::<CHILDREN>(&this.borrow(strand)?)
+            .as_array(strand)
+            .unwrap()
+            .set(strand, index, value)?;
+        debug_assert!(found);
+        Ok(())
+    }
+
+    fn push<'a, 's>(
+        &self,
+        this: Instance<'v, '_, Node>,
+        strand: &'a mut Strand<'v, 's>,
+        values: &mut [Slot<'v, 'a>],
+    ) -> Result<'v, 's, ()> {
+        Ref::slot::<CHILDREN>(&this.borrow(strand)?)
+            .as_array(strand)
+            .unwrap()
+            .push_all(strand, values)
+    }
+
+    fn insert<'a, 's>(
+        &self,
+        this: Instance<'v, '_, Node>,
+        strand: &'a mut Strand<'v, 's>,
+        index: usize,
+        values: &mut [Slot<'v, 'a>],
+    ) -> Result<'v, 's, ()> {
+        let inserted = Ref::slot::<CHILDREN>(&this.borrow(strand)?)
+            .as_array(strand)
+            .unwrap()
+            .insert(strand, index, values)?;
+        debug_assert!(inserted);
+        Ok(())
+    }
+
+    fn pop<'a, 's>(
+        &self,
+        this: Instance<'v, '_, Node>,
+        strand: &'a mut Strand<'v, 's>,
+        index: usize,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        let popped = Ref::slot::<CHILDREN>(&this.borrow(strand)?)
+            .as_array(strand)
+            .unwrap()
+            .pop_at(strand, index, out)?;
+        debug_assert!(popped);
+        Ok(())
+    }
+
+    fn delete<'s>(
+        &self,
+        this: Instance<'v, '_, Node>,
+        strand: &mut Strand<'v, 's>,
+        index: usize,
+    ) -> Result<'v, 's, ()> {
+        let deleted = Ref::slot::<CHILDREN>(&this.borrow(strand)?)
+            .as_array(strand)
+            .unwrap()
+            .delete(strand, index)?;
+        debug_assert!(deleted);
+        Ok(())
+    }
+
+    fn clear<'s>(
+        &self,
+        this: Instance<'v, '_, Node>,
+        strand: &mut Strand<'v, 's>,
+    ) -> Result<'v, 's, ()> {
+        Ref::slot::<CHILDREN>(&this.borrow(strand)?)
+            .as_array(strand)
+            .unwrap()
+            .clear(strand)
+    }
 }
 
 struct Attrs;
