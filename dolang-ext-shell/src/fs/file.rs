@@ -590,6 +590,8 @@ impl<'v> Object<'v> for File<'v> {
         let end_sym = builder.sym("end");
         let namespace = builder.sym("namespace");
         let any = builder.sym("ANY");
+        let namespace_user = builder.sym("USER");
+        let namespace_system = builder.sym("SYSTEM");
         let owner = builder.sym("owner");
         let group = builder.sym("group");
         let dacl = builder.sym("dacl");
@@ -814,10 +816,14 @@ impl<'v> Object<'v> for File<'v> {
                         if let Some(sym) = namespace.as_sym(strand) {
                             if sym == any {
                                 (None, true)
+                            } else if sym == namespace_user {
+                                (Some("user".to_owned()), false)
+                            } else if sym == namespace_system {
+                                (Some("system".to_owned()), false)
                             } else {
                                 return Err(Error::value(
                                     strand,
-                                    "namespace: expected str or :ANY:",
+                                    "namespace: expected str, :ANY:, :USER:, or :SYSTEM:",
                                 ));
                             }
                         } else if let Some(namespace) = namespace.as_str(strand) {

@@ -58,13 +58,14 @@ def user_and_group_name()
   open $test_path w do |f|
     f.write "ownership"
 
-  let before = Path(test_path).metadata()
   let user = sub $id -un
   let group = sub $id -gn
+  let uid = int $ sub $id -u
+  let gid = int $ sub $id -g
   Path(test_path).set_metadata user: $user group: $group
   let after = Path(test_path).metadata()
-  assert_eq $after.uid $before.uid
-  assert_eq $after.gid $before.gid
+  assert_eq $after.uid $uid
+  assert_eq $after.gid $gid
 
   remove $test_path
 

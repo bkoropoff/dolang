@@ -163,7 +163,7 @@ pub enum OperatingSystemFamily {
 impl OperatingSystem {
     pub fn family(&self) -> OperatingSystemFamily {
         match self {
-            Self::Linux | Self::Macos => OperatingSystemFamily::Unix,
+            Self::FreeBsd | Self::Linux | Self::Macos => OperatingSystemFamily::Unix,
             Self::Windows => OperatingSystemFamily::Windows,
         }
     }
@@ -567,6 +567,7 @@ pub struct UnixMetadata {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum UnixMetadataPlatform {
+    FreeBsd { attrs: u32 },
     Linux { attrs: Option<u32> },
     Macos { attrs: u32 },
 }
@@ -608,6 +609,16 @@ impl Metadata {
                 platform: UnixMetadataPlatform::Linux { attrs },
                 ..
             }) => *attrs,
+            _ => None,
+        }
+    }
+
+    pub const fn freebsd_attrs(&self) -> Option<u32> {
+        match &self.family {
+            MetadataFamily::Unix(UnixMetadata {
+                platform: UnixMetadataPlatform::FreeBsd { attrs },
+                ..
+            }) => Some(*attrs),
             _ => None,
         }
     }
@@ -663,6 +674,7 @@ pub struct UnixFsMetadata {
 pub enum UnixFsMetadataPlatform {
     Linux { flags: u64 },
     Macos { flags: u64 },
+    FreeBsd { flags: u64 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -747,7 +759,7 @@ impl FsMetadata {
 impl UnixFsMetadataPlatform {
     pub fn flags(&self) -> u64 {
         match self {
-            Self::Linux { flags } | Self::Macos { flags } => *flags,
+            Self::FreeBsd { flags } | Self::Linux { flags } | Self::Macos { flags } => *flags,
         }
     }
 }
@@ -891,6 +903,8 @@ pub(crate) fn metadata_from_std(metadata: std::fs::Metadata) -> Metadata {
         use nix::sys::stat::{SFlag, mode_t};
         #[cfg(target_os = "macos")]
         use std::os::darwin::fs::MetadataExt as DarwinMetadataExt;
+        #[cfg(target_os = "freebsd")]
+        use std::os::freebsd::fs::MetadataExt as FreeBsdMetadataExt;
         use std::os::unix::fs::MetadataExt;
 
         let mode = metadata.mode();
@@ -926,6 +940,10 @@ pub(crate) fn metadata_from_std(metadata: std::fs::Metadata) -> Metadata {
                 blocks: metadata.blocks(),
                 #[cfg(target_os = "linux")]
                 platform: UnixMetadataPlatform::Linux { attrs: None },
+                #[cfg(target_os = "freebsd")]
+                platform: UnixMetadataPlatform::FreeBsd {
+                    attrs: metadata.st_flags(),
+                },
                 #[cfg(target_os = "macos")]
                 platform: UnixMetadataPlatform::Macos {
                     attrs: metadata.st_flags(),

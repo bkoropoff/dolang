@@ -272,6 +272,8 @@ fn fcntl_set_lock(fd: RawFd, lock_type: c_short, start: off_t, len: off_t) -> Vf
         l_start: start,
         l_len: len,
         l_pid: 0,
+        #[cfg(target_os = "freebsd")]
+        l_sysid: 0,
     };
     let ret = unsafe { libc::fcntl(fd, libc::F_SETLK, &flock) };
     if ret == 0 {
@@ -296,6 +298,8 @@ fn fcntl_unlock(fd: RawFd, start: off_t, len: off_t) -> VfsResult<()> {
         l_start: start,
         l_len: len,
         l_pid: 0,
+        #[cfg(target_os = "freebsd")]
+        l_sysid: 0,
     };
     let ret = unsafe { libc::fcntl(fd, libc::F_SETLK, &flock) };
     if ret == 0 {
@@ -359,6 +363,8 @@ fn shm_fcntl_lock(fd: RawFd, lock_type: c_short, start: off_t, len: off_t) -> Vf
         l_start: start,
         l_len: len,
         l_pid: 0,
+        #[cfg(target_os = "freebsd")]
+        l_sysid: 0,
     };
     let ret = unsafe { libc::fcntl(fd, libc::F_SETLK, &flock) };
     if ret == 0 { Ok(()) } else { Err(SQLITE_BUSY) }
@@ -446,6 +452,8 @@ fn lock_shm_dms(shm_file: &File, is_readonly: bool) -> VfsResult<()> {
         l_start: UNIX_SHM_DMS,
         l_len: 1,
         l_pid: 0,
+        #[cfg(target_os = "freebsd")]
+        l_sysid: 0,
     };
     if unsafe { libc::fcntl(fd, libc::F_GETLK, &mut flock) } != 0 {
         return Err(SQLITE_IOERR_LOCK);
@@ -886,6 +894,8 @@ impl Vfs for ShellVfs {
             l_start: RESERVED_BYTE,
             l_len: 1,
             l_pid: 0,
+            #[cfg(target_os = "freebsd")]
+            l_sysid: 0,
         };
         let ret = unsafe { libc::fcntl(fd, libc::F_GETLK, &mut flock) };
         if ret != 0 {

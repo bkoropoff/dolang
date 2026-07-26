@@ -1,4 +1,4 @@
-import agent sys sys.unix sys.linux sys.macos sys.windows
+import agent sys sys.unix sys.freebsd sys.linux sys.macos sys.windows
   test:
     - assert
     - assert_eq
@@ -131,6 +131,8 @@ def missing_file_yields_sys_error()
     assert_type $sys.unix.Errno $code
     if (sys.os_info().os == :LINUX:)
       assert_type $sys.linux.Errno $code
+    else if (sys.os_info().os == :FREEBSD:)
+      assert_type $sys.freebsd.Errno $code
     else
       assert_type $sys.macos.Errno $code
     assert_eq $code.value 2

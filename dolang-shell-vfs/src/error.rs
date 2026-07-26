@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OperatingSystem {
+    FreeBsd,
     Linux,
     Macos,
     Windows,
@@ -15,15 +16,22 @@ impl OperatingSystem {
         return Self::Linux;
         #[cfg(target_os = "macos")]
         return Self::Macos;
+        #[cfg(target_os = "freebsd")]
+        return Self::FreeBsd;
         #[cfg(windows)]
         return Self::Windows;
-        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "freebsd",
+            windows
+        )))]
         compile_error!("unsupported target operating system");
     }
 
     pub const fn path_type(&self) -> typed_path::PathType {
         match self {
-            Self::Linux | Self::Macos => typed_path::PathType::Unix,
+            Self::Linux | Self::Macos | Self::FreeBsd => typed_path::PathType::Unix,
             Self::Windows => typed_path::PathType::Windows,
         }
     }

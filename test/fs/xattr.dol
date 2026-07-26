@@ -49,16 +49,18 @@ def module_path_and_file_operations()
     xattr $path "text"
 
 #[agent.test]
-def linux_namespace_handling()
-  if (sys.os_info().os != :LINUX:)
-    skip "requires Linux"
+def unix_namespace_handling()
+  if !(sys.os_info().os == :LINUX: || sys.os_info().os == :FREEBSD:)
+    skip "requires Linux or FreeBSD"
   let path = Path "file.txt"
   write $path "payload"
 
-  set_xattr $path "explicit" b"value" namespace: "user"
-  assert_eq (xattr path "explicit" namespace: "user") b"value"
+  set_xattr $path "explicit" b"value" namespace: :USER:
+  assert_eq (xattr path "explicit" namespace: :USER:) b"value"
 
-  open $path r do |file|
+  open $path r+ do |file|
+    file.set_xattr "file_explicit" b"value" namespace: :USER:
+    assert_eq (file.xattr "file_explicit" namespace: :USER:) b"value"
     let entries = file.xattrs namespace: :ANY:
     let saw_explicit = false
     for entry = entries

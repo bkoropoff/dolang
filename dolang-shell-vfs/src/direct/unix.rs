@@ -1,8 +1,9 @@
 use super::{Direct, DirectChild, DirectCommand};
+#[cfg(any(target_os = "freebsd", target_os = "linux", target_os = "macos"))]
+use crate::{AttrFlags, Metadata};
 use crate::{
-    AttrFlags, AttrsPatch, FsMetadata, FsMetadataFamily, Metadata, MetadataPatch,
-    OwnershipIdentity, SecDesc, StreamEntry, UnixFsMetadata, UnixFsMetadataPlatform, XattrEntry,
-    XattrNamespace,
+    AttrsPatch, FsMetadata, FsMetadataFamily, MetadataPatch, OwnershipIdentity, SecDesc,
+    StreamEntry, UnixFsMetadata, UnixFsMetadataPlatform, XattrEntry, XattrNamespace,
 };
 #[cfg(target_os = "linux")]
 use crate::{MetadataFamily, UnixMetadata, UnixMetadataPlatform};
@@ -44,6 +45,7 @@ mod linux_attrs {
     pub(super) const CASEFOLD: libc::c_long = 0x4000_0000;
 }
 
+#[derive(Clone, Copy)]
 pub(super) enum UnixXattrTarget<'a> {
     Fd(BorrowedFd<'a>),
     Path(&'a CStr, bool),
@@ -204,6 +206,10 @@ impl Direct {
                 },
                 #[cfg(target_os = "macos")]
                 platform: UnixFsMetadataPlatform::Macos {
+                    flags: stat.f_flag.into(),
+                },
+                #[cfg(target_os = "freebsd")]
+                platform: UnixFsMetadataPlatform::FreeBsd {
                     flags: stat.f_flag.into(),
                 },
             }),
@@ -395,7 +401,7 @@ impl Direct {
         unsafe { Self::set_linux_flags(file.as_raw_fd(), flags) }
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "freebsd", target_os = "macos"))]
     pub(super) fn metadata_with_attrs(
         metadata: std::fs::Metadata,
         _file: &File,
@@ -403,7 +409,7 @@ impl Direct {
         Ok(crate::metadata_from_std(metadata))
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "freebsd", target_os = "macos"))]
     pub(super) fn metadata_from_path(path: &Path, follow: bool) -> io::Result<Metadata> {
         let metadata = if follow {
             std::fs::metadata(path)?
@@ -432,7 +438,59 @@ impl Direct {
 
     #[cfg(target_os = "macos")]
     pub(super) fn set_attrs_path(path: PathBuf, patch: AttrsPatch) -> io::Result<()> {
+        use nix::sys::stat::{self, FileFlag};
+
+        Self::validate_attrs_patch(patch)?;
+
+        if patch.is_empty() {
+            return Ok(());
+        }
+
+        let stat = stat::stat(&path).map_err(io::Error::from)?;
+        let mut flags = FileFlag::from_bits_retain(stat.st_flags);
+        for (semantic, native) in [
+            (AttrFlags::HIDDEN, FileFlag::UF_HIDDEN),
+            (AttrFlags::IMMUTABLE, FileFlag::UF_IMMUTABLE),
+            (AttrFlags::APPEND_ONLY, FileFlag::UF_APPEND),
+            (AttrFlags::NO_DUMP, FileFlag::UF_NODUMP),
+            (AttrFlags::OPAQUE, FileFlag::UF_OPAQUE),
+        ] {
+            if patch.set.contains(semantic) {
+                flags.insert(native);
+            } else if patch.clear.contains(semantic) {
+                flags.remove(native);
+            }
+        }
+        nix::unistd::chflags(&path, flags).map_err(io::Error::from)
+    }
+
+    #[cfg(target_os = "freebsd")]
+    fn validate_attrs_patch(patch: AttrsPatch) -> io::Result<()> {
+        let supported = AttrFlags::READONLY
+            .union(AttrFlags::HIDDEN)
+            .union(AttrFlags::SYSTEM)
+            .union(AttrFlags::ARCHIVE)
+            .union(AttrFlags::COMPRESSED)
+            .union(AttrFlags::OFFLINE)
+            .union(AttrFlags::IMMUTABLE)
+            .union(AttrFlags::APPEND_ONLY)
+            .union(AttrFlags::NO_DUMP)
+            .union(AttrFlags::OPAQUE);
+        if !patch.requested().difference(supported).is_empty() {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "one or more attributes cannot be set on this platform",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    #[cfg(target_os = "freebsd")]
+    pub(super) fn set_attrs_path(path: PathBuf, patch: AttrsPatch) -> io::Result<()> {
         use nix::sys::stat::FileFlag;
+
+        const UF_COMPRESSED: libc::c_ulong = 0x0000_0020;
 
         Self::validate_attrs_patch(patch)?;
 
@@ -441,9 +499,32 @@ impl Direct {
         }
 
         let stat = nix::sys::stat::stat(&path).map_err(io::Error::from)?;
-        let mut flags = FileFlag::from_bits_truncate(stat.st_flags);
+        let mut flags = FileFlag::from_bits_retain(stat.st_flags.into());
         for (semantic, native) in [
-            (AttrFlags::HIDDEN, FileFlag::UF_HIDDEN),
+            (
+                AttrFlags::READONLY,
+                FileFlag::from_bits_retain(libc::UF_READONLY),
+            ),
+            (
+                AttrFlags::HIDDEN,
+                FileFlag::from_bits_retain(libc::UF_HIDDEN),
+            ),
+            (
+                AttrFlags::SYSTEM,
+                FileFlag::from_bits_retain(libc::UF_SYSTEM),
+            ),
+            (
+                AttrFlags::ARCHIVE,
+                FileFlag::from_bits_retain(libc::UF_ARCHIVE),
+            ),
+            (
+                AttrFlags::COMPRESSED,
+                FileFlag::from_bits_retain(UF_COMPRESSED),
+            ),
+            (
+                AttrFlags::OFFLINE,
+                FileFlag::from_bits_retain(libc::UF_OFFLINE),
+            ),
             (AttrFlags::IMMUTABLE, FileFlag::UF_IMMUTABLE),
             (AttrFlags::APPEND_ONLY, FileFlag::UF_APPEND),
             (AttrFlags::NO_DUMP, FileFlag::UF_NODUMP),
@@ -545,7 +626,7 @@ impl Direct {
     pub(super) fn unix_xattr_namespace(
         namespace: XattrNamespace<'_>,
     ) -> io::Result<Option<Vec<u8>>> {
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
         {
             if !matches!(namespace, XattrNamespace::Default) {
                 return Err(io::Error::new(
@@ -563,6 +644,17 @@ impl Direct {
                 XattrNamespace::Any => None,
             })
         }
+        #[cfg(target_os = "freebsd")]
+        {
+            Ok(match namespace {
+                XattrNamespace::Default => Some(b"user".to_vec()),
+                XattrNamespace::Named(namespace) => {
+                    Self::freebsd_xattr_namespace(namespace)?;
+                    Some(namespace.as_bytes().to_vec())
+                }
+                XattrNamespace::Any => None,
+            })
+        }
     }
 
     pub(super) fn xattr_path(path: &Path) -> io::Result<CString> {
@@ -576,7 +668,7 @@ impl Direct {
             Some(namespace) => format!("{namespace}.{name}"),
             None => format!("user.{name}"),
         };
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
         let full_name = match namespace {
             Some(_) => {
                 return Err(io::Error::new(
@@ -586,10 +678,17 @@ impl Direct {
             }
             None => name.to_owned(),
         };
+        #[cfg(target_os = "freebsd")]
+        let full_name = {
+            let namespace = namespace.unwrap_or("user");
+            Self::freebsd_xattr_namespace(namespace)?;
+            format!("{namespace}.{name}")
+        };
         CString::new(full_name)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "xattr name contains NUL"))
     }
 
+    #[cfg(not(target_os = "freebsd"))]
     fn xattr_entry(raw_name: Vec<u8>) -> io::Result<XattrEntry> {
         let name = String::from_utf8(raw_name)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "xattr name is not UTF-8"))?;
@@ -617,6 +716,33 @@ impl Direct {
         }
     }
 
+    #[cfg(target_os = "freebsd")]
+    fn freebsd_xattr_namespace(namespace: &str) -> io::Result<libc::c_int> {
+        match namespace {
+            "user" => Ok(libc::EXTATTR_NAMESPACE_USER),
+            "system" => Ok(libc::EXTATTR_NAMESPACE_SYSTEM),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "FreeBSD xattr namespace must be user or system",
+            )),
+        }
+    }
+
+    #[cfg(target_os = "freebsd")]
+    fn freebsd_xattr_name(name: &CStr) -> io::Result<(libc::c_int, &CStr)> {
+        let bytes = name.to_bytes_with_nul();
+        let separator = bytes
+            .iter()
+            .position(|byte| *byte == b'.')
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing namespace"))?;
+        let namespace = std::str::from_utf8(&bytes[..separator])
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid namespace"))?;
+        let name = CStr::from_bytes_with_nul(&bytes[separator + 1..])
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid xattr name"))?;
+        Ok((Self::freebsd_xattr_namespace(namespace)?, name))
+    }
+
+    #[cfg(not(target_os = "freebsd"))]
     pub(super) fn unix_list_xattrs(
         target: UnixXattrTarget<'_>,
         namespace: Option<Vec<u8>>,
@@ -746,6 +872,115 @@ impl Direct {
         }
     }
 
+    #[cfg(target_os = "freebsd")]
+    pub(super) fn unix_list_xattrs(
+        target: UnixXattrTarget<'_>,
+        namespace: Option<Vec<u8>>,
+    ) -> io::Result<Vec<XattrEntry>> {
+        let mut entries = Vec::new();
+        if let Some(namespace) = namespace {
+            let namespace = std::str::from_utf8(&namespace).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "invalid xattr namespace")
+            })?;
+            Self::freebsd_list_xattrs_in_namespace(
+                target,
+                namespace,
+                Self::freebsd_xattr_namespace(namespace)?,
+                &mut entries,
+            )?;
+        } else {
+            for (namespace, native) in [
+                ("user", libc::EXTATTR_NAMESPACE_USER),
+                ("system", libc::EXTATTR_NAMESPACE_SYSTEM),
+            ] {
+                if let Err(error) =
+                    Self::freebsd_list_xattrs_in_namespace(target, namespace, native, &mut entries)
+                {
+                    if native == libc::EXTATTR_NAMESPACE_SYSTEM
+                        && matches!(error.raw_os_error(), Some(libc::EACCES | libc::EPERM))
+                    {
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        Ok(entries)
+    }
+
+    #[cfg(target_os = "freebsd")]
+    fn freebsd_list_xattrs_in_namespace(
+        target: UnixXattrTarget<'_>,
+        namespace: &str,
+        native: libc::c_int,
+        entries: &mut Vec<XattrEntry>,
+    ) -> io::Result<()> {
+        fn list(
+            target: UnixXattrTarget<'_>,
+            namespace: libc::c_int,
+            data: *mut libc::c_void,
+            len: usize,
+        ) -> libc::ssize_t {
+            unsafe {
+                match target {
+                    UnixXattrTarget::Fd(fd) => {
+                        libc::extattr_list_fd(fd.as_raw_fd(), namespace, data, len)
+                    }
+                    UnixXattrTarget::Path(path, true) => {
+                        libc::extattr_list_file(path.as_ptr(), namespace, data, len)
+                    }
+                    UnixXattrTarget::Path(path, false) => {
+                        libc::extattr_list_link(path.as_ptr(), namespace, data, len)
+                    }
+                }
+            }
+        }
+
+        let mut size = list(target, native, std::ptr::null_mut(), 0);
+        if size < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        loop {
+            let mut buf = vec![0u8; size as usize];
+            let read = list(target, native, buf.as_mut_ptr().cast(), buf.len());
+            if read < 0 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::ERANGE) {
+                    size = list(target, native, std::ptr::null_mut(), 0);
+                    if size < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    continue;
+                }
+                return Err(error);
+            }
+            buf.truncate(read as usize);
+            let mut remaining = buf.as_slice();
+            while let Some((&name_len, rest)) = remaining.split_first() {
+                let name_len = usize::from(name_len);
+                if rest.len() < name_len {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "malformed FreeBSD xattr list",
+                    ));
+                }
+                let (name, tail) = rest.split_at(name_len);
+                let name = std::str::from_utf8(name).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "xattr name is not UTF-8")
+                })?;
+                entries.push(XattrEntry {
+                    name: name.to_owned(),
+                    namespace: Some(namespace.to_owned()),
+                    size: None,
+                    flags: None,
+                });
+                remaining = tail;
+            }
+            return Ok(());
+        }
+    }
+
+    #[cfg(not(target_os = "freebsd"))]
     pub(super) fn unix_get_xattr(target: UnixXattrTarget<'_>, name: &CStr) -> io::Result<Vec<u8>> {
         #[cfg(not(target_os = "macos"))]
         let mut size = unsafe {
@@ -890,6 +1125,55 @@ impl Direct {
         }
     }
 
+    #[cfg(target_os = "freebsd")]
+    pub(super) fn unix_get_xattr(target: UnixXattrTarget<'_>, name: &CStr) -> io::Result<Vec<u8>> {
+        fn get(
+            target: UnixXattrTarget<'_>,
+            namespace: libc::c_int,
+            name: &CStr,
+            data: *mut libc::c_void,
+            len: usize,
+        ) -> libc::ssize_t {
+            unsafe {
+                match target {
+                    UnixXattrTarget::Fd(fd) => {
+                        libc::extattr_get_fd(fd.as_raw_fd(), namespace, name.as_ptr(), data, len)
+                    }
+                    UnixXattrTarget::Path(path, true) => {
+                        libc::extattr_get_file(path.as_ptr(), namespace, name.as_ptr(), data, len)
+                    }
+                    UnixXattrTarget::Path(path, false) => {
+                        libc::extattr_get_link(path.as_ptr(), namespace, name.as_ptr(), data, len)
+                    }
+                }
+            }
+        }
+
+        let (namespace, name) = Self::freebsd_xattr_name(name)?;
+        let mut size = get(target, namespace, name, std::ptr::null_mut(), 0);
+        if size < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        loop {
+            let mut buf = vec![0u8; size as usize];
+            let read = get(target, namespace, name, buf.as_mut_ptr().cast(), buf.len());
+            if read < 0 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::ERANGE) {
+                    size = get(target, namespace, name, std::ptr::null_mut(), 0);
+                    if size < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    continue;
+                }
+                return Err(error);
+            }
+            buf.truncate(read as usize);
+            return Ok(buf);
+        }
+    }
+
+    #[cfg(not(target_os = "freebsd"))]
     pub(super) fn unix_set_xattr(
         target: UnixXattrTarget<'_>,
         name: &CStr,
@@ -949,6 +1233,46 @@ impl Direct {
         }
     }
 
+    #[cfg(target_os = "freebsd")]
+    pub(super) fn unix_set_xattr(
+        target: UnixXattrTarget<'_>,
+        name: &CStr,
+        value: &[u8],
+    ) -> io::Result<()> {
+        let (namespace, name) = Self::freebsd_xattr_name(name)?;
+        let result = unsafe {
+            match target {
+                UnixXattrTarget::Fd(fd) => libc::extattr_set_fd(
+                    fd.as_raw_fd(),
+                    namespace,
+                    name.as_ptr(),
+                    value.as_ptr().cast(),
+                    value.len(),
+                ),
+                UnixXattrTarget::Path(path, true) => libc::extattr_set_file(
+                    path.as_ptr(),
+                    namespace,
+                    name.as_ptr(),
+                    value.as_ptr().cast(),
+                    value.len(),
+                ),
+                UnixXattrTarget::Path(path, false) => libc::extattr_set_link(
+                    path.as_ptr(),
+                    namespace,
+                    name.as_ptr(),
+                    value.as_ptr().cast(),
+                    value.len(),
+                ),
+            }
+        };
+        if result < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    #[cfg(not(target_os = "freebsd"))]
     pub(super) fn unix_remove_xattr(target: UnixXattrTarget<'_>, name: &CStr) -> io::Result<()> {
         #[cfg(not(target_os = "macos"))]
         let res = unsafe {
@@ -974,6 +1298,29 @@ impl Direct {
             }
         };
         if res < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    #[cfg(target_os = "freebsd")]
+    pub(super) fn unix_remove_xattr(target: UnixXattrTarget<'_>, name: &CStr) -> io::Result<()> {
+        let (namespace, name) = Self::freebsd_xattr_name(name)?;
+        let result = unsafe {
+            match target {
+                UnixXattrTarget::Fd(fd) => {
+                    libc::extattr_delete_fd(fd.as_raw_fd(), namespace, name.as_ptr())
+                }
+                UnixXattrTarget::Path(path, true) => {
+                    libc::extattr_delete_file(path.as_ptr(), namespace, name.as_ptr())
+                }
+                UnixXattrTarget::Path(path, false) => {
+                    libc::extattr_delete_link(path.as_ptr(), namespace, name.as_ptr())
+                }
+            }
+        };
+        if result < 0 {
             Err(io::Error::last_os_error())
         } else {
             Ok(())

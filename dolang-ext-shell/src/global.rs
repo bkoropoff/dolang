@@ -21,7 +21,7 @@ use crate::{
         AlreadyExistsError, NotFoundError, PermissionDeniedError, ProcError, SysError,
         SysErrorObject, TimedOutError, UnsupportedError,
     },
-    error_code::{CodeObject, Errno, ErrorCode, LinuxErrno, MacosErrno, WinError},
+    error_code::{CodeObject, Errno, ErrorCode, FreeBsdErrno, LinuxErrno, MacosErrno, WinError},
     fs::{
         file::File,
         file_lock::FileLock,
@@ -76,6 +76,7 @@ pub(crate) struct Types<'v> {
     pub(crate) token_info: Type<'v, TokenInfo>,
     pub(crate) error_code: Type<'v, CodeObject<ErrorCode>>,
     pub(crate) errno: Type<'v, CodeObject<Errno>>,
+    pub(crate) freebsd_errno: Type<'v, CodeObject<FreeBsdErrno>>,
     pub(crate) linux_errno: Type<'v, CodeObject<LinuxErrno>>,
     pub(crate) macos_errno: Type<'v, CodeObject<MacosErrno>>,
     pub(crate) win_error: Type<'v, CodeObject<WinError>>,
@@ -106,6 +107,8 @@ pub(crate) struct Syms<'v> {
     pub(crate) link: Sym<'v, 'v>,
     pub(crate) inherit: Sym<'v, 'v>,
     pub(crate) namespace: Sym<'v, 'v>,
+    pub(crate) namespace_system: Sym<'v, 'v>,
+    pub(crate) namespace_user: Sym<'v, 'v>,
     pub(crate) revision: Sym<'v, 'v>,
     pub(crate) socket: Sym<'v, 'v>,
     pub(crate) stderr: Sym<'v, 'v>,
@@ -252,6 +255,10 @@ impl<'v> Global<'v> {
                 token_info: builder.register_type(),
                 error_code,
                 errno,
+                freebsd_errno: builder
+                    .build_type::<CodeObject<FreeBsdErrno>>((), ())
+                    .nominal_supertype(errno)
+                    .build(),
                 linux_errno: builder
                     .build_type::<CodeObject<LinuxErrno>>((), ())
                     .nominal_supertype(errno)
@@ -307,6 +314,8 @@ impl<'v> Global<'v> {
                 link: builder.sym("LINK"),
                 inherit: builder.sym("INHERIT"),
                 namespace: builder.sym("namespace"),
+                namespace_system: builder.sym("SYSTEM"),
+                namespace_user: builder.sym("USER"),
                 revision: builder.sym("revision"),
                 socket: builder.sym("SOCKET"),
                 stderr: builder.sym("stderr"),

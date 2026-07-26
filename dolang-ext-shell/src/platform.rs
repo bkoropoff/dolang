@@ -9,6 +9,11 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         .commit();
 
     builder
+        .module("sys.freebsd")
+        .value("Errno", global.types.freebsd_errno)
+        .commit();
+
+    builder
         .module("sys.linux")
         .value("Errno", global.types.linux_errno)
         .commit();

@@ -7,8 +7,9 @@ For filesystem-level capacity and mount metadata, use
 [`FsMetadata`](./fs-metadata.md).
 
 Accessing a field that does not apply to the target platform raises a field
-error. `linux_attrs`, `macos_attrs`, and related attribute fields are `nil`
-when the filesystem or file type does not support querying file attributes.
+error. `freebsd_attrs`, `linux_attrs`, `macos_attrs`, and related attribute
+fields are `nil` when the filesystem or file type does not support querying
+file attributes.
 
 ## Fields
 
@@ -151,11 +152,17 @@ Raw macOS file flags.
 
 Whether the opaque flag is set.
 
+## FreeBSD-Only Fields
+
+### `freebsd_attrs`
+
+Raw FreeBSD file flags.
+
 ## Platform Attribute Fields
 
 ### `hidden`
 
-Whether the Windows or macOS hidden flag is set.
+Whether the platform hidden flag is set.
 
 ### `compressed`
 
@@ -163,15 +170,15 @@ Whether the platform compressed flag is set.
 
 ### `immutable`
 
-Whether the Linux or macOS immutable flag is set.
+Whether the platform immutable flag is set.
 
 ### `append_only`
 
-Whether the Linux or macOS append-only flag is set.
+Whether the platform append-only flag is set.
 
 ### `no_dump`
 
-Whether the Linux or macOS no-dump flag is set.
+Whether the platform no-dump flag is set.
 
 ## Unix-Only Fields
 
