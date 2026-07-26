@@ -3,6 +3,7 @@ use std::{
     ffi::OsStr,
     io::IsTerminal,
     pin::Pin,
+    rc::Rc,
 };
 
 use dolang::runtime::{
@@ -37,6 +38,7 @@ use crate::{
     program::Program,
     security::{Ace, Acl, Guid, Identity, SecDesc, Sid, SidName, TokenGroup, TokenInfo},
     shell::{Stderr, Stdin, Stdout, Vfs},
+    shell_args::ArgsData,
     sys::{CpuInfo, OsInfo},
     term::{StyleObject, Text},
     time::{DateTime, Duration},
@@ -138,6 +140,7 @@ pub(crate) struct Syms<'v> {
     pub(crate) rm_control: Sym<'v, 'v>,
 }
 
+#[derive(Clone)]
 pub enum ProgramSource {
     Path(std::path::PathBuf),
     Module(String),
@@ -148,7 +151,7 @@ pub(crate) struct Global<'v> {
     pub(crate) types: Types<'v>,
     pub(crate) syms: Syms<'v>,
     pub(crate) local: LocalKey<'v, Local>,
-    pub(crate) args: RefCell<Vec<String>>,
+    pub(crate) args: RefCell<ArgsData>,
     pub(crate) program: RefCell<Option<ProgramSource>>,
 }
 
@@ -345,7 +348,7 @@ impl<'v> Global<'v> {
                 rm_control: builder.sym("rm_control"),
             },
             local: builder.local(),
-            args: RefCell::new(Vec::new()),
+            args: RefCell::new(Rc::from([])),
             program: RefCell::new(None),
         }
     }

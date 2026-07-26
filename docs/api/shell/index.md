@@ -57,6 +57,32 @@ the current or nested VFS contexts.
 
 Return value of the executed callable
 
+### `with_override func :args? :program?`
+
+Runs `func` with scoped command-line arguments or program identity. Strands
+created within the call inherit the overrides.
+
+**Parameters:**
+
+| Name      | Type                                              | Description                                              |
+| --------- | ------------------------------------------------- | -------------------------------------------------------- |
+| `func`    | callable                                          | Block to execute                                         |
+| `args`    | [`Iterable`](../std/iterable.md)?                 | Values converted with [`arg`](../std/index.md#arg-value) |
+| `program` | [`str`](../std/str.md)?\|[`Path`](../fs/path.md)? | Program identity                                         |
+
+**Returns:** Return value of `func`.
+
+`args:` and `program:` are independent. An omitted argument retains its
+current value, so nested calls can override only one part of the invocation
+identity. The previous values are restored when `func` returns or raises an
+error.
+
+**Errors:**
+
+- Raises [`TypeError`](../std/type-error.md) if `args` is not iterable.
+- Raises [`TypeError`](../std/type-error.md) if `program` is not a string or
+  path.
+
 ### `vfs_exe()`
 
 Returns the current executable reported by the active VFS context, or `nil`
@@ -86,8 +112,8 @@ An object for accessing environment variables.
 
 ### `args`
 
-An [`array`](../std/array.md) of command-line arguments passed to the current
-shell invocation.
+An immutable [`Args`](./args.md) sequence containing the command-line arguments
+for the current invocation.
 
 ### `program`
 

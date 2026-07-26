@@ -140,7 +140,7 @@ impl<'v> Object<'v> for Blake3State {
             })
     }
 
-    async fn output<'a, 's>(
+    async fn sink<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,
@@ -193,7 +193,7 @@ impl<'v, T: Algorithm> Object<'v> for Digestible<T> {
             })
     }
 
-    async fn output<'a, 's>(
+    async fn sink<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,

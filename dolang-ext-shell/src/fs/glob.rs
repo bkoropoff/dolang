@@ -35,7 +35,7 @@ impl<'v> Object<'v> for GlobIter {
     }
 
     /// GlobIter is both an iterator and a sink
-    async fn input<'a, 's>(
+    async fn iter<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,

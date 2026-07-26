@@ -164,8 +164,8 @@ impl<'v, 'a, I: DictLike<'v>> DictView<'v, 'a, I> {
         }
     }
 
-    /// Implements [`Object::input`] directly without constructing a view object.
-    pub fn input<'s>(
+    /// Implements [`Object::iter`] directly without constructing a view object.
+    pub fn iter<'s>(
         owner: Instance<'v, '_, I::Object>,
         view: &I,
         strand: &mut Strand<'v, 's>,

@@ -11,6 +11,8 @@ use dolang::runtime::{Strand, strand};
 use dolang_shell_vfs::{AnyVfs, OperatingSystem, OperatingSystemFamily, SecurityInfo, TargetInfo};
 use dolang_shell_vfs::{Utf8TypedPathBuf, typed_path};
 
+use crate::shell_args::ArgsData;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ChannelMode {
     Line,
@@ -158,6 +160,18 @@ impl Env {
     }
 }
 
+#[derive(Clone)]
+pub(crate) enum ProgramOverride {
+    Path(Utf8TypedPathBuf),
+    Module(Box<str>),
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct InvocationOverride {
+    pub(crate) args: Option<ArgsData>,
+    pub(crate) program: Option<ProgramOverride>,
+}
+
 pub(crate) struct Local {
     cwd: RefCell<Utf8TypedPathBuf>,
     env: RefCell<Rc<Env>>,
@@ -166,6 +180,7 @@ pub(crate) struct Local {
     target: RefCell<TargetInfo>,
     security: RefCell<Option<SecurityInfo>>,
     channel_mode: Cell<ChannelMode>,
+    invocation: RefCell<InvocationOverride>,
 }
 
 impl<'v> strand::Local<'v> for Local {
@@ -181,6 +196,7 @@ impl<'v> strand::Local<'v> for Local {
             target: RefCell::new(TargetInfo::current()),
             security: RefCell::new(None),
             channel_mode: Cell::new(ChannelMode::Line),
+            invocation: RefCell::new(InvocationOverride::default()),
         }
     }
 
@@ -193,6 +209,7 @@ impl<'v> strand::Local<'v> for Local {
             target: self.target.clone(),
             security: self.security.clone(),
             channel_mode: Cell::new(self.channel_mode.get()),
+            invocation: self.invocation.clone(),
         }
     }
 }
@@ -255,6 +272,14 @@ impl Local {
 
     pub(crate) fn set_channel_mode(&self, v: ChannelMode) {
         self.channel_mode.set(v);
+    }
+
+    pub(crate) fn invocation(&self) -> InvocationOverride {
+        self.invocation.borrow().clone()
+    }
+
+    pub(crate) fn replace_invocation(&self, invocation: InvocationOverride) -> InvocationOverride {
+        mem::replace(&mut *self.invocation.borrow_mut(), invocation)
     }
 }
 

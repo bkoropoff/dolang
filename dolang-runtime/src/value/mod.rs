@@ -2353,6 +2353,8 @@ pub enum TypeObject {
     UnsupportedError,
     /// `std.iter.Iter`
     Iter,
+    /// `std.iter.Iterable`
+    Iterable,
     /// `std.iter.Sink`
     Sink,
     /// `std.Getter`
@@ -2374,6 +2376,7 @@ impl<'v> Input<'v> for TypeObject {
             TypeObject::TimedOutError => &builtins.error_timed_out,
             TypeObject::UnsupportedError => &builtins.error_unsupported,
             TypeObject::Iter => &builtins.input_iter,
+            TypeObject::Iterable => &builtins.iterable,
             TypeObject::Sink => &builtins.output_iter,
             TypeObject::Getter => &builtins.getter,
             TypeObject::Setter => &builtins.setter,

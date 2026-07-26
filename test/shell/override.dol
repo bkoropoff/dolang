@@ -1,0 +1,90 @@
+import shell
+  fs:
+    - Path
+  shell:
+    - with_override
+  strand:
+    - stream
+  test:
+    - assert_eq
+    - assert_throws
+    - test
+  std:
+    - ImmutableError
+    - RuntimeError
+    - TypeError
+
+#[test]
+def args_is_an_immutable_sequence()
+  with_override args: (range 3) do
+    assert_eq $shell.args.len 3
+    assert_eq $shell.args[0] "0"
+    assert_eq $shell.args[-1] "2"
+    assert_eq $shell.args[1..] ["1", "2"]
+    assert_eq [...shell.args] ["0", "1", "2"]
+    assert_eq (!shell.args) false
+
+    let first ...rest = shell.args
+    assert_eq $first "0"
+    assert_eq [...rest] ["1", "2"]
+
+    assert_throws $ImmutableError do
+      shell.args[0] = "changed"
+
+  with_override args: [] do
+    assert_eq $shell.args.len 0
+    assert_eq (!shell.args) true
+
+#[test]
+def program_accepts_string_and_path()
+  with_override program: synthetic.module do
+    assert_eq $shell.program synthetic.module
+
+  let path = Path synthetic.dol
+  with_override program: $path do
+    assert_eq $shell.program $path
+
+#[test]
+def nested_partial_overrides_restore_context()
+  let original_args = [...shell.args]
+  let original_program = shell.program
+
+  with_override args: ["outer"] do
+    assert_eq [...shell.args] ["outer"]
+    assert_eq $shell.program $original_program
+
+    with_override program: inner.module do
+      assert_eq [...shell.args] ["outer"]
+      assert_eq $shell.program inner.module
+
+    assert_eq [...shell.args] ["outer"]
+    assert_eq $shell.program $original_program
+
+  assert_eq [...shell.args] $original_args
+  assert_eq $shell.program $original_program
+
+  assert_throws $RuntimeError do
+    with_override args: ["failure"] program: failure.module do
+      throw RuntimeError expected
+
+  assert_eq [...shell.args] $original_args
+  assert_eq $shell.program $original_program
+
+#[test]
+def derived_strands_inherit_overrides()
+  with_override args: ["child"] program: child.module do
+    let child = stream do [shell.program, [...shell.args]]
+    assert_eq $child.join() ["child.module", ["child"]]
+
+#[test]
+def invalid_overrides_do_not_change_context()
+  let original_args = [...shell.args]
+  let original_program = shell.program
+
+  assert_throws $TypeError do
+    with_override args: 1 do nil
+  assert_throws $TypeError do
+    with_override program: nil do nil
+
+  assert_eq [...shell.args] $original_args
+  assert_eq $shell.program $original_program

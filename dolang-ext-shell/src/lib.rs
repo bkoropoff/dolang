@@ -14,6 +14,7 @@ mod proc;
 mod program;
 mod security;
 mod shell;
+mod shell_args;
 mod shlex;
 mod syntax;
 mod sys;
@@ -127,9 +128,11 @@ pub async fn set_args<'v, 's>(
     args: impl IntoIterator<Item = impl AsRef<str>>,
 ) -> Result<'v, 's, ()> {
     let global = strand.state::<Global<'v>>();
-    let mut stored = global.args.borrow_mut();
-    stored.clear();
-    stored.extend(args.into_iter().map(|arg| arg.as_ref().to_owned()));
+    *global.args.borrow_mut() = args
+        .into_iter()
+        .map(|arg| Box::<str>::from(arg.as_ref()))
+        .collect::<Vec<_>>()
+        .into();
     Ok(())
 }
 
