@@ -8,9 +8,10 @@ use dolang::{
     compile,
     extension::VmExt,
     runtime::{
-        self, Output,
+        self, Error as RuntimeError, Output,
         error::ErrorKind,
         strand::Redirect,
+        unpack,
         value::{Empty, Root},
         vm,
     },
@@ -126,6 +127,29 @@ fn run(config: Arc<dyn Config>) -> i32 {
                 Output::set(builder, &mut root, Empty::Dict);
                 builder.module_object(DYNAMIC_PRELUDE, &dynamic_prelude, DynamicPrelude { root });
             }
+
+            let compile_prelude = cli.prelude.clone();
+            let compile_strict = cli.strict;
+            let compile_cache = cli.cache;
+            builder
+                .module("_shell")
+                .function("compile_script", async move |strand, args, out| {
+                    let ([path], []) = unpack!(strand, args, 1, 0)?;
+                    let path = dolang_ext_shell::as_path(strand, &path).ok_or_else(|| {
+                        RuntimeError::type_error(strand, "path must be a str or fs.Path")
+                    })?;
+                    let bytecode = load::compile_script_cached(
+                        strand,
+                        &path,
+                        &compile_prelude,
+                        compile_strict,
+                        compile_cache,
+                    )
+                    .await?;
+                    Output::set(strand, out, bytecode.as_slice());
+                    Ok(())
+                })
+                .commit();
 
             let strict_mode = cli.strict;
             let cache = cli.cache;

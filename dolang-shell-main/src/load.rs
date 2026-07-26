@@ -63,7 +63,9 @@ pub(crate) async fn compile<'v, 's, 'a>(
     for diag in &diagnostics {
         dolang_ext_shell::print_compile_diag_stderr(strand, &disp, source, diag).await?;
     }
-    result.into_do(strand)?;
+    if let Err(error) = result {
+        return Err(Error::compile(strand, error));
+    }
     if warnings != 0 && strict {
         Err(Error::compile(
             strand,
@@ -207,6 +209,27 @@ async fn compile_script<'v, 's>(
     }
 }
 
+pub(crate) async fn compile_script_cached<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    path: &Path,
+    prelude: &[PreludeImport],
+    strict: bool,
+    cache: bool,
+) -> Result<'v, 's, Vec<u8>> {
+    let mode = Mode::Script;
+    let bc = cache
+        .then(|| cache_path(strand, path, &mode, prelude, strict))
+        .transpose()?;
+
+    if let Some(data) = read_cached(strand, path, bc.as_deref()).await? {
+        return Ok(data);
+    }
+
+    let data = compile_script(strand, path, prelude, strict).await?;
+    write_cached(strand, bc.as_deref(), &data).await?;
+    Ok(data)
+}
+
 pub(crate) async fn compile_only<'v, 's>(
     strand: &mut Strand<'v, 's>,
     path: &Path,
@@ -242,11 +265,7 @@ pub(crate) async fn load<'v, 's>(
         .then(|| cache_path(strand, path, &mode, prelude, strict))
         .transpose()?;
 
-    if let Some(bc) = &bc
-        && fs::try_exists(bc).await.into_do(strand)?
-        && !file_is_newer(bc, path).await
-    {
-        let data = fs::read(bc).await.into_do(strand)?;
+    if let Some(data) = read_cached(strand, path, bc.as_deref()).await? {
         let bytecode = Bytecode::new(data);
         match bytecode.run(strand, &mut out).await {
             Ok(()) => return Ok(()),
@@ -256,14 +275,38 @@ pub(crate) async fn load<'v, 's>(
     }
     let source = fs::read_to_string(path).await.into_do(strand)?;
     let data = compile(strand, path, &source, None, prelude, mode, strict).await?;
-    if let Some(bc) = &bc {
+    write_cached(strand, bc.as_deref(), &data).await?;
+    let bytecode = Bytecode::new(data);
+    bytecode.run(strand, &mut out).await?;
+    Ok(())
+}
+
+async fn read_cached<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    path: &Path,
+    bc: Option<&Path>,
+) -> Result<'v, 's, Option<Vec<u8>>> {
+    if let Some(bc) = bc
+        && fs::try_exists(bc).await.into_do(strand)?
+        && !file_is_newer(bc, path).await
+    {
+        Ok(Some(fs::read(bc).await.into_do(strand)?))
+    } else {
+        Ok(None)
+    }
+}
+
+async fn write_cached<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    bc: Option<&Path>,
+    data: &[u8],
+) -> Result<'v, 's, ()> {
+    if let Some(bc) = bc {
         fs::create_dir_all(bc.parent().unwrap())
             .await
             .into_do(strand)?;
-        fs::write(bc, &data).await.into_do(strand)?;
+        fs::write(bc, data).await.into_do(strand)?;
     }
-    let bytecode = Bytecode::new(data);
-    bytecode.run(strand, &mut out).await?;
     Ok(())
 }
 
