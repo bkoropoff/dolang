@@ -30,6 +30,7 @@ import _ssh
 # | `keepalive_count`    | `int?`   | Unanswered keepalives allowed                    |
 # | `batch`              | `bool?`  | Disable interactive prompts                      |
 # | `host_key`           | `sym?`   | `:DEFAULT:`, `:STRICT:`, or `:ACCEPT_NEW:`       |
+# | `known_hosts`        | `Path?`  | Override the known-hosts file                    |
 # | `command`            | `array?` | Remote VFS launcher prefix                        |
 # | `cd`                 | `Path?`  | Initial remote working directory                  |
 # | `env`                | `dict`   | Initial remote environment overrides              |
@@ -82,6 +83,7 @@ pub def with
   :keepalive_count = nil
   :batch = false
   :host_key = :DEFAULT:
+  :known_hosts = nil
   :command = ["dolang-vfs"]
   :cd = nil
   :env = {}
@@ -99,6 +101,7 @@ do
     :keepalive_count
     :batch
     :host_key
+    :known_hosts
     :command
     :cd
     :env

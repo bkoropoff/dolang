@@ -242,6 +242,11 @@ pub def get source :app = nil :digest = nil :policy = nil :cache = nil
     throw std.ValueError "app: not valid together with cache"
   source = parse_location $source
   if (type source Path)
+    if (digest != nil)
+      let digest_info = digest_spec digest
+      let actual = file_digest $source $digest_info.constructor
+      if (actual != digest_info.expected)
+        throw std.ValueError "digest mismatch for $source"
     return source
 
   (Cache app cache).get(source, digest)

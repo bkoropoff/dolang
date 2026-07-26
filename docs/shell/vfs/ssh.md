@@ -96,6 +96,7 @@ agent, and credential providers. Do does not replace or weaken that setup.
   connection failure detection.
 - `batch:` disables interactive SSH prompts.
 - `host_key:` accepts `:DEFAULT:`, `:STRICT:`, or `:ACCEPT_NEW:`.
+- `known_hosts:` selects a known-hosts file instead of the user's default.
 - `command:` replaces the remote VFS command when it is installed elsewhere.
 
 SSH configuration continues to supply settings not represented by these

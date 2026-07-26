@@ -63,11 +63,14 @@ the module name instead. In the REPL, `shell.program` is `nil`.
 dolang -m dodo --list
 dolang -m test -- test
 dolang -m ssh build.example.com build.dol
+dolang -m libvirt freebsd-build build.dol
 ```
 
 Installed aliases such as `dodo` and `dolang-test` select the corresponding
 entrypoint implicitly when available. The [`ssh` entrypoint](./vfs/ssh.md)
-compiles a local script and executes it through a remote VFS context.
+compiles a local script and executes it through a remote VFS context. The
+[`libvirt` entrypoint](./vfs/libvirt.md#running-a-script-in-a-domain) does the
+same through an existing domain created by the `libvirt` module.
 
 ### Companion Programs
 

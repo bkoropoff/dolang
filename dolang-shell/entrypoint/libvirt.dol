@@ -1,0 +1,62 @@
+import _shell args libvirt load shell
+  fs:
+    - Path
+
+def parse_env sets unsets
+  let overrides = {}
+  for spec = sets
+    let name value = if spec.contains "="
+      spec.split "=" limit: 1
+    else
+      [spec, :INHERIT:]
+    if (name.len == 0)
+      throw args.Error "--env expects a non-empty name"
+    overrides[name] = value
+
+  for name = unsets
+    if (name.len == 0 || name.contains "=")
+      throw args.Error "--unset-env expects a non-empty name without '='"
+    overrides[name] = nil
+  overrides
+
+args.with
+  help: Compile a local Do script and run it through a libvirt domain VFS.
+  - opt: connect-uri
+    default: qemu:///session
+    meta: URI
+    help: Libvirt connection URI
+  - opt: cd
+    type: $Path
+    default: nil
+    meta: PATH
+    help: Initial remote working directory
+  - opt: env
+    collect: true
+    meta: NAME[=VALUE]
+    help: Set or inherit a remote environment variable; may be repeated
+  - opt: unset-env
+    collect: true
+    meta: NAME
+    help: Unset a remote environment variable; may be repeated
+  - arg: domain
+    help: Libvirt domain name
+  - arg: script
+    type: $Path
+    divider: true
+    help: Local Do script
+  - arg: script-args
+    collect: true
+    help: Arguments passed to the target script
+  do |p|
+    let remote_env = parse_env $p.env $p.unset_env
+    let bytecode = _shell.compile_script $p.script
+    let domain = libvirt.attach $p.domain connect_uri: $p.connect_uri
+
+    domain.with
+      cd: $p.cd
+      env: $remote_env
+      do
+        shell.with_override
+          program: $p.script
+          args: $p.script_args
+          do load.run $bytecode

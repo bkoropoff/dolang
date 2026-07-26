@@ -24,6 +24,7 @@ pub def build_command
   :keepalive_count = nil
   :batch = false
   :host_key = :DEFAULT:
+  :known_hosts = nil
   :command = ["dolang-vfs"]
   :cd = nil
   :env = {}
@@ -71,6 +72,8 @@ do
     argv.push -o StrictHostKeyChecking=accept-new
   else if (host_key != :DEFAULT:)
     throw ValueError "ssh.with: invalid host-key policy: $host_key"
+  if (known_hosts != nil)
+    argv.push -o "UserKnownHostsFile=$known_hosts"
 
   argv.push -- $host ...command ...(_vfs.vfs_args cd env) --stdio
   argv
@@ -88,6 +91,7 @@ pub def with_program
   :keepalive_count = nil
   :batch = false
   :host_key = :DEFAULT:
+  :known_hosts = nil
   :command = ["dolang-vfs"]
   :cd = nil
   :env = {}
@@ -104,6 +108,7 @@ do
     :keepalive_count
     :batch
     :host_key
+    :known_hosts
     :command
     :cd
     :env
