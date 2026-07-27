@@ -3150,7 +3150,23 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_cmd_arg0(&mut self, scope: &mut Scope) -> Result<Expr> {
-        self.parse_expr(scope, ExprMode::Compact)
+        use TokenInfo::*;
+        let res = self.parse_expr(scope, ExprMode::Compact)?;
+        match self.peek()? {
+            Some(token!(ArgSep)) => {
+                self.advance();
+            }
+            None | Some(token!(StmtSep | Indent | Dedent)) => (),
+            _ => {
+                let token = self.consume();
+                return Err(self.syntax_error(
+                    scope,
+                    Some(token),
+                    "expected whitespace or end of statement",
+                ));
+            }
+        }
+        Ok(res)
     }
 
     fn parse_cmd_arg_expr(
@@ -3283,7 +3299,15 @@ impl<'a> Parser<'a> {
                 }
                 Ok(true)
             }
-            Some(token!(Key, span)) if allow_keys => {
+            Some(token!(Key, span)) => {
+                if !allow_keys {
+                    let token = self.consume();
+                    return Err(self.syntax_error(
+                        scope,
+                        Some(token),
+                        "key arguments must head a line in vertical contexts",
+                    ));
+                }
                 let span = *span;
                 self.advance();
                 let (expr, consumed) = match self.peek()? {
@@ -3366,9 +3390,6 @@ impl<'a> Parser<'a> {
         use TokenInfo::*;
 
         let arg0 = self.parse_cmd_arg0(scope)?;
-        if let Some(token!(ArgSep)) = self.peek()? {
-            self.advance();
-        }
         let mut args = vec![];
         Ok(match self.peek()? {
             Some(token!(Equal)) => {
@@ -4398,9 +4419,6 @@ impl<'a> Parser<'a> {
             Some(..) => {
                 // Parse expression and check for assignment
                 let arg0 = self.parse_cmd_arg0(scope)?;
-                if let Some(token!(ArgSep)) = self.peek()? {
-                    self.advance();
-                }
                 match self.peek()? {
                     Some(token!(Equal)) => {
                         // This is an assignment

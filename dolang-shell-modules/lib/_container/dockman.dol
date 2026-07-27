@@ -463,7 +463,8 @@ pub class Runtime
       sub do self.cli pull
         if (platform != nil)
           --platform $platform
-        $ref stderr: $lines
+        $ref
+        stderr: $lines
     catch proc.Error: e
       classify_image_error $ref $lines
       throw e
