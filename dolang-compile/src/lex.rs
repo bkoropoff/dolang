@@ -862,7 +862,9 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                 }, {
                     match Some(b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_') => (),
                     match Some(_) => match self.mode {
-                        Mode::Shell | Mode::String | Mode::Heredoc | Mode::RawHeredoc => self.trans(Literal),
+                        Mode::Shell | Mode::String | Mode::Heredoc | Mode::RawHeredoc => {
+                            return self.token(RawToken::Ident, Literal)
+                        }
                         _ => return self.error(ErrorDiagKind::BadIdent),
                     },
                 }),
