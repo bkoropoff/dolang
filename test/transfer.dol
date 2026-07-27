@@ -1,4 +1,4 @@
-import agent http http.mock tar transfer zip
+import agent http http.mock proc tar transfer zip
   fs:
     - Path
     - UnixPath
@@ -11,6 +11,7 @@ import agent http http.mock tar transfer zip
     - assert
     - assert_eq
     - assert_throws
+    - skip
 
 #[agent.test]
 def local_get_and_put()
@@ -142,6 +143,60 @@ def archive_round_trips()
       assert_eq $(destination / "nested/link").metadata(resolve: :LINK:).type :SYMLINK:
       assert_eq [...(destination / "nested/link").read_link().components] ["..", "hello.txt"]
       assert_eq $(destination / "nested/link").read() hello
+
+def compress_raw source destination format
+  destination.open wb do |file|
+    if (format == :GZIP:)
+      run gzip -c -- $source stdout: $file
+    else if (format == :ZSTD:)
+      run zstd -cq -- $source stdout: $file
+    else
+      run xz -c -- $source stdout: $file
+
+#[agent.test]
+def raw_compression_round_trips()
+  if (os_info().family == :WINDOWS:)
+    skip "requires gzip, zstd, and xz"
+
+  let source = Path "payload.bin"
+  source.write b"\x00hello\xffworld\n"
+  let formats = $
+    - [:GZIP:, "payload.GZ"]
+    - [:ZSTD:, "payload.zst"]
+    - [:XZ:, "payload.xz"]
+  for format name = formats
+    let compressed = Path $name
+    compress_raw $source $compressed $format
+    let destination = Path "out-$(str format)"
+    transfer.unpack $compressed $destination
+    assert_eq $destination.read("b") $source.read("b")
+
+  compress_raw $source (Path "payload.data") :XZ:
+  transfer.unpack payload.data explicit-output format: :XZ:
+  assert_eq (Path("explicit-output").read "b") $source.read("b")
+
+#[agent.test]
+def raw_decompression_validates_destination_and_strip()
+  if (os_info().family == :WINDOWS:)
+    skip "requires gzip"
+
+  let source = Path "payload.bin"
+  source.write b"hello"
+  compress_raw $source (Path "payload.gz") :GZIP:
+
+  Path("existing").write b"old"
+  assert_throws $ValueError do transfer.unpack payload.gz existing
+  assert_throws $ValueError do transfer.unpack payload.gz stripped strip: 1
+  assert !(Path("stripped").exists())
+
+#[agent.test]
+def corrupt_raw_input_is_not_published()
+  if (os_info().family == :WINDOWS:)
+    skip "requires xz"
+
+  Path("corrupt.xz").write b"not xz"
+  assert_throws $proc.Error do transfer.unpack corrupt.xz output
+  assert !(Path("output").exists())
 
 #[agent.test]
 def extraction_rejects_existing_destination()
