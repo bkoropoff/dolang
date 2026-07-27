@@ -3299,7 +3299,15 @@ impl<'a> Parser<'a> {
                 }
                 Ok(true)
             }
-            Some(token!(Key, span)) if allow_keys => {
+            Some(token!(Key, span)) => {
+                if !allow_keys {
+                    let token = self.consume();
+                    return Err(self.syntax_error(
+                        scope,
+                        Some(token),
+                        "key arguments must head a line in vertical contexts",
+                    ));
+                }
                 let span = *span;
                 self.advance();
                 let (expr, consumed) = match self.peek()? {
