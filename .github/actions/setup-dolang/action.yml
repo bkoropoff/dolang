@@ -4,7 +4,7 @@ description: Install the pinned Dolang bootstrap release
 inputs:
   version:
     description: Dolang release tag to install
-    default: v0.1.1
+    default: bootstrap
 
 outputs:
   target:
