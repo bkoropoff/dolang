@@ -20,6 +20,9 @@ jobs:
   test:
     name: Test
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: ${{ matrix.target == 'x86_64-freebsd' && 'dolang --strict --no-cache --import dodo -m libvirt --env PATH=/home/ci/.cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin --env CARGO_TERM_COLOR --env FORCE_COLOR dolang-ci {0}' || 'dolang --strict --no-cache --import dodo {0}' }}
     strategy:
       matrix:
         include:
@@ -29,6 +32,8 @@ jobs:
             target: x86_64-pc-windows-msvc
           - os: macos-latest
             target: aarch64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-freebsd
 
     steps:
       - uses: actions/checkout@v5
@@ -38,16 +43,85 @@ jobs:
         uses: ./.github/actions/setup-dolang
 
       - name: Install Rust toolchain
+        if: matrix.target != 'x86_64-freebsd'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
       - name: Rust cache
+        if: matrix.target != 'x86_64-freebsd'
         uses: Swatinem/rust-cache@v2
 
-      - name: Prereqs
+      - name: Cache FreeBSD VM assets
+        if: matrix.target == 'x86_64-freebsd'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/share/dolang-freebsd-ci/libvirt/ssh
+            ~/.local/share/dolang-freebsd-ci/libvirt/seeds
+            ~/.cache/dolang-freebsd-ci
+          key: freebsd-libvirt-v1
+          restore-keys: |
+            freebsd-libvirt-
+
+      - name: Prereqs (FreeBSD)
+        if: matrix.target == 'x86_64-freebsd'
+        shell: dolang --strict --no-cache {0}
         run: |
-          import systemd http sudo fs sys
+          import proc sudo fs libvirt http
+          sudo.with do 
+            run apt-get update
+            run apt-get install -y
+              libvirt-daemon-system libvirt-clients qemu-system-x86 qemu-utils
+              passt cloud-image-utils openssh-client apparmor-utils
+            run usermod -aG kvm,libvirt $env["USER"]
+            fs.set_metadata mode: 0o666 /dev/kvm
+            run sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+            run sysctl -w kernel.unprivileged_userns_clone=1
+            run systemctl stop apparmor.service
+            run systemctl disable apparmor.service
+            try
+              run aa-teardown
+            catch proc.Error: _
+              nil
+
+            # Make some room
+            fs.remove all: true
+              - /usr/local/lib/android
+              - /usr/share/dotnet
+
+          let vm = libvirt.create
+            image: https://download.freebsd.org/releases/VM-IMAGES/15.1-RELEASE/amd64/Latest/FreeBSD-15.1-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2.xz
+            os: :FREEBSD:
+            dolang: bootstrap
+            name: dolang-ci
+            app: dolang-freebsd-ci
+            memory: 12288
+            vcpus: 4
+            disk_size: 50G
+            packages:
+              - sqlite3
+              - pkgconf
+              - curl
+              - llvm19
+            init:
+              add:
+                target: /etc/rc.conf.d/firstboot_pkg_upgrade
+                content: |
+                  firstboot_pkg_upgrade_enable="NO"
+            run: do http.get https://sh.rustup.rs do |resp|
+              run sh -s -- -y stdin: $resp.chunks()
+
+          run tar -czf /tmp/dolang-src.tar.gz --exclude=.git --exclude=target .
+          vm.upload /tmp/dolang-src.tar.gz /home/ci/dolang-src.tar.gz
+          vm.with do
+            run tar -xzf dolang-src.tar.gz
+            run rm -f dolang-src.tar.gz
+
+      - name: Prereqs (not FreeBSD)
+        if: matrix.target != 'x86_64-freebsd'
+        run: |
+          import sudo fs sys
           let os = sys.os_info().os
           let env_file = env["GITHUB_ENV"]
 
@@ -60,32 +134,30 @@ jobs:
             fs.append $env_file |
               LIBCLANG_PATH=/opt/homebrew/opt/llvm/lib
           else if (os == :LINUX:)
-            bind systemd.os_release()
-              "UBUNTU_CODENAME": ubuntu_codename = nil
-              "VERSION_CODENAME": version_codename
-              ...
             sudo.with do
-              http.get https://download.docker.com/linux/ubuntu/gpg do |resp|
-                fs.write /etc/apt/keyrings/docker.asc $resp.body()
-              fs.set_metadata mode: 0o644 /etc/apt/keyrings/docker.asc
-
-              fs.write /etc/apt/sources.list.d/docker.sources |
-                Types: deb
-                URIs: https://download.docker.com/linux/ubuntu
-                Suites: $(ubuntu_codename || version_codename)
-                Components: stable
-                Signed-By: /etc/apt/keyrings/docker.asc
-
               run apt update
-              run apt install
-                docker-ce docker-ce-cli containerd.io docker-buildx-plugin
-                docker-compose-plugin llvm libclang-dev
+              run apt install llvm libclang-dev
+            run rustup target add x86_64-unknown-linux-musl
 
       - name: Lint
         run: dodo.run lint
 
       - name: Run tests
         run: dodo.run test
+
+      - name: Destroy FreeBSD VM
+        if: matrix.target == 'x86_64-freebsd'
+        shell: dolang --strict --no-cache {0}
+        run: |
+          import libvirt
+
+          try
+            let vm = libvirt.attach dolang-ci
+            if (vm.state() != :SHUTOFF:)
+              vm.destroy()
+            vm.undefine()
+          catch libvirt.NoDomainError: _
+            nil
 
   extension:
     name: VS Code Extension
