@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["v*", "bootstrap"]
   workflow_dispatch:
 
 env:
@@ -14,7 +14,7 @@ permissions:
 
 defaults:
   run:
-    shell: dolang --strict --no-cache --import dodo --import sys {0}
+    shell: dolang --strict --no-cache --import dodo --import sys --import fs {0}
 
 jobs:
   build-release:
@@ -50,7 +50,7 @@ jobs:
 
       - name: Prereqs
         run: |
-          import systemd http sudo fs
+          import systemd http sudo
           let os = sys.os_info().os
           if (os == :MACOS:)
             run brew install llvm
@@ -85,7 +85,18 @@ jobs:
           dodo.run install --prefix release
 
       - name: Run integration tests
-        run: run release/bin/dolang --module-path testlib -m test -- test
+        run: |
+          let is_win = (sys.os_info().family == :WINDOWS:)
+          if is_win
+            # Temporarily build polyfill binary and place it next to dolang
+            dodo.run build -- --bin dolang-private-polyfill
+            fs.copy
+              target/${{ matrix.target }}/debug/dolang-private-polyfill.exe
+              release/bin/dolang-private-polyfill.exe
+          run release/bin/dolang --module-path testlib -m test -- test
+          if is_win
+            # Now remove it
+            fs.remove release/bin/dolang-private-polyfill.exe
 
       - name: Package release
         run: |
@@ -139,8 +150,8 @@ jobs:
           path: dolang-code/*.vsix
 
   create-release:
-    name: Create Draft Release
-    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    name: Create Release
+    if: github.ref_type == 'tag' && (github.ref_name == 'bootstrap' || startsWith(github.ref_name, 'v'))
     needs: [build-release, build-release-vsix]
     runs-on: ubuntu-latest
     permissions:
@@ -166,12 +177,25 @@ jobs:
             VERSION=$(env["GITHUB_REF"].without_prefix "refs/tags/")
 
       - name: Create draft release
+        if: startsWith(github.ref_name, 'v')
         uses: softprops/action-gh-release@v2
         with:
           name: Release ${{ env.VERSION }}
+          prerelease: true
           draft: true
           files: |
             artifacts/*.tar.gz
             artifacts/*.vsix
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create bootstrap release
+        if: github.ref_name == 'bootstrap'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Bootstrap
+          prerelease: true
+          files: |
+            artifacts/*.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
