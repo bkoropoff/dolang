@@ -285,17 +285,27 @@ pub def put source destination :headers = nil
     put_path $source $destination
   nil
 
-let ALLOWED_FORMATS = set $
+let ARCHIVE_FORMATS = set $
   :TAR: :TAR_GZIP: :TAR_ZSTD: :ZIP:
 
-def parse_format format
+let INPUT_FORMATS = set $
+  :TAR: :TAR_GZIP: :TAR_ZSTD: :ZIP: :GZIP: :ZSTD: :XZ:
+
+def parse_input_format format
   if (format == nil)
     return nil
-  if !(ALLOWED_FORMATS.contains format)
+  if !(INPUT_FORMATS.contains format)
+    throw std.ValueError "format: expected :TAR:, :TAR_GZIP:, :TAR_ZSTD:, :ZIP:, :GZIP:, :ZSTD:, or :XZ:"
+  format
+
+def parse_archive_format format
+  if (format == nil)
+    return nil
+  if !(ARCHIVE_FORMATS.contains format)
     throw std.ValueError "format: expected :TAR:, :TAR_GZIP:, :TAR_ZSTD:, or :ZIP:"
   format
 
-def format_from_name name
+def archive_format_from_name name
   if (name == nil)
     return nil
   name = name.lower()
@@ -310,6 +320,20 @@ def format_from_name name
   else
     nil
 
+def input_format_from_name name
+  let format = archive_format_from_name $name
+  if (format != nil || name == nil)
+    return format
+  name = name.lower()
+  if name.ends_with ".gz"
+    :GZIP:
+  else if name.ends_with ".zst"
+    :ZSTD:
+  else if name.ends_with ".xz"
+    :XZ:
+  else
+    nil
+
 def sniff_format path
   let head = path.open rb do |file| file.read 512
   if (head.starts_with b"PK\x03\x04" || head.starts_with b"PK\x05\x06" ||
@@ -319,14 +343,16 @@ def sniff_format path
     :TAR_GZIP:
   else if head.starts_with b"\x28\xb5\x2f\xfd"
     :TAR_ZSTD:
+  else if head.starts_with b"\xfd7zXZ\x00"
+    :XZ:
   else
     :TAR:
 
 def input_format path format
-  (parse_format format || format_from_name path.name || sniff_format path)
+  (parse_input_format format || input_format_from_name path.name || sniff_format path)
 
 def output_format destination format
-  let selected = (parse_format format || format_from_name destination.name)
+  let selected = (parse_archive_format format || archive_format_from_name destination.name)
   if (selected == nil)
     throw std.ValueError "can't infer archive format from destination"
   selected
@@ -775,9 +801,23 @@ class ZipUnpack
     finish_links $root $records $outputs
     finish_metadata $root $records
 
-# Safely extracts TAR, compressed TAR, or ZIP into a new destination.
+def raw_format format
+  (format == :GZIP: || format == :ZSTD: || format == :XZ:)
+
+def decompress_raw source destination format
+  destination.open wb do |file|
+    if (format == :GZIP:)
+      run gzip -dc -- $source stdout: $file
+    else if (format == :ZSTD:)
+      run zstd -dc -- $source stdout: $file
+    else
+      run xz -dc -- $source stdout: $file
+
+# Safely extracts an archive or decompresses a single file into a new
+# destination.
 #
-# `strip` accepts a non-negative component count or `:ROOT:`.
+# For archives, `strip` accepts a non-negative component count or `:ROOT:`.
+# Raw gzip, Zstandard, and XZ streams require `strip: 0` and produce a file.
 pub def unpack source destination :format = nil :strip = 0 :app = nil
   source = parse_location $source
   if (type source Url)
@@ -789,12 +829,24 @@ pub def unpack source destination :format = nil :strip = 0 :app = nil
     throw std.ValueError "unpack destination already exists: $destination"
 
   let selected = input_format $source $format
+  let parent = (destination.parent || Path ".")
+  if raw_format $selected
+    if (strip != 0)
+      throw std.ValueError "strip: not valid for raw compressed input"
+    parent.create_dir all: true
+    with_temp_dir parent: $parent do |staging|
+      let output = (staging / "output")
+      decompress_raw $source $output $selected
+      if destination.exists()
+        throw std.ValueError "unpack destination appeared during decompression: $destination"
+      output.rename $destination
+    return nil
+
   let unpacker = if (selected == :ZIP:)
     ZipUnpack $source
   else
     TarUnpack $source
   let records outputs = normalize_manifest $unpacker.parse() $strip
-  let parent = (destination.parent || Path ".")
   parent.create_dir all: true
   with_temp_dir parent: $parent do |staging|
     unpacker.extract $staging $records $outputs
