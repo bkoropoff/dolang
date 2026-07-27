@@ -1530,6 +1530,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
                 Some(Entry::Setter(handler) | Entry::Property(_, handler)) => unsafe {
                     handler.call(this.as_header(), strand, value)
                 },
+                Some(Entry::Getter(_)) => Err(Error::immutable(strand)),
                 _ => T::set(Instance::new(this.receiver), strand, field, value),
             },
         )
@@ -3355,6 +3356,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for TypeObjectWrap<'v, T> {
                     Some(Cow::Borrowed("(set)")),
                     |strand| unsafe { handler.call(this.as_header(), strand, value) },
                 ),
+                Entry::Getter(_) => Err(Error::immutable(strand)),
                 _ => Err(Error::field(strand, field)),
             }
         } else {

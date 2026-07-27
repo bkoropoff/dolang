@@ -1,133 +1,163 @@
 # Node
 
-Represents an XML element node.
+Represents a parentless XML element.
+
+Nodes can be shared or inserted into different trees. Serialization derives
+namespace declarations from each node rather than from parent pointers.
 
 ## Constructor
 
-Calling `Node` as a function creates a new element node:
+### `Node tag :namespace? :prefix?`
+
+Creates an empty element.
+
+**Parameters:**
+
+| Name        | Type   | Description                         |
+| ----------- | ------ | ----------------------------------- |
+| `tag`       | `str`  | Local element name                  |
+| `namespace` | `str?` | Namespace URI                       |
+| `prefix`    | `str?` | Preferred namespace prefix          |
+
+**Returns:** `Node`.
 
 ```
-let n = Node "item"
-n["id"] = "123"
-n.push "content"
+let item = Node "item" namespace: "urn:inventory" prefix: "inv"
 ```
-
-### Parameters
-
-| Name  | Type  | Description          |
-| ----- | ----- | -------------------- |
-| `tag` | `str` | The tag name         |
 
 ## Fields
 
-| Field      | Type      | Description                    |
-| ---------- | --------- | ------------------------------ |
-| `tag`      | `str`     | The element's tag name         |
-| `attrs`    | dict-like | Ordered attribute view         |
-| `children` | array-like| Ordered child view             |
+### `tag`
 
-The `tag` field can be read and written:
+Mutable local element name.
 
-```
-let n = Node "old"
-assert_eq $n.tag "old"
-n.tag = "new"
-assert_eq $n.tag "new"
-```
+### `namespace`
 
-## Indexing
+Mutable namespace URI as a `str`, or `nil` for no namespace.
 
-Nodes support attribute access via indexing:
+### `prefix`
 
-```
-let n = Node "item"
-n["id"] = "123"
-assert_eq $n["id"] "123"
-```
+Mutable preferred prefix as a `str`, or `nil`.
+
+### `qname`
+
+Read-only qualified name formed from `prefix` and `tag`.
 
 ### `attrs`
 
-Mutable dictionary-like view of the node's attributes.
+Mutable array-like view of [`Attr`](./attr.md) objects in document order.
 
-#### Returns
-
-An iterator suitable for use in `for` loops and dict
-comprehensions.
+The view supports indexed assignment and the [`array`](../std/array.md)
+mutation methods `push`, `insert`, `pop`, `delete`, and `clear`. Duplicate
+expanded names can exist temporarily, but [`verify`](./index.md#verify-node)
+and serialization reject them.
 
 ```
-let el = from_str r#"<foo x="1" y="2"/>"#
-for k v = el.attrs
-  echo "$k = $v"
-
-# Or use with dict comprehension
-let attrs = {...el.attrs}
+let node = Node "item"
+node.attrs.push (Attr "id" "123")
+node.attrs[0].value = "456"
 ```
 
 ### `children`
 
-Mutable array-like view of the node's children.
-
-#### Returns
-
-An iterator yielding child nodes (which may be `Node` or
-`str` for text).
-
-```
-let el = from_str "<root><a/><b/></root>"
-for child = el.children
-  echo $child.tag
-```
+Mutable array-like view of child `Node` and `str` values in document order.
 
 The view supports indexed assignment and the [`array`](../std/array.md)
 mutation methods `push`, `insert`, `pop`, `delete`, and `clear`.
 
-```
-let el = from_str "<root><second/></root>"
-el.children.insert 0 (Node "first")
-el.children[1] = "text"
-assert_eq $el.children.pop() "text"
-```
+Iterating a node iterates this view directly.
+
+### `namespaces`
+
+Mutable `dict` containing the complete effective namespace snapshot for the
+node. Keys are prefix strings; `""` is the default namespace. The reserved
+`xml` binding is included.
+
+Parsed descendants retain inherited bindings in their own snapshots, so they
+can be detached and serialized independently.
 
 ## Methods
 
-### `traverse()`
+### `attr name :namespace? :default? :else?`
 
-Returns a depth-first, parent-first iterator over the node and all its
-descendants.
+Gets the first attribute matching an expanded name.
 
-#### Returns
+**Parameters:**
 
-An iterator yielding each node in the tree in document
-order. Each yielded value is either an `Node` (element) or a `str` (text
-content). The root node itself is the first value yielded.
+| Name        | Type   | Description                       |
+| ----------- | ------ | --------------------------------- |
+| `name`      | `str`  | Local attribute name              |
+| `namespace` | `str?` | Namespace URI                     |
+| `default`   |        | Value returned when absent        |
+| `else`      |        | Callable evaluated when absent    |
 
-```
-let doc = from_str "<a><b><c/></b><d/></a>"
-for n = doc.traverse()
-  if (type n Node)
-    echo $n.tag
-# prints: a, b, c, d
-```
-
-To collect all element nodes into an array:
+**Returns:** The attribute value, `nil`, or the selected fallback.
 
 ```
-let nodes = [...doc.traverse()]
+let id = node.attr "id" namespace: "urn:inventory"
 ```
+
+### `set_attr name value :namespace? :prefix?`
+
+Updates the first matching attribute or appends one.
+
+An omitted `prefix` mutates the existing attribute's value in place. An
+explicit prefix, including `prefix: nil`, replaces the matching attribute
+because attribute identity fields are immutable.
+
+**Parameters:**
+
+| Name        | Type   | Description                         |
+| ----------- | ------ | ----------------------------------- |
+| `name`      | `str`  | Local attribute name                |
+| `value`     | `str`  | Attribute value                     |
+| `namespace` | `str?` | Namespace URI                       |
+| `prefix`    | `str?` | Preferred namespace prefix          |
+
+**Returns:** `nil`.
+
+### `delete_attr name :namespace?`
+
+Deletes all attributes matching an expanded name.
+
+**Parameters:**
+
+| Name        | Type   | Description             |
+| ----------- | ------ | ----------------------- |
+| `name`      | `str`  | Local attribute name    |
+| `namespace` | `str?` | Namespace URI           |
+
+**Returns:** `bool`, whether an attribute was deleted.
 
 ### `push child`
 
-Appends a child to the node.
+Appends a child.
 
-#### Parameters
+**Parameters:**
 
-| Name    | Type            | Description      |
-| ------- | --------------- | ---------------- |
-| `child` | `Node` or `str` | The child to add |
+| Name    | Type          | Description |
+| ------- | ------------- | ----------- |
+| `child` | `Node`\|`str` | Child value |
+
+**Returns:** `nil`.
+
+### `traverse`
+
+Returns a depth-first, parent-first iterator over the node and its descendants.
+
+**Returns:** An iterator of nodes and text values in document order.
+
+## Operators
+
+String indexing accesses unnamespaced attributes. Assignment updates the first
+match or appends a new attribute. Integer indexing reads children, including
+negative indexes. Use `attr`, `set_attr`, and `delete_attr` for namespaced
+attributes.
 
 ```
-let parent = Node "parent"
-let child = Node "child"
-parent.push $child
-parent.push "text content"
+let node = Node "item"
+node["id"] = "123"
+assert_eq $node["id"] "123"
+node.push "content"
+assert_eq $node[0] "content"
 ```

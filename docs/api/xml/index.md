@@ -1,28 +1,35 @@
 # xml
 
-XML parsing and serialization.
+Parses, edits, validates, and serializes XML element trees.
+
+## Types
+
+| Type                  | Description              |
+| --------------------- | ------------------------ |
+| [`Attr`](./attr.md)   | XML attribute            |
+| [`Node`](./node.md)   | XML element node         |
 
 ## Functions
 
 ### `from_str xml`
 
-Parses an XML string and returns the root element as an [`Node`](./node.md).
+Parses an XML document into a parentless element tree.
 
-#### Parameters
+**Parameters:**
 
 | Name  | Type  | Description         |
 | ----- | ----- | ------------------- |
-| `xml` | `str` | XML string to parse |
+| `xml` | `str` | XML document        |
 
-#### Returns
+**Returns:** [`Node`](./node.md), the root element.
 
-[`Node`](./node.md) -- The root element
+**Errors:**
 
-#### Errors
+- `ValueError` if the document is invalid, has no root element, or uses an
+  unsupported entity.
 
-| Exception    | Condition                                 |
-| ------------ | ----------------------------------------- |
-| `ValueError` | The XML is invalid or has no root element |
+Predefined entities and numeric character references are expanded into text
+and attribute values. Custom DTD entities are not resolved.
 
 ```
 let doc = from_str "<root><child>text</child></root>"
@@ -31,23 +38,23 @@ assert_eq $doc.tag "root"
 
 ### `to_str node`
 
-Serializes a value to an XML string.
+Validates and serializes an XML tree.
 
-#### Parameters
+Namespace declarations are generated from expanded names and namespace
+snapshots. Prefix spelling and declaration placement can differ from the input,
+but element and attribute namespace semantics are preserved.
 
-| Name   | Type                         | Description                   |
-| ------ | ---------------------------- | ----------------------------- |
-| `node` | [`Node`](./node.md) or `str` | The node or text to serialize |
+**Parameters:**
 
-#### Returns
+| Name   | Type                         | Description          |
+| ------ | ---------------------------- | -------------------- |
+| `node` | [`Node`](./node.md)\|`str`   | XML node or text     |
 
-`str` -- XML string
+**Returns:** `str`, the serialized XML.
 
-#### Errors
+**Errors:**
 
-| Exception    | Condition                      |
-| ------------ | ------------------------------ |
-| `ValueError` | The value cannot be serialized |
+- `ValueError` if the tree is invalid or cyclic.
 
 ```
 let n = Node "greeting"
@@ -55,6 +62,27 @@ n.push "hello"
 assert_eq (to_str $n) "<greeting>hello</greeting>"
 ```
 
-## Types
+### `verify node`
 
-- [`Node`](./node.md) -- XML element node
+Checks an entire XML tree without serializing it.
+
+Validation includes names, namespace bindings, attribute uniqueness by
+expanded name, child and attribute types, and cycles. A node can temporarily
+contain invalid data while it is being edited.
+
+**Parameters:**
+
+| Name   | Type                    | Description  |
+| ------ | ----------------------- | ------------ |
+| `node` | [`Node`](./node.md)     | Root element |
+
+**Returns:** `nil`.
+
+**Errors:**
+
+- `ValueError` if the tree is invalid or cyclic.
+
+```
+let doc = Node "root"
+verify $doc
+```

@@ -2,10 +2,16 @@ import
   test:
     - assert
     - assert_eq
+    - assert_throws
     - test
+  std:
+    - ImmutableError
+    - ValueError
   xml:
+    - Attr
     - from_str
     - to_str
+    - verify
     - Node
 
 #[test]
@@ -36,6 +42,10 @@ def parse_children_and_mixed_content()
   assert_eq $cs[0] "before"
   assert_eq $cs[1].tag "mid"
   assert_eq $cs[2] "after"
+  assert_eq $el[0] "before"
+  assert_eq $el[-1] "after"
+  let iterated = [...el]
+  assert_eq $iterated[1].tag "mid"
 
 #[test]
 def parse_nested_and_multiple_children()
@@ -102,6 +112,16 @@ def round_trip_nested_and_escaped_content()
   assert_eq $"".join(parsed.children) "a < b & c > d"
 
 #[test]
+def entity_references_are_expanded()
+  let node = from_str "<root>a&amp;b&#65;&#x42;<![CDATA[c]]>d</root>"
+  assert_eq $node.children.len 1
+  assert_eq $node[0] "a&bABcd"
+  assert_eq $to_str(node) "<root>a&amp;bABcd</root>"
+
+  assert_throws $ValueError do
+    from_str "<!DOCTYPE root [<!ENTITY custom \"value\">]><root>&custom;</root>"
+
+#[test]
 def children_are_mutable()
   let root = Node "root"
   let children = root.children
@@ -138,16 +158,35 @@ def children_are_mutable()
 #[test]
 def attrs_and_tag_are_mutable()
   let el = from_str r#"<foo x="1" y="2"/>"#
-  let a = {...el.attrs}
-  assert_eq $a["x"] "1"
-  assert_eq $a["y"] "2"
-  assert_eq $el.attrs["x"] "1"
-  el.attrs["x"] = "changed"
+  assert_eq $el.attrs[0].name "x"
+  assert_eq $el.attrs[0].value "1"
+  assert_eq $el.attrs[1].name "y"
+  assert_eq $el.attrs[1].value "2"
+  el.attrs[0].value = "changed"
   assert_eq $el["x"] "changed"
+  el.attrs.push (Attr "z" "3")
+  assert_eq $el["z"] "3"
+  assert_eq $el.attrs.pop().name "z"
+
+  let attr = Attr "fixed" "value" namespace: "urn:test" prefix: "t"
+  assert_throws $ImmutableError do attr.name = "changed"
+  assert_throws $ImmutableError do attr.namespace = nil
+  assert_throws $ImmutableError do attr.prefix = nil
+  attr.value = "changed"
+  assert_eq $attr.value "changed"
 
   let n = Node "old"
   n.tag = "new"
   assert_eq $n.tag "new"
+
+  n["x"] = "first"
+  assert_eq $n["x"] "first"
+  n.set_attr "x" "second"
+  assert_eq $n.attr("x") "second"
+  assert_eq (n.attr "missing" default: "fallback") "fallback"
+  assert_eq (n.attr "missing" else: do "computed") "computed"
+  assert (n.delete_attr "x")
+  assert (!(n.delete_attr "x"))
 
 #[test]
 def node_type_and_subclassing()
@@ -163,22 +202,108 @@ def node_type_and_subclassing()
 
   let node = MyNode foo
   assert_eq $node.tag foo
+  assert_eq (type node) $MyNode
 
 #[test]
 def namespace_handling()
   let el = from_str r#"<ns:elem xmlns:ns="http://example.com"/>"#
-  assert_eq $el.tag "ns:elem"
-  assert_eq $el["xmlns:ns"] "http://example.com"
+  assert_eq $el.tag "elem"
+  assert_eq $el.namespace "http://example.com"
+  assert_eq $el.prefix "ns"
+  assert_eq $el.qname "ns:elem"
+  assert_eq $el.namespaces["ns"] "http://example.com"
+  assert_eq $el.namespaces["xml"] "http://www.w3.org/XML/1998/namespace"
 
   let src = r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body><ns:Data xmlns:ns="http://example.com">value</ns:Data></soap:Body></soap:Envelope>"#
   let doc = from_str $src
-  assert_eq $doc.tag "soap:Envelope"
+  assert_eq $doc.tag "Envelope"
+  assert_eq $doc.prefix "soap"
   let rt = to_str $doc
   let doc2 = from_str $rt
-  assert_eq $doc2.tag "soap:Envelope"
-  assert_eq $doc2["xmlns:soap"] "http://schemas.xmlsoap.org/soap/envelope/"
+  assert_eq $doc2.qname "soap:Envelope"
+  assert_eq $doc2.namespaces["soap"] "http://schemas.xmlsoap.org/soap/envelope/"
   let body = [...doc2.children]
-  assert_eq $body[0].tag "soap:Body"
+  assert_eq $body[0].qname "soap:Body"
+  let data = [...body[0].children][0]
+  assert_eq $data.tag "Data"
+  assert_eq $data.namespace "http://example.com"
+  assert_eq $data.namespaces["soap"] "http://schemas.xmlsoap.org/soap/envelope/"
+
+#[test]
+def namespaced_attributes()
+  let el = from_str r#"<root xmlns:a="urn:a" xmlns:b="urn:b" plain="p" a:id="one" b:id="two"/>"#
+  assert_eq $el["plain"] "p"
+  assert_eq (el.attr "id" namespace: "urn:a") "one"
+  assert_eq (el.attr "id" namespace: "urn:b") "two"
+  assert_eq $el.attrs[1].prefix "a"
+  assert_eq $el.attrs[1].qname "a:id"
+
+  el.set_attr "id" "changed" namespace: "urn:a"
+  el.set_attr "id" "reprefixed" namespace: "urn:a" prefix: "new"
+  el.set_attr "new" "value" namespace: "urn:b" prefix: "b"
+  assert_eq (el.attr "id" namespace: "urn:a") "reprefixed"
+  assert_eq $el.attrs[1].prefix "new"
+  assert_eq (el.attr "new" namespace: "urn:b") "value"
+  assert (el.delete_attr "id" namespace: "urn:b")
+  verify $el
+
+  assert_throws $ValueError do
+    from_str r#"<root xmlns:a="urn:x" xmlns:b="urn:x" a:id="1" b:id="2"/>"#
+
+#[test]
+def default_namespace_semantics()
+  let doc = from_str r#"<root xmlns="urn:root" plain="x"><child xmlns=""><leaf/></child></root>"#
+  assert_eq $doc.namespace "urn:root"
+  assert_eq $doc.attrs[0].namespace nil
+  let child = [...doc.children][0]
+  assert_eq $child.namespace nil
+  let reparsed = from_str $to_str(doc)
+  let reparsed_child = [...reparsed.children][0]
+  assert_eq $reparsed.namespace "urn:root"
+  assert_eq $reparsed_child.namespace nil
+
+#[test]
+def namespace_fixup_and_detached_nodes()
+  let child = Node "child" namespace: "urn:child" prefix: "c"
+  child.set_attr "id" "1" namespace: "urn:attr" prefix: "a"
+  let root = Node "root"
+  root.push $child
+
+  let encoded = to_str $root
+  let parsed = from_str $encoded
+  let parsed_child = [...parsed.children][0]
+  assert_eq $parsed_child.namespace "urn:child"
+  assert_eq (parsed_child.attr "id" namespace: "urn:attr") "1"
+
+  let detached = from_str r#"<outer xmlns="urn:default" xmlns:x="urn:x"><x:inner/></outer>"#
+  let remixed = [...detached.children][0]
+  let remixed_again = from_str $to_str(remixed)
+  assert_eq $remixed_again.namespace "urn:x"
+  assert_eq $remixed_again.tag "inner"
+
+#[test]
+def verification_rejects_invalid_trees()
+  let duplicate = Node "root"
+  duplicate.attrs.push (Attr "x" "1") (Attr "x" "2")
+  assert_throws $ValueError do verify $duplicate
+  assert_throws $ValueError do to_str $duplicate
+
+  let bad_child = Node "root"
+  bad_child.children.push 42
+  assert_throws $ValueError do verify $bad_child
+
+  let bad_namespaces = Node "root"
+  bad_namespaces.namespaces["bad"] = 42
+  assert_throws $ValueError do verify $bad_namespaces
+
+  let cyclic = Node "root"
+  cyclic.children.push $cyclic
+  assert_throws $ValueError do verify $cyclic
+
+  let shared = Node "shared"
+  let dag = Node "root"
+  dag.children.push $shared $shared
+  verify $dag
 
 #[test]
 def traverse_is_depth_first_parent_first()
