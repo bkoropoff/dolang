@@ -1,4 +1,4 @@
-import agent http http.mock proc tar transfer zip
+import agent http http.mock tar transfer zip
   fs:
     - Path
     - UnixPath
@@ -195,7 +195,9 @@ def corrupt_raw_input_is_not_published()
     skip "requires xz"
 
   Path("corrupt.xz").write b"not xz"
-  assert_throws $proc.Error do transfer.unpack corrupt.xz output
+  let e = assert_throws $transfer.ArchiveError do transfer.unpack corrupt.xz output
+  assert_eq $e.source.name corrupt.xz
+  assert e.detail
   assert !(Path("output").exists())
 
 #[agent.test]
