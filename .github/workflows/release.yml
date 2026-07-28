@@ -17,8 +17,8 @@ defaults:
     shell: dolang --strict --no-cache --import dodo --import sys --import fs {0}
 
 jobs:
-  build-release:
-    name: Build Release
+  dist:
+    name: Build Distribution
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -26,14 +26,14 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-22.04
-            target: x86_64-linux
-          - os: windows-latest
-            target: x86_64-windows
-          - os: macos-latest
-            target: aarch64-macos
-          - os: ubuntu-latest
-            target: x86_64-freebsd
+          - target: x86_64-linux
+            os: ubuntu-latest
+          - target: x86_64-windows
+            os: windows-latest
+          - target: aarch64-macos
+            os: macos-latest
+          - target: x86_64-freebsd
+            os: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v5
@@ -177,8 +177,8 @@ jobs:
           name: dolang-${{ matrix.target }}
           path: dolang-${{ matrix.target }}.tar.gz
 
-  build-release-vsix:
-    name: Build Release VSIX
+  vsix:
+    name: Build VSIX
     runs-on: ubuntu-latest
 
     steps:
@@ -220,7 +220,7 @@ jobs:
   create-release:
     name: Create Release
     if: github.ref_type == 'tag' && (github.ref_name == 'bootstrap' || startsWith(github.ref_name, 'v'))
-    needs: [build-release, build-release-vsix]
+    needs: [dist, vsix]
     runs-on: ubuntu-latest
     permissions:
       contents: write
