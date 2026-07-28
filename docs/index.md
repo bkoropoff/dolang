@@ -93,7 +93,7 @@ progress.with do podman.build
     icon: 📦
     do |i|
       for pkg = PACKAGES
-        i.message = "installing $pkg"
+        i.update message: "installing $pkg"
         run dnf install -y $pkg
         i.delta()
   tag: my-image
@@ -136,9 +136,9 @@ APIs, and a REPL.
 
 ## Platform Support
 
-Supported platforms are currently Linux, macOS, and Windows. Platform-specific
-features follow the VFS context, not the host platform, so a Linux host can
-remotely modify security descriptors on Windows, etc.
+Supported platforms are Linux, macOS, Windows, and FreeBSD.
+Platform-specific features follow the VFS context, not the host platform, so
+a Linux host can remotely modify security descriptors on Windows, etc.
 
 ## Get Started
 

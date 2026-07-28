@@ -8,6 +8,23 @@ Progress state is implicit: `progress.with` activates a progress context for the
 current scope, and `progress.show` creates widgets at the appropriate
 nesting depth automatically.
 
+When stderr is not a terminal, `with`/`show` switch to a plain-text rendering
+instead: each indicator prints an indented
+`icon <parent:id> message bar-or-position elapsed` line through the same
+`NO_COLOR`/`FORCE_COLOR`-aware output path `term.echo` uses. The `<parent:id>`
+tag stands in for the tree structure a live redraw would otherwise show visually
+— `<3>` for a top-level indicator, `<3:7>` for one whose immediate parent is
+`<3>`. IDs are assigned per `progress.with` scope in creation order and are
+never reused. `Indicator.update`/`delta` calls that only change position
+(`position:`/`delta:`/`total:`) are rate-limited (see `interval:` below) so a
+tight loop doesn't flood a log file; `icon:`/`message:` changes always print
+immediately, since they represent a change in what the indicator is doing, not
+routine progress. A line is always printed when an indicator is created and when
+its scope exits, so the last known status is never lost — the first shows
+`started` and the last shows `finished (Xs)` in place of an elapsed time, so a
+fast-finishing indicator's closing line doesn't read as just another routine
+update.
+
 ## Functions
 
 ### `with func`
@@ -16,10 +33,14 @@ Activates a progress context for the duration of `func`. Terminal output (echo,
 print, child process stderr/stdout) is routed through the progress display so it
 does not interfere with active indicators.
 
-| Name    | Type  | Description             |
-| ------- | ----- | ----------------------- |
-| `func`  | func  | Callback (no arguments) |
-| `style` | dict? | Display style overrides |
+| Name       | Type   | Description                                  |
+| ---------- | ------ | -------------------------------------------- |
+| `func`     | func   | Callback (no arguments)                      |
+| `style`    | dict?  | Display style overrides                      |
+| `interval` | float? | Plain-mode rate limit in seconds (default 5) |
+
+`interval` only affects the plain-text (non-terminal) rendering — it has no
+effect when connected to a real terminal.
 
 **Style dict:**
 

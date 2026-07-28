@@ -234,6 +234,35 @@ pub fn is_terminal() -> bool {
     std::io::stderr().is_terminal()
 }
 
+/// Whether ANSI styling should be emitted to stderr, per the same
+/// NO_COLOR/FORCE_COLOR/tty policy `term.echo`/`term.print` use.
+pub fn ansi_enabled<'v>(strand: &Strand<'v, '_>) -> bool {
+    strand.state::<Global<'v>>().terminal.ansi
+}
+
+/// Write a line (newline appended) through the shared terminal writer,
+/// serialized with `term.echo`/`term.print`/diagnostic output.
+///
+/// Unlike [`with_terminal`], this does not require stderr to be a terminal
+/// or take exclusive ownership of the writer — it just locks the same mutex
+/// used by every other terminal writer, so callers may use it freely
+/// alongside concurrent `echo`/`print` calls from other strands.
+pub async fn write_terminal_line<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    line: &str,
+) -> Result<'v, 's, ()> {
+    let global = strand.state::<Global<'v>>();
+    let mut guard = global.terminal.writer.lock().await;
+    guard
+        .write_all(line.as_bytes())
+        .await
+        .map_err(|error| Error::runtime(strand, error))?;
+    guard
+        .write_all(b"\n")
+        .await
+        .map_err(|error| Error::runtime(strand, error))
+}
+
 /// Redirect terminal output (`term.echo`/`term.print` and default child stderr)
 /// through the provided writer for the duration of the callback.
 ///

@@ -72,6 +72,56 @@ impl Color {
             Bright => s.push_str(".on_bright"),
         }
     }
+
+    /// Raw ANSI SGR code for this color as a foreground.
+    fn fg_ansi(self) -> &'static str {
+        use Color::*;
+        match self {
+            Black => "30",
+            Red => "31",
+            Green => "32",
+            Yellow => "33",
+            Blue => "34",
+            Magenta => "35",
+            Cyan => "36",
+            White => "37",
+            BrightBlack => "90",
+            BrightRed => "91",
+            BrightGreen => "92",
+            BrightYellow => "93",
+            BrightBlue => "94",
+            BrightMagenta => "95",
+            BrightCyan => "96",
+            BrightWhite => "97",
+            // No specific color: brighten whatever the terminal default is.
+            Bright => "1",
+        }
+    }
+
+    /// Raw ANSI SGR code for this color as a background, or `None` if there
+    /// is no direct SGR equivalent (bare `Bright` used as a background).
+    fn bg_ansi(self) -> Option<&'static str> {
+        use Color::*;
+        Some(match self {
+            Black => "40",
+            Red => "41",
+            Green => "42",
+            Yellow => "43",
+            Blue => "44",
+            Magenta => "45",
+            Cyan => "46",
+            White => "47",
+            BrightBlack => "100",
+            BrightRed => "101",
+            BrightGreen => "102",
+            BrightYellow => "103",
+            BrightBlue => "104",
+            BrightMagenta => "105",
+            BrightCyan => "106",
+            BrightWhite => "107",
+            Bright => return None,
+        })
+    }
 }
 
 fn parse_color_value<'v, 's>(
@@ -136,6 +186,22 @@ impl TryFrom<&str> for Attr {
     }
 }
 
+impl Attr {
+    fn ansi(self) -> &'static str {
+        use Attr::*;
+        match self {
+            Bold => "1",
+            Dim => "2",
+            Italic => "3",
+            Underlined => "4",
+            Blink => "5",
+            Reverse => "7",
+            Hidden => "8",
+            Strikethrough => "9",
+        }
+    }
+}
+
 // --- Element style ---
 
 #[derive(Clone, Default)]
@@ -170,7 +236,35 @@ impl ElementStyle {
         }
         s
     }
+
+    /// Appends a raw ANSI SGR escape sequence for this style to `s`, or
+    /// nothing if the style has no attrs/colors set. Used for the
+    /// non-interactive (plain) rendering path, parallel to
+    /// [`to_template_suffix`](Self::to_template_suffix) which drives
+    /// indicatif's own template mini-language for the interactive path.
+    pub(crate) fn write_ansi_prefix(&self, s: &mut String) {
+        let mut codes: Vec<&str> = Vec::new();
+        for attr in &self.attrs {
+            codes.push(attr.ansi());
+        }
+        if let Some(fg) = self.fg {
+            codes.push(fg.fg_ansi());
+        }
+        if let Some(bg) = self.bg
+            && let Some(code) = bg.bg_ansi()
+        {
+            codes.push(code);
+        }
+        if !codes.is_empty() {
+            s.push_str("\x1b[");
+            s.push_str(&codes.join(";"));
+            s.push('m');
+        }
+    }
 }
+
+/// ANSI SGR reset sequence, paired with [`ElementStyle::write_ansi_prefix`].
+pub(crate) const ANSI_RESET: &str = "\x1b[0m";
 
 // --- Style ---
 
@@ -187,6 +281,31 @@ pub(crate) struct Style {
     elapsed: ElementStyle,
     position: ElementStyle,
     total: ElementStyle,
+}
+
+impl Style {
+    // Accessors for the plain (non-interactive) rendering path, which
+    // builds raw ANSI lines directly rather than going through indicatif's
+    // template mini-language.
+    pub(crate) fn bar(&self) -> &ElementStyle {
+        &self.bar
+    }
+
+    pub(crate) fn bar_alt(&self) -> &ElementStyle {
+        &self.bar_alt
+    }
+
+    pub(crate) fn message(&self) -> &ElementStyle {
+        &self.message
+    }
+
+    pub(crate) fn icon(&self) -> &ElementStyle {
+        &self.icon
+    }
+
+    pub(crate) fn elapsed(&self) -> &ElementStyle {
+        &self.elapsed
+    }
 }
 
 impl Default for Style {
@@ -245,7 +364,7 @@ pub(crate) enum Mode {
 
 const MIN_MSG_WIDTH: u16 = 10;
 
-fn effective_indent(style: &Style, depth: u16) -> u16 {
+pub(crate) fn effective_indent(style: &Style, depth: u16) -> u16 {
     let max_indent = style.message_width.saturating_sub(MIN_MSG_WIDTH);
     (depth * 2).min(max_indent)
 }
@@ -378,43 +497,108 @@ impl<'v> ColorKeys<'v> {
     }
 }
 
+fn unknown_key_error<'v, 's>(strand: &mut Strand<'v, 's>, sym: Sym<'v, '_>) -> Error<'v, 's> {
+    Error::value(
+        strand,
+        format!("style: unknown key: {}", sym.as_str(strand)),
+    )
+}
+
+fn as_style_dict<'v, 's, 'a>(
+    strand: &mut Strand<'v, 's>,
+    val: &'a Value<'v>,
+) -> Result<'v, 's, dolang::runtime::value::Dict<'v, 'a>> {
+    val.as_dict(strand)
+        .ok_or_else(|| Error::type_error(strand, "style: expected `dict`"))
+}
+
+fn parse_attrs<'v, 's>(strand: &mut Strand<'v, 's>, val: &Value<'v>) -> Result<'v, 's, Vec<Attr>> {
+    let arr = val
+        .as_array(strand.vm())
+        .ok_or_else(|| Error::type_error(strand, "style: attrs: expected array"))?;
+    let len = arr.len(strand)?;
+    let mut attrs = Vec::with_capacity(len);
+    for i in 0..len {
+        strand.with_slots_sync(|strand, [mut elem]| {
+            arr.get(strand, i, &mut elem)?;
+            let s = elem
+                .as_str(strand)
+                .ok_or_else(|| Error::type_error(strand, "style: attrs: expected `str` element"))?
+                .to_string();
+            let attr = Attr::try_from(s.as_str())
+                .map_err(|e| Error::runtime(strand, format!("style: attrs: {e}")))?;
+            attrs.push(attr);
+            Ok(())
+        })?;
+    }
+    Ok(attrs)
+}
+
+/// Parses a plain element-style dict — `fg`, `bg`, `attrs` only. Used for
+/// `spinner`/`elapsed`/`position`/`total`, and for `bar.alt`. Iterates the
+/// dict's actual entries (rather than probing for expected keys) so an
+/// unrecognized key is caught as an error instead of silently ignored.
 fn parse_element_style<'v, 's>(
     strand: &mut Strand<'v, 's>,
     cat: &Value<'v>,
     keys: &StyleKeys<'v>,
     es: &mut ElementStyle,
 ) -> Result<'v, 's, ()> {
-    strand.with_slots_sync(|strand, [mut slot]| {
-        // fg
-        if cat.index(strand, keys.fg, &mut slot).is_ok() && !slot.is_nil() {
-            es.fg = Some(parse_color_value(strand, &slot, "fg", keys.colors)?);
+    let dict = as_style_dict(strand, cat)?;
+    let mut pairs = dict.pairs();
+    strand.with_slots_sync(|strand, [mut key, mut val]| {
+        while pairs.next(strand, &mut key, &mut val)? {
+            let sym = key
+                .as_sym(strand)
+                .ok_or_else(|| Error::type_error(strand, "style: expected `sym` key"))?;
+            if sym == keys.fg {
+                es.fg = Some(parse_color_value(strand, &val, "fg", keys.colors)?);
+            } else if sym == keys.bg {
+                es.bg = Some(parse_color_value(strand, &val, "bg", keys.colors)?);
+            } else if sym == keys.attrs {
+                es.attrs = parse_attrs(strand, &val)?;
+            } else {
+                return Err(unknown_key_error(strand, sym));
+            }
         }
-        // bg
-        if cat.index(strand, keys.bg, &mut slot).is_ok() && !slot.is_nil() {
-            es.bg = Some(parse_color_value(strand, &slot, "bg", keys.colors)?);
-        }
-        // attrs
-        if cat.index(strand, keys.attrs, &mut slot).is_ok() && !slot.is_nil() {
-            let vm = strand.vm();
-            let arr = slot
-                .as_array(vm)
-                .ok_or_else(|| Error::type_error(strand, "style: attrs: expected array"))?;
-            let len = arr.len(strand)?;
-            es.attrs.clear();
-            for i in 0..len {
-                strand.with_slots_sync(|strand, [mut elem]| {
-                    arr.get(strand, i, &mut elem)?;
-                    let s = elem
-                        .as_str(strand)
-                        .ok_or_else(|| {
-                            Error::type_error(strand, "style: attrs: expected `str` element")
-                        })?
-                        .to_string();
-                    let attr = Attr::try_from(s.as_str())
-                        .map_err(|e| Error::runtime(strand, format!("style: attrs: {e}")))?;
-                    es.attrs.push(attr);
-                    Ok(())
-                })?;
+        Ok(())
+    })
+}
+
+/// Parses a width+color category dict — `width`, `fg`, `bg`, `attrs`, and
+/// (bar only, when `alt` is `Some`) `alt`. Used for `bar`/`message`/`icon`.
+fn parse_width_category<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    cat: &Value<'v>,
+    keys: &StyleKeys<'v>,
+    width: &mut u16,
+    es: &mut ElementStyle,
+    mut alt: Option<&mut ElementStyle>,
+) -> Result<'v, 's, ()> {
+    let dict = as_style_dict(strand, cat)?;
+    let mut pairs = dict.pairs();
+    strand.with_slots_sync(|strand, [mut key, mut val]| {
+        while pairs.next(strand, &mut key, &mut val)? {
+            let sym = key
+                .as_sym(strand)
+                .ok_or_else(|| Error::type_error(strand, "style: expected `sym` key"))?;
+            if sym == keys.width {
+                let n = val
+                    .to_i64(strand)
+                    .map_err(|_| Error::type_error(strand, "style: width: expected `int`"))?;
+                *width = n as u16;
+            } else if sym == keys.fg {
+                es.fg = Some(parse_color_value(strand, &val, "fg", keys.colors)?);
+            } else if sym == keys.bg {
+                es.bg = Some(parse_color_value(strand, &val, "bg", keys.colors)?);
+            } else if sym == keys.attrs {
+                es.attrs = parse_attrs(strand, &val)?;
+            } else if sym == keys.alt
+                && let Some(a) = alt.as_deref_mut()
+            {
+                parse_element_style(strand, &val, keys, a)?;
+            } else {
+                return Err(unknown_key_error(strand, sym));
             }
         }
         Ok(())
@@ -428,74 +612,54 @@ pub(crate) fn parse_style<'v, 's>(
 ) -> Result<'v, 's, Style> {
     let mut style = Style::default();
 
-    // Categories with width + color
-    struct WidthCat<'a> {
-        width: &'a mut u16,
-        es: &'a mut ElementStyle,
-    }
-    for (key, wc) in [
-        (
-            keys.bar,
-            WidthCat {
-                width: &mut style.bar_width,
-                es: &mut style.bar,
-            },
-        ),
-        (
-            keys.message,
-            WidthCat {
-                width: &mut style.message_width,
-                es: &mut style.message,
-            },
-        ),
-        (
-            keys.icon,
-            WidthCat {
-                width: &mut style.icon_width,
-                es: &mut style.icon,
-            },
-        ),
-    ] {
-        strand.with_slots_sync(|strand, [mut cat, mut val]| {
-            if style_val.index(strand, key, &mut cat).is_ok() && !cat.is_nil() {
-                if cat.index(strand, keys.width, &mut val).is_ok() && !val.is_nil() {
-                    let n = val
-                        .to_i64(strand)
-                        .map_err(|_| Error::type_error(strand, "style: width: expected `int`"))?;
-                    *wc.width = n as u16;
-                }
-                parse_element_style(strand, &cat, keys, wc.es)?;
+    let dict = as_style_dict(strand, style_val)?;
+    let mut pairs = dict.pairs();
+    strand.with_slots_sync(|strand, [mut key, mut val]| {
+        while pairs.next(strand, &mut key, &mut val)? {
+            let sym = key
+                .as_sym(strand)
+                .ok_or_else(|| Error::type_error(strand, "style: expected `sym` key"))?;
+            if sym == keys.bar {
+                parse_width_category(
+                    strand,
+                    &val,
+                    keys,
+                    &mut style.bar_width,
+                    &mut style.bar,
+                    Some(&mut style.bar_alt),
+                )?;
+            } else if sym == keys.message {
+                parse_width_category(
+                    strand,
+                    &val,
+                    keys,
+                    &mut style.message_width,
+                    &mut style.message,
+                    None,
+                )?;
+            } else if sym == keys.icon {
+                parse_width_category(
+                    strand,
+                    &val,
+                    keys,
+                    &mut style.icon_width,
+                    &mut style.icon,
+                    None,
+                )?;
+            } else if sym == keys.spinner {
+                parse_element_style(strand, &val, keys, &mut style.spinner)?;
+            } else if sym == keys.elapsed {
+                parse_element_style(strand, &val, keys, &mut style.elapsed)?;
+            } else if sym == keys.position {
+                parse_element_style(strand, &val, keys, &mut style.position)?;
+            } else if sym == keys.total {
+                parse_element_style(strand, &val, keys, &mut style.total)?;
+            } else {
+                return Err(unknown_key_error(strand, sym));
             }
-            Ok(())
-        })?;
-    }
-
-    // bar.alt
-    strand.with_slots_sync(|strand, [mut cat, mut alt_val]| {
-        if style_val.index(strand, keys.bar, &mut cat).is_ok()
-            && !cat.is_nil()
-            && cat.index(strand, keys.alt, &mut alt_val).is_ok()
-            && !alt_val.is_nil()
-        {
-            parse_element_style(strand, &alt_val, keys, &mut style.bar_alt)?;
         }
         Ok(())
     })?;
-
-    // Color-only categories
-    for (key, es) in [
-        (keys.spinner, &mut style.spinner),
-        (keys.elapsed, &mut style.elapsed),
-        (keys.position, &mut style.position),
-        (keys.total, &mut style.total),
-    ] {
-        strand.with_slots_sync(|strand, [mut cat]| {
-            if style_val.index(strand, key, &mut cat).is_ok() && !cat.is_nil() {
-                parse_element_style(strand, &cat, keys, es)?;
-            }
-            Ok(())
-        })?;
-    }
 
     Ok(style)
 }

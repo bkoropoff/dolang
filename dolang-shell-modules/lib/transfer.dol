@@ -1,4 +1,4 @@
-import digest fs http json progress security shell std sys tar zip
+import digest fs http json proc progress security shell std sys tar zip
   fs:
     - Path
     - UnixPath
@@ -178,7 +178,7 @@ class Cache
 
         response.throw_for_status()
         let total = (response.headers.get "content-length")
-        indicator.total = (total && int total)
+        indicator.update total: (total && int total)
         let tmp = payload.add_ext tmp
         let state = (digest_info && digest_info.constructor())
         try
@@ -806,17 +806,50 @@ class ZipUnpack
     finish_links $root $records $outputs
     finish_metadata $root $records
 
+# Raised when unpacking a raw compressed stream (gzip, Zstandard, XZ) fails.
+# `detail` is the failing tool's stderr, when it printed exactly one line.
+pub class ArchiveError: std.RuntimeError
+  pub field source = nil
+  pub field detail = nil
+
+  def (init) self source detail = nil
+    self.source = source
+    self.detail = detail
+
+  pub def (str) self
+    if self.detail
+      "archive operation failed: $(self.source): $(self.detail)"
+    else
+      "archive operation failed: $(self.source)"
+
 def raw_format format
   (format == :GZIP: || format == :ZSTD: || format == :XZ:)
 
 def decompress_raw source destination format
-  destination.open wb do |file|
-    if (format == :GZIP:)
-      run gzip -dc -- $source stdout: $file
-    else if (format == :ZSTD:)
-      run zstd -dc -- $source stdout: $file
-    else
-      run xz -dc -- $source stdout: $file
+  let prog = if (format == :GZIP:)
+    "gzip"
+  else if (format == :ZSTD:)
+    "zstd"
+  else
+    "xz"
+
+  # Capture stderr instead of letting it leak straight to the real process
+  # stderr, and use it for a clearer error on failure — a bare `proc.Error`
+  # only reports the exit status, not why the tool failed. Only the
+  # single-line case is handled specially; anything more just rethrows the
+  # original error rather than guessing how to summarize it. If there's more
+  # than a single line, dump it to stderr for logging purposes (same as
+  # libvirt's fallback for unrecognized errors) before rethrowing.
+  let lines = []
+  try
+    destination.open wb do |file|
+      run $prog -dc -- $source stdout: $file stderr: $lines
+  catch proc.Error: e
+    if (lines.len == 1)
+      throw ArchiveError $source $lines[0]
+    if lines.len
+      echo $"\n".join(lines)
+    throw e
 
 # Safely extracts an archive or decompresses a single file into a new
 # destination.
