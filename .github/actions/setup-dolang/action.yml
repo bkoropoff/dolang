@@ -6,11 +6,6 @@ inputs:
     description: Dolang release tag to install
     default: bootstrap
 
-outputs:
-  target:
-    description: Dodo target name for the current runner
-    value: ${{ steps.setup.outputs.target }}
-
 runs:
   using: composite
   steps:
@@ -24,19 +19,16 @@ runs:
       run: |
         case "${RUNNER_OS}-${RUNNER_ARCH}" in
           Linux-X64)
-            artifact=dolang-x86_64-linux-gnu.tar.gz
+            artifact=dolang-x86_64-linux.tar.gz
             executable=dolang
-            target=x86_64-linux
             ;;
           Windows-X64)
-            artifact=dolang-x86_64-windows-msvc.tar.gz
+            artifact=dolang-x86_64-windows.tar.gz
             executable=dolang.exe
-            target=x86_64-windows
             ;;
           macOS-ARM64)
-            artifact=dolang-aarch64-darwin.tar.gz
+            artifact=dolang-aarch64-macos.tar.gz
             executable=dolang
-            target=aarch64-macos
             ;;
           *)
             echo "Unsupported runner: ${RUNNER_OS}-${RUNNER_ARCH}" >&2
@@ -64,5 +56,4 @@ runs:
         fi
 
         echo "$install_dir" >> "$GITHUB_PATH"
-        echo "target=$target" >> "$GITHUB_OUTPUT"
         "$shell_install_dir/$executable" -m dodo --list

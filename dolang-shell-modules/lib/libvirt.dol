@@ -21,11 +21,11 @@ let READY_PATH = "/var/tmp/dolang-cloud-init-ready"
 let PAYLOAD_PATH = "/var/tmp/dolang-payload.tar.gz"
 let DOLANG_REPO = "dolang-org/dolang"
 
-let DOLANG_ARTIFACTS = $
-  "x86_64-linux": dolang-x86_64-linux-gnu.tar.gz
-  "x86_64-windows": dolang-x86_64-windows-msvc.tar.gz
-  "aarch64-macos": dolang-aarch64-darwin.tar.gz
-  "x86_64-freebsd": dolang-x86_64-freebsd.tar.gz
+let DOLANG_PLATFORMS = set $
+  - x86_64-linux
+  - x86_64-windows
+  - aarch64-macos
+  - x86_64-freebsd
 
 let DOMAIN_STATES = $
   "running": :RUNNING:
@@ -682,7 +682,8 @@ def dolang_platform_key os arch
   "$(str(arch).lower())-$(str(os).lower())"
 
 def dolang_artifact_name os arch
-  DOLANG_ARTIFACTS.get (dolang_platform_key os arch)
+  let key = (dolang_platform_key os arch)
+  (DOLANG_PLATFORMS.contains(key) && "dolang-$key.tar.gz" || nil)
 
 def dolang_current_tag()
   let major minor patch = shell.VERSION
