@@ -1,0 +1,27 @@
+# Functions carry their qualified name, which shows up in string coercion.
+
+class Traced
+  pub def frames _self
+    nil
+
+  pub def nested _self
+    do nil
+
+# Sibling top-level function with the same name as a method.
+def frames()
+  nil
+
+def outer()
+  def inner()
+    nil
+  inner
+
+assert_eq (str frames) "frames"
+assert_eq (str outer) "outer"
+assert_eq (str(outer())) "outer.inner"
+
+# Methods are qualified by their class, not the other way around.
+assert_eq (str Traced.frames) "Traced.frames"
+
+# Lambdas nested in a method keep the class qualification too.
+assert (str(Traced().nested()).starts_with "Traced.nested.")

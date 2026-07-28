@@ -611,22 +611,27 @@ impl<'a> Emitter<'a> {
 
     fn qualified_name(&self, func: &cfg::Func) -> String {
         let mut parts = Vec::new();
-        if let Some(span) = func.class_name {
-            parts.push(self.file.str(span).to_string());
-        }
         let mut scope_id = Some(self.graph.block(func.enter).scope);
 
         while let Some(id) = scope_id {
             let scope = self.graph.scope(id);
             // Function-entry scope: record the def name or lambda index.
             if let Some(func_id) = scope.func {
-                if let Some(span) = self.graph.func(func_id).name {
+                let scope_func = self.graph.func(func_id);
+                if let Some(span) = scope_func.name {
                     parts.push(self.file.str(span).to_string());
                 } else if scope.parent.is_some() {
                     // Unnamed function (lambda); use index to distinguish siblings.
                     parts.push(format!("{}", func_id.index()));
                 }
                 // scope.parent.is_none() → top-level <main>, omit from name.
+
+                // Methods are qualified by their class, which encloses them:
+                // pushed after the method name so the final reversal orders it
+                // as `Class.method`.
+                if let Some(span) = scope_func.class_name {
+                    parts.push(self.file.str(span).to_string());
+                }
             }
             scope_id = scope.parent;
         }
