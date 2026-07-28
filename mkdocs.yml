@@ -68,6 +68,7 @@ nav:
       - shell/vfs/index.md
       - shell/vfs/containers.md
       - shell/vfs/ssh.md
+      - shell/vfs/libvirt.md
       - shell/vfs/wsl.md
       - shell/vfs/admin.md
   - lsp.md
@@ -77,13 +78,13 @@ nav:
     - base64: api/base64.md
     - compile:
       - api/compile/index.md
-      - api/compile/result.md
-      - api/compile/diagnostic.md
-      - api/compile/span.md
-      - api/compile/pos.md
       - api/compile/annotation.md
+      - api/compile/diagnostic.md
       - api/compile/note.md
       - api/compile/patch.md
+      - api/compile/pos.md
+      - api/compile/result.md
+      - api/compile/span.md
     - digest:
       - api/digest/index.md
       - api/digest/blake3.md
@@ -114,14 +115,6 @@ nav:
     - glob:
       - api/glob/index.md
       - api/glob/glob.md
-    - podman:
-      - api/podman/index.md
-      - api/podman/container.md
-      - api/podman/image.md
-      - api/podman/noimageerror.md
-    - progress:
-      - api/progress/index.md
-      - api/progress/indicator.md
     - http:
       - api/http/index.md
       - api/http/client.md
@@ -131,26 +124,35 @@ nav:
       - api/http/status.md
     - http.mock:
       - api/http-mock/index.md
+      - api/http-mock/mock.md
       - api/http-mock/request.md
       - api/http-mock/server.md
-      - api/http-mock/mock.md
     - json: api/json.md
-    - patch:
-      - api/patch/index.md
-      - api/patch/patch.md
-      - api/patch/patchiter.md
-      - api/patch/parseerror.md
-      - api/patch/applyerror.md
-    - toml: api/toml.md
-    - toolbx: api/toolbx.md
-    - transfer: api/transfer.md
+    - libvirt:
+      - api/libvirt/index.md
+      - api/libvirt/domain.md
+      - api/libvirt/nodomainerror.md
     - load:
       - api/load/index.md
       - api/load/importhandler.md
+    - patch:
+      - api/patch/index.md
+      - api/patch/applyerror.md
+      - api/patch/parseerror.md
+      - api/patch/patch.md
+      - api/patch/patchiter.md
+    - podman:
+      - api/podman/index.md
+      - api/podman/container.md
+      - api/podman/image.md
+      - api/podman/noimageerror.md
     - proc:
       - api/proc/index.md
       - api/proc/error.md
     - proc.run: api/proc-run.md
+    - progress:
+      - api/progress/index.md
+      - api/progress/indicator.md
     - rand: api/rand.md
     - regex:
       - api/regex/index.md
@@ -158,15 +160,24 @@ nav:
       - api/regex/find.md
       - api/regex/match.md
       - api/regex/regex.md
+    - security:
+      - api/security/index.md
+    - security.unix:
+      - api/security/unix/index.md
+      - api/security/unix/identity.md
+    - security.windows:
+      - api/security/windows/index.md
+      - api/security/windows/ace.md
+      - api/security/windows/acl.md
+      - api/security/windows/secdesc.md
+      - api/security/windows/sid.md
+      - api/security/windows/sidname.md
+      - api/security/windows/tokengroup.md
+      - api/security/windows/tokeninfo.md
     - shell:
       - api/shell/index.md
       - api/shell/args.md
       - api/shell/vfs.md
-    - term:
-      - api/term/index.md
-      - api/term/style.md
-      - api/term/text.md
-    - ssh: api/ssh.md
     - shlex: api/shlex.md
     - sqlite:
       - api/sqlite/index.md
@@ -177,8 +188,10 @@ nav:
       - api/sqlite/rows.md
       - api/sqlite/statement.md
       - api/sqlite/transaction.md
+    - ssh: api/ssh.md
     - std:
       - api/std/index.md
+      - api/std/abort-error.md
       - api/std/args.md
       - api/std/array.md
       - api/std/bin.md
@@ -197,11 +210,10 @@ nav:
       - api/std/immutable-error.md
       - api/std/import-error.md
       - api/std/index-error.md
-      - api/std/abort-error.md
       - api/std/int.md
-      - api/std/iterable.md
       - api/std/iter.md
       - api/std/iter-stop.md
+      - api/std/iterable.md
       - api/std/missing-key-error.md
       - api/std/missing-pos-error.md
       - api/std/nil.md
@@ -211,52 +223,37 @@ nav:
       - api/std/runtime-error.md
       - api/std/set.md
       - api/std/setter.md
-      - api/std/state-error.md
-      - api/std/sinkable.md
       - api/std/sink.md
       - api/std/sink-stop.md
+      - api/std/sinkable.md
+      - api/std/state-error.md
       - api/std/str.md
       - api/std/sym.md
       - api/std/timed-out-error.md
       - api/std/tuple.md
-      - api/std/type-error.md
       - api/std/type.md
-      - api/std/value-error.md
-      - api/std/value.md
+      - api/std/type-error.md
       - api/std/unexpected-key-error.md
       - api/std/unexpected-pos-error.md
       - api/std/unsupported-error.md
+      - api/std/value.md
+      - api/std/value-error.md
       - api/std/zero-div-error.md
     - strand:
       - api/strand/index.md
       - api/strand/key.md
+      - api/strand/receiver.md
       - api/strand/resource.md
+      - api/strand/sender.md
       - api/strand/strand.md
       - api/strand/stream.md
-      - api/strand/sender.md
-      - api/strand/receiver.md
     - sudo: api/sudo.md
-    - wsl: api/wsl.md
-    - security:
-      - api/security/index.md
-    - security.unix:
-      - api/security/unix/index.md
-      - api/security/unix/identity.md
-    - security.windows:
-      - api/security/windows/index.md
-      - api/security/windows/acl.md
-      - api/security/windows/ace.md
-      - api/security/windows/secdesc.md
-      - api/security/windows/sid.md
-      - api/security/windows/sidname.md
-      - api/security/windows/tokengroup.md
-      - api/security/windows/tokeninfo.md
     - sys:
       - api/sys/index.md
       - api/sys/already-exists-error.md
       - api/sys/cpuinfo.md
-      - api/sys/error-code.md
       - api/sys/error.md
+      - api/sys/error-code.md
       - api/sys/not-found-error.md
       - api/sys/osinfo.md
       - api/sys/permission-denied-error.md
@@ -276,6 +273,16 @@ nav:
       - api/sys/windows/guid.md
       - api/sys/windows/win-error.md
     - systemd: api/systemd.md
+    - tar:
+      - api/tar/index.md
+      - api/tar/entry-writer.md
+      - api/tar/tar-entry.md
+      - api/tar/tar-reader.md
+      - api/tar/tar-writer.md
+    - term:
+      - api/term/index.md
+      - api/term/style.md
+      - api/term/text.md
     - test:
       - api/test/index.md
       - api/test/skip.md
@@ -283,23 +290,21 @@ nav:
       - api/time/index.md
       - api/time/datetime.md
       - api/time/duration.md
+    - toml: api/toml.md
+    - toolbx: api/toolbx.md
+    - transfer: api/transfer.md
     - url:
       - api/url/index.md
       - api/url/url.md
+    - wsl: api/wsl.md
     - xdg: api/xdg.md
-    - yaml: api/yaml.md
     - xml:
       - api/xml/index.md
       - api/xml/attr.md
       - api/xml/node.md
+    - yaml: api/yaml.md
     - zip:
       - api/zip/index.md
       - api/zip/archive.md
       - api/zip/entry.md
       - api/zip/file.md
-    - tar:
-      - api/tar/index.md
-      - api/tar/tar-reader.md
-      - api/tar/tar-entry.md
-      - api/tar/tar-writer.md
-      - api/tar/entry-writer.md

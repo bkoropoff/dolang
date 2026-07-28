@@ -1,0 +1,3 @@
+# NoDomainError
+
+::: libvirt.NoDomainError
