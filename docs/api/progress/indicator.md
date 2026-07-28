@@ -7,33 +7,62 @@ An indicator is either a progress bar (when `total` is set) or a spinner (when
 `total` is not set). Setting `total` dynamically switches between the two
 modes.
 
-## Properties
+## Fields
 
 ### `message`
 
-The indicator message text (`str`). Read/write.
+The indicator message text (`str`). Read-only — see
+[`update`](#update-icon-message-total-position-delta).
 
 ### `icon`
 
-The prefix icon (`str`). Read/write.
+The prefix icon (`str`). Read-only — see
+[`update`](#update-icon-message-total-position-delta).
 
 ### `total`
 
-The total value for bar mode (`int`), or `nil` for spinner mode. Read/write.
-
-Setting `total` to an `int` switches to bar mode. Setting it to `nil` switches
-to spinner mode.
+The total value for bar mode (`int`), or `nil` for spinner mode. Read-only —
+see [`update`](#update-icon-message-total-position-delta).
 
 ### `position`
 
-The current position (`int`). Read/write.
+The current position (`int`). Read-only — see
+[`update`](#update-icon-message-total-position-delta).
 
 ## Methods
+
+### `update :icon? :message? :total? :position? :delta?`
+
+Applies one or more changes atomically in a single call — one redraw instead
+of one per field.
+
+| Name       | Type                    | Description                                |
+| ---------- | ----------------------- | ------------------------------------------ |
+| `icon`     | [`str`](../std/str.md)? | New prefix icon                            |
+| `message`  | [`str`](../std/str.md)? | New message text                           |
+| `total`    | [`int`](../std/int.md)? | New total; `nil` switches to spinner mode  |
+| `position` | [`int`](../std/int.md)? | Absolute position                          |
+| `delta`    | [`int`](../std/int.md)? | Relative adjustment (positive or negative) |
+
+`position` and `delta` are exclusive — passing both raises an error. Omitted
+keys are left unchanged.
+
+In non-terminal (plain-text) output, `total`/`position`/`delta` changes are
+rate-limited (see `progress.with`'s `interval:`), but `icon`/`message`
+changes always print immediately.
+
+```
+w.update icon: 📦 message: "installing $pkg"
+w.update total: 100
+w.update delta: 1
+```
 
 ### `delta n?`
 
 Adjusts the position by `n` (default +1). Positive values increment, negative
-values decrement.
+values decrement. Equivalent to `update delta: n` but without the overhead of
+unpacking unused keys — the common case for a tight loop that only bumps
+progress.
 
 | Name | Type                   | Description                  |
 | ---- | ---------------------- | ---------------------------- |

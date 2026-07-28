@@ -716,11 +716,11 @@ pub class Builder
         if (kind == :CREATE:)
           let target = p.target
           let result = p.apply b""
-          w.message = "create: $target"
+          w.update message: "create: $target"
           self.#add_content $result $target nil
         else if (kind == :DELETE:)
           let source = p.source
-          w.message = "delete: $source"
+          w.update message: "delete: $source"
           self.#agent.with do
             let result = p.apply (source.read "b")
             if (result.len != 0)
@@ -730,9 +730,9 @@ pub class Builder
           let source = p.source
           let target = p.target
           if (kind == :MODIFY: || source == target)
-            w.message = "modify: $source"
+            w.update message: "modify: $source"
           else
-            w.message = "$kind: $source => $target"
+            w.update message: "$kind: $source => $target"
           self.#agent.with do
             let result = p.apply (p.source.read "b")
             self.#add_content $result $p.target nil
@@ -776,7 +776,7 @@ pub class Builder
 
     progress.show message: $label icon: 🔨 do |w|
       prefetch_add_urls $spec
-      w.total = (spec.len + 3)
+      w.update total: (spec.len + 3)
       try
         progress.show message: "starting container" do |_|
           self.#connect $from :pull
@@ -789,7 +789,7 @@ pub class Builder
         w.delta()
         return img
       finally
-        w.position = (w.total - 1)
+        w.update position: (w.total - 1)
         progress.show message: "stopping container" do |_|
           self.#cleanup()
         w.delta()

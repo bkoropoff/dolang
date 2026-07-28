@@ -23,6 +23,7 @@ use tokio::io::AsyncWrite;
 
 use crate::{
     global::Global,
+    plain,
     style::{self, Color, ColorKeys, DEFAULT_ICON, Mode, Style, StyleKeys, Units},
 };
 
@@ -31,7 +32,15 @@ use crate::{
 pub(crate) struct ProgressLocal {
     depth: Cell<u16>,
     parent_id: Cell<u64>,
-    state: RefCell<Option<Rc<RefCell<ProgressState>>>>,
+    state: RefCell<Option<SharedState>>,
+}
+
+/// Shared state for the enclosing `progress.with` scope: either interactive
+/// (indicatif `MultiProgress`) or plain (non-terminal, plain-text lines).
+#[derive(Clone)]
+enum SharedState {
+    Interactive(Rc<RefCell<ProgressState>>),
+    Plain(Rc<plain::PlainConfig>),
 }
 
 struct Widget {
@@ -300,18 +309,20 @@ fn apply_message<'v, 's>(
     Ok(())
 }
 
-fn parse_tick<'v, 's>(
+fn parse_duration_secs<'v, 's>(
     strand: &mut Strand<'v, 's>,
-    tick_val: Option<&Value<'v>>,
+    name: &str,
+    val: Option<&Value<'v>>,
+    default: Duration,
 ) -> Result<'v, 's, Duration> {
-    match tick_val {
+    match val {
         Some(v) => {
             let secs = v
                 .as_f64(strand)
-                .ok_or_else(|| Error::type_error(strand, "tick: expected `float`"))?;
+                .ok_or_else(|| Error::type_error(strand, format!("{name}: expected `float`")))?;
             Ok(Duration::from_secs_f64(secs))
         }
-        None => Ok(Duration::from_secs_f64(0.08)),
+        None => Ok(default),
     }
 }
 
@@ -332,6 +343,7 @@ fn get_multi<'v, 's>(
 
 pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Global<'v>>) {
     let style_kw = builder.sym("style");
+    let interval_kw = builder.sym("interval");
     let total_kw = builder.sym("total");
     let message_kw = builder.sym("message");
     let icon_kw = builder.sym("icon");
@@ -377,17 +389,41 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
     builder
         .module("progress")
         .function("with", async move |strand, args, mut out| {
-            let ([func], [style_val]) = unpack!(strand, args, 1, 0, style_kw = None)?;
-
-            // If stderr is not a terminal, skip progress setup entirely
-            if !dolang_ext_shell::is_terminal() {
-                return call!(strand, &func, &mut out).await;
-            }
+            let ([func], [style_val, interval_val]) =
+                unpack!(strand, args, 1, 0, style_kw = None, interval_kw = None)?;
 
             let style = match style_val {
                 Some(sv) => style::parse_style(strand, &sv, &style_keys)?,
                 None => Style::default(),
             };
+
+            // If stderr is not a terminal, use the plain (non-interactive)
+            // rendering path instead of indicatif's MultiProgress.
+            if !dolang_ext_shell::is_terminal() {
+                let interval = parse_duration_secs(
+                    strand,
+                    "interval",
+                    interval_val.as_deref(),
+                    plain::DEFAULT_INTERVAL,
+                )?;
+                let config = plain::PlainConfig::new(style, interval);
+
+                let local = global.local.get(strand);
+                let prev_depth = local.depth.replace(0);
+                let prev_parent_id = local.parent_id.replace(0);
+                let prev_state = local
+                    .state
+                    .replace(Some(SharedState::Plain(Rc::new(config))));
+
+                let result = call!(strand, &func, &mut out).await;
+
+                let local = global.local.get(strand);
+                local.depth.replace(prev_depth);
+                local.parent_id.replace(prev_parent_id);
+                local.state.replace(prev_state);
+
+                return result;
+            }
 
             let multi = MultiProgress::new();
             let state_rc = Rc::new(RefCell::new(ProgressState {
@@ -406,7 +442,9 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             let local = global.local.get(strand);
             let prev_depth = local.depth.replace(0);
             let prev_parent_id = local.parent_id.replace(0);
-            let prev_state = local.state.replace(Some(state_rc.clone()));
+            let prev_state = local
+                .state
+                .replace(Some(SharedState::Interactive(state_rc.clone())));
 
             let writer: Pin<Box<dyn AsyncWrite>> =
                 Box::pin(MultiProgressWriter::new(multi.clone()));
@@ -443,7 +481,12 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
 
             let units = parse_units(strand, units_val.as_deref())?;
             let icon_str = parse_icon(strand, icon_val.as_deref())?;
-            let tick_interval = parse_tick(strand, tick_ms.as_deref())?;
+            let tick_interval = parse_duration_secs(
+                strand,
+                "tick",
+                tick_ms.as_deref(),
+                Duration::from_secs_f64(0.08),
+            )?;
 
             // Determine mode and total from the total kwarg
             let (mode, total_n) = match &total_val {
@@ -452,9 +495,9 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             };
 
             let local = global.local.get(strand);
-            let state_rc = local.state.borrow().clone();
+            let shared_state = local.state.borrow().clone();
 
-            // Set up the progress bar and optional multi-progress tracking
+            // Set up the progress bar and track what kind of scope it lives in
             struct MultiState {
                 multi: MultiProgress,
                 state_rc: Rc<RefCell<ProgressState>>,
@@ -463,16 +506,26 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 prev_parent_id: u64,
             }
 
-            let (pb, multi_state) = match state_rc {
+            enum ShowKind {
+                None,
+                Interactive(MultiState),
+                Plain {
+                    prev_depth: u16,
+                    prev_parent_id: u64,
+                    info: Rc<plain::PlainInfo>,
+                },
+            }
+
+            let (pb, kind) = match shared_state {
                 None => {
                     // Outside progress.with: dummy hidden indicator
                     let pb = ix::ProgressBar::hidden();
                     if let Some(n) = total_n {
                         pb.set_length(n);
                     }
-                    (pb, None)
+                    (pb, ShowKind::None)
                 }
-                Some(state_rc) => {
+                Some(SharedState::Interactive(state_rc)) => {
                     let multi = get_multi(strand, &state_rc)?;
                     let local = global.local.get(strand);
                     let depth = local.depth.get();
@@ -511,7 +564,33 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                         prev_depth: depth,
                         prev_parent_id: parent_id,
                     };
-                    (pb, Some(ms))
+                    (pb, ShowKind::Interactive(ms))
+                }
+                Some(SharedState::Plain(config)) => {
+                    let pb = ix::ProgressBar::hidden();
+                    if let Some(n) = total_n {
+                        pb.set_length(n);
+                    }
+
+                    let local = global.local.get(strand);
+                    let depth = local.depth.get();
+                    let parent_id = local.parent_id.get();
+
+                    let ansi = dolang_ext_shell::ansi_enabled(strand);
+                    let info =
+                        Rc::new(plain::PlainInfo::new(depth, units, ansi, config, parent_id));
+
+                    local.depth.set(depth + 1);
+                    local.parent_id.set(info.id());
+
+                    (
+                        pb,
+                        ShowKind::Plain {
+                            prev_depth: depth,
+                            prev_parent_id: parent_id,
+                            info,
+                        },
+                    )
                 }
             };
 
@@ -519,10 +598,22 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             pb.enable_steady_tick(tick_interval);
             apply_message(strand, &pb, msg_val.as_deref())?;
 
+            let plain_info = match &kind {
+                ShowKind::Plain { info, .. } => Some(info.clone()),
+                _ => None,
+            };
+
             let annex = IndicatorAnnex {
                 bar: pb.clone(),
-                state_rc: multi_state.as_ref().map(|ms| ms.state_rc.clone()),
-                widget_id: multi_state.as_ref().map(|ms| ms.widget_id).unwrap_or(0),
+                state_rc: match &kind {
+                    ShowKind::Interactive(ms) => Some(ms.state_rc.clone()),
+                    _ => None,
+                },
+                widget_id: match &kind {
+                    ShowKind::Interactive(ms) => ms.widget_id,
+                    _ => 0,
+                },
+                plain: plain_info,
                 closed: Cell::new(false),
             };
 
@@ -530,6 +621,14 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 .types
                 .indicator
                 .create_with_annex(strand, Indicator, annex, &mut slot);
+
+            // Show an initial line immediately so every plain-mode indicator
+            // is visible even if it's never updated again.
+            if let ShowKind::Plain { info, .. } = &kind
+                && let Some(line) = plain::maybe_format(&pb, info, true, plain::LineEvent::Start)
+            {
+                dolang_ext_shell::write_terminal_line(strand, &line).await?;
+            }
 
             let res = call!(strand, &func, &mut out, &slot).await;
 
@@ -543,20 +642,39 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                     inst.annex().closed.set(true);
                 });
 
-            // Clean up multi-progress state if we were inside progress.with
-            if let Some(ms) = multi_state {
-                let local = global.local.get(strand);
-                local.depth.set(ms.prev_depth);
-                local.parent_id.set(ms.prev_parent_id);
+            // Clean up scope state and show final status.
+            let final_result: Result<'_, '_, ()> = match kind {
+                ShowKind::None => Ok(()),
+                ShowKind::Interactive(ms) => {
+                    let local = global.local.get(strand);
+                    local.depth.set(ms.prev_depth);
+                    local.parent_id.set(ms.prev_parent_id);
 
-                if !pb.is_finished() {
-                    pb.finish_and_clear();
+                    if !pb.is_finished() {
+                        pb.finish_and_clear();
+                    }
+                    let mut state = ms.state_rc.borrow_mut();
+                    do_remove(&mut state, &ms.multi, ms.widget_id);
+                    Ok(())
                 }
-                let mut state = ms.state_rc.borrow_mut();
-                do_remove(&mut state, &ms.multi, ms.widget_id);
-            }
+                ShowKind::Plain {
+                    prev_depth,
+                    prev_parent_id,
+                    info,
+                } => {
+                    let local = global.local.get(strand);
+                    local.depth.set(prev_depth);
+                    local.parent_id.set(prev_parent_id);
 
-            res
+                    // Always show final status, bypassing the rate limit.
+                    match plain::maybe_format(&pb, &info, true, plain::LineEvent::End) {
+                        Some(line) => dolang_ext_shell::write_terminal_line(strand, &line).await,
+                        None => Ok(()),
+                    }
+                }
+            };
+
+            res.and(final_result)
         })
         .commit();
 }
@@ -569,7 +687,35 @@ pub(crate) struct IndicatorAnnex {
     bar: ix::ProgressBar,
     state_rc: Option<Rc<RefCell<ProgressState>>>,
     widget_id: u64,
+    plain: Option<Rc<plain::PlainInfo>>,
     closed: Cell<bool>,
+}
+
+/// Plain-mode emit checkpoint shared by `update` and `delta`: writes a
+/// rate-limited (or, if `force`, unconditional) status line if this
+/// indicator belongs to a non-interactive `progress.with` scope.
+async fn maybe_emit_plain<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    bar: &ix::ProgressBar,
+    plain_info: &Option<Rc<plain::PlainInfo>>,
+    force: bool,
+) -> Result<'v, 's, ()> {
+    let Some(info) = plain_info else {
+        return Ok(());
+    };
+    // Skip a routine (non-forced) update that just completed the bar — the
+    // indicator's scope is almost certainly about to exit, which prints a
+    // `finished` line anyway, so a "100%" line right before that would just
+    // be redundant. A forced update (icon/message change) still goes
+    // through even at completion, since that's a real content change.
+    let completed = matches!(bar.length(), Some(len) if bar.position() >= len);
+    if !force && completed {
+        return Ok(());
+    }
+    if let Some(line) = plain::maybe_format(bar, info, force, plain::LineEvent::Update) {
+        dolang_ext_shell::write_terminal_line(strand, &line).await?;
+    }
+    Ok(())
 }
 
 impl<'v> Object<'v> for Indicator {
@@ -587,9 +733,14 @@ impl<'v> Object<'v> for Indicator {
         fmt!(strand, w, "<progress.Indicator>")
     }
 
-    fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
+    fn build<'a>(mut builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
+        let icon_kw = builder.sym("icon");
+        let message_kw = builder.sym("message");
+        let total_kw = builder.sym("total");
+        let position_kw = builder.sym("position");
+        let delta_kw = builder.sym("delta");
         builder
-            // --- Getters ---
+            // --- Getters (read-only; see `update` for writes) ---
             .get("message", |this, strand, out| {
                 check_closed(strand, &this.annex().closed)?;
                 Output::set(strand, out, this.annex().bar.message().as_str());
@@ -612,68 +763,6 @@ impl<'v> Object<'v> for Indicator {
                 Output::set(strand, out, this.annex().bar.position());
                 Ok(())
             })
-            // --- Setters ---
-            .set("message", |this, strand, value| {
-                check_closed(strand, &this.annex().closed)?;
-                let msg = value
-                    .as_str(strand)
-                    .ok_or_else(|| Error::type_error(strand, "message: expected `str`"))?
-                    .to_string();
-                this.annex().bar.set_message(msg);
-                Ok(())
-            })
-            .set("icon", |this, strand, value| {
-                check_closed(strand, &this.annex().closed)?;
-                let icon = value
-                    .as_str(strand)
-                    .ok_or_else(|| Error::type_error(strand, "icon: expected `str`"))?
-                    .to_string();
-                this.annex().bar.set_prefix(icon);
-                Ok(())
-            })
-            .set("total", |this, strand, value| {
-                check_closed(strand, &this.annex().closed)?;
-                let annex = this.annex();
-                if value.is_nil() {
-                    // Switch to spinner mode
-                    annex.bar.unset_length();
-                    if let Some(state_rc) = &annex.state_rc {
-                        let mut state = state_rc.borrow_mut();
-                        if let Some(idx) = state.find_widget_idx(annex.widget_id)
-                            && state.widgets[idx].mode != Mode::Spinner
-                        {
-                            state.widgets[idx].mode = Mode::Spinner;
-                            let leaf = is_leaf(&state.widgets, idx);
-                            let w = &state.widgets[idx];
-                            style::apply_spinner_style(
-                                &w.bar,
-                                &state.style,
-                                w.depth - 1,
-                                w.units,
-                                leaf,
-                            );
-                        }
-                    }
-                } else {
-                    annex.bar.set_length(value.to_u64(strand)?);
-                    if let Some(state_rc) = &annex.state_rc {
-                        let mut state = state_rc.borrow_mut();
-                        if let Some(idx) = state.find_widget_idx(annex.widget_id)
-                            && state.widgets[idx].mode != Mode::Bar
-                        {
-                            state.widgets[idx].mode = Mode::Bar;
-                            let w = &state.widgets[idx];
-                            style::apply_bar_style(&w.bar, &state.style, w.depth - 1, w.units);
-                        }
-                    }
-                }
-                Ok(())
-            })
-            .set("position", |this, strand, value| {
-                check_closed(strand, &this.annex().closed)?;
-                this.annex().bar.set_position(value.to_u64(strand)?);
-                Ok(())
-            })
             // --- Methods ---
             .method("delta", async move |this, strand, args, _out| {
                 check_closed(strand, &this.annex().closed)?;
@@ -689,7 +778,102 @@ impl<'v> Object<'v> for Indicator {
                 } else {
                     this.annex().bar.dec(n.unsigned_abs());
                 }
-                Ok(())
+                let annex = this.annex();
+                maybe_emit_plain(strand, &annex.bar, &annex.plain, false).await
+            })
+            .method("update", async move |this, strand, args, _out| {
+                check_closed(strand, &this.annex().closed)?;
+                let ([], [icon, message, total, position, delta]) = unpack!(
+                    strand,
+                    args,
+                    0,
+                    0,
+                    icon_kw = None,
+                    message_kw = None,
+                    total_kw = None,
+                    position_kw = None,
+                    delta_kw = None
+                )?;
+
+                if position.is_some() && delta.is_some() {
+                    return Err(Error::value(
+                        strand,
+                        "update: position: and delta: are exclusive",
+                    ));
+                }
+
+                // Message/icon changes always go through immediately in
+                // plain mode, even mid-debounce — they're identity changes
+                // ("what is this indicator doing now"), not progress noise.
+                // Position/delta/total stay rate-limited.
+                let force = icon.is_some() || message.is_some();
+
+                if let Some(v) = icon {
+                    let icon = v
+                        .as_str(strand)
+                        .ok_or_else(|| Error::type_error(strand, "icon: expected `str`"))?
+                        .to_string();
+                    this.annex().bar.set_prefix(icon);
+                }
+                if let Some(v) = message {
+                    let msg = v
+                        .as_str(strand)
+                        .ok_or_else(|| Error::type_error(strand, "message: expected `str`"))?
+                        .to_string();
+                    this.annex().bar.set_message(msg);
+                }
+                if let Some(v) = total {
+                    let annex = this.annex();
+                    if v.is_nil() {
+                        // Switch to spinner mode
+                        annex.bar.unset_length();
+                        if let Some(state_rc) = &annex.state_rc {
+                            let mut state = state_rc.borrow_mut();
+                            if let Some(idx) = state.find_widget_idx(annex.widget_id)
+                                && state.widgets[idx].mode != Mode::Spinner
+                            {
+                                state.widgets[idx].mode = Mode::Spinner;
+                                let leaf = is_leaf(&state.widgets, idx);
+                                let w = &state.widgets[idx];
+                                style::apply_spinner_style(
+                                    &w.bar,
+                                    &state.style,
+                                    w.depth - 1,
+                                    w.units,
+                                    leaf,
+                                );
+                            }
+                        }
+                    } else {
+                        annex.bar.set_length(v.to_u64(strand)?);
+                        if let Some(state_rc) = &annex.state_rc {
+                            let mut state = state_rc.borrow_mut();
+                            if let Some(idx) = state.find_widget_idx(annex.widget_id)
+                                && state.widgets[idx].mode != Mode::Bar
+                            {
+                                state.widgets[idx].mode = Mode::Bar;
+                                let w = &state.widgets[idx];
+                                style::apply_bar_style(&w.bar, &state.style, w.depth - 1, w.units);
+                            }
+                        }
+                    }
+                }
+                if let Some(v) = position {
+                    this.annex().bar.set_position(v.to_u64(strand)?);
+                }
+                if let Some(v) = delta {
+                    let n = v
+                        .to_i64(strand)
+                        .map_err(|_| Error::type_error(strand, "delta: expected `int`"))?;
+                    if n >= 0 {
+                        this.annex().bar.inc(n as u64); // safe: n >= 0
+                    } else {
+                        this.annex().bar.dec(n.unsigned_abs());
+                    }
+                }
+
+                let annex = this.annex();
+                maybe_emit_plain(strand, &annex.bar, &annex.plain, force).await
             })
     }
 }

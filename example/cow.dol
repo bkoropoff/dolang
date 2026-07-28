@@ -21,9 +21,9 @@ progress.with do docker.build
   commit: After refresh
   run: do progress.show message: searching icon: 📦 do |w|
     let pkgs = search cow*
-    w.total = pkgs.len
+    w.update total: $pkgs.len
     for pkg = pkgs
-      w.message = "install $pkg"
+      w.update message: "install $pkg"
       zypper -n install $pkg
       w.delta()
     run cowsay MOO

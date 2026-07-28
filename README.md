@@ -85,7 +85,7 @@ progress.with do podman.build
     icon: 📦
     do |i|
       for pkg = PACKAGES
-        i.message = "installing $pkg"
+        i.update message: "installing $pkg"
         run dnf install -y $pkg
         i.delta()
   tag: my-image

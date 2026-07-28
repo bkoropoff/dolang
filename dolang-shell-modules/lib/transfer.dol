@@ -178,7 +178,7 @@ class Cache
 
         response.throw_for_status()
         let total = (response.headers.get "content-length")
-        indicator.total = (total && int total)
+        indicator.update total: (total && int total)
         let tmp = payload.add_ext tmp
         let state = (digest_info && digest_info.constructor())
         try
