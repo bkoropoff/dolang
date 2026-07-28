@@ -175,7 +175,7 @@ export class GitHubReleaseToolDownloader {
     }
 
     public releaseAssetName(): string {
-        return `dolang-${platformTripleFor(process.platform, process.arch)}.tar.gz`;
+        return `dolang-${platformKeyFor(process.platform, process.arch)}.tar.gz`;
     }
 
     public downloadedArchivePath(): string {
@@ -183,7 +183,7 @@ export class GitHubReleaseToolDownloader {
     }
 
     private platformCacheDir(): string {
-        return path.join(this.cacheRoot, platformTripleFor(process.platform, process.arch));
+        return path.join(this.cacheRoot, platformKeyFor(process.platform, process.arch));
     }
 
     private bundleInstallDir(): string {
@@ -260,31 +260,31 @@ export class GitHubReleaseToolDownloader {
     }
 }
 
-export function platformTripleFor(
+export function platformKeyFor(
     platformName: NodeJS.Platform,
     arch: NodeJS.Architecture
 ): string {
-    return `${githubArch(arch)}-${githubPlatform(platformName)}`;
+    return `${dolangArch(arch)}-${dolangOs(platformName)}`;
 }
 
 function isToolSupportedOnPlatform(tool: ToolName, platformName: NodeJS.Platform): boolean {
     return !(tool === "vfs" && platformName === "win32");
 }
 
-function githubPlatform(platformName: NodeJS.Platform): string {
+function dolangOs(platformName: NodeJS.Platform): string {
     switch (platformName) {
         case "darwin":
-            return "apple-darwin";
+            return "macos";
         case "linux":
-            return "unknown-linux-gnu";
+            return "linux";
         case "win32":
-            return "pc-windows-msvc";
+            return "windows";
         default:
             throw new Error(`Unsupported platform for release downloads: ${platformName}`);
     }
 }
 
-function githubArch(arch: NodeJS.Architecture): string {
+function dolangArch(arch: NodeJS.Architecture): string {
     switch (arch) {
         case "arm64":
             return "aarch64";

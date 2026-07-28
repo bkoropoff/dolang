@@ -6,7 +6,7 @@ import * as vscode from "vscode";
 import {
     binaryFileName,
     GitHubReleaseToolDownloader,
-    platformTripleFor,
+    platformKeyFor,
     resolveExecutionTools,
     resolveTool,
     type ToolName
@@ -56,7 +56,7 @@ suite("Tool Resolution", () => {
                 "global-storage",
                 "tools",
                 "releases",
-                platformTripleFor(process.platform, process.arch),
+                platformKeyFor(process.platform, process.arch),
                 "bundle"
             ),
             "vfs"
@@ -111,7 +111,7 @@ suite("Tool Resolution", () => {
     test("downloader computes stable bundle cache paths", () => {
         const root = path.join(os.tmpdir(), "dolang-code-test-static");
         const downloader = new GitHubReleaseToolDownloader(createContext(root));
-        const triple = platformTripleFor(process.platform, process.arch);
+        const key = platformKeyFor(process.platform, process.arch);
 
         assert.strictEqual(downloader.isEnabled(), true);
         assert.strictEqual(
@@ -121,7 +121,7 @@ suite("Tool Resolution", () => {
                 "global-storage",
                 "tools",
                 "releases",
-                triple,
+                key,
                 "bundle",
                 binaryFileName("shell")
             )
@@ -133,11 +133,11 @@ suite("Tool Resolution", () => {
                 "global-storage",
                 "tools",
                 "releases",
-                triple,
-                `dolang-${triple}.tar.gz`
+                key,
+                `dolang-${key}.tar.gz`
             )
         );
-        assert.strictEqual(downloader.releaseAssetName(), `dolang-${triple}.tar.gz`);
+        assert.strictEqual(downloader.releaseAssetName(), `dolang-${key}.tar.gz`);
     });
 });
 
