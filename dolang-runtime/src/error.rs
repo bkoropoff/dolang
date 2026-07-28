@@ -707,10 +707,14 @@ impl<'v, 's> Error<'v, 's> {
     /// Constuct error from `self` which indicates it was caused by `cause`.
     pub fn caused_by(self, strand: &mut Strand<'v, 's>, cause: Error<'v, 's>) -> Self {
         match (self.inner, cause.inner) {
-            (Variant::Boxed(left, mut left_bt), Variant::Boxed(right, right_bt))
+            (Variant::Boxed(left, mut left_bt), Variant::Boxed(right, mut right_bt))
                 if left.get().repr_eq(strand, &right.get()) =>
             {
-                left_bt.backtrace.extend(right_bt.backtrace);
+                // Rethrow of the same error value: the original trace comes
+                // first, with the frames unwound from the rethrow site spliced
+                // in after it.
+                right_bt.backtrace.append(&mut left_bt.backtrace);
+                left_bt.backtrace = right_bt.backtrace;
                 Self {
                     inner: Variant::Boxed(left, left_bt),
                     phantom: PhantomData,

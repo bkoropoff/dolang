@@ -33,6 +33,12 @@ def boom_inner()
 def boom_outer()
   return boom_inner()
 
+def plain_rethrow()
+  try
+    boom_outer()
+  catch e
+    throw e
+
 def catch_snapshot()
   try
     boom_outer()
@@ -104,6 +110,18 @@ catch e
 let reraised_receivers = receivers $reraised_bt
 assert_eq $reraised_receivers[0] "boom_inner"
 assert_eq $reraised_receivers[1] "boom_outer"
+
+# A plain rethrow of the caught error keeps the original trace instead of
+# splicing the rethrow site onto the front of it.
+let plain_bt = try
+  plain_rethrow()
+catch e
+  assert_eq $e "boom"
+  strand.error_backtrace()
+let plain_receivers = receivers $plain_bt
+assert_eq $plain_receivers[0] "boom_inner"
+assert_eq $plain_receivers[1] "boom_outer"
+assert (plain_receivers[2].starts_with "plain_rethrow")
 
 # Strand join preserves the originating backtrace.
 let joined_bt = try
