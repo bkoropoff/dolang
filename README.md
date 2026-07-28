@@ -7,7 +7,7 @@ ordinary functions, structured concurrency, and remote-capable system APIs.
 [Documentation](https://dolang-org.github.io/dolang/) ·
 [Source](https://github.com/dolang-org/dolang)
 
-- Run the same automation on Linux, macOS, and Windows.
+- Run the same automation on Linux, macOS, Windows, and FreeBSD.
 - Use structured concurrency, cancellation, channels, pipelines, and scoped
   resources.
 - Redirect filesystem, process, environment, system, and security operations
@@ -90,19 +90,6 @@ progress.with do podman.build
         i.delta()
   tag: my-image
 ```
-
-## Platform Support
-
-The core test suite runs on Linux, macOS, and Windows. Some integrations also
-require platform tools or services.
-
-| Capability           | Linux              | macOS              | Windows                      |
-| -------------------- | ------------------ | ------------------ | ---------------------------- |
-| Files and processes  | Tested             | Tested             | Tested                       |
-| Native identity      | UID/GID and groups | UID/GID and groups | tokens, SIDs, ACLs, SecDescs |
-| Privilege elevation  | `sudo`             | `sudo`             | UAC                          |
-| Remoting             | SSH                | SSH                | SSH                          |
-| Local containers/VMs | Docker/Podman      | Planned            | WSL                          |
 
 ## Included Modules
 
