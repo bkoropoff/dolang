@@ -128,3 +128,8 @@ Identifies what `dolang` is executing.
 
 An [`fs.Path`](../fs/path.md) containing the path returned by the host for the
 current `dolang` executable. The path is not automatically canonicalized.
+
+### `VERSION`
+
+A `(major, minor, patch)` [`tuple`](../std/tuple.md) with the version of the
+running `dolang` build.

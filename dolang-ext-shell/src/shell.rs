@@ -13,7 +13,7 @@ use dolang::{
         Arg, Error, Instance, Object, Output, Result, Slot, State, Strand, call, method,
         object::{Mut, TypeBuilder},
         unpack,
-        value::{Nil, TypeObject},
+        value::{AsTuple, Nil, TypeObject},
         vm::Builder,
     },
 };
@@ -599,6 +599,20 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 Err(Error::abort(strand, Exit { code }))
             },
         )
+        .get("VERSION", move |strand, out| {
+            let components: [i64; 3] = [
+                env!("CARGO_PKG_VERSION_MAJOR"),
+                env!("CARGO_PKG_VERSION_MINOR"),
+                env!("CARGO_PKG_VERSION_PATCH"),
+            ]
+            .map(|component| {
+                component
+                    .parse()
+                    .expect("CARGO_PKG_VERSION_* is not an integer")
+            });
+            Output::set(strand, out, AsTuple::new(components));
+            Ok(())
+        })
         .get("args", move |strand, out| {
             let invocation = global.local.get(strand).invocation();
             let args = invocation
