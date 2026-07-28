@@ -59,10 +59,10 @@ open mydb.sqlite do |conn|
 open "mydb.sqlite" do |conn|
   conn.execute
     "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT)"
-  conn.execute
-    "INSERT INTO users (name) VALUES (:name)" name: "Alice"
-  conn.execute
-    "INSERT INTO users (name) VALUES (:name)" name: "Bob"
+  conn.execute "INSERT INTO users (name) VALUES (:name)"
+    name: "Alice"
+  conn.execute "INSERT INTO users (name) VALUES (:name)"
+    name: "Bob"
 ```
 
 ### Prepared statements
