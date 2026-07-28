@@ -134,7 +134,7 @@ echo $ comma.replace "a,b,c,d" ";" limit: 2  # => a;b;c,d
 # Callback replacement
 let upper = Regex r"[a-z]+"
 echo $ upper.replace "hello world" do |caps|
-  caps.0.upper
+  caps[0].upper()
 # => HELLO WORLD
 ```
 

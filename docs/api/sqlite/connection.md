@@ -28,10 +28,9 @@ need to be reused.
 
 ```
 open "mydb.sqlite" do |conn|
-  conn.execute
-    "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)"
-  conn.execute
-    "INSERT INTO users (name) VALUES (:name)" name: "Alice"
+  conn.execute "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)"
+  conn.execute "INSERT INTO users (name) VALUES (:name)"
+    name: "Alice"
 ```
 
 ### `prepare sql func?`

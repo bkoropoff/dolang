@@ -160,6 +160,7 @@ nav:
       - api/regex/regex.md
     - shell:
       - api/shell/index.md
+      - api/shell/args.md
       - api/shell/vfs.md
     - term:
       - api/term/index.md
@@ -289,6 +290,7 @@ nav:
     - yaml: api/yaml.md
     - xml:
       - api/xml/index.md
+      - api/xml/attr.md
       - api/xml/node.md
     - zip:
       - api/zip/index.md
