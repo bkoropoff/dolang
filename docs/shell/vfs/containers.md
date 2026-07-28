@@ -22,6 +22,11 @@ echo $release["PRETTY_NAME"]
 strings or symbols; `nil` unsets a variable and `:INHERIT:` copies its current
 strand value into the container.
 
+`run`, `with`, and `build` also accept `pull:`, either `:missing:` (default;
+pull only if the image isn't present locally) or `:always:`.
+Starting a container waits for its VFS agent to come up with no built-in
+timeout; wrap the call in `time.timeout` if a bound is needed.
+
 Use [`with_host`](./index.md#returning-to-the-host) to temporarily return to the
 host VFS context:
 

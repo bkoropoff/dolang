@@ -22,20 +22,26 @@ let docker = DockerRuntime()
 
 # Run a direct command in a temporary Docker container from `image`.
 #
+# `pull` follows the same policy as `build`: `:missing:` (default) or
+# `:always:`.
+#
 # Returns `nil`.
-pub def run image cmd :cd = nil :env = {} ...args
-  docker.run $image $cmd :cd :env ...args
+pub def run image cmd :cd = nil :env = {} :pull = :missing: ...args
+  docker.run $image $cmd :cd :env :pull ...args
 
 # Run a function in a temporary Docker container from `image`.
 #
 # Program execution and filesystem access will be redirected for the
 # duration of the function.
 #
+# `pull` follows the same policy as `build`: `:missing:` (default) or
+# `:always:`.
+#
 # # Returns
 #
 # The result of `func`
-pub def with image func :cd = nil :env = {}
-  docker.with $image $func :cd :env
+pub def with image func :cd = nil :env = {} :pull = :missing:
+  docker.with $image $func :cd :env :pull
 
 # Build a Docker image.
 #
