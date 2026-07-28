@@ -17,9 +17,8 @@ import progress json patch strand proc time transfer _vfs
     - cache_dir
 
 let COPY_BLOCK_SIZE = 1048576
-let SOCKET_SPINS = 10
-let SOCKET_SLEEPS = 100
-let SOCKET_SLEEP = 0.10
+let SOCKET_SLEEP_MIN = 0.001
+let SOCKET_SLEEP_MAX = 0.5
 
 let SAVE_FORMATS = $
   DOCKER_ARCHIVE: docker-archive
@@ -146,6 +145,25 @@ pub class NoContainerError: RuntimeError
 
   pub def (dbg) self
     "<NoContainerError ref: $(dbg self.ref)>"
+
+# Applies a pull policy ("always" / "missing" / "never") up front, as a step
+# separate from starting a container. Docker/Podman's own inline
+# `run --pull=...` prints pull progress and "unable to find image locally"
+# straight to the real stderr with no way to capture or quiet it; pulling
+# explicitly reuses `Runtime.pull`, which redirects output and classifies
+# failures (`NoImageError`, `RegistryAuthError`, etc.) via known error
+# patterns.
+def ensure_image runtime img policy
+  if (policy == "always")
+    runtime.pull $img
+  else if (policy == "missing")
+    let present = try
+      inspect_image $runtime $img
+      true
+    catch NoImageError: _
+      false
+    if !present
+      runtime.pull $img
 
 def normalize_known mapping value
   mapping.get $value else: $value
@@ -335,7 +353,8 @@ pub class Runtime
     else
       ""
 
-  pub def with self ctr thunk :cd = nil :env = {}
+  pub def with self ctr thunk :cd = nil :env = {} :pull = :missing:
+    ensure_image $self $ctr (str(pull).lower())
     let ctr_subdir = Path /tmp/dolang-vfs-dir
     let ctr_socket = (ctr_subdir / "socket")
     let ctr_agent = Path "/tmp/dolang-vfs"
@@ -346,23 +365,33 @@ pub class Runtime
       subdir.set_metadata mode: 0o700
       let socket = (subdir / "socket")
       let input = strand.input()
-      pipeline
-        do self.cli run --rm -i
-          --entrypoint $ctr_agent
-          -v $subdir:$ctr_subdir:rw,z$uopt
-          -v $agent_bin:$ctr_agent:ro,z$uopt
-          $ctr ...(_vfs.vfs_args cd env) --listen $ctr_socket
-        do
-          strand.next()
-          let agent = Vfs.unix_socket $socket
-          return strand.redirect input: $input do agent.with $thunk
+      # The pipeline's first stage is only the agent bootstrap process, not
+      # user command output, so capturing its stderr for classification
+      # (rather than the pull chatter leaking to the real terminal) is safe.
+      let lines = []
+      try
+        pipeline
+          do self.cli run --rm -i --pull=never
+            --entrypoint $ctr_agent
+            -v $subdir:$ctr_subdir:rw,z$uopt
+            -v $agent_bin:$ctr_agent:ro,z$uopt
+            $ctr ...(_vfs.vfs_args cd env) --listen $ctr_socket
+            stderr: $lines
+          do
+            strand.next()
+            let agent = Vfs.unix_socket $socket
+            return strand.redirect input: $input do agent.with $thunk
+      catch proc.Error: e
+        classify_image_error $ctr $lines
+        throw e
 
-  def run_direct self ctr cmd cd env argv
-    self.cli run --rm -i --entrypoint env $ctr
+  def run_direct self ctr cmd cd env argv pull
+    ensure_image $self $ctr (str(pull).lower())
+    self.cli run --rm -i --pull=never --entrypoint env $ctr
       ...(_vfs.env_args cd env) $cmd ...argv
 
-  pub def run self ctr cmd :cd = nil :env = {} ...args
-    self.#run_direct $ctr $cmd $cd $env $args.pos_only()
+  pub def run self ctr cmd :cd = nil :env = {} :pull = :missing: ...args
+    self.#run_direct $ctr $cmd $cd $env $args.pos_only() $pull
 
   pub def build self :pull = :MISSING: :mounts = [] :cd = nil :env = {} :from ...args
     with_temp_dir parent: $runtime_dir() do |subdir|
@@ -460,7 +489,7 @@ pub class Runtime
     let platform = normalize_platform $platform
     let lines = []
     let output = try
-      sub do self.cli pull
+      sub do self.cli pull --quiet
         if (platform != nil)
           --platform $platform
         $ref
@@ -609,26 +638,35 @@ pub class Builder
     self.#ctr_socket = (self.#ctr_subdir / "socket")
     self.#ctr_agent = Path "/tmp/dolang-vfs"
 
+  # Waits for the container agent's socket to appear. Retries indefinitely
+  # with exponential backoff (starting small so the common case where the
+  # socket appears almost immediately doesn't pay sleep latency); callers
+  # that need a bound should wrap in `time.timeout`.
   def wait_socket self
-    for _ = 0..SOCKET_SPINS
-      if self.#socket.exists()
-        return
-    for _ = 0..SOCKET_SLEEPS
-      if self.#socket.exists()
-        return
-      time.sleep $SOCKET_SLEEP
-    throw "timed out waiting for container agent"
+    let sleep = SOCKET_SLEEP_MIN
+    while !self.#socket.exists()
+      time.sleep $sleep
+      sleep = (sleep * 2)
+      if (sleep > SOCKET_SLEEP_MAX)
+        sleep = SOCKET_SLEEP_MAX
 
   def connect self img :pull = :NEVER:
     if self.#socket.exists()
       self.#socket.remove()
-    let ctr_id = sub do self.#runtime.cli run -d --pull=$str(pull).lower()
-      ...mount_args(self.#mounts)
-      --entrypoint env
-      -v $self.#subdir:$self.#ctr_subdir:rw,z$(self.#runtime.mount_uopt())
-      -v $self.#bin:$self.#ctr_agent:ro,z$(self.#runtime.mount_uopt())
-      $img 
-      $self.#ctr_agent ...(_vfs.vfs_args self.#cd self.#env) --listen $self.#ctr_socket
+    ensure_image $self.#runtime $img (str(pull).lower())
+    let lines = []
+    let ctr_id = try
+      sub do self.#runtime.cli run -d --pull=never
+        ...mount_args(self.#mounts)
+        --entrypoint env
+        -v $self.#subdir:$self.#ctr_subdir:rw,z$(self.#runtime.mount_uopt())
+        -v $self.#bin:$self.#ctr_agent:ro,z$(self.#runtime.mount_uopt())
+        $img
+        $self.#ctr_agent ...(_vfs.vfs_args self.#cd self.#env) --listen $self.#ctr_socket
+        stderr: $lines
+    catch proc.Error: e
+      classify_image_error $img $lines
+      throw e
     self.#wait_socket()
     self.#ctr_id = ctr_id
     self.#agent = Vfs.unix_socket $self.#socket
