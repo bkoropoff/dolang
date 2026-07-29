@@ -1,4 +1,31 @@
-import shell sys std
+import base64 shell sys std
+import
+  regex:
+    - Regex
+
+# Survives unquoted in both POSIX shells and cmd.exe. The base64 alphabet is a
+# subset, so an encoded value always matches.
+let BARE = Regex r"^[A-Za-z0-9_.:/=@+,-]+$"
+
+# Render one VFS option, encoding its value when the transport asks for it and
+# the value is not self-delimiting.
+#
+# `encode` is for transports that hand the command line to a shell on the far
+# end -- SSH does, and the shell it lands in is a POSIX shell on a Unix host
+# and cmd.exe on a Windows one. Since the answering system is unknown when the
+# command is built, no quoting style is portable; base64 sidesteps quoting
+# altogether.
+def option encode name value
+  let value = str $value
+  if (encode && !(BARE.match value))
+    return ["$name-base64", (base64.encode value)]
+  [name, value]
+
+# `--login-env` carries its value in the option itself rather than as a
+# separate argument, so it cannot be spread like the others.
+def login_option encode shell
+  let name value = option $encode "--login-env" $shell
+  "$name=$value"
 
 pub def bin exe = nil
   let vfs_exe = shell.vfs_exe()
@@ -55,12 +82,17 @@ pub def env_args cd overrides
       -C $cd
     ...unsets ...sets
 
-pub def vfs_args cd overrides
+pub def vfs_args cd overrides :login = false :encode = false
   return $
+    if login
+      if (login == true)
+        --login-env
+      else
+        (login_option encode login)
     if cd
-      --cd $cd
+      ...(option encode "--cd" cd)
     for k v = env_pairs $overrides
       if (v == nil)
-        --unset $k
+        ...(option encode "--unset" k)
       else
-        --set "$k=$v"
+        ...(option encode "--set" "$k=$v")

@@ -785,7 +785,7 @@ impl Direct {
         Ok(())
     }
 
-    pub(super) fn known_folder(folder_id: &GUID) -> Result<PathBuf, io::Error> {
+    pub(crate) fn known_folder(folder_id: &GUID) -> Result<PathBuf, io::Error> {
         unsafe extern "C" {
             fn wcslen(buf: *const u16) -> usize;
         }

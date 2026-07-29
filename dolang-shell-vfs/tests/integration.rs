@@ -597,3 +597,271 @@ async fn sigterm_during_spawn() {
 
     assert!(!socket_path.exists(), "socket should be cleaned up");
 }
+
+/// Write a stand-in login shell that emits profile chatter on both streams,
+/// exports a few variables, leaks the snapshot descriptor into a background
+/// daemon, and then runs its `-c` command.
+///
+/// The daemon models the profile that starts an agent without closing
+/// descriptors it does not own: it holds the write end of the snapshot pipe
+/// open long after the probe exits, so an import that treats end-of-file as
+/// the completion signal hangs here rather than returning. Its pid lands in
+/// [`daemon_pid_path`] so the cleanup can be checked too.
+fn fake_login_shell(dir: &Path) -> std::path::PathBuf {
+    let path = dir.join("login-shell");
+    std::fs::write(
+        &path,
+        concat!(
+            "#!/bin/sh\n",
+            "echo 'profile noise on stdout'\n",
+            "echo 'profile noise on stderr' >&2\n",
+            "FROM_PROFILE=hello; export FROM_PROFILE\n",
+            "WEIRD=$(printf 'a\\377b'); export WEIRD\n",
+            "sleep 30 &\n",
+            "echo $! > \"$0.daemon\"\n",
+            "exec /bin/sh \"$@\"\n",
+        ),
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+/// Path [`fake_login_shell`] records its background daemon's pid in.
+fn daemon_pid_path(shell: &Path) -> std::path::PathBuf {
+    let mut path = shell.as_os_str().to_owned();
+    path.push(".daemon");
+    path.into()
+}
+
+/// Write a stand-in login shell that fails before running its command.
+fn failing_login_shell(dir: &Path) -> std::path::PathBuf {
+    let path = dir.join("broken-shell");
+    std::fs::write(&path, "#!/bin/sh\necho 'profile is broken' >&2\nexit 1\n").unwrap();
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+async fn listen_and_query(args: &[std::ffi::OsString]) -> dolang_shell_vfs::Query {
+    let (_dir, socket_path) = find_free_socket_path();
+
+    let mut child = std::process::Command::new(AGENT_BIN)
+        .args(args)
+        .arg("--listen")
+        .arg(&socket_path)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to spawn agent");
+
+    wait_for_ready_from_stdout(&mut child).expect("failed to read READY");
+
+    let client = timeout(
+        Duration::from_secs(5),
+        dolang_shell_vfs::Client::connect(&socket_path),
+    )
+    .await
+    .expect("timeout connecting")
+    .expect("failed to connect");
+
+    let query = client.query().await.expect("query should succeed");
+
+    stop_daemon(&socket_path).await;
+
+    query
+}
+
+#[tokio::test]
+async fn login_env_imports_profile_vars() {
+    let dir = tempdir().unwrap();
+    let shell = fake_login_shell(dir.path());
+
+    let mut flag = std::ffi::OsString::from("--login-env=");
+    flag.push(&shell);
+    let query = listen_and_query(&[flag]).await;
+
+    assert_eq!(
+        query.env.get("FROM_PROFILE").map(String::as_str),
+        Some("hello"),
+        "profile-exported variable should be imported"
+    );
+    // The probe imports the raw bytes, but a snapshot cannot represent them.
+    assert!(
+        !query.env.contains_key("WEIRD"),
+        "non-UTF-8 value should be omitted from the query rather than panicking"
+    );
+}
+
+#[tokio::test]
+async fn base64_option_forms_carry_awkward_values() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+
+    let value = r#"a "quoted" $dollar %percent\ back\slash"#;
+    let dir = tempdir().unwrap();
+    let cwd = dir.path().join("a dir with spaces");
+    std::fs::create_dir(&cwd).unwrap();
+
+    let query = listen_and_query(&[
+        std::ffi::OsString::from("--set-base64"),
+        STANDARD.encode(format!("AWKWARD={value}")).into(),
+        std::ffi::OsString::from("--cd-base64"),
+        STANDARD.encode(cwd.to_str().unwrap()).into(),
+    ])
+    .await;
+
+    assert_eq!(query.env.get("AWKWARD").map(String::as_str), Some(value));
+    assert_eq!(
+        std::fs::canonicalize(query.cwd.as_str()).unwrap(),
+        std::fs::canonicalize(&cwd).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn base64_option_forms_reject_undecodable_values() {
+    let (_dir, socket_path) = find_free_socket_path();
+
+    let output = std::process::Command::new(AGENT_BIN)
+        .arg("--set-base64")
+        .arg("not base64!")
+        .arg("--listen")
+        .arg(&socket_path)
+        .output()
+        .expect("failed to run agent");
+
+    assert!(!output.status.success(), "agent should refuse to start");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--set-base64") && stderr.contains("base64"),
+        "error should name the option and the problem: {stderr}"
+    );
+}
+
+#[tokio::test]
+async fn login_env_kills_processes_started_by_the_profile() {
+    let dir = tempdir().unwrap();
+    let shell = fake_login_shell(dir.path());
+
+    let mut flag = std::ffi::OsString::from("--login-env=");
+    flag.push(&shell);
+    // Completing at all proves the leaked descriptor did not stall the import.
+    let query = listen_and_query(&[flag]).await;
+    assert!(query.env.contains_key("FROM_PROFILE"));
+
+    let pid: i32 = std::fs::read_to_string(daemon_pid_path(&shell))
+        .expect("profile daemon should have recorded its pid")
+        .trim()
+        .parse()
+        .expect("pid should be numeric");
+
+    // The daemon is not our child, so it cannot be reaped here; signal 0 just
+    // reports whether the pid is still live.
+    for attempt in 0.. {
+        // SAFETY: signal 0 performs permission checks only.
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            break;
+        }
+        assert!(attempt < 50, "profile daemon {pid} outlived the probe");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn login_env_is_off_by_default() {
+    let dir = tempdir().unwrap();
+    let _shell = fake_login_shell(dir.path());
+
+    let query = listen_and_query(&[]).await;
+
+    assert!(
+        !query.env.contains_key("FROM_PROFILE"),
+        "login environment should not be probed without --login-env"
+    );
+}
+
+#[tokio::test]
+async fn set_flag_overrides_login_env() {
+    let dir = tempdir().unwrap();
+    let shell = fake_login_shell(dir.path());
+
+    let mut flag = std::ffi::OsString::from("--login-env=");
+    flag.push(&shell);
+    let query = listen_and_query(&[
+        flag,
+        std::ffi::OsString::from("--set"),
+        std::ffi::OsString::from("FROM_PROFILE=override"),
+    ])
+    .await;
+
+    assert_eq!(
+        query.env.get("FROM_PROFILE").map(String::as_str),
+        Some("override"),
+        "explicit --set should win over the imported login environment"
+    );
+}
+
+#[tokio::test]
+async fn login_env_probe_failure_reports_flag() {
+    let dir = tempdir().unwrap();
+    let shell = failing_login_shell(dir.path());
+    let (_socket_dir, socket_path) = find_free_socket_path();
+
+    let mut flag = std::ffi::OsString::from("--login-env=");
+    flag.push(&shell);
+
+    let output = std::process::Command::new(AGENT_BIN)
+        .arg(&flag)
+        .arg("--listen")
+        .arg(&socket_path)
+        .output()
+        .expect("failed to run agent");
+
+    assert!(!output.status.success(), "agent should fail to start");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--login-env"),
+        "error should name the flag to drop: {stderr}"
+    );
+    assert!(
+        stderr.contains("profile is broken"),
+        "shell diagnostics should reach stderr: {stderr}"
+    );
+}
+
+#[tokio::test]
+async fn login_env_profile_output_stays_out_of_stdio_stream() {
+    let dir = tempdir().unwrap();
+    let shell = fake_login_shell(dir.path());
+
+    let mut flag = std::ffi::OsString::from("--login-env=");
+    flag.push(&shell);
+
+    let mut child = tokio::process::Command::new(AGENT_BIN)
+        .arg(&flag)
+        .arg("--stdio")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to spawn agent");
+
+    let stdout = child.stdout.take().expect("stdout not captured");
+    let stdin = child.stdin.take().expect("stdin not captured");
+    let client = dolang_shell_vfs::Client::new_split(stdout, stdin);
+
+    // A single stray byte of profile output would desynchronize the frame
+    // stream and this would fail.
+    let query = timeout(Duration::from_secs(5), client.query())
+        .await
+        .expect("timeout querying")
+        .expect("query should succeed");
+
+    assert_eq!(
+        query.env.get("FROM_PROFILE").map(String::as_str),
+        Some("hello")
+    );
+
+    client.stop().await.expect("stop should succeed");
+    let _ = child.wait().await;
+}

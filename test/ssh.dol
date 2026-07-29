@@ -1,4 +1,4 @@
-import _ssh proc sys
+import _ssh base64 proc sys
   test:
     - assert_eq
     - assert_throws
@@ -40,19 +40,58 @@ def command_options()
       ssh -T -e none -A -o IdentitiesOnly=yes -o BatchMode=yes -l
       alice -p 2222 -i id-a -i id-b -J jump-a,jump-b -o ConnectTimeout=10
       -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o StrictHostKeyChecking=yes
-      -- example agent extra --cd /srv/project --set SET=value --unset UNSET
-      --set TEST_DOLANG_SSH_INHERIT=inherited --stdio
+      -- example agent extra --login-env --cd /srv/project --set SET=value
+      --unset UNSET --set TEST_DOLANG_SSH_INHERIT=inherited --stdio
 
 #[test]
 def command_defaults_and_host_key()
   let argv = _ssh.build_command example host_key: :ACCEPT_NEW:
   assert_eq $argv $
     ssh -T -e none -a -o IdentitiesOnly=no -o BatchMode=no -o
-    StrictHostKeyChecking=accept-new -- example dolang-vfs --stdio
+    StrictHostKeyChecking=accept-new -- example dolang-vfs --login-env --stdio
+
+#[test]
+def command_login_env()
+  # Off by request
+  let argv = _ssh.build_command example login_env: false
+  assert_eq $argv $
+    ssh -T -e none -a -o IdentitiesOnly=no -o BatchMode=no
+    -- example dolang-vfs --stdio
+
+  # A specific shell instead of the one in the passwd database
+  let argv = _ssh.build_command example login_env: /bin/zsh
+  assert_eq $argv $
+    ssh -T -e none -a -o IdentitiesOnly=no -o BatchMode=no
+    -- example dolang-vfs --login-env=/bin/zsh --stdio
 
   assert_throws $ValueError do _ssh.build_command example host_key: :UNKNOWN:
   assert_throws $UnexpectedKeyError do _ssh.build_command example unknown: value
   assert_throws $UnexpectedPosError do _ssh.build_command example extra
+
+#[test]
+def command_encodes_remote_args()
+  # ssh(1) joins these with spaces and the remote shell -- POSIX or cmd.exe,
+  # unknown from here -- splits them again, so values it would otherwise
+  # mangle travel base64-encoded instead of quoted.
+  let argv = _ssh.build_command example
+    login_env: "/opt/My Shell/zsh"
+    cd: r"C:\Program Files\project"
+    env:
+      GREETING: "hello there"
+      QUOTED: r#"a"b`c$d%e"#
+  assert_eq $argv $
+    ssh -T -e none -a -o IdentitiesOnly=no -o BatchMode=no -- example dolang-vfs
+    "--login-env-base64=$(base64.encode "/opt/My Shell/zsh")"
+    --cd-base64 (base64.encode r"C:\Program Files\project")
+    --set-base64 (base64.encode "GREETING=hello there")
+    --set-base64 (base64.encode r#"QUOTED=a"b`c$d%e"#)
+    --stdio
+
+  # Values that the remote shell cannot misread are left legible.
+  let argv = _ssh.build_command example cd: /srv/project login_env: false
+  assert_eq $argv $
+    ssh -T -e none -a -o IdentitiesOnly=no -o BatchMode=no
+    -- example dolang-vfs --cd /srv/project --stdio
 
 #[test]
 def with_uses_stdio_vfs()
