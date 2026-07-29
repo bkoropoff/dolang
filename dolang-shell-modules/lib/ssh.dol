@@ -13,6 +13,16 @@ import _ssh
 # `command` supplies another location. The SSH session is terminated when
 # `block` exits, including during unwind.
 #
+# SSH does not give the remote command the environment a logged-in session
+# would have, so the remote VFS reconstructs it before serving requests. On
+# Unix hosts it runs the account's login shell, which SSH itself skips. On
+# Windows hosts it reads the user environment from the registry, which the
+# OpenSSH server there populates only for `PATH`.
+#
+# Pass `login_env: false` to skip this, or a path to use that login shell
+# instead of the one in the passwd database; a path is ignored by Windows
+# hosts, which have no login shell. `env` overrides win over imported values.
+#
 # # Parameters
 #
 # | Name                 | Type     | Description                                      |
@@ -34,6 +44,7 @@ import _ssh
 # | `command`            | `array?` | Remote VFS launcher prefix                        |
 # | `cd`                 | `Path?`  | Initial remote working directory                  |
 # | `env`                | `dict`   | Initial remote environment overrides              |
+# | `login_env`          | `bool?`  | Import the remote login environment; may name a Unix shell |
 #
 # # Returns
 #
@@ -87,6 +98,7 @@ pub def with
   :command = ["dolang-vfs"]
   :cd = nil
   :env = {}
+  :login_env = true
   ...options
 do
   _ssh.with_program ssh
@@ -105,4 +117,5 @@ do
     :command
     :cd
     :env
+    :login_env
     ...options

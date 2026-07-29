@@ -28,6 +28,7 @@ pub def build_command
   :command = ["dolang-vfs"]
   :cd = nil
   :env = {}
+  :login_env = true
   ...options
 do
   let identities = []
@@ -75,7 +76,10 @@ do
   if (known_hosts != nil)
     argv.push -o "UserKnownHostsFile=$known_hosts"
 
-  argv.push -- $host ...command ...(_vfs.vfs_args cd env) --stdio
+  # ssh(1) joins everything past the host with spaces and the remote account's
+  # shell splits it again, so the VFS options are encoded rather than quoted.
+  let vfs_args = _vfs.vfs_args $cd $env login: $login_env encode: true
+  argv.push -- $host ...command ...vfs_args --stdio
   argv
 
 pub def with_program
@@ -95,6 +99,7 @@ pub def with_program
   :command = ["dolang-vfs"]
   :cd = nil
   :env = {}
+  :login_env = true
   ...options
 do
   let argv = build_command
@@ -112,6 +117,7 @@ do
     :command
     :cd
     :env
+    :login_env
     ...options
   argv[0] = executable
   let vfs = Vfs do run ...argv

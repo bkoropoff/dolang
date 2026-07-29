@@ -65,6 +65,15 @@ def parse_env sets unsets
     overrides[name] = nil
   overrides
 
+def parse_login_env disabled shell
+  if disabled
+    if shell
+      throw args.Error "--no-login-env and --login-shell are mutually exclusive"
+    return false
+  if shell
+    return shell
+  true
+
 args.with
   help: Compile a local Do script and run it through an SSH VFS.
   - opt: user
@@ -134,6 +143,12 @@ args.with
     collect: true
     meta: NAME
     help: Unset a remote environment variable; may be repeated
+  - flag: no-login-env
+    help: Do not import the remote login environment
+  - opt: login-shell
+    default: nil
+    meta: SHELL
+    help: Remote login shell to import the environment from
   - arg: host
     help: SSH destination
   - arg: script
@@ -145,6 +160,7 @@ args.with
     help: Arguments passed to the target script
   do |p|
     let remote_env = parse_env $p.env $p.unset_env
+    let login_env = parse_login_env $p.no_login_env $p.login_shell
     let bytecode = _shell.compile_script $p.script
 
     ssh.with $p.host
@@ -160,6 +176,7 @@ args.with
       command: $p.command
       cd: $p.cd
       env: $remote_env
+      :login_env
       for identity = p.identity
         identity: $identity
       for jump = p.jump

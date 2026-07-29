@@ -23,6 +23,7 @@ mod direct;
 mod error;
 mod guid;
 mod pipe;
+mod probe;
 mod protocol;
 mod read_dir;
 mod sec_desc;
@@ -480,7 +481,15 @@ pub struct Query {
 impl Query {
     pub fn current() -> crate::Result<Self> {
         Ok(Self {
-            env: std::env::vars().collect(),
+            // vars() would panic on a value that is not valid UTF-8, which the
+            // login environment probe can legitimately import. Such variables
+            // stay in the process environment (and are inherited by spawned
+            // commands); they are just absent from this snapshot.
+            env: std::env::vars_os()
+                .filter_map(|(name, value)| {
+                    Some((name.into_string().ok()?, value.into_string().ok()?))
+                })
+                .collect(),
             cwd: typed_path(std::env::current_dir()?)?,
             current_exe: typed_path(std::env::current_exe()?)?,
             target: TargetInfo::current(),
