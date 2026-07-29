@@ -24,7 +24,7 @@ jobs:
       matrix:
         include:
           - target: x86_64-linux
-            os: ubuntu-latest
+            os: ubuntu-22.04
           - target: x86_64-windows
             os: windows-latest
           - target: aarch64-macos
