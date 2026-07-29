@@ -180,7 +180,7 @@ fn value_to_unix_seconds_nanos<'v, 's>(
 
     Err(Error::type_error(
         strand,
-        format!("{context}: expected int or float seconds"),
+        format!("{context}: expected Int or Float seconds"),
     ))
 }
 
@@ -229,7 +229,7 @@ fn coerce_sleep_duration<'v, 's>(
 
     Err(Error::type_error(
         strand,
-        "sleep argument must be a Duration, integer, or float",
+        "sleep argument must be a Duration, integer, or Float",
     ))
 }
 
@@ -291,7 +291,7 @@ impl<'v> Object<'v> for DateTime {
                 let nanos = nanos.map_or(Ok(None), |value| {
                     value
                         .as_int(strand)
-                        .ok_or_else(|| Error::type_error(strand, "from_unix: expected int nanos"))
+                        .ok_or_else(|| Error::type_error(strand, "from_unix: expected Int nanos"))
                         .map(Some)
                 })?;
                 let total_nanos = if let Some(secs) = secs {

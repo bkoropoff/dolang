@@ -110,7 +110,7 @@ containers ([`docker`](./api/docker/index.md),
 [`podman`](./api/podman/index.md), [`toolbx`](./api/toolbx.md)),
 [SSH](./api/ssh.md), [WSL](./api/wsl.md), privilege elevation
 ([`admin`](./api/admin.md), [`sudo`](./api/sudo.md)), argument parsing
-([`args`](./api/args.md)), system integration
+([`Args`](./api/args.md)), system integration
 ([`sys`](./api/sys/index.md), [`systemd`](./api/systemd.md),
 [`xdg`](./api/xdg.md)), identity and Windows access control
 ([`security`](./api/security/index.md)), and safe terminal output

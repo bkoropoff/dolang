@@ -52,6 +52,15 @@ def option_short()
   assert_eq $p.format "xz"
 
 #[test]
+def option_parse()
+  let p = args.parse
+    args: ["--count", "42"]
+    - opt: count
+      parse: $int
+  assert_eq $p.count 42
+  assert (type p.count Int)
+
+#[test]
 def positional()
   let p = args.parse
     args: ["hello"]

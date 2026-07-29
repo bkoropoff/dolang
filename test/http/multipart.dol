@@ -40,7 +40,7 @@ def parse_boundary content_type
   nil
 
 def parse_multipart body boundary
-  let marker = (bin "--$boundary")
+  let marker = (Bin "--$boundary")
   let _preamble rest = (body.split marker limit: 1)
   let parts = []
   while (!(rest.starts_with b"--"))

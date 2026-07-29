@@ -1,5 +1,5 @@
 echo (foo[1=])
-# error: invalid expression in index or array literal
+# error: invalid expression in index or Array literal
 #   --> index_literal_errors.dol:LL:LL
 #    |
 # LL | echo (foo[1=])

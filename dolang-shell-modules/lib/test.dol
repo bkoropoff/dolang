@@ -173,7 +173,7 @@ pub def fixture wrap
   do |func| Fixture $wrap $func
 
 # Register a test case that runs `func` with no arguments.  `name`, if unspecified,
-# defaults to the `str` coercion of `func`, which for `def`s is simply the function
+# defaults to the `Str` coercion of `func`, which for `def`s is simply the function
 # name.  This function is suitable for use as a decorator:
 #
 # ```

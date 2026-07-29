@@ -434,7 +434,7 @@ async fn write_with_mode<'v, 's>(
         }
         _ => {
             let _ = file.close().await;
-            return Err(Error::type_error(strand, "expected `str` or `bin`"));
+            return Err(Error::type_error(strand, "expected `Str` or `Bin`"));
         }
     };
 
@@ -655,7 +655,7 @@ fn parse_ownership_identity<'v, 's>(
 ) -> Result<'v, 's, dolang_shell_vfs::OwnershipIdentity> {
     if let Some(value) = value.as_int(strand) {
         let value = u32::try_from(value)
-            .map_err(|_| Error::type_error(strand, "expected non-negative int or str"))?;
+            .map_err(|_| Error::type_error(strand, "expected non-negative Int or Str"))?;
         Ok(dolang_shell_vfs::OwnershipIdentity::Id(value))
     } else if let Some(value) = value.as_str(strand) {
         Ok(dolang_shell_vfs::OwnershipIdentity::Name(value.to_string()))
@@ -667,9 +667,9 @@ fn parse_ownership_identity<'v, 's>(
         Err(Error::type_error(
             strand,
             match field {
-                "user" => "user: expected int, str, or security.Sid",
-                "group" => "group: expected int, str, or security.Sid",
-                _ => "expected int, str, or security.Sid",
+                "user" => "user: expected Int, str, or security.Sid",
+                "group" => "group: expected Int, str, or security.Sid",
+                _ => "expected Int, str, or security.Sid",
             },
         ))
     }
@@ -754,7 +754,7 @@ async fn glob<'v, 's>(
 ) -> Result<'v, 's, ()> {
     let pattern = pattern
         .as_str(strand)
-        .ok_or_else(|| Error::type_error(strand, "pattern: expected str"))?
+        .ok_or_else(|| Error::type_error(strand, "pattern: expected Str"))?
         .to_string();
     let max_depth = match max_depth {
         Some(v) => Some(v.to_usize(strand)?),
@@ -883,13 +883,13 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             let all = match all {
                 Some(v) => v
                     .as_bool(strand)
-                    .ok_or_else(|| Error::type_error(strand, "expected bool"))?,
+                    .ok_or_else(|| Error::type_error(strand, "expected Bool"))?,
                 None => false,
             };
             let ignore = match ignore {
                 Some(v) => v
                     .as_bool(strand)
-                    .ok_or_else(|| Error::type_error(strand, "expected bool"))?,
+                    .ok_or_else(|| Error::type_error(strand, "expected Bool"))?,
                 None => false,
             };
             for path in paths {
@@ -1172,7 +1172,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             let all = match all {
                 Some(v) => v
                     .as_bool(strand)
-                    .ok_or_else(|| Error::type_error(strand, "expected bool"))?,
+                    .ok_or_else(|| Error::type_error(strand, "expected Bool"))?,
                 None => false,
             };
             let _ = out;
@@ -1191,7 +1191,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             let all = match all {
                 Some(v) => v
                     .as_bool(strand)
-                    .ok_or_else(|| Error::type_error(strand, "expected bool"))?,
+                    .ok_or_else(|| Error::type_error(strand, "expected Bool"))?,
                 None => false,
             };
             move_(strand, global, from.to_path(), to.to_path(), all).await
@@ -1236,7 +1236,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             let all = match all {
                 Some(v) => v
                     .as_bool(strand)
-                    .ok_or_else(|| Error::type_error(strand, "expected bool"))?,
+                    .ok_or_else(|| Error::type_error(strand, "expected Bool"))?,
                 None => false,
             };
             create_dir(strand, global, path.to_path(), all).await
@@ -1247,13 +1247,13 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             let all = match all {
                 Some(v) => v
                     .as_bool(strand)
-                    .ok_or_else(|| Error::type_error(strand, "expected bool"))?,
+                    .ok_or_else(|| Error::type_error(strand, "expected Bool"))?,
                 None => false,
             };
             let ignore = match ignore {
                 Some(v) => v
                     .as_bool(strand)
-                    .ok_or_else(|| Error::type_error(strand, "expected bool"))?,
+                    .ok_or_else(|| Error::type_error(strand, "expected Bool"))?,
                 None => false,
             };
             for path in paths {

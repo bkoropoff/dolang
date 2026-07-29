@@ -65,7 +65,7 @@ let label = (condition && "yes" || "no")
 
 ### Range Expressions
 
-`..` constructs a [`range`](../api/std/range.md) value.
+`..` constructs a [`Range`](../api/std/range.md) value.
 
 ```
 let bounded = 1..5
@@ -105,7 +105,7 @@ The `$` prefix introduces a compact expression at statement level. It supports:
 let person = {name: "Alice", age: 30}
 echo $person.name
 echo $person["age"]
-echo $str(person.age)
+echo $Str(person.age)
 ```
 
 ### Implicit
@@ -161,5 +161,5 @@ syntax error.
 See [Here Strings](basic-types.md#here-strings) for multi-line string literals
 that use the same interpolation syntax.
 
-See [Binary Strings](basic-types.md#binary-strings-bin) for details on `bin`
+See [Binary Strings](basic-types.md#binary-strings-bin) for details on `Bin`
 literals and their methods.

@@ -110,7 +110,7 @@ and objects.
 | [`exit`](../api/shell/index.md#exit-code)  | Exit with a status code (default: 0)                    |
 | [`cd`](../api/shell/index.md#cd-path-func) | Change directory; optionally run func in new dir        |
 | [`env`](../api/shell/index.md#env)         | Access environment variables                            |
-| [`args`](../api/shell/index.md#args)       | Command-line arguments ([`array`](../api/std/array.md)) |
+| [`Args`](../api/shell/index.md#args)       | Command-line arguments ([`Array`](../api/std/array.md)) |
 | [`program`](../api/shell/index.md#program) | Script [`Path`](../api/fs/path.md) or `-m` module name  |
 
 ### `term`

@@ -19,7 +19,7 @@ File size in bytes.
 
 ### `type`
 
-File type as a [`sym`](../std/sym.md): `:FILE:`, `:DIR:`, `:SYMLINK:`,
+File type as a [`Sym`](../std/sym.md): `:FILE:`, `:DIR:`, `:SYMLINK:`,
 `:FIFO:`, `:CHAR_DEVICE:`, `:BLOCK_DEVICE:`, `:SOCKET:`, or `:UNKNOWN:`.
 
 ### `modified`

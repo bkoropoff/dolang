@@ -11,7 +11,7 @@ field, this defaults to `"message"`.
 
 #### Type
 
-[`str`](../std/str.md)
+[`Str`](../std/str.md)
 
 ### `data`
 
@@ -19,7 +19,7 @@ The event payload text. Multiple `data:` lines are joined with `\n`.
 
 #### Type
 
-[`str`](../std/str.md)
+[`Str`](../std/str.md)
 
 ### `id`
 
@@ -27,7 +27,7 @@ The event identifier, if present.
 
 #### Type
 
-[`str`](../std/str.md) or `nil`
+[`Str`](../std/str.md) or `nil`
 
 ### `retry`
 
@@ -35,7 +35,7 @@ The reconnection delay hint from the stream, if present.
 
 #### Type
 
-[`int`](../std/int.md) or `nil`
+[`Int`](../std/int.md) or `nil`
 
 ```
 

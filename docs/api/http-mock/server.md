@@ -33,7 +33,7 @@ The server's bound socket address, e.g. `127.0.0.1:41823`.
 
 #### Type
 
-[`str`](../std/str.md)
+[`Str`](../std/str.md)
 
 ### `url`
 
@@ -62,16 +62,16 @@ Each item accepts:
 
 | Name         | Type                           | Description                                                              |
 | ------------ | ------------------------------ | ------------------------------------------------------------------------ |
-| `method`     | [`str`](../std/str.md)         | HTTP method to match, case-insensitive                                   |
-| `path`       | [`str`](../std/str.md)         | Exact request path to match                                              |
-| `path_regex` | [`str`](../std/str.md)         | Regex the request path must match                                        |
-| `headers`    | [`dict`](../std/dict.md)       | Header name/value pairs that must all be present and match exactly       |
-| `query`      | [`dict`](../std/dict.md)       | Query parameter name/value pairs that must all match exactly             |
+| `method`     | [`Str`](../std/str.md)         | HTTP method to match, case-insensitive                                   |
+| `path`       | [`Str`](../std/str.md)         | Exact request path to match                                              |
+| `path_regex` | [`Str`](../std/str.md)         | Regex the request path must match                                        |
+| `headers`    | [`Dict`](../std/dict.md)       | Header name/value pairs that must all be present and match exactly       |
+| `query`      | [`Dict`](../std/dict.md)       | Query parameter name/value pairs that must all match exactly             |
 | `body_json`  | any                            | JSON value the request body must deserialize to and equal                |
 | `match`      | func                           | Callback matcher — see below                                             |
-| `respond`    | [`dict`](../std/dict.md)\|func | Response to return, or a callback that builds one — see below. Required. |
-| `expect`     | `int`\|range                   | Number (or range) of matching requests expected                          |
-| `name`       | [`str`](../std/str.md)         | Name used in `expect:` failure messages                                  |
+| `respond`    | [`Dict`](../std/dict.md)\|func | Response to return, or a callback that builds one — see below. Required. |
+| `expect`     | `Int`\|range                   | Number (or range) of matching requests expected                          |
+| `name`       | [`Str`](../std/str.md)         | Name used in `expect:` failure messages                                  |
 
 If none of `method`/`path`/`path_regex`/`headers`/`query`/`body_json`/`match`
 are given, the item matches any request. All given matchers on one item must
@@ -89,9 +89,9 @@ callback that returns one — built dynamically from the matched request
 
 | Name      | Type                                           | Description                         |
 | --------- | ---------------------------------------------- | ----------------------------------- |
-| `status`  | `int`                                          | HTTP status code, defaults to `200` |
-| `headers` | [`dict`](../std/dict.md)                       | Response headers                    |
-| `body`    | [`str`](../std/str.md)\|[`bin`](../std/bin.md) | Raw response body                   |
+| `status`  | `Int`                                          | HTTP status code, defaults to `200` |
+| `headers` | [`Dict`](../std/dict.md)                       | Response headers                    |
+| `body`    | [`Str`](../std/str.md)\|[`Bin`](../std/bin.md) | Raw response body                   |
 | `json`    | any                                            | Response body, JSON-serialized      |
 
 ```

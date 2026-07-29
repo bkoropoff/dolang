@@ -90,7 +90,7 @@ pub(crate) fn parse_named_namespace<'v, 's>(
         } else {
             Err(Error::value(
                 strand,
-                "namespace: expected str, :USER:, or :SYSTEM:",
+                "namespace: expected Str, :USER:, or :SYSTEM:",
             ))
         }
     } else {
@@ -121,14 +121,14 @@ pub(crate) async fn path_list<'v, 's>(
                 } else {
                     return Err(Error::value(
                         strand,
-                        "namespace: expected str, :ANY:, :USER:, or :SYSTEM:",
+                        "namespace: expected Str, :ANY:, :USER:, or :SYSTEM:",
                     ));
                 }
             } else if let Some(namespace) = namespace.as_str(strand) {
                 namespace_buf = namespace.to_string();
                 XattrNamespace::Named(&namespace_buf)
             } else {
-                return Err(Error::type_error(strand, "namespace: expected str or sym"));
+                return Err(Error::type_error(strand, "namespace: expected Str or Sym"));
             }
         }
     };

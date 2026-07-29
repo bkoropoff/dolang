@@ -1,5 +1,5 @@
 import std:
-  - args
+  - Args
 
 def foo :bar = "hello"
   bar
@@ -15,10 +15,10 @@ bind {foo: nil}
   :foo = 42
 assert_eq $foo nil
 
-bind args()
+bind Args()
   :foo = 42
 assert_eq $foo 42
 
-bind args foo: nil
+bind Args foo: nil
   :foo = 42
 assert_eq $foo nil

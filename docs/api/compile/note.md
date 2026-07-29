@@ -13,4 +13,4 @@ The note kind as a symbol:
 
 ### `message`
 
-The note text as [`str`](../std/str.md).
+The note text as [`Str`](../std/str.md).

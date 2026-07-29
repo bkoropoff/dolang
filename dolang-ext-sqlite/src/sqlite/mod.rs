@@ -108,7 +108,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 max_wait = None
             )?;
             let path = dolang_ext_shell::as_path(strand, &path)
-                .ok_or_else(|| Error::type_error(strand, "path: expected str"))?;
+                .ok_or_else(|| Error::type_error(strand, "path: expected Str"))?;
             let path = if path == Path::new(":memory:") {
                 path
             } else {
@@ -119,7 +119,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             // Parse retry configuration with defaults
             let busy_retries = if let Some(v) = retries {
                 v.to_i64(strand)
-                    .map_err(|_| Error::type_error(strand, "busy_retries: expected int"))?
+                    .map_err(|_| Error::type_error(strand, "busy_retries: expected Int"))?
                     .try_into()
                     .map_err(|_| Error::overflow(strand))?
             } else {
@@ -127,7 +127,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             };
             let busy_min_wait = if let Some(v) = min_wait {
                 v.to_i64(strand)
-                    .map_err(|_| Error::type_error(strand, "busy_min_wait: expected int"))?
+                    .map_err(|_| Error::type_error(strand, "busy_min_wait: expected Int"))?
                     .try_into()
                     .map_err(|_| Error::overflow(strand))?
             } else {
@@ -135,7 +135,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             };
             let busy_max_wait = if let Some(v) = max_wait {
                 v.to_i64(strand)
-                    .map_err(|_| Error::type_error(strand, "busy_max_wait: expected int"))?
+                    .map_err(|_| Error::type_error(strand, "busy_max_wait: expected Int"))?
                     .try_into()
                     .map_err(|_| Error::overflow(strand))?
             } else {

@@ -3,7 +3,7 @@
 Do is dynamically typed. Values carry their type at runtime, and variables can
 hold any type.
 
-## Integers (`int`)
+## Integers (`Int`)
 
 128-bit signed integers.
 
@@ -18,10 +18,10 @@ Integers support arithmetic (`+`, `-`, `*`, `/`, `//`, `%`), bitwise
 
 `/` performs floating point division and results in a float. The `//` operator
 performs Euclidean division and `%` computes the Euclidean remainder, such that
-`x == (x // y) * y + (x % y)`. This means both always yield `int`s as
+`x == (x // y) * y + (x % y)`. This means both always yield `Int`s as
 results.
 
-## Floats (`float`)
+## Floats (`Float`)
 
 64-bit floating point.
 
@@ -33,9 +33,9 @@ echo $sci      # 0.055
 ```
 
 `//` and `%` likewise perform Euclidean division and remainder operations for
-floats, meaning that `//` always returns an `int` while `%` returns a `float`.
+floats, meaning that `//` always returns an `Int` while `%` returns a `Float`.
 
-## Strings (`str`)
+## Strings (`Str`)
 
 Immutable UTF-8 strings. Created with double quotes or as bare literals at
 statement level:
@@ -178,7 +178,7 @@ let pattern = r|-
 
 All the same indentation rules apply as for regular here strings.
 
-## Binary Strings (`bin`)
+## Binary Strings (`Bin`)
 
 Immutable byte sequences that may contain arbitrary (non-UTF-8) data. Created
 with a `b"..."` prefix:
@@ -205,10 +205,10 @@ let prefix = b"foo"
 let result = b"$(prefix)bar"   # b"foobar"
 ```
 
-Both `str` and `bin` values can be interpolated into a binary string. `str`
-values contribute their UTF-8 bytes; `bin` values contribute their raw bytes.
+Both `Str` and `Bin` values can be interpolated into a binary string. `Str`
+values contribute their UTF-8 bytes; `Bin` values contribute their raw bytes.
 
-### Comparison with `str`
+### Comparison with `Str`
 
 Binary strings and regular strings are distinct types and are never equal,
 even when their byte content matches:
@@ -217,7 +217,7 @@ even when their byte content matches:
 assert_ne b"hello" "hello"
 ```
 
-## Booleans (`bool`)
+## Booleans (`Bool`)
 
 `true` and `false`.
 
@@ -226,10 +226,10 @@ assert_ne b"hello" "hello"
 A generic "absent" marker and the result of functions, expressions, and
 statements with nothing interesting to return.
 
-## Symbols (`sym`)
+## Symbols (`Sym`)
 
 Globally canonical identifiers that are more efficient to hash and compare than
-`str`. Used for literal dictionary keys, key arguments in variadic argument
+`Str`. Used for literal dictionary keys, key arguments in variadic argument
 packs, object fields, ad-hoc enumerated constants, etc.
 
 ```
@@ -251,21 +251,22 @@ sets, and tuples.
 ## Type Inspection
 
 Every value has an associated **type object** that represents its type. The
-built-in types (`int`, `float`, `str`, `bool`, `sym`, `array`, `dict`, etc.)
+built-in types (`Int`, `Float`, `Str`, `Bool`, `Sym`, `Array`, `Dict`, etc.)
 each have a corresponding type object available in the standard library.
 
-`type` is the type of types. You can call it to query or test types:
+`Type` is the type of types. Use the lowercase `type` function to query or
+test types:
 
 ```
 # Get the type of a value (returns the type object)
-assert_eq (type 42) $int
-assert_eq (type "hello") $str
-assert_eq (type [1, 2]) $array
+assert_eq (type 42) $Int
+assert_eq (type "hello") $Str
+assert_eq (type [1, 2]) $Array
 assert_eq (type nil) $Nil
 
 # Test if a value is an instance of a type
-assert (type 42 int)
-assert (type "hello" str)
+assert (type 42 Int)
+assert (type "hello" Str)
 assert (type nil Nil)
 ```
 

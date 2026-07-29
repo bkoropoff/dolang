@@ -1,6 +1,7 @@
-# type
+# Type
 
-`type` is the type of all types. It can also be used to query and test types.
+`Type` is the type of all types and cannot be constructed directly. The
+lowercase `type` function queries and tests types.
 
 ## `type value`
 
@@ -17,9 +18,9 @@ Returns the type object representing the value's type.
 type object
 
 ```
-assert_eq (type 42) $int
-assert_eq (type "hello") $str
-assert_eq (type [1, 2]) $array
+assert_eq (type 42) $Int
+assert_eq (type "hello") $Str
+assert_eq (type [1, 2]) $Array
 assert_eq (type nil) $Nil
 ```
 
@@ -37,11 +38,11 @@ inheritance.
 
 #### Returns
 
-`bool`
+`Bool`
 
 ```
-assert (type 42 int)
-assert (type "hello" str)
+assert (type 42 Int)
+assert (type "hello" Str)
 assert (type nil Nil)
 
 class Animal

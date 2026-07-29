@@ -1,7 +1,7 @@
-assert (!(bool (tuple([]))))
-assert (bool (tuple([1])))
+assert (!(bool (Tuple([]))))
+assert (bool (Tuple([1])))
 
-let tup = tuple([1, 2, 3, "hello", [1, 2], {"key": "value"}])
+let tup = Tuple([1, 2, 3, "hello", [1, 2], {"key": "value"}])
 assert_eq $tup[0] 1
 assert_eq $tup[-1] {"key": "value"}
 assert_eq $tup[-2] [1, 2]
@@ -19,13 +19,13 @@ let nested_arr = [1, 2]
 assert (tup.contains nested_arr)
 let nested_dict = {"key": "value"}
 assert (tup.contains nested_dict)
-assert (!(tuple([]).contains 1))
+assert (!(Tuple([]).contains 1))
 
 let copied = tup.copy()
 assert_eq $copied $tup
 
 let shared_inner = [1]
-let shallow = (tuple ([[shared_inner]])).copy()
+let shallow = (Tuple ([[shared_inner]])).copy()
 let outer = shallow.get 0
 let inner = outer[0]
 inner.push 2

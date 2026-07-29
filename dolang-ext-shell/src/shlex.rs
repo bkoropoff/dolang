@@ -92,7 +92,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>) {
             // Input must be a string
             let s = arg
                 .as_str(strand)
-                .ok_or_else(|| Error::type_error(strand, "expected `str`"))?;
+                .ok_or_else(|| Error::type_error(strand, "expected `Str`"))?;
 
             // SAFETY: the string will be kept alive as long as this iterator object exists.
             let pin = unsafe { s.pin().into_static_unchecked() };

@@ -106,6 +106,29 @@ impl<'v> Dict<'v> {
         Self(Inner::new())
     }
 
+    pub(crate) fn from_args<'s>(
+        strand: &mut Strand<'v, 's>,
+        args: Args<'v, '_>,
+    ) -> Result<'v, 's, Self> {
+        let mut this = Self::new();
+        let mut sink = DictPairs {
+            int: 0,
+            dict: &mut this,
+        };
+
+        for (index, arg) in args.enumerate() {
+            if (index + 1) % crate::INTERRUPT_INTERVAL == 0 {
+                strand.check_trap_gc()?;
+            }
+            match arg {
+                Arg::Pos(value) => sink.positional(strand, value)?,
+                Arg::Key(key, value) => sink.symbol(strand, key, value)?,
+            }
+        }
+
+        Ok(this)
+    }
+
     pub(crate) fn get<'s>(
         &self,
         strand: &mut Strand<'v, 's>,
@@ -704,7 +727,7 @@ impl<'v> Protocol<'v> for Type {
         let ([items], []) = unpack!(strand, args, 1, 0)?;
         let mut dict = Dict::new();
 
-        // FIXME: `dict` is not GC-scannable, but then again if it were it would also
+        // FIXME: `Dict` is not GC-scannable, but then again if it were it would also
         // be mutably borrowed, which would inhibit GC.  This needs a resolution.
         let mut sink = DictPairs {
             int: 0,
@@ -740,7 +763,7 @@ impl<'v> Protocol<'v> for Type {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "<type std.dict>")
+        crate::fmt!(strand, w, "<type std.Dict>")
     }
 
     fn op_inspect<'a>(_this: Recv<'v, 'a, Self>, _vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {

@@ -54,11 +54,11 @@ be valid UTF-8.
 
 | Name   | Type                                              | Description                    |
 | ------ | ------------------------------------------------- | ------------------------------ |
-| `base` | [`str`](../std/str.md)\|[`bin`](../std/bin.md)    | Content to patch               |
+| `base` | [`Str`](../std/str.md)\|[`Bin`](../std/bin.md)    | Content to patch               |
 
 #### Returns
 
-[`str`](../std/str.md)\|[`bin`](../std/bin.md)
+[`Str`](../std/str.md)\|[`Bin`](../std/bin.md)
 
 #### Errors
 
@@ -66,7 +66,7 @@ be valid UTF-8.
 | ------------------------------- | -------------------------------------------------------------- |
 | [`ApplyError`](./applyerror.md) | The patch does not apply cleanly                               |
 | [`ApplyError`](./applyerror.md) | A text result is not valid UTF-8                               |
-| `TypeError`                     | `base` is not [`str`](../std/str.md) or [`bin`](../std/bin.md) |
+| `TypeError`                     | `base` is not [`Str`](../std/str.md) or [`Bin`](../std/bin.md) |
 
 ```
 let p = patch.diff "alpha\n" "beta\n"

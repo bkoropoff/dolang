@@ -22,13 +22,13 @@ let HEX_DIGEST = Regex r"^[0-9a-f]+$"
 def parse_location value
   if (type value Url || type value Path)
     value
-  else if (type value str)
+  else if (type value Str)
     if (value.starts_with "http://" || value.starts_with "https://")
       Url $value
     else
       Path $value
   else
-    throw std.TypeError "expected `str`, `Url`, or `Path`"
+    throw std.TypeError "expected `Str`, `Url`, or `Path`"
 
 def require_http url
   if !(url.scheme == "http" || url.scheme == "https")
@@ -63,7 +63,7 @@ def safe_leaf name
   name.replace("/", "_").replace("\\", "_")
 
 def digest_spec spec
-  if !(type spec str)
+  if !(type spec Str)
     throw std.TypeError "digest: expected `algorithm:hex` string"
   let parts = [...spec.lower().split ":" limit: 1]
   if (parts.len != 2)
@@ -290,10 +290,10 @@ pub def put source destination :headers = nil
     put_path $source $destination
   nil
 
-let ARCHIVE_FORMATS = set $
+let ARCHIVE_FORMATS = Set $
   :TAR: :TAR_GZIP: :TAR_ZSTD: :ZIP:
 
-let INPUT_FORMATS = set $
+let INPUT_FORMATS = Set $
   :TAR: :TAR_GZIP: :TAR_ZSTD: :ZIP: :GZIP: :ZSTD: :XZ:
 
 def parse_input_format format
@@ -434,7 +434,7 @@ def filesystem_metadata path kind options
     if group_name
       :group_name
 
-let ALLOWED_METADATA = set $
+let ALLOWED_METADATA = Set $
   :mode: :dir_mode: :link_mode: :uid: :gid:
   :user_name: :group_name: :mtime:
 
@@ -443,7 +443,7 @@ def validate_metadata arguments
   let positional = [...positional]
   if (positional.len != 0)
     throw std.ValueError "pack metadata accepts keyed options only"
-  let metadata = (dict keyed)
+  let metadata = (Dict keyed)
   for key = metadata.keys()
     if !(ALLOWED_METADATA.contains key)
       throw std.ValueError "unexpected pack metadata option: $key"
@@ -570,10 +570,10 @@ def strip_count records strip
     if rest.any do |x| (x != root)
       throw std.ValueError "strip: :ROOT: requires one shared root component"
     1
-  else if (type strip int && strip >= 0)
+  else if (type strip Int && strip >= 0)
     strip
   else
-    throw std.ValueError "strip: expected a non-negative int or :ROOT:"
+    throw std.ValueError "strip: expected a non-negative Int or :ROOT:"
 
 def record_path parts
   let path = UnixPath.join ...parts
@@ -758,7 +758,7 @@ class ZipUnpack
     let records = []
     zip.open $self.#source do |archive|
       let entries = [...archive.entries]
-      let seen = set()
+      let seen = Set()
 
       for entry = entries
         let raw = (str entry.name)

@@ -192,7 +192,7 @@ well_known_symbols! {
 ///
 /// Allocated symbols are backed by an object which is sometimes exposed as a
 /// [`Value`], such as when iterating the contents of a module, or instantiating
-/// a symbol dynamically with the `sym` prelude function.  Such an object can
+/// a symbol dynamically with the `Sym` prelude function.  Such an object can
 /// be downcast to this type with [`Value::as_sym`].  This type also implements
 /// [`Input`], which implicitly converts it into the underlying object.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]

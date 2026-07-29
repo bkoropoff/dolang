@@ -12,7 +12,7 @@ Creates a resource with `count` concurrent reservations.
 
 | Name    | Type                   | Description                   |
 | ------- | ---------------------- | ----------------------------- |
-| `count` | [`int`](../std/int.md) | maximum concurrent admissions |
+| `count` | [`Int`](../std/int.md) | maximum concurrent admissions |
 
 **Returns:** `Resource`
 

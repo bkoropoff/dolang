@@ -42,7 +42,7 @@ class Param
   pub field help = nil
   pub field collect = false
   pub field default = :UNSET:
-  pub field type = nil
+  pub field parse = nil
   pub field sym = nil
   pub field values = nil
   pub field divider = false
@@ -52,6 +52,8 @@ class Param
     :help = nil
     :collect = false
     :default = :UNSET:
+    :parse = nil
+    # Bootstrap compatibility for the top-level dodo.dol.
     :type = nil
     :values = nil
     :divider = false
@@ -61,15 +63,15 @@ class Param
     self.collect = collect
     self.default = default
     self.sym = sym $ name.replace "-" "_"
-    self.type = (type || str)
+    self.parse = (parse || type || str)
     self.divider = divider
     if (values != nil)
-      self.values = set $values
+      self.values = Set $values
 
   pub def coerce self value
     if (self.values != nil && !self.values.contains value)
       throw Error "unexpected value for $(self.name): $value" nil
-    self.type $value
+    self.parse $value
 
   pub def assign self rec value
     let v = self.coerce $value
@@ -96,6 +98,7 @@ class Named: Param
   def (init)
     self :name
     :long = :UNSET:
+    :parse = nil
     :type = nil
     :help = nil
     :collect = false
@@ -105,7 +108,7 @@ class Named: Param
     :short = nil
     :env = nil
   do
-    Param.(init) $self :name :type :help :collect :default :divider :values
+    Param.(init) $self :name :parse :type :help :collect :default :divider :values
     self.long = if (long == :UNSET:)
       name
     else
@@ -123,6 +126,7 @@ class Opt: Named
   def (init)
     self :name
     :long = :UNSET:
+    :parse = nil
     :type = nil
     :help = nil
     :collect = false
@@ -133,7 +137,7 @@ class Opt: Named
     :env = nil
     :meta = nil
   do
-    Named.(init) $self :name :long :type :help :collect
+    Named.(init) $self :name :long :parse :type :help :collect
       :default :divider :values :short :env
     self.meta = meta
 
@@ -210,8 +214,8 @@ class Parser
       if (cmd != nil)
         self.#sym = sym $ cmd.replace "-" "_"
     for k v = spec
-      if (type k == int)
-        if (type v dict)
+      if (type k Int)
+        if (type v Dict)
           bind v
             :opt = nil
             :arg = nil
@@ -559,7 +563,7 @@ do
 #
 # Accepts the same spec declarations as `args.parse`. The subcommand or
 # top-level `cmd:` block's handler (positional `handler`) is called with the
-# parsed top-level record.
+# parsed top-level Record.
 #
 # When `exit: true` (default), an argument error or `--help` option is automatically
 # handled by printing to the terminal and exiting with an appropriate status code.

@@ -29,7 +29,7 @@ A dict-like view of the response headers. See
 
 #### Type
 
-[`dict`](../std/dict.md)-like
+[`Dict`](../std/dict.md)-like
 
 ### `url`
 
@@ -45,11 +45,11 @@ read error while buffering it.
 
 ### `body`
 
-Returns the saved body excerpt as [`bin`](../std/bin.md).
+Returns the saved body excerpt as [`Bin`](../std/bin.md).
 
 ### `text`
 
-Returns the saved body excerpt as [`str`](../std/str.md), failing on
+Returns the saved body excerpt as [`Str`](../std/str.md), failing on
 invalid UTF-8.
 
 ### `json`

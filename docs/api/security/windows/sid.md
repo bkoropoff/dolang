@@ -12,7 +12,7 @@ Constructs a SID from its canonical string or native binary representation.
 
 | Name    | Type                                                 | Description        |
 | ------- | ---------------------------------------------------- | ------------------ |
-| `value` | [`str`](../../std/str.md)\|[`bin`](../../std/bin.md) | SID representation |
+| `value` | [`Str`](../../std/str.md)\|[`Bin`](../../std/bin.md) | SID representation |
 
 ## Fields
 
@@ -30,7 +30,7 @@ Number of sub-authorities.
 
 ### `sub_authorities`
 
-Sub-authorities as an immutable [`tuple`](../../std/tuple.md).
+Sub-authorities as an immutable [`Tuple`](../../std/tuple.md).
 
 ## Methods
 
@@ -50,7 +50,7 @@ Resolves the SID in the active Windows VFS target.
 
 Returns the native Windows packet representation.
 
-**Returns:** [`bin`](../../std/bin.md)
+**Returns:** [`Bin`](../../std/bin.md)
 
 ```
 let sid = Sid S-1-5-32-544

@@ -66,9 +66,9 @@ Reads up to `size` bytes from the current content position.
 
 | Name   | Type                    | Description             |
 | ------ | ----------------------- | ----------------------- |
-| `size` | [`int`](../std/int.md)  | Maximum bytes to read   |
+| `size` | [`Int`](../std/int.md)  | Maximum bytes to read   |
 
-**Returns:** [`bin`](../std/bin.md).
+**Returns:** [`Bin`](../std/bin.md).
 
 ```
 let prefix = entry.read 512

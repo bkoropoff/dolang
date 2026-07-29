@@ -46,24 +46,16 @@ impl<'v> Protocol<'v> for Value {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "<type value>")
+        crate::fmt!(strand, w, "<type Value>")
     }
 
     async fn op_call<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        args: Args<'v, 'a>,
-        out: Slot<'v, 'a>,
+        _args: Args<'v, 'a>,
+        _out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        let ([obj], [ty]) = unpack!(strand, args, 1, 1)?;
-
-        if let Some(ty) = ty {
-            let res = obj.is_instance_of(strand, &ty);
-            Output::set(strand, out, res)
-        } else {
-            obj.op_type(strand, out);
-        }
-        Ok(())
+        Err(Error::type_error(strand, "Value is not instantiable"))
     }
 }
 
@@ -101,18 +93,10 @@ impl<'v> Protocol<'v> for Type {
     async fn op_call<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        args: Args<'v, 'a>,
-        out: Slot<'v, 'a>,
+        _args: Args<'v, 'a>,
+        _out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        let ([obj], [ty]) = unpack!(strand, args, 1, 1)?;
-
-        if let Some(ty) = ty {
-            let res = obj.is_instance_of(strand, &ty);
-            Output::set(strand, out, res)
-        } else {
-            obj.op_type(strand, out);
-        }
-        Ok(())
+        Err(Error::type_error(strand, "Type is not instantiable"))
     }
 }
 
@@ -171,7 +155,7 @@ impl<'v> Protocol<'v> for Bool {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "<type std.bool>")
+        crate::fmt!(strand, w, "<type std.Bool>")
     }
 
     async fn op_call<'a, 's>(
@@ -180,10 +164,11 @@ impl<'v> Protocol<'v> for Bool {
         args: Args<'v, 'a>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        // Constructor: bool(value) - convert to boolean
-        let ([value], _) = unpack!(strand, args, 1, 0)?;
-        let truth = value.op_bool(strand);
-        Output::set(strand, out, truth);
+        let ([value], []) = unpack!(strand, args, 1, 0)?;
+        let value = value
+            .as_bool(strand)
+            .ok_or_else(|| Error::type_error(strand, "Bool: expected Bool"))?;
+        Output::set(strand, out, value);
         Ok(())
     }
 
@@ -238,7 +223,10 @@ impl<'v> Protocol<'v> for Bool {
         match method.tag() {
             sym::INIT_METHOD => {
                 let ([self_val, value], []) = unpack!(strand, args, 2, 0)?;
-                let native = DoValue::from_bool(value.op_bool(strand));
+                let value = value
+                    .as_bool(strand)
+                    .ok_or_else(|| Error::type_error(strand, "Bool: expected Bool"))?;
+                let native = DoValue::from_bool(value);
                 self_val.op_fill(strand, &strand.singletons().bool, native)?;
                 Ok(())
             }
@@ -275,7 +263,7 @@ impl<'v> Protocol<'v> for ArgsType {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "<type std.args>")
+        crate::fmt!(strand, w, "<type std.Args>")
     }
 
     async fn op_call<'a, 's>(

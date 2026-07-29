@@ -1,10 +1,10 @@
 import std:
   - hash
 
-# Basic subclassing of float
-class MyFloat: float
+# Basic subclassing of Float
+class MyFloat: Float
   def (init) self value
-    float.(init) $self $value
+    Float.(init) $self $value
 
 let x = MyFloat 2.5
 let y = MyFloat 0.5

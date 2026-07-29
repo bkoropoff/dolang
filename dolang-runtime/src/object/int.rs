@@ -473,7 +473,10 @@ impl<'v> Protocol<'v> for Verbatim {
     }
 }
 
-fn coerce_to_int<'v, 's>(value: &Value<'v>, strand: &mut Strand<'v, 's>) -> Result<'v, 's, i128> {
+pub(crate) fn coerce<'v, 's>(
+    value: &Value<'v>,
+    strand: &mut Strand<'v, 's>,
+) -> Result<'v, 's, i128> {
     if let Some(str) = value.as_str_raw(strand) {
         str.parse::<i128>().map_err(|e| match e.kind() {
             IntErrorKind::Zero => unreachable!(),
@@ -489,6 +492,25 @@ fn coerce_to_int<'v, 's>(value: &Value<'v>, strand: &mut Strand<'v, 's>) -> Resu
             Prim::Bool(v) => Ok(v as i128),
             Prim::Nil => Err(Error::type_error(strand, "int: `nil` can't be converted")),
         }
+    }
+}
+
+fn construct<'v, 's>(value: &Value<'v>, strand: &mut Strand<'v, 's>) -> Result<'v, 's, i128> {
+    match value.to_prim(strand) {
+        Ok(Prim::Int(value)) => Ok(value),
+        Ok(Prim::Bool(value)) => Ok(value as i128),
+        Ok(Prim::F64(value))
+            if value.is_finite()
+                && value.fract() == 0.0
+                && value >= i128::MIN as f64
+                && value < -(i128::MIN as f64) =>
+        {
+            Ok(value as i128)
+        }
+        _ => Err(Error::type_error(
+            strand,
+            "Int: expected Int, Bool, or integral Float",
+        )),
     }
 }
 
@@ -520,7 +542,7 @@ impl<'v> Protocol<'v> for Int {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "<type std.int>")
+        crate::fmt!(strand, w, "<type std.Int>")
     }
 
     fn op_inspect<'a>(_this: Recv<'v, 'a, Self>, _vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {
@@ -599,7 +621,7 @@ impl<'v> Protocol<'v> for Int {
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
         let ([value], _) = unpack!(strand, args, 1, 0)?;
-        let coerced = coerce_to_int(&value, strand)?;
+        let coerced = construct(&value, strand)?;
         Output::set(strand, out, coerced);
         Ok(())
     }
@@ -614,7 +636,7 @@ impl<'v> Protocol<'v> for Int {
         match method.tag() {
             sym::INIT_METHOD => {
                 let ([self_val, value], []) = unpack!(strand, args, 2, 0)?;
-                let coerced = coerce_to_int(&value, strand)?;
+                let coerced = construct(&value, strand)?;
                 let native = Value::from_int(strand, coerced);
                 self_val.op_fill(strand, &strand.singletons().int, native)?;
                 Ok(())

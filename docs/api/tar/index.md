@@ -22,7 +22,7 @@ Compression is detected from gzip or zstd magic bytes.
 
 | Name   | Type                                            | Description  |
 | ------ | ----------------------------------------------- | ------------ |
-| `path` | [`str`](../std/str.md)\|[`Path`](../fs/path.md) | Archive path |
+| `path` | [`Str`](../std/str.md)\|[`Path`](../fs/path.md) | Archive path |
 | `func` | callable                                        | Reader scope |
 
 **Returns:** the result of `func`.
@@ -41,8 +41,8 @@ Creates an archive and calls `func` with a [`Writer`](./tar-writer.md).
 
 | Name          | Type                                            | Description                          |
 | ------------- | ----------------------------------------------- | ------------------------------------ |
-| `path`        | [`str`](../std/str.md)\|[`Path`](../fs/path.md) | Archive path                         |
-| `compression` | [`sym`](../std/sym.md)?                         | `:NONE:`, `:GZIP:`, or `:ZSTD:`      |
+| `path`        | [`Str`](../std/str.md)\|[`Path`](../fs/path.md) | Archive path                         |
+| `compression` | [`Sym`](../std/sym.md)?                         | `:NONE:`, `:GZIP:`, or `:ZSTD:`      |
 | `func`        | callable                                        | Writer scope                         |
 
 When `compression` is omitted, `.gz` and `.tgz` select gzip, `.zst` and

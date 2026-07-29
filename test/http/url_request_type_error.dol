@@ -19,4 +19,4 @@ def assert_err func type: ty :msg ...rest
 
 #[test]
 def get_rejects_non_url()
-  assert_err $http.get 1 type: $TypeError msg: "type error: expected Url or str"
+  assert_err $http.get 1 type: $TypeError msg: "type error: expected Url or Str"

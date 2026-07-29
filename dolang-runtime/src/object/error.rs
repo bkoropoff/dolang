@@ -333,7 +333,7 @@ impl<'v> Protocol<'v> for VariantType {
                 let ([name], []) = unpack!(strand, args, 1, 0)?;
                 let name = name
                     .as_sym(strand)
-                    .ok_or_else(|| Error::type_error(strand, "expected `sym`"))?;
+                    .ok_or_else(|| Error::type_error(strand, "expected `Sym`"))?;
                 Error::field(strand, name)
             }
             ErrorKind::UnexpectedPos => {
@@ -468,7 +468,7 @@ fn is_runtime_superkind(kind: ErrorKind) -> bool {
 fn expect_index<'v, 's>(strand: &mut Strand<'v, 's>, value: &Value<'v>) -> Result<'v, 's, usize> {
     let index = value
         .to_i64(strand)
-        .map_err(|_| Error::type_error(strand, "expected `int`"))?;
+        .map_err(|_| Error::type_error(strand, "expected `Int`"))?;
     usize::try_from(index).map_err(|_| Error::value(strand, "expected non-negative value"))
 }
 
@@ -476,6 +476,6 @@ fn expect_string<'v, 's>(strand: &mut Strand<'v, 's>, value: &Value<'v>) -> Resu
     if let Some(str) = value.as_str_raw(strand) {
         Ok(str.to_owned())
     } else {
-        Err(Error::type_error(strand, "expected `str`"))
+        Err(Error::type_error(strand, "expected `Str`"))
     }
 }

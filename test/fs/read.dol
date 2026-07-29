@@ -52,7 +52,7 @@ def read_binary_mode()
   open $path "rb" do |file|
     let contents = file.read()
     # Verify we got some binary data
-    assert $ type $contents $bin
+    assert $ type $contents $Bin
     assert (contents.len > 0)
     # Binary mode returns bytes, check that we got a string representation
     assert (contents.contains "[" )

@@ -33,13 +33,13 @@ args.with
   help: Download files over HTTP(S)
   - opt: limit
     short: l
-    type: $int
+    parse: $int
     help: Maximum concurrent downloads
     default: 4
   - arg: urls
     collect: true
     help: URLs to download
-    type: $url.Url
+    parse: $url.Url
   do |args| progress.with do
     let client = http.Client()
     strand.pool $args.limit $args.urls do |url|
@@ -49,8 +49,8 @@ args.with
 ### Argument Parsing
 
 [`args.with`](../api/args.md) describes the command line and invokes its block
-with a record of converted values. `type:` specifies how to coerce the argument
-from a string, e.g. `type: $url.Url` ensures that `download` receives URL
+with a record of converted values. `parse:` specifies how to parse the argument
+from a string, e.g. `parse: $url.Url` ensures that `download` receives URL
 objects. `collect: true` gathers the remaining positional arguments into an
 array.
 

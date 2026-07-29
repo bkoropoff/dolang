@@ -17,13 +17,13 @@ Executes a function with the current strand's external process I/O mode set for
 the duration of the call.
 
 In `:LINE:` mode, external process input is treated as UTF-8, split on line
-boundaries, and yields `str` values with any line endings removed. Output to an
-external process sends the `str` form of each value as UTF-8 with
-platform-specific line endings appended, except for `bin` values, which are
+boundaries, and yields `Str` values with any line endings removed. Output to an
+external process sends the `Str` form of each value as UTF-8 with
+platform-specific line endings appended, except for `Bin` values, which are
 always sent verbatim. This is the default behavior.
 
-In `:CHUNK:` mode, input yields arbitrary-size `bin` values with no other
-processing. Output sends `bin` values verbatim and otherwise sends the `str`
+In `:CHUNK:` mode, input yields arbitrary-size `Bin` values with no other
+processing. Output sends `Bin` values verbatim and otherwise sends the `Str`
 form of each value as UTF-8 with no further transformation.
 
 In a pipeline, the mode of the strand *adjacent* to the external process
@@ -70,7 +70,7 @@ Executes a function with its output discarded.
 The return value of `func`.
 
 The `mute` function redirects the output of the given function to
-[`nulliter`](../std/index.md#nulliter), effectively discarding
+[`NULLITER`](../std/index.md#nulliter), effectively discarding
 `stdout` of any executed external programs.
 
 ```
@@ -87,11 +87,11 @@ Captures the output of a function as a string.
 | Name   | Type                     | Description                                                        |
 | ------ | ------------------------ | ------------------------------------------------------------------ |
 | `func` | `func`                   | function whose output to capture                                   |
-| `trim` | [`bool`](../std/bool.md) | whether to trim trailing carriage return/newline (default: `true`) |
+| `trim` | [`Bool`](../std/bool.md) | whether to trim trailing carriage return/newline (default: `true`) |
 
 #### Returns
 
-[`str`](../std/str.md)
+[`Str`](../std/str.md)
 
 ```
 let output = sub do run echo hello

@@ -5,10 +5,10 @@ use dolang::runtime::object::fmt;
 use dolang::{
     compile::Compiler,
     runtime::{
-        Args, Error, Instance, Object, Output, Result, Slot, State, Strand, Type, Value, method,
+        Args, Error, Instance, Object, Output, Result, Slot, State, Strand, Type, Value,
         object::{ArrayLike, ArrayView, Mut, Ref, TypeBuilder},
         unpack,
-        value::{AsTuple, Empty, Nil, View},
+        value::{AsTuple, Nil},
         vm::Builder,
     },
 };
@@ -110,7 +110,7 @@ fn sid_from_value<'v, 's>(
         let bytes = value.to_vec();
         VfsSid::from_bytes(&bytes).map_err(|error| Error::value(strand, error.to_string()))
     } else {
-        Err(Error::type_error(strand, "Sid: expected str or bin"))
+        Err(Error::type_error(strand, "Sid: expected Str or Bin"))
     }
 }
 
@@ -239,7 +239,7 @@ impl<'v> Object<'v> for Guid {
             VfsGuid::from_bytes(&value.to_vec())
                 .map_err(|error| Error::value(strand, error.to_string()))?
         } else {
-            return Err(Error::type_error(strand, "Guid: expected str or bin"));
+            return Err(Error::type_error(strand, "Guid: expected Str or Bin"));
         };
         this.create_with_annex(strand, Guid, guid, out);
         Ok(())
@@ -415,7 +415,7 @@ impl<'v> Object<'v> for Acl {
         let revision = revision
             .map(|value| value.to_i64(strand))
             .transpose()
-            .map_err(|_| Error::type_error(strand, "revision: expected int"))?
+            .map_err(|_| Error::type_error(strand, "revision: expected Int"))?
             .map(|value| {
                 u8::try_from(value).map_err(|_| Error::value(strand, "revision: expected 2 or 4"))
             })
@@ -483,7 +483,7 @@ fn ace_u32<'v, 's>(
 ) -> Result<'v, 's, u32> {
     let value = value
         .to_i64(strand)
-        .map_err(|_| Error::type_error(strand, format!("{name}: expected int")))?;
+        .map_err(|_| Error::type_error(strand, format!("{name}: expected Int")))?;
     u32::try_from(value).map_err(|_| Error::value(strand, format!("{name}: out of range")))
 }
 
@@ -503,7 +503,7 @@ fn ace_bool<'v, 's>(
 ) -> Result<'v, 's, bool> {
     value
         .as_bool(strand)
-        .ok_or_else(|| Error::type_error(strand, format!("{name}: expected bool")))
+        .ok_or_else(|| Error::type_error(strand, format!("{name}: expected Bool")))
 }
 
 fn ace_options<'v, 's>(
@@ -543,7 +543,7 @@ fn ace_options<'v, 's>(
                 value
                     .as_bin(strand)
                     .map(|value| value.to_vec())
-                    .ok_or_else(|| Error::type_error(strand, "application_data: expected bin"))
+                    .ok_or_else(|| Error::type_error(strand, "application_data: expected Bin"))
             })
             .transpose()?
             .unwrap_or_default(),
@@ -1197,7 +1197,7 @@ impl<'v> Object<'v> for SecDesc {
             }
             let value = value
                 .as_bin(strand)
-                .ok_or_else(|| Error::type_error(strand, "SecDesc: expected bin"))?;
+                .ok_or_else(|| Error::type_error(strand, "SecDesc: expected Bin"))?;
             VfsSecDesc::from_bytes(&value.to_vec())
                 .map_err(|error| Error::value(strand, error.to_string()))?
         } else {
@@ -1608,7 +1608,7 @@ impl<'v> Object<'v> for SidName {
                 } else {
                     return Err(Error::type_error(
                         strand,
-                        "SidName.lookup: expected Sid or str",
+                        "SidName.lookup: expected Sid or Str",
                     ));
                 };
                 create_sid_name(strand, global, name, &mut out);
@@ -1796,29 +1796,21 @@ fn security_info<'v, 's>(
 }
 
 pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Global<'v>>) {
-    let tuple = builder.sym("tuple");
-
     builder
         .module("security")
         .function_with_slots(
             "unix_info",
-            async move |strand, args, mut out, [mut std, mut group_ids, mut tmp]| {
+            async move |strand, args, mut out, [mut group_ids]| {
                 let ([], []) = unpack!(strand, args, 0, 0)?;
                 let SecurityInfo::Unix(info) = security_info(strand, global)? else {
                     return Err(Error::not_supported(strand));
                 };
 
-                strand.import("std", &mut std).await?;
-                Output::set(strand, &mut group_ids, Empty::Array);
-                {
-                    let View::Array(group_ids_view) = group_ids.view(strand.vm()) else {
-                        unreachable!("Empty::Array did not create an array")
-                    };
-                    for group_id in &info.group_ids {
-                        group_ids_view.push(strand, *group_id)?;
-                    }
-                }
-                method!(strand, &std, tuple, &mut tmp, &group_ids).await?;
+                Output::set(
+                    strand,
+                    &mut group_ids,
+                    AsTuple::new(info.group_ids.iter().copied()),
+                );
 
                 global
                     .types
@@ -1830,7 +1822,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                         Output::set(
                             strand,
                             Mut::slot_mut::<0>(&mut this.borrow_mut_unwrap()),
-                            &tmp,
+                            &group_ids,
                         );
                     },
                 );
@@ -1921,7 +1913,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             }
             let name = name
                 .as_str(strand)
-                .ok_or_else(|| Error::type_error(strand, "user_id: expected str"))?
+                .ok_or_else(|| Error::type_error(strand, "user_id: expected Str"))?
                 .to_string();
             let vfs = global.local.get(strand).vfs();
             let uid = error::io_result(strand, vfs.user_id(&name).await)?;
@@ -1950,7 +1942,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             }
             let name = name
                 .as_str(strand)
-                .ok_or_else(|| Error::type_error(strand, "group_id: expected str"))?
+                .ok_or_else(|| Error::type_error(strand, "group_id: expected Str"))?
                 .to_string();
             let vfs = global.local.get(strand).vfs();
             let gid = error::io_result(strand, vfs.group_id(&name).await)?;

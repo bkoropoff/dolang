@@ -37,7 +37,7 @@ impl<'v, 'a> UrlOrStr<'v, 'a> {
         } else if let Some(str) = value.as_str(strand) {
             Ok(Self::Str(str))
         } else {
-            Err(Error::type_error(strand, "expected Url or str"))
+            Err(Error::type_error(strand, "expected Url or Str"))
         }
     }
 
@@ -170,7 +170,7 @@ pub fn create_url<'v, 'a>(strand: &mut Strand<'v, '_>, url: url::Url, out: Slot<
     create_url_with_global(global, strand, url, out);
 }
 
-/// Converts a Do `url.Url` or `str` value into an owned `url::Url`.
+/// Converts a Do `url.Url` or `Str` value into an owned `url::Url`.
 pub fn value_to_url<'v, 's>(
     strand: &mut Strand<'v, 's>,
     value: &Value<'v>,
@@ -312,7 +312,7 @@ impl<'v> Object<'v> for Url {
                 } else {
                     let query = query
                         .as_str(strand)
-                        .ok_or_else(|| Error::type_error(strand, "expected str or nil"))?;
+                        .ok_or_else(|| Error::type_error(strand, "expected Str or nil"))?;
                     strand.access(|x| url.set_query(Some(query.as_str(x))))
                 }
                 create_url_with_global(this.annex().global, strand, url, out);
@@ -326,7 +326,7 @@ impl<'v> Object<'v> for Url {
                 } else {
                     let fragment = fragment
                         .as_str(strand)
-                        .ok_or_else(|| Error::type_error(strand, "expected str or nil"))?;
+                        .ok_or_else(|| Error::type_error(strand, "expected Str or nil"))?;
                     strand.access(|x| url.set_fragment(Some(fragment.as_str(x))));
                 }
                 create_url_with_global(this.annex().global, strand, url, out);
@@ -398,7 +398,7 @@ impl<'v> Object<'v> for Url {
     ) -> Result<'v, 's, ()> {
         let segment = other
             .as_str(strand)
-            .ok_or_else(|| Error::type_error(strand, "expected `str`"))?
+            .ok_or_else(|| Error::type_error(strand, "expected `Str`"))?
             .to_string();
         let mut url = this.annex().inner.clone();
         if segment.starts_with('/') {

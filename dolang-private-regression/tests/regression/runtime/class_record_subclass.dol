@@ -1,12 +1,12 @@
 # Basic subclassing of record
-class MyRecord: record
+class MyRecord: Record
 def (init) self
   # error: special methods are only valid in a class body
   #   --> class_record_subclass.dol:LL:LL
   #    |
   # LL | def (init) self
   #    |      ^^^^
-  record.(init) $self
+  Record.(init) $self {}
 
 let r = MyRecord()
 r.name = "Alice"

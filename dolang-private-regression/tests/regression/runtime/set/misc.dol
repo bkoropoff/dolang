@@ -1,7 +1,7 @@
 import
   std:
     - hash
-    - set
+    - Set
 
 def assert_err msg block
   let res = try
@@ -12,14 +12,14 @@ def assert_err msg block
     true
   assert $res
 
-assert (!(bool(set())))
-assert (bool(set([1])))
+assert (!(bool(Set())))
+assert (bool(Set([1])))
 
-let empty = set()
+let empty = Set()
 assert_eq $empty.len 0
 assert_eq [...empty] []
 
-let s = set [3, 1, 2, 1, 3]
+let s = Set [3, 1, 2, 1, 3]
 assert_eq $s.len 3
 assert_eq [...s] [3, 1, 2]
 s.add 4
@@ -33,41 +33,41 @@ assert (s.delete 2)
 assert (!(s.delete 2))
 assert_eq [...s] [3, 1, 4]
 
-let a = set [1, 2, 3]
-let b = set [3, 2, 1]
+let a = Set [1, 2, 3]
+let b = Set [3, 2, 1]
 assert_eq $a $b
 assert_eq (hash a) (hash b)
 
-assert_eq [...(a.union (set [3, 4, 5, 4]))] [1, 2, 3, 4, 5]
-assert_eq [...(a.intersect (set [3, 1, 7, 1]))] [1, 3]
-assert_eq [...(a.diff (set [2, 4]))] [1, 3]
-assert_eq [...(a.sym_diff (set [3, 4, 1, 5]))] [2, 4, 5]
+assert_eq [...(a.union (Set [3, 4, 5, 4]))] [1, 2, 3, 4, 5]
+assert_eq [...(a.intersect (Set [3, 1, 7, 1]))] [1, 3]
+assert_eq [...(a.diff (Set [2, 4]))] [1, 3]
+assert_eq [...(a.sym_diff (Set [3, 4, 1, 5]))] [2, 4, 5]
 
-assert (a.is_subset (set [1, 2, 3, 4]))
-assert (!(a.is_subset (set [1, 3])))
-assert ((set [1, 2, 3, 4]).is_superset (set [1, 3]))
-assert (!((set [1, 2]).is_superset (set [1, 2, 3])))
+assert (a.is_subset (Set [1, 2, 3, 4]))
+assert (!(a.is_subset (Set [1, 3])))
+assert ((Set [1, 2, 3, 4]).is_superset (Set [1, 3]))
+assert (!((Set [1, 2]).is_superset (Set [1, 2, 3])))
 
-let cleared = set [1, 2]
+let cleared = Set [1, 2]
 cleared.clear()
 assert_eq $cleared.len 0
 assert_eq [...cleared] []
 
-let original = set [1, 2]
+let original = Set [1, 2]
 let copied = original.copy()
 copied.add 3
 assert_eq [...original] [1, 2]
 assert_eq [...copied] [1, 2, 3]
 
 let shared_inner = [1]
-let shallow = (set ([shared_inner])).copy()
+let shallow = (Set ([shared_inner])).copy()
 let shallow_items = [...shallow]
 let first = shallow_items[0]
 first.push 2
 assert_eq $shared_inner [1, 2]
 assert_eq $first [1, 2]
 
-let iter_set = set [1, 2]
+let iter_set = Set [1, 2]
 let caught = try
   for x = iter_set
     iter_set.add 3
@@ -77,7 +77,7 @@ catch _
   true
 assert $caught
 
-let pair_set = set {1, foo: "bar"}
+let pair_set = Set {1, foo: "bar"}
 assert_eq $pair_set.len 2
 let pair_items = [...pair_set]
 assert_eq $pair_items[0][0] 0
@@ -85,5 +85,5 @@ assert_eq $pair_items[0][1] 1
 assert_eq $pair_items[1][0] :foo:
 assert_eq $pair_items[1][1] "bar"
 
-assert (type (set([]).iter()) std.Iter)
-assert_err "unexpected positional item: 0" do (set []).copy 1
+assert (type (Set([]).iter()) std.Iter)
+assert_err "unexpected positional item: 0" do (Set []).copy 1

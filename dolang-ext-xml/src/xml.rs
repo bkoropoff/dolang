@@ -53,7 +53,7 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>, state: State<'v, Global<'
             let ([arg], []) = unpack!(strand, args, 1, 0)?;
             let src = arg
                 .as_str(strand.vm())
-                .ok_or_else(|| Error::type_error(strand, "expected str"))?
+                .ok_or_else(|| Error::type_error(strand, "expected Str"))?
                 .pin();
             let mut reader = NsReader::from_str(&src);
             reader.config_mut().trim_text(false);
@@ -602,7 +602,7 @@ fn walk_value<'v, 's>(
     let Some(cast) = state.node_type.cast(value) else {
         let text = value
             .as_str(strand)
-            .ok_or_else(|| value_error(strand, "XML children must be Node or str"))?
+            .ok_or_else(|| value_error(strand, "XML children must be Node or Str"))?
             .to_string();
         validate_text(strand, &text, "XML text")?;
         if let Some(writer) = writer {

@@ -33,7 +33,7 @@ methods can be called on the value directly:
 
 `premap`/`prefilter` are named for their direction — they act on values headed
 *into* the sink. A value that is both `Sinkable` and
-[`Iterable`](./iterable.md), such as an [`array`](./array.md), offers those
+[`Iterable`](./iterable.md), such as an [`Array`](./array.md), offers those
 alongside `map`/`filter`, which run the opposite way:
 
 ```

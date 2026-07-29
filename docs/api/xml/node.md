@@ -15,7 +15,7 @@ Creates an empty element.
 
 | Name        | Type   | Description                         |
 | ----------- | ------ | ----------------------------------- |
-| `tag`       | `str`  | Local element name                  |
+| `tag`       | `Str`  | Local element name                  |
 | `namespace` | `str?` | Namespace URI                       |
 | `prefix`    | `str?` | Preferred namespace prefix          |
 
@@ -33,11 +33,11 @@ Mutable local element name.
 
 ### `namespace`
 
-Mutable namespace URI as a `str`, or `nil` for no namespace.
+Mutable namespace URI as a `Str`, or `nil` for no namespace.
 
 ### `prefix`
 
-Mutable preferred prefix as a `str`, or `nil`.
+Mutable preferred prefix as a `Str`, or `nil`.
 
 ### `qname`
 
@@ -47,7 +47,7 @@ Read-only qualified name formed from `prefix` and `tag`.
 
 Mutable array-like view of [`Attr`](./attr.md) objects in document order.
 
-The view supports indexed assignment and the [`array`](../std/array.md)
+The view supports indexed assignment and the [`Array`](../std/array.md)
 mutation methods `push`, `insert`, `pop`, `delete`, and `clear`. Duplicate
 expanded names can exist temporarily, but [`verify`](./index.md#verify-node)
 and serialization reject them.
@@ -60,9 +60,9 @@ node.attrs[0].value = "456"
 
 ### `children`
 
-Mutable array-like view of child `Node` and `str` values in document order.
+Mutable array-like view of child `Node` and `Str` values in document order.
 
-The view supports indexed assignment and the [`array`](../std/array.md)
+The view supports indexed assignment and the [`Array`](../std/array.md)
 mutation methods `push`, `insert`, `pop`, `delete`, and `clear`.
 
 Iterating a node iterates this view directly.
@@ -86,7 +86,7 @@ Gets the first attribute matching an expanded name.
 
 | Name        | Type   | Description                       |
 | ----------- | ------ | --------------------------------- |
-| `name`      | `str`  | Local attribute name              |
+| `name`      | `Str`  | Local attribute name              |
 | `namespace` | `str?` | Namespace URI                     |
 | `default`   |        | Value returned when absent        |
 | `else`      |        | Callable evaluated when absent    |
@@ -109,8 +109,8 @@ because attribute identity fields are immutable.
 
 | Name        | Type   | Description                         |
 | ----------- | ------ | ----------------------------------- |
-| `name`      | `str`  | Local attribute name                |
-| `value`     | `str`  | Attribute value                     |
+| `name`      | `Str`  | Local attribute name                |
+| `value`     | `Str`  | Attribute value                     |
 | `namespace` | `str?` | Namespace URI                       |
 | `prefix`    | `str?` | Preferred namespace prefix          |
 
@@ -124,10 +124,10 @@ Deletes all attributes matching an expanded name.
 
 | Name        | Type   | Description             |
 | ----------- | ------ | ----------------------- |
-| `name`      | `str`  | Local attribute name    |
+| `name`      | `Str`  | Local attribute name    |
 | `namespace` | `str?` | Namespace URI           |
 
-**Returns:** `bool`, whether an attribute was deleted.
+**Returns:** `Bool`, whether an attribute was deleted.
 
 ### `push child`
 
@@ -137,7 +137,7 @@ Appends a child.
 
 | Name    | Type          | Description |
 | ------- | ------------- | ----------- |
-| `child` | `Node`\|`str` | Child value |
+| `child` | `Node`\|`Str` | Child value |
 
 **Returns:** `nil`.
 

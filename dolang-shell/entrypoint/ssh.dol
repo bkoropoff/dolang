@@ -83,13 +83,13 @@ args.with
     help: Remote user
   - opt: port
     short: p
-    type: $parse_port
+    parse: $parse_port
     default: nil
     meta: PORT
     help: SSH server port
   - opt: identity
     short: i
-    type: $Path
+    parse: $Path
     collect: true
     meta: PATH
     help: Identity file; may be repeated
@@ -104,34 +104,34 @@ args.with
     meta: HOST
     help: Jump host; may be repeated
   - opt: connect-timeout
-    type: $parse_connect_timeout
+    parse: $parse_connect_timeout
     default: nil
     meta: SECONDS
     help: Connection timeout
   - opt: keepalive-interval
-    type: $parse_keepalive_interval
+    parse: $parse_keepalive_interval
     default: nil
     meta: SECONDS
     help: Protocol keepalive interval
   - opt: keepalive-count
-    type: $parse_keepalive_count
+    parse: $parse_keepalive_count
     default: nil
     meta: COUNT
     help: Unanswered keepalives allowed
   - flag: batch
     help: Disable interactive prompts
   - opt: host-key
-    type: $parse_host_key
+    parse: $parse_host_key
     default: :DEFAULT:
     meta: POLICY
     help: Host-key policy: default, strict, or accept-new
   - opt: command
-    type: $parse_command
+    parse: $parse_command
     default: ["dolang-vfs"]
     meta: COMMAND
     help: Remote VFS launcher command
   - opt: cd
-    type: $Path
+    parse: $Path
     default: nil
     meta: PATH
     help: Initial remote working directory
@@ -152,7 +152,7 @@ args.with
   - arg: host
     help: SSH destination
   - arg: script
-    type: $Path
+    parse: $Path
     divider: true
     help: Local Do script
   - arg: script-args

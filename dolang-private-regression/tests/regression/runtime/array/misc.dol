@@ -105,10 +105,10 @@ shallow[0].push 2
 assert_eq $shared_inner [1, 2]
 assert_eq $shallow [[1, 2]]
 
-assert_err "type error: reverse: expected bool" do
+assert_err "type error: reverse: expected Bool" do
   [1, 2].sort reverse: 1
 
-assert_err "type error: array.len is a field, not a method" do [].len()
+assert_err "type error: Array.len is a field, not a method" do [].len()
 assert_err "unexpected positional item: 0" do [].copy 1
 # output: END
 # ["hello", 1, 2, "goodbye"]

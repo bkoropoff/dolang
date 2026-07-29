@@ -18,7 +18,7 @@ Exits the current shell with the given status code.
 
 | Name   | Type                   | Description              |
 | ------ | ---------------------- | ------------------------ |
-| `code` | [`int`](../std/int.md) | exit status (default: 0) |
+| `code` | [`Int`](../std/int.md) | exit status (default: 0) |
 
 #### Returns
 
@@ -34,7 +34,7 @@ changed only for the duration of that call, then restored.
 
 | Name   | Type                                            | Description                          |
 | ------ | ----------------------------------------------- | ------------------------------------ |
-| `path` | [`str`](../std/str.md)\|[`Path`](../fs/path.md) | directory path                       |
+| `path` | [`Str`](../std/str.md)\|[`Path`](../fs/path.md) | directory path                       |
 | `func` |                                                 | callable to run in the new directory |
 
 #### Returns
@@ -68,7 +68,7 @@ created within the call inherit the overrides.
 | --------- | ------------------------------------------------- | -------------------------------------------------------- |
 | `func`    | callable                                          | Block to execute                                         |
 | `args`    | [`Iterable`](../std/iterable.md)?                 | Values converted with [`arg`](../std/index.md#arg-value) |
-| `program` | [`str`](../std/str.md)?\|[`Path`](../fs/path.md)? | Program identity                                         |
+| `program` | [`Str`](../std/str.md)?\|[`Path`](../fs/path.md)? | Program identity                                         |
 
 **Returns:** Return value of `func`.
 
@@ -101,7 +101,7 @@ Runs `func` with scoped environment overrides. Keys may be strings or symbols.
 
 | Name        | Type                     | Description           |
 | ----------- | ------------------------ | --------------------- |
-| `overrides` | [`dict`](../std/dict.md) | Environment overrides |
+| `overrides` | [`Dict`](../std/dict.md) | Environment overrides |
 | `func`      | callable                 | Block to run          |
 
 ## Values
@@ -131,5 +131,5 @@ current `dolang` executable. The path is not automatically canonicalized.
 
 ### `VERSION`
 
-A `(major, minor, patch)` [`tuple`](../std/tuple.md) with the version of the
+A `(major, minor, patch)` [`Tuple`](../std/tuple.md) with the version of the
 running `dolang` build.

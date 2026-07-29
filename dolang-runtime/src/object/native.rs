@@ -1428,14 +1428,14 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
                     let ([field], []) = unpack!(strand, args, 1, 0)?;
                     let field = field
                         .as_sym(strand)
-                        .ok_or_else(|| Error::type_error(strand, "field: expected `sym`"))?;
+                        .ok_or_else(|| Error::type_error(strand, "field: expected `Sym`"))?;
                     Self::op_get(this, strand, field, out)
                 }
                 sym::SET_METHOD => {
                     let ([field, value], []) = unpack!(strand, args, 2, 0)?;
                     let field = field
                         .as_sym(strand)
-                        .ok_or_else(|| Error::type_error(strand, "field: expected `sym`"))?;
+                        .ok_or_else(|| Error::type_error(strand, "field: expected `Sym`"))?;
                     Self::op_set(this, strand, field, value)
                 }
                 _ => T::method(Instance::new(this.receiver), strand, method, args, out).await,

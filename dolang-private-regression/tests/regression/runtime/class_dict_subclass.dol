@@ -1,7 +1,7 @@
 # Basic subclassing of dict
-class MyDict: dict
+class MyDict: Dict
   def (init) self source
-    dict.(init) $self $source
+    Dict.(init) $self $source
 
 let d = MyDict {"a": 1, "b": 2}
 

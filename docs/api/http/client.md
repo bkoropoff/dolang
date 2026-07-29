@@ -15,12 +15,12 @@ HTTP client for making web requests.
 
 | Name            | Type                                                        | Description                                                  |
 | --------------- | ----------------------------------------------------------- | ------------------------------------------------------------ |
-| `unix_socket`   | [`str`](../std/str.md)                                      | Path to a Unix domain socket to connect through (Unix only)  |
-| `proxy`         | [`str`](../std/str.md)\|[`url.Url`](../url/index.md)\|`nil` | Proxy URL for all requests, or `nil` to disable system proxy |
-| `cookies`       | `bool`                                                      | Enable a per-client cookie jar for session-style workflows   |
-| `ca_cert`       | [`str`](../std/str.md)\|[`bin`](../std/bin.md)              | PEM-encoded CA certificate to add to the trust store         |
-| `identity`      | [`str`](../std/str.md)\|[`bin`](../std/bin.md)              | PKCS#12/PFX client certificate for mutual TLS                |
-| `password`      | [`str`](../std/str.md)                                      | Password for the PKCS#12 identity (defaults to empty)        |
+| `unix_socket`   | [`Str`](../std/str.md)                                      | Path to a Unix domain socket to connect through (Unix only)  |
+| `proxy`         | [`Str`](../std/str.md)\|[`url.Url`](../url/index.md)\|`nil` | Proxy URL for all requests, or `nil` to disable system proxy |
+| `cookies`       | `Bool`                                                      | Enable a per-client cookie jar for session-style workflows   |
+| `ca_cert`       | [`Str`](../std/str.md)\|[`Bin`](../std/bin.md)              | PEM-encoded CA certificate to add to the trust store         |
+| `identity`      | [`Str`](../std/str.md)\|[`Bin`](../std/bin.md)              | PKCS#12/PFX client certificate for mutual TLS                |
+| `password`      | [`Str`](../std/str.md)                                      | Password for the PKCS#12 identity (defaults to empty)        |
 | `invalid_certs` | `:DANGER_ACCEPT:`                                           | Pass `:DANGER_ACCEPT:` to disable TLS certificate validation |
 | `func`          | func                                                        | Callable to run with the client; auto-closes when done       |
 
@@ -110,13 +110,13 @@ Makes an HTTP request using the specified verb.
 
 | Name        | Type                                                  | Description                                                   |
 | ----------- | ----------------------------------------------------- | ------------------------------------------------------------- |
-| `url`       | [`str`](../std/str.md)                                | The URL to request                                            |
-| `body`      | [`str`](../std/str.md)\|[`bin`](../std/bin.md)\|input | Request body; accepts iterables for streaming                 |
+| `url`       | [`Str`](../std/str.md)                                | The URL to request                                            |
+| `body`      | [`Str`](../std/str.md)\|[`Bin`](../std/bin.md)\|input | Request body; accepts iterables for streaming                 |
 | `json`      | any                                                   | Request body as JSON value (auto-serialized)                  |
 | `lines`     | input                                                 | Stream request body with newlines between elements            |
 | `multipart` | input                                                 | Multipart/form-data parts                                     |
-| `headers`   | [`dict`](../std/dict.md)                              | Dictionary of headers; repeated keys are accepted             |
-| `query`     | [`dict`](../std/dict.md)                              | Dictionary of query parameters; repeated keys are accepted    |
+| `headers`   | [`Dict`](../std/dict.md)                              | Dictionary of headers; repeated keys are accepted             |
+| `query`     | [`Dict`](../std/dict.md)                              | Dictionary of query parameters; repeated keys are accepted    |
 | `status`    | `:IGNORE:`\|`"IGNORE"`                                | Return the response even when the status is outside 200-299   |
 | `block`     | func                                                  | Called with response; response is closed upon return or error |
 
@@ -227,8 +227,8 @@ let response = client.post https://api.example.com/upload
 
 Multipart part bodies accept:
 
-- `str` for text fields
-- `bin` for binary fields
+- `Str` for text fields
+- `Bin` for binary fields
 - iterable/input values for streaming uploads such as files opened in binary
   mode
 

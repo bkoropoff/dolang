@@ -11,7 +11,7 @@ Abstract supertype of [`UnixPath`](unix-path.md) and
 
 | Name   | Type                                      | Description |
 | ------ | ----------------------------------------- | ----------- |
-| `path` | [`str`](../std/str.md)\|[`Path`](path.md) | Path value  |
+| `path` | [`Str`](../std/str.md)\|[`Path`](path.md) | Path value  |
 
 **Returns:** [`UnixPath`](unix-path.md) or [`WindowsPath`](windows-path.md).
 
@@ -102,7 +102,7 @@ If any component is an absolute path, it replaces everything before it.
 
 | Name         | Type          | Description             |
 | ------------ | ------------- | ----------------------- |
-| `components` | `str`\|`Path` | Path components to join |
+| `components` | `Str`\|`Path` | Path components to join |
 
 #### Returns
 
@@ -201,7 +201,7 @@ Returns a new path with `ext` appended as an additional extension.
 
 | Name  | Type                   | Description                  |
 | ----- | ---------------------- | ---------------------------- |
-| `ext` | [`str`](../std/str.md) | Extension to append          |
+| `ext` | [`Str`](../std/str.md) | Extension to append          |
 
 #### Returns
 
@@ -249,7 +249,7 @@ Returns a new path with the final extension replaced.
 
 | Name  | Type                   | Description             |
 | ----- | ---------------------- | ----------------------- |
-| `ext` | [`str`](../std/str.md) | Replacement extension   |
+| `ext` | [`Str`](../std/str.md) | Replacement extension   |
 
 #### Returns
 
@@ -271,7 +271,7 @@ Returns a new path with the final component replaced.
 
 | Name   | Type                   | Description                 |
 | ------ | ---------------------- | --------------------------- |
-| `name` | [`str`](../std/str.md) | Replacement final component |
+| `name` | [`Str`](../std/str.md) | Replacement final component |
 
 #### Returns
 
@@ -291,7 +291,7 @@ extension when present.
 
 | Name   | Type                   | Description         |
 | ------ | ---------------------- | ------------------- |
-| `stem` | [`str`](../std/str.md) | Replacement stem    |
+| `stem` | [`Str`](../std/str.md) | Replacement stem    |
 
 #### Returns
 

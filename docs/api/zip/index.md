@@ -13,8 +13,8 @@ Opens a ZIP archive and returns an Archive object.
 
 | Name   | Type                   | Description                                             |
 | ------ | ---------------------- | ------------------------------------------------------- |
-| `path` | [`str`](../std/str.md) | Path to the ZIP archive file                            |
-| `mode` | `str`                  | Access mode (default: `"r"`)                            |
+| `path` | [`Str`](../std/str.md) | Path to the ZIP archive file                            |
+| `mode` | `Str`                  | Access mode (default: `"r"`)                            |
 | `func` | func                   | Callable to run with the archive; auto-closes when done |
 
 **Archive modes:**

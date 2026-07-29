@@ -56,7 +56,7 @@ assert (!"foobar".contains "foobarbar")
 assert (!"".contains "foo")
 assert ("".contains "")
 
-assert_err "type error: str.len is a field, not a method" do "foo".len()
+assert_err "type error: Str.len is a field, not a method" do "foo".len()
 assert_err "numeric overflow" do "ab".repeat -1
 assert_err "index out of range or invalid" do "foobar"[-99..]
 assert_err "index out of range or invalid" do "foobar"[0..-99]

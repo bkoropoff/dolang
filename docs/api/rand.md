@@ -12,11 +12,11 @@ Samples a uniformly distributed integer from the half-open range `[0, end)`.
 
 | Name  | Type  | Description           |
 | ----- | ----- | --------------------- |
-| `end` | `int` | exclusive upper bound |
+| `end` | `Int` | exclusive upper bound |
 
 #### Returns
 
-`int` - Sampled integer
+`Int` - Sampled integer
 
 #### Errors
 
@@ -39,12 +39,12 @@ Samples a uniformly distributed integer from the half-open range `[start, end)`.
 
 | Name    | Type  | Description           |
 | ------- | ----- | --------------------- |
-| `end`   | `int` | exclusive upper bound |
-| `start` | `int` | lower bound           |
+| `end`   | `Int` | exclusive upper bound |
+| `start` | `Int` | lower bound           |
 
 #### Returns
 
-`int` - Sampled integer
+`Int` - Sampled integer
 
 #### Errors
 
@@ -68,12 +68,12 @@ Generates a random string by sampling characters from `alphabet`.
 
 | Name       | Type   | Description                  |
 | ---------- | ------ | ---------------------------- |
-| `len`      | `int`  | number of characters to emit |
+| `len`      | `Int`  | number of characters to emit |
 | `alphabet` | `str?` | characters to sample from    |
 
 #### Returns
 
-[`str`](./std/str.md) - Randomly generated text
+[`Str`](./std/str.md) - Randomly generated text
 
 #### Errors
 

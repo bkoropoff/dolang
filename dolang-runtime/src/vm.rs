@@ -525,8 +525,8 @@ impl<'v, 'a> ModuleBuilder<'v, 'a> {
     /// ```ignore
     /// .function("add", async |strand, args, out| {
     ///     let ([a, b], []) = unpack!(strand, args, 2, 0)?;
-    ///     let a = a.as_i64(strand).ok_or_else(|| Error::type_error(strand, "expected int"))?;
-    ///     let b = b.as_i64(strand).ok_or_else(|| Error::type_error(strand, "expected int"))?;
+    ///     let a = a.as_i64(strand).ok_or_else(|| Error::type_error(strand, "expected Int"))?;
+    ///     let b = b.as_i64(strand).ok_or_else(|| Error::type_error(strand, "expected Int"))?;
     ///     Output::set(strand, out, a + b);
     ///     Ok(())
     /// })

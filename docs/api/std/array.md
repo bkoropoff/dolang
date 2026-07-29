@@ -1,6 +1,13 @@
-# array
+# Array
 
 Arrays are ordered, mutable sequences of values.
+
+## Constructor
+
+### `Array iterable`
+
+Builds an array from one iterable. The lowercase `array` factory instead
+collects its positional arguments verbatim.
 
 ## Fields
 
@@ -10,7 +17,7 @@ Returns the number of elements.
 
 #### Type
 
-[`int`](./index.md)
+[`Int`](./index.md)
 
 ```
 assert_eq $[1, 2, 3].len 3
@@ -43,7 +50,7 @@ Negative indexes count from the end; `-1` inserts before the last element.
 
 | Name        | Type                | Description               |
 | ----------- | ------------------- | ------------------------- |
-| `index`     | [`int`](./index.md) | the position to insert at |
+| `index`     | [`Int`](./index.md) | the position to insert at |
 | `...values` |                     | values to insert          |
 
 ```
@@ -63,7 +70,7 @@ alternative is provided. Negative indexes count from the end.
 
 | Name       | Type                | Description                         |
 | ---------- | ------------------- | ----------------------------------- |
-| `index`    | [`int`](./index.md) | the index to access                 |
+| `index`    | [`Int`](./index.md) | the index to access                 |
 | `default:` |                     | value to return if out of bounds    |
 | `else:`    |                     | callable to invoke if out of bounds |
 
@@ -89,7 +96,7 @@ provided. Negative indexes count from the end.
 
 | Name       | Type                | Description                                            |
 | ---------- | ------------------- | ------------------------------------------------------ |
-| `index`    | [`int`](./index.md) | optional index to remove; defaults to the last element |
+| `index`    | [`Int`](./index.md) | optional index to remove; defaults to the last element |
 | `default:` |                     | value to return if the element does not exist          |
 | `else:`    |                     | callable to invoke if the element does not exist       |
 
@@ -116,7 +123,7 @@ Out-of-bounds indexes are ignored.
 
 #### Returns
 
-[`bool`](./index.md) indicating whether an element was removed
+[`Bool`](./index.md) indicating whether an element was removed
 
 ```
 let arr = [10, 20, 30]
@@ -142,7 +149,7 @@ Returns a shallow copy of the array. Contents are *not* copied recursively.
 
 #### Returns
 
-[`array`](./array.md)
+[`Array`](./array.md)
 
 When inherited by a Do subclass, `copy()` calls the subclass constructor with
 the source array as a single positional argument.
@@ -156,7 +163,7 @@ Sorts the array in place.
 | Name       | Type                  | Description                           |
 | ---------- | --------------------- | ------------------------------------- |
 | `key:`     | callable?             | computes a sort key for each element  |
-| `reverse:` | [`bool`](./index.md)? | sorts in descending order when `true` |
+| `reverse:` | [`Bool`](./index.md)? | sorts in descending order when `true` |
 
 The `key:` callable is evaluated once per element.
 
@@ -181,7 +188,7 @@ Tests whether the array contains the given element (by equality).
 
 #### Returns
 
-[`bool`](./index.md)
+[`Bool`](./index.md)
 
 ```
 let arr = [1, 2, 3, "hello"]
@@ -223,7 +230,7 @@ assert_eq $arr[-1] 77
 
 Out-of-bounds access raises an error; use `get` if you wish to avoid this.
 
-Arrays also accept [`range`](./range.md) values for slicing:
+Arrays also accept [`Range`](./range.md) values for slicing:
 
 ```
 let arr = [0, 1, 2, 3]
@@ -231,8 +238,8 @@ assert_eq $arr[1..3] [1, 2]
 assert_eq $arr[..2] [0, 1]
 assert_eq $arr[2..] [2, 3]
 assert_eq $arr[..] [0, 1, 2, 3]
-assert_eq $arr[range 0 4 2] [0, 2]
-assert_eq $arr[range nil nil -1] [3, 2, 1, 0]
+assert_eq $arr[Range 0 4 2] [0, 2]
+assert_eq $arr[Range nil nil -1] [3, 2, 1, 0]
 ```
 
 Slice indexing returns a new array.
@@ -249,7 +256,7 @@ assert_eq $arr [0, 9, 9, 3]
 arr[1..1] = (tuple [4, 5])
 assert_eq $arr [0, 4, 5, 9, 9, 3]
 
-arr[2..4] = range 7 10
+arr[2..4] = Range 7 10
 assert_eq $arr [0, 4, 7, 8, 9, 3]
 ```
 

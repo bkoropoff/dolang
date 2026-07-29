@@ -39,7 +39,7 @@ fn digest_single<'v, 's, T: Algorithm>(
     let digest = match value.view(strand.vm()) {
         View::Str(str) => strand.access(|access| T::digest(str.as_str(access).as_bytes())),
         View::Bin(bin) => strand.access(|access| T::digest(bin.as_slice(access))),
-        _ => return Err(Error::type_error(strand, "expected str or bin")),
+        _ => return Err(Error::type_error(strand, "expected Str or Bin")),
     };
     Output::set(strand, out, digest.as_slice());
     Ok(())
@@ -59,7 +59,7 @@ fn digest_update<'v, 's, T: Algorithm>(
             let bytes: Vec<u8> = bin.into();
             this.borrow_mut(strand)?.0.update(&bytes);
         }
-        _ => return Err(Error::type_error(strand, "expected str or bin")),
+        _ => return Err(Error::type_error(strand, "expected Str or Bin")),
     }
     Ok(())
 }
@@ -72,7 +72,7 @@ fn blake3_single<'v, 's>(
     let digest = match value.view(strand.vm()) {
         View::Str(str) => strand.access(|access| blake3::hash(str.as_str(access).as_bytes())),
         View::Bin(bin) => strand.access(|access| blake3::hash(bin.as_slice(access))),
-        _ => return Err(Error::type_error(strand, "expected str or bin")),
+        _ => return Err(Error::type_error(strand, "expected Str or Bin")),
     };
     Output::set(strand, out, digest.as_slice());
     Ok(())
@@ -92,7 +92,7 @@ fn blake3_update<'v, 's>(
             let bytes: Vec<u8> = bin.into();
             this.borrow_mut(strand)?.0.update(&bytes);
         }
-        _ => return Err(Error::type_error(strand, "expected str or bin")),
+        _ => return Err(Error::type_error(strand, "expected Str or Bin")),
     }
     Ok(())
 }

@@ -23,7 +23,7 @@ The HTTP status code of the response.
 
 #### Type
 
-[`int`](../std/int.md)
+[`Int`](../std/int.md)
 
 ```
 
@@ -40,7 +40,7 @@ HTTP-date, it is returned as a [`DateTime`](../time/datetime.md) instead.
 
 #### Type
 
-[`dict`](../std/dict.md)-like
+[`Dict`](../std/dict.md)-like
 
 ```
 
@@ -71,7 +71,7 @@ in a "closed" state.
 
 #### Returns
 
-[`str`](../std/str.md) -- The response body as text
+[`Str`](../std/str.md) -- The response body as text
 
 #### Errors
 
@@ -93,7 +93,7 @@ leaves it in a "closed" state.
 
 #### Returns
 
-[`bin`](../std/bin.md) -- The response body as bytes
+[`Bin`](../std/bin.md) -- The response body as bytes
 
 ```
 
@@ -110,9 +110,9 @@ and leaves it in a "closed" state.
 #### Returns
 
 The parsed JSON value as a tree of
-[`int`](../std/int.md),
-[`float`](../std/float.md), [`str`](../std/str.md),
-[`array`](../std/array.md), and [`dict`](../std/dict.md), as
+[`Int`](../std/int.md),
+[`Float`](../std/float.md), [`Str`](../std/str.md),
+[`Array`](../std/array.md), and [`Dict`](../std/dict.md), as
 appropriate.
 
 #### Errors
@@ -138,7 +138,7 @@ body into memory.
 
 #### Returns
 
-An iterator of [`bin`](../std/bin.md) values
+An iterator of [`Bin`](../std/bin.md) values
 
 ```
 
@@ -156,7 +156,7 @@ Returns an iterator that yields the response body as lines (split on `\n` or
 
 #### Returns
 
-An iterator of [`str`](../std/str.md) values
+An iterator of [`Str`](../std/str.md) values
 
 ```
 

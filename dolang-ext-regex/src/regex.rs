@@ -44,7 +44,7 @@ impl<'v> Object<'v> for Regex {
         let ([pattern], []) = unpack!(strand, args, 1, 0)?;
         let pattern = pattern
             .as_str(strand.vm())
-            .ok_or_else(|| Error::type_error(strand, "pattern: expected str"))?
+            .ok_or_else(|| Error::type_error(strand, "pattern: expected Str"))?
             .pin();
         let regex = rx::Regex::new(&pattern).into_do(strand)?;
         let global = strand.state::<Global<'v>>();
@@ -60,7 +60,7 @@ impl<'v> Object<'v> for Regex {
                 let ([haystack_value], []) = unpack!(strand, args, 1, 0)?;
                 let haystack = haystack_value
                     .as_str(strand.vm())
-                    .ok_or_else(|| Error::type_error(strand, "expected `str`"))?.pin();
+                    .ok_or_else(|| Error::type_error(strand, "expected `Str`"))?.pin();
                 match annex.regex.captures(&haystack) {
                     Some(caps) => {
                         // SAFETY: We transmute the captures to have 'static lifetime.
@@ -103,7 +103,7 @@ impl<'v> Object<'v> for Regex {
                 let ([haystack_value], []) = unpack!(strand, args, 1, 0)?;
                 let haystack = haystack_value
                     .as_str(strand.vm())
-                    .ok_or_else(|| Error::type_error(strand, "expected `str`"))?.pin();
+                    .ok_or_else(|| Error::type_error(strand, "expected `Str`"))?.pin();
                 // Create the captures iterator
                 let iter = annex.regex.captures_iter(&haystack);
 
@@ -151,12 +151,12 @@ impl<'v> Object<'v> for Regex {
                         unpack!(strand, args, 2, 0, limit_sym = None)?;
                     let haystack = haystack_value
                         .as_str(strand.vm())
-                        .ok_or_else(|| Error::type_error(strand, "expected `str`"))?;
+                        .ok_or_else(|| Error::type_error(strand, "expected `Str`"))?;
                     let haystack = haystack.pin();
                     let limit_val = limit
                         .map(|l| {
                             l.to_i64(strand)
-                                .map_err(|_| Error::type_error(strand, "limit: expected `int`"))
+                                .map_err(|_| Error::type_error(strand, "limit: expected `Int`"))
                         })
                         .transpose()?;
 
@@ -232,7 +232,7 @@ impl<'v> Object<'v> for Regex {
                                 .ok_or_else(|| {
                                     Error::type_error(
                                         strand,
-                                        "replacement callback must return `str`",
+                                        "replacement callback must return `Str`",
                                     )
                                 })?;
                             strand.access(|x| result.push_str(rep.as_str(x)));
@@ -250,12 +250,12 @@ impl<'v> Object<'v> for Regex {
                 let ([haystack_value], [limit]) = unpack!(strand, args, 1, 0, limit_sym = None)?;
                 let haystack = haystack_value
                     .as_str(strand.vm())
-                    .ok_or_else(|| Error::type_error(strand, "expected `str`"))?;
+                    .ok_or_else(|| Error::type_error(strand, "expected `Str`"))?;
                 let haystack = haystack.pin();
                 let limit_i64 = limit
                     .map(|l| {
                         l.to_i64(strand)
-                            .map_err(|_| Error::type_error(strand, "limit: expected `int`"))
+                            .map_err(|_| Error::type_error(strand, "limit: expected `Int`"))
                     })
                     .transpose()?;
 
@@ -351,12 +351,12 @@ impl<'v> Object<'v> for Regex {
                 let ([haystack_value], [limit]) = unpack!(strand, args, 1, 0, limit_sym = None)?;
                 let haystack = haystack_value
                     .as_str(strand.vm())
-                    .ok_or_else(|| Error::type_error(strand, "expected `str`"))?;
+                    .ok_or_else(|| Error::type_error(strand, "expected `Str`"))?;
                 let haystack = haystack.pin();
                 let limit_i64 = limit
                     .map(|l| {
                         l.to_i64(strand)
-                            .map_err(|_| Error::type_error(strand, "limit: expected `int`"))
+                            .map_err(|_| Error::type_error(strand, "limit: expected `Int`"))
                     })
                     .transpose()?;
 
@@ -462,7 +462,7 @@ impl<'v> Object<'v> for Captures<'v> {
         } else if let Some(name) = index.as_str(strand) {
             strand.access(|x| borrow.caps.name(name.as_str(x)))
         } else {
-            return Err(Error::type_error(strand, "expected `int` or `str`"));
+            return Err(Error::type_error(strand, "expected `Int` or `Str`"));
         };
 
         match cap {

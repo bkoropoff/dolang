@@ -1,15 +1,18 @@
-# tuple
+# Tuple
 
 Tuples are immutable, ordered sequences of values. They are produced by
-certain operations such as iterating over key-value pairs. The `tuple` type
-object is in the prelude, so `tuple(iterable)` is available without an
+certain operations such as iterating over key-value pairs. The `Tuple` type
+object is in the prelude, so `Tuple(iterable)` is available without an
 explicit import.
 
 ## Constructor
 
-### `tuple iterable`
+### `Tuple iterable`
 
 Builds a tuple from an iterable.
+
+The lowercase `tuple` factory instead collects its positional arguments
+verbatim.
 
 #### Parameters
 
@@ -20,10 +23,10 @@ Builds a tuple from an iterable.
 When inherited by a Do subclass, `copy()` calls the subclass constructor with
 the source tuple as a single positional argument. Subclasses that inherit
 `copy()` should accept that argument and usually forward it with
-`tuple.(init) $self $source`.
+`Tuple.(init) $self $source`.
 
 ```
-let tup = tuple([1, 2, 3])
+let tup = Tuple([1, 2, 3])
 assert_eq $tup[1] 2
 
 for k v = {name: "Alice", age: 30}
@@ -39,7 +42,7 @@ Returns the number of elements.
 
 #### Type
 
-`int`
+`Int`
 
 ## Methods
 
@@ -52,7 +55,7 @@ alternative is provided. Negative indexes count from the end.
 
 | Name       | Type  | Description                         |
 | ---------- | ----- | ----------------------------------- |
-| `index`    | `int` | the index to access                 |
+| `index`    | `Int` | the index to access                 |
 | `default:` |       | value to return if out of bounds    |
 | `else:`    |       | callable to invoke if out of bounds |
 
@@ -72,7 +75,7 @@ Tests whether the tuple contains the given element (by equality).
 
 #### Returns
 
-`bool`
+`Bool`
 
 ### `copy`
 
@@ -104,7 +107,7 @@ assert_eq $pair[-1] "Alice"
 
 Tuples are immutable; indexed assignment is not supported.
 
-Tuples also accept [`range`](./range.md) values for slicing:
+Tuples also accept [`Range`](./range.md) values for slicing:
 
 ```
 let tup = tuple([0, 1, 2, 3])
@@ -112,8 +115,8 @@ assert_eq $tup[1..3] (tuple [1, 2])
 assert_eq $tup[..2] (tuple [0, 1])
 assert_eq $tup[2..] (tuple [2, 3])
 assert_eq $tup[..] (tuple [0, 1, 2, 3])
-assert_eq $tup[range 0 4 2] (tuple [0, 2])
-assert_eq $tup[range nil nil -1] (tuple [3, 2, 1, 0])
+assert_eq $tup[Range 0 4 2] (tuple [0, 2])
+assert_eq $tup[Range nil nil -1] (tuple [3, 2, 1, 0])
 ```
 
 Slice indexing returns a new tuple.

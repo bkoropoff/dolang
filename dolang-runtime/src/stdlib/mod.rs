@@ -3,8 +3,9 @@ use std::hash::{DefaultHasher, Hasher};
 use crate::{
     arg::Arg,
     error::Error,
+    object::{array::Array, dict::Dict, float, int, record::Record, tuple},
     unpack,
-    value::{Output, StrEmbryo},
+    value::{Output, StrEmbryo, Value},
     vm::Builder,
 };
 
@@ -74,26 +75,26 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
     builder
         .module("std")
         // Core types
-        .value("value", &value)
-        .value("type", &type_obj)
-        .value("int", &int)
-        .value("float", &float)
-        .value("bool", &bool)
+        .value("Value", &value)
+        .value("Type", &type_obj)
+        .value("Int", &int)
+        .value("Float", &float)
+        .value("Bool", &bool)
         .value("Nil", &nil)
-        .value("str", &str)
-        .value("sym", &sym)
-        .value("array", &array)
-        .value("dict", &dict)
-        .value("set", &set)
-        .value("tuple", &tuple)
-        .value("func", &func)
-        .value("range", &range)
+        .value("Str", &str)
+        .value("Sym", &sym)
+        .value("Array", &array)
+        .value("Dict", &dict)
+        .value("Set", &set)
+        .value("Tuple", &tuple)
+        .value("Func", &func)
+        .value("Range", &range)
         .value("getter", property_types.getter)
         .value("setter", property_types.setter)
-        .value("module", &module)
-        .value("record", &record)
-        .value("bin", &bin)
-        .value("args", &args)
+        .value("Module", &module)
+        .value("Record", &record)
+        .value("Bin", &bin)
+        .value("Args", &args)
         // Iterator protocol types
         .value("Iterable", &iterable_type)
         .value("Sinkable", &sinkable_type)
@@ -101,7 +102,7 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
         .value("Setter", &setter_type)
         .value("Iter", &iter_type)
         .value("Sink", &sink_type)
-        .value("nulliter", &nulliter)
+        .value("NULLITER", &nulliter)
         .value("SinkStop", &error_sink_stop)
         .value("IterStop", &error_iter_stop)
         // Error types
@@ -128,6 +129,75 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
         .value("AbortError", &error_abort)
         .value("CanceledError", &error_canceled)
         .value("TimedOutError", &error_timed_out)
+        // Collection factories
+        .function("array", async move |strand, args, out| {
+            let array = Array::from_args(strand, args)?;
+            strand.builtin_types().array.create(strand, array, out);
+            Ok(())
+        })
+        .function("dict", async move |strand, args, out| {
+            let dict = Dict::from_args(strand, args)?;
+            strand.builtin_types().dict.create(strand, dict, out);
+            Ok(())
+        })
+        .function("tuple", async move |strand, args, mut out| {
+            let values = tuple::from_args(strand, args)?;
+            out.store(Value::from_object(tuple::tuple(strand.vm(), values)));
+            Ok(())
+        })
+        .function("record", async move |strand, args, out| {
+            let record = Record::from_args(strand, args)?;
+            strand.builtin_types().record.create(strand, record, out);
+            Ok(())
+        })
+        .function("type", async move |strand, args, out| {
+            let ([obj], [ty]) = unpack!(strand, args, 1, 1)?;
+            if let Some(ty) = ty {
+                let result = obj.is_instance_of(strand, &ty);
+                Output::set(strand, out, result);
+            } else {
+                obj.op_type(strand, out);
+            }
+            Ok(())
+        })
+        .function("int", async move |strand, args, out| {
+            let ([value], []) = unpack!(strand, args, 1, 0)?;
+            let value = int::coerce(&value, strand)?;
+            Output::set(strand, out, value);
+            Ok(())
+        })
+        .function("float", async move |strand, args, out| {
+            let ([value], []) = unpack!(strand, args, 1, 0)?;
+            let value = float::coerce(&value, strand)?;
+            Output::set(strand, out, value);
+            Ok(())
+        })
+        .function("bool", async move |strand, args, out| {
+            let ([value], []) = unpack!(strand, args, 1, 0)?;
+            let value = value.op_bool(strand);
+            Output::set(strand, out, value);
+            Ok(())
+        })
+        .function("str", async move |strand, args, out| {
+            let ([value], []) = unpack!(strand, args, 1, 0)?;
+            let mut format = StrEmbryo::new();
+            value.display(strand, &mut format)?;
+            format.finish(strand, out);
+            Ok(())
+        })
+        .function("sym", async move |strand, args, mut out| {
+            let ([value], []) = unpack!(strand, args, 1, 0)?;
+            if value.as_sym(strand).is_some() {
+                Output::set(strand, out, value);
+                Ok(())
+            } else if let Some(value) = value.as_str_raw(strand) {
+                strand.sym_gc();
+                out.store(Value::from_object(strand.sym_register_obj(value)));
+                Ok(())
+            } else {
+                Err(Error::type_error(strand, "sym: expected Str or Sym"))
+            }
+        })
         // Core functions
         .function("arg", async move |strand, args, out| {
             let ([value], _) = unpack!(strand, args, 1, 0)?;

@@ -18,11 +18,11 @@ def int_range()
   let zero = int 0 1
   assert_eq $zero 0
 
-  for _ = range 200
+  for _ = Range 200
     let n = int 10
     assert ((n >= 0) && (n < 10))
 
-  for _ = range 200
+  for _ = Range 200
     let n = int -5 5
     assert ((n >= -5) && (n < 5))
 
@@ -38,11 +38,11 @@ def int_invalid_args()
 
   let start_type_err = assert_throws $TypeError do
     int a
-  assert_eq (str start_type_err) "type error: expected `int`"
+  assert_eq (str start_type_err) "type error: expected `Int`"
 
   let end_type_err = assert_throws $TypeError do
     int 0 b
-  assert_eq (str end_type_err) "type error: expected `int`"
+  assert_eq (str end_type_err) "type error: expected `Int`"
 
 #[test]
 def string_func()
@@ -51,12 +51,12 @@ def string_func()
   let token = string 8
   assert_eq $token.len 8
 
-  for _ = range 50
+  for _ = Range 50
     let s = string 12 alphabet: a
     assert_eq $s.len 12
     assert_eq $s "aaaaaaaaaaaa"
 
-  for _ = range 50
+  for _ = Range 50
     let s = string 6 alphabet: "å"
     assert_eq $s "åååååå"
 
@@ -72,16 +72,16 @@ def string_invalid_args()
 
   let len_type_err = assert_throws $TypeError do
     string foo alphabet: abc
-  assert_eq (str len_type_err) "type error: expected `int`"
+  assert_eq (str len_type_err) "type error: expected `Int`"
 
   let alpha_type_err = assert_throws $TypeError do
     string 4 alphabet: 123
-  assert_eq (str alpha_type_err) "type error: expected `str`"
+  assert_eq (str alpha_type_err) "type error: expected `Str`"
 
 #[test]
 def pick_func()
   let items = [10, 20, 30]
-  for _ = range 50
+  for _ = Range 50
     assert (items.contains (pick items))
 
 #[test]
@@ -92,7 +92,7 @@ def pick_invalid_args()
 
   let type_err = assert_throws $TypeError do
     pick 123
-  assert_eq (str type_err) "type error: expected array"
+  assert_eq (str type_err) "type error: expected Array"
 
 #[test]
 def shuffle_handles_empty_and_singleton_arrays()
@@ -118,7 +118,7 @@ def shuffle_preserves_elements_and_mutates_in_place()
   let original = [...seq]
   let alias = seq
   let changed = false
-  for _ = range 100
+  for _ = Range 100
     shuffle $alias
     if (seq != original)
       changed = true
@@ -134,4 +134,4 @@ def shuffle_preserves_elements_and_mutates_in_place()
 def shuffle_rejects_non_arrays()
   let err = assert_throws $TypeError do
     shuffle 123
-  assert_eq (str err) "type error: expected array"
+  assert_eq (str err) "type error: expected Array"

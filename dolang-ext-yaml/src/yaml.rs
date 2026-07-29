@@ -19,7 +19,7 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
             let ([arg], []) = unpack!(strand, args, 1, 0)?;
             let src = arg
                 .as_str(strand.vm())
-                .ok_or_else(|| Error::type_error(strand, "expected str"))?
+                .ok_or_else(|| Error::type_error(strand, "expected Str"))?
                 .pin();
 
             parse_yaml(strand, &src, out)

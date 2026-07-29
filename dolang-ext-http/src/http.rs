@@ -585,7 +585,7 @@ fn multipart_text_field<'v, 's>(
         .ok_or_else(|| {
             Error::type_error(
                 strand,
-                format!("multipart part {}: expected str", key.as_str(strand.vm())),
+                format!("multipart part {}: expected Str", key.as_str(strand.vm())),
             )
         })
 }
@@ -1049,7 +1049,7 @@ impl<'v> Object<'v> for Client {
                 builder.unix_socket(
                     unix_socket
                         .as_str(strand)
-                        .ok_or_else(|| Error::type_error(strand, "unix_socket: expected str"))?
+                        .ok_or_else(|| Error::type_error(strand, "unix_socket: expected Str"))?
                         .to_string(),
                 )
             }
@@ -1075,7 +1075,7 @@ impl<'v> Object<'v> for Client {
             builder = builder.cookie_store(
                 cookies
                     .as_bool(strand)
-                    .ok_or_else(|| Error::type_error(strand, "cookies: expected bool"))?,
+                    .ok_or_else(|| Error::type_error(strand, "cookies: expected Bool"))?,
             );
         }
 
@@ -1083,7 +1083,7 @@ impl<'v> Object<'v> for Client {
             let cert = match ca_cert.view(strand) {
                 View::Str(s) => strand.access(|x| Certificate::from_pem(s.as_str(x).as_bytes())),
                 View::Bin(b) => strand.access(|x| Certificate::from_pem(b.as_slice(x))),
-                _ => return Err(Error::type_error(strand, "ca_cert: expected str or bin")),
+                _ => return Err(Error::type_error(strand, "ca_cert: expected Str or Bin")),
             }
             .into_http(strand)?;
             builder = builder.add_root_certificate(cert);
@@ -1092,11 +1092,11 @@ impl<'v> Object<'v> for Client {
         if let Some(identity) = identity {
             let id_bytes = identity
                 .as_bin(strand)
-                .ok_or_else(|| Error::type_error(strand, "identity: expected str or bin"))?;
+                .ok_or_else(|| Error::type_error(strand, "identity: expected Str or Bin"))?;
             let pass = match password {
                 Some(p) => p
                     .as_str(strand)
-                    .ok_or_else(|| Error::type_error(strand, "password: expected str"))?
+                    .ok_or_else(|| Error::type_error(strand, "password: expected Str"))?
                     .to_string(),
                 None => String::new(),
             };

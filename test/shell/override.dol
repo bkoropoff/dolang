@@ -16,7 +16,7 @@ import shell
 
 #[test]
 def args_is_an_immutable_sequence()
-  with_override args: (range 3) do
+  with_override args: (Range 3) do
     assert_eq $shell.args.len 3
     assert_eq $shell.args[0] "0"
     assert_eq $shell.args[-1] "2"

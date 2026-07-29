@@ -16,7 +16,7 @@ Serializes a Do value to a TOML string.
 
 #### Returns
 
-`str` -- TOML string
+`Str` -- TOML string
 
 #### Errors
 
@@ -28,11 +28,11 @@ Type mapping:
 
 | Do Type  | TOML Value |
 | -------- | ---------- |
-| `bool`   | boolean    |
-| `int`    | integer    |
-| `float`  | float      |
-| `str`    | string     |
-| `sym`    | string     |
+| `Bool`   | boolean    |
+| `Int`    | integer    |
+| `Float`  | float      |
+| `Str`    | string     |
+| `Sym`    | string     |
 | `array`  | array      |
 | `tuple`  | array      |
 | `dict`   | table      |
@@ -57,7 +57,7 @@ Parses a TOML string into a Do value.
 
 | Name   | Type                  | Description         |
 | ------ | --------------------- | ------------------- |
-| `toml` | [`str`](./std/str.md) | TOML input to parse |
+| `toml` | [`Str`](./std/str.md) | TOML input to parse |
 
 #### Returns
 
@@ -74,10 +74,10 @@ Type mapping:
 
 | TOML Value | Do Type |
 | ---------- | ------- |
-| boolean    | `bool`  |
-| integer    | `int`   |
-| float      | `float` |
-| string     | `str`   |
+| boolean    | `Bool`  |
+| integer    | `Int`   |
+| float      | `Float` |
+| string     | `Str`   |
 | array      | `array` |
 | table      | `dict`  |
 

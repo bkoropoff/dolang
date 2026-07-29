@@ -307,14 +307,14 @@ impl<'v> Protocol<'v> for ClassObject<'v> {
                 let ([field], []) = unpack!(strand, args, 1, 0)?;
                 let field = field
                     .as_sym(strand)
-                    .ok_or_else(|| Error::type_error(strand, "field: expected `sym`"))?;
+                    .ok_or_else(|| Error::type_error(strand, "field: expected `Sym`"))?;
                 Self::op_get(this, strand, field, out)
             }
             sym::GET_METHOD => {
                 let ([obj, field], []) = unpack!(strand, args, 2, 0)?;
                 let field = field
                     .as_sym(strand)
-                    .ok_or_else(|| Error::type_error(strand, "field: expected `sym`"))?;
+                    .ok_or_else(|| Error::type_error(strand, "field: expected `Sym`"))?;
                 if !obj.is_instance_of(strand, this.clone()) {
                     return Err(Error::type_error(strand, "invalid class object type"));
                 }
@@ -386,14 +386,14 @@ impl<'v> Protocol<'v> for ClassObject<'v> {
                 let ([field, value], []) = unpack!(strand, args, 2, 0)?;
                 let field = field
                     .as_sym(strand)
-                    .ok_or_else(|| Error::type_error(strand, "field: expected `sym`"))?;
+                    .ok_or_else(|| Error::type_error(strand, "field: expected `Sym`"))?;
                 Self::op_set(this, strand, field, value)
             }
             sym::SET_METHOD => {
                 let ([obj, field, mut value], []) = unpack!(strand, args, 3, 0)?;
                 let field = field
                     .as_sym(strand)
-                    .ok_or_else(|| Error::type_error(strand, "field: expected `sym`"))?;
+                    .ok_or_else(|| Error::type_error(strand, "field: expected `Sym`"))?;
                 if !obj.is_instance_of(strand, this.clone()) {
                     return Err(Error::type_error(strand, "invalid class object type"));
                 }
@@ -716,7 +716,7 @@ impl<'v> Protocol<'v> for ClassInstance<'v> {
                     strand.sync(async |strand| call!(strand, v, &mut result, &this).await)?;
                     let result = result
                         .as_str_raw(strand)
-                        .ok_or_else(|| Error::type_error(strand, "expected str result"))?;
+                        .ok_or_else(|| Error::type_error(strand, "expected Str result"))?;
                     crate::fmt!(strand, w, "{result}")?;
                     Ok(false)
                 })?,
@@ -748,7 +748,7 @@ impl<'v> Protocol<'v> for ClassInstance<'v> {
                 strand.sync(async |strand| call!(strand, v, &mut result, &this).await)?;
                 let result = result
                     .as_str_raw(strand)
-                    .ok_or_else(|| Error::type_error(strand, "expected str result"))?;
+                    .ok_or_else(|| Error::type_error(strand, "expected Str result"))?;
                 crate::fmt!(strand, w, "{result}")
             }),
             Some(ClassEntry::Delegate(slot)) => {
@@ -782,7 +782,7 @@ impl<'v> Protocol<'v> for ClassInstance<'v> {
                         strand.sync(async |strand| call!(strand, v, &mut result, &this).await)?;
                         let result = result
                             .as_str_raw(strand)
-                            .ok_or_else(|| Error::type_error(strand, "expected str result"))?;
+                            .ok_or_else(|| Error::type_error(strand, "expected Str result"))?;
                         crate::fmt!(strand, w, "{result}")?;
                         Ok(false)
                     })?
@@ -916,14 +916,14 @@ impl<'v> Protocol<'v> for ClassInstance<'v> {
                 let ([field], []) = unpack!(strand, args, 1, 0)?;
                 let field = field
                     .as_sym(strand)
-                    .ok_or_else(|| Error::type_error(strand, "field: expected `sym`"))?;
+                    .ok_or_else(|| Error::type_error(strand, "field: expected `Sym`"))?;
                 return Self::op_get(this, strand, field, out);
             }
             sym::SET_METHOD => {
                 let ([field, value], []) = unpack!(strand, args, 2, 0)?;
                 let field = field
                     .as_sym(strand)
-                    .ok_or_else(|| Error::type_error(strand, "field: expected `sym`"))?;
+                    .ok_or_else(|| Error::type_error(strand, "field: expected `Sym`"))?;
                 return Self::op_set(this, strand, field, value);
             }
             _ => (),
@@ -1376,7 +1376,7 @@ impl<'v> Protocol<'v> for ClassInstance<'v> {
                     strand.with_slots_sync(move |strand, [mut result]| {
                         strand.sync(async |strand| call!(strand, v, &mut result, &this).await)?;
                         let v = result.to_int(strand).map_err(|_| {
-                            Error::type_error(strand, "expected int result from (hash)")
+                            Error::type_error(strand, "expected Int result from (hash)")
                         })?;
                         v.hash(hasher);
                         Ok(true)

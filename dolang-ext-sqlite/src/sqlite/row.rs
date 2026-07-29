@@ -327,7 +327,7 @@ unsafe fn unpack_row<'v, 's, 'a>(
                     } else {
                         return Err(Error::type_error(
                             strand,
-                            "expected int or str for column key",
+                            "expected Int or Str for column key",
                         ));
                     };
 
@@ -491,7 +491,7 @@ impl<'v> Object<'v> for Row {
                 } else {
                     return Err(Error::type_error(
                         strand,
-                        "expected int or str for column key",
+                        "expected Int or Str for column key",
                     ));
                 };
 

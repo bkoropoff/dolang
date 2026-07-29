@@ -10,7 +10,9 @@ import std
     - Sink
     - SinkStop
     - TypeError
+    - Value
     - ZeroDivError
+    - NULLITER
   strand:
     - channel
 
@@ -23,28 +25,43 @@ def assert_err_type ty block
     true
   assert $res
 
-assert_eq (type 5) $int
+assert_eq (type 5) $Int
+assert_eq (type Int) $Type
+assert_eq (type type) $Func
+assert_eq (type int) $Func
+assert_eq (type float) $Func
+assert_eq (type bool) $Func
+assert_eq (type str) $Func
+assert_eq (type sym) $Func
+assert_eq (type array) $Func
+assert_eq (type dict) $Func
+assert_eq (type tuple) $Func
+assert_eq (type record) $Func
+assert_err_type $TypeError do Type()
+assert_err_type $TypeError do Value()
 
-assert_eq (type 0.5) $float
+assert_eq (type 0.5) $Float
 
-assert_eq (type "hello") $str
+assert_eq (type "hello") $Str
 
-assert_eq (type :sym:) $sym
+assert_eq (type :sym:) $Sym
 
 assert_eq (type nil) $Nil
 assert (type nil Nil)
 assert (!(type false Nil))
 assert_err_type $TypeError do Nil nil
 
-assert_eq (type false) $bool
+assert_eq (type false) $Bool
 
-assert_eq (type []) $array
+assert_eq (type []) $Array
 
 assert_eq (type $ [].iter()) $Iter
 
 assert_eq (type $ [].sink()) $Sink
 
-assert_eq (type {}) $dict
+assert_eq (type {}) $Dict
+
+assert_eq (type NULLITER) $Type
 
 # Errors
 assert_err_type $TypeError do (5 + "hello")

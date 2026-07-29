@@ -15,5 +15,5 @@ def compiles_a_script_to_bytecode()
     script.write "(40 + 2)\n"
 
     let bytecode = compile_script $script
-    assert_type $bin $bytecode
+    assert_type $Bin $bytecode
     assert_eq (load.run bytecode) 42

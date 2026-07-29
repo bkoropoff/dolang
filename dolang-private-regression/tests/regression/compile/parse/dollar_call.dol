@@ -1,7 +1,7 @@
-let res = type $ str $ range 10
-assert_eq $res $str
-let res = (type $ str $ range 10)
-assert_eq $res $str
+let res = type $ str $ Range 10
+assert_eq $res $Str
+let res = (type $ str $ Range 10)
+assert_eq $res $Str
 echo $
   - a
   - b

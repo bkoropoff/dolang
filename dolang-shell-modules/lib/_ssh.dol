@@ -39,7 +39,7 @@ do
     else if (key == :jump:)
       jumps.push $value
     else
-      if (type key int)
+      if (type key Int)
         throw UnexpectedPosError $key
       else
         throw UnexpectedKeyError $key

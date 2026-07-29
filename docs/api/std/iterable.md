@@ -52,7 +52,7 @@ Three of `Iter`'s methods are deliberately not forwarded, and raise
   each call would mint a fresh iterator and a loop over `next` would keep
   returning the first item.
 - `count` would be an O(n) way to ask for what most containers answer in
-  constant time with `len`. [`dict`](./dict.md) also defines `count` with an
+  constant time with `len`. [`Dict`](./dict.md) also defines `count` with an
   unrelated meaning.
 - `kv` describes the pair shape of an iterator; how a value spreads is the
   iterable's own business.

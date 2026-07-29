@@ -10,7 +10,7 @@
 
 | Name   | Type                                      | Description |
 | ------ | ----------------------------------------- | ----------- |
-| `path` | [`str`](../std/str.md)\|[`Path`](path.md) | Path value  |
+| `path` | [`Str`](../std/str.md)\|[`Path`](path.md) | Path value  |
 
 **Returns:** `WindowsPath`.
 
@@ -96,10 +96,10 @@ Gets selected parts of the Windows security descriptor.
 
 | Name       | Type                     | Description                                           |
 | ---------- | ------------------------ | ----------------------------------------------------- |
-| `owner:`   | [`bool`](../std/bool.md) | Load the owner SID                                    |
-| `group:`   | [`bool`](../std/bool.md) | Load the primary group SID                            |
-| `dacl:`    | [`bool`](../std/bool.md) | Load the discretionary ACL                            |
-| `sacl:`    | [`bool`](../std/bool.md) | Load the system ACL                                   |
+| `owner:`   | [`Bool`](../std/bool.md) | Load the owner SID                                    |
+| `group:`   | [`Bool`](../std/bool.md) | Load the primary group SID                            |
+| `dacl:`    | [`Bool`](../std/bool.md) | Load the discretionary ACL                            |
+| `sacl:`    | [`Bool`](../std/bool.md) | Load the system ACL                                   |
 | `resolve:` | `:TARGET:`\|`:LINK:`     | Resolution mode (see [fs](index.md#resolution-modes)) |
 
 **Returns:** [`security.windows.SecDesc`](../security/windows/secdesc.md)

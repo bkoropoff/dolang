@@ -197,7 +197,7 @@ impl<'v> Object<'v> for Env<'v> {
                                 _ => {
                                     return Err(Error::type_error(
                                         strand,
-                                        "env key: expected str or sym",
+                                        "env key: expected Str or Sym",
                                     ));
                                 }
                             };

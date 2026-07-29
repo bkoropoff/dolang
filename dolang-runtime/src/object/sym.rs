@@ -129,27 +129,20 @@ impl<'v> Protocol<'v> for Type {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "<type std.sym>")
+        crate::fmt!(strand, w, "<type std.Sym>")
     }
 
     async fn op_call<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         args: Args<'v, 'a>,
-        mut out: Slot<'v, 'a>,
+        out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        // Constructor: sym(value) - convert to symbol
-        let ([value], _) = unpack!(strand, args, 1, 0)?;
-        if value.as_sym(strand).is_some() {
-            Output::set(strand, out, value);
-            Ok(())
-        } else if let Some(str) = value.as_str_raw(strand) {
-            // FIXME: don't do this every time, move it to an interrupt
-            strand.sym_gc();
-            out.store(Value::from_object(strand.sym_register_obj(str)));
-            Ok(())
-        } else {
-            Err(Error::type_error(strand, "sym: not a string"))
-        }
+        let ([value], []) = unpack!(strand, args, 1, 0)?;
+        value
+            .as_sym(strand)
+            .ok_or_else(|| Error::type_error(strand, "Sym: expected Sym"))?;
+        Output::set(strand, out, value);
+        Ok(())
     }
 }

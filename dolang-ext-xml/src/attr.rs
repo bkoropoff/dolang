@@ -37,7 +37,7 @@ pub(crate) fn required_string<'v, 's>(
     value
         .as_str(strand)
         .map(|value| value.to_string())
-        .ok_or_else(|| Error::type_error(strand, format!("{field}: expected str")))
+        .ok_or_else(|| Error::type_error(strand, format!("{field}: expected Str")))
 }
 
 pub(crate) fn optional_string<'v, 's>(

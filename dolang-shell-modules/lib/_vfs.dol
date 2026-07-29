@@ -50,13 +50,13 @@ pub def bin exe = nil
   bin
 
 def env_key key
-  if (type key str || type key sym)
+  if (type key Str || type key Sym)
     return str $key
-  throw std.TypeError "env key: expected str or sym"
+  throw std.TypeError "env key: expected Str or Sym"
 
 def validate_env overrides
-  if !(type overrides dict)
-    throw std.TypeError "env: expected dict"
+  if !(type overrides Dict)
+    throw std.TypeError "env: expected Dict"
 
 def env_pairs overrides
   validate_env $overrides

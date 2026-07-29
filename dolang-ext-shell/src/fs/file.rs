@@ -400,7 +400,7 @@ impl<'v> File<'v> {
                 let b = b.pin();
                 file.write_all(&b).await.map(|_| b.len())
             }
-            _ => return Err(Error::type_error(strand, "expected `str` or `bin`")),
+            _ => return Err(Error::type_error(strand, "expected `Str` or `Bin`")),
         }
         .into_sys(strand)?;
 
@@ -823,7 +823,7 @@ impl<'v> Object<'v> for File<'v> {
                             } else {
                                 return Err(Error::value(
                                     strand,
-                                    "namespace: expected str, :ANY:, :USER:, or :SYSTEM:",
+                                    "namespace: expected Str, :ANY:, :USER:, or :SYSTEM:",
                                 ));
                             }
                         } else if let Some(namespace) = namespace.as_str(strand) {
@@ -831,7 +831,7 @@ impl<'v> Object<'v> for File<'v> {
                         } else {
                             return Err(Error::type_error(
                                 strand,
-                                "namespace: expected str or sym",
+                                "namespace: expected Str or Sym",
                             ));
                         }
                     }

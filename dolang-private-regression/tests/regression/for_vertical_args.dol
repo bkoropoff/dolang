@@ -1,5 +1,5 @@
 echo
-  for i = range end: 4
+  for i = Range end: 4
     - $i
     x: (i * 2)
 # output: END

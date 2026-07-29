@@ -2009,7 +2009,7 @@ impl<'a> Parser<'a> {
                             return Err(self.syntax_error(
                                 scope,
                                 token,
-                                "invalid expression in index or array literal",
+                                "invalid expression in index or Array literal",
                             ));
                         }
                     }

@@ -8,12 +8,12 @@ import sys
     - ImmutableError
     - UnsupportedError
     - ValueError
-    - bin
-    - bool
+    - Bin
+    - Bool
     - hash
-    - int
-    - str
-    - tuple
+    - Int
+    - Str
+    - Tuple
   test:
     - assert_eq
     - assert_throws
@@ -44,12 +44,12 @@ def sid_converts_between_structural_forms()
   assert_eq $sid.revision 1
   assert_eq $sid.identifier_authority 5
   assert_eq $sid.sub_authority_count 2
-  assert_type $tuple $sid.sub_authorities
+  assert_type $Tuple $sid.sub_authorities
   assert_eq $sid.sub_authorities[0] 32
   assert_eq $sid.sub_authorities[1] 544
   assert_eq (str sid) S-1-5-32-544
   let bytes = sid.to_bin()
-  assert_type $bin $bytes
+  assert_type $Bin $bytes
   assert_eq (str(Sid(bytes))) S-1-5-32-544
 
 #[test]
@@ -222,17 +222,17 @@ def reports_security_information_for_target()
   if (sys.os_info().family == :UNIX:)
     let info = unix_info()
     assert_type $Identity $info
-    assert_type $int $info.uid
-    assert_type $int $info.gid
-    assert_type $int $info.euid
-    assert_type $int $info.egid
-    assert_type $tuple $info.group_ids
+    assert_type $Int $info.uid
+    assert_type $Int $info.gid
+    assert_type $Int $info.euid
+    assert_type $Int $info.egid
+    assert_type $Tuple $info.group_ids
     for group_id = info.group_ids
-      assert_type $int $group_id
+      assert_type $Int $group_id
     let user = user_name $info.euid
     let group = group_name $info.egid
-    assert_type $str $user
-    assert_type $str $group
+    assert_type $Str $user
+    assert_type $Str $group
     assert_eq (user_id user) $info.euid
     assert_eq (user_id(user_name())) $info.uid
     assert_eq (group_id group) $info.egid
@@ -243,16 +243,16 @@ def reports_security_information_for_target()
   else
     let info = token_info()
     assert_type $TokenInfo $info
-    assert_type $bool $info.is_elevated
+    assert_type $Bool $info.is_elevated
     assert_type $Sid $info.user_sid
     assert_type $Sid $info.owner_sid
     assert_type $Sid $info.primary_group_sid
     let sid_name = info.user_sid.lookup()
     assert_type $SidName $sid_name
     assert_type $Sid $sid_name.sid
-    assert_type $str $sid_name.name
-    assert_type $str $sid_name.domain
-    assert_type $str $sid_name.qualified_name
+    assert_type $Str $sid_name.name
+    assert_type $Str $sid_name.domain
+    assert_type $Str $sid_name.qualified_name
     assert_eq (user_name()) $sid_name.name
     let by_sid = SidName.lookup $info.user_sid
     let by_name = SidName.lookup $sid_name.qualified_name
@@ -262,28 +262,28 @@ def reports_security_information_for_target()
     assert_throws $NotFoundError do SidName.lookup dolang-account-that-does-not-exist
     assert_throws $UnsupportedError do user_name 0
     let groups = info.groups
-    assert_type $int $groups.len
+    assert_type $Int $groups.len
     assert_type $TokenGroup $groups[0]
     let snapshot = [...groups]
     assert_eq $snapshot.len $groups.len
     let first ...rest = groups
     assert_type $TokenGroup $first
-    assert_eq (snapshot[1..].len) (array(rest).len)
+    assert_eq (snapshot[1..].len) (Array(rest).len)
     assert_throws $ImmutableError do
       groups[0] = nil
     for group = groups
       assert_type $TokenGroup $group
       assert_type $Sid $group.sid
-      assert_type $int $group.attributes
-      assert_type $bool $group.mandatory
-      assert_type $bool $group.enabled_by_default
-      assert_type $bool $group.enabled
-      assert_type $bool $group.owner
-      assert_type $bool $group.use_for_deny_only
-      assert_type $bool $group.integrity
-      assert_type $bool $group.integrity_enabled
-      assert_type $bool $group.resource
-      assert_type $bool $group.logon_id
+      assert_type $Int $group.attributes
+      assert_type $Bool $group.mandatory
+      assert_type $Bool $group.enabled_by_default
+      assert_type $Bool $group.enabled
+      assert_type $Bool $group.owner
+      assert_type $Bool $group.use_for_deny_only
+      assert_type $Bool $group.integrity
+      assert_type $Bool $group.integrity_enabled
+      assert_type $Bool $group.resource
+      assert_type $Bool $group.logon_id
       if group.logon_id
         assert_eq (str group.sid) (str info.logon_sid)
     assert_throws $UnsupportedError do unix_info()

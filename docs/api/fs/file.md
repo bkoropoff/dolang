@@ -19,11 +19,11 @@ Writes data to the file.
 
 | Name   | Type         | Description                                       |
 | ------ | ------------ | ------------------------------------------------- |
-| `data` | `str`\|`bin` | Data to write. Strings are written as UTF-8 text. |
+| `data` | `Str`\|`Bin` | Data to write. Strings are written as UTF-8 text. |
 
 #### Returns
 
-[`int`](../std/index.md) (number of bytes written)
+[`Int`](../std/index.md) (number of bytes written)
 
 #### Example
 
@@ -48,7 +48,7 @@ after truncation.
 
 | Name   | Type                     | Description                 |
 | ------ | ------------------------ | --------------------------- |
-| `size` | [`int`](../std/index.md) | New file length in bytes    |
+| `size` | [`Int`](../std/index.md) | New file length in bytes    |
 
 #### Example
 
@@ -65,9 +65,9 @@ Acquires a byte-range lock while `func` runs.
 
 | Name     | Type                       | Description                                    |
 | -------- | -------------------------- | ---------------------------------------------- |
-| `range`  | [`range`](../std/range.md) | Half-open byte range; `..` is total            |
-| `shared` | [`bool`](../std/bool.md)?  | Acquire a shared lock                          |
-| `func`   | [`func`](../std/func.md)   | Block receiving a [`FileLock`](./file-lock.md) |
+| `range`  | [`Range`](../std/range.md) | Half-open byte range; `..` is total            |
+| `shared` | [`Bool`](../std/bool.md)?  | Acquire a shared lock                          |
+| `func`   | [`Func`](../std/func.md)   | Block receiving a [`FileLock`](./file-lock.md) |
 
 **Returns:** the block's result
 
@@ -104,9 +104,9 @@ Attempts to acquire a byte-range lock without waiting.
 
 | Name     | Type                       | Description                                    |
 | -------- | -------------------------- | ---------------------------------------------- |
-| `range`  | [`range`](../std/range.md) | Half-open byte range; `..` is total            |
-| `shared` | [`bool`](../std/bool.md)?  | Acquire a shared lock                          |
-| `func`   | [`func`](../std/func.md)   | Block receiving a [`FileLock`](./file-lock.md) |
+| `range`  | [`Range`](../std/range.md) | Half-open byte range; `..` is total            |
+| `shared` | [`Bool`](../std/bool.md)?  | Acquire a shared lock                          |
+| `func`   | [`Func`](../std/func.md)   | Block receiving a [`FileLock`](./file-lock.md) |
 
 **Returns:** the block's result
 
@@ -127,11 +127,11 @@ Reads data from the file.
 
 | Name   | Type                     | Description                                                              |
 | ------ | ------------------------ | ------------------------------------------------------------------------ |
-| `size` | [`int`](../std/index.md) | Number of bytes to read. If [`nil`](../std/index.md), reads entire file. |
+| `size` | [`Int`](../std/index.md) | Number of bytes to read. If [`nil`](../std/index.md), reads entire file. |
 
 #### Returns
 
-[`str`](../std/str.md) in text mode, binary blob in binary
+[`Str`](../std/str.md) in text mode, binary blob in binary
 mode
 
 #### Example
@@ -160,8 +160,8 @@ Gets file metadata.
 
 | Field  | Type                     | Description                                                                                                        |
 | ------ | ------------------------ | ------------------------------------------------------------------------------------------------------------------ |
-| `len`  | [`int`](../std/index.md) | File size in bytes                                                                                                 |
-| `type` | [`sym`](../std/sym.md)   | File type: `:FILE:`, `:DIR:`, `:SYMLINK:`, `:FIFO:`, `:CHAR_DEVICE:`, `:BLOCK_DEVICE:`, `:SOCKET:`, or `:UNKNOWN:` |
+| `len`  | [`Int`](../std/index.md) | File size in bytes                                                                                                 |
+| `type` | [`Sym`](../std/sym.md)   | File type: `:FILE:`, `:DIR:`, `:SYMLINK:`, `:FIFO:`, `:CHAR_DEVICE:`, `:BLOCK_DEVICE:`, `:SOCKET:`, or `:UNKNOWN:` |
 
 **Optional timestamps** (platform-dependent):
 
@@ -175,21 +175,21 @@ Gets file metadata.
 
 | Field     | Type                     | Description                           |
 | --------- | ------------------------ | ------------------------------------- |
-| `mode`    | [`int`](../std/index.md) | File permissions and type (stat mode) |
-| `dev`     | [`int`](../std/index.md) | Device ID                             |
-| `ino`     | [`int`](../std/index.md) | Inode number                          |
-| `nlink`   | [`int`](../std/index.md) | Number of hard links                  |
-| `uid`     | [`int`](../std/index.md) | User ID of owner                      |
-| `gid`     | [`int`](../std/index.md) | Group ID of owner                     |
-| `rdev`    | [`int`](../std/index.md) | Device ID (if special file)           |
-| `blksize` | [`int`](../std/index.md) | Preferred block size for I/O          |
-| `blocks`  | [`int`](../std/index.md) | Number of 512-byte blocks allocated   |
+| `mode`    | [`Int`](../std/index.md) | File permissions and type (stat mode) |
+| `dev`     | [`Int`](../std/index.md) | Device ID                             |
+| `ino`     | [`Int`](../std/index.md) | Inode number                          |
+| `nlink`   | [`Int`](../std/index.md) | Number of hard links                  |
+| `uid`     | [`Int`](../std/index.md) | User ID of owner                      |
+| `gid`     | [`Int`](../std/index.md) | Group ID of owner                     |
+| `rdev`    | [`Int`](../std/index.md) | Device ID (if special file)           |
+| `blksize` | [`Int`](../std/index.md) | Preferred block size for I/O          |
+| `blocks`  | [`Int`](../std/index.md) | Number of 512-byte blocks allocated   |
 
 **Windows-only** (these fields do not exist on Unix):
 
 | Field       | Type                     | Description                           |
 | ----------- | ------------------------ | ------------------------------------- |
-| `win_attrs` | [`int`](../std/index.md) | Raw Windows file attribute bitmask    |
+| `win_attrs` | [`Int`](../std/index.md) | Raw Windows file attribute bitmask    |
 
 #### Example
 
@@ -234,10 +234,10 @@ existing handle.
 
 | Name    | Type                     | Description                |
 | ------- | ------------------------ | -------------------------- |
-| `owner` | [`bool`](../std/bool.md) | Load the owner SID         |
-| `group` | [`bool`](../std/bool.md) | Load the primary group SID |
-| `dacl`  | [`bool`](../std/bool.md) | Load the discretionary ACL |
-| `sacl`  | [`bool`](../std/bool.md) | Load the system ACL        |
+| `owner` | [`Bool`](../std/bool.md) | Load the owner SID         |
+| `group` | [`Bool`](../std/bool.md) | Load the primary group SID |
+| `dacl`  | [`Bool`](../std/bool.md) | Load the discretionary ACL |
+| `sacl`  | [`Bool`](../std/bool.md) | Load the system ACL        |
 
 **Returns:** [`security.windows.SecDesc`](../security/windows/secdesc.md)
 
@@ -270,7 +270,7 @@ case from the requested name.
 
 | Name        | Type                                            | Description                                                                                              |
 | ----------- | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| `namespace` | [`str`](../std/str.md)\|[`sym`](../std/sym.md)? | Namespace to query; `:USER:` and `:SYSTEM:` name well-known namespaces, and `:ANY:` lists all namespaces |
+| `namespace` | [`Str`](../std/str.md)\|[`Sym`](../std/sym.md)? | Namespace to query; `:USER:` and `:SYSTEM:` name well-known namespaces, and `:ANY:` lists all namespaces |
 
 #### Returns
 
@@ -308,12 +308,12 @@ Gets an extended attribute value.
 
 | Name        | Type                                                   | Description                           |
 | ----------- | ------------------------------------------------------ | ------------------------------------- |
-| `name`      | [`str`](../std/str.md)\|[`XattrEntry`](xattr-entry.md) | Attribute name or entry from `xattrs` |
-| `namespace` | [`str`](../std/str.md)\|[`sym`](../std/sym.md)?        | Namespace to query                    |
+| `name`      | [`Str`](../std/str.md)\|[`XattrEntry`](xattr-entry.md) | Attribute name or entry from `xattrs` |
+| `namespace` | [`Str`](../std/str.md)\|[`Sym`](../std/sym.md)?        | Namespace to query                    |
 
 #### Returns
 
-[`bin`](../std/bin.md)
+[`Bin`](../std/bin.md)
 
 ```
 open data.txt r do |file|
@@ -331,9 +331,9 @@ storing an empty value.
 
 | Name        | Type                                                   | Description                           |
 | ----------- | ------------------------------------------------------ | ------------------------------------- |
-| `name`      | [`str`](../std/str.md)\|[`XattrEntry`](xattr-entry.md) | Attribute name or entry from `xattrs` |
-| `value`     | [`str`](../std/str.md)\|[`bin`](../std/bin.md)         | Attribute bytes; strings use UTF-8    |
-| `namespace` | [`str`](../std/str.md)\|[`sym`](../std/sym.md)?        | Namespace to update                   |
+| `name`      | [`Str`](../std/str.md)\|[`XattrEntry`](xattr-entry.md) | Attribute name or entry from `xattrs` |
+| `value`     | [`Str`](../std/str.md)\|[`Bin`](../std/bin.md)         | Attribute bytes; strings use UTF-8    |
+| `namespace` | [`Str`](../std/str.md)\|[`Sym`](../std/sym.md)?        | Namespace to update                   |
 
 ```
 open data.txt r+ do |file|
@@ -348,8 +348,8 @@ Removes an extended attribute.
 
 | Name        | Type                                                   | Description                           |
 | ----------- | ------------------------------------------------------ | ------------------------------------- |
-| `name`      | [`str`](../std/str.md)\|[`XattrEntry`](xattr-entry.md) | Attribute name or entry from `xattrs` |
-| `namespace` | [`str`](../std/str.md)\|[`sym`](../std/sym.md)?        | Namespace to update                   |
+| `name`      | [`Str`](../std/str.md)\|[`XattrEntry`](xattr-entry.md) | Attribute name or entry from `xattrs` |
+| `namespace` | [`Str`](../std/str.md)\|[`Sym`](../std/sym.md)?        | Namespace to update                   |
 
 ```
 open data.txt r+ do |file|
@@ -367,11 +367,11 @@ new cursor position.
 
 | Name     | Type                     | Description                       |
 | -------- | ------------------------ | --------------------------------- |
-| `offset` | [`int`](../std/index.md) | Relative byte offset from current |
+| `offset` | [`Int`](../std/index.md) | Relative byte offset from current |
 
 #### Returns
 
-[`int`](../std/index.md) - New absolute byte position
+[`Int`](../std/index.md) - New absolute byte position
 
 #### Example
 
@@ -392,11 +392,11 @@ new cursor position.
 
 | Name  | Type                     | Description                          |
 | ----- | ------------------------ | ------------------------------------ |
-| `ofs` | [`int`](../std/index.md) | Absolute byte offset from file start |
+| `ofs` | [`Int`](../std/index.md) | Absolute byte offset from file start |
 
 #### Returns
 
-[`int`](../std/index.md) - New absolute byte position
+[`Int`](../std/index.md) - New absolute byte position
 
 #### Example
 
@@ -417,11 +417,11 @@ new cursor position.
 
 | Name  | Type                     | Description                      |
 | ----- | ------------------------ | -------------------------------- |
-| `ofs` | [`int`](../std/index.md) | Byte offset relative to file end |
+| `ofs` | [`Int`](../std/index.md) | Byte offset relative to file end |
 
 #### Returns
 
-[`int`](../std/index.md) - New absolute byte position
+[`Int`](../std/index.md) - New absolute byte position
 
 #### Example
 
@@ -436,7 +436,7 @@ Returns the current file cursor position in bytes.
 
 #### Returns
 
-[`int`](../std/index.md)
+[`Int`](../std/index.md)
 
 #### Example
 
@@ -488,7 +488,7 @@ Writes a value to the file.
 
 **Text mode:**
 
-- If the value is binary data (`bin`), writes it unmodified
+- If the value is binary data (`Bin`), writes it unmodified
 - Otherwise, converts to string and appends `\n`
 
 **Binary mode:** Writes bytes directly.

@@ -2,8 +2,8 @@
 
 Supertype for stateful digest handles.
 
-Subtype of [`Sink`](../std/sink.md). Putting a [`str`](../std/str.md)
-or [`bin`](../std/bin.md) value updates the digest state with its bytes.
+Subtype of [`Sink`](../std/sink.md). Putting a [`Str`](../std/str.md)
+or [`Bin`](../std/bin.md) value updates the digest state with its bytes.
 
 ## Methods
 
@@ -15,7 +15,7 @@ Updates the digest state with the bytes of `data`.
 
 | Name   | Type                                           | Description     |
 | ------ | ---------------------------------------------- | --------------- |
-| `data` | [`str`](../std/str.md)\|[`bin`](../std/bin.md) | Input to hash   |
+| `data` | [`Str`](../std/str.md)\|[`Bin`](../std/bin.md) | Input to hash   |
 
 #### Returns
 
@@ -40,7 +40,7 @@ Returns the current digest bytes without consuming the handle.
 
 #### Returns
 
-[`bin`](../std/bin.md) - Digest snapshot
+[`Bin`](../std/bin.md) - Digest snapshot
 
 ```
 let state = Blake3()

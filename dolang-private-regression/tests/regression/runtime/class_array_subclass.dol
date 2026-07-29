@@ -1,7 +1,7 @@
 # Basic subclassing of array
-class MyArray: array
+class MyArray: Array
   def (init) self source
-    array.(init) $self $source
+    Array.(init) $self $source
 
 let a = MyArray [1, 2, 3]
 

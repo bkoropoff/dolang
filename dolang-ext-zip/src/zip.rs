@@ -110,7 +110,7 @@ fn parse_mode_bits<'v, 's>(
     };
     let bits = mode
         .to_i64(strand)
-        .map_err(|_| Error::type_error(strand, "mode: expected non-negative int"))?;
+        .map_err(|_| Error::type_error(strand, "mode: expected non-negative Int"))?;
     u16::try_from(bits)
         .ok()
         .filter(|bits| *bits <= 0o7777)
@@ -818,7 +818,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         .function("open", async move |strand, args, out| {
             let ([path], [opt1, opt2]) = unpack!(strand, args, 1, 2)?;
             let path = dolang_ext_shell::as_path(strand, &path)
-                .ok_or_else(|| Error::type_error(strand, "expected `str` or `Path` for `path`"))?;
+                .ok_or_else(|| Error::type_error(strand, "expected `Str` or `Path` for `path`"))?;
 
             let (mode, block) = match (&opt1, &opt2) {
                 (None, None) => (None, None),
@@ -831,7 +831,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 .as_ref()
                 .map(|mode| {
                     mode.as_str(strand)
-                        .ok_or_else(|| Error::type_error(strand, "expected `str` for `mode`"))
+                        .ok_or_else(|| Error::type_error(strand, "expected `Str` for `mode`"))
                         .map(|mode| mode.to_string())
                 })
                 .transpose()?

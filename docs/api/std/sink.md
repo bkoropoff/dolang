@@ -32,7 +32,7 @@ Wraps the sink so each value is transformed before it is written.
 The `pre` prefix marks the direction: unlike [`Iter.map`](./iter.md#map-func),
 which transforms values on their way *out*, `premap` transforms values on their
 way *into* the sink. A value that is both [`Iterable`](./iterable.md) and
-[`Sinkable`](./sinkable.md) — an [`array`](./array.md), say — therefore offers
+[`Sinkable`](./sinkable.md) — an [`Array`](./array.md), say — therefore offers
 `map` and `premap` as separate methods running in opposite directions.
 
 #### Parameters

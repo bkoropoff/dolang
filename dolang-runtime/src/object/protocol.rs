@@ -98,14 +98,14 @@ pub(crate) trait Protocol<'v>: Boxable<Header> + Collect + 'v {
                 let ([field], []) = unpack!(strand, args, 1, 0)?;
                 let field = field
                     .as_sym(strand)
-                    .ok_or_else(|| Error::type_error(strand, "field: expected `sym`"))?;
+                    .ok_or_else(|| Error::type_error(strand, "field: expected `Sym`"))?;
                 Self::op_get(this, strand, field, out)
             }
             sym::SET_METHOD => {
                 let ([field, value], []) = unpack!(strand, args, 2, 0)?;
                 let field = field
                     .as_sym(strand)
-                    .ok_or_else(|| Error::type_error(strand, "field: expected `sym`"))?;
+                    .ok_or_else(|| Error::type_error(strand, "field: expected `Sym`"))?;
                 Self::op_set(this, strand, field, value)
             }
             _ => {
@@ -1956,14 +1956,14 @@ pub(crate) async fn dispatch_native_method<'v, 's>(
             let ([field], []) = unpack!(strand, args, 1, 0)?;
             let field = field
                 .as_sym(strand)
-                .ok_or_else(|| Error::type_error(strand, "field: expected `sym`"))?;
+                .ok_or_else(|| Error::type_error(strand, "field: expected `Sym`"))?;
             return ty.op_get(strand, field, out);
         }
         sym::SET_METHOD if args.len() == 2 => {
             let ([field, value], []) = unpack!(strand, args, 2, 0)?;
             let field = field
                 .as_sym(strand)
-                .ok_or_else(|| Error::type_error(strand, "field: expected `sym`"))?;
+                .ok_or_else(|| Error::type_error(strand, "field: expected `Sym`"))?;
             return ty.op_set(strand, field, value);
         }
         _ => (),

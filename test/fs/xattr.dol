@@ -28,7 +28,7 @@ def module_path_and_file_operations()
     xattr $path "missing"
 
   set_xattr $path "text" "å"
-  assert_type $bin (xattr path "text")
+  assert_type $Bin (xattr path "text")
   assert_eq (xattr path "text") b"\xc3\xa5"
 
   path.set_xattr "path_method" b"path"

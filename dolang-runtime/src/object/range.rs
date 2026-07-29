@@ -213,7 +213,7 @@ impl<'v> Protocol<'v> for Range<'v> {
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
         let borrow = this.get();
-        crate::fmt!(strand, w, "<range start: ")?;
+        crate::fmt!(strand, w, "<Range start: ")?;
         borrow.start.op_debug(strand, &mut *w)?;
         if !borrow.end.is_nil() {
             crate::fmt!(strand, w, ", end: ")?;
@@ -499,7 +499,7 @@ impl<'v> Protocol<'v> for Type {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "<type std.range>")
+        crate::fmt!(strand, w, "<type std.Range>")
     }
 
     async fn op_call<'a, 's>(

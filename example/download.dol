@@ -26,13 +26,13 @@ args.with
   help: Download files over HTTP(S)
   - opt: limit
     short: l
-    type: $int
+    parse: $int
     help: Maximum concurrent downloads
     default: 4
   - arg: urls
     collect: true
     help: URLs to download
-    type: $url.Url
+    parse: $url.Url
   do |args| progress.with do
     let client = http.Client()
     strand.pool $args.limit $args.urls do |url|

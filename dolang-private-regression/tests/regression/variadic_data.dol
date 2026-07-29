@@ -1,3 +1,17 @@
+import std:
+  - MissingPosError
+  - UnexpectedKeyError
+  - UnexpectedPosError
+
+def assert_err_type ty block
+  let res = try
+    block()
+    false
+  catch e
+    assert (type e ty)
+    true
+  assert $res
+
 let data = $
   - 1
   ...[2, 3]
@@ -15,15 +29,15 @@ assert_eq $data {1, foo: "bar", bar: 42, 4}
 
 let mapped = ["foo=bar", "baz=qux"].iter().map do |e| e.split "="
 let atomic = {...mapped}
-assert_eq (array atomic[0]) ["foo", "bar"]
-assert_eq (array atomic[1]) ["baz", "qux"]
+assert_eq (Array atomic[0]) ["foo", "bar"]
+assert_eq (Array atomic[1]) ["baz", "qux"]
 let mapped = ["foo=bar", "baz=qux"].iter().map do |e| e.split "="
 assert_eq {...mapped.kv()} {"foo": "bar", "baz": "qux"}
 
 let items = [1, 2, 3].iter()
-assert_eq (array items) [1, 2, 3]
+assert_eq (Array items) [1, 2, 3]
 let entries = (["foo=bar", "baz=qux"].iter().map do |e| e.split "=")
-assert_eq (dict(entries.kv())) {"foo": "bar", "baz": "qux"}
+assert_eq (Dict(entries.kv())) {"foo": "bar", "baz": "qux"}
 
 let arr = [...{1, foo: "bar", 2}]
 assert_eq $arr[0][0] 0
@@ -33,7 +47,7 @@ assert_eq $arr[1][1] "bar"
 assert_eq $arr[2][0] 1
 assert_eq $arr[2][1] 2
 
-arr = array {1, foo: "bar", 2}
+arr = Array {1, foo: "bar", 2}
 assert_eq $arr[0][0] 0
 assert_eq $arr[0][1] 1
 assert_eq $arr[1][0] :foo:
@@ -41,10 +55,35 @@ assert_eq $arr[1][1] "bar"
 assert_eq $arr[2][0] 1
 assert_eq $arr[2][1] 2
 
-let tup = tuple({1, foo: "bar", 2})
+let tup = Tuple({1, foo: "bar", 2})
 assert_eq $tup[0][0] 0
 assert_eq $tup[0][1] 1
 assert_eq $tup[1][0] :foo:
 assert_eq $tup[1][1] "bar"
 assert_eq $tup[2][0] 1
 assert_eq $tup[2][1] 2
+
+# Lowercase collection factories accept literal-like variadic arguments.
+assert_eq (array()) []
+assert_eq (array 1 2 3) [1, 2, 3]
+assert_eq (tuple()) (Tuple [])
+assert_eq (tuple 1 2 3) (Tuple [1, 2, 3])
+assert_eq (dict 1 2 foo: 3) {1, 2, foo: 3}
+assert_eq (record 1 2 foo: 3) (Record {1, 2, foo: 3})
+
+# Capitalized raw constructors consume one iterable or spreadable.
+assert_eq (Array [1, 2, 3]) [1, 2, 3]
+assert_eq (Tuple [1, 2, 3]) (tuple 1 2 3)
+assert_eq (Dict {1, 2, foo: 3}) {1, 2, foo: 3}
+assert_eq (Record {1, 2, foo: 3}) (record 1 2 foo: 3)
+
+assert_err_type $UnexpectedKeyError do array foo: 1
+assert_err_type $UnexpectedKeyError do tuple foo: 1
+assert_err_type $MissingPosError do Array()
+assert_err_type $UnexpectedPosError do Array [] []
+assert_err_type $MissingPosError do Dict()
+assert_err_type $UnexpectedPosError do Dict {} {}
+assert_err_type $MissingPosError do Tuple()
+assert_err_type $UnexpectedPosError do Tuple [] []
+assert_err_type $MissingPosError do Record()
+assert_err_type $UnexpectedPosError do Record {} {}

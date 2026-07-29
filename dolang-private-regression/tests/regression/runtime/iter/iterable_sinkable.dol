@@ -59,7 +59,7 @@ let array = [1, 2, 3]
 assert (type array Iterable)
 assert_eq [...array.iter()] [1, 2, 3]
 
-let range = range start: 1 end: 4
+let range = Range start: 1 end: 4
 assert (type range Iterable)
 assert_eq [...range.iter()] [1, 2, 3]
 

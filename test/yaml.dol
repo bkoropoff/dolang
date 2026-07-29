@@ -76,7 +76,7 @@ def parse_error_cases()
   assert ((str multi_err).contains "single document")
 
   let tag_err = assert_throws $RuntimeError do
-    from_str "!!str hello"
+    from_str "!!Str hello"
   assert ((str tag_err).contains "YAML tags are not supported")
 
   let alias_err = assert_throws $RuntimeError do
@@ -130,5 +130,5 @@ def serialize_error_cases()
   assert ((str bin_err).contains "YAML-representable")
 
   let type_err = assert_throws $RuntimeError do
-    to_str $ range 10
+    to_str $ Range 10
   assert ((str type_err).contains "unsupported YAML type")

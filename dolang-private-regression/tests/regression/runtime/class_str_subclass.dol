@@ -1,13 +1,13 @@
 import std:
   - hash
 
-# Basic subclassing of str
-class MyStr: str
+# Basic subclassing of Str
+class MyStr: Str
   def (init) self value
-    str.(init) $self $value
+    Str.(init) $self $value
 
   def (dbg) self
-    "<MyStr $(str.(dbg) self)>"
+    "<MyStr $(Str.(dbg) self)>"
 
 let x = MyStr "hello"
 let y = MyStr "world"

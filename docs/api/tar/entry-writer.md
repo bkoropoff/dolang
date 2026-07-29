@@ -12,7 +12,7 @@ Writes raw string or binary bytes.
 
 | Name   | Type                                           | Description    |
 | ------ | ---------------------------------------------- | -------------- |
-| `data` | [`str`](../std/str.md)\|[`bin`](../std/bin.md) | Bytes to write |
+| `data` | [`Str`](../std/str.md)\|[`Bin`](../std/bin.md) | Bytes to write |
 
 **Returns:** `nil`.
 
@@ -23,7 +23,7 @@ entry.write b"\x00\x01"
 
 ## Operators
 
-The sink protocol accepts `str` and `bin` values without adding separators.
+The sink protocol accepts `Str` and `Bin` values without adding separators.
 
 ```
 entry.put "first"

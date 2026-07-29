@@ -13,7 +13,7 @@ The diagnostic severity as a symbol:
 
 ### `message`
 
-The primary diagnostic message as [`str`](../std/str.md).
+The primary diagnostic message as [`Str`](../std/str.md).
 
 ### `span`
 

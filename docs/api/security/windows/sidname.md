@@ -12,7 +12,7 @@ Resolves an account name or [`Sid`](./sid.md) in the active VFS target.
 
 | Name    | Type                                         | Description         |
 | ------- | -------------------------------------------- | ------------------- |
-| `value` | [`str`](../../std/str.md)\|[`Sid`](./sid.md) | Account name or SID |
+| `value` | [`Str`](../../std/str.md)\|[`Sid`](./sid.md) | Account name or SID |
 
 **Returns:** `SidName`
 

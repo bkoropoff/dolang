@@ -61,7 +61,7 @@ impl<'v, 's, 'a> Serialize for SerializeKey<'v, 's, 'a> {
             View::Str(s) => strand.access(|access| serializer.serialize_str(s.as_str(access))),
             View::Sym(sym) => serializer.serialize_str(sym.as_str(strand.vm())),
             _ => Err(ser::Error::custom(
-                "TOML table keys must be str or sym values",
+                "TOML table keys must be Str or Sym values",
             )),
         }
     }
@@ -488,7 +488,7 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
             let ([arg], []) = unpack!(strand, args, 1, 0)?;
             let src = arg
                 .as_str(strand.vm())
-                .ok_or_else(|| Error::type_error(strand, "expected str"))?
+                .ok_or_else(|| Error::type_error(strand, "expected Str"))?
                 .pin();
             parse(strand, &src, out)
         })

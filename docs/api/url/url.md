@@ -13,7 +13,7 @@ Parses a URL string or copies an existing `Url`.
 
 | Name    | Type                     | Description          |
 | ------- | ------------------------ | -------------------- |
-| `value` | `str`\|[`Url`](./url.md) | URL to parse or copy |
+| `value` | `Str`\|[`Url`](./url.md) | URL to parse or copy |
 
 #### Errors
 
@@ -78,7 +78,7 @@ Immutable array-like view of decoded path segments.
 
 #### Returns
 
-iterator of [`str`](../std/str.md)
+iterator of [`Str`](../std/str.md)
 
 #### Example
 
@@ -119,7 +119,7 @@ Pass `nil` to remove the query.
 
 | Name    | Type         | Description               |
 | ------- | ------------ | ------------------------- |
-| `query` | `str`\|`nil` | Raw query string or `nil` |
+| `query` | `Str`\|`nil` | Raw query string or `nil` |
 
 #### Returns
 
@@ -135,7 +135,7 @@ Pass `nil` to remove the fragment.
 
 | Name       | Type         | Description              |
 | ---------- | ------------ | ------------------------ |
-| `fragment` | `str`\|`nil` | Fragment string or `nil` |
+| `fragment` | `Str`\|`nil` | Fragment string or `nil` |
 
 #### Returns
 
