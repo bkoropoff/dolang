@@ -367,7 +367,7 @@ return $
   install:
     help: install dolang binaries
     - opt: prefix
-      type: $Path
+      parse: $Path
       help: installation root
     do |args|
       let spec = Spec $args profile: dist

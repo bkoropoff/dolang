@@ -53,8 +53,6 @@ class Param
     :collect = false
     :default = :UNSET:
     :parse = nil
-    # Bootstrap compatibility for the top-level dodo.dol.
-    :type = nil
     :values = nil
     :divider = false
   do
@@ -63,7 +61,7 @@ class Param
     self.collect = collect
     self.default = default
     self.sym = sym $ name.replace "-" "_"
-    self.parse = (parse || type || str)
+    self.parse = (parse || str)
     self.divider = divider
     if (values != nil)
       self.values = Set $values
@@ -99,7 +97,6 @@ class Named: Param
     self :name
     :long = :UNSET:
     :parse = nil
-    :type = nil
     :help = nil
     :collect = false
     :default = :UNSET:
@@ -108,7 +105,7 @@ class Named: Param
     :short = nil
     :env = nil
   do
-    Param.(init) $self :name :parse :type :help :collect :default :divider :values
+    Param.(init) $self :name :parse :help :collect :default :divider :values
     self.long = if (long == :UNSET:)
       name
     else
@@ -127,7 +124,6 @@ class Opt: Named
     self :name
     :long = :UNSET:
     :parse = nil
-    :type = nil
     :help = nil
     :collect = false
     :short = nil
@@ -137,7 +133,7 @@ class Opt: Named
     :env = nil
     :meta = nil
   do
-    Named.(init) $self :name :long :parse :type :help :collect
+    Named.(init) $self :name :long :parse :help :collect
       :default :divider :values :short :env
     self.meta = meta
 

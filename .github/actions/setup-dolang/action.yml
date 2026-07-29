@@ -62,4 +62,3 @@ runs:
         fi
 
         echo "$install_dir" >> "$GITHUB_PATH"
-        "$shell_install_dir/$executable" -m dodo --list

@@ -7,7 +7,7 @@
 
 import fs http libvirt proc progress sudo sys
 import std:
-  - nulliter
+  - NULLITER
 
 # Libvirt domain name for the CI VM.
 pub let VM_NAME = "dolang-ci"
@@ -115,7 +115,7 @@ def unconfine()
     run systemctl disable apparmor.service
     try
       # Noisy about every profile it unloads, and failure is not fatal
-      run aa-teardown stderr: $nulliter
+      run aa-teardown stderr: $NULLITER
     catch proc.Error: _
       nil
 

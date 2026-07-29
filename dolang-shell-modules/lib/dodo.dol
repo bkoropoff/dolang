@@ -35,7 +35,7 @@ def with_rules path block
 def list_rules rules
   echo "Available tasks:"
   for k v = rules
-    if special_rules.contains (Str k)
+    if special_rules.contains (str k)
       continue
     let help = (type v Dict && v.get :help:)
     if help
@@ -74,12 +74,12 @@ pub def run ...argv
     - flag: list
       help: list tasks
     - arg: task
-      type: $Str
+      parse: $Str
       help: task to run
       divider: true
       default: default
     - arg: args
-      type: $Str
+      parse: $Str
       collect: true
       help: task arguments
     do |p|
