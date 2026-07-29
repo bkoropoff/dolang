@@ -12,7 +12,7 @@ Executes compiled Do bytecode.
 
 | Name       | Type                   | Description          |
 | ---------- | ---------------------- | -------------------- |
-| `bytecode` | [`bin`](../std/bin.md) | Compiled Do bytecode |
+| `bytecode` | [`Bin`](../std/bin.md) | Compiled Do bytecode |
 
 #### Returns
 
@@ -22,7 +22,7 @@ The result of executing the bytecode.
 
 | Exception   | Condition                                |
 | ----------- | ---------------------------------------- |
-| `TypeError` | `bytecode` is not `bin`                  |
+| `TypeError` | `bytecode` is not `Bin`                  |
 | Various     | Bytecode verification or execution fails |
 
 ```
@@ -47,7 +47,7 @@ To decline a module name, raise
 
 | Name       | Type                     | Description                           |
 | ---------- | ------------------------ | ------------------------------------- |
-| `callback` | [`func`](../std/func.md) | Called with the requested module name |
+| `callback` | [`Func`](../std/func.md) | Called with the requested module name |
 
 #### Returns
 

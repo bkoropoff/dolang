@@ -12,7 +12,7 @@ Compiles a glob pattern.
 
 | Name      | Type                   | Description   |
 | --------- | ---------------------- | ------------- |
-| `pattern` | [`str`](../std/str.md) | Glob pattern  |
+| `pattern` | [`Str`](../std/str.md) | Glob pattern  |
 
 #### Errors
 
@@ -35,11 +35,11 @@ Tests whether `value` matches this glob.
 
 | Name    | Type                   | Description               |
 | ------- | ---------------------- | ------------------------- |
-| `value` | [`str`](../std/str.md) | Candidate string to test  |
+| `value` | [`Str`](../std/str.md) | Candidate string to test  |
 
 #### Returns
 
-[`bool`](../std/index.md) indicating whether the value matches.
+[`Bool`](../std/index.md) indicating whether the value matches.
 
 ```
 let png = Glob "**/*.png"

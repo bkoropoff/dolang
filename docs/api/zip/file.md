@@ -18,7 +18,7 @@ Reads data from the file.
 
 | Name   | Type                   | Description                     |
 | ------ | ---------------------- | ------------------------------- |
-| `size` | [`int`](../std/int.md) | Maximum number of bytes to read |
+| `size` | [`Int`](../std/int.md) | Maximum number of bytes to read |
 
 #### Returns
 
@@ -33,7 +33,7 @@ open "archive.zip" do |archive|
     echo "Read $(data.len) bytes"
 
     # Convert to string if text
-    let text = str data
+    let text = Str data
     echo text
 ```
 
@@ -49,7 +49,7 @@ Writes data to the file.
 
 | Name   | Type                                             | Description   |
 | ------ | ------------------------------------------------ | ------------- |
-| `data` | [`bin`](../std/bin.md) or [`str`](../std/str.md) | Data to write |
+| `data` | [`Bin`](../std/bin.md) or [`Str`](../std/str.md) | Data to write |
 
 #### Example
 

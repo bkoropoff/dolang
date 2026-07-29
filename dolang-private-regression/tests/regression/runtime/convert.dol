@@ -10,7 +10,7 @@ def assert_err block msg
     true
   assert $res
 
-# Bool conversions
+# Lowercase coercions
 assert_eq  (bool nil) false
 assert_eq  (bool false) false
 assert_eq  (bool true) true
@@ -21,7 +21,6 @@ assert_eq  (bool 1.0) true
 assert_eq  (bool(0.0 / 0.0)) true
 assert_eq  (bool(1.0 / 0.0)) true
 assert_eq  (bool(-1.0 / 0.0)) true
-# Int conversions
 assert_err (do int nil) "type error: int: `nil` can't be converted"
 assert_eq  (int false) 0
 assert_eq  (int true) 1
@@ -29,7 +28,6 @@ assert_eq  (int 5) 5
 assert_eq  (int 5.0) 5
 assert_eq  (int 2.5) 2
 assert_eq  (int "5") 5
-# Float conversions
 assert_err (do float nil) "type error: float: `nil` can't be converted"
 assert_eq  (float false) 0.0
 assert_eq  (float true) 1.0
@@ -51,6 +49,34 @@ assert_eq  (str(1.0 / 0.0)) "inf"
 assert_eq  (str(-1.0 / 0.0)) "-inf"
 assert_eq  (str(0.0 / 0.0)) "NaN"
 assert_eq  (str "foo") "foo"
+
+# Capitalized constructors reject lossy or interpretive conversions.
+assert_eq (Bool true) true
+assert_err (do Bool 1) "type error: Bool: expected Bool"
+
+assert_eq (Int 5) 5
+assert_eq (Int true) 1
+assert_eq (Int 5.0) 5
+assert_err (do Int 2.5) "type error: Int: expected Int, Bool, or integral Float"
+assert_err (do Int "5") "type error: Int: expected Int, Bool, or integral Float"
+
+assert_eq (Float 2.5) 2.5
+assert_eq (Float 9007199254740992) 9007199254740992.0
+assert_err (do Float 9007199254740993) "type error: Float: Int cannot be represented exactly"
+assert_err (do Float true) "type error: Float: expected Float or Int"
+
+assert_eq (Str "foo") "foo"
+assert_eq (Str b"foo") "foo"
+assert_err (do Str b"\xff") "value error: Str: invalid UTF-8"
+assert_err (do Str 5) "type error: Str: expected Str or Bin"
+
+assert_eq (Sym :foo:) :foo:
+assert_err (do Sym "foo") "type error: Sym: expected Sym"
+assert_eq (sym "foo") :foo:
+
+assert_eq (Bin "foo") b"foo"
+assert_eq (Bin b"foo") b"foo"
+assert_err (do Bin 5) "type error: Bin: expected Str or Bin"
 
 # Streaming conversions through a native object's formatting implementation
 let foo = makefoo()

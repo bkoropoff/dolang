@@ -33,13 +33,13 @@ def round_trip()
 def encode_type_error()
   let err = assert_throws $TypeError do
     encode 123
-  assert_eq (str err) "type error: expected str or bin"
+  assert_eq (str err) "type error: expected Str or Bin"
 
 #[test]
 def decode_type_error()
   let err = assert_throws $TypeError do
     decode 123
-  assert_eq (str err) "type error: expected str"
+  assert_eq (str err) "type error: expected Str"
 
 #[test]
 def decode_invalid()

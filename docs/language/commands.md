@@ -98,8 +98,8 @@ func 1 false nil :symbol:
 Key arguments use `key: value` syntax:
 
 ```
-range end: 10
-range start: 1 end: 10 step: 2
+Range end: 10
+Range start: 1 end: 10 step: 2
 ```
 
 The value is treated as usual: interpreted as a literal string unless subject
@@ -110,8 +110,8 @@ The `:key` shorthand passes a variable with the same name as a key argument:
 ```
 let start = 1
 let end = 10
-range :start :end
-# equivalent to: range start: $start end: $end
+Range :start :end
+# equivalent to: Range start: $start end: $end
 ```
 
 ## Bare Names and Zero-Argument Calls

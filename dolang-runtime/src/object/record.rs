@@ -8,6 +8,7 @@ use bitvec::bitbox;
 
 use crate::{
     arg::{Arg, Args},
+    call,
     error::{Error, Result},
     gc::{Collect, arena::Visit},
     sig,
@@ -29,6 +30,53 @@ use super::{
 // ── Record newtype ──────────────────────────────────────────────────
 
 pub(crate) struct Record<'v>(pub(crate) Inner<'v>);
+
+struct RecordPairs<'b, 'v> {
+    int: i64,
+    record: &'b mut Record<'v>,
+}
+
+impl<'b, 'v, 's> Spread<'v, 's> for RecordPairs<'b, 'v> {
+    fn positional(
+        &mut self,
+        strand: &mut Strand<'v, 's>,
+        mut value: Slot<'v, '_>,
+    ) -> Result<'v, 's, ()> {
+        let key = Value::from_i64(strand, self.int);
+        let hv = kv::hash(strand, &key).unwrap();
+        self.record.0.insert(strand, key, value.take(), hv, false);
+        self.int = self
+            .int
+            .checked_add(1)
+            .ok_or_else(|| Error::overflow(strand))?;
+        Ok(())
+    }
+
+    fn symbol(
+        &mut self,
+        strand: &mut Strand<'v, 's>,
+        key: Sym<'v, '_>,
+        mut value: Slot<'v, '_>,
+    ) -> Result<'v, 's, ()> {
+        let key = Value::from_object(strand.sym_obj(key));
+        let hv = kv::hash(strand, &key).unwrap();
+        self.record.0.insert(strand, key, value.take(), hv, false);
+        Ok(())
+    }
+
+    fn keyed(
+        &mut self,
+        strand: &mut Strand<'v, 's>,
+        mut key: Slot<'v, '_>,
+        mut value: Slot<'v, '_>,
+    ) -> Result<'v, 's, ()> {
+        let hv = kv::hash(strand, &key)?;
+        self.record
+            .0
+            .insert(strand, key.take(), value.take(), hv, false);
+        Ok(())
+    }
+}
 
 impl<'v> AsRef<Inner<'v>> for Record<'v> {
     fn as_ref(&self) -> &Inner<'v> {
@@ -479,7 +527,7 @@ impl Class {
         } else {
             Err(Error::type_error(
                 strand,
-                "record: expected record for first argument",
+                "record: expected Record for first argument",
             ))
         }
     }
@@ -520,7 +568,7 @@ impl<'v> Protocol<'v> for Class {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "<type std.record>")
+        crate::fmt!(strand, w, "<type std.Record>")
     }
 
     fn op_inspect<'a>(_this: Recv<'v, 'a, Self>, _vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {
@@ -552,14 +600,14 @@ impl<'v> Protocol<'v> for Class {
     ) -> Result<'v, 's, ()> {
         match method.tag() {
             sym::INIT_METHOD => {
-                let ([self_val], []) = unpack!(strand, args, 1, 0)?;
-                let native = Value::from_object(GcObj::new(
-                    strand.arena(),
-                    strand.builtin_types().record,
-                    Record(kv::Inner::new()),
-                ));
-                self_val.op_fill(strand, &strand.singletons().record, native)?;
-                Ok(())
+                let ([self_val, items], []) = unpack!(strand, args, 2, 0)?;
+                strand
+                    .with_slots(async |strand, [mut native]| {
+                        call!(strand, &strand.singletons().record, &mut native, items).await?;
+                        self_val.op_fill(strand, &strand.singletons().record, native.take())?;
+                        Ok(())
+                    })
+                    .await
             }
             sym::LEN => {
                 let ([record], []) = unpack!(strand, args, 1, 0)?;
@@ -759,7 +807,15 @@ impl<'v> Protocol<'v> for Class {
         args: Args<'v, 'a>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        let value = Record::from_args(strand, args)?;
+        let ([items], []) = unpack!(strand, args, 1, 0)?;
+        let mut value = Record(Inner::new());
+        let mut sink = RecordPairs {
+            int: 0,
+            record: &mut value,
+        };
+        items
+            .op_spread(strand, SpreadContext::Pairs, &mut sink)
+            .await?;
         strand
             .vm()
             .builtin_types()

@@ -7,7 +7,7 @@ pub(crate) fn bool<'v, 's>(
 ) -> Result<'v, 's, bool> {
     value
         .as_bool(strand)
-        .ok_or_else(|| Error::type_error(strand, format!("{name}: expected bool")))
+        .ok_or_else(|| Error::type_error(strand, format!("{name}: expected Bool")))
 }
 
 pub(crate) fn string<'v, 's>(
@@ -18,7 +18,7 @@ pub(crate) fn string<'v, 's>(
     value
         .as_str(strand)
         .map(|value| value.to_string())
-        .ok_or_else(|| Error::type_error(strand, format!("{name}: expected str")))
+        .ok_or_else(|| Error::type_error(strand, format!("{name}: expected Str")))
 }
 
 pub(crate) fn bytes<'v, 's>(
@@ -31,7 +31,7 @@ pub(crate) fn bytes<'v, 's>(
         View::Bin(value) => Ok(value.to_vec()),
         _ => Err(Error::type_error(
             strand,
-            format!("{name}: expected `str` or `bin`"),
+            format!("{name}: expected `Str` or `Bin`"),
         )),
     }
 }

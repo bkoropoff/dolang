@@ -173,7 +173,7 @@ unsafe impl<'v> Collect for Sink<'v> {
     }
 
     fn clear(&mut self) {
-        // Can't clear `array`, but array itself is clearable
+        // Can't clear `Array`, but array itself is clearable
     }
 }
 
@@ -391,6 +391,25 @@ impl<'v> Array<'v> {
         }
     }
 
+    pub(crate) fn from_args<'s>(
+        strand: &mut Strand<'v, 's>,
+        args: Args<'v, '_>,
+    ) -> Result<'v, 's, Self> {
+        let mut this = Self::new();
+
+        for (index, arg) in args.enumerate() {
+            if (index + 1) % crate::INTERRUPT_INTERVAL == 0 {
+                strand.check_trap_gc()?;
+            }
+            match arg {
+                Arg::Pos(mut value) => this.inner.push(value.take()),
+                Arg::Key(key, _) => return Err(Error::unexpected_key(strand, key)),
+            }
+        }
+
+        Ok(this)
+    }
+
     pub(crate) async fn from_builtin_args<'s>(
         strand: &mut Strand<'v, 's>,
         mut args: Args<'v, '_>,
@@ -431,7 +450,7 @@ impl<'v> Array<'v> {
         let reverse = reverse
             .map(|r| {
                 r.as_bool(strand)
-                    .ok_or_else(|| Error::type_error(strand, "reverse: expected bool"))
+                    .ok_or_else(|| Error::type_error(strand, "reverse: expected Bool"))
             })
             .transpose()?
             .unwrap_or(false);
@@ -909,7 +928,7 @@ impl<'v> Protocol<'v> for Array<'v> {
             }
             sym::LEN => Err(Error::type_error(
                 strand,
-                "array.len is a field, not a method",
+                "Array.len is a field, not a method",
             )),
             _ => iter::iterable_sinkable_mcall(strand, &this, method, args, out).await,
         }
@@ -1126,7 +1145,7 @@ impl<'v> Protocol<'v> for Type {
         let ([items], []) = unpack!(strand, args, 1, 0)?;
         let mut array = Array::new();
         let mut sink = ArraySpread(&mut array.inner);
-        // FIXME: `array` is not GC-scannable, but then again if it were it would also
+        // FIXME: `Array` is not GC-scannable, but then again if it were it would also
         // be mutably borrowed, which would inhibit GC.  This needs a resolution.
         items
             .op_spread(strand, SpreadContext::Sequence, &mut sink)
@@ -1159,7 +1178,7 @@ impl<'v> Protocol<'v> for Type {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "<type std.array>")
+        crate::fmt!(strand, w, "<type std.Array>")
     }
 
     fn op_inspect<'a>(_this: Recv<'v, 'a, Self>, _vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {

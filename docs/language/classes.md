@@ -480,7 +480,7 @@ class NumberRange
     self.stop = stop
 
   def (iter) self
-    (range start: self.start end: self.stop).iter()
+    (Range start: self.start end: self.stop).iter()
 
 let r = NumberRange 0 5
 assert_eq [...r] [0, 1, 2, 3, 4]
@@ -583,7 +583,7 @@ assert (bool nonzero)
 ### `(hash)`: Hash Code
 
 Called by `std.hash` and when an instance is used as a dictionary key. Must
-return an `int`. If not defined, the hash is derived from the instance's
+return an `Int`. If not defined, the hash is derived from the instance's
 identity (memory address), consistent with the default identity-based equality.
 
 `std.hash` accepts multiple values and hashes them all together in sequence,
@@ -631,7 +631,7 @@ assert_eq $d[p2] "hello"
 ### `(str)`: String Conversion
 
 Called when an instance is converted to a string via `str()` or used in string
-interpolation. Must return a `str`. Falls back to `(dbg)` if not defined:
+interpolation. Must return a `Str`. Falls back to `(dbg)` if not defined:
 
 ```
 class Point
@@ -652,7 +652,7 @@ echo "Point is $p"   # Point is (3, 4)
 ### `(dbg)`: Debug String
 
 Called for debug/inspect output and as a fallback when `(str)` is not defined.
-Must return a `str`. If neither `(str)` nor `(dbg)` is defined, the instance
+Must return a `Str`. If neither `(str)` nor `(dbg)` is defined, the instance
 displays as `<object>`:
 
 ```
@@ -669,7 +669,7 @@ class Node
 ### `(arg)`: External Command Argument
 
 Called when an instance is interpolated into an external command as an argument
-(e.g. `echo $obj` in a shell context). Must return a `str`. Falls back to
+(e.g. `echo $obj` in a shell context). Must return a `Str`. Falls back to
 `(str)` if not defined, which in turn falls back to `(dbg)`:
 
 ```

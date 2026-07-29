@@ -12,7 +12,7 @@ HTTP client for making web requests.
 | [`Status`](./status.md) | Non-2xx HTTP response error         |
 
 HTTP request functions and client methods accept either a plain
-[`str`](../std/str.md) URL or a [`url.Url`](../url/index.md)
+[`Str`](../std/str.md) URL or a [`url.Url`](../url/index.md)
 instance.
 
 Cookie-backed session handling is available through

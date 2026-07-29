@@ -47,7 +47,7 @@ Executes the statement and returns the number of rows affected.
 
 #### Returns
 
-`int` - Number of rows affected
+`Int` - Number of rows affected
 
 #### Example
 
@@ -74,13 +74,13 @@ are bound by passing keyword arguments to `query()` or `execute()`.
 | Type    | SQLite Type  | Example                                  |
 | ------- | ------------ | ---------------------------------------- |
 | `nil`   | NULL         | `stmt.execute value: nil`                |
-| `bool`  | INTEGER      | `stmt.execute active: true`              |
-| `int`   | INTEGER      | `stmt.execute id: 42`                    |
-| `float` | REAL         | `stmt.execute price: 19.99`              |
-| `str`   | TEXT         | `stmt.execute name: "Alice"`             |
-| `bin`   | BLOB         | `stmt.execute data: b"\x01\x02\x03"`     |
+| `Bool`  | INTEGER      | `stmt.execute active: true`              |
+| `Int`   | INTEGER      | `stmt.execute id: 42`                    |
+| `Float` | REAL         | `stmt.execute price: 19.99`              |
+| `Str`   | TEXT         | `stmt.execute name: "Alice"`             |
+| `Bin`   | BLOB         | `stmt.execute data: b"\x01\x02\x03"`     |
 
-`bool` values are stored as `0` or `1`.
+`Bool` values are stored as `0` or `1`.
 
 #### Example
 

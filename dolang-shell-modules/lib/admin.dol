@@ -7,7 +7,7 @@ import sudo sys security shell
 #
 # # Returns
 #
-# `bool`
+# `Bool`
 pub def query()
   if (sys.os_info().family == :WINDOWS:)
     security.token_info().is_elevated
@@ -24,7 +24,7 @@ pub def query()
 #
 # # Parameters
 #
-# | Name    | Type     | Description  |
+# | Name    | type     | Description  |
 # | ------- | -------- | ------------ |
 # | `block` | callable | Block to run |
 #

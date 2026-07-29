@@ -1,4 +1,4 @@
-# bin
+# Bin
 
 Binary data; an immutable sequence of bytes.
 
@@ -10,7 +10,7 @@ Returns the byte length of the binary data.
 
 #### Type
 
-[`int`](./index.md)
+[`Int`](./index.md)
 
 ```
 assert_eq (b"hello".len) 5
@@ -27,11 +27,11 @@ Tests whether the binary data starts with the given prefix.
 
 | Name     | Type              | Description      |
 | -------- | ----------------- | ---------------- |
-| `prefix` | [`bin`](./bin.md) | the prefix bytes |
+| `prefix` | [`Bin`](./bin.md) | the prefix bytes |
 
 #### Returns
 
-[`bool`](./index.md)
+[`Bool`](./index.md)
 
 ```
 assert (b"hello".starts_with b"he")
@@ -47,11 +47,11 @@ returns the original data.
 
 | Name     | Type              | Description          |
 | -------- | ----------------- | -------------------- |
-| `prefix` | [`bin`](./bin.md) | the prefix to remove |
+| `prefix` | [`Bin`](./bin.md) | the prefix to remove |
 
 #### Returns
 
-[`bin`](./bin.md)
+[`Bin`](./bin.md)
 
 ```
 assert_eq (b"hello".without_prefix b"he") b"lo"
@@ -66,11 +66,11 @@ Tests whether the binary data ends with the given suffix.
 
 | Name     | Type              | Description      |
 | -------- | ----------------- | ---------------- |
-| `suffix` | [`bin`](./bin.md) | the suffix bytes |
+| `suffix` | [`Bin`](./bin.md) | the suffix bytes |
 
 #### Returns
 
-[`bool`](./index.md)
+[`Bool`](./index.md)
 
 ```
 assert (b"hello".ends_with b"lo")
@@ -85,11 +85,11 @@ the original data.
 
 | Name     | Type              | Description          |
 | -------- | ----------------- | -------------------- |
-| `suffix` | [`bin`](./bin.md) | the suffix to remove |
+| `suffix` | [`Bin`](./bin.md) | the suffix to remove |
 
 #### Returns
 
-[`bin`](./bin.md)
+[`Bin`](./bin.md)
 
 ```
 assert_eq (b"hello".without_suffix b"lo") b"hel"
@@ -108,12 +108,12 @@ left, negative splits from the right (but still yields left-to-right).
 
 | Name        | Type                | Description                                 |
 | ----------- | ------------------- | ------------------------------------------- |
-| `delimiter` | [`bin`](./bin.md)   | the delimiter bytes                         |
-| `limit`     | [`int`](./index.md) | max splits; negative means split from right |
+| `delimiter` | [`Bin`](./bin.md)   | the delimiter bytes                         |
+| `limit`     | [`Int`](./index.md) | max splits; negative means split from right |
 
 #### Returns
 
-iterator of [`bin`](./bin.md)
+iterator of [`Bin`](./bin.md)
 
 ```
 assert_eq [...b"a,b,c".split b","] [b"a", b"b", b"c"]
@@ -132,12 +132,12 @@ Like `split`, but yields segments in **right-to-left** order. Mirrors
 
 | Name        | Type                | Description                                |
 | ----------- | ------------------- | ------------------------------------------ |
-| `delimiter` | [`bin`](./bin.md)   | the delimiter bytes                        |
-| `limit`     | [`int`](./index.md) | max splits; negative means split from left |
+| `delimiter` | [`Bin`](./bin.md)   | the delimiter bytes                        |
+| `limit`     | [`Int`](./index.md) | max splits; negative means split from left |
 
 #### Returns
 
-iterator of [`bin`](./bin.md)
+iterator of [`Bin`](./bin.md)
 
 ```
 assert_eq [...b"a,b,c".rsplit b","] [b"c", b"b", b"a"]
@@ -156,7 +156,7 @@ Joins values from an input source using this binary data as a separator.
 
 #### Returns
 
-[`bin`](./bin.md)
+[`Bin`](./bin.md)
 
 ```
 assert_eq (b",".join [b"a", b"b", b"c"]) b"a,b,c"
@@ -170,11 +170,11 @@ Removes bytes (or specified characters) from both ends.
 
 | Name    | Type              | Description                                  |
 | ------- | ----------------- | -------------------------------------------- |
-| `chars` | [`bin`](./bin.md) | bytes to trim (defaults to whitespace bytes) |
+| `chars` | [`Bin`](./bin.md) | bytes to trim (defaults to whitespace bytes) |
 
 #### Returns
 
-[`bin`](./bin.md)
+[`Bin`](./bin.md)
 
 ```
 assert_eq (b"  hello  ".trim()) b"hello"
@@ -189,11 +189,11 @@ Removes bytes (or specified characters) from the start.
 
 | Name    | Type              | Description   |
 | ------- | ----------------- | ------------- |
-| `chars` | [`bin`](./bin.md) | bytes to trim |
+| `chars` | [`Bin`](./bin.md) | bytes to trim |
 
 #### Returns
 
-[`bin`](./bin.md)
+[`Bin`](./bin.md)
 
 ```
 assert_eq (b"  hello  ".trim_start()) b"hello  "
@@ -207,11 +207,11 @@ Removes bytes (or specified characters) from the end.
 
 | Name    | Type              | Description   |
 | ------- | ----------------- | ------------- |
-| `chars` | [`bin`](./bin.md) | bytes to trim |
+| `chars` | [`Bin`](./bin.md) | bytes to trim |
 
 #### Returns
 
-[`bin`](./bin.md)
+[`Bin`](./bin.md)
 
 ```
 assert_eq (b"  hello  ".trim_end()) b"  hello"
@@ -225,11 +225,11 @@ Tests whether the binary data contains the given bytes.
 
 | Name     | Type              | Description       |
 | -------- | ----------------- | ----------------- |
-| `needle` | [`bin`](./bin.md) | the bytes to find |
+| `needle` | [`Bin`](./bin.md) | the bytes to find |
 
 #### Returns
 
-[`bool`](./index.md)
+[`Bool`](./index.md)
 
 ```
 assert (b"hello".contains b"ell")
@@ -244,7 +244,7 @@ Unpacks binary data into an array of byte values (integers from 0-255).
 
 #### Returns
 
-[`array`](./array.md) of [`int`](./index.md)
+[`Array`](./array.md) of [`Int`](./index.md)
 
 ```
 let bytes = b"hello"
@@ -257,7 +257,7 @@ Returns the binary data as a lowercase hexadecimal string.
 
 #### Returns
 
-[`str`](./str.md)
+[`Str`](./str.md)
 
 ```
 assert_eq (b"ABC".hex()) "414243"
@@ -268,7 +268,7 @@ assert_eq (b"\x00\x01\xff".hex()) "0001ff"
 
 ### Indexing
 
-Binary data accepts [`range`](./range.md) values for slicing by byte position:
+Binary data accepts [`Range`](./range.md) values for slicing by byte position:
 
 ```
 assert_eq (b"abcd"[1..3]) b"bc"
@@ -276,8 +276,8 @@ assert_eq (b"abcd"[..2]) b"ab"
 assert_eq (b"abcd"[2..]) b"cd"
 assert_eq (b"abcd"[..]) b"abcd"
 assert_eq (b"foobar"[-3..]) b"bar"
-assert_eq (b"abcd"[range 0 4 2]) b"ac"
-assert_eq (b"abcd"[range nil nil -1]) b"dcba"
+assert_eq (b"abcd"[Range 0 4 2]) b"ac"
+assert_eq (b"abcd"[Range nil nil -1]) b"dcba"
 ```
 
 This returns a new binary value. Slice boundaries must be in bounds. Omitted
@@ -286,21 +286,19 @@ endpoints count from the end. Negative steps reverse the slice.
 
 ## Constructors
 
-### `bin value`
+### `Bin value`
 
-Converts a value to binary data. If the value is already binary, returns it
-directly. Otherwise, converts via string representation.
+Accepts binary data or copies the UTF-8 bytes of a string.
 
 #### Parameters
 
-| Name    | Type | Description          |
-| ------- | ---- | -------------------- |
-| `value` |      | value to convert     |
+| Name    | Type                                 | Description  |
+| ------- | ------------------------------------ | ------------ |
+| `value` | [`Bin`](./bin.md)\|[`Str`](./str.md) | source bytes |
 
 ```
-# From string
-let data = b"hello"
-echo $data  # hello
+let data = Bin "hello"
+assert_eq $data b"hello"
 ```
 
 ## Class Methods
@@ -313,11 +311,11 @@ Packs an array of integers (0-255) into binary data.
 
 | Name    | Type                  | Description               |
 | ------- | --------------------- | ------------------------- |
-| `array` | [`array`](./array.md) | array of integers (0-255) |
+| `array` | [`Array`](./array.md) | array of integers (0-255) |
 
 #### Returns
 
-[`bin`](./bin.md)
+[`Bin`](./bin.md)
 
 ```
 let bytes = bin.pack [104, 101, 108, 108, 111]
@@ -336,7 +334,7 @@ Unpacks any value that can be converted to binary into an array of byte values.
 
 #### Returns
 
-[`array`](./array.md) of [`int`](./index.md)
+[`Array`](./array.md) of [`Int`](./index.md)
 
 ```
 assert_eq (bin.unpack b"hello") [104, 101, 108, 108, 111]

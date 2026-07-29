@@ -52,12 +52,12 @@ do
 #
 # # Parameters
 #
-# | Name   | Type   | Description                        |
+# | Name   | type   | Description                        |
 # | ------ | ------ | ---------------------------------- |
 # | `cmd`  |         | Program to run                        |
-# | `user` | `str?`  | Account to use instead of root        |
+# | `user` | `Str?`  | Account to use instead of root        |
 # | `cd`   | `Path?` | Working directory requested via sudo  |
-# | `env`  | `dict`  | Environment requested via sudo policy |
+# | `env`  | `Dict`  | Environment requested via sudo policy |
 # | `args` | `*`     | Arguments passed verbatim to `cmd`    |
 #
 # # Returns
@@ -85,12 +85,12 @@ do
 #
 # # Parameters
 #
-# | Name   | Type     | Description                    |
+# | Name   | type     | Description                    |
 # | ------ | -------- | ------------------------------ |
 # | `func` | callable | Block to run                   |
-# | `user` | `str?`   | Account to use instead of root |
+# | `user` | `Str?`   | Account to use instead of root |
 # | `cd`   | `Path?`  | Initial elevated directory     |
-# | `env`  | `dict`   | Initial environment overrides  |
+# | `env`  | `Dict`   | Initial environment overrides  |
 #
 # # Returns
 #

@@ -99,7 +99,7 @@ def with_temp_dir_cleans_up_on_error()
 def each_with_temp_dir_gets_unique_directory()
   let paths = []
 
-  for _ = range end: 5
+  for _ = Range end: 5
     with_temp_dir do |dir|
       paths.push (str dir)
 

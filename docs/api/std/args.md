@@ -1,19 +1,19 @@
-# args
+# Args
 
 Argument pack.
 
-`args` values are returned by variadic captures such as `...rest` and by
-calling the `args` type object. Iterating an `args` value yields `[key, value]`
+`Args` values are returned by variadic captures such as `...rest` and by
+calling the `Args` type object. Iterating an `Args` value yields `[key, value]`
 pairs. Positional items use their positional index as the key.
 
 ## Constructor
 
-### `args ...`
+### `Args ...`
 
 Creates an argument pack from positional and keyed arguments.
 
 ```
-let pack = args 1 name: Alice 2
+let pack = Args 1 name: Alice 2
 assert_eq [...pack] [[0, 1], [:name:, "Alice"], [1, 2]]
 ```
 
@@ -24,7 +24,7 @@ assert_eq [...pack] [[0, 1], [:name:, "Alice"], [1, 2]]
 Number of items in the argument pack.
 
 ```
-let pack = args 1 2 name: Alice
+let pack = Args 1 2 name: Alice
 assert_eq $pack.len 3
 ```
 

@@ -148,7 +148,7 @@ fn unix_path_string<'v, 's>(
     } else {
         Err(Error::type_error(
             strand,
-            format!("{name} must be a str or UnixPath"),
+            format!("{name} must be a Str or UnixPath"),
         ))
     }
 }
@@ -666,7 +666,7 @@ impl<'v> Object<'v> for TarEntryWriter {
                 let data = match data.view(strand) {
                     View::Str(value) => String::from(value).into_bytes(),
                     View::Bin(value) => value.to_vec(),
-                    _ => return Err(Error::type_error(strand, "expected str or bin")),
+                    _ => return Err(Error::type_error(strand, "expected Str or Bin")),
                 };
                 validate_entry_writer!(this, strand);
                 this.borrow_mut(strand)?.write(strand, &data).await
@@ -692,7 +692,7 @@ impl<'v> Object<'v> for TarEntryWriter {
         let data = match value.view(strand) {
             View::Str(value) => String::from(value).into_bytes(),
             View::Bin(value) => value.to_vec(),
-            _ => return Err(Error::type_error(strand, "expected str or bin")),
+            _ => return Err(Error::type_error(strand, "expected Str or Bin")),
         };
         validate_entry_writer!(this, strand);
         this.borrow_mut(strand)?.write(strand, &data).await
@@ -976,7 +976,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         .function("read", async move |strand, args, out| {
             let ([path, block], []) = unpack!(strand, args, 2, 0)?;
             let path = dolang_ext_shell::as_path(strand, &path)
-                .ok_or_else(|| Error::type_error(strand, "path must be a str or Path"))?;
+                .ok_or_else(|| Error::type_error(strand, "path must be a Str or Path"))?;
             let (entries, compression) = open_reader(strand, path.as_ref()).await?;
             strand
                 .with_slots(async move |strand, [mut reader]| {
@@ -1011,7 +1011,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             let ([path, block], [compression]) =
                 unpack!(strand, args, 2, 0, compression_sym = None)?;
             let path = dolang_ext_shell::as_path(strand, &path)
-                .ok_or_else(|| Error::type_error(strand, "path must be a str or Path"))?;
+                .ok_or_else(|| Error::type_error(strand, "path must be a Str or Path"))?;
             let compression = parse_compression(strand, global, compression, path.as_ref())?;
             let file = dolang_ext_shell::open(strand, path.as_ref(), "w")
                 .await

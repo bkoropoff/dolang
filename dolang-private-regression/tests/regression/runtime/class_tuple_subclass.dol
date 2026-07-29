@@ -1,11 +1,11 @@
 import std:
-  - tuple
+  - Tuple
 # Basic subclassing of tuple
-class MyTuple: tuple
+class MyTuple: Tuple
   def (init) self source
-    tuple.(init) $self $source
+    Tuple.(init) $self $source
 
-let t = MyTuple (tuple [])
+let t = MyTuple (Tuple [])
 
 # Length
 assert_eq $t.len 0

@@ -13,7 +13,7 @@ let ESC = str b"\x1b"
 
 #[test]
 def terminal_detection()
-  assert_eq (type term.have_terminal) $bool
+  assert_eq (type term.have_terminal) $Bool
 
 #[test]
 def text_string_coercion()
@@ -25,7 +25,7 @@ def text_string_coercion()
   assert_eq (str $ term.style("indexed", fg: 123)) "$ESC[38;5;123mindexed$ESC[0m"
   assert_eq (str $ term.style("rgb", fg: [1, 2, 3])) "$ESC[38;2;1;2;3mrgb$ESC[0m"
   assert_eq (
-    str $ term.style("rgb", bg: tuple([4, 5, 6]))
+    str $ term.style("rgb", bg: Tuple([4, 5, 6]))
   ) "$ESC[48;2;4;5;6mrgb$ESC[0m"
 
   assert_throws $ValueError do term.style fg: 256 text

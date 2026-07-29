@@ -1,7 +1,7 @@
 use std::ops::ControlFlow;
 
 use crate::{
-    arg::Args,
+    arg::{Arg, Args},
     bytecode::Variadic,
     call,
     error::{Error, Result},
@@ -35,6 +35,25 @@ where
             iter.into_iter(),
         )
     }
+}
+
+pub(crate) fn from_args<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    args: Args<'v, '_>,
+) -> Result<'v, 's, Vec<Value<'v>>> {
+    let mut values = Vec::new();
+
+    for (index, arg) in args.enumerate() {
+        if (index + 1) % crate::INTERRUPT_INTERVAL == 0 {
+            strand.check_trap_gc()?;
+        }
+        match arg {
+            Arg::Pos(mut value) => values.push(value.take()),
+            Arg::Key(key, _) => return Err(Error::unexpected_key(strand, key)),
+        }
+    }
+
+    Ok(values)
 }
 
 struct TupleSpread<'a, 'v>(&'a mut Vec<Value<'v>>);
@@ -696,7 +715,7 @@ impl<'v> Protocol<'v> for Type {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "<type std.tuple>")
+        crate::fmt!(strand, w, "<type std.Tuple>")
     }
 
     fn op_inspect<'a>(_this: Recv<'v, 'a, Self>, _vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {

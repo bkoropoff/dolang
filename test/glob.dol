@@ -45,12 +45,12 @@ def type_errors()
 
   let pattern_err = assert_throws $TypeError do
     matches 1 "foo"
-  assert_eq (str pattern_err) "type error: pattern: expected `Glob` or `str`"
+  assert_eq (str pattern_err) "type error: pattern: expected `Glob` or `Str`"
 
   let value_err = assert_throws $TypeError do
     matches "*.png" 1
-  assert_eq (str value_err) "type error: value: expected `str`"
+  assert_eq (str value_err) "type error: value: expected `Str`"
 
   let method_err = assert_throws $TypeError do
     png.matches 1
-  assert_eq (str method_err) "type error: value: expected `str`"
+  assert_eq (str method_err) "type error: value: expected `Str`"

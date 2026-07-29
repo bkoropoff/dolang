@@ -106,7 +106,7 @@ def run_rejects_non_dict_inject()
       exec.run $script inject: 1
       false
     catch TypeError: err
-      assert_eq (str err) "type error: inject: expected `dict`"
+      assert_eq (str err) "type error: inject: expected `Dict`"
       true
     assert $ok
 
@@ -119,6 +119,6 @@ def run_rejects_non_symbol_inject_key()
       exec.run $script inject: {"answer": 1}
       false
     catch TypeError: err
-      assert_eq (str err) "type error: inject key: expected `sym`"
+      assert_eq (str err) "type error: inject key: expected `Sym`"
       true
     assert $ok

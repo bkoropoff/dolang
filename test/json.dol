@@ -55,7 +55,7 @@ def parse_objects()
   assert_eq $nested["x"]["y"]["z"] 42
 
   let mixed = from_str "{\"items\": [1, 2, 3], \"count\": 3}"
-  assert_eq (type mixed["items"]) $array
+  assert_eq (type mixed["items"]) $Array
   assert_eq $mixed["count"] 3
 
 #[test]
@@ -81,7 +81,7 @@ def round_trip_mixed()
   let parsed = from_str $json_str
   assert_eq $parsed["total"] 2
   let users = parsed["users"]
-  assert_eq (type users) $array
+  assert_eq (type users) $Array
 
 #[test]
 def symbols_as_strings()

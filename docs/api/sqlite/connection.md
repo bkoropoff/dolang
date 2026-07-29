@@ -17,12 +17,12 @@ need to be reused.
 
 | Name  | Type                   | Description                             |
 | ----- | ---------------------- | --------------------------------------- |
-| `sql` | [`str`](../std/str.md) | SQL statement to execute                |
+| `sql` | [`Str`](../std/str.md) | SQL statement to execute                |
 | `...` | any                    | Keyword arguments for parameter binding |
 
 #### Returns
 
-`int` — number of rows affected
+`Int` — number of rows affected
 
 #### Example
 
@@ -41,7 +41,7 @@ Prepares a SQL statement for repeated execution.
 
 | Name   | Type                   | Description                                               |
 | ------ | ---------------------- | --------------------------------------------------------- |
-| `sql`  | [`str`](../std/str.md) | SQL statement to prepare                                  |
+| `sql`  | [`Str`](../std/str.md) | SQL statement to prepare                                  |
 | `func` | func                   | Callable to run with the statement; auto-closes when done |
 
 #### Returns

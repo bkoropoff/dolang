@@ -70,8 +70,8 @@ def path_api()
   let sliced = components[1..]
   assert_eq $sliced ["beta", "gamma"]
   assert_eq $components[..-1] ["alpha", "beta"]
-  assert_eq $components[range 0 3 2] ["alpha", "gamma"]
-  assert_eq $components[range nil nil -1] ["gamma", "beta", "alpha"]
+  assert_eq $components[Range 0 3 2] ["alpha", "gamma"]
+  assert_eq $components[Range nil nil -1] ["gamma", "beta", "alpha"]
   sliced.push "delta"
   assert_eq $sliced ["beta", "gamma", "delta"]
   assert_eq [...components] ["alpha", "beta", "gamma"]

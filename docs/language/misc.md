@@ -7,14 +7,14 @@ operator. Everything to the right of `$` is passed as an argument:
 
 ```
 # These are equivalent:
-echo (type (str (range 10)))
-echo $ type $ str $ range 10
+echo (type (str (Range 10)))
+echo $ type $ str $ Range 10
 ```
 
 This works in both statement and expression contexts:
 
 ```
-let ty = (type $ str $ range 10)
+let ty = (type $ str $ Range 10)
 ```
 
 ### Forcing Vertical Layout as a Single Argument
@@ -37,7 +37,7 @@ func $
   - 3
 ```
 
-## String Representations: `str`, `dbg`, and `std.arg`
+## String Representations: `Str`, `dbg`, and `std.arg`
 
 Do has three builtins for converting values to strings, each serving a
 different purpose:

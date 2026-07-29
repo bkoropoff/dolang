@@ -20,8 +20,8 @@ Creates a `DateTime` from a Unix timestamp.
 
 | Name      | Type                                                | Description                                            |
 | --------- | --------------------------------------------------- | ------------------------------------------------------ |
-| `seconds` | [`int`](../std/int.md)\|[`float`](../std/float.md)? | Optional seconds since Unix epoch                      |
-| `nanos`   | [`int`](../std/int.md)?                             | Optional nanoseconds since Unix epoch or offset to add |
+| `seconds` | [`Int`](../std/int.md)\|[`Float`](../std/float.md)? | Optional seconds since Unix epoch                      |
+| `nanos`   | [`Int`](../std/int.md)?                             | Optional nanoseconds since Unix epoch or offset to add |
 
 ```
 echo $ DateTime.from_unix 1700000000
@@ -38,7 +38,7 @@ Parses an RFC3339 timestamp.
 
 | Name   | Type                   | Description         |
 | ------ | ---------------------- | ------------------- |
-| `text` | [`str`](../std/str.md) | RFC3339 input text  |
+| `text` | [`Str`](../std/str.md) | RFC3339 input text  |
 
 #### Returns
 
@@ -59,8 +59,8 @@ echo $dt.rfc3339()
 
 | Field        | Type                       | Description                   |
 | ------------ | -------------------------- | ----------------------------- |
-| `unix_secs`  | [`float`](../std/float.md) | Approximate Unix seconds view |
-| `unix_nanos` | [`int`](../std/int.md)     | Exact Unix nanoseconds view   |
+| `unix_secs`  | [`Float`](../std/float.md) | Approximate Unix seconds view |
+| `unix_nanos` | [`Int`](../std/int.md)     | Exact Unix nanoseconds view   |
 
 ## Operators
 
@@ -74,7 +74,7 @@ Returns the RFC3339 representation.
 
 #### Returns
 
-[`str`](../std/str.md)
+[`Str`](../std/str.md)
 
 ```
 let dt = DateTime.from_unix(1700000000)

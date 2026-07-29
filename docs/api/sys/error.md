@@ -6,7 +6,7 @@
 try
   fs.read "/definitely/missing"
 catch Error: err
-  echo $str(err)
+  echo $Str(err)
 ```
 
 `str(err)` returns the underlying system error message and appends the native

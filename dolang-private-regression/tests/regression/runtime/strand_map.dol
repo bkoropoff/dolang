@@ -85,7 +85,7 @@ assert_eq $observed [1, 0]
 let send recv = channel 4
 output = []
 helper = spawn do
-  for value = range 4
+  for value = Range 4
     send.put $value
   send.close()
 map 3 input: $recv output: $output do |value| (value + 1)

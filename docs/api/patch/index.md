@@ -22,7 +22,7 @@ Parses a patch stream.
 
 | Name    | Type                                              | Description                |
 | ------- | ------------------------------------------------- | -------------------------- |
-| `input` | [`str`](../std/str.md)\|[`bin`](../std/bin.md)    | Unified or git-style patch |
+| `input` | [`Str`](../std/str.md)\|[`Bin`](../std/bin.md)    | Unified or git-style patch |
 
 #### Returns
 
@@ -42,17 +42,17 @@ let patches = [...patch.decode diff_text]
 
 Builds a text patch from two versions of the same content.
 
-`before` and `after` must both be [`str`](../std/str.md) or both be
-[`bin`](../std/bin.md).
+`before` and `after` must both be [`Str`](../std/str.md) or both be
+[`Bin`](../std/bin.md).
 
 #### Parameters
 
 | Name     | Type                                                                               | Description                            |
 | -------- | ---------------------------------------------------------------------------------- | -------------------------------------- |
-| `before` | [`str`](../std/str.md)\|[`bin`](../std/bin.md)                                     | Original content                       |
-| `after`  | [`str`](../std/str.md)\|[`bin`](../std/bin.md)                                     | Modified content                       |
-| `source` | [`Path`](../fs/path.md)\|[`str`](../std/str.md)?                                   | Source filename for the patch headers  |
-| `target` | [`Path`](../fs/path.md)\|[`str`](../std/str.md)?                                   | Target filename for the patch headers  |
+| `before` | [`Str`](../std/str.md)\|[`Bin`](../std/bin.md)                                     | Original content                       |
+| `after`  | [`Str`](../std/str.md)\|[`Bin`](../std/bin.md)                                     | Modified content                       |
+| `source` | [`Path`](../fs/path.md)\|[`Str`](../std/str.md)?                                   | Source filename for the patch headers  |
+| `target` | [`Path`](../fs/path.md)\|[`Str`](../std/str.md)?                                   | Target filename for the patch headers  |
 
 #### Returns
 
@@ -63,7 +63,7 @@ Builds a text patch from two versions of the same content.
 | Exception   | Condition                                                                       |
 | ----------- | ------------------------------------------------------------------------------- |
 | `TypeError` | `before` and `after` are not both text or both binary                           |
-| `TypeError` | `source` or `target` is not a [`Path`](../fs/path.md) or [`str`](../std/str.md) |
+| `TypeError` | `source` or `target` is not a [`Path`](../fs/path.md) or [`Str`](../std/str.md) |
 
 ```
 let p = patch.diff "alpha\n" "beta\n" source: old.txt target: new.txt
@@ -75,7 +75,7 @@ echo (patch.encode p)
 Encodes a [`Patch`](./patch.md) or iterable of patches back to patch text.
 
 When every encoded byte is valid UTF-8, this returns a
-[`str`](../std/str.md). Otherwise it returns [`bin`](../std/bin.md).
+[`Str`](../std/str.md). Otherwise it returns [`Bin`](../std/bin.md).
 
 #### Parameters
 
@@ -85,7 +85,7 @@ When every encoded byte is valid UTF-8, this returns a
 
 #### Returns
 
-[`str`](../std/str.md)\|[`bin`](../std/bin.md)
+[`Str`](../std/str.md)\|[`Bin`](../std/bin.md)
 
 #### Errors
 

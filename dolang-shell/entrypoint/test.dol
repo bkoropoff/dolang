@@ -33,31 +33,31 @@ args.with args: $shell.args
   help: Run Do unit test modules.
   - opt: jobs
     short: j
-    type: $parse_jobs
+    parse: $parse_jobs
     default: 8
     meta: N
     help: Max concurrent tests (among all modules)
   - opt: module-jobs
-    type: $parse_jobs
+    parse: $parse_jobs
     default: 4
     meta: N
     help: Max concurrent modules
   - opt: filter
-    type: $parse_filter
+    parse: $parse_filter
     default: **
     help: Glob filter for test names in `stem/test` form
   - opt: timeout
-    type: $parse_timeout
+    parse: $parse_timeout
     default: 600
     meta: SECS
     help: Max seconds for each test and module load.
   - opt: width
-    type: $int
+    parse: $int
     default: 60
     meta: CELLS
     help: Message width
   - arg: paths
-    type: $Path
+    parse: $Path
     collect: true
     help: Test directories or files to run.
   do |p|

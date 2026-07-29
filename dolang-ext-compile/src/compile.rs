@@ -386,7 +386,7 @@ fn apply_prelude_module_items<'v, 's>(
                 match elem.view(vm) {
                     View::Str(s) => Ok(s.into()),
                     View::Sym(sym) => Ok(sym.as_str(vm).to_owned()),
-                    _ => Err(Error::type_error(strand, "prelude item must be str or sym")),
+                    _ => Err(Error::type_error(strand, "prelude item must be Str or Sym")),
                 }
             },
         )?;
@@ -423,7 +423,7 @@ fn apply_prelude_dict_items<'v, 's>(
                     _ => {
                         return Err(Error::type_error(
                             strand,
-                            "prelude item key must be str or sym",
+                            "prelude item key must be Str or Sym",
                         ));
                     }
                 };
@@ -433,7 +433,7 @@ fn apply_prelude_dict_items<'v, 's>(
                     _ => {
                         return Err(Error::type_error(
                             strand,
-                            "prelude item binding must be str or sym",
+                            "prelude item binding must be Str or Sym",
                         ));
                     }
                 };
@@ -477,7 +477,7 @@ fn apply_prelude_value<'v, 's>(
                         _ => {
                             return Err(Error::type_error(
                                 strand,
-                                "prelude array item must be str or sym",
+                                "prelude array item must be Str or Sym",
                             ));
                         }
                     };
@@ -498,7 +498,7 @@ fn apply_prelude_value<'v, 's>(
                         _ => {
                             return Err(Error::type_error(
                                 strand,
-                                "prelude module key must be str or sym",
+                                "prelude module key must be Str or Sym",
                             ));
                         }
                     };
@@ -525,7 +525,7 @@ fn apply_prelude_value<'v, 's>(
                         _ => {
                             return Err(Error::type_error(
                                 strand,
-                                "prelude module value must be str, sym, array, or dict",
+                                "prelude module value must be str, sym, array, or Dict",
                             ));
                         }
                     }
@@ -534,7 +534,7 @@ fn apply_prelude_value<'v, 's>(
             _ => {
                 return Err(Error::type_error(
                     strand,
-                    "prelude must be a module name, array, or dict",
+                    "prelude must be a module name, array, or Dict",
                 ));
             }
         }
@@ -610,7 +610,7 @@ impl<'v> Object<'v> for Diagnostic {
                             _ => {
                                 return Err(Error::type_error(
                                     strand,
-                                    "source: expected `str` or `bin`",
+                                    "source: expected `Str` or `Bin`",
                                 ));
                             }
                         }
@@ -912,7 +912,7 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>, global: State<'v, Global<
                 .as_ref()
                 .map(|m| {
                     m.as_str(strand)
-                        .ok_or_else(|| Error::type_error(strand, "module: expected `str`"))
+                        .ok_or_else(|| Error::type_error(strand, "module: expected `Str`"))
                         .map(|m| m.to_string())
                 })
                 .transpose()?;
@@ -920,7 +920,7 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>, global: State<'v, Global<
             let source_vec = match source.view(strand) {
                 View::Str(s) => s.to_string().into(),
                 View::Bin(b) => b.to_vec(),
-                _ => return Err(Error::type_error(strand, "source: expected `str` or `bin`")),
+                _ => return Err(Error::type_error(strand, "source: expected `Str` or `Bin`")),
             };
 
             let path = path.to_string(strand)?;

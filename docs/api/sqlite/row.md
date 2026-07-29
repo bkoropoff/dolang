@@ -23,8 +23,8 @@ Column values are automatically converted from SQLite types to Do types:
 | SQLite Type                | Do Type | Notes                                                        |
 | -------------------------- | ------- | ------------------------------------------------------------ |
 | NULL                       | `nil`   |                                                              |
-| INTEGER (declared BOOLEAN) | `bool`  | Declared type must be `BOOLEAN` or `BOOL` (case-insensitive) |
-| INTEGER                    | `int`   |                                                              |
-| REAL                       | `float` |                                                              |
-| TEXT                       | `str`   |                                                              |
-| BLOB                       | `bin`   |                                                              |
+| INTEGER (declared BOOLEAN) | `Bool`  | Declared type must be `BOOLEAN` or `BOOL` (case-insensitive) |
+| INTEGER                    | `Int`   |                                                              |
+| REAL                       | `Float` |                                                              |
+| TEXT                       | `Str`   |                                                              |
+| BLOB                       | `Bin`   |                                                              |

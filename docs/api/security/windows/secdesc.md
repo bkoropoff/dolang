@@ -12,7 +12,7 @@ Parses a self-relative security descriptor.
 
 | Name    | Type                      | Description                 |
 | ------- | ------------------------- | --------------------------- |
-| `value` | [`bin`](../../std/bin.md) | Native self-relative packet |
+| `value` | [`Bin`](../../std/bin.md) | Native self-relative packet |
 
 **Errors:**
 
@@ -32,19 +32,19 @@ The constructor and [`with`](#with-options) accept these options:
 | `group`                      | [`Sid`](./sid.md)\|`nil`         | Group, or loaded absent group |
 | `dacl`                       | [`Acl`](./acl.md)\|`nil`         | DACL, or present null DACL    |
 | `sacl`                       | [`Acl`](./acl.md)\|`nil`         | SACL, or present null SACL    |
-| `owner_defaulted`            | [`bool`](../../std/bool.md)      | Owner defaulted flag          |
-| `group_defaulted`            | [`bool`](../../std/bool.md)      | Group defaulted flag          |
-| `dacl_present`               | [`bool`](../../std/bool.md)      | DACL presence                 |
-| `dacl_defaulted`             | [`bool`](../../std/bool.md)      | DACL defaulted flag           |
-| `dacl_auto_inherit_required` | [`bool`](../../std/bool.md)      | DACL inheritance request      |
-| `dacl_auto_inherited`        | [`bool`](../../std/bool.md)      | DACL inherited flag           |
-| `dacl_protected`             | [`bool`](../../std/bool.md)      | DACL protection               |
-| `sacl_present`               | [`bool`](../../std/bool.md)      | SACL presence                 |
-| `sacl_defaulted`             | [`bool`](../../std/bool.md)      | SACL defaulted flag           |
-| `sacl_auto_inherit_required` | [`bool`](../../std/bool.md)      | SACL inheritance request      |
-| `sacl_auto_inherited`        | [`bool`](../../std/bool.md)      | SACL inherited flag           |
-| `sacl_protected`             | [`bool`](../../std/bool.md)      | SACL protection               |
-| `rm_control`                 | [`int`](../../std/int.md)\|`nil` | RM control byte, or clear it  |
+| `owner_defaulted`            | [`Bool`](../../std/bool.md)      | Owner defaulted flag          |
+| `group_defaulted`            | [`Bool`](../../std/bool.md)      | Group defaulted flag          |
+| `dacl_present`               | [`Bool`](../../std/bool.md)      | DACL presence                 |
+| `dacl_defaulted`             | [`Bool`](../../std/bool.md)      | DACL defaulted flag           |
+| `dacl_auto_inherit_required` | [`Bool`](../../std/bool.md)      | DACL inheritance request      |
+| `dacl_auto_inherited`        | [`Bool`](../../std/bool.md)      | DACL inherited flag           |
+| `dacl_protected`             | [`Bool`](../../std/bool.md)      | DACL protection               |
+| `sacl_present`               | [`Bool`](../../std/bool.md)      | SACL presence                 |
+| `sacl_defaulted`             | [`Bool`](../../std/bool.md)      | SACL defaulted flag           |
+| `sacl_auto_inherit_required` | [`Bool`](../../std/bool.md)      | SACL inheritance request      |
+| `sacl_auto_inherited`        | [`Bool`](../../std/bool.md)      | SACL inherited flag           |
+| `sacl_protected`             | [`Bool`](../../std/bool.md)      | SACL protection               |
+| `rm_control`                 | [`Int`](../../std/int.md)\|`nil` | RM control byte, or clear it  |
 
 Specifying ACL presence as `false` when using [`with`](#with-options) clears
 that field. Specifying `true` for control flags requires the corresponding field
@@ -166,4 +166,4 @@ Returns a descriptor with selected components or control fields replaced.
 
 Returns a canonical self-relative security descriptor packet.
 
-**Returns:** [`bin`](../../std/bin.md)
+**Returns:** [`Bin`](../../std/bin.md)

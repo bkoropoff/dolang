@@ -54,7 +54,7 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>, global: State<'v, Global<
             let bytecode = dolang::runtime::Bytecode::new(
                 bytecode
                     .as_bin(strand)
-                    .ok_or_else(|| Error::type_error(strand, "bytecode: expected bin"))?
+                    .ok_or_else(|| Error::type_error(strand, "bytecode: expected Bin"))?
                     .to_vec(),
             );
             bytecode.run(strand, out).await

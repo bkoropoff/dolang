@@ -19,7 +19,7 @@ Parses an XML document into a parentless element tree.
 
 | Name  | Type  | Description         |
 | ----- | ----- | ------------------- |
-| `xml` | `str` | XML document        |
+| `xml` | `Str` | XML document        |
 
 **Returns:** [`Node`](./node.md), the root element.
 
@@ -48,9 +48,9 @@ but element and attribute namespace semantics are preserved.
 
 | Name   | Type                         | Description          |
 | ------ | ---------------------------- | -------------------- |
-| `node` | [`Node`](./node.md)\|`str`   | XML node or text     |
+| `node` | [`Node`](./node.md)\|`Str`   | XML node or text     |
 
-**Returns:** `str`, the serialized XML.
+**Returns:** `Str`, the serialized XML.
 
 **Errors:**
 

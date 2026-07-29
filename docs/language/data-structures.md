@@ -1,6 +1,6 @@
 # Data Structures
 
-## Arrays (`array`)
+## Arrays (`Array`)
 
 Arrays are ordered, mutable sequences of values.
 
@@ -25,7 +25,7 @@ assert_eq $all [1, 2, 3, 4, 5, 6]
 
 See the [Array API](../api/std/array.md) for methods.
 
-## Dictionaries (`dict`)
+## Dictionaries (`Dict`)
 
 Dictionaries are **ordered**, mutable key-value mappings. They preserve
 insertion order and are actually **multi-maps**: a single key can have multiple
@@ -114,7 +114,7 @@ let dict = {...entries.kv()}
 
 Spreading of dicts preserves duplicate keys and order.
 
-## Records (`record`)
+## Records (`Record`)
 
 Records are similar to dicts but only support symbol and integer keys.
 They allow direct field access with dot syntax:
@@ -131,16 +131,16 @@ their key types.
 
 See the [Record API](../api/std/record.md) for details.
 
-## Sets (`set`)
+## Sets (`Set`)
 
 Sets are ordered, mutable collections with unique membership semantics.
 
 Unlike arrays and dicts, sets do not have a dedicated literal syntax. Construct
-them with the `set` type object from any iterable:
+them with the `Set` type object from any iterable:
 
 ```
-let empty = set()
-let s = set [3, 1, 2, 1]
+let empty = Set()
+let s = Set [3, 1, 2, 1]
 assert_eq [...s] [3, 1, 2]
 ```
 
@@ -150,15 +150,15 @@ does not move it to the end.
 See the [Set API](../api/std/set.md) for methods such as `add`, `contains`,
 `union`, and `diff`.
 
-## Tuples (`tuple`)
+## Tuples (`Tuple`)
 
 Tuples are immutable, ordered sequences of values.
 
 Like sets, tuples do not have a dedicated literal syntax. Construct them with
-the `tuple` type object from an iterable:
+the `Tuple` type object from an iterable:
 
 ```
-let tup = tuple [1, 2, 3]
+let tup = Tuple [1, 2, 3]
 assert_eq $tup[1] 2
 ```
 

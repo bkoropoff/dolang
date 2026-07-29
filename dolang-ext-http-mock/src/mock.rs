@@ -584,7 +584,7 @@ async fn parse_mock_spec<'v, 's>(
 > {
     let dict = spec
         .as_dict(strand)
-        .ok_or_else(|| Error::type_error(strand, "mock: expected a dict"))?;
+        .ok_or_else(|| Error::type_error(strand, "mock: expected a Dict"))?;
 
     let (all, response, expect, name, uses_callback) = strand
         .with_slots(

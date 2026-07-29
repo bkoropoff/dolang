@@ -20,9 +20,9 @@ Compiles Do source code and returns a structured result.
 
 | Name      | Type        | Description                                          |
 | --------- | ----------- | ---------------------------------------------------- |
-| `path`    | `str`       | Source path (for debug information)                  |
-| `source`  | `str`/`bin` | Source code to compile                               |
-| `module`  | `str`       | Optional. Compile in module mode with the given name |
+| `path`    | `Str`       | Source path (for debug information)                  |
+| `source`  | `Str`/`Bin` | Source code to compile                               |
+| `module`  | `Str`       | Optional. Compile in module mode with the given name |
 | `prelude` | various     | Optional. Additional prelude imports to include      |
 
 #### Returns
@@ -34,8 +34,8 @@ diagnostics emitted during compilation.
 
 | Exception    | Condition                         |
 | ------------ | --------------------------------- |
-| `TypeError`  | `source` is not `str` or `bin`    |
-| `TypeError`  | `module` is present but not `str` |
+| `TypeError`  | `source` is not `Str` or `Bin`    |
+| `TypeError`  | `module` is present but not `Str` |
 | `ValueError` | `prelude` is malformed            |
 
 Ordinary compiler diagnostics from the compiled source are returned on the

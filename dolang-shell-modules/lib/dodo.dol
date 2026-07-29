@@ -1,7 +1,7 @@
 import args exec strand term proc.run: proc_run
 
 let rules_key = strand.Key()
-let special_rules = set ["common", "default"]
+let special_rules = Set ["common", "default"]
 
 def lookup rules task
   rules.get $task else: do rules.get (sym task) else: do
@@ -10,9 +10,9 @@ def lookup rules task
 def dispatch rules task argv
   let rule = lookup $rules $task
   let common = rules.get :common: default: {}
-  while (type rule str)
+  while (type rule Str)
     rule = lookup $rules $rule
-  if type $rule $func
+  if type $rule $Func
     rule = [rule]
 
   args.with args: $argv ...common ...rule
@@ -35,9 +35,9 @@ def with_rules path block
 def list_rules rules
   echo "Available tasks:"
   for k v = rules
-    if special_rules.contains (str k)
+    if special_rules.contains (Str k)
       continue
-    let help = (type v dict && v.get :help:)
+    let help = (type v Dict && v.get :help:)
     if help
       echo "  - $k: $help"
     else
@@ -74,12 +74,12 @@ pub def run ...argv
     - flag: list
       help: list tasks
     - arg: task
-      type: $str
+      type: $Str
       help: task to run
       divider: true
       default: default
     - arg: args
-      type: $str
+      type: $Str
       collect: true
       help: task arguments
     do |p|

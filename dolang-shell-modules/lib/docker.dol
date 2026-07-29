@@ -58,13 +58,13 @@ pub def with image func :cd = nil :env = {} :pull = :missing:
 # ## `mounts: <array>`
 #
 # Container mounts available for the entire build process.
-# Each element is a `dict` of the form:
+# Each element is a `Dict` of the form:
 #
 # - `type`:
 #     - `cache`: Mount a persistent cache at `target`
 #     - `bind`: Bind mount `source` at `target`
-# - `target: <path | str>`: target mount path
-# - `source: <path | str>`: mount source (omit for `cache` mounts)
+# - `target: <path | Str>`: target mount path
+# - `source: <path | Str>`: mount source (omit for `cache` mounts)
 # - `id` (optional): identifier for `cache` mounts; `target` used if omitted
 #
 # # Build steps
@@ -77,9 +77,9 @@ pub def with image func :cd = nil :env = {} :pull = :missing:
 #
 # Add a file to the image:
 #
-# - `source: <path | url | str>`: source path or URL
-# - `content: <str | bin>`: content to write directly to `target`
-# - `target: <path | str>`: target path; if a directory, source file name will be appended for `source`, but not for `content`
+# - `source: <path | url | Str>`: source path or URL
+# - `content: <Str | bin>`: content to write directly to `target`
+# - `target: <path | Str>`: target path; if a directory, source file name will be appended for `source`, but not for `content`
 # - `chmod: mode` (optional): change target permissions
 #
 # ## `commit: msg`

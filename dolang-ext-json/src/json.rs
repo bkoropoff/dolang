@@ -286,7 +286,7 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
             let ([arg], []) = unpack!(strand, args, 1, 0)?;
             let src = arg
                 .as_str(strand.vm())
-                .ok_or_else(|| Error::type_error(strand, "expected str"))?
+                .ok_or_else(|| Error::type_error(strand, "expected Str"))?
                 .pin();
             let mut dejson = serde_json::Deserializer::from_str(&src);
             Seed(strand, out).deserialize(&mut dejson).into_do(strand)

@@ -67,7 +67,7 @@ assert_ctor $UnsupportedError msg: "unsupported operation"
 assert_ctor $ImmutableError msg: "object is immutable"
 assert_ctor $ConcurrencyError msg: "conflicting concurrent operation"
 assert_ctor $ConcurrencyError msg: "conflicting concurrent operation: shared" "shared"
-assert_ctor $TypeError msg: "type error: expected int" "expected int"
+assert_ctor $TypeError msg: "type error: expected Int" "expected Int"
 assert_ctor $ValueError msg: "value error: expected mode" "expected mode"
 assert_ctor $StateError msg: "state error: closed" "closed"
 assert_ctor $IndexError msg: "index out of range or invalid"
@@ -87,15 +87,15 @@ assert_ctor $RuntimeError msg: "closed" "closed"
 assert_ctor $CanceledError msg: "strand canceled"
 assert_ctor $TimedOutError msg: "strand timed out"
 
-assert_ctor_fail $MissingPosError type: $TypeError msg: "type error: expected `int`" "bad"
+assert_ctor_fail $MissingPosError type: $TypeError msg: "type error: expected `Int`" "bad"
 assert_ctor_fail $UnexpectedPosError type: $ValueError msg: "value error: expected non-negative value" -1
-assert_ctor_fail $TypeError type: $TypeError msg: "type error: expected `str`" 123
-assert_ctor_fail $ValueError type: $TypeError msg: "type error: expected `str`" 123
-assert_ctor_fail $StateError type: $TypeError msg: "type error: expected `str`" 123
-assert_ctor_fail $FieldError type: $TypeError msg: "type error: expected `sym`" 123
-assert_ctor_fail $ImportError type: $TypeError msg: "type error: expected `str`" 123
-assert_ctor_fail $CompileError type: $TypeError msg: "type error: expected `str`" 123
-assert_ctor_fail $RuntimeError type: $TypeError msg: "type error: expected `str`" 123
+assert_ctor_fail $TypeError type: $TypeError msg: "type error: expected `Str`" 123
+assert_ctor_fail $ValueError type: $TypeError msg: "type error: expected `Str`" 123
+assert_ctor_fail $StateError type: $TypeError msg: "type error: expected `Str`" 123
+assert_ctor_fail $FieldError type: $TypeError msg: "type error: expected `Sym`" 123
+assert_ctor_fail $ImportError type: $TypeError msg: "type error: expected `Str`" 123
+assert_ctor_fail $CompileError type: $TypeError msg: "type error: expected `Str`" 123
+assert_ctor_fail $RuntimeError type: $TypeError msg: "type error: expected `Str`" 123
 
 assert_ctor_fail $AbortError type: $TypeError msg: "type error: Abort is not instantiable" "stop"
 assert_ctor_fail $BytecodeError type: $TypeError msg: "type error: Bytecode is not instantiable" "bad"

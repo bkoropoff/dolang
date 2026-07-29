@@ -1,7 +1,7 @@
 import std:
-  - args
+  - Args
 
-let rest = args 1 2 3 4
+let rest = Args 1 2 3 4
 let a b ...rest = rest
 assert_eq $a 1
 assert_eq $b 2
@@ -9,7 +9,7 @@ let a b = rest
 assert_eq $a 3
 assert_eq $b 4
 
-rest = args 1 foo: 42 2 bar: false
+rest = Args 1 foo: 42 2 bar: false
 let a bar: b ...rest = rest
 assert_eq $a 1
 assert_eq $b false

@@ -1,12 +1,12 @@
-# value
+# Value
 
-`value` is the abstract supertype of all values.
+`Value` is the abstract supertype of all values.
 
-`value` is not constructible directly.
+`Value` is not constructible directly.
 
 ```
-assert (type 42 value)
-assert (type "hello" value)
-assert (type [] value)
-assert (type nil value)
+assert (type 42 Value)
+assert (type "hello" Value)
+assert (type [] Value)
+assert (type nil Value)
 ```

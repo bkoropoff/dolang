@@ -12,8 +12,8 @@ Creates an attribute.
 
 | Name        | Type   | Description                  |
 | ----------- | ------ | ---------------------------- |
-| `name`      | `str`  | Local attribute name         |
-| `value`     | `str`  | Attribute value              |
+| `name`      | `Str`  | Local attribute name         |
+| `value`     | `Str`  | Attribute value              |
 | `namespace` | `str?` | Namespace URI                |
 | `prefix`    | `str?` | Preferred namespace prefix   |
 
@@ -35,11 +35,11 @@ Mutable attribute value.
 
 ### `namespace`
 
-Read-only namespace URI as a `str`, or `nil` for no namespace.
+Read-only namespace URI as a `Str`, or `nil` for no namespace.
 
 ### `prefix`
 
-Read-only preferred prefix as a `str`, or `nil`.
+Read-only preferred prefix as a `Str`, or `nil`.
 
 ### `qname`
 

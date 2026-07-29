@@ -48,8 +48,8 @@ Opens a file and returns a File object.
 
 | Name   | Type                   | Description                                          |
 | ------ | ---------------------- | ---------------------------------------------------- |
-| `path` | [`str`](../std/str.md) | Path to the file to open                             |
-| `mode` | `str`                  | File access mode (default: `"r"`)                    |
+| `path` | [`Str`](../std/str.md) | Path to the file to open                             |
+| `mode` | `Str`                  | File access mode (default: `"r"`)                    |
 | `func` | func                   | Callable to run with the file; auto-closes when done |
 
 **File modes:**
@@ -99,9 +99,9 @@ missing paths are treated as success.
 
 | Name     | Type                                      | Description                                |
 | -------- | ----------------------------------------- | ------------------------------------------ |
-| `path`   | [`str`](../std/str.md)\|[`Path`](path.md) | One or more paths to remove                |
-| `all`    | [`bool`](../std/bool.md)                  | If `true`, removes directories recursively |
-| `ignore` | [`bool`](../std/bool.md)                  | If `true`, ignores a missing path          |
+| `path`   | [`Str`](../std/str.md)\|[`Path`](path.md) | One or more paths to remove                |
+| `all`    | [`Bool`](../std/bool.md)                  | If `true`, removes directories recursively |
+| `ignore` | [`Bool`](../std/bool.md)                  | If `true`, ignores a missing path          |
 
 #### Example
 
@@ -122,11 +122,11 @@ Checks whether a file or directory exists at the given path.
 
 | Name   | Type                                      | Description                 |
 | ------ | ----------------------------------------- | --------------------------- |
-| `path` | [`str`](../std/str.md)\|[`Path`](path.md) | Path to check for existence |
+| `path` | [`Str`](../std/str.md)\|[`Path`](path.md) | Path to check for existence |
 
 #### Returns
 
-[`bool`](../std/bool.md) - `true` if the path
+[`Bool`](../std/bool.md) - `true` if the path
 exists, `false` otherwise
 
 #### Example
@@ -148,19 +148,19 @@ if exists "config.yaml"
 
 Reads the entire contents of a file in one call.
 
-By default, returns text as a [`str`](../std/str.md). If `mode` is
-`"b"`, returns raw bytes as [`bin`](../std/bin.md).
+By default, returns text as a [`Str`](../std/str.md). If `mode` is
+`"b"`, returns raw bytes as [`Bin`](../std/bin.md).
 
 #### Parameters
 
 | Name   | Type                                      | Description                                 |
 | ------ | ----------------------------------------- | ------------------------------------------- |
-| `path` | [`str`](../std/str.md)\|[`Path`](path.md) | Path to the file to read                    |
-| `mode` | `str`                                     | Optional mode string; only `"b"` is allowed |
+| `path` | [`Str`](../std/str.md)\|[`Path`](path.md) | Path to the file to read                    |
+| `mode` | `Str`                                     | Optional mode string; only `"b"` is allowed |
 
 #### Returns
 
-[`str`](../std/str.md)\|[`bin`](../std/bin.md)
+[`Str`](../std/str.md)\|[`Bin`](../std/bin.md)
 
 #### Example
 
@@ -180,12 +180,12 @@ Binary values are written as raw bytes and strings as UTF-8 text.
 
 | Name      | Type                                      | Description               |
 | --------- | ----------------------------------------- | ------------------------- |
-| `path`    | [`str`](../std/str.md)\|[`Path`](path.md) | Path to the file to write |
-| `content` | `str`\|`bin`                              | Value to write            |
+| `path`    | [`Str`](../std/str.md)\|[`Path`](path.md) | Path to the file to write |
+| `content` | `Str`\|`Bin`                              | Value to write            |
 
 #### Returns
 
-[`int`](../std/int.md) - Number of bytes written
+[`Int`](../std/int.md) - Number of bytes written
 
 #### Example
 
@@ -202,12 +202,12 @@ Appends content to a file, creating it if needed.
 
 | Name      | Type                                      | Description                 |
 | --------- | ----------------------------------------- | --------------------------- |
-| `path`    | [`str`](../std/str.md)\|[`Path`](path.md) | Path to the file to append  |
-| `content` | `str`\|`bin`                              | Content to append           |
+| `path`    | [`Str`](../std/str.md)\|[`Path`](path.md) | Path to the file to append  |
+| `content` | `Str`\|`Bin`                              | Content to append           |
 
 #### Returns
 
-[`int`](../std/int.md) - Number of bytes written
+[`Int`](../std/int.md) - Number of bytes written
 
 #### Example
 
@@ -225,8 +225,8 @@ if needed.
 
 | Name   | Type                                      | Description              |
 | ------ | ----------------------------------------- | ------------------------ |
-| `path` | [`str`](../std/str.md)\|[`Path`](path.md) | Path to the file         |
-| `size` | [`int`](../std/index.md)                  | New file length in bytes |
+| `path` | [`Str`](../std/str.md)\|[`Path`](path.md) | Path to the file         |
+| `size` | [`Int`](../std/index.md)                  | New file length in bytes |
 
 #### Example
 
@@ -243,11 +243,11 @@ Checks whether a path is absolute.
 
 | Name   | Type                                      | Description   |
 | ------ | ----------------------------------------- | ------------- |
-| `path` | [`str`](../std/str.md)\|[`Path`](path.md) | Path to check |
+| `path` | [`Str`](../std/str.md)\|[`Path`](path.md) | Path to check |
 
 #### Returns
 
-[`bool`](../std/bool.md) - `true` if the path is absolute,
+[`Bool`](../std/bool.md) - `true` if the path is absolute,
 `false` if relative
 
 #### Example
@@ -286,7 +286,7 @@ When `app` is given, the result is scoped to that application.
 
 | Name  | Type                    | Description      |
 | ----- | ----------------------- | ---------------- |
-| `app` | [`str`](../std/str.md)? | Application name |
+| `app` | [`Str`](../std/str.md)? | Application name |
 
 #### Platform behavior
 
@@ -325,7 +325,7 @@ Gets file metadata for the given path.
 
 | Name      | Type                                      | Description                                      |
 | --------- | ----------------------------------------- | ------------------------------------------------ |
-| `path`    | [`str`](../std/str.md)\|[`Path`](path.md) | Path to the file or directory                    |
+| `path`    | [`Str`](../std/str.md)\|[`Path`](path.md) | Path to the file or directory                    |
 | `resolve` | `:TARGET:`\|`:LINK:`                      | Resolution mode (see [above](#resolution-modes)) |
 
 #### Returns
@@ -336,8 +336,8 @@ Gets file metadata for the given path.
 
 | Field  | Type                   | Description                                                                                                        |
 | ------ | ---------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `len`  | [`int`](../std/int.md) | File size in bytes                                                                                                 |
-| `type` | [`sym`](../std/sym.md) | File type: `:FILE:`, `:DIR:`, `:SYMLINK:`, `:FIFO:`, `:CHAR_DEVICE:`, `:BLOCK_DEVICE:`, `:SOCKET:`, or `:UNKNOWN:` |
+| `len`  | [`Int`](../std/int.md) | File size in bytes                                                                                                 |
+| `type` | [`Sym`](../std/sym.md) | File type: `:FILE:`, `:DIR:`, `:SYMLINK:`, `:FIFO:`, `:CHAR_DEVICE:`, `:BLOCK_DEVICE:`, `:SOCKET:`, or `:UNKNOWN:` |
 
 **Optional timestamps** (platform-dependent):
 
@@ -351,21 +351,21 @@ Gets file metadata for the given path.
 
 | Field     | Type                   | Description                           |
 | --------- | ---------------------- | ------------------------------------- |
-| `mode`    | [`int`](../std/int.md) | File permissions and type (stat mode) |
-| `dev`     | [`int`](../std/int.md) | Device ID                             |
-| `ino`     | [`int`](../std/int.md) | Inode number                          |
-| `nlink`   | [`int`](../std/int.md) | Number of hard links                  |
-| `uid`     | [`int`](../std/int.md) | User ID of owner                      |
-| `gid`     | [`int`](../std/int.md) | Group ID of owner                     |
-| `rdev`    | [`int`](../std/int.md) | Device ID (if special file)           |
-| `blksize` | [`int`](../std/int.md) | Preferred block size for I/O          |
-| `blocks`  | [`int`](../std/int.md) | Number of 512-byte blocks allocated   |
+| `mode`    | [`Int`](../std/int.md) | File permissions and type (stat mode) |
+| `dev`     | [`Int`](../std/int.md) | Device ID                             |
+| `ino`     | [`Int`](../std/int.md) | Inode number                          |
+| `nlink`   | [`Int`](../std/int.md) | Number of hard links                  |
+| `uid`     | [`Int`](../std/int.md) | User ID of owner                      |
+| `gid`     | [`Int`](../std/int.md) | Group ID of owner                     |
+| `rdev`    | [`Int`](../std/int.md) | Device ID (if special file)           |
+| `blksize` | [`Int`](../std/int.md) | Preferred block size for I/O          |
+| `blocks`  | [`Int`](../std/int.md) | Number of 512-byte blocks allocated   |
 
 **Windows-only** (these fields do not exist on Unix):
 
 | Field       | Type                   | Description                             |
 | ----------- | ---------------------- | --------------------------------------- |
-| `win_attrs` | [`int`](../std/int.md) | Raw Windows file attribute bitmask      |
+| `win_attrs` | [`Int`](../std/int.md) | Raw Windows file attribute bitmask      |
 
 #### Example
 
@@ -392,7 +392,7 @@ Gets filesystem metadata for the filesystem containing the given path.
 
 | Name      | Type                                      | Description                                      |
 | --------- | ----------------------------------------- | ------------------------------------------------ |
-| `path`    | [`str`](../std/str.md)\|[`Path`](path.md) | Path to resolve                                  |
+| `path`    | [`Str`](../std/str.md)\|[`Path`](path.md) | Path to resolve                                  |
 | `resolve` | `:TARGET:`\|`:LINK:`                      | Resolution mode (see [above](#resolution-modes)) |
 
 #### Returns
@@ -420,11 +420,11 @@ Gets selected parts of a Windows security descriptor.
 
 | Name      | Type                                      | Description                                      |
 | --------- | ----------------------------------------- | ------------------------------------------------ |
-| `path`    | [`str`](../std/str.md)\|[`Path`](path.md) | Path to query                                    |
-| `owner`   | [`bool`](../std/bool.md)                  | Load the owner SID                               |
-| `group`   | [`bool`](../std/bool.md)                  | Load the primary group SID                       |
-| `dacl`    | [`bool`](../std/bool.md)                  | Load the discretionary ACL                       |
-| `sacl`    | [`bool`](../std/bool.md)                  | Load the system ACL                              |
+| `path`    | [`Str`](../std/str.md)\|[`Path`](path.md) | Path to query                                    |
+| `owner`   | [`Bool`](../std/bool.md)                  | Load the owner SID                               |
+| `group`   | [`Bool`](../std/bool.md)                  | Load the primary group SID                       |
+| `dacl`    | [`Bool`](../std/bool.md)                  | Load the discretionary ACL                       |
+| `sacl`    | [`Bool`](../std/bool.md)                  | Load the system ACL                              |
 | `resolve` | `:TARGET:`\|`:LINK:`                      | Resolution mode (see [above](#resolution-modes)) |
 
 #### Returns
@@ -439,7 +439,7 @@ Applies the components selected by a Windows security descriptor's `mask`.
 
 | Name      | Type                                                         | Description                                      |
 | --------- | ------------------------------------------------------------ | ------------------------------------------------ |
-| `path`    | [`str`](../std/str.md)\|[`Path`](path.md)                    | Path to update                                   |
+| `path`    | [`Str`](../std/str.md)\|[`Path`](path.md)                    | Path to update                                   |
 | `desc`    | [`security.windows.SecDesc`](../security/windows/secdesc.md) | Security descriptor to apply                     |
 | `resolve` | `:TARGET:`\|`:LINK:`                                         | Resolution mode (see [above](#resolution-modes)) |
 
@@ -454,8 +454,8 @@ case from the requested name.
 
 | Name        | Type                                            | Description                                                                                              |
 | ----------- | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| `path`      | [`str`](../std/str.md)\|[`Path`](path.md)       | Path to query                                                                                            |
-| `namespace` | [`str`](../std/str.md)\|[`sym`](../std/sym.md)? | Namespace to query; `:USER:` and `:SYSTEM:` name well-known namespaces, and `:ANY:` lists all namespaces |
+| `path`      | [`Str`](../std/str.md)\|[`Path`](path.md)       | Path to query                                                                                            |
+| `namespace` | [`Str`](../std/str.md)\|[`Sym`](../std/sym.md)? | Namespace to query; `:USER:` and `:SYSTEM:` name well-known namespaces, and `:ANY:` lists all namespaces |
 | `resolve`   | `:TARGET:`\|`:LINK:`                            | Resolution mode (see [above](#resolution-modes))                                                         |
 
 #### Returns
@@ -477,7 +477,7 @@ This is only supported on Windows.
 
 | Name      | Type                                      | Description                                      |
 | --------- | ----------------------------------------- | ------------------------------------------------ |
-| `path`    | [`str`](../std/str.md)\|[`Path`](path.md) | Path to query                                    |
+| `path`    | [`Str`](../std/str.md)\|[`Path`](path.md) | Path to query                                    |
 | `resolve` | `:TARGET:`\|`:LINK:`                      | Resolution mode (see [above](#resolution-modes)) |
 
 #### Returns
@@ -500,14 +500,14 @@ Gets an extended attribute value.
 
 | Name        | Type                                                   | Description                                      |
 | ----------- | ------------------------------------------------------ | ------------------------------------------------ |
-| `path`      | [`str`](../std/str.md)\|[`Path`](path.md)              | Path to query                                    |
-| `name`      | [`str`](../std/str.md)\|[`XattrEntry`](xattr-entry.md) | Attribute name or entry from `xattrs`            |
-| `namespace` | [`str`](../std/str.md)\|[`sym`](../std/sym.md)?        | Namespace to query                               |
+| `path`      | [`Str`](../std/str.md)\|[`Path`](path.md)              | Path to query                                    |
+| `name`      | [`Str`](../std/str.md)\|[`XattrEntry`](xattr-entry.md) | Attribute name or entry from `xattrs`            |
+| `namespace` | [`Str`](../std/str.md)\|[`Sym`](../std/sym.md)?        | Namespace to query                               |
 | `resolve`   | `:TARGET:`\|`:LINK:`                                   | Resolution mode (see [above](#resolution-modes)) |
 
 #### Returns
 
-[`bin`](../std/bin.md)
+[`Bin`](../std/bin.md)
 
 ```
 let value = xattr "data.txt" "comment"
@@ -524,10 +524,10 @@ storing an empty value.
 
 | Name        | Type                                                   | Description                                      |
 | ----------- | ------------------------------------------------------ | ------------------------------------------------ |
-| `path`      | [`str`](../std/str.md)\|[`Path`](path.md)              | Path to update                                   |
-| `name`      | [`str`](../std/str.md)\|[`XattrEntry`](xattr-entry.md) | Attribute name or entry from `xattrs`            |
-| `value`     | [`str`](../std/str.md)\|[`bin`](../std/bin.md)         | Attribute bytes; strings use UTF-8               |
-| `namespace` | [`str`](../std/str.md)\|[`sym`](../std/sym.md)?        | Namespace to update                              |
+| `path`      | [`Str`](../std/str.md)\|[`Path`](path.md)              | Path to update                                   |
+| `name`      | [`Str`](../std/str.md)\|[`XattrEntry`](xattr-entry.md) | Attribute name or entry from `xattrs`            |
+| `value`     | [`Str`](../std/str.md)\|[`Bin`](../std/bin.md)         | Attribute bytes; strings use UTF-8               |
+| `namespace` | [`Str`](../std/str.md)\|[`Sym`](../std/sym.md)?        | Namespace to update                              |
 | `resolve`   | `:TARGET:`\|`:LINK:`                                   | Resolution mode (see [above](#resolution-modes)) |
 
 ```
@@ -543,9 +543,9 @@ Removes an extended attribute.
 
 | Name        | Type                                                   | Description                                      |
 | ----------- | ------------------------------------------------------ | ------------------------------------------------ |
-| `path`      | [`str`](../std/str.md)\|[`Path`](path.md)              | Path to update                                   |
-| `name`      | [`str`](../std/str.md)\|[`XattrEntry`](xattr-entry.md) | Attribute name or entry from `xattrs`            |
-| `namespace` | [`str`](../std/str.md)\|[`sym`](../std/sym.md)?        | Namespace to update                              |
+| `path`      | [`Str`](../std/str.md)\|[`Path`](path.md)              | Path to update                                   |
+| `name`      | [`Str`](../std/str.md)\|[`XattrEntry`](xattr-entry.md) | Attribute name or entry from `xattrs`            |
+| `namespace` | [`Str`](../std/str.md)\|[`Sym`](../std/sym.md)?        | Namespace to update                              |
 | `resolve`   | `:TARGET:`\|`:LINK:`                                   | Resolution mode (see [above](#resolution-modes)) |
 
 ```
@@ -563,9 +563,9 @@ copies directories recursively.
 
 | Name   | Type                                      | Description                                |
 | ------ | ----------------------------------------- | ------------------------------------------ |
-| `from` | [`str`](../std/str.md)\|[`Path`](path.md) | Source path                                |
-| `to`   | [`str`](../std/str.md)\|[`Path`](path.md) | Destination path                           |
-| `all`  | [`bool`](../std/bool.md)                  | If `true`, allows recursive directory copy |
+| `from` | [`Str`](../std/str.md)\|[`Path`](path.md) | Source path                                |
+| `to`   | [`Str`](../std/str.md)\|[`Path`](path.md) | Destination path                           |
+| `all`  | [`Bool`](../std/bool.md)                  | If `true`, allows recursive directory copy |
 
 #### Example
 
@@ -582,8 +582,8 @@ Renames (moves) a file or directory.
 
 | Name   | Type                                      | Description      |
 | ------ | ----------------------------------------- | ---------------- |
-| `from` | [`str`](../std/str.md)\|[`Path`](path.md) | Source path      |
-| `to`   | [`str`](../std/str.md)\|[`Path`](path.md) | Destination path |
+| `from` | [`Str`](../std/str.md)\|[`Path`](path.md) | Source path      |
+| `to`   | [`Str`](../std/str.md)\|[`Path`](path.md) | Destination path |
 
 #### Example
 
@@ -607,9 +607,9 @@ moves directories recursively.
 
 | Name   | Type                                      | Description                                |
 | ------ | ----------------------------------------- | ------------------------------------------ |
-| `from` | [`str`](../std/str.md)\|[`Path`](path.md) | Source path                                |
-| `to`   | [`str`](../std/str.md)\|[`Path`](path.md) | Destination path                           |
-| `all`  | [`bool`](../std/bool.md)                  | If `true`, allows recursive directory move |
+| `from` | [`Str`](../std/str.md)\|[`Path`](path.md) | Source path                                |
+| `to`   | [`Str`](../std/str.md)\|[`Path`](path.md) | Destination path                           |
+| `all`  | [`Bool`](../std/bool.md)                  | If `true`, allows recursive directory move |
 
 #### Example
 
@@ -633,8 +633,8 @@ Creates a symbolic link at `dst` pointing to `src`.
 
 | Name  | Type                                      | Description                       |
 | ----- | ----------------------------------------- | --------------------------------- |
-| `src` | [`str`](../std/str.md)\|[`Path`](path.md) | Target path the symlink points to |
-| `dst` | [`str`](../std/str.md)\|[`Path`](path.md) | Path where the symlink is created |
+| `src` | [`Str`](../std/str.md)\|[`Path`](path.md) | Target path the symlink points to |
+| `dst` | [`Str`](../std/str.md)\|[`Path`](path.md) | Path where the symlink is created |
 
 #### Errors
 
@@ -662,8 +662,8 @@ Creates a directory symbolic link at `dst` pointing to `src`.
 
 | Name  | Type                                      | Description                       |
 | ----- | ----------------------------------------- | --------------------------------- |
-| `src` | [`str`](../std/str.md)\|[`Path`](path.md) | Target directory path             |
-| `dst` | [`str`](../std/str.md)\|[`Path`](path.md) | Path where the symlink is created |
+| `src` | [`Str`](../std/str.md)\|[`Path`](path.md) | Target directory path             |
+| `dst` | [`Str`](../std/str.md)\|[`Path`](path.md) | Path where the symlink is created |
 
 #### Example
 
@@ -685,8 +685,8 @@ Creates a file symbolic link at `dst` pointing to `src`.
 
 | Name  | Type                                      | Description                       |
 | ----- | ----------------------------------------- | --------------------------------- |
-| `src` | [`str`](../std/str.md)\|[`Path`](path.md) | Target file path                  |
-| `dst` | [`str`](../std/str.md)\|[`Path`](path.md) | Path where the symlink is created |
+| `src` | [`Str`](../std/str.md)\|[`Path`](path.md) | Target file path                  |
+| `dst` | [`Str`](../std/str.md)\|[`Path`](path.md) | Path where the symlink is created |
 
 #### Example
 
@@ -706,8 +706,8 @@ platform requires it.
 
 | Name  | Type                                      | Description                         |
 | ----- | ----------------------------------------- | ----------------------------------- |
-| `src` | [`str`](../std/str.md)\|[`Path`](path.md) | Existing file to link to            |
-| `dst` | [`str`](../std/str.md)\|[`Path`](path.md) | Path where the hard link is created |
+| `src` | [`Str`](../std/str.md)\|[`Path`](path.md) | Existing file to link to            |
+| `dst` | [`Str`](../std/str.md)\|[`Path`](path.md) | Path where the hard link is created |
 
 #### Example
 
@@ -723,7 +723,7 @@ Reads the entries in a directory.
 
 | Name   | Type                                      | Description           |
 | ------ | ----------------------------------------- | --------------------- |
-| `path` | [`str`](../std/str.md)\|[`Path`](path.md) | Path to the directory |
+| `path` | [`Str`](../std/str.md)\|[`Path`](path.md) | Path to the directory |
 
 #### Returns
 
@@ -749,8 +749,8 @@ Creates a directory at the given path.
 
 | Name   | Type                                      | Description                               |
 | ------ | ----------------------------------------- | ----------------------------------------- |
-| `path` | [`str`](../std/str.md)\|[`Path`](path.md) | Path to the directory to create           |
-| `all`  | [`bool`](../std/bool.md)                  | If `true`, creates parent directories too |
+| `path` | [`Str`](../std/str.md)\|[`Path`](path.md) | Path to the directory to create           |
+| `all`  | [`Bool`](../std/bool.md)                  | If `true`, creates parent directories too |
 
 #### Example
 
@@ -776,9 +776,9 @@ files.
 
 | Name     | Type                                      | Description                                                      |
 | -------- | ----------------------------------------- | ---------------------------------------------------------------- |
-| `path`   | [`str`](../std/str.md)\|[`Path`](path.md) | One or more directories to remove                                |
-| `all`    | [`bool`](../std/bool.md)                  | If `true`, recursively prunes only empty directory subtrees      |
-| `ignore` | [`bool`](../std/bool.md)                  | If `true`, ignores missing directories and file-blocked subtrees |
+| `path`   | [`Str`](../std/str.md)\|[`Path`](path.md) | One or more directories to remove                                |
+| `all`    | [`Bool`](../std/bool.md)                  | If `true`, recursively prunes only empty directory subtrees      |
+| `ignore` | [`Bool`](../std/bool.md)                  | If `true`, ignores missing directories and file-blocked subtrees |
 
 #### Example
 
@@ -801,8 +801,8 @@ Returns an iterator over paths matching a glob pattern.
 
 | Name        | Type                   | Description                                                          |
 | ----------- | ---------------------- | -------------------------------------------------------------------- |
-| `pattern`   | `str`                  | Glob pattern (e.g., `"*.txt"`, `"**/*.rs"`)                          |
-| `max_depth` | [`int`](../std/int.md) | Maximum directory depth to traverse (default: unlimited)             |
+| `pattern`   | `Str`                  | Glob pattern (e.g., `"*.txt"`, `"**/*.rs"`)                          |
+| `max_depth` | [`Int`](../std/int.md) | Maximum directory depth to traverse (default: unlimited)             |
 | `resolve`   | `:TARGET:`\|`:LINK:`   | Resolution mode (see [above](#resolution-modes)) (default: `:LINK:`) |
 
 #### Returns
@@ -844,7 +844,7 @@ Unresolvable `..` components in relative paths are preserved.
 
 | Name   | Type                                      | Description       |
 | ------ | ----------------------------------------- | ----------------- |
-| `path` | [`str`](../std/str.md)\|[`Path`](path.md) | Path to normalize |
+| `path` | [`Str`](../std/str.md)\|[`Path`](path.md) | Path to normalize |
 
 #### Returns
 
@@ -871,7 +871,7 @@ Returns the absolute form of a path based on the current working directory.
 
 | Name   | Type                                      | Description           |
 | ------ | ----------------------------------------- | --------------------- |
-| `path` | [`str`](../std/str.md)\|[`Path`](path.md) | Path to make absolute |
+| `path` | [`Str`](../std/str.md)\|[`Path`](path.md) | Path to make absolute |
 
 #### Returns
 
@@ -896,8 +896,8 @@ Returns the path relative to a base directory.
 
 | Name   | Type                                      | Description                   |
 | ------ | ----------------------------------------- | ----------------------------- |
-| `path` | [`str`](../std/str.md)\|[`Path`](path.md) | Path to make relative         |
-| `base` | [`str`](../std/str.md)\|[`Path`](path.md) | Base directory (default: cwd) |
+| `path` | [`Str`](../std/str.md)\|[`Path`](path.md) | Path to make relative         |
+| `base` | [`Str`](../std/str.md)\|[`Path`](path.md) | Base directory (default: cwd) |
 
 #### Returns
 
@@ -940,40 +940,40 @@ are unspecified.
 
 | Name                  | Type                                                                                | Description                                      |
 | --------------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------ |
-| `paths`               | ([`str`](../std/str.md)\|[`Path`](path.md))*                                        | Paths to update in order                         |
-| `mode`                | [`int`](../std/int.md)                                                              | Optional Unix permission mode                    |
-| `user`                | [`int`](../std/int.md)\|[`str`](../std/str.md)\|[`Sid`](../security/windows/sid.md) | Optional owner ID, name, or SID                  |
-| `group`               | [`int`](../std/int.md)\|[`str`](../std/str.md)\|[`Sid`](../security/windows/sid.md) | Optional group ID, name, or SID                  |
+| `paths`               | ([`Str`](../std/str.md)\|[`Path`](path.md))*                                        | Paths to update in order                         |
+| `mode`                | [`Int`](../std/int.md)                                                              | Optional Unix permission mode                    |
+| `user`                | [`Int`](../std/int.md)\|[`Str`](../std/str.md)\|[`Sid`](../security/windows/sid.md) | Optional owner ID, name, or SID                  |
+| `group`               | [`Int`](../std/int.md)\|[`Str`](../std/str.md)\|[`Sid`](../security/windows/sid.md) | Optional group ID, name, or SID                  |
 | `modified`            | [`DateTime`](../time/datetime.md)                                                   | Optional new modification time                   |
 | `accessed`            | [`DateTime`](../time/datetime.md)                                                   | Optional new access time                         |
 | `created`             | [`DateTime`](../time/datetime.md)                                                   | Optional new creation time (Windows only)        |
 | `resolve`             | `:TARGET:`\|`:LINK:`                                                                | Resolution mode (see [above](#resolution-modes)) |
-| `readonly`            | [`bool`](../std/bool.md)                                                            | Optional readonly attribute value                |
-| `hidden`              | [`bool`](../std/bool.md)                                                            | Optional hidden attribute/flag                   |
-| `system`              | [`bool`](../std/bool.md)                                                            | Optional system attribute value                  |
-| `archive`             | [`bool`](../std/bool.md)                                                            | Optional archive attribute value                 |
-| `compressed`          | [`bool`](../std/bool.md)                                                            | Optional compressed flag                         |
-| `temporary`           | [`bool`](../std/bool.md)                                                            | Optional temporary value                         |
-| `offline`             | [`bool`](../std/bool.md)                                                            | Optional offline value                           |
-| `not_content_indexed` | [`bool`](../std/bool.md)                                                            | Optional indexing attribute value                |
-| `immutable`           | [`bool`](../std/bool.md)                                                            | Optional immutable flag                          |
-| `append_only`         | [`bool`](../std/bool.md)                                                            | Optional append-only flag                        |
-| `no_dump`             | [`bool`](../std/bool.md)                                                            | Optional no-dump flag                            |
-| `no_atime`            | [`bool`](../std/bool.md)                                                            | Optional Linux no-atime flag                     |
-| `no_copy_on_write`    | [`bool`](../std/bool.md)                                                            | Optional Linux no-COW flag                       |
-| `dir_sync`            | [`bool`](../std/bool.md)                                                            | Optional Linux dir-sync flag                     |
-| `casefold`            | [`bool`](../std/bool.md)                                                            | Optional Linux casefold flag                     |
-| `data_journaling`     | [`bool`](../std/bool.md)                                                            | Optional Linux journaling flag                   |
-| `no_compress`         | [`bool`](../std/bool.md)                                                            | Optional Linux no-compress flag                  |
-| `project_inherit`     | [`bool`](../std/bool.md)                                                            | Optional Linux project flag                      |
-| `secure_delete`       | [`bool`](../std/bool.md)                                                            | Optional Linux secure-delete flag                |
-| `sync`                | [`bool`](../std/bool.md)                                                            | Optional Linux sync flag                         |
-| `no_tail_merge`       | [`bool`](../std/bool.md)                                                            | Optional Linux no-tail flag                      |
-| `top_dir`             | [`bool`](../std/bool.md)                                                            | Optional Linux top-dir flag                      |
-| `undelete`            | [`bool`](../std/bool.md)                                                            | Optional Linux undelete flag                     |
-| `direct_access`       | [`bool`](../std/bool.md)                                                            | Optional Linux direct-access flag                |
-| `extent_format`       | [`bool`](../std/bool.md)                                                            | Optional Linux extent flag                       |
-| `opaque`              | [`bool`](../std/bool.md)                                                            | Optional macOS opaque flag                       |
+| `readonly`            | [`Bool`](../std/bool.md)                                                            | Optional readonly attribute value                |
+| `hidden`              | [`Bool`](../std/bool.md)                                                            | Optional hidden attribute/flag                   |
+| `system`              | [`Bool`](../std/bool.md)                                                            | Optional system attribute value                  |
+| `archive`             | [`Bool`](../std/bool.md)                                                            | Optional archive attribute value                 |
+| `compressed`          | [`Bool`](../std/bool.md)                                                            | Optional compressed flag                         |
+| `temporary`           | [`Bool`](../std/bool.md)                                                            | Optional temporary value                         |
+| `offline`             | [`Bool`](../std/bool.md)                                                            | Optional offline value                           |
+| `not_content_indexed` | [`Bool`](../std/bool.md)                                                            | Optional indexing attribute value                |
+| `immutable`           | [`Bool`](../std/bool.md)                                                            | Optional immutable flag                          |
+| `append_only`         | [`Bool`](../std/bool.md)                                                            | Optional append-only flag                        |
+| `no_dump`             | [`Bool`](../std/bool.md)                                                            | Optional no-dump flag                            |
+| `no_atime`            | [`Bool`](../std/bool.md)                                                            | Optional Linux no-atime flag                     |
+| `no_copy_on_write`    | [`Bool`](../std/bool.md)                                                            | Optional Linux no-COW flag                       |
+| `dir_sync`            | [`Bool`](../std/bool.md)                                                            | Optional Linux dir-sync flag                     |
+| `casefold`            | [`Bool`](../std/bool.md)                                                            | Optional Linux casefold flag                     |
+| `data_journaling`     | [`Bool`](../std/bool.md)                                                            | Optional Linux journaling flag                   |
+| `no_compress`         | [`Bool`](../std/bool.md)                                                            | Optional Linux no-compress flag                  |
+| `project_inherit`     | [`Bool`](../std/bool.md)                                                            | Optional Linux project flag                      |
+| `secure_delete`       | [`Bool`](../std/bool.md)                                                            | Optional Linux secure-delete flag                |
+| `sync`                | [`Bool`](../std/bool.md)                                                            | Optional Linux sync flag                         |
+| `no_tail_merge`       | [`Bool`](../std/bool.md)                                                            | Optional Linux no-tail flag                      |
+| `top_dir`             | [`Bool`](../std/bool.md)                                                            | Optional Linux top-dir flag                      |
+| `undelete`            | [`Bool`](../std/bool.md)                                                            | Optional Linux undelete flag                     |
+| `direct_access`       | [`Bool`](../std/bool.md)                                                            | Optional Linux direct-access flag                |
+| `extent_format`       | [`Bool`](../std/bool.md)                                                            | Optional Linux extent flag                       |
+| `opaque`              | [`Bool`](../std/bool.md)                                                            | Optional macOS opaque flag                       |
 
 #### Errors
 
@@ -1000,7 +1000,7 @@ normalized and symbolic links resolved.
 
 | Name   | Type                                      | Description          |
 | ------ | ----------------------------------------- | -------------------- |
-| `path` | [`str`](../std/str.md)\|[`Path`](path.md) | Path to canonicalize |
+| `path` | [`Str`](../std/str.md)\|[`Path`](path.md) | Path to canonicalize |
 
 #### Returns
 
@@ -1022,7 +1022,7 @@ Reads the target of a symbolic link.
 
 | Name   | Type                                      | Description         |
 | ------ | ----------------------------------------- | ------------------- |
-| `path` | [`str`](../std/str.md)\|[`Path`](path.md) | Path to the symlink |
+| `path` | [`Str`](../std/str.md)\|[`Path`](path.md) | Path to the symlink |
 
 #### Returns
 

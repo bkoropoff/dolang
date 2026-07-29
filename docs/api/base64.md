@@ -12,11 +12,11 @@ Encodes a string or binary value using standard RFC 4648 base64 with padding.
 
 | Name   | Type                                         | Description      |
 | ------ | -------------------------------------------- | ---------------- |
-| `data` | [`str`](./std/str.md)\|[`bin`](./std/bin.md) | data to encode   |
+| `data` | [`Str`](./std/str.md)\|[`Bin`](./std/bin.md) | data to encode   |
 
 #### Returns
 
-[`str`](./std/str.md) - Base64 text
+[`Str`](./std/str.md) - Base64 text
 
 ```
 assert_eq (encode "") ""
@@ -33,11 +33,11 @@ Decodes standard RFC 4648 base64 text with padding and returns the raw bytes.
 
 | Name   | Type                  | Description           |
 | ------ | --------------------- | --------------------- |
-| `text` | [`str`](./std/str.md) | base64 text to decode |
+| `text` | [`Str`](./std/str.md) | base64 text to decode |
 
 #### Returns
 
-[`bin`](./std/bin.md) - Decoded bytes
+[`Bin`](./std/bin.md) - Decoded bytes
 
 #### Errors
 

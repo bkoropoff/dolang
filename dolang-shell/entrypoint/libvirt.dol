@@ -26,7 +26,7 @@ args.with
     meta: URI
     help: Libvirt connection URI
   - opt: cd
-    type: $Path
+    parse: $Path
     default: nil
     meta: PATH
     help: Initial remote working directory
@@ -41,7 +41,7 @@ args.with
   - arg: domain
     help: Libvirt domain name
   - arg: script
-    type: $Path
+    parse: $Path
     divider: true
     help: Local Do script
   - arg: script-args

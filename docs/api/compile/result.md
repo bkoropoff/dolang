@@ -6,7 +6,7 @@ The result object returned by `compile`.
 
 ### `bytecode`
 
-The compiled bytecode as [`bin`](../std/bin.md), or `nil` if compilation
+The compiled bytecode as [`Bin`](../std/bin.md), or `nil` if compilation
 failed.
 
 ### `diagnostics`

@@ -2,9 +2,9 @@ import std:
   - hash
 
 # Basic subclassing of Int
-class MyInt: int
+class MyInt: Int
   def (init) self value
-    int.(init) $self $value
+    Int.(init) $self $value
 
 let x = MyInt 21
 let y = MyInt 7

@@ -1,10 +1,11 @@
-# bool
+# Bool
 
 Boolean values: `true` and `false`.
 
 ## Constructor
 
-Calling `bool` converts a value to a boolean based on its truthiness.
+`Bool` accepts an existing boolean. The lowercase `bool` function converts a
+value based on its truthiness.
 
 ```
 assert_eq (bool 0) false

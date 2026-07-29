@@ -22,7 +22,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             let pattern = PatternArg::new(strand, global, &pattern)?;
             let value = value
                 .as_str(strand)
-                .ok_or_else(|| Error::type_error(strand, "value: expected `str`"))?;
+                .ok_or_else(|| Error::type_error(strand, "value: expected `Str`"))?;
             let matched = pattern.is_match(strand, value)?;
             Output::set(strand, &mut out, matched);
             Ok(())
@@ -48,7 +48,7 @@ impl<'v, 'a> PatternArg<'v, 'a> {
                 View::Str(pattern) => Ok(Self::Str(pattern.into())),
                 _ => Err(Error::type_error(
                     strand,
-                    "pattern: expected `Glob` or `str`",
+                    "pattern: expected `Glob` or `Str`",
                 )),
             }
         }
@@ -93,7 +93,7 @@ impl<'v> Object<'v> for Glob {
         let ([pattern], []) = unpack!(strand, args, 1, 0)?;
         let pattern: String = match pattern.view(strand.vm()) {
             View::Str(pattern) => pattern.into(),
-            _ => return Err(Error::type_error(strand, "pattern: expected `str`")),
+            _ => return Err(Error::type_error(strand, "pattern: expected `Str`")),
         };
         let glob = compile(&pattern, strand)?;
         this.create_with_annex(strand, Glob, GlobAnnex { glob }, out);
@@ -107,7 +107,7 @@ impl<'v> Object<'v> for Glob {
                 View::Str(value) => {
                     strand.access(|access| this.annex().glob.is_match(value.as_str(access)))
                 }
-                _ => return Err(Error::type_error(strand, "value: expected `str`")),
+                _ => return Err(Error::type_error(strand, "value: expected `Str`")),
             };
             Output::set(strand, &mut out, matched);
             Ok(())

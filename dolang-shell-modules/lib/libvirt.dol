@@ -3,7 +3,7 @@ import base64 digest json proc progress rand shell shlex ssh std sys time transf
     - Path
     - with_temp_dir
   std:
-    - nulliter
+    - NULLITER
   url:
     - Url
 
@@ -21,7 +21,7 @@ let READY_PATH = "/var/tmp/dolang-cloud-init-ready"
 let PAYLOAD_PATH = "/var/tmp/dolang-payload.tar.gz"
 let DOLANG_REPO = "dolang-org/dolang"
 
-let DOLANG_PLATFORMS = set $
+let DOLANG_PLATFORMS = Set $
   - x86_64-linux
   - x86_64-windows
   - aarch64-macos
@@ -126,7 +126,7 @@ def require_child node tag :namespace = nil
 def node_text node
   let text = ""
   for child = node.children
-    if (type child str)
+    if (type child Str)
       text = "$text$child"
   text
 
@@ -381,7 +381,7 @@ pub class Domain
         known_hosts == nil || command == nil)
       throw std.ValueError "domain has incomplete dolang:vm metadata"
 
-    let reserved = set $
+    let reserved = Set $
       :user: :port: :identity: :known_hosts: :command:
       :host_key: :batch: :identities_only:
     for key _ = options
@@ -428,7 +428,7 @@ pub def list :connect_uri = DEFAULT_CONNECT_URI
 def resolve_source source app digest_spec
   transfer.get $source app: $app digest: $digest_spec
 
-let COMPRESSED_IMAGE_EXTS = set ["gz", "xz", "zst"]
+let COMPRESSED_IMAGE_EXTS = Set ["gz", "xz", "zst"]
 
 def prepared_image source root
   let ext = source.ext
@@ -483,8 +483,8 @@ def resolved_add_content spec app
 # `chmod:`, mirroring `dockman`'s own `add:` build step). No VFS access —
 # just shape checking, so it's safe to call eagerly at parse time.
 def validate_add_spec spec
-  if !(type spec dict)
-    throw std.TypeError "add: expected dict"
+  if !(type spec Dict)
+    throw std.TypeError "add: expected Dict"
   let allowed = [:target:, :source:, :content:, :chmod:]
   for key _ = spec
     if !allowed.contains(key)
@@ -492,15 +492,15 @@ def validate_add_spec spec
 
   let target = spec.get :target: else: do
     throw std.ValueError "add: missing target"
-  if !(type target str)
-    throw std.TypeError "add target: expected str"
+  if !(type target Str)
+    throw std.TypeError "add target: expected Str"
 
   let source = spec.get :source:
   let content = spec.get :content:
   if ((source == nil) == (content == nil))
     throw std.ValueError "add: expected exactly one of source or content"
-  if (content != nil && !(type content str || type content bin))
-    throw std.TypeError "add content: expected str or bin"
+  if (content != nil && !(type content Str || type content Bin))
+    throw std.TypeError "add content: expected Str or Bin"
   spec
 
 # Performs a validated top-level `add:` entry against `domain`, on the host
@@ -524,8 +524,8 @@ def perform_add domain spec app
 # `chmod`, plus cloud-init-specific `owner`/`append`/`defer`) into a
 # cloud-init `write_files` entry.
 def parse_add_spec spec app
-  if !(type spec dict)
-    throw std.TypeError "add: expected dict"
+  if !(type spec Dict)
+    throw std.TypeError "add: expected Dict"
   let allowed = [:target:, :source:, :content:, :chmod:, :owner:, :append:, :defer:]
   for key _ = spec
     if !allowed.contains(key)
@@ -533,18 +533,18 @@ def parse_add_spec spec app
 
   let target = spec.get :target: else: do
     throw std.ValueError "add: missing target"
-  if !(type target str)
-    throw std.TypeError "add target: expected str"
+  if !(type target Str)
+    throw std.TypeError "add target: expected Str"
 
   let content = resolved_add_content $spec $app
   let file = {path: target}
-  if (type content str)
+  if (type content Str)
     file[:content:] = content
-  else if (type content bin)
+  else if (type content Bin)
     file[:content:] = base64.encode $content
     file[:encoding:] = "b64"
   else
-    throw std.TypeError "add content: expected str or bin"
+    throw std.TypeError "add content: expected Str or Bin"
 
   let chmod = spec.get :chmod:
   if (chmod != nil)
@@ -557,14 +557,14 @@ def parse_add_spec spec app
 
 # Parses the `init:` sub-dict into boot-time cloud-init state. Like the
 # top-level keyword arguments, `add:` and `run:` may repeat (dicts are
-# multimaps). `run:` entries here must be a raw string or array of strings —
+# multimaps). `run:` entries here must be a raw string or Array of strings —
 # anything needing a live VFS connection belongs in the top-level repeated
 # `run:` keyword argument instead.
 def parse_init init app
   if (init == nil)
     return record boot: [] write: []
-  if !(type init dict)
-    throw std.TypeError "init: expected dict"
+  if !(type init Dict)
+    throw std.TypeError "init: expected Dict"
 
   let write = []
   let boot = []
@@ -572,13 +572,13 @@ def parse_init init app
     if (key == :add:)
       write.push (parse_add_spec value app)
     else if (key == :run:)
-      if (type value str)
+      if (type value Str)
         boot.push [...(shlex.split value)]
-      else if (type value array)
+      else if (type value Array)
         boot.push [...value]
       else
-        throw std.TypeError "init.run: expected str or array"
-    else if (type key int)
+        throw std.TypeError "init.run: expected Str or Array"
+    else if (type key Int)
       throw std.UnexpectedPosError $key
     else
       throw std.UnexpectedKeyError $key
@@ -594,10 +594,10 @@ def parse_post_options options
     if (key == :add:)
       post.push (record kind: :add: spec: (validate_add_spec value))
     else if (key == :run:)
-      if (type value str || type value array)
+      if (type value Str || type value Array)
         throw std.TypeError "run: expected a func; use init: {run: ...} for boot-time commands"
       post.push (record kind: :run: block: value)
-    else if (type key int)
+    else if (type key Int)
       throw std.UnexpectedPosError $key
     else
       throw std.UnexpectedKeyError $key
@@ -660,7 +660,7 @@ def normalize_dolang_spec spec
     return nil
   if (spec == true)
     return {}
-  if (type spec dict)
+  if (type spec Dict)
     let allowed = [:version:, :archive:, :digest:]
     for key _ = spec
       if !allowed.contains(key)
@@ -674,9 +674,9 @@ def normalize_dolang_spec spec
     return {archive: spec}
   if (type spec Url)
     return {archive: spec}
-  if (type spec str)
+  if (type spec Str)
     return {version: spec}
-  throw std.TypeError "dolang: expected bool, str, Path, Url, or dict"
+  throw std.TypeError "dolang: expected Bool, Str, Path, Url, or Dict"
 
 def dolang_platform_key os arch
   "$(str(arch).lower())-$(str(os).lower())"
@@ -836,14 +836,14 @@ def remove_partial name connect_uri workdir
     let domain = Domain $name $connect_uri
     if (domain.state() != :SHUTOFF:)
       virsh $connect_uri destroy $name
-        stdout: $nulliter
-        stderr: $nulliter
+        stdout: $NULLITER
+        stderr: $NULLITER
   catch _
     nil
   try
     raw_undefine $name $connect_uri
-      stdout: $nulliter
-      stderr: $nulliter
+      stdout: $NULLITER
+      stderr: $NULLITER
   catch _
     nil
   workdir.remove all: true ignore: true
@@ -863,8 +863,8 @@ def wait_ssh metadata
         -o ConnectTimeout=5
         -l $user -p $port -i $identity
         -- 127.0.0.1 true
-        stdout: $nulliter
-        stderr: $nulliter
+        stdout: $NULLITER
+        stderr: $NULLITER
       return
     catch proc.Error: _
       time.sleep $READY_SLEEP
@@ -910,8 +910,8 @@ def wait_ready metadata
         -o ConnectTimeout=5
         -l $user -p $port -i $identity
         -- 127.0.0.1 $check
-        stdout: $nulliter
-        stderr: $nulliter
+        stdout: $NULLITER
+        stderr: $NULLITER
       return
     catch proc.Error: _
       time.sleep $READY_SLEEP
@@ -920,23 +920,23 @@ def wait_ready metadata
 #
 # # Parameters
 #
-# | Name            | Type                 | Description |
+# | Name            | type                 | Description |
 # | --------------- | -------------------- | ------------------------------------------------------ |
-# | `image`         | `str`\|`Path`\|`Url` | Base disk image (may be `.gz`/`.xz`/`.zstd` compressed) |
-# | `name`          | `str`                | Domain name; auto-generated if omitted |
-# | `os`            | `sym`                | Guest OS, using `sys`'s symbol vocabulary            |
-# | `arch`?         | `sym`                | Guest CPU architecture, `sys` symbol; defaults to the host's |
-# | `app`?          | `str`                | Cache/data namespace; derived from `shell.program` by default |
-# | `user`?         | `str`                | Guest user to create (default `"ci"`) |
+# | `image`         | `Str`\|`Path`\|`Url` | Base disk image (may be `.gz`/`.xz`/`.zstd` compressed) |
+# | `name`          | `Str`                | Domain name; auto-generated if omitted |
+# | `os`            | `Sym`                | Guest OS, using `sys`'s symbol vocabulary            |
+# | `arch`?         | `Sym`                | Guest CPU architecture, `sys` symbol; defaults to the host's |
+# | `app`?          | `Str`                | Cache/data namespace; derived from `shell.program` by default |
+# | `user`?         | `Str`                | Guest user to create (default `"ci"`) |
 # | `dolang`?       | See below            | Installs Do into the guest — see [`dolang:`](#dolang) |
-# | `image_digest`? | `str`                | `algorithm:hex` digest to verify a downloaded `image` |
-# | `packages`?     | `array`              | Guest packages to install |
-# | `memory`?       | `int`                | Guest memory in MiB (default `2048`) |
-# | `vcpus`?        | `int`                | Guest vCPU count (default `2`) |
-# | `disk_size`?    | `str`                | Disk size (default `"20G"`)               |
-# | `connect_uri`?  | `str`                | libvirt connection URI (default `"qemu:///session"`) |
-# | `init`?         | `dict`               | Early boot provisioning — see [`init:`](#init) |
-# | `add`*          | `dict`               | Uploads a file — see [`add:`](#add)         |
+# | `image_digest`? | `Str`                | `algorithm:hex` digest to verify a downloaded `image` |
+# | `packages`?     | `Array`              | Guest packages to install |
+# | `memory`?       | `Int`                | Guest memory in MiB (default `2048`) |
+# | `vcpus`?        | `Int`                | Guest vCPU count (default `2`) |
+# | `disk_size`?    | `Str`                | Disk size (default `"20G"`)               |
+# | `connect_uri`?  | `Str`                | libvirt connection URI (default `"qemu:///session"`) |
+# | `init`?         | `Dict`               | Early boot provisioning — see [`init:`](#init) |
+# | `add`*          | `Dict`               | Uploads a file — see [`add:`](#add)         |
 # | `run`*          | `func`               | Runs a block in VFS context |
 #
 # # `dolang:`
@@ -947,31 +947,31 @@ def wait_ready metadata
 # | `true` (default)                 | Install matching release for target platform if available. |
 # | a version tag, e.g. `"v0.1.1"`   | Install specific release version |
 # | a `Path` or `Url`                | Install provided release archive |
-# | a `dict`                         | Explicit form of the above — see below. |
+# | a `Dict`                         | Explicit form of the above — see below. |
 #
 # `dolang:`'s dict form:
 #
-# | Key       | Type          | Description                          |
+# | Key       | type          | Description                          |
 # | --------- | --------------| -------------------------------------|
-# | `version`? | `str`         | Version tag; excludes `archive`     |
+# | `version`? | `Str`         | Version tag; excludes `archive`     |
 # | `archive`? | `Path`\|`Url` | Release archive; excludes `version` |
-# | `digest`?  | `str`        | `algorithm:hex` digest for `archive` |
+# | `digest`?  | `Str`        | `algorithm:hex` digest for `archive` |
 #
 # # `init:`
 #
-# | Key    | Type            | Description                                          |
+# | Key    | type            | Description                                          |
 # | ------ | --------------- | ---------------------------------------------------  |
-# | `add`* | `dict`          | Writes a file during early boot                      |
-# | `run`* | `str`\|`array`  | Split with `shlex` if a `str`. Run during early boot |
+# | `add`* | `Dict`          | Writes a file during early boot                      |
+# | `run`* | `Str`\|`Array`  | Split with `shlex` if a `Str`. Run during early boot |
 #
 # # `add:`
 #
-# | Key        | Type                 | Description                            |
+# | Key        | type                 | Description                            |
 # | ---------- | -------------------- | ------------------------------------- |
-# | `target`   | `str`                | Guest file path to write              |
-# | `source`?  | `str`\|`Path`\|`Url` | Resolved and read; excludes `content` |
-# | `content`? | `str`\|`bin`         | Embedded directly; excludes `source` |
-# | `chmod`?   | `int`                | File mode, e.g. `0o644`               |
+# | `target`   | `Str`                | Guest file path to write              |
+# | `source`?  | `Str`\|`Path`\|`Url` | Resolved and read; excludes `content` |
+# | `content`? | `Str`\|`Bin`         | Embedded directly; excludes `source` |
+# | `chmod`?   | `Int`                | File mode, e.g. `0o644`               |
 #
 # # Returns
 #
@@ -1123,7 +1123,7 @@ do
 #
 # Takes the same keyword arguments as `create`, plus:
 #
-# | Name    | Type     | Description             |
+# | Name    | type     | Description             |
 # | ------- | -------- | ------------------------ |
 # | `block` | `func`  | Block to run in the VFS |
 #

@@ -17,9 +17,9 @@ resolves that ID on Unix.
 
 | Name  | Type   | Description                   |
 | ----- | ------ | ----------------------------- |
-| `uid` | `int`? | Unix user ID; defaults to UID |
+| `uid` | `Int`? | Unix user ID; defaults to UID |
 
-**Returns:** [`str`](../std/str.md)
+**Returns:** [`Str`](../std/str.md)
 
 **Errors:**
 
@@ -31,7 +31,7 @@ resolves that ID on Unix.
 
 Resolves a Unix user name in the active VFS target.
 
-**Returns:** [`int`](../std/int.md)
+**Returns:** [`Int`](../std/int.md)
 
 **Errors:**
 
@@ -43,7 +43,7 @@ Resolves a Unix user name in the active VFS target.
 
 Resolves a Unix group ID in the active VFS target.
 
-**Returns:** [`str`](../std/str.md)
+**Returns:** [`Str`](../std/str.md)
 
 **Errors:**
 
@@ -55,7 +55,7 @@ Resolves a Unix group ID in the active VFS target.
 
 Resolves a Unix group name in the active VFS target.
 
-**Returns:** [`int`](../std/int.md)
+**Returns:** [`Int`](../std/int.md)
 
 **Errors:**
 

@@ -10,7 +10,7 @@
 
 | Name   | Type                                      | Description |
 | ------ | ----------------------------------------- | ----------- |
-| `path` | [`str`](../std/str.md)\|[`Path`](path.md) | Path value  |
+| `path` | [`Str`](../std/str.md)\|[`Path`](path.md) | Path value  |
 
 **Returns:** `UnixPath`.
 

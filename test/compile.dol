@@ -16,7 +16,7 @@ def success()
 
   assert_type $compile.Result $result
   assert $result.ok
-  assert_type $bin $result.bytecode
+  assert_type $Bin $result.bytecode
   assert_eq $result.diagnostics.len 0
 
 #[test]
@@ -61,6 +61,6 @@ def error()
   assert_eq $diag.span $diag.span
   assert_eq (hash diag.span) (hash diag.span)
   assert (diag.span <= diag.span)
-  assert_type $array $diag.annotations
-  assert_type $array $diag.notes
-  assert_type $array $diag.patches
+  assert_type $Array $diag.annotations
+  assert_type $Array $diag.notes
+  assert_type $Array $diag.patches

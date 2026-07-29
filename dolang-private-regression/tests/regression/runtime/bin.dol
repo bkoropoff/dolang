@@ -84,11 +84,11 @@ assert_eq [...bytes] [1, 2, 3]
 assert_eq (b"ABC".hex()) "414243"
 assert_eq (b"\x00\x01\xff".hex()) "0001ff"
 
-# bin is not equal to str even when bytes match
+# bin is not equal to Str even when bytes match
 assert (!(b"hello" == "hello"))
 
 # type is bin
-assert_eq (type b"hello") $bin
+assert_eq (type b"hello") $Bin
 
 def assert_err msg block
   let res = try

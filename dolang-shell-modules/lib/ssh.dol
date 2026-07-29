@@ -25,26 +25,26 @@ import _ssh
 #
 # # Parameters
 #
-# | Name                 | Type     | Description                                      |
+# | Name                 | type     | Description                                      |
 # | -------------------- | -------- | ------------------------------------------------ |
-# | `host`               | `str`    | SSH destination                                  |
+# | `host`               | `Str`    | SSH destination                                  |
 # | `block`              | callable | Block to run                                     |
-# | `user`               | `str?`   | Remote user                                      |
-# | `port`               | `int?`   | SSH server port                                  |
+# | `user`               | `Str?`   | Remote user                                      |
+# | `port`               | `Int?`   | SSH server port                                  |
 # | `identity`           | `*`      | Identity file; may be repeated                   |
-# | `identities_only`    | `bool?`  | Restrict authentication to configured identities |
-# | `forward_agent`      | `bool?`  | Forward the authentication agent                 |
-# | `jump`               | `str*`   | Jump host; may be repeated                       |
-# | `connect_timeout`    | `int?`   | Connection timeout in seconds                    |
-# | `keepalive_interval` | `int?`   | Protocol keepalive interval in seconds           |
-# | `keepalive_count`    | `int?`   | Unanswered keepalives allowed                    |
-# | `batch`              | `bool?`  | Disable interactive prompts                      |
+# | `identities_only`    | `Bool?`  | Restrict authentication to configured identities |
+# | `forward_agent`      | `Bool?`  | Forward the authentication agent                 |
+# | `jump`               | `Str*`   | Jump host; may be repeated                       |
+# | `connect_timeout`    | `Int?`   | Connection timeout in seconds                    |
+# | `keepalive_interval` | `Int?`   | Protocol keepalive interval in seconds           |
+# | `keepalive_count`    | `Int?`   | Unanswered keepalives allowed                    |
+# | `batch`              | `Bool?`  | Disable interactive prompts                      |
 # | `host_key`           | `sym?`   | `:DEFAULT:`, `:STRICT:`, or `:ACCEPT_NEW:`       |
 # | `known_hosts`        | `Path?`  | Override the known-hosts file                    |
 # | `command`            | `array?` | Remote VFS launcher prefix                        |
 # | `cd`                 | `Path?`  | Initial remote working directory                  |
-# | `env`                | `dict`   | Initial remote environment overrides              |
-# | `login_env`          | `bool?`  | Import the remote login environment; may name a Unix shell |
+# | `env`                | `Dict`   | Initial remote environment overrides              |
+# | `login_env`          | `Bool?`  | Import the remote login environment; may name a Unix shell |
 #
 # # Returns
 #

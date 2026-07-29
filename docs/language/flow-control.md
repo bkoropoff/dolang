@@ -80,7 +80,7 @@ for item = [1, 2, 3]
 for pair = {name: "Alice", age: 30}
   echo $pair
 
-for i = range 5
+for i = Range 5
   echo $i
 ```
 
@@ -100,7 +100,7 @@ See [Destructuring](destructuring.md) for more on `for` unpacking.
 Exit the innermost loop.
 
 ```
-for i = range 100
+for i = Range 100
   if (i >= 5)
     break
   echo $i
@@ -122,7 +122,7 @@ def find_incomplete configs
 Skip to the next iteration.
 
 ```
-for i = range 10
+for i = Range 10
   if (i % 2 == 0)
     continue
   echo $i  # prints odd numbers

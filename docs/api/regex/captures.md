@@ -4,7 +4,7 @@ Represents a successful regex match along with any capture groups. `Captures`
 objects are returned by [`Regex.match()`](./regex.md#match-haystack) and
 yielded by [`Find`](./find.md).
 
-Coercing `Captures` value to `str` produces the text of the overall match.
+Coercing a `Captures` value with `str` produces the text of the overall match.
 
 ## Fields
 
@@ -14,7 +14,7 @@ The byte offset of the start of the overall match within the haystack.
 
 #### Type
 
-[`int`](../std/int.md)
+[`Int`](../std/int.md)
 
 ### `end`
 
@@ -22,7 +22,7 @@ The byte offset of the end of the overall match within the haystack.
 
 #### Type
 
-[`int`](../std/int.md)
+[`Int`](../std/int.md)
 
 ## Index Access
 

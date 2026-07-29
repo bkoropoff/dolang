@@ -180,7 +180,7 @@ def normalize_save_format runtime format
 def normalize_platform platform
   if (platform == nil)
     return nil
-  if (type platform str || type platform sym)
+  if (type platform Str || type platform Sym)
     return str platform
   let os = platform.get :os: default: nil
   let arch = platform.get :arch: default: nil
@@ -312,7 +312,7 @@ def parse_container_mounts mounts
   mapped
 
 def parse_image_tags repo_tags
-  array $ repo_tags.map do |tag|
+  Array $ repo_tags.map do |tag|
     let repo tag = tag.split ":" limit: 1
     record :repo :tag
 
@@ -507,7 +507,7 @@ pub class Runtime
     if (refs.len == 0)
       throw ArchiveError $source
     let loaded = []
-    let seen = set()
+    let seen = Set()
     for ref = refs
       let img = self.image $ref
       if !(seen.contains img.id)
@@ -617,7 +617,7 @@ def url_leaf url
   name
 
 def parse_source source
-  if (type source str)
+  if (type source Str)
     if (source.starts_with "http://" || source.starts_with "https://")
       Url $source
     else
@@ -642,7 +642,7 @@ class Cache
 let cache = Cache()
 
 def prefetch_add_urls spec
-  let urls = set()
+  let urls = Set()
   for add = spec.values(:add:).filter(do |add| add.contains :source:)
     let source = parse_source $add[:source:]
     if (type source Url)
@@ -771,7 +771,7 @@ pub class Builder
       target = self.#resolve_target $target (path_leaf source)
       self.#add_file $source $target $chmod
     else
-      throw "source: expected str, Path, or Url"
+      throw "source: expected Str, Path, or Url"
 
   def step_patch self spec
     bind spec
@@ -884,15 +884,15 @@ pub class Image
   pub field architecture = nil
   # Operating system (e.g. `"linux"`)
   pub field os = nil
-  # Command (`array` of `str`)
+  # Command (`Array` of `Str`)
   pub field cmd = nil
-  # Entrypoint (`array` of `str`)
+  # Entrypoint (`Array` of `Str`)
   pub field entrypoint = nil
-  # Environment (a `dict`)
+  # Environment (a `Dict`)
   pub field env = nil
   # Working directory (a `Path`)
   pub field working_dir = nil
-  # User (`str`)
+  # User (`Str`)
   pub field user = nil
   # Labels (`dict)`A
   pub field labels = nil
@@ -934,7 +934,7 @@ pub class Image
     self.entrypoint = entrypoint
     self.working_dir = (working_dir && Path working_dir)
     self.user = user
-    self.env = dict $ env.map do |e| e.split "=" limit: 1
+    self.env = Dict $ env.map do |e| e.split "=" limit: 1
 
   pub def (str) self
     self.id

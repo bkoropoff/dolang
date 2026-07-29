@@ -41,8 +41,8 @@ which carry no content and so have no use for a write handle.
 
 | Name   | Type                    | Description                                          |
 | ------ | ----------------------- | ---------------------------------------------------- |
-| `name` | [`str`](../std/str.md)  | Name/path of the file within the archive             |
-| `mode` | [`int`](../std/int.md)? | Unix permission bits in write mode (default: `0`)    |
+| `name` | [`Str`](../std/str.md)  | Name/path of the file within the archive             |
+| `mode` | [`Int`](../std/int.md)? | Unix permission bits in write mode (default: `0`)    |
 | `func` | func                    | Callable to run with the file; auto-closes when done |
 
 **Mode-specific behavior:**
@@ -78,8 +78,8 @@ Creates a directory entry. Write mode only.
 
 | Name   | Type                    | Description                                                                        |
 | ------ | ----------------------- | ---------------------------------------------------------------------------------- |
-| `name` | [`str`](../std/str.md)  | Name/path of the directory within the archive (a trailing `/` is added if missing) |
-| `mode` | [`int`](../std/int.md)? | Unix permission bits (default: `0`)                                                |
+| `name` | [`Str`](../std/str.md)  | Name/path of the directory within the archive (a trailing `/` is added if missing) |
+| `mode` | [`Int`](../std/int.md)? | Unix permission bits (default: `0`)                                                |
 
 #### Example
 
@@ -97,9 +97,9 @@ Argument order matches [`fs.symlink_file`](../fs/index.md#symlink_file-src-dst).
 
 | Name     | Type                    | Description                                 |
 | -------- | ----------------------- | ------------------------------------------- |
-| `target` | [`str`](../std/str.md)  | Path the symlink points to                  |
-| `name`   | [`str`](../std/str.md)  | Name/path of the symlink within the archive |
-| `mode`   | [`int`](../std/int.md)? | Unix permission bits (default: `0`)         |
+| `target` | [`Str`](../std/str.md)  | Path the symlink points to                  |
+| `name`   | [`Str`](../std/str.md)  | Name/path of the symlink within the archive |
+| `mode`   | [`Int`](../std/int.md)? | Unix permission bits (default: `0`)         |
 
 #### Example
 

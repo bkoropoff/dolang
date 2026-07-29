@@ -46,7 +46,7 @@ Applies `func` concurrently to values pulled lazily from an iterator.
 
 | Name     | Type                   | Description                                      |
 | -------- | ---------------------- | ------------------------------------------------ |
-| `count`  | [`int`](../std/int.md) | number of worker strands                         |
+| `count`  | [`Int`](../std/int.md) | number of worker strands                         |
 | `func`   | func                   | callable applied to each input value             |
 | `input`  | input?                 | source; defaults to the strand-local iterator    |
 | `output` | output?                | destination; defaults to the strand-local sink   |
@@ -56,7 +56,7 @@ input is exhausted and every worker has finished.
 
 ```
 let results = []
-map 4 input: (range 20) output: $results do |value|
+map 4 input: (Range 20) output: $results do |value|
   fetch $value
 ```
 
@@ -64,7 +64,7 @@ As a pipeline stage:
 
 ```
 let results = pipeline
-  do from (range 20)
+  do from (Range 20)
   do map 4 do |value| fetch $value
   do collect()
 ```
@@ -77,7 +77,7 @@ Executes `func` over an iterator with a fixed number of scoped worker strands.
 
 | Name    | Type                   | Description                           |
 | ------- | ---------------------- | ------------------------------------- |
-| `count` | [`int`](../std/int.md) | number of worker strands              |
+| `count` | [`Int`](../std/int.md) | number of worker strands              |
 | `input` | input                  | source consumed lazily by the workers |
 | `func`  | func                   | callable applied to each input value  |
 
@@ -208,7 +208,7 @@ Creates a new channel for communication between strands.
 
 | Name     | Type  | Description                                |
 | -------- | ----- | ------------------------------------------ |
-| `buffer` | `int` | Buffer capacity (default: 1, unbuffered)   |
+| `buffer` | `Int` | Buffer capacity (default: 1, unbuffered)   |
 
 #### Returns
 

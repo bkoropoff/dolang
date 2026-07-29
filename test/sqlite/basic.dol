@@ -59,13 +59,13 @@ def boolean_round_trip()
       let second_flag = rows[1]["flag"]
       let first_count = rows[0]["count"]
 
-      assert_type $bool $first_flag
+      assert_type $Bool $first_flag
       assert_eq $first_flag true
 
-      assert_type $bool $second_flag
+      assert_type $Bool $second_flag
       assert_eq $second_flag false
 
-      assert_type $int $first_count
+      assert_type $Int $first_count
       assert_eq $first_count 42
 
 #[test]
@@ -77,7 +77,7 @@ def boolean()
     conn.prepare "SELECT v FROM t" do |stmt|
       for row = stmt.query()
         let value = row["v"]
-        assert_type $bool $value
+        assert_type $Bool $value
         assert_eq $value true
 
 #[test]
@@ -90,7 +90,7 @@ def unpack_by_name()
     conn.prepare "SELECT name, active FROM t ORDER BY name" do |stmt|
       for row = stmt.query()
         let :name :active = row
-        assert_type $bool $active
+        assert_type $Bool $active
         if (name == "Alice")
           assert_eq $active true
         else

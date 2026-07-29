@@ -30,14 +30,14 @@ def find_windows_command()
 #
 # # Parameters
 #
-# | Name      | Type     | Description                         |
+# | Name      | type     | Description                         |
 # | --------- | -------- | ----------------------------------- |
 # | `block`   | `func`   | Block to run in Linux               |
-# | `distro`  | `str?`   | WSL distribution                    |
-# | `user`    | `str?`   | Linux user                          |
-# | `command` | `array`  | Linux VFS launcher prefix           |
+# | `distro`  | `Str?`   | WSL distribution                    |
+# | `user`    | `Str?`   | Linux user                          |
+# | `command` | `Array`  | Linux VFS launcher prefix           |
 # | `cd`      | `Path?`  | Initial Linux working directory     |
-# | `env`     | `dict`   | Initial Linux environment overrides |
+# | `env`     | `Dict`   | Initial Linux environment overrides |
 #
 # # Returns
 #
@@ -66,12 +66,12 @@ do
 #
 # # Parameters
 #
-# | Name      | Type     | Description                           |
+# | Name      | type     | Description                           |
 # | --------- | -------- | ------------------------------------- |
 # | `block`   | `func`   | Block to run on Windows               |
-# | `command` | `array`  | Windows VFS launcher prefix           |
+# | `command` | `Array`  | Windows VFS launcher prefix           |
 # | `cd`      | `Path?`  | Initial Windows working directory     |
-# | `env`     | `dict`   | Initial Windows environment overrides |
+# | `env`     | `Dict`   | Initial Windows environment overrides |
 #
 # # Returns
 #

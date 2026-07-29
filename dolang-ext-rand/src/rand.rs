@@ -20,9 +20,9 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
         .module("rand")
         .function("int", async move |strand, args, out| {
             let ([start], [end]) = unpack!(strand, args, 1, 1)?;
-            let start = require_i64(strand, &start, "expected `int`")?;
+            let start = require_i64(strand, &start, "expected `Int`")?;
             let (start, end) = match end {
-                Some(end) => (start, require_i64(strand, &end, "expected `int`")?),
+                Some(end) => (start, require_i64(strand, &end, "expected `Int`")?),
                 None => (0, start),
             };
             if end <= start {
@@ -37,14 +37,14 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
         })
         .function("string", async move |strand, args, out| {
             let ([len], [alphabet]) = unpack!(strand, args, 1, 0, alphabet_key = None)?;
-            let len = require_i64(strand, &len, "expected `int`")?;
+            let len = require_i64(strand, &len, "expected `Int`")?;
             let len = usize::try_from(len)
                 .map_err(|_| Error::value(strand, "expected len to be non-negative"))?;
             let chars = match &alphabet {
                 Some(alphabet) => {
                     let alphabet = alphabet
                         .as_str(strand)
-                        .ok_or_else(|| Error::type_error(strand, "expected `str`"))?;
+                        .ok_or_else(|| Error::type_error(strand, "expected `Str`"))?;
                     strand.access(|x| alphabet.as_str(x).chars().collect::<Vec<_>>())
                 }
                 None => DEFAULT_ALPHABET.chars().collect(),
@@ -63,7 +63,7 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
             let ([value], []) = unpack!(strand, args, 1, 0)?;
             let array = value
                 .as_array(strand.vm())
-                .ok_or_else(|| Error::type_error(strand, "expected array"))?;
+                .ok_or_else(|| Error::type_error(strand, "expected Array"))?;
             let len = array.len(strand)?;
             if len == 0 {
                 return Err(Error::value(strand, "expected non-empty array"));
@@ -79,7 +79,7 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
                 let ([value], []) = unpack!(strand, args, 1, 0)?;
                 let arr = value
                     .as_array(strand.vm())
-                    .ok_or_else(|| Error::type_error(strand, "expected array"))?;
+                    .ok_or_else(|| Error::type_error(strand, "expected Array"))?;
                 let len = arr.len(strand)?;
                 let mut rng = rand::rng();
                 for i in (1..len).rev() {

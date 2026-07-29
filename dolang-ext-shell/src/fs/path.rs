@@ -60,7 +60,7 @@ pub(crate) fn path_from_value<'v, 's>(
             typed_path::PathType::Windows => Utf8TypedPathBuf::from_windows(str.as_str(x)),
         }))
     } else {
-        Err(Error::type_error(strand, "expected Path or str"))
+        Err(Error::type_error(strand, "expected Path or Str"))
     }?;
     Ok(path)
 }
@@ -125,7 +125,7 @@ fn any_path_from_value<'v, 's>(
             typed_path::PathType::Windows => Utf8TypedPathBuf::from_windows(value.as_str(x)),
         }))
     } else {
-        Err(Error::type_error(strand, "expected Path or str"))
+        Err(Error::type_error(strand, "expected Path or Str"))
     }
 }
 
@@ -245,7 +245,7 @@ fn expect_str<'v, 's>(strand: &mut Strand<'v, 's>, value: &Value<'v>) -> Result<
     value
         .as_str(strand)
         .map(|value| value.to_string())
-        .ok_or_else(|| Error::type_error(strand, "expected str"))
+        .ok_or_else(|| Error::type_error(strand, "expected Str"))
 }
 
 fn rewrite_path<'v, 'a, 's>(
@@ -766,7 +766,7 @@ macro_rules! impl_concrete_path {
                         let all = match all {
                             Some(v) => v
                                 .as_bool(strand)
-                                .ok_or_else(|| Error::type_error(strand, "expected bool"))?,
+                                .ok_or_else(|| Error::type_error(strand, "expected Bool"))?,
                             None => false,
                         };
                         let to = path_from_value(strand, this.annex().global, &to)?;
@@ -784,7 +784,7 @@ macro_rules! impl_concrete_path {
                         let all = match all {
                             Some(v) => v
                                 .as_bool(strand)
-                                .ok_or_else(|| Error::type_error(strand, "expected bool"))?,
+                                .ok_or_else(|| Error::type_error(strand, "expected Bool"))?,
                             None => false,
                         };
                         let to = path_from_value(strand, this.annex().global, &to)?;
@@ -826,13 +826,13 @@ macro_rules! impl_concrete_path {
                         let all = match all {
                             Some(v) => v
                                 .as_bool(strand)
-                                .ok_or_else(|| Error::type_error(strand, "expected bool"))?,
+                                .ok_or_else(|| Error::type_error(strand, "expected Bool"))?,
                             None => false,
                         };
                         let ignore = match ignore {
                             Some(v) => v
                                 .as_bool(strand)
-                                .ok_or_else(|| Error::type_error(strand, "expected bool"))?,
+                                .ok_or_else(|| Error::type_error(strand, "expected Bool"))?,
                             None => false,
                         };
                         let annex = this.annex();
@@ -843,7 +843,7 @@ macro_rules! impl_concrete_path {
                         let all = match all {
                             Some(v) => v
                                 .as_bool(strand)
-                                .ok_or_else(|| Error::type_error(strand, "expected bool"))?,
+                                .ok_or_else(|| Error::type_error(strand, "expected Bool"))?,
                             None => false,
                         };
                         let annex = this.annex();
@@ -855,13 +855,13 @@ macro_rules! impl_concrete_path {
                         let all = match all {
                             Some(v) => v
                                 .as_bool(strand)
-                                .ok_or_else(|| Error::type_error(strand, "expected bool"))?,
+                                .ok_or_else(|| Error::type_error(strand, "expected Bool"))?,
                             None => false,
                         };
                         let ignore = match ignore {
                             Some(v) => v
                                 .as_bool(strand)
-                                .ok_or_else(|| Error::type_error(strand, "expected bool"))?,
+                                .ok_or_else(|| Error::type_error(strand, "expected Bool"))?,
                             None => false,
                         };
                         let annex = this.annex();

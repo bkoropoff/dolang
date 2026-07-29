@@ -69,10 +69,10 @@ properties.
 
 | Property | Type                                           | Description                                   |
 | -------- | ---------------------------------------------- | --------------------------------------------- |
-| `width`  | [`int`](../std/int.md)                         | Character width (bar, message, icon only)     |
-| `fg`     | [`sym`](../std/sym.md)                         | Foreground color                              |
-| `bg`     | [`sym`](../std/sym.md)                         | Background color                              |
-| `attrs`  | array of `str`                                 | Text attributes                               |
+| `width`  | [`Int`](../std/int.md)                         | Character width (bar, message, icon only)     |
+| `fg`     | [`Sym`](../std/sym.md)                         | Foreground color                              |
+| `bg`     | [`Sym`](../std/sym.md)                         | Background color                              |
+| `attrs`  | array of `Str`                                 | Text attributes                               |
 | `alt`    | dict                                           | Alt style for unfilled bar portion (bar only) |
 
 The `alt` sub-dict accepts the same `fg`, `bg`, and `attrs` properties. The
@@ -95,7 +95,7 @@ The return value of `func`
 ```
 progress.with do
   progress.show total: 100 message: "downloading" do |w|
-    for i = range 100
+    for i = Range 100
       w.delta()
 
 # With custom style
@@ -134,11 +134,11 @@ whose methods are silent no-ops.
 | Name      | Type                                            | Description                                         |
 | --------- | ----------------------------------------------- | --------------------------------------------------- |
 | `func`    | func                                            | Callback receiving an [`Indicator`](./indicator.md) |
-| `total`   | [`int`](../std/int.md)?                         | Total value for bar mode                            |
-| `message` | [`str`](../std/str.md)?                         | Initial message                                     |
-| `icon`    | [`str`](../std/str.md)?                         | Prefix icon, e.g. "📦"                              |
-| `units`   | [`sym`](../std/sym.md)\|[`str`](../std/str.md)? | Unit format                                         |
-| `tick`    | [`float`](../std/float.md)?                     | Tick interval in seconds (default 0.08)             |
+| `total`   | [`Int`](../std/int.md)?                         | Total value for bar mode                            |
+| `message` | [`Str`](../std/str.md)?                         | Initial message                                     |
+| `icon`    | [`Str`](../std/str.md)?                         | Prefix icon, e.g. "📦"                              |
+| `units`   | [`Sym`](../std/sym.md)\|[`Str`](../std/str.md)? | Unit format                                         |
+| `tick`    | [`Float`](../std/float.md)?                     | Tick interval in seconds (default 0.08)             |
 
 **Units:**
 

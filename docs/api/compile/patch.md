@@ -14,4 +14,4 @@ Human-readable text describing the suggested change.
 
 ### `sub`
 
-The replacement text as [`str`](../std/str.md).
+The replacement text as [`Str`](../std/str.md).

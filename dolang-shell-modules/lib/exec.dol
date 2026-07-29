@@ -37,8 +37,8 @@ def module_name path name
 
 def inject_keys inject
   let keys = [...inject.keys()]
-  if !(keys.all do |k| type k sym)
-    throw std.TypeError "inject key: expected `sym`"
+  if !(keys.all do |k| type k Sym)
+    throw std.TypeError "inject key: expected `Sym`"
   keys
 
 def cache_key path mode name prelude inject
@@ -119,8 +119,8 @@ def compile_cached path mode name cache prelude synthetic inject
   run_loaded $compiled.bytecode $synthetic $inject
 
 def exec_cached path mode name app prelude inject
-  if !(type inject dict)
-    throw std.TypeError "inject: expected `dict`"
+  if !(type inject Dict)
+    throw std.TypeError "inject: expected `Dict`"
   path = fs.Path $path
   let key = cache_key $path $mode $name $prelude $inject
   let cache = cache_path $path $mode $name $app $prelude $inject

@@ -1,9 +1,15 @@
-# set
+# Set
 
 Sets are ordered, mutable collections with unique membership semantics.
 
 Iteration preserves insertion order. Reinserting an existing value is a no-op
 and does not move it to the end.
+
+## Constructor
+
+### `Set iterable`
+
+Builds a set from one iterable.
 
 ## Fields
 
@@ -13,7 +19,7 @@ Returns the number of members.
 
 #### Type
 
-[`int`](./index.md)
+[`Int`](./index.md)
 
 ## Methods
 
@@ -28,7 +34,7 @@ Adds `value` if it is not already present.
 | `value` |      | the value to insert |
 
 ```
-let s = set [1, 2]
+let s = Set [1, 2]
 s.add 3
 s.add 2
 assert_eq [...s] [1, 2, 3]
@@ -46,31 +52,31 @@ Removes `value` if present.
 
 #### Returns
 
-[`bool`](./index.md) indicating whether a value was removed
+[`Bool`](./index.md) indicating whether a value was removed
 
 ### `clear`
 
 Removes all members.
 
 ```
-let s = set [1, 2]
+let s = Set [1, 2]
 s.clear()
 assert_eq $s.len 0
 ```
 
 ### `copy`
 
-Returns a shallow copy of the set.
+Returns a shallow copy of the Set.
 
 Insertion order is preserved. Contained values are *not* recursively copied.
 
 #### Returns
 
-[`set`](./set.md)
+[`Set`](./set.md)
 
 ### `contains value`
 
-Tests whether the set contains `value`.
+Tests whether the Set contains `value`.
 
 #### Parameters
 
@@ -80,67 +86,67 @@ Tests whether the set contains `value`.
 
 #### Returns
 
-[`bool`](./index.md)
+[`Bool`](./index.md)
 
 ### `union other`
 
-Returns a new set containing all members from `self`, then first-seen members
+Returns a new Set containing all members from `self`, then first-seen members
 from `other`.
 
 #### Parameters
 
 | Name    | Type              | Description |
 | ------- | ----------------- | ----------- |
-| `other` | [`set`](./set.md) | other set   |
+| `other` | [`Set`](./set.md) | other Set   |
 
 #### Returns
 
-[`set`](./set.md)
+[`Set`](./set.md)
 
 ### `intersect other`
 
-Returns a new set containing members that are present in both sets, in
+Returns a new Set containing members that are present in both sets, in
 the receiver's insertion order.
 
 #### Parameters
 
 | Name    | Type              | Description |
 | ------- | ----------------- | ----------- |
-| `other` | [`set`](./set.md) | other set   |
+| `other` | [`Set`](./set.md) | other Set   |
 
 #### Returns
 
-[`set`](./set.md)
+[`Set`](./set.md)
 
 ### `diff other`
 
-Returns a new set containing members from the receiver that are not present in
+Returns a new Set containing members from the receiver that are not present in
 `other`.
 
 #### Parameters
 
 | Name    | Type              | Description |
 | ------- | ----------------- | ----------- |
-| `other` | [`set`](./set.md) | other set   |
+| `other` | [`Set`](./set.md) | other Set   |
 
 #### Returns
 
-[`set`](./set.md)
+[`Set`](./set.md)
 
 ### `sym_diff other`
 
-Returns a new set containing members present in exactly one of the two
+Returns a new Set containing members present in exactly one of the two
 sets.
 
 #### Parameters
 
 | Name    | Type              | Description |
 | ------- | ----------------- | ----------- |
-| `other` | [`set`](./set.md) | other set   |
+| `other` | [`Set`](./set.md) | other Set   |
 
 #### Returns
 
-[`set`](./set.md)
+[`Set`](./set.md)
 
 ### `is_subset other`
 
@@ -150,11 +156,11 @@ Returns `true` when every member of the receiver is present in `other`.
 
 | Name    | Type              | Description |
 | ------- | ----------------- | ----------- |
-| `other` | [`set`](./set.md) | other set   |
+| `other` | [`Set`](./set.md) | other Set   |
 
 #### Returns
 
-[`bool`](./index.md)
+[`Bool`](./index.md)
 
 ### `is_superset other`
 
@@ -164,19 +170,19 @@ Returns `true` when every member of `other` is present in the receiver.
 
 | Name    | Type              | Description |
 | ------- | ----------------- | ----------- |
-| `other` | [`set`](./set.md) | other set   |
+| `other` | [`Set`](./set.md) | other Set   |
 
 #### Returns
 
-[`bool`](./index.md)
+[`Bool`](./index.md)
 
 ## Operations
 
 ### Iteration
 
-Iterating a set yields values in insertion order:
+Iterating a Set yields values in insertion order:
 
 ```
-let s = set [3, 1, 2, 1]
+let s = Set [3, 1, 2, 1]
 assert_eq [...s] [3, 1, 2]
 ```

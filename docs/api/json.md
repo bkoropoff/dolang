@@ -16,18 +16,18 @@ Serializes a Do value to a JSON string.
 
 #### Returns
 
-`str` -- JSON string
+`Str` -- JSON string
 
 Type mapping:
 
 | Do Type | JSON Type            |
 | ------- | -------------------- |
 | `nil`   | `null`               |
-| `bool`  | boolean              |
-| `int`   | number               |
-| `float` | number               |
-| `str`   | string               |
-| `sym`   | string (symbol name) |
+| `Bool`  | boolean              |
+| `Int`   | number               |
+| `Float` | number               |
+| `Str`   | string               |
+| `Sym`   | string (symbol name) |
 | `array` | array                |
 | `dict`  | object               |
 
@@ -45,7 +45,7 @@ Deserializes a JSON string to a Do value.
 
 | Name   | Type  | Description          |
 | ------ | ----- | -------------------- |
-| `json` | `str` | JSON string to parse |
+| `json` | `Str` | JSON string to parse |
 
 #### Returns
 
@@ -62,10 +62,10 @@ Type mapping:
 | JSON Type | Do Type |
 | --------- | ------- |
 | `null`    | `nil`   |
-| boolean   | `bool`  |
-| integer   | `int`   |
-| float     | `float` |
-| string    | `str`   |
+| boolean   | `Bool`  |
+| integer   | `Int`   |
+| float     | `Float` |
+| string    | `Str`   |
 | array     | `array` |
 | object    | `dict`  |
 

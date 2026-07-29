@@ -1,11 +1,11 @@
 let foo = $
-  for i = range end: 5
+  for i = Range end: 5
     - $i
 
 assert_eq $foo [0, 1, 2, 3, 4]
 
 let bar = $
-  for i = range end: 5
+  for i = Range end: 5
     "$i": (i * 2)
 
 assert_eq $bar {"0": 0, "1": 2, "2": 4, "3": 6, "4": 8}

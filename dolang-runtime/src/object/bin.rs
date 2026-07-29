@@ -210,7 +210,7 @@ impl<'v> Protocol<'v> for [u8] {
                 let limit_i64 = limit
                     .map(|l| {
                         l.to_i64(strand)
-                            .map_err(|_| Error::type_error(strand, "limit: expected `int`"))
+                            .map_err(|_| Error::type_error(strand, "limit: expected `Int`"))
                     })
                     .transpose()?;
                 let delim_gc = delim
@@ -657,7 +657,7 @@ impl<'v> Protocol<'v> for Class {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "<type std.bin>")
+        crate::fmt!(strand, w, "<type std.Bin>")
     }
 
     async fn op_call<'a, 's>(
@@ -670,8 +670,7 @@ impl<'v> Protocol<'v> for Class {
         if let Some(slice) = value.as_u8_slice_raw(strand) {
             Output::set(strand, out, slice)
         } else {
-            let str = value.to_string(strand)?;
-            Output::set(strand, out, str.as_bytes())
+            return Err(Error::type_error(strand, "Bin: expected Str or Bin"));
         }
         Ok(())
     }
@@ -718,8 +717,7 @@ impl<'v> Protocol<'v> for Class {
                 let native = if let Some(slice) = value.as_u8_slice_raw(strand) {
                     Value::from_u8_slice(strand, slice)
                 } else {
-                    let s = value.to_string(strand)?;
-                    Value::from_u8_slice(strand, s.as_bytes())
+                    return Err(Error::type_error(strand, "Bin: expected Str or Bin"));
                 };
                 self_val.op_fill(strand, &strand.singletons().bin, native)?;
                 Ok(())

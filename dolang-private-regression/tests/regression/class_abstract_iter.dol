@@ -20,7 +20,7 @@ class MyInput: Iter
 
 # op_get of (init) returns a bound method
 let f = Iter.(init)
-assert (type f func)
+assert (type f Func)
 
 # Subtype checks
 let src = MyInput [1, 2, 3]

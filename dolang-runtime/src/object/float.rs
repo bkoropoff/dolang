@@ -371,7 +371,10 @@ impl<'v> Protocol<'v> for Verbatim {
     }
 }
 
-fn coerce_to_f64<'v, 's>(value: &Value<'v>, strand: &mut Strand<'v, 's>) -> Result<'v, 's, f64> {
+pub(crate) fn coerce<'v, 's>(
+    value: &Value<'v>,
+    strand: &mut Strand<'v, 's>,
+) -> Result<'v, 's, f64> {
     if let Some(str) = value.as_str_raw(strand) {
         str.parse::<f64>()
             .map_err(|_| Error::type_error(strand, format!("float: not a valid float: {:?}", str)))
@@ -382,6 +385,28 @@ fn coerce_to_f64<'v, 's>(value: &Value<'v>, strand: &mut Strand<'v, 's>) -> Resu
             Prim::Bool(v) => Ok(v as i32 as f64),
             Prim::Nil => Err(Error::type_error(strand, "float: `nil` can't be converted")),
         }
+    }
+}
+
+fn construct<'v, 's>(value: &Value<'v>, strand: &mut Strand<'v, 's>) -> Result<'v, 's, f64> {
+    match value.to_prim(strand) {
+        Ok(Prim::F64(value)) => Ok(value),
+        Ok(Prim::Int(value)) => {
+            let converted = value as f64;
+            if converted.is_finite()
+                && converted >= i128::MIN as f64
+                && converted < -(i128::MIN as f64)
+                && converted as i128 == value
+            {
+                Ok(converted)
+            } else {
+                Err(Error::type_error(
+                    strand,
+                    "Float: Int cannot be represented exactly",
+                ))
+            }
+        }
+        _ => Err(Error::type_error(strand, "Float: expected Float or Int")),
     }
 }
 
@@ -413,7 +438,7 @@ impl<'v> Protocol<'v> for Float {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "<type std.float>")
+        crate::fmt!(strand, w, "<type std.Float>")
     }
 
     async fn op_call<'a, 's>(
@@ -423,7 +448,7 @@ impl<'v> Protocol<'v> for Float {
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
         let ([value], _) = unpack!(strand, args, 1, 0)?;
-        let coerced = coerce_to_f64(&value, strand)?;
+        let coerced = construct(&value, strand)?;
         Output::set(strand, out, coerced);
         Ok(())
     }
@@ -495,7 +520,7 @@ impl<'v> Protocol<'v> for Float {
         match method.tag() {
             sym::INIT_METHOD => {
                 let ([self_val, value], []) = unpack!(strand, args, 2, 0)?;
-                let coerced = coerce_to_f64(&value, strand)?;
+                let coerced = construct(&value, strand)?;
                 let native = Value::from_f64(strand, coerced);
                 self_val.op_fill(strand, &strand.singletons().float, native)?;
                 Ok(())

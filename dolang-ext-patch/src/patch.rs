@@ -44,7 +44,7 @@ impl<'v> Backing<'v> {
         } else if let Some(value) = value.as_bin(strand.vm()) {
             Ok(Self::Bin(unsafe { value.pin().into_static_unchecked() }))
         } else {
-            Err(Error::type_error(strand, "expected `str` or `bin`"))
+            Err(Error::type_error(strand, "expected `Str` or `Bin`"))
         }
     }
 
@@ -178,7 +178,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             if before_backing.is_str() != after_backing.is_str() {
                 return Err(Error::type_error(
                     strand,
-                    "before/after must both be `str` or both be `bin`",
+                    "before/after must both be `Str` or both be `Bin`",
                 ));
             }
 
@@ -329,7 +329,7 @@ impl<'v> Object<'v> for Patch<'v> {
                                     .map_err(|err| apply_error(strand, err.to_string()))?,
                             )
                         } else {
-                            return Err(Error::type_error(strand, "expected `str` or `bin`"));
+                            return Err(Error::type_error(strand, "expected `Str` or `Bin`"));
                         }
                     }
                     PatchKind::Binary(patch) => {
@@ -348,7 +348,7 @@ impl<'v> Object<'v> for Patch<'v> {
                                     .map_err(|err| apply_error(strand, err.to_string()))?,
                             )
                         } else {
-                            return Err(Error::type_error(strand, "expected `str` or `bin`"));
+                            return Err(Error::type_error(strand, "expected `Str` or `Bin`"));
                         }
                     }
                 };
@@ -533,7 +533,7 @@ fn path_value_to_filename<'v, 's>(
     } else if let Some(value) = value.as_str(strand) {
         Ok(value.to_string())
     } else {
-        Err(Error::type_error(strand, "expected `Path` or `str`"))
+        Err(Error::type_error(strand, "expected `Path` or `Str`"))
     }
 }
 

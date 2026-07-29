@@ -75,7 +75,7 @@ current value.
 | Name  | Type                     | Description           |
 | ----- | ------------------------ | --------------------- |
 | `cd`  | [`Path`](../fs/path.md)? | Initial directory     |
-| `env` | [`dict`](../std/dict.md) | Environment overrides |
+| `env` | [`Dict`](../std/dict.md) | Environment overrides |
 
 Windows displays a User Account Control prompt. Cancelling the prompt raises a
 system error.

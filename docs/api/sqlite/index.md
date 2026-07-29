@@ -17,10 +17,10 @@ Opens a SQLite database connection and returns a Connection object.
 
 | Name       | Type                                            | Description                                                |
 | ---------- | ----------------------------------------------- | ---------------------------------------------------------- |
-| `path`     | [`str`](../std/str.md)\|[`Path`](../fs/path.md) | Path to the database file                                  |
-| `retries`  | `int`                                           | Max retry attempts on busy (default: 10)                   |
-| `min_wait` | `int`                                           | Initial wait in ms between retries (default: 1)            |
-| `max_wait` | `int`                                           | Max wait in ms between retries (default: 1000)             |
+| `path`     | [`Str`](../std/str.md)\|[`Path`](../fs/path.md) | Path to the database file                                  |
+| `retries`  | `Int`                                           | Max retry attempts on busy (default: 10)                   |
+| `min_wait` | `Int`                                           | Initial wait in ms between retries (default: 1)            |
+| `max_wait` | `Int`                                           | Max wait in ms between retries (default: 1000)             |
 | `func`     | func                                            | Callable to run with the connection; auto-closes when done |
 
 #### Returns

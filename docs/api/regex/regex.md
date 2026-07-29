@@ -12,7 +12,7 @@ Compiles a regular expression pattern.
 
 | Name      | Type                   | Description            |
 | --------- | ---------------------- | ---------------------- |
-| `pattern` | [`str`](../std/str.md) | RE2-compatible pattern |
+| `pattern` | [`Str`](../std/str.md) | RE2-compatible pattern |
 
 #### Errors
 
@@ -37,7 +37,7 @@ Searches for the first match of this pattern anywhere in `haystack`.
 
 | Name       | Type                   | Description             |
 | ---------- | ---------------------- | ----------------------- |
-| `haystack` | [`str`](../std/str.md) | The string to search in |
+| `haystack` | [`Str`](../std/str.md) | The string to search in |
 
 #### Returns
 
@@ -64,7 +64,7 @@ Returns an iterator over all non-overlapping matches of this pattern in
 
 | Name       | Type                   | Description             |
 | ---------- | ---------------------- | ----------------------- |
-| `haystack` | [`str`](../std/str.md) | The string to search in |
+| `haystack` | [`Str`](../std/str.md) | The string to search in |
 
 #### Returns
 
@@ -95,7 +95,7 @@ string template or a callback function.
 - `$$` — literal `$`
 
 **Callback replacement** receives a [`Captures`](./captures.md) object for each
-match and must return a `str`.
+match and must return a `Str`.
 
 The optional `limit` controls how many replacements are performed:
 
@@ -109,13 +109,13 @@ Negative limits are not supported.
 
 | Name          | Type                                     | Description                           |
 | ------------- | ---------------------------------------- | ------------------------------------- |
-| `haystack`    | [`str`](../std/str.md)                   | the string to search in               |
-| `replacement` | [`str`](../std/str.md) or function       | template string or callback           |
-| `limit`       | [`int`](../std/index.md)                 | max replacements (default: unlimited) |
+| `haystack`    | [`Str`](../std/str.md)                   | the string to search in               |
+| `replacement` | [`Str`](../std/str.md) or function       | template string or callback           |
+| `limit`       | [`Int`](../std/index.md)                 | max replacements (default: unlimited) |
 
 #### Returns
 
-A new `str` with replacements applied.
+A new `Str` with replacements applied.
 
 #### Example
 
@@ -141,7 +141,7 @@ echo $ upper.replace "hello world" do |caps|
 ### `split haystack [limit: int]`
 
 Splits `haystack` around matches of this pattern. Returns an iterator that
-yields the `str` substrings between matches.
+yields the `Str` substrings between matches.
 
 The optional `limit` controls how many splits are performed and from which end:
 
@@ -158,8 +158,8 @@ limits require buffering all matches up front.
 
 | Name       | Type                     | Description                                 |
 | ---------- | ------------------------ | ------------------------------------------- |
-| `haystack` | [`str`](../std/str.md)   | the string to split                         |
-| `limit`    | [`int`](../std/index.md) | max splits; negative means split from right |
+| `haystack` | [`Str`](../std/str.md)   | the string to split                         |
+| `limit`    | [`Int`](../std/index.md) | max splits; negative means split from right |
 
 #### Returns
 
@@ -205,8 +205,8 @@ forward).
 
 | Name       | Type                     | Description                                |
 | ---------- | ------------------------ | ------------------------------------------ |
-| `haystack` | [`str`](../std/str.md)   | the string to split                        |
-| `limit`    | [`int`](../std/index.md) | max splits; negative means split from left |
+| `haystack` | [`Str`](../std/str.md)   | the string to split                        |
+| `limit`    | [`Int`](../std/index.md) | max splits; negative means split from left |
 
 #### Returns
 

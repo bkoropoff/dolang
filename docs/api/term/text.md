@@ -23,7 +23,7 @@ terminal newline does not gain a trailing indentation prefix.
 
 | Name     | Type                   | Description                   |
 | -------- | ---------------------- | ----------------------------- |
-| `spaces` | [`int`](../std/int.md) | Non-negative number of spaces |
+| `spaces` | [`Int`](../std/int.md) | Non-negative number of spaces |
 
 **Returns:** `Text`
 

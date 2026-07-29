@@ -17,7 +17,7 @@ for entry = entries .
 
 ### `type`
 
-Returns the file type as a [`sym`](../std/sym.md).
+Returns the file type as a [`Sym`](../std/sym.md).
 
 Possible values when present:
 

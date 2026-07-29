@@ -136,4 +136,4 @@ def eq_ord_hash()
 def constructor_bad_type()
   let err = assert_throws $TypeError do
     Url 1
-  assert_eq (str err) "type error: expected Url or str"
+  assert_eq (str err) "type error: expected Url or Str"

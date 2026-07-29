@@ -15,12 +15,12 @@ assert_eq $a 3
 assert_eq $b 4
 
 # bind with ...rest should exclude already-extracted keyword keys
-bind {opt: "verbose", type: bool, short: "v"}
+bind {opt: "verbose", type: Bool, short: "v"}
   :opt = nil
   :pos = nil
   ...rest
 assert_eq $opt "verbose"
 assert_eq $pos nil
 let type: ty short: sh = rest
-assert_eq $ty $bool
+assert_eq $ty $Bool
 assert_eq $sh "v"

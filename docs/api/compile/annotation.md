@@ -18,4 +18,4 @@ The annotated [`Span`](./span.md).
 
 ### `message`
 
-The annotation label as [`str`](../std/str.md).
+The annotation label as [`Str`](../std/str.md).

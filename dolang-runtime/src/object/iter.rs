@@ -45,7 +45,7 @@ const ITERABLE_METHODS: &[sym::Tag] = &[
 /// - `next` is stateful: a container has no iteration position of its own, so
 ///   forwarding it would mint a fresh iterator per call and a `while` loop
 ///   over `next` would spin on the first element forever.
-/// - `count` is `len` spelled expensively, and `dict`/`dict_view`/`record`
+/// - `count` is `len` spelled expensively, and `Dict`/`dict_view`/`Record`
 ///   already define `count` with unrelated semantics.
 /// - `kv` describes the pair shape of an iterator; spread behavior belongs to
 ///   the iterable itself.
@@ -56,7 +56,7 @@ const ITER_ONLY_METHODS: &[sym::Tag] = &[sym::NEXT, sym::COUNT, sym::KV];
 ///
 /// `premap`/`prefilter` are named for their direction: unlike the `Iterable`
 /// `map`/`filter`, they transform values on the way *into* the sink. The
-/// distinct names are what let a value that is both surfaces (an `array`, say)
+/// distinct names are what let a value that is both surfaces (an `Array`, say)
 /// offer both without one spelling carrying two meanings.
 const SINKABLE_METHODS: &[sym::Tag] = &[sym::SINK, sym::PUT, sym::PREMAP, sym::PREFILTER];
 
@@ -233,9 +233,9 @@ fn nonnegative_count<'v, 's>(
 ) -> Result<'v, 's, usize> {
     let count = value
         .to_i64(strand)
-        .map_err(|_| Error::type_error(strand, "expected int"))?;
+        .map_err(|_| Error::type_error(strand, "expected Int"))?;
     if count < 0 {
-        return Err(Error::value(strand, "expected non-negative int"));
+        return Err(Error::value(strand, "expected non-negative Int"));
     }
     usize::try_from(count).map_err(|_| Error::overflow(strand))
 }

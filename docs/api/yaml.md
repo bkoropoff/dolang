@@ -16,7 +16,7 @@ Serializes a Do value to a YAML string.
 
 #### Returns
 
-`str` -- YAML string
+`Str` -- YAML string
 
 #### Errors
 
@@ -29,11 +29,11 @@ Type mapping:
 | Do Type | YAML Value |
 | ------- | ---------- |
 | `nil`   | `null`     |
-| `bool`  | boolean    |
-| `int`   | integer    |
-| `float` | float      |
-| `str`   | string     |
-| `sym`   | string     |
+| `Bool`  | boolean    |
+| `Int`   | integer    |
+| `Float` | float      |
+| `Str`   | string     |
+| `Sym`   | string     |
 | `array` | sequence   |
 | `dict`  | mapping    |
 
@@ -51,7 +51,7 @@ Parses a YAML string into a Do value.
 
 | Name   | Type                  | Description            |
 | ------ | --------------------- | ---------------------- |
-| `yaml` | [`str`](./std/str.md) | YAML document to parse |
+| `yaml` | [`Str`](./std/str.md) | YAML document to parse |
 
 #### Returns
 
@@ -70,10 +70,10 @@ Type mapping:
 | YAML Value | Do Type |
 | ---------- | ------- |
 | `null`     | `nil`   |
-| boolean    | `bool`  |
-| integer    | `int`   |
-| float      | `float` |
-| string     | `str`   |
+| boolean    | `Bool`  |
+| integer    | `Int`   |
+| float      | `Float` |
+| string     | `Str`   |
 | sequence   | `array` |
 | mapping    | `dict`  |
 

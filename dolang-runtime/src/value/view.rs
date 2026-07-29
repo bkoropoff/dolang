@@ -54,14 +54,14 @@ impl<'v, 'a> Hash for ObjectId<'v, 'a> {
     }
 }
 
-/// Typed view of a `str` value.
+/// Typed view of a `Str` value.
 #[derive(Clone, Copy)]
 pub struct Str<'v, 'a> {
     value: &'a str,
     phantom: PhantomData<&'v mut &'v ()>,
 }
 
-/// Pinned `str` view
+/// Pinned `Str` view
 ///
 /// The underlying string slice is guaranteed to remain address-stable for
 /// the lifetime of this struct.
@@ -149,14 +149,14 @@ impl<'v, 'a> From<Str<'v, 'a>> for String {
     }
 }
 
-/// Typed view of a `bin` value.
+/// Typed view of a `Bin` value.
 #[derive(Clone, Copy)]
 pub struct Bin<'v, 'a> {
     value: &'a [u8],
     phantom: PhantomData<&'v mut &'v ()>,
 }
 
-/// Pinned `bin` view
+/// Pinned `Bin` view
 ///
 /// The underlying byte slice is guaranteed to remain address-stable for
 /// the lifetime of this struct.
@@ -186,12 +186,12 @@ impl<'v, 'a> Bin<'v, 'a> {
         self.value
     }
 
-    /// Get length of `bin`
+    /// Get length of `Bin`
     pub fn len(&self) -> usize {
         self.value.len()
     }
 
-    /// Is the the `bin` empty?
+    /// Is the the `Bin` empty?
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -201,7 +201,7 @@ impl<'v, 'a> Bin<'v, 'a> {
         self.value.to_owned()
     }
 
-    /// Get pinned view of `bin`
+    /// Get pinned view of `Bin`
     pub fn pin(&self) -> PinBin<'v, 'a> {
         PinBin {
             value: self.value,

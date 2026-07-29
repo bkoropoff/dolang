@@ -16,16 +16,16 @@ The terminal styling functions accept these keyword options:
 
 | Name            | Type                                                                                                    | Description                        |
 | --------------- | ------------------------------------------------------------------------------------------------------- | ---------------------------------- |
-| `fg`            | [`sym`](../std/sym.md)\|[`int`](../std/int.md)\|[`array`](../std/array.md)\|[`tuple`](../std/tuple.md)? | Foreground color                   |
-| `bg`            | [`sym`](../std/sym.md)\|[`int`](../std/int.md)\|[`array`](../std/array.md)\|[`tuple`](../std/tuple.md)? | Background color                   |
-| `bold`          | [`bool`](../std/bool.md)\|[`sym`](../std/sym.md)?                                                       | Enables bold                       |
-| `dim`           | [`bool`](../std/bool.md)\|[`sym`](../std/sym.md)?                                                       | Enables dim intensity              |
-| `italic`        | [`bool`](../std/bool.md)\|[`sym`](../std/sym.md)?                                                       | Enables italics                    |
-| `underline`     | [`bool`](../std/bool.md)\|[`sym`](../std/sym.md)?                                                       | Enables underlining                |
-| `blink`         | [`bool`](../std/bool.md)\|[`sym`](../std/sym.md)?                                                       | Enables blinking                   |
-| `reverse`       | [`bool`](../std/bool.md)\|[`sym`](../std/sym.md)?                                                       | Reverses foreground and background |
-| `hidden`        | [`bool`](../std/bool.md)\|[`sym`](../std/sym.md)?                                                       | Hides text                         |
-| `strikethrough` | [`bool`](../std/bool.md)\|[`sym`](../std/sym.md)?                                                       | Enables strikethrough              |
+| `fg`            | [`Sym`](../std/sym.md)\|[`Int`](../std/int.md)\|[`Array`](../std/array.md)\|[`Tuple`](../std/tuple.md)? | Foreground color                   |
+| `bg`            | [`Sym`](../std/sym.md)\|[`Int`](../std/int.md)\|[`Array`](../std/array.md)\|[`Tuple`](../std/tuple.md)? | Background color                   |
+| `bold`          | [`Bool`](../std/bool.md)\|[`Sym`](../std/sym.md)?                                                       | Enables bold                       |
+| `dim`           | [`Bool`](../std/bool.md)\|[`Sym`](../std/sym.md)?                                                       | Enables dim intensity              |
+| `italic`        | [`Bool`](../std/bool.md)\|[`Sym`](../std/sym.md)?                                                       | Enables italics                    |
+| `underline`     | [`Bool`](../std/bool.md)\|[`Sym`](../std/sym.md)?                                                       | Enables underlining                |
+| `blink`         | [`Bool`](../std/bool.md)\|[`Sym`](../std/sym.md)?                                                       | Enables blinking                   |
+| `reverse`       | [`Bool`](../std/bool.md)\|[`Sym`](../std/sym.md)?                                                       | Reverses foreground and background |
+| `hidden`        | [`Bool`](../std/bool.md)\|[`Sym`](../std/sym.md)?                                                       | Hides text                         |
+| `strikethrough` | [`Bool`](../std/bool.md)\|[`Sym`](../std/sym.md)?                                                       | Enables strikethrough              |
 
 Attribute options accept `true` or `:INHERIT:`. `false` is not accepted.
 
@@ -118,7 +118,7 @@ terminal controls, including hyperlinks, are removed.
 
 | Name   | Type                   | Description              |
 | ------ | ---------------------- | ------------------------ |
-| `text` | [`str`](../std/str.md) | ANSI-formatted input     |
+| `text` | [`Str`](../std/str.md) | ANSI-formatted input     |
 
 **Returns:** [`Text`](./text.md)
 

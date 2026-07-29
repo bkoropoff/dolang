@@ -274,7 +274,7 @@ fn parse_units<'v, 's>(
                     )),
                 }
             } else {
-                Err(Error::type_error(strand, "units: expected `sym` or `str`"))
+                Err(Error::type_error(strand, "units: expected `Sym` or `Str`"))
             }
         }
         None => Ok(None),
@@ -288,7 +288,7 @@ fn parse_icon<'v, 's>(
     match icon_val {
         Some(v) => Ok(v
             .as_str(strand)
-            .ok_or_else(|| Error::type_error(strand, "icon: expected `str`"))?
+            .ok_or_else(|| Error::type_error(strand, "icon: expected `Str`"))?
             .into()),
         None => Ok(DEFAULT_ICON.to_owned()),
     }
@@ -302,7 +302,7 @@ fn apply_message<'v, 's>(
     if let Some(msg) = message {
         let msg = msg
             .as_str(strand)
-            .ok_or_else(|| Error::type_error(strand, "message: expected `str`"))?
+            .ok_or_else(|| Error::type_error(strand, "message: expected `Str`"))?
             .to_string();
         pb.set_message(msg);
     }
@@ -319,7 +319,7 @@ fn parse_duration_secs<'v, 's>(
         Some(v) => {
             let secs = v
                 .as_f64(strand)
-                .ok_or_else(|| Error::type_error(strand, format!("{name}: expected `float`")))?;
+                .ok_or_else(|| Error::type_error(strand, format!("{name}: expected `Float`")))?;
             Ok(Duration::from_secs_f64(secs))
         }
         None => Ok(default),
@@ -770,7 +770,7 @@ impl<'v> Object<'v> for Indicator {
                 let n = match amount {
                     Some(v) => v
                         .to_i64(strand)
-                        .map_err(|_| Error::type_error(strand, "expected `int`"))?,
+                        .map_err(|_| Error::type_error(strand, "expected `Int`"))?,
                     None => 1,
                 };
                 if n >= 0 {
@@ -811,14 +811,14 @@ impl<'v> Object<'v> for Indicator {
                 if let Some(v) = icon {
                     let icon = v
                         .as_str(strand)
-                        .ok_or_else(|| Error::type_error(strand, "icon: expected `str`"))?
+                        .ok_or_else(|| Error::type_error(strand, "icon: expected `Str`"))?
                         .to_string();
                     this.annex().bar.set_prefix(icon);
                 }
                 if let Some(v) = message {
                     let msg = v
                         .as_str(strand)
-                        .ok_or_else(|| Error::type_error(strand, "message: expected `str`"))?
+                        .ok_or_else(|| Error::type_error(strand, "message: expected `Str`"))?
                         .to_string();
                     this.annex().bar.set_message(msg);
                 }
@@ -864,7 +864,7 @@ impl<'v> Object<'v> for Indicator {
                 if let Some(v) = delta {
                     let n = v
                         .to_i64(strand)
-                        .map_err(|_| Error::type_error(strand, "delta: expected `int`"))?;
+                        .map_err(|_| Error::type_error(strand, "delta: expected `Int`"))?;
                     if n >= 0 {
                         this.annex().bar.inc(n as u64); // safe: n >= 0
                     } else {

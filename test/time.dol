@@ -19,8 +19,8 @@ import strand
 def datetime_conversions()
   let now = DateTime.now()
   assert_type $DateTime $now
-  assert_type $float $now.unix_secs
-  assert_type $int $now.unix_nanos
+  assert_type $Float $now.unix_secs
+  assert_type $Int $now.unix_nanos
 
   assert $str(now).contains(":")
   assert_eq (str now) (now.rfc3339())

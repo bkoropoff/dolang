@@ -1,10 +1,10 @@
 import std:
   - hash
 
-# Basic subclassing of bool
-class MyBool: bool
+# Basic subclassing of Bool
+class MyBool: Bool
   def (init) self value
-    bool.(init) $self $value
+    Bool.(init) $self $value
 
 let t = MyBool true
 let f = MyBool false

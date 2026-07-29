@@ -6,22 +6,22 @@ assert_eq $arr[..] [0, 1, 2, 3]
 assert_eq $arr[-2..] [2, 3]
 assert_eq $arr[..-1] [0, 1, 2]
 assert_eq $arr[-3..-1] [1, 2]
-assert_eq $arr[range 0 4 2] [0, 2]
-assert_eq $arr[range 3 0 -1] [3, 2, 1]
-assert_eq $arr[range nil nil -1] [3, 2, 1, 0]
-assert_eq $arr[range 1 1 2] []
+assert_eq $arr[Range 0 4 2] [0, 2]
+assert_eq $arr[Range 3 0 -1] [3, 2, 1]
+assert_eq $arr[Range nil nil -1] [3, 2, 1, 0]
+assert_eq $arr[Range 1 1 2] []
 
-let tup = tuple([0, 1, 2, 3])
-assert_eq $tup[1..3] (tuple [1, 2])
-assert_eq $tup[..2] (tuple [0, 1])
-assert_eq $tup[2..] (tuple [2, 3])
-assert_eq $tup[..] (tuple [0, 1, 2, 3])
-assert_eq $tup[-2..] (tuple [2, 3])
-assert_eq $tup[..-1] (tuple [0, 1, 2])
-assert_eq $tup[-3..-1] (tuple [1, 2])
-assert_eq $tup[range 0 4 2] (tuple [0, 2])
-assert_eq $tup[range 3 0 -1] (tuple [3, 2, 1])
-assert_eq $tup[range nil nil -1] (tuple [3, 2, 1, 0])
+let tup = Tuple([0, 1, 2, 3])
+assert_eq $tup[1..3] (Tuple [1, 2])
+assert_eq $tup[..2] (Tuple [0, 1])
+assert_eq $tup[2..] (Tuple [2, 3])
+assert_eq $tup[..] (Tuple [0, 1, 2, 3])
+assert_eq $tup[-2..] (Tuple [2, 3])
+assert_eq $tup[..-1] (Tuple [0, 1, 2])
+assert_eq $tup[-3..-1] (Tuple [1, 2])
+assert_eq $tup[Range 0 4 2] (Tuple [0, 2])
+assert_eq $tup[Range 3 0 -1] (Tuple [3, 2, 1])
+assert_eq $tup[Range nil nil -1] (Tuple [3, 2, 1, 0])
 
 let text = "abcd"
 assert_eq $text[1..3] bc
@@ -40,9 +40,9 @@ assert_eq $data[..] b"abcd"
 assert_eq $data[-2..] b"cd"
 assert_eq $data[..-1] b"abc"
 assert_eq $data[-3..-1] b"bc"
-assert_eq $data[range 0 4 2] b"ac"
-assert_eq $data[range 3 0 -1] b"dcb"
-assert_eq $data[range nil nil -1] b"dcba"
+assert_eq $data[Range 0 4 2] b"ac"
+assert_eq $data[Range 3 0 -1] b"dcb"
+assert_eq $data[Range nil nil -1] b"dcba"
 
 let values = []
 for i = 2..
@@ -66,9 +66,9 @@ edit[1..2] = [4, 5, 6]
 assert_eq $edit [0, 4, 5, 6, 3]
 edit[1..4] = []
 assert_eq $edit [0, 3]
-edit[1..1] = (tuple [7, 8])
+edit[1..1] = (Tuple [7, 8])
 assert_eq $edit [0, 7, 8, 3]
-edit[1..2] = range 4 7
+edit[1..2] = Range 4 7
 assert_eq $edit [0, 4, 5, 6, 8, 3]
 edit[..2] = [1]
 assert_eq $edit [1, 5, 6, 8, 3]
@@ -89,8 +89,8 @@ def assert_err msg block
   assert $ok
 
 assert_err "index out of range or invalid" do
-  arr[range 0 4 0]
+  arr[Range 0 4 0]
 assert_err "index out of range or invalid" do
-  text[range 0 4 2]
+  text[Range 0 4 2]
 assert_err "index out of range or invalid" do
-  edit[range 0 4 2] = [1, 2]
+  edit[Range 0 4 2] = [1, 2]

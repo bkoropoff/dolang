@@ -25,14 +25,14 @@ handle.
 
 | Name         | Type                                                     | Description                           |
 | ------------ | -------------------------------------------------------- | ------------------------------------- |
-| `path`       | [`str`](../std/str.md)\|[`UnixPath`](../fs/unix-path.md) | Entry path                            |
-| `size`       | [`int`](../std/int.md)                                   | Exact content size                    |
-| `mode`       | [`int`](../std/int.md)?                                  | Permission bits; default `0o644`      |
-| `uid`        | [`int`](../std/int.md)?                                  | Owner ID; default `0`                 |
-| `gid`        | [`int`](../std/int.md)?                                  | Group ID; default `0`                 |
+| `path`       | [`Str`](../std/str.md)\|[`UnixPath`](../fs/unix-path.md) | Entry path                            |
+| `size`       | [`Int`](../std/int.md)                                   | Exact content size                    |
+| `mode`       | [`Int`](../std/int.md)?                                  | Permission bits; default `0o644`      |
+| `uid`        | [`Int`](../std/int.md)?                                  | Owner ID; default `0`                 |
+| `gid`        | [`Int`](../std/int.md)?                                  | Group ID; default `0`                 |
 | `mtime`      | [`DateTime`](../time/datetime.md)?                       | Modification time; default Unix epoch |
-| `user_name`  | [`str`](../std/str.md)?                                  | Owner name                            |
-| `group_name` | [`str`](../std/str.md)?                                  | Group name                            |
+| `user_name`  | [`Str`](../std/str.md)?                                  | Owner name                            |
+| `group_name` | [`Str`](../std/str.md)?                                  | Group name                            |
 | `func`       | callable                                                 | Entry writer scope                    |
 
 **Returns:** the result of `func`.
@@ -56,13 +56,13 @@ Creates a directory entry.
 
 | Name         | Type                                                     | Description                           |
 | ------------ | -------------------------------------------------------- | ------------------------------------- |
-| `path`       | [`str`](../std/str.md)\|[`UnixPath`](../fs/unix-path.md) | Entry path                            |
-| `mode`       | [`int`](../std/int.md)?                                  | Permission bits; default `0o755`      |
-| `uid`        | [`int`](../std/int.md)?                                  | Owner ID; default `0`                 |
-| `gid`        | [`int`](../std/int.md)?                                  | Group ID; default `0`                 |
+| `path`       | [`Str`](../std/str.md)\|[`UnixPath`](../fs/unix-path.md) | Entry path                            |
+| `mode`       | [`Int`](../std/int.md)?                                  | Permission bits; default `0o755`      |
+| `uid`        | [`Int`](../std/int.md)?                                  | Owner ID; default `0`                 |
+| `gid`        | [`Int`](../std/int.md)?                                  | Group ID; default `0`                 |
 | `mtime`      | [`DateTime`](../time/datetime.md)?                       | Modification time; default Unix epoch |
-| `user_name`  | [`str`](../std/str.md)?                                  | Owner name                            |
-| `group_name` | [`str`](../std/str.md)?                                  | Group name                            |
+| `user_name`  | [`Str`](../std/str.md)?                                  | Owner name                            |
+| `group_name` | [`Str`](../std/str.md)?                                  | Group name                            |
 
 ```
 archive.create_dir "subdir" mode: 0o755
@@ -77,14 +77,14 @@ Creates a symbolic link entry pointing to `target`. Argument order matches
 
 | Name         | Type                                                     | Description                           |
 | ------------ | -------------------------------------------------------- | ------------------------------------- |
-| `target`     | [`str`](../std/str.md)\|[`UnixPath`](../fs/unix-path.md) | Path the symlink points to            |
-| `path`       | [`str`](../std/str.md)\|[`UnixPath`](../fs/unix-path.md) | Entry path                            |
-| `mode`       | [`int`](../std/int.md)?                                  | Permission bits; default `0o777`      |
-| `uid`        | [`int`](../std/int.md)?                                  | Owner ID; default `0`                 |
-| `gid`        | [`int`](../std/int.md)?                                  | Group ID; default `0`                 |
+| `target`     | [`Str`](../std/str.md)\|[`UnixPath`](../fs/unix-path.md) | Path the symlink points to            |
+| `path`       | [`Str`](../std/str.md)\|[`UnixPath`](../fs/unix-path.md) | Entry path                            |
+| `mode`       | [`Int`](../std/int.md)?                                  | Permission bits; default `0o777`      |
+| `uid`        | [`Int`](../std/int.md)?                                  | Owner ID; default `0`                 |
+| `gid`        | [`Int`](../std/int.md)?                                  | Group ID; default `0`                 |
 | `mtime`      | [`DateTime`](../time/datetime.md)?                       | Modification time; default Unix epoch |
-| `user_name`  | [`str`](../std/str.md)?                                  | Owner name                            |
-| `group_name` | [`str`](../std/str.md)?                                  | Group name                            |
+| `user_name`  | [`Str`](../std/str.md)?                                  | Owner name                            |
+| `group_name` | [`Str`](../std/str.md)?                                  | Group name                            |
 
 ```
 archive.symlink "target.txt" "link.txt"
@@ -99,14 +99,14 @@ Creates a hard-link entry pointing to `target`. Argument order matches
 
 | Name         | Type                                                     | Description                           |
 | ------------ | -------------------------------------------------------- | ------------------------------------- |
-| `target`     | [`str`](../std/str.md)\|[`UnixPath`](../fs/unix-path.md) | Path the hard link points to          |
-| `path`       | [`str`](../std/str.md)\|[`UnixPath`](../fs/unix-path.md) | Entry path                            |
-| `mode`       | [`int`](../std/int.md)?                                  | Permission bits; default `0o644`      |
-| `uid`        | [`int`](../std/int.md)?                                  | Owner ID; default `0`                 |
-| `gid`        | [`int`](../std/int.md)?                                  | Group ID; default `0`                 |
+| `target`     | [`Str`](../std/str.md)\|[`UnixPath`](../fs/unix-path.md) | Path the hard link points to          |
+| `path`       | [`Str`](../std/str.md)\|[`UnixPath`](../fs/unix-path.md) | Entry path                            |
+| `mode`       | [`Int`](../std/int.md)?                                  | Permission bits; default `0o644`      |
+| `uid`        | [`Int`](../std/int.md)?                                  | Owner ID; default `0`                 |
+| `gid`        | [`Int`](../std/int.md)?                                  | Group ID; default `0`                 |
 | `mtime`      | [`DateTime`](../time/datetime.md)?                       | Modification time; default Unix epoch |
-| `user_name`  | [`str`](../std/str.md)?                                  | Owner name                            |
-| `group_name` | [`str`](../std/str.md)?                                  | Group name                            |
+| `user_name`  | [`Str`](../std/str.md)?                                  | Owner name                            |
+| `group_name` | [`Str`](../std/str.md)?                                  | Group name                            |
 
 ```
 archive.hard_link "file.txt" "link.txt"

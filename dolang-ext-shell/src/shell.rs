@@ -499,7 +499,7 @@ impl<'v> Object<'v> for Vfs {
             let mut env_overrides = HashMap::new();
             if let Some(env_value) = env_value {
                 let View::Dict(env_value) = env_value.view(strand) else {
-                    return Err(Error::type_error(strand, "env: expected dict"));
+                    return Err(Error::type_error(strand, "env: expected Dict"));
                 };
                 let mut pairs = env_value.pairs();
                 strand.with_slots_sync(|strand, [mut key, mut value]| {
@@ -510,7 +510,7 @@ impl<'v> Object<'v> for Vfs {
                             _ => {
                                 return Err(Error::type_error(
                                     strand,
-                                    "env key: expected str or sym",
+                                    "env key: expected Str or Sym",
                                 ));
                             }
                         };
@@ -672,7 +672,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                     } else {
                         return Err(Error::type_error(
                             strand,
-                            "program: expected fs.Path or str",
+                            "program: expected fs.Path or Str",
                         ));
                     }
                 } else {

@@ -89,4 +89,4 @@ def cookie_jar_session()
 
 #[test]
 def cookies_kwarg_type_error()
-  assert_err $http.Client cookies: 1 type: $TypeError msg: "type error: cookies: expected bool"
+  assert_err $http.Client cookies: 1 type: $TypeError msg: "type error: cookies: expected Bool"

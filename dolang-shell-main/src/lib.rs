@@ -136,7 +136,7 @@ fn run(config: Arc<dyn Config>) -> i32 {
                 .function("compile_script", async move |strand, args, out| {
                     let ([path], []) = unpack!(strand, args, 1, 0)?;
                     let path = dolang_ext_shell::as_path(strand, &path).ok_or_else(|| {
-                        RuntimeError::type_error(strand, "path must be a str or fs.Path")
+                        RuntimeError::type_error(strand, "path must be a Str or fs.Path")
                     })?;
                     let bytecode = load::compile_script_cached(
                         strand,

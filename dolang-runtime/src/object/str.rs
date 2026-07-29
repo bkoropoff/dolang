@@ -211,7 +211,7 @@ impl<'v> Protocol<'v> for str {
                 let limit_i64 = limit
                     .map(|l| {
                         l.to_i64(strand)
-                            .map_err(|_| Error::type_error(strand, "limit: expected `int`"))
+                            .map_err(|_| Error::type_error(strand, "limit: expected `Int`"))
                     })
                     .transpose()?;
                 let delim_gc = delim
@@ -404,7 +404,7 @@ impl<'v> Protocol<'v> for str {
             }
             sym::LEN => Err(Error::type_error(
                 strand,
-                "str.len is a field, not a method",
+                "Str.len is a field, not a method",
             )),
             _ => Err(Error::field(strand, method)),
         }
@@ -453,7 +453,7 @@ enum SplitState {
         limit: usize,
         reverse: bool,
     },
-    /// Pre-computed segments (byte ranges into `str`) stored in yield order.
+    /// Pre-computed segments (byte ranges into `Str`) stored in yield order.
     /// Used when split direction differs from yield direction.
     Buffered {
         segments: Vec<(usize, usize)>,
@@ -681,7 +681,7 @@ impl<'v> Protocol<'v> for Type {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "<type std.str>")
+        crate::fmt!(strand, w, "<type std.Str>")
     }
 
     async fn op_call<'a, 's>(
@@ -690,12 +690,18 @@ impl<'v> Protocol<'v> for Type {
         args: Args<'v, 'a>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        // Constructor: str(value) - convert to string
-        let ([value], _) = unpack!(strand, args, 1, 0)?;
-        let mut format = StrEmbryo::new();
-        value.display(strand, &mut format)?;
-        format.finish(strand, out);
-        Ok(())
+        let ([value], []) = unpack!(strand, args, 1, 0)?;
+        if let Some(value) = value.as_str_raw(strand) {
+            Output::set(strand, out, value);
+            Ok(())
+        } else if let Some(value) = value.as_bin_raw(strand) {
+            let value = std::str::from_utf8(value)
+                .map_err(|_| Error::value(strand, "Str: invalid UTF-8"))?;
+            Output::set(strand, out, value);
+            Ok(())
+        } else {
+            Err(Error::type_error(strand, "Str: expected Str or Bin"))
+        }
     }
 
     fn op_inspect<'a>(_this: Recv<'v, 'a, Self>, _vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {
@@ -775,9 +781,15 @@ impl<'v> Protocol<'v> for Type {
         match method.tag() {
             sym::INIT_METHOD => {
                 let ([self_val, value], []) = unpack!(strand, args, 2, 0)?;
-                let mut format = StrEmbryo::new();
-                value.display(strand, &mut format)?;
-                format.finish(strand, &mut out);
+                if let Some(value) = value.as_str_raw(strand) {
+                    Output::set(strand, &mut out, value);
+                } else if let Some(value) = value.as_bin_raw(strand) {
+                    let value = std::str::from_utf8(value)
+                        .map_err(|_| Error::value(strand, "Str: invalid UTF-8"))?;
+                    Output::set(strand, &mut out, value);
+                } else {
+                    return Err(Error::type_error(strand, "Str: expected Str or Bin"));
+                }
                 let native = out.take();
                 self_val.op_fill(strand, &strand.singletons().str, native)?;
                 Ok(())

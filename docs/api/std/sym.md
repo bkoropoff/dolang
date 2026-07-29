@@ -1,4 +1,4 @@
-# sym
+# Sym
 
 Symbols are interned identifiers used for dictionary keys and enum-like
 values.
@@ -11,7 +11,7 @@ Literal syntax with surrounding colons:
 let s = :my_symbol:
 ```
 
-From a string with `sym`:
+From a string with the lowercase `sym` coercion:
 
 ```
 let s = sym "my_symbol"

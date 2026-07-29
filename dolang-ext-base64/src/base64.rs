@@ -10,7 +10,7 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
             let encoded = match arg.view(strand.vm()) {
                 View::Str(str) => strand.access(|access| STANDARD.encode(str.as_str(access))),
                 View::Bin(bin) => strand.access(|access| STANDARD.encode(bin.as_slice(access))),
-                _ => return Err(Error::type_error(strand, "expected str or bin")),
+                _ => return Err(Error::type_error(strand, "expected Str or Bin")),
             };
             Output::set(strand, out, encoded.as_str());
             Ok(())
@@ -21,7 +21,7 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
                 View::Str(str) => strand
                     .access(|access| STANDARD.decode(str.as_str(access)))
                     .map_err(|e| Error::value(strand, e.to_string()))?,
-                _ => return Err(Error::type_error(strand, "expected str")),
+                _ => return Err(Error::type_error(strand, "expected Str")),
             };
             Output::set(strand, out, decoded.as_slice());
             Ok(())

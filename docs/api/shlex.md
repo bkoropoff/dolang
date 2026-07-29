@@ -16,7 +16,7 @@ Quote a string for shell safety.
 
 #### Returns
 
-[`str`](../api/std/str.md) - The quoted string.
+[`Str`](../api/std/str.md) - The quoted string.
 
 ```
 echo (quote "hello world")
@@ -31,7 +31,7 @@ Split a shell-quoted string into tokens, returning an iterator.
 
 | Name     | Type                       | Description     |
 | -------- | -------------------------- | --------------- |
-| `string` | [`str`](../api/std/str.md) | string to split |
+| `string` | [`Str`](../api/std/str.md) | string to split |
 
 #### Returns
 
@@ -58,7 +58,7 @@ Join an iterable of arguments into a shell-quoted string.
 
 #### Returns
 
-[`str`](../api/std/str.md) - Joined string with proper quoting.
+[`Str`](../api/std/str.md) - Joined string with proper quoting.
 
 ```
 echo $ join ["echo", "hello world"]

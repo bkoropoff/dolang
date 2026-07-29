@@ -132,7 +132,7 @@ fn parse_color_value<'v, 's>(
 ) -> Result<'v, 's, Color> {
     let value = value
         .as_sym(strand)
-        .ok_or_else(|| Error::type_error(strand, format!("style: {name}: expected `sym`")))?;
+        .ok_or_else(|| Error::type_error(strand, format!("style: {name}: expected `Sym`")))?;
     colors
         .get(value)
         .ok_or_else(|| Error::value(strand, format!("style: {name}: unknown color")))
@@ -509,13 +509,13 @@ fn as_style_dict<'v, 's, 'a>(
     val: &'a Value<'v>,
 ) -> Result<'v, 's, dolang::runtime::value::Dict<'v, 'a>> {
     val.as_dict(strand)
-        .ok_or_else(|| Error::type_error(strand, "style: expected `dict`"))
+        .ok_or_else(|| Error::type_error(strand, "style: expected `Dict`"))
 }
 
 fn parse_attrs<'v, 's>(strand: &mut Strand<'v, 's>, val: &Value<'v>) -> Result<'v, 's, Vec<Attr>> {
     let arr = val
         .as_array(strand.vm())
-        .ok_or_else(|| Error::type_error(strand, "style: attrs: expected array"))?;
+        .ok_or_else(|| Error::type_error(strand, "style: attrs: expected Array"))?;
     let len = arr.len(strand)?;
     let mut attrs = Vec::with_capacity(len);
     for i in 0..len {
@@ -523,7 +523,7 @@ fn parse_attrs<'v, 's>(strand: &mut Strand<'v, 's>, val: &Value<'v>) -> Result<'
             arr.get(strand, i, &mut elem)?;
             let s = elem
                 .as_str(strand)
-                .ok_or_else(|| Error::type_error(strand, "style: attrs: expected `str` element"))?
+                .ok_or_else(|| Error::type_error(strand, "style: attrs: expected `Str` element"))?
                 .to_string();
             let attr = Attr::try_from(s.as_str())
                 .map_err(|e| Error::runtime(strand, format!("style: attrs: {e}")))?;
@@ -550,7 +550,7 @@ fn parse_element_style<'v, 's>(
         while pairs.next(strand, &mut key, &mut val)? {
             let sym = key
                 .as_sym(strand)
-                .ok_or_else(|| Error::type_error(strand, "style: expected `sym` key"))?;
+                .ok_or_else(|| Error::type_error(strand, "style: expected `Sym` key"))?;
             if sym == keys.fg {
                 es.fg = Some(parse_color_value(strand, &val, "fg", keys.colors)?);
             } else if sym == keys.bg {
@@ -581,11 +581,11 @@ fn parse_width_category<'v, 's>(
         while pairs.next(strand, &mut key, &mut val)? {
             let sym = key
                 .as_sym(strand)
-                .ok_or_else(|| Error::type_error(strand, "style: expected `sym` key"))?;
+                .ok_or_else(|| Error::type_error(strand, "style: expected `Sym` key"))?;
             if sym == keys.width {
                 let n = val
                     .to_i64(strand)
-                    .map_err(|_| Error::type_error(strand, "style: width: expected `int`"))?;
+                    .map_err(|_| Error::type_error(strand, "style: width: expected `Int`"))?;
                 *width = n as u16;
             } else if sym == keys.fg {
                 es.fg = Some(parse_color_value(strand, &val, "fg", keys.colors)?);
@@ -618,7 +618,7 @@ pub(crate) fn parse_style<'v, 's>(
         while pairs.next(strand, &mut key, &mut val)? {
             let sym = key
                 .as_sym(strand)
-                .ok_or_else(|| Error::type_error(strand, "style: expected `sym` key"))?;
+                .ok_or_else(|| Error::type_error(strand, "style: expected `Sym` key"))?;
             if sym == keys.bar {
                 parse_width_category(
                     strand,

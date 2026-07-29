@@ -10,6 +10,6 @@ pub def assert_err func type: ty :msg ...rest
 
 pub def cases run ...cases
   for i case = cases
-    assert $ type $i $int
+    assert $ type $i $Int
     log "test case: $case"
     run ...case

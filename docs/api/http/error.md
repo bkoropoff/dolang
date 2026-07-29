@@ -6,7 +6,7 @@
 try
   get "http://127.0.0.1:1"
 catch Error: err
-  echo $str(err)
+  echo $Str(err)
 ```
 
 `str(err)` returns the underlying error message.

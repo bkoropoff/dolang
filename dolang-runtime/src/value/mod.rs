@@ -52,7 +52,7 @@ pub(crate) enum Case<'v, 'a> {
 /// or the [`Object::SLOTS`](crate::object::native::Object::SLOTS) mechanism.
 pub struct Value<'v>(Repr, PhantomData<&'v mut &'v ()>);
 
-/// Growable binary buffer that can be finalized directly into a Do `bin` or `str`.
+/// Growable binary buffer that can be finalized directly into a Do `Bin` or `Str`.
 ///
 /// This is useful when bytes arrive incrementally and an intermediate
 /// allocation would otherwise be needed before constructing a Do value.
@@ -60,7 +60,7 @@ pub struct BinEmbryo<'v> {
     embryo: Option<gc::Embryo<'v, Header, [u8]>>,
 }
 
-/// Growable UTF-8 buffer that can be finalized directly into a Do `str`.
+/// Growable UTF-8 buffer that can be finalized directly into a Do `Str`.
 ///
 /// Safe methods on this type preserve the invariant that the initialized prefix
 /// is valid UTF-8. The unsafe spare-capacity/advance path may be used when the
@@ -1342,7 +1342,7 @@ impl<'v> Value<'v> {
         self.op_put(strand, slot).await
     }
 
-    /// Downcast to `int` ([`i128`]).
+    /// Downcast to `Int` ([`i128`]).
     ///
     /// # Errors
     /// Returns a type error if the value is not an integer.
@@ -1350,7 +1350,7 @@ impl<'v> Value<'v> {
     pub fn to_int<'s>(&self, strand: &mut Strand<'v, 's>) -> Result<'v, 's, i128> {
         match self.to_prim(strand)? {
             Prim::Int(v) => Ok(v),
-            _ => Err(Error::type_error(strand, "expected int")),
+            _ => Err(Error::type_error(strand, "expected Int")),
         }
     }
 
@@ -1409,10 +1409,10 @@ impl<'v> Value<'v> {
         usize::try_from(value).map_err(|_| Error::value(strand, "int out of range for usize"))
     }
 
-    /// Downcast to `int` ([`i128`]).
+    /// Downcast to `Int` ([`i128`]).
     ///
     /// # Returns
-    /// - [`None`]: Not an `int` value
+    /// - [`None`]: Not an `Int` value
     /// - [`Some(value)`](Some): The value as an [`i128`]
     #[inline]
     pub fn as_int(&self, strand: &mut Strand<'v, '_>) -> Option<i128> {
@@ -1422,7 +1422,7 @@ impl<'v> Value<'v> {
         }
     }
 
-    /// Test whether the value is an `int`.
+    /// Test whether the value is an `Int`.
     #[inline]
     pub fn is_int(&self, strand: &mut Strand<'v, '_>) -> bool {
         self.as_int(strand).is_some()
@@ -1441,13 +1441,13 @@ impl<'v> Value<'v> {
         }
     }
 
-    /// Downcast to [`bool`]
+    /// Downcast to [`Bool`]
     ///
-    /// If you want to convert to `bool` based on "truthiness", use [`Value::to_bool`].
+    /// If you want to convert to `Bool` based on "truthiness", use [`Value::to_bool`].
     ///
     /// # Returns
-    /// - [`None`]: Not a `bool` value
-    /// - [`Some(value)`](Some): The value as a `bool`
+    /// - [`None`]: Not a `Bool` value
+    /// - [`Some(value)`](Some): The value as a `Bool`
     #[inline]
     pub fn as_bool(&self, strand: &mut Strand<'v, '_>) -> Option<bool> {
         match self.to_prim(strand) {
@@ -1456,43 +1456,43 @@ impl<'v> Value<'v> {
         }
     }
 
-    /// Downcast to `str` ([`&str`])
+    /// Downcast to `Str` ([`&str`])
     ///
     /// If you want to convert to a string, use [`Value::to_string`].
     ///
     /// # Returns
-    /// - [`None`]: Not a `str` value
-    /// - [`Some(value)`](Some): The value as a `str`
+    /// - [`None`]: Not a `Str` value
+    /// - [`Some(value)`](Some): The value as a `Str`
     #[inline]
     pub(crate) fn as_str_raw(&self, vm: &Vm<'v>) -> Option<&str> {
         self.downcast_native(vm, vm.builtin_types().str)
             .map(|s| s.get())
     }
 
-    /// Downcast to a `str` witness.
+    /// Downcast to a `Str` witness.
     #[inline]
     pub fn as_str<'a>(&'a self, vm: &Vm<'v>) -> Option<Str<'v, 'a>> {
         Some(Str::from_value(self.as_str_raw(vm)?))
     }
 
-    /// Downcast to `bin` ([`&[u8]`])
+    /// Downcast to `Bin` ([`&[u8]`])
     ///
     /// # Returns
-    /// - [`None`]: Not a `bin` value
-    /// - [`Some(value)`](Some): The value as a `bin`
+    /// - [`None`]: Not a `Bin` value
+    /// - [`Some(value)`](Some): The value as a `Bin`
     #[inline]
     pub(crate) fn as_bin_raw(&self, vm: &Vm<'v>) -> Option<&[u8]> {
         self.downcast_native(vm, vm.builtin_types().bin)
             .map(|s| s.get())
     }
 
-    /// Downcast to a `bin` witness.
+    /// Downcast to a `Bin` witness.
     #[inline]
     pub fn as_bin<'a>(&'a self, vm: &Vm<'v>) -> Option<Bin<'v, 'a>> {
         Some(Bin::from_value(self.as_bin_raw(vm)?))
     }
 
-    /// Downcast to [`&[u8]`].  This works for both `str` and `bin` types.
+    /// Downcast to [`&[u8]`].  This works for both `Str` and `Bin` types.
     ///
     /// # Returns
     /// - [`None`]: Not a `&[u8]` value
@@ -1684,7 +1684,7 @@ impl<'v> BinEmbryo<'v> {
         unsafe { self.embryo.as_mut().unwrap_unchecked().extend(slice) }
     }
 
-    /// Finalizes the embryo into a Do `bin` and writes it to `out`.
+    /// Finalizes the embryo into a Do `Bin` and writes it to `out`.
     pub fn finish(self, alloc: &mut impl Alloc<'v>, mut out: impl Output<'v>) {
         let vm = alloc.alloc_vm(crate::vm::private::Sealed);
         let value = unsafe {
@@ -1701,7 +1701,7 @@ impl<'v> BinEmbryo<'v> {
         Slot::from_output(&mut out).store(value);
     }
 
-    /// Finalizes the embryo into a Do `str` after validating it as UTF-8.
+    /// Finalizes the embryo into a Do `Str` after validating it as UTF-8.
     pub fn finish_str(
         self,
         alloc: &mut impl Alloc<'v>,
@@ -1712,7 +1712,7 @@ impl<'v> BinEmbryo<'v> {
         Ok(())
     }
 
-    /// Finalizes the embryo into a Do `str` *without validation*
+    /// Finalizes the embryo into a Do `Str` *without validation*
     /// # Safety
     /// The initialized bytes must be valid UTF-8.
     pub unsafe fn finish_str_unchecked(self, alloc: &mut impl Alloc<'v>, mut out: impl Output<'v>) {
@@ -1812,7 +1812,7 @@ impl<'v> StrEmbryo<'v> {
         }
     }
 
-    /// Finalizes the embryo into a Do `str` and writes it to `out`.
+    /// Finalizes the embryo into a Do `Str` and writes it to `out`.
     pub fn finish(self, alloc: &mut impl Alloc<'v>, mut out: impl Output<'v>) {
         let vm = alloc.alloc_vm(crate::vm::private::Sealed);
         let value = unsafe {
@@ -2339,9 +2339,9 @@ impl<'v, 'a> Slots<'v, 'a> {
 /// [`Input`] which becomes a well-known type object
 #[non_exhaustive]
 pub enum TypeObject {
-    /// `std.value`, the universal supertype
+    /// `std.Value`, the universal supertype
     Value,
-    /// `std.type`, the type of types
+    /// `std.Type`, the type of types
     Type,
     /// `std.error.Value`
     ValueError,

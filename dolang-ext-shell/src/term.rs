@@ -685,7 +685,7 @@ fn color<'v, 's>(
         }
         _ => Err(Error::type_error(
             strand,
-            format!("{name}: expected sym, int, array, or tuple"),
+            format!("{name}: expected Sym, int, array, or Tuple"),
         )),
     }
 }
@@ -1107,7 +1107,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             let ([value], []) = unpack!(strand, args, 1, 0)?;
             let value = value
                 .as_str(strand)
-                .ok_or_else(|| Error::type_error(strand, "preformat: expected str"))?
+                .ok_or_else(|| Error::type_error(strand, "preformat: expected Str"))?
                 .pin();
             create_preformatted_text(strand, global, &value, out)
         })

@@ -1,9 +1,17 @@
-# dict
+# Dict
 
 Dictionaries are **ordered**, mutable key-value mappings. They preserve
 insertion order and are **multi-maps**: a single key can have multiple values.
 
 Keys can be any hashable type.
+
+## Constructor
+
+### `Dict source`
+
+Builds a dictionary from one spreadable source of key-value pairs. The
+lowercase `dict` factory instead assigns integer keys to positional arguments
+and symbol keys to keyword arguments.
 
 ## Ordering
 
@@ -33,7 +41,7 @@ separately).
 
 #### Type
 
-[`int`](./index.md)
+[`Int`](./index.md)
 
 ## Methods
 
@@ -56,7 +64,7 @@ values are *not* copied recursively.
 
 #### Returns
 
-[`dict`](./dict.md)
+[`Dict`](./dict.md)
 
 When inherited by a Do subclass, `copy()` calls the subclass constructor with
 the source dict as a single positional argument.
@@ -83,7 +91,7 @@ alternative is provided. Negative `instance` indexes count from the end.
 | Name       | Type                | Description                                                                                                 |
 | ---------- | ------------------- | ----------------------------------------------------------------------------------------------------------- |
 | `key`      |                     | the key to look up                                                                                          |
-| `instance` | [`int`](./index.md) | which value to retrieve when a key has multiple values (0-indexed; negative counts from end; default: last) |
+| `instance` | [`Int`](./index.md) | which value to retrieve when a key has multiple values (0-indexed; negative counts from end; default: last) |
 | `default:` |                     | value to return if missing                                                                                  |
 | `else:`    |                     | callable to invoke if missing                                                                               |
 
@@ -110,7 +118,7 @@ remove a specific value by its position among values for that key. Negative
 | Name       | Type  | Description                                                                                               |
 | ---------- | ----- | --------------------------------------------------------------------------------------------------------- |
 | `key`      |       | the key to remove                                                                                         |
-| `instance` | `int` | which value to remove when a key has multiple values (0-indexed; negative counts from end; default: last) |
+| `instance` | `Int` | which value to remove when a key has multiple values (0-indexed; negative counts from end; default: last) |
 | `default:` |       | value to return if missing                                                                                |
 | `else:`    |       | callable to invoke if missing                                                                             |
 
@@ -142,7 +150,7 @@ Removes all values for the key.
 
 #### Returns
 
-[`bool`](./index.md) indicating whether any values were removed
+[`Bool`](./index.md) indicating whether any values were removed
 
 ```
 let d = {a: 1, b: 2}
@@ -155,7 +163,7 @@ assert_eq $d.len 1
 
 Returns an iterator yielding `[key, value]` pairs, the same as ordinary
 iteration. This method is present to allow uniform key/value iteration
-over both [`dict`](./dict.md) and [`array`](./array.md).
+over both [`Dict`](./dict.md) and [`Array`](./array.md).
 
 #### Returns
 
@@ -195,7 +203,7 @@ Missing keys return `0`.
 
 #### Returns
 
-[`int`](./index.md)
+[`Int`](./index.md)
 
 ### `contains key value?`
 
@@ -212,7 +220,7 @@ tests whether any value associated with that key matches the given value
 
 #### Returns
 
-[`bool`](./index.md)
+[`Bool`](./index.md)
 
 ```
 let d = {a: 1, b: 2}
@@ -242,7 +250,7 @@ d[:age:] = 30
 Missing keys raise an error on access. Assignment replaces all values for the
 key.
 
-[`range`](./range.md) values are treated as ordinary keys, not as slices.
+[`Range`](./range.md) values are treated as ordinary keys, not as slices.
 
 ### Iteration
 

@@ -13,7 +13,7 @@ The request method, e.g. `"GET"`.
 
 #### Type
 
-[`str`](../std/str.md)
+[`Str`](../std/str.md)
 
 ### `url`
 
@@ -21,7 +21,7 @@ The full request URL.
 
 #### Type
 
-[`str`](../std/str.md)
+[`Str`](../std/str.md)
 
 ### `headers`
 
@@ -32,7 +32,7 @@ last), matching [`dict.get`](../std/dict.md#get-key-instance-default-else).
 
 #### Type
 
-[`dict`](../std/dict.md)-like
+[`Dict`](../std/dict.md)-like
 
 ```
 server.mock
@@ -48,4 +48,4 @@ The raw request body.
 
 #### Type
 
-[`bin`](../std/bin.md)
+[`Bin`](../std/bin.md)

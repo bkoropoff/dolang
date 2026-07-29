@@ -11,22 +11,22 @@ modes.
 
 ### `message`
 
-The indicator message text (`str`). Read-only — see
+The indicator message text (`Str`). Read-only — see
 [`update`](#update-icon-message-total-position-delta).
 
 ### `icon`
 
-The prefix icon (`str`). Read-only — see
+The prefix icon (`Str`). Read-only — see
 [`update`](#update-icon-message-total-position-delta).
 
 ### `total`
 
-The total value for bar mode (`int`), or `nil` for spinner mode. Read-only —
+The total value for bar mode (`Int`), or `nil` for spinner mode. Read-only —
 see [`update`](#update-icon-message-total-position-delta).
 
 ### `position`
 
-The current position (`int`). Read-only — see
+The current position (`Int`). Read-only — see
 [`update`](#update-icon-message-total-position-delta).
 
 ## Methods
@@ -38,11 +38,11 @@ of one per field.
 
 | Name       | Type                    | Description                                |
 | ---------- | ----------------------- | ------------------------------------------ |
-| `icon`     | [`str`](../std/str.md)? | New prefix icon                            |
-| `message`  | [`str`](../std/str.md)? | New message text                           |
-| `total`    | [`int`](../std/int.md)? | New total; `nil` switches to spinner mode  |
-| `position` | [`int`](../std/int.md)? | Absolute position                          |
-| `delta`    | [`int`](../std/int.md)? | Relative adjustment (positive or negative) |
+| `icon`     | [`Str`](../std/str.md)? | New prefix icon                            |
+| `message`  | [`Str`](../std/str.md)? | New message text                           |
+| `total`    | [`Int`](../std/int.md)? | New total; `nil` switches to spinner mode  |
+| `position` | [`Int`](../std/int.md)? | Absolute position                          |
+| `delta`    | [`Int`](../std/int.md)? | Relative adjustment (positive or negative) |
 
 `position` and `delta` are exclusive — passing both raises an error. Omitted
 keys are left unchanged.
@@ -66,4 +66,4 @@ progress.
 
 | Name | Type                   | Description                  |
 | ---- | ---------------------- | ---------------------------- |
-| `n`  | [`int`](../std/int.md) | Amount to adjust (default 1) |
+| `n`  | [`Int`](../std/int.md) | Amount to adjust (default 1) |

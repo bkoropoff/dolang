@@ -22,7 +22,7 @@ import agent proc sys sys.unix sys.windows _vfs
     - Vfs
   std:
     - FieldError
-    - nulliter
+    - NULLITER
     - RuntimeError
   time:
     - sleep
@@ -100,7 +100,7 @@ def path_selector()
     "echo"
   let path = run[name].which()
   let prog = run[path]
-  strand.redirect output: $nulliter do
+  strand.redirect output: $NULLITER do
     if is_windows
       prog /c echo ok
       run $path /c echo ok

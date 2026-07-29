@@ -36,7 +36,7 @@ assert_eq (mapped.max()) 6
 let filtered = [1, 2, 3, 4].iter().filter (do |x| x % 2 == 0)
 assert_eq (filtered.min()) 2
 
-let ranged = (range start: 5 end: 0 step: -1).iter()
+let ranged = (Range start: 5 end: 0 step: -1).iter()
 assert_eq (ranged.min()) 1
 
 let pair = ([10, 20]).pairs().max()

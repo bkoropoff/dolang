@@ -13,7 +13,7 @@ Suspends the current strand.
 
 | Name       | Type                                                                                | Description                                                |
 | ---------- | ----------------------------------------------------------------------------------- | ---------------------------------------------------------- |
-| `duration` | [`Duration`](./duration.md) \| [`int`](../std/int.md) \| [`float`](../std/float.md) | Sleep duration. Numeric values are interpreted as seconds. |
+| `duration` | [`Duration`](./duration.md) \| [`Int`](../std/int.md) \| [`Float`](../std/float.md) | Sleep duration. Numeric values are interpreted as seconds. |
 
 **Notes:**
 
@@ -33,8 +33,8 @@ Runs `block` with a scoped timeout.
 
 | Name       | Type                                                                                | Description                                                  |
 | ---------- | ----------------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| `duration` | [`Duration`](./duration.md) \| [`int`](../std/int.md) \| [`float`](../std/float.md) | Timeout duration. Numeric values are interpreted as seconds. |
-| `block`    | [`func`](../std/func.md)                                                            | Block to run under the timeout scope.                        |
+| `duration` | [`Duration`](./duration.md) \| [`Int`](../std/int.md) \| [`Float`](../std/float.md) | Timeout duration. Numeric values are interpreted as seconds. |
+| `block`    | [`Func`](../std/func.md)                                                            | Block to run under the timeout scope.                        |
 
 #### Returns
 

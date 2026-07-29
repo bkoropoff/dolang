@@ -41,8 +41,8 @@ def spread_twice ...args
 def collect_pairs ...args
   [...args]
 
-assert (type (std.args 1 2) std.args)
-let pack = std.args 1
+assert (type (std.Args 1 2) std.Args)
+let pack = std.Args 1
 assert_eq (pack.push 2 name: "Alice") nil
 let pushed = [...pack]
 assert_eq $pushed[0][1] 1

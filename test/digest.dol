@@ -90,22 +90,22 @@ def update_rejects_non_string_non_binary()
   let bad = digest.Blake3()
   let err = assert_throws $TypeError do
     bad.update 123
-  assert_eq (str err) "type error: expected str or bin"
+  assert_eq (str err) "type error: expected Str or Bin"
 
 #[test]
 def digest_functions_reject_non_string_non_binary()
   let md5_err = assert_throws $TypeError do
     digest.md5 123
-  assert_eq (str md5_err) "type error: expected str or bin"
+  assert_eq (str md5_err) "type error: expected Str or Bin"
 
   let sha1_err = assert_throws $TypeError do
     digest.sha1 123
-  assert_eq (str sha1_err) "type error: expected str or bin"
+  assert_eq (str sha1_err) "type error: expected Str or Bin"
 
   let sha256_err = assert_throws $TypeError do
     digest.sha256 123
-  assert_eq (str sha256_err) "type error: expected str or bin"
+  assert_eq (str sha256_err) "type error: expected Str or Bin"
 
   let sha512_err = assert_throws $TypeError do
     digest.sha512 123
-  assert_eq (str sha512_err) "type error: expected str or bin"
+  assert_eq (str sha512_err) "type error: expected Str or Bin"

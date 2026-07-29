@@ -6,8 +6,8 @@ A signed time span with nanosecond precision.
 
 | Field   | Type                       | Description                  |
 | ------- | -------------------------- | ---------------------------- |
-| `secs`  | [`float`](../std/float.md) | Approximate seconds view     |
-| `nanos` | [`int`](../std/int.md)     | Exact total nanoseconds view |
+| `secs`  | [`Float`](../std/float.md) | Approximate seconds view     |
+| `nanos` | [`Int`](../std/int.md)     | Exact total nanoseconds view |
 
 ## String Form
 

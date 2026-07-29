@@ -1,7 +1,7 @@
 def make_cyclic len inner
   let start = [inner]
   let link = start
-  for _ = range $len
+  for _ = Range $len
     link = [link]
   start.push $link
   start
@@ -16,7 +16,7 @@ let clear_at = 5
 let last = nil
 let keep = []
 
-for len = range $count
+for len = Range $count
   last = make_cyclic $len $last
   if (len % keep_at == 0)
     keep.push $last

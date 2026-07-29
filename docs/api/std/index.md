@@ -6,26 +6,26 @@ The `std` module provides core language facilities.
 
 | Name                                              | Description                                |
 | ------------------------------------------------- | ------------------------------------------ |
-| [`args`](./args.md)                               | Argument pack                              |
-| [`array`](./array.md)                             | Mutable ordered sequence                   |
-| [`bin`](./bin.md)                                 | Immutable binary data                      |
+| [`Args`](./args.md)                               | Argument pack                              |
+| [`Array`](./array.md)                             | Mutable ordered sequence                   |
+| [`Bin`](./bin.md)                                 | Immutable binary data                      |
 | [`BytecodeError`](./bytecode-error.md)            | Bytecode verification error                |
-| [`bool`](./bool.md)                               | Boolean (`true` / `false`)                 |
+| [`Bool`](./bool.md)                               | Boolean (`true` / `false`)                 |
 | [`CanceledError`](./canceled-error.md)            | Strand cancellation                        |
 | [`CompileError`](./compile-error.md)              | Compilation error                          |
 | [`ConcurrencyError`](./concurrency-error.md)      | Concurrent access violation                |
 | [`CyclicImportError`](./cyclic-import-error.md)   | Cyclic module dependency                   |
-| [`dict`](./dict.md)                               | Mutable ordered dictionary                 |
-| [`set`](./set.md)                                 | Mutable ordered set                        |
+| [`Dict`](./dict.md)                               | Mutable ordered dictionary                 |
+| [`Set`](./set.md)                                 | Mutable ordered set                        |
 | [`Error`](./error.md)                             | Abstract base error type                   |
 | [`FieldError`](./field-error.md)                  | Nonexistent field access                   |
-| [`float`](./float.md)                             | 64-bit floating point                      |
-| [`func`](./func.md)                               | Callable value                             |
+| [`Float`](./float.md)                             | 64-bit floating point                      |
+| [`Func`](./func.md)                               | Callable value                             |
 | [`Getter`](./getter.md)                           | Abstract getter protocol type              |
 | [`ImmutableError`](./immutable-error.md)          | Mutation of an immutable value             |
 | [`ImportError`](./import-error.md)                | Module import failure                      |
 | [`IndexError`](./index-error.md)                  | Out-of-bounds index access                 |
-| [`int`](./int.md)                                 | 128-bit signed integer                     |
+| [`Int`](./int.md)                                 | 128-bit signed integer                     |
 | [`AbortError`](./abort-error.md)                  | Uncatchable host abort                     |
 | [`Iter`](./iter.md)                               | Abstract iterator type                     |
 | [`Iterable`](./iterable.md)                       | Abstract iterable type                     |
@@ -34,35 +34,35 @@ The `std` module provides core language facilities.
 | [`MissingPosError`](./missing-pos-error.md)       | Required positional argument not provided  |
 | [`Nil`](./nil.md)                                 | Type object for `nil`                      |
 | [`OverflowError`](./overflow-error.md)            | Integer overflow                           |
-| [`range`](./range.md)                             | Numeric range for iteration                |
-| [`record`](./record.md)                           | Record with dot-syntax access              |
+| [`Range`](./range.md)                             | Numeric range for iteration                |
+| [`Record`](./record.md)                           | Record with dot-syntax access              |
 | [`RuntimeError`](./runtime-error.md)              | Ordinary runtime failure supertype         |
 | [`Setter`](./setter.md)                           | Abstract setter protocol type              |
 | [`StateError`](./state-error.md)                  | Invalid operation for current state        |
 | [`Sinkable`](./sinkable.md)                       | Abstract sinkable type                     |
 | [`Sink`](./sink.md)                               | Abstract sink type                         |
 | [`SinkStop`](./sink-stop.md)                      | Error raised when a sink is closed         |
-| [`str`](./str.md)                                 | Immutable UTF-8 string                     |
-| [`sym`](./sym.md)                                 | Interned symbol                            |
+| [`Str`](./str.md)                                 | Immutable UTF-8 string                     |
+| [`Sym`](./sym.md)                                 | Interned symbol                            |
 | [`TimedOutError`](./timed-out-error.md)           | Strand timeout                             |
-| [`tuple`](./tuple.md)                             | Immutable ordered sequence                 |
-| [`type`](./type.md)                               | Type of types                              |
+| [`Tuple`](./tuple.md)                             | Immutable ordered sequence                 |
+| [`Type`](./type.md)                               | Type of types                              |
 | [`TypeError`](./type-error.md)                    | Wrong type for an operation                |
 | [`UnexpectedKeyError`](./unexpected-key-error.md) | Unexpected keyword argument                |
 | [`UnexpectedPosError`](./unexpected-pos-error.md) | Unexpected positional argument             |
 | [`UnsupportedError`](./unsupported-error.md)      | Unsupported operation                      |
 | [`ValueError`](./value-error.md)                  | Invalid value for an operation             |
-| [`value`](./value.md)                             | Abstract supertype of all values           |
+| [`Value`](./value.md)                             | Abstract supertype of all values           |
 | [`ZeroDivError`](./zero-div-error.md)             | Integer division or modulo by zero         |
 
 ## Values
 
-### `nulliter`
+### `NULLITER`
 
 Acts as both an iterator and a sink that performs no operations.
 
-- **As an iterator:** `nulliter` never yields any items.
-- **As a sink:** `nulliter` silently discards all items.
+- **As an iterator:** `NULLITER` never yields any items.
+- **As a sink:** `NULLITER` silently discards all items.
 
 ## Functions
 
@@ -79,7 +79,7 @@ quotes strings, shows type tags).
 
 #### Returns
 
-[`str`](./str.md)
+[`Str`](./str.md)
 
 ### `getter func`
 
@@ -125,6 +125,18 @@ class Config
     obj.#_port = value
 ```
 
+### `array ...values`
+
+Creates an array from positional arguments.
+
+### `dict ...`
+
+Creates a dictionary from positional and keyword arguments.
+
+### `tuple ...values`
+
+Creates a tuple from positional arguments.
+
 ### `record ...`
 
 Creates a record from keyword arguments.
@@ -137,12 +149,37 @@ Creates a record from keyword arguments.
 
 #### Returns
 
-[`record`](./record.md)
+[`Record`](./record.md)
 
 ```
 let r = record name: Alice age: 30
 echo $r.name  # Alice
 ```
+
+### `type value type?`
+
+Returns the value's type, or tests whether the value is an instance of
+`type`. See [`Type`](./type.md).
+
+### `int value`
+
+Coerces or parses a value as an [`Int`](./int.md).
+
+### `float value`
+
+Coerces or parses a value as a [`Float`](./float.md).
+
+### `bool value`
+
+Converts a value to [`Bool`](./bool.md) according to its truthiness.
+
+### `str value`
+
+Returns the general-purpose [`Str`](./str.md) representation of a value.
+
+### `sym value`
+
+Interns a string as a [`Sym`](./sym.md).
 
 ### `arg value`
 
@@ -158,7 +195,7 @@ command-line arguments to external programs.
 
 #### Returns
 
-[`str`](./str.md)
+[`Str`](./str.md)
 
 ### `hash ...values`
 
@@ -178,4 +215,4 @@ def (hash) self
 
 #### Returns
 
-`int`
+`Int`

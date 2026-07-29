@@ -110,17 +110,17 @@ def windows_attrs()
     assert_type $Metadata $meta
     assert_type $Sid $meta.user
     assert_type $Sid $meta.group
-    assert_type $int $meta.win_attrs
-    assert_type $bool $meta.readonly
-    assert_type $bool $meta.hidden
-    assert_type $bool $meta.system
-    assert_type $bool $meta.archive
-    assert_type $bool $meta.reparse_point
-    assert_type $bool $meta.compressed
-    assert_type $bool $meta.encrypted
-    assert_type $bool $meta.temporary
-    assert_type $bool $meta.offline
-    assert_type $bool $meta.not_content_indexed
+    assert_type $Int $meta.win_attrs
+    assert_type $Bool $meta.readonly
+    assert_type $Bool $meta.hidden
+    assert_type $Bool $meta.system
+    assert_type $Bool $meta.archive
+    assert_type $Bool $meta.reparse_point
+    assert_type $Bool $meta.compressed
+    assert_type $Bool $meta.encrypted
+    assert_type $Bool $meta.temporary
+    assert_type $Bool $meta.offline
+    assert_type $Bool $meta.not_content_indexed
 
     let path_meta = Path(test_path).metadata()
     assert_eq $meta.win_attrs $path_meta.win_attrs
@@ -171,24 +171,24 @@ def linux_attrs()
 
   let meta = metadata $test_path
   assert_type $Metadata $meta
-  assert_type $int $meta.linux_attrs
-  assert_type $bool $meta.immutable
-  assert_type $bool $meta.append_only
-  assert_type $bool $meta.no_dump
-  assert_type $bool $meta.no_atime
-  assert_type $bool $meta.no_copy_on_write
-  assert_type $bool $meta.dir_sync
-  assert_type $bool $meta.casefold
-  assert_type $bool $meta.data_journaling
-  assert_type $bool $meta.no_compress
-  assert_type $bool $meta.project_inherit
-  assert_type $bool $meta.secure_delete
-  assert_type $bool $meta.sync
-  assert_type $bool $meta.no_tail_merge
-  assert_type $bool $meta.top_dir
-  assert_type $bool $meta.undelete
-  assert_type $bool $meta.direct_access
-  assert_type $bool $meta.extent_format
+  assert_type $Int $meta.linux_attrs
+  assert_type $Bool $meta.immutable
+  assert_type $Bool $meta.append_only
+  assert_type $Bool $meta.no_dump
+  assert_type $Bool $meta.no_atime
+  assert_type $Bool $meta.no_copy_on_write
+  assert_type $Bool $meta.dir_sync
+  assert_type $Bool $meta.casefold
+  assert_type $Bool $meta.data_journaling
+  assert_type $Bool $meta.no_compress
+  assert_type $Bool $meta.project_inherit
+  assert_type $Bool $meta.secure_delete
+  assert_type $Bool $meta.sync
+  assert_type $Bool $meta.no_tail_merge
+  assert_type $Bool $meta.top_dir
+  assert_type $Bool $meta.undelete
+  assert_type $Bool $meta.direct_access
+  assert_type $Bool $meta.extent_format
 
   set_metadata $test_path no_dump: true
   let no_dump_meta = metadata $test_path
@@ -209,13 +209,13 @@ def macos_attrs()
 
   let meta = metadata $test_path
   assert_type $Metadata $meta
-  assert_type $int $meta.macos_attrs
-  assert_type $bool $meta.hidden
-  assert_type $bool $meta.compressed
-  assert_type $bool $meta.immutable
-  assert_type $bool $meta.append_only
-  assert_type $bool $meta.no_dump
-  assert_type $bool $meta.opaque
+  assert_type $Int $meta.macos_attrs
+  assert_type $Bool $meta.hidden
+  assert_type $Bool $meta.compressed
+  assert_type $Bool $meta.immutable
+  assert_type $Bool $meta.append_only
+  assert_type $Bool $meta.no_dump
+  assert_type $Bool $meta.opaque
 
   set_metadata $test_path hidden: true no_dump: true
   let hidden_meta = metadata $test_path
@@ -279,18 +279,18 @@ def freebsd_attrs()
 
   let meta = metadata $test_path
   assert_type $Metadata $meta
-  assert_type $int $meta.freebsd_attrs
-  assert_type $bool $meta.readonly
-  assert_type $bool $meta.hidden
-  assert_type $bool $meta.system
-  assert_type $bool $meta.archive
-  assert_type $bool $meta.reparse_point
-  assert_type $bool $meta.compressed
-  assert_type $bool $meta.offline
-  assert_type $bool $meta.immutable
-  assert_type $bool $meta.append_only
-  assert_type $bool $meta.no_dump
-  assert_type $bool $meta.opaque
+  assert_type $Int $meta.freebsd_attrs
+  assert_type $Bool $meta.readonly
+  assert_type $Bool $meta.hidden
+  assert_type $Bool $meta.system
+  assert_type $Bool $meta.archive
+  assert_type $Bool $meta.reparse_point
+  assert_type $Bool $meta.compressed
+  assert_type $Bool $meta.offline
+  assert_type $Bool $meta.immutable
+  assert_type $Bool $meta.append_only
+  assert_type $Bool $meta.no_dump
+  assert_type $Bool $meta.opaque
 
   set_metadata $test_path no_dump: true
   let no_dump_meta = metadata $test_path
@@ -310,18 +310,18 @@ def unix_raw()
     f.write "test"
 
   let meta = fs_metadata $test_path
-  assert_type $int $meta.blocks
-  assert_type $int $meta.blocks_free
-  assert_type $int $meta.blocks_available
-  assert_type $int $meta.files
-  assert_type $int $meta.files_free
-  assert_type $int $meta.files_available
+  assert_type $Int $meta.blocks
+  assert_type $Int $meta.blocks_free
+  assert_type $Int $meta.blocks_available
+  assert_type $Int $meta.files
+  assert_type $Int $meta.files_free
+  assert_type $Int $meta.files_available
   if (sys.os_info().os == :LINUX:)
-    assert_type $int $meta.linux_attrs
+    assert_type $Int $meta.linux_attrs
   else if (sys.os_info().os == :FREEBSD:)
-    assert_type $int $meta.freebsd_attrs
+    assert_type $Int $meta.freebsd_attrs
   else
-    assert_type $int $meta.macos_attrs
-  assert_type $int $meta.name_max
+    assert_type $Int $meta.macos_attrs
+  assert_type $Int $meta.name_max
 
   remove $test_path

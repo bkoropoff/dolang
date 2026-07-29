@@ -1,22 +1,23 @@
-# int
+# Int
 
 128-bit signed integers.
 
 ## Constructor
 
-Calling `int` converts a value to an integer.
+`Int` accepts an integer, a boolean, or an integral float. It rejects
+fractional floats and interpretive conversions such as parsing strings.
+
+```
+assert_eq (Int true) 1
+assert_eq (Int 3.0) 3
+```
+
+The lowercase `int` function performs coercion and parsing:
 
 ```
 assert_eq (int "42") 42
 assert_eq (int 3.14) 3
-assert_eq (int true) 1
-assert_eq (int false) 0
 ```
-
-### Errors
-
-Raises an error if the value cannot be converted (e.g. `nil` or
-a non-numeric string).
 
 ## Operators
 
@@ -24,15 +25,15 @@ a non-numeric string).
 
 | Operator | Description                  | Result  |
 | -------- | ---------------------------- | ------- |
-| `+`      | Addition                     | `int`   |
-| `-`      | Subtraction                  | `int`   |
-| `*`      | Multiplication               | `int`   |
-| `/`      | Division                     | `float` |
-| `//`     | Euclidean (integer) division | `int`   |
-| `%`      | Euclidean remainder          | `int`   |
-| `-x`     | Negation                     | `int`   |
+| `+`      | Addition                     | `Int`   |
+| `-`      | Subtraction                  | `Int`   |
+| `*`      | Multiplication               | `Int`   |
+| `/`      | Division                     | `Float` |
+| `//`     | Euclidean (integer) division | `Int`   |
+| `%`      | Euclidean remainder          | `Int`   |
+| `-x`     | Negation                     | `Int`   |
 
-`/` always produces a `float`. `//` and `%` satisfy the identity
+`/` always produces a `Float`. `//` and `%` satisfy the identity
 `x == (x // y) * y + (x % y)`.
 
 ### Bitwise

@@ -3,7 +3,7 @@
 Represents a single matched span within a string. `Match` objects are returned
 by indexing a [`Captures`](./captures.md) value.
 
-Coercing a `Match` value to `str` produces the matched text.
+Coercing a `Match` value with `str` produces the matched text.
 
 ## Fields
 
@@ -13,7 +13,7 @@ The byte offset of the start of the match within the haystack.
 
 #### Type
 
-[`int`](../std/int.md)
+[`Int`](../std/int.md)
 
 ### `end`
 
@@ -21,7 +21,7 @@ The byte offset of the end of the match within the haystack.
 
 #### Type
 
-[`int`](../std/int.md)
+[`Int`](../std/int.md)
 
 ```
 let date = Regex r"(?<year>\d{4})-(?<month>\d{2})-(?<day>\d{2})"
