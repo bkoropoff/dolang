@@ -7,22 +7,44 @@ namespace declarations from each node rather than from parent pointers.
 
 ## Constructor
 
-### `Node tag :namespace? :prefix?`
+### `Node tag ...items :namespace? :prefix? :attrs?`
 
-Creates an empty element.
+Creates an element, optionally with attributes and children.
 
 **Parameters:**
 
-| Name        | Type   | Description                         |
-| ----------- | ------ | ----------------------------------- |
-| `tag`       | `Str`  | Local element name                  |
-| `namespace` | `str?` | Namespace URI                       |
-| `prefix`    | `str?` | Preferred namespace prefix          |
+| Name        | Type    | Description                                                                |
+| ----------- | ------- | -------------------------------------------------------------------------- |
+| `tag`       | `Str`   | Local element name                                                         |
+| `items`     | `*`     | An [`Attr`](./attr.md) becomes an attribute; anything else becomes a child |
+| `namespace` | `str?`  | Namespace URI                                                              |
+| `prefix`    | `str?`  | Preferred namespace prefix                                                 |
+| `attrs`     | `Dict?` | Unnamespaced attributes; keys may be `Sym` or `Str`, values must be `Str`  |
 
 **Returns:** `Node`.
 
+**Errors:**
+
+- `TypeError` if `attrs` is not a `Dict`, or one of its values is not a `Str`.
+
+Children are not type-checked here, matching `children.push`; a tree
+containing anything other than `Node` and `Str` children is rejected by
+[`verify`](./index.md#verify-node) and by serialization.
+
+`attrs` is applied before any positional `Attr`, regardless of where the
+keyword appears in the call.
+
 ```
 let item = Node "item" namespace: "urn:inventory" prefix: "inv"
+
+let disk = Node disk
+  attrs:
+    type: file
+    device: disk
+  - $ Node driver attrs: {name: "qemu", type: "qcow2"}
+  - $ Node source
+      attrs:
+        file: /tmp/disk.qcow2
 ```
 
 ## Fields

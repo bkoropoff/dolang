@@ -109,6 +109,9 @@ dolang -m libvirt --connect-uri qemu:///system freebsd-build build.dol
 same symbol vocabulary as
 [`sys.os_info().os`](../../api/sys/index.md)/[`sys.cpu_info().arch`](../../api/sys/index.md).
 
+The domain is defined for KVM with a `host-passthrough` CPU, so `arch:` must be
+the host architecture; a foreign one is rejected rather than emulated.
+
 ## Installing Do
 
 `dolang:` controls whether and how Do (particularly `dolang-vfs`) gets
@@ -135,6 +138,9 @@ considered complete; these may be repeated.
 `run:` keys; however, `run:` only supports raw commands as strings or string
 arrays.
 
+Both forms of `add:` take `chmod:` as an [`Int`](../../api/std/int.md) mode
+such as `0o644`.
+
 ```
 let vm = libvirt.create
   image: freebsd.qcow2.xz
@@ -144,7 +150,7 @@ let vm = libvirt.create
   init:
     add:
       target: /etc/example.conf
-      chmod: "0644"
+      chmod: 0o644
       content: |
         enabled=yes
     run: mkdir -p /opt/build

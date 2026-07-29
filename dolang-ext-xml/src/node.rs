@@ -1,7 +1,7 @@
 use dolang::runtime::object::fmt;
 
 use dolang::runtime::{
-    Args, Error, Instance, Object, Output, Result, Slot, Strand, Type, Value, call,
+    Arg, Args, Error, Instance, Object, Output, Result, Slot, Strand, Type, Value, call,
     object::{ArrayLike, ArrayView, Mut, Ref, TypeBuilder},
     unpack,
     value::{Empty, Nil, TypeObject},
@@ -222,6 +222,68 @@ fn append_attr<'v, 's>(
     })
 }
 
+/// Appends the pairs of an `attrs:` dict as unnamespaced attributes.
+///
+/// Keys may be `Str` or `Sym`, since bareword dict keys intern as the latter;
+/// values must be `Str`, matching `Attr` and `set_attr`.
+fn append_attrs_dict<'v, 's>(
+    this: Instance<'v, '_, Node>,
+    strand: &mut Strand<'v, 's>,
+    attrs: &Slot<'v, '_>,
+) -> Result<'v, 's, ()> {
+    let dict = attrs
+        .as_dict(strand)
+        .ok_or_else(|| Error::type_error(strand, "attrs: expected Dict"))?;
+    let mut pairs = dict.pairs();
+    loop {
+        let pair = strand.with_slots_sync(|strand, [mut key, mut value]| {
+            if !pairs.next(strand, &mut key, &mut value)? {
+                return Ok(None);
+            }
+            let local = key.to_string(strand)?;
+            let value = required_string(strand, &value, "attribute value")?;
+            Ok(Some((local, value)))
+        })?;
+        let Some((local, value)) = pair else {
+            return Ok(());
+        };
+        append_attr(
+            this,
+            strand,
+            Attr {
+                name: Name {
+                    local,
+                    namespace: None,
+                    prefix: None,
+                },
+                value,
+            },
+        )?;
+    }
+}
+
+/// Appends one variadic constructor item: an `Attr` becomes an attribute and
+/// anything else becomes a child.
+///
+/// Children are not type-checked here, matching `push` and `children.push`:
+/// `verify` and `to_str` remain the single place a tree is validated. Checking
+/// eagerly would also reject Do subclasses of `Node`, which cast as neither
+/// `Node` nor `Str`.
+fn append_item<'v, 's>(
+    this: Instance<'v, '_, Node>,
+    strand: &mut Strand<'v, 's>,
+    item: Slot<'v, '_>,
+) -> Result<'v, 's, ()> {
+    let global = strand.state::<Global<'v>>();
+    if let Some(attr) = global.attr_type.cast(&item) {
+        let attr = attr.enter_sync(strand, |strand, attr| Ok(attr.borrow(strand)?.clone()))?;
+        return append_attr(this, strand, attr);
+    }
+    let borrow = this.borrow(strand)?;
+    let children = Ref::slot::<CHILDREN>(&borrow).as_array(strand).unwrap();
+    children.push(strand, item)
+}
+
 impl<'v> Object<'v> for Node {
     const MODULE: &'static str = "xml";
     const NAME: &'static str = "Node";
@@ -234,20 +296,44 @@ impl<'v> Object<'v> for Node {
         this: Type<'v, Self>,
         strand: &'a mut Strand<'v, 's>,
         args: Args<'v, 'a>,
-        out: Slot<'v, 'a>,
+        mut out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
         let global = strand.state::<Global<'v>>();
         let namespace_sym = global.syms.namespace;
         let prefix_sym = global.syms.prefix;
-        let ([tag], [namespace, prefix]) =
-            unpack!(strand, args, 1, 0, namespace_sym = None, prefix_sym = None)?;
+        let attrs_sym = global.syms.attrs;
+        let ([tag], [namespace, prefix, attrs], items) = unpack!(
+            strand,
+            args,
+            1,
+            0,
+            namespace_sym = None,
+            prefix_sym = None,
+            attrs_sym = None,
+            ...
+        )?;
         let name = Name {
             local: required_string(strand, &tag, "tag")?,
             namespace: optional_string(strand, namespace.as_deref(), "namespace")?,
             prefix: optional_string(strand, prefix.as_deref(), "prefix")?,
         };
-        create_node(strand, this, name, out)?;
-        Ok(())
+        create_node(strand, this, name, Slot::reborrow(&mut out))?;
+        let node = this.cast(&out).expect("freshly created node");
+        node.enter_sync(strand, |strand, node| {
+            // `attrs:` lands ahead of any positional `Attr`, so the bulk form
+            // reads as the element's own attribute list regardless of where the
+            // keyword appears in the call.
+            if let Some(attrs) = attrs {
+                append_attrs_dict(node, strand, &attrs)?;
+            }
+            for item in items {
+                match item {
+                    Arg::Pos(item) => append_item(node, strand, item)?,
+                    Arg::Key(key, _) => return Err(Error::unexpected_key(strand, key)),
+                }
+            }
+            Ok(())
+        })
     }
 
     fn debug<'a, 's>(

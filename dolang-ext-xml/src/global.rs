@@ -18,6 +18,7 @@ pub(crate) struct Global<'v> {
 pub(crate) struct Syms<'v> {
     pub(crate) namespace: Sym<'v, 'v>,
     pub(crate) prefix: Sym<'v, 'v>,
+    pub(crate) attrs: Sym<'v, 'v>,
 }
 
 pub struct Tag;
@@ -35,6 +36,7 @@ impl<'v> Global<'v> {
             syms: Syms {
                 namespace: builder.sym("namespace"),
                 prefix: builder.sym("prefix"),
+                attrs: builder.sym("attrs"),
             },
         }
     }
