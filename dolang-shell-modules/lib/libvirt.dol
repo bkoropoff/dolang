@@ -83,8 +83,19 @@ def require_os os
     throw std.ValueError "os: is required"
   os
 
-def default_arch arch
-  (arch || sys.cpu_info().arch)
+# Defaults `arch` to the host's, and rejects any other.
+#
+# `DomainConfig.to_xml` emits `<domain type="kvm">` with a `host-passthrough`
+# CPU, both of which require the guest architecture to match the host — a
+# foreign one needs TCG emulation, plus a machine type and firmware chosen per
+# target. Rejecting it here reports the unsupported argument instead of letting
+# libvirt refuse the document with an error about KVM.
+def require_arch arch
+  let host = sys.cpu_info().arch
+  let arch = (arch || host)
+  if (arch != host)
+    throw std.ValueError "arch: must be the host architecture $host, got $arch"
+  arch
 
 def normalized_app app
   let candidate = (app || shell.program || "dolang-libvirt")
@@ -130,18 +141,6 @@ def node_text node
       text = "$text$child"
   text
 
-def set_text node value
-  node.children.clear()
-  node.push (str value)
-
-def vm_metadata document
-  for node = document.traverse()
-    if (type node xml.Node &&
-        node.tag == "vm" &&
-        node.namespace == VM_NAMESPACE)
-      return node
-  nil
-
 def metadata_value metadata name
   let node = find_child $metadata $name
   if node
@@ -149,65 +148,12 @@ def metadata_value metadata name
   else
     nil
 
-def domain_name_from_xml document
-  if (document.tag != "domain")
-    throw std.ValueError "expected a libvirt <domain> document"
-  let node = require_child $document name
-  let name = node_text(node).trim()
-  require_name $name
-
-def disk_source document device
-  let devices = find_child $document devices
-  if !devices
-    return nil
-  for disk = devices.children
-    if (type disk xml.Node &&
-        disk.tag == "disk" &&
-        disk.attr("device") == device)
-      let source = find_child $disk source
-      if source
-        return source.attr "file"
-  nil
-
-def file_disk_sources document
-  let sources = []
-  let devices = find_child $document devices
-  if !devices
-    return sources
-  for disk = devices.children
-    if (type disk xml.Node &&
-        disk.tag == "disk" &&
-        disk.attr("device") == "disk")
-      let source = find_child $disk source
-      if source
-        let path = source.attr "file"
-        if (path != nil)
-          sources.push $path
-  sources
-
 def path_within path root
   while path
     if (path == root)
       return true
     path = path.parent
   false
-
-def cleanup_info document
-  let metadata = vm_metadata $document
-  if !metadata
-    return nil
-  let workdir = metadata_value $metadata workdir
-  let managed = metadata_value $metadata managed
-  let source = disk_source $document disk
-  if (managed != "true" || workdir == nil || source == nil)
-    return nil
-  let workdir = Path(workdir).absolute()
-  let source = Path(source).absolute()
-  if (source.parent != workdir)
-    return nil
-  if !path_within(workdir, xdg.data_home().absolute())
-    return nil
-  record :workdir :source
 
 def raw_undefine name connect_uri ...options
   try
@@ -219,6 +165,322 @@ def copy_chunks input output indicator
   for chunk = input
     output.write $chunk
     indicator.delta $chunk.len
+
+def payload_directory user
+  "/home/$(user)/.dolang-libvirt-guest"
+
+# How to reach a managed domain's guest over SSH.
+#
+# These are exactly the facts `create` records in the domain's `<dolang:vm>`
+# metadata, so the metadata is this class's serialized form — see
+# `guest_from_metadata`.
+#
+# Two transports use them. `exec` and `install_payload` drive the `ssh` and
+# `scp` binaries directly, which is what bootstrap has to do: `dolang-vfs`
+# does not exist in the guest until the payload is installed. Once it does,
+# `with` runs blocks through the VFS instead.
+class Guest
+  # The forwarded SSH port. Public because `create` reassigns it while hunting
+  # for a free one.
+  pub field port = nil
+  field user = nil
+  field identity = nil
+  field known_hosts = nil
+  field command = nil
+
+  def (init) self :port :user :identity :known_hosts :command
+    self.port = int $port
+    self.#user = str $user
+    self.#identity = Path $identity
+    self.#known_hosts = Path $known_hosts
+    self.#command = str $command
+
+  # The `ssh`/`scp` options every direct connection to the guest shares.
+  #
+  # Host key checking is `accept-new` rather than `no` so that a key change
+  # after first contact is still an error.
+  def options self :connect_timeout = nil
+    let values = $
+      - IdentitiesOnly=yes
+      - BatchMode=yes
+      - StrictHostKeyChecking=accept-new
+      - "UserKnownHostsFile=$(self.#known_hosts)"
+    if (connect_timeout != nil)
+      values.push "ConnectTimeout=$connect_timeout"
+    let flags = []
+    for value = values
+      flags.push -o $value
+    flags
+
+  # Runs `command` in the guest over `ssh`. Trailing keyword arguments are
+  # passed through to `run`.
+  def exec self command :connect_timeout = nil ...options
+    let flags = self.#options connect_timeout: $connect_timeout
+    run ssh -T -e none -a ...flags
+      -l $self.#user -p $self.port -i $self.#identity
+      -- 127.0.0.1 $command
+      ...options
+
+  # Polls `command` until it succeeds.
+  def wait self command
+    while true
+      try
+        self.#exec $command connect_timeout: 5
+          stdout: $NULLITER
+          stderr: $NULLITER
+        return
+      catch proc.Error: _
+        time.sleep $READY_SLEEP
+
+  # Waits until the guest accepts SSH connections.
+  pub def wait_available self
+    self.#wait "true"
+
+  # Waits until cloud-init has finished provisioning the guest.
+  pub def wait_ready self
+    self.#wait "test -f $(shlex.quote READY_PATH)"
+
+  # Copies `payload` into the guest and unpacks it.
+  pub def install_payload self payload
+    let flags = self.#options()
+    run scp -q ...flags
+      -P $self.port -i $self.#identity
+      -- $payload "$(self.#user)@127.0.0.1:$PAYLOAD_PATH"
+    let dir = shlex.quote (payload_directory self.#user)
+    let archive = shlex.quote $PAYLOAD_PATH
+    self.#exec "mkdir -p $dir && tar -xzf $archive -C $dir && rm -f $archive"
+
+  # Runs `block` through the guest's SSH VFS connection.
+  pub def with self block ...options
+    let reserved = Set $
+      :user: :port: :identity: :known_hosts: :command:
+      :host_key: :batch: :identities_only:
+    for key _ = options
+      if reserved.contains $key
+        throw std.ValueError "Domain.with cannot override metadata option: $key"
+
+    ssh.with 127.0.0.1 $block
+      user: $self.#user
+      port: $self.port
+      identity: $self.#identity
+      known_hosts: $self.#known_hosts
+      command: [self.#command]
+      host_key: :ACCEPT_NEW:
+      batch: true
+      identities_only: true
+      ...options
+
+  # The `<dolang:vm>` elements recording how to reach this guest — the form
+  # `guest_from_metadata` reads back.
+  pub def to_metadata self
+    $
+      - $ xml.Node ssh_port (str self.port)
+      - $ xml.Node ssh_user $self.#user
+      - $ xml.Node ssh_identity (str self.#identity)
+      - $ xml.Node ssh_known_hosts (str self.#known_hosts)
+      - $ xml.Node vfs_command $self.#command
+
+# Reads a `Guest` out of a domain's `<dolang:vm>` metadata subtree, which is
+# where `create` recorded it.
+def guest_from_metadata metadata
+  if !metadata
+    throw std.ValueError "domain has no dolang:vm metadata"
+  let port = metadata_value $metadata ssh_port
+  let user = metadata_value $metadata ssh_user
+  let identity = metadata_value $metadata ssh_identity
+  let known_hosts = metadata_value $metadata ssh_known_hosts
+  let command = metadata_value $metadata vfs_command
+  if (port == nil || user == nil || identity == nil ||
+      known_hosts == nil || command == nil)
+    throw std.ValueError "domain has incomplete dolang:vm metadata"
+  Guest :port :user :identity :known_hosts :command
+
+# Everything that describes a domain to be created, with the libvirt XML
+# document as its serialized form.
+#
+# Grouping these means `create` decides each one once and then hands over a
+# single value, instead of threading a dozen positional arguments through to
+# the emitter. It also makes the port-retry loop a mutate-and-re-emit rather
+# than a re-derivation of the whole document.
+class DomainConfig
+  pub field name = nil
+  # The `Guest` this domain will be reachable as, whose `port` `create`
+  # reassigns between definition attempts.
+  pub field guest = nil
+  field arch = nil
+  field memory = nil
+  field vcpus = nil
+  field overlay = nil
+  field seed = nil
+  field app = nil
+  field workdir = nil
+
+  def (init)
+    self
+    :name
+    :arch
+    :guest
+    :overlay
+    :seed
+    :app
+    :workdir
+    :memory = DEFAULT_MEMORY
+    :vcpus = DEFAULT_VCPUS
+  do
+    self.name = require_name $name
+    self.guest = guest
+    self.#arch = arch
+    self.#memory = int $memory
+    self.#vcpus = int $vcpus
+    self.#overlay = Path $overlay
+    self.#seed = Path $seed
+    self.#app = str $app
+    self.#workdir = Path $workdir
+
+  # The libvirt domain document for this configuration.
+  pub def to_xml self
+    # Locally aliased so the tree below reads like the XML it emits.
+    let Node = xml.Node
+
+    let vm = Node vm namespace: $VM_NAMESPACE prefix: dolang
+      - $ Node managed "true"
+      - $ Node app $self.#app
+      - $ Node workdir (str self.#workdir)
+    for element = self.guest.to_metadata()
+      vm.push $element
+    let metadata = Node metadata $vm
+
+    Node domain attrs: {type: "kvm"}
+      - $ Node name $self.name
+      - $ Node memory (str self.#memory) attrs: {unit: "MiB"}
+      - $ Node vcpu (str self.#vcpus)
+      - $ Node os
+          - $ Node type hvm attrs: {arch: str(self.#arch).lower()}
+          - $ Node boot attrs: {dev: "hd"}
+      - $ Node features
+          - $ Node acpi
+          - $ Node apic
+      - $ Node cpu attrs: {mode: "host-passthrough"}
+      - $ Node clock attrs: {offset: "utc"}
+      - $ Node on_poweroff destroy
+      - $ Node on_reboot restart
+      - $ Node on_crash destroy
+      - $ Node devices
+          - $ Node disk attrs: {type: "file", device: "disk"}
+              - $ Node driver attrs: {name: "qemu", type: "qcow2"}
+              - $ Node source attrs: {file: str(self.#overlay)}
+              - $ Node target attrs: {dev: "vda", bus: "virtio"}
+          - $ Node disk attrs: {type: "file", device: "cdrom"}
+              - $ Node driver attrs: {name: "qemu", type: "raw"}
+              - $ Node source attrs: {file: str(self.#seed)}
+              - $ Node target attrs: {dev: "sda", bus: "sata"}
+              - $ Node readonly
+          - $ Node interface attrs: {type: "user"}
+              - $ Node backend attrs: {type: "passt"}
+              - $ Node model attrs: {type: "virtio"}
+              - $ Node portForward attrs: {proto: "tcp", address: "127.0.0.1"}
+                  - $ Node range attrs: {start: str(self.guest.port), to: "22"}
+          - $ Node serial attrs: {type: "pty"}
+              - $ Node target attrs: {port: "0"}
+          - $ Node console attrs: {type: "pty"}
+              - $ Node target attrs: {type: "serial", port: "0"}
+      $metadata
+
+# A read-only view over a libvirt domain document.
+#
+# `virsh dumpxml` returns libvirt's own expansion of whatever was defined — a
+# generated uuid, PCI addresses, filled-in defaults, rewritten devices — so
+# this reads back only the parts we wrote and can still recognize. It is
+# deliberately not the inverse of the document `create` emits: there is no
+# faithful parse of an expanded document back into a configuration, so none is
+# offered.
+class DomainXml
+  field document = nil
+
+  def (init) self document
+    self.#document = document
+
+  # The `<name>` text, validated as a usable domain name.
+  pub def name self
+    if (self.#document.tag != "domain")
+      throw std.ValueError "expected a libvirt <domain> document"
+    let node = require_child $self.#document name
+    let name = node_text(node).trim()
+    require_name $name
+
+  # The `<metadata>` element, or `nil`.
+  pub def metadata self
+    find_child $self.#document metadata
+
+  # The `<dolang:vm>` subtree `create` writes, or `nil` for a domain this
+  # module did not create.
+  def vm self
+    for node = self.#document.traverse()
+      if (type node xml.Node &&
+          node.tag == "vm" &&
+          node.namespace == VM_NAMESPACE)
+        return node
+    nil
+
+  # The guest's SSH connection facts. Throws if the domain is not one of ours
+  # or its metadata is incomplete.
+  pub def guest self
+    guest_from_metadata $self.#vm()
+
+  # The `<source file=...>` of the first disk with the given `device`.
+  def disk_source self device
+    let devices = find_child $self.#document devices
+    if !devices
+      return nil
+    for disk = devices.children
+      if (type disk xml.Node &&
+          disk.tag == "disk" &&
+          disk.attr("device") == device)
+        let source = find_child $disk source
+        if source
+          return source.attr "file"
+    nil
+
+  # Every file-backed disk source, in document order.
+  pub def disk_sources self
+    let sources = []
+    let devices = find_child $self.#document devices
+    if !devices
+      return sources
+    for disk = devices.children
+      if (type disk xml.Node &&
+          disk.tag == "disk" &&
+          disk.attr("device") == "disk")
+        let source = find_child $disk source
+        if source
+          let path = source.attr "file"
+          if (path != nil)
+            sources.push $path
+    sources
+
+  # The work directory and overlay of a domain this module manages, or `nil`
+  # if the domain is not ours or its recorded paths fail validation.
+  #
+  # Every condition here is a guard against removing something we did not
+  # create: the domain must claim to be managed, its overlay must sit directly
+  # in the recorded work directory, and that directory must live under the XDG
+  # data home.
+  pub def cleanup_info self
+    let metadata = self.#vm()
+    if !metadata
+      return nil
+    let workdir = metadata_value $metadata workdir
+    let managed = metadata_value $metadata managed
+    let source = self.#disk_source("disk")
+    if (managed != "true" || workdir == nil || source == nil)
+      return nil
+    let workdir = Path(workdir).absolute()
+    let source = Path(source).absolute()
+    if (source.parent != workdir)
+      return nil
+    if !path_within(workdir, xdg.data_home().absolute())
+      return nil
+    record :workdir :source
 
 # References a libvirt domain by name and connection URI.
 #
@@ -242,14 +504,13 @@ pub class Domain
       throw e
     xml.from_str $source
 
+  # A view over the domain's current libvirt XML.
+  def xml self
+    DomainXml $self.dumpxml()
+
   # Returns the domain XML's `<metadata>` subtree, or `nil`.
   pub def metadata self
-    let document = self.dumpxml()
-    let metadata = find_child $document metadata
-    if metadata
-      metadata
-    else
-      nil
+    self.#xml().metadata()
 
   # Returns the normalized libvirt state as a symbol.
   pub def state self
@@ -291,15 +552,15 @@ pub class Domain
   pub def export_disk self destination :compress = false
     if (self.state() != :SHUTOFF:)
       throw std.StateError "domain must be shut off before exporting its disk"
-    let document = self.dumpxml()
-    let sources = file_disk_sources $document
+    let document = self.#xml()
+    let sources = document.disk_sources()
     if (sources.len != 1)
       throw std.ValueError "expected exactly one file-backed domain disk; found $(sources.len)"
     let source = Path(sources[0]).absolute()
     let destination = Path(destination).absolute()
     if (source == destination)
       throw std.ValueError "export destination is the domain disk"
-    let cleanup = cleanup_info $document
+    let cleanup = document.cleanup_info()
     if (cleanup && path_within(destination, cleanup.workdir))
       throw std.ValueError "export destination is inside the managed domain work directory"
     if destination.exists()
@@ -356,8 +617,7 @@ pub class Domain
 
   # Undefines the domain and removes a validated managed overlay.
   pub def undefine self
-    let document = self.dumpxml()
-    let cleanup = cleanup_info $document
+    let cleanup = self.#xml().cleanup_info()
     raw_undefine $self.name $self.connect_uri
     if cleanup
       cleanup.workdir.remove all: true ignore: true
@@ -365,44 +625,15 @@ pub class Domain
 
   # Runs `block` through the domain's SSH VFS connection.
   pub def with self block ...options
-    let document = self.dumpxml()
-    let metadata = vm_metadata $document
-    if !metadata
-      throw std.ValueError "domain has no dolang:vm metadata"
+    let guest = self.#xml().guest()
     if (self.state() != :RUNNING:)
       throw std.ValueError "libvirt domain is not running: $(self.name)"
-
-    let port = metadata_value $metadata ssh_port
-    let user = metadata_value $metadata ssh_user
-    let identity = metadata_value $metadata ssh_identity
-    let known_hosts = metadata_value $metadata ssh_known_hosts
-    let command = metadata_value $metadata vfs_command
-    if (port == nil || user == nil || identity == nil ||
-        known_hosts == nil || command == nil)
-      throw std.ValueError "domain has incomplete dolang:vm metadata"
-
-    let reserved = Set $
-      :user: :port: :identity: :known_hosts: :command:
-      :host_key: :batch: :identities_only:
-    for key _ = options
-      if reserved.contains $key
-        throw std.ValueError "Domain.with cannot override metadata option: $key"
-
-    ssh.with 127.0.0.1 $block
-      user: $user
-      port: (int port)
-      identity: (Path identity)
-      known_hosts: (Path known_hosts)
-      command: [command]
-      host_key: :ACCEPT_NEW:
-      batch: true
-      identities_only: true
-      ...options
+    guest.with $block ...options
 
 # Defines a domain from an XML string.
 pub def define source :connect_uri = DEFAULT_CONNECT_URI
-  let document = xml.from_str $source
-  let name = domain_name_from_xml $document
+  let document = DomainXml (xml.from_str source)
+  let name = document.name()
   with_temp_dir do |dir|
     let path = (dir / "domain.xml")
     path.write $source
@@ -479,6 +710,16 @@ def resolved_add_content spec app
   let resolved = resolve_source $source $app nil
   resolved.open rb do |file| file.read()
 
+# `chmod:` is always an `Int` mode, whichever `add:` it appears in.
+#
+# cloud-init's `write_files` wants `permissions` as an octal string, but that is
+# its serialization detail, not a second calling convention: `parse_add_spec`
+# renders the int with `Int.octal()` instead.
+def require_chmod chmod
+  if (chmod != nil && !(type chmod Int))
+    throw std.TypeError "add chmod: expected Int"
+  chmod
+
 # Validates a top-level `add:` entry (`target`, `source:`|`content:`,
 # `chmod:`, mirroring `dockman`'s own `add:` build step). No VFS access —
 # just shape checking, so it's safe to call eagerly at parse time.
@@ -501,6 +742,7 @@ def validate_add_spec spec
     throw std.ValueError "add: expected exactly one of source or content"
   if (content != nil && !(type content Str || type content Bin))
     throw std.TypeError "add content: expected Str or Bin"
+  require_chmod (spec.get :chmod:)
   spec
 
 # Performs a validated top-level `add:` entry against `domain`, on the host
@@ -546,9 +788,9 @@ def parse_add_spec spec app
   else
     throw std.TypeError "add content: expected Str or Bin"
 
-  let chmod = spec.get :chmod:
+  let chmod = require_chmod (spec.get :chmod:)
   if (chmod != nil)
-    file[:permissions:] = chmod
+    file[:permissions:] = chmod.octal()
   for key = [:owner:, :append:, :defer:]
     let value = spec.get $key
     if (value != nil)
@@ -634,8 +876,10 @@ def cloud_config user public_key packages boot write_files
       :write_files
   "#cloud-config\n$(yaml.to_str config)"
 
-def build_seed root user_data identity
-  let key = digest.blake3(identity).hex()
+# Builds the cloud-init seed ISO, cached under a digest of its contents so
+# identical configurations share one.
+def build_seed root user_data
+  let key = digest.blake3(user_data).hex()
   let entry = (root / "seeds" / key)
   entry.create_dir all: true
   let destination = (entry / "seed.iso")
@@ -727,104 +971,6 @@ def resolve_dolang spec os arch app
       throw e
     nil
 
-def domain_document
-  name
-  arch
-  memory
-  vcpus
-  overlay
-  seed
-  port
-  app
-  user
-  identity
-  known_hosts
-  command
-  workdir
-do
-  let document = xml.from_str r|
-    <domain type="kvm">
-      <name>placeholder</name>
-      <memory unit="MiB">2048</memory>
-      <vcpu>2</vcpu>
-      <os>
-        <type arch="x86_64">hvm</type>
-        <boot dev="hd"/>
-      </os>
-      <features><acpi/><apic/></features>
-      <cpu mode="host-passthrough"/>
-      <clock offset="utc"/>
-      <on_poweroff>destroy</on_poweroff>
-      <on_reboot>restart</on_reboot>
-      <on_crash>destroy</on_crash>
-      <devices>
-        <disk type="file" device="disk">
-          <driver name="qemu" type="qcow2"/>
-          <source file="overlay"/>
-          <target dev="vda" bus="virtio"/>
-        </disk>
-        <disk type="file" device="cdrom">
-          <driver name="qemu" type="raw"/>
-          <source file="seed"/>
-          <target dev="sda" bus="sata"/>
-          <readonly/>
-        </disk>
-        <interface type="user">
-          <backend type="passt"/>
-          <model type="virtio"/>
-          <portForward proto="tcp" address="127.0.0.1">
-            <range start="20000" to="22"/>
-          </portForward>
-        </interface>
-        <serial type="pty"><target port="0"/></serial>
-        <console type="pty"><target type="serial" port="0"/></console>
-      </devices>
-      <metadata>
-        <dolang:vm xmlns:dolang="https://github.com/dolang-org/dolang">
-          <managed>true</managed>
-          <app>app</app>
-          <workdir>workdir</workdir>
-          <ssh_port>20000</ssh_port>
-          <ssh_user>user</ssh_user>
-          <ssh_identity>identity</ssh_identity>
-          <ssh_known_hosts>known_hosts</ssh_known_hosts>
-          <vfs_command>command</vfs_command>
-        </dolang:vm>
-      </metadata>
-    </domain>
-
-  set_text (require_child document "name") $name
-  set_text (require_child document "memory") $memory
-  set_text (require_child document "vcpu") $vcpus
-  (require_child (require_child document "os") "type").set_attr arch (str(arch).lower())
-
-  let devices = require_child $document devices
-  for disk = devices.children
-    if (type disk xml.Node && disk.tag == "disk")
-      let source = require_child $disk source
-      if (disk.attr("device") == "disk")
-        source.set_attr file (str overlay)
-      else
-        source.set_attr file (str seed)
-
-  let interface = require_child $devices interface
-  let forward = require_child $interface portForward
-  let range = require_child $forward range
-  range.set_attr start (str port)
-
-  let metadata = vm_metadata $document
-  for key value = {
-    app: app,
-    workdir: workdir,
-    ssh_port: port,
-    ssh_user: user,
-    ssh_identity: identity,
-    ssh_known_hosts: known_hosts,
-    vfs_command: command,
-  }
-    set_text (require_child metadata (str key)) $value
-  document
-
 def raw_define document connect_uri workdir
   let source = xml.to_str $document
   let path = (workdir / "domain.xml")
@@ -848,74 +994,6 @@ def remove_partial name connect_uri workdir
     nil
   workdir.remove all: true ignore: true
 
-def wait_ssh metadata
-  let port = int(metadata_value(metadata, "ssh_port"))
-  let user = metadata_value $metadata ssh_user
-  let identity = Path(metadata_value(metadata, "ssh_identity"))
-  let known_hosts = Path(metadata_value(metadata, "ssh_known_hosts"))
-  while true
-    try
-      run ssh -T -e none -a
-        -o IdentitiesOnly=yes
-        -o BatchMode=yes
-        -o StrictHostKeyChecking=accept-new
-        -o UserKnownHostsFile=$known_hosts
-        -o ConnectTimeout=5
-        -l $user -p $port -i $identity
-        -- 127.0.0.1 true
-        stdout: $NULLITER
-        stderr: $NULLITER
-      return
-    catch proc.Error: _
-      time.sleep $READY_SLEEP
-
-def payload_directory user
-  "/home/$(user)/.dolang-libvirt-guest"
-
-def transfer_payload metadata payload
-  let port = int(metadata_value(metadata, "ssh_port"))
-  let user = metadata_value $metadata ssh_user
-  let identity = Path(metadata_value(metadata, "ssh_identity"))
-  let known_hosts = Path(metadata_value(metadata, "ssh_known_hosts"))
-  run scp -q
-    -o IdentitiesOnly=yes
-    -o BatchMode=yes
-    -o StrictHostKeyChecking=accept-new
-    -o UserKnownHostsFile=$known_hosts
-    -P $port -i $identity
-    -- $payload "$(user)@127.0.0.1:$PAYLOAD_PATH"
-  let remote_dir = payload_directory $user
-  let command = "mkdir -p $(shlex.quote remote_dir) && tar -xzf $(shlex.quote PAYLOAD_PATH) -C $(shlex.quote remote_dir) && rm -f $(shlex.quote PAYLOAD_PATH)"
-  run ssh -T -e none -a
-    -o IdentitiesOnly=yes
-    -o BatchMode=yes
-    -o StrictHostKeyChecking=accept-new
-    -o UserKnownHostsFile=$known_hosts
-    -l $user -p $port -i $identity
-    -- 127.0.0.1 $command
-
-def wait_ready metadata
-  let port = int(metadata_value(metadata, "ssh_port"))
-  let user = metadata_value $metadata ssh_user
-  let identity = Path(metadata_value(metadata, "ssh_identity"))
-  let known_hosts = Path(metadata_value(metadata, "ssh_known_hosts"))
-  let check = "test -f $(shlex.quote READY_PATH)"
-  while true
-    try
-      run ssh -T -e none -a
-        -o IdentitiesOnly=yes
-        -o BatchMode=yes
-        -o StrictHostKeyChecking=accept-new
-        -o UserKnownHostsFile=$known_hosts
-        -o ConnectTimeout=5
-        -l $user -p $port -i $identity
-        -- 127.0.0.1 $check
-        stdout: $NULLITER
-        stderr: $NULLITER
-      return
-    catch proc.Error: _
-      time.sleep $READY_SLEEP
-
 # Creates and starts a cloud-init domain.
 #
 # # Parameters
@@ -925,7 +1003,7 @@ def wait_ready metadata
 # | `image`         | `Str`\|`Path`\|`Url` | Base disk image (may be `.gz`/`.xz`/`.zstd` compressed) |
 # | `name`          | `Str`                | Domain name; auto-generated if omitted |
 # | `os`            | `Sym`                | Guest OS, using `sys`'s symbol vocabulary            |
-# | `arch`?         | `Sym`                | Guest CPU architecture, `sys` symbol; defaults to the host's |
+# | `arch`?         | `Sym`                | Guest CPU architecture, `sys` symbol; must be the host's, which is the default |
 # | `app`?          | `Str`                | Cache/data namespace; derived from `shell.program` by default |
 # | `user`?         | `Str`                | Guest user to create (default `"ci"`) |
 # | `dolang`?       | See below            | Installs Do into the guest — see [`dolang:`](#dolang) |
@@ -981,7 +1059,7 @@ def wait_ready metadata
 #
 # | Error          | Condition                                                            |
 # | -------------- | ----------------------------------------------------------------------- |
-# | `ValueError`   | `image` or `os` is omitted, or a domain named `name` already exists     |
+# | `ValueError`   | `image` or `os` is omitted, `arch` is not the host's, or a domain named `name` already exists |
 # | `RuntimeError` | No forwarded SSH port could be allocated                                |
 # | `TypeError`    | Invalid argument type |
 #
@@ -1024,7 +1102,7 @@ do
   if (image == nil)
     throw std.ValueError "image: is required"
   os = require_os $os
-  arch = default_arch $arch
+  arch = require_arch $arch
   app = normalized_app $app
   let post = parse_post_options $options
   name = require_name(name || "$app-$(rand.string 8)")
@@ -1054,8 +1132,7 @@ do
         let keys = ensure_key $root $app
         let public_key = keys.public.read().trim()
         let user_data = cloud_config $user $public_key $packages $staged.boot $staged.write
-        let identity = user_data
-        let seed = build_seed $root $user_data $identity
+        let seed = build_seed $root $user_data
         record :keys :seed
 
       let overlay = progress.show message: "create disk" icon: 💾 do |_|
@@ -1068,14 +1145,26 @@ do
       else
         "dolang-vfs"
 
+      let config = DomainConfig
+        :name :arch :app :workdir :memory :vcpus
+        overlay: $overlay
+        seed: $setup.seed
+        guest: $ Guest
+          port: (rand.int PORT_START PORT_END)
+          user: $user
+          identity: $setup.keys.key.absolute()
+          known_hosts: $known_hosts
+          command: $command
+
       let domain = progress.show message: "start domain" do |_|
         let domain = Domain $name $connect_uri
         let started = false
         for attempt = 0..PORT_ATTEMPTS
-          let port = rand.int $PORT_START $PORT_END
-          let document = domain_document
-            $name $arch $memory $vcpus $overlay $setup.seed $port $app $user
-            $setup.keys.key.absolute() $known_hosts $command $workdir
+          # A forwarded port is only known to be free once libvirt has bound
+          # it, so a collision means re-emitting with a fresh one.
+          if (attempt > 0)
+            config.guest.port = rand.int $PORT_START $PORT_END
+          let document = config.to_xml()
           raw_define $document $connect_uri $workdir
           let stderr = []
           try
@@ -1095,14 +1184,18 @@ do
           throw std.RuntimeError "could not allocate a forwarded SSH port"
         domain
 
-      let metadata = vm_metadata $domain.dumpxml()
+      # Read the guest back out of the defined domain rather than reusing the
+      # local one: if libvirt failed to record the `<dolang:vm>` metadata, that
+      # surfaces here instead of at the first `with`.
+      let dumped = domain.dumpxml()
+      let guest = DomainXml(dumped).guest()
       progress.show message: "wait for SSH" icon: 🔑 do |_|
-        wait_ssh $metadata
+        guest.wait_available()
       if payload
         progress.show message: "copy payload" icon: 📦 do |_|
-          transfer_payload $metadata $payload
+          guest.install_payload $payload
       progress.show message: "wait for provisioning" do |_|
-        wait_ready $metadata
+        guest.wait_ready()
       for action = post
         if (action.kind == :add:)
           perform_add $domain $action.spec $app
