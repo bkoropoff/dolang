@@ -6,6 +6,8 @@ import
     - test
   std:
     - ImmutableError
+    - TypeError
+    - UnexpectedKeyError
     - ValueError
   xml:
     - Attr
@@ -314,3 +316,170 @@ def traverse_is_depth_first_parent_first()
   assert_eq $nodes[1].tag "b"
   assert_eq $nodes[2].tag "c"
   assert_eq $nodes[3].tag "d"
+
+#[test]
+def construct_children_variadically()
+  let n = Node "greeting" "hello"
+  assert_eq $to_str(n) "<greeting>hello</greeting>"
+
+  let n = Node "root" (Node "a") "text" (Node "b")
+  assert_eq $to_str(n) "<root><a></a>text<b></b></root>"
+
+  let nested = Node "outer" (Node "inner" "content")
+  let parsed = from_str $to_str(nested)
+  let children = [...parsed.children]
+  assert_eq $children[0].tag "inner"
+  assert_eq $[...children[0].children][0] "content"
+
+#[test]
+def construct_attrs_from_dict()
+  let n = Node "disk" attrs: {type: "file", device: "disk"}
+  assert_eq $to_str(n) r#"<disk type="file" device="disk"></disk>"#
+  assert_eq $n.attr("type") "file"
+
+  # Bareword keys intern as Sym and quoted keys as Str; both name attributes.
+  let n = Node "e" attrs: {plain: "1", "x-custom": "2"}
+  assert_eq $n.attrs[0].name "plain"
+  assert_eq $n.attrs[1].name "x-custom"
+  assert_eq $n.attr("x-custom") "2"
+
+  # `attrs:` is applied ahead of positional `Attr`s wherever the keyword sits.
+  let n = Node "e" (Attr "second" "2") attrs: {first: "1"}
+  assert_eq $n.attrs[0].name "first"
+  assert_eq $n.attrs[1].name "second"
+
+#[test]
+def construct_mixes_attrs_and_children()
+  let n = Node "root"
+    (Attr "id" "1")
+    (Node "child" "text")
+  assert_eq $to_str(n) r#"<root id="1"><child>text</child></root>"#
+
+  let ns = Node "vm" namespace: "urn:vm" prefix: "v"
+    attrs: {managed: "true"}
+    $Node("port", "22")
+  let parsed = from_str $to_str(ns)
+  assert_eq $parsed.namespace "urn:vm"
+  assert_eq $parsed.attr("managed") "true"
+  assert_eq $[...parsed.children][0].tag "port"
+
+  let attr = Attr "id" "1" namespace: "urn:a" prefix: "a"
+  let n = Node "root" $attr
+  assert_eq (n.attr "id" namespace: "urn:a") "1"
+
+#[test]
+def construct_vertical_layout()
+  # A nested element is a parenthesized or `$`-compact call; a bare vertical
+  # item is literal text to end of line, and a dash item likewise.
+  let disk = Node disk
+    attrs:
+      type: file
+      device: disk
+    (Node "driver" attrs: {name: "qemu", type: "qcow2"})
+    $Node("source", attrs: {file: "/tmp/disk.qcow2"})
+  assert_eq $to_str(disk) $ "".join $
+    - r#"<disk type="file" device="disk">"#
+    - r#"<driver name="qemu" type="qcow2"></driver>"#
+    - r#"<source file="/tmp/disk.qcow2"></source></disk>"#
+
+  # A bare item is an ordinary statement-level argument list, so these are two
+  # separate string children; serialization concatenates adjacent text.
+  let text = Node "note"
+    plain literal words
+  assert_eq $text.children.len 3
+  assert_eq $to_str(text) "<note>plainliteralwords</note>"
+
+  # `- $ ` introduces a command-or-expression running to end of line.
+  let dollar = Node disk
+    - $ Node driver attrs: {name: "qemu"}
+  assert_eq $to_str(dollar) r#"<disk><driver name="qemu"></driver></disk>"#
+
+  let nested = Node disk
+    - $ Node source
+        attrs:
+          file: /tmp/disk.qcow2
+  assert_eq $to_str(nested) r#"<disk><source file="/tmp/disk.qcow2"></source></disk>"#
+
+  # `- $ ` items nest arbitrarily deep, each opening its own vertical block.
+  let domain = Node domain
+    attrs:
+      type: kvm
+    - $ Node name dolang-ci
+    - $ Node devices
+        - $ Node interface
+            attrs:
+              type: user
+            - $ Node portForward
+                attrs:
+                  proto: tcp
+                - $ Node range attrs: {start: "20000", to: "22"}
+  assert_eq $to_str(domain) $ "".join $
+    - r#"<domain type="kvm"><name>dolang-ci</name><devices>"#
+    - r#"<interface type="user"><portForward proto="tcp">"#
+    - r#"<range start="20000" to="22"></range>"#
+    - r#"</portForward></interface></devices></domain>"#
+
+#[test]
+def construct_rejects_invalid_arguments()
+  assert_throws $TypeError do Node "root" attrs: {x: 42}
+  assert_throws $TypeError do Node "root" attrs: "nope"
+  assert_throws $UnexpectedKeyError do Node "root" bogus: "1"
+
+  # Children are unchecked at construction, exactly as with `push`; `verify`
+  # is what rejects a malformed tree.
+  let bad = Node "root" 42
+  assert_eq $bad.children[0] 42
+  assert_throws $ValueError do verify $bad
+
+#[test]
+def construct_variadically_through_subclass()
+  class Element: Node
+    def (init) self tag ...items
+      Node.(init) $self $tag ...items
+
+  let el = Element "root" (Attr "id" "1") (Node "child")
+  assert_eq (type el) $Element
+  assert_eq $el.attr("id") "1"
+  assert_eq $el.children[0].tag "child"
+
+#[test]
+def do_subclasses_are_accepted_as_native_values()
+  class MyAttr: Attr
+    def (init) self name value
+      Attr.(init) $self $name $value
+
+  class MyNode: Node
+    def (init) self tag
+      Node.(init) $self $tag
+
+  # A Do subclass of a native type is a class instance holding the native in a
+  # slot; casts look through it, so it serializes like the base type.
+  let el = MyNode "root"
+  assert (type el Node)
+  verify $el
+  assert_eq $to_str(el) "<root></root>"
+
+  let with_attr = Node "root"
+  with_attr.attrs.push (MyAttr "id" "1")
+  assert_eq $to_str(with_attr) r#"<root id="1"></root>"#
+
+  let with_child = Node "root"
+  with_child.push (MyNode "child")
+  assert_eq $to_str(with_child) "<root><child></child></root>"
+
+  # Nested both ways, and through the variadic constructor.
+  let tree = MyNode "outer"
+  tree.push (Node "inner" (MyNode "leaf"))
+  assert_eq $to_str(tree) "<outer><inner><leaf></leaf></inner></outer>"
+  assert_eq $to_str(Node "wrap" (MyNode "sub")) "<wrap><sub></sub></wrap>"
+
+  let parsed = from_str $to_str(tree)
+  assert_eq $parsed.tag "outer"
+  assert_eq $[...parsed.children][0].tag "inner"
+
+  # A cast that looks through to the native delegate still refers to the whole
+  # object, so values recovered from a tree keep their subclass identity.
+  let nodes = [...tree.traverse()]
+  assert_eq (type nodes[0]) $MyNode
+  assert_eq (type nodes[2]) $MyNode
+  assert_eq (type with_attr.attrs[0]) $MyAttr
