@@ -1,4 +1,4 @@
-import sys sqlite systemd
+import proc sys sqlite systemd
   fs:
     - with_temp_dir
     - Path
@@ -230,7 +230,17 @@ def container_inspect_lifecycle()
   remove_container $name
 
   clean_container $name do
-    sub do container_cli run --init -d --name $name ubuntu:24.04 sleep infinity
+    # Deliberately bypasses the container module to make a container it did not
+    # create. That means the runtime's own quieting doesn't apply: an inline
+    # pull would spray "Unable to find image locally" plus layer progress over
+    # the real stderr, so capture it and only surface it if the run fails.
+    let lines = []
+    try
+      sub do container_cli run --init -d --name $name ubuntu:24.04 sleep infinity
+        stderr: $lines
+    catch proc.Error: e
+      echo $"\n".join(lines)
+      throw e
 
     let ctr = runtime.container $name
     let state = ctr.state()
