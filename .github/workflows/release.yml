@@ -39,7 +39,6 @@ jobs:
         uses: ./.github/actions/setup-runner
         with:
           target: ${{ matrix.target }}
-          vm-disk-size: 100G
 
       - name: Build and install release binaries
         run: |
