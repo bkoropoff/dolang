@@ -8,12 +8,12 @@ use crate::{
     strand::{InterruptToken, Strand, StrandInner},
     sym::{self, Sym},
     unpack,
-    value::{Output, Slot, Value},
+    value::{Output, Slot, TypeObject, Value},
 };
 
 use super::{
     iter,
-    protocol::{Protocol, Recv},
+    protocol::{GcObj, Protocol, Recv},
 };
 
 /// Result stored in a JoinHandle after a background strand completes.
@@ -28,8 +28,6 @@ pub(crate) struct Handle<'v> {
     pub(crate) interrupt: InterruptToken<'v>,
     pub(crate) result: Option<Completion<'v>>,
     pub(crate) wakers: Vec<Waker>,
-    pub(crate) stream_input: Value<'v>,
-    pub(crate) stream_output: Value<'v>,
 }
 
 impl<'v> Handle<'v> {
@@ -39,8 +37,6 @@ impl<'v> Handle<'v> {
             interrupt,
             result: None,
             wakers: Vec::new(),
-            stream_input: Value::NIL,
-            stream_output: Value::NIL,
         }
     }
 
@@ -60,16 +56,12 @@ unsafe impl<'v> Collect for Handle<'v> {
     type Annex = ();
 
     fn accept(&self, visit: &mut dyn Visit) -> ControlFlow<()> {
-        // Scan result value
         if let Some(Completion::Ok(v)) = &self.result {
             v.accept(visit)?;
         }
         if let Some(Completion::Err((v, _))) = &self.result {
             v.accept(visit)?;
         }
-
-        self.stream_input.accept(visit)?;
-        self.stream_output.accept(visit)?;
 
         // Scan the strand's stack (start_callable, frame chain, input/output)
         if let Some(ref inner) = self.inner {
@@ -92,6 +84,50 @@ impl<'v> Drop for Handle<'v> {
     }
 }
 
+async fn join_handle<'v, 's>(
+    handle: &GcObj<'v, Handle<'v>>,
+    strand: &mut Strand<'v, 's>,
+    out: Slot<'v, '_>,
+) -> Result<'v, 's, ()> {
+    // Borrow only while polling so the handle remains collectable across suspension.
+    future::poll_fn(|cx| {
+        let mut borrow = handle
+            .borrow_mut()
+            .ok_or_else(|| Error::concurrency(strand))?;
+        if borrow.result.is_some() {
+            return Poll::Ready(Ok(()));
+        }
+        borrow.wakers.push(cx.waker().clone());
+        Poll::Pending
+    })
+    .await?;
+    let borrow = handle.borrow().ok_or_else(|| Error::concurrency(strand))?;
+    match borrow.result.as_ref().unwrap() {
+        Completion::Ok(v) => {
+            Output::set(strand, out, v);
+            Ok(())
+        }
+        Completion::Err(pair) => Err(Error::from_pair_ref(strand, pair)),
+    }
+}
+
+async fn wait_handle<'v, 's>(
+    handle: &GcObj<'v, Handle<'v>>,
+    strand: &mut Strand<'v, 's>,
+) -> Result<'v, 's, ()> {
+    future::poll_fn(|cx| {
+        let mut borrow = handle
+            .borrow_mut()
+            .ok_or_else(|| Error::concurrency(strand))?;
+        if borrow.result.is_some() {
+            return Poll::Ready(Ok(()));
+        }
+        borrow.wakers.push(cx.waker().clone());
+        Poll::Pending
+    })
+    .await
+}
+
 impl<'v> Protocol<'v> for Handle<'v> {
     fn op_type<'a, 's>(
         _this: Recv<'v, 'a, Self>,
@@ -102,17 +138,11 @@ impl<'v> Protocol<'v> for Handle<'v> {
     }
 
     fn op_debug<'a, 's>(
-        this: Recv<'v, 'a, Self>,
+        _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        let is_stream = !this.borrow(strand)?.stream_output.is_nil();
-        crate::fmt!(
-            strand,
-            w,
-            "<strand.{}>",
-            if is_stream { "Stream" } else { "Strand" }
-        )
+        crate::fmt!(strand, w, "<strand.Strand>")
     }
 
     async fn op_mcall<'a, 's>(
@@ -125,48 +155,7 @@ impl<'v> Protocol<'v> for Handle<'v> {
         match method.tag() {
             sym::JOIN => {
                 let ([], []) = unpack!(strand, args, 0, 0)?;
-                // Close stream channels first to prevent deadlock when the strand
-                // is blocked on I/O from the handle side.
-                let (stream_input, stream_output) = {
-                    let borrow = this.borrow(strand)?;
-                    (borrow.stream_input.dup(), borrow.stream_output.dup())
-                };
-                let close = Sym::well_known(sym::CLOSE);
-                if !stream_input.is_nil() {
-                    strand
-                        .with_slots(async move |strand, [mut tmp]| {
-                            let _ = method!(strand, &stream_input, close, &mut tmp).await;
-                        })
-                        .await;
-                }
-                if !stream_output.is_nil() {
-                    strand
-                        .with_slots(async move |strand, [mut tmp]| {
-                            let _ = method!(strand, &stream_output, close, &mut tmp).await;
-                        })
-                        .await;
-                }
-                // Suspend until result is available. Uses borrow_mut just-in-time
-                // and drops it before the await point so the GC can clear the
-                // JoinHandle if needed (e.g. during cycle collection).
-                future::poll_fn(|cx| {
-                    let mut borrow = this.borrow_mut(strand)?;
-                    if borrow.result.is_some() {
-                        return Poll::Ready(Ok(()));
-                    }
-                    borrow.wakers.push(cx.waker().clone());
-                    Poll::Pending
-                })
-                .await?;
-                // Result is now available
-                let borrow = this.borrow(strand)?;
-                match borrow.result.as_ref().unwrap() {
-                    Completion::Ok(v) => {
-                        Output::set(strand, out, v);
-                        Ok(())
-                    }
-                    Completion::Err(pair) => Err(Error::from_pair_ref(strand, pair)),
-                }
+                join_handle(&this.to_strong(), strand, out).await
             }
             sym::CANCEL => {
                 let ([], []) = unpack!(strand, args, 0, 0)?;
@@ -176,38 +165,124 @@ impl<'v> Protocol<'v> for Handle<'v> {
             }
             sym::WAIT => {
                 let ([], []) = unpack!(strand, args, 0, 0)?;
-                future::poll_fn(|cx| {
-                    let mut borrow = this.borrow_mut(strand)?;
-                    if borrow.result.is_some() {
-                        return Poll::Ready(Ok(()));
-                    }
-                    borrow.wakers.push(cx.waker().clone());
-                    Poll::Pending
-                })
-                .await
+                wait_handle(&this.to_strong(), strand).await
             }
             sym::DONE => Err(Error::type_error(strand, "`done` is a field, not a method")),
-            // Each surface is gated on the end that backs it, matching
-            // `op_iter`/`op_sink`/`op_subtype`: a half-duplex stream offers
-            // exactly the one it has.
-            tag => {
-                let (can_iter, can_sink) = {
+            _ => Err(Error::field(strand, method)),
+        }
+    }
+
+    fn op_get<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        field: Sym<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        match field.tag() {
+            sym::JOIN | sym::CANCEL | sym::WAIT => {
+                super::BoundMethod::create(strand, &this, field, out);
+                Ok(())
+            }
+            sym::DONE => {
+                let done = this.borrow(strand)?.result.is_some();
+                Output::set(strand, out, done);
+                Ok(())
+            }
+            _ => Err(Error::field(strand, field)),
+        }
+    }
+}
+
+/// A background strand together with its caller-facing stream endpoints.
+pub(crate) struct Stream<'v> {
+    pub(crate) handle: GcObj<'v, Handle<'v>>,
+    pub(crate) input: Value<'v>,
+    pub(crate) output: Value<'v>,
+}
+
+unsafe impl<'v> Collect for Stream<'v> {
+    const CYCLIC: bool = true;
+    const IMMUTABLE: bool = true;
+    type Annex = ();
+
+    fn accept(&self, visit: &mut dyn Visit) -> ControlFlow<()> {
+        self.handle.accept(visit)?;
+        self.input.accept(visit)?;
+        self.output.accept(visit)
+    }
+
+    fn clear(&mut self) {
+        self.input = Value::NIL;
+        self.output = Value::NIL;
+    }
+}
+
+impl<'v> Protocol<'v> for Stream<'v> {
+    fn op_type<'a, 's>(
+        _this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        out: Slot<'v, 'a>,
+    ) {
+        Output::set(strand, out, &strand.singletons().stream)
+    }
+
+    fn op_debug<'a, 's>(
+        _this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        w: &mut dyn crate::value::Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        crate::fmt!(strand, w, "<strand.Stream>")
+    }
+
+    async fn op_mcall<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        method: Sym<'v, 'a>,
+        args: Args<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        match method.tag() {
+            sym::JOIN => {
+                let ([], []) = unpack!(strand, args, 0, 0)?;
+                let (input, output, handle) = {
                     let borrow = this.borrow(strand)?;
                     (
-                        !borrow.stream_output.is_nil(),
-                        !borrow.stream_input.is_nil(),
+                        borrow.input.dup(),
+                        borrow.output.dup(),
+                        borrow.handle.clone(),
                     )
                 };
-                match iter::classify(tag) {
-                    Some(iter::Surface::Iterable) if can_iter => {
-                        iter::iterable_mcall(strand, &this, method, args, out).await
-                    }
-                    Some(iter::Surface::Sinkable) if can_sink => {
-                        iter::sinkable_mcall(strand, &this, method, args, out).await
-                    }
-                    _ => Err(Error::field(strand, method)),
-                }
+                let close = Sym::well_known(sym::CLOSE);
+                strand
+                    .with_slots(async move |strand, [mut tmp]| {
+                        let _ = method!(strand, &input, close, &mut tmp).await;
+                        let _ = method!(strand, &output, close, &mut tmp).await;
+                    })
+                    .await;
+                join_handle(&handle, strand, out).await
             }
+            sym::CANCEL => {
+                let ([], []) = unpack!(strand, args, 0, 0)?;
+                let handle = this.borrow(strand)?.handle.clone();
+                let borrow = handle.borrow().ok_or_else(|| Error::concurrency(strand))?;
+                borrow.interrupt.cancel();
+                Ok(())
+            }
+            sym::WAIT => {
+                let ([], []) = unpack!(strand, args, 0, 0)?;
+                let handle = this.borrow(strand)?.handle.clone();
+                wait_handle(&handle, strand).await
+            }
+            sym::DONE => Err(Error::type_error(strand, "`done` is a field, not a method")),
+            tag => match iter::classify(tag) {
+                Some(iter::Surface::Iterable) => {
+                    iter::iterable_mcall(strand, &this, method, args, out).await
+                }
+                Some(iter::Surface::Sinkable) => {
+                    iter::sinkable_mcall(strand, &this, method, args, out).await
+                }
+                None => Err(Error::field(strand, method)),
+            },
         }
     }
 
@@ -216,11 +291,8 @@ impl<'v> Protocol<'v> for Handle<'v> {
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        let borrow = this.borrow(strand)?;
-        if borrow.stream_output.is_nil() {
-            return Err(Error::type_error(strand, "strand is not a stream"));
-        }
-        Output::set(strand, out, &borrow.stream_output);
+        let output = this.borrow(strand)?.output.dup();
+        Output::set(strand, out, &output);
         Ok(())
     }
 
@@ -229,11 +301,8 @@ impl<'v> Protocol<'v> for Handle<'v> {
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        let borrow = this.borrow(strand)?;
-        if borrow.stream_input.is_nil() {
-            return Err(Error::type_error(strand, "strand is not a stream"));
-        }
-        Output::set(strand, out, &borrow.stream_input);
+        let input = this.borrow(strand)?.input.dup();
+        Output::set(strand, out, &input);
         Ok(())
     }
 
@@ -243,31 +312,25 @@ impl<'v> Protocol<'v> for Handle<'v> {
         field: Sym<'v, 'a>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        let (can_iter, can_sink) = {
-            let borrow = this.borrow(strand)?;
-            (
-                !borrow.stream_output.is_nil(),
-                !borrow.stream_input.is_nil(),
-            )
-        };
         match field.tag() {
             sym::JOIN | sym::CANCEL | sym::WAIT => {
                 super::BoundMethod::create(strand, &this, field, out);
                 Ok(())
             }
             sym::DONE => {
-                let input = this.borrow(strand)?.result.is_some();
-                Output::set(strand, out, input);
+                let handle = this.borrow(strand)?.handle.clone();
+                let done = handle
+                    .borrow()
+                    .ok_or_else(|| Error::concurrency(strand))?
+                    .result
+                    .is_some();
+                Output::set(strand, out, done);
                 Ok(())
             }
             tag => match iter::classify(tag) {
-                Some(iter::Surface::Iterable) if can_iter => {
-                    iter::iterable_get(strand, &this, field, out)
-                }
-                Some(iter::Surface::Sinkable) if can_sink => {
-                    iter::sinkable_get(strand, &this, field, out)
-                }
-                _ => Err(Error::field(strand, field)),
+                Some(iter::Surface::Iterable) => iter::iterable_get(strand, &this, field, out),
+                Some(iter::Surface::Sinkable) => iter::sinkable_get(strand, &this, field, out),
+                None => Err(Error::field(strand, field)),
             },
         }
     }
@@ -304,5 +367,51 @@ impl<'v> Protocol<'v> for Type {
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<type strand.Strand>")
+    }
+}
+
+// ── Stream Class ────────────────────────────────────────────────
+
+pub(crate) struct StreamType;
+
+unsafe impl Collect for StreamType {
+    const CYCLIC: bool = false;
+    const IMMUTABLE: bool = true;
+    type Annex = ();
+
+    fn accept(&self, _visit: &mut dyn Visit) -> ControlFlow<()> {
+        ControlFlow::Continue(())
+    }
+
+    fn clear(&mut self) {}
+}
+
+impl<'v> Protocol<'v> for StreamType {
+    fn op_type<'a, 's>(
+        _this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        out: Slot<'v, 'a>,
+    ) {
+        Output::set(strand, out, &strand.singletons().type_obj)
+    }
+
+    fn op_subtype<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        supertype: &Value<'v>,
+    ) -> bool {
+        supertype.eq(strand, &this)
+            || supertype.eq(strand, TypeObject::Value)
+            || strand.singletons().strand.eq(strand, supertype)
+            || strand.singletons().iterable.eq(strand, supertype)
+            || strand.singletons().sinkable.eq(strand, supertype)
+    }
+
+    fn op_debug<'a, 's>(
+        _this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        w: &mut dyn crate::value::Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        crate::fmt!(strand, w, "<type strand.Stream>")
     }
 }

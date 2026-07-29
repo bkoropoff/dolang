@@ -17,7 +17,7 @@ use crate::{
         array::Array,
         backtrace, channel,
         native::{Object, Type, TypeBuilder},
-        tuple,
+        strand as strand_object, tuple,
     },
     strand::{InheritKind, InterruptToken, Local, LocalKey, LocalRootKey, Redirect, Strand},
     unpack,
@@ -525,11 +525,13 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
     let default_key = builder.sym("default");
     let else_key = builder.sym("else");
     let strand_class = builder.singletons().strand.dup();
+    let stream_class = builder.singletons().stream.dup();
     let backtrace_class = builder.singletons().backtrace.dup();
 
     builder
         .module("strand")
         .value("Strand", &strand_class)
+        .value("Stream", &stream_class)
         .value("Backtrace", &backtrace_class)
         .value("Key", state.types.key)
         .value("Resource", state.types.resource)
@@ -845,7 +847,6 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
                 callable.take(),
                 InterruptToken::new(),
                 None,
-                None,
                 async move |strand, arg, out| call!(strand, arg, out).await,
             )?;
             out.store(Value::from_object(handle));
@@ -876,11 +877,19 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
                 callable.take(),
                 InterruptToken::new(),
                 Some((input_receiver, output_sender)),
-                Some((input_sender, output_receiver)),
                 async move |strand, arg, out| call!(strand, arg, out).await,
             )?;
 
-            out.store(Value::from_object(handle));
+            let stream_type = strand.vm().builtin_types().stream;
+            stream_type.create(
+                strand,
+                strand_object::Stream {
+                    handle,
+                    input: input_sender,
+                    output: output_receiver,
+                },
+                &mut out,
+            );
             Ok(())
         })
         .function_with_slots(

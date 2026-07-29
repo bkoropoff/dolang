@@ -1150,17 +1150,12 @@ impl<'v, 's> Strand<'v, 's> {
     /// iterators are set to those values before `f` runs, and both are closed when
     /// `f` returns (regardless of success or failure).
     ///
-    /// If `handle_stream` is `Some((handle_input, handle_output))`, the returned handle's
-    /// own iterable/sinkable channel ends (the caller-facing side, as opposed to `stream`'s
-    /// strand-facing side) are set to those values before it's returned.
-    ///
     /// Returns an error if the spawn channel is not available (e.g. the VM is shutting down).
     pub(crate) fn spawn_background_raw<F>(
         &mut self,
         arg: Value<'v>,
         interrupt: InterruptToken<'v>,
         stream: Option<(Value<'v>, Value<'v>)>,
-        handle_stream: Option<(Value<'v>, Value<'v>)>,
         f: F,
     ) -> Result<'v, 's, GcObj<'v, Handle<'v>>>
     where
@@ -1197,15 +1192,6 @@ impl<'v, 's> Strand<'v, 's> {
             vm.builtin_types().strand_handle,
             Handle::new(inner.clone(), interrupt),
         );
-
-        // Wire up the handle-facing channel ends, if this is a stream strand.
-        if let Some((handle_input, handle_output)) = handle_stream {
-            let mut h = handle
-                .borrow_mut()
-                .expect("fresh handle is always borrowable");
-            h.stream_input = handle_input;
-            h.stream_output = handle_output;
-        }
 
         // Create weak ref for the future (doesn't participate in cycles)
         let weak_handle = GcObj::downgrade(&handle);
@@ -1315,7 +1301,7 @@ impl<'v, 's> Strand<'v, 's> {
         let interrupt = interrupt
             .map(|t| t.nested())
             .unwrap_or_else(InterruptToken::new);
-        let handle = self.spawn_background_raw(arg, interrupt, None, None, f)?;
+        let handle = self.spawn_background_raw(arg, interrupt, None, f)?;
         Output::set(self, &mut out, &Value::from_object(handle));
         Ok(())
     }

@@ -122,6 +122,7 @@ pub(crate) struct BuiltinTypes<'v> {
     pub(crate) set_iter: TypeHandle<'v, set::Iter<'v>>,
     pub(crate) set: TypeHandle<'v, set::Set<'v>>,
     pub(crate) strand_handle: TypeHandle<'v, strand::Handle<'v>>,
+    pub(crate) stream: TypeHandle<'v, strand::Stream<'v>>,
     pub(crate) module: TypeHandle<'v, module::Module<'v>>,
     pub(crate) module_iter: TypeHandle<'v, module::Iter<'v>>,
     pub(crate) native_module: TypeHandle<'v, module::Native<'v>>,
@@ -187,6 +188,7 @@ pub(crate) struct BuiltinTypes<'v> {
     pub(crate) error_variant_type: TypeHandle<'v, error::VariantType>,
     pub(crate) module_type: TypeHandle<'v, module::Type>,
     pub(crate) strand_type: TypeHandle<'v, strand::Type>,
+    pub(crate) stream_type: TypeHandle<'v, strand::StreamType>,
     pub(crate) args_type: TypeHandle<'v, types::ArgsType>,
 }
 
@@ -225,6 +227,7 @@ impl<'v> BuiltinTypes<'v> {
             set_iter: types.register_type_handle(),
             set: types.register_type_handle(),
             strand_handle: types.register_type_handle(),
+            stream: types.register_type_handle(),
             error: types.register_type_handle(),
             f64: types.register_type_handle(),
             function: types.register_type_handle(),
@@ -273,6 +276,7 @@ impl<'v> BuiltinTypes<'v> {
             error_variant_type: types.register_type_handle(),
             module_type: types.register_type_handle(),
             strand_type: types.register_type_handle(),
+            stream_type: types.register_type_handle(),
             args_type: types.register_type_handle(),
             input_iter: types.register_type_handle(),
             output_iter: types.register_type_handle(),
@@ -325,6 +329,7 @@ pub(crate) struct Singletons<'v> {
     pub(crate) error: Value<'v>,
     pub(crate) module: Value<'v>,
     pub(crate) strand: Value<'v>,
+    pub(crate) stream: Value<'v>,
     pub(crate) args: Value<'v>,
 
     // Error variant classes
@@ -397,6 +402,7 @@ impl<'v> Singletons<'v> {
             error: v!(builtin_types.error_type, error::Type),
             module: v!(builtin_types.module_type, module::Type),
             strand: v!(builtin_types.strand_type, strand::Type),
+            stream: v!(builtin_types.stream_type, strand::StreamType),
             args: v!(builtin_types.args_type, types::ArgsType),
             error_unsupported: v!(
                 builtin_types.error_variant_type,
