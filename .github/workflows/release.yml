@@ -24,7 +24,7 @@ jobs:
       matrix:
         include:
           - target: x86_64-linux
-            os: ubuntu-latest
+            os: ubuntu-22.04
           - target: x86_64-windows
             os: windows-latest
           - target: aarch64-macos
@@ -39,7 +39,6 @@ jobs:
         uses: ./.github/actions/setup-runner
         with:
           target: ${{ matrix.target }}
-          vm-disk-size: 100G
 
       - name: Build and install release binaries
         run: |

@@ -452,7 +452,9 @@ def validate_metadata arguments
 def source_entries source
   let metadata = (source.metadata resolve: :LINK:)
   if (metadata.type == :DIR:)
-    [...source.glob "**" resolve: :LINK:]
+    # `**` matches the source directory itself, which sorts first and must not
+    # become an entry
+    [...(source.glob "**" resolve: :LINK:).skip(1)]
   else
     [source]
 
