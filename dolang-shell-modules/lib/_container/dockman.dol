@@ -216,7 +216,7 @@ def merged_lines out err
   lines
 
 def matches_any haystack needles
-  needles.iter().any do |needle| haystack.contains $needle
+  needles.any do |needle| haystack.contains $needle
 
 def classify_image_error ref lines
   for line = lines
@@ -312,7 +312,7 @@ def parse_container_mounts mounts
   mapped
 
 def parse_image_tags repo_tags
-  array $ repo_tags.iter().map do |tag|
+  array $ repo_tags.map do |tag|
     let repo tag = tag.split ":" limit: 1
     record :repo :tag
 
@@ -934,7 +934,7 @@ pub class Image
     self.entrypoint = entrypoint
     self.working_dir = (working_dir && Path working_dir)
     self.user = user
-    self.env = dict $ env.iter().map do |e| e.split "=" limit: 1
+    self.env = dict $ env.map do |e| e.split "=" limit: 1
 
   pub def (str) self
     self.id

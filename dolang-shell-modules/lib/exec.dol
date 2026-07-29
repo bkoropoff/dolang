@@ -37,7 +37,7 @@ def module_name path name
 
 def inject_keys inject
   let keys = [...inject.keys()]
-  if !(keys.iter().all do |k| type k sym)
+  if !(keys.all do |k| type k sym)
     throw std.TypeError "inject key: expected `sym`"
   keys
 

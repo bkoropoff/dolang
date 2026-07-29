@@ -922,9 +922,7 @@ impl<'v> Protocol<'v> for Array<'v> {
                 strand,
                 "array.len is a field, not a method",
             )),
-            sym::ITER => iter::iterable_mcall(strand, &this, method, args, out).await,
-            sym::SINK => iter::sinkable_mcall(strand, &this, method, args, out).await,
-            _ => Err(Error::field(strand, method)),
+            _ => iter::iterable_sinkable_mcall(strand, &this, method, args, out).await,
         }
     }
 
@@ -932,7 +930,7 @@ impl<'v> Protocol<'v> for Array<'v> {
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         field: Sym<'v, 'a>,
-        mut out: Slot<'v, 'a>,
+        out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
         match field.tag() {
             sym::LEN => {
@@ -953,13 +951,7 @@ impl<'v> Protocol<'v> for Array<'v> {
                 BoundMethod::create(strand, &this, field, out);
                 Ok(())
             }
-            _ => {
-                if let Ok(()) = iter::iterable_get(strand, &this, field, Slot::reborrow(&mut out)) {
-                    Ok(())
-                } else {
-                    iter::sinkable_get(strand, &this, field, out)
-                }
-            }
+            _ => iter::iterable_sinkable_get(strand, &this, field, out),
         }
     }
 

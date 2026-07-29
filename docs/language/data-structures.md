@@ -108,7 +108,7 @@ Use `kv()` when you want an ordinary iterator of 2-item sequences to spread as
 key/value entries:
 
 ```
-let entries = ["x=1", "y=2"].iter().map do |e| e.split "="
+let entries = ["x=1", "y=2"].map do |e| e.split "="
 let dict = {...entries.kv()}
 ```
 

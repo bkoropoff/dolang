@@ -12,7 +12,7 @@ use crate::{
     object::{
         BoundMethod, dict,
         native::{Instance, Object, Spread, SpreadContext, Unpack, UnpackItem},
-        protocol::{GcObj, Protocol, Recv},
+        protocol::{GcObj, Inspect, Protocol, Recv},
     },
     sig,
     strand::Strand,
@@ -784,7 +784,7 @@ impl<'v> Protocol<'v> for View<'v> {
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,
     ) {
-        Output::set(strand, out, TypeObject::Value)
+        Output::set(strand, out, &strand.singletons().dict_view)
     }
 }
 
@@ -874,5 +874,58 @@ impl<'v> Protocol<'v> for Iter<'v> {
         out: Slot<'v, 'a>,
     ) {
         Output::set(strand, out, &strand.singletons().input_iter)
+    }
+}
+
+/// Type object shared by every dict view.
+///
+/// See [`crate::object::array_view::Type`] for why views need a real type
+/// object rather than answering `Value`.
+pub(crate) struct Type;
+
+unsafe impl Collect for Type {
+    const CYCLIC: bool = false;
+    const IMMUTABLE: bool = true;
+    type Annex = ();
+
+    fn accept(&self, _visit: &mut dyn Visit) -> ControlFlow<()> {
+        ControlFlow::Continue(())
+    }
+
+    fn clear(&mut self) {}
+}
+
+impl<'v> Protocol<'v> for Type {
+    fn op_type<'a, 's>(
+        _this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        out: Slot<'v, 'a>,
+    ) {
+        Output::set(strand, out, &strand.singletons().type_obj)
+    }
+
+    fn op_subtype<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        supertype: &Value<'v>,
+    ) -> bool {
+        supertype.eq(strand, &this)
+            || supertype.eq(strand, &strand.singletons().iterable)
+            || supertype.eq(strand, TypeObject::Value)
+    }
+
+    fn op_debug<'a, 's>(
+        _this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        w: &mut dyn crate::value::Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        crate::fmt!(strand, w, "<type std.DictView>")
+    }
+
+    fn op_inspect<'a>(_this: Recv<'v, 'a, Self>, _vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {
+        Some(Inspect {
+            is_abstract: true,
+            members: Vec::new(),
+        })
     }
 }

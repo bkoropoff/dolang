@@ -74,7 +74,7 @@ class Harness
   def run_file self path
     let source = path.read b
     let compiled = compile.compile $path $source
-    let warnings = compiled.diagnostics.iter().any do |d| (d.severity == :WARNING:)
+    let warnings = compiled.diagnostics.any do |d| (d.severity == :WARNING:)
     if (!compiled.ok || warnings)
       throw ModuleCompileError $path $compiled
 
@@ -82,7 +82,7 @@ class Harness
     self.#with_timeout do load.run $compiled.bytecode
     let tests = collect_key.value
     collect_key.value = nil
-    tests = [...tests.iter().filter(do |test| self.#matches_filter path test[0])]
+    tests = [...tests.filter(do |test| self.#matches_filter path test[0])]
     self.#run_module $path $tests
 
   def report self

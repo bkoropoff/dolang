@@ -104,6 +104,8 @@ well_known_symbols! {
     (PosOnly, "pos_only", POS_ONLY),
     (PosKeys, "pos_keys", POS_KEYS),
     (Pop, "pop", POP),
+    (Premap, "premap", PREMAP),
+    (Prefilter, "prefilter", PREFILTER),
     (Put, "put", PUT),
     (PutMethod, "(put)", PUT_METHOD),
     (Push, "push", PUSH),

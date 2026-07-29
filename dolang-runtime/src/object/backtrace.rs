@@ -1,10 +1,13 @@
 use std::ops::ControlFlow;
 
 use crate::{
+    arg::Args,
     error::{BacktraceIter, Error, Result, UnwindEntry},
     gc::{Collect, arena::Visit},
+    object::iter,
     strand::Strand,
     sym::{self, Sym},
+    unpack,
     value::{Output, Slot, TypeObject, Value},
     vm::Vm,
 };
@@ -111,7 +114,32 @@ impl<'v> Protocol<'v> for Backtrace<'v> {
                 super::BoundMethod::create(strand, &this, field, out);
                 Ok(())
             }
-            _ => Err(Error::field(strand, field)),
+            _ => iter::iterable_get(strand, &this, field, out),
+        }
+    }
+
+    /// Dispatch a method call on a backtrace.
+    ///
+    /// Required rather than optional: [`iter::iterable_get`] hands back a
+    /// `BoundMethod` that re-enters `op_mcall`, so without an explicit
+    /// implementation the default (`op_get` then `op_call`) recurses.
+    async fn op_mcall<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        method: Sym<'v, 'a>,
+        args: Args<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        match method.tag() {
+            sym::LEN => Err(Error::type_error(
+                strand,
+                "backtrace.len is a field, not a method",
+            )),
+            sym::ITER_METHOD => {
+                let ([_self_val], []) = unpack!(strand, args, 1, 0)?;
+                Self::op_iter(this, strand, out).await
+            }
+            _ => iter::iterable_mcall(strand, &this, method, args, out).await,
         }
     }
 
@@ -189,6 +217,25 @@ impl<'v> Protocol<'v> for Iter<'v> {
             .backtrace_frame
             .create(strand, Frame { entry }, out);
         Ok(true)
+    }
+
+    fn op_get<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        field: Sym<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        iter::iter_get(strand, &this, field, out)
+    }
+
+    async fn op_mcall<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        method: Sym<'v, 'a>,
+        args: Args<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        iter::iter_mcall(strand, &this, method, args, out).await
     }
 }
 
@@ -294,6 +341,21 @@ impl<'v> Protocol<'v> for Type {
         out: Slot<'v, 'a>,
     ) {
         Output::set(strand, out, &strand.singletons().type_obj)
+    }
+
+    /// Mirrors the instance-level `op_subtype`.
+    ///
+    /// `is_instance_of` dispatches on the type object, not the instance, so
+    /// without this `type bt Iterable` would answer `false` even though a
+    /// backtrace both follows the protocol and exposes the surface.
+    fn op_subtype<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        supertype: &Value<'v>,
+    ) -> bool {
+        supertype.eq(strand, &this)
+            || supertype.eq(strand, &strand.singletons().iterable)
+            || supertype.eq(strand, TypeObject::Value)
     }
 
     fn op_debug<'a, 's>(

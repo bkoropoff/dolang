@@ -149,6 +149,47 @@ impl<'v> Protocol<'v> for Module<'v> {
         }
     }
 
+    /// Dispatch a method call on a module.
+    ///
+    /// The lookup is inlined rather than delegated to [`Self::op_get`] on
+    /// purpose. The default `op_mcall` is `op_get` followed by `op_call`, and
+    /// `op_get`'s miss branch hands back a `BoundMethod` whose `op_call`
+    /// re-enters `op_mcall` — so relying on the default here recurses without
+    /// bound instead of reaching the `Iterable` surface.
+    async fn op_mcall<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        method: Sym<'v, 'a>,
+        args: Args<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        let re = this.get();
+        let found = match re.map.binary_search_by_key(&method, |(s, _)| *s) {
+            Ok(index) => unsafe {
+                Some(
+                    re.upvars
+                        .borrow()
+                        .expect("upvar borrow conflict")
+                        .vars
+                        .get_unchecked(re.map.get_unchecked(index).1)
+                        .dup(),
+                )
+            },
+            Err(_) => None,
+        };
+        match found {
+            Some(func) => {
+                strand
+                    .with_slots(async move |strand, [mut slot]| {
+                        slot.store(func);
+                        slot.op_call(strand, args, out).await
+                    })
+                    .await
+            }
+            None => iter::iterable_mcall(strand, &this, method, args, out).await,
+        }
+    }
+
     fn op_set<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
