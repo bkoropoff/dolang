@@ -3,8 +3,8 @@ description: Install the pinned Dolang bootstrap release
 
 inputs:
   version:
-    description: Dolang release tag to install
-    default: bootstrap
+    description: Dolang release tag to install (defaults to .github/dolang-version)
+    default: ""
 
 runs:
   using: composite
@@ -17,6 +17,12 @@ runs:
         GH_REPO: ${{ github.repository }}
         DOLANG_VERSION: ${{ inputs.version }}
       run: |
+        set -eu
+
+        if [[ -z "$DOLANG_VERSION" ]]; then
+          DOLANG_VERSION=$(tr -d '[:space:]' < "${GITHUB_WORKSPACE}/.github/dolang-version")
+        fi
+
         case "${RUNNER_OS}-${RUNNER_ARCH}" in
           Linux-X64)
             artifact=dolang-x86_64-linux.tar.gz

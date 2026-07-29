@@ -14,123 +14,32 @@ permissions:
 
 defaults:
   run:
-    shell: dolang --strict --no-cache --import dodo --import sys --import fs {0}
+    shell: dolang-ci {0}
 
 jobs:
-  build-release:
-    name: Build Release
+  dist:
+    name: Build Distribution
     runs-on: ${{ matrix.os }}
-    defaults:
-      run:
-        shell: ${{ matrix.target == 'x86_64-freebsd' && 'dolang --strict --no-cache --import dodo --import sys --import fs -m libvirt --env PATH=/home/ci/.cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin --env CARGO_TERM_COLOR --env FORCE_COLOR dolang-ci {0}' || 'dolang --strict --no-cache --import dodo --import sys --import fs {0}' }}
     strategy:
       matrix:
         include:
-          - os: ubuntu-22.04
-            target: x86_64-linux
-          - os: windows-latest
-            target: x86_64-windows
-          - os: macos-latest
-            target: aarch64-macos
-          - os: ubuntu-latest
-            target: x86_64-freebsd
+          - target: x86_64-linux
+            os: ubuntu-latest
+          - target: x86_64-windows
+            os: windows-latest
+          - target: aarch64-macos
+            os: macos-latest
+          - target: x86_64-freebsd
+            os: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v5
 
-      - name: Setup Dolang
-        id: dolang
-        uses: ./.github/actions/setup-dolang
-
-      - name: Install Rust toolchain
-        if: matrix.target != 'x86_64-freebsd'
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Rust cache
-        if: matrix.target != 'x86_64-freebsd'
-        uses: Swatinem/rust-cache@v2
-
-      - name: Cache FreeBSD VM assets
-        if: matrix.target == 'x86_64-freebsd'
-        uses: actions/cache@v4
+      - name: Setup runner
+        uses: ./.github/actions/setup-runner
         with:
-          path: |
-            ~/.local/share/dolang-freebsd-ci/libvirt/ssh
-            ~/.local/share/dolang-freebsd-ci/libvirt/seeds
-            ~/.cache/dolang-freebsd-ci
-          key: freebsd-libvirt-v1
-          restore-keys: |
-            freebsd-libvirt-
-
-      - name: Prereqs (FreeBSD)
-        if: matrix.target == 'x86_64-freebsd'
-        shell: dolang --strict --no-cache {0}
-        run: |
-          import proc sudo fs libvirt http
-          sudo.with do
-            run apt-get update
-            run apt-get install -y
-              libvirt-daemon-system libvirt-clients qemu-system-x86 qemu-utils
-              passt cloud-image-utils openssh-client apparmor-utils
-            run usermod -aG kvm,libvirt $env["USER"]
-            fs.set_metadata mode: 0o666 /dev/kvm
-            run sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-            run sysctl -w kernel.unprivileged_userns_clone=1
-            run systemctl stop apparmor.service
-            run systemctl disable apparmor.service
-            try
-              run aa-teardown
-            catch proc.Error: _
-              nil
-
-          let vm = libvirt.create
-            image: https://download.freebsd.org/releases/VM-IMAGES/15.1-RELEASE/amd64/Latest/FreeBSD-15.1-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2.xz
-            os: :FREEBSD:
-            dolang: bootstrap
-            name: dolang-ci
-            app: dolang-freebsd-ci
-            memory: 12288
-            vcpus: 4
-            disk_size: 100G
-            packages:
-              - sqlite3
-              - pkgconf
-              - curl
-              - llvm19
-            init:
-              add:
-                target: /etc/rc.conf.d/firstboot_pkg_upgrade
-                content: |
-                  firstboot_pkg_upgrade_enable="NO"
-            run: do http.get https://sh.rustup.rs do |resp|
-              run sh -s -- -y stdin: $resp.chunks()
-
-          run tar -czf /tmp/dolang-src.tar.gz --exclude=.git --exclude=target .
-          vm.upload /tmp/dolang-src.tar.gz /home/ci/dolang-src.tar.gz
-          vm.with do
-            run tar -xzf dolang-src.tar.gz
-            run rm -f dolang-src.tar.gz
-
-      - name: Prereqs (not FreeBSD)
-        if: matrix.target != 'x86_64-freebsd'
-        run: |
-          import sudo fs sys
-          let os = sys.os_info().os
-          let env_file = env["GITHUB_ENV"]
-
-          if (os == :WINDOWS:)
-            fs.append $env_file |
-              CARGO_PROFILE_DEV_DEBUG=0
-              CARGO_PROFILE_TEST_DEBUG=0
-          else if (os == :MACOS:)
-            run brew install llvm
-            fs.append $env_file |
-              LIBCLANG_PATH=/opt/homebrew/opt/llvm/lib
-          else if (os == :LINUX:)
-            sudo.with do
-              run apt update
-              run apt install llvm libclang-dev
-            run rustup target add x86_64-unknown-linux-musl
+          target: ${{ matrix.target }}
+          vm-disk-size: 100G
 
       - name: Build and install release binaries
         run: |
@@ -150,15 +59,15 @@ jobs:
             # Now remove it
             fs.remove release/bin/dolang-private-polyfill.exe
 
-      - name: Package release (not FreeBSD)
+      - name: Package release (host)
         if: matrix.target != 'x86_64-freebsd'
         run: |
           import transfer
           transfer.pack release/bin "dolang-${{ matrix.target }}.tar.gz"
 
-      - name: Package release and stop VM (FreeBSD)
+      - name: Package release (CI VM)
         if: matrix.target == 'x86_64-freebsd'
-        shell: dolang --strict --no-cache {0}
+        shell: dolang-ci --host {0}
         run: |
           import libvirt
             fs:
@@ -168,8 +77,6 @@ jobs:
           vm.with do cd release/bin do
             run tar -czf ../../dolang-${{ matrix.target }}.tar.gz ...(glob "*")
           vm.download dolang-${{ matrix.target }}.tar.gz dolang-${{ matrix.target }}.tar.gz
-          vm.destroy()
-          vm.undefine()
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6
@@ -177,50 +84,22 @@ jobs:
           name: dolang-${{ matrix.target }}
           path: dolang-${{ matrix.target }}.tar.gz
 
-  build-release-vsix:
-    name: Build Release VSIX
+  vsix:
+    name: Build VSIX
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v5
 
-      - name: Setup Dolang
-        id: dolang
-        uses: ./.github/actions/setup-dolang
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v5
+      - name: Build VSIX
+        uses: ./.github/actions/build-vsix
         with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: dolang-code/package-lock.json
-
-      - name: Install extension dependencies
-        working-directory: dolang-code
-        run: run npm ci
-
-      - name: Build extension
-        working-directory: dolang-code
-        run: run npm run compile
-
-      - name: Run extension tests
-        working-directory: dolang-code
-        run: run xvfb-run -a npm test
-
-      - name: Build release VSIX
-        working-directory: dolang-code
-        run: run npm run package:vsix
-
-      - name: Upload release VSIX artifact
-        uses: actions/upload-artifact@v6
-        with:
-          name: dolang-vsix
-          path: dolang-code/*.vsix
+          upload: true
 
   create-release:
     name: Create Release
     if: github.ref_type == 'tag' && (github.ref_name == 'bootstrap' || startsWith(github.ref_name, 'v'))
-    needs: [build-release, build-release-vsix]
+    needs: [dist, vsix]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -228,9 +107,10 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Setup Dolang
-        id: dolang
-        uses: ./.github/actions/setup-dolang
+      - name: Setup runner
+        uses: ./.github/actions/setup-runner
+        with:
+          rust: false
 
       - name: Download all artifacts
         uses: actions/download-artifact@v6
@@ -240,7 +120,6 @@ jobs:
 
       - name: Extract version from tag
         run: |
-          import fs
           fs.append $env["GITHUB_ENV"] |
             VERSION=$(env["GITHUB_REF"].without_prefix "refs/tags/")
 

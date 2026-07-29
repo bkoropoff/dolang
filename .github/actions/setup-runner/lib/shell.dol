@@ -1,0 +1,61 @@
+# Backing script for the `dolang-ci` wrapper installed by the setup-runner
+# action.
+#
+# It re-runs `dolang` on a workflow step script with the standard CI prelude,
+# redirecting the script into the CI VM when one has been provisioned for the
+# job. `--host` runs on the runner regardless.
+
+import args proc shell
+
+# Flags every step script is compiled with.
+let PRELUDE = $
+  - "--strict"
+  - "--no-cache"
+  - "--import"
+  - "dodo"
+  - "--import"
+  - "sys"
+  - "--import"
+  - "fs"
+
+# Search path inside the CI VM: rustup toolchains plus the stock FreeBSD path.
+let VM_PATH = "/home/ci/.cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+
+# Environment forwarded into the CI VM.
+let VM_ENV = $
+  - "CARGO_TERM_COLOR"
+  - "FORCE_COLOR"
+
+# Arguments that route a script through the libvirt entrypoint into `domain`.
+def vm_args domain
+  $
+    - "-m"
+    - "libvirt"
+    - "--env"
+    - "PATH=$VM_PATH"
+    for name = VM_ENV
+      - "--env"
+      - $name
+    - $domain
+
+args.with
+  help: Run a CI step script on the runner or in the CI VM.
+  - flag: host
+    help: run the script on the runner even when a CI VM is provisioned
+  - arg: script
+    divider: true
+    help: step script to run
+  - arg: script-args
+    collect: true
+    help: arguments passed to the step script
+  do |p|
+    let domain = (!p.host && env.get "DOLANG_CI_VM")
+    let target = if domain
+      vm_args $domain
+    else
+      []
+
+    try
+      run dolang ...PRELUDE ...target $p.script ...p.script_args
+    catch proc.Error: err
+      shell.exit (err.rc || 1)
