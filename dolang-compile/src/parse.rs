@@ -2262,21 +2262,31 @@ impl<'a> Parser<'a> {
             Some(token!(Keyword(Keyword::Do))) => self.parse_cmd_or_expr(scope, true),
             Some(token!(Dollar)) => {
                 let span = self.advance();
-                if let Some(token!(ArgSep)) = self.peek()? {
-                    self.advance();
-                    Ok(Expr::Group {
-                        expr: Box::new(self.parse_cmd_or_expr(scope, true)?),
-                        delim: Some(GroupDelim::Dollar(span)),
-                    })
-                } else {
-                    let expr = Expr::Group {
-                        expr: Box::new(self.parse_expr(scope, ExprMode::Compact)?),
-                        delim: Some(GroupDelim::Dollar(span)),
-                    };
-                    if matches!(self.peek()?, Some(token!(Dedent | StmtSep)) | None) {
-                        Ok(expr)
-                    } else {
-                        self.parse_implicit_concat(scope, Some(expr), UnquotedMode::Data)
+                match self.peek()? {
+                    Some(token!(ArgSep)) => {
+                        self.advance();
+                        Ok(Expr::Group {
+                            expr: Box::new(self.parse_cmd_or_expr(scope, true)?),
+                            delim: Some(GroupDelim::Dollar(span)),
+                        })
+                    }
+                    Some(token!(Indent)) => {
+                        self.advance();
+                        Ok(Expr::Group {
+                            expr: Box::new(self.parse_data(scope, vec![])?),
+                            delim: Some(GroupDelim::Dollar(span)),
+                        })
+                    }
+                    _ => {
+                        let expr = Expr::Group {
+                            expr: Box::new(self.parse_expr(scope, ExprMode::Compact)?),
+                            delim: Some(GroupDelim::Dollar(span)),
+                        };
+                        if matches!(self.peek()?, Some(token!(Dedent | StmtSep)) | None) {
+                            Ok(expr)
+                        } else {
+                            self.parse_implicit_concat(scope, Some(expr), UnquotedMode::Data)
+                        }
                     }
                 }
             }
@@ -2544,8 +2554,36 @@ impl<'a> Parser<'a> {
                 Ok(())
             }
             Some(token!(Dollar)) => {
-                self.advance();
-                let key = self.parse_expr(scope, ExprMode::Compact)?;
+                let span = self.advance();
+                match self.peek()? {
+                    Some(token!(ArgSep)) => {
+                        self.advance();
+                        args.push(Arg::Pos(Single {
+                            expr: Expr::Group {
+                                expr: Box::new(self.parse_cmd_or_expr(scope, true)?),
+                                delim: Some(GroupDelim::Dollar(span)),
+                            },
+                            delim_span: None,
+                        }));
+                        return Ok(());
+                    }
+                    Some(token!(Indent)) => {
+                        self.advance();
+                        args.push(Arg::Pos(Single {
+                            expr: Expr::Group {
+                                expr: Box::new(self.parse_data(scope, vec![])?),
+                                delim: Some(GroupDelim::Dollar(span)),
+                            },
+                            delim_span: None,
+                        }));
+                        return Ok(());
+                    }
+                    _ => (),
+                }
+                let key = Expr::Group {
+                    expr: Box::new(self.parse_expr(scope, ExprMode::Compact)?),
+                    delim: Some(GroupDelim::Dollar(span)),
+                };
                 if let Some(token!(Colon)) = self.peek()? {
                     let colon_span = self.advance();
                     let value = if let Some(token!(Indent)) = self.peek()? {
