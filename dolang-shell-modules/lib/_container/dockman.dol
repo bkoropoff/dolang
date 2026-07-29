@@ -205,6 +205,16 @@ def output_lines output stderr
         lines.push $line
   lines
 
+# Merges captured stdout and stderr line arrays, trimming and dropping blanks.
+def merged_lines out err
+  let lines = []
+  for stream = [out, err]
+    for line = stream
+      line = line.trim()
+      if line
+        lines.push $line
+  lines
+
 def matches_any haystack needles
   needles.iter().any do |needle| haystack.contains $needle
 
@@ -241,6 +251,18 @@ def classify_container_error ref lines
     let upper = line.upper()
     if (matches_any upper NO_CONTAINER_ERRORS)
       throw NoContainerError $ref
+
+# Last resort for a CLI failure none of the `classify_*` tables recognized.
+#
+# Their captured output is redirected away from the real stderr so routine
+# chatter (pull progress and the like) stays out of the log, which means an
+# unrecognized failure would otherwise be rethrown as a bare `proc.Error`
+# reporting only the exit status, with everything the CLI actually said
+# discarded. Dump it before rethrowing, the same fallback `transfer` uses for
+# unrecognized unpacking errors.
+def report_unknown lines
+  if lines.len
+    echo $"\n".join(lines)
 
 def parse_container_ports ports
   let mapped = []
@@ -300,6 +322,7 @@ def inspect_image runtime ref
     sub do runtime.cli inspect --type image $ref stderr: $lines
   catch proc.Error: e
     classify_image_error $ref $lines
+    report_unknown $lines
     throw e
   (json.from_str output)[0]
 
@@ -309,6 +332,7 @@ def inspect_container runtime ref
     sub do runtime.cli inspect --type container $ref stderr: $lines
   catch proc.Error: e
     classify_container_error $ref $lines
+    report_unknown $lines
     throw e
   (json.from_str output)[0]
 
@@ -383,6 +407,7 @@ pub class Runtime
             return strand.redirect input: $input do agent.with $thunk
       catch proc.Error: e
         classify_image_error $ctr $lines
+        report_unknown $lines
         throw e
 
   def run_direct self ctr cmd cd env argv pull
@@ -457,6 +482,7 @@ pub class Runtime
     catch proc.Error: e
       classify_image_error $refs[0] $lines
       classify_archive_error $(spec.file && target || path_target) $lines
+      report_unknown $lines
       throw e
     target
 
@@ -472,6 +498,7 @@ pub class Runtime
         stderr: $lines
     catch proc.Error: e
       classify_archive_error $source $lines
+      report_unknown $lines
       throw e
     let refs = parse_loaded_refs $output $lines
     if (refs.len == 0)
@@ -487,17 +514,23 @@ pub class Runtime
 
   pub def pull self ref :platform = nil
     let platform = normalize_platform $platform
+    let out = []
     let lines = []
-    let output = try
-      sub do self.cli pull --quiet
+    try
+      self.cli pull --quiet
         if (platform != nil)
           --platform $platform
         $ref
+        stdout: $out
         stderr: $lines
     catch proc.Error: e
-      classify_image_error $ref $lines
+      # Capture both streams rather than `sub`bing stdout: on failure `sub`'s
+      # value never materializes, so anything the CLI said there would be lost.
+      let all = merged_lines $out $lines
+      classify_image_error $ref $all
+      report_unknown $all
       throw e
-    for line = output_lines $output $lines
+    for line = merged_lines $out $lines
       if (line.starts_with "sha256:")
         return self.image $line
     self.image $ref
@@ -513,6 +546,7 @@ pub class Runtime
         stderr: $lines
     catch proc.Error: e
       classify_push_error $ref $lines
+      report_unknown $lines
       throw e
     let digest = parse_pushed_digest $output $lines
     record :ref :digest
@@ -666,6 +700,7 @@ pub class Builder
         stderr: $lines
     catch proc.Error: e
       classify_image_error $img $lines
+      report_unknown $lines
       throw e
     self.#wait_socket()
     self.#ctr_id = ctr_id
