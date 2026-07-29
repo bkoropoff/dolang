@@ -144,6 +144,24 @@ def archive_round_trips()
       assert_eq [...(destination / "nested/link").read_link().components] ["..", "hello.txt"]
       assert_eq $(destination / "nested/link").read() hello
 
+#[agent.test]
+def pack_omits_source_directory()
+  let source = Path "source"
+  (source / "nested").create_dir all: true
+  (source / "hello.txt").write hello
+  (source / "nested/data.bin").write b"\x01\x02"
+
+  let formats = $
+    - [:TAR:, "archive.tar"]
+    - [:ZIP:, "archive.zip"]
+  for format name = formats
+    transfer.pack $source $name format: $format
+    let destination = Path "out-$(str format)"
+    transfer.unpack $name $destination
+    assert_eq $(destination / "hello.txt").read() hello
+    assert_eq $(destination / "nested/data.bin").read("b") b"\x01\x02"
+    assert (!(destination / "source").exists())
+
 def compress_raw source destination format
   destination.open wb do |file|
     if (format == :GZIP:)
