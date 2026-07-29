@@ -338,6 +338,9 @@ impl<'v, 'a, T: Object<'v>> Copy for Instance<'v, 'a, T> {}
 #[must_use]
 pub struct Cast<'v, 'a, T: Object<'v>> {
     receiver: gc::Borrow<'v, 'a, protocol::Header, ObjectWrap<'v, T>>,
+    /// When the cast looked through a [`ClassInstance`](super::class::ClassInstance) native
+    /// slot, the composite value it was found in.  `None` for a direct cast.
+    delegator: Option<&'a Value<'v>>,
 }
 
 impl<'v, 'a, T: Object<'v>> Clone for Cast<'v, 'a, T> {
@@ -357,7 +360,7 @@ impl<'v, 'a, T: Object<'v>> Cast<'v, 'a, T> {
     {
         Instance {
             receiver: self.receiver,
-            delegator: None,
+            delegator: self.delegator,
         }
     }
 
@@ -2180,6 +2183,10 @@ pub struct Type<'v, T: Object<'v>> {
     pub(crate) type_vtbl: TypeHandle<'v, TypeObjectWrap<'v, T>>,
     /// Index into `Vm::type_singletons` for `Input` and `op_type` dispatch.
     pub(crate) singleton_idx: usize,
+    /// The VM this type belongs to, so that [`Type::cast`] can reach
+    /// [`BuiltinTypes::class_instance`](crate::object::BuiltinTypes) to look through the
+    /// native slots of a Do subclass.
+    pub(crate) vm: &'v Vm<'v>,
 }
 
 impl<'v, T: Object<'v>> Copy for Type<'v, T> {}
@@ -2246,10 +2253,26 @@ impl<'v, T: Object<'v>> Type<'v, T> {
 
     /// Check whether `value` has dynamic type `T`, returning a witness suitable to obtain an
     /// [`Instance`].
+    ///
+    /// A Do class deriving from `T` is a
+    /// [`ClassInstance`](super::class::ClassInstance) holding the native object in a slot,
+    /// so a direct vtable match is tried first and its native slots second — matching the
+    /// Do-side `type value T` check.  When the native is found that way, the composite value
+    /// is retained as the resulting [`Instance`]'s delegator, so the instance still refers to
+    /// the whole object rather than the bare delegate.
     pub fn cast<'a>(&self, value: &'a Value<'v>) -> Option<Cast<'v, 'a, T>> {
+        if let Some(receiver) = value.downcast_ref(self.vtbl) {
+            return Some(Cast {
+                receiver,
+                delegator: None,
+            });
+        }
         value
-            .downcast_ref(self.vtbl)
-            .map(|receiver| Cast { receiver })
+            .downcast_native(self.vm, self.vtbl)
+            .map(|receiver| Cast {
+                receiver,
+                delegator: Some(value),
+            })
     }
 
     /// Reconstructs a `Type<'v,T>` from a raw type object GC header.
@@ -2257,12 +2280,13 @@ impl<'v, T: Object<'v>> Type<'v, T> {
     /// # Safety
     /// `header` must point to a GC-allocated `TypeObjectWrap<'v,T>` whose vtable is
     /// `TypeVtbl<'v>`.
-    pub(crate) unsafe fn from_type_header(header: NonNull<arena::Header>) -> Self {
+    pub(crate) unsafe fn from_type_header(header: NonNull<arena::Header>, vm: &'v Vm<'v>) -> Self {
         let vtbl = unsafe { header.as_ref().vtbl().cast::<TypeVtbl<'v>>() };
         Type {
             vtbl: unsafe { TypeHandle::new(vtbl.as_ref().inst_vtbl.cast()) },
             type_vtbl: unsafe { TypeHandle::new(vtbl.cast()) },
             singleton_idx: unsafe { vtbl.as_ref().inst_vtbl.as_ref().singleton_idx },
+            vm,
         }
     }
 
@@ -2915,6 +2939,7 @@ impl<'v, 'a, T: Object<'v>> TypeBuilder<'v, 'a, T> {
             vtbl: unsafe { TypeHandle::new(result.inst_vtbl.cast()) },
             type_vtbl: unsafe { TypeHandle::new(result.type_vtbl.cast()) },
             singleton_idx: result.singleton_idx,
+            vm: result.vm.vm_ref(),
         };
 
         let singleton = Value::from_object(protocol::GcObj::new_annex(
@@ -3096,9 +3121,9 @@ impl<'v, 'a, T: Object<'v>> Recv<'v, 'a, TypeObjectWrap<'v, T>> {
         &vm.type_singletons[self.inst_vtbl().singleton_idx]
     }
 
-    fn ty(&self) -> Type<'v, T> {
+    fn ty(&self, vm: &'v Vm<'v>) -> Type<'v, T> {
         // SAFETY: `self` is a live `TypeObjectWrap<'v, T>` receiver.
-        unsafe { Type::<T>::from_type_header(self.as_header().cast()) }
+        unsafe { Type::<T>::from_type_header(self.as_header().cast(), vm) }
     }
 }
 
@@ -3172,7 +3197,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for TypeObjectWrap<'v, T> {
         args: Args<'v, 'a>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        let ty = this.ty();
+        let ty = this.ty(strand.vm());
         Strand::async_for_native_frame(
             strand,
             Cow::Borrowed(T::MODULE),
@@ -3216,7 +3241,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for TypeObjectWrap<'v, T> {
                 async |strand| {
                     let mut out = out;
                     let ([inst], [], trailing) = unpack!(strand, args, 1, 0, ...)?;
-                    let ty = this.ty();
+                    let ty = this.ty(strand.vm());
                     T::new(ty, strand, trailing, Slot::reborrow(&mut out)).await?;
                     let native = out.take();
                     let singleton = this.singleton(strand.vm());
@@ -3390,7 +3415,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for TypeObjectWrap<'v, T> {
         if supertype.repr_eq(strand, &this) || supertype.repr_eq(strand, TypeObject::Value) {
             return true;
         }
-        let ty = this.ty();
+        let ty = this.ty(strand.vm());
         let annex = ty.type_borrow_impl(strand).annex();
         annex
             .supertypes
@@ -3502,7 +3527,7 @@ where
 {
     let f = unsafe { closure.cast::<F>().as_ref() };
     // Reconstruct Type<'v,T> from the type object header.
-    let ty = unsafe { Type::<T>::from_type_header(header.cast()) };
+    let ty = unsafe { Type::<T>::from_type_header(header.cast(), strand.vm()) };
     strand.pin_future_call(async move |strand| f(ty, strand, args, out).await)
 }
 
@@ -3518,6 +3543,6 @@ where
 {
     let f = unsafe { &*closure.cast::<F>().as_ptr() };
     // Reconstruct Type<'v, T> from the type object header.
-    let ty = unsafe { Type::<T>::from_type_header(header.cast()) };
+    let ty = unsafe { Type::<T>::from_type_header(header.cast(), strand.vm()) };
     f(ty, strand, slot)
 }
