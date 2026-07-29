@@ -1,4 +1,12 @@
+import std:
+  - Iterable
+  - Iter
+  - Sink
+  - Sinkable
 import strand:
+  - Strand
+  - Stream
+  - spawn
   - stream
   - fork
   - each
@@ -6,6 +14,13 @@ import strand:
 
 # Test 1: basic stream — each branch doubles values
 let s = stream do each do |x| (x * 2)
+assert_eq (type s) $Stream
+assert (type s Stream)
+assert (type s Strand)
+assert (type s Iterable)
+assert (type s Sinkable)
+assert (!(type s Iter))
+assert (!(type s Sink))
 let s_input = s.sink()
 let s_output = s.iter()
 
@@ -56,3 +71,11 @@ let results4 = fork
   do mapped.next()
 s4.join()
 assert_eq $results4[1] 2
+
+# Test 5: plain strand handles do not claim stream protocols.
+let plain = spawn do 42
+assert_eq (type plain) $Strand
+assert (!(type plain Stream))
+assert (!(type plain Iterable))
+assert (!(type plain Sinkable))
+assert_eq $plain.join() 42

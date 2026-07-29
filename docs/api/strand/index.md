@@ -4,10 +4,12 @@ Concurrency primitives.
 
 ## Types
 
-| Type                           | Description                         |
-| ------------------------------ | ----------------------------------- |
-| [`Key`](./key.md)              | Strand-local storage key            |
-| [`Resource`](./resource.md)    | Scoped concurrency admission limit  |
+| Type                        | Description                         |
+| --------------------------- | ----------------------------------- |
+| [`Strand`](./strand.md)     | Background strand handle            |
+| [`Stream`](./stream.md)     | Strand handle with stream endpoints |
+| [`Key`](./key.md)           | Strand-local storage key            |
+| [`Resource`](./resource.md) | Scoped concurrency admission limit  |
 
 ## Functions
 

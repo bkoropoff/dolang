@@ -1,10 +1,9 @@
 # Stream
 
-A `Stream` is a handle to a background strand created by
-[`stream`](./index.md#stream-func). Unlike a plain
-[`Strand`](./strand.md), a `Stream` has input and output channels wired up
-automatically. It implements [`Iterable`](../std/iterable.md) for its output
-side and [`Sinkable`](../std/sinkable.md) for its input side.
+A `Stream` is a [`Strand`](./strand.md) with input and output channels wired
+up automatically by [`stream`](./index.md#stream-func). It implements
+[`Iterable`](../std/iterable.md) for its output side and
+[`Sinkable`](../std/sinkable.md) for its input side.
 
 The background strand does not inherit active
 [`Resource`](./resource.md) reservations from its creator.
