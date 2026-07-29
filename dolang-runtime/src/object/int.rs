@@ -53,6 +53,59 @@ fn rbinop<'v, 's>(
     Ok(Value::from_prim(strand, value))
 }
 
+pub(crate) fn op_get<'v, 'a, 's>(
+    receiver: &'a Value<'v>,
+    strand: &'a mut Strand<'v, 's>,
+    field: Sym<'v, 'a>,
+    out: Slot<'v, 'a>,
+) -> Result<'v, 's, ()> {
+    match field.tag() {
+        sym::BINARY | sym::OCTAL | sym::HEX => {
+            BoundMethod::create(strand, receiver, field, out);
+            Ok(())
+        }
+        _ => Err(Error::field(strand, field)),
+    }
+}
+
+pub(crate) async fn op_mcall<'v, 'a, 's>(
+    value: i128,
+    strand: &'a mut Strand<'v, 's>,
+    method: Sym<'v, 'a>,
+    args: Args<'v, 'a>,
+    out: Slot<'v, 'a>,
+) -> Result<'v, 's, ()> {
+    let formatted = match method.tag() {
+        sym::BINARY => {
+            let ([], []) = unpack!(strand, args, 0, 0)?;
+            if value < 0 {
+                format!("-{:b}", value.unsigned_abs())
+            } else {
+                format!("{value:b}")
+            }
+        }
+        sym::OCTAL => {
+            let ([], []) = unpack!(strand, args, 0, 0)?;
+            if value < 0 {
+                format!("-{:o}", value.unsigned_abs())
+            } else {
+                format!("{value:o}")
+            }
+        }
+        sym::HEX => {
+            let ([], []) = unpack!(strand, args, 0, 0)?;
+            if value < 0 {
+                format!("-{:x}", value.unsigned_abs())
+            } else {
+                format!("{value:x}")
+            }
+        }
+        _ => return Err(Error::field(strand, method)),
+    };
+    Output::set(strand, out, formatted.as_str());
+    Ok(())
+}
+
 impl<'v> Protocol<'v> for i128 {
     fn op_type<'a, 's>(
         _this: Recv<'v, 'a, Self>,
@@ -68,6 +121,31 @@ impl<'v> Protocol<'v> for i128 {
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "{}", *this.get())
+    }
+
+    fn op_get<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        field: Sym<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        match field.tag() {
+            sym::BINARY | sym::OCTAL | sym::HEX => {
+                BoundMethod::create(strand, &this, field, out);
+                Ok(())
+            }
+            _ => Err(Error::field(strand, field)),
+        }
+    }
+
+    async fn op_mcall<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        method: Sym<'v, 'a>,
+        args: Args<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        op_mcall(*this.get(), strand, method, args, out).await
     }
 
     fn op_bool<'a, 's>(this: Recv<'v, 'a, Self>, _strand: &mut Strand<'v, 's>) -> bool {
@@ -300,6 +378,31 @@ impl<'v> Protocol<'v> for Verbatim {
     ) -> Result<'v, 's, ()> {
         let borrow = this.get();
         crate::fmt!(strand, w, "{}", borrow.text)
+    }
+
+    fn op_get<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        field: Sym<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        match field.tag() {
+            sym::BINARY | sym::OCTAL | sym::HEX => {
+                BoundMethod::create(strand, &this, field, out);
+                Ok(())
+            }
+            _ => Err(Error::field(strand, field)),
+        }
+    }
+
+    async fn op_mcall<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        method: Sym<'v, 'a>,
+        args: Args<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        op_mcall(this.get().value, strand, method, args, out).await
     }
 
     fn op_bool<'a, 's>(this: Recv<'v, 'a, Self>, _strand: &mut Strand<'v, 's>) -> bool {
@@ -572,6 +675,9 @@ impl<'v> Protocol<'v> for Int {
                 Sym::well_known(sym::LT_METHOD),
                 Sym::well_known(sym::BOOL_METHOD),
                 Sym::well_known(sym::HASH_METHOD),
+                Sym::well_known(sym::BINARY),
+                Sym::well_known(sym::OCTAL),
+                Sym::well_known(sym::HEX),
             ],
         })
     }
@@ -606,7 +712,10 @@ impl<'v> Protocol<'v> for Int {
             | sym::EQ_METHOD
             | sym::LT_METHOD
             | sym::BOOL_METHOD
-            | sym::HASH_METHOD => {
+            | sym::HASH_METHOD
+            | sym::BINARY
+            | sym::OCTAL
+            | sym::HEX => {
                 BoundMethod::create(strand, &this, field, out);
                 Ok(())
             }

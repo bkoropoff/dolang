@@ -1,0 +1,41 @@
+def assert_err msg block
+  let res = try
+    block()
+    false
+  catch e
+    assert_eq (str e) $msg
+    true
+  assert $res
+
+# Immediate integers
+assert_eq ((0).binary()) "0"
+assert_eq ((10).binary()) "1010"
+assert_eq ((10).octal()) "12"
+assert_eq ((255).hex()) "ff"
+
+# Negative integers use a leading minus sign
+assert_eq ((-10).binary()) "-1010"
+assert_eq ((-10).octal()) "-12"
+assert_eq ((-255).hex()) "-ff"
+
+# The minimum Int formats without overflowing
+let min = -170141183460469231731687303715884105728
+assert_eq $min.hex() "-80000000000000000000000000000000"
+
+# Large integers take the boxed representation
+let large = (1 << 100)
+assert_eq $large.hex() "10000000000000000000000000"
+
+# Statement-level verbatim integers retain the same method behavior
+def identity value
+  value
+
+let verbatim = identity 0255
+assert_eq $verbatim.hex() "ff"
+
+# Methods work when extracted or called through the type
+let to_hex = (255).hex
+assert_eq $to_hex() "ff"
+assert_eq (Int.hex 255) "ff"
+
+assert_err "unexpected positional item: 0" do (1).hex 2

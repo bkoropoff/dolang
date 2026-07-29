@@ -7,9 +7,14 @@ use std::{
 };
 
 use crate::{
+    arg::Args,
     error::{Error, Result},
+    object::int,
     strand::Strand,
+    sym::Sym,
 };
+
+use super::{Slot, Value};
 
 pub type Integer = i128;
 
@@ -69,6 +74,32 @@ impl Display for Prim {
 }
 
 impl Prim {
+    pub(crate) fn op_get<'v, 'a, 's>(
+        self,
+        receiver: &'a Value<'v>,
+        strand: &'a mut Strand<'v, 's>,
+        field: Sym<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        match self {
+            Prim::Int(_) => int::op_get(receiver, strand, field, out),
+            _ => Err(Error::type_error(strand, "field get not supported")),
+        }
+    }
+
+    pub(crate) async fn op_mcall<'v, 'a, 's>(
+        self,
+        strand: &'a mut Strand<'v, 's>,
+        method: Sym<'v, 'a>,
+        args: Args<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        match self {
+            Prim::Int(value) => int::op_mcall(value, strand, method, args, out).await,
+            _ => Err(Error::type_error(strand, "method call not supported")),
+        }
+    }
+
     #[inline]
     pub(crate) fn op_bool(self, _strand: &mut Strand) -> bool {
         match self {

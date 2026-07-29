@@ -354,7 +354,7 @@ impl<'v> Value<'v> {
     ) -> Result<'v, 's, ()> {
         match self.case() {
             Case::Object(o) => o.op_mcall(strand, method, args, out).await,
-            _ => Err(Error::type_error(strand, "method call not supported")),
+            Case::Prim(prim) => prim.op_mcall(strand, method, args, out).await,
         }
     }
 
@@ -368,7 +368,10 @@ impl<'v> Value<'v> {
     ) -> Result<'v, 's, ()> {
         match self.case() {
             Case::Object(o) => o.op_dcall(strand, delegator, method, args, out).await,
-            _ => Err(Error::type_error(strand, "method call not supported")),
+            Case::Prim(prim) => {
+                let _ = delegator;
+                prim.op_mcall(strand, method, args, out).await
+            }
         }
     }
 
@@ -954,7 +957,7 @@ impl<'v> Value<'v> {
     ) -> Result<'v, 's, ()> {
         match self.case() {
             Case::Object(o) => o.op_get(strand, field, out),
-            _ => Err(Error::type_error(strand, "field get not supported")),
+            Case::Prim(prim) => prim.op_get(self, strand, field, out),
         }
     }
 
