@@ -364,6 +364,8 @@ async fn opaque_pipe_transfers_bytes_and_reports_eof() {
     recv.read_to_end(&mut data).await.unwrap();
     assert_eq!(data, b"remote pipe");
 
+    // Stopping drains outstanding endpoints, so release them first.
+    drop(recv);
     client.stop().await.unwrap();
     server_task.await.unwrap().unwrap();
 }
@@ -382,6 +384,8 @@ async fn opaque_pipe_clones_have_independent_ownership() {
     recv.read_to_end(&mut data).await.unwrap();
     assert_eq!(data, b"from clone");
 
+    // Stopping drains outstanding endpoints, so release them first.
+    drop(recv);
     client.stop().await.unwrap();
     server_task.await.unwrap().unwrap();
 }
@@ -404,6 +408,8 @@ async fn opaque_pipe_reports_broken_pipe_after_receiver_drop() {
     .expect("remote receiver close did not reach the server");
     assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
 
+    // Stopping drains outstanding endpoints, so release them first.
+    drop(send);
     client.stop().await.unwrap();
     server_task.await.unwrap().unwrap();
 }
@@ -1048,5 +1054,44 @@ async fn regular_file_xattrs_round_trip_over_generic_stream() {
     file.close().await.unwrap();
 
     client.stop().await.unwrap();
+    server_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn stop_drains_outstanding_pipe_endpoints() {
+    use tokio::time::{Duration, sleep, timeout};
+
+    let (client, server_task) = connected_pair().await;
+
+    let (mut send, mut recv) = client.pipe().await.unwrap();
+
+    let stopping = client.clone();
+    let mut stop = tokio::spawn(async move { stopping.stop().await });
+
+    // The stop must not complete while endpoints are still outstanding.
+    sleep(Duration::from_millis(200)).await;
+    assert!(
+        !stop.is_finished(),
+        "stop completed while pipe endpoints were still open"
+    );
+
+    // Traffic through those endpoints keeps working during the drain.
+    send.write_all(b"drained").await.unwrap();
+    let mut buf = [0; 7];
+    recv.read_exact(&mut buf).await.unwrap();
+    assert_eq!(&buf, b"drained");
+
+    // New endpoints are refused, though.
+    let error = client.pipe().await.unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::NotConnected);
+
+    drop(send);
+    drop(recv);
+
+    timeout(Duration::from_secs(5), &mut stop)
+        .await
+        .expect("stop did not complete after endpoints were closed")
+        .unwrap()
+        .expect("stop should succeed");
     server_task.await.unwrap().unwrap();
 }

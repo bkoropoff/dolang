@@ -2711,6 +2711,8 @@ mod tests {
             io::ErrorKind::InvalidInput
         );
 
+        // Stopping drains outstanding endpoints, so release this one first.
+        drop(recv);
         client.stop().await.unwrap();
         server.await.unwrap().unwrap();
     }
@@ -2773,6 +2775,8 @@ mod tests {
             io::ErrorKind::InvalidInput
         );
         inner_task.await.unwrap().unwrap();
+        // Stopping drains outstanding endpoints, so release this one first.
+        drop(recv);
         root.stop().await.unwrap();
         outer_task.await.unwrap().unwrap();
     }
