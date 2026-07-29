@@ -124,6 +124,49 @@ async fn byte_range_locks_contend_and_release() {
     );
 }
 
+// Whole-file locks work everywhere on Unix, FreeBSD's `flock` included, and
+// `to_stdio_send` duplicates the descriptor rather than reopening the file, so
+// the duplicate shares the lock on every one of these platforms.
+#[cfg(unix)]
+#[tokio::test]
+async fn closing_a_file_releases_locks_held_by_duplicate_handles() {
+    let direct = Direct::default();
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("closed-locks");
+    let first = open_lock_file(&direct, &path).await;
+    let second = open_lock_file(&direct, &path).await;
+
+    let mut held = first
+        .lock(lock_request(
+            0,
+            None,
+            FileLockMode::Exclusive,
+            FileLockBehavior::Blocking,
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    // A duplicate of the same open file description outlives the close, so the
+    // lock stays in force unless the close unlocks explicitly.
+    let duplicate = first.to_stdio_send().await.unwrap();
+    first.close().await.unwrap();
+
+    assert!(
+        second
+            .lock(lock_request(
+                0,
+                None,
+                FileLockMode::Exclusive,
+                FileLockBehavior::Try,
+            ))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    held.release().await.unwrap();
+    drop(duplicate);
+}
+
 #[cfg(target_os = "freebsd")]
 #[tokio::test]
 async fn byte_range_locks_are_rejected() {

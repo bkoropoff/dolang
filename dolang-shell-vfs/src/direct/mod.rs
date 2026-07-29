@@ -211,10 +211,14 @@ impl FileHandle for DirectFile {
 
     async fn close(mut self) -> crate::Result<()> {
         use tokio::io::AsyncWriteExt as _;
-        let result = self.inner.flush().await;
+        let result = self.inner.flush().await.map_err(crate::Error::from);
+        // Unlock in band rather than leaving it to the handles being closed:
+        // duplicates of this open file description may still be alive
+        // elsewhere, which would keep the locks in force past this point.
+        let released = self.locks.release_all().await.map_err(crate::Error::from);
         let file = self.inner;
         let _ = tokio::task::spawn_blocking(move || drop(file)).await;
-        result.map_err(Into::into)
+        result.and(released)
     }
 
     async fn set_size(&mut self, size: u64) -> crate::Result<()> {

@@ -68,6 +68,37 @@ impl DirectFileLocks {
         };
         reservation.commit(armed).map(Some)
     }
+
+    /// Releases every lock still held on this file, in band.
+    ///
+    /// Closing a descriptor only drops the underlying locks once *every*
+    /// duplicate of the open file description is gone, and duplicates outlive
+    /// this file for all sorts of reasons — they are handed to other processes
+    /// over the wire, held by in-flight blocking work, and so on — so an
+    /// explicit unlock is the only reliable release. Callers must do this
+    /// before dropping the file's handles.
+    pub(crate) async fn release_all(&self) -> io::Result<()> {
+        let Some(table) = self.table.get() else {
+            return Ok(());
+        };
+        let armed = table.take_all_armed();
+        if armed.is_empty() {
+            return Ok(());
+        }
+        tokio::task::spawn_blocking(move || {
+            let mut outcome = Ok(());
+            for lock in armed {
+                if let Err(error) = lock.release()
+                    && outcome.is_ok()
+                {
+                    outcome = Err(error);
+                }
+            }
+            outcome
+        })
+        .await
+        .map_err(|_| io::Error::other("file unlock worker failed"))?
+    }
 }
 
 #[derive(Debug)]
@@ -180,6 +211,21 @@ impl LockTable {
         self.state.lock().unwrap().entries.remove(&id);
     }
 
+    fn take_all_armed(&self) -> Vec<ArmedLock> {
+        let mut state = self.state.lock().unwrap();
+        let mut armed = Vec::new();
+        state.entries.retain(|_, entry| match entry.armed.take() {
+            Some(lock) => {
+                armed.push(lock);
+                false
+            }
+            // A reservation that has not committed yet, or a release already in
+            // progress elsewhere; neither is ours to take.
+            None => true,
+        });
+        armed
+    }
+
     fn take_armed(&self, id: u64) -> io::Result<Option<ArmedLock>> {
         let mut state = self.state.lock().unwrap();
         let Some(entry) = state.entries.get_mut(&id) else {
@@ -200,16 +246,6 @@ fn release(armed: ArmedLock, table: Weak<LockTable>, id: u64) -> io::Result<()> 
         table.remove(id);
     }
     outcome
-}
-
-impl Drop for LockTable {
-    fn drop(&mut self) {
-        for entry in self.state.get_mut().unwrap().entries.values_mut() {
-            if let Some(armed) = &mut entry.armed {
-                armed.disarm();
-            }
-        }
-    }
 }
 
 struct Reservation {
@@ -264,10 +300,6 @@ impl ArmedLock {
             return Ok(());
         };
         unlock(&handle, self.range)
-    }
-
-    fn disarm(&mut self) {
-        self.handle.take();
     }
 }
 
