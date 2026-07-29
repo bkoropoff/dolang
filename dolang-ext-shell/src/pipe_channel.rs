@@ -149,7 +149,29 @@ impl PipeChannelShared {
     fn recv_done(&mut self) {
         match mem::replace(&mut self.state, PipeState::Value) {
             PipeState::RecvPipe => {
-                if self.send_end.is_absent() {
+                if self.send_closed {
+                    // The send side is permanently closed, so nothing more can
+                    // arrive and no later negotiation can want this end. Drop it
+                    // instead of parking in `Draining`: the read end is a VFS
+                    // endpoint, and holding it keeps the session that owns it
+                    // alive until the channel itself is closed, which happens
+                    // outside the scope that owns the session.
+                    //
+                    // This discards any bytes the program left unread in the
+                    // pipe. Sequential *writers* upstream are well defined and
+                    // preserved by `Draining`, but sequential readers downstream
+                    // are already a crapshoot, in Do and in plain Unix alike:
+                    //
+                    //     cat file | { grep -m 1 foobar; cat }
+                    //
+                    // only forwards the remainder if `grep` never read past the
+                    // matching line's newline, and nothing reads a byte at a
+                    // time. So there is no expectation here to break.
+                    self.recv_end.set_absent();
+                    self.wake_senders();
+                    self.wake_receivers();
+                    self.wake_negotiators();
+                } else if self.send_end.is_absent() {
                     self.state = PipeState::Draining;
                     self.wake_receivers();
                     self.wake_negotiators();

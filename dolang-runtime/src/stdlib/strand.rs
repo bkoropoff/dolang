@@ -632,7 +632,7 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
             )));
             Ok(())
         })
-        .function("pipeline", async move |strand, args, out| {
+        .function_with_slots("pipeline", async move |strand, args, out, [mut tmp]| {
             let mut thunks = Vec::new();
             let mut redir_input = None;
             let mut redir_output = None;
@@ -659,6 +659,18 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
                         let mut strands = Vec::new();
                         let mut pipes = Vec::with_capacity(count.saturating_sub(1));
                         let interrupt = strand.interrupt_token().nested();
+                        // Resolve the caller's redirects up front, in place.
+                        // Doing this in the stage body would put a fallible
+                        // await ahead of the call, and an early return from it
+                        // would skip closing the stage's pipe ends.
+                        if let Some(input) = &mut redir_input {
+                            input.iter(strand, &mut tmp).await?;
+                            input.store(tmp.take());
+                        }
+                        if let Some(output) = &mut redir_output {
+                            output.sink(strand, &mut tmp).await?;
+                            output.store(tmp.take());
+                        }
                         for _ in 0..count.saturating_sub(1) {
                             let mut send = Value::NIL;
                             let mut recv = Value::NIL;
@@ -685,15 +697,13 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
                                                     r.store(last_recv);
                                                     redir = redir.input(&*r);
                                                 } else if let Some(redir_input) = redir_input {
-                                                    redir_input.iter(&mut redir, &mut tmp).await?;
-                                                    redir = redir.input(&mut tmp);
+                                                    redir = redir.input(&*redir_input);
                                                 }
                                                 if let Some(send) = send {
                                                     s.store(send);
                                                     redir = redir.output(&*s);
                                                 } else if let Some(redir_output) = redir_output {
-                                                    redir_output.sink(&mut redir, &mut tmp).await?;
-                                                    redir = redir.output(&mut tmp);
+                                                    redir = redir.output(&*redir_output);
                                                 }
                                                 let res = redir
                                                     .enter(async move |strand| {
@@ -705,12 +715,22 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
                                                         .await
                                                     })
                                                     .await;
-                                                if !r.is_nil() {
-                                                    method!(strand, r, close, &mut tmp2).await?;
-                                                }
-                                                if !s.is_nil() {
-                                                    method!(strand, s, close, &mut tmp2).await?;
-                                                }
+                                                // Close both ends even if the
+                                                // first close fails, so a
+                                                // failure cannot strand the
+                                                // other end open.
+                                                let closed_recv = if !r.is_nil() {
+                                                    method!(strand, r, close, &mut tmp2).await
+                                                } else {
+                                                    Ok(())
+                                                };
+                                                let closed_send = if !s.is_nil() {
+                                                    method!(strand, s, close, &mut tmp2).await
+                                                } else {
+                                                    Ok(())
+                                                };
+                                                closed_recv?;
+                                                closed_send?;
                                                 res
                                             },
                                         )

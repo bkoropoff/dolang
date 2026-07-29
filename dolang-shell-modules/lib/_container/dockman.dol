@@ -404,7 +404,10 @@ pub class Runtime
           do
             strand.next()
             let agent = Vfs.unix_socket $socket
-            return strand.redirect input: $input do agent.with $thunk
+            try
+              return strand.redirect input: $input do agent.with $thunk
+            finally
+              agent.stop()
       catch proc.Error: e
         classify_image_error $ctr $lines
         report_unknown $lines

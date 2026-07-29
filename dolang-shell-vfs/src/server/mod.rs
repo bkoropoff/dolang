@@ -1,6 +1,6 @@
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 #[cfg(unix)]
@@ -12,12 +12,9 @@ use std::os::unix::io::OwnedFd;
 use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::NamedPipeClient;
-use tokio::sync::Mutex;
 #[cfg(unix)]
-use tokio::{
-    net::{UnixListener, UnixStream, unix::SocketAddr},
-    sync::watch,
-};
+use tokio::net::{UnixListener, UnixStream, unix::SocketAddr};
+use tokio::sync::{Mutex, watch};
 
 use crate::{
     AnyFile, AnyVfs, Child as _, Command as _, Direct, FileHandle as _, OpenOptions as _,
@@ -42,6 +39,67 @@ fn request_path(path: &WirePath) -> Utf8TypedPath<'_> {
 struct Connection {
     server: Arc<ServerState>,
     mode: SessionMode,
+    drain: Arc<Drain>,
+}
+
+/// Tracks outstanding stdio endpoints so a stop request can drain them.
+///
+/// A stop request must not sever the connection while a peer is still relaying
+/// through a pipe endpoint it obtained from this session: a stdio relay may
+/// outlive the lexical scope of the session it was created in, since pipe
+/// negotiation decides which side of a cross-domain pipeline ends up owning it.
+/// Instead, a stop marks the session as stopping (so no *new* endpoints can be
+/// created) and waits for the endpoints already handed out to be closed.
+struct Drain {
+    /// Outstanding endpoint count in the upper bits, stopping flag in the LSB.
+    state: AtomicUsize,
+    done: watch::Sender<bool>,
+}
+
+impl Drain {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: AtomicUsize::new(0),
+            done: watch::channel(false).0,
+        })
+    }
+
+    /// Reserves `count` endpoints, or fails if the session is stopping.
+    ///
+    /// The check and the increment are separate non-atomic steps, which is
+    /// sound because every handler for a connection runs as a future on the
+    /// single serve task: no other handler can observe or modify the state
+    /// between them, since there is no await point in between. A stop landing
+    /// just after a successful reservation is equivalent to one landing just
+    /// before it, and either way the drain waits for those endpoints.
+    fn try_acquire(&self, count: usize) -> bool {
+        if self.state.load(Ordering::Acquire) & 1 != 0 {
+            return false;
+        }
+        self.state.fetch_add(count << 1, Ordering::Relaxed);
+        true
+    }
+
+    /// Returns `count` endpoints, completing the drain if it goes idle.
+    fn release(&self, count: usize) {
+        // The stopping flag plus exactly `count` endpoints means the drain has
+        // just gone idle after a stop was requested.
+        if self.state.fetch_sub(count << 1, Ordering::AcqRel) == (count << 1) | 1 {
+            self.done.send_replace(true);
+        }
+    }
+
+    /// Marks the session as stopping, completing the drain if it is already idle.
+    fn begin_stop(&self) {
+        if self.state.fetch_or(1, Ordering::AcqRel) == 0 {
+            self.done.send_replace(true);
+        }
+    }
+
+    /// Waits for a stop to be requested and all outstanding endpoints to close.
+    async fn wait(&self) {
+        let _ = self.done.subscribe().wait_for(|done| *done).await;
+    }
 }
 
 struct RetainedVfs {
@@ -185,6 +243,7 @@ impl Server {
         let connection = Arc::new(Connection {
             server: self.shared.clone(),
             mode: SessionMode::Native,
+            drain: Drain::new(),
         });
         tokio::spawn(async move {
             let stop = Arc::new(AtomicBool::new(false));
@@ -222,6 +281,7 @@ impl Server {
         let connection = Arc::new(Connection {
             server: self.shared,
             mode: self.mode,
+            drain: Drain::new(),
         });
         let stop = Arc::new(AtomicBool::new(false));
         let rpc = self
@@ -292,6 +352,7 @@ impl Connection {
                 shutdown_tx: self.server.shutdown_tx.clone(),
             }),
             mode: self.mode,
+            drain: self.drain.clone(),
         })
     }
 
@@ -303,6 +364,12 @@ impl Connection {
     ) -> ResponseKind {
         let Some(vfs) = vfs else {
             stop.store(true, Ordering::Release);
+            // Reject new stdio endpoints, then keep serving reads, writes and
+            // closes on the ones already handed out until they are all closed.
+            // The rpc serve loop polls request handlers on the same task as it
+            // reads frames, so awaiting here does not stall the connection.
+            self.drain.begin_stop();
+            self.drain.wait().await;
             context.shutdown();
             return ResponseKind::Stop;
         };
@@ -589,6 +656,7 @@ impl Connection {
                 let stdio = context
                     .unregister::<RetainedStdioRecv>(stdio)
                     .map_err(|_| Self::invalid_opaque("stdio receive"))?;
+                self.drain.release(1);
                 let Some(stdio) = stdio else {
                     return Err(wire_error(io::Error::new(
                         io::ErrorKind::ResourceBusy,
@@ -619,6 +687,7 @@ impl Connection {
                 let stdio = context
                     .unregister::<RetainedStdioSend>(stdio)
                     .map_err(|_| Self::invalid_opaque("stdio send"))?;
+                self.drain.release(1);
                 let Some(stdio) = stdio else {
                     return Err(wire_error(io::Error::new(
                         io::ErrorKind::ResourceBusy,
@@ -742,17 +811,34 @@ impl Connection {
         )))
     }
 
+    /// Reserves a drain slot for an endpoint about to be handed to the peer.
+    ///
+    /// Only endpoint creation is gated this way. `Spawn` and `Open` stay
+    /// available while stopping: they create no stdio endpoint of their own,
+    /// and refusing a spawn could break the very in-flight pipeline stage the
+    /// drain exists to protect.
+    fn reserve_stdio(&self, count: usize) -> Result<(), crate::protocol::WireError> {
+        if self.drain.try_acquire(count) {
+            Ok(())
+        } else {
+            Err(wire_error(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "VFS session is stopping",
+            )))
+        }
+    }
+
     async fn handle_pipe(&self, context: &CallContext<VfsProtocol>) -> ResponseKind {
-        let result = self
-            .server
-            .vfs
-            .pipe()
-            .await
-            .map(|(send, recv)| PipeResponse {
+        let result = async {
+            let (send, recv) = self.server.vfs.pipe().await.map_err(wire_error)?;
+            self.reserve_stdio(2)?;
+            Ok(PipeResponse {
                 send: context.register(RetainedStdioSend(Mutex::new(send))),
                 recv: context.register(RetainedStdioRecv(Mutex::new(recv))),
-            });
-        ResponseKind::Pipe(result.map_err(wire_error))
+            })
+        }
+        .await;
+        ResponseKind::Pipe(result)
     }
 
     fn retained_stdio_send(
@@ -782,10 +868,15 @@ impl Connection {
     ) -> Result<(), crate::protocol::WireError> {
         let retained = self.retained_stdio_send(context, stdio.clone())?;
         drop(retained);
-        match context
+        let retained = context
             .unregister::<RetainedStdioSend>(stdio)
-            .map_err(|_| Self::invalid_opaque("stdio send"))?
-        {
+            .map_err(|_| Self::invalid_opaque("stdio send"))?;
+        // The endpoint is out of the object table either way, so it no longer
+        // holds up a drain. A racing read or write can still be holding the
+        // last reference, but a peer doing that while closing has no flush
+        // guarantee to lose.
+        self.drain.release(1);
+        match retained {
             Some(_) => Ok(()),
             None => Err(wire_error(io::Error::new(
                 io::ErrorKind::ResourceBusy,
@@ -801,10 +892,15 @@ impl Connection {
     ) -> Result<(), crate::protocol::WireError> {
         let retained = self.retained_stdio_recv(context, stdio.clone())?;
         drop(retained);
-        match context
+        let retained = context
             .unregister::<RetainedStdioRecv>(stdio)
-            .map_err(|_| Self::invalid_opaque("stdio receive"))?
-        {
+            .map_err(|_| Self::invalid_opaque("stdio receive"))?;
+        // The endpoint is out of the object table either way, so it no longer
+        // holds up a drain. A racing read or write can still be holding the
+        // last reference, but a peer doing that while closing has no flush
+        // guarantee to lose.
+        self.drain.release(1);
+        match retained {
             Some(_) => Ok(()),
             None => Err(wire_error(io::Error::new(
                 io::ErrorKind::ResourceBusy,
@@ -835,6 +931,7 @@ impl Connection {
         let result = async {
             let stdio = self.retained_stdio_send(context, stdio)?;
             let clone = stdio.0.lock().await.try_clone().await.map_err(wire_error)?;
+            self.reserve_stdio(1)?;
             Ok(context.register(RetainedStdioSend(Mutex::new(clone))))
         }
         .await;
@@ -872,6 +969,7 @@ impl Connection {
         let result = async {
             let stdio = self.retained_stdio_recv(context, stdio)?;
             let clone = stdio.0.lock().await.try_clone().await.map_err(wire_error)?;
+            self.reserve_stdio(1)?;
             Ok(context.register(RetainedStdioRecv(Mutex::new(clone))))
         }
         .await;
@@ -1012,6 +1110,7 @@ impl Connection {
                 .to_stdio_send()
                 .await
                 .map_err(wire_error)?;
+            self.reserve_stdio(1)?;
             Ok(context.register(RetainedStdioSend(Mutex::new(stdio))))
         }
         .await;
@@ -1032,6 +1131,7 @@ impl Connection {
                 .to_stdio_recv()
                 .await
                 .map_err(wire_error)?;
+            self.reserve_stdio(1)?;
             Ok(context.register(RetainedStdioRecv(Mutex::new(stdio))))
         }
         .await;
