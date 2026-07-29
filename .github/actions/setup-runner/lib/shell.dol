@@ -9,17 +9,10 @@ import args proc shell
 
 # Flags every step script is compiled with.
 let PRELUDE = $
-  - "--strict"
-  - "--no-cache"
-  - "--import"
-  - "dodo"
-  - "--import"
-  - "sys"
-  - "--import"
-  - "fs"
-
-# Search path inside the CI VM: rustup toolchains plus the stock FreeBSD path.
-let VM_PATH = "/home/ci/.cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+  --strict --no-cache
+  --import dodo
+  --import sys
+  --import fs
 
 # Environment forwarded into the CI VM.
 let VM_ENV = $
@@ -29,14 +22,10 @@ let VM_ENV = $
 # Arguments that route a script through the libvirt entrypoint into `domain`.
 def vm_args domain
   $
-    - "-m"
-    - "libvirt"
-    - "--env"
-    - "PATH=$VM_PATH"
+    -m libvirt
     for name = VM_ENV
-      - "--env"
-      - $name
-    - $domain
+      --env $name
+    $domain
 
 args.with
   help: Run a CI step script on the runner or in the CI VM.
