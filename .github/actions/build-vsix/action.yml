@@ -1,0 +1,47 @@
+name: Build VSIX
+description: Build, test, and package the VS Code extension
+
+inputs:
+  node-version:
+    description: Node.js version to build with
+    default: "24"
+  upload:
+    description: Upload the packaged VSIX as a workflow artifact
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Node.js
+      uses: actions/setup-node@v5
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: npm
+        cache-dependency-path: dolang-code/package-lock.json
+
+    - name: Install extension dependencies
+      shell: bash
+      working-directory: dolang-code
+      run: npm ci
+
+    - name: Build extension
+      shell: bash
+      working-directory: dolang-code
+      run: npm run compile
+
+    - name: Run extension tests
+      shell: bash
+      working-directory: dolang-code
+      run: xvfb-run -a npm test
+
+    - name: Build VSIX
+      shell: bash
+      working-directory: dolang-code
+      run: npm run package:vsix
+
+    - name: Upload VSIX artifact
+      if: inputs.upload == 'true'
+      uses: actions/upload-artifact@v6
+      with:
+        name: dolang-vsix
+        path: dolang-code/*.vsix

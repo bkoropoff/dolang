@@ -1,0 +1,62 @@
+name: Setup Runner
+description: Provision a runner with Dolang, build prerequisites, and the dolang-ci shell wrapper
+
+inputs:
+  target:
+    description: Dodo target name to build (empty means the runner's native target)
+    default: ""
+  dolang-version:
+    description: Dolang release tag to install (defaults to .github/dolang-version)
+    default: ""
+  rust:
+    description: Install the Rust toolchain and shared build cache
+    default: "true"
+  vm-disk-size:
+    description: Disk size of the CI VM, for targets that build in one
+    default: 50G
+
+runs:
+  using: composite
+  steps:
+    - name: Install Dolang
+      uses: ./.github/actions/setup-dolang
+      with:
+        version: ${{ inputs.dolang-version }}
+
+    - name: Install Rust toolchain
+      if: inputs.rust == 'true' && inputs.target != 'x86_64-freebsd'
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Rust cache
+      if: inputs.rust == 'true' && inputs.target != 'x86_64-freebsd'
+      uses: Swatinem/rust-cache@v2
+
+    # Paths follow the VM application name in lib/ci.dol
+    - name: Cache CI VM assets
+      if: inputs.target == 'x86_64-freebsd'
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.local/share/dolang-freebsd-ci/libvirt/ssh
+          ~/.local/share/dolang-freebsd-ci/libvirt/seeds
+          ~/.cache/dolang-freebsd-ci
+        key: freebsd-libvirt-v1
+        restore-keys: |
+          freebsd-libvirt-
+
+    # Inputs arrive through the environment: on Windows the action path is a
+    # backslash path, which would be mangled as a Do string literal
+    - name: Set up runner
+      shell: dolang --strict --no-cache --module-path ${{ github.action_path }}/lib {0}
+      env:
+        CI_SHELL: ${{ github.action_path }}/lib/shell.dol
+        CI_TARGET: ${{ inputs.target }}
+        CI_RUST: ${{ inputs.rust }}
+        CI_DISK_SIZE: ${{ inputs.vm-disk-size }}
+      run: |
+        import ci
+        ci.setup
+          shell: $env["CI_SHELL"]
+          target: $env["CI_TARGET"]
+          rust: (env["CI_RUST"] == "true")
+          disk_size: $env["CI_DISK_SIZE"]
