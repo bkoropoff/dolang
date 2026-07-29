@@ -1,0 +1,13 @@
+assert_eq [5] $
+  $ Int 5
+
+assert_eq [5] $
+  - $ Int 5
+
+assert_eq [[5]] $
+  $
+    - 5
+
+assert_eq [[5]] $
+  - $
+      - 5
