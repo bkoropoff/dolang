@@ -191,16 +191,6 @@ pub(crate) fn slice<'v, 's>(
 }
 
 impl<'v> Protocol<'v> for Range<'v> {
-    fn op_subtype<'a, 's>(
-        _this: Recv<'v, 'a, Self>,
-        strand: &'a mut Strand<'v, 's>,
-        supertype: &Value<'v>,
-    ) -> bool {
-        supertype.eq(strand, &strand.singletons().iterable)
-            || supertype.eq(strand, &strand.singletons().range)
-            || supertype.eq(strand, TypeObject::Value)
-    }
-
     fn op_type<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,

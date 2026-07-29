@@ -13,7 +13,7 @@ use crate::{
     strand::{Strand, StrandInner},
     sym::{self, Sym},
     unpack,
-    value::{Output, Slot, TypeObject, Value},
+    value::{Output, Slot, Value},
     vm::Vm,
 };
 
@@ -204,16 +204,6 @@ impl<'v> Drop for Receiver<'v> {
 }
 
 impl<'v> Protocol<'v> for Receiver<'v> {
-    fn op_subtype<'a, 's>(
-        _this: Recv<'v, 'a, Self>,
-        strand: &'a mut Strand<'v, 's>,
-        supertype: &Value<'v>,
-    ) -> bool {
-        supertype.eq(strand, &strand.singletons().iterable)
-            || supertype.eq(strand, &strand.singletons().input_iter)
-            || supertype.eq(strand, TypeObject::Value)
-    }
-
     fn op_type<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
@@ -327,16 +317,6 @@ unsafe impl<'v> Collect for Sender<'v> {
 }
 
 impl<'v> Protocol<'v> for Sender<'v> {
-    fn op_subtype<'a, 's>(
-        _this: Recv<'v, 'a, Self>,
-        strand: &'a mut Strand<'v, 's>,
-        supertype: &Value<'v>,
-    ) -> bool {
-        supertype.eq(strand, &strand.singletons().sinkable)
-            || supertype.eq(strand, &strand.singletons().output_iter)
-            || supertype.eq(strand, TypeObject::Value)
-    }
-
     fn op_type<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,

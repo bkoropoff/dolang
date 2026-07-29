@@ -382,16 +382,6 @@ impl<'v> Protocol<'v> for Unpack<'v> {
 // ── Protocol: Dict ──────────────────────────────────────────────────
 
 impl<'v> Protocol<'v> for Dict<'v> {
-    fn op_subtype<'a, 's>(
-        _this: Recv<'v, 'a, Self>,
-        strand: &'a mut Strand<'v, 's>,
-        supertype: &Value<'v>,
-    ) -> bool {
-        supertype.eq(strand, &strand.singletons().iterable)
-            || supertype.eq(strand, &strand.singletons().dict)
-            || supertype.eq(strand, TypeObject::Value)
-    }
-
     fn op_type<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,

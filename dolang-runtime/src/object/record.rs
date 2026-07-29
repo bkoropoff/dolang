@@ -290,19 +290,6 @@ impl<'v> Protocol<'v> for Unpack<'v> {
 // ── Protocol: Record ────────────────────────────────────────────────
 
 impl<'v> Protocol<'v> for Record<'v> {
-    // Deliberately not `Iterable`. A record follows the iteration protocol —
-    // it has `(iter)`, so it spreads and drives a `for` loop — but its member
-    // namespace is entirely reserved for user fields, so it can never expose
-    // `Iterable`'s method surface. Claiming the supertype would advertise
-    // methods that resolve to field lookups and fail.
-    fn op_subtype<'a, 's>(
-        _this: Recv<'v, 'a, Self>,
-        strand: &'a mut Strand<'v, 's>,
-        supertype: &Value<'v>,
-    ) -> bool {
-        supertype.eq(strand, &strand.singletons().record) || supertype.eq(strand, TypeObject::Value)
-    }
-
     fn op_type<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,

@@ -8,7 +8,7 @@ use crate::{
     strand::{InterruptToken, Strand, StrandInner},
     sym::{self, Sym},
     unpack,
-    value::{Output, Slot, TypeObject, Value},
+    value::{Output, Slot, Value},
 };
 
 use super::{
@@ -93,24 +93,6 @@ impl<'v> Drop for Handle<'v> {
 }
 
 impl<'v> Protocol<'v> for Handle<'v> {
-    fn op_subtype<'a, 's>(
-        this: Recv<'v, 'a, Self>,
-        strand: &'a mut Strand<'v, 's>,
-        supertype: &Value<'v>,
-    ) -> bool {
-        let borrow = this.borrow(strand).ok();
-        let is_iterable = borrow
-            .as_ref()
-            .is_some_and(|borrow| !borrow.stream_output.is_nil());
-        let is_sinkable = borrow
-            .as_ref()
-            .is_some_and(|borrow| !borrow.stream_input.is_nil());
-        (is_iterable && supertype.eq(strand, &strand.singletons().iterable))
-            || (is_sinkable && supertype.eq(strand, &strand.singletons().sinkable))
-            || supertype.eq(strand, &strand.singletons().strand)
-            || supertype.eq(strand, TypeObject::Value)
-    }
-
     fn op_type<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
