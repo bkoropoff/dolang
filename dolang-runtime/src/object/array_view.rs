@@ -12,7 +12,7 @@ use crate::{
     object::{
         BoundMethod, array, index, iter,
         native::{Instance, Object, Unpack as NativeUnpack, UnpackItem},
-        protocol::{GcObj, Protocol, Recv, Spread, SpreadContext},
+        protocol::{GcObj, Inspect, Protocol, Recv, Spread, SpreadContext},
         range,
     },
     sig::{Unpack, UnpackKeyKind},
@@ -463,14 +463,6 @@ fn positional<'v, 'a, 's>(
 }
 
 impl<'v> Protocol<'v> for View<'v> {
-    fn op_subtype<'a, 's>(
-        _this: Recv<'v, 'a, Self>,
-        strand: &'a mut Strand<'v, 's>,
-        supertype: &Value<'v>,
-    ) -> bool {
-        supertype.eq(strand, &strand.singletons().iterable)
-            || supertype.eq(strand, TypeObject::Value)
-    }
     fn op_debug<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &mut Strand<'v, 's>,
@@ -672,7 +664,7 @@ impl<'v> Protocol<'v> for View<'v> {
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,
     ) {
-        Output::set(strand, out, TypeObject::Value)
+        Output::set(strand, out, &strand.singletons().array_view)
     }
 }
 
@@ -891,6 +883,63 @@ fn unpack_from<'v, 's>(
         }
     }
     Ok(min + sig.keys.len())
+}
+
+/// Type object shared by every array view.
+///
+/// Views are a generic projection over extension-supplied glue, so the
+/// Do-visible *name* of a view comes from its glue rather than from a
+/// dedicated type. One shared type object is still what `op_type` needs to
+/// return: `is_instance_of` dispatches `op_subtype` on the type object, so
+/// answering `Value` (as this did before) made `type v Iterable` false even
+/// though views follow the protocol and expose the surface.
+pub(crate) struct Type;
+
+unsafe impl Collect for Type {
+    const CYCLIC: bool = false;
+    const IMMUTABLE: bool = true;
+    type Annex = ();
+
+    fn accept(&self, _visit: &mut dyn Visit) -> ControlFlow<()> {
+        ControlFlow::Continue(())
+    }
+
+    fn clear(&mut self) {}
+}
+
+impl<'v> Protocol<'v> for Type {
+    fn op_type<'a, 's>(
+        _this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        out: Slot<'v, 'a>,
+    ) {
+        Output::set(strand, out, &strand.singletons().type_obj)
+    }
+
+    fn op_subtype<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        supertype: &Value<'v>,
+    ) -> bool {
+        supertype.eq(strand, &this)
+            || supertype.eq(strand, &strand.singletons().iterable)
+            || supertype.eq(strand, TypeObject::Value)
+    }
+
+    fn op_debug<'a, 's>(
+        _this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        w: &mut dyn crate::value::Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        crate::fmt!(strand, w, "<type std.ArrayView>")
+    }
+
+    fn op_inspect<'a>(_this: Recv<'v, 'a, Self>, _vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {
+        Some(Inspect {
+            is_abstract: true,
+            members: Vec::new(),
+        })
+    }
 }
 
 #[cfg(test)]

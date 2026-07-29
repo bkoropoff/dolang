@@ -482,7 +482,7 @@ class Parser
     while (rec.cmd != nil)
       let cmd = rec.cmd
       rec = rec[cmd]
-      sub = sub.#sub_cmds.iter().map(do |p| p[1]).filter(do |s| s.#sym == cmd).next()
+      sub = sub.#sub_cmds.map(do |p| p[1]).filter(do |s| s.#sym == cmd).next()
       prog = "$prog $(sub.name)"
     sub.make_help $prog
 

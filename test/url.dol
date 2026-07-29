@@ -1,6 +1,7 @@
 import
   std:
     - hash
+    - Iterable
     - ImmutableError
     - TypeError
   test:
@@ -44,6 +45,15 @@ def parse()
   assert_eq $query2[3][1] "hello world"
   assert_eq $parsed.query["x"] "2"
   assert_eq (parsed.query.get "x") "2"
+
+  # Views are Iterable, and answer to the forwarded method surface rather
+  # than only to `(iter)`.
+  assert (type parsed.segments Iterable)
+  assert (type parsed.query Iterable)
+  assert_eq [...parsed.segments.map (do |s| s.upper())] ["A B", "C"]
+  assert_eq (parsed.segments.fold 0 (do |acc s| acc + s.len)) 4
+  assert (parsed.segments.any (do |s| s == "c"))
+  assert_eq ([...parsed.query.map (do |kv| kv[0])].len) 4
   assert_eq (parsed.query.get "x" 0) "1"
   assert_eq (parsed.query.get "x" 1) "2"
   assert_eq (parsed.query.get "x" -1) "2"

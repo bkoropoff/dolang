@@ -81,16 +81,6 @@ impl<'v> Module<'v> {
 }
 
 impl<'v> Protocol<'v> for Module<'v> {
-    fn op_subtype<'a, 's>(
-        _this: Recv<'v, 'a, Self>,
-        strand: &'a mut Strand<'v, 's>,
-        supertype: &Value<'v>,
-    ) -> bool {
-        supertype.eq(strand, &strand.singletons().iterable)
-            || supertype.eq(strand, &strand.singletons().module)
-            || supertype.eq(strand, TypeObject::Value)
-    }
-
     fn op_type<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
@@ -145,7 +135,12 @@ impl<'v> Protocol<'v> for Module<'v> {
                 }
                 Ok(())
             }
-            Err(_) => iter::iterable_get(strand, &this, field, out),
+            // No `Iterable` fallback: a module's namespace is reserved for its
+            // exports, so it does not claim the supertype (see `Type` below).
+            // This also keeps the default `op_mcall` safe — handing back a
+            // `BoundMethod` here would make it recurse, since the default is
+            // `op_get` followed by `op_call`.
+            Err(_) => Err(Error::field(strand, field)),
         }
     }
 
@@ -618,14 +613,17 @@ impl<'v> Protocol<'v> for Type {
         Output::set(strand, out, &strand.singletons().type_obj)
     }
 
+    // Deliberately not `Iterable`. Modules follow the iteration protocol —
+    // `op_iter` yields `(name, value)` pairs, which the REPL's dynamic prelude
+    // relies on to carry bindings across executions — but a module's member
+    // namespace is entirely reserved for its exports, so it cannot expose
+    // `Iterable`'s method surface. Same reasoning as `record`.
     fn op_subtype<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         supertype: &Value<'v>,
     ) -> bool {
-        supertype.eq(strand, &this)
-            || supertype.eq(strand, &strand.singletons().iterable)
-            || supertype.eq(strand, TypeObject::Value)
+        supertype.eq(strand, &this) || supertype.eq(strand, TypeObject::Value)
     }
 
     fn op_debug<'a, 's>(

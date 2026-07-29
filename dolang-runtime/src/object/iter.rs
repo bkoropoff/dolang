@@ -19,43 +19,84 @@ use crate::{
     vm::Vm,
 };
 
+/// Methods of [`Iter`] that [`Iterable`] forwards, by materializing an
+/// iterator from the receiver with `iter` and re-dispatching onto it.
+///
+/// `iter` itself heads the list: it is the defining method of the surface.
+const ITERABLE_METHODS: &[sym::Tag] = &[
+    sym::ITER,
+    sym::ALL,
+    sym::ANY,
+    sym::FOLD,
+    sym::MAP,
+    sym::FILTER,
+    sym::CHAIN,
+    sym::ZIP,
+    sym::TAKE,
+    sym::SKIP,
+    sym::ENUMERATE,
+    sym::FIND,
+    sym::MIN,
+    sym::MAX,
+];
+
+/// Methods of [`Iter`] that [`Iterable`] deliberately does *not* forward.
+///
+/// - `next` is stateful: a container has no iteration position of its own, so
+///   forwarding it would mint a fresh iterator per call and a `while` loop
+///   over `next` would spin on the first element forever.
+/// - `count` is `len` spelled expensively, and `dict`/`dict_view`/`record`
+///   already define `count` with unrelated semantics.
+/// - `kv` describes the pair shape of an iterator; spread behavior belongs to
+///   the iterable itself.
+const ITER_ONLY_METHODS: &[sym::Tag] = &[sym::NEXT, sym::COUNT, sym::KV];
+
+/// Methods of [`Sink`], all of which [`Sinkable`] forwards by materializing a
+/// sink from the receiver with `sink` and re-dispatching onto it.
+///
+/// `premap`/`prefilter` are named for their direction: unlike the `Iterable`
+/// `map`/`filter`, they transform values on the way *into* the sink. The
+/// distinct names are what let a value that is both surfaces (an `array`, say)
+/// offer both without one spelling carrying two meanings.
+const SINKABLE_METHODS: &[sym::Tag] = &[sym::SINK, sym::PUT, sym::PREMAP, sym::PREFILTER];
+
+/// Which abstract surface a method name belongs to, if any.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Surface {
+    Iterable,
+    Sinkable,
+}
+
+pub(crate) fn classify(tag: sym::Tag) -> Option<Surface> {
+    if ITERABLE_METHODS.contains(&tag) {
+        Some(Surface::Iterable)
+    } else if SINKABLE_METHODS.contains(&tag) {
+        Some(Surface::Sinkable)
+    } else {
+        None
+    }
+}
+
+fn members<'v, 'a>(tags: &[sym::Tag]) -> Vec<Sym<'v, 'a>> {
+    tags.iter().copied().map(Sym::well_known).collect()
+}
+
 fn iter_members<'v, 'a>() -> Vec<Sym<'v, 'a>> {
-    vec![
-        Sym::well_known(sym::ALL),
-        Sym::well_known(sym::ANY),
-        Sym::well_known(sym::COUNT),
-        Sym::well_known(sym::FOLD),
-        Sym::well_known(sym::ITER),
-        Sym::well_known(sym::NEXT),
-        Sym::well_known(sym::MAP),
-        Sym::well_known(sym::FILTER),
-        Sym::well_known(sym::CHAIN),
-        Sym::well_known(sym::ZIP),
-        Sym::well_known(sym::TAKE),
-        Sym::well_known(sym::SKIP),
-        Sym::well_known(sym::ENUMERATE),
-        Sym::well_known(sym::KV),
-        Sym::well_known(sym::FIND),
-        Sym::well_known(sym::MIN),
-        Sym::well_known(sym::MAX),
-    ]
+    let mut syms = members(ITERABLE_METHODS);
+    syms.extend(members(ITER_ONLY_METHODS));
+    syms
 }
 
 fn iterable_members<'v, 'a>() -> Vec<Sym<'v, 'a>> {
-    vec![Sym::well_known(sym::ITER)]
+    members(ITERABLE_METHODS)
 }
 
 fn sink_members<'v, 'a>() -> Vec<Sym<'v, 'a>> {
-    vec![
-        Sym::well_known(sym::SINK),
-        Sym::well_known(sym::PUT),
-        Sym::well_known(sym::MAP),
-        Sym::well_known(sym::FILTER),
-    ]
+    members(SINKABLE_METHODS)
 }
 
 fn sinkable_members<'v, 'a>() -> Vec<Sym<'v, 'a>> {
-    vec![Sym::well_known(sym::SINK)]
+    members(SINKABLE_METHODS)
 }
 
 pub(crate) fn iter_get<'v, 'a, 's>(
@@ -64,28 +105,12 @@ pub(crate) fn iter_get<'v, 'a, 's>(
     field: Sym<'v, 'a>,
     out: Slot<'v, 'a>,
 ) -> Result<'v, 's, ()> {
-    match field.tag() {
-        sym::ALL
-        | sym::ANY
-        | sym::COUNT
-        | sym::FOLD
-        | sym::ITER
-        | sym::NEXT
-        | sym::MAP
-        | sym::FILTER
-        | sym::CHAIN
-        | sym::ZIP
-        | sym::TAKE
-        | sym::SKIP
-        | sym::ENUMERATE
-        | sym::KV
-        | sym::FIND
-        | sym::MIN
-        | sym::MAX => {
-            BoundMethod::create(strand, rcvr, field, out);
-            Ok(())
-        }
-        _ => Err(Error::field(strand, field)),
+    let tag = field.tag();
+    if classify(tag) == Some(Surface::Iterable) || ITER_ONLY_METHODS.contains(&tag) {
+        BoundMethod::create(strand, rcvr, field, out);
+        Ok(())
+    } else {
+        Err(Error::field(strand, field))
     }
 }
 
@@ -97,16 +122,15 @@ async fn iter_extrema<'v, 'a, 's>(
     is_min: bool,
 ) -> Result<'v, 's, ()> {
     strand
-        .with_slots(async move |strand, [mut iter, mut item]| {
-            obj.iter(strand, &mut iter).await?;
-            if !iter.next(strand, &mut out).await? {
+        .with_slots(async move |strand, [mut item]| {
+            if !obj.next(strand, &mut out).await? {
                 if let Some(mut default) = default {
                     out.store(default.take());
                     return Ok(());
                 }
                 return Err(Error::iter_stop(strand));
             }
-            while iter.next(strand, &mut item).await? {
+            while obj.next(strand, &mut item).await? {
                 let replace = if is_min {
                     item.op_lt(strand, &out)?.to_bool(strand)
                 } else {
@@ -131,33 +155,30 @@ async fn iter_all_any<'v, 'a, 's>(
 ) -> Result<'v, 's, ()> {
     let has_pred = pred.is_some();
     strand
-        .with_slots(
-            async move |strand, [mut iter, mut item, mut pred_fn, mut pred_out]| {
-                obj.iter(strand, &mut iter).await?;
-                if let Some(mut pred) = pred {
-                    pred_fn.store(pred.take());
+        .with_slots(async move |strand, [mut item, mut pred_fn, mut pred_out]| {
+            if let Some(mut pred) = pred {
+                pred_fn.store(pred.take());
+            }
+            while obj.next(strand, &mut item).await? {
+                let passed = if has_pred {
+                    call!(strand, &pred_fn, &mut pred_out, &item).await?;
+                    pred_out.to_bool(strand)
+                } else {
+                    item.to_bool(strand)
+                };
+                if want_all && !passed {
+                    out.store(Value::FALSE);
+                    return Ok(());
                 }
-                while iter.next(strand, &mut item).await? {
-                    let passed = if has_pred {
-                        call!(strand, &pred_fn, &mut pred_out, &item).await?;
-                        pred_out.to_bool(strand)
-                    } else {
-                        item.to_bool(strand)
-                    };
-                    if want_all && !passed {
-                        out.store(Value::FALSE);
-                        return Ok(());
-                    }
-                    if !want_all && passed {
-                        out.store(Value::TRUE);
-                        return Ok(());
-                    }
-                    strand.check_trap_gc()?;
+                if !want_all && passed {
+                    out.store(Value::TRUE);
+                    return Ok(());
                 }
-                out.store(Value::from_bool(want_all));
-                Ok(())
-            },
-        )
+                strand.check_trap_gc()?;
+            }
+            out.store(Value::from_bool(want_all));
+            Ok(())
+        })
         .await
 }
 
@@ -167,10 +188,9 @@ async fn iter_count<'v, 'a, 's>(
     mut out: Slot<'v, 'a>,
 ) -> Result<'v, 's, ()> {
     strand
-        .with_slots(async move |strand, [mut iter, mut item]| {
-            obj.iter(strand, &mut iter).await?;
+        .with_slots(async move |strand, [mut item]| {
             let mut count = 0usize;
-            while iter.next(strand, &mut item).await? {
+            while obj.next(strand, &mut item).await? {
                 count += 1;
                 if count.is_multiple_of(crate::INTERRUPT_INTERVAL) {
                     strand.check_trap_gc()?;
@@ -192,11 +212,10 @@ async fn iter_fold<'v, 'a, 's>(
 ) -> Result<'v, 's, ()> {
     strand
         .with_slots(
-            async move |strand, [mut iter, mut acc, mut next_acc, mut item, mut func_slot]| {
-                obj.iter(strand, &mut iter).await?;
+            async move |strand, [mut acc, mut next_acc, mut item, mut func_slot]| {
                 acc.store(init.take());
                 func_slot.store(func.take());
-                while iter.next(strand, &mut item).await? {
+                while obj.next(strand, &mut item).await? {
                     call!(strand, &func_slot, &mut next_acc, &acc, &item).await?;
                     Slot::swap(Slot::reborrow(&mut acc), &mut next_acc);
                     strand.check_trap_gc()?;
@@ -233,28 +252,25 @@ async fn iter_find<'v, 'a, 's>(
         return Err(Error::unexpected_key(strand, Sym::well_known(sym::ELSE)));
     }
     strand
-        .with_slots(
-            async move |strand, [mut iter, mut item, mut pred_fn, mut pred_out]| {
-                obj.iter(strand, &mut iter).await?;
-                pred_fn.store(pred.take());
-                while iter.next(strand, &mut item).await? {
-                    call!(strand, &pred_fn, &mut pred_out, &item).await?;
-                    if pred_out.to_bool(strand) {
-                        out.store(item.take());
-                        return Ok(());
-                    }
-                    strand.check_trap_gc()?;
-                }
-                if let Some(mut default) = default {
-                    out.store(default.take());
+        .with_slots(async move |strand, [mut item, mut pred_fn, mut pred_out]| {
+            pred_fn.store(pred.take());
+            while obj.next(strand, &mut item).await? {
+                call!(strand, &pred_fn, &mut pred_out, &item).await?;
+                if pred_out.to_bool(strand) {
+                    out.store(item.take());
                     return Ok(());
                 }
-                if let Some(or_else) = or_else {
-                    return call!(strand, or_else, out).await;
-                }
-                Err(Error::runtime(strand, "find: no matching item"))
-            },
-        )
+                strand.check_trap_gc()?;
+            }
+            if let Some(mut default) = default {
+                out.store(default.take());
+                return Ok(());
+            }
+            if let Some(or_else) = or_else {
+                return call!(strand, or_else, out).await;
+            }
+            Err(Error::runtime(strand, "find: no matching item"))
+        })
         .await
 }
 
@@ -281,33 +297,22 @@ pub(crate) async fn iter_next<'v, 'a, 's>(
     Err(Error::iter_stop(strand))
 }
 
-async fn collect_chain_sources<'v, 'a, 's>(
+/// Collect the sources for a `chain` or `zip`.
+///
+/// The leading argument is the method receiver, which arrives already
+/// materialized as an `Iter`. The rest are arbitrary iterables passed by the
+/// caller, so each needs an `iter` of its own.
+async fn collect_sources<'v, 'a, 's>(
     strand: &'a mut Strand<'v, 's>,
-    args: Args<'v, 'a>,
+    mut args: Args<'v, 'a>,
 ) -> Result<'v, 's, Vec<Value<'v>>> {
+    let Some(Arg::Pos(rcvr)) = args.next() else {
+        return Err(Error::type_error(strand, "expected receiver argument"));
+    };
+    let sources = vec![rcvr.dup()];
     strand
         .with_slots(async move |strand, [mut tmp]| {
-            let mut sources = Vec::new();
-            for arg in args {
-                let slot = match arg {
-                    Arg::Pos(slot) => slot,
-                    Arg::Key(sym, _) => return Err(Error::unexpected_key(strand, sym)),
-                };
-                slot.iter(strand, &mut tmp).await?;
-                sources.push(tmp.take());
-            }
-            Ok(sources)
-        })
-        .await
-}
-
-async fn collect_zip_sources<'v, 'a, 's>(
-    strand: &'a mut Strand<'v, 's>,
-    args: Args<'v, 'a>,
-) -> Result<'v, 's, Vec<Value<'v>>> {
-    strand
-        .with_slots(async move |strand, [mut tmp]| {
-            let mut sources = Vec::new();
+            let mut sources = sources;
             for arg in args {
                 let slot = match arg {
                     Arg::Pos(slot) => slot,
@@ -449,6 +454,12 @@ impl<'v> Protocol<'v> for Iterable {
                 let ([obj], []) = unpack!(strand, args, 1, 0)?;
                 obj.iter(strand, out).await
             }
+            // `x.foo(..)` on an `Iterable` means `x.iter().foo(..)`: take the
+            // receiver off the front of the arguments, materialize an iterator
+            // from it, and re-dispatch the method onto that iterator.
+            tag if classify(tag) == Some(Surface::Iterable) => {
+                forward(strand, args, out, method, Surface::Iterable).await
+            }
             _ => Err(Error::field(strand, method)),
         }
     }
@@ -520,6 +531,10 @@ impl<'v> Protocol<'v> for Sinkable {
                 let ([obj], []) = unpack!(strand, args, 1, 0)?;
                 obj.sink(strand, out).await
             }
+            // `x.foo(..)` on a `Sinkable` means `x.sink().foo(..)`.
+            tag if classify(tag) == Some(Surface::Sinkable) => {
+                forward(strand, args, out, method, Surface::Sinkable).await
+            }
             _ => Err(Error::field(strand, method)),
         }
     }
@@ -543,12 +558,11 @@ pub(crate) fn sink_get<'v, 'a, 's>(
     field: Sym<'v, 'a>,
     out: Slot<'v, 'a>,
 ) -> Result<'v, 's, ()> {
-    match field.tag() {
-        sym::SINK | sym::PUT | sym::MAP | sym::FILTER => {
-            BoundMethod::create(strand, rcvr, field, out);
-            Ok(())
-        }
-        _ => Err(Error::field(strand, field)),
+    if classify(field.tag()) == Some(Surface::Sinkable) {
+        BoundMethod::create(strand, rcvr, field, out);
+        Ok(())
+    } else {
+        Err(Error::field(strand, field))
     }
 }
 
@@ -572,18 +586,24 @@ pub(crate) async fn sink_mcall<'v, 'a, 's>(
     }
 }
 
+/// Field access for the `Iterable` surface.
+///
+/// **Precondition:** a type routing here from `op_get` must also define an
+/// `op_mcall` that routes to [`iterable_mcall`]. These helpers hand back a
+/// `BoundMethod` whose `op_call` re-enters the receiver's `op_mcall`; with the
+/// default `op_mcall` (which is `op_get` followed by `op_call`) that is an
+/// unbounded recursion rather than a dispatch.
 pub(crate) fn iterable_get<'v, 'a, 's>(
     strand: &'a mut Strand<'v, 's>,
     rcvr: impl Input<'v>,
     field: Sym<'v, 'a>,
     out: Slot<'v, 'a>,
 ) -> Result<'v, 's, ()> {
-    match field.tag() {
-        sym::ITER => {
-            BoundMethod::create(strand, rcvr, field, out);
-            Ok(())
-        }
-        _ => Err(Error::field(strand, field)),
+    if classify(field.tag()) == Some(Surface::Iterable) {
+        BoundMethod::create(strand, rcvr, field, out);
+        Ok(())
+    } else {
+        Err(Error::field(strand, field))
     }
 }
 
@@ -603,18 +623,20 @@ pub(crate) async fn iterable_mcall<'v, 'a, 's>(
         .await
 }
 
+/// Field access for the `Sinkable` surface.
+///
+/// Carries the same `op_mcall` precondition as [`iterable_get`].
 pub(crate) fn sinkable_get<'v, 'a, 's>(
     strand: &'a mut Strand<'v, 's>,
     rcvr: impl Input<'v>,
     field: Sym<'v, 'a>,
     out: Slot<'v, 'a>,
 ) -> Result<'v, 's, ()> {
-    match field.tag() {
-        sym::SINK => {
-            BoundMethod::create(strand, rcvr, field, out);
-            Ok(())
-        }
-        _ => Err(Error::field(strand, field)),
+    if classify(field.tag()) == Some(Surface::Sinkable) {
+        BoundMethod::create(strand, rcvr, field, out);
+        Ok(())
+    } else {
+        Err(Error::field(strand, field))
     }
 }
 
@@ -632,6 +654,71 @@ pub(crate) async fn sinkable_mcall<'v, 'a, 's>(
         .sinkable
         .op_dcall(strand, &delegator, method, args, out)
         .await
+}
+
+/// Forward an `Iterable`/`Sinkable` method onto a materialized `Iter`/`Sink`.
+///
+/// `args` arrives with the receiver as the leading positional argument (either
+/// prepended by `op_dcall`, or written explicitly as in `Iterable.map(x, f)`).
+/// Popping it leaves exactly the method's own arguments behind, so dispatching
+/// `method` onto the materialized value is literally `x.iter().foo(..)`.
+///
+/// Materialization is idempotent — `iter` on an `Iter` returns self — so this
+/// costs one extra vtable call when the receiver was already an iterator, and
+/// nothing at all in the common case where it was a container.
+async fn forward<'v, 'a, 's>(
+    strand: &'a mut Strand<'v, 's>,
+    mut args: Args<'v, 'a>,
+    out: Slot<'v, 'a>,
+    method: Sym<'v, 'a>,
+    surface: Surface,
+) -> Result<'v, 's, ()> {
+    let Some(Arg::Pos(obj)) = args.next() else {
+        return Err(Error::type_error(strand, "expected receiver argument"));
+    };
+    strand
+        .with_slots(async move |strand, [mut target]| {
+            match surface {
+                Surface::Iterable => obj.iter(strand, &mut target).await?,
+                Surface::Sinkable => obj.sink(strand, &mut target).await?,
+            }
+            target.op_mcall(strand, method, args, out).await
+        })
+        .await
+}
+
+/// Field access for a type that is both `Iterable` and `Sinkable`.
+///
+/// The two surfaces are disjoint by construction (see [`classify`]), so the
+/// name alone selects one; there is no ambiguity to resolve and no need to
+/// try one and fall back to the other.
+pub(crate) fn iterable_sinkable_get<'v, 'a, 's>(
+    strand: &'a mut Strand<'v, 's>,
+    rcvr: impl Input<'v>,
+    field: Sym<'v, 'a>,
+    out: Slot<'v, 'a>,
+) -> Result<'v, 's, ()> {
+    if classify(field.tag()).is_some() {
+        BoundMethod::create(strand, rcvr, field, out);
+        Ok(())
+    } else {
+        Err(Error::field(strand, field))
+    }
+}
+
+/// Method dispatch for a type that is both `Iterable` and `Sinkable`.
+pub(crate) async fn iterable_sinkable_mcall<'v, 'a, 's>(
+    strand: &'a mut Strand<'v, 's>,
+    rcvr: impl Input<'v>,
+    method: Sym<'v, 'a>,
+    args: Args<'v, 'a>,
+    out: Slot<'v, 'a>,
+) -> Result<'v, 's, ()> {
+    match classify(method.tag()) {
+        Some(Surface::Iterable) => iterable_mcall(strand, rcvr, method, args, out).await,
+        Some(Surface::Sinkable) => sinkable_mcall(strand, rcvr, method, args, out).await,
+        None => Err(Error::field(strand, method)),
+    }
 }
 
 pub(crate) struct Chain<'v> {
@@ -1414,11 +1501,11 @@ impl<'v> Protocol<'v> for Sink {
                 let ([obj, value], []) = unpack!(strand, args, 2, 0)?;
                 obj.put(strand, value).await
             }
-            sym::MAP => {
+            sym::PREMAP => {
                 let ([obj, func], []) = unpack!(strand, args, 2, 0)?;
                 create_map(strand, &obj, func, false, true, out).await
             }
-            sym::FILTER => {
+            sym::PREFILTER => {
                 let ([obj, pred], []) = unpack!(strand, args, 2, 0)?;
                 create_filter(strand, &obj, pred, false, true, out).await
             }
@@ -1573,15 +1660,13 @@ impl<'v> Protocol<'v> for Map<'v> {
         field: Sym<'v, 'a>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        if field.tag() == sym::PUT && this.annex().has_output {
+        if field.tag() == sym::INIT_METHOD {
+            BoundMethod::create(strand, &this, field, out);
+            Ok(())
+        } else if this.annex().has_output {
             sink_get(strand, &this, field, out)
         } else {
-            if field.tag() == sym::INIT_METHOD {
-                BoundMethod::create(strand, &this, field, out);
-                Ok(())
-            } else {
-                iter_get(strand, &this, field, out)
-            }
+            iter_get(strand, &this, field, out)
         }
     }
 
@@ -1597,9 +1682,7 @@ impl<'v> Protocol<'v> for Map<'v> {
                 let ([_self_val], []) = unpack!(strand, args, 1, 0)?;
                 Ok(())
             }
-            sym::PUT if this.annex().has_output => {
-                sink_mcall(strand, &this, method, args, out).await
-            }
+            _ if this.annex().has_output => sink_mcall(strand, &this, method, args, out).await,
             _ => iter_mcall(strand, &this, method, args, out).await,
         }
     }
@@ -1746,15 +1829,13 @@ impl<'v> Protocol<'v> for Filter<'v> {
         field: Sym<'v, 'a>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        if field.tag() == sym::PUT && this.annex().has_output {
+        if field.tag() == sym::INIT_METHOD {
+            BoundMethod::create(strand, &this, field, out);
+            Ok(())
+        } else if this.annex().has_output {
             sink_get(strand, &this, field, out)
         } else {
-            if field.tag() == sym::INIT_METHOD {
-                BoundMethod::create(strand, &this, field, out);
-                Ok(())
-            } else {
-                iter_get(strand, &this, field, out)
-            }
+            iter_get(strand, &this, field, out)
         }
     }
 
@@ -1770,9 +1851,7 @@ impl<'v> Protocol<'v> for Filter<'v> {
                 let ([_self_val], []) = unpack!(strand, args, 1, 0)?;
                 Ok(())
             }
-            sym::PUT if this.annex().has_output => {
-                sink_mcall(strand, &this, method, args, out).await
-            }
+            _ if this.annex().has_output => sink_mcall(strand, &this, method, args, out).await,
             _ => iter_mcall(strand, &this, method, args, out).await,
         }
     }
@@ -1977,7 +2056,7 @@ pub(crate) async fn create_chain_from_args<'v, 'a, 's>(
     args: Args<'v, 'a>,
     out: impl Output<'v>,
 ) -> Result<'v, 's, ()> {
-    let sources = collect_chain_sources(strand, args).await?;
+    let sources = collect_sources(strand, args).await?;
     create_chain(strand, sources, out);
     Ok(())
 }
@@ -1987,7 +2066,7 @@ pub(crate) async fn create_zip_from_args<'v, 'a, 's>(
     args: Args<'v, 'a>,
     out: impl Output<'v>,
 ) -> Result<'v, 's, ()> {
-    let sources = collect_zip_sources(strand, args).await?;
+    let sources = collect_sources(strand, args).await?;
     create_zip(strand, sources, out);
     Ok(())
 }
@@ -2067,15 +2146,13 @@ impl<'v> Protocol<'v> for Null {
         field: Sym<'v, 'a>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        if field.tag() == sym::PUT {
+        if field.tag() == sym::INIT_METHOD {
+            BoundMethod::create(strand, &this, field, out);
+            Ok(())
+        } else if classify(field.tag()) == Some(Surface::Sinkable) {
             sink_get(strand, &this, field, out)
         } else {
-            if field.tag() == sym::INIT_METHOD {
-                BoundMethod::create(strand, &this, field, out);
-                Ok(())
-            } else {
-                iter_get(strand, &this, field, out)
-            }
+            iter_get(strand, &this, field, out)
         }
     }
 
@@ -2091,7 +2168,9 @@ impl<'v> Protocol<'v> for Null {
                 let ([_self_val], []) = unpack!(strand, args, 1, 0)?;
                 Ok(())
             }
-            sym::PUT => sink_mcall(strand, &this, method, args, out).await,
+            tag if classify(tag) == Some(Surface::Sinkable) => {
+                sink_mcall(strand, &this, method, args, out).await
+            }
             _ => iter_mcall(strand, &this, method, args, out).await,
         }
     }

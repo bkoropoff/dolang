@@ -1,0 +1,138 @@
+import std:
+  - FieldError
+  - Iterable
+  - Sinkable
+
+def assert_err_type ty block
+  let res = try
+    block()
+    false
+  catch e
+    assert (type e ty)
+    true
+  assert $res
+
+# `x.foo(..)` on an Iterable means `x.iter().foo(..)`, so every forwarded
+# method works directly on a container.
+assert_eq [...[1, 2, 3].map (do |x| x * 2)] [2, 4, 6]
+assert_eq [...[1, 2, 3, 4].filter (do |x| x % 2 == 0)] [2, 4]
+assert_eq [...[1, 2, 3].take 2] [1, 2]
+assert_eq [...[1, 2, 3].skip 1] [2, 3]
+assert_eq [...[1, 2].chain [3, 4]] [1, 2, 3, 4]
+let zipped = [...[1, 2].zip [3, 4]]
+assert_eq $zipped[0][1] 3
+assert_eq ([1, 2, 3, 4].fold 0 (do |acc x| acc + x)) 10
+assert_eq ([1, 2, 3].find (do |x| x > 1)) 2
+assert_eq ([3, 1, 2].min()) 1
+assert_eq ([3, 1, 2].max()) 3
+assert ([1, 2, 3].all (do |x| x > 0))
+assert (![1, 2, 3].all (do |x| x > 1))
+assert ([1, 2, 3].any (do |x| x > 2))
+assert (![1, 2, 3].any (do |x| x > 5))
+
+let enumerated = [...["a", "b"].enumerate()]
+assert_eq $enumerated[1][0] 1
+assert_eq $enumerated[1][1] "b"
+
+# Forwarding is exactly the `.iter()` spelling, not a distinct code path.
+let arr = [1, 2, 3]
+assert_eq [...arr.map (do |x| x * 2)] [...arr.iter().map (do |x| x * 2)]
+
+# Every Iterable-only native type reaches the surface.
+assert_eq [...(range start: 1 end: 4).map (do |x| x * 10)] [10, 20, 30]
+assert_eq [...{"a": 1}.map (do |kv| kv[0])] ["a"]
+assert_eq ([...[1, 2, 3].pairs().map (do |kv| kv[1])].len) 3
+
+let s = set()
+s.add 7
+assert_eq [...s.map (do |x| x + 1)] [8]
+
+def count_variadic ...rest
+  [...rest.map (do |x| x)].len
+assert_eq (count_variadic 1 2) 2
+
+# Methods deliberately withheld from Iterable stay withheld: `next` would mint
+# a fresh iterator per call, `count` is `len` spelled expensively, and `kv` is
+# the iterable's own business.
+assert_err_type $FieldError do [1, 2, 3].next()
+assert_err_type $FieldError do [1, 2, 3].kv()
+assert_err_type $FieldError do [1, 2, 3].count()
+assert_err_type $FieldError do (range start: 1 end: 4).next()
+
+# ...and dict keeps its own unrelated `count`.
+assert_eq ({"a": 1}.count "a") 1
+assert_eq ({"a": 1}.count "b") 0
+
+# An array is both surfaces. `map` transforms values coming out; `premap`
+# transforms values going in. Same receiver, opposite directions.
+let acc = []
+let sink = acc.premap (do |x| x * 2)
+sink.put 3
+sink.put 4
+assert_eq $acc [6, 8]
+assert_eq [...acc.map (do |x| x + 1)] [7, 9]
+
+let filtered = []
+let fsink = filtered.prefilter (do |x| x % 2 == 0)
+fsink.put 1
+fsink.put 2
+assert_eq $filtered [2]
+
+# Output-mode adapters chain. Because each wrapper transforms values on the way
+# in, the *outermost* one sees the value first -- the reverse of an iterator
+# chain, where the outermost adapter sees values last.
+let chained = []
+let csink = chained.sink().premap(do |x| x * 2).prefilter(do |x| x > 4)
+csink.put 3
+csink.put 5
+assert_eq $chained [10]
+
+# `put` forwards from Sinkable too.
+let direct = []
+direct.put 9
+assert_eq $direct [9]
+
+# A record follows the iteration protocol but is deliberately NOT Iterable:
+# its member namespace is reserved for user fields, so it cannot expose the
+# method surface. Spreading still works; the methods are absent.
+let rec = record(a: 1, b: 2)
+assert (!(type rec Iterable))
+assert_eq ([...rec].len) 2
+assert_err_type $FieldError do rec.map (do |kv| kv)
+
+# User classes inherit the forwarded methods from the abstract supertype.
+# MyIterable supplies only `(iter)` -- no `(next)` of its own.
+class MyIterable: Iterable
+  pub field items = nil
+
+  def (init) self items
+    Iterable.(init) self
+    self.items = items
+
+  def (iter) self
+    self.items.iter()
+
+let mine = MyIterable [1, 2, 3]
+assert (type mine Iterable)
+assert_eq [...mine.map (do |x| x * 2)] [2, 4, 6]
+assert_eq [...mine.take 2] [1, 2]
+assert_eq (mine.fold 0 (do |acc x| acc + x)) 6
+assert_eq (mine.find (do |x| x > 1)) 2
+assert_eq (mine.max()) 3
+
+class MySinkable: Sinkable
+  pub field dest = nil
+
+  def (init) self dest
+    Sinkable.(init) self
+    self.dest = dest
+
+  def (sink) self
+    self.dest.sink()
+
+let mysink = MySinkable []
+assert (type mysink Sinkable)
+mysink.put 1
+let pre = mysink.premap (do |x| x * 10)
+pre.put 2
+assert_eq $mysink.dest [1, 20]

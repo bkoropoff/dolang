@@ -64,7 +64,7 @@ def events_identity_and_hash()
               id: nil
               retry: nil
 
-          for e x = events.iter().zip(expected)
+          for e x = events.zip(expected)
             assert_eq $e $x
 
         let closed = http.get (server.url / "/events")

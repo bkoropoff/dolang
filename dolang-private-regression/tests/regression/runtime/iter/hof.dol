@@ -2,7 +2,7 @@ let m = [1, 2, 3, 4].iter().map (do |x| x * 2)
 assert_eq [...m] [2, 4, 6, 8]
 
 let acc = []
-let out = acc.sink().map (do |x| x * 2)
+let out = acc.sink().premap (do |x| x * 2)
 out.put 1
 out.put 2
 out.put 3
@@ -13,7 +13,7 @@ let m = [1, 2, 3, 4].iter().filter (do |x| x % 2 == 0)
 assert_eq [...m] [2, 4]
 
 let acc = []
-let out = acc.sink().filter (do |x| x % 2 == 0)
+let out = acc.sink().prefilter (do |x| x % 2 == 0)
 out.put 1
 out.put 2
 out.put 3

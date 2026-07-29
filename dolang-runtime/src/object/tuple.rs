@@ -69,16 +69,6 @@ impl<'a, 'v, 's> Spread<'v, 's> for TupleSpread<'a, 'v> {
 }
 
 impl<'v> Protocol<'v> for [Value<'v>] {
-    fn op_subtype<'a, 's>(
-        _this: Recv<'v, 'a, Self>,
-        strand: &'a mut Strand<'v, 's>,
-        supertype: &Value<'v>,
-    ) -> bool {
-        supertype.eq(strand, &strand.singletons().iterable)
-            || supertype.eq(strand, &strand.singletons().tuple)
-            || supertype.eq(strand, TypeObject::Value)
-    }
-
     fn op_type<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,

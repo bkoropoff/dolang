@@ -8,7 +8,7 @@ use crate::{
     strand::{InterruptToken, Strand, StrandInner},
     sym::{self, Sym},
     unpack,
-    value::{Output, Slot, TypeObject, Value},
+    value::{Output, Slot, Value},
 };
 
 use super::{
@@ -93,24 +93,6 @@ impl<'v> Drop for Handle<'v> {
 }
 
 impl<'v> Protocol<'v> for Handle<'v> {
-    fn op_subtype<'a, 's>(
-        this: Recv<'v, 'a, Self>,
-        strand: &'a mut Strand<'v, 's>,
-        supertype: &Value<'v>,
-    ) -> bool {
-        let borrow = this.borrow(strand).ok();
-        let is_iterable = borrow
-            .as_ref()
-            .is_some_and(|borrow| !borrow.stream_output.is_nil());
-        let is_sinkable = borrow
-            .as_ref()
-            .is_some_and(|borrow| !borrow.stream_input.is_nil());
-        (is_iterable && supertype.eq(strand, &strand.singletons().iterable))
-            || (is_sinkable && supertype.eq(strand, &strand.singletons().sinkable))
-            || supertype.eq(strand, &strand.singletons().strand)
-            || supertype.eq(strand, TypeObject::Value)
-    }
-
     fn op_type<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
@@ -205,27 +187,27 @@ impl<'v> Protocol<'v> for Handle<'v> {
                 .await
             }
             sym::DONE => Err(Error::type_error(strand, "`done` is a field, not a method")),
-            sym::ITER => {
-                let is_stream = {
+            // Each surface is gated on the end that backs it, matching
+            // `op_iter`/`op_sink`/`op_subtype`: a half-duplex stream offers
+            // exactly the one it has.
+            tag => {
+                let (can_iter, can_sink) = {
                     let borrow = this.borrow(strand)?;
-                    !borrow.stream_input.is_nil() && !borrow.stream_output.is_nil()
+                    (
+                        !borrow.stream_output.is_nil(),
+                        !borrow.stream_input.is_nil(),
+                    )
                 };
-                if !is_stream {
-                    return Err(Error::field(strand, method));
+                match iter::classify(tag) {
+                    Some(iter::Surface::Iterable) if can_iter => {
+                        iter::iterable_mcall(strand, &this, method, args, out).await
+                    }
+                    Some(iter::Surface::Sinkable) if can_sink => {
+                        iter::sinkable_mcall(strand, &this, method, args, out).await
+                    }
+                    _ => Err(Error::field(strand, method)),
                 }
-                iter::iterable_mcall(strand, &this, method, args, out).await
             }
-            sym::SINK => {
-                let is_stream = {
-                    let borrow = this.borrow(strand)?;
-                    !borrow.stream_input.is_nil() && !borrow.stream_output.is_nil()
-                };
-                if !is_stream {
-                    return Err(Error::field(strand, method));
-                }
-                iter::sinkable_mcall(strand, &this, method, args, out).await
-            }
-            _ => Err(Error::field(strand, method)),
         }
     }
 
@@ -261,9 +243,12 @@ impl<'v> Protocol<'v> for Handle<'v> {
         field: Sym<'v, 'a>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        let is_stream = {
+        let (can_iter, can_sink) = {
             let borrow = this.borrow(strand)?;
-            !borrow.stream_input.is_nil() && !borrow.stream_output.is_nil()
+            (
+                !borrow.stream_output.is_nil(),
+                !borrow.stream_input.is_nil(),
+            )
         };
         match field.tag() {
             sym::JOIN | sym::CANCEL | sym::WAIT => {
@@ -275,9 +260,15 @@ impl<'v> Protocol<'v> for Handle<'v> {
                 Output::set(strand, out, input);
                 Ok(())
             }
-            sym::ITER if is_stream => iter::iterable_get(strand, &this, field, out),
-            sym::SINK if is_stream => iter::sinkable_get(strand, &this, field, out),
-            _ => Err(Error::field(strand, field)),
+            tag => match iter::classify(tag) {
+                Some(iter::Surface::Iterable) if can_iter => {
+                    iter::iterable_get(strand, &this, field, out)
+                }
+                Some(iter::Surface::Sinkable) if can_sink => {
+                    iter::sinkable_get(strand, &this, field, out)
+                }
+                _ => Err(Error::field(strand, field)),
+            },
         }
     }
 }
