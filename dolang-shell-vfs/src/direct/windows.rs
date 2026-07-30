@@ -20,7 +20,7 @@ use std::{
 };
 use tokio::{
     fs::{self, File, OpenOptions},
-    time::Duration,
+    time::{Duration, timeout},
 };
 use windows_sys::{
     Wdk::Storage::FileSystem::{
@@ -63,10 +63,22 @@ use windows_sys::{
         },
         System::{
             Com::CoTaskMemFree,
+            Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent},
+            Diagnostics::ToolHelp::{
+                CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First,
+                Thread32Next,
+            },
             IO::{DeviceIoControl, IO_STATUS_BLOCK},
             Ioctl::FSCTL_SET_COMPRESSION,
+            JobObjects::{
+                AssignProcessToJobObject, CreateJobObjectW, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+                JobObjectBasicAccountingInformation, QueryInformationJobObject, TerminateJobObject,
+            },
             SystemServices::ACCESS_SYSTEM_SECURITY,
-            Threading::{GetCurrentProcess, OpenProcessToken, SetThreadToken},
+            Threading::{
+                CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED, GetCurrentProcess, OpenProcessToken,
+                OpenThread, ResumeThread, SetThreadToken, THREAD_SUSPEND_RESUME,
+            },
         },
         UI::Shell::{
             FOLDERID_LocalAppData, FOLDERID_Profile, KF_FLAG_DONT_VERIFY, SHGetKnownFolderPath,
@@ -1581,21 +1593,150 @@ impl Direct {
 }
 
 impl DirectChild {
-    pub(super) async fn impl_terminate(self) -> io::Result<std::process::ExitStatus> {
+    pub(super) async fn impl_terminate(self) -> io::Result<Option<std::process::ExitStatus>> {
+        let pid = self.inner.id();
         let mut child = self.inner;
-        if child.id().is_some() {
+        let Some(pid) = pid else {
+            return child.wait().await.map(Some);
+        };
+        let _ = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) };
+
+        let wait = async {
+            if self.process_control == crate::ProcessControl::Foreground {
+                return child.wait().await;
+            }
+            loop {
+                let active = if let Some(job) = &self.job {
+                    let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { mem::zeroed() };
+                    let result = unsafe {
+                        QueryInformationJobObject(
+                            job.as_raw_handle(),
+                            JobObjectBasicAccountingInformation,
+                            (&raw mut info).cast(),
+                            mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                            ptr::null_mut(),
+                        )
+                    };
+                    if result == 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    info.ActiveProcesses != 0
+                } else {
+                    false
+                };
+                if !active {
+                    return child.wait().await;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        if let Ok(status) = timeout(self.termination_policy.grace, wait).await {
+            return status.map(Some);
+        }
+        if !self.termination_policy.force {
+            return Ok(None);
+        }
+        if let Some(job) = &self.job {
+            if unsafe { TerminateJobObject(job.as_raw_handle(), 1) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+        } else {
             let _ = child.start_kill();
         }
-        child.wait().await
+        child.wait().await.map(Some)
     }
 }
 
 impl DirectCommand<'_> {
+    pub(super) fn configure_process(
+        &self,
+        command: &mut tokio::process::Command,
+    ) -> io::Result<()> {
+        let mut flags = CREATE_NEW_PROCESS_GROUP;
+        if self.process_control == crate::ProcessControl::Background {
+            flags |= CREATE_SUSPENDED;
+        }
+        command.creation_flags(flags);
+        Ok(())
+    }
+
+    pub(super) fn finish_spawn(&self, mut child: tokio::process::Child) -> io::Result<DirectChild> {
+        let job = if self.process_control == crate::ProcessControl::Background {
+            let handle = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
+            if handle.is_null() {
+                let _ = child.start_kill();
+                return Err(io::Error::last_os_error());
+            }
+            let job = unsafe { OwnedHandle::from_raw_handle(handle) };
+            let Some(pid) = child.id() else {
+                let _ = child.start_kill();
+                return Err(io::Error::other("spawned process has no process ID"));
+            };
+            let Some(process) = child.raw_handle() else {
+                let _ = child.start_kill();
+                return Err(io::Error::other("spawned process has no process handle"));
+            };
+            if unsafe { AssignProcessToJobObject(job.as_raw_handle(), process) } == 0 {
+                let error = io::Error::last_os_error();
+                let _ = child.start_kill();
+                return Err(error);
+            }
+            if let Err(error) = resume_process(pid) {
+                let _ = child.start_kill();
+                return Err(error);
+            }
+            Some(job)
+        } else {
+            None
+        };
+        Ok(DirectChild::new(
+            child,
+            self.process_control,
+            self.termination_policy,
+            job,
+        ))
+    }
+
     pub(super) fn impl_stderr_inherit_stdout(&mut self) -> io::Result<&mut Self> {
         self.stderr = Some(std::process::Stdio::from(
             std::io::stdout().as_handle().try_clone_to_owned()?,
         ));
         Ok(self)
+    }
+}
+
+fn resume_process(pid: u32) -> io::Result<()> {
+    // std::process closes the primary thread handle returned by CreateProcess.
+    // A newly created suspended process has only that thread, so locate it by
+    // owner PID before allowing the process to execute.
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot) };
+    let mut entry: THREADENTRY32 = unsafe { mem::zeroed() };
+    entry.dwSize = mem::size_of::<THREADENTRY32>() as u32;
+    if unsafe { Thread32First(snapshot.as_raw_handle(), &raw mut entry) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    loop {
+        if entry.th32OwnerProcessID == pid {
+            let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+            if thread.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            let thread = unsafe { OwnedHandle::from_raw_handle(thread) };
+            if unsafe { ResumeThread(thread.as_raw_handle()) } == u32::MAX {
+                return Err(io::Error::last_os_error());
+            }
+            return Ok(());
+        }
+        if unsafe { Thread32Next(snapshot.as_raw_handle(), &raw mut entry) } == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "spawned process has no primary thread",
+            ));
+        }
     }
 }
 

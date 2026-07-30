@@ -14,6 +14,7 @@ use std::{
     ffi::{CStr, CString, OsString},
     io,
     mem::MaybeUninit,
+    os::unix::process::CommandExt,
     os::{
         fd::{AsFd, AsRawFd, BorrowedFd},
         unix::ffi::OsStrExt,
@@ -1746,35 +1747,160 @@ impl Direct {
 }
 
 impl DirectChild {
-    pub(super) async fn impl_terminate(self) -> io::Result<std::process::ExitStatus> {
+    pub(super) async fn impl_terminate(self) -> io::Result<Option<std::process::ExitStatus>> {
         let mut child = self.inner;
         let Some(pid) = child.id() else {
-            return child.wait().await;
+            return child.wait().await.map(Some);
         };
-        let res = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
-        if res != 0 {
-            let err = io::Error::last_os_error();
-            if err.raw_os_error() != Some(libc::ESRCH) {
-                return Err(err);
+        let target = match self.process_control {
+            crate::ProcessControl::Foreground => pid as libc::pid_t,
+            crate::ProcessControl::Background => -(pid as libc::pid_t),
+        };
+        let signal = signal_to_raw(self.termination_policy.signal)?;
+
+        let send = |signal| {
+            let result = unsafe { libc::kill(target, signal) };
+            if result == 0 {
+                Ok(())
+            } else {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::ESRCH) {
+                    Ok(())
+                } else {
+                    Err(error)
+                }
             }
-        }
-        match timeout(Duration::from_millis(500), child.wait()).await {
-            Ok(result) => result,
-            Err(_) => {
-                let _ = child.start_kill();
-                child.wait().await
+        };
+        send(signal)?;
+
+        let wait = async {
+            match self.process_control {
+                crate::ProcessControl::Foreground => child.wait().await,
+                crate::ProcessControl::Background => {
+                    let mut root_status = None;
+                    loop {
+                        if root_status.is_none() {
+                            root_status = child.try_wait()?;
+                        }
+                        if unsafe { libc::kill(target, 0) } != 0 {
+                            let error = io::Error::last_os_error();
+                            if error.raw_os_error() == Some(libc::ESRCH) {
+                                break match root_status {
+                                    Some(status) => Ok(status),
+                                    None => child.wait().await,
+                                };
+                            }
+                            if error.raw_os_error() != Some(libc::EPERM) {
+                                return Err(error);
+                            }
+                        }
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                }
             }
+        };
+        if let Ok(status) = timeout(self.termination_policy.grace, wait).await {
+            return status.map(Some);
         }
+        if !self.termination_policy.force {
+            return Ok(None);
+        }
+
+        send(libc::SIGKILL)?;
+        // Remaining group members are not necessarily our children. In
+        // particular, an orphaned zombie can keep kill(-pgid, 0) succeeding
+        // indefinitely when PID 1 does not reap it.
+        child.wait().await.map(Some)
     }
 }
 
 impl DirectCommand<'_> {
+    pub(super) fn configure_process(
+        &self,
+        command: &mut tokio::process::Command,
+    ) -> io::Result<()> {
+        signal_to_raw(self.termination_policy.signal)?;
+        if self.process_control == crate::ProcessControl::Background {
+            command.as_std_mut().process_group(0);
+        }
+        Ok(())
+    }
+
+    pub(super) fn finish_spawn(&self, child: tokio::process::Child) -> io::Result<DirectChild> {
+        Ok(DirectChild::new(
+            child,
+            self.process_control,
+            self.termination_policy,
+        ))
+    }
+
     pub(super) fn impl_stderr_inherit_stdout(&mut self) -> io::Result<&mut Self> {
         self.stderr = Some(std::process::Stdio::from(
             std::io::stdout().as_fd().try_clone_to_owned()?,
         ));
         Ok(self)
     }
+}
+
+fn signal_to_raw(signal: crate::Signal) -> io::Result<libc::c_int> {
+    use crate::Signal;
+    let signal = match signal {
+        Signal::Hup => libc::SIGHUP,
+        Signal::Int => libc::SIGINT,
+        Signal::Quit => libc::SIGQUIT,
+        Signal::Ill => libc::SIGILL,
+        Signal::Trap => libc::SIGTRAP,
+        Signal::Abrt => libc::SIGABRT,
+        Signal::Fpe => libc::SIGFPE,
+        Signal::Kill => libc::SIGKILL,
+        Signal::Bus => libc::SIGBUS,
+        Signal::Segv => libc::SIGSEGV,
+        Signal::Sys => libc::SIGSYS,
+        Signal::Pipe => libc::SIGPIPE,
+        Signal::Alrm => libc::SIGALRM,
+        Signal::Term => libc::SIGTERM,
+        Signal::Urg => libc::SIGURG,
+        Signal::Stop => libc::SIGSTOP,
+        Signal::Tstp => libc::SIGTSTP,
+        Signal::Cont => libc::SIGCONT,
+        Signal::Chld => libc::SIGCHLD,
+        Signal::Ttin => libc::SIGTTIN,
+        Signal::Ttou => libc::SIGTTOU,
+        Signal::Io => libc::SIGIO,
+        Signal::Xcpu => libc::SIGXCPU,
+        Signal::Xfsz => libc::SIGXFSZ,
+        Signal::Vtalrm => libc::SIGVTALRM,
+        Signal::Prof => libc::SIGPROF,
+        Signal::Winch => libc::SIGWINCH,
+        Signal::Usr1 => libc::SIGUSR1,
+        Signal::Usr2 => libc::SIGUSR2,
+        #[cfg(any(target_os = "freebsd", target_os = "macos"))]
+        Signal::Emt => libc::SIGEMT,
+        #[cfg(any(target_os = "freebsd", target_os = "macos"))]
+        Signal::Info => libc::SIGINFO,
+        #[cfg(target_os = "linux")]
+        Signal::Stkflt => libc::SIGSTKFLT,
+        #[cfg(target_os = "linux")]
+        Signal::Pwr => libc::SIGPWR,
+        #[cfg(target_os = "freebsd")]
+        Signal::Thr => libc::SIGTHR,
+        #[cfg(target_os = "freebsd")]
+        Signal::Librt => libc::SIGLIBRT,
+        Signal::Number(signal) if signal > 0 => signal,
+        Signal::Number(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "termination signal must be positive",
+            ));
+        }
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{signal:?} is not supported on this platform"),
+            ));
+        }
+    };
+    Ok(signal)
 }
 
 impl super::DirectOpenOptions {

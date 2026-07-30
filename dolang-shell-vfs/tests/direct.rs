@@ -17,6 +17,8 @@ use dolang_shell_vfs::{
 use dolang_shell_vfs::{
     DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
 };
+#[cfg(any(unix, windows))]
+use dolang_shell_vfs::{ProcessControl, Signal, TerminationPolicy};
 use tempfile::tempdir;
 
 fn typed(path: &Path) -> Utf8TypedPath<'_> {
@@ -41,6 +43,115 @@ fn typed_str(path: &str) -> Utf8TypedPath<'_> {
     } else {
         Utf8TypedPath::Unix(Utf8UnixPath::new(path))
     }
+}
+
+#[cfg(unix)]
+async fn wait_for_pid(path: &Path) -> libc::pid_t {
+    for _ in 0..200 {
+        if let Ok(pid) = tokio::fs::read_to_string(path).await {
+            return pid.trim().parse().unwrap();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("child did not write {}", path.display());
+}
+
+#[cfg(unix)]
+fn process_exists(pid: libc::pid_t) -> bool {
+    (unsafe { libc::kill(pid, 0) }) == 0
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn background_termination_signals_the_process_group() {
+    let direct = Direct::default();
+    let dir = tempdir().unwrap();
+    let pid_path = dir.path().join("descendant.pid");
+    let script = format!("sleep 60 & echo $! > '{}'; wait", pid_path.display());
+    let mut command = direct.command(Utf8TypedPath::Unix(Utf8UnixPath::new("sh")));
+    command
+        .arg("-c")
+        .arg(&script)
+        .process_control(ProcessControl::Background)
+        .termination_policy(TerminationPolicy {
+            signal: Signal::Term,
+            grace: std::time::Duration::from_secs(1),
+            force: true,
+        });
+    let child = command.spawn().await.unwrap();
+    let descendant = wait_for_pid(&pid_path).await;
+
+    assert!(child.terminate().await.unwrap().is_some());
+    for _ in 0..100 {
+        if !process_exists(descendant) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("background descendant {descendant} survived group termination");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn force_false_orphans_the_background_process_group() {
+    let direct = Direct::default();
+    let dir = tempdir().unwrap();
+    let pid_path = dir.path().join("group.pid");
+    let script = format!(
+        "trap '' TERM; echo $$ > '{}'; sleep 60 & wait",
+        pid_path.display()
+    );
+    let mut command = direct.command(Utf8TypedPath::Unix(Utf8UnixPath::new("sh")));
+    command
+        .arg("-c")
+        .arg(&script)
+        .process_control(ProcessControl::Background)
+        .termination_policy(TerminationPolicy {
+            signal: Signal::Term,
+            grace: std::time::Duration::from_millis(50),
+            force: false,
+        });
+    let child = command.spawn().await.unwrap();
+    let group = wait_for_pid(&pid_path).await;
+
+    assert_eq!(child.terminate().await.unwrap(), None);
+    assert!(process_exists(group));
+    unsafe {
+        libc::kill(-group, libc::SIGKILL);
+    }
+}
+
+#[cfg(windows)]
+async fn assert_windows_termination(control: ProcessControl) {
+    let direct = Direct::default();
+    let mut command = direct.command(Utf8TypedPath::Windows(Utf8WindowsPath::new("cmd")));
+    command
+        .arg("/C")
+        .arg("ping -n 60 127.0.0.1 >nul")
+        .process_control(control)
+        .termination_policy(TerminationPolicy {
+            signal: Signal::Term,
+            grace: std::time::Duration::from_millis(50),
+            force: true,
+        });
+    let child = command.spawn().await.unwrap();
+    let status = tokio::time::timeout(std::time::Duration::from_secs(5), child.terminate())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(status.is_some());
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_foreground_process_group_can_be_terminated() {
+    assert_windows_termination(ProcessControl::Foreground).await;
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_background_job_can_be_terminated() {
+    assert_windows_termination(ProcessControl::Background).await;
 }
 
 fn lock_request(

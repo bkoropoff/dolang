@@ -9,6 +9,7 @@ use std::{
     path::PathBuf,
     pin::Pin,
     task::{Context, Poll},
+    time::Duration,
 };
 use tokio::{
     io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf},
@@ -60,6 +61,88 @@ pub enum Architecture {
 pub enum ProcessStatus {
     Exited(i32),
     Signaled(i32),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProcessControl {
+    Foreground,
+    Background,
+}
+
+/// A Unix process signal.
+///
+/// Named variants are resolved to native signal numbers by the VFS executing
+/// the process. `Number` is target-specific; the caller is responsible for
+/// using the numbering of the VFS that will execute the process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Signal {
+    Hup,
+    Int,
+    Quit,
+    Ill,
+    Trap,
+    Abrt,
+    Emt,
+    Fpe,
+    Kill,
+    Bus,
+    Segv,
+    Sys,
+    Pipe,
+    Alrm,
+    Term,
+    Urg,
+    Stop,
+    Tstp,
+    Cont,
+    Chld,
+    Ttin,
+    Ttou,
+    Io,
+    Xcpu,
+    Xfsz,
+    Vtalrm,
+    Prof,
+    Winch,
+    Info,
+    Usr1,
+    Usr2,
+    Stkflt,
+    Pwr,
+    Thr,
+    Librt,
+    Number(i32),
+}
+
+impl Signal {
+    /// Returns whether this signal exists on an operating system.
+    pub fn is_supported(self, operating_system: OperatingSystem) -> bool {
+        use OperatingSystem::{FreeBsd, Linux, Macos, Windows};
+        match self {
+            Self::Emt | Self::Info => matches!(operating_system, FreeBsd | Macos),
+            Self::Stkflt | Self::Pwr => operating_system == Linux,
+            Self::Thr | Self::Librt => operating_system == FreeBsd,
+            Self::Number(_) => operating_system != Windows,
+            _ => operating_system != Windows,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminationPolicy {
+    pub signal: Signal,
+    pub grace: Duration,
+    pub force: bool,
+}
+
+impl Default for TerminationPolicy {
+    fn default() -> Self {
+        Self {
+            signal: Signal::Term,
+            grace: Duration::from_secs(5),
+            force: true,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1173,7 +1256,7 @@ pub trait FileHandle: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Sized {
 #[allow(async_fn_in_trait)]
 pub trait Child {
     async fn wait(&mut self) -> Result<ProcessStatus>;
-    async fn terminate(self) -> Result<ProcessStatus>
+    async fn terminate(self) -> Result<Option<ProcessStatus>>
     where
         Self: Sized;
 }
@@ -1203,6 +1286,8 @@ pub trait Command {
     fn stderr_inherit(&mut self) -> io::Result<&mut Self>;
     fn stderr_inherit_stdout(&mut self) -> io::Result<&mut Self>;
     fn stderr_null(&mut self) -> &mut Self;
+    fn process_control(&mut self, control: ProcessControl) -> &mut Self;
+    fn termination_policy(&mut self, policy: TerminationPolicy) -> &mut Self;
     async fn spawn(self) -> Result<Self::Child>;
 }
 
@@ -1754,13 +1839,17 @@ impl Child for AnyChild {
         Ok(status)
     }
 
-    async fn terminate(mut self) -> crate::Result<ProcessStatus> {
+    async fn terminate(mut self) -> crate::Result<Option<ProcessStatus>> {
         self.relays.abort_inputs();
         let result = match self.inner {
             AnyChildInner::Client(child) => child.terminate().await,
             AnyChildInner::Direct(child) => (*child).terminate().await,
         };
-        self.relays.finish().await;
+        if result.as_ref().is_ok_and(Option::is_some) {
+            self.relays.finish().await;
+        } else {
+            self.relays.abandon();
+        }
         result
     }
 }
@@ -1973,6 +2062,30 @@ impl<'a> Command for AnyCommand<'a> {
             }
             AnyCommandInner::Direct(builder) => {
                 builder.stderr_null();
+            }
+        }
+        self
+    }
+
+    fn process_control(&mut self, control: ProcessControl) -> &mut Self {
+        match &mut self.inner {
+            AnyCommandInner::Client(builder) => {
+                builder.process_control(control);
+            }
+            AnyCommandInner::Direct(builder) => {
+                builder.process_control(control);
+            }
+        }
+        self
+    }
+
+    fn termination_policy(&mut self, policy: TerminationPolicy) -> &mut Self {
+        match &mut self.inner {
+            AnyCommandInner::Client(builder) => {
+                builder.termination_policy(policy);
+            }
+            AnyCommandInner::Direct(builder) => {
+                builder.termination_policy(policy);
             }
         }
         self

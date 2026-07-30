@@ -8,7 +8,9 @@ use std::{
 };
 
 use dolang::runtime::{Strand, strand};
-use dolang_shell_vfs::{AnyVfs, OperatingSystem, OperatingSystemFamily, SecurityInfo, TargetInfo};
+use dolang_shell_vfs::{
+    AnyVfs, OperatingSystem, OperatingSystemFamily, SecurityInfo, Signal, TargetInfo,
+};
 use dolang_shell_vfs::{Utf8TypedPathBuf, typed_path};
 
 use crate::shell_args::ArgsData;
@@ -17,6 +19,23 @@ use crate::shell_args::ArgsData;
 pub(crate) enum ChannelMode {
     Line,
     Chunk,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TerminationPolicy {
+    pub(crate) signal: Signal,
+    pub(crate) grace: std::time::Duration,
+    pub(crate) force: bool,
+}
+
+impl Default for TerminationPolicy {
+    fn default() -> Self {
+        Self {
+            signal: Signal::Term,
+            grace: std::time::Duration::from_secs(5),
+            force: true,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -180,6 +199,8 @@ pub(crate) struct Local {
     target: RefCell<TargetInfo>,
     security: RefCell<Option<SecurityInfo>>,
     channel_mode: Cell<ChannelMode>,
+    background: Cell<bool>,
+    termination_policy: RefCell<TerminationPolicy>,
     invocation: RefCell<InvocationOverride>,
 }
 
@@ -196,11 +217,13 @@ impl<'v> strand::Local<'v> for Local {
             target: RefCell::new(TargetInfo::current()),
             security: RefCell::new(None),
             channel_mode: Cell::new(ChannelMode::Line),
+            background: Cell::new(false),
+            termination_policy: RefCell::new(TerminationPolicy::default()),
             invocation: RefCell::new(InvocationOverride::default()),
         }
     }
 
-    fn inherit(&self, _strand: &Strand<'v, '_>, _kind: strand::InheritKind) -> Self {
+    fn inherit(&self, _strand: &Strand<'v, '_>, kind: strand::InheritKind) -> Self {
         Self {
             cwd: self.cwd.clone(),
             env: self.env.clone(),
@@ -209,6 +232,8 @@ impl<'v> strand::Local<'v> for Local {
             target: self.target.clone(),
             security: self.security.clone(),
             channel_mode: Cell::new(self.channel_mode.get()),
+            background: Cell::new(self.background.get() || kind == strand::InheritKind::Background),
+            termination_policy: self.termination_policy.clone(),
             invocation: self.invocation.clone(),
         }
     }
@@ -272,6 +297,21 @@ impl Local {
 
     pub(crate) fn set_channel_mode(&self, v: ChannelMode) {
         self.channel_mode.set(v);
+    }
+
+    pub(crate) fn background(&self) -> bool {
+        self.background.get()
+    }
+
+    pub(crate) fn termination_policy(&self) -> TerminationPolicy {
+        self.termination_policy.borrow().clone()
+    }
+
+    pub(crate) fn replace_termination_policy(
+        &self,
+        policy: TerminationPolicy,
+    ) -> TerminationPolicy {
+        mem::replace(&mut self.termination_policy.borrow_mut(), policy)
     }
 
     pub(crate) fn invocation(&self) -> InvocationOverride {

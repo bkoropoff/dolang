@@ -413,6 +413,8 @@ pub(crate) struct SpawnRequest {
     pub(crate) stdin: StdioRecvTarget,
     pub(crate) stdout: StdioSendTarget,
     pub(crate) stderr: StdioSendTarget,
+    pub(crate) process_control: crate::ProcessControl,
+    pub(crate) termination_policy: crate::TerminationPolicy,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -858,7 +860,7 @@ pub(crate) enum ResponseKind {
     Error(WireError),
     Spawn(Result<Opaque<crate::ChildMarker>, WireError>),
     ChildWait(Result<crate::ProcessStatus, WireError>),
-    ChildTerminate(Result<crate::ProcessStatus, WireError>),
+    ChildTerminate(Result<Option<crate::ProcessStatus>, WireError>),
     ChildClose(Result<(), WireError>),
     Query(Result<QueryResponse, WireError>),
     UserName(Result<String, WireError>),

@@ -11,6 +11,33 @@ output capture.
 
 ## Functions
 
+### `with_policy func :signal? :grace? :force? ...`
+
+Runs a callable with temporary process termination defaults.
+
+**Parameters:**
+
+| Name     | Type                                                          | Description                                         |
+| -------- | ------------------------------------------------------------- | --------------------------------------------------- |
+| `func`   | `func`                                                        | Callable to execute                                 |
+| `signal` | [`sym`](../std/sym.md)                                        | Unix signal name (default: `:TERM:`)                |
+| `grace`  | [`Duration`](../time/duration.md)\|[`float`](../std/float.md) | Time before forced termination (default: 5 seconds) |
+| `force`  | [`bool`](../std/bool.md)                                      | Force termination after the grace period            |
+| `...`    |                                                               | Additional arguments passed to `func`               |
+
+**Returns:**
+
+The return value of `func`.
+
+The signal setting is retained when the strand later targets a Unix VFS.
+Windows launches always use `CTRL_BREAK_EVENT`. With `force: false`, a process
+that outlives the grace period is orphaned.
+
+```
+with_policy signal: :INT: grace: 2.5 do
+  run worker
+```
+
 ### `io_mode mode func ...`
 
 Executes a function with the current strand's external process I/O mode set for
