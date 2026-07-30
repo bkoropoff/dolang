@@ -5,7 +5,7 @@
 # VM created for the job. Runner logs are not a terminal, so its progress
 # indicators render as plain step lines.
 
-import fs http libvirt proc progress sudo sys
+import cache fs http libvirt proc progress sudo sys
 import std:
   - NULLITER
 
@@ -19,7 +19,11 @@ let VM_TARGET = "x86_64-freebsd"
 # ../action.yml are derived from it.
 let VM_APP = "dolang-freebsd-ci"
 
-let VM_IMAGE = "https://download.freebsd.org/releases/VM-IMAGES/15.1-RELEASE/amd64/Latest/FreeBSD-15.1-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2.xz"
+# The raw image rather than the qcow2 one: the domain disk is a qcow2 overlay
+# either way, and a raw backing file spares every overlay read miss a second
+# layer of qcow2 cluster translation. The two downloads are within 0.2% of the
+# same size, though the raw one decompresses to the image's full virtual size.
+let VM_IMAGE = "https://download.freebsd.org/releases/VM-IMAGES/15.1-RELEASE/amd64/Latest/FreeBSD-15.1-RELEASE-amd64-BASIC-CLOUDINIT-ufs.raw.xz"
 
 # Directories worth reclaiming on the runner before staging a VM image.
 let RUNNER_BALLAST = $
@@ -32,6 +36,24 @@ let VERSION_FILE = ".github/dolang-version"
 let PROGRESS_STYLE = $
   message:
     width: 120
+
+# The guest's `~/.profile`, which is what puts the Rust toolchain on `PATH`.
+#
+# `dolang-vfs` reconstructs a login environment by running the account's login
+# shell (see `ssh.with`), so this file — not the environment of any one
+# command — is what every later build step inherits.
+#
+# Written during provisioning rather than left to rustup's own `PATH` edit, so
+# that it is a fact about the guest either way: a run whose toolchain came from
+# a restored cache never executes the installer at all, and would otherwise
+# have a `cargo` on disk that nothing could resolve.
+# Spelled out in full rather than prepending to whatever `PATH` arrives,
+# because writing this file replaces the base image's own `.profile`: the
+# `pkg`-installed build prerequisites live in `/usr/local/bin`, which an
+# inherited `PATH` from `sshd` is not guaranteed to include.
+pub let PROFILE = r|
+  PATH="$HOME/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  export PATH
 
 # Reads the pinned Dolang release tag from the checked out workspace.
 def dolang_version()
@@ -69,16 +91,25 @@ def install_wrapper shell
 
   fs.append $env["GITHUB_PATH"] "$bin_dir\n"
 
+# Trims debug info generation for every CI build.
+#
+# Full debug info costs compile time, link time, and disk on every runner, and
+# nothing in CI keeps the artifacts for offline analysis — no core files are
+# scraped off a runner before it is destroyed. `line-tables-only` is the least
+# that still gives a panic or crash backtrace file and line numbers; symbol
+# names come from the symbol table, so those survive regardless.
+#
+# The VM target needs these forwarded into the guest as well; `VM_ENV` in
+# shell.dol next door lists them.
+def configure_cargo()
+  export CARGO_PROFILE_DEV_DEBUG line-tables-only
+  export CARGO_PROFILE_TEST_DEBUG line-tables-only
+
 # Installs the Rust build prerequisites on the runner itself.
 def host_prereqs w
   let os = sys.os_info().os
 
-  if (os == :WINDOWS:)
-    step $w 🦀 "configure cargo" do
-      # Debug info dominates build time and disk on Windows runners
-      export CARGO_PROFILE_DEV_DEBUG 0
-      export CARGO_PROFILE_TEST_DEBUG 0
-  else if (os == :MACOS:)
+  if (os == :MACOS:)
     step $w 📦 "install llvm" do
       run brew install llvm
       export LIBCLANG_PATH /opt/homebrew/opt/llvm/lib
@@ -93,7 +124,13 @@ def host_prereqs w
 
 # Steps `host_prereqs` reports on the runner it is running on.
 def host_prereq_steps()
-  ((sys.os_info().os == :LINUX:) && 2 || 1)
+  let os = sys.os_info().os
+  if (os == :LINUX:)
+    2
+  else if (os == :MACOS:)
+    1
+  else
+    0
 
 # Installs the virtualization packages a session-mode libvirt domain needs.
 def install_virt()
@@ -114,7 +151,11 @@ def unconfine()
     run systemctl stop apparmor.service
     run systemctl disable apparmor.service
     try
-      # Noisy about every profile it unloads, and failure is not fatal
+      # Reports an I/O error per profile it could not unload — around a hundred
+      # of them — and then exits non-zero even though enforcement did get
+      # turned off. The catch is for that false failure, not for a real one:
+      # `aa-teardown` going missing must stay fatal, because passt segfaults if
+      # AppArmor is still enforcing.
       run aa-teardown stderr: $NULLITER
     catch proc.Error: _
       nil
@@ -130,6 +171,12 @@ def create_vm disk_size
     memory: 12288
     vcpus: 4
     disk_size: $disk_size
+    # The domain is destroyed with the runner at the end of the job, so there
+    # is nothing to lose by dropping guest flushes — and a great deal of the
+    # build's write traffic is temporaries that then never need to reach the
+    # host's storage at all. Anything worth keeping is tarred out of the guest
+    # while it is still running.
+    cache: :UNSAFE:
     packages:
       - sqlite3
       - pkgconf
@@ -140,9 +187,34 @@ def create_vm disk_size
         target: /etc/rc.conf.d/firstboot_pkg_upgrade
         content: |
           firstboot_pkg_upgrade_enable="NO"
-    run: do progress.show icon: 🦀 message: "install rust" do |_|
-      http.get https://sh.rustup.rs do |resp|
-        run sh -s -- -y stdin: $resp.chunks()
+    # A top-level `add:` rather than an `init:` one: this runs once SSH is up,
+    # so the user exists and the file is written through the guest's VFS with
+    # the right ownership
+    add:
+      target: /home/ci/.profile
+      content: $PROFILE
+      chmod: 0o644
+
+# Installs the Rust toolchain into the guest.
+#
+# Separate from `create_vm` so that a restored build cache can skip it: the
+# cache carries `.rustup` and `.cargo`, which is a working toolchain already,
+# and rustup's download is a large share of what provisioning costs.
+#
+# `http.get` runs on the runner and its chunks are piped into the guest's
+# `sh`, so the download uses the runner's network rather than the domain's
+# comparatively slow user-mode networking.
+# `--no-modify-path` because `PROFILE` already puts the toolchain on `PATH`;
+# letting rustup append its own line as well would leave two sources of truth
+# for the same thing, only one of which survives into a cached run.
+#
+# `--profile minimal` drops rust-docs, clippy, and rustfmt — several hundred
+# megabytes that this job does not use, off both the download and the cached
+# `.rustup`. Re-enabling lint for this target would need `default` back.
+def install_rust vm
+  vm.with do
+    http.get https://sh.rustup.rs do |resp|
+      run sh -s -- -y --no-modify-path --profile minimal stdin: $resp.chunks()
 
 # Uploads a snapshot of the workspace into the VM's home directory.
 def upload_workspace vm
@@ -167,7 +239,32 @@ def provision_vm w disk_size
   w.delta()
 
   step $w ⬆️ "upload workspace" do upload_workspace $vm
+  step $w 📥 "restore build cache" do cache.restore $vm
+  # A restored cache already supplies a toolchain, so this is usually a no-op
+  step $w 🦀 "ensure rust" do
+    if !cache.has_rust(vm)
+      install_rust $vm
   export DOLANG_CI_VM $VM_NAME
+
+# Packs the CI VM's build caches back onto the runner, for `actions/cache` to
+# save once the job ends.
+#
+# Lives here rather than in `cache` so that the progress presentation stays
+# with `PROGRESS_STYLE` and the runner-specific plumbing — `cache` is imported
+# by this module, so it cannot import back. Without the `progress.with`, the
+# indicators inside `cache.save` have no renderer configured and the step
+# produces no output at all.
+#
+# Runs as its own workflow step rather than at the end of `setup`, because it
+# has to happen after the build steps have populated the caches.
+pub def save_cache()
+  let name = env.get "DOLANG_CI_VM"
+  if name
+    let vm = libvirt.attach $name
+    progress.with style: $PROGRESS_STYLE do
+      progress.show icon: 💾 message: "save build cache" do |_|
+        cache.save $vm
+  nil
 
 # Sets up the runner to build `target`, which defaults to whatever the runner
 # builds natively.
@@ -182,12 +279,14 @@ pub def setup
   :disk_size = "50G"
 do
   let vm = (target == VM_TARGET)
-  # The wrapper, plus VM provisioning or whatever a host build needs
-  let steps = (1 + (vm && 5 || rust && host_prereq_steps() || 0))
+  # The wrapper and cargo configuration, plus VM provisioning or whatever a
+  # host build needs
+  let steps = (2 + (vm && 7 || rust && host_prereq_steps() || 0))
 
   progress.with style: $PROGRESS_STYLE do
     progress.show icon: 🚀 message: "set up runner" total: $steps do |w|
       step $w 🔧 "install dolang-ci wrapper" do install_wrapper $shell
+      step $w 🦀 "configure cargo" do configure_cargo()
 
       if vm
         provision_vm $w $disk_size

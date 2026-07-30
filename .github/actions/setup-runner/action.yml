@@ -15,6 +15,14 @@ inputs:
     description: Disk size of the CI VM, for targets that build in one
     default: 50G
 
+outputs:
+  vm-cache-hit:
+    description: >
+      Whether the CI VM build cache was restored from an exact key match, in
+      which case actions/cache will not save again and repacking the guest's
+      caches at the end of the job would be wasted work.
+    value: ${{ steps.vm-build-cache.outputs.cache-hit }}
+
 runs:
   using: composite
   steps:
@@ -40,9 +48,35 @@ runs:
           ~/.local/share/dolang-freebsd-ci/libvirt/ssh
           ~/.local/share/dolang-freebsd-ci/libvirt/seeds
           ~/.cache/dolang-freebsd-ci
-        key: freebsd-libvirt-v1
+        # Bump when VM_IMAGE changes: the download cache is keyed by URL, and
+        # a cache hit on the primary key suppresses the save, so a stale entry
+        # would make the new image re-download on every run.
+        #
+        # No restore-keys on purpose. This key is static and only ever bumped by
+        # hand, so a prefix fallback cannot help — it can only inherit the
+        # previous image. That is what doubled this cache to 1.2 GB when the
+        # image moved from qcow2 to raw: the old download came back via the
+        # fallback, the new one landed beside it, and the save kept both.
+        key: freebsd-libvirt-v3
+
+    # The guest's cargo/rustup/target caches, tarred out of the VM at the end
+    # of the job by the workflow's save step. Keyed on the lockfile so a
+    # dependency change repacks; restore-keys let an unrelated lockfile change
+    # still start from the last good cache.
+    #
+    # The path is intentionally suffix-free — it is an archive whose format only
+    # lib/cache.dol knows (see RUNNER_TARBALL there). Do not add one back: this
+    # path and that constant must agree exactly, and a mismatch fails silently
+    # as "Path(s) specified in the action for caching do(es) not exist".
+    - name: CI VM build cache
+      id: vm-build-cache
+      if: inputs.target == 'x86_64-freebsd'
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/dolang-freebsd-cache
+        key: freebsd-cargo-v2-${{ hashFiles('Cargo.lock') }}
         restore-keys: |
-          freebsd-libvirt-
+          freebsd-cargo-v2-
 
     # Inputs arrive through the environment: on Windows the action path is a
     # backslash path, which would be mangled as a Do string literal

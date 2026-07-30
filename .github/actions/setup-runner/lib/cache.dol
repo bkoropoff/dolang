@@ -1,0 +1,238 @@
+# Carrying the CI VM's Rust caches across jobs.
+#
+# The FreeBSD target builds in a VM that dies with the job, so by default
+# every run recompiled the whole dependency graph against a cold cargo and a
+# cold rustup. `actions/cache` is the only durable store a runner has and it
+# can only cache paths on the runner itself, hence the tarball round trip: the
+# guest packs its caches, the host pulls the tarball out, and `actions/cache`
+# saves it after the job ends.
+#
+# Only dependency artifacts earn their place, and the margins here are wide:
+# a debug `target` is ~36 G, of which the reusable dependency state is a couple
+# of GiB. The workspace's own crates are recompiled every run whatever is
+# cached, so `exclude_args` drops them at pack time. Staying small matters
+# beyond this job — one 10 GB ceiling covers every runner and workflow in the
+# repository.
+#
+# `tar` and `zstd` run inside the guest rather than via `transfer.pack`, which
+# would stream every byte through the VFS, and the archive leaves over `scp`
+# (`Domain.fetch`) rather than `Domain.download` for the same reason: the VFS
+# data path manages ~0.7 MiB/s, or twenty minutes for a tarball this size. See
+# https://github.com/dolang-org/dolang/issues/354. The VFS is still the right
+# tool for the cheap metadata probes here — `fs.glob` and `exists`.
+
+import fs proc progress sys toml
+import std:
+  - NULLITER
+# `pipeline` puts the pipe ends on the VFS and spawns both processes onto them,
+# so `tar | zstd` stays entirely inside the guest rather than routing gigabytes
+# back through the host
+import strand:
+  - pipeline
+
+# Guest home-relative paths worth carrying between runs. Together these are a
+# working toolchain plus every dependency download, so a restored cache needs no
+# `rustup` install and no crate fetching.
+#
+# Narrower than `.cargo` wholesale on purpose. `registry/src` holds crate
+# sources extracted from the `.crate` archives already in `registry/cache`, so
+# carrying both stores every dependency twice; cargo re-extracts on demand, and
+# `Swatinem/rust-cache` omits `src` for exactly this reason. `git/checkouts`
+# stands in the same relation to `git/db`.
+#
+# Deliberately not `.profile`: provisioning writes it, so a cached copy would
+# only risk restoring a stale one over the current version. What makes the
+# restored toolchain reachable is that profile, since `dolang-vfs` rebuilds the
+# login environment by running the account's login shell — see `ci.PROFILE`.
+#
+# `target` is absent as well: only the reusable slices of it are packed, which
+# `profile_paths` locates.
+let CACHED_PATHS = $
+  - .cargo/bin
+  - .cargo/registry/index
+  - .cargo/registry/cache
+  - .cargo/git/db
+  - .rustup
+
+# Paths excluded from the archive even though they sit under a cached path.
+#
+# `downloads` and `tmp` are rustup's scratch space during an install and hold
+# nothing a later run needs.
+let EXCLUDED_PATHS = $
+  - .rustup/downloads
+  - .rustup/tmp
+
+# Tarball name inside the guest, relative to the ci user's home.
+let GUEST_TARBALL = "dolang-cache.tar.zst"
+
+# Runner-side name, which ../action.yml hardcodes as its `actions/cache` path.
+#
+# Deliberately carries no format suffix. Both ends of the archive are written
+# and read here, so this module is the only thing that needs to know it is a
+# zstd tarball — and changing that must not mean editing a path in the
+# workflow, which is a coupling already broken once: renaming this from `.gz` to
+# `.zst` left `actions/cache` watching a path nothing ever wrote, and it
+# silently declined to save anything.
+let RUNNER_TARBALL = "dolang-freebsd-cache"
+
+# The only subdirectories of a `target` profile worth carrying: everything
+# cargo consults to decide a dependency need not be rebuilt.
+#
+# Measured on this workspace, a debug `target` is ~36 G, of which 19 G is
+# `incremental` (worthless across runs, nothing reuses it) and 5.8 GiB is the
+# workspace's own crates (rebuilt every run regardless). The dependency
+# artifacts actually worth keeping are ~2.9 GiB. An allowlist keeps that ratio
+# from silently inverting — the first version of this was a denylist and fed
+# ~10 G to gzip, which took longer than the build it was meant to accelerate.
+let PROFILE_SUBDIRS = $
+  - .fingerprint
+  - deps
+  - build
+
+# Where the tarball sits on the runner, between the guest and `actions/cache`.
+pub def tarball()
+  (fs.Path(env["RUNNER_TEMP"]) / RUNNER_TARBALL).absolute()
+
+# Artifact name stems for every workspace crate, read from the root manifest.
+#
+# Cargo spells artifacts with underscores (`dolang_runtime-<hash>.rlib`) while
+# the manifest lists directories with dashes, and in this workspace a member's
+# directory is also its crate name.
+def workspace_stems()
+  let stems = []
+  for member = toml.from_str(fs.read "Cargo.toml")["workspace"]["members"]
+    stems.push $ member.replace "-" "_"
+  stems
+
+# `tar --exclude` arguments dropping every workspace crate's artifacts.
+#
+# Both spellings are needed: rlibs are prefixed (`libdolang_runtime-<hash>`),
+# fingerprint and build directories are not. `tar` matches a pattern against
+# the whole path, hence the leading `*/`.
+#
+# Excluding at pack time rather than deleting beforehand keeps this
+# non-destructive and saves an entire traversal: the previous version ran a
+# `find`-and-delete pass over the tree before packing it.
+def exclude_args()
+  let args = []
+  for stem = workspace_stems()
+    args.push "--exclude=*/$stem-*" "--exclude=*/lib$stem-*"
+  for path = EXCLUDED_PATHS
+    args.push "--exclude=$path" "--exclude=$path/*"
+  args
+
+# Every `PROFILE_SUBDIRS` directory present under `target`, as guest-relative
+# paths.
+#
+# Cargo splits artifacts across a host directory (`target/debug`, holding build
+# scripts and proc macros) and a per-target one (`target/<triple>/debug`), and
+# both are needed for a dependency to count as already built.
+def profile_paths vm
+  let subdirs = "{$(",".join PROFILE_SUBDIRS)}"
+  let found = []
+  vm.with do
+    # `fs.glob` expands VFS-side, so this is one round trip per pattern rather
+    # than a walk driven from here. `target/<profile>/` and
+    # `target/<triple>/<profile>/` need separate patterns since `*` stops at a
+    # path separator.
+    for pattern = ["target/*/$subdirs", "target/*/*/$subdirs"]
+      for path = fs.glob $pattern
+        found.push (str path)
+  found
+
+# The guest-relative paths to pack: the toolchain and registry wholesale, plus
+# only the reusable parts of `target`.
+#
+# `tar` fails on a missing operand, and `.rustup` legitimately will not exist
+# before Rust is installed, so everything here is probed first.
+def present_paths vm
+  let found = []
+  vm.with do
+    for path = CACHED_PATHS
+      if fs.Path(path).exists()
+        found.push $path
+  [...found, ...(profile_paths vm)]
+
+# Packs the guest's caches and pulls the tarball onto the runner.
+#
+# Call while the domain is still running: its disk uses `cache: :UNSAFE:`, so
+# anything not copied out before teardown is not guaranteed to survive.
+#
+# Returns whether a tarball was produced.
+pub def save vm
+  let destination = tarball()
+  let paths = progress.show icon: 🔍 message: "find caches to save" do |_|
+    present_paths $vm
+  if (paths.len == 0)
+    echo "no caches present in the guest; nothing to save"
+    return false
+  echo "saving: $(" ".join paths)"
+
+  # `zstd -T0` rather than `tar -z`: gzip is single-threaded and was the bulk of
+  # a 12-minute save. Two stages rather than `tar --zstd` keeps the level and
+  # thread count ours rather than libarchive's.
+  #
+  # Level 6 rather than 1. Measured over 2.9 GiB of real dependency rlibs on
+  # four threads, `-1` gave 670 MiB in 3.3s, `-3` 576 MiB in 4.7s, `-6` 530 MiB
+  # in 12.1s, and `-10` only 487 MiB for 26.9s. `-6` is where the curve stops
+  # paying: a quarter off `-1` for a few seconds in a step that runs after the
+  # build and blocks nothing, against a download that is on the critical path
+  # of every later run. Expect less than a quarter off the whole tarball, since
+  # `.cargo`'s `.crate` files are already compressed.
+  progress.show icon: 🗜️ message: "pack build cache" do |_|
+    vm.with do
+      pipeline
+        do run tar -cf - ...(exclude_args()) ...paths
+        do run zstd -6 -T0 -q -o $GUEST_TARBALL
+  # Logged before the transfer, so an interrupted one still teaches us what the
+  # pack produced
+  let packed = vm.with do
+    fs.Path(GUEST_TARBALL).metadata().size
+  echo "packed: $(packed // 1048576) MiB"
+
+  # `send`/`fetch` rather than `upload`/`download`: the VFS path was measured at
+  # ~0.7 MiB/s, which is 20 minutes for a tarball this size. No byte progress
+  # from scp, hence the sizes logged either side.
+  progress.show icon: ⬇️ message: "fetch build cache" do |_|
+    vm.fetch $GUEST_TARBALL $destination
+  vm.with do
+    fs.remove $GUEST_TARBALL ignore: true
+  true
+
+# Unpacks a previously saved tarball into the guest's home.
+#
+# Returns whether there was one to restore.
+pub def restore vm
+  let source = tarball()
+  if !source.exists()
+    return false
+  echo "restoring: $(source.metadata().size // 1048576) MiB"
+  progress.show icon: ⬆️ message: "send build cache" do |_|
+    vm.send $source $GUEST_TARBALL
+  progress.show icon: 🗜️ message: "unpack build cache" do |_|
+    vm.with do
+      pipeline
+        do run zstd -dc $GUEST_TARBALL
+        do run tar -xf -
+      fs.remove $GUEST_TARBALL ignore: true
+  true
+
+# Whether the guest already has a usable cargo, which a restored cache
+# supplies and a cold guest does not.
+#
+# Deliberately behavioral rather than a check for `.cargo/bin/cargo`: what the
+# build needs is a `cargo` the guest can resolve, so running it is the only
+# probe that answers the actual question.
+pub def has_rust vm
+  try
+    vm.with do
+      run cargo --version stdout: $NULLITER stderr: $NULLITER
+    true
+  catch sys.NotFoundError: _
+    # The cold-guest case: no `cargo` on the guest's search path at all, which
+    # fails when spawning rather than with an exit status
+    false
+  catch proc.Error: _
+    # Present but not working
+    false
+
