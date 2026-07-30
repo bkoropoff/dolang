@@ -4,7 +4,7 @@ JSON serialization and deserialization.
 
 ## Functions
 
-### `to_str value`
+### `encode value`
 
 Serializes a Do value to a JSON string.
 
@@ -32,12 +32,12 @@ Type mapping:
 | `dict`  | object               |
 
 ```
-assert_eq (to_str 42) "42"
-assert_eq (to_str "hello") "\"hello\""
-assert_eq (to_str nil) "null"
+assert_eq (encode 42) "42"
+assert_eq (encode "hello") "\"hello\""
+assert_eq (encode nil) "null"
 ```
 
-### `from_str json`
+### `decode json`
 
 Deserializes a JSON string to a Do value.
 
@@ -70,11 +70,11 @@ Type mapping:
 | object    | `dict`  |
 
 ```
-assert_eq (from_str "null") nil
-assert_eq (from_str "42") 42
-assert_eq (from_str "[1, 2, 3]") [1, 2, 3]
+assert_eq (decode "null") nil
+assert_eq (decode "42") 42
+assert_eq (decode "[1, 2, 3]") [1, 2, 3]
 
-let obj = from_str "{\"name\": \"Alice\", \"age\": 30}"
+let obj = decode "{\"name\": \"Alice\", \"age\": 30}"
 assert_eq $obj["name"] "Alice"
 assert_eq $obj["age"] 30
 ```

@@ -450,7 +450,7 @@ fn parse<'v, 's>(
 pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
     builder
         .module("toml")
-        .function("to_str", async move |strand, args, out| {
+        .function("encode", async move |strand, args, out| {
             let ([arg], []) = unpack!(strand, args, 1, 0)?;
             let as_document = is_document(&arg, strand.vm());
             let seen = RefCell::new(HashSet::new());
@@ -484,7 +484,7 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
             Output::set(strand, out, dst.as_str());
             Ok(())
         })
-        .function("from_str", async move |strand, args, out| {
+        .function("decode", async move |strand, args, out| {
             let ([arg], []) = unpack!(strand, args, 1, 0)?;
             let src = arg
                 .as_str(strand.vm())

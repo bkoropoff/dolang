@@ -11,7 +11,7 @@ Parses, edits, validates, and serializes XML element trees.
 
 ## Functions
 
-### `from_str xml`
+### `decode xml`
 
 Parses an XML document into a parentless element tree.
 
@@ -32,11 +32,11 @@ Predefined entities and numeric character references are expanded into text
 and attribute values. Custom DTD entities are not resolved.
 
 ```
-let doc = from_str "<root><child>text</child></root>"
+let doc = decode "<root><child>text</child></root>"
 assert_eq $doc.tag "root"
 ```
 
-### `to_str node`
+### `encode node`
 
 Validates and serializes an XML tree.
 
@@ -59,7 +59,7 @@ but element and attribute namespace semantics are preserved.
 ```
 let n = Node "greeting"
 n.push "hello"
-assert_eq (to_str $n) "<greeting>hello</greeting>"
+assert_eq (encode $n) "<greeting>hello</greeting>"
 ```
 
 ### `verify node`

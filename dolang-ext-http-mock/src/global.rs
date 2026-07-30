@@ -25,7 +25,7 @@ pub(crate) struct Syms<'v> {
     #[cfg(feature = "json")]
     pub(crate) json: Sym<'v, 'v>,
     #[cfg(feature = "json")]
-    pub(crate) to_str: Sym<'v, 'v>,
+    pub(crate) encode: Sym<'v, 'v>,
     pub(crate) expect: Sym<'v, 'v>,
     pub(crate) name: Sym<'v, 'v>,
     pub(crate) close: Sym<'v, 'v>,
@@ -65,7 +65,7 @@ impl<'v> Global<'v> {
                 #[cfg(feature = "json")]
                 json: builder.sym("json"),
                 #[cfg(feature = "json")]
-                to_str: builder.sym("to_str"),
+                encode: builder.sym("encode"),
                 expect: builder.sym("expect"),
                 name: builder.sym("name"),
                 close: builder.sym("close"),

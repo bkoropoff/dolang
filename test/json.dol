@@ -1,7 +1,7 @@
 import
   json:
-    - to_str
-    - from_str
+    - encode
+    - decode
   test:
     - assert
     - assert_eq
@@ -12,57 +12,57 @@ import
 
 #[test]
 def parse_primitives()
-  assert_eq (from_str "null") nil
-  assert_eq (from_str "true") true
-  assert_eq (from_str "false") false
-  assert_eq (from_str "42") 42
-  assert_eq (from_str "3.14") 3.14
-  assert_eq (from_str "\"hello\"") "hello"
+  assert_eq (decode "null") nil
+  assert_eq (decode "true") true
+  assert_eq (decode "false") false
+  assert_eq (decode "42") 42
+  assert_eq (decode "3.14") 3.14
+  assert_eq (decode "\"hello\"") "hello"
 
 #[test]
 def round_trip_primitives()
-  assert_eq (from_str $ to_str nil) nil
-  assert_eq (from_str $ to_str true) true
-  assert_eq (from_str $ to_str false) false
-  assert_eq (from_str $ to_str 42) 42
-  assert_eq (from_str $ to_str 3.14) 3.14
-  assert_eq (from_str $ to_str "hello") "hello"
+  assert_eq (decode $ encode nil) nil
+  assert_eq (decode $ encode true) true
+  assert_eq (decode $ encode false) false
+  assert_eq (decode $ encode 42) 42
+  assert_eq (decode $ encode 3.14) 3.14
+  assert_eq (decode $ encode "hello") "hello"
 
 #[test]
 def parse_arrays()
-  assert_eq (from_str "[]") []
-  assert_eq (from_str "[1, 2, 3]") [1, 2, 3]
-  assert_eq (from_str "[\"a\", \"b\"]") ["a", "b"]
-  assert_eq (from_str "[true, false, null]") [true, false, nil]
-  assert_eq (from_str "[[1, 2], [3, 4]]") [[1, 2], [3, 4]]
-  assert_eq (from_str "[1, [2, 3], 4]") [1, [2, 3], 4]
+  assert_eq (decode "[]") []
+  assert_eq (decode "[1, 2, 3]") [1, 2, 3]
+  assert_eq (decode "[\"a\", \"b\"]") ["a", "b"]
+  assert_eq (decode "[true, false, null]") [true, false, nil]
+  assert_eq (decode "[[1, 2], [3, 4]]") [[1, 2], [3, 4]]
+  assert_eq (decode "[1, [2, 3], 4]") [1, [2, 3], 4]
 
 #[test]
 def round_trip_arrays()
-  assert_eq (from_str $ to_str []) []
-  assert_eq (from_str $ to_str [1, 2, 3]) [1, 2, 3]
-  assert_eq (from_str $ to_str ["a", "b"]) ["a", "b"]
+  assert_eq (decode $ encode []) []
+  assert_eq (decode $ encode [1, 2, 3]) [1, 2, 3]
+  assert_eq (decode $ encode ["a", "b"]) ["a", "b"]
 
 #[test]
 def parse_objects()
-  assert_eq (from_str "{}") {}
+  assert_eq (decode "{}") {}
 
-  let obj = from_str "{\"a\": 1, \"b\": 2}"
+  let obj = decode "{\"a\": 1, \"b\": 2}"
   assert_eq $obj["a"] 1
   assert_eq $obj["b"] 2
 
-  let nested = from_str "{\"x\": {\"y\": {\"z\": 42}}}"
+  let nested = decode "{\"x\": {\"y\": {\"z\": 42}}}"
   assert_eq $nested["x"]["y"]["z"] 42
 
-  let mixed = from_str "{\"items\": [1, 2, 3], \"count\": 3}"
+  let mixed = decode "{\"items\": [1, 2, 3], \"count\": 3}"
   assert_eq (type mixed["items"]) $Array
   assert_eq $mixed["count"] 3
 
 #[test]
 def round_trip_objects()
   let orig = {"foo": 42, "bar": "hello", "baz": true}
-  let serialized = to_str $orig
-  let deserialized = from_str $serialized
+  let serialized = encode $orig
+  let deserialized = decode $serialized
   assert_eq $deserialized["foo"] 42
   assert_eq $deserialized["bar"] "hello"
   assert_eq $deserialized["baz"] true
@@ -77,8 +77,8 @@ def round_trip_mixed()
         age: 25
     total: 2
 
-  let json_str = to_str $complex
-  let parsed = from_str $json_str
+  let json_str = encode $complex
+  let parsed = decode $json_str
   assert_eq $parsed["total"] 2
   let users = parsed["users"]
   assert_eq (type users) $Array
@@ -86,23 +86,23 @@ def round_trip_mixed()
 #[test]
 def symbols_as_strings()
   let map_with_sym = {"key": :test:}
-  let json_str = to_str $map_with_sym
-  let parsed = from_str $json_str
+  let json_str = encode $map_with_sym
+  let parsed = decode $json_str
   assert_eq $parsed["key"] "test"
 
 #[test]
 def round_trip_empty()
-  assert_eq (from_str $ to_str []) []
-  assert_eq (from_str $ to_str {}) {}
+  assert_eq (decode $ encode []) []
+  assert_eq (decode $ encode {}) {}
 
 #[test]
 def numbers()
-  assert_eq (from_str "9223372036854775807") 9223372036854775807
-  assert_eq (from_str "-9223372036854775808") -9223372036854775808
-  assert_eq (from_str "1.5") 1.5
-  assert_eq (from_str "-2.25") -2.25
-  assert_eq (from_str "0.0") 0.0
+  assert_eq (decode "9223372036854775807") 9223372036854775807
+  assert_eq (decode "-9223372036854775808") -9223372036854775808
+  assert_eq (decode "1.5") 1.5
+  assert_eq (decode "-2.25") -2.25
+  assert_eq (decode "0.0") 0.0
 
   let err = assert_throws $RuntimeError do
-    to_str 170141183460469231731687303715884105727
+    encode 170141183460469231731687303715884105727
   assert ((str err).contains "outside i64 range")

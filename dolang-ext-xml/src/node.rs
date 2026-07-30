@@ -266,7 +266,7 @@ fn append_attrs_dict<'v, 's>(
 /// anything else becomes a child.
 ///
 /// Children are not type-checked here, matching `push` and `children.push`:
-/// `verify` and `to_str` remain the single place a tree is validated. Checking
+/// `verify` and `encode` remain the single place a tree is validated. Checking
 /// eagerly would also reject Do subclasses of `Node`, which cast as neither
 /// `Node` nor `Str`.
 fn append_item<'v, 's>(

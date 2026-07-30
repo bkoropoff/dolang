@@ -569,7 +569,7 @@ pub class Domain
       if missing_domain_error $stderr
         throw NoDomainError $self.name
       throw e
-    xml.from_str $source
+    xml.decode $source
 
   # A view over the domain's current libvirt XML.
   def xml self
@@ -713,7 +713,7 @@ pub class Domain
 
 # Defines a domain from an XML string.
 pub def define source :connect_uri = DEFAULT_CONNECT_URI
-  let document = DomainXml (xml.from_str source)
+  let document = DomainXml (xml.decode source)
   let name = document.name()
   with_temp_dir do |dir|
     let path = (dir / "domain.xml")
@@ -763,7 +763,7 @@ def prepared_image source root
 
 def image_format image
   let output = sub do cli qemu-img info --output json -- $image
-  let format = json.from_str(output).get "format"
+  let format = json.decode(output).get "format"
   if (format == nil)
     throw std.ValueError "qemu-img did not report an image format"
   str $format
@@ -955,7 +955,7 @@ def cloud_config user public_key packages boot write_files
       :packages
     if (write_files.len > 0)
       :write_files
-  "#cloud-config\n$(yaml.to_str config)"
+  "#cloud-config\n$(yaml.encode config)"
 
 # Builds the cloud-init seed ISO, cached under a digest of its contents so
 # identical configurations share one.
@@ -972,7 +972,7 @@ def build_seed root user_data
         let metadata_path = (dir / "meta-data")
         let temporary = (dir / "seed.iso")
         user_data_path.write $user_data
-        metadata_path.write $ yaml.to_str $
+        metadata_path.write $ yaml.encode $
           "instance-id": "dolang-$key"
           "local-hostname": dolang-ci
         cli cloud-localds $temporary $user_data_path $metadata_path
@@ -1053,7 +1053,7 @@ def resolve_dolang spec os arch app
     nil
 
 def raw_define document connect_uri workdir
-  let source = xml.to_str $document
+  let source = xml.encode $document
   let path = (workdir / "domain.xml")
   path.write $source
   virsh $connect_uri define $path

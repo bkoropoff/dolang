@@ -270,7 +270,7 @@ impl<'v, 'a, 'b, 'de> Visitor<'de> for Seed<'v, 'a, 'b> {
 pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
     builder
         .module("json")
-        .function("to_str", async move |strand, args, out| {
+        .function("encode", async move |strand, args, out| {
             let ([arg], []) = unpack!(strand, args, 1, 0)?;
             let mut seen = HashSet::new();
             let value = SerializeValue {
@@ -282,7 +282,7 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
             Output::set(strand, out, res.as_str());
             Ok(())
         })
-        .function("from_str", async move |strand, args, out| {
+        .function("decode", async move |strand, args, out| {
             let ([arg], []) = unpack!(strand, args, 1, 0)?;
             let src = arg
                 .as_str(strand.vm())

@@ -324,7 +324,7 @@ def inspect_image runtime ref
     classify_image_error $ref $lines
     report_unknown $lines
     throw e
-  (json.from_str output)[0]
+  (json.decode output)[0]
 
 def inspect_container runtime ref
   let lines = []
@@ -334,7 +334,7 @@ def inspect_container runtime ref
     classify_container_error $ref $lines
     report_unknown $lines
     throw e
-  (json.from_str output)[0]
+  (json.decode output)[0]
 
 def parse_loaded_refs output stderr
   let refs = []
@@ -435,7 +435,7 @@ pub class Runtime
         if all
           --all
       do each do |id|
-        let data = json.from_str $ sub do self.cli inspect --type image $id
+        let data = json.decode $ sub do self.cli inspect --type image $id
         Image $self $data[0]
 
   pub def containers self :all = false :filter = nil
