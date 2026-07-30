@@ -1,7 +1,7 @@
 # Security
 
-The `security` module provides portable name lookup, Unix process
-identity, and Windows access token information and security descriptor
+The `security` module provides portable name lookup, Unix process identity,
+POSIX ACLs, and Windows access token information and security descriptor
 manipulation.
 
 ## Portable Identity Queries
@@ -34,6 +34,40 @@ echo "effective uid=$(identity.euid) gid=$(identity.egid)"
 for gid = identity.group_ids
   echo "group $gid: $(security.group_name(gid))"
 ```
+
+## POSIX ACLs
+
+[`security.unix.Acl`](../api/security/unix/acl.md) is an immutable collection
+of [`security.unix.Ace`](../api/security/unix/ace.md) entries. The object model
+is available on every platform. Filesystem get and set operations are supported
+on Linux and FreeBSD.
+
+```
+import fs
+import security.unix:
+  - Acl
+  - Ace
+
+let identity = security.unix_info()
+let access = Acl $
+  $ Ace.user_obj read: true write: true
+  $ Ace.user $identity.euid read: true
+  $ Ace.group_obj read: true
+  $ Ace.mask read: true
+  $ Ace.other()
+fs.set_acl config.ini $access
+```
+
+Use [`fs.acl`](../api/fs/index.md#acl-path-default-resolve) to read stored ACL
+metadata. It returns `nil` when no ACL is stored; it does not construct an ACL
+from file mode bits. Pass `nil` to
+[`fs.set_acl`](../api/fs/index.md#set_acl-path-acl-default-resolve) to remove
+the ACL. Set `default: true` to operate on a directory's inheritable default
+ACL.
+
+`Acl` validates the required base entries and requires a mask when named user
+or group entries are present. It preserves the supplied mask without
+recalculating it.
 
 ## Windows Access Tokens
 

@@ -1,0 +1,64 @@
+import sys agent
+  fs:
+    - Path
+    - acl
+    - create_dir
+    - open
+    - remove
+    - set_acl
+  security:
+    - unix_info
+  security.unix: unix_security
+  std:
+    - UnsupportedError
+  test:
+    - assert_eq
+    - assert_throws
+    - assert_type
+
+def extended_acl id
+  unix_security.Acl [
+    unix_security.Ace.user_obj(read: true, write: true),
+    unix_security.Ace.user(id, read: true),
+    unix_security.Ace.group_obj(read: true),
+    unix_security.Ace.mask(read: true),
+    unix_security.Ace.other(),
+  ]
+
+#[agent.test]
+def accesses_posix_acl_metadata()
+  let path = Path test_posix_acl.txt
+  let dir = Path test_posix_acl_dir
+  open $path w do |file|
+    file.write acl
+  create_dir $dir
+
+  let supported = (sys.os_info().os == :LINUX: || sys.os_info().os == :FREEBSD:)
+  if supported
+    assert_eq (acl path) nil
+    let id = unix_info().euid
+    let value = extended_acl $id
+    set_acl $path $value
+    let loaded = acl $path
+    assert_type $unix_security.Acl $loaded
+    assert_eq $loaded.ace_count 5
+    assert_eq $loaded.aces[1].id $id
+    open $path r do |file|
+      assert_type $unix_security.Acl $file.acl()
+      file.set_acl nil
+      assert_eq $file.acl() nil
+
+    set_acl $dir $value default: true
+    assert_type $unix_security.Acl (acl dir default: true)
+    set_acl $dir nil default: true
+    assert_eq (acl dir default: true) nil
+  else
+    let value = extended_acl 12345
+    assert_throws $UnsupportedError do acl $path
+    assert_throws $UnsupportedError do set_acl $path $value
+    open $path r do |file|
+      assert_throws $UnsupportedError do file.acl()
+      assert_throws $UnsupportedError do file.set_acl $value
+
+  remove $path
+  remove $dir all: true

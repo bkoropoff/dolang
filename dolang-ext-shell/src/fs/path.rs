@@ -542,6 +542,7 @@ macro_rules! impl_concrete_path {
                 let group = builder.sym("group");
                 let dacl = builder.sym("dacl");
                 let sacl = builder.sym("sacl");
+                let default_acl = builder.sym("default");
                 let namespace = builder.sym("namespace");
                 let modified = builder.sym("modified");
                 let accessed = builder.sym("accessed");
@@ -640,6 +641,36 @@ macro_rules! impl_concrete_path {
                         let follow = super::resolve_sym(strand, annex.global, resolve, true)?;
                         super::sec_desc(strand, annex.global, annex.as_path(), mask, follow, out)
                             .await
+                    })
+                    .method("acl", async move |this, strand, args, out| {
+                        let ([], [default, resolve]) =
+                            unpack!(strand, args, 0, 0, default_acl = None, resolve = None)?;
+                        let annex = this.annex();
+                        let default = super::acl_default(strand, default.as_deref())?;
+                        let follow = super::resolve_sym(strand, annex.global, resolve, true)?;
+                        super::acl(strand, annex.global, annex.as_path(), default, follow, out)
+                            .await
+                    })
+                    .method("set_acl", async move |this, strand, args, _out| {
+                        let ([acl_value], [default, resolve]) =
+                            unpack!(strand, args, 1, 0, default_acl = None, resolve = None)?;
+                        let annex = this.annex();
+                        let acl = crate::security::posix_acl_from_value(
+                            strand,
+                            annex.global,
+                            &acl_value,
+                        )?;
+                        let default = super::acl_default(strand, default.as_deref())?;
+                        let follow = super::resolve_sym(strand, annex.global, resolve, true)?;
+                        super::set_acl(
+                            strand,
+                            annex.global,
+                            annex.as_path(),
+                            acl.as_ref(),
+                            default,
+                            follow,
+                        )
+                        .await
                     })
                     .method("set_sec_desc", async move |this, strand, args, _out| {
                         let ([descriptor], [resolve]) =

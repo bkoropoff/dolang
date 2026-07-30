@@ -187,6 +187,8 @@ def create_vm disk_size
         target: /etc/rc.conf.d/firstboot_pkg_upgrade
         content: |
           firstboot_pkg_upgrade_enable="NO"
+      run: sed -i "" s/rw,noatime/rw,noatime,acls/ /etc/fstab
+      run: sh -c 'if [ ! -e /etc/.rebooted ]; then touch /etc/.rebooted; reboot; fi'
     # A top-level `add:` rather than an `init:` one: this runs once SSH is up,
     # so the user exists and the file is written through the guest's VFS with
     # the right ownership

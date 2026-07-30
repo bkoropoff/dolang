@@ -164,6 +164,8 @@ nav:
       - api/security/index.md
     - security.unix:
       - api/security/unix/index.md
+      - api/security/unix/ace.md
+      - api/security/unix/acl.md
       - api/security/unix/identity.md
     - security.windows:
       - api/security/windows/index.md

@@ -1,4 +1,5 @@
 import sys
+  security.unix: unix_security
   sys.windows:
     - Guid
   sys:
@@ -216,6 +217,34 @@ def functionally_updates_security_descriptors()
   let loaded_absent = SecDesc(dacl_present: false)
   assert_eq $loaded_absent.dacl_present false
   assert_throws $ValueError do SecDesc(empty.to_bin(), dacl: acl)
+
+#[test]
+def constructs_posix_acls_on_every_platform()
+  let owner = unix_security.Ace.user_obj read: true write: true
+  let named = unix_security.Ace.user 1234 read: true
+  let group = unix_security.Ace.group_obj read: true
+  let mask = unix_security.Ace.mask read: true
+  let other = unix_security.Ace.other()
+  assert_type $unix_security.Ace $owner
+  assert_type $unix_security.Ace $named
+  assert_type $unix_security.Ace $group
+  assert_type $unix_security.Ace $mask
+  assert_type $unix_security.Ace $other
+  let acl = unix_security.Acl [owner, named, group, mask, other]
+
+  assert_type $unix_security.Acl $acl
+  assert_eq $acl.ace_count 5
+  assert_eq $acl.aces[0].type :USER_OBJ:
+  assert_eq $acl.aces[0].read true
+  assert_eq $acl.aces[0].write true
+  assert_eq $acl.aces[0].execute false
+  assert_throws $FieldError do acl.aces[0].id
+  assert_eq $acl.aces[1].type :USER:
+  assert_eq $acl.aces[1].id 1234
+  assert_throws $ImmutableError do
+    acl.aces[0] = nil
+  assert_throws $ValueError do unix_security.Acl []
+  assert_throws $ValueError do unix_security.Acl [owner, named, group, other]
 
 #[test]
 def reports_security_information_for_target()

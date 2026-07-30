@@ -29,19 +29,19 @@ use tokio::{
 #[cfg(unix)]
 use crate::protocol::AccessRequest;
 use crate::{
-    Child, Command, FileHandle, FsMetadata, Metadata, MetadataPatch, ProcessStatus, Query, ReadDir,
-    SecDesc, SessionMode, Sid, SidName, StdioRecv, StdioSend, StreamEntry, Utf8TypedPath,
-    Utf8TypedPathBuf, Vfs, WellKnownPath, XattrEntry,
+    Child, Command, FileHandle, FsMetadata, Metadata, MetadataPatch, PosixAcl, ProcessStatus,
+    Query, ReadDir, SecDesc, SessionMode, Sid, SidName, StdioRecv, StdioSend, StreamEntry,
+    Utf8TypedPath, Utf8TypedPathBuf, Vfs, WellKnownPath, XattrEntry,
     direct::DirectFile,
     protocol::{
-        CanonicalizeRequest, CopyRequest, CreateDirRequest, FsMetadataRequest, GlobRequest,
-        HardLinkRequest, MetadataRequest, MoveRequest, OpenHandle, OpenHandlePreference,
-        OpenRequest, OpenVfsHandle, QueryResponse, ReadDirResponse, ReadLinkRequest,
-        RemoveDirRequest, RemoveRequest, RenameRequest, Request, RequestKind, ResponseKind,
-        SecDescRequest, SetMetadataRequest, SetSecDescRequest, SetXattrRequest, SpawnRequest,
-        StdioRecvTarget, StdioSendTarget, StreamsRequest, SymlinkKind, SymlinkRequest,
-        UnixVfsRequest, VfsProtocol, WellKnownPathRequest, WindowsAdminRequest, WirePath,
-        XattrNamespaceRequest, XattrRequest, XattrsRequest,
+        AclRequest, CanonicalizeRequest, CopyRequest, CreateDirRequest, FsMetadataRequest,
+        GlobRequest, HardLinkRequest, MetadataRequest, MoveRequest, OpenHandle,
+        OpenHandlePreference, OpenRequest, OpenVfsHandle, QueryResponse, ReadDirResponse,
+        ReadLinkRequest, RemoveDirRequest, RemoveRequest, RenameRequest, Request, RequestKind,
+        ResponseKind, SecDescRequest, SetAclRequest, SetMetadataRequest, SetSecDescRequest,
+        SetXattrRequest, SpawnRequest, StdioRecvTarget, StdioSendTarget, StreamsRequest,
+        SymlinkKind, SymlinkRequest, UnixVfsRequest, VfsProtocol, WellKnownPathRequest,
+        WindowsAdminRequest, WirePath, XattrNamespaceRequest, XattrRequest, XattrsRequest,
     },
 };
 
@@ -508,6 +508,47 @@ impl FileHandle for ClientFile {
                     .await?
                 {
                     ResponseKind::FileFsMetadata(result) => result.map_err(Into::into),
+                    response => Err(unexpected(response).into()),
+                }
+            }
+        }
+    }
+
+    async fn acl(&mut self, default: bool) -> crate::Result<Option<PosixAcl>> {
+        match &mut self.0 {
+            ClientFileInner::Direct(file) => file.acl(default).await,
+            ClientFileInner::Remote(file) => {
+                file.idle()?;
+                match file
+                    .client
+                    .request(RequestKind::FileAcl {
+                        file: file.opaque(),
+                        default,
+                    })
+                    .await?
+                {
+                    ResponseKind::FileAcl(result) => result.map_err(Into::into),
+                    response => Err(unexpected(response).into()),
+                }
+            }
+        }
+    }
+
+    async fn set_acl(&mut self, acl: Option<&PosixAcl>, default: bool) -> crate::Result<()> {
+        match &mut self.0 {
+            ClientFileInner::Direct(file) => file.set_acl(acl, default).await,
+            ClientFileInner::Remote(file) => {
+                file.idle()?;
+                match file
+                    .client
+                    .request(RequestKind::FileSetAcl {
+                        file: file.opaque(),
+                        acl: acl.cloned(),
+                        default,
+                    })
+                    .await?
+                {
+                    ResponseKind::FileSetAcl(result) => result.map_err(Into::into),
                     response => Err(unexpected(response).into()),
                 }
             }
@@ -2348,6 +2389,42 @@ impl Vfs for Client {
         };
         match self.request(RequestKind::FsMetadata(request)).await? {
             ResponseKind::FsMetadata(result) => result.map_err(crate::Error::from),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    async fn acl(
+        &self,
+        path: Utf8TypedPath<'_>,
+        default: bool,
+        follow: bool,
+    ) -> crate::Result<Option<PosixAcl>> {
+        let request = AclRequest {
+            path: path.into(),
+            default,
+            follow,
+        };
+        match self.request(RequestKind::Acl(request)).await? {
+            ResponseKind::Acl(result) => result.map_err(crate::Error::from),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    async fn set_acl(
+        &self,
+        path: Utf8TypedPath<'_>,
+        acl: Option<&PosixAcl>,
+        default: bool,
+        follow: bool,
+    ) -> crate::Result<()> {
+        let request = SetAclRequest {
+            path: path.into(),
+            acl: acl.cloned(),
+            default,
+            follow,
+        };
+        match self.request(RequestKind::SetAcl(request)).await? {
+            ResponseKind::SetAcl(result) => result.map_err(crate::Error::from),
             response => Err(unexpected(response).into()),
         }
     }

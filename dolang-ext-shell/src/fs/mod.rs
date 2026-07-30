@@ -5,8 +5,8 @@ use dolang::runtime::{
 };
 use dolang_shell_vfs::{
     AttrFlags, AttrsPatch, DACL_SECURITY_INFORMATION, FileHandle, FileType,
-    GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, OpenOptions, SACL_SECURITY_INFORMATION,
-    SecDesc, Utf8TypedPath, Utf8TypedPathBuf, Vfs, WellKnownPath,
+    GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, OpenOptions, PosixAcl,
+    SACL_SECURITY_INFORMATION, SecDesc, Utf8TypedPath, Utf8TypedPathBuf, Vfs, WellKnownPath,
 };
 use std::{
     future::poll_fn,
@@ -96,6 +96,58 @@ async fn sec_desc<'v, 's>(
         .into_sys(strand)?;
     security::create_sec_desc(strand, global, descriptor, &mut out);
     Ok(())
+}
+
+fn acl_default<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    value: Option<&Value<'v>>,
+) -> Result<'v, 's, bool> {
+    value
+        .map(|value| {
+            value
+                .as_bool(strand)
+                .ok_or_else(|| Error::type_error(strand, "default: expected Bool"))
+        })
+        .transpose()
+        .map(|value| value.unwrap_or(false))
+}
+
+async fn acl<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    path: Utf8TypedPath<'_>,
+    default: bool,
+    follow: bool,
+    mut out: Slot<'v, '_>,
+) -> Result<'v, 's, ()> {
+    let path = prepend_cwd(strand, global, path)?;
+    let acl = global
+        .local
+        .get(strand)
+        .vfs()
+        .acl(path.to_path(), default, follow)
+        .await
+        .into_sys(strand)?;
+    security::create_posix_acl(strand, global, acl, &mut out);
+    Ok(())
+}
+
+async fn set_acl<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    path: Utf8TypedPath<'_>,
+    acl: Option<&PosixAcl>,
+    default: bool,
+    follow: bool,
+) -> Result<'v, 's, ()> {
+    let path = prepend_cwd(strand, global, path)?;
+    global
+        .local
+        .get(strand)
+        .vfs()
+        .set_acl(path.to_path(), acl, default, follow)
+        .await
+        .into_sys(strand)
 }
 
 async fn set_sec_desc<'v, 's>(
@@ -839,6 +891,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
     let group = builder.sym("group");
     let dacl = builder.sym("dacl");
     let sacl = builder.sym("sacl");
+    let default_acl = builder.sym("default");
     let namespace = builder.sym("namespace");
     let modified = builder.sym("modified");
     let accessed = builder.sym("accessed");
@@ -931,6 +984,31 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             let mask = sec_desc_mask(strand, owner, group, dacl, sacl)?;
             let follow = resolve_sym(strand, global, resolve, true)?;
             sec_desc(strand, global, path.to_path(), mask, follow, out).await
+        })
+        .function("acl", async move |strand, args, out| {
+            let ([path], [default, resolve]) =
+                unpack!(strand, args, 1, 0, default_acl = None, resolve = None)?;
+            let path = path_from_value(strand, global, &path)?;
+            let default = acl_default(strand, default.as_deref())?;
+            let follow = resolve_sym(strand, global, resolve, true)?;
+            acl(strand, global, path.to_path(), default, follow, out).await
+        })
+        .function("set_acl", async move |strand, args, _out| {
+            let ([path, acl_value], [default, resolve]) =
+                unpack!(strand, args, 2, 0, default_acl = None, resolve = None)?;
+            let path = path_from_value(strand, global, &path)?;
+            let acl = security::posix_acl_from_value(strand, global, &acl_value)?;
+            let default = acl_default(strand, default.as_deref())?;
+            let follow = resolve_sym(strand, global, resolve, true)?;
+            set_acl(
+                strand,
+                global,
+                path.to_path(),
+                acl.as_ref(),
+                default,
+                follow,
+            )
+            .await
         })
         .function("set_sec_desc", async move |strand, args, _out| {
             let ([path, descriptor], [resolve]) = unpack!(strand, args, 2, 0, resolve = None)?;
