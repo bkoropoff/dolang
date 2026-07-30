@@ -49,7 +49,7 @@ struct WalkState {
 pub(crate) fn configure<'v>(builder: &mut Builder<'v>, state: State<'v, Global<'v>>) {
     builder
         .module("xml")
-        .function("from_str", async move |strand, args, mut out| {
+        .function("decode", async move |strand, args, mut out| {
             let ([arg], []) = unpack!(strand, args, 1, 0)?;
             let src = arg
                 .as_str(strand.vm())
@@ -77,7 +77,7 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>, state: State<'v, Global<'
             verify_value(strand, &out, state)?;
             Ok(())
         })
-        .function("to_str", async move |strand, args, out| {
+        .function("encode", async move |strand, args, out| {
             let ([arg], []) = unpack!(strand, args, 1, 0)?;
             let mut writer = Some(Writer::new(Vec::new()));
             let mut walk = WalkState::default();

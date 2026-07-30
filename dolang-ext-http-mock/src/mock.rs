@@ -656,8 +656,8 @@ async fn parse_mock_spec<'v, 's>(
                 #[cfg(feature = "json")]
                 if dict.get(strand, global.syms.body_json, None, &mut tmp)? {
                     strand.import("json", &mut tmp2).await?;
-                    let to_str = global.syms.to_str;
-                    method!(strand, Slot::reborrow(&mut tmp2), to_str, &mut tmp3, &tmp).await?;
+                    let encode = global.syms.encode;
+                    method!(strand, Slot::reborrow(&mut tmp2), encode, &mut tmp3, &tmp).await?;
                     all.push(Box::new(matchers::body_json_string(
                         tmp3.to_string(strand)?,
                     )));
@@ -786,8 +786,8 @@ async fn build_response<'v, 's>(
             #[cfg(feature = "json")]
             if dict.get(strand, global.syms.json, None, &mut tmp)? {
                 strand.import("json", &mut tmp2).await?;
-                let to_str = global.syms.to_str;
-                method!(strand, Slot::reborrow(&mut tmp2), to_str, &mut tmp3, &tmp).await?;
+                let encode = global.syms.encode;
+                method!(strand, Slot::reborrow(&mut tmp2), encode, &mut tmp3, &tmp).await?;
                 body = Some(tmp3.to_string(strand)?.into_bytes());
                 headers.push((
                     HeaderName::from_static("content-type"),

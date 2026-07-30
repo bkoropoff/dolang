@@ -88,7 +88,7 @@ def read_metadata path identity
   if !path.exists()
     return nil
   try
-    let metadata = json.from_str(path.read())
+    let metadata = json.decode(path.read())
     if (metadata.get("version") != 1 || metadata.get("url") != identity)
       nil
     else
@@ -99,7 +99,7 @@ def read_metadata path identity
 def write_metadata path metadata
   let tmp = path.add_ext tmp
   try
-    tmp.write $ json.to_str(metadata)
+    tmp.write $ json.encode(metadata)
     tmp.rename $path
   finally
     tmp.remove ignore: true

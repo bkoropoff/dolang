@@ -15,7 +15,7 @@ use saphyr_parser::{Event, Parser, ScalarStyle, Span, StrInput};
 pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
     builder
         .module("yaml")
-        .function("from_str", async move |strand, args, out| {
+        .function("decode", async move |strand, args, out| {
             let ([arg], []) = unpack!(strand, args, 1, 0)?;
             let src = arg
                 .as_str(strand.vm())
@@ -24,7 +24,7 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
 
             parse_yaml(strand, &src, out)
         })
-        .function("to_str", async move |strand, args, out| {
+        .function("encode", async move |strand, args, out| {
             let ([arg], []) = unpack!(strand, args, 1, 0)?;
             let mut seen = HashSet::new();
             let yaml = value_to_yaml(strand, &arg, &mut seen)?;
@@ -177,7 +177,7 @@ fn parse_yaml<'v, 's, 'i>(
             return Err(error_at(
                 strand,
                 span,
-                "yaml.from_str only accepts a single document",
+                "yaml.decode only accepts a single document",
             ));
         }
         Some((_, span)) => {
@@ -195,7 +195,7 @@ fn parse_yaml<'v, 's, 'i>(
         Some((Event::DocumentStart(_), span)) => Err(error_at(
             strand,
             span,
-            "yaml.from_str only accepts a single document",
+            "yaml.decode only accepts a single document",
         )),
         Some((_, span)) => Err(error_at(
             strand,

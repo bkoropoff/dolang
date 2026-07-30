@@ -38,7 +38,7 @@ pub(crate) struct Syms<'v> {
     pub(crate) status: Sym<'v, 'v>,
     pub(crate) ignore: Sym<'v, 'v>,
     #[cfg(feature = "json")]
-    pub(crate) to_str: Sym<'v, 'v>,
+    pub(crate) encode: Sym<'v, 'v>,
     pub(crate) unix_socket: Sym<'v, 'v>,
     pub(crate) proxy: Sym<'v, 'v>,
     pub(crate) ca_cert: Sym<'v, 'v>,
@@ -107,7 +107,7 @@ impl<'v> Global<'v> {
                 status: builder.sym("status"),
                 ignore: builder.sym("IGNORE"),
                 #[cfg(feature = "json")]
-                to_str: builder.sym("to_str"),
+                encode: builder.sym("encode"),
                 unix_socket: builder.sym("unix_socket"),
                 proxy: builder.sym("proxy"),
                 ca_cert: builder.sym("ca_cert"),

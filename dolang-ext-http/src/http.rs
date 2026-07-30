@@ -434,7 +434,7 @@ impl<'v> Object<'v> for StatusObject {
         let mut builder = builder;
 
         #[cfg(feature = "json")]
-        let from_str = builder.sym("from_str");
+        let decode = builder.sym("decode");
 
         #[cfg(feature = "json")]
         let builder =
@@ -443,7 +443,7 @@ impl<'v> Object<'v> for StatusObject {
                 let annex = this.annex();
                 let text = status_text(strand, &annex)?;
                 strand.import("json", &mut json).await?;
-                method!(strand, json, from_str, out, text).await
+                method!(strand, json, decode, out, text).await
             });
 
         builder
@@ -683,8 +683,8 @@ async fn multipart_part<'v, 's>(
                     strand
                         .with_slots(async |strand, [mut json_mod, mut json_text]| {
                             strand.import("json", &mut json_mod).await?;
-                            let to_str = global.syms.to_str;
-                            method!(strand, json_mod, to_str, &mut json_text, &mut body).await?;
+                            let encode = global.syms.encode;
+                            method!(strand, json_mod, encode, &mut json_text, &mut body).await?;
                             Output::set(strand, &mut body, &json_text);
                             Ok(())
                         })
@@ -875,8 +875,8 @@ async fn request<'v, 's>(
             #[cfg(feature = "json")]
             if let Some(json) = json {
                 st.import("json", &mut key).await?;
-                let to_str = global.syms.to_str;
-                method!(st, key, to_str, &mut value, json).await?;
+                let encode = global.syms.encode;
+                method!(st, key, encode, &mut value, json).await?;
                 builder = builder
                     .body(value.to_string(st)?)
                     .header("content-type", "application/json");
@@ -1213,7 +1213,7 @@ impl<'v> Object<'v> for Response {
         let mut builder = builder;
 
         #[cfg(feature = "json")]
-        let from_str = builder.sym("from_str");
+        let decode = builder.sym("decode");
 
         #[cfg(feature = "json")]
         let builder =
@@ -1227,7 +1227,7 @@ impl<'v> Object<'v> for Response {
                 };
                 let text = inner.text().await.into_http(strand)?;
                 strand.import("json", &mut json).await?;
-                method!(strand, json, from_str, out, text.as_str()).await
+                method!(strand, json, decode, out, text.as_str()).await
             });
 
         builder

@@ -4,7 +4,7 @@ YAML serialization and deserialization.
 
 ## Functions
 
-### `to_str value`
+### `encode value`
 
 Serializes a Do value to a YAML string.
 
@@ -38,12 +38,12 @@ Type mapping:
 | `dict`  | mapping    |
 
 ```
-assert_eq (to_str nil) "~"
-assert_eq (to_str [1, 2, 3]) "- 1\n- 2\n- 3"
-assert_eq (from_str $ to_str [1, 2, 3]) [1, 2, 3]
+assert_eq (encode nil) "~"
+assert_eq (encode [1, 2, 3]) "- 1\n- 2\n- 3"
+assert_eq (decode $ encode [1, 2, 3]) [1, 2, 3]
 ```
 
-### `from_str yaml`
+### `decode yaml`
 
 Parses a YAML string into a Do value.
 
@@ -78,7 +78,7 @@ Type mapping:
 | mapping    | `dict`  |
 
 ```
-let doc = from_str |
+let doc = decode |
   name: Alice
   enabled: true
   ports:

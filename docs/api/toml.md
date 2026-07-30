@@ -4,7 +4,7 @@ TOML serialization and deserialization.
 
 ## Functions
 
-### `to_str value`
+### `encode value`
 
 Serializes a Do value to a TOML string.
 
@@ -42,14 +42,14 @@ Top-level `dict` and `record` values serialize as TOML documents. Other values
 serialize as TOML values.
 
 ```
-assert_eq (to_str 42) "42"
-assert_eq (from_str $ to_str [1, 2, 3]) [1, 2, 3]
+assert_eq (encode 42) "42"
+assert_eq (decode $ encode [1, 2, 3]) [1, 2, 3]
 
-let doc = to_str {"name": "alice", "enabled": true}
-assert_eq (from_str $doc) {"name": "alice", "enabled": true}
+let doc = encode {"name": "alice", "enabled": true}
+assert_eq (decode $doc) {"name": "alice", "enabled": true}
 ```
 
-### `from_str toml`
+### `decode toml`
 
 Parses a TOML string into a Do value.
 
@@ -81,14 +81,14 @@ Type mapping:
 | array      | `array` |
 | table      | `dict`  |
 
-`from_str` accepts both full TOML documents and bare TOML values such as
+`decode` accepts both full TOML documents and bare TOML values such as
 numbers, arrays, and inline tables.
 
 ```
-assert_eq (from_str "42") 42
-assert_eq (from_str "[1, 2, 3]") [1, 2, 3]
+assert_eq (decode "42") 42
+assert_eq (decode "[1, 2, 3]") [1, 2, 3]
 
-let doc = from_str |
+let doc = decode |
   title = "Example"
   [server]
   port = 8080
