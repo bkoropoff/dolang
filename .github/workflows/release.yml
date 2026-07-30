@@ -135,6 +135,36 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Download previous bootstrap release
+        id: previous-bootstrap
+        if: github.ref_name == 'bootstrap'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          import proc
+
+          let exists = try
+            run gh release view bootstrap
+            true
+          catch proc.Error: _
+            false
+          if exists
+            run gh release download bootstrap --dir bootstrap-prev
+          fs.append $env["GITHUB_OUTPUT"] |
+            exists=$exists
+
+      - name: Back up previous bootstrap release
+        if: github.ref_name == 'bootstrap' && steps.previous-bootstrap.outputs.exists == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: bootstrap-prev
+          name: Previous Bootstrap
+          prerelease: true
+          files: |
+            bootstrap-prev/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Create bootstrap release
         if: github.ref_name == 'bootstrap'
         uses: softprops/action-gh-release@v2
