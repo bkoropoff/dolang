@@ -24,9 +24,9 @@ use wax::{
 };
 
 use crate::{
-    Child, Command, FileHandle, FsMetadata, Metadata, MetadataPatch, ProcessStatus, Query, ReadDir,
-    SecDesc, Sid, SidName, StdioRecv, StdioSend, StreamEntry, Utf8TypedPath, Utf8TypedPathBuf, Vfs,
-    WellKnownPath, XattrEntry, XattrNamespace, native_path, typed_path,
+    Child, Command, FileHandle, FsMetadata, Metadata, MetadataPatch, PosixAcl, ProcessStatus,
+    Query, ReadDir, SecDesc, Sid, SidName, StdioRecv, StdioSend, StreamEntry, Utf8TypedPath,
+    Utf8TypedPathBuf, Vfs, WellKnownPath, XattrEntry, XattrNamespace, native_path, typed_path,
 };
 
 use std::{
@@ -35,6 +35,8 @@ use std::{
 };
 
 mod lock;
+#[cfg(unix)]
+mod posix_acl;
 #[cfg(unix)]
 mod unix;
 #[cfg(windows)]
@@ -250,6 +252,23 @@ impl FileHandle for DirectFile {
         tokio::task::spawn_blocking(move || Direct::fs_metadata_from_file(&file))
             .await
             .unwrap_or_else(|_| Err(io::Error::other("failed to join fs metadata query task")))
+            .map_err(Into::into)
+    }
+
+    async fn acl(&mut self, default: bool) -> crate::Result<Option<PosixAcl>> {
+        let file = self.inner.try_clone().await?;
+        tokio::task::spawn_blocking(move || Direct::acl_from_file(&file, default))
+            .await
+            .unwrap_or_else(|_| Err(io::Error::other("failed to join ACL query task")))
+            .map_err(Into::into)
+    }
+
+    async fn set_acl(&mut self, acl: Option<&PosixAcl>, default: bool) -> crate::Result<()> {
+        let file = self.inner.try_clone().await?;
+        let acl = acl.cloned();
+        tokio::task::spawn_blocking(move || Direct::set_acl_file(&file, acl.as_ref(), default))
+            .await
+            .unwrap_or_else(|_| Err(io::Error::other("failed to join ACL update task")))
             .map_err(Into::into)
     }
 
@@ -1081,6 +1100,36 @@ impl Vfs for Direct {
             .await
             .unwrap_or_else(|_| Err(io::Error::other("failed to join fs metadata query task")))
             .map_err(Into::into)
+    }
+
+    async fn acl(
+        &self,
+        path: Utf8TypedPath<'_>,
+        default: bool,
+        follow: bool,
+    ) -> crate::Result<Option<PosixAcl>> {
+        let path = native_path(path)?;
+        tokio::task::spawn_blocking(move || Self::acl_from_path(&path, default, follow))
+            .await
+            .unwrap_or_else(|_| Err(io::Error::other("failed to join ACL query task")))
+            .map_err(Into::into)
+    }
+
+    async fn set_acl(
+        &self,
+        path: Utf8TypedPath<'_>,
+        acl: Option<&PosixAcl>,
+        default: bool,
+        follow: bool,
+    ) -> crate::Result<()> {
+        let path = native_path(path)?;
+        let acl = acl.cloned();
+        tokio::task::spawn_blocking(move || {
+            Self::set_acl_path(&path, acl.as_ref(), default, follow)
+        })
+        .await
+        .unwrap_or_else(|_| Err(io::Error::other("failed to join ACL update task")))
+        .map_err(Into::into)
     }
 
     async fn sec_desc(

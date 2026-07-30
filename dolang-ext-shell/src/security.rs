@@ -14,7 +14,9 @@ use dolang::{
 };
 use dolang_shell_vfs::{
     Ace as VfsAce, AceBuf as VfsAceBuf, AceBuildOptions, AceType as VfsAceType, Acl as VfsAcl,
-    AclBuf as VfsAclBuf, Guid as VfsGuid, OperatingSystemFamily, SecDesc as VfsSecDesc,
+    AclBuf as VfsAclBuf, Guid as VfsGuid, OperatingSystemFamily, PosixAce as VfsPosixAce,
+    PosixAcl as VfsPosixAcl, PosixAclPermissions as VfsPosixAclPermissions,
+    PosixAclQualifier as VfsPosixAclQualifier, SecDesc as VfsSecDesc,
     SecDescUpdate as VfsSecDescUpdate, SecurityInfo, Sid as VfsSid, SidName as VfsSidName,
     SidNameUse, TokenGroup as VfsTokenGroup, UnixSecurityInfo, Vfs as _, WindowsTokenInfo,
 };
@@ -64,6 +66,296 @@ impl<'v> Object<'v> for Identity {
             .get("group_ids", |this, strand, out| {
                 let borrow = this.borrow(strand)?;
                 Output::set(strand, out, Ref::slot::<0>(&borrow));
+                Ok(())
+            })
+    }
+}
+
+pub(crate) struct PosixAclObject;
+
+struct PosixAclAces;
+
+impl<'v> ArrayLike<'v> for PosixAclAces {
+    type Object = PosixAclObject;
+
+    const MODULE: &'v str = "security.unix";
+    const NAME: &'v str = "AclAces";
+
+    fn len(&self, this: Instance<'v, '_, PosixAclObject>, _strand: &mut Strand<'v, '_>) -> usize {
+        this.annex().entries().len()
+    }
+
+    fn get<'a, 's>(
+        &self,
+        this: Instance<'v, '_, PosixAclObject>,
+        strand: &'a mut Strand<'v, 's>,
+        index: usize,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        let ace = this.annex().entries()[index];
+        strand
+            .state::<Global<'v>>()
+            .types
+            .posix_ace
+            .create_with_annex(strand, PosixAceObject, ace, out);
+        Ok(())
+    }
+}
+
+impl<'v> Object<'v> for PosixAclObject {
+    const NAME: &'v str = "Acl";
+    const MODULE: &'v str = "security.unix";
+    type Annex = VfsPosixAcl;
+    type Type = ();
+    type TypeAnnex = ();
+
+    async fn new<'a, 's>(
+        this: Type<'v, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        args: Args<'v, 'a>,
+        mut out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        let ([mut iterable], []) = unpack!(strand, args, 1, 0)?;
+        let global = strand.state::<Global<'v>>();
+        iterable.iter(strand, &mut out).await?;
+        let mut entries = Vec::new();
+        while out.next(strand, &mut iterable).await? {
+            let ace = global.types.posix_ace.cast(&iterable).ok_or_else(|| {
+                Error::type_error(strand, "Acl: iterable must contain security.unix.Ace")
+            })?;
+            entries.push(ace.enter_sync(strand, |_strand, ace| *ace.annex()));
+        }
+        let acl =
+            VfsPosixAcl::new(entries).map_err(|error| Error::value(strand, error.to_string()))?;
+        this.create_with_annex(strand, PosixAclObject, acl, out);
+        Ok(())
+    }
+
+    fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
+        builder
+            .get("ace_count", |this, strand, out| {
+                Output::set(strand, out, this.annex().entries().len());
+                Ok(())
+            })
+            .get("aces", |this, strand, out| {
+                Output::set(strand, out, ArrayView::new(this, PosixAclAces));
+                Ok(())
+            })
+    }
+}
+
+pub(crate) fn create_posix_acl<'v>(
+    strand: &mut Strand<'v, '_>,
+    global: State<'v, Global<'v>>,
+    acl: Option<VfsPosixAcl>,
+    out: &mut Slot<'v, '_>,
+) {
+    match acl {
+        Some(acl) => {
+            global
+                .types
+                .posix_acl
+                .create_with_annex(strand, PosixAclObject, acl, out);
+        }
+        None => Output::set(strand, out, Nil),
+    }
+}
+
+pub(crate) fn posix_acl_from_value<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    value: &Value<'v>,
+) -> Result<'v, 's, Option<VfsPosixAcl>> {
+    if value.is_nil() {
+        return Ok(None);
+    }
+    global
+        .types
+        .posix_acl
+        .cast(value)
+        .map(|acl| acl.enter_sync(strand, |_strand, acl| Some(acl.annex().clone())))
+        .ok_or_else(|| Error::type_error(strand, "expected security.unix.Acl or nil"))
+}
+
+pub(crate) struct PosixAceObject;
+
+fn posix_permissions<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    read: Option<&Value<'v>>,
+    write: Option<&Value<'v>>,
+    execute: Option<&Value<'v>>,
+) -> Result<'v, 's, VfsPosixAclPermissions> {
+    let permission = |strand: &mut Strand<'v, 's>, value: Option<&Value<'v>>, name| {
+        value
+            .map(|value| {
+                value
+                    .as_bool(strand)
+                    .ok_or_else(|| Error::type_error(strand, format!("{name}: expected Bool")))
+            })
+            .transpose()
+            .map(|value| value.unwrap_or(false))
+    };
+    Ok(VfsPosixAclPermissions {
+        read: permission(strand, read, "read")?,
+        write: permission(strand, write, "write")?,
+        execute: permission(strand, execute, "execute")?,
+    })
+}
+
+fn posix_id<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    value: &Value<'v>,
+    name: &'static str,
+) -> Result<'v, 's, u32> {
+    let value = value
+        .to_i64(strand)
+        .map_err(|_| Error::type_error(strand, format!("{name}: expected Int")))?;
+    u32::try_from(value).map_err(|_| Error::value(strand, format!("{name}: out of range")))
+}
+
+impl<'v> Object<'v> for PosixAceObject {
+    const NAME: &'v str = "Ace";
+    const MODULE: &'v str = "security.unix";
+    type Annex = VfsPosixAce;
+    type Type = ();
+    type TypeAnnex = ();
+
+    fn build<'a>(mut builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
+        let read = builder.sym("read");
+        let write = builder.sym("write");
+        let execute = builder.sym("execute");
+        let id_field = builder.sym("id");
+        let user_obj = builder.sym("USER_OBJ");
+        let user = builder.sym("USER");
+        let group_obj = builder.sym("GROUP_OBJ");
+        let group = builder.sym("GROUP");
+        let mask = builder.sym("MASK");
+        let other = builder.sym("OTHER");
+
+        macro_rules! constructor {
+            ($builder:expr, $name:literal, $qualifier:expr) => {
+                $builder.type_method($name, async move |this, strand, args, out| {
+                    let ([], [read, write, execute]) = unpack!(
+                        strand,
+                        args,
+                        0,
+                        0,
+                        read = None,
+                        write = None,
+                        execute = None
+                    )?;
+                    let permissions = posix_permissions(
+                        strand,
+                        read.as_deref(),
+                        write.as_deref(),
+                        execute.as_deref(),
+                    )?;
+                    this.create_with_annex(
+                        strand,
+                        PosixAceObject,
+                        VfsPosixAce {
+                            qualifier: $qualifier,
+                            permissions,
+                        },
+                        out,
+                    );
+                    Ok(())
+                })
+            };
+        }
+
+        let builder = constructor!(builder, "user_obj", VfsPosixAclQualifier::UserObj);
+        let builder = constructor!(builder, "group_obj", VfsPosixAclQualifier::GroupObj);
+        let builder = constructor!(builder, "mask", VfsPosixAclQualifier::Mask);
+        let builder = constructor!(builder, "other", VfsPosixAclQualifier::Other);
+
+        builder
+            .type_method("user", async move |this, strand, args, out| {
+                let ([id], [read, write, execute]) = unpack!(
+                    strand,
+                    args,
+                    1,
+                    0,
+                    read = None,
+                    write = None,
+                    execute = None
+                )?;
+                let permissions = posix_permissions(
+                    strand,
+                    read.as_deref(),
+                    write.as_deref(),
+                    execute.as_deref(),
+                )?;
+                let id = posix_id(strand, &id, "uid")?;
+                this.create_with_annex(
+                    strand,
+                    PosixAceObject,
+                    VfsPosixAce {
+                        qualifier: VfsPosixAclQualifier::User(id),
+                        permissions,
+                    },
+                    out,
+                );
+                Ok(())
+            })
+            .type_method("group", async move |this, strand, args, out| {
+                let ([id], [read, write, execute]) = unpack!(
+                    strand,
+                    args,
+                    1,
+                    0,
+                    read = None,
+                    write = None,
+                    execute = None
+                )?;
+                let permissions = posix_permissions(
+                    strand,
+                    read.as_deref(),
+                    write.as_deref(),
+                    execute.as_deref(),
+                )?;
+                let id = posix_id(strand, &id, "gid")?;
+                this.create_with_annex(
+                    strand,
+                    PosixAceObject,
+                    VfsPosixAce {
+                        qualifier: VfsPosixAclQualifier::Group(id),
+                        permissions,
+                    },
+                    out,
+                );
+                Ok(())
+            })
+            .get("type", move |this, strand, out| {
+                let value = match this.annex().qualifier {
+                    VfsPosixAclQualifier::UserObj => user_obj,
+                    VfsPosixAclQualifier::User(_) => user,
+                    VfsPosixAclQualifier::GroupObj => group_obj,
+                    VfsPosixAclQualifier::Group(_) => group,
+                    VfsPosixAclQualifier::Mask => mask,
+                    VfsPosixAclQualifier::Other => other,
+                };
+                Output::set(strand, out, value);
+                Ok(())
+            })
+            .get("id", move |this, strand, out| {
+                let id = match this.annex().qualifier {
+                    VfsPosixAclQualifier::User(id) | VfsPosixAclQualifier::Group(id) => id,
+                    _ => return Err(Error::field(strand, id_field)),
+                };
+                Output::set(strand, out, id);
+                Ok(())
+            })
+            .get("read", |this, strand, out| {
+                Output::set(strand, out, this.annex().permissions.read);
+                Ok(())
+            })
+            .get("write", |this, strand, out| {
+                Output::set(strand, out, this.annex().permissions.write);
+                Ok(())
+            })
+            .get("execute", |this, strand, out| {
+                Output::set(strand, out, this.annex().permissions.execute);
                 Ok(())
             })
     }
@@ -1954,6 +2246,8 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
     builder
         .module("security.unix")
         .value("Identity", global.types.unix_identity)
+        .value("Acl", global.types.posix_acl)
+        .value("Ace", global.types.posix_ace)
         .commit();
 
     builder

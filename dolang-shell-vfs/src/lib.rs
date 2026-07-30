@@ -23,6 +23,7 @@ mod direct;
 mod error;
 mod guid;
 mod pipe;
+mod posix_acl;
 mod probe;
 mod protocol;
 mod read_dir;
@@ -35,6 +36,7 @@ mod windows;
 
 pub use error::{Error, OperatingSystem, Result, SystemError};
 pub use guid::{Guid, GuidError};
+pub use posix_acl::{PosixAce, PosixAcl, PosixAclError, PosixAclPermissions, PosixAclQualifier};
 pub use sec_desc::{
     ALL_SECURITY_INFORMATION, Ace, AceBuf, AceBuildError, AceBuildOptions, AceError, AceType, Aces,
     Acl, AclBuf, AclBuildError, AclError, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION,
@@ -1155,6 +1157,8 @@ pub trait FileHandle: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Sized {
     async fn set_size(&mut self, size: u64) -> Result<()>;
     async fn metadata(&mut self) -> Result<Metadata>;
     async fn fs_metadata(&mut self) -> Result<FsMetadata>;
+    async fn acl(&mut self, default: bool) -> Result<Option<PosixAcl>>;
+    async fn set_acl(&mut self, acl: Option<&PosixAcl>, default: bool) -> Result<()>;
     async fn sec_desc(&mut self, mask: u32) -> Result<SecDesc>;
     async fn set_sec_desc(&mut self, sec_desc: &SecDesc) -> Result<()>;
     async fn xattrs(&mut self, namespace: XattrNamespace<'_>) -> Result<Vec<XattrEntry>>;
@@ -1278,6 +1282,19 @@ pub trait Vfs {
     async fn remove(&self, path: Utf8TypedPath<'_>, all: bool, ignore: bool) -> Result<()>;
     async fn metadata(&self, path: Utf8TypedPath<'_>) -> Result<Metadata>;
     async fn fs_metadata(&self, path: Utf8TypedPath<'_>, follow: bool) -> Result<FsMetadata>;
+    async fn acl(
+        &self,
+        path: Utf8TypedPath<'_>,
+        default: bool,
+        follow: bool,
+    ) -> Result<Option<PosixAcl>>;
+    async fn set_acl(
+        &self,
+        path: Utf8TypedPath<'_>,
+        acl: Option<&PosixAcl>,
+        default: bool,
+        follow: bool,
+    ) -> Result<()>;
     async fn sec_desc(&self, path: Utf8TypedPath<'_>, mask: u32, follow: bool) -> Result<SecDesc>;
     async fn set_sec_desc(
         &self,
@@ -1472,6 +1489,14 @@ impl FileHandle for AnyFile {
 
     async fn fs_metadata(&mut self) -> crate::Result<FsMetadata> {
         match_file!(self, file => file.fs_metadata().await)
+    }
+
+    async fn acl(&mut self, default: bool) -> crate::Result<Option<PosixAcl>> {
+        match_file!(self, file => file.acl(default).await)
+    }
+
+    async fn set_acl(&mut self, acl: Option<&PosixAcl>, default: bool) -> crate::Result<()> {
+        match_file!(self, file => file.set_acl(acl, default).await)
     }
 
     async fn sec_desc(&mut self, mask: u32) -> crate::Result<SecDesc> {
@@ -2314,6 +2339,31 @@ impl Vfs for AnyVfs {
         match self {
             Self::Client(client) => client.fs_metadata(path, follow).await,
             Self::Direct(direct) => direct.fs_metadata(path, follow).await,
+        }
+    }
+
+    async fn acl(
+        &self,
+        path: Utf8TypedPath<'_>,
+        default: bool,
+        follow: bool,
+    ) -> crate::Result<Option<PosixAcl>> {
+        match self {
+            Self::Client(client) => client.acl(path, default, follow).await,
+            Self::Direct(direct) => direct.acl(path, default, follow).await,
+        }
+    }
+
+    async fn set_acl(
+        &self,
+        path: Utf8TypedPath<'_>,
+        acl: Option<&PosixAcl>,
+        default: bool,
+        follow: bool,
+    ) -> crate::Result<()> {
+        match self {
+            Self::Client(client) => client.set_acl(path, acl, default, follow).await,
+            Self::Direct(direct) => direct.set_acl(path, acl, default, follow).await,
         }
     }
 

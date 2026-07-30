@@ -596,6 +596,7 @@ impl<'v> Object<'v> for File<'v> {
         let group = builder.sym("group");
         let dacl = builder.sym("dacl");
         let sacl = builder.sym("sacl");
+        let default_acl = builder.sym("default");
         let shared = builder.sym("shared");
         builder
             .supertype(TypeObject::Iter)
@@ -795,6 +796,33 @@ impl<'v> Object<'v> for File<'v> {
                 };
                 crate::security::create_sec_desc(strand, global, descriptor, &mut out);
                 Ok(())
+            })
+            .method("acl", async move |this, strand, args, mut out| {
+                let ([], [default]) = unpack!(strand, args, 0, 0, default_acl = None)?;
+                let default = super::acl_default(strand, default.as_deref())?;
+                let global = this.annex().global;
+                let acl = {
+                    let mut borrow = this.borrow_mut(strand)?;
+                    let file = borrow
+                        .file
+                        .as_mut()
+                        .ok_or_else(|| Error::state_error(strand, "file is closed"))?;
+                    file.acl(default).await.into_sys(strand)?
+                };
+                crate::security::create_posix_acl(strand, global, acl, &mut out);
+                Ok(())
+            })
+            .method("set_acl", async move |this, strand, args, _out| {
+                let ([acl_value], [default]) = unpack!(strand, args, 1, 0, default_acl = None)?;
+                let global = this.annex().global;
+                let acl = crate::security::posix_acl_from_value(strand, global, &acl_value)?;
+                let default = super::acl_default(strand, default.as_deref())?;
+                let mut borrow = this.borrow_mut(strand)?;
+                let file = borrow
+                    .file
+                    .as_mut()
+                    .ok_or_else(|| Error::state_error(strand, "file is closed"))?;
+                file.set_acl(acl.as_ref(), default).await.into_sys(strand)
             })
             .method("set_sec_desc", async move |this, strand, args, _out| {
                 let ([descriptor], []) = unpack!(strand, args, 1, 0)?;

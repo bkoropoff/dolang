@@ -165,6 +165,14 @@ Equivalent to [`fs.xattrs`](index.md).
 
 Equivalent to [`fs.xattr`](index.md).
 
+### `acl :default? :resolve = :TARGET:`
+
+Equivalent to [`fs.acl`](index.md#acl-path-default-resolve).
+
+### `set_acl acl :default? :resolve = :TARGET:`
+
+Equivalent to [`fs.set_acl`](index.md#set_acl-path-acl-default-resolve).
+
 ### `set_xattr name value :namespace? :resolve = :TARGET:`
 
 Equivalent to [`fs.set_xattr`](index.md).

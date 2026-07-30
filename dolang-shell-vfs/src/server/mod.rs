@@ -20,14 +20,14 @@ use crate::{
     AnyFile, AnyVfs, Child as _, Command as _, Direct, FileHandle as _, OpenOptions as _,
     SessionMode, StdioRecv, StdioSend, Utf8TypedPath, Vfs,
     protocol::{
-        AccessRequest, CanonicalizeRequest, CopyRequest, CreateDirRequest, FsMetadataRequest,
-        GlobRequest, HardLinkRequest, MetadataRequest, MoveRequest, OpenHandle,
+        AccessRequest, AclRequest, CanonicalizeRequest, CopyRequest, CreateDirRequest,
+        FsMetadataRequest, GlobRequest, HardLinkRequest, MetadataRequest, MoveRequest, OpenHandle,
         OpenHandlePreference, OpenRequest, OpenVfsHandle, PipeResponse, QueryResponse,
         ReadDirResponse, ReadLinkRequest, RemoveDirRequest, RemoveRequest, RenameRequest, Request,
-        RequestKind, ResponseKind, SecDescRequest, SetMetadataRequest, SetSecDescRequest,
-        SetXattrRequest, SpawnRequest, StdioRecvTarget, StdioSendTarget, StreamsRequest,
-        SymlinkKind, SymlinkRequest, UnixVfsRequest, VfsProtocol, WellKnownPathRequest,
-        WindowsAdminRequest, WirePath, XattrRequest, XattrsRequest,
+        RequestKind, ResponseKind, SecDescRequest, SetAclRequest, SetMetadataRequest,
+        SetSecDescRequest, SetXattrRequest, SpawnRequest, StdioRecvTarget, StdioSendTarget,
+        StreamsRequest, SymlinkKind, SymlinkRequest, UnixVfsRequest, VfsProtocol,
+        WellKnownPathRequest, WindowsAdminRequest, WirePath, XattrRequest, XattrsRequest,
     },
 };
 
@@ -502,6 +502,12 @@ impl Connection {
             RequestKind::FileFsMetadata { file } => {
                 self.handle_file_fs_metadata(context, file).await
             }
+            RequestKind::FileAcl { file, default } => {
+                self.handle_file_acl(context, file, default).await
+            }
+            RequestKind::FileSetAcl { file, acl, default } => {
+                self.handle_file_set_acl(context, file, acl, default).await
+            }
             RequestKind::FileSecDesc { file, mask } => {
                 self.handle_file_sec_desc(context, file, mask).await
             }
@@ -541,6 +547,8 @@ impl Connection {
             RequestKind::Remove(request) => self.handle_remove(request).await,
             RequestKind::Metadata(request) => self.handle_metadata(request).await,
             RequestKind::FsMetadata(request) => self.handle_fs_metadata(request).await,
+            RequestKind::Acl(request) => self.handle_acl(request).await,
+            RequestKind::SetAcl(request) => self.handle_set_acl(request).await,
             RequestKind::SecDesc(request) => self.handle_sec_desc(request).await,
             RequestKind::SetSecDesc(request) => self.handle_set_sec_desc(request).await,
             RequestKind::CreateDir(request) => self.handle_create_dir(request).await,
@@ -1178,6 +1186,40 @@ impl Connection {
         ResponseKind::FileSecDesc(result)
     }
 
+    async fn handle_file_acl(
+        &self,
+        context: &CallContext<VfsProtocol>,
+        file: dolang_rpc::Opaque<crate::FileMarker>,
+        default: bool,
+    ) -> ResponseKind {
+        let result = async {
+            let file = self.retained_file(context, file)?;
+            file.0.lock().await.acl(default).await.map_err(wire_error)
+        }
+        .await;
+        ResponseKind::FileAcl(result)
+    }
+
+    async fn handle_file_set_acl(
+        &self,
+        context: &CallContext<VfsProtocol>,
+        file: dolang_rpc::Opaque<crate::FileMarker>,
+        acl: Option<crate::PosixAcl>,
+        default: bool,
+    ) -> ResponseKind {
+        let result = async {
+            let file = self.retained_file(context, file)?;
+            file.0
+                .lock()
+                .await
+                .set_acl(acl.as_ref(), default)
+                .await
+                .map_err(wire_error)
+        }
+        .await;
+        ResponseKind::FileSetAcl(result)
+    }
+
     async fn handle_file_set_sec_desc(
         &self,
         context: &CallContext<VfsProtocol>,
@@ -1478,6 +1520,29 @@ impl Connection {
             self.server
                 .vfs
                 .sec_desc(request_path(&req.path), req.mask, req.follow)
+                .await,
+        ))
+    }
+
+    async fn handle_acl(&self, req: AclRequest) -> ResponseKind {
+        ResponseKind::Acl(Self::wire_result(
+            self.server
+                .vfs
+                .acl(request_path(&req.path), req.default, req.follow)
+                .await,
+        ))
+    }
+
+    async fn handle_set_acl(&self, req: SetAclRequest) -> ResponseKind {
+        ResponseKind::SetAcl(Self::wire_result(
+            self.server
+                .vfs
+                .set_acl(
+                    request_path(&req.path),
+                    req.acl.as_ref(),
+                    req.default,
+                    req.follow,
+                )
                 .await,
         ))
     }

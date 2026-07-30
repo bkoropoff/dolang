@@ -83,6 +83,50 @@ fn typed_windows_path(path: &Path) -> io::Result<Utf8TypedPath<'_>> {
 }
 
 impl Direct {
+    pub(super) fn acl_from_path(
+        _path: &Path,
+        _default: bool,
+        _follow: bool,
+    ) -> io::Result<Option<crate::PosixAcl>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "POSIX ACLs are not supported on Windows",
+        ))
+    }
+
+    pub(super) fn set_acl_path(
+        _path: &Path,
+        _acl: Option<&crate::PosixAcl>,
+        _default: bool,
+        _follow: bool,
+    ) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "POSIX ACLs are not supported on Windows",
+        ))
+    }
+
+    pub(super) fn acl_from_file(
+        _file: &File,
+        _default: bool,
+    ) -> io::Result<Option<crate::PosixAcl>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "POSIX ACLs are not supported on Windows",
+        ))
+    }
+
+    pub(super) fn set_acl_file(
+        _file: &File,
+        _acl: Option<&crate::PosixAcl>,
+        _default: bool,
+    ) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "POSIX ACLs are not supported on Windows",
+        ))
+    }
+
     fn with_security_privilege<T>(mask: u32, f: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
         if mask & SACL_SECURITY_INFORMATION == 0 {
             return f();
