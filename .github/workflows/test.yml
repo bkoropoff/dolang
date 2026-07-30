@@ -38,15 +38,34 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Setup runner
+        id: setup
         uses: ./.github/actions/setup-runner
         with:
           target: ${{ matrix.target }}
 
+      # Skipped in the VM: `clippy --all-targets` compiles the whole dependency
+      # graph again without producing anything `cargo test` can reuse, so it
+      # costs a second cold build to re-check lints that the other three
+      # targets already cover.
       - name: Lint
+        if: matrix.target != 'x86_64-freebsd'
         run: dodo.run lint
 
       - name: Run tests
         run: dodo.run test
+
+      # Runs on the runner rather than in the VM, and before teardown: the
+      # domain disk drops guest flushes, so the caches have to be copied out
+      # while it is still up. Skipped on an exact cache hit, where
+      # actions/cache would not save the repacked tarball anyway.
+      - name: Save build cache
+        if: >
+          always() && matrix.target == 'x86_64-freebsd' &&
+          steps.setup.outputs.vm-cache-hit != 'true'
+        shell: dolang --strict --no-cache --module-path .github/actions/setup-runner/lib {0}
+        run: |
+          import ci
+          ci.save_cache()
 
   extension:
     name: VS Code Extension

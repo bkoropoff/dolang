@@ -12,6 +12,26 @@ let DEFAULT_CONNECT_URI = "qemu:///session"
 let DEFAULT_MEMORY = 2048
 let DEFAULT_VCPUS = 2
 let DEFAULT_DISK_SIZE = "20G"
+
+# Host cache modes for the domain disk, spelled as libvirt spells them.
+let DISK_CACHE_MODES = Set $
+  - none
+  - writeback
+  - writethrough
+  - directsync
+  - unsafe
+
+# Disk I/O submission modes, likewise.
+let DISK_IO_MODES = Set $
+  - threads
+  - native
+  - io_uring
+
+# `io_uring` is the best-performing submission mode and needs QEMU 6.0+ on a
+# 5.1+ kernel, which any currently supported host satisfies. An older host
+# fails at domain start rather than falling back, so `io:` can select a
+# different mode.
+let DEFAULT_DISK_IO = :IO_URING:
 let PORT_START = 20000
 let PORT_END = 60000
 let PORT_ATTEMPTS = 10
@@ -96,6 +116,21 @@ def require_arch arch
   if (arch != host)
     throw std.ValueError "arch: must be the host architecture $host, got $arch"
   arch
+
+# Normalizes a disk `cache:`/`io:` option to its libvirt attribute spelling.
+#
+# The symbol vocabulary is libvirt's own value set, so lowercasing the name is
+# the whole mapping (`:IO_URING:` becomes `io_uring`); a `Str` is accepted as
+# written. Checking the value here reports a typo as a Do error naming the
+# argument, instead of letting libvirt reject the whole document over one
+# attribute.
+def require_disk_mode value allowed name
+  if (value == nil)
+    return nil
+  let text = str(value).lower()
+  if !allowed.contains(text)
+    throw std.ValueError "$name: unsupported value: $value"
+  text
 
 def normalized_app app
   let candidate = (app || shell.program || "dolang-libvirt")
@@ -240,12 +275,30 @@ class Guest
   pub def wait_ready self
     self.#wait "test -f $(shlex.quote READY_PATH)"
 
-  # Copies `payload` into the guest and unpacks it.
-  pub def install_payload self payload
+  # Copies one local file into the guest with `scp`.
+  #
+  # The bulk counterpart to `Domain.upload`: no VFS session, so no `chmod:` and
+  # no progress reporting, but the transfer runs at the speed of the SSH
+  # connection rather than of the VFS protocol. For anything large the
+  # difference is the difference between seconds and tens of minutes.
+  pub def send self source destination
     let flags = self.#options()
     run scp -q ...flags
       -P $self.port -i $self.#identity
-      -- $payload "$(self.#user)@127.0.0.1:$PAYLOAD_PATH"
+      -- $source "$(self.#user)@127.0.0.1:$destination"
+    nil
+
+  # Copies one file out of the guest with `scp`. The counterpart to `send`.
+  pub def fetch self source destination
+    let flags = self.#options()
+    run scp -q ...flags
+      -P $self.port -i $self.#identity
+      -- "$(self.#user)@127.0.0.1:$source" $destination
+    nil
+
+  # Copies `payload` into the guest and unpacks it.
+  pub def install_payload self payload
+    self.send $payload $PAYLOAD_PATH
     let dir = shlex.quote (payload_directory self.#user)
     let archive = shlex.quote $PAYLOAD_PATH
     self.#exec "mkdir -p $dir && tar -xzf $archive -C $dir && rm -f $archive"
@@ -314,6 +367,8 @@ class DomainConfig
   field seed = nil
   field app = nil
   field workdir = nil
+  field cache = nil
+  field io = nil
 
   def (init)
     self
@@ -326,6 +381,8 @@ class DomainConfig
     :workdir
     :memory = DEFAULT_MEMORY
     :vcpus = DEFAULT_VCPUS
+    :cache = nil
+    :io = DEFAULT_DISK_IO
   do
     self.name = require_name $name
     self.guest = guest
@@ -336,11 +393,21 @@ class DomainConfig
     self.#seed = Path $seed
     self.#app = str $app
     self.#workdir = Path $workdir
+    self.#cache = require_disk_mode $cache $DISK_CACHE_MODES cache
+    self.#io = require_disk_mode $io $DISK_IO_MODES io
 
   # The libvirt domain document for this configuration.
   pub def to_xml self
     # Locally aliased so the tree below reads like the XML it emits.
     let Node = xml.Node
+
+    # Only the overlay carries the tuning options: the seed is a read-only ISO
+    # read once at boot, so its driver has nothing to gain from them.
+    let overlay_driver = {name: "qemu", type: "qcow2"}
+    if (self.#cache != nil)
+      overlay_driver[:cache:] = self.#cache
+    if (self.#io != nil)
+      overlay_driver[:io:] = self.#io
 
     let vm = Node vm namespace: $VM_NAMESPACE prefix: dolang
       - $ Node managed "true"
@@ -367,7 +434,7 @@ class DomainConfig
       - $ Node on_crash destroy
       - $ Node devices
           - $ Node disk attrs: {type: "file", device: "disk"}
-              - $ Node driver attrs: {name: "qemu", type: "qcow2"}
+              - $ Node driver attrs: $overlay_driver
               - $ Node source attrs: {file: str(self.#overlay)}
               - $ Node target attrs: {dev: "vda", bus: "virtio"}
           - $ Node disk attrs: {type: "file", device: "cdrom"}
@@ -578,6 +645,20 @@ pub class Domain
           throw std.ValueError "export destination appeared during conversion: $destination"
         temporary.rename $destination
     destination
+
+  # Copies one local file into the domain with `scp`.
+  #
+  # `upload` and `download` move their bytes through the VFS, which buys a
+  # `chmod:` in the same session, byte-level progress, and any path the VFS can
+  # reach — at a small fraction of the throughput the SSH connection itself
+  # sustains. `send` and `fetch` trade all of that away for speed, and are what
+  # a multi-hundred-megabyte transfer wants.
+  pub def send self source destination
+    self.#xml().guest().send $source $destination
+
+  # Copies one file out of the domain with `scp`. The counterpart to `send`.
+  pub def fetch self source destination
+    self.#xml().guest().fetch $source $destination
 
   # Copies one local file into the domain. `chmod:` sets the destination's
   # mode within the same VFS session as the copy, if given.
@@ -1012,6 +1093,8 @@ def remove_partial name connect_uri workdir
 # | `memory`?       | `Int`                | Guest memory in MiB (default `2048`) |
 # | `vcpus`?        | `Int`                | Guest vCPU count (default `2`) |
 # | `disk_size`?    | `Str`                | Disk size (default `"20G"`)               |
+# | `cache`?        | `Sym`                | Disk host cache mode — see [`cache:`](#cache) |
+# | `io`?           | `Sym`                | Disk I/O submission mode — see [`io:`](#io) |
 # | `connect_uri`?  | `Str`                | libvirt connection URI (default `"qemu:///session"`) |
 # | `init`?         | `Dict`               | Early boot provisioning — see [`init:`](#init) |
 # | `add`*          | `Dict`               | Uploads a file — see [`add:`](#add)         |
@@ -1034,6 +1117,43 @@ def remove_partial name connect_uri workdir
 # | `version`? | `Str`         | Version tag; excludes `archive`     |
 # | `archive`? | `Path`\|`Url` | Release archive; excludes `version` |
 # | `digest`?  | `Str`        | `algorithm:hex` digest for `archive` |
+#
+# # `cache:`
+#
+# Host cache mode for the domain disk. Defaults to the hypervisor's own
+# default, which honors guest flushes.
+#
+# | Value            | Behavior |
+# | ---------------- | -------- |
+# | `:NONE:`         | `O_DIRECT`; no host page cache, guest flushes honored |
+# | `:WRITEBACK:`    | Host page cache, guest flushes honored |
+# | `:WRITETHROUGH:` | Host page cache, every write flushed |
+# | `:DIRECTSYNC:`   | `O_DIRECT` and every write flushed |
+# | `:UNSAFE:`       | Host page cache, guest flushes **ignored** |
+#
+# `:UNSAFE:` loses the disk's contents if the host or the domain dies
+# uncleanly, since nothing the guest wrote is guaranteed to have reached
+# storage until the domain shuts down. That is a fair trade for a disposable
+# build domain — dropping flushes removes them from the critical path, and
+# files written and deleted within one run need never reach storage at all —
+# but it is not a safe default for a domain whose disk matters.
+#
+# # `io:`
+#
+# Disk I/O submission mode, defaulting to `:IO_URING:`.
+#
+# | Value        | Behavior |
+# | ------------ | -------- |
+# | `:IO_URING:` | `io_uring`; needs QEMU 6.0+ on a 5.1+ kernel |
+# | `:THREADS:`  | Thread pool |
+# | `:NATIVE:`   | Linux AIO; only asynchronous with `cache:` `:NONE:` or `:DIRECTSYNC:` |
+#
+# An older host fails at domain start rather than falling back, so select
+# `:THREADS:` there.
+#
+# `:NATIVE:` needs `O_DIRECT` to be asynchronous; paired with a cache mode
+# that uses the host page cache it quietly degrades to blocking submission.
+# `:IO_URING:` has no such pairing constraint.
 #
 # # `init:`
 #
@@ -1095,6 +1215,8 @@ pub def create
   :memory = DEFAULT_MEMORY
   :vcpus = DEFAULT_VCPUS
   :disk_size = DEFAULT_DISK_SIZE
+  :cache = nil
+  :io = DEFAULT_DISK_IO
   :connect_uri = DEFAULT_CONNECT_URI
   :init = nil
   ...options
@@ -1146,7 +1268,7 @@ do
         "dolang-vfs"
 
       let config = DomainConfig
-        :name :arch :app :workdir :memory :vcpus
+        :name :arch :app :workdir :memory :vcpus :cache :io
         overlay: $overlay
         seed: $setup.seed
         guest: $ Guest
@@ -1247,13 +1369,15 @@ pub def with
   :memory = DEFAULT_MEMORY
   :vcpus = DEFAULT_VCPUS
   :disk_size = DEFAULT_DISK_SIZE
+  :cache = nil
+  :io = DEFAULT_DISK_IO
   :connect_uri = DEFAULT_CONNECT_URI
   :init = nil
   ...options
 do
   let domain = create
     :image :name :os :arch :app :user :dolang :image_digest :packages
-    :memory :vcpus :disk_size :connect_uri :init ...options
+    :memory :vcpus :disk_size :cache :io :connect_uri :init ...options
   try
     domain.with $block
   finally

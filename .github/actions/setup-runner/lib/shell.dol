@@ -14,10 +14,13 @@ let PRELUDE = $
   --import sys
   --import fs
 
-# Environment forwarded into the CI VM.
+# Environment forwarded into the CI VM. The cargo debug settings are exported
+# by `configure_cargo` in ci.dol next door.
 let VM_ENV = $
   - "CARGO_TERM_COLOR"
   - "FORCE_COLOR"
+  - "CARGO_PROFILE_DEV_DEBUG"
+  - "CARGO_PROFILE_TEST_DEBUG"
 
 # Arguments that route a script through the libvirt entrypoint into `domain`.
 def vm_args domain
