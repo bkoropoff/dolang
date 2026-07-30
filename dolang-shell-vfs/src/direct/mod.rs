@@ -72,11 +72,17 @@ pub struct DirectCommand<'a> {
     stdin_resource: Option<StdioRecv>,
     stdout_resource: Option<StdioSend>,
     stderr_resource: Option<StdioSend>,
+    process_control: crate::ProcessControl,
+    termination_policy: crate::TerminationPolicy,
     error: Option<io::Error>,
 }
 
 pub struct DirectChild {
     inner: tokio::process::Child,
+    process_control: crate::ProcessControl,
+    termination_policy: crate::TerminationPolicy,
+    #[cfg(windows)]
+    job: Option<std::os::windows::io::OwnedHandle>,
 }
 
 #[derive(Debug)]
@@ -444,14 +450,27 @@ impl<'a> DirectCommand<'a> {
             stdin_resource: None,
             stdout_resource: None,
             stderr_resource: None,
+            process_control: crate::ProcessControl::Foreground,
+            termination_policy: crate::TerminationPolicy::default(),
             error: program.err(),
         }
     }
 }
 
 impl DirectChild {
-    fn new(child: tokio::process::Child) -> Self {
-        Self { inner: child }
+    fn new(
+        child: tokio::process::Child,
+        process_control: crate::ProcessControl,
+        termination_policy: crate::TerminationPolicy,
+        #[cfg(windows)] job: Option<std::os::windows::io::OwnedHandle>,
+    ) -> Self {
+        Self {
+            inner: child,
+            process_control,
+            termination_policy,
+            #[cfg(windows)]
+            job,
+        }
     }
 }
 
@@ -460,8 +479,12 @@ impl Child for DirectChild {
         ProcessStatus::from_native(self.inner.wait().await?).map_err(Into::into)
     }
 
-    async fn terminate(self) -> crate::Result<ProcessStatus> {
-        ProcessStatus::from_native(self.impl_terminate().await?).map_err(Into::into)
+    async fn terminate(self) -> crate::Result<Option<ProcessStatus>> {
+        self.impl_terminate()
+            .await?
+            .map(ProcessStatus::from_native)
+            .transpose()
+            .map_err(Into::into)
     }
 }
 
@@ -552,6 +575,16 @@ impl Command for DirectCommand<'_> {
         self
     }
 
+    fn process_control(&mut self, control: crate::ProcessControl) -> &mut Self {
+        self.process_control = control;
+        self
+    }
+
+    fn termination_policy(&mut self, policy: crate::TerminationPolicy) -> &mut Self {
+        self.termination_policy = policy;
+        self
+    }
+
     async fn spawn(mut self) -> crate::Result<Self::Child> {
         if let Some(error) = self.error {
             return Err(error.into());
@@ -584,7 +617,7 @@ impl Command for DirectCommand<'_> {
             command.current_dir(cwd);
         }
 
-        for (k, v) in self.env {
+        for (k, v) in &self.env {
             match v {
                 Some(val) => {
                     command.env(k, val);
@@ -595,23 +628,25 @@ impl Command for DirectCommand<'_> {
             }
         }
 
-        if let Some(stdin) = self.stdin {
+        if let Some(stdin) = self.stdin.take() {
             command.stdin(stdin);
         } else {
             command.stdin(Stdio::null());
         }
-        if let Some(stdout) = self.stdout {
+        if let Some(stdout) = self.stdout.take() {
             command.stdout(stdout);
         } else {
             command.stdout(Stdio::null());
         }
-        if let Some(stderr) = self.stderr {
+        if let Some(stderr) = self.stderr.take() {
             command.stderr(stderr);
         } else {
             command.stderr(Stdio::null());
         }
 
-        command.spawn().map(DirectChild::new).map_err(Into::into)
+        self.configure_process(&mut command)?;
+        let child = command.spawn()?;
+        self.finish_spawn(child).map_err(Into::into)
     }
 }
 

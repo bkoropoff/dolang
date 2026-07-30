@@ -1160,6 +1160,8 @@ pub struct CommandBuilder<'a> {
     stdin: ClientRecv,
     stdout: ClientSend,
     stderr: ClientSend,
+    process_control: crate::ProcessControl,
+    termination_policy: crate::TerminationPolicy,
 }
 
 pub struct ClientChild {
@@ -1541,6 +1543,8 @@ impl<'a> CommandBuilder<'a> {
             stdin: ClientRecv::Null,
             stdout: ClientSend::Null,
             stderr: ClientSend::Null,
+            process_control: crate::ProcessControl::Foreground,
+            termination_policy: crate::TerminationPolicy::default(),
         }
     }
 
@@ -1780,10 +1784,10 @@ impl Child for ClientChild {
         }
     }
 
-    async fn terminate(mut self) -> crate::Result<ProcessStatus> {
+    async fn terminate(mut self) -> crate::Result<Option<ProcessStatus>> {
         self.relays.abort_stdin();
         if let Some(result) = self.result() {
-            return result;
+            return result.map(Some);
         }
         let ClientChildState::Live(child) = &self.state else {
             unreachable!();
@@ -1797,8 +1801,10 @@ impl Child for ClientChild {
         {
             ResponseKind::ChildTerminate(result) => {
                 self.relays.finish();
-                self.store_result(&result);
-                self.result().unwrap()
+                if let Ok(Some(status)) = result {
+                    self.state = ClientChildState::Exited(status);
+                }
+                result.map_err(Into::into)
             }
             response => Err(unexpected(response).into()),
         }
@@ -1924,6 +1930,16 @@ impl<'a> Command for CommandBuilder<'a> {
         self
     }
 
+    fn process_control(&mut self, control: crate::ProcessControl) -> &mut Self {
+        self.process_control = control;
+        self
+    }
+
+    fn termination_policy(&mut self, policy: crate::TerminationPolicy) -> &mut Self {
+        self.termination_policy = policy;
+        self
+    }
+
     async fn spawn(self) -> crate::Result<Self::Child> {
         let Self {
             client,
@@ -1934,6 +1950,8 @@ impl<'a> Command for CommandBuilder<'a> {
             stdin,
             stdout,
             stderr,
+            process_control,
+            termination_policy,
         } = self;
         let mut relays = PreparedRelays::default();
         let (stdin, mut stdin_resource) = Self::prepare_recv(client, stdin, &mut relays).await?;
@@ -1947,6 +1965,8 @@ impl<'a> Command for CommandBuilder<'a> {
             stdin,
             stdout,
             stderr,
+            process_control,
+            termination_policy,
         };
         match client.request(RequestKind::Spawn(req)).await? {
             ResponseKind::Spawn(result) => {

@@ -331,7 +331,7 @@ async fn null_stdio_processes_work_over_generic_stream() {
     let status = child.wait().await.unwrap();
     assert!(status.success());
     assert_eq!(child.wait().await.unwrap(), status);
-    assert_eq!(child.terminate().await.unwrap(), status);
+    assert_eq!(child.terminate().await.unwrap(), Some(status));
 
     let mut child = command_with_args(&client, failing_command())
         .spawn()
@@ -801,7 +801,7 @@ async fn cross_domain_stdin_relay_is_aborted_on_terminate() {
         .await
         .unwrap()
         .unwrap();
-    assert!(!status.success());
+    assert!(!status.unwrap().success());
 
     // The relay's stdin task was aborted on terminate; poll until further
     // writes observe a broken pipe rather than hanging forever.
@@ -875,7 +875,7 @@ async fn remote_process_can_be_terminated() {
         .await
         .unwrap()
         .unwrap();
-    assert!(!status.success());
+    assert!(!status.unwrap().success());
 
     client.stop().await.unwrap();
     server_task.await.unwrap().unwrap();

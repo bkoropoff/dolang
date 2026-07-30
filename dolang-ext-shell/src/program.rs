@@ -10,7 +10,9 @@ use dolang::runtime::{
     value::{Nil, Singleton},
     vm::Builder,
 };
-use dolang_shell_vfs::{AnyVfs, Child as _, Command, Utf8TypedPath, Vfs};
+use dolang_shell_vfs::{
+    AnyVfs, Child as _, Command, OperatingSystem, ProcessControl, Utf8TypedPath, Vfs,
+};
 
 use crate::{
     error::{self, ResultExt as _},
@@ -21,6 +23,7 @@ use crate::{
     global::Global,
     local::ChannelMode,
     pipe_channel::{self, RecvGuard, SendGuard},
+    proc::{parse_policy_dict, vfs_policy},
 };
 
 pub(crate) struct Program;
@@ -65,11 +68,12 @@ async fn resolve_io<'v, 's, 'a>(
     mut input: Slot<'v, '_>,
     mut output: Slot<'v, '_>,
     mut stderr: Slot<'v, '_>,
-) -> Result<'v, 's, (Args<'v, 'a>, [bool; 3])> {
+) -> Result<'v, 's, (Args<'v, 'a>, [bool; 3], Option<Slot<'v, 'a>>)> {
     let stdin_sym = global.syms.stdin;
     let stdout_sym = global.syms.stdout;
     let stderr_sym = global.syms.stderr;
-    let ([], [stdin_key, stdout_key, stderr_key], rest) = unpack!(
+    let policy_sym = global.syms.policy;
+    let ([], [stdin_key, stdout_key, stderr_key, policy_key], rest) = unpack!(
         strand,
         args,
         0,
@@ -77,6 +81,7 @@ async fn resolve_io<'v, 's, 'a>(
         stdin_sym = None,
         stdout_sym = None,
         stderr_sym = None,
+        policy_sym = None,
         ...
     )?;
     let input_temp = if let Some(stdin_key) = stdin_key {
@@ -127,7 +132,7 @@ async fn resolve_io<'v, 's, 'a>(
         false
     };
 
-    Ok((rest, [input_temp, output_temp, stderr_temp]))
+    Ok((rest, [input_temp, output_temp, stderr_temp], policy_key))
 }
 
 async fn resolve_io_file<'v, 's>(
@@ -540,18 +545,31 @@ fn configure_default_stderr<'v, 's>(
     Ok(true)
 }
 
+struct RunIo<'v, 'a> {
+    input: &'a Value<'v>,
+    output: &'a Value<'v>,
+    stderr: &'a Value<'v>,
+    policy_override: Option<Slot<'v, 'a>>,
+}
+
 async fn run<'v, 's>(
     strand: &mut Strand<'v, 's>,
     name: &str,
     args: Args<'v, '_>,
     global: State<'v, Global<'v>>,
-    input: &Value<'v>,
-    output: &Value<'v>,
-    stderr: &Value<'v>,
+    io: RunIo<'v, '_>,
 ) -> Result<'v, 's, ()> {
-    let local = global.local.get(strand);
-    let vfs = local.vfs();
-    let program = match local.target().operating_system.path_type() {
+    let (vfs, target, background, mut termination_policy) = {
+        let local = global.local.get(strand);
+        (
+            local.vfs(),
+            local.target(),
+            local.background(),
+            local.termination_policy(),
+        )
+    };
+    let operating_system = target.operating_system;
+    let program = match operating_system.path_type() {
         dolang_shell_vfs::PathType::Unix => {
             Utf8TypedPath::Unix(dolang_shell_vfs::Utf8UnixPath::new(name))
         }
@@ -560,12 +578,38 @@ async fn run<'v, 's>(
         }
     };
     let mut command = vfs.command(program);
+    if let Some(policy_override) = io.policy_override {
+        termination_policy = parse_policy_dict(
+            strand,
+            global,
+            &policy_override,
+            termination_policy,
+            operating_system != OperatingSystem::Windows,
+        )?;
+    }
+    if operating_system != OperatingSystem::Windows
+        && !termination_policy.signal.is_supported(operating_system)
+    {
+        return Err(Error::value(
+            strand,
+            format!(
+                "{:?} is not supported by the target operating system",
+                termination_policy.signal
+            ),
+        ));
+    }
+    command.process_control(if background {
+        ProcessControl::Background
+    } else {
+        ProcessControl::Foreground
+    });
+    command.termination_policy(vfs_policy(&termination_policy));
     configure_default_stderr(strand, global, &mut command)?;
     let mut stdin_pipe = None;
     let mut stdout_pipe = None;
     let mut stderr_pipe = None;
-    let stderr_inherit = stderr.is_nil();
-    let stderr_merge = !stderr_inherit && stderr.eq(strand, output);
+    let stderr_inherit = io.stderr.is_nil();
+    let stderr_merge = !stderr_inherit && io.stderr.eq(strand, io.output);
 
     let (
         stdin_negotiated,
@@ -575,12 +619,13 @@ async fn run<'v, 's>(
         send_guard,
         _stderr_guard,
     ) = {
-        let recv_guard = configure_negotiated_input(strand, global, &mut command, input).await?;
-        let send_guard = configure_negotiated_output(strand, global, &mut command, output).await?;
+        let recv_guard = configure_negotiated_input(strand, global, &mut command, io.input).await?;
+        let send_guard =
+            configure_negotiated_output(strand, global, &mut command, io.output).await?;
         let stderr_guard = if stderr_inherit || stderr_merge {
             None
         } else {
-            configure_negotiated_output(strand, global, &mut command, stderr).await?
+            configure_negotiated_output(strand, global, &mut command, io.stderr).await?
         };
         let sn_in = recv_guard.is_some();
         let sn_out = send_guard.is_some();
@@ -588,14 +633,14 @@ async fn run<'v, 's>(
         (sn_in, sn_out, sn_err, recv_guard, send_guard, stderr_guard)
     };
 
-    if !stdin_negotiated && !configure_direct_input(strand, global, &mut command, input).await? {
+    if !stdin_negotiated && !configure_direct_input(strand, global, &mut command, io.input).await? {
         let (parent_stdin, child_stdin) = vfs.pipe().await.into_sys(strand)?;
         command.stdin(child_stdin).into_sys(strand)?;
         stdin_pipe = Some(parent_stdin);
     }
 
-    let stdout_direct =
-        stdout_negotiated || configure_direct_output(strand, global, &mut command, output).await?;
+    let stdout_direct = stdout_negotiated
+        || configure_direct_output(strand, global, &mut command, io.output).await?;
     if stderr_merge {
         if stdout_negotiated {
             command
@@ -609,12 +654,12 @@ async fn run<'v, 's>(
                 )
                 .into_sys(strand)?;
         } else if stdout_direct {
-            if output.is_nil() || output.eq(strand, Singleton::IterNull) {
+            if io.output.is_nil() || io.output.eq(strand, Singleton::IterNull) {
                 command.stderr_null();
-            } else if global.types.stdout.cast(output).is_some() {
+            } else if global.types.stdout.cast(io.output).is_some() {
                 command.stderr_inherit_stdout().into_sys(strand)?;
             } else {
-                if let Some(file) = global.types.file.cast(output) {
+                if let Some(file) = global.types.file.cast(io.output) {
                     let stdio = file
                         .enter(strand, async |strand, inst| {
                             File::command_send(inst, strand).await
@@ -642,7 +687,7 @@ async fn run<'v, 's>(
     if !stderr_inherit
         && !stderr_merge
         && !stderr_negotiated
-        && !configure_direct_stderr(strand, global, &mut command, stderr).await?
+        && !configure_direct_stderr(strand, global, &mut command, io.stderr).await?
     {
         let (child_stderr, parent_stderr) = vfs.pipe().await.into_sys(strand)?;
         command.stderr(child_stderr).into_sys(strand)?;
@@ -663,9 +708,9 @@ async fn run<'v, 's>(
                     strand,
                     &mut proc,
                     name,
-                    input,
-                    output,
-                    (!stderr_inherit && !stderr_merge).then_some(stderr),
+                    io.input,
+                    io.output,
+                    (!stderr_inherit && !stderr_merge).then_some(io.stderr),
                     stdin,
                     stdout,
                     stderr_pipe,
@@ -692,7 +737,7 @@ async fn dispatch_run<'v, 's>(
 ) -> Result<'v, 's, ()> {
     strand
         .with_slots(async move |strand, [mut input, mut output, mut stderr]| {
-            let (args, cleanup) = resolve_io(
+            let (args, cleanup, policy) = resolve_io(
                 strand,
                 global,
                 args,
@@ -702,7 +747,19 @@ async fn dispatch_run<'v, 's>(
             )
             .await?;
 
-            let res = run(strand, name, args, global, &input, &output, &stderr).await;
+            let res = run(
+                strand,
+                name,
+                args,
+                global,
+                RunIo {
+                    input: &input,
+                    output: &output,
+                    stderr: &stderr,
+                    policy_override: policy,
+                },
+            )
+            .await;
             cleanup_io(strand, global, &input, &output, &stderr, cleanup).await;
             res
         })

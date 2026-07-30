@@ -125,7 +125,7 @@ impl DurationAnnex {
         fmt!(strand, w, "{}.{}s", secs, frac)
     }
 
-    fn to_std_duration<'v, 's>(
+    pub(crate) fn to_std_duration<'v, 's>(
         &self,
         strand: &mut Strand<'v, 's>,
     ) -> Result<'v, 's, std::time::Duration> {
@@ -195,12 +195,13 @@ fn format_datetime_rfc3339<'v, 's>(
         .map_err(|err| Error::runtime(strand, err))
 }
 
-fn coerce_sleep_duration<'v, 's>(
+pub(crate) fn coerce_duration<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    value: Slot<'v, '_>,
+    value: &dolang::runtime::Value<'v>,
+    context: &str,
 ) -> Result<'v, 's, std::time::Duration> {
-    if let Some(duration) = global.types.duration.cast(&value) {
+    if let Some(duration) = global.types.duration.cast(value) {
         return duration.enter_sync(strand, |strand, duration| {
             duration.annex().to_std_duration(strand)
         });
@@ -210,7 +211,7 @@ fn coerce_sleep_duration<'v, 's>(
         if i < 0 {
             return Err(Error::runtime(
                 strand,
-                "sleep duration must be non-negative",
+                format!("{context} must be non-negative"),
             ));
         }
         let secs = u64::try_from(i).map_err(|_| Error::overflow(strand))?;
@@ -221,7 +222,7 @@ fn coerce_sleep_duration<'v, 's>(
         if !f.is_finite() || f < 0.0 {
             return Err(Error::runtime(
                 strand,
-                "sleep duration must be a non-negative finite number",
+                format!("{context} must be a non-negative finite number"),
             ));
         }
         return Ok(std::time::Duration::from_secs_f64(f));
@@ -229,7 +230,7 @@ fn coerce_sleep_duration<'v, 's>(
 
     Err(Error::type_error(
         strand,
-        "sleep argument must be a Duration, integer, or Float",
+        format!("{context} must be a Duration, integer, or Float"),
     ))
 }
 
@@ -484,13 +485,13 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         .module("time")
         .function("sleep", async move |strand, args, _out| {
             let ([duration], []) = unpack!(strand, args, 1, 0)?;
-            let duration = coerce_sleep_duration(strand, global, duration)?;
+            let duration = coerce_duration(strand, global, &duration, "sleep duration")?;
             tokio::time::sleep(duration).await;
             Ok(())
         })
         .function("timeout", async move |strand, args, out| {
             let ([duration, block], []) = unpack!(strand, args, 2, 0)?;
-            let duration = coerce_sleep_duration(strand, global, duration)?;
+            let duration = coerce_duration(strand, global, &duration, "timeout duration")?;
             let interrupt = strand.interrupt_token().nested();
             let (abort, reg) = AbortHandle::new_pair();
             let interrupt_clone = interrupt.clone();

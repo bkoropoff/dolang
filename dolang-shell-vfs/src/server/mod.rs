@@ -628,6 +628,8 @@ impl Connection {
                 }
             };
         }
+        cmd.process_control(req.process_control);
+        cmd.termination_policy(req.termination_policy);
 
         if let Err(error) = self
             .configure_spawn_stdio(context, &mut cmd, req.stdin, req.stdout, req.stderr)
@@ -769,7 +771,11 @@ impl Connection {
                 let mut child = child.0.into_inner();
                 match context.cancel_guard(async |_| child.wait().await).await {
                     Ok(result) => result,
-                    Err(_) => child.terminate().await,
+                    Err(_) => child.terminate().await.and_then(|status| {
+                        status.ok_or_else(|| {
+                            io::Error::other("process was orphaned during cancelled wait").into()
+                        })
+                    }),
                 }
                 .map_err(wire_error)
             }
