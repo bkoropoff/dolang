@@ -5,11 +5,12 @@ text.
 
 ## Types
 
-| Type                      | Description                           |
-| ------------------------- | ------------------------------------- |
-| [`Console`](./console.md) | Destination for human-readable output |
-| [`Style`](./style.md)     | Reusable terminal style               |
-| [`Text`](./text.md)       | Validated terminal presentation       |
+| Type                                 | Description                           |
+| ------------------------------------ | ------------------------------------- |
+| [`Console`](./console.md)            | Destination for human-readable output |
+| [`SinkConsole`](./sink-console.md)   | Console over an ordinary sink         |
+| [`Style`](./style.md)                | Reusable terminal style               |
+| [`Text`](./text.md)                  | Validated terminal presentation       |
 
 ## Style options
 
@@ -46,8 +47,10 @@ must be between 0 and 255. Color options also accept `:INHERIT:`.
 
 ### `console`
 
-The [`Console`](./console.md): where `echo`, `print`, and undirected child
-process output go. Follows extension terminal takeover.
+The host [`Console`](./console.md). Follows extension terminal takeover.
+
+Naming it pins to it: unlike [`output()`](#output), it is not intercepted by an
+enclosing [`capture`](#capture-console-func-args).
 
 ### `have_terminal`
 
@@ -55,12 +58,80 @@ Whether stderr was a terminal when the process started.
 
 ## Functions
 
-### `sink()`
+### `output()`
 
-Returns the console output currently in effect. Today this is always
-[`console`](#console).
+Returns the *ambient* console: the one installed by an enclosing
+[`capture`](#capture-console-func-args), or [`console`](#console) if there is
+none. This is where `echo`, `print`, diagnostics, and undirected child process
+output go.
 
 **Returns:** [`Console`](./console.md)
+
+### `capture console func ...args`
+
+Runs a callable with `console` installed as the ambient console, then flushes
+it and restores the previous one.
+
+`console` may be any [`Console`](./console.md), or any
+[sink](../std/sink.md) — a sink is wrapped in a
+[`SinkConsole`](./sink-console.md), which frames per the ambient
+[I/O mode](../shell/index.md#with_io_mode-mode-func).
+
+The override is inherited by strands spawned inside the call.
+[`console`](#console) is *not* intercepted; it pins to the host.
+
+**Parameters:**
+
+| Name      | Type                            | Description                           |
+| --------- | ------------------------------- | ------------------------------------- |
+| `console` | [`Console`](./console.md)\|sink | Destination to install                |
+| `func`    | callable                        | Block to run                          |
+| `...`     |                                 | Additional arguments passed to `func` |
+
+**Returns:** Return value of `func`.
+
+```
+let lines = []
+term.capture $lines do
+  echo "Hello, Alice!"
+assert_eq $lines ["Hello, Alice!"]
+```
+
+The scope always ends with a flush, so an unterminated `print` still arrives:
+
+```
+let out = []
+term.capture $out do print hi
+assert_eq $out ["hi"]
+```
+
+### `sub func :trim? ...args`
+
+Runs a callable and returns its console output as a string. The human-stream
+counterpart to [`proc.sub`](../proc/index.md#sub-func-trim), which captures a
+child's *data* stream.
+
+Capture is verbatim: no framing and no I/O mode, so `echo` still terminates and
+`print` still does not. The output must be valid UTF-8. One final line ending
+(LF or CRLF) is removed unless `trim: false`.
+
+**Parameters:**
+
+| Name   | Type                      | Description                                     |
+| ------ | ------------------------- | ----------------------------------------------- |
+| `func` | callable                  | Block to run                                    |
+| `trim` | [`Bool`](../std/bool.md)? | Strip one trailing line ending (default `true`) |
+| `...`  |                           | Additional arguments passed to `func`           |
+
+**Returns:** [`Str`](../std/str.md)
+
+```
+let greeting = term.sub do greet Alice
+assert_eq $greeting "Hello, Alice!"
+```
+
+Styling is off inside a capture — a capture is not a terminal — so an assertion
+on captured text behaves the same piped and on a terminal.
 
 ### `echo ...args`
 

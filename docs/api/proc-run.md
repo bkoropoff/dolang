@@ -104,12 +104,16 @@ output is copied to the console instead of to the inherited stream. Naming a
 handle pins the channel to exactly what it names:
 
 ```
-# Follows the console — pumped through a progress display if one is active.
+# Follows the console — pumped through a progress display or capture.
 run mytool
 
 # The real stream, whatever is happening on the terminal.
 run mytool stdout: $shell.stdout
 ```
+
+An undirected `stderr:` is likewise captured by an enclosing
+[`term.capture`](./term/index.md#capture-console-func-args); naming
+`$shell.stderr` opts out, exactly as it opts out of takeover.
 
 See [Terminal output](../shell/terminal-output.md) for the full model.
 
@@ -147,6 +151,14 @@ string:
 ```
 let kernel = sub do run.uname -r
 echo "Kernel: $kernel"
+```
+
+That is the *data* stream. For what the program told a person, use
+[`term.sub`](./term/index.md#sub-func-trim-args), which captures the console
+and so picks up an undirected stderr:
+
+```
+let complaints = term.sub do run.mytool
 ```
 
 ### Environment

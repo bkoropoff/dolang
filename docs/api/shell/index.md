@@ -168,8 +168,10 @@ A [`Stderr`](./stderr.md) handle for the process's standard error.
 
 Not the same thing as [`term.console`](../term/console.md): `shell.stderr`
 always writes to the real stream, while the console follows an extension that
-has taken the terminal over. Use `shell.stderr` when you specifically mean the
-error stream, and `term.console` for human-readable output.
+has taken the terminal over or a
+[`term.capture`](../term/index.md#capture-console-func-args). Use `shell.stderr`
+when you specifically mean the error stream, and `term.console` for
+human-readable output.
 
 Passing one of these three to [`run`](../proc/index.md) as `stdin:`, `stdout:`,
 or `stderr:` hands the child the real stream and opts the channel out of console

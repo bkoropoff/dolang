@@ -289,11 +289,9 @@ impl<'v> Value<'v> {
         self.0 = Repr::UNINIT;
     }
 
-    pub(crate) fn is_instance_of(
-        &self,
-        strand: &mut Strand<'v, '_>,
-        input: impl Input<'v>,
-    ) -> bool {
+    /// Tests whether this value is an instance of a type, following nominal
+    /// supertypes as the `isa` operator does.
+    pub fn is_instance_of(&self, strand: &mut Strand<'v, '_>, input: impl Input<'v>) -> bool {
         strand.with_slots_sync(|strand, [mut self_ty, mut ty]| {
             self.op_type(strand, Slot::reborrow(&mut self_ty));
             Output::set(strand, &mut ty, input);

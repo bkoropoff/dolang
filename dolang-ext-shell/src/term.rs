@@ -3,16 +3,42 @@ use dolang::{
     compile::Compiler,
     runtime::{
         Arg, Args, Error, Format, Instance, Object, Output, Result, Slot, State, Strand, Sym,
-        Value,
+        Value, method,
         object::{Mut, Ref, TypeBuilder},
         unpack,
         value::{StrEmbryo, View},
         vm::Builder,
     },
 };
-use tokio::io::AsyncWriteExt;
 
-use crate::{console::Console, error::ErrorExt as _, global::Global};
+use crate::{
+    console::{self, HostConsole, SubConsole},
+    global::Global,
+    io_mode::strip_line_ending,
+};
+
+/// Runs `f` with `console` installed as the ambient console for this strand.
+///
+/// The override lives in a strand-local GC root, so it is inherited by strands
+/// spawned inside `f` and restored on every path out.
+async fn with_capture<'v, 's, R>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    console: &Slot<'v, '_>,
+    f: impl AsyncFnOnce(&mut Strand<'v, 's>) -> R,
+) -> R {
+    strand
+        .with_slots(async move |strand, [mut prev]| {
+            let mut root = global.capture.slot(strand);
+            Output::set(strand, &mut prev, &root);
+            Output::set(strand, &mut root, console);
+            let result = f(strand).await;
+            let mut root = global.capture.slot(strand);
+            Output::set(strand, &mut root, &prev);
+            result
+        })
+        .await
+}
 
 const BOLD: usize = 0;
 const DIM: usize = 1;
@@ -985,24 +1011,79 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         inherit,
     } = keys;
     let backtrace = builder.sym("backtrace");
+    let trim = builder.sym("trim");
 
     builder
         .module("term")
         .value("Text", global.types.text)
         .value("Style", global.types.style)
         .value("Console", global.types.console)
+        .value("SinkConsole", global.types.sink_console)
         .value("have_terminal", global.terminal.stderr_is_terminal)
-        .object("console", global.types.console, Console)
-        .function("sink", async move |strand, args, out| {
+        .object("console", global.types.host_console, HostConsole)
+        .function("output", async move |strand, args, out| {
             let ([], []) = unpack!(strand, args, 0, 0)?;
-            // Currently always the console itself. Once terminal output can be
-            // captured, this returns the installed capture sink instead, and
-            // only this body changes.
-            global.types.console.create(strand, Console, out);
+            // The *ambient* console: whatever an enclosing `capture` installed,
+            // else the host. `term.console` is a name, so it pins instead.
+            let root = global.capture.slot(strand);
+            if root.is_nil() {
+                global.types.host_console.create(strand, HostConsole, out);
+            } else {
+                Output::set(strand, out, &root);
+            }
             Ok(())
         })
+        .function_with_slots(
+            "capture",
+            async move |strand, args, out, [mut console, mut tmp]| {
+                let ([target, func], [], rest) = unpack!(strand, args, 2, 0, ...)?;
+                if target.is_instance_of(strand, global.types.console) {
+                    Output::set(strand, &mut console, target);
+                } else {
+                    // Any ordinary sink works; the adapter supplies the rest of
+                    // the console interface.
+                    console::create_sink_console(strand, &target, Slot::reborrow(&mut console))
+                        .await?;
+                }
+                let result = with_capture(strand, global, &console, async move |strand| {
+                    func.call(strand, rest, out).await
+                })
+                .await;
+                // An unterminated `print` is only visible once the partial line
+                // is emitted, so the scope always ends with a flush.
+                let flushed = method!(strand, &console, global.syms.flush, &mut tmp).await;
+                result.and(flushed)
+            },
+        )
+        .function_with_slots(
+            "sub",
+            async move |strand, args, out, [mut console, mut tmp]| {
+                let ([func], [trim], rest) = unpack!(strand, args, 1, 0, trim = None, ...)?;
+                let trim = trim.map(|v| v.to_bool(strand)).unwrap_or(true);
+                global
+                    .types
+                    .sub_console
+                    .create(strand, SubConsole::default(), &mut console);
+                with_capture(strand, global, &console, async move |strand| {
+                    func.call(strand, rest, &mut tmp).await
+                })
+                .await?;
+                global.types.sub_console.cast(&console).unwrap().enter_sync(
+                    strand,
+                    |strand, inst| {
+                        let sub = inst.borrow(strand)?;
+                        let mut value = sub.text();
+                        if trim {
+                            value = strip_line_ending(value);
+                        }
+                        Output::set(strand, out, value);
+                        Ok(())
+                    },
+                )
+            },
+        )
         .function("echo", async move |strand, args, _| {
-            let ansi = global.terminal.ansi;
+            let ansi = console::ansi(strand);
             let mut output = String::new();
             let mut space = false;
             for arg in args {
@@ -1035,15 +1116,9 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                     }
                 }
             }
-            output.push('\n');
-            global
-                .terminal
-                .writer
-                .lock()
-                .await
-                .write_all(output.as_bytes())
-                .await
-                .map_err(|error| error.into_sys(strand))
+            // The console supplies the terminator: only it knows what its own
+            // line ending is.
+            console::writeln(strand, output.as_bytes()).await
         })
         .function("print", async move |strand, args, _| {
             let (
@@ -1098,17 +1173,10 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 global,
                 &mut output,
                 style,
-                global.terminal.ansi,
+                console::ansi(strand),
                 args,
             )?;
-            global
-                .terminal
-                .writer
-                .lock()
-                .await
-                .write_all(output.as_bytes())
-                .await
-                .map_err(|error| error.into_sys(strand))
+            console::write(strand, output.as_bytes()).await
         })
         .function("style", async move |strand, args, out| {
             apply_style(strand, global, keys, Style::default(), args, out)

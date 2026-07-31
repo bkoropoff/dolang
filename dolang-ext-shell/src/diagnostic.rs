@@ -11,10 +11,8 @@ use dolang::{
     compile::{Compiler, Diag},
     runtime::{Error, Frame, Result, Strand, Value},
 };
-use tokio::io::AsyncWriteExt;
 
 use crate::{
-    global::Global,
     syntax::{SemanticToken, highlight_range},
     term,
 };
@@ -222,19 +220,9 @@ async fn write_preformatted_stderr<'v, 's>(
     strand: &mut Strand<'v, 's>,
     rendered: &str,
 ) -> Result<'v, 's, ()> {
-    let global = strand.state::<Global<'v>>();
-    let rendered = term::filter_preformatted(strand, rendered, global.terminal.ansi)?;
-    let global = strand.state::<Global<'v>>();
-    let result = {
-        let mut writer = global.terminal.writer.lock().await;
-        async {
-            writer.write_all(rendered.as_bytes()).await?;
-            writer.write_all(b"\n").await?;
-            writer.flush().await
-        }
-        .await
-    };
-    result.map_err(|error| Error::runtime(strand, error))
+    let rendered = term::filter_preformatted(strand, rendered, crate::console::ansi(strand))?;
+    crate::console::writeln(strand, rendered.as_bytes()).await?;
+    crate::console::flush(strand).await
 }
 
 pub async fn print_error_stderr<'v, 's>(

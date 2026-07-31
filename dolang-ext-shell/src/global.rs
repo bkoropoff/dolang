@@ -8,7 +8,7 @@ use std::{
 
 use dolang::runtime::{
     Sym, Type,
-    strand::LocalKey,
+    strand::{LocalKey, LocalRootKey},
     value::TypeObject,
     vm::{Builder, Stateful},
 };
@@ -18,7 +18,7 @@ use tokio::{
 };
 
 use crate::{
-    console::Console,
+    console::{Console, HostConsole, SinkConsole, SubConsole},
     error::{
         AlreadyExistsError, NotFoundError, PermissionDeniedError, ProcError, SysError,
         SysErrorObject, TimedOutError, UnsupportedError,
@@ -69,6 +69,9 @@ pub(crate) struct Types<'v> {
     pub(crate) stdout: Type<'v, Stdout>,
     pub(crate) stderr: Type<'v, Stderr>,
     pub(crate) console: Type<'v, Console>,
+    pub(crate) host_console: Type<'v, HostConsole>,
+    pub(crate) sink_console: Type<'v, SinkConsole>,
+    pub(crate) sub_console: Type<'v, SubConsole>,
     pub(crate) date_time: Type<'v, DateTime>,
     pub(crate) duration: Type<'v, Duration>,
     pub(crate) os_info: Type<'v, OsInfo>,
@@ -111,6 +114,9 @@ pub(crate) struct Syms<'v> {
     pub(crate) char_device: Sym<'v, 'v>,
     pub(crate) chunk: Sym<'v, 'v>,
     pub(crate) close: Sym<'v, 'v>,
+    pub(crate) write: Sym<'v, 'v>,
+    pub(crate) writeln: Sym<'v, 'v>,
+    pub(crate) flush: Sym<'v, 'v>,
     pub(crate) dir: Sym<'v, 'v>,
     pub(crate) fifo: Sym<'v, 'v>,
     pub(crate) file: Sym<'v, 'v>,
@@ -165,6 +171,12 @@ pub(crate) struct Global<'v> {
     pub(crate) types: Types<'v>,
     pub(crate) syms: Syms<'v>,
     pub(crate) local: LocalKey<'v, Local>,
+    /// The console installed by an enclosing `term.capture`, or `nil` for none.
+    ///
+    /// A strand-local root rather than a `Local` field because it holds a GC
+    /// value; it is duplicated into derived strands at spawn, so a capture
+    /// covers whatever the block spawns.
+    pub(crate) capture: LocalRootKey<'v>,
     pub(crate) args: RefCell<ArgsData>,
     pub(crate) program: RefCell<Option<ProgramSource>>,
 }
@@ -245,6 +257,20 @@ impl<'v> Global<'v> {
             .nominal_supertype(path)
             .build();
 
+        let console = builder.register_type::<Console>();
+        let host_console = builder
+            .build_type::<HostConsole>((), ())
+            .nominal_supertype(console)
+            .build();
+        let sink_console = builder
+            .build_type::<SinkConsole>((), ())
+            .nominal_supertype(console)
+            .build();
+        let sub_console = builder
+            .build_type::<SubConsole>((), ())
+            .nominal_supertype(console)
+            .build();
+
         let stderr_is_terminal = std::io::stderr().is_terminal();
         Self {
             stdio: Stdio {
@@ -282,7 +308,10 @@ impl<'v> Global<'v> {
                 stdin: builder.register_type(),
                 stdout: builder.register_type(),
                 stderr: builder.register_type(),
-                console: builder.register_type(),
+                console,
+                host_console,
+                sink_console,
+                sub_console,
                 date_time: builder.register_type::<DateTime>(),
                 duration: builder.register_type::<Duration>(),
                 os_info: builder.register_type(),
@@ -353,6 +382,9 @@ impl<'v> Global<'v> {
                 char_device: builder.sym("CHAR_DEVICE"),
                 chunk: builder.sym("CHUNK"),
                 close: builder.sym("close"),
+                write: builder.sym("write"),
+                writeln: builder.sym("writeln"),
+                flush: builder.sym("flush"),
                 dir: builder.sym("DIR"),
                 fifo: builder.sym("FIFO"),
                 file: builder.sym("FILE"),
@@ -395,6 +427,7 @@ impl<'v> Global<'v> {
                 rm_control: builder.sym("rm_control"),
             },
             local: builder.local(),
+            capture: builder.local_root(),
             args: RefCell::new(Rc::from([])),
             program: RefCell::new(None),
         }

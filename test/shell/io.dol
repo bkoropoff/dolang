@@ -32,7 +32,9 @@ def handle_identity()
   assert_eq (type shell.stdin) $shell.Stdin
   assert_eq (type shell.stdout) $shell.Stdout
   assert_eq (type shell.stderr) $shell.Stderr
-  assert_eq (type term.console) $term.Console
+  # `term.Console` is the interface; the host console is a subtype of it that
+  # identifies itself as `shell.Console`.
+  assert (type term.console term.Console)
 
   # The handles are stateless views on the process's streams, so any two of the
   # same kind are interchangeable.
@@ -40,9 +42,8 @@ def handle_identity()
   assert (shell.stdout != shell.stderr)
   assert (shell.stderr != term.console)
 
-  # Until terminal output can be captured, the current console target is always
-  # the console itself.
-  assert_eq (term.sink()) $term.console
+  # With no capture installed, the ambient console is the host console.
+  assert_eq (term.output()) $term.console
 
 #[test]
 def write_rejects_non_byte_values()

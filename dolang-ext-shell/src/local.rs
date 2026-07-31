@@ -194,6 +194,13 @@ pub(crate) struct Local {
     security: RefCell<Option<SecurityInfo>>,
     io_mode: Cell<IoMode>,
     background: Cell<bool>,
+    /// Set while dispatching a write into the ambient console.
+    ///
+    /// A console written in Do may itself call `echo`; without this guard that
+    /// would route straight back into the same console and recurse until the
+    /// call-depth limit. While set, console writes bypass the capture and go to
+    /// the host.
+    capturing: Cell<bool>,
     termination_policy: RefCell<TerminationPolicy>,
     invocation: RefCell<InvocationOverride>,
 }
@@ -212,6 +219,7 @@ impl<'v> strand::Local<'v> for Local {
             security: RefCell::new(None),
             io_mode: Cell::new(IoMode::Line),
             background: Cell::new(false),
+            capturing: Cell::new(false),
             termination_policy: RefCell::new(TerminationPolicy::default()),
             invocation: RefCell::new(InvocationOverride::default()),
         }
@@ -227,6 +235,9 @@ impl<'v> strand::Local<'v> for Local {
             security: self.security.clone(),
             io_mode: Cell::new(self.io_mode.get()),
             background: Cell::new(self.background.get() || kind == strand::InheritKind::Background),
+            // Inherited so that a strand spawned from inside a console's own
+            // write stays guarded rather than routing back into it.
+            capturing: Cell::new(self.capturing.get()),
             termination_policy: self.termination_policy.clone(),
             invocation: self.invocation.clone(),
         }
@@ -295,6 +306,14 @@ impl Local {
 
     pub(crate) fn background(&self) -> bool {
         self.background.get()
+    }
+
+    pub(crate) fn capturing(&self) -> bool {
+        self.capturing.get()
+    }
+
+    pub(crate) fn set_capturing(&self, v: bool) -> bool {
+        self.capturing.replace(v)
     }
 
     pub(crate) fn termination_policy(&self) -> TerminationPolicy {

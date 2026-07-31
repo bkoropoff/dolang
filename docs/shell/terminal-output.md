@@ -62,6 +62,42 @@ Both usually write to the same place, which is why they are easy to confuse:
 Use the console for anything a person reads; use `shell.stderr` when you
 specifically mean the stream.
 
+## Capturing the Console
+
+[`term.capture`](../api/term/index.md#capture-console-func-args) installs a
+console for the duration of a call, and
+[`term.sub`](../api/term/index.md#sub-func-trim-args) returns what was written
+as a string. This is the same pinning rule one level further in: `echo`,
+`print`, diagnostics, and undirected child output are anonymous and follow
+[`term.output()`](../api/term/index.md#output), while
+[`term.console`](../api/term/console.md) is a name and pins to the host.
+
+```
+let greeting = term.sub do greet Alice
+assert_eq $greeting "Hello, Alice!"
+```
+
+The pairing with `proc.sub` makes the three destinations self-documenting:
+
+```
+term.sub do run mytool     # what mytool told a person   (its stderr)
+sub do run mytool          # what mytool produced        (its stdout)
+```
+
+A capture is inherited by strands spawned inside it, and nests — the innermost
+one wins, and the outer resumes when it ends. Since a console is evaluated
+before the override it installs, a capture can never route into a strand that
+already inherited it, so cycles are impossible by construction.
+
+A plain sink passed to `capture` is wrapped in a
+[`SinkConsole`](../api/term/sink-console.md), which is a bytestream-to-value
+boundary and therefore honors the I/O mode. `term.sub` sits on the byte side
+instead and reports exactly what was written.
+
+Styling is off inside a capture: a capture is not a terminal, and without this
+an assertion on captured text would pass in CI and fail on a developer's
+terminal.
+
 ## Child Process Output
 
 A child process launched with [`run`](../api/proc/index.md) and no `stdout:` or
@@ -70,10 +106,14 @@ console. If an extension has taken the terminal over, its output is copied to
 the console rather than to the inherited descriptor, so it cannot scribble over
 a progress display. Otherwise it inherits the stream directly.
 
+The same applies to a capture: an undirected child's stderr is console-bound,
+so an enclosing `term.capture` takes it. Child stdout is the data stream and
+keeps going to the implicit sink.
+
 Naming a handle pins the channel to exactly what it names:
 
 ```
-# Follows the console — pumped through a progress display if one is active.
+# Follows the console — pumped through a progress display or capture.
 run mytool
 
 # The real stream, whatever is happening on the terminal.

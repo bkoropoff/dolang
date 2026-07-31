@@ -244,7 +244,7 @@ pub fn is_terminal() -> bool {
 /// Whether ANSI styling should be emitted to stderr, per the same
 /// NO_COLOR/FORCE_COLOR/tty policy `term.echo`/`term.print` use.
 pub fn ansi_enabled<'v>(strand: &Strand<'v, '_>) -> bool {
-    strand.state::<Global<'v>>().terminal.ansi
+    crate::console::ansi(strand)
 }
 
 /// Write a line (newline appended) through the shared terminal writer,
@@ -258,16 +258,7 @@ pub async fn write_terminal_line<'v, 's>(
     strand: &mut Strand<'v, 's>,
     line: &str,
 ) -> Result<'v, 's, ()> {
-    let global = strand.state::<Global<'v>>();
-    let mut guard = global.terminal.writer.lock().await;
-    guard
-        .write_all(line.as_bytes())
-        .await
-        .map_err(|error| Error::runtime(strand, error))?;
-    guard
-        .write_all(b"\n")
-        .await
-        .map_err(|error| Error::runtime(strand, error))
+    crate::console::writeln(strand, line.as_bytes()).await
 }
 
 /// Redirect terminal output (`term.echo`/`term.print` and default child stderr)

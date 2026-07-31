@@ -427,7 +427,7 @@ where
         if read == 0 {
             break;
         }
-        crate::console::write_bytes(strand, &buf[..read]).await?;
+        crate::console::write(strand, &buf[..read]).await?;
     }
     Ok(())
 }
@@ -668,8 +668,11 @@ async fn run<'v, 's>(
         && console_owned
         && global.terminal.stdout_is_terminal
         && global.types.stdout.cast(io.value.stdout).is_some();
+    // A capture routes regardless of whether stderr is a terminal: gating it on
+    // a tty would make capture work interactively and silently not in CI.
+    let captured = !global.capture.slot(strand).is_nil();
     let stderr_to_console =
-        !io.explicit.stderr && console_owned && global.terminal.stderr_is_terminal;
+        !io.explicit.stderr && (captured || (console_owned && global.terminal.stderr_is_terminal));
 
     let mut stdin_pipe = None;
     let mut stdout_pipe = None;
