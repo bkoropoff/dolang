@@ -13,7 +13,8 @@ use dolang_shell_vfs::Signal;
 
 use crate::{
     global::Global,
-    local::{ChannelMode, TerminationPolicy},
+    io_mode::{ValueEncoding, encode_value, strip_line_ending},
+    local::TerminationPolicy,
     time::coerce_duration,
 };
 
@@ -180,6 +181,10 @@ impl Capture {
     pub(crate) fn new() -> Self {
         Self(String::new())
     }
+
+    pub(crate) fn append(&mut self, value: &str) {
+        self.0.push_str(value);
+    }
 }
 
 impl Default for Capture {
@@ -221,9 +226,19 @@ impl<'v> Object<'v> for Capture {
         strand: &'a mut Strand<'v, 's>,
         value: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
+        let global = strand.state::<Global<'v>>();
+        let local = global.local.get(strand);
+        let bytes = encode_value(
+            strand,
+            &value,
+            local.io_mode(),
+            ValueEncoding::Display,
+            local.target().operating_system,
+        )?;
+        let value = std::str::from_utf8(&bytes)
+            .map_err(|_| Error::runtime(strand, "sub: captured invalid UTF-8"))?;
         let mut capture = this.borrow_mut(strand)?;
-        value.display(strand, &mut capture.0)?;
-        capture.0.push('\n');
+        capture.append(value);
         Ok(())
     }
 }
@@ -238,28 +253,11 @@ pub(crate) fn configure_compiler<'a>(compiler: &mut Compiler<'a>) {
 }
 
 pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Global<'v>>) {
-    let capture_ty = builder.register_type::<Capture>();
+    let capture_ty = global.types.capture;
     let trim = builder.sym("trim");
 
     builder
         .module("proc")
-        .function("io_mode", async move |strand, args, out| {
-            let ([mode, func], [], rest) = unpack!(strand, args, 2, 0, ...)?;
-            let mode = match mode.as_sym(strand) {
-                Some(sym) if sym == global.syms.line => ChannelMode::Line,
-                Some(sym) if sym == global.syms.chunk => ChannelMode::Chunk,
-                _ => return Err(Error::value(strand, "mode must be :LINE: or :CHUNK:")),
-            };
-            let old_mode = {
-                let local = global.local.get(strand);
-                let old_mode = local.channel_mode();
-                local.set_channel_mode(mode);
-                old_mode
-            };
-            let res = func.call(strand, rest, out).await;
-            global.local.get(strand).set_channel_mode(old_mode);
-            res
-        })
         .function("with_policy", async move |strand, args, out| {
             let signal_sym = global.syms.signal;
             let grace_sym = global.syms.grace;
@@ -313,7 +311,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                     let capture = inst.borrow(strand)?;
                     let mut value = capture.0.as_str();
                     if trim {
-                        value = value.trim_end_matches(['\r', '\n'])
+                        value = strip_line_ending(value)
                     }
                     Output::set(strand, out, value);
                     Ok(())

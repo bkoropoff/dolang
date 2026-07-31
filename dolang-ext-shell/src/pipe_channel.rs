@@ -7,33 +7,24 @@ use std::{
     task::{Poll, Waker},
 };
 
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 
 use dolang::runtime::{
-    Error, Format, Instance, Object, Output, Result, Slot, State, Strand, Value,
+    Error, Instance, Object, Output, Result, Slot, State, Strand, Value,
     object::{Mut, Ref, TypeBuilder},
     unpack,
-    value::{Nil, TypeObject, View},
+    value::{Nil, TypeObject},
 };
 use dolang_shell_vfs::{AnyVfs, Vfs};
 
 use crate::{
     error::{ErrorExt as _, ResultExt as _},
     global::Global,
-    local::ChannelMode,
+    io_mode::{IoMode, ReadValue, ValueEncoding, encode_value, read_value},
 };
 
 type StdioSend = <AnyVfs as Vfs>::StdioSend;
 type StdioRecv = <AnyVfs as Vfs>::StdioRecv;
-
-struct BytesFormat(Vec<u8>);
-
-impl<'v> Format<'v> for BytesFormat {
-    fn write_str<'s>(&mut self, _strand: &mut Strand<'v, 's>, s: &str) -> Result<'v, 's, ()> {
-        self.0.extend_from_slice(s.as_bytes());
-        Ok(())
-    }
-}
 
 // ---------------------------------------------------------------------------
 // State machine
@@ -272,15 +263,28 @@ fn take_buffered_bytes<'v, 's>(
     strand: &mut Strand<'v, 's>,
     inner: &mut PipeChannelShared,
 ) -> Result<'v, 's, Option<Vec<u8>>> {
-    let channel_mode = match inner.buffered {
+    let io_mode = match inner.buffered {
         BufferedValue::Empty => return Ok(None),
-        BufferedValue::Line => ChannelMode::Line,
-        BufferedValue::Chunk => ChannelMode::Chunk,
+        BufferedValue::Line => IoMode::Line,
+        BufferedValue::Chunk => IoMode::Chunk,
     };
+    let operating_system = recv_inst
+        .annex()
+        .global
+        .local
+        .get(strand)
+        .target()
+        .operating_system;
 
     let mut recv_borrow = recv_inst.borrow_mut(strand)?;
     let mut slot = Mut::slot_mut::<0>(&mut recv_borrow);
-    let bytes = encode_value(strand, Slot::reborrow(&mut slot), channel_mode)?;
+    let bytes = encode_value(
+        strand,
+        &Slot::reborrow(&mut slot),
+        io_mode,
+        ValueEncoding::Display,
+        operating_system,
+    )?;
     Output::set(strand, slot, Nil);
     inner.buffered = BufferedValue::Empty;
     inner.wake_senders();
@@ -746,32 +750,6 @@ pub(crate) fn make_pair<'v, 's>(
         });
 }
 
-fn encode_value<'v, 's>(
-    strand: &mut Strand<'v, 's>,
-    value: Slot<'v, '_>,
-    channel_mode: ChannelMode,
-) -> Result<'v, 's, Vec<u8>> {
-    match value.view(strand) {
-        View::Str(s) => {
-            let str: String = s.into();
-            let mut bytes: Vec<u8> = str.into();
-            if channel_mode == ChannelMode::Line {
-                bytes.push(b'\n');
-            }
-            Ok(bytes)
-        }
-        View::Bin(s) => Ok(s.into()),
-        _ => {
-            let mut format = BytesFormat(Vec::new());
-            value.display(strand, &mut format)?;
-            if channel_mode == ChannelMode::Line {
-                format.0.push(b'\n');
-            }
-            Ok(format.0)
-        }
-    }
-}
-
 impl<'v> Object<'v> for PipeReceiver {
     const MODULE: &'v str = "proc";
     const NAME: &'v str = "PipeReceiver";
@@ -806,7 +784,7 @@ impl<'v> Object<'v> for PipeReceiver {
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, bool> {
         let shared = &this.annex().shared;
-        let channel_mode = this.annex().global.local.get(strand).channel_mode();
+        let io_mode = this.annex().global.local.get(strand).io_mode();
 
         loop {
             let recv_end = {
@@ -878,50 +856,26 @@ impl<'v> Object<'v> for PipeReceiver {
             };
 
             if let Some(mut reader) = recv_end {
-                match channel_mode {
-                    ChannelMode::Chunk => {
-                        let mut buf = vec![0u8; 8192];
-                        match reader.read(&mut buf).await {
-                            Ok(0) => {
-                                reader.discard();
-                                let mut inner = shared.borrow_mut();
-                                inner.state = PipeState::Value;
-                                inner.wake_senders();
-                                inner.wake_receivers();
-                                inner.wake_negotiators();
-                                continue;
-                            }
-                            Ok(n) => {
-                                buf.truncate(n);
-                                Output::set(strand, out, buf.as_slice());
-                                return Ok(true);
-                            }
-                            Err(e) => {
-                                return Err(e.into_sys(strand));
-                            }
-                        }
+                match read_value(&mut *reader, io_mode).await {
+                    Ok(None) => {
+                        reader.discard();
+                        let mut inner = shared.borrow_mut();
+                        inner.state = PipeState::Value;
+                        inner.wake_senders();
+                        inner.wake_receivers();
+                        inner.wake_negotiators();
+                        continue;
                     }
-                    ChannelMode::Line => {
-                        let mut line = String::new();
-                        match reader.read_line(&mut line).await {
-                            Ok(0) => {
-                                reader.discard();
-                                let mut inner = shared.borrow_mut();
-                                inner.state = PipeState::Value;
-                                inner.wake_senders();
-                                inner.wake_receivers();
-                                inner.wake_negotiators();
-                                continue;
-                            }
-                            Ok(_) => {
-                                let trimmed = line.trim_end_matches(['\r', '\n']).to_owned();
-                                Output::set(strand, out, trimmed.as_str());
-                                return Ok(true);
-                            }
-                            Err(e) => {
-                                return Err(e.into_sys(strand));
-                            }
-                        }
+                    Ok(Some(ReadValue::Line(line))) => {
+                        Output::set(strand, out, line.as_str());
+                        return Ok(true);
+                    }
+                    Ok(Some(ReadValue::Chunk(chunk))) => {
+                        Output::set(strand, out, chunk.as_slice());
+                        return Ok(true);
+                    }
+                    Err(e) => {
+                        return Err(e.into_sys(strand));
                     }
                 }
             }
@@ -1017,7 +971,9 @@ impl<'v> Object<'v> for PipeSender {
     ) -> Result<'v, 's, ()> {
         let shared = &this.annex().shared;
         let global = this.annex().global;
-        let channel_mode = global.local.get(strand).channel_mode();
+        let local = global.local.get(strand);
+        let io_mode = local.io_mode();
+        let operating_system = local.target().operating_system;
 
         loop {
             let send_end = {
@@ -1033,7 +989,7 @@ impl<'v> Object<'v> for PipeSender {
                         if !matches!(inner.buffered, BufferedValue::Empty) {
                             None
                         } else {
-                            inner.buffered = if channel_mode == ChannelMode::Chunk {
+                            inner.buffered = if io_mode == IoMode::Chunk {
                                 BufferedValue::Chunk
                             } else {
                                 BufferedValue::Line
@@ -1075,7 +1031,13 @@ impl<'v> Object<'v> for PipeSender {
             };
 
             if let Some(mut writer) = send_end {
-                let bytes = encode_value(strand, value, channel_mode)?;
+                let bytes = encode_value(
+                    strand,
+                    &value,
+                    io_mode,
+                    ValueEncoding::Display,
+                    operating_system,
+                )?;
                 match writer.write_all(&bytes).await {
                     Ok(()) => {
                         return Ok(());

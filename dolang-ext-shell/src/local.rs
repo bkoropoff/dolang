@@ -13,13 +13,7 @@ use dolang_shell_vfs::{
 };
 use dolang_shell_vfs::{Utf8TypedPathBuf, typed_path};
 
-use crate::shell_args::ArgsData;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ChannelMode {
-    Line,
-    Chunk,
-}
+use crate::{io_mode::IoMode, shell_args::ArgsData};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TerminationPolicy {
@@ -198,7 +192,7 @@ pub(crate) struct Local {
     vfs_exe: RefCell<Option<Utf8TypedPathBuf>>,
     target: RefCell<TargetInfo>,
     security: RefCell<Option<SecurityInfo>>,
-    channel_mode: Cell<ChannelMode>,
+    io_mode: Cell<IoMode>,
     background: Cell<bool>,
     termination_policy: RefCell<TerminationPolicy>,
     invocation: RefCell<InvocationOverride>,
@@ -216,7 +210,7 @@ impl<'v> strand::Local<'v> for Local {
             vfs_exe: RefCell::new(None),
             target: RefCell::new(TargetInfo::current()),
             security: RefCell::new(None),
-            channel_mode: Cell::new(ChannelMode::Line),
+            io_mode: Cell::new(IoMode::Line),
             background: Cell::new(false),
             termination_policy: RefCell::new(TerminationPolicy::default()),
             invocation: RefCell::new(InvocationOverride::default()),
@@ -231,7 +225,7 @@ impl<'v> strand::Local<'v> for Local {
             vfs_exe: self.vfs_exe.clone(),
             target: self.target.clone(),
             security: self.security.clone(),
-            channel_mode: Cell::new(self.channel_mode.get()),
+            io_mode: Cell::new(self.io_mode.get()),
             background: Cell::new(self.background.get() || kind == strand::InheritKind::Background),
             termination_policy: self.termination_policy.clone(),
             invocation: self.invocation.clone(),
@@ -291,12 +285,12 @@ impl Local {
         mem::replace(&mut *self.security.borrow_mut(), security)
     }
 
-    pub(crate) fn channel_mode(&self) -> ChannelMode {
-        self.channel_mode.get()
+    pub(crate) fn io_mode(&self) -> IoMode {
+        self.io_mode.get()
     }
 
-    pub(crate) fn set_channel_mode(&self, v: ChannelMode) {
-        self.channel_mode.set(v);
+    pub(crate) fn set_io_mode(&self, v: IoMode) {
+        self.io_mode.set(v);
     }
 
     pub(crate) fn background(&self) -> bool {

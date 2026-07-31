@@ -10,6 +10,47 @@ The `shell` module provides shell-context values and functions.
 
 ## Functions
 
+### `with_io_mode mode func ...`
+
+Runs a callable with the current strand's adapter I/O mode set for the duration
+of the call.
+
+In `:LINE:` mode, iterator adapters decode UTF-8, split input on line
+boundaries, and yield [`Str`](../std/str.md) values with either an LF or CRLF
+line ending removed. Sink adapters append the destination platform's line
+ending to the string form of each value. This is the default mode.
+
+In `:CHUNK:` mode, iterator adapters yield arbitrary-sized
+[`Bin`](../std/bin.md) values. Sink adapters write the string form of each value
+without adding a newline. Sink adapters write `Bin` values verbatim in both
+modes.
+
+The mode of the strand that owns an adapter determines its behavior. For an
+external process connected to a pipeline, this is the strand adjacent to the
+process. Adjacent external processes communicate in raw bytes regardless of
+mode.
+
+External-process adapters use the active VFS target's line ending. Interpreter
+stdin/stdout/stderr use the host platform. A text-mode file sink uses the target
+recorded when its handle was opened.
+
+**Parameters:**
+
+| Name   | Type                   | Description                           |
+| ------ | ---------------------- | ------------------------------------- |
+| `mode` | [`sym`](../std/sym.md) | `:LINE:` or `:CHUNK:`                 |
+| `func` | callable               | Block to run                          |
+| `...`  |                        | Additional arguments passed to `func` |
+
+**Returns:** Return value of `func`.
+
+```
+let chunks = []
+with_io_mode :CHUNK: do run gzip -c stdin: ["hello world"] stdout: $chunks
+
+assert (chunks[0].starts_with b"\x1f\x8b")
+```
+
 ### `exit code?`
 
 Exits the current shell with the given status code.

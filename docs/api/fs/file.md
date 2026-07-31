@@ -512,6 +512,7 @@ Writes a value to the file.
 **Text mode:**
 
 - If the value is binary data (`Bin`), writes it unmodified
-- Otherwise, converts to string and appends `\n`
+- Otherwise, converts to string and appends the line ending for the VFS target
+  on which the file handle was opened
 
 **Binary mode:** Writes bytes directly.

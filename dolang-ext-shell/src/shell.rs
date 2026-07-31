@@ -3,7 +3,7 @@ use std::{
     rc::Rc,
 };
 
-use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{self, AsyncWriteExt, BufReader};
 
 use dolang::runtime::object::fmt;
 
@@ -24,13 +24,15 @@ use crate::{
     error::{ErrorExt, ResultExt as _},
     fs::path::{PathAnnex, create_path_annex, path_from_value},
     global::{Global, ProgramSource},
+    io_mode::{IoMode, ReadValue, ValueEncoding, encode_value, read_value},
     local::{Env as LocalEnv, ProgramOverride},
     pipe_channel,
     shell_args::Args as ShellArgs,
 };
 use dolang::runtime::value::View;
 use dolang_shell_vfs::{
-    AnyVfs, Client, Query, SecurityInfo, TargetInfo, Utf8TypedPathBuf, Vfs as _, VfsSession,
+    AnyVfs, Client, OperatingSystem, Query, SecurityInfo, TargetInfo, Utf8TypedPathBuf, Vfs as _,
+    VfsSession,
 };
 use std::collections::HashMap;
 
@@ -135,19 +137,20 @@ impl<'v> Object<'v> for Stdin {
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, bool> {
-        let mut line = String::new();
-        if this
-            .borrow_mut(strand)?
-            .0
-            .read_line(&mut line)
+        let mode = strand.state::<Global<'v>>().local.get(strand).io_mode();
+        let value = read_value(&mut this.borrow_mut(strand)?.0, mode)
             .await
-            .map_err(|err| err.into_sys(strand))?
-            != 0
-        {
-            Output::set(strand, out, line.as_str());
-            Ok(true)
-        } else {
-            Ok(false)
+            .map_err(|err| err.into_sys(strand))?;
+        match value {
+            Some(ReadValue::Line(line)) => {
+                Output::set(strand, out, line.as_str());
+                Ok(true)
+            }
+            Some(ReadValue::Chunk(chunk)) => {
+                Output::set(strand, out, chunk.as_slice());
+                Ok(true)
+            }
+            None => Ok(false),
         }
     }
 }
@@ -196,23 +199,27 @@ impl<'v> Object<'v> for Stdout {
         value: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
         let global = strand.state::<Global<'v>>();
+        let local = global.local.get(strand);
+        let mode = local.io_mode();
+        let bytes = encode_value(
+            strand,
+            &value,
+            mode,
+            ValueEncoding::Display,
+            OperatingSystem::current(),
+        )?;
         if global.terminal.redirected.get() && global.terminal.stdout_is_terminal {
             // Route through the terminal writer so output goes through
             // the redirect target (e.g. MultiProgress::println).
-            let s = value.to_string(strand)?;
             let mut writer = global.terminal.writer.lock().await;
             writer
-                .write_all(s.as_bytes())
-                .await
-                .map_err(|e| e.into_sys(strand))?;
-            writer
-                .write_all(b"\n")
+                .write_all(&bytes)
                 .await
                 .map_err(|e| e.into_sys(strand))
         } else {
             this.borrow_mut(strand)?
                 .0
-                .write_all(value.to_string(strand)?.as_bytes())
+                .write_all(&bytes)
                 .await
                 .map_err(|err| err.into_sys(strand))
         }
@@ -257,14 +264,18 @@ impl<'v> Object<'v> for Stderr {
         value: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
         let global = strand.state::<Global<'v>>();
-        let s = value.to_string(strand)?;
+        let local = global.local.get(strand);
+        let mode = local.io_mode();
+        let bytes = encode_value(
+            strand,
+            &value,
+            mode,
+            ValueEncoding::Display,
+            OperatingSystem::current(),
+        )?;
         let mut writer = global.terminal.writer.lock().await;
         writer
-            .write_all(s.as_bytes())
-            .await
-            .map_err(|e| e.into_sys(strand))?;
-        writer
-            .write_all(b"\n")
+            .write_all(&bytes)
             .await
             .map_err(|e| e.into_sys(strand))
     }
@@ -585,6 +596,23 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
 
     builder
         .module("shell")
+        .function("with_io_mode", async move |strand, args, out| {
+            let ([mode, func], [], rest) = unpack!(strand, args, 2, 0, ...)?;
+            let mode = match mode.as_sym(strand) {
+                Some(sym) if sym == global.syms.line => IoMode::Line,
+                Some(sym) if sym == global.syms.chunk => IoMode::Chunk,
+                _ => return Err(Error::value(strand, "mode must be :LINE: or :CHUNK:")),
+            };
+            let old_mode = {
+                let local = global.local.get(strand);
+                let old_mode = local.io_mode();
+                local.set_io_mode(mode);
+                old_mode
+            };
+            let res = func.call(strand, rest, out).await;
+            global.local.get(strand).set_io_mode(old_mode);
+            res
+        })
         .function(
             "exit",
             async move |strand, args: dolang::runtime::Args<'v, '_>, _| {

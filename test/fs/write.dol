@@ -13,6 +13,7 @@ import fs:
   - Path
 
 import agent
+import sys
 import std:
   - RuntimeError
 
@@ -52,6 +53,20 @@ def write_binary_data()
 
     # Cleanup
     remove $test_path
+
+#[agent.test]
+def sink_put_uses_handle_target_line_endings()
+    let test_path = "test_sink_put.txt"
+    open $test_path w do |file|
+      file.put "line"
+      file.put b"BIN"
+
+    let expected = if (sys.os_info().family == :WINDOWS:)
+      b"line\r\nBIN"
+    else
+      b"line\nBIN"
+    open $test_path rb do |file|
+      assert_eq $file.read() $expected
 
 #[agent.test]
 def write_to_file_opened_in_append_mode()
