@@ -1,0 +1,186 @@
+import shell
+import term
+import sys
+import fs:
+  - open
+  - with_temp_dir
+import test:
+  - assert
+  - assert_eq
+  - assert_throws
+  - test
+import std:
+  - TypeError
+
+# The line ending a sink adapter appends in `:LINE:` mode. Framed output picks
+# this up; `write` never does, which is what several tests below turn on.
+let NL = if (sys.os_info().family == :WINDOWS:)
+  "\r\n"
+else
+  "\n"
+
+# Writes `source` into the temp dir and returns the script path, so tests can
+# name it in a `run` invocation without the here string swallowing the
+# arguments that follow it.
+def script dir name source
+  let path = (dir / name)
+  path.write $source
+  path
+
+#[test]
+def handle_identity()
+  assert_eq (type shell.stdin) $shell.Stdin
+  assert_eq (type shell.stdout) $shell.Stdout
+  assert_eq (type shell.stderr) $shell.Stderr
+  assert_eq (type term.console) $term.Console
+
+  # The handles are stateless views on the process's streams, so any two of the
+  # same kind are interchangeable.
+  assert_eq $shell.stdout $shell.stdout
+  assert (shell.stdout != shell.stderr)
+  assert (shell.stderr != term.console)
+
+  # Until terminal output can be captured, the current console target is always
+  # the console itself.
+  assert_eq (term.sink()) $term.console
+
+#[test]
+def write_rejects_non_byte_values()
+  assert_throws $TypeError do shell.stdout.write 42
+  assert_throws $TypeError do shell.stderr.write [1, 2]
+  assert_throws $TypeError do term.console.write nil
+
+#[test]
+def stdin_handle_shares_the_buffered_reader()
+  # The load-bearing property: `shell.stdin` and the strand's implicit input
+  # read through one buffered reader. Two readers would let the first swallow
+  # everything the second was supposed to see.
+  with_temp_dir do |dir|
+    let src = r|
+      import shell
+      import fs
+      import strand:
+        - next
+      let first = next()
+      let rest = str $shell.stdin.read()
+      fs.write $shell.args[0] "$first|$rest"
+
+    let path = script $dir read.dol $src
+    let out = (dir / "out.txt")
+    run $shell.exe --no-cache $path $out
+      stdin:
+        - one
+        - two
+        - three
+
+    # The remainder comes back exactly as the sink framed it, line endings and
+    # all — `read` is raw.
+    assert_eq $out.read() "one|two$(NL)three$(NL)"
+
+#[test]
+def write_is_unframed_and_put_is_framed()
+  with_temp_dir do |dir|
+    let src = r|
+      import shell
+      import strand:
+        - put
+      put a
+      shell.stdout.write b
+      shell.stdout.write "c\n"
+
+    let path = script $dir frame.dol $src
+    let out = (dir / "out.txt")
+    run $shell.exe --no-cache $path stdout: $out
+
+    # `put` frames per the ambient I/O mode, so it appends the platform line
+    # ending; `write` adds nothing and the "\n" is the one in the source.
+    assert_eq $out.read() "a$(NL)bc\n"
+
+#[test]
+def write_reports_bytes_not_characters()
+  with_temp_dir do |dir|
+    let src = r|
+      import shell
+      import fs
+      let written = shell.stdout.write "héllo"
+      fs.write $shell.args[0] (str(written))
+
+    let path = script $dir count.dol $src
+    let out = (dir / "out.txt")
+    let raw = (dir / "raw.txt")
+    run $shell.exe --no-cache $path $out stdout: $raw
+
+    assert_eq $out.read() "6"
+    # The bytes themselves, not just the count — and redirecting keeps the
+    # child's output off the test runner's terminal.
+    open $raw rb do |f|
+      assert_eq (f.read()) b"h\xc3\xa9llo"
+
+#[test]
+def write_passes_binary_through_verbatim()
+  with_temp_dir do |dir|
+    let src = r|
+      import shell
+      shell.stdout.write b"\x01\x02\xff"
+
+    let path = script $dir binary.dol $src
+    let out = (dir / "out.bin")
+    run $shell.exe --no-cache $path stdout: $out
+
+    open $out rb do |f|
+      assert_eq (f.read()) b"\x01\x02\xff"
+
+#[test]
+def stdout_and_stderr_handles_do_not_cross()
+  with_temp_dir do |dir|
+    let src = r|
+      import shell
+      shell.stdout.write "on-stdout\n"
+      shell.stderr.write "on-stderr\n"
+
+    let path = script $dir split.dol $src
+    let out = (dir / "out.txt")
+    let err = (dir / "err.txt")
+    run $shell.exe --no-cache $path stdout: $out stderr: $err
+
+    assert_eq $out.read() "on-stdout\n"
+    assert_eq $err.read() "on-stderr\n"
+
+#[test]
+def console_write_is_verbatim_but_echo_sanitizes()
+  # Sanitization belongs to `echo`, not to the console. Run in a child so the
+  # escape lands in a captured file rather than on the test runner's terminal.
+  with_temp_dir do |dir|
+    let src = r|
+      import term
+      let ESC = str b"\x1b"
+      term.console.write "a$ESC[31mb\n"
+      term.echo "a$ESC[31mb"
+
+    let path = script $dir console.dol $src
+    let err = (dir / "err.txt")
+    run $shell.exe --no-cache $path stderr: $err
+
+    let ESC = str b"\x1b"
+    assert_eq $err.read() "a$ESC[31mb\nab\n"
+
+#[test]
+def naming_shell_stderr_inherits_the_stream()
+  # A grandchild given `stderr: $shell.stderr` writes to the inherited stream
+  # rather than being pumped through a sink.
+  with_temp_dir do |dir|
+    let inner_src = r|
+      import shell
+      shell.stderr.write "from-grandchild\n"
+
+    let inner = script $dir inner.dol $inner_src
+
+    let outer_src = r|
+      import shell
+      run $shell.exe --no-cache $shell.args[0] stderr: $shell.stderr
+
+    let outer = script $dir outer.dol $outer_src
+    let err = (dir / "err.txt")
+    run $shell.exe --no-cache $outer $inner stderr: $err
+
+    assert_eq $err.read() "from-grandchild\n"

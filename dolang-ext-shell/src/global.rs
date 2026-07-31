@@ -13,11 +13,12 @@ use dolang::runtime::{
     vm::{Builder, Stateful},
 };
 use tokio::{
-    io::{AsyncWrite, stderr},
+    io::{self as tio, AsyncWrite, stderr},
     sync::Mutex,
 };
 
 use crate::{
+    console::Console,
     error::{
         AlreadyExistsError, NotFoundError, PermissionDeniedError, ProcError, SysError,
         SysErrorObject, TimedOutError, UnsupportedError,
@@ -67,6 +68,7 @@ pub(crate) struct Types<'v> {
     pub(crate) stdin: Type<'v, Stdin>,
     pub(crate) stdout: Type<'v, Stdout>,
     pub(crate) stderr: Type<'v, Stderr>,
+    pub(crate) console: Type<'v, Console>,
     pub(crate) date_time: Type<'v, DateTime>,
     pub(crate) duration: Type<'v, Duration>,
     pub(crate) os_info: Type<'v, OsInfo>,
@@ -159,11 +161,32 @@ pub enum ProgramSource {
 
 pub(crate) struct Global<'v> {
     pub(crate) terminal: Terminal,
+    pub(crate) stdio: Stdio,
     pub(crate) types: Types<'v>,
     pub(crate) syms: Syms<'v>,
     pub(crate) local: LocalKey<'v, Local>,
     pub(crate) args: RefCell<ArgsData>,
     pub(crate) program: RefCell<Option<ProgramSource>>,
+}
+
+/// The process's standard streams.
+///
+/// These live here rather than inside the `shell.stdin`/`stdout`/`stderr`
+/// handle objects, which are stateless. Two consequences, both load-bearing:
+///
+/// - There is exactly one `BufReader` over stdin. A second one would silently
+///   split buffered input, so reading through `shell.stdin` and through the
+///   implicit input stay coherent no matter how many handle objects exist.
+/// - Writes serialize on a mutex rather than on a per-object GC borrow, so
+///   concurrent writes from forked strands queue instead of failing with a
+///   concurrency error.
+///
+/// It also means handle instances are interchangeable, so nothing needs to root
+/// a particular one.
+pub(crate) struct Stdio {
+    pub(crate) stdin: Mutex<tio::BufReader<tio::Stdin>>,
+    pub(crate) stdout: Mutex<tio::Stdout>,
+    pub(crate) stderr: Mutex<tio::Stderr>,
 }
 
 pub(crate) struct Terminal {
@@ -224,6 +247,11 @@ impl<'v> Global<'v> {
 
         let stderr_is_terminal = std::io::stderr().is_terminal();
         Self {
+            stdio: Stdio {
+                stdin: Mutex::new(tio::BufReader::new(tio::stdin())),
+                stdout: Mutex::new(tio::stdout()),
+                stderr: Mutex::new(tio::stderr()),
+            },
             terminal: Terminal {
                 writer: Mutex::new(Box::pin(stderr())),
                 redirected: Cell::new(false),
@@ -254,6 +282,7 @@ impl<'v> Global<'v> {
                 stdin: builder.register_type(),
                 stdout: builder.register_type(),
                 stderr: builder.register_type(),
+                console: builder.register_type(),
                 date_time: builder.register_type::<DateTime>(),
                 duration: builder.register_type::<Duration>(),
                 os_info: builder.register_type(),

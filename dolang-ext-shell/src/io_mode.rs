@@ -1,8 +1,16 @@
 use std::io;
 
-use dolang::runtime::{Result, Strand, Value, value::View};
+use dolang::runtime::{
+    Error, Output, Result, Slot, Strand, Value,
+    value::{BinEmbryo, View},
+};
 use dolang_shell_vfs::OperatingSystem;
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt};
+
+use crate::{
+    error::{ErrorExt as _, ResultExt as _},
+    fs::{read_all, read_into_spare},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum IoMode {
@@ -67,6 +75,72 @@ pub(crate) fn encode_value<'v, 's>(
         }
     };
     Ok(frame_value(bytes, mode, verbatim, operating_system))
+}
+
+/// Reads up to `size` bytes, or to end of stream when `None`, as a `Bin`.
+///
+/// The unframed counterpart to [`read_value`]. Handle methods such as
+/// `shell.stdin.read` sit on a byte edge rather than a value edge, so no
+/// [`IoMode`] applies: nothing is quantized into lines and nothing is required
+/// to be valid UTF-8. A bounded read is a single read and may yield fewer bytes
+/// than requested, as `fs.File.read` does; empty means end of stream.
+pub(crate) async fn read_raw<'v, 'a, 's, R>(
+    reader: &mut R,
+    size: Option<usize>,
+    strand: &mut Strand<'v, 's>,
+    out: Slot<'v, 'a>,
+) -> Result<'v, 's, ()>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut buf = BinEmbryo::new();
+    match size {
+        Some(size) => {
+            buf.reserve(strand, size);
+            let read = read_into_spare(reader, buf.spare_capacity_mut())
+                .await
+                .into_sys(strand)?;
+            unsafe { buf.advance(read) };
+        }
+        None => read_all(strand, reader, &mut buf).await?,
+    }
+    buf.finish(strand, out);
+    Ok(())
+}
+
+/// Writes the bytes of a `Str` or `Bin` value verbatim, reporting the byte count.
+///
+/// The unframed counterpart to [`encode_value`]. Handle methods such as
+/// `shell.stdout.write` sit on a byte edge rather than a value edge, so no
+/// [`IoMode`] applies: no line ending is appended and none is translated.
+/// Anything that is not a `Str` or `Bin` is a type error rather than being
+/// stringified, since there is no framing convention to stringify it into.
+pub(crate) async fn write_raw<'v, 'a, 's, W>(
+    writer: &mut W,
+    data: Slot<'v, 'a>,
+    strand: &mut Strand<'v, 's>,
+    out: Slot<'v, 'a>,
+) -> Result<'v, 's, ()>
+where
+    W: AsyncWriteExt + Unpin + ?Sized,
+{
+    let written = match data.view(strand) {
+        View::Str(value) => {
+            let value = value.pin();
+            writer
+                .write_all(value.as_bytes())
+                .await
+                .map(|_| value.len())
+        }
+        View::Bin(value) => {
+            let value = value.pin();
+            writer.write_all(&value).await.map(|_| value.len())
+        }
+        _ => return Err(Error::type_error(strand, "expected `Str` or `Bin`")),
+    }
+    .map_err(|error| error.into_sys(strand))?;
+    Output::set(strand, out, written);
+    Ok(())
 }
 
 fn frame_value(

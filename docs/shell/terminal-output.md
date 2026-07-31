@@ -25,6 +25,69 @@ uses ordinary `str` coercion.
 Newlines and tabs are preserved, but other C0/C1 controls and terminal escape
 sequences are sanitized before being output.
 
+Sanitization belongs to `echo` and `print`, not to the destination. Nothing
+below them applies it — not [`term.console`](../api/term/console.md), not
+[`shell.stdout`](../api/shell/stdout.md), and certainly not a child process that
+inherited the stream. It is a property of these two functions, not a guarantee
+about what reaches the terminal.
+
+## Three Destinations
+
+Output has three destinations, and they are deliberately distinct:
+
+| Destination      | Reached by                                 | Follows takeover |
+| ---------------- | ------------------------------------------ | ---------------- |
+| Console          | `echo`, `print`, `term.console`            | Yes              |
+| Implicit sink    | `strand.put`, pipelines                    | No               |
+| Explicit handles | `shell.stdin`/`stdout`/`stderr`, `fs.File` | No               |
+
+The implicit sink *starts as* `shell.stdout` — the same object, not an analogy —
+but it is redirected by pipelines and by `run`, so the two are not synonyms.
+
+`echo` targets the console rather than stdout on purpose. When that is the wrong
+choice the failure is loud and locally diagnosable: `script.dol > out.txt`
+leaves the file empty while the output is plainly visible on the terminal. The
+reverse mistake — diagnostics mixed into a structured stdout stream — is silent,
+and surfaces as corruption in whatever consumes it downstream.
+
+### `term.console` versus `shell.stderr`
+
+Both usually write to the same place, which is why they are easy to confuse:
+
+- [`term.console`](../api/term/console.md) is the *human channel*. When an
+  extension takes the terminal over shell-wide, output follows it.
+- [`shell.stderr`](../api/shell/stderr.md) is the *error stream*. It bypasses
+  such a takeover entirely — caveat emptor.
+
+Use the console for anything a person reads; use `shell.stderr` when you
+specifically mean the stream.
+
+## Child Process Output
+
+A child process launched with [`run`](../api/proc/index.md) and no `stdout:` or
+`stderr:` argument has an *anonymous* channel, so it follows the ambient
+console. If an extension has taken the terminal over, its output is copied to
+the console rather than to the inherited descriptor, so it cannot scribble over
+a progress display. Otherwise it inherits the stream directly.
+
+Naming a handle pins the channel to exactly what it names:
+
+```
+# Follows the console — pumped through a progress display if one is active.
+run mytool
+
+# The real stream, whatever is happening on the terminal.
+run mytool stdout: $shell.stdout
+```
+
+This is the same "ambient state governs anonymous channels, named handles pin"
+rule that the [I/O mode](../api/shell/index.md#with_io_mode-mode-func) follows.
+
+Copying to the console is a byte-to-byte edge: the child emits bytes and the
+console consumes bytes, so no framing applies in either direction. Nothing is
+split into lines, nothing must be valid UTF-8, and no line ending is added or
+translated.
+
 ## Styled Text
 
 [`term.style`](../api/term/index.md#style-options-args) returns

@@ -5,10 +5,11 @@ text.
 
 ## Types
 
-| Type                  | Description                     |
-| --------------------- | ------------------------------- |
-| [`Style`](./style.md) | Reusable terminal style         |
-| [`Text`](./text.md)   | Validated terminal presentation |
+| Type                      | Description                           |
+| ------------------------- | ------------------------------------- |
+| [`Console`](./console.md) | Destination for human-readable output |
+| [`Style`](./style.md)     | Reusable terminal style               |
+| [`Text`](./text.md)       | Validated terminal presentation       |
 
 ## Style options
 
@@ -43,11 +44,23 @@ must be between 0 and 255. Color options also accept `:INHERIT:`.
 
 ## Values
 
+### `console`
+
+The [`Console`](./console.md): where `echo`, `print`, and undirected child
+process output go. Follows extension terminal takeover.
+
 ### `have_terminal`
 
 Whether stderr was a terminal when the process started.
 
 ## Functions
+
+### `sink()`
+
+Returns the console output currently in effect. Today this is always
+[`console`](#console).
+
+**Returns:** [`Console`](./console.md)
 
 ### `echo ...args`
 

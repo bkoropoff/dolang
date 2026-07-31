@@ -4,9 +4,12 @@ The `shell` module provides shell-context values and functions.
 
 ## Types
 
-| Name                            | Description                                              |
-| ------------------------------- | -------------------------------------------------------- |
-| [`Vfs`](./vfs.md)               | Execution context handle                                 |
+| Name                    | Description                              |
+| ----------------------- | ---------------------------------------- |
+| [`Vfs`](./vfs.md)       | Execution context handle                 |
+| [`Stdin`](./stdin.md)   | Handle for the process's standard input  |
+| [`Stdout`](./stdout.md) | Handle for the process's standard output |
+| [`Stderr`](./stderr.md) | Handle for the process's standard error  |
 
 ## Functions
 
@@ -146,6 +149,31 @@ Runs `func` with scoped environment overrides. Keys may be strings or symbols.
 | `func`      | callable                 | Block to run          |
 
 ## Values
+
+### `stdin`
+
+A [`Stdin`](./stdin.md) handle for the process's standard input. This is also
+what the root strand's implicit input starts as, and both read through one
+buffered reader, so mixing iteration with
+[`read`](./stdin.md#read-size) cannot lose data.
+
+### `stdout`
+
+A [`Stdout`](./stdout.md) handle for the process's standard output. The root
+strand's implicit sink starts here.
+
+### `stderr`
+
+A [`Stderr`](./stderr.md) handle for the process's standard error.
+
+Not the same thing as [`term.console`](../term/console.md): `shell.stderr`
+always writes to the real stream, while the console follows an extension that
+has taken the terminal over. Use `shell.stderr` when you specifically mean the
+error stream, and `term.console` for human-readable output.
+
+Passing one of these three to [`run`](../proc/index.md) as `stdin:`, `stdout:`,
+or `stderr:` hands the child the real stream and opts the channel out of console
+routing — see [Terminal output](../../shell/terminal-output.md).
 
 ### `env`
 

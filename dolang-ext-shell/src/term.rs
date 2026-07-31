@@ -12,7 +12,7 @@ use dolang::{
 };
 use tokio::io::AsyncWriteExt;
 
-use crate::{error::ErrorExt as _, global::Global};
+use crate::{console::Console, error::ErrorExt as _, global::Global};
 
 const BOLD: usize = 0;
 const DIM: usize = 1;
@@ -990,7 +990,17 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         .module("term")
         .value("Text", global.types.text)
         .value("Style", global.types.style)
+        .value("Console", global.types.console)
         .value("have_terminal", global.terminal.stderr_is_terminal)
+        .object("console", global.types.console, Console)
+        .function("sink", async move |strand, args, out| {
+            let ([], []) = unpack!(strand, args, 0, 0)?;
+            // Currently always the console itself. Once terminal output can be
+            // captured, this returns the installed capture sink instead, and
+            // only this body changes.
+            global.types.console.create(strand, Console, out);
+            Ok(())
+        })
         .function("echo", async move |strand, args, _| {
             let ansi = global.terminal.ansi;
             let mut output = String::new();

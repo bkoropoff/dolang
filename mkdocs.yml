@@ -179,6 +179,9 @@ nav:
     - shell:
       - api/shell/index.md
       - api/shell/args.md
+      - api/shell/stdin.md
+      - api/shell/stdout.md
+      - api/shell/stderr.md
       - api/shell/vfs.md
     - shlex: api/shlex.md
     - sqlite:
@@ -283,6 +286,7 @@ nav:
       - api/tar/tar-writer.md
     - term:
       - api/term/index.md
+      - api/term/console.md
       - api/term/style.md
       - api/term/text.md
     - test:

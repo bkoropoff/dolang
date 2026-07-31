@@ -1,5 +1,6 @@
 #![deny(warnings)]
 
+mod console;
 mod diagnostic;
 mod env;
 mod error;
@@ -49,40 +50,45 @@ pub use diagnostic::{print_compile_diag_stderr, print_error_stderr, render_messa
 #[doc(hidden)]
 pub use syntax::{SemanticToken, highlight_range as highlight_source_range};
 
-/// Instantiate wrapper iterator around stdin
+/// Instantiate the `shell.stdin` handle.
+///
+/// The handle is stateless — the buffered reader itself lives on the VM — so
+/// this and `shell.stdin` read the same stream and cannot split its buffer.
 pub fn stdin<'v, 's>(strand: &mut Strand<'v, 's>, out: impl Output<'v>) {
     let global = strand.state::<Global<'v>>();
-    global.types.stdin.create(strand, shell::Stdin::new(), out)
+    global.types.stdin.create(strand, shell::Stdin, out)
 }
 
-/// Instantiate wrapper sink around stdout
+/// Instantiate the `shell.stdout` handle.
+///
+/// Stateless, as with [`stdin`].
 pub fn stdout<'v, 's>(strand: &mut Strand<'v, 's>, out: impl Output<'v>) {
     let global = strand.state::<Global<'v>>();
-    global
-        .types
-        .stdout
-        .create(strand, shell::Stdout::new(), out)
+    global.types.stdout.create(strand, shell::Stdout, out)
 }
 
-/// Flush the shell's stdout sink and terminal stderr writer.
+/// Flush the process's standard streams and the console writer.
 ///
-/// `stdout` must be the value installed as the shell's output sink so the
-/// precise Tokio handle used for output is flushed before VM shutdown.
-pub async fn flush<'v, 's>(strand: &mut Strand<'v, 's>, stdout: &Value<'v>) -> Result<'v, 's, ()> {
+/// Tokio stdio handles can retain buffered output when the runtime shuts down,
+/// so this must run while the runtime is still alive.
+pub async fn flush<'v, 's>(strand: &mut Strand<'v, 's>) -> Result<'v, 's, ()> {
     let global = strand.state::<Global<'v>>();
-    let stdout = global
-        .types
+    global
+        .stdio
         .stdout
-        .cast(stdout)
-        .ok_or_else(|| Error::type_error(strand, "stdout sink: expected shell.Stdout"))?;
-    stdout
-        .enter(strand, async |strand, inst| {
-            inst.borrow_mut(strand)?
-                .flush()
-                .await
-                .map_err(|error| Error::runtime(strand, error))
-        })
-        .await?;
+        .lock()
+        .await
+        .flush()
+        .await
+        .map_err(|error| Error::runtime(strand, error))?;
+    global
+        .stdio
+        .stderr
+        .lock()
+        .await
+        .flush()
+        .await
+        .map_err(|error| Error::runtime(strand, error))?;
     global
         .terminal
         .writer
