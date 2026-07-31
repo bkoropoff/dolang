@@ -79,4 +79,4 @@ the environment-variable override.
 
 Output to the default stdout sink using `strand.put` is not sanitized, but
 follows the current I/O mode. See
-[`proc.io_mode`](../api/proc/index.md#io_mode-mode-func).
+[`shell.with_io_mode`](../api/shell/index.md#with_io_mode-mode-func).

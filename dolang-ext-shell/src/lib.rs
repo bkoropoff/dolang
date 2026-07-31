@@ -7,6 +7,7 @@ mod error_code;
 mod extension;
 mod fs;
 mod global;
+mod io_mode;
 mod local;
 mod pipe_channel;
 mod platform;

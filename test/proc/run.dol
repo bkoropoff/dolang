@@ -21,6 +21,8 @@ import agent proc sys sys.unix sys.windows _vfs
     - grep
   shell:
     - Vfs
+    - exe
+    - with_io_mode
   std:
     - FieldError
     - CanceledError
@@ -31,7 +33,6 @@ import agent proc sys sys.unix sys.windows _vfs
   time:
     - sleep
   proc:
-    - io_mode
     - with_policy
 
 let is_windows = (sys.os_info().family == :WINDOWS:)
@@ -192,7 +193,11 @@ def pipe_send_side_value_flush()
     do
       yield()
       cat()
-  assert_eq $res "foo\nfoo"
+  let expected = if is_windows
+    "foo\r\nfoo"
+  else
+    "foo\nfoo"
+  assert_eq $res $expected
 
 #[agent.test]
 def formatted_values_stream_to_capture_and_pipe()
@@ -205,36 +210,96 @@ def formatted_values_stream_to_capture_and_pipe()
   assert_eq $res rendered
 
 #[agent.test]
-def pipeline_and_io_mode_use_matching_encodings()
+def pipeline_and_with_io_mode_use_matching_encodings()
   let out = []
-  io_mode :LINE: do cat stdin: ["foo", "bar"] stdout: $out
+  with_io_mode :LINE: do cat stdin: ["foo", "bar"] stdout: $out
   assert_eq $out ["foo", "bar"]
 
   out = []
-  sub do io_mode :CHUNK: do cat stdin: ["foo", "bar"] stdout: $out
+  sub do with_io_mode :CHUNK: do cat stdin: ["foo", "bar"] stdout: $out
   assert_eq (b"".join out) b"foobar"
 
   let res = pipeline
-    do io_mode :LINE: do strand.put "foo"
+    do with_io_mode :LINE: do strand.put "foo"
     do cat()
-    do io_mode :CHUNK: do collect()
-  assert_eq $res [b"foo\n"]
+    do with_io_mode :CHUNK: do collect()
+  let expected = if is_windows
+    [b"foo\r\n"]
+  else
+    [b"foo\n"]
+  assert_eq $res $expected
 
   let res = pipeline
-    do io_mode :CHUNK: do strand.put "foo"
+    do with_io_mode :CHUNK: do strand.put "foo"
     do cat()
-    do io_mode :CHUNK: do collect()
+    do with_io_mode :CHUNK: do collect()
   assert_eq $res [b"foo"]
 
   let res = pipeline
     do echo foo
-    do io_mode :LINE: do collect()
+    do with_io_mode :LINE: do collect()
   assert_eq $res ["foo"]
 
   let res = pipeline
     do echo foo
-    do io_mode :CHUNK: do collect()
+    do with_io_mode :CHUNK: do collect()
   assert_eq $res [b"foo\n"]
+
+#[agent.test windows_vfs: false remote: false]
+def stdio_adapters_honor_io_mode()
+  let script = Path "stdio-child.dol"
+  script.write r|
+    import shell
+    import strand
+
+    if (shell.args[0] == "raw")
+      shell.with_io_mode :CHUNK: do strand.put b"first\r\nsecond\n\n"
+    else if (shell.args[0] == "write")
+      if (shell.args[1] == "line")
+        shell.with_io_mode :LINE: do
+          strand.put "pipeline-echo-result: []"
+          strand.put b"BIN"
+      else
+        shell.with_io_mode :CHUNK: do
+          strand.put "pipeline-echo-result: []"
+          strand.put b"BIN"
+    else
+      let values = if (shell.args[1] == "line")
+        shell.with_io_mode :LINE: do strand.collect()
+      else
+        shell.with_io_mode :CHUNK: do strand.collect()
+      shell.with_io_mode :CHUNK: do
+        if (shell.args[1] == "line")
+          strand.put ("|".join values)
+        else
+          strand.put (b"".join values)
+
+  let output = []
+  with_io_mode :CHUNK: do run $exe $script write line stdout: $output
+  let expected = if is_windows
+    b"pipeline-echo-result: []\r\nBIN"
+  else
+    b"pipeline-echo-result: []\nBIN"
+  assert_eq (b"".join output) $expected
+
+  output = []
+  with_io_mode :CHUNK: do run $exe $script write chunk stdout: $output
+  assert_eq (b"".join output) b"pipeline-echo-result: []BIN"
+
+  output = []
+  with_io_mode :CHUNK: do
+    run $exe $script read line stdin: [b"first\r\nsecond\n"] stdout: $output
+  assert_eq (b"".join output) b"first|second"
+
+  output = []
+  with_io_mode :CHUNK: do
+    run $exe $script read chunk stdin: [b"\x00\xffraw"] stdout: $output
+  assert_eq (b"".join output) b"\x00\xffraw"
+
+  let captured = sub do run $exe $script raw
+  assert_eq $captured "first\r\nsecond\n"
+  captured = sub trim: false do run $exe $script raw
+  assert_eq $captured "first\r\nsecond\n\n"
 
 #[agent.test]
 def missing_program_yields_sys_error()

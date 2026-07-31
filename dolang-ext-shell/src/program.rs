@@ -1,5 +1,5 @@
 use futures::future::MaybeDone;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 use dolang::runtime::object::fmt;
 
@@ -21,7 +21,7 @@ use crate::{
         path::{PathAnnex, create_path_annex, path_from_value},
     },
     global::Global,
-    local::ChannelMode,
+    io_mode::{ReadValue, ValueEncoding, encode_value, read_value},
     pipe_channel::{self, RecvGuard, SendGuard},
     proc::{parse_policy_dict, vfs_policy},
 };
@@ -147,7 +147,7 @@ async fn resolve_io_file<'v, 's>(
     };
 
     let file = file::open(strand, global, path.to_path(), mode).await?;
-    let (file, annex) = File::create(global, file, mode.contains('b'));
+    let (file, annex) = File::create(strand, global, file, mode.contains('b'));
     global
         .types
         .file
@@ -346,45 +346,20 @@ async fn input_pump<'v, 's, W>(
 where
     W: AsyncWrite + Unpin,
 {
-    let channel_mode = strand
-        .vm()
-        .state::<Global<'v>>()
-        .local
-        .get(strand)
-        .channel_mode();
+    let local = strand.vm().state::<Global<'v>>().local.get(strand);
+    let io_mode = local.io_mode();
+    let operating_system = local.target().operating_system;
     strand
         .with_slots(async move |strand, [mut inval]| {
             while input.next(strand, &mut inval).await? {
-                match channel_mode {
-                    ChannelMode::Line => {
-                        if let Some(str) = inval.as_str(strand) {
-                            writer
-                                .write_all(str.pin().as_bytes())
-                                .await
-                                .into_sys(strand)?;
-                            writer.write_all(b"\n").await.into_sys(strand)?;
-                        } else if let Some(bin) = inval.as_bin(strand) {
-                            writer.write_all(&bin.pin()).await.into_sys(strand)?;
-                        } else {
-                            let s = inval.to_arg(strand)?;
-                            writer.write_all(s.as_bytes()).await.into_sys(strand)?;
-                            writer.write_all(b"\n").await.into_sys(strand)?;
-                        }
-                    }
-                    ChannelMode::Chunk => {
-                        if let Some(str) = inval.as_str(strand) {
-                            writer
-                                .write_all(str.pin().as_bytes())
-                                .await
-                                .into_sys(strand)?;
-                        } else if let Some(bin) = inval.as_bin(strand) {
-                            writer.write_all(&bin.pin()).await.into_sys(strand)?;
-                        } else {
-                            let s = inval.to_arg(strand)?;
-                            writer.write_all(s.as_bytes()).await.into_sys(strand)?;
-                        }
-                    }
-                }
+                let bytes = encode_value(
+                    strand,
+                    &inval,
+                    io_mode,
+                    ValueEncoding::Argument,
+                    operating_system,
+                )?;
+                writer.write_all(&bytes).await.into_sys(strand)?;
             }
             Ok(())
         })
@@ -394,40 +369,36 @@ where
 async fn output_pump<'v, 's, R>(
     strand: &mut Strand<'v, 's>,
     output: &Value<'v>,
-    mut reader: R,
+    reader: R,
 ) -> Result<'v, 's, ()>
 where
     R: AsyncRead + Unpin,
 {
-    let channel_mode = strand
+    let global = strand.vm().state::<Global<'v>>();
+    if let Some(capture) = global.types.capture.cast(output) {
+        let mut reader = reader;
+        let mut value = String::new();
+        reader.read_to_string(&mut value).await.into_sys(strand)?;
+        return capture.enter_sync(strand, |strand, capture| {
+            capture.borrow_mut(strand)?.append(&value);
+            Ok(())
+        });
+    }
+    let io_mode = strand
         .vm()
         .state::<Global<'v>>()
         .local
         .get(strand)
-        .channel_mode();
+        .io_mode();
     strand
         .with_slots(async move |strand, [mut outval]| {
-            match channel_mode {
-                ChannelMode::Line => {
-                    let mut reader = BufReader::new(reader);
-                    let mut line = String::new();
-                    while reader.read_line(&mut line).await.into_sys(strand)? != 0 {
-                        Output::set(strand, &mut outval, line.trim_end_matches(['\r', '\n']));
-                        line.clear();
-                        output.put(strand, &mut outval).await?;
-                    }
+            let mut reader = BufReader::new(reader);
+            while let Some(value) = read_value(&mut reader, io_mode).await.into_sys(strand)? {
+                match value {
+                    ReadValue::Line(line) => Output::set(strand, &mut outval, line.as_str()),
+                    ReadValue::Chunk(chunk) => Output::set(strand, &mut outval, chunk.as_slice()),
                 }
-                ChannelMode::Chunk => {
-                    let mut buf = [0u8; 8192];
-                    loop {
-                        let n = reader.read(&mut buf).await.into_sys(strand)?;
-                        if n == 0 {
-                            break;
-                        }
-                        Output::set(strand, &mut outval, &buf[..n]);
-                        output.put(strand, &mut outval).await?;
-                    }
-                }
+                output.put(strand, &mut outval).await?;
             }
             Ok(())
         })

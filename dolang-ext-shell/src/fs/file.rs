@@ -12,7 +12,7 @@ use dolang::runtime::{
 };
 use dolang_shell_vfs::{
     AnyFile, FileHandle, FileLockBehavior, FileLockMode, FileLockRange, FileLockRequest,
-    OpenOptions, Utf8TypedPath, Vfs,
+    OpenOptions, OperatingSystem, Utf8TypedPath, Vfs,
 };
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
@@ -23,6 +23,7 @@ use crate::{
         metadata::create_metadata, read_all, read_into_spare, stream, xattr,
     },
     global::Global,
+    io_mode::{IoMode, ValueEncoding, encode_value},
     util,
 };
 
@@ -124,6 +125,7 @@ pub(crate) struct File<'v> {
 pub(crate) struct FileAnnex<'v> {
     global: State<'v, Global<'v>>,
     is_binary: bool,
+    operating_system: OperatingSystem,
 }
 
 pub(crate) async fn open<'v, 's>(
@@ -158,6 +160,7 @@ pub(crate) async fn open_native<'v>(
 
 impl<'v> File<'v> {
     pub(crate) fn create(
+        strand: &Strand<'v, '_>,
         global: State<'v, Global<'v>>,
         file: AnyFile,
         is_binary: bool,
@@ -167,7 +170,11 @@ impl<'v> File<'v> {
                 file: Some(file),
                 buf: BinEmbryo::new(),
             },
-            FileAnnex { global, is_binary },
+            FileAnnex {
+                global,
+                is_binary,
+                operating_system: global.local.get(strand).target().operating_system,
+            },
         )
     }
 
@@ -271,7 +278,7 @@ impl<'v> File<'v> {
             strand
                 .with_slots(async move |strand, [mut handle, mut tmp]| {
                     // Block scope mode: create handle, call block with auto-close
-                    let (file, annex) = File::create(global, file, mode.contains('b'));
+                    let (file, annex) = File::create(strand, global, file, mode.contains('b'));
                     global
                         .types
                         .file
@@ -288,7 +295,7 @@ impl<'v> File<'v> {
                 .await
         } else {
             // No block: just return the handle in the slot
-            let (file, annex) = File::create(global, file, mode.contains('b'));
+            let (file, annex) = File::create(strand, global, file, mode.contains('b'));
             global
                 .types
                 .file
@@ -555,33 +562,25 @@ impl<'v> Object<'v> for File<'v> {
         strand: &'a mut Strand<'v, 's>,
         value: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
+        let annex = this.annex();
+        let mode = if annex.is_binary {
+            IoMode::Chunk
+        } else {
+            IoMode::Line
+        };
+        let bytes = encode_value(
+            strand,
+            &value,
+            mode,
+            ValueEncoding::Display,
+            annex.operating_system,
+        )?;
         let mut borrow = this.borrow_mut(strand)?;
-        let is_binary = this.annex().is_binary;
         let file = borrow
             .file
             .as_mut()
             .ok_or_else(|| Error::state_error(strand, "file is closed"))?;
-
-        if is_binary {
-            // Binary mode: write bytes directly
-            if let Some(s) = value.as_str(strand) {
-                file.write_all(s.pin().as_bytes()).await.into_sys(strand)?;
-            } else {
-                let s = value.to_string(strand)?;
-                file.write_all(s.as_bytes()).await.into_sys(strand)?;
-            }
-        } else {
-            // Text mode: check if value is binary
-            if let Some(b) = value.as_bin(strand) {
-                // It's binary data, write as-is
-                file.write_all(&b.pin()).await.into_sys(strand)?;
-            } else {
-                // Not binary, convert to string and add newline
-                let s = value.to_string(strand)?;
-                file.write_all(s.as_bytes()).await.into_sys(strand)?;
-                file.write_all(b"\n").await.into_sys(strand)?;
-            }
-        }
+        file.write_all(&bytes).await.into_sys(strand)?;
         Ok(())
     }
 

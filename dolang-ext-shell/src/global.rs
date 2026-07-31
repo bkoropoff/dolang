@@ -35,6 +35,7 @@ use crate::{
     },
     local::Local,
     pipe_channel::{PipeReceiver, PipeSender},
+    proc::Capture,
     program::Program,
     security::{
         Ace, Acl, Guid, Identity, PosixAceObject, PosixAclObject, SecDesc, Sid, SidName,
@@ -94,6 +95,7 @@ pub(crate) struct Types<'v> {
     pub(crate) timed_out: Type<'v, SysErrorObject<TimedOutError>>,
     pub(crate) unsupported: Type<'v, SysErrorObject<UnsupportedError>>,
     pub(crate) proc_error: Type<'v, ProcError>,
+    pub(crate) capture: Type<'v, Capture>,
     pub(crate) pipe_receiver: Type<'v, PipeReceiver>,
     pub(crate) pipe_sender: Type<'v, PipeSender>,
     pub(crate) vfs: Type<'v, Vfs>,
@@ -309,6 +311,7 @@ impl<'v> Global<'v> {
                     .nominal_supertype(TypeObject::UnsupportedError)
                     .build(),
                 proc_error: builder.register_type(),
+                capture: builder.register_type(),
                 pipe_receiver: builder.register_type(),
                 pipe_sender: builder.register_type(),
                 vfs: builder.register_type(),
