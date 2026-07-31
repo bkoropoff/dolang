@@ -2,9 +2,7 @@
 
 The dimensions of a terminal-backed [`Console`](./console.md).
 
-Returned by [`geometry()`](./console.md#geometry), which answers `nil` for a
-console that is just a stream. So the presence of a `Geometry` — not the
-identity of the console — is the test for whether there is a layout to fit.
+Returned by [`geometry()`](./console.md#geometry).
 
 ## Fields
 

@@ -3,20 +3,11 @@
 Handle for the process's standard input, obtained as
 [`shell.stdin`](./index.md#stdin).
 
-The handle is stateless — the buffered reader lives on the interpreter — so
-every `Stdin` value reads the same stream through the same buffer. That is what
-makes mixing iteration with [`read`](#read-size) safe: a second reader would
-buffer ahead and swallow bytes the first was going to see.
-
 ## Methods
 
 ### `read size?`
 
 Reads raw bytes.
-
-No framing: nothing is split into lines and nothing is required to be valid
-UTF-8. This is the escape hatch below iteration, which applies the ambient
-[I/O mode](./index.md#with_io_mode-mode-func).
 
 **Parameters:**
 
@@ -42,8 +33,6 @@ let head = shell.stdin.read 64
 [I/O mode](./index.md#with_io_mode-mode-func): `:LINE:` yields
 [`Str`](../std/str.md) values with the line ending removed, `:CHUNK:` yields
 [`Bin`](../std/bin.md) values.
-
-Iteration and `read` share the same buffer, so they can be interleaved:
 
 ```
 for line = shell.stdin

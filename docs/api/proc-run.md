@@ -42,17 +42,14 @@ run.echo hello world
 # Runs: /usr/bin/echo hello world
 ```
 
-## Reserved Keyword Arguments
+## Key Arguments
 
-Four keyword arguments are reserved by the launch itself rather than passed to
-the program: `stdin:`, `stdout:`, `stderr:`, and `policy:`.
-
-| Name      | Type                     | Description                              |
-| --------- | ------------------------ | ---------------------------------------- |
-| `stdin`   | iterable\|path\|handle   | Source for the program's standard input  |
-| `stdout`  | sink\|path\|handle       | Target for the program's standard output |
-| `stderr`  | sink\|path\|handle\|sym  | Target for the program's standard error  |
-| `policy`  | [`dict`](./std/dict.md)  | Termination policy overrides             |
+| Name      | Type                    | Description                              |
+| --------- | ----------------------- | ---------------------------------------- |
+| `stdin`?  | iterable\|path\|handle  | Source for the program's standard input  |
+| `stdout`? | sink\|path\|handle      | Target for the program's standard output |
+| `stderr`? | sink\|path\|handle\|sym | Target for the program's standard error  |
+| `policy`? | [`dict`](./std/dict.md) | Termination policy overrides             |
 
 ### I/O Redirection
 
@@ -96,39 +93,27 @@ run.make -j8 stdout: build.log stderr: build.log
 run.sort stdin: ["c", "a", "b"] stdout: $sorted
 ```
 
-#### Naming a handle opts out of console routing
-
-An omitted `stdout:`/`stderr:` is an *anonymous* channel and follows the
-ambient console, so when an extension has taken the terminal over the program's
-output is copied to the console instead of to the inherited stream. Naming a
-handle pins the channel to exactly what it names:
-
-```
-# Follows the console — pumped through a progress display or capture.
-run mytool
-
-# The real stream, whatever is happening on the terminal.
-run mytool stdout: $shell.stdout
-```
-
-An undirected `stderr:` is likewise captured by an enclosing
-[`term.capture`](./term/index.md#capture-console-func-args); naming
-`$shell.stderr` opts out, exactly as it opts out of takeover.
+An omitted `stdout:`/`stderr:` follows console/terminal interception, such as
+`progress` module indicators or
+[`term.capture`](./term/index.md#capture-console-func-args). Using
+`term.console` as an explicit destination opts out of `term.capture`; using
+`shell.stdout` or `shell.stderr` opts out of all terminal interception
+entirely.
 
 See [Terminal output](../shell/terminal-output.md) for the full model.
 
 ### Termination Policy
 
-Use the reserved `policy:` dictionary to override termination behavior for one
-launch. Unspecified fields inherit the current
+Use the `policy:` dictionary to override termination behavior for one launch.
+Unspecified fields inherit the current
 [`proc.with_policy`](./proc/index.md#with_policy-func-signal-grace-force)
 settings.
 
-| Key      | Type                                                        | Description                              |
-| -------- | ----------------------------------------------------------- | ---------------------------------------- |
-| `signal` | [`sym`](./std/sym.md)\|[`int`](./std/int.md)                | Unix signal name or target-native number |
-| `grace`  | [`Duration`](./time/duration.md)\|[`float`](./std/float.md) | Time before forced termination           |
-| `force`  | [`bool`](./std/bool.md)                                     | Force termination after the grace period |
+| Key      | Type                                                        | Description                                               |
+| -------- | ----------------------------------------------------------- | --------------------------------------------------------- |
+| `signal` | [`sym`](./std/sym.md)\|[`int`](./std/int.md)                | Unix signal name or target-native number                  |
+| `grace`  | [`Duration`](./time/duration.md)\|[`float`](./std/float.md) | Time to wait for process to exit after termination signal |
+| `force`  | [`bool`](./std/bool.md)                                     | Force termination after the grace period                  |
 
 ```
 run worker policy: {signal: :INT:, grace: 10.0, force: true}
@@ -136,26 +121,23 @@ run worker policy: {signal: :INT:, grace: 10.0, force: true}
 
 Foreground Unix processes are terminated directly. Processes launched under
 `strand.spawn` or `strand.stream` are placed in a separate process group and
-terminated as a group. Windows uses `CTRL_BREAK_EVENT`; background launches
-are force-terminated through a Job Object. A per-launch `signal` override is
-invalid for a Windows target. Numeric signals are accepted only for direct
-launch policies and are interpreted using the target's numbering. Named signals
-cross VFS boundaries symbolically and are resolved by the target VFS. They
-produce `ValueError` at launch when the target does not support them.
+terminated as a group. Windows uses `CTRL_BREAK_EVENT`; background launches are
+force-terminated through a Job Object. A `signal` override is invalid for a
+Windows target.
 
 ### Capturing Output
 
-Use [`sub`](proc/index.md#sub-func-trim) to capture a program's output as a
-string:
+Use [`sub`](proc/index.md#sub-func-trim) to capture a program's standard output
+as a string:
 
 ```
 let kernel = sub do run.uname -r
 echo "Kernel: $kernel"
 ```
 
-That is the *data* stream. For what the program told a person, use
-[`term.sub`](./term/index.md#sub-func-trim-can_style-args), which captures the
-console and so picks up an undirected stderr:
+To capture all console-bound output, use
+[`term.sub`](./term/index.md#sub-func-trim-can_style-args); this picks up
+unredirected undirected stderr.
 
 ```
 let complaints = term.sub do run.mytool

@@ -3,23 +3,11 @@
 Handle for the process's standard output, obtained as
 [`shell.stdout`](./index.md#stdout).
 
-The handle is stateless — the underlying stream lives on the interpreter — so
-every `Stdout` value refers to the same stream and compares equal. Concurrent
-writes from different strands serialize rather than conflicting.
-
-Always writes to the real stream. Naming this handle explicitly is how you opt
-a channel out of terminal takeover; use [`term.console`](../term/console.md) to
-follow it instead.
-
 ## Methods
 
 ### `write data`
 
 Writes bytes verbatim and reports how many were written.
-
-No framing: nothing is appended, and no line ending is translated. This is the
-escape hatch below [`put`](#sink), which applies the ambient
-[I/O mode](./index.md#with_io_mode-mode-func).
 
 **Parameters:**
 
@@ -33,8 +21,7 @@ UTF-8 byte count, not the character count.
 **Errors:**
 
 - Raises [`TypeError`](../std/type-error.md) for anything other than a `Str` or
-  `Bin`. There is no framing convention to stringify other values into, so they
-  are rejected rather than converted.
+  `Bin`.
 
 ```
 shell.stdout.write "no newline"
@@ -61,5 +48,5 @@ framed per the ambient [I/O mode](./index.md#with_io_mode-mode-func): in
 values are always written verbatim.
 
 ```
-["one", "two"] | shell.stdout
+shell.stdout.put "hello"
 ```

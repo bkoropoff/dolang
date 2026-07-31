@@ -4,22 +4,17 @@ A [`Console`](./console.md) over an ordinary [sink](../std/sink.md), supplying
 the rest of the console interface.
 
 [`capture`](./index.md#capture-console-func-args) wraps a plain sink in one of
-these automatically, so callers pass an array or a pipeline end and never name
-this type.
+these automatically.
 
 ## Framing
 
-This is a bytestream-to-value boundary, and that conversion is exactly what the
-[I/O mode](../shell/index.md#with_io_mode-mode-func) governs — the same way an
-external process's output is framed when it crosses into a sink.
+The current [I/O mode](../shell/index.md#with_io_mode-mode-func) governs how
+written data is divided into values.
 
 - `:LINE:` — one [`Str`](../std/str.md) per complete line, with the ending
   stripped (LF or CRLF).
 - `:CHUNK:` — arbitrary [`Bin`](../std/bin.md) chunks, line endings left in
   place. Chunk boundaries are unspecified.
-
-`writeln` materializes its line ending into the byte stream *first*, so the
-terminator survives either mode rather than depending on one.
 
 ```
 let lines = []
@@ -31,15 +26,13 @@ with_io_mode :CHUNK: do term.capture $chunks do echo hello
 # [b"hello\n"] — the terminator is still there
 ```
 
-Its line ending is the host platform's. A console has no VFS target to consult,
-so it has to pick one.
+The line ending is arbitarily chosen to be the interpreter's host platform's.
 
 ## Constructor
 
 ### `SinkConsole sink :can_style?`
 
-Wraps `sink`. [`capture`](./index.md#capture-console-func-args) does this for
-you; construct one directly to pass options.
+Wraps `sink`.
 
 **Parameters:**
 
@@ -48,16 +41,14 @@ you; construct one directly to pass options.
 | `sink`      | [`Sink`](../std/sink.md) | Where framed values are written   |
 | `can_style` | `bool?`                  | Emit ANSI styling (default false) |
 
-**Returns:** `SinkConsole`
-
 ```
-# Off by default, so assertions compare against plain text.
+# Style is off by default
 let plain = []
 term.capture $plain do echo $warning
 
-# Opt in when the test is specifically about styling.
+# Opt in to SGR styling
 let styled = []
-term.capture (term.SinkConsole(styled, can_style: true)) do echo $warning
+term.capture (term.SinkConsole styled can_style: true) do echo $warning
 ```
 
 ## Methods

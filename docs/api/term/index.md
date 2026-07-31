@@ -1,7 +1,6 @@
 # term
 
-The `term` module writes sanitized terminal output and constructs ANSI-styled
-text.
+The `term` module interfaces with terminals and consoles.
 
 ## Types
 
@@ -48,22 +47,20 @@ must be between 0 and 255. Color options also accept `:INHERIT:`.
 
 ### `console`
 
-The host [`Console`](./console.md). Follows extension terminal takeover.
+The host [`Console`](./console.md), which may be taken over by an extension
+such a `progress.`
 
-Naming it pins to it: unlike [`output()`](#output), it is not intercepted by an
-enclosing [`capture`](#capture-console-func-args). So
-`term.console.geometry()` is the test for whether a real terminal is attached,
-and `term.console.can_style` for the process-wide styling policy, no matter what
-is capturing.
+Unlike [`output()`](#output), it is not intercepted by an enclosing
+[`capture`](#capture-console-func-args).
 
 ## Functions
 
 ### `output()`
 
-Returns the *ambient* console: the one installed by an enclosing
+Returns the current output console: the one installed by an enclosing
 [`capture`](#capture-console-func-args), or [`console`](#console) if there is
-none. This is where `echo`, `print`, diagnostics, and undirected child process
-output go.
+none. This is where `echo`, `print`, diagnostics, and unredirected child
+process output go.
 
 **Returns:** [`Console`](./console.md)
 
@@ -73,12 +70,11 @@ Runs a callable with `console` installed as the ambient console, then flushes
 it and restores the previous one.
 
 `console` may be any [`Console`](./console.md), or any
-[sink](../std/sink.md) — a sink is wrapped in a
+[`Sink`](../std/sink.md) — a plain sink is wrapped in a
 [`SinkConsole`](./sink-console.md), which frames per the ambient
 [I/O mode](../shell/index.md#with_io_mode-mode-func).
 
-The override is inherited by strands spawned inside the call.
-[`console`](#console) is *not* intercepted; it pins to the host.
+The override is inherited by all strands spawned inside the call.
 
 **Parameters:**
 
@@ -107,12 +103,11 @@ assert_eq $out ["hi"]
 
 ### `sub func :trim? :can_style? ...args`
 
-Runs a callable and returns its console output as a string. The human-stream
+Runs a callable and returns its console output as a string. The console
 counterpart to [`proc.sub`](../proc/index.md#sub-func-trim), which captures a
-child's *data* stream.
+strand's implicit output stream.
 
-Capture is verbatim: no framing and no I/O mode, so `echo` still terminates and
-`print` still does not. The output must be valid UTF-8. One final line ending
+Verbatim output is captured, which must be valid UTF-8. One final line ending
 (LF or CRLF) is removed unless `trim: false`.
 
 **Parameters:**
@@ -129,15 +124,6 @@ Capture is verbatim: no framing and no I/O mode, so `echo` still terminates and
 ```
 let greeting = term.sub do greet Alice
 assert_eq $greeting "Hello, Alice!"
-```
-
-Styling is off by default — a capture is not a terminal — so an assertion on
-captured text behaves the same piped and on a terminal. Pass `can_style: true`
-when the styling itself is what is being tested:
-
-```
-let styled = term.sub can_style: true do
-  echo (term.style "warn" fg: :YELLOW:)
 ```
 
 ### `echo ...args`
