@@ -201,6 +201,16 @@ pub(crate) struct Local {
     /// call-depth limit. While set, console writes bypass the capture and go to
     /// the host.
     capturing: Cell<bool>,
+    /// The `can_style` the ambient console reported when it was installed.
+    ///
+    /// Snapshotted rather than read live because `can_style` is defined to be
+    /// fixed for the life of an installed console — which is what makes a
+    /// capture's styling deterministic — and because the styling query is a
+    /// sync, infallible one reachable from a public Rust API.
+    ///
+    /// Only meaningful while a capture is installed; the host answers from
+    /// `Terminal::ansi` instead.
+    capture_can_style: Cell<bool>,
     termination_policy: RefCell<TerminationPolicy>,
     invocation: RefCell<InvocationOverride>,
 }
@@ -220,6 +230,7 @@ impl<'v> strand::Local<'v> for Local {
             io_mode: Cell::new(IoMode::Line),
             background: Cell::new(false),
             capturing: Cell::new(false),
+            capture_can_style: Cell::new(false),
             termination_policy: RefCell::new(TerminationPolicy::default()),
             invocation: RefCell::new(InvocationOverride::default()),
         }
@@ -238,6 +249,9 @@ impl<'v> strand::Local<'v> for Local {
             // Inherited so that a strand spawned from inside a console's own
             // write stays guarded rather than routing back into it.
             capturing: Cell::new(self.capturing.get()),
+            // Inherited alongside the capture root itself, so a strand spawned
+            // inside a capture answers the styling question the same way.
+            capture_can_style: Cell::new(self.capture_can_style.get()),
             termination_policy: self.termination_policy.clone(),
             invocation: self.invocation.clone(),
         }
@@ -314,6 +328,14 @@ impl Local {
 
     pub(crate) fn set_capturing(&self, v: bool) -> bool {
         self.capturing.replace(v)
+    }
+
+    pub(crate) fn capture_can_style(&self) -> bool {
+        self.capture_can_style.get()
+    }
+
+    pub(crate) fn set_capture_can_style(&self, v: bool) -> bool {
+        self.capture_can_style.replace(v)
     }
 
     pub(crate) fn termination_policy(&self) -> TerminationPolicy {

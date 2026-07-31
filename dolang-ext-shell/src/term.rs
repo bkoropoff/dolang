@@ -21,10 +21,15 @@ use crate::{
 ///
 /// The override lives in a strand-local GC root, so it is inherited by strands
 /// spawned inside `f` and restored on every path out.
+///
+/// `can_style` is the answer the console gave when it was handed over; it is
+/// snapshotted rather than re-read, which is what fixes styling for the life of
+/// the capture.
 async fn with_capture<'v, 's, R>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
     console: &Slot<'v, '_>,
+    can_style: bool,
     f: impl AsyncFnOnce(&mut Strand<'v, 's>) -> R,
 ) -> R {
     strand
@@ -32,9 +37,14 @@ async fn with_capture<'v, 's, R>(
             let mut root = global.capture.slot(strand);
             Output::set(strand, &mut prev, &root);
             Output::set(strand, &mut root, console);
+            let prev_can_style = global.local.get(strand).set_capture_can_style(can_style);
             let result = f(strand).await;
             let mut root = global.capture.slot(strand);
             Output::set(strand, &mut root, &prev);
+            global
+                .local
+                .get(strand)
+                .set_capture_can_style(prev_can_style);
             result
         })
         .await
@@ -1012,6 +1022,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
     } = keys;
     let backtrace = builder.sym("backtrace");
     let trim = builder.sym("trim");
+    let can_style = global.syms.can_style;
 
     builder
         .module("term")
@@ -1019,7 +1030,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         .value("Style", global.types.style)
         .value("Console", global.types.console)
         .value("SinkConsole", global.types.sink_console)
-        .value("have_terminal", global.terminal.stderr_is_terminal)
+        .value("Geometry", global.types.geometry)
         .object("console", global.types.host_console, HostConsole)
         .function("output", async move |strand, args, out| {
             let ([], []) = unpack!(strand, args, 0, 0)?;
@@ -1041,14 +1052,23 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                     Output::set(strand, &mut console, target);
                 } else {
                     // Any ordinary sink works; the adapter supplies the rest of
-                    // the console interface.
-                    console::create_sink_console(strand, &target, Slot::reborrow(&mut console))
-                        .await?;
+                    // the console interface. A bare sink does not style — pass
+                    // a `term.SinkConsole` built with `can_style: true` to say
+                    // otherwise.
+                    console::create_sink_console(
+                        strand,
+                        &target,
+                        false,
+                        Slot::reborrow(&mut console),
+                    )
+                    .await?;
                 }
-                let result = with_capture(strand, global, &console, async move |strand| {
-                    func.call(strand, rest, out).await
-                })
-                .await;
+                let can_style = console::can_style(strand, &console)?;
+                let result =
+                    with_capture(strand, global, &console, can_style, async move |strand| {
+                        func.call(strand, rest, out).await
+                    })
+                    .await;
                 // An unterminated `print` is only visible once the partial line
                 // is emitted, so the scope always ends with a flush.
                 let flushed = method!(strand, &console, global.syms.flush, &mut tmp).await;
@@ -1058,13 +1078,15 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         .function_with_slots(
             "sub",
             async move |strand, args, out, [mut console, mut tmp]| {
-                let ([func], [trim], rest) = unpack!(strand, args, 1, 0, trim = None, ...)?;
+                let ([func], [trim, can_style], rest) =
+                    unpack!(strand, args, 1, 0, trim = None, can_style = None, ...)?;
                 let trim = trim.map(|v| v.to_bool(strand)).unwrap_or(true);
+                let can_style = can_style.is_some_and(|v| v.to_bool(strand));
                 global
                     .types
                     .sub_console
-                    .create(strand, SubConsole::default(), &mut console);
-                with_capture(strand, global, &console, async move |strand| {
+                    .create(strand, SubConsole::new(can_style), &mut console);
+                with_capture(strand, global, &console, can_style, async move |strand| {
                     func.call(strand, rest, &mut tmp).await
                 })
                 .await?;

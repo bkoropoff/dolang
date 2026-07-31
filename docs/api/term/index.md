@@ -5,12 +5,13 @@ text.
 
 ## Types
 
-| Type                                 | Description                           |
-| ------------------------------------ | ------------------------------------- |
-| [`Console`](./console.md)            | Destination for human-readable output |
-| [`SinkConsole`](./sink-console.md)   | Console over an ordinary sink         |
-| [`Style`](./style.md)                | Reusable terminal style               |
-| [`Text`](./text.md)                  | Validated terminal presentation       |
+| Type                               | Description                             |
+| ---------------------------------- | --------------------------------------- |
+| [`Console`](./console.md)          | Destination for human-readable output   |
+| [`Geometry`](./geometry.md)        | Dimensions of a terminal-backed console |
+| [`SinkConsole`](./sink-console.md) | Console over an ordinary sink           |
+| [`Style`](./style.md)              | Reusable terminal style                 |
+| [`Text`](./text.md)                | Validated terminal presentation         |
 
 ## Style options
 
@@ -50,11 +51,10 @@ must be between 0 and 255. Color options also accept `:INHERIT:`.
 The host [`Console`](./console.md). Follows extension terminal takeover.
 
 Naming it pins to it: unlike [`output()`](#output), it is not intercepted by an
-enclosing [`capture`](#capture-console-func-args).
-
-### `have_terminal`
-
-Whether stderr was a terminal when the process started.
+enclosing [`capture`](#capture-console-func-args). So
+`term.console.geometry()` is the test for whether a real terminal is attached,
+and `term.console.can_style` for the process-wide styling policy, no matter what
+is capturing.
 
 ## Functions
 
@@ -105,7 +105,7 @@ term.capture $out do print hi
 assert_eq $out ["hi"]
 ```
 
-### `sub func :trim? ...args`
+### `sub func :trim? :can_style? ...args`
 
 Runs a callable and returns its console output as a string. The human-stream
 counterpart to [`proc.sub`](../proc/index.md#sub-func-trim), which captures a
@@ -117,11 +117,12 @@ Capture is verbatim: no framing and no I/O mode, so `echo` still terminates and
 
 **Parameters:**
 
-| Name   | Type                      | Description                                     |
-| ------ | ------------------------- | ----------------------------------------------- |
-| `func` | callable                  | Block to run                                    |
-| `trim` | [`Bool`](../std/bool.md)? | Strip one trailing line ending (default `true`) |
-| `...`  |                           | Additional arguments passed to `func`           |
+| Name        | Type                      | Description                                     |
+| ----------- | ------------------------- | ----------------------------------------------- |
+| `func`      | callable                  | Block to run                                    |
+| `trim`      | [`Bool`](../std/bool.md)? | Strip one trailing line ending (default `true`) |
+| `can_style` | [`Bool`](../std/bool.md)? | Keep ANSI styling (default `false`)             |
+| `...`       |                           | Additional arguments passed to `func`           |
 
 **Returns:** [`Str`](../std/str.md)
 
@@ -130,8 +131,14 @@ let greeting = term.sub do greet Alice
 assert_eq $greeting "Hello, Alice!"
 ```
 
-Styling is off inside a capture — a capture is not a terminal — so an assertion
-on captured text behaves the same piped and on a terminal.
+Styling is off by default — a capture is not a terminal — so an assertion on
+captured text behaves the same piped and on a terminal. Pass `can_style: true`
+when the styling itself is what is being tested:
+
+```
+let styled = term.sub can_style: true do
+  echo (term.style "warn" fg: :YELLOW:)
+```
 
 ### `echo ...args`
 

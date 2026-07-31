@@ -66,10 +66,10 @@ specifically mean the stream.
 
 [`term.capture`](../api/term/index.md#capture-console-func-args) installs a
 console for the duration of a call, and
-[`term.sub`](../api/term/index.md#sub-func-trim-args) returns what was written
-as a string. This is the same pinning rule one level further in: `echo`,
-`print`, diagnostics, and undirected child output are anonymous and follow
-[`term.output()`](../api/term/index.md#output), while
+[`term.sub`](../api/term/index.md#sub-func-trim-can_style-args) returns what
+was written as a string. This is the same pinning rule one level further in:
+`echo`, `print`, diagnostics, and undirected child output are anonymous and
+follow [`term.output()`](../api/term/index.md#output), while
 [`term.console`](../api/term/console.md) is a name and pins to the host.
 
 ```
@@ -94,9 +94,8 @@ A plain sink passed to `capture` is wrapped in a
 boundary and therefore honors the I/O mode. `term.sub` sits on the byte side
 instead and reports exactly what was written.
 
-Styling is off inside a capture: a capture is not a terminal, and without this
-an assertion on captured text would pass in CI and fail on a developer's
-terminal.
+Styling is off inside a capture unless asked for; see
+[Styling Control](#styling-control).
 
 ## Child Process Output
 
@@ -167,16 +166,49 @@ including hyperlinks, are removed.
 
 ## Styling Control
 
-Styling is enabled when stderr is a terminal at process startup, otherwise
-`Text` renders without it. Environment variables override terminal detection:
+`echo` and `print` style their output when the console they are writing to says
+it can. That answer is the console's
+[`can_style`](../api/term/console.md#can_style) — a property of the destination,
+not a global.
+
+For the host console, it is the process-wide policy:
 
 1. If `FORCE_COLOR` is set, any value except `0` enables styling; `0` disables
    it.
 2. Otherwise, a non-empty `NO_COLOR` disables styling.
 3. Otherwise, styling follows stderr terminal detection.
 
-`term.have_terminal` reports whether stderr was a terminal; it does not include
-the environment-variable override.
+For a [`capture`](../api/term/index.md#capture-console-func-args) it is `false`
+unless asked for, which is what keeps a test asserting on `echo`ed text behaving
+the same piped and on a developer's terminal:
+
+```
+# Plain, on a terminal or not.
+assert_eq (term.sub do echo $warning) "warning"
+
+# Unless the styling is the point.
+term.sub can_style: true do echo $warning
+```
+
+Because it is the *installed* console that is consulted,
+`term.console.can_style` still reports the process-wide policy from inside a
+capture — naming it pins to the host, the same as for writes.
+
+## Terminal Dimensions
+
+[`term.console.geometry()`](../api/term/console.md#geometry) returns the
+terminal's `rows` and `cols`, or `nil` when stderr is not a terminal. It is a
+call, not a field, because the terminal is resized while the program runs.
+
+```
+let g = term.console.geometry()
+if g
+  echo $ term.preformat $ "─" * g.cols
+```
+
+A capture reports `nil` — a sink has no layout — so `term.output().geometry()`
+answers for wherever the output is actually going, while `term.console` answers
+for the real terminal.
 
 ## Raw Output
 

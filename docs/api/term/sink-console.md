@@ -36,13 +36,34 @@ so it has to pick one.
 
 ## Constructor
 
-### `SinkConsole()`
+### `SinkConsole sink :can_style?`
 
-Constructs an empty adapter. The downstream sink is normally supplied by
-`capture`; construct one directly only when subclassing.
+Wraps `sink`. [`capture`](./index.md#capture-console-func-args) does this for
+you; construct one directly to pass options.
+
+**Parameters:**
+
+| Name        | Type                     | Description                       |
+| ----------- | ------------------------ | --------------------------------- |
+| `sink`      | [`Sink`](../std/sink.md) | Where framed values are written   |
+| `can_style` | `bool?`                  | Emit ANSI styling (default false) |
+
+**Returns:** `SinkConsole`
+
+```
+# Off by default, so assertions compare against plain text.
+let plain = []
+term.capture $plain do echo $warning
+
+# Opt in when the test is specifically about styling.
+let styled = []
+term.capture (term.SinkConsole(styled, can_style: true)) do echo $warning
+```
 
 ## Methods
 
 Implements the [`Console`](./console.md) interface: `write`, `writeln`, and
 `flush`. `flush` emits any partial final line, which is what makes an
 unterminated `print` visible when a capture scope ends.
+
+[`geometry()`](./console.md#geometry) is `nil` — a sink has no layout.

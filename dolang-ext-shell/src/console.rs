@@ -12,6 +12,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::{
     error::ErrorExt as _,
+    geometry::{HostGeometry, HostGeometryAnnex},
     global::Global,
     io_mode::{IoMode, ValueEncoding, encode_value, line_ending, strip_line_ending, write_raw},
 };
@@ -67,6 +68,19 @@ impl<'v> Object<'v> for Console {
             .method("flush", async move |_this, strand, args, _out| {
                 let ([], []) = unpack!(strand, args, 0, 0)?;
                 Err(Error::not_supported(strand))
+            })
+            // Unlike the write methods, the capability members have a safe
+            // default, so a Do subclass that supplies only the three above
+            // still answers them — by delegating to these.
+            .get("can_style", |_this, strand, out| {
+                Output::set(strand, out, false);
+                Ok(())
+            })
+            .method("geometry", async move |_this, strand, args, _out| {
+                let ([], []) = unpack!(strand, args, 0, 0)?;
+                // Nil: a bare console is just a stream, which is a real answer
+                // rather than a missing one.
+                Ok(())
             })
     }
 
@@ -158,6 +172,36 @@ impl<'v> Object<'v> for HostConsole {
                     .await
                     .map_err(|error| error.into_sys(strand))
             })
+            .get("can_style", |_this, strand, out| {
+                let global = strand.state::<Global<'v>>();
+                Output::set(strand, out, global.terminal.ansi);
+                Ok(())
+            })
+            .method("geometry", async move |_this, strand, args, out| {
+                let ([], []) = unpack!(strand, args, 0, 0)?;
+                // The real terminal is queried even under takeover: a progress
+                // display owns the cursor, but the width is still the width.
+                let term = ::console::Term::stderr();
+                if !term.is_term() {
+                    return Ok(());
+                }
+                // Nil means "not a terminal", not "the ioctl declined". A pty
+                // with no window size set is still a terminal — everything that
+                // draws on one falls back to the conventional 24x80, so an
+                // answer here is more useful than a hole.
+                let (rows, cols) = term.size();
+                let global = strand.state::<Global<'v>>();
+                global.types.host_geometry.create_with_annex(
+                    strand,
+                    HostGeometry,
+                    HostGeometryAnnex {
+                        rows: rows.into(),
+                        cols: cols.into(),
+                    },
+                    out,
+                );
+                Ok(())
+            })
     }
 
     /// There is exactly one host console per VM, so having the type is having
@@ -223,12 +267,14 @@ fn data_bytes<'v, 's>(strand: &mut Strand<'v, 's>, data: &Slot<'v, '_>) -> Resul
 /// [`io_mode::read_value`](crate::io_mode::read_value) on the pull side. The
 /// line ending `writeln` appends is materialized into the bytestream *first*,
 /// so it survives every mode rather than being at the mercy of one.
-#[derive(Default)]
 pub(crate) struct SinkConsole {
     /// Bytes written but not yet emitted as a value.
     ///
     /// Only ever non-empty in `:LINE:` mode, holding a partial final line.
     buf: Vec<u8>,
+    /// Off unless the caller asked for styling, since the point of capturing
+    /// into a sink is usually to assert on plain text.
+    can_style: bool,
 }
 
 impl SinkConsole {
@@ -270,13 +316,24 @@ impl<'v> Object<'v> for SinkConsole {
         args: dolang::runtime::Args<'v, 'a>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        let ([target], []) = unpack!(strand, args, 1, 0)?;
-        create_sink_console(strand, &target, out).await
+        let can_style_sym = strand.state::<Global<'v>>().syms.can_style;
+        let ([target], [can_style]) = unpack!(strand, args, 1, 0, can_style_sym = None)?;
+        let can_style = can_style.is_some_and(|value| value.to_bool(strand));
+        create_sink_console(strand, &target, can_style, out).await
     }
 
     fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
         builder
             .supertype(TypeObject::Sink)
+            .get("can_style", |this, strand, out| {
+                let can_style = this.borrow(strand)?.can_style;
+                Output::set(strand, out, can_style);
+                Ok(())
+            })
+            .method("geometry", async move |_this, strand, args, _out| {
+                let ([], []) = unpack!(strand, args, 0, 0)?;
+                Ok(())
+            })
             .method_with_slots(
                 "write",
                 async move |this, strand, args, out, [sink, item]| {
@@ -351,13 +408,18 @@ impl<'v> Object<'v> for SinkConsole {
 pub(crate) async fn create_sink_console<'v, 'a, 's>(
     strand: &mut Strand<'v, 's>,
     target: &Value<'v>,
+    can_style: bool,
     mut out: Slot<'v, 'a>,
 ) -> Result<'v, 's, ()> {
     let global = strand.state::<Global<'v>>();
-    global
-        .types
-        .sink_console
-        .create(strand, SinkConsole::default(), &mut out);
+    global.types.sink_console.create(
+        strand,
+        SinkConsole {
+            buf: Vec::new(),
+            can_style,
+        },
+        &mut out,
+    );
     strand
         .with_slots(async move |strand, [mut downstream]| {
             target.sink(strand, &mut downstream).await?;
@@ -422,18 +484,27 @@ async fn feed<'v, 'a, 's>(
 ///
 /// No framing and no I/O mode — `term.sub` reports exactly what was written,
 /// so `print a`, `print b`, `echo c` is `"abc"` whatever the mode.
-#[derive(Default)]
-pub(crate) struct SubConsole(String);
+pub(crate) struct SubConsole {
+    text: String,
+    can_style: bool,
+}
 
 impl SubConsole {
+    pub(crate) fn new(can_style: bool) -> Self {
+        Self {
+            text: String::new(),
+            can_style,
+        }
+    }
+
     pub(crate) fn text(&self) -> &str {
-        &self.0
+        &self.text
     }
 
     fn append<'v, 's>(&mut self, strand: &mut Strand<'v, 's>, bytes: &[u8]) -> Result<'v, 's, ()> {
         let text = std::str::from_utf8(bytes)
             .map_err(|_| Error::runtime(strand, "term.sub: captured invalid UTF-8"))?;
-        self.0.push_str(text);
+        self.text.push_str(text);
         Ok(())
     }
 }
@@ -465,6 +536,15 @@ impl<'v> Object<'v> for SubConsole {
                 Ok(())
             })
             .method("flush", async move |_this, strand, args, _out| {
+                let ([], []) = unpack!(strand, args, 0, 0)?;
+                Ok(())
+            })
+            .get("can_style", |this, strand, out| {
+                let can_style = this.borrow(strand)?.can_style;
+                Output::set(strand, out, can_style);
+                Ok(())
+            })
+            .method("geometry", async move |_this, strand, args, _out| {
                 let ([], []) = unpack!(strand, args, 0, 0)?;
                 Ok(())
             })
@@ -560,14 +640,30 @@ pub(crate) async fn flush<'v, 's>(strand: &mut Strand<'v, 's>) -> Result<'v, 's,
 
 /// Whether ANSI styling should be emitted to the ambient console.
 ///
-/// A capture is not a terminal, so styling is off inside one. Without this a
-/// test asserting on `echo`ed text would pass piped and fail on a developer's
-/// terminal.
+/// Under a capture this is the `can_style` the installed console reported when
+/// it was installed — off by default, since a capture is not a terminal and a
+/// test asserting on `echo`ed text would otherwise pass piped and fail on a
+/// developer's terminal.
 pub(crate) fn ansi<'v>(strand: &Strand<'v, '_>) -> bool {
+    let global = strand.state::<Global<'v>>();
     if captured(strand) {
-        return false;
+        return global.local.get(strand).capture_can_style();
     }
-    strand.state::<Global<'v>>().terminal.ansi
+    global.terminal.ansi
+}
+
+/// Reads a console's `can_style`, for snapshotting when it is installed.
+pub(crate) fn can_style<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    console: &Value<'v>,
+) -> Result<'v, 's, bool> {
+    let sym = strand.state::<Global<'v>>().syms.can_style;
+    strand.with_slots_sync(|strand, [mut value]| {
+        console.get(strand, sym, &mut value)?;
+        value
+            .as_bool(strand)
+            .ok_or_else(|| Error::type_error(strand, "can_style: expected `Bool`"))
+    })
 }
 
 /// Writes to the host console, optionally terminating the line.

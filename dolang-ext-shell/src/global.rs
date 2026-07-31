@@ -34,6 +34,7 @@ use crate::{
         stream::{StreamEntry, StreamIter},
         xattr::{XattrEntry, XattrIter},
     },
+    geometry::{Geometry, HostGeometry},
     local::Local,
     pipe_channel::{PipeReceiver, PipeSender},
     proc::Capture,
@@ -72,6 +73,8 @@ pub(crate) struct Types<'v> {
     pub(crate) host_console: Type<'v, HostConsole>,
     pub(crate) sink_console: Type<'v, SinkConsole>,
     pub(crate) sub_console: Type<'v, SubConsole>,
+    pub(crate) geometry: Type<'v, Geometry>,
+    pub(crate) host_geometry: Type<'v, HostGeometry>,
     pub(crate) date_time: Type<'v, DateTime>,
     pub(crate) duration: Type<'v, Duration>,
     pub(crate) os_info: Type<'v, OsInfo>,
@@ -117,6 +120,7 @@ pub(crate) struct Syms<'v> {
     pub(crate) write: Sym<'v, 'v>,
     pub(crate) writeln: Sym<'v, 'v>,
     pub(crate) flush: Sym<'v, 'v>,
+    pub(crate) can_style: Sym<'v, 'v>,
     pub(crate) dir: Sym<'v, 'v>,
     pub(crate) fifo: Sym<'v, 'v>,
     pub(crate) file: Sym<'v, 'v>,
@@ -271,6 +275,12 @@ impl<'v> Global<'v> {
             .nominal_supertype(console)
             .build();
 
+        let geometry = builder.register_type::<Geometry>();
+        let host_geometry = builder
+            .build_type::<HostGeometry>((), ())
+            .nominal_supertype(geometry)
+            .build();
+
         let stderr_is_terminal = std::io::stderr().is_terminal();
         Self {
             stdio: Stdio {
@@ -312,6 +322,8 @@ impl<'v> Global<'v> {
                 host_console,
                 sink_console,
                 sub_console,
+                geometry,
+                host_geometry,
                 date_time: builder.register_type::<DateTime>(),
                 duration: builder.register_type::<Duration>(),
                 os_info: builder.register_type(),
@@ -385,6 +397,7 @@ impl<'v> Global<'v> {
                 write: builder.sym("write"),
                 writeln: builder.sym("writeln"),
                 flush: builder.sym("flush"),
+                can_style: builder.sym("can_style"),
                 dir: builder.sym("DIR"),
                 fifo: builder.sym("FIFO"),
                 file: builder.sym("FILE"),

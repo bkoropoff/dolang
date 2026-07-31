@@ -28,6 +28,26 @@ error stream and bypasses terminal takeover and capture entirely. The host
 console happens to write there when nothing has taken the terminal over, which
 is why the two are easy to confuse.
 
+## Fields
+
+### `can_style`
+
+Whether ANSI styling should be emitted to this console.
+
+Fixed for the life of an installed console: `echo` and `print` read it when
+[`capture`](./index.md#capture-console-func-args) installs the console, not on
+every write. That is what makes a capture's styling deterministic — mutating
+the field afterwards does not change the current capture's answer.
+
+The host console answers the `FORCE_COLOR`/`NO_COLOR`/tty policy described in
+[Styling Control](../../shell/terminal-output.md#styling-control). Everything
+else answers `false` unless it was asked for.
+
+```
+term.capture (term.SinkConsole(out, can_style: true)) do
+  echo $warning
+```
+
 ## Methods
 
 ### `write data`
@@ -69,6 +89,31 @@ ending, and only the console knows which one.
 Makes buffered output visible. A `SinkConsole` also emits any partial final
 line here.
 
+### `geometry()`
+
+The console's dimensions, or `nil` if it is just a stream.
+
+A call rather than a field: the terminal is resized while the program runs.
+
+**Returns:** [`Geometry`](./geometry.md) or `nil`
+
+```
+let g = term.console.geometry()
+if g
+  echo "terminal is $(g.cols)x$(g.rows)"
+```
+
+`nil` means "not a terminal", not "the size could not be determined" — a
+terminal that reports no window size still answers, with the conventional
+24×80. So `term.console.geometry()` is the honest test for whether a real
+terminal is attached.
+
+An answer here says nothing about cursor control. A console may support
+`geometry()` and still throw
+[`UnsupportedError`](../std/unsupported-error.md) for other terminal
+operations — under a progress display, for instance, the width is real but the
+cursor belongs to the display.
+
 ### Line endings
 
 Which ending `writeln` appends is the console's own business, and the two
@@ -104,7 +149,18 @@ and go through `writeln`/`write`. The rule is that adapters honor the mode and
 ## Subclassing
 
 Do classes may subclass `Console` to implement one. Supply `write`, `writeln`,
-and `flush`; `put` and the sink protocol come from the base.
+and `flush`; `put`, the sink protocol, and the capability members come from the
+base:
+
+| Console                            | `can_style`    | `geometry()`  |
+| ---------------------------------- | -------------- | ------------- |
+| `Console` (the base)               | `false`        | `nil`         |
+| Host (`term.console`)              | styling policy | terminal size |
+| [`SinkConsole`](./sink-console.md) | as constructed | `nil`         |
+
+Unlike the write methods, the capability members have a safe default, so a
+subclass only overrides them when it has a better answer — a `can_style` field
+and a `geometry` method, both of which shadow the base.
 
 ```
 class Recorder: term.Console

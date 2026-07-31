@@ -16,6 +16,7 @@ import
     - test
   std:
     - TypeError
+    - UnsupportedError
     - ValueError
 
 let ESC = str b"\x1b"
@@ -30,8 +31,17 @@ else
   "\n"
 
 #[test]
-def terminal_detection()
-  assert_eq (type term.have_terminal) $Bool
+def console_geometry()
+  # `term.console` is a name, so this is the honest "is there a real terminal"
+  # test — nil under a pipe, dimensions under a tty. There is no separate
+  # `have_terminal` flag to disagree with it.
+  assert_eq (type term.console.can_style) $Bool
+  let g = term.console.geometry()
+  if (g == nil)
+    return
+  assert (type g term.Geometry)
+  assert_eq (type g.rows) $Int
+  assert_eq (type g.cols) $Int
 
 #[test]
 def text_string_coercion()
@@ -164,10 +174,38 @@ def capture_flushes_partial_line()
   assert_eq $out ["hi"]
 
 #[test]
-def capture_is_unstyled()
+def capture_is_unstyled_by_default()
   # A capture is not a terminal, so styling is off inside one — otherwise this
   # would pass piped and fail on a developer's terminal.
   assert_eq (term.sub do echo (term.style "warn" fg: :YELLOW:)) warn
+  # And the console says so, which is what `echo` consulted to decide.
+  let out = []
+  term.capture $out do
+    assert_eq (term.output().can_style) false
+
+#[test]
+def capture_can_style_opt_in()
+  # Styling is a property of the installed console, so a test that is
+  # specifically *about* styled output can ask for it — something a global tty
+  # check could never express.
+  let styled = "$ESC[33mwarn$ESC[0m"
+  assert_eq (term.sub can_style: true do echo (term.style "warn" fg: :YELLOW:)) $styled
+
+  # The same opt-in on the sink adapter, which is the route `capture` takes.
+  let out = []
+  term.capture (term.SinkConsole(out, can_style: true)) do
+    assert_eq (term.output().can_style) true
+    echo (term.style "warn" fg: :YELLOW:)
+  assert_eq $out [styled]
+
+#[test]
+def capture_reports_no_geometry()
+  # A sink has no layout, and the pin still answers for the real terminal.
+  let host = term.console.geometry()
+  let out = []
+  term.capture $out do
+    assert_eq (term.output().geometry()) nil
+    assert_eq (term.console.geometry() == nil) (host == nil)
 
 #[test]
 def nesting_composes()
@@ -220,6 +258,38 @@ def console_pins_past_capture()
     assert_eq $err.read() "pinned-write\npinned-put$NL"
 
 #[test]
+def concurrent_lines_do_not_interleave()
+  # `echo` writes its payload and its terminator to the host console under one
+  # lock. Two locks would let another strand slip a line in between, which
+  # surfaces as run-together output — most visibly plain-mode progress lines.
+  # Run in a child so the concurrent writes land in a file.
+  with_temp_dir do |dir|
+    let src = r|
+      import strand:
+        - fork
+      fork
+        do
+          for _ = (0..200)
+            echo aaaaaaaaaa
+        do
+          for _ = (0..200)
+            echo bbbbbbbbbb
+
+    let path = script $dir race.dol $src
+    let err = (dir / "err.txt")
+    run $shell.exe --no-cache $path stderr: $err
+
+    let lines = Array(err.read().split("\n"))
+    # `split` on a trailing terminator leaves one empty tail element.
+    assert_eq $lines[lines.len - 1] ""
+    let body = lines[..(lines.len - 1)]
+    # A lost lock shows up as two payloads run together plus a blank line, so
+    # both the count and the contents catch it.
+    assert_eq $body.len 400
+    for line = body
+      assert ((line == "aaaaaaaaaa") || (line == "bbbbbbbbbb"))
+
+#[test]
 def child_stderr_is_captured()
   # An undirected child stderr is console-bound, so a capture takes it. Child
   # stdout is the data stream and still goes to the implicit sink.
@@ -241,7 +311,7 @@ def progress_lines_are_captured()
   # Covers the other funnelled writer, `write_terminal_line`. Only plain-mode
   # progress goes through it — on a real terminal indicatif takes the terminal
   # over and draws directly, bypassing ordinary console output entirely.
-  if term.have_terminal
+  if term.console.geometry()
     skip "requires no terminal (progress draws directly on one)"
 
   let out = []
@@ -276,6 +346,63 @@ def do_subclass_console()
     echo terminated
     print bare
   assert_eq $recorder.lines ["terminated|", "bare"]
+
+  # Supplying only the three write members is enough: the capability members
+  # have safe defaults, which the subclass inherits from the base.
+  assert_eq $recorder.can_style false
+  assert_eq (recorder.geometry()) nil
+
+#[test]
+def do_console_declares_capabilities()
+  # A Do field shadows the base's getter, and a Do method its `geometry()`.
+  class MyGeometry: term.Geometry
+    pub field rows
+    pub field cols
+
+    def (init) self rows cols
+      term.Geometry.(init) $self
+      self.rows = rows
+      self.cols = cols
+
+  class Fancy: term.Console
+    pub field lines
+    pub field can_style = true
+
+    def (init) self
+      term.Console.(init) $self
+      self.lines = []
+
+    pub def write self data
+      self.lines.push (str data)
+      data.len
+
+    pub def writeln self data
+      self.lines.push (str data)
+      data.len
+
+    pub def flush _self
+      nil
+
+    pub def geometry _self
+      MyGeometry 24 80
+
+  let fancy = Fancy()
+  term.capture $fancy do echo (term.style "warn" fg: :YELLOW:)
+  assert_eq $fancy.lines ["$ESC[33mwarn$ESC[0m"]
+
+  let g = fancy.geometry()
+  assert (type g term.Geometry)
+  assert_eq $g.rows 24
+  assert_eq $g.cols 80
+
+#[test]
+def bare_geometry_refuses()
+  # `term.Geometry` is the interface, so an instance of it has no dimensions to
+  # report — the same refusal `term.Console`'s write methods make.
+  let base = term.Geometry()
+  assert (type base term.Geometry)
+  assert_throws $UnsupportedError do base.rows
+  assert_throws $UnsupportedError do base.cols
 
 #[test]
 def reentrant_console_does_not_recurse()

@@ -154,8 +154,8 @@ echo "Kernel: $kernel"
 ```
 
 That is the *data* stream. For what the program told a person, use
-[`term.sub`](./term/index.md#sub-func-trim-args), which captures the console
-and so picks up an undirected stderr:
+[`term.sub`](./term/index.md#sub-func-trim-can_style-args), which captures the
+console and so picks up an undirected stderr:
 
 ```
 let complaints = term.sub do run.mytool
