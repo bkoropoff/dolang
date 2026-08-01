@@ -1,4 +1,4 @@
-import progress json patch strand proc time transfer _vfs
+import progress json patch strand proc term time transfer _vfs
   std:
     - RuntimeError
   strand:
@@ -714,7 +714,7 @@ pub class Builder
       self.#agent.stop()
       self.#agent = nil
     if self.#ctr_id
-      proc.mute do self.#runtime.cli rm -f $self.#ctr_id
+      term.mute do self.#runtime.cli rm -f $self.#ctr_id
       self.#ctr_id = nil
 
   def step_run self thunk
@@ -832,7 +832,7 @@ pub class Builder
       sub do self.#runtime.cli commit $self.#ctr_id
     progress.show message: tag do |_|
       for tag = tags
-        proc.mute do self.#runtime.cli tag $img_id $tag
+        term.mute do self.#runtime.cli tag $img_id $tag
     self.#runtime.image $img_id
 
   pub def build self from :pull = :MISSING: ...args
@@ -951,7 +951,7 @@ pub class Image
   # ```
   pub def tag self new_tag
     let ref = str $self
-    proc.mute do self.#runtime.cli tag $ref $new_tag
+    term.mute do self.#runtime.cli tag $ref $new_tag
 
   # Remove the image.
   #
@@ -962,7 +962,7 @@ pub class Image
   # img.remove force: true
   # ```
   pub def remove self :force = false
-    proc.mute do self.#runtime.cli rmi
+    term.mute do self.#runtime.cli rmi
       if force
         --force
       $self.id
@@ -1034,25 +1034,25 @@ pub class Container
       mounts: $parse_container_mounts(mounts)
 
   pub def stop self :timeout = nil
-    proc.mute do self.#runtime.cli stop
+    term.mute do self.#runtime.cli stop
       if (timeout != nil)
         --time $timeout
       $self.id
 
   pub def start self
-    proc.mute do self.#runtime.cli start $self.id
+    term.mute do self.#runtime.cli start $self.id
 
   pub def kill self
-    proc.mute do self.#runtime.cli kill $self.id
+    term.mute do self.#runtime.cli kill $self.id
 
   pub def restart self :timeout = nil
-    proc.mute do self.#runtime.cli restart
+    term.mute do self.#runtime.cli restart
       if (timeout != nil)
         --time $timeout
       $self.id
 
   pub def remove self :force = false :volumes = false
-    proc.mute do self.#runtime.cli rm
+    term.mute do self.#runtime.cli rm
       if force
         --force
       if volumes

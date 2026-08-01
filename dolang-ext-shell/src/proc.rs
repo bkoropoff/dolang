@@ -5,7 +5,7 @@ use dolang::{
         object::{TypeBuilder, fmt},
         strand::Redirect,
         unpack,
-        value::{Singleton, TypeObject, View},
+        value::{TypeObject, View},
         vm::Builder,
     },
 };
@@ -288,13 +288,6 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 .get(strand)
                 .replace_termination_policy(old_policy);
             result
-        })
-        .function("mute", async move |strand, args, out| {
-            let ([func], [], rest) = unpack!(strand, args, 1, 0, ...)?;
-            Redirect::new(strand)
-                .output(Singleton::IterNull)
-                .enter(async move |strand| func.call(strand, rest, out).await)
-                .await
         })
         .function_with_slots("sub", async move |strand, args, out, [mut cap, tmp]| {
             let ([func], [trim], rest) = unpack!(strand, args, 1, 0, trim = None, ...)?;

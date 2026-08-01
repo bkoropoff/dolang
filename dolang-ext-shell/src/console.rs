@@ -76,6 +76,10 @@ impl<'v> Object<'v> for Console {
                 Output::set(strand, out, false);
                 Ok(())
             })
+            .get("is_tty", |_this, strand, out| {
+                Output::set(strand, out, false);
+                Ok(())
+            })
             .method("geometry", async move |_this, strand, args, _out| {
                 let ([], []) = unpack!(strand, args, 0, 0)?;
                 // Nil: a bare console is just a stream, which is a real answer
@@ -177,27 +181,40 @@ impl<'v> Object<'v> for HostConsole {
                 Output::set(strand, out, global.terminal.ansi);
                 Ok(())
             })
+            .get("is_tty", |_this, strand, out| {
+                let global = strand.state::<Global<'v>>();
+                Output::set(strand, out, global.terminal.stderr_is_terminal);
+                Ok(())
+            })
             .method("geometry", async move |_this, strand, args, out| {
                 let ([], []) = unpack!(strand, args, 0, 0)?;
-                // The real terminal is queried even under takeover: a progress
-                // display owns the cursor, but the width is still the width.
-                let term = ::console::Term::stderr();
-                if !term.is_term() {
-                    return Ok(());
-                }
-                // Nil means "not a terminal", not "the ioctl declined". A pty
-                // with no window size set is still a terminal — everything that
-                // draws on one falls back to the conventional 24x80, so an
-                // answer here is more useful than a hole.
-                let (rows, cols) = term.size();
                 let global = strand.state::<Global<'v>>();
+                let ov = &global.terminal.console_override;
+                // The real terminal is queried even under takeover (a
+                // progress display owns the cursor, but the width is still
+                // the width), but only for whichever of rows/cols
+                // `DOLANG_CONSOLE` didn't already pin down. `size_checked`
+                // itself answers `None` on a non-terminal fd or one that
+                // declines to report its size, so there's nothing further to
+                // gate on here.
+                let real = if ov.rows.is_none() || ov.cols.is_none() {
+                    ::console::Term::stderr().size_checked()
+                } else {
+                    None
+                };
+                let rows = ov.rows.map(u32::from).or(real.map(|(r, _)| r.into()));
+                let cols = ov.cols.map(u32::from).or(real.map(|(_, c)| c.into()));
+                // Always a `Geometry`, never nil: the host console is the
+                // terminal-shaped one, so "I don't know either dimension" is
+                // itself expressed as a `Geometry` with both fields nil,
+                // rather than as a second, redundant way to say "unknown"
+                // alongside the per-field nils. `is_tty` is the determinative
+                // terminal test — a guessed 24x80 is never invented here,
+                // each dimension is independently advisory.
                 global.types.host_geometry.create_with_annex(
                     strand,
                     HostGeometry,
-                    HostGeometryAnnex {
-                        rows: rows.into(),
-                        cols: cols.into(),
-                    },
+                    HostGeometryAnnex { rows, cols },
                     out,
                 );
                 Ok(())
@@ -293,6 +310,10 @@ impl<'v> Object<'v> for DefaultOutput {
             })
             .get("can_style", |_this, strand, out| {
                 Output::set(strand, out, ansi(strand));
+                Ok(())
+            })
+            .get("is_tty", |_this, strand, out| {
+                Output::set(strand, out, is_tty(strand));
                 Ok(())
             })
             .method("geometry", async move |_this, strand, args, out| {
@@ -425,6 +446,11 @@ impl<'v> Object<'v> for SinkConsole {
             .get("can_style", |this, strand, out| {
                 let can_style = this.borrow(strand)?.can_style;
                 Output::set(strand, out, can_style);
+                Ok(())
+            })
+            .get("is_tty", |_this, strand, out| {
+                // An adapter over an arbitrary sink is never a terminal.
+                Output::set(strand, out, false);
                 Ok(())
             })
             .method("geometry", async move |_this, strand, args, _out| {
@@ -641,6 +667,11 @@ impl<'v> Object<'v> for SubConsole {
                 Output::set(strand, out, can_style);
                 Ok(())
             })
+            .get("is_tty", |_this, strand, out| {
+                // A capture buffer is never a terminal.
+                Output::set(strand, out, false);
+                Ok(())
+            })
             .method("geometry", async move |_this, strand, args, _out| {
                 let ([], []) = unpack!(strand, args, 0, 0)?;
                 Ok(())
@@ -760,6 +791,34 @@ pub(crate) fn can_style<'v, 's>(
         value
             .as_bool(strand)
             .ok_or_else(|| Error::type_error(strand, "can_style: expected `Bool`"))
+    })
+}
+
+/// Whether the ambient console is a real terminal.
+///
+/// Under a capture this is the `is_tty` the installed console reported
+/// when it was installed, mirroring [`ansi`]/`can_style`. Distinct from
+/// [`crate::stderr_is_tty`], which answers the process-wide, capture-blind
+/// question of whether stderr itself is a terminal.
+pub(crate) fn is_tty<'v>(strand: &Strand<'v, '_>) -> bool {
+    let global = strand.state::<Global<'v>>();
+    if captured(strand) {
+        return global.local.get(strand).capture_is_tty();
+    }
+    global.terminal.stderr_is_terminal
+}
+
+/// Reads a console's `is_tty`, for snapshotting when it is installed.
+pub(crate) fn console_is_tty<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    console: &Value<'v>,
+) -> Result<'v, 's, bool> {
+    let sym = strand.state::<Global<'v>>().syms.is_tty;
+    strand.with_slots_sync(|strand, [mut value]| {
+        console.get(strand, sym, &mut value)?;
+        value
+            .as_bool(strand)
+            .ok_or_else(|| Error::type_error(strand, "is_tty: expected `Bool`"))
     })
 }
 

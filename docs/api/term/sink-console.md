@@ -57,4 +57,5 @@ Implements the [`Console`](./console.md) interface: `write`, `writeln`, and
 `flush`. `flush` emits any partial final line, which is what makes an
 unterminated `print` visible when a capture scope ends.
 
-[`geometry()`](./console.md#geometry) is `nil` — a sink has no layout.
+[`is_tty`](./console.md#is_tty) is always `false` and
+[`geometry()`](./console.md#geometry) is `nil` — a sink is never a terminal.

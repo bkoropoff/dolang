@@ -8,19 +8,24 @@ Returned by [`geometry()`](./console.md#geometry).
 
 ### `rows`
 
-Height in character cells.
+Height in character cells, or `nil` if unknown.
 
-**Returns:** [`Int`](../std/int.md)
+**Returns:** [`Int`](../std/int.md)?
 
 ### `cols`
 
-Width in character cells.
+Width in character cells, or `nil` if unknown.
 
-**Returns:** [`Int`](../std/int.md)
+**Returns:** [`Int`](../std/int.md)?
+
+`rows` and `cols` are independently `nil`: a console may know one dimension
+without the other. The host console (`term.console`) always returns a
+`Geometry`, never `nil` itself — see
+[`Console.geometry()`](./console.md#geometry).
 
 ```
 let g = term.console.geometry()
-if g
+if g.cols
   echo $ term.preformat $ "-" * g.cols
 ```
 

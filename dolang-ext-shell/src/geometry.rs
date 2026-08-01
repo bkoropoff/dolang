@@ -50,9 +50,12 @@ impl<'v> Object<'v> for Geometry {
 /// them.
 pub(crate) struct HostGeometry;
 
+/// `rows`/`cols` are independently optional: `DOLANG_CONSOLE` may pin one
+/// without the other (e.g. `cols=120` alone), in which case the unpinned
+/// dimension falls back to a live ioctl query that may itself come up empty.
 pub(crate) struct HostGeometryAnnex {
-    pub(crate) rows: u32,
-    pub(crate) cols: u32,
+    pub(crate) rows: Option<u32>,
+    pub(crate) cols: Option<u32>,
 }
 
 impl<'v> Object<'v> for HostGeometry {
@@ -65,11 +68,15 @@ impl<'v> Object<'v> for HostGeometry {
     fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
         builder
             .get("rows", |this, strand, out| {
-                Output::set(strand, out, this.annex().rows);
+                if let Some(rows) = this.annex().rows {
+                    Output::set(strand, out, rows);
+                }
                 Ok(())
             })
             .get("cols", |this, strand, out| {
-                Output::set(strand, out, this.annex().cols);
+                if let Some(cols) = this.annex().cols {
+                    Output::set(strand, out, cols);
+                }
                 Ok(())
             })
     }
@@ -80,6 +87,9 @@ impl<'v> Object<'v> for HostGeometry {
         w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         let HostGeometryAnnex { rows, cols } = *this.annex();
-        fmt!(strand, w, "<geometry {cols}x{rows}>")
+        match (rows, cols) {
+            (Some(rows), Some(cols)) => fmt!(strand, w, "<geometry {cols}x{rows}>"),
+            (rows, cols) => fmt!(strand, w, "<geometry {cols:?}x{rows:?}>"),
+        }
     }
 }

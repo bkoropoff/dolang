@@ -11,6 +11,12 @@ The console interface: where human-readable output goes.
 
 Whether the console supports ANSI styling.
 
+### `is_tty`
+
+Whether the console is a real terminal. This is the determinative test —
+unlike [`geometry()`](#geometry), which may answer `nil` for a real terminal
+that simply cannot report its size.
+
 ## Methods
 
 ### `write data`
@@ -57,8 +63,13 @@ if g
   echo "terminal is $(g.cols)x$(g.rows)"
 ```
 
-`nil` means "not a terminal", not "the size could not be determined" — a
-terminal that reports no window size defaults to the conventional 24×80.
+`nil` is advisory: it also covers a real terminal whose size could not be
+determined. Use [`is_tty`](#is_tty) to test for a real terminal regardless of
+whether a size is available.
+
+The host console never returns `nil` here — see
+[`Geometry`](./geometry.md#rows) for how `rows`/`cols` are each
+independently `nil` when unknown rather than the whole result being absent.
 
 ## Operators
 
@@ -79,11 +90,11 @@ Do classes may subclass `Console` to implement one. Supply `write`, `writeln`,
 and `flush`; `put`, the sink protocol, and the capability members come from the
 base:
 
-| Console                            | `can_style`    | `geometry()`  |
-| ---------------------------------- | -------------- | ------------- |
-| `Console` (the base)               | `false`        | `nil`         |
-| Host (`term.console`)              | styling policy | terminal size |
-| [`SinkConsole`](./sink-console.md) | as constructed | `nil`         |
+| Console                            | `can_style`    | `is_tty`      | `geometry()`  |
+| ---------------------------------- | -------------- | ------------- | ------------- |
+| `Console` (the base)               | `false`        | `false`       | `nil`         |
+| Host (`term.console`)              | styling policy | real tty test | never `nil`   |
+| [`SinkConsole`](./sink-console.md) | as constructed | `false`       | `nil`         |
 
 ```
 class Recorder: term.Console
