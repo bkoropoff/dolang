@@ -1,10 +1,11 @@
-import agent
+import sys agent
   test:
     - assert
     - assert_eq
     - assert_throws
   std:
     - RuntimeError
+    - UnsupportedError
   fs:
     - open
     - rename
@@ -84,3 +85,32 @@ def path_rename_method()
   assert !$src.exists()
   open $dst r do |f|
     assert_eq (f.read()) "rename method"
+
+#[agent.test]
+def rename_without_replacing_existing_file()
+  let src = Path "no_replace_source.txt"
+  let dst = Path "no_replace_destination.txt"
+  open $src w do |f| f.write source
+  open $dst w do |f| f.write destination
+
+  if (sys.os_info().os == :FREEBSD:)
+    assert_throws $UnsupportedError do rename $src $dst replace: false
+  else
+    assert_throws $RuntimeError do rename $src $dst replace: false
+
+  assert_eq (src.read()) source
+  assert_eq (dst.read()) destination
+
+#[agent.test]
+def path_rename_without_replacement()
+  let src = Path "path_no_replace_source.txt"
+  let dst = Path "path_no_replace_destination.txt"
+  open $src w do |f| f.write source
+
+  if (sys.os_info().os == :FREEBSD:)
+    assert_throws $UnsupportedError do src.rename $dst replace: false
+    assert $src.exists()
+  else
+    src.rename $dst replace: false
+    assert !$src.exists()
+    assert_eq (dst.read()) source

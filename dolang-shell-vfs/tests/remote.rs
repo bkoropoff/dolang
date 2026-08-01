@@ -267,7 +267,7 @@ async fn path_operations_work_over_generic_stream() {
         FileType::Dir
     );
     client
-        .rename(first.to_path(), second.to_path())
+        .rename(first.to_path(), second.to_path(), true)
         .await
         .unwrap();
     assert!(
@@ -281,6 +281,32 @@ async fn path_operations_work_over_generic_stream() {
         .remove_dir(second.to_path(), false, false)
         .await
         .unwrap();
+
+    client.stop().await.unwrap();
+    server_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn rename_replace_flag_works_over_generic_stream() {
+    let (client, server_task) = connected_pair().await;
+    let temp = tempdir().unwrap();
+    let first_native = temp.path().join("first");
+    let second_native = temp.path().join("second");
+    let first = typed_path(first_native.clone()).unwrap();
+    let second = typed_path(second_native.clone()).unwrap();
+    tokio::fs::write(&first_native, b"first").await.unwrap();
+    tokio::fs::write(&second_native, b"second").await.unwrap();
+
+    let error = client
+        .rename(first.to_path(), second.to_path(), false)
+        .await
+        .unwrap_err();
+    #[cfg(target_os = "freebsd")]
+    assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+    #[cfg(not(target_os = "freebsd"))]
+    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    assert_eq!(tokio::fs::read(&first_native).await.unwrap(), b"first");
+    assert_eq!(tokio::fs::read(&second_native).await.unwrap(), b"second");
 
     client.stop().await.unwrap();
     server_task.await.unwrap().unwrap();

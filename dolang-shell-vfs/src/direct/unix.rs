@@ -53,6 +53,69 @@ pub(super) enum UnixXattrTarget<'a> {
 }
 
 impl Direct {
+    pub(super) async fn impl_rename(from: PathBuf, to: PathBuf, replace: bool) -> io::Result<()> {
+        if replace {
+            return fs::rename(from, to).await;
+        }
+
+        let from = CString::new(from.as_os_str().as_bytes())?;
+        let to = CString::new(to.as_os_str().as_bytes())?;
+        tokio::task::spawn_blocking(move || Self::rename_no_replace(&from, &to))
+            .await
+            .unwrap_or_else(|_| Err(io::Error::other("rename task failed")))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn rename_no_replace(from: &CStr, to: &CStr) -> io::Result<()> {
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                libc::AT_FDCWD,
+                from.as_ptr(),
+                libc::AT_FDCWD,
+                to.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if matches!(
+            error.raw_os_error(),
+            Some(libc::ENOSYS | libc::EINVAL | libc::EOPNOTSUPP)
+        ) {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "atomic rename without replacement is not supported",
+            ));
+        }
+        Err(error)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn rename_no_replace(from: &CStr, to: &CStr) -> io::Result<()> {
+        if unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) } == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if matches!(error.raw_os_error(), Some(libc::ENOTSUP | libc::EINVAL)) {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "atomic rename without replacement is not supported",
+            ));
+        }
+        Err(error)
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    fn rename_no_replace(_from: &CStr, _to: &CStr) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "atomic rename without replacement is not supported",
+        ))
+    }
+
     pub(super) fn sec_desc_from_path(
         _path: &Path,
         _mask: u32,

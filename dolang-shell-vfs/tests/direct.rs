@@ -2,9 +2,7 @@
 
 #[cfg(unix)]
 use std::collections::HashMap;
-#[cfg(target_os = "linux")]
-use std::io;
-use std::path::Path;
+use std::{io, path::Path};
 
 #[cfg(any(windows, target_os = "linux"))]
 use dolang_shell_vfs::{AttrFlags, AttrsPatch};
@@ -43,6 +41,82 @@ fn typed_str(path: &str) -> Utf8TypedPath<'_> {
     } else {
         Utf8TypedPath::Unix(Utf8UnixPath::new(path))
     }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+#[tokio::test]
+async fn rename_can_refuse_to_replace_destination() {
+    let direct = Direct::default();
+    let dir = tempdir().unwrap();
+    let from = dir.path().join("rename-from");
+    let to = dir.path().join("rename-to");
+    tokio::fs::write(&from, b"from").await.unwrap();
+    tokio::fs::write(&to, b"to").await.unwrap();
+
+    let error = direct
+        .rename(typed(&from), typed(&to), false)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    assert_eq!(tokio::fs::read(&from).await.unwrap(), b"from");
+    assert_eq!(tokio::fs::read(&to).await.unwrap(), b"to");
+
+    tokio::fs::remove_file(&to).await.unwrap();
+    direct
+        .rename(typed(&from), typed(&to), false)
+        .await
+        .unwrap();
+    assert!(!from.exists());
+    assert_eq!(tokio::fs::read(&to).await.unwrap(), b"from");
+}
+
+#[cfg(target_os = "freebsd")]
+#[tokio::test]
+async fn rename_without_replacement_is_unsupported() {
+    let direct = Direct::default();
+    let dir = tempdir().unwrap();
+    let from = dir.path().join("rename-from");
+    let to = dir.path().join("rename-to");
+    tokio::fs::write(&from, b"from").await.unwrap();
+
+    let error = direct
+        .rename(typed(&from), typed(&to), false)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+    assert_eq!(tokio::fs::read(&from).await.unwrap(), b"from");
+    assert!(!to.exists());
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn rename_replaces_an_open_destination() {
+    use std::{io::Read as _, os::windows::fs::OpenOptionsExt as _};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    if is_wine() {
+        return;
+    }
+
+    let direct = Direct::default();
+    let dir = tempdir().unwrap();
+    let from = dir.path().join("rename-from");
+    let to = dir.path().join("rename-to");
+    tokio::fs::write(&from, b"from").await.unwrap();
+    tokio::fs::write(&to, b"to").await.unwrap();
+    let mut old_destination = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .open(&to)
+        .unwrap();
+
+    direct.rename(typed(&from), typed(&to), true).await.unwrap();
+    assert_eq!(tokio::fs::read(&to).await.unwrap(), b"from");
+    let mut old_contents = String::new();
+    old_destination.read_to_string(&mut old_contents).unwrap();
+    assert_eq!(old_contents, "to");
 }
 
 #[cfg(unix)]

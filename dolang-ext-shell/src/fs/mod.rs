@@ -560,12 +560,13 @@ async fn rename<'v, 's>(
     global: State<'v, Global<'v>>,
     from: Utf8TypedPath<'_>,
     to: Utf8TypedPath<'_>,
+    replace: bool,
 ) -> Result<'v, 's, ()> {
     let from_path = prepend_cwd(strand, global, from)?;
     let to_path = prepend_cwd(strand, global, to)?;
     let local = global.local.get(strand);
     let vfs = local.vfs();
-    vfs.rename(from_path.to_path(), to_path.to_path())
+    vfs.rename(from_path.to_path(), to_path.to_path(), replace)
         .await
         .into_sys(strand)?;
     Ok(())
@@ -923,6 +924,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
     let extent_format = builder.sym("extent_format");
     let opaque = builder.sym("opaque");
     let app = builder.sym("app");
+    let replace = builder.sym("replace");
     let module = builder
         .module("fs")
         .function("open", async move |strand, args, out| {
@@ -1257,10 +1259,14 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             copy(strand, global, from.to_path(), to.to_path(), all).await
         })
         .function("rename", async move |strand, args, _out| {
-            let ([from, to], []) = unpack!(strand, args, 2, 0)?;
+            let ([from, to], [replace]) = unpack!(strand, args, 2, 0, replace = None)?;
             let from = path_from_value(strand, global, &from)?;
             let to = path_from_value(strand, global, &to)?;
-            rename(strand, global, from.to_path(), to.to_path()).await
+            let replace = replace
+                .map(|value| util::bool(strand, value, "replace"))
+                .transpose()?
+                .unwrap_or(true);
+            rename(strand, global, from.to_path(), to.to_path(), replace).await
         })
         .function("move", async move |strand, args, _out| {
             let ([from, to], [all]) = unpack!(strand, args, 2, 0, all = None)?;
