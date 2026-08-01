@@ -396,17 +396,19 @@ impl Connection {
     }
 
     fn unsupported(operation: &str) -> crate::protocol::WireError {
-        wire_error(io::Error::new(
-            io::ErrorKind::Unsupported,
+        crate::Error::new(
+            crate::ErrorKind::Unsupported,
             format!("{operation} is not supported by a remote VFS session"),
-        ))
+        )
+        .into()
     }
 
     fn invalid_opaque(kind: &str) -> crate::protocol::WireError {
-        wire_error(io::Error::new(
-            io::ErrorKind::InvalidInput,
+        crate::Error::new(
+            crate::ErrorKind::InvalidInput,
             format!("invalid opaque {kind}"),
-        ))
+        )
+        .into()
     }
 
     fn wire_result<T, E>(
@@ -1695,31 +1697,33 @@ impl Connection {
             let path = match PathBuf::try_from(path) {
                 Ok(path) => path,
                 Err(_) => {
-                    return ResponseKind::Access(Err(wire_error(io::Error::from_raw_os_error(
+                    return ResponseKind::Access(Err(crate::Error::from_raw_os_error(
                         libc::EINVAL,
-                    ))));
+                    )
+                    .into()));
                 }
             };
             let flags = AccessFlags::from_bits(mode).unwrap_or(AccessFlags::empty());
             match access(&path, flags) {
                 Ok(()) => ResponseKind::Access(Ok(())),
                 Err(e) => {
-                    ResponseKind::Access(Err(wire_error(io::Error::from_raw_os_error(e as i32))))
+                    ResponseKind::Access(Err(crate::Error::from_raw_os_error(e as i32).into()))
                 }
             }
         })
         .await
         .unwrap_or_else(|_| {
-            ResponseKind::Access(Err(wire_error(io::Error::from_raw_os_error(libc::EIO))))
+            ResponseKind::Access(Err(crate::Error::from_raw_os_error(libc::EIO).into()))
         })
     }
 
     #[cfg(not(unix))]
     async fn handle_access(&self, _req: AccessRequest) -> ResponseKind {
-        ResponseKind::Access(Err(wire_error(io::Error::new(
-            io::ErrorKind::Unsupported,
+        ResponseKind::Access(Err(crate::Error::new(
+            crate::ErrorKind::Unsupported,
             "POSIX access checks are not supported on this platform",
-        ))))
+        )
+        .into()))
     }
 
     async fn handle_glob(&self, req: GlobRequest) -> ResponseKind {

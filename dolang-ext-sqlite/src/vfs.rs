@@ -69,8 +69,9 @@ fn gen_temp_path() -> String {
 /// - Anything else    → `default_code`
 fn map_vfs_err(err: dolang_shell_vfs::Error, not_found_code: i32, default_code: i32) -> i32 {
     match err.kind() {
-        std::io::ErrorKind::NotFound => not_found_code,
-        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::AlreadyExists => SQLITE_CANTOPEN,
+        dolang_shell_vfs::ErrorKind::NotFound => not_found_code,
+        dolang_shell_vfs::ErrorKind::PermissionDenied
+        | dolang_shell_vfs::ErrorKind::AlreadyExists => SQLITE_CANTOPEN,
         _ => default_code,
     }
 }

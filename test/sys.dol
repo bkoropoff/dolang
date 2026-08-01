@@ -1,13 +1,19 @@
-import sys
+import sys sys.freebsd sys.linux sys.macos sys.unix sys.windows
   test:
     - assert
+    - assert_eq
     - assert_type
     - assert_throws
     - test
   std:
     - FieldError
+    - TypeError
+    - ValueError
   sys:
     - CpuInfo
+    - Error
+    - ErrorCode
+    - NotFoundError
     - OsInfo
 
 #[test]
@@ -27,3 +33,56 @@ def sys_reports_basic_information()
   assert_type $CpuInfo $cpu
   assert (cpu.arch == :X86_64: || cpu.arch == :AARCH64:)
   assert (cpu.logical_count >= 1)
+
+#[test]
+def platform_error_codes_are_lazy_fields_and_constructible()
+  let linux = sys.linux.Errno.EAGAIN
+  assert_type $sys.linux.Errno $linux
+  assert_type $ErrorCode $linux
+  assert_eq $linux.value 11
+  assert_eq (str linux) EAGAIN
+  assert_eq $(sys.linux.Errno(11)).value $linux.value
+  assert_eq $sys.linux.Errno.EWOULDBLOCK.value $linux.value
+
+  let freebsd = sys.freebsd.Errno.EAGAIN
+  assert_type $sys.freebsd.Errno $freebsd
+  assert_eq $freebsd.value 35
+
+  let macos = sys.macos.Errno.EAGAIN
+  assert_type $sys.macos.Errno $macos
+  assert_eq $macos.value 35
+
+  let windows = sys.windows.WinError.ERROR_FILE_NOT_FOUND
+  assert_type $sys.windows.WinError $windows
+  assert_eq $windows.value 2
+  assert_eq $(sys.windows.WinError(2)).value $windows.value
+
+  assert_throws $FieldError do sys.linux.Errno.NOT_A_REAL_ERRNO
+  assert_throws $TypeError do sys.ErrorCode 1
+  assert_throws $TypeError do sys.unix.Errno 1
+  assert_throws $ValueError do sys.windows.WinError -1
+
+#[test]
+def system_errors_are_constructible_and_subclassable()
+  let plain = Error synthetic
+  assert_type $Error $plain
+  assert_eq (str plain) synthetic
+  assert_eq $plain.code nil
+
+  let missing = NotFoundError "library lookup failed" code: $sys.linux.Errno.ENOENT
+  assert_type $NotFoundError $missing
+  assert_type $Error $missing
+  assert_eq $missing.code.value $sys.linux.Errno.ENOENT.value
+  assert_eq (str missing) "library lookup failed (ENOENT)"
+
+  class LibraryError: Error
+    def (init) self message code
+      Error.(init) $self $message code: $code
+
+  let custom = LibraryError "library failed" $sys.windows.WinError.ERROR_ACCESS_DENIED
+  assert_type $LibraryError $custom
+  assert_type $Error $custom
+  assert_eq $custom.code.value $sys.windows.WinError.ERROR_ACCESS_DENIED.value
+  assert_eq (str custom) "library failed (ERROR_ACCESS_DENIED)"
+  assert_throws $LibraryError do
+    throw custom

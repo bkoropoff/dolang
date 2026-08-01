@@ -915,6 +915,7 @@ dependencies = [
  "libc",
  "linkme",
  "nix",
+ "phf",
  "rand",
  "shlex 2.0.1",
  "time",

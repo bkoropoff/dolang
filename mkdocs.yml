@@ -267,6 +267,9 @@ nav:
     - sys.linux:
       - api/sys/linux/index.md
       - api/sys/linux/errno.md
+    - sys.freebsd:
+      - api/sys/freebsd/index.md
+      - api/sys/freebsd/errno.md
     - sys.macos:
       - api/sys/macos/index.md
       - api/sys/macos/errno.md

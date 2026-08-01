@@ -63,11 +63,14 @@ Path-based operations execute on the RPC server. Operations whose names begin
 with `file_` act locally on a file handle that the server already transferred
 to the client.
 
-VFS operations return the crate's `Error` type. Errors without a raw system
-code retain their original `io::Error` locally. System errors carry the raw
-code, originating operating system, `ErrorKind`, and formatted message across
-RPC. A client must not interpret a foreign raw code using the host platform's
-error tables.
+VFS operations return the crate's owned `Error` type, which carries an
+`ErrorKind`, formatted message, and optional raw code with its originating
+operating system. The same representation crosses RPC unchanged. A client must
+not interpret a foreign raw code using the host platform's error tables.
+
+`io::Error` remains at async stream, standard-library, and transport
+boundaries. Converting one into a VFS error captures its formatted message and
+current-platform raw code without parsing the message.
 
 The initial VFS query returns a snapshot of the target environment, working
 directory, operating system, architecture, logical CPU count, and Wine status.

@@ -114,6 +114,7 @@ pub(crate) struct Types<'v> {
 
 pub(crate) struct Syms<'v> {
     pub(crate) any: Sym<'v, 'v>,
+    pub(crate) code: Sym<'v, 'v>,
     pub(crate) block_device: Sym<'v, 'v>,
     pub(crate) char_device: Sym<'v, 'v>,
     pub(crate) chunk: Sym<'v, 'v>,
@@ -468,6 +469,7 @@ impl<'v> Global<'v> {
             },
             syms: Syms {
                 any: builder.sym("ANY"),
+                code: builder.sym("code"),
                 block_device: builder.sym("BLOCK_DEVICE"),
                 char_device: builder.sym("CHAR_DEVICE"),
                 chunk: builder.sym("CHUNK"),

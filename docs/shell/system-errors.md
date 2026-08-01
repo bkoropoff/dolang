@@ -22,6 +22,7 @@ catch sys.PermissionDeniedError: error
 available. Otherwise it is one of:
 
 - [`sys.linux.Errno`](../api/sys/linux/errno.md)
+- [`sys.freebsd.Errno`](../api/sys/freebsd/errno.md)
 - [`sys.macos.Errno`](../api/sys/macos/errno.md)
 - [`sys.windows.WinError`](../api/sys/windows/win-error.md)
 
@@ -43,6 +44,17 @@ catch sys.Error: error
 
 Use native codes only when recovery genuinely depends on a platform-specific
 condition. Prefer the categorized subclasses otherwise.
+
+Libraries can construct or subclass these errors while retaining a native
+code:
+
+```
+class ServiceError: sys.Error
+  def (init) self message code
+    sys.Error.(init) $self $message code: $code
+
+throw ServiceError "service failed" $sys.linux.Errno.EIO
+```
 
 Errors reflect the current VFS target, not the shell host. A Linux host
 operating through a Windows VFS receives `sys.windows.WinError` codes; a Windows

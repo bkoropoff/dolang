@@ -711,6 +711,46 @@ pub trait Object<'v>: Sized + 'v {
         builder
     }
 
+    /// Implements dynamic method lookup on the type object.
+    /// # Default
+    /// Returns a field error
+    #[allow(unused_variables)]
+    fn type_method<'a, 's>(
+        this: Type<'v, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        method: Sym<'v, 'a>,
+        args: Args<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> impl Future<Output = Result<'v, 's, ()>> {
+        future::ready(Err(Error::field(strand, method)))
+    }
+
+    /// Implements dynamic field lookup on the type object.
+    /// # Default
+    /// Returns a field error
+    #[allow(unused_variables)]
+    fn type_get<'a, 's>(
+        this: Type<'v, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        field: Sym<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        Err(Error::field(strand, field))
+    }
+
+    /// Implements dynamic field assignment on the type object.
+    /// # Default
+    /// Returns a field error
+    #[allow(unused_variables)]
+    fn type_set<'a, 's>(
+        this: Type<'v, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        field: Sym<'v, 'a>,
+        value: Slot<'v, '_>,
+    ) -> Result<'v, 's, ()> {
+        Err(Error::field(strand, field))
+    }
+
     /// Implements Do method call (`func.meth arg...`) operations
     /// # Default
     /// Returns a field error
@@ -3249,6 +3289,18 @@ impl<'v, T: Object<'v>> Protocol<'v> for TypeObjectWrap<'v, T> {
                 },
             )
             .await
+        } else if method.tag() == sym::GET_METHOD {
+            let ([field], []) = unpack!(strand, args, 1, 0)?;
+            let field = field
+                .as_sym(strand)
+                .ok_or_else(|| Error::type_error(strand, "field: expected `Sym`"))?;
+            Self::op_get(this, strand, field, out)
+        } else if method.tag() == sym::SET_METHOD {
+            let ([field, value], []) = unpack!(strand, args, 2, 0)?;
+            let field = field
+                .as_sym(strand)
+                .ok_or_else(|| Error::type_error(strand, "field: expected `Sym`"))?;
+            Self::op_set(this, strand, field, value)
         } else if let Some((sym, entry)) = this.inst_vtbl().entry_with_sym(method) {
             let name = sym.as_str(strand);
             Strand::async_for_native_frame(
@@ -3284,8 +3336,35 @@ impl<'v, T: Object<'v>> Protocol<'v> for TypeObjectWrap<'v, T> {
             // Fall through to dispatch_native_method for protocol/special
             // methods (str, dbg, bool, hash, arithmetic, comparison, etc.).
             // It will error for unsupported operations.
-            let singleton = this.singleton(strand.vm());
-            dispatch_native_method(strand, singleton, method, args, out).await
+            if matches!(
+                method.tag(),
+                sym::STR_METHOD
+                    | sym::DBG_METHOD
+                    | sym::BOOL_METHOD
+                    | sym::HASH_METHOD
+                    | sym::EQ_METHOD
+                    | sym::LT_METHOD
+                    | sym::NEG_METHOD
+                    | sym::BNOT_METHOD
+                    | sym::ADD_METHOD
+                    | sym::SUB_METHOD
+                    | sym::RSUB_METHOD
+                    | sym::MUL_METHOD
+                    | sym::DIV_METHOD
+                    | sym::RDIV_METHOD
+                    | sym::EDIV_METHOD
+                    | sym::REDIV_METHOD
+                    | sym::MOD_METHOD
+                    | sym::RMOD_METHOD
+                    | sym::BAND_METHOD
+                    | sym::BOR_METHOD
+                    | sym::BXOR_METHOD
+            ) {
+                let singleton = this.singleton(strand.vm());
+                dispatch_native_method(strand, singleton, method, args, out).await
+            } else {
+                T::type_method(this.ty(strand.vm()), strand, method, args, out).await
+            }
         }
     }
 
@@ -3362,7 +3441,13 @@ impl<'v, T: Object<'v>> Protocol<'v> for TypeObjectWrap<'v, T> {
             BoundMethod::create(strand, &this, field, out);
             Ok(())
         } else {
-            Err(Error::field(strand, field))
+            Strand::for_native_frame(
+                strand,
+                Cow::Borrowed(T::MODULE),
+                Cow::Borrowed(T::NAME),
+                Some(Cow::Borrowed("(get)")),
+                |strand| T::type_get(this.ty(strand.vm()), strand, field, out),
+            )
         }
     }
 
@@ -3385,7 +3470,13 @@ impl<'v, T: Object<'v>> Protocol<'v> for TypeObjectWrap<'v, T> {
                 _ => Err(Error::field(strand, field)),
             }
         } else {
-            Err(Error::field(strand, field))
+            Strand::for_native_frame(
+                strand,
+                Cow::Borrowed(T::MODULE),
+                Cow::Borrowed(T::NAME),
+                Some(Cow::Borrowed("(set)")),
+                |strand| T::type_set(this.ty(strand.vm()), strand, field, value),
+            )
         }
     }
 
