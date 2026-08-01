@@ -26,7 +26,7 @@ mod time;
 mod util;
 
 use std::{
-    io::{self, IsTerminal},
+    io,
     path::{self, PathBuf},
     pin::Pin,
 };
@@ -255,9 +255,16 @@ pub fn vfs<'v, 's, 'a>(strand: &'a Strand<'v, 's>) -> Option<Client> {
     local.vfs().into_client()
 }
 
-/// Returns whether stderr is a terminal.
-pub fn is_terminal() -> bool {
-    std::io::stderr().is_terminal()
+/// Returns whether stderr is a terminal — the same override-aware answer
+/// `term.console.is_tty` and `console::ansi`'s tty-detection fallback use, so
+/// `DOLANG_CONSOLE=tty=...` also governs whether an extension can take over
+/// the terminal ([`with_terminal`]) or render an interactive display
+/// (`dolang-ext-progress`'s indicatif vs. plain choice).
+///
+/// Capture-blind: unlike [`crate::console::is_tty`], this always answers
+/// about stderr itself, never an installed capture console.
+pub fn stderr_is_tty<'v>(strand: &Strand<'v, '_>) -> bool {
+    strand.state::<Global<'v>>().terminal.stderr_is_terminal
 }
 
 /// Whether ANSI styling should be emitted to stderr, per the same
@@ -292,7 +299,7 @@ pub async fn with_terminal<'v, 's>(
 ) -> Result<'v, 's, ()> {
     let global = strand.state::<Global<'v>>();
 
-    if !is_terminal() {
+    if !stderr_is_tty(strand) {
         return Err(Error::runtime(strand, "stderr is not a terminal"));
     }
     if global.terminal.redirected.get() {

@@ -211,6 +211,14 @@ pub(crate) struct Local {
     /// Only meaningful while a capture is installed; the host answers from
     /// `Terminal::ansi` instead.
     capture_can_style: Cell<bool>,
+    /// The `is_tty` the ambient console reported when it was installed.
+    ///
+    /// Snapshotted for the same reason as [`Self::capture_can_style`]: the
+    /// question is defined to be fixed for the life of an installed console.
+    ///
+    /// Only meaningful while a capture is installed; the host answers from
+    /// `Terminal::stderr_is_terminal` instead.
+    capture_is_tty: Cell<bool>,
     termination_policy: RefCell<TerminationPolicy>,
     invocation: RefCell<InvocationOverride>,
 }
@@ -231,6 +239,7 @@ impl<'v> strand::Local<'v> for Local {
             background: Cell::new(false),
             capturing: Cell::new(false),
             capture_can_style: Cell::new(false),
+            capture_is_tty: Cell::new(false),
             termination_policy: RefCell::new(TerminationPolicy::default()),
             invocation: RefCell::new(InvocationOverride::default()),
         }
@@ -252,6 +261,7 @@ impl<'v> strand::Local<'v> for Local {
             // Inherited alongside the capture root itself, so a strand spawned
             // inside a capture answers the styling question the same way.
             capture_can_style: Cell::new(self.capture_can_style.get()),
+            capture_is_tty: Cell::new(self.capture_is_tty.get()),
             termination_policy: self.termination_policy.clone(),
             invocation: self.invocation.clone(),
         }
@@ -336,6 +346,14 @@ impl Local {
 
     pub(crate) fn set_capture_can_style(&self, v: bool) -> bool {
         self.capture_can_style.replace(v)
+    }
+
+    pub(crate) fn capture_is_tty(&self) -> bool {
+        self.capture_is_tty.get()
+    }
+
+    pub(crate) fn set_capture_is_tty(&self, v: bool) -> bool {
+        self.capture_is_tty.replace(v)
     }
 
     pub(crate) fn termination_policy(&self) -> TerminationPolicy {

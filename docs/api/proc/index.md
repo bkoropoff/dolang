@@ -38,30 +38,6 @@ with_policy signal: :INT: grace: 2.5 do
   run worker
 ```
 
-### `mute func ...`
-
-Executes a function with its output discarded.
-
-#### Parameters
-
-| Name   | Type   | Description                           |
-| ------ | ------ | ------------------------------------- |
-| `func` | `func` | function to execute with muted output |
-| `...`  |        | additional arguments passed to `func` |
-
-#### Returns
-
-The return value of `func`.
-
-The `mute` function redirects the output of the given function to
-[`NULLITER`](../std/index.md#nulliter), effectively discarding
-`stdout` of any executed external programs.
-
-```
-# Execute a command without printing its output
-mute do run printf "this will not be printed"
-```
-
 ### `sub func :trim?`
 
 Captures the output of a function as a string.

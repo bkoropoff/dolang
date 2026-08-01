@@ -32,16 +32,18 @@ else
 
 #[test]
 def console_geometry()
-  # `term.console` is a name, so this is the honest "is there a real terminal"
-  # test — nil under a pipe, dimensions under a tty. There is no separate
-  # `have_terminal` flag to disagree with it.
+  # `term.console` is a name, so it pins to the host: `is_tty` is the
+  # determinative "is there a real terminal" test.
   assert_eq (type term.console.can_style) $Bool
+  assert_eq (type term.console.is_tty) $Bool
+
+  # `geometry()` is only advisory, and never nil for the host console: each
+  # dimension is independently nil when it cannot be determined, even when
+  # `is_tty` is true, rather than the whole result being absent.
   let g = term.console.geometry()
-  if (g == nil)
-    return
   assert (type g term.Geometry)
-  assert_eq (type g.rows) $Int
-  assert_eq (type g.cols) $Int
+  assert (g.rows == nil || type g.rows == Int)
+  assert (g.cols == nil || type g.cols == Int)
 
 #[test]
 def text_string_coercion()
@@ -200,12 +202,16 @@ def capture_can_style_opt_in()
 
 #[test]
 def capture_reports_no_geometry()
-  # A sink has no layout, and the pin still answers for the real terminal.
+  # A sink is never a terminal and has no layout, and the pin still answers
+  # for the real terminal — unaffected by the capture in progress.
   let host = term.console.geometry()
   let out = []
   term.capture $out do
+    assert_eq (term.output().is_tty) false
     assert_eq (term.output().geometry()) nil
-    assert_eq (term.console.geometry() == nil) (host == nil)
+    let pinned = term.console.geometry()
+    assert_eq $pinned.rows $host.rows
+    assert_eq $pinned.cols $host.cols
 
 #[test]
 def nesting_composes()
@@ -307,11 +313,56 @@ def child_stderr_is_captured()
     assert_eq $out ["child-out"]
 
 #[test]
+def mute_silences_echo_and_child_stderr()
+  # Same mechanism as `capture`, just wired to a sink that throws writes away
+  # — so it composes with an enclosing capture rather than fighting it, and
+  # a named `stdout:` is untouched.
+  let out = []
+  term.capture $out do
+    term.mute do
+      echo hidden
+      print more
+    echo visible
+  assert_eq $out ["visible"]
+
+  with_temp_dir do |dir|
+    let src = r|
+      import shell
+      shell.stderr.write "should-not-appear\n"
+      shell.stdout.write "child-out\n"
+
+    let path = script $dir noisy.dol $src
+    let child_out = []
+    let human = term.sub do
+      term.mute do run $shell.exe --no-cache $path stdout: $child_out
+
+    assert_eq $human ""
+    assert_eq $child_out ["child-out"]
+
+#[test]
+def mute_leaves_named_strand_output_alone()
+  # Redirecting via `stdout: $out` pins the inner process's own implicit
+  # output to `shell.stdout`, not `term.default` — `mute` only swaps that when
+  # it is still the startup default, so an unnamed grandchild here still
+  # reaches it. Only the console mechanism (`term.echo`) is silenced.
+  with_temp_dir do |dir|
+    let src = r|
+      import term
+      term.mute do
+        run.echo visible
+        echo hidden
+
+    let path = script $dir quiet.dol $src
+    let out = []
+    run $shell.exe --no-cache $path stdout: $out
+    assert_eq $out ["visible"]
+
+#[test]
 def progress_lines_are_captured()
   # Covers the other funnelled writer, `write_terminal_line`. Only plain-mode
   # progress goes through it — on a real terminal indicatif takes the terminal
   # over and draws directly, bypassing ordinary console output entirely.
-  if term.console.geometry()
+  if term.console.is_tty
     skip "requires no terminal (progress draws directly on one)"
 
   let out = []
@@ -350,6 +401,7 @@ def do_subclass_console()
   # Supplying only the three write members is enough: the capability members
   # have safe defaults, which the subclass inherits from the base.
   assert_eq $recorder.can_style false
+  assert_eq $recorder.is_tty false
   assert_eq (recorder.geometry()) nil
 
 #[test]

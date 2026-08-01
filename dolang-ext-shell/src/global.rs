@@ -122,6 +122,7 @@ pub(crate) struct Syms<'v> {
     pub(crate) writeln: Sym<'v, 'v>,
     pub(crate) flush: Sym<'v, 'v>,
     pub(crate) can_style: Sym<'v, 'v>,
+    pub(crate) is_tty: Sym<'v, 'v>,
     pub(crate) geometry: Sym<'v, 'v>,
     pub(crate) dir: Sym<'v, 'v>,
     pub(crate) fifo: Sym<'v, 'v>,
@@ -215,10 +216,18 @@ pub(crate) struct Terminal {
     /// Whether stdout was a terminal at startup (cached to avoid repeated
     /// syscalls).
     pub(crate) stdout_is_terminal: bool,
-    /// Whether stderr was a terminal at startup.
+    /// Whether stderr is a terminal, for every purpose that answer feeds:
+    /// `HostConsole::is_tty`, `console::ansi`'s tty-detection fallback, and
+    /// [`crate::stderr_is_tty`]. Cached at startup — real terminal-ness
+    /// cannot change mid-process — and already folds in `DOLANG_CONSOLE`'s
+    /// `tty=` override, so every reader downstream gets the overridden
+    /// answer for free rather than each needing to know the override exists.
     pub(crate) stderr_is_terminal: bool,
     /// Whether ANSI styling should be emitted to stderr.
     pub(crate) ansi: bool,
+    /// Parsed `DOLANG_CONSOLE`, consulted directly only by `geometry()`
+    /// (`rows`/`cols` have no other home to fold into).
+    pub(crate) console_override: ConsoleOverride,
 }
 
 fn ansi_enabled(
@@ -232,6 +241,59 @@ fn ansi_enabled(
         false
     } else {
         stderr_is_terminal
+    }
+}
+
+/// Explicit console overrides from `DOLANG_CONSOLE`, e.g.
+/// `tty=false,cols=120,style=true`.
+///
+/// A comma-separated list of `key=value` pairs. Each key is independent and
+/// optional; an unset key falls through to normal detection. Unknown keys and
+/// unparseable values are ignored rather than erroring — a malformed
+/// environment variable must not be able to crash startup, the same
+/// forgiving posture `FORCE_COLOR`/`NO_COLOR` already have (no value of
+/// either is rejected).
+///
+/// This exists for tests and CI that need deterministic console behavior
+/// regardless of the real stderr: forcing `tty=false` for reproducible plain
+/// output, or `tty=true` with explicit `rows`/`cols` to exercise
+/// terminal-shaped rendering (styling, `progress`) through a capture that
+/// isn't a real terminal.
+#[derive(Default)]
+pub(crate) struct ConsoleOverride {
+    pub(crate) tty: Option<bool>,
+    pub(crate) rows: Option<u16>,
+    pub(crate) cols: Option<u16>,
+    pub(crate) style: Option<bool>,
+}
+
+fn parse_override_bool(value: &str) -> Option<bool> {
+    match value {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+impl ConsoleOverride {
+    fn parse(input: Option<&str>) -> Self {
+        let mut result = Self::default();
+        let Some(input) = input else {
+            return result;
+        };
+        for entry in input.split(',') {
+            let Some((key, value)) = entry.split_once('=') else {
+                continue;
+            };
+            match key.trim() {
+                "tty" => result.tty = parse_override_bool(value.trim()),
+                "style" => result.style = parse_override_bool(value.trim()),
+                "rows" => result.rows = value.trim().parse().ok(),
+                "cols" => result.cols = value.trim().parse().ok(),
+                _ => {}
+            }
+        }
+        result
     }
 }
 
@@ -287,7 +349,19 @@ impl<'v> Global<'v> {
             .nominal_supertype(geometry)
             .build();
 
-        let stderr_is_terminal = std::io::stderr().is_terminal();
+        let console_override =
+            ConsoleOverride::parse(std::env::var("DOLANG_CONSOLE").ok().as_deref());
+        let stderr_is_terminal = console_override
+            .tty
+            .unwrap_or_else(|| std::io::stderr().is_terminal());
+        let ansi = match console_override.style {
+            Some(style) => style,
+            None => ansi_enabled(
+                stderr_is_terminal,
+                std::env::var_os("FORCE_COLOR").as_deref(),
+                std::env::var_os("NO_COLOR").as_deref(),
+            ),
+        };
         Self {
             stdio: Stdio {
                 stdin: Mutex::new(tio::BufReader::new(tio::stdin())),
@@ -299,11 +373,8 @@ impl<'v> Global<'v> {
                 redirected: Cell::new(false),
                 stdout_is_terminal: std::io::stdout().is_terminal(),
                 stderr_is_terminal,
-                ansi: ansi_enabled(
-                    stderr_is_terminal,
-                    std::env::var_os("FORCE_COLOR").as_deref(),
-                    std::env::var_os("NO_COLOR").as_deref(),
-                ),
+                ansi,
+                console_override,
             },
             types: Types {
                 file: builder.register_type(),
@@ -405,6 +476,7 @@ impl<'v> Global<'v> {
                 writeln: builder.sym("writeln"),
                 flush: builder.sym("flush"),
                 can_style: builder.sym("can_style"),
+                is_tty: builder.sym("is_tty"),
                 geometry: builder.sym("geometry"),
                 dir: builder.sym("DIR"),
                 fifo: builder.sym("FIFO"),
@@ -459,7 +531,7 @@ impl<'v> Global<'v> {
 mod tests {
     use std::ffi::OsStr;
 
-    use super::ansi_enabled;
+    use super::{ConsoleOverride, ansi_enabled};
 
     #[test]
     fn ansi_policy_respects_terminal_and_color_environment() {
@@ -473,5 +545,59 @@ mod tests {
             Some(OsStr::new(""))
         ));
         assert!(!ansi_enabled(true, Some(OsStr::new("0")), None));
+    }
+
+    #[test]
+    fn console_override_parses_nothing_when_unset() {
+        let ov = ConsoleOverride::parse(None);
+        assert_eq!(ov.tty, None);
+        assert_eq!(ov.rows, None);
+        assert_eq!(ov.cols, None);
+        assert_eq!(ov.style, None);
+    }
+
+    #[test]
+    fn console_override_parses_every_key() {
+        let ov = ConsoleOverride::parse(Some("tty=false,cols=120,rows=40,style=true"));
+        assert_eq!(ov.tty, Some(false));
+        assert_eq!(ov.rows, Some(40));
+        assert_eq!(ov.cols, Some(120));
+        assert_eq!(ov.style, Some(true));
+    }
+
+    #[test]
+    fn console_override_ignores_unknown_keys_and_bad_values() {
+        let ov = ConsoleOverride::parse(Some("wat=1,tty=maybe,cols=wide,rows=40"));
+        assert_eq!(ov.tty, None);
+        assert_eq!(ov.cols, None);
+        assert_eq!(ov.rows, Some(40));
+        assert_eq!(ov.style, None);
+    }
+
+    #[test]
+    fn console_override_tolerates_whitespace_and_empty_entries() {
+        let ov = ConsoleOverride::parse(Some(" tty = false , , cols=80 "));
+        assert_eq!(ov.tty, Some(false));
+        assert_eq!(ov.cols, Some(80));
+    }
+
+    #[test]
+    fn console_override_style_key_takes_precedence_over_no_color_force_color() {
+        // The override's `style` key is consulted before `ansi_enabled` is
+        // even called — this proves it wins regardless of what
+        // FORCE_COLOR/NO_COLOR say, per DOLANG_CONSOLE's contract.
+        let ov = ConsoleOverride::parse(Some("style=false"));
+        let effective = match ov.style {
+            Some(style) => style,
+            None => ansi_enabled(true, Some(OsStr::new("1")), None),
+        };
+        assert!(!effective);
+
+        let ov = ConsoleOverride::parse(Some("style=true"));
+        let effective = match ov.style {
+            Some(style) => style,
+            None => ansi_enabled(false, None, Some(OsStr::new("1"))),
+        };
+        assert!(effective);
     }
 }

@@ -135,6 +135,25 @@ let greeting = term.sub do greet Alice
 assert_eq $greeting "Hello, Alice!"
 ```
 
+### `mute func ...args`
+
+Runs a function with default console-bound output silenced: `echo`, `print`,
+unredirected program `stderr`, etc.
+
+**Parameters:**
+
+| Name      | Type     | Description                           |
+| --------- | -------- | ------------------------------------- |
+| `func`    | callable | Block to run                          |
+| `...args` |          | Additional arguments passed to `func` |
+
+**Returns:** Return value of `func`.
+
+```
+# Nothing from this reaches the terminal.
+mute do run printf "this will not be printed"
+```
+
 ### `echo ...args`
 
 Prints arguments separated by spaces, followed by a newline. Ordinary values

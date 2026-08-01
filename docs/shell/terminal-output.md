@@ -92,10 +92,13 @@ not a global.
 
 For the host console, it is the process-wide policy:
 
-1. If `FORCE_COLOR` is set, any value except `0` enables styling; `0` disables
-   it.
-2. Otherwise, a non-empty `NO_COLOR` disables styling.
-3. Otherwise, styling follows stderr terminal detection.
+1. If `DOLANG_CONSOLE` sets `style`, that value wins outright — `FORCE_COLOR`
+   and `NO_COLOR` are not consulted at all. See
+   [Overriding Console Behavior](#overriding-console-behavior).
+2. Otherwise, if `FORCE_COLOR` is set, any value except `0` enables styling;
+   `0` disables it.
+3. Otherwise, a non-empty `NO_COLOR` disables styling.
+4. Otherwise, styling follows stderr terminal detection.
 
 For a [`capture`](../api/term/index.md#capture-console-func-args) it is `false`
 unless asked for, which is what keeps a test asserting on `echo`ed text behaving
@@ -113,13 +116,48 @@ Because it is the *installed* console that is consulted,
 `term.console.can_style` still reports the process-wide policy from inside a
 capture — naming it pins to the host, the same as for writes.
 
-## Terminal Dimensions
+## Terminal Detection and Dimensions
+
+[`term.console.is_tty`](../api/term/console.md#is_tty) is the determinative
+test for whether stderr is a real terminal.
 
 [`term.console.geometry()`](../api/term/console.md#geometry) returns the
-terminal's `rows` and `cols`, or `nil` when stderr is not a terminal.
+terminal's `rows` and `cols`, but is only advisory. It never answers `nil`
+itself for the host console; instead `rows` and `cols` are each
+independently `nil` when that dimension cannot be determined — a real
+terminal that declines to report its size still yields a `Geometry`, just one
+with both fields `nil`, so their absence does not imply `is_tty` is `false`.
 
 ```
-let g = term.console.geometry()
-if g
-  echo $"─".repeat(g.cols)
+if term.console.is_tty
+  let g = term.console.geometry()
+  if g.cols
+    echo $"─".repeat(g.cols)
 ```
+
+## Overriding Console Behavior
+
+The `DOLANG_CONSOLE` environment variable gives tests and CI deterministic,
+explicit control over what the host console reports, independent of the real
+stderr. It is a comma-separated list of `key=value` pairs, all optional:
+
+| Key     | Value          | Overrides                                              |
+| ------- | -------------- | ------------------------------------------------------ |
+| `tty`   | `true`/`false` | [`is_tty`](../api/term/console.md#is_tty)              |
+| `rows`  | integer        | [`geometry()`](../api/term/console.md#geometry)'s rows |
+| `cols`  | integer        | [`geometry()`](../api/term/console.md#geometry)'s cols |
+| `style` | `true`/`false` | [`can_style`](../api/term/console.md#can_style)        |
+
+`tty` also governs whether an extension can take over the terminal (progress
+bars and similar) — `tty=false` disables that even on a real terminal;
+`tty=true` allows it even on a pipe, which is useful for capturing an
+extension's rendered output deterministically. An unrecognized key or an
+unparseable value is ignored rather than raising an error.
+
+```text
+DOLANG_CONSOLE=tty=false,cols=120,style=true dolang script.dol
+```
+
+`rows` and `cols` are independent: `DOLANG_CONSOLE=cols=120` alone pins
+`geometry().cols` to `120` while `geometry().rows` falls back to the real
+terminal (or `nil`, on a pipe).

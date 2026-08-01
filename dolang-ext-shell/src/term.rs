@@ -5,8 +5,9 @@ use dolang::{
         Arg, Args, Error, Format, Instance, Object, Output, Result, Slot, State, Strand, Sym,
         Value, method,
         object::{Mut, Ref, TypeBuilder},
+        strand::Redirect,
         unpack,
-        value::{StrEmbryo, View},
+        value::{Singleton, StrEmbryo, View},
         vm::Builder,
     },
 };
@@ -22,14 +23,15 @@ use crate::{
 /// The override lives in a strand-local GC root, so it is inherited by strands
 /// spawned inside `f` and restored on every path out.
 ///
-/// `can_style` is the answer the console gave when it was handed over; it is
-/// snapshotted rather than re-read, which is what fixes styling for the life of
-/// the capture.
+/// `can_style`/`is_tty` are the answers the console gave when it was
+/// handed over; they are snapshotted rather than re-read, which is what fixes
+/// them for the life of the capture.
 async fn with_capture<'v, 's, R>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
     console: &Slot<'v, '_>,
     can_style: bool,
+    is_tty: bool,
     f: impl AsyncFnOnce(&mut Strand<'v, 's>) -> R,
 ) -> R {
     strand
@@ -38,6 +40,7 @@ async fn with_capture<'v, 's, R>(
             Output::set(strand, &mut prev, &root);
             Output::set(strand, &mut root, console);
             let prev_can_style = global.local.get(strand).set_capture_can_style(can_style);
+            let prev_is_tty = global.local.get(strand).set_capture_is_tty(is_tty);
             let result = f(strand).await;
             let mut root = global.capture.slot(strand);
             Output::set(strand, &mut root, &prev);
@@ -45,6 +48,7 @@ async fn with_capture<'v, 's, R>(
                 .local
                 .get(strand)
                 .set_capture_can_style(prev_can_style);
+            global.local.get(strand).set_capture_is_tty(prev_is_tty);
             result
         })
         .await
@@ -1066,11 +1070,16 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                     .await?;
                 }
                 let can_style = console::can_style(strand, &console)?;
-                let result =
-                    with_capture(strand, global, &console, can_style, async move |strand| {
-                        func.call(strand, rest, out).await
-                    })
-                    .await;
+                let is_tty = console::console_is_tty(strand, &console)?;
+                let result = with_capture(
+                    strand,
+                    global,
+                    &console,
+                    can_style,
+                    is_tty,
+                    async move |strand| func.call(strand, rest, out).await,
+                )
+                .await;
                 // An unterminated `print` is only visible once the partial line
                 // is emitted, so the scope always ends with a flush.
                 let flushed = method!(strand, &console, global.syms.flush, &mut tmp).await;
@@ -1088,9 +1097,15 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                     .types
                     .sub_console
                     .create(strand, SubConsole::new(can_style), &mut console);
-                with_capture(strand, global, &console, can_style, async move |strand| {
-                    func.call(strand, rest, &mut tmp).await
-                })
+                // A capture buffer is never a terminal.
+                with_capture(
+                    strand,
+                    global,
+                    &console,
+                    can_style,
+                    false,
+                    async move |strand| func.call(strand, rest, &mut tmp).await,
+                )
                 .await?;
                 global.types.sub_console.cast(&console).unwrap().enter_sync(
                     strand,
@@ -1104,6 +1119,43 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                         Ok(())
                     },
                 )
+            },
+        )
+        .function_with_slots(
+            "mute",
+            async move |strand, args, out, [mut console, mut scratch]| {
+                let ([func], [], rest) = unpack!(strand, args, 1, 0, ...)?;
+                // A console over NULLITER discards everything written to it —
+                // the same mechanism `capture` uses, just wired to a sink that
+                // throws writes away instead of collecting them.
+                Output::set(strand, &mut scratch, Singleton::IterNull);
+                console::create_sink_console(strand, &scratch, false, Slot::reborrow(&mut console))
+                    .await?;
+                // The strand's own implicit output only needs touching when it
+                // is still `term.default` — the startup placeholder that
+                // itself forwards through this same capture. Anything else
+                // (an explicit `shell.stdout`, a file, a redirect the caller
+                // set up) was asked for by name and is left alone.
+                strand.output(&mut scratch);
+                let target: &Slot<'v, '_> = if global.types.default.cast(&scratch).is_some() {
+                    &console
+                } else {
+                    &scratch
+                };
+                Redirect::new(strand)
+                    .output(target)
+                    .enter(async move |strand| {
+                        with_capture(
+                            strand,
+                            global,
+                            &console,
+                            false,
+                            false,
+                            async move |strand| func.call(strand, rest, out).await,
+                        )
+                        .await
+                    })
+                    .await
             },
         )
         .function("echo", async move |strand, args, _| {

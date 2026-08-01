@@ -399,7 +399,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
 
             // If stderr is not a terminal, use the plain (non-interactive)
             // rendering path instead of indicatif's MultiProgress.
-            if !dolang_ext_shell::is_terminal() {
+            if !dolang_ext_shell::stderr_is_tty(strand) {
                 let interval = parse_duration_secs(
                     strand,
                     "interval",
