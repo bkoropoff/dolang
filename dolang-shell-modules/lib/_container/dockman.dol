@@ -649,6 +649,20 @@ def prefetch_add_urls spec
       urls.add $source
   strand.pool 4 $urls do |url| cache.ensure $url
 
+def patch_name p
+  let kind = p.type
+  if (p.type == :CREATE:)
+    "create $(p.target)"
+  else if (p.type == :DELETE:)
+    "delete $(p.source)"
+  else
+    let source = p.source
+    let target = p.target
+    if (kind == :MODIFY: || source == target)
+      "modify $source"
+    else
+      "$(str(kind).lower()): $source => $target"
+
 pub class Builder
   field runtime = nil
   field subdir = nil
@@ -785,36 +799,28 @@ pub class Builder
     else
       (Path source).read b
 
-    let patches = [...patch.decode patch_data]
-    progress.show message: "patching files" total: $patches.len do |w|
-      for p = patches
-        let kind = p.type
-        if (kind == :CREATE:)
-          let target = p.target
-          let result = p.apply b""
-          w.update message: "create: $target"
-          self.#add_content $result $target nil
-        else if (kind == :DELETE:)
-          let source = p.source
-          w.update message: "delete: $source"
-          self.#agent.with do
-            let result = p.apply (source.read "b")
-            if (result.len != 0)
-              throw "delete patch did not produce empty output: $source"
-            p.source.remove()
-        else if (kind == :MODIFY: || kind == :MOVE: || kind == :COPY:)
-          let source = p.source
-          let target = p.target
-          if (kind == :MODIFY: || source == target)
-            w.update message: "modify: $source"
-          else
-            w.update message: "$kind: $source => $target"
-          self.#agent.with do
-            let result = p.apply (p.source.read "b")
-            self.#add_content $result $p.target nil
-            if (kind == :MOVE: && p.source != p.target)
-              p.source.remove()
-        w.delta()
+    progress.steps message: patch
+      for p = patch.decode $patch_data
+        - name: (patch_name p)
+          do
+            let kind = p.type
+            if (kind == :CREATE:)
+              let target = p.target
+              let result = p.apply b""
+              self.#add_content $result $target nil
+            else if (kind == :DELETE:)
+              let source = p.source
+              self.#agent.with do
+                let result = p.apply (source.read "b")
+                if (result.len != 0)
+                  throw "delete patch did not produce empty output: $source"
+                p.source.remove()
+            else if (kind == :MODIFY: || kind == :MOVE: || kind == :COPY:)
+              self.#agent.with do
+                let result = p.apply (p.source.read "b")
+                self.#add_content $result $p.target nil
+                if (kind == :MOVE: && p.source != p.target)
+                  p.source.remove()
 
   def step_commit self msg
     progress.show message: "commit" do |_|
@@ -845,30 +851,25 @@ pub class Builder
       patch: $self.#step_patch
       commit: $self.#step_commit
 
-    let label = if tags.len
+    let message = if tags.len
       tags[0]
     else
       from
 
-    progress.show message: $label icon: 🔨 do |w|
-      prefetch_add_urls $spec
-      w.update total: (spec.len + 3)
-      try
-        progress.show message: "starting container" do |_|
+    try
+      progress.steps :message icon: 🔨
+        do prefetch_add_urls $spec
+        do progress.show message: "starting container" do |_|
           self.#connect $from :pull
-        w.delta()
         for key value = spec
-          let step = steps.get $key else: do throw "unrecognized step: $key: $value"
-          step $value
-          w.delta()
-        let img = self.#finish_image $tags
-        w.delta()
-        return img
-      finally
-        w.update position: (w.total - 1)
-        progress.show message: "stopping container" do |_|
-          self.#cleanup()
-        w.delta()
+          do
+            let step = steps.get $key else: do throw "unrecognized step: $key: $value"
+            step $value
+        do
+          return self.#finish_image $tags
+    finally
+      progress.show message: "stopping container" icon: 🧹 do |_|
+        self.#cleanup()
 
 # A container image.
 pub class Image

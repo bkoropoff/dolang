@@ -166,3 +166,38 @@ progress.with do
 !!! warning
     The [`Indicator`](./indicator.md) object is only valid inside its callback.
     Using it after the callback returns raises a runtime error.
+
+### `steps ...steps :message? :icon?`
+
+Runs a sequence of steps under a progress indicator tracking step completion.
+
+A step can be a `func` or a `dict` containing one positional `func`
+and optional `name` and `icon` keys.
+
+```
+let results = progress.steps message: building icon: "•"
+  - name: compile
+    icon: "C"
+    do compile()
+  do test()
+  - name: package
+    do package()
+```
+
+Before a named step runs, its name is appended to the overall message with a
+colon, such as `building: compile`. An unnamed step uses the overall message
+unchanged. If no overall message is provided, a named step uses its name by
+itself. A step's `icon` overrides the default icon for that step.
+
+If a step raises an error, remaining steps are skipped and the error is
+propagated.
+
+| Name      | Type                          | Description                          |
+| --------- | ----------------------------- | ------------------------------------ |
+| `steps`   | func\|dict*                   | Callables or annotated step specs    |
+| `message` | [`Str`](../std/str.md)?       | Overall message prefix               |
+| `icon`    | [`Str`](../std/str.md)?       | Default icon (default `"●"`)         |
+
+#### Returns
+
+An `array` containing each step's return value, in order.

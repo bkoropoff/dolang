@@ -1,0 +1,91 @@
+import progress
+  test:
+    - assert_eq
+    - assert_throws
+    - test
+  std:
+    - MissingPosError
+    - TypeError
+    - UnexpectedKeyError
+    - UnexpectedPosError
+    - ValueError
+
+#[test]
+def plain_steps()
+  let order = []
+  let results = progress.steps
+    do
+      order.push first
+      10
+    do
+      order.push second
+      20
+
+  assert_eq $order ["first", "second"]
+  assert_eq $results [10, 20]
+
+#[test]
+def annotated_steps()
+  let order = []
+  let results = progress.steps message: building icon: "•"
+    - name: compile
+      icon: "C"
+      do
+        order.push compile
+        "compiled"
+    do
+      order.push test
+      "tested"
+    - name: package
+      do
+        order.push package
+        "packaged"
+
+  assert_eq $order ["compile", "test", "package"]
+  assert_eq $results ["compiled", "tested", "packaged"]
+
+#[test]
+def empty_steps()
+  assert_eq (progress.steps()) []
+
+#[test]
+def step_error_stops_sequence()
+  let order = []
+  assert_throws $ValueError do progress.steps
+    do order.push first
+    do
+      order.push second
+      throw ValueError boom
+    do order.push third
+  assert_eq $order ["first", "second"]
+
+#[test]
+def nested_indicator()
+  let results = progress.steps message: outer
+    do progress.show message: inner do |_| 42
+  assert_eq $results [42]
+
+#[test]
+def invalid_step_specs()
+  assert_throws $TypeError do progress.steps message: 1
+  assert_throws $TypeError do progress.steps icon: 1
+
+  assert_throws $MissingPosError do progress.steps
+    - name: missing
+
+  assert_throws $UnexpectedPosError do
+    progress.steps {0: (do nil), 1: (do nil)}
+
+  assert_throws $UnexpectedKeyError do progress.steps
+    - unknown: value
+      do nil
+
+  assert_throws $TypeError do progress.steps
+    - name: 1
+      do nil
+
+  assert_throws $TypeError do progress.steps
+    - icon: 1
+      do nil
+
+  assert_throws $UnexpectedKeyError do progress.steps unknown: value do nil
