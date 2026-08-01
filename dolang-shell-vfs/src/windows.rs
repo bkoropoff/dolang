@@ -98,7 +98,10 @@ async fn launch_with(
 ) -> io::Result<(AdminSession, Query)> {
     let pipe_name = random_pipe_name();
     let pipe = create_pipe(&pipe_name)?;
-    let executable = std::env::current_exe()?;
+    let executable =
+        tokio::task::spawn_blocking(move || dunce::canonicalize(std::env::current_exe()?))
+            .await
+            .map_err(io::Error::other)??;
     let args = launch_args(&executable, pipe_name, env);
     let process = launch_on_sta_thread(executable, args, cwd, launcher).await?;
     let guard = ProcessGuard::new(&process);
