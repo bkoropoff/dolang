@@ -1,9 +1,4 @@
-import
-  shell
-  sys
-  term
-  strand
-  progress
+import shell sys term strand progress
   fs:
     - with_temp_dir
   shell:
@@ -349,7 +344,7 @@ def mute_leaves_named_strand_output_alone()
     let src = r|
       import term
       term.mute do
-        run.echo visible
+        strand.put visible
         echo hidden
 
     let path = script $dir quiet.dol $src

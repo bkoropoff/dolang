@@ -39,8 +39,8 @@ fn token_style(token: Token, origin: Option<&Origin>, context: Context) -> Optio
             );
         }
         Token::Keyword => AnsiColor::Red,
-        Token::Literal | Token::Key => AnsiColor::Green,
-        Token::Operator | Token::Delim | Token::Escape => AnsiColor::Yellow,
+        Token::Literal => AnsiColor::Green,
+        Token::Operator | Token::Delim | Token::Escape | Token::Key => AnsiColor::Yellow,
         Token::StringDelim | Token::ModuleItem => AnsiColor::Cyan,
         Token::Number | Token::Constant | Token::ModuleName => AnsiColor::Magenta,
         Token::Field => match context {
