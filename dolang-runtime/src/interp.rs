@@ -223,7 +223,7 @@ impl<'v> Vm<'v> {
                     }
                     Mode::Module => {
                         let mut ns = Namespace::new(strand);
-                        ns.insert(strand, &[], raw)?;
+                        ns.insert(strand, components.get(1..).unwrap_or(&[]), raw)?;
                         strand
                             .vm()
                             .builtin_types()
