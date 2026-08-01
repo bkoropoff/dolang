@@ -185,9 +185,9 @@ Equivalent to [`fs.remove_xattr`](index.md).
 
 Equivalent to [`fs.copy`](index.md#copy-from-to-all).
 
-### `rename to`
+### `rename to :replace?`
 
-Equivalent to [`fs.rename`](index.md#rename-from-to).
+Equivalent to [`fs.rename`](index.md#rename-from-to-replace).
 
 ### `move to :all?`
 

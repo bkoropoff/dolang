@@ -2528,10 +2528,16 @@ impl Vfs for Client {
         }
     }
 
-    async fn rename(&self, from: Utf8TypedPath<'_>, to: Utf8TypedPath<'_>) -> crate::Result<()> {
+    async fn rename(
+        &self,
+        from: Utf8TypedPath<'_>,
+        to: Utf8TypedPath<'_>,
+        replace: bool,
+    ) -> crate::Result<()> {
         let request = RenameRequest {
             from: from.into(),
             to: to.into(),
+            replace,
         };
         match self.request(RequestKind::Rename(request)).await? {
             ResponseKind::Rename(result) => result.map_err(crate::Error::from),

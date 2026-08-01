@@ -589,6 +589,7 @@ pub(crate) struct CopyRequest {
 pub(crate) struct RenameRequest {
     pub(crate) from: WirePath,
     pub(crate) to: WirePath,
+    pub(crate) replace: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

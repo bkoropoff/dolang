@@ -24,12 +24,14 @@ use tokio::{
 };
 use windows_sys::{
     Wdk::Storage::FileSystem::{
-        FILE_FULL_EA_INFORMATION, FILE_GET_EA_INFORMATION, NtQueryEaFile, NtSetEaFile,
+        FILE_FULL_EA_INFORMATION, FILE_GET_EA_INFORMATION, FILE_RENAME_POSIX_SEMANTICS,
+        FILE_RENAME_REPLACE_IF_EXISTS, NtQueryEaFile, NtSetEaFile,
     },
     Win32::{
         Foundation::{
-            ERROR_FILE_NOT_FOUND, ERROR_HANDLE_EOF, ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA,
-            ERROR_NONE_MAPPED, ERROR_NOT_ALL_ASSIGNED, GENERIC_READ, GENERIC_WRITE, GetLastError,
+            ERROR_FILE_NOT_FOUND, ERROR_HANDLE_EOF, ERROR_INSUFFICIENT_BUFFER,
+            ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_MORE_DATA, ERROR_NONE_MAPPED,
+            ERROR_NOT_ALL_ASSIGNED, ERROR_NOT_SUPPORTED, GENERIC_READ, GENERIC_WRITE, GetLastError,
             INVALID_HANDLE_VALUE, LocalFree, RtlNtStatusToDosError, S_OK, STATUS_BUFFER_OVERFLOW,
             STATUS_BUFFER_TOO_SMALL, STATUS_NO_EAS_ON_FILE, STATUS_NO_MORE_EAS, STATUS_SUCCESS,
             SetLastError,
@@ -51,14 +53,15 @@ use windows_sys::{
             UNPROTECTED_DACL_SECURITY_INFORMATION, UNPROTECTED_SACL_SECURITY_INFORMATION,
         },
         Storage::FileSystem::{
-            COMPRESSION_FORMAT_DEFAULT, COMPRESSION_FORMAT_NONE, CreateFileW,
+            COMPRESSION_FORMAT_DEFAULT, COMPRESSION_FORMAT_NONE, CreateFileW, DELETE,
             FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NORMAL,
             FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_READONLY,
             FILE_ATTRIBUTE_SYSTEM, FILE_ATTRIBUTE_TEMPORARY, FILE_FLAG_BACKUP_SEMANTICS,
-            FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-            FILE_STREAM_INFO, FileStreamInfo, GetDiskFreeSpaceExW, GetFileAttributesW,
-            GetFileInformationByHandleEx, GetFinalPathNameByHandleW, GetVolumeInformationByHandleW,
-            INVALID_FILE_ATTRIBUTES, OPEN_EXISTING, READ_CONTROL, SetFileAttributesW,
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_RENAME_INFO, FILE_RENAME_INFO_0, FILE_SHARE_DELETE,
+            FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STREAM_INFO, FileRenameInfo, FileRenameInfoEx,
+            FileStreamInfo, GetDiskFreeSpaceExW, GetFileAttributesW, GetFileInformationByHandleEx,
+            GetFinalPathNameByHandleW, GetVolumeInformationByHandleW, INVALID_FILE_ATTRIBUTES,
+            OPEN_EXISTING, READ_CONTROL, SetFileAttributesW, SetFileInformationByHandle,
             VOLUME_NAME_DOS, WRITE_DAC, WRITE_OWNER,
         },
         System::{
@@ -95,6 +98,110 @@ fn typed_windows_path(path: &Path) -> io::Result<Utf8TypedPath<'_>> {
 }
 
 impl Direct {
+    pub(super) async fn impl_rename(from: PathBuf, to: PathBuf, replace: bool) -> io::Result<()> {
+        tokio::task::spawn_blocking(move || Self::rename_path(&from, &to, replace))
+            .await
+            .unwrap_or_else(|_| Err(io::Error::other("rename task failed")))
+    }
+
+    fn rename_path(from: &Path, to: &Path, replace: bool) -> io::Result<()> {
+        let mut from = Self::rename_path_wide(from)?;
+        from.push(0);
+        let handle = unsafe {
+            CreateFileW(
+                from.as_ptr(),
+                DELETE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                ptr::null(),
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+
+        if !replace {
+            return Self::set_rename_information(handle.as_raw_handle(), to, false, false);
+        }
+
+        match Self::set_rename_information(handle.as_raw_handle(), to, true, true) {
+            Err(error)
+                if error.raw_os_error().is_some_and(|code| {
+                    code == ERROR_NOT_SUPPORTED as i32
+                        || code == ERROR_INVALID_FUNCTION as i32
+                        || code == ERROR_INVALID_PARAMETER as i32
+                }) =>
+            {
+                Self::set_rename_information(handle.as_raw_handle(), to, true, false)
+            }
+            result => result,
+        }
+    }
+
+    fn rename_path_wide(path: &Path) -> io::Result<Vec<u16>> {
+        let path: Vec<_> = path.as_os_str().encode_wide().collect();
+        if path.contains(&0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "path contains NUL",
+            ));
+        }
+        Ok(path)
+    }
+
+    fn set_rename_information(
+        handle: windows_sys::Win32::Foundation::HANDLE,
+        to: &Path,
+        replace: bool,
+        extended: bool,
+    ) -> io::Result<()> {
+        let to = Self::rename_path_wide(to)?;
+        let name_bytes = to
+            .len()
+            .checked_mul(mem::size_of::<u16>())
+            .and_then(|len| u32::try_from(len).ok())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path is too long"))?;
+        let offset = mem::offset_of!(FILE_RENAME_INFO, FileName);
+        let buffer_len = offset
+            .checked_add(name_bytes as usize)
+            .and_then(|len| len.checked_add(mem::size_of::<u16>()))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path is too long"))?;
+        let word_size = mem::size_of::<usize>();
+        let mut buffer = vec![0usize; buffer_len.div_ceil(word_size)];
+        let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+
+        unsafe {
+            if extended {
+                (&raw mut (*info).Anonymous).write(FILE_RENAME_INFO_0 {
+                    Flags: FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS,
+                });
+            } else {
+                (&raw mut (*info).Anonymous).write(FILE_RENAME_INFO_0 {
+                    ReplaceIfExists: replace,
+                });
+            }
+            (&raw mut (*info).RootDirectory).write(ptr::null_mut());
+            (&raw mut (*info).FileNameLength).write(name_bytes);
+            to.as_ptr()
+                .copy_to_nonoverlapping((&raw mut (*info).FileName).cast::<u16>(), to.len());
+        }
+
+        let buffer_len = u32::try_from(buffer_len)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path is too long"))?;
+        let class = if extended {
+            FileRenameInfoEx
+        } else {
+            FileRenameInfo
+        };
+        if unsafe { SetFileInformationByHandle(handle, class, info.cast(), buffer_len) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     pub(super) fn acl_from_path(
         _path: &Path,
         _default: bool,

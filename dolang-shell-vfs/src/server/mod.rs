@@ -1593,7 +1593,7 @@ impl Connection {
         ResponseKind::Rename(Self::wire_result(
             self.server
                 .vfs
-                .rename(request_path(&req.from), request_path(&req.to))
+                .rename(request_path(&req.from), request_path(&req.to), req.replace)
                 .await,
         ))
     }

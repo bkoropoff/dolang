@@ -536,6 +536,7 @@ macro_rules! impl_concrete_path {
                 let ignore = builder.sym("ignore");
                 let max_depth = builder.sym("max_depth");
                 let resolve = builder.sym("resolve");
+                let replace = builder.sym("replace");
                 let mode = builder.sym("mode");
                 let user = builder.sym("user");
                 let owner = builder.sym("owner");
@@ -805,10 +806,15 @@ macro_rules! impl_concrete_path {
                         super::copy(strand, annex.global, annex.as_path(), to.to_path(), all).await
                     })
                     .method("rename", async move |this, strand, args, _out| {
-                        let ([to], []) = unpack!(strand, args, 1, 0)?;
+                        let ([to], [replace]) = unpack!(strand, args, 1, 0, replace = None)?;
                         let to = path_from_value(strand, this.annex().global, &to)?;
+                        let replace = replace
+                            .map(|value| crate::util::bool(strand, value, "replace"))
+                            .transpose()?
+                            .unwrap_or(true);
                         let annex = this.annex();
-                        super::rename(strand, annex.global, annex.as_path(), to.to_path()).await
+                        super::rename(strand, annex.global, annex.as_path(), to.to_path(), replace)
+                            .await
                     })
                     .method("move", async move |this, strand, args, _out| {
                         let ([to], [all]) = unpack!(strand, args, 1, 0, all = None)?;

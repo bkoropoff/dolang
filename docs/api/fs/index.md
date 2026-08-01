@@ -612,16 +612,23 @@ copy "source.txt" "backup.txt"
 copy "project" "project-backup" all: true
 ```
 
-### `rename from to`
+### `rename from to :replace?`
 
 Renames (moves) a file or directory.
 
+By default, this replaces an existing destination. Set `replace` to `false`
+to fail atomically instead.
+
+!!! note
+    `replace: false` is not supported on FreeBSD.
+
 #### Parameters
 
-| Name   | Type                                      | Description      |
-| ------ | ----------------------------------------- | ---------------- |
-| `from` | [`Str`](../std/str.md)\|[`Path`](path.md) | Source path      |
-| `to`   | [`Str`](../std/str.md)\|[`Path`](path.md) | Destination path |
+| Name      | Type                                      | Description                                  |
+| --------- | ----------------------------------------- | -------------------------------------------- |
+| `from`    | [`Str`](../std/str.md)\|[`Path`](path.md) | Source path                                  |
+| `to`      | [`Str`](../std/str.md)\|[`Path`](path.md) | Destination path                             |
+| `replace` | [`Bool`](../std/bool.md)?                 | Whether to replace an existing destination   |
 
 #### Example
 
@@ -630,6 +637,9 @@ rename "old_name.txt" "new_name.txt"
 
 # Move to different directory
 rename "file.txt" "subdir/file.txt"
+
+# Fail if the destination exists
+rename "draft.txt" "published.txt" replace: false
 ```
 
 ### `move from to :all?`

@@ -1390,7 +1390,12 @@ pub trait Vfs {
     async fn create_dir(&self, path: Utf8TypedPath<'_>, all: bool) -> Result<()>;
     async fn remove_dir(&self, path: Utf8TypedPath<'_>, all: bool, ignore: bool) -> Result<()>;
     async fn copy(&self, from: Utf8TypedPath<'_>, to: Utf8TypedPath<'_>, all: bool) -> Result<()>;
-    async fn rename(&self, from: Utf8TypedPath<'_>, to: Utf8TypedPath<'_>) -> Result<()>;
+    async fn rename(
+        &self,
+        from: Utf8TypedPath<'_>,
+        to: Utf8TypedPath<'_>,
+        replace: bool,
+    ) -> Result<()>;
     async fn move_(&self, from: Utf8TypedPath<'_>, to: Utf8TypedPath<'_>, all: bool) -> Result<()>;
     async fn symlink(
         &self,
@@ -2535,10 +2540,15 @@ impl Vfs for AnyVfs {
         }
     }
 
-    async fn rename(&self, from: Utf8TypedPath<'_>, to: Utf8TypedPath<'_>) -> crate::Result<()> {
+    async fn rename(
+        &self,
+        from: Utf8TypedPath<'_>,
+        to: Utf8TypedPath<'_>,
+        replace: bool,
+    ) -> crate::Result<()> {
         match self {
-            Self::Client(client) => client.rename(from, to).await,
-            Self::Direct(direct) => direct.rename(from, to).await,
+            Self::Client(client) => client.rename(from, to, replace).await,
+            Self::Direct(direct) => direct.rename(from, to, replace).await,
         }
     }
 

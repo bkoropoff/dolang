@@ -1235,8 +1235,13 @@ impl Vfs for Direct {
             .map_err(Into::into)
     }
 
-    async fn rename(&self, from: Utf8TypedPath<'_>, to: Utf8TypedPath<'_>) -> crate::Result<()> {
-        fs::rename(native_path(from)?, native_path(to)?)
+    async fn rename(
+        &self,
+        from: Utf8TypedPath<'_>,
+        to: Utf8TypedPath<'_>,
+        replace: bool,
+    ) -> crate::Result<()> {
+        Self::impl_rename(native_path(from)?, native_path(to)?, replace)
             .await
             .map_err(Into::into)
     }
