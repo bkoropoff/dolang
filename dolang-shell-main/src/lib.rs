@@ -181,7 +181,7 @@ fn run(config: Arc<dyn Config>) -> i32 {
             builder
                 .enter_with_slots(async move |strand, [mut stdin, mut stdout]| {
                     dolang_ext_shell::stdin(strand, &mut stdin);
-                    dolang_ext_shell::stdout(strand, &mut stdout);
+                    dolang_ext_shell::default_output(strand, &mut stdout);
                     let ct = strand.interrupt_token();
                     let res =
                         Redirect::new(strand)

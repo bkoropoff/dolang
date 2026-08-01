@@ -37,8 +37,14 @@ assert_eq $greeting "Hello, Alice!"
 
 ## Child Process Output
 
-A child process launched with no `stdout:` or `stderr:` override will output
-that stream to `term.output()` if it would have otherwise reached the terminal.
+The main strand's implicit output is set once at startup: to
+[`term.default`](../api/term/index.md#default) if stdout is a terminal, or to
+[`shell.stdout`](../api/shell/stdout.md) otherwise. A child process launched
+with no `stdout:` override inherits whichever one is current, so it follows
+console/terminal interception — `progress` indicators,
+[`term.capture`](../api/term/index.md#capture-console-func-args) — only when
+stdout was a terminal to begin with. An omitted `stderr:` always defaults to
+`term.default`.
 
 ## Styled Text
 

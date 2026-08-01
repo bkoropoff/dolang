@@ -242,6 +242,103 @@ impl<'v> Object<'v> for HostConsole {
     }
 }
 
+/// The strand's default output, exported as `term.default`.
+///
+/// A forwarder, not a destination: every operation resolves *at call time* to
+/// whatever `term.output()` currently is — the host console, or an installed
+/// capture. Bound as the main strand's implicit output when stdout is a
+/// terminal (see [`crate::default_output`]), so that unnamed program output
+/// keeps following capture and progress takeover for the life of the process,
+/// the same way naming `term.output()` itself would, without every caller
+/// having to re-resolve it.
+///
+/// Contrast `term.console`, which pins to the host and is never intercepted,
+/// and `shell.stdout`, which is the literal stream and bypasses this
+/// machinery entirely.
+pub(crate) struct DefaultOutput;
+
+impl Default for DefaultOutput {
+    fn default() -> Self {
+        Self
+    }
+}
+
+impl<'v> Object<'v> for DefaultOutput {
+    const NAME: &'v str = "Default";
+    const MODULE: &'v str = "term";
+    type Annex = ();
+    type Type = ();
+    type TypeAnnex = ();
+
+    fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
+        builder
+            .supertype(TypeObject::Sink)
+            .method("write", async move |_this, strand, args, out| {
+                let ([data], []) = unpack!(strand, args, 1, 0)?;
+                let bytes = data_bytes(strand, &data)?;
+                write(strand, &bytes).await?;
+                Output::set(strand, out, bytes.len() as i64);
+                Ok(())
+            })
+            .method("writeln", async move |_this, strand, args, out| {
+                let ([data], []) = unpack!(strand, args, 1, 0)?;
+                let bytes = data_bytes(strand, &data)?;
+                writeln(strand, &bytes).await?;
+                Output::set(strand, out, bytes.len() as i64);
+                Ok(())
+            })
+            .method("flush", async move |_this, strand, args, _out| {
+                let ([], []) = unpack!(strand, args, 0, 0)?;
+                flush(strand).await
+            })
+            .get("can_style", |_this, strand, out| {
+                Output::set(strand, out, ansi(strand));
+                Ok(())
+            })
+            .method("geometry", async move |_this, strand, args, out| {
+                let ([], []) = unpack!(strand, args, 0, 0)?;
+                geometry(strand, out).await
+            })
+    }
+
+    /// There is exactly one `term.default` per VM, so having the type is
+    /// having the object.
+    fn eq<'a, 's>(
+        _this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        other: &Value<'v>,
+    ) -> Result<'v, 's, bool> {
+        let global = strand.state::<Global<'v>>();
+        Ok(global.types.default.cast(other).is_some())
+    }
+
+    async fn sink<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        Output::set(strand, out, this);
+        Ok(())
+    }
+
+    async fn put<'a, 's>(
+        _this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        value: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        let global = strand.state::<Global<'v>>();
+        let mode = global.local.get(strand).io_mode();
+        let bytes = encode_value(
+            strand,
+            &value,
+            mode,
+            ValueEncoding::Display,
+            OperatingSystem::current(),
+        )?;
+        write(strand, &bytes).await
+    }
+}
+
 /// The line ending a `Console` that has no opinion of its own appends.
 ///
 /// A `SinkConsole` has to pick something, and a console is a host-facing stream
@@ -664,6 +761,32 @@ pub(crate) fn can_style<'v, 's>(
             .as_bool(strand)
             .ok_or_else(|| Error::type_error(strand, "can_style: expected `Bool`"))
     })
+}
+
+/// The ambient console's `geometry()`.
+///
+/// Forwards to whatever `term.output()` resolves to, the same way
+/// `write`/`writeln`/`flush` do: the host outside a capture, the installed
+/// console inside one.
+pub(crate) async fn geometry<'v, 's, 'a>(
+    strand: &'a mut Strand<'v, 's>,
+    out: Slot<'v, 'a>,
+) -> Result<'v, 's, ()> {
+    let global = strand.state::<Global<'v>>();
+    strand
+        .with_slots(async move |strand, [mut rcvr]| {
+            let root = global.capture.slot(strand);
+            if root.is_nil() {
+                global
+                    .types
+                    .host_console
+                    .create(strand, HostConsole, &mut rcvr);
+            } else {
+                Output::set(strand, &mut rcvr, &root);
+            }
+            method!(strand, &rcvr, global.syms.geometry, out).await
+        })
+        .await
 }
 
 /// Writes to the host console, optionally terminating the line.

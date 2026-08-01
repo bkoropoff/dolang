@@ -18,7 +18,7 @@ use tokio::{
 };
 
 use crate::{
-    console::{Console, HostConsole, SinkConsole, SubConsole},
+    console::{Console, DefaultOutput, HostConsole, SinkConsole, SubConsole},
     error::{
         AlreadyExistsError, NotFoundError, PermissionDeniedError, ProcError, SysError,
         SysErrorObject, TimedOutError, UnsupportedError,
@@ -73,6 +73,7 @@ pub(crate) struct Types<'v> {
     pub(crate) host_console: Type<'v, HostConsole>,
     pub(crate) sink_console: Type<'v, SinkConsole>,
     pub(crate) sub_console: Type<'v, SubConsole>,
+    pub(crate) default: Type<'v, DefaultOutput>,
     pub(crate) geometry: Type<'v, Geometry>,
     pub(crate) host_geometry: Type<'v, HostGeometry>,
     pub(crate) date_time: Type<'v, DateTime>,
@@ -121,6 +122,7 @@ pub(crate) struct Syms<'v> {
     pub(crate) writeln: Sym<'v, 'v>,
     pub(crate) flush: Sym<'v, 'v>,
     pub(crate) can_style: Sym<'v, 'v>,
+    pub(crate) geometry: Sym<'v, 'v>,
     pub(crate) dir: Sym<'v, 'v>,
     pub(crate) fifo: Sym<'v, 'v>,
     pub(crate) file: Sym<'v, 'v>,
@@ -274,6 +276,10 @@ impl<'v> Global<'v> {
             .build_type::<SubConsole>((), ())
             .nominal_supertype(console)
             .build();
+        let default = builder
+            .build_type::<DefaultOutput>((), ())
+            .nominal_supertype(console)
+            .build();
 
         let geometry = builder.register_type::<Geometry>();
         let host_geometry = builder
@@ -322,6 +328,7 @@ impl<'v> Global<'v> {
                 host_console,
                 sink_console,
                 sub_console,
+                default,
                 geometry,
                 host_geometry,
                 date_time: builder.register_type::<DateTime>(),
@@ -398,6 +405,7 @@ impl<'v> Global<'v> {
                 writeln: builder.sym("writeln"),
                 flush: builder.sym("flush"),
                 can_style: builder.sym("can_style"),
+                geometry: builder.sym("geometry"),
                 dir: builder.sym("DIR"),
                 fifo: builder.sym("FIFO"),
                 file: builder.sym("FILE"),

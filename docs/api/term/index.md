@@ -53,6 +53,15 @@ such a `progress.`
 Unlike [`output()`](#output), it is not intercepted by an enclosing
 [`capture`](#capture-console-func-args).
 
+### `default`
+
+A [`Console`](./console.md) that forwards every operation to whatever
+[`output()`](#output) currently resolves to, resolved fresh on each call
+rather than once. Bound as the main strand's implicit output when stdout is a
+terminal, so unnamed program output keeps following capture and `progress`
+takeover for the life of the process — see
+[Terminal output](../../shell/terminal-output.md#child-process-output).
+
 ## Functions
 
 ### `output()`

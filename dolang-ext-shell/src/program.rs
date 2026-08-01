@@ -273,6 +273,15 @@ async fn configure_direct_input<'v, 's>(
     Ok(false)
 }
 
+/// Whether `value` is an unredirected default for standard output: either the
+/// literal stream (`shell.stdout`, bound when stdout is not a terminal) or the
+/// terminal-following handle (`term.default`, bound when it is). Either way,
+/// nothing has redirected this stream, which is what licenses falling through
+/// to raw fd inheritance instead of a value-framed pump.
+fn is_default_stdout<'v>(global: State<'v, Global<'v>>, value: &Value<'v>) -> bool {
+    global.types.stdout.cast(value).is_some() || global.types.default.cast(value).is_some()
+}
+
 async fn configure_direct_output<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
@@ -283,7 +292,7 @@ async fn configure_direct_output<'v, 's>(
         command.stdout_null();
         return Ok(true);
     }
-    if global.types.stdout.cast(output).is_some() {
+    if is_default_stdout(global, output) {
         command.stdout_inherit().into_sys(strand)?;
         return Ok(true);
     }
@@ -311,7 +320,7 @@ async fn configure_direct_stderr<'v, 's>(
         command.stderr_null();
         return Ok(true);
     }
-    if global.types.stdout.cast(stderr).is_some() {
+    if is_default_stdout(global, stderr) {
         command.stderr_inherit_stdout().into_sys(strand)?;
         return Ok(true);
     }
@@ -667,7 +676,7 @@ async fn run<'v, 's>(
     let stdout_to_console = !io.explicit.stdout
         && console_owned
         && global.terminal.stdout_is_terminal
-        && global.types.stdout.cast(io.value.stdout).is_some();
+        && is_default_stdout(global, io.value.stdout);
     // A capture routes regardless of whether stderr is a terminal: gating it on
     // a tty would make capture work interactively and silently not in CI.
     let captured = !global.capture.slot(strand).is_nil();
@@ -730,7 +739,7 @@ async fn run<'v, 's>(
         } else if stdout_direct {
             if io.value.stdout.is_nil() || io.value.stdout.eq(strand, Singleton::IterNull) {
                 command.stderr_null();
-            } else if global.types.stdout.cast(io.value.stdout).is_some() {
+            } else if is_default_stdout(global, io.value.stdout) {
                 command.stderr_inherit_stdout().into_sys(strand)?;
             } else {
                 if let Some(file) = global.types.file.cast(io.value.stdout) {

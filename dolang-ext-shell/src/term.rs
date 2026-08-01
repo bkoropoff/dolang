@@ -12,7 +12,7 @@ use dolang::{
 };
 
 use crate::{
-    console::{self, HostConsole, SubConsole},
+    console::{self, DefaultOutput, HostConsole, SubConsole},
     global::Global,
     io_mode::strip_line_ending,
 };
@@ -1031,7 +1031,9 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         .value("Console", global.types.console)
         .value("SinkConsole", global.types.sink_console)
         .value("Geometry", global.types.geometry)
+        .value("Default", global.types.default)
         .object("console", global.types.host_console, HostConsole)
+        .object("default", global.types.default, DefaultOutput)
         .function("output", async move |strand, args, out| {
             let ([], []) = unpack!(strand, args, 0, 0)?;
             // The *ambient* console: whatever an enclosing `capture` installed,

@@ -93,12 +93,10 @@ run.make -j8 stdout: build.log stderr: build.log
 run.sort stdin: ["c", "a", "b"] stdout: $sorted
 ```
 
-An omitted `stdout:`/`stderr:` follows console/terminal interception, such as
-`progress` module indicators or
-[`term.capture`](./term/index.md#capture-console-func-args). Using
-`term.console` as an explicit destination opts out of `term.capture`; using
-`shell.stdout` or `shell.stderr` opts out of all terminal interception
-entirely.
+An omitted `stderr:` defaults to [`term.default`](./term/index.md#default),
+which follows console/terminal interception such as `progress` module
+indicators or [`term.capture`](./term/index.md#capture-console-func-args).
+Naming `shell.stdout`/`shell.stderr` explicitly opts out of that entirely.
 
 See [Terminal output](../shell/terminal-output.md) for the full model.
 

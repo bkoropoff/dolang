@@ -68,6 +68,24 @@ pub fn stdout<'v, 's>(strand: &mut Strand<'v, 's>, out: impl Output<'v>) {
     global.types.stdout.create(strand, shell::Stdout, out)
 }
 
+/// Instantiate the strand's default output handle.
+///
+/// `term.default` when stdout is a terminal, so unnamed program output keeps
+/// following capture and progress takeover for the life of the process; the
+/// literal `shell.stdout` otherwise, since there is nothing to follow and raw
+/// fd inheritance is the cheaper, simpler path.
+pub fn default_output<'v, 's>(strand: &mut Strand<'v, 's>, out: impl Output<'v>) {
+    let global = strand.state::<Global<'v>>();
+    if global.terminal.stdout_is_terminal {
+        global
+            .types
+            .default
+            .create(strand, console::DefaultOutput, out)
+    } else {
+        global.types.stdout.create(strand, shell::Stdout, out)
+    }
+}
+
 /// Flush the process's standard streams and the console writer.
 ///
 /// Tokio stdio handles can retain buffered output when the runtime shuts down,
