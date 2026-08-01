@@ -1,10 +1,31 @@
 use std::marker::PhantomData;
 
 use dolang::runtime::object::fmt;
-use dolang::runtime::{Instance, Object, Output, Result, Strand, Type, object::TypeBuilder};
+use dolang::runtime::{
+    Args, Error, Instance, Object, Output, Result, Slot, Strand, Type, Value, object::TypeBuilder,
+    unpack,
+};
 use dolang_shell_vfs::OperatingSystem;
 
 use crate::global::Global;
+
+macro_rules! error_codes {
+    (
+        $by_code:ident,
+        $by_name:ident,
+        $ty:ty,
+        { $($value:literal => $name:literal,)* },
+        { $($alias:literal => $alias_value:literal,)* }
+    ) => {
+        pub(crate) static $by_code: phf::Map<$ty, &'static str> = phf::phf_map! {
+            $($value => $name,)*
+        };
+        pub(crate) static $by_name: phf::Map<&'static str, $ty> = phf::phf_map! {
+            $($name => $value,)*
+            $($alias => $alias_value,)*
+        };
+    };
+}
 
 mod generated;
 
@@ -32,6 +53,7 @@ trait CodeType<'v>: Sized + 'v {
     const NAME: &'v str;
     const MODULE: &'v str;
     const ERRNO: bool = false;
+    const OPERATING_SYSTEM: Option<OperatingSystem> = None;
 
     fn value(raw: i32) -> i64 {
         i64::from(raw)
@@ -40,13 +62,14 @@ trait CodeType<'v>: Sized + 'v {
     fn name(_value: i64) -> Option<&'static str> {
         None
     }
-}
 
-fn lookup<T: Copy + Ord>(table: &'static [(T, &'static str)], value: T) -> Option<&'static str> {
-    table
-        .binary_search_by_key(&value, |(value, _)| *value)
-        .ok()
-        .map(|index| table[index].1)
+    fn code(_name: &str) -> Option<i32> {
+        None
+    }
+
+    fn raw(value: i128) -> Option<i32> {
+        i32::try_from(value).ok()
+    }
 }
 
 pub(crate) fn system_code_name(
@@ -54,10 +77,10 @@ pub(crate) fn system_code_name(
     raw: i32,
 ) -> Option<&'static str> {
     match operating_system {
-        OperatingSystem::FreeBsd => lookup(generated::FREEBSD_ERRNO, raw),
-        OperatingSystem::Linux => lookup(generated::LINUX_ERRNO, raw),
-        OperatingSystem::Macos => lookup(generated::MACOS_ERRNO, raw),
-        OperatingSystem::Windows => lookup(generated::WIN_ERROR, raw as u32),
+        OperatingSystem::FreeBsd => generated::FREEBSD_ERRNO_BY_CODE.get(&raw).copied(),
+        OperatingSystem::Linux => generated::LINUX_ERRNO_BY_CODE.get(&raw).copied(),
+        OperatingSystem::Macos => generated::MACOS_ERRNO_BY_CODE.get(&raw).copied(),
+        OperatingSystem::Windows => generated::WIN_ERROR_BY_CODE.get(&(raw as u32)).copied(),
     }
 }
 
@@ -67,6 +90,39 @@ impl<'v, T: CodeType<'v>> Object<'v> for CodeObject<T> {
     type Annex = CodeAnnex;
     type Type = ();
     type TypeAnnex = ();
+
+    async fn new<'a, 's>(
+        this: Type<'v, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        args: Args<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        let ([value], []) = unpack!(strand, args, 1, 0)?;
+        let value = value
+            .as_int(strand)
+            .and_then(T::raw)
+            .ok_or_else(|| Error::value(strand, "system error code is out of range"))?;
+        let operating_system = T::OPERATING_SYSTEM.ok_or_else(|| {
+            Error::type_error(
+                strand,
+                format!("{}.{} is not instantiable", T::MODULE, T::NAME),
+            )
+        })?;
+        create(strand, this, operating_system, value, out);
+        Ok(())
+    }
+
+    fn type_get<'a, 's>(
+        this: Type<'v, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        field: dolang::runtime::Sym<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        let raw = T::code(field.as_str(strand)).ok_or_else(|| Error::field(strand, field))?;
+        let operating_system = T::OPERATING_SYSTEM.expect("code lookup on abstract code type");
+        create(strand, this, operating_system, raw, out);
+        Ok(())
+    }
 
     fn build<'a>(mut builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
         builder = builder.get("value", |this, strand, out| {
@@ -129,11 +185,16 @@ impl<'v> CodeType<'v> for FreeBsdErrno {
     const NAME: &'v str = "Errno";
     const MODULE: &'v str = "sys.freebsd";
     const ERRNO: bool = true;
+    const OPERATING_SYSTEM: Option<OperatingSystem> = Some(OperatingSystem::FreeBsd);
 
     fn name(value: i64) -> Option<&'static str> {
         i32::try_from(value)
             .ok()
-            .and_then(|value| lookup(generated::FREEBSD_ERRNO, value))
+            .and_then(|value| generated::FREEBSD_ERRNO_BY_CODE.get(&value).copied())
+    }
+
+    fn code(name: &str) -> Option<i32> {
+        generated::FREEBSD_ERRNO_BY_NAME.get(name).copied()
     }
 }
 
@@ -141,11 +202,16 @@ impl<'v> CodeType<'v> for LinuxErrno {
     const NAME: &'v str = "Errno";
     const MODULE: &'v str = "sys.linux";
     const ERRNO: bool = true;
+    const OPERATING_SYSTEM: Option<OperatingSystem> = Some(OperatingSystem::Linux);
 
     fn name(value: i64) -> Option<&'static str> {
         i32::try_from(value)
             .ok()
-            .and_then(|value| lookup(generated::LINUX_ERRNO, value))
+            .and_then(|value| generated::LINUX_ERRNO_BY_CODE.get(&value).copied())
+    }
+
+    fn code(name: &str) -> Option<i32> {
+        generated::LINUX_ERRNO_BY_NAME.get(name).copied()
     }
 }
 
@@ -153,17 +219,23 @@ impl<'v> CodeType<'v> for MacosErrno {
     const NAME: &'v str = "Errno";
     const MODULE: &'v str = "sys.macos";
     const ERRNO: bool = true;
+    const OPERATING_SYSTEM: Option<OperatingSystem> = Some(OperatingSystem::Macos);
 
     fn name(value: i64) -> Option<&'static str> {
         i32::try_from(value)
             .ok()
-            .and_then(|value| lookup(generated::MACOS_ERRNO, value))
+            .and_then(|value| generated::MACOS_ERRNO_BY_CODE.get(&value).copied())
+    }
+
+    fn code(name: &str) -> Option<i32> {
+        generated::MACOS_ERRNO_BY_NAME.get(name).copied()
     }
 }
 
 impl<'v> CodeType<'v> for WinError {
     const NAME: &'v str = "WinError";
     const MODULE: &'v str = "sys.windows";
+    const OPERATING_SYSTEM: Option<OperatingSystem> = Some(OperatingSystem::Windows);
 
     fn value(raw: i32) -> i64 {
         i64::from(raw as u32)
@@ -172,7 +244,18 @@ impl<'v> CodeType<'v> for WinError {
     fn name(value: i64) -> Option<&'static str> {
         u32::try_from(value)
             .ok()
-            .and_then(|value| lookup(generated::WIN_ERROR, value))
+            .and_then(|value| generated::WIN_ERROR_BY_CODE.get(&value).copied())
+    }
+
+    fn code(name: &str) -> Option<i32> {
+        generated::WIN_ERROR_BY_NAME
+            .get(name)
+            .copied()
+            .map(|value| value as i32)
+    }
+
+    fn raw(value: i128) -> Option<i32> {
+        u32::try_from(value).ok().map(|value| value as i32)
     }
 }
 
@@ -221,6 +304,34 @@ pub(crate) fn create_system_code<'v, 's>(
     }
 }
 
+pub(crate) fn extract_system_code<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    value: &Value<'v>,
+) -> Option<(OperatingSystem, i32)> {
+    let global = strand.state::<Global<'v>>();
+    if let Some(value) = global.types.freebsd_errno.cast(value) {
+        return value.enter_sync(strand, |_strand, value| {
+            Some((OperatingSystem::FreeBsd, value.annex().value as i32))
+        });
+    }
+    if let Some(value) = global.types.linux_errno.cast(value) {
+        return value.enter_sync(strand, |_strand, value| {
+            Some((OperatingSystem::Linux, value.annex().value as i32))
+        });
+    }
+    if let Some(value) = global.types.macos_errno.cast(value) {
+        return value.enter_sync(strand, |_strand, value| {
+            Some((OperatingSystem::Macos, value.annex().value as i32))
+        });
+    }
+    if let Some(value) = global.types.win_error.cast(value) {
+        return value.enter_sync(strand, |_strand, value| {
+            Some((OperatingSystem::Windows, value.annex().value as u32 as i32))
+        });
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CodeType, FreeBsdErrno, LinuxErrno, MacosErrno, WinError};
@@ -248,5 +359,12 @@ mod tests {
     #[test]
     fn winerror_value_preserves_unsigned_dword_bits() {
         assert_eq!(WinError::value(-1), i64::from(u32::MAX));
+    }
+
+    #[test]
+    fn errno_aliases_support_reverse_lookup() {
+        assert_eq!(LinuxErrno::code("EWOULDBLOCK"), Some(11));
+        assert_eq!(FreeBsdErrno::code("EWOULDBLOCK"), Some(35));
+        assert_eq!(MacosErrno::code("EWOULDBLOCK"), Some(35));
     }
 }

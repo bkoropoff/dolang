@@ -517,13 +517,12 @@ impl Direct {
 
     fn lookup_error(error: io::Error) -> crate::Error {
         if error.raw_os_error() == Some(ERROR_NONE_MAPPED as i32) {
-            crate::SystemError::new(
+            crate::Error::from_system_code(
+                crate::ErrorKind::NotFound,
+                error.to_string(),
                 crate::OperatingSystem::Windows,
                 ERROR_NONE_MAPPED as i32,
-                io::ErrorKind::NotFound,
-                error.to_string(),
             )
-            .into()
         } else {
             error.into()
         }

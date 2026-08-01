@@ -1,12 +1,12 @@
 # Errno
 
-[`sys.unix.Errno`](../unix/errno.md) originating from macOS.
+[`sys.unix.Errno`](../unix/errno.md) originating from FreeBSD.
 
 ## Constructor
 
 ### `Errno value`
 
-Creates a macOS error number.
+Creates a FreeBSD error number.
 
 **Parameters:**
 
@@ -15,6 +15,12 @@ Creates a macOS error number.
 | value | [`int`](../../std/int.md) | Raw error number |
 
 Known codes are available as class fields such as `Errno.ENOENT`.
+
+## Fields
+
+### `os`
+
+The originating operating system, `:FREEBSD:`.
 
 ## Inherits
 

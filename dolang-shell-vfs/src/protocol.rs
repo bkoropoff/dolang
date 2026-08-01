@@ -5,194 +5,23 @@ use dolang_rpc::{Opaque, OsHandle, Protocol};
 use serde::{Deserialize, Serialize};
 
 pub(crate) use crate::{
-    DirEntry, FsMetadata, Metadata, MetadataPatch, OperatingSystem, PosixAcl, SecDesc,
-    SecurityInfo, Sid, SidName, StreamEntry, TargetInfo, WellKnownPath, XattrEntry, XattrNamespace,
+    DirEntry, FsMetadata, Metadata, MetadataPatch, PosixAcl, SecDesc, SecurityInfo, Sid, SidName,
+    StreamEntry, TargetInfo, WellKnownPath, XattrEntry, XattrNamespace,
 };
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
-pub(crate) enum WireErrorKind {
-    NotFound,
-    PermissionDenied,
-    ConnectionRefused,
-    ConnectionReset,
-    HostUnreachable,
-    NetworkUnreachable,
-    ConnectionAborted,
-    NotConnected,
-    AddrInUse,
-    AddrNotAvailable,
-    NetworkDown,
-    BrokenPipe,
-    AlreadyExists,
-    WouldBlock,
-    NotADirectory,
-    IsADirectory,
-    DirectoryNotEmpty,
-    ReadOnlyFilesystem,
-    StaleNetworkFileHandle,
-    InvalidInput,
-    InvalidData,
-    TimedOut,
-    WriteZero,
-    StorageFull,
-    NotSeekable,
-    QuotaExceeded,
-    FileTooLarge,
-    ResourceBusy,
-    ExecutableFileBusy,
-    Deadlock,
-    CrossesDevices,
-    TooManyLinks,
-    InvalidFilename,
-    ArgumentListTooLong,
-    Interrupted,
-    Unsupported,
-    UnexpectedEof,
-    OutOfMemory,
-    Other,
-}
-
-impl From<io::ErrorKind> for WireErrorKind {
-    fn from(kind: io::ErrorKind) -> Self {
-        match kind {
-            io::ErrorKind::NotFound => Self::NotFound,
-            io::ErrorKind::PermissionDenied => Self::PermissionDenied,
-            io::ErrorKind::ConnectionRefused => Self::ConnectionRefused,
-            io::ErrorKind::ConnectionReset => Self::ConnectionReset,
-            io::ErrorKind::HostUnreachable => Self::HostUnreachable,
-            io::ErrorKind::NetworkUnreachable => Self::NetworkUnreachable,
-            io::ErrorKind::ConnectionAborted => Self::ConnectionAborted,
-            io::ErrorKind::NotConnected => Self::NotConnected,
-            io::ErrorKind::AddrInUse => Self::AddrInUse,
-            io::ErrorKind::AddrNotAvailable => Self::AddrNotAvailable,
-            io::ErrorKind::NetworkDown => Self::NetworkDown,
-            io::ErrorKind::BrokenPipe => Self::BrokenPipe,
-            io::ErrorKind::AlreadyExists => Self::AlreadyExists,
-            io::ErrorKind::WouldBlock => Self::WouldBlock,
-            io::ErrorKind::NotADirectory => Self::NotADirectory,
-            io::ErrorKind::IsADirectory => Self::IsADirectory,
-            io::ErrorKind::DirectoryNotEmpty => Self::DirectoryNotEmpty,
-            io::ErrorKind::ReadOnlyFilesystem => Self::ReadOnlyFilesystem,
-            io::ErrorKind::StaleNetworkFileHandle => Self::StaleNetworkFileHandle,
-            io::ErrorKind::InvalidInput => Self::InvalidInput,
-            io::ErrorKind::InvalidData => Self::InvalidData,
-            io::ErrorKind::TimedOut => Self::TimedOut,
-            io::ErrorKind::WriteZero => Self::WriteZero,
-            io::ErrorKind::StorageFull => Self::StorageFull,
-            io::ErrorKind::NotSeekable => Self::NotSeekable,
-            io::ErrorKind::QuotaExceeded => Self::QuotaExceeded,
-            io::ErrorKind::FileTooLarge => Self::FileTooLarge,
-            io::ErrorKind::ResourceBusy => Self::ResourceBusy,
-            io::ErrorKind::ExecutableFileBusy => Self::ExecutableFileBusy,
-            io::ErrorKind::Deadlock => Self::Deadlock,
-            io::ErrorKind::CrossesDevices => Self::CrossesDevices,
-            io::ErrorKind::TooManyLinks => Self::TooManyLinks,
-            io::ErrorKind::InvalidFilename => Self::InvalidFilename,
-            io::ErrorKind::ArgumentListTooLong => Self::ArgumentListTooLong,
-            io::ErrorKind::Interrupted => Self::Interrupted,
-            io::ErrorKind::Unsupported => Self::Unsupported,
-            io::ErrorKind::UnexpectedEof => Self::UnexpectedEof,
-            io::ErrorKind::OutOfMemory => Self::OutOfMemory,
-            _ => Self::Other,
-        }
-    }
-}
-
-impl From<WireErrorKind> for io::ErrorKind {
-    fn from(kind: WireErrorKind) -> Self {
-        match kind {
-            WireErrorKind::NotFound => Self::NotFound,
-            WireErrorKind::PermissionDenied => Self::PermissionDenied,
-            WireErrorKind::ConnectionRefused => Self::ConnectionRefused,
-            WireErrorKind::ConnectionReset => Self::ConnectionReset,
-            WireErrorKind::HostUnreachable => Self::HostUnreachable,
-            WireErrorKind::NetworkUnreachable => Self::NetworkUnreachable,
-            WireErrorKind::ConnectionAborted => Self::ConnectionAborted,
-            WireErrorKind::NotConnected => Self::NotConnected,
-            WireErrorKind::AddrInUse => Self::AddrInUse,
-            WireErrorKind::AddrNotAvailable => Self::AddrNotAvailable,
-            WireErrorKind::NetworkDown => Self::NetworkDown,
-            WireErrorKind::BrokenPipe => Self::BrokenPipe,
-            WireErrorKind::AlreadyExists => Self::AlreadyExists,
-            WireErrorKind::WouldBlock => Self::WouldBlock,
-            WireErrorKind::NotADirectory => Self::NotADirectory,
-            WireErrorKind::IsADirectory => Self::IsADirectory,
-            WireErrorKind::DirectoryNotEmpty => Self::DirectoryNotEmpty,
-            WireErrorKind::ReadOnlyFilesystem => Self::ReadOnlyFilesystem,
-            WireErrorKind::StaleNetworkFileHandle => Self::StaleNetworkFileHandle,
-            WireErrorKind::InvalidInput => Self::InvalidInput,
-            WireErrorKind::InvalidData => Self::InvalidData,
-            WireErrorKind::TimedOut => Self::TimedOut,
-            WireErrorKind::WriteZero => Self::WriteZero,
-            WireErrorKind::StorageFull => Self::StorageFull,
-            WireErrorKind::NotSeekable => Self::NotSeekable,
-            WireErrorKind::QuotaExceeded => Self::QuotaExceeded,
-            WireErrorKind::FileTooLarge => Self::FileTooLarge,
-            WireErrorKind::ResourceBusy => Self::ResourceBusy,
-            WireErrorKind::ExecutableFileBusy => Self::ExecutableFileBusy,
-            WireErrorKind::Deadlock => Self::Deadlock,
-            WireErrorKind::CrossesDevices => Self::CrossesDevices,
-            WireErrorKind::TooManyLinks => Self::TooManyLinks,
-            WireErrorKind::InvalidFilename => Self::InvalidFilename,
-            WireErrorKind::ArgumentListTooLong => Self::ArgumentListTooLong,
-            WireErrorKind::Interrupted => Self::Interrupted,
-            WireErrorKind::Unsupported => Self::Unsupported,
-            WireErrorKind::UnexpectedEof => Self::UnexpectedEof,
-            WireErrorKind::OutOfMemory => Self::OutOfMemory,
-            WireErrorKind::Other => Self::Other,
-        }
-    }
-}
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) enum WireError {
-    Io {
-        kind: WireErrorKind,
-        message: String,
-    },
-    System {
-        operating_system: OperatingSystem,
-        code: i32,
-        kind: WireErrorKind,
-        message: String,
-    },
-}
+#[serde(transparent)]
+pub(crate) struct WireError(crate::Error);
 
 impl From<crate::Error> for WireError {
     fn from(error: crate::Error) -> Self {
-        match error {
-            crate::Error::Io(error) => Self::Io {
-                kind: error.kind().into(),
-                message: error.to_string(),
-            },
-            crate::Error::System(error) => Self::System {
-                operating_system: *error.operating_system(),
-                code: error.code(),
-                kind: error.kind().into(),
-                message: error.message().to_owned(),
-            },
-        }
+        Self(error)
     }
 }
 
 impl From<WireError> for crate::Error {
     fn from(error: WireError) -> Self {
-        match error {
-            WireError::Io { kind, message } => {
-                Self::Io(io::Error::new(io::ErrorKind::from(kind), message))
-            }
-            WireError::System {
-                operating_system,
-                code,
-                kind,
-                message,
-            } => Self::System(crate::SystemError::new(
-                operating_system,
-                code,
-                kind.into(),
-                message,
-            )),
-        }
+        error.0
     }
 }
 
@@ -301,11 +130,11 @@ impl TryFrom<WirePath> for PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use std::{io, path::PathBuf};
+    use std::path::PathBuf;
 
     use super::{WireError, WirePath, WirePathKind};
     use crate::{
-        Error, OperatingSystem, SystemError, Utf8TypedPath, Utf8TypedPathBuf, Utf8UnixPath,
+        Error, ErrorKind, OperatingSystem, Utf8TypedPath, Utf8TypedPathBuf, Utf8UnixPath,
         Utf8WindowsPath,
     };
 
@@ -351,28 +180,28 @@ mod tests {
 
     #[test]
     fn wire_error_preserves_foreign_system_error() {
-        let error = Error::System(SystemError::new(
+        let error = Error::from_system_code(
+            ErrorKind::PermissionDenied,
+            "access is denied",
             OperatingSystem::Windows,
             5,
-            io::ErrorKind::PermissionDenied,
-            "access is denied",
-        ));
+        );
 
         let error = Error::from(WireError::from(error));
-        let system = error.system().unwrap();
-        assert_eq!(system.operating_system(), &OperatingSystem::Windows);
-        assert_eq!(system.code(), 5);
-        assert_eq!(system.kind(), io::ErrorKind::PermissionDenied);
-        assert_eq!(system.message(), "access is denied");
+        let system = error.system_code().unwrap();
+        assert_eq!(system.operating_system(), OperatingSystem::Windows);
+        assert_eq!(system.raw(), 5);
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+        assert_eq!(error.message(), "access is denied");
     }
 
     #[test]
     fn wire_error_preserves_incidental_io_error() {
-        let error = Error::Io(io::Error::new(io::ErrorKind::InvalidData, "bad reply"));
+        let error = Error::new(ErrorKind::InvalidData, "bad reply");
 
         let error = Error::from(WireError::from(error));
-        assert!(error.system().is_none());
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.system_code().is_none());
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
         assert_eq!(error.to_string(), "bad reply");
     }
 }

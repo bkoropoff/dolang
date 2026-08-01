@@ -35,7 +35,7 @@ mod sid;
 #[cfg(windows)]
 mod windows;
 
-pub use error::{Error, OperatingSystem, Result, SystemError};
+pub use error::{Error, ErrorKind, OperatingSystem, Result, SystemCode};
 pub use guid::{Guid, GuidError};
 pub use posix_acl::{PosixAce, PosixAcl, PosixAclError, PosixAclPermissions, PosixAclQualifier};
 pub use sec_desc::{
