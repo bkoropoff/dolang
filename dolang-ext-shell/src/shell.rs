@@ -3,14 +3,14 @@ use std::{
     rc::Rc,
 };
 
-use tokio::io::{self, AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
 
 use dolang::runtime::object::fmt;
 
 use dolang::{
     compile::Compiler,
     runtime::{
-        Arg, Error, Instance, Object, Output, Result, Slot, State, Strand, call, method,
+        Arg, Error, Instance, Object, Output, Result, Slot, State, Strand, Value, call, method,
         object::{Mut, TypeBuilder},
         unpack,
         value::{AsTuple, Nil, TypeObject},
@@ -24,7 +24,7 @@ use crate::{
     error::{ErrorExt, ResultExt as _},
     fs::path::{PathAnnex, create_path_annex, path_from_value},
     global::{Global, ProgramSource},
-    io_mode::{IoMode, ReadValue, ValueEncoding, encode_value, read_value},
+    io_mode::{IoMode, ReadValue, ValueEncoding, encode_value, read_raw, read_value, write_raw},
     local::{Env as LocalEnv, ProgramOverride},
     pipe_channel,
     shell_args::Args as ShellArgs,
@@ -98,17 +98,16 @@ impl Context {
     }
 }
 
-pub(crate) struct Stdin(BufReader<io::Stdin>);
-
-impl Stdin {
-    pub(crate) fn new() -> Self {
-        Self(BufReader::new(io::stdin()))
-    }
-}
+/// The process's standard input, exported as `shell.stdin`.
+///
+/// A handle, not a wrapper: the underlying reader lives in [`Global::stdio`] so
+/// that this object and the root strand's implicit input are the same buffered
+/// reader. See [`crate::global::Stdio`].
+pub(crate) struct Stdin;
 
 impl Default for Stdin {
     fn default() -> Self {
-        Self::new()
+        Self
     }
 }
 
@@ -120,7 +119,35 @@ impl<'v> Object<'v> for Stdin {
     type TypeAnnex = ();
 
     fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
-        builder.supertype(TypeObject::Iter)
+        builder
+            .supertype(TypeObject::Iter)
+            .method("read", async move |_this, strand, args, out| {
+                let ([], [size]) = unpack!(strand, args, 0, 1)?;
+                let size = size
+                    .map(|size| {
+                        size.to_i64(strand)
+                            .ok()
+                            .and_then(|size| usize::try_from(size).ok())
+                            .ok_or_else(|| {
+                                Error::type_error(strand, "size must be a non-negative integer")
+                            })
+                    })
+                    .transpose()?;
+                let global = strand.state::<Global<'v>>();
+                let mut reader = global.stdio.stdin.lock().await;
+                read_raw(&mut *reader, size, strand, out).await
+            })
+    }
+
+    /// There is exactly one `Stdin` per VM, so having the type is having the
+    /// object.
+    fn eq<'a, 's>(
+        _this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        other: &Value<'v>,
+    ) -> Result<'v, 's, bool> {
+        let global = strand.state::<Global<'v>>();
+        Ok(global.types.stdin.cast(other).is_some())
     }
 
     async fn iter<'a, 's>(
@@ -133,14 +160,18 @@ impl<'v> Object<'v> for Stdin {
     }
 
     async fn next<'a, 's>(
-        this: Instance<'v, 'a, Self>,
+        _this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, bool> {
-        let mode = strand.state::<Global<'v>>().local.get(strand).io_mode();
-        let value = read_value(&mut this.borrow_mut(strand)?.0, mode)
-            .await
-            .map_err(|err| err.into_sys(strand))?;
+        let global = strand.state::<Global<'v>>();
+        let mode = global.local.get(strand).io_mode();
+        let value = {
+            let mut reader = global.stdio.stdin.lock().await;
+            read_value(&mut *reader, mode)
+                .await
+                .map_err(|err| err.into_sys(strand))?
+        };
         match value {
             Some(ReadValue::Line(line)) => {
                 Output::set(strand, out, line.as_str());
@@ -155,21 +186,15 @@ impl<'v> Object<'v> for Stdin {
     }
 }
 
-pub(crate) struct Stdout(io::Stdout);
-
-impl Stdout {
-    pub(crate) fn new() -> Self {
-        Self(io::stdout())
-    }
-
-    pub(crate) async fn flush(&mut self) -> std::io::Result<()> {
-        self.0.flush().await
-    }
-}
+/// The process's standard output, exported as `shell.stdout`.
+///
+/// Always writes to the real stream. Naming this handle is how you opt out of
+/// terminal takeover — use `term.console` to follow it instead.
+pub(crate) struct Stdout;
 
 impl Default for Stdout {
     fn default() -> Self {
-        Self::new()
+        Self
     }
 }
 
@@ -181,72 +206,36 @@ impl<'v> Object<'v> for Stdout {
     type TypeAnnex = ();
 
     fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
-        builder.supertype(TypeObject::Sink)
+        builder
+            .supertype(TypeObject::Sink)
+            .method("write", async move |_this, strand, args, out| {
+                let ([data], []) = unpack!(strand, args, 1, 0)?;
+                let global = strand.state::<Global<'v>>();
+                let mut writer = global.stdio.stdout.lock().await;
+                write_raw(&mut *writer, data, strand, out).await
+            })
+            .method("flush", async move |_this, strand, args, _out| {
+                let ([], []) = unpack!(strand, args, 0, 0)?;
+                let global = strand.state::<Global<'v>>();
+                global
+                    .stdio
+                    .stdout
+                    .lock()
+                    .await
+                    .flush()
+                    .await
+                    .map_err(|err| err.into_sys(strand))
+            })
     }
 
-    async fn sink<'a, 's>(
-        this: Instance<'v, 'a, Self>,
+    /// All instances share [`Global::stdio`], so any two are interchangeable.
+    fn eq<'a, 's>(
+        _this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        out: Slot<'v, 'a>,
-    ) -> Result<'v, 's, ()> {
-        Output::set(strand, out, this);
-        Ok(())
-    }
-
-    async fn put<'a, 's>(
-        this: Instance<'v, 'a, Self>,
-        strand: &'a mut Strand<'v, 's>,
-        value: Slot<'v, 'a>,
-    ) -> Result<'v, 's, ()> {
+        other: &Value<'v>,
+    ) -> Result<'v, 's, bool> {
         let global = strand.state::<Global<'v>>();
-        let local = global.local.get(strand);
-        let mode = local.io_mode();
-        let bytes = encode_value(
-            strand,
-            &value,
-            mode,
-            ValueEncoding::Display,
-            OperatingSystem::current(),
-        )?;
-        if global.terminal.redirected.get() && global.terminal.stdout_is_terminal {
-            // Route through the terminal writer so output goes through
-            // the redirect target (e.g. MultiProgress::println).
-            let mut writer = global.terminal.writer.lock().await;
-            writer
-                .write_all(&bytes)
-                .await
-                .map_err(|e| e.into_sys(strand))
-        } else {
-            this.borrow_mut(strand)?
-                .0
-                .write_all(&bytes)
-                .await
-                .map_err(|err| err.into_sys(strand))
-        }
-    }
-}
-
-/// Sink that writes to the current terminal writer (`term.echo`/`term.print` destination).
-///
-/// When terminal output is redirected via `with_terminal`, this writes to the
-/// redirect target. Otherwise it writes to stderr.
-pub(crate) struct Stderr;
-
-impl Default for Stderr {
-    fn default() -> Self {
-        Self
-    }
-}
-
-impl<'v> Object<'v> for Stderr {
-    const NAME: &'v str = "Stderr";
-    const MODULE: &'v str = "shell";
-    type Annex = ();
-    type Type = ();
-    type TypeAnnex = ();
-
-    fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
-        builder.supertype(TypeObject::Sink)
+        Ok(global.types.stdout.cast(other).is_some())
     }
 
     async fn sink<'a, 's>(
@@ -264,8 +253,7 @@ impl<'v> Object<'v> for Stderr {
         value: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
         let global = strand.state::<Global<'v>>();
-        let local = global.local.get(strand);
-        let mode = local.io_mode();
+        let mode = global.local.get(strand).io_mode();
         let bytes = encode_value(
             strand,
             &value,
@@ -273,11 +261,94 @@ impl<'v> Object<'v> for Stderr {
             ValueEncoding::Display,
             OperatingSystem::current(),
         )?;
-        let mut writer = global.terminal.writer.lock().await;
+        let mut writer = global.stdio.stdout.lock().await;
         writer
             .write_all(&bytes)
             .await
-            .map_err(|e| e.into_sys(strand))
+            .map_err(|err| err.into_sys(strand))
+    }
+}
+
+/// The process's standard error, exported as `shell.stderr`.
+///
+/// The real stream, unaffected by terminal takeover. For human-readable
+/// diagnostics that should follow a progress display, use `term.console`.
+pub(crate) struct Stderr;
+
+impl Default for Stderr {
+    fn default() -> Self {
+        Self
+    }
+}
+
+impl<'v> Object<'v> for Stderr {
+    const NAME: &'v str = "Stderr";
+    const MODULE: &'v str = "shell";
+    type Annex = ();
+    type Type = ();
+    type TypeAnnex = ();
+
+    fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
+        builder
+            .supertype(TypeObject::Sink)
+            .method("write", async move |_this, strand, args, out| {
+                let ([data], []) = unpack!(strand, args, 1, 0)?;
+                let global = strand.state::<Global<'v>>();
+                let mut writer = global.stdio.stderr.lock().await;
+                write_raw(&mut *writer, data, strand, out).await
+            })
+            .method("flush", async move |_this, strand, args, _out| {
+                let ([], []) = unpack!(strand, args, 0, 0)?;
+                let global = strand.state::<Global<'v>>();
+                global
+                    .stdio
+                    .stderr
+                    .lock()
+                    .await
+                    .flush()
+                    .await
+                    .map_err(|err| err.into_sys(strand))
+            })
+    }
+
+    /// All instances share [`Global::stdio`], so any two are interchangeable.
+    fn eq<'a, 's>(
+        _this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        other: &Value<'v>,
+    ) -> Result<'v, 's, bool> {
+        let global = strand.state::<Global<'v>>();
+        Ok(global.types.stderr.cast(other).is_some())
+    }
+
+    async fn sink<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        Output::set(strand, out, this);
+        Ok(())
+    }
+
+    async fn put<'a, 's>(
+        _this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        value: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        let global = strand.state::<Global<'v>>();
+        let mode = global.local.get(strand).io_mode();
+        let bytes = encode_value(
+            strand,
+            &value,
+            mode,
+            ValueEncoding::Display,
+            OperatingSystem::current(),
+        )?;
+        let mut writer = global.stdio.stderr.lock().await;
+        writer
+            .write_all(&bytes)
+            .await
+            .map_err(|err| err.into_sys(strand))
     }
 }
 
@@ -811,9 +882,11 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             }
         })
         .value("Vfs", global.types.vfs)
+        .value("Stdin", global.types.stdin)
+        .value("Stdout", global.types.stdout)
+        .value("Stderr", global.types.stderr)
+        .object("stdin", global.types.stdin, Stdin)
+        .object("stdout", global.types.stdout, Stdout)
+        .object("stderr", global.types.stderr, Stderr)
         .commit();
-
-    // Register Stdin and Stdout types with global
-    let _stdin_ty = builder.register_type::<Stdin>();
-    let _stdout_ty = builder.register_type::<Stdout>();
 }

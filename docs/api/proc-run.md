@@ -42,12 +42,22 @@ run.echo hello world
 # Runs: /usr/bin/echo hello world
 ```
 
+## Key Arguments
+
+| Name      | Type                    | Description                              |
+| --------- | ----------------------- | ---------------------------------------- |
+| `stdin`?  | iterable\|path\|handle  | Source for the program's standard input  |
+| `stdout`? | sink\|path\|handle      | Target for the program's standard output |
+| `stderr`? | sink\|path\|handle\|sym | Target for the program's standard error  |
+| `policy`? | [`dict`](./std/dict.md) | Termination policy overrides             |
+
 ### I/O Redirection
 
-Programs participate in Do's I/O system:
+Omitted, programs participate in Do's I/O system:
 
-- Program **stdout** is connected to the current output
 - Program **stdin** is connected to the current input
+- Program **stdout** is connected to the current output
+- Program **stderr** goes to the [console](./term/console.md)
 
 This means programs work naturally in pipelines:
 
@@ -61,18 +71,47 @@ let result = strand.pipeline
   do strand.collect()
 ```
 
+Given explicitly, each accepts:
+
+- A [`str`](./std/str.md) or [`fs.Path`](./fs/path.md), which is opened as a
+  file for the appropriate direction.
+- Any iterable (`stdin:`) or sink (`stdout:`/`stderr:`), including arrays,
+  pipeline ends, and [`fs.File`](./fs/file.md) handles. Values crossing this
+  boundary are framed per the ambient
+  [I/O mode](./shell/index.md#with_io_mode-mode-func).
+- One of the [`shell.stdin`](./shell/stdin.md),
+  [`shell.stdout`](./shell/stdout.md), or [`shell.stderr`](./shell/stderr.md)
+  handles, which hands the program the corresponding stream directly.
+- `nil` or [`NULLITER`](./std/index.md#nulliter), discarding the stream.
+
+`stderr: :stdout:` merges the program's standard error into whatever its
+standard output is connected to.
+
+```
+run.tar czf archive.tar.gz src stderr: :stdout:
+run.make -j8 stdout: build.log stderr: build.log
+run.sort stdin: ["c", "a", "b"] stdout: $sorted
+```
+
+An omitted `stderr:` defaults to [`term.default`](./term/index.md#default),
+which follows console/terminal interception such as `progress` module
+indicators or [`term.capture`](./term/index.md#capture-console-func-args).
+Naming `shell.stdout`/`shell.stderr` explicitly opts out of that entirely.
+
+See [Terminal output](../shell/terminal-output.md) for the full model.
+
 ### Termination Policy
 
-Use the reserved `policy:` dictionary to override termination behavior for one
-launch. Unspecified fields inherit the current
+Use the `policy:` dictionary to override termination behavior for one launch.
+Unspecified fields inherit the current
 [`proc.with_policy`](./proc/index.md#with_policy-func-signal-grace-force)
 settings.
 
-| Key      | Type                                                        | Description                              |
-| -------- | ----------------------------------------------------------- | ---------------------------------------- |
-| `signal` | [`sym`](./std/sym.md)\|[`int`](./std/int.md)                | Unix signal name or target-native number |
-| `grace`  | [`Duration`](./time/duration.md)\|[`float`](./std/float.md) | Time before forced termination           |
-| `force`  | [`bool`](./std/bool.md)                                     | Force termination after the grace period |
+| Key      | Type                                                        | Description                                               |
+| -------- | ----------------------------------------------------------- | --------------------------------------------------------- |
+| `signal` | [`sym`](./std/sym.md)\|[`int`](./std/int.md)                | Unix signal name or target-native number                  |
+| `grace`  | [`Duration`](./time/duration.md)\|[`float`](./std/float.md) | Time to wait for process to exit after termination signal |
+| `force`  | [`bool`](./std/bool.md)                                     | Force termination after the grace period                  |
 
 ```
 run worker policy: {signal: :INT:, grace: 10.0, force: true}
@@ -80,21 +119,26 @@ run worker policy: {signal: :INT:, grace: 10.0, force: true}
 
 Foreground Unix processes are terminated directly. Processes launched under
 `strand.spawn` or `strand.stream` are placed in a separate process group and
-terminated as a group. Windows uses `CTRL_BREAK_EVENT`; background launches
-are force-terminated through a Job Object. A per-launch `signal` override is
-invalid for a Windows target. Numeric signals are accepted only for direct
-launch policies and are interpreted using the target's numbering. Named signals
-cross VFS boundaries symbolically and are resolved by the target VFS. They
-produce `ValueError` at launch when the target does not support them.
+terminated as a group. Windows uses `CTRL_BREAK_EVENT`; background launches are
+force-terminated through a Job Object. A `signal` override is invalid for a
+Windows target.
 
 ### Capturing Output
 
-Use [`sub`](proc/index.md#sub-func-trim) to capture a program's output as a
-string:
+Use [`sub`](proc/index.md#sub-func-trim) to capture a program's standard output
+as a string:
 
 ```
 let kernel = sub do run.uname -r
 echo "Kernel: $kernel"
+```
+
+To capture all console-bound output, use
+[`term.sub`](./term/index.md#sub-func-trim-can_style-args); this picks up
+unredirected undirected stderr.
+
+```
+let complaints = term.sub do run.mytool
 ```
 
 ### Environment

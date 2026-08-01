@@ -3,16 +3,52 @@ use dolang::{
     compile::Compiler,
     runtime::{
         Arg, Args, Error, Format, Instance, Object, Output, Result, Slot, State, Strand, Sym,
-        Value,
+        Value, method,
         object::{Mut, Ref, TypeBuilder},
         unpack,
         value::{StrEmbryo, View},
         vm::Builder,
     },
 };
-use tokio::io::AsyncWriteExt;
 
-use crate::{error::ErrorExt as _, global::Global};
+use crate::{
+    console::{self, DefaultOutput, HostConsole, SubConsole},
+    global::Global,
+    io_mode::strip_line_ending,
+};
+
+/// Runs `f` with `console` installed as the ambient console for this strand.
+///
+/// The override lives in a strand-local GC root, so it is inherited by strands
+/// spawned inside `f` and restored on every path out.
+///
+/// `can_style` is the answer the console gave when it was handed over; it is
+/// snapshotted rather than re-read, which is what fixes styling for the life of
+/// the capture.
+async fn with_capture<'v, 's, R>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    console: &Slot<'v, '_>,
+    can_style: bool,
+    f: impl AsyncFnOnce(&mut Strand<'v, 's>) -> R,
+) -> R {
+    strand
+        .with_slots(async move |strand, [mut prev]| {
+            let mut root = global.capture.slot(strand);
+            Output::set(strand, &mut prev, &root);
+            Output::set(strand, &mut root, console);
+            let prev_can_style = global.local.get(strand).set_capture_can_style(can_style);
+            let result = f(strand).await;
+            let mut root = global.capture.slot(strand);
+            Output::set(strand, &mut root, &prev);
+            global
+                .local
+                .get(strand)
+                .set_capture_can_style(prev_can_style);
+            result
+        })
+        .await
+}
 
 const BOLD: usize = 0;
 const DIM: usize = 1;
@@ -985,14 +1021,93 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         inherit,
     } = keys;
     let backtrace = builder.sym("backtrace");
+    let trim = builder.sym("trim");
+    let can_style = global.syms.can_style;
 
     builder
         .module("term")
         .value("Text", global.types.text)
         .value("Style", global.types.style)
-        .value("have_terminal", global.terminal.stderr_is_terminal)
+        .value("Console", global.types.console)
+        .value("SinkConsole", global.types.sink_console)
+        .value("Geometry", global.types.geometry)
+        .value("Default", global.types.default)
+        .object("console", global.types.host_console, HostConsole)
+        .object("default", global.types.default, DefaultOutput)
+        .function("output", async move |strand, args, out| {
+            let ([], []) = unpack!(strand, args, 0, 0)?;
+            // The *ambient* console: whatever an enclosing `capture` installed,
+            // else the host. `term.console` is a name, so it pins instead.
+            let root = global.capture.slot(strand);
+            if root.is_nil() {
+                global.types.host_console.create(strand, HostConsole, out);
+            } else {
+                Output::set(strand, out, &root);
+            }
+            Ok(())
+        })
+        .function_with_slots(
+            "capture",
+            async move |strand, args, out, [mut console, mut tmp]| {
+                let ([target, func], [], rest) = unpack!(strand, args, 2, 0, ...)?;
+                if target.is_instance_of(strand, global.types.console) {
+                    Output::set(strand, &mut console, target);
+                } else {
+                    // Any ordinary sink works; the adapter supplies the rest of
+                    // the console interface. A bare sink does not style — pass
+                    // a `term.SinkConsole` built with `can_style: true` to say
+                    // otherwise.
+                    console::create_sink_console(
+                        strand,
+                        &target,
+                        false,
+                        Slot::reborrow(&mut console),
+                    )
+                    .await?;
+                }
+                let can_style = console::can_style(strand, &console)?;
+                let result =
+                    with_capture(strand, global, &console, can_style, async move |strand| {
+                        func.call(strand, rest, out).await
+                    })
+                    .await;
+                // An unterminated `print` is only visible once the partial line
+                // is emitted, so the scope always ends with a flush.
+                let flushed = method!(strand, &console, global.syms.flush, &mut tmp).await;
+                result.and(flushed)
+            },
+        )
+        .function_with_slots(
+            "sub",
+            async move |strand, args, out, [mut console, mut tmp]| {
+                let ([func], [trim, can_style], rest) =
+                    unpack!(strand, args, 1, 0, trim = None, can_style = None, ...)?;
+                let trim = trim.map(|v| v.to_bool(strand)).unwrap_or(true);
+                let can_style = can_style.is_some_and(|v| v.to_bool(strand));
+                global
+                    .types
+                    .sub_console
+                    .create(strand, SubConsole::new(can_style), &mut console);
+                with_capture(strand, global, &console, can_style, async move |strand| {
+                    func.call(strand, rest, &mut tmp).await
+                })
+                .await?;
+                global.types.sub_console.cast(&console).unwrap().enter_sync(
+                    strand,
+                    |strand, inst| {
+                        let sub = inst.borrow(strand)?;
+                        let mut value = sub.text();
+                        if trim {
+                            value = strip_line_ending(value);
+                        }
+                        Output::set(strand, out, value);
+                        Ok(())
+                    },
+                )
+            },
+        )
         .function("echo", async move |strand, args, _| {
-            let ansi = global.terminal.ansi;
+            let ansi = console::ansi(strand);
             let mut output = String::new();
             let mut space = false;
             for arg in args {
@@ -1025,15 +1140,9 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                     }
                 }
             }
-            output.push('\n');
-            global
-                .terminal
-                .writer
-                .lock()
-                .await
-                .write_all(output.as_bytes())
-                .await
-                .map_err(|error| error.into_sys(strand))
+            // The console supplies the terminator: only it knows what its own
+            // line ending is.
+            console::writeln(strand, output.as_bytes()).await
         })
         .function("print", async move |strand, args, _| {
             let (
@@ -1088,17 +1197,10 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 global,
                 &mut output,
                 style,
-                global.terminal.ansi,
+                console::ansi(strand),
                 args,
             )?;
-            global
-                .terminal
-                .writer
-                .lock()
-                .await
-                .write_all(output.as_bytes())
-                .await
-                .map_err(|error| error.into_sys(strand))
+            console::write(strand, output.as_bytes()).await
         })
         .function("style", async move |strand, args, out| {
             apply_style(strand, global, keys, Style::default(), args, out)

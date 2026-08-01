@@ -181,7 +181,7 @@ fn run(config: Arc<dyn Config>) -> i32 {
             builder
                 .enter_with_slots(async move |strand, [mut stdin, mut stdout]| {
                     dolang_ext_shell::stdin(strand, &mut stdin);
-                    dolang_ext_shell::stdout(strand, &mut stdout);
+                    dolang_ext_shell::default_output(strand, &mut stdout);
                     let ct = strand.interrupt_token();
                     let res =
                         Redirect::new(strand)
@@ -246,11 +246,10 @@ fn run(config: Arc<dyn Config>) -> i32 {
                         }
                     };
 
-                    // Tokio stdout/stderr handles can retain buffered output
-                    // when the runtime shuts down. Flush the exact stdout sink
-                    // installed above and the shell extension's stderr writer
-                    // while both are still alive.
-                    let flush = dolang_ext_shell::flush(strand, &stdout).await;
+                    // Tokio stdio handles can retain buffered output when the
+                    // runtime shuts down, so flush the process's standard
+                    // streams and the console writer while they are still alive.
+                    let flush = dolang_ext_shell::flush(strand).await;
                     let res = match (res, flush) {
                         (result @ Err(_), _) => result,
                         (Ok(()), flush) => flush,

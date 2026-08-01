@@ -1,11 +1,13 @@
 #![deny(warnings)]
 
+mod console;
 mod diagnostic;
 mod env;
 mod error;
 mod error_code;
 mod extension;
 mod fs;
+mod geometry;
 mod global;
 mod io_mode;
 mod local;
@@ -49,40 +51,63 @@ pub use diagnostic::{print_compile_diag_stderr, print_error_stderr, render_messa
 #[doc(hidden)]
 pub use syntax::{SemanticToken, highlight_range as highlight_source_range};
 
-/// Instantiate wrapper iterator around stdin
+/// Instantiate the `shell.stdin` handle.
+///
+/// The handle is stateless — the buffered reader itself lives on the VM — so
+/// this and `shell.stdin` read the same stream and cannot split its buffer.
 pub fn stdin<'v, 's>(strand: &mut Strand<'v, 's>, out: impl Output<'v>) {
     let global = strand.state::<Global<'v>>();
-    global.types.stdin.create(strand, shell::Stdin::new(), out)
+    global.types.stdin.create(strand, shell::Stdin, out)
 }
 
-/// Instantiate wrapper sink around stdout
+/// Instantiate the `shell.stdout` handle.
+///
+/// Stateless, as with [`stdin`].
 pub fn stdout<'v, 's>(strand: &mut Strand<'v, 's>, out: impl Output<'v>) {
     let global = strand.state::<Global<'v>>();
-    global
-        .types
-        .stdout
-        .create(strand, shell::Stdout::new(), out)
+    global.types.stdout.create(strand, shell::Stdout, out)
 }
 
-/// Flush the shell's stdout sink and terminal stderr writer.
+/// Instantiate the strand's default output handle.
 ///
-/// `stdout` must be the value installed as the shell's output sink so the
-/// precise Tokio handle used for output is flushed before VM shutdown.
-pub async fn flush<'v, 's>(strand: &mut Strand<'v, 's>, stdout: &Value<'v>) -> Result<'v, 's, ()> {
+/// `term.default` when stdout is a terminal, so unnamed program output keeps
+/// following capture and progress takeover for the life of the process; the
+/// literal `shell.stdout` otherwise, since there is nothing to follow and raw
+/// fd inheritance is the cheaper, simpler path.
+pub fn default_output<'v, 's>(strand: &mut Strand<'v, 's>, out: impl Output<'v>) {
     let global = strand.state::<Global<'v>>();
-    let stdout = global
-        .types
+    if global.terminal.stdout_is_terminal {
+        global
+            .types
+            .default
+            .create(strand, console::DefaultOutput, out)
+    } else {
+        global.types.stdout.create(strand, shell::Stdout, out)
+    }
+}
+
+/// Flush the process's standard streams and the console writer.
+///
+/// Tokio stdio handles can retain buffered output when the runtime shuts down,
+/// so this must run while the runtime is still alive.
+pub async fn flush<'v, 's>(strand: &mut Strand<'v, 's>) -> Result<'v, 's, ()> {
+    let global = strand.state::<Global<'v>>();
+    global
+        .stdio
         .stdout
-        .cast(stdout)
-        .ok_or_else(|| Error::type_error(strand, "stdout sink: expected shell.Stdout"))?;
-    stdout
-        .enter(strand, async |strand, inst| {
-            inst.borrow_mut(strand)?
-                .flush()
-                .await
-                .map_err(|error| Error::runtime(strand, error))
-        })
-        .await?;
+        .lock()
+        .await
+        .flush()
+        .await
+        .map_err(|error| Error::runtime(strand, error))?;
+    global
+        .stdio
+        .stderr
+        .lock()
+        .await
+        .flush()
+        .await
+        .map_err(|error| Error::runtime(strand, error))?;
     global
         .terminal
         .writer
@@ -238,7 +263,7 @@ pub fn is_terminal() -> bool {
 /// Whether ANSI styling should be emitted to stderr, per the same
 /// NO_COLOR/FORCE_COLOR/tty policy `term.echo`/`term.print` use.
 pub fn ansi_enabled<'v>(strand: &Strand<'v, '_>) -> bool {
-    strand.state::<Global<'v>>().terminal.ansi
+    crate::console::ansi(strand)
 }
 
 /// Write a line (newline appended) through the shared terminal writer,
@@ -252,16 +277,7 @@ pub async fn write_terminal_line<'v, 's>(
     strand: &mut Strand<'v, 's>,
     line: &str,
 ) -> Result<'v, 's, ()> {
-    let global = strand.state::<Global<'v>>();
-    let mut guard = global.terminal.writer.lock().await;
-    guard
-        .write_all(line.as_bytes())
-        .await
-        .map_err(|error| Error::runtime(strand, error))?;
-    guard
-        .write_all(b"\n")
-        .await
-        .map_err(|error| Error::runtime(strand, error))
+    crate::console::writeln(strand, line.as_bytes()).await
 }
 
 /// Redirect terminal output (`term.echo`/`term.print` and default child stderr)

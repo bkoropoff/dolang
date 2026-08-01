@@ -4,35 +4,41 @@ The `shell` module provides shell-context values and functions.
 
 ## Types
 
-| Name                            | Description                                              |
-| ------------------------------- | -------------------------------------------------------- |
-| [`Vfs`](./vfs.md)               | Execution context handle                                 |
+| Name                    | Description                              |
+| ----------------------- | ---------------------------------------- |
+| [`Vfs`](./vfs.md)       | Execution context handle                 |
+| [`Stdin`](./stdin.md)   | Handle for the process's standard input  |
+| [`Stdout`](./stdout.md) | Handle for the process's standard output |
+| [`Stderr`](./stderr.md) | Handle for the process's standard error  |
 
 ## Functions
 
 ### `with_io_mode mode func ...`
 
 Runs a callable with the current strand's adapter I/O mode set for the duration
-of the call.
+of the call. This controls behavior when using `Iter` or `Sink` adapters for
+anonymous byte/character-stream interfaces, such strand input or outputs
+connected to stdio or an external program.
 
 In `:LINE:` mode, iterator adapters decode UTF-8, split input on line
 boundaries, and yield [`Str`](../std/str.md) values with either an LF or CRLF
-line ending removed. Sink adapters append the destination platform's line
-ending to the string form of each value. This is the default mode.
+line ending removed. Sink adapters append the target platform's line ending to
+the string form of each value. Interpreter stdin/stdout/stderr always use the
+host's native line ending. This is the default mode.
 
 In `:CHUNK:` mode, iterator adapters yield arbitrary-sized
 [`Bin`](../std/bin.md) values. Sink adapters write the string form of each value
-without adding a newline. Sink adapters write `Bin` values verbatim in both
-modes.
+without adding a newline.
 
-The mode of the strand that owns an adapter determines its behavior. For an
-external process connected to a pipeline, this is the strand adjacent to the
-process. Adjacent external processes communicate in raw bytes regardless of
-mode.
+Sink adapters always write `Bin` values verbatim with no line ending regardless
+of mode.
 
-External-process adapters use the active VFS target's line ending. Interpreter
-stdin/stdout/stderr use the host platform. A text-mode file sink uses the target
-recorded when its handle was opened.
+The I/O mode is only used when translation between a byte stream and discrete Do
+values is required. For example, adjacent external processes in a pipeline
+communicate directly in raw bytes.
+
+Opened file handles always use line/chunk mode according to whether the `b`
+mode was specified during open, not the strand-local mode.
 
 **Parameters:**
 
@@ -127,7 +133,7 @@ error.
 ### `vfs_exe()`
 
 Returns the current executable reported by the active VFS context, or `nil`
-when running on the host filesystem.
+when running on the host.
 
 #### Returns
 
@@ -146,6 +152,20 @@ Runs `func` with scoped environment overrides. Keys may be strings or symbols.
 | `func`      | callable                 | Block to run          |
 
 ## Values
+
+### `stdin`
+
+A [`Stdin`](./stdin.md) handle for the process's standard input, and initial
+input for the main strand.
+
+### `stdout`
+
+A [`Stdout`](./stdout.md) handle for the process's standard output, and initial
+output for the main strand.
+
+### `stderr`
+
+A [`Stderr`](./stderr.md) handle for the process's standard error output.
 
 ### `env`
 

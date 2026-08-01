@@ -1,14 +1,16 @@
 # term
 
-The `term` module writes sanitized terminal output and constructs ANSI-styled
-text.
+The `term` module interfaces with terminals and consoles.
 
 ## Types
 
-| Type                  | Description                     |
-| --------------------- | ------------------------------- |
-| [`Style`](./style.md) | Reusable terminal style         |
-| [`Text`](./text.md)   | Validated terminal presentation |
+| Type                               | Description                             |
+| ---------------------------------- | --------------------------------------- |
+| [`Console`](./console.md)          | Destination for human-readable output   |
+| [`Geometry`](./geometry.md)        | Dimensions of a terminal-backed console |
+| [`SinkConsole`](./sink-console.md) | Console over an ordinary sink           |
+| [`Style`](./style.md)              | Reusable terminal style                 |
+| [`Text`](./text.md)                | Validated terminal presentation         |
 
 ## Style options
 
@@ -43,11 +45,95 @@ must be between 0 and 255. Color options also accept `:INHERIT:`.
 
 ## Values
 
-### `have_terminal`
+### `console`
 
-Whether stderr was a terminal when the process started.
+The host [`Console`](./console.md), which may be taken over by an extension
+such a `progress.`
+
+Unlike [`output()`](#output), it is not intercepted by an enclosing
+[`capture`](#capture-console-func-args).
+
+### `default`
+
+A [`Console`](./console.md) that forwards every operation to whatever
+[`output()`](#output) currently resolves to, resolved fresh on each call
+rather than once. Bound as the main strand's implicit output when stdout is a
+terminal, so unnamed program output keeps following capture and `progress`
+takeover for the life of the process — see
+[Terminal output](../../shell/terminal-output.md#child-process-output).
 
 ## Functions
+
+### `output()`
+
+Returns the current output console: the one installed by an enclosing
+[`capture`](#capture-console-func-args), or [`console`](#console) if there is
+none. This is where `echo`, `print`, diagnostics, and unredirected child
+process output go.
+
+**Returns:** [`Console`](./console.md)
+
+### `capture console func ...args`
+
+Runs a callable with `console` installed as the ambient console, then flushes
+it and restores the previous one.
+
+`console` may be any [`Console`](./console.md), or any
+[`Sink`](../std/sink.md) — a plain sink is wrapped in a
+[`SinkConsole`](./sink-console.md), which frames per the ambient
+[I/O mode](../shell/index.md#with_io_mode-mode-func).
+
+The override is inherited by all strands spawned inside the call.
+
+**Parameters:**
+
+| Name      | Type                            | Description                           |
+| --------- | ------------------------------- | ------------------------------------- |
+| `console` | [`Console`](./console.md)\|sink | Destination to install                |
+| `func`    | callable                        | Block to run                          |
+| `...`     |                                 | Additional arguments passed to `func` |
+
+**Returns:** Return value of `func`.
+
+```
+let lines = []
+term.capture $lines do
+  echo "Hello, Alice!"
+assert_eq $lines ["Hello, Alice!"]
+```
+
+The scope always ends with a flush, so an unterminated `print` still arrives:
+
+```
+let out = []
+term.capture $out do print hi
+assert_eq $out ["hi"]
+```
+
+### `sub func :trim? :can_style? ...args`
+
+Runs a callable and returns its console output as a string. The console
+counterpart to [`proc.sub`](../proc/index.md#sub-func-trim), which captures a
+strand's implicit output stream.
+
+Verbatim output is captured, which must be valid UTF-8. One final line ending
+(LF or CRLF) is removed unless `trim: false`.
+
+**Parameters:**
+
+| Name        | Type                      | Description                                     |
+| ----------- | ------------------------- | ----------------------------------------------- |
+| `func`      | callable                  | Block to run                                    |
+| `trim`      | [`Bool`](../std/bool.md)? | Strip one trailing line ending (default `true`) |
+| `can_style` | [`Bool`](../std/bool.md)? | Keep ANSI styling (default `false`)             |
+| `...`       |                           | Additional arguments passed to `func`           |
+
+**Returns:** [`Str`](../std/str.md)
+
+```
+let greeting = term.sub do greet Alice
+assert_eq $greeting "Hello, Alice!"
+```
 
 ### `echo ...args`
 

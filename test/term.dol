@@ -1,19 +1,47 @@
 import
   shell
+  sys
   term
+  strand
+  progress
+  fs:
+    - with_temp_dir
+  shell:
+    - with_io_mode
   test:
+    - assert
     - assert_eq
     - assert_throws
+    - skip
     - test
   std:
     - TypeError
+    - UnsupportedError
     - ValueError
 
 let ESC = str b"\x1b"
 
+# The line ending a console appends where it follows the platform: a
+# `SinkConsole`'s `writeln`, and `put` on any console (that one is value
+# framing, so it goes through the same path an `fs.File` sink would). `echo` on
+# the host console is deliberately *not* one of these — it is LF everywhere.
+let NL = if (sys.os_info().family == :WINDOWS:)
+  "\r\n"
+else
+  "\n"
+
 #[test]
-def terminal_detection()
-  assert_eq (type term.have_terminal) $Bool
+def console_geometry()
+  # `term.console` is a name, so this is the honest "is there a real terminal"
+  # test — nil under a pipe, dimensions under a tty. There is no separate
+  # `have_terminal` flag to disagree with it.
+  assert_eq (type term.console.can_style) $Bool
+  let g = term.console.geometry()
+  if (g == nil)
+    return
+  assert (type g term.Geometry)
+  assert_eq (type g.rows) $Int
+  assert_eq (type g.cols) $Int
 
 #[test]
 def text_string_coercion()
@@ -81,3 +109,346 @@ def text_indent()
 
   assert_throws $ValueError do text.indent(-1)
   assert_throws $TypeError do text.indent("2")
+
+# --- Terminal output capture ----------------------------------------------
+
+# Writes `source` into the temp dir and returns the script path, so tests can
+# name it in a `run` invocation without the here string swallowing the
+# arguments that follow it.
+def script dir name source
+  let path = (dir / name)
+  path.write $source
+  path
+
+#[test]
+def capture_collects_echo_lines()
+  let out = []
+  term.capture $out do
+    echo hello world
+    echo second
+  assert_eq $out ["hello world", "second"]
+
+#[test]
+def sub_returns_captured_text()
+  assert_eq (term.sub do echo("hi")) hi
+  assert_eq (term.sub trim: false do echo("hi")) "hi\n"
+
+  # A CRLF written straight into the byte stream trims the same way.
+  assert_eq (term.sub do term.output().write "hi\r\n") hi
+
+#[test]
+def print_stays_unterminated()
+  # `sub` reports the byte stream verbatim, so the I/O mode must not reach it:
+  # `echo` still terminates and `print` still does not, in either mode.
+  def mixed()
+    print a
+    print b
+    echo c
+
+  assert_eq (term.sub mixed) abc
+  assert_eq (with_io_mode :CHUNK: do term.sub mixed) abc
+
+#[test]
+def capture_into_sink_honors_io_mode()
+  # Crossing from the console's byte stream into a sink is a value conversion,
+  # which is exactly what the I/O mode governs.
+  let lines = []
+  term.capture $lines do echo hello
+
+  let chunks = []
+  with_io_mode :CHUNK: do term.capture $chunks do echo hello
+
+  assert_eq $lines ["hello"]
+  # The terminator survives the mode because `writeln` put it in the byte
+  # stream before any framing decision was made.
+  let joined = ""
+  for chunk = chunks
+    joined = "$joined$(str(chunk))"
+  assert_eq $joined "hello$NL"
+
+#[test]
+def capture_flushes_partial_line()
+  # An unterminated `print` is only visible once the scope ends and flushes.
+  let out = []
+  term.capture $out do print hi
+  assert_eq $out ["hi"]
+
+#[test]
+def capture_is_unstyled_by_default()
+  # A capture is not a terminal, so styling is off inside one — otherwise this
+  # would pass piped and fail on a developer's terminal.
+  assert_eq (term.sub do echo (term.style "warn" fg: :YELLOW:)) warn
+  # And the console says so, which is what `echo` consulted to decide.
+  let out = []
+  term.capture $out do
+    assert_eq (term.output().can_style) false
+
+#[test]
+def capture_can_style_opt_in()
+  # Styling is a property of the installed console, so a test that is
+  # specifically *about* styled output can ask for it — something a global tty
+  # check could never express.
+  let styled = "$ESC[33mwarn$ESC[0m"
+  assert_eq (term.sub can_style: true do echo (term.style "warn" fg: :YELLOW:)) $styled
+
+  # The same opt-in on the sink adapter, which is the route `capture` takes.
+  let out = []
+  term.capture (term.SinkConsole(out, can_style: true)) do
+    assert_eq (term.output().can_style) true
+    echo (term.style "warn" fg: :YELLOW:)
+  assert_eq $out [styled]
+
+#[test]
+def capture_reports_no_geometry()
+  # A sink has no layout, and the pin still answers for the real terminal.
+  let host = term.console.geometry()
+  let out = []
+  term.capture $out do
+    assert_eq (term.output().geometry()) nil
+    assert_eq (term.console.geometry() == nil) (host == nil)
+
+#[test]
+def nesting_composes()
+  let outer = []
+  let inner = []
+  term.capture $outer do
+    echo o1
+    term.capture $inner do echo i1
+    echo o2
+
+  assert_eq $outer ["o1", "o2"]
+  assert_eq $inner ["i1"]
+
+#[test]
+def spawn_inherits_capture()
+  let out = []
+  term.capture $out do
+    let s = strand.spawn do echo from-spawn
+    s.join()
+  assert_eq $out ["from-spawn"]
+
+#[test]
+def console_pins_past_capture()
+  # `term.console` is a name, so it pins to the host for `write` and `put`
+  # alike; only the anonymous `term.output()` follows the capture. Run in a
+  # child so the pinned bytes land in a file rather than on the test runner's
+  # terminal.
+  with_temp_dir do |dir|
+    let src = r|
+      import term
+      import shell
+      import strand
+      import fs
+      let out = []
+      term.capture $out do
+        term.console.write "pinned-write\n"
+        strand.pipeline output: $term.console
+          do strand.from ["pinned-put"]
+        echo captured
+      fs.write $shell.args[0] (str out)
+
+    let path = script $dir pin.dol $src
+    let seen = (dir / "seen.txt")
+    let err = (dir / "err.txt")
+    run $shell.exe --no-cache $path $seen stderr: $err
+
+    assert_eq $seen.read() r#"["captured"]"#
+    # `write` is verbatim, so its LF is the one in the source; `put` is value
+    # framing, so it picks up the platform ending.
+    assert_eq $err.read() "pinned-write\npinned-put$NL"
+
+#[test]
+def concurrent_lines_do_not_interleave()
+  # `echo` writes its payload and its terminator to the host console under one
+  # lock. Two locks would let another strand slip a line in between, which
+  # surfaces as run-together output — most visibly plain-mode progress lines.
+  # Run in a child so the concurrent writes land in a file.
+  with_temp_dir do |dir|
+    let src = r|
+      import strand:
+        - fork
+      fork
+        do
+          for _ = (0..200)
+            echo aaaaaaaaaa
+        do
+          for _ = (0..200)
+            echo bbbbbbbbbb
+
+    let path = script $dir race.dol $src
+    let err = (dir / "err.txt")
+    run $shell.exe --no-cache $path stderr: $err
+
+    let lines = Array(err.read().split("\n"))
+    # `split` on a trailing terminator leaves one empty tail element.
+    assert_eq $lines[lines.len - 1] ""
+    let body = lines[..(lines.len - 1)]
+    # A lost lock shows up as two payloads run together plus a blank line, so
+    # both the count and the contents catch it.
+    assert_eq $body.len 400
+    for line = body
+      assert ((line == "aaaaaaaaaa") || (line == "bbbbbbbbbb"))
+
+#[test]
+def child_stderr_is_captured()
+  # An undirected child stderr is console-bound, so a capture takes it. Child
+  # stdout is the data stream and still goes to the implicit sink.
+  with_temp_dir do |dir|
+    let src = r|
+      import shell
+      shell.stderr.write "child-err\n"
+      shell.stdout.write "child-out\n"
+
+    let path = script $dir noisy.dol $src
+    let out = []
+    let human = term.sub do run $shell.exe --no-cache $path stdout: $out
+
+    assert_eq $human child-err
+    assert_eq $out ["child-out"]
+
+#[test]
+def progress_lines_are_captured()
+  # Covers the other funnelled writer, `write_terminal_line`. Only plain-mode
+  # progress goes through it — on a real terminal indicatif takes the terminal
+  # over and draws directly, bypassing ordinary console output entirely.
+  if term.console.geometry()
+    skip "requires no terminal (progress draws directly on one)"
+
+  let out = []
+  term.capture $out do
+    progress.show message: working do |_|
+      nil
+  assert (out.len > 0)
+
+#[test]
+def do_subclass_console()
+  # The interface is a real type, so Do code can implement a console.
+  class Recorder: term.Console
+    pub field lines
+
+    def (init) self
+      term.Console.(init) $self
+      self.lines = []
+
+    pub def write self data
+      self.lines.push (str data)
+      data.len
+
+    pub def writeln self data
+      self.lines.push "$(str data)|"
+      data.len
+
+    pub def flush _self
+      nil
+
+  let recorder = Recorder()
+  term.capture $recorder do
+    echo terminated
+    print bare
+  assert_eq $recorder.lines ["terminated|", "bare"]
+
+  # Supplying only the three write members is enough: the capability members
+  # have safe defaults, which the subclass inherits from the base.
+  assert_eq $recorder.can_style false
+  assert_eq (recorder.geometry()) nil
+
+#[test]
+def do_console_declares_capabilities()
+  # A Do field shadows the base's getter, and a Do method its `geometry()`.
+  class MyGeometry: term.Geometry
+    pub field rows
+    pub field cols
+
+    def (init) self rows cols
+      term.Geometry.(init) $self
+      self.rows = rows
+      self.cols = cols
+
+  class Fancy: term.Console
+    pub field lines
+    pub field can_style = true
+
+    def (init) self
+      term.Console.(init) $self
+      self.lines = []
+
+    pub def write self data
+      self.lines.push (str data)
+      data.len
+
+    pub def writeln self data
+      self.lines.push (str data)
+      data.len
+
+    pub def flush _self
+      nil
+
+    pub def geometry _self
+      MyGeometry 24 80
+
+  let fancy = Fancy()
+  term.capture $fancy do echo (term.style "warn" fg: :YELLOW:)
+  assert_eq $fancy.lines ["$ESC[33mwarn$ESC[0m"]
+
+  let g = fancy.geometry()
+  assert (type g term.Geometry)
+  assert_eq $g.rows 24
+  assert_eq $g.cols 80
+
+#[test]
+def bare_geometry_refuses()
+  # `term.Geometry` is the interface, so an instance of it has no dimensions to
+  # report — the same refusal `term.Console`'s write methods make.
+  let base = term.Geometry()
+  assert (type base term.Geometry)
+  assert_throws $UnsupportedError do base.rows
+  assert_throws $UnsupportedError do base.cols
+
+#[test]
+def reentrant_console_does_not_recurse()
+  # A console whose own `write` echoes falls through to the host rather than
+  # routing back into itself until the call-depth limit. Run in a child so the
+  # fallen-through line lands in a file — where it can be asserted on — rather
+  # than on the test runner's terminal.
+  with_temp_dir do |dir|
+    let src = r|
+      import term
+      import shell
+      import fs
+
+      class Loud: term.Console
+        pub field seen
+
+        def (init) self
+          term.Console.(init) $self
+          self.seen = []
+
+        pub def write self data
+          self.seen.push (str data)
+          data.len
+
+        pub def writeln self data
+          self.seen.push (str data)
+          echo "loud: $(str data)"
+          data.len
+
+        pub def flush _self
+          nil
+
+      let loud = Loud()
+      let outer = []
+      term.capture $outer do
+        term.capture $loud do echo hello
+      fs.write $shell.args[0] "$(str loud.seen) $(str outer)"
+
+    let path = script $dir loud.dol $src
+    let seen = (dir / "seen.txt")
+    let err = (dir / "err.txt")
+    run $shell.exe --no-cache $path $seen stderr: $err
+
+    # The inner console saw the line, and the re-entrant `echo` skipped both
+    # captures rather than landing in the enclosing one — which is what keeps
+    # the guard simple.
+    assert_eq $seen.read() r#"["hello"] []"#
+    # It reached the host console, whose line ending is LF on every platform.
+    assert_eq $err.read() "loud: hello\n"

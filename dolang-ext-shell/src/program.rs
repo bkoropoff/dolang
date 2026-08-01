@@ -61,6 +61,30 @@ fn program_name_from_value<'v, 's>(
     }
 }
 
+/// One value per standard stream.
+///
+/// Purely for grouping — the fields are the names, so callers say
+/// `explicit.stdout` rather than indexing a bare triple.
+#[derive(Clone, Copy, Debug, Default)]
+struct Streams<T> {
+    stdin: T,
+    stdout: T,
+    stderr: T,
+}
+
+/// What [`resolve_io`] worked out about a launch's standard streams.
+struct ResolvedIo<'v, 'a> {
+    /// The launch arguments with the reserved keywords removed.
+    args: Args<'v, 'a>,
+    /// Streams `run` opened itself and must close when the launch finishes.
+    temp: Streams<bool>,
+    /// Streams the caller named explicitly. A named stream is pinned to what it
+    /// names; an unnamed one is anonymous and follows the ambient console.
+    explicit: Streams<bool>,
+    /// The reserved `policy:` argument, if given.
+    policy: Option<Slot<'v, 'a>>,
+}
+
 async fn resolve_io<'v, 's, 'a>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
@@ -68,7 +92,7 @@ async fn resolve_io<'v, 's, 'a>(
     mut input: Slot<'v, '_>,
     mut output: Slot<'v, '_>,
     mut stderr: Slot<'v, '_>,
-) -> Result<'v, 's, (Args<'v, 'a>, [bool; 3], Option<Slot<'v, 'a>>)> {
+) -> Result<'v, 's, ResolvedIo<'v, 'a>> {
     let stdin_sym = global.syms.stdin;
     let stdout_sym = global.syms.stdout;
     let stderr_sym = global.syms.stderr;
@@ -84,6 +108,12 @@ async fn resolve_io<'v, 's, 'a>(
         policy_sym = None,
         ...
     )?;
+    let explicit = Streams {
+        stdin: stdin_key.is_some(),
+        stdout: stdout_key.is_some(),
+        stderr: stderr_key.is_some(),
+    };
+
     let input_temp = if let Some(stdin_key) = stdin_key {
         if resolve_io_file(strand, global, &stdin_key, "r", &mut input).await? {
             true
@@ -120,19 +150,22 @@ async fn resolve_io<'v, 's, 'a>(
             stderr_key.sink(strand, Slot::reborrow(&mut stderr)).await?;
             false
         }
-    } else if global.terminal.redirected.get() {
-        // Terminal is redirected — pipe child stderr through the Stderr sink
-        // so it goes through the redirect writer instead of directly to stderr fd
-        global
-            .types
-            .stderr
-            .create(strand, crate::shell::Stderr, &mut stderr);
-        false
     } else {
+        // Left nil: an unnamed stderr follows the ambient console, which `run`
+        // resolves to either inheriting fd 2 or a byte pump into the console.
         false
     };
 
-    Ok((rest, [input_temp, output_temp, stderr_temp], policy_key))
+    Ok(ResolvedIo {
+        args: rest,
+        temp: Streams {
+            stdin: input_temp,
+            stdout: output_temp,
+            stderr: stderr_temp,
+        },
+        explicit,
+        policy: policy_key,
+    })
 }
 
 async fn resolve_io_file<'v, 's>(
@@ -158,23 +191,21 @@ async fn resolve_io_file<'v, 's>(
 async fn cleanup_io<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    input: &Value<'v>,
-    output: &Value<'v>,
-    stderr: &Value<'v>,
-    cleanup: [bool; 3],
+    value: Streams<&Value<'v>>,
+    temp: Streams<bool>,
 ) {
     strand
         .with_interrupt_mask(true, async move |strand| {
             strand
                 .with_slots(async move |strand, [mut tmp]| {
-                    if cleanup[0] {
-                        let _ = method!(strand, input, global.syms.close, &mut tmp).await;
-                    }
-                    if cleanup[1] {
-                        let _ = method!(strand, output, global.syms.close, &mut tmp).await;
-                    }
-                    if cleanup[2] {
-                        let _ = method!(strand, stderr, global.syms.close, &mut tmp).await;
+                    for (temp, value) in [
+                        (temp.stdin, value.stdin),
+                        (temp.stdout, value.stdout),
+                        (temp.stderr, value.stderr),
+                    ] {
+                        if temp {
+                            let _ = method!(strand, value, global.syms.close, &mut tmp).await;
+                        }
                     }
                 })
                 .await
@@ -242,6 +273,15 @@ async fn configure_direct_input<'v, 's>(
     Ok(false)
 }
 
+/// Whether `value` is an unredirected default for standard output: either the
+/// literal stream (`shell.stdout`, bound when stdout is not a terminal) or the
+/// terminal-following handle (`term.default`, bound when it is). Either way,
+/// nothing has redirected this stream, which is what licenses falling through
+/// to raw fd inheritance instead of a value-framed pump.
+fn is_default_stdout<'v>(global: State<'v, Global<'v>>, value: &Value<'v>) -> bool {
+    global.types.stdout.cast(value).is_some() || global.types.default.cast(value).is_some()
+}
+
 async fn configure_direct_output<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
@@ -252,10 +292,7 @@ async fn configure_direct_output<'v, 's>(
         command.stdout_null();
         return Ok(true);
     }
-    if global.types.stdout.cast(output).is_some() {
-        if global.terminal.redirected.get() && global.terminal.stdout_is_terminal {
-            return Ok(false);
-        }
+    if is_default_stdout(global, output) {
         command.stdout_inherit().into_sys(strand)?;
         return Ok(true);
     }
@@ -283,11 +320,12 @@ async fn configure_direct_stderr<'v, 's>(
         command.stderr_null();
         return Ok(true);
     }
-    if global.types.stdout.cast(stderr).is_some() {
-        if global.terminal.redirected.get() && global.terminal.stdout_is_terminal {
-            return Ok(false);
-        }
+    if is_default_stdout(global, stderr) {
         command.stderr_inherit_stdout().into_sys(strand)?;
+        return Ok(true);
+    }
+    if global.types.stderr.cast(stderr).is_some() {
+        command.stderr_inherit().into_sys(strand)?;
         return Ok(true);
     }
     if let Some(file) = global.types.file.cast(stderr) {
@@ -366,6 +404,43 @@ where
         .await
 }
 
+/// Where a child's output is being pumped.
+#[derive(Clone, Copy)]
+enum PumpTarget<'v, 'a> {
+    /// A Do sink. Values are framed per the ambient I/O mode.
+    Sink(&'a Value<'v>),
+    /// The console, because an unnamed channel is following an extension that
+    /// has taken the terminal over.
+    ///
+    /// A byte-to-byte edge: the child emits bytes and the console consumes
+    /// bytes, so no framing applies in either direction — nothing is quantized
+    /// into lines, nothing is required to be valid UTF-8, and no line ending is
+    /// added or translated.
+    Console,
+}
+
+/// Copies a child's output straight to the console.
+///
+/// Deliberately not `tokio::io::copy`: the console writer is shared with
+/// `term.echo`/`print` and diagnostics, so the lock is reacquired per chunk
+/// rather than held for the child's entire lifetime. Terminal owners already
+/// cope with arbitrary chunk boundaries — the progress writer buffers a partial
+/// line and coalesces it with the next newline.
+async fn console_pump<'v, 's, R>(strand: &mut Strand<'v, 's>, mut reader: R) -> Result<'v, 's, ()>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut buf = [0u8; 8192];
+    loop {
+        let read = reader.read(&mut buf).await.into_sys(strand)?;
+        if read == 0 {
+            break;
+        }
+        crate::console::write(strand, &buf[..read]).await?;
+    }
+    Ok(())
+}
+
 async fn output_pump<'v, 's, R>(
     strand: &mut Strand<'v, 's>,
     output: &Value<'v>,
@@ -405,39 +480,62 @@ where
         .await
 }
 
+/// The parent ends of whatever pipes were created for the child.
+///
+/// A stream is `None` when it was wired up directly — inherited, negotiated, or
+/// handed a file descriptor — and so needs no pump.
+#[derive(Default)]
+struct Pipes {
+    stdin: Option<Box<dyn AsyncWrite + Unpin>>,
+    stdout: Option<Box<dyn AsyncRead + Unpin>>,
+    stderr: Option<Box<dyn AsyncRead + Unpin>>,
+}
+
+/// Where each pumped stream is going.
+struct PumpTargets<'v, 'a> {
+    stdin: &'a Value<'v>,
+    stdout: PumpTarget<'v, 'a>,
+    /// `None` when stderr is inherited or merged into stdout, so nothing pumps
+    /// it.
+    stderr: Option<PumpTarget<'v, 'a>>,
+}
+
 /// Runs input/output pumps and waits for process completion with unified error handling.
-#[expect(clippy::too_many_arguments)]
 async fn run_monitor<'v, 's>(
     strand: &mut Strand<'v, 's>,
     process: &mut impl dolang_shell_vfs::Child,
     name: &str,
-    input: &Value<'v>,
-    output: &Value<'v>,
-    stderr_output: Option<&Value<'v>>,
-    stdin: Option<Box<dyn AsyncWrite + Unpin>>,
-    stdout: Option<Box<dyn AsyncRead + Unpin>>,
-    stderr: Option<Box<dyn AsyncRead + Unpin>>,
+    target: PumpTargets<'v, '_>,
+    pipes: Pipes,
 ) -> Result<'v, 's, ()> {
     let (res, ires, ores, eres) = {
         // Create pumps
-        let ipump = match stdin {
+        let ipump = match pipes.stdin {
             None => MaybeDone::Done(Ok(())),
-            Some(writer) => MaybeDone::Future(strand.spawn_scoped(None, async move |strand| {
-                input_pump(strand, input, writer).await
-            })),
-        };
-
-        let opump = match stdout {
-            None => MaybeDone::Done(Ok(())),
-            Some(reader) => MaybeDone::Future(strand.spawn_scoped(None, async move |strand| {
-                output_pump(strand, output, reader).await
-            })),
-        };
-
-        let epump = match (stderr_output, stderr) {
-            (Some(output), Some(reader)) => {
+            Some(writer) => {
+                let input = target.stdin;
                 MaybeDone::Future(strand.spawn_scoped(None, async move |strand| {
-                    output_pump(strand, output, reader).await
+                    input_pump(strand, input, writer).await
+                }))
+            }
+        };
+
+        let opump = match pipes.stdout {
+            None => MaybeDone::Done(Ok(())),
+            Some(reader) => {
+                let output = target.stdout;
+                MaybeDone::Future(strand.spawn_scoped(None, async move |strand| match output {
+                    PumpTarget::Sink(output) => output_pump(strand, output, reader).await,
+                    PumpTarget::Console => console_pump(strand, reader).await,
+                }))
+            }
+        };
+
+        let epump = match (target.stderr, pipes.stderr) {
+            (Some(output), Some(reader)) => {
+                MaybeDone::Future(strand.spawn_scoped(None, async move |strand| match output {
+                    PumpTarget::Sink(output) => output_pump(strand, output, reader).await,
+                    PumpTarget::Console => console_pump(strand, reader).await,
                 }))
             }
             _ => MaybeDone::Done(Ok(())),
@@ -504,22 +602,16 @@ async fn run_monitor<'v, 's>(
     }
 }
 
-fn configure_default_stderr<'v, 's>(
-    _strand: &mut Strand<'v, 's>,
-    global: State<'v, Global<'v>>,
-    command: &mut impl Command,
-) -> Result<'v, 's, bool> {
-    if global.terminal.redirected.get() {
-        return Ok(false);
-    }
-    command.stderr_inherit().into_sys(_strand)?;
-    Ok(true)
-}
-
 struct RunIo<'v, 'a> {
-    input: &'a Value<'v>,
-    output: &'a Value<'v>,
-    stderr: &'a Value<'v>,
+    /// What each standard stream is connected to. Nil stderr means it was left
+    /// unnamed, which `run` resolves against the ambient console.
+    value: Streams<&'a Value<'v>>,
+    /// Whether the caller named each stream explicitly.
+    ///
+    /// An unnamed stream is anonymous and follows the ambient console; a named
+    /// one is pinned to exactly what it names, which is how `stdout:
+    /// $shell.stdout` opts out of terminal takeover.
+    explicit: Streams<bool>,
     policy_override: Option<Slot<'v, 'a>>,
 }
 
@@ -575,45 +667,65 @@ async fn run<'v, 's>(
         ProcessControl::Foreground
     });
     command.termination_policy(vfs_policy(&termination_policy));
-    configure_default_stderr(strand, global, &mut command)?;
+
+    // An unnamed channel that would otherwise land on the terminal follows the
+    // console instead, so a child's output does not scribble over an extension
+    // that has taken the terminal over. Naming `shell.stdout`/`shell.stderr`
+    // explicitly pins the channel to the real stream and opts out.
+    let console_owned = global.terminal.redirected.get();
+    let stdout_to_console = !io.explicit.stdout
+        && console_owned
+        && global.terminal.stdout_is_terminal
+        && is_default_stdout(global, io.value.stdout);
+    // A capture routes regardless of whether stderr is a terminal: gating it on
+    // a tty would make capture work interactively and silently not in CI.
+    let captured = !global.capture.slot(strand).is_nil();
+    let stderr_to_console =
+        !io.explicit.stderr && (captured || (console_owned && global.terminal.stderr_is_terminal));
+
     let mut stdin_pipe = None;
     let mut stdout_pipe = None;
     let mut stderr_pipe = None;
-    let stderr_inherit = io.stderr.is_nil();
-    let stderr_merge = !stderr_inherit && io.stderr.eq(strand, io.output);
+    let stderr_inherit = io.value.stderr.is_nil() && !stderr_to_console;
+    if stderr_inherit {
+        command.stderr_inherit().into_sys(strand)?;
+    }
+    let stderr_merge = !io.value.stderr.is_nil() && io.value.stderr.eq(strand, io.value.stdout);
 
-    let (
-        stdin_negotiated,
-        stdout_negotiated,
-        stderr_negotiated,
-        _recv_guard,
-        send_guard,
-        _stderr_guard,
-    ) = {
-        let recv_guard = configure_negotiated_input(strand, global, &mut command, io.input).await?;
-        let send_guard =
-            configure_negotiated_output(strand, global, &mut command, io.output).await?;
-        let stderr_guard = if stderr_inherit || stderr_merge {
-            None
-        } else {
-            configure_negotiated_output(strand, global, &mut command, io.stderr).await?
-        };
-        let sn_in = recv_guard.is_some();
-        let sn_out = send_guard.is_some();
-        let sn_err = stderr_guard.is_some();
-        (sn_in, sn_out, sn_err, recv_guard, send_guard, stderr_guard)
+    let recv_guard =
+        configure_negotiated_input(strand, global, &mut command, io.value.stdin).await?;
+    let send_guard =
+        configure_negotiated_output(strand, global, &mut command, io.value.stdout).await?;
+    let stderr_guard = if stderr_inherit || stderr_merge {
+        None
+    } else {
+        configure_negotiated_output(strand, global, &mut command, io.value.stderr).await?
     };
+    // Which streams were satisfied by pipe-channel negotiation and so need no
+    // further wiring.
+    let negotiated = Streams {
+        stdin: recv_guard.is_some(),
+        stdout: send_guard.is_some(),
+        stderr: stderr_guard.is_some(),
+    };
+    // The guards must outlive the launch. `send_guard` is also read below, to
+    // duplicate the negotiated stdout pipe when stderr merges into it.
+    let _recv_guard = recv_guard;
+    let _stderr_guard = stderr_guard;
 
-    if !stdin_negotiated && !configure_direct_input(strand, global, &mut command, io.input).await? {
+    if !negotiated.stdin
+        && !configure_direct_input(strand, global, &mut command, io.value.stdin).await?
+    {
         let (parent_stdin, child_stdin) = vfs.pipe().await.into_sys(strand)?;
         command.stdin(child_stdin).into_sys(strand)?;
         stdin_pipe = Some(parent_stdin);
     }
 
-    let stdout_direct = stdout_negotiated
-        || configure_direct_output(strand, global, &mut command, io.output).await?;
+    let stdout_direct = negotiated.stdout
+        || (!stdout_to_console
+            && configure_direct_output(strand, global, &mut command, io.value.stdout).await?);
     if stderr_merge {
-        if stdout_negotiated {
+        if negotiated.stdout {
             command
                 .stderr(
                     send_guard
@@ -625,12 +737,12 @@ async fn run<'v, 's>(
                 )
                 .into_sys(strand)?;
         } else if stdout_direct {
-            if io.output.is_nil() || io.output.eq(strand, Singleton::IterNull) {
+            if io.value.stdout.is_nil() || io.value.stdout.eq(strand, Singleton::IterNull) {
                 command.stderr_null();
-            } else if global.types.stdout.cast(io.output).is_some() {
+            } else if is_default_stdout(global, io.value.stdout) {
                 command.stderr_inherit_stdout().into_sys(strand)?;
             } else {
-                if let Some(file) = global.types.file.cast(io.output) {
+                if let Some(file) = global.types.file.cast(io.value.stdout) {
                     let stdio = file
                         .enter(strand, async |strand, inst| {
                             File::command_send(inst, strand).await
@@ -657,8 +769,9 @@ async fn run<'v, 's>(
 
     if !stderr_inherit
         && !stderr_merge
-        && !stderr_negotiated
-        && !configure_direct_stderr(strand, global, &mut command, io.stderr).await?
+        && !negotiated.stderr
+        && (stderr_to_console
+            || !configure_direct_stderr(strand, global, &mut command, io.value.stderr).await?)
     {
         let (child_stderr, parent_stderr) = vfs.pipe().await.into_sys(strand)?;
         command.stderr(child_stderr).into_sys(strand)?;
@@ -669,24 +782,28 @@ async fn run<'v, 's>(
     apply_args(strand, args, &mut command)?;
 
     let mut proc = command.spawn().await.into_sys(strand)?;
-    let stdin = stdin_pipe.map(|pipe| Box::new(pipe) as Box<dyn AsyncWrite + Unpin>);
-    let stdout = stdout_pipe.map(|pipe| Box::new(pipe) as Box<dyn AsyncRead + Unpin>);
-    let stderr_pipe = stderr_pipe.map(|pipe| Box::new(pipe) as Box<dyn AsyncRead + Unpin>);
+    let pipes = Pipes {
+        stdin: stdin_pipe.map(|pipe| Box::new(pipe) as Box<dyn AsyncWrite + Unpin>),
+        stdout: stdout_pipe.map(|pipe| Box::new(pipe) as Box<dyn AsyncRead + Unpin>),
+        stderr: stderr_pipe.map(|pipe| Box::new(pipe) as Box<dyn AsyncRead + Unpin>),
+    };
+    let target = PumpTargets {
+        stdin: io.value.stdin,
+        stdout: if stdout_to_console {
+            PumpTarget::Console
+        } else {
+            PumpTarget::Sink(io.value.stdout)
+        },
+        stderr: (!stderr_inherit && !stderr_merge).then_some(if stderr_to_console {
+            PumpTarget::Console
+        } else {
+            PumpTarget::Sink(io.value.stderr)
+        }),
+    };
     let res = {
         strand
             .interrupt_guard(async |strand| {
-                run_monitor(
-                    strand,
-                    &mut proc,
-                    name,
-                    io.input,
-                    io.output,
-                    (!stderr_inherit && !stderr_merge).then_some(io.stderr),
-                    stdin,
-                    stdout,
-                    stderr_pipe,
-                )
-                .await
+                run_monitor(strand, &mut proc, name, target, pipes).await
             })
             .await
     };
@@ -708,7 +825,7 @@ async fn dispatch_run<'v, 's>(
 ) -> Result<'v, 's, ()> {
     strand
         .with_slots(async move |strand, [mut input, mut output, mut stderr]| {
-            let (args, cleanup, policy) = resolve_io(
+            let resolved = resolve_io(
                 strand,
                 global,
                 args,
@@ -718,20 +835,24 @@ async fn dispatch_run<'v, 's>(
             )
             .await?;
 
+            let value = Streams {
+                stdin: &*input,
+                stdout: &*output,
+                stderr: &*stderr,
+            };
             let res = run(
                 strand,
                 name,
-                args,
+                resolved.args,
                 global,
                 RunIo {
-                    input: &input,
-                    output: &output,
-                    stderr: &stderr,
-                    policy_override: policy,
+                    value,
+                    explicit: resolved.explicit,
+                    policy_override: resolved.policy,
                 },
             )
             .await;
-            cleanup_io(strand, global, &input, &output, &stderr, cleanup).await;
+            cleanup_io(strand, global, value, resolved.temp).await;
             res
         })
         .await

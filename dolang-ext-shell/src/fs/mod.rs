@@ -171,7 +171,7 @@ use glob::{GlobIter, GlobIterAnnex};
 
 use dolang::runtime::Value;
 
-pub(super) async fn read_into_spare(
+pub(crate) async fn read_into_spare(
     reader: &mut (impl AsyncRead + Unpin),
     spare: &mut [MaybeUninit<u8>],
 ) -> io::Result<usize> {
@@ -180,7 +180,7 @@ pub(super) async fn read_into_spare(
     Ok(buf.filled().len())
 }
 
-pub(super) async fn read_all<'v, 's>(
+pub(crate) async fn read_all<'v, 's>(
     strand: &mut Strand<'v, 's>,
     reader: &mut (impl AsyncRead + Unpin),
     embryo: &mut BinEmbryo<'v>,
