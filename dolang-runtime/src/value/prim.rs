@@ -275,7 +275,7 @@ impl Prim {
             (Prim::Int(a), Prim::Int(b)) => a
                 .checked_add(*b)
                 .map(|v| Ok(v.into()))
-                .unwrap_or(Err(Error::overflow(strand))),
+                .unwrap_or_else(|| Err(Error::overflow(strand))),
             (Prim::F64(a), Prim::F64(b)) => Ok(Prim::F64(a + b)),
             (Prim::Int(a), Prim::F64(b)) => Ok(Prim::F64(*a as f64 + b)),
             (Prim::F64(a), Prim::Int(b)) => Ok(Prim::F64(a + *b as f64)),
@@ -293,7 +293,7 @@ impl Prim {
             (Prim::Int(a), Prim::Int(b)) => a
                 .checked_sub(*b)
                 .map(|v| Ok(v.into()))
-                .unwrap_or(Err(Error::overflow(strand))),
+                .unwrap_or_else(|| Err(Error::overflow(strand))),
             (Prim::F64(a), Prim::F64(b)) => Ok(Prim::F64(a - b)),
             (Prim::Int(a), Prim::F64(b)) => Ok(Prim::F64(*a as f64 - b)),
             (Prim::F64(a), Prim::Int(b)) => Ok(Prim::F64(a - *b as f64)),
@@ -311,7 +311,7 @@ impl Prim {
             (Prim::Int(a), Prim::Int(b)) => a
                 .checked_mul(*b)
                 .map(|v| Ok(v.into()))
-                .unwrap_or(Err(Error::overflow(strand))),
+                .unwrap_or_else(|| Err(Error::overflow(strand))),
             (Prim::F64(a), Prim::F64(b)) => Ok(Prim::F64(a * b)),
             (Prim::Int(a), Prim::F64(b)) => Ok(Prim::F64(*a as f64 * b)),
             (Prim::F64(a), Prim::Int(b)) => Ok(Prim::F64(a * *b as f64)),
@@ -332,7 +332,7 @@ impl Prim {
             (Prim::Int(a), Prim::Int(b)) => a
                 .checked_div_euclid(*b)
                 .map(|v| Ok(v.into()))
-                .unwrap_or(Err(Error::zero_div(strand))),
+                .unwrap_or_else(|| Err(Error::zero_div(strand))),
             (Prim::F64(a), Prim::F64(b)) => Ok(Prim::Int(a.div_euclid(*b) as i128)),
             (Prim::Int(a), Prim::F64(b)) => Ok(Prim::Int((*a as f64).div_euclid(*b) as i128)),
             (Prim::F64(a), Prim::Int(b)) => Ok(Prim::Int(a.div_euclid(*b as f64) as i128)),
@@ -374,7 +374,7 @@ impl Prim {
             (Prim::Int(a), Prim::Int(b)) => a
                 .checked_rem_euclid(*b)
                 .map(|v| Ok(v.into()))
-                .unwrap_or(Err(Error::zero_div(strand))),
+                .unwrap_or_else(|| Err(Error::zero_div(strand))),
             (Prim::F64(a), Prim::F64(b)) => Ok(Prim::F64(a.rem_euclid(*b))),
             (Prim::Int(a), Prim::F64(b)) => Ok(Prim::F64((*a as f64).rem_euclid(*b))),
             (Prim::F64(a), Prim::Int(b)) => Ok(Prim::F64(a.rem_euclid(*b as f64))),
@@ -398,7 +398,7 @@ impl Prim {
             (Prim::Int(a), Prim::Int(b)) => b
                 .checked_sub(*a)
                 .map(|v| Ok(v.into()))
-                .unwrap_or(Err(Error::overflow(strand))),
+                .unwrap_or_else(|| Err(Error::overflow(strand))),
             (Prim::F64(a), Prim::F64(b)) => Ok(Prim::F64(b - a)),
             (Prim::Int(a), Prim::F64(b)) => Ok(Prim::F64(b - *a as f64)),
             (Prim::F64(a), Prim::Int(b)) => Ok(Prim::F64(*b as f64 - a)),
@@ -439,7 +439,7 @@ impl Prim {
             (Prim::Int(a), Prim::Int(b)) => b
                 .checked_div_euclid(*a)
                 .map(|v| Ok(v.into()))
-                .unwrap_or(Err(Error::zero_div(strand))),
+                .unwrap_or_else(|| Err(Error::zero_div(strand))),
             (Prim::F64(a), Prim::F64(b)) => Ok(Prim::Int(b.div_euclid(*a) as i128)),
             (Prim::Int(a), Prim::F64(b)) => Ok(Prim::Int(b.div_euclid(*a as f64) as i128)),
             (Prim::F64(a), Prim::Int(b)) => Ok(Prim::Int((*b as f64).div_euclid(*a) as i128)),
@@ -461,7 +461,7 @@ impl Prim {
             (Prim::Int(a), Prim::Int(b)) => b
                 .checked_rem_euclid(*a)
                 .map(|v| Ok(v.into()))
-                .unwrap_or(Err(Error::zero_div(strand))),
+                .unwrap_or_else(|| Err(Error::zero_div(strand))),
             (Prim::F64(a), Prim::F64(b)) => Ok(Prim::F64(b.rem_euclid(*a))),
             (Prim::Int(a), Prim::F64(b)) => Ok(Prim::F64(b.rem_euclid(*a as f64))),
             (Prim::F64(a), Prim::Int(b)) => Ok(Prim::F64((*b as f64).rem_euclid(*a))),

@@ -5,8 +5,7 @@ use dolang::{
     runtime::{Bytecode, Result, Strand},
 };
 
-use crate::cli::PreludeImport;
-use crate::load;
+use crate::{cli::PreludeImport, load};
 
 pub enum Action {
     Run,
@@ -26,7 +25,7 @@ pub(crate) async fn main<'v, 's>(
     match action {
         Action::Run => {
             strand
-                .with_slots(async move |strand, [_module, tmp]| {
+                .with_slots(async move |strand, [tmp]| {
                     if let Some(entrypoint) = entrypoint {
                         Bytecode::new(entrypoint).run(strand, tmp).await
                     } else {
