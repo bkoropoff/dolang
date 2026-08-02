@@ -415,8 +415,16 @@ impl<P: Protocol> Future for Call<P> {
 
 impl<P: Protocol> Drop for Call<P> {
     fn drop(&mut self) {
-        self.cancel();
-        self.inner.pending.lock().unwrap().remove(&self.id);
+        if self
+            .inner
+            .pending
+            .lock()
+            .unwrap()
+            .remove(&self.id)
+            .is_some()
+        {
+            self.cancel();
+        }
     }
 }
 
@@ -513,5 +521,61 @@ impl<P: Protocol> Reader<P> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Test;
+
+    impl Protocol for Test {
+        type Request = u8;
+        type Response = u8;
+    }
+
+    fn pending_call() -> (Call<Test>, mpsc::UnboundedReceiver<Message<u8>>) {
+        let (outgoing, outgoing_rx) = mpsc::unbounded_channel();
+        let inner = Arc::new(Inner {
+            outgoing,
+            pending: Mutex::new(HashMap::new()),
+            next_id: Mutex::new(1),
+            tasks: Mutex::new(None),
+            request_keepalive: Mutex::new(HashMap::new()),
+            #[cfg(windows)]
+            _peer_process: None,
+        });
+        let (tx, rx) = oneshot::channel();
+        inner.pending.lock().unwrap().insert(0, tx);
+        (
+            Call {
+                id: 0,
+                rx,
+                inner,
+                cancel_sent: false,
+            },
+            outgoing_rx,
+        )
+    }
+
+    #[tokio::test]
+    async fn completed_call_does_not_send_cancel_when_dropped() {
+        let (call, mut outgoing) = pending_call();
+        let inner = call.inner.clone();
+        call.inner.complete(call.id, Ok(7));
+        assert_eq!(call.await.unwrap(), 7);
+        assert!(matches!(
+            outgoing.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        drop(inner);
+    }
+
+    #[test]
+    fn dropped_pending_call_sends_cancel() {
+        let (call, mut outgoing) = pending_call();
+        drop(call);
+        assert!(matches!(outgoing.try_recv(), Ok(Message::Cancel { id: 0 })));
     }
 }

@@ -863,5 +863,6 @@ async fn login_env_profile_output_stays_out_of_stdio_stream() {
     );
 
     client.stop().await.expect("stop should succeed");
+    drop(client);
     let _ = child.wait().await;
 }

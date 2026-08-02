@@ -67,5 +67,6 @@ async fn embedded_vfs_stdio_mode_serves_and_stops() {
     );
 
     client.stop().await.unwrap();
+    drop(client);
     assert!(child.wait().await.unwrap().success());
 }
