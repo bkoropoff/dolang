@@ -96,7 +96,13 @@ The Docker and Podman modules also provide a small management API:
 See the [`docker`](../../api/docker/index.md) and
 [`podman`](../../api/podman/index.md) references for the complete interfaces.
 
-`Container` objects inspect and change the lifecycle of existing containers;
+`Container` objects inspect and change the lifecycle of existing containers.
+Their `with` method copies `dolang-vfs` to a session-specific path under
+`/tmp`, starts it through `docker exec` or `podman exec`, and runs a block with
+that container as its VFS target. The copied helper uses the standard I/O
+transport, so file and process handles use opaque RPC identities rather than
+Unix `SCM_RIGHTS` handle passing.
+
 `docker.run` and `podman.run` run a single direct command in a temporary
 container, while `docker.with` and `podman.with` run a Do block with a
 temporary container as a VFS target.
@@ -138,7 +144,8 @@ This gives the following common lifetimes:
 | ------------------------------- | --------------------------------------------------------- |
 | `docker.with` / `podman.with`   | Temporary container and session for one block             |
 | `docker.build` / `podman.build` | Temporary container spanning the build steps              |
-| `Container` object              | Management handle                                         |
+| `Container.with`                | Existing container and session for one block              |
+| Other `Container` methods       | Management handle                                         |
 | Manual socket connection        | Controlled by the caller and external container lifecycle |
 
 To target Docker on another host, enter that host first and then use the
