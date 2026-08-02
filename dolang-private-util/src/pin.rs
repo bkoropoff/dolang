@@ -157,6 +157,9 @@ impl Arena {
         unsafe {
             let last_seg = entry.as_ref().last_seg;
             let last_cur = entry.as_ref().last_cur;
+            // Must drop contents *first*, which drops any nested Pinned guard;
+            // segment/offset updates will then occur in LIFO order as required
+            ptr::drop_in_place(entry.as_ptr());
             while self.seg.get() != last_seg {
                 self.seg.update(|seg| {
                     let prev = (*seg.as_ptr()).prev.unwrap_unchecked();
@@ -165,7 +168,6 @@ impl Arena {
                 })
             }
             (*self.seg.get().as_ptr()).cur.set(last_cur);
-            ptr::drop_in_place(entry.as_ptr());
         }
     }
 
