@@ -264,10 +264,29 @@ fn serve_stdio() -> io::Result<()> {
         .enable_all()
         .build()?
         .block_on(async {
-            Server::new_split(tokio::io::stdin(), tokio::io::stdout())
-                .serve()
-                .await
+            let server = Server::new_split(tokio::io::stdin(), tokio::io::stdout());
+            #[cfg(windows)]
+            {
+                tokio::select! {
+                    result = server.serve() => result,
+                    result = windows_interrupt_signal() => result,
+                }
+            }
+            #[cfg(not(windows))]
+            server.serve().await
         })
+}
+
+#[cfg(windows)]
+async fn windows_interrupt_signal() -> io::Result<()> {
+    use tokio::signal::windows::{ctrl_break, ctrl_c};
+
+    let mut ctrl_c = ctrl_c()?;
+    let mut ctrl_break = ctrl_break()?;
+    tokio::select! {
+        _ = ctrl_c.recv() => Ok(()),
+        _ = ctrl_break.recv() => Ok(()),
+    }
 }
 
 #[cfg(unix)]
@@ -352,6 +371,10 @@ fn serve_named_pipe(pipe_name: &OsStr) -> io::Result<()> {
     let runtime = Builder::new_current_thread().enable_all().build()?;
     runtime.block_on(async move {
         let pipe = ClientOptions::new().open(pipe_name)?;
-        Server::from_named_pipe_client(pipe)?.serve().await
+        let server = Server::from_named_pipe_client(pipe)?;
+        tokio::select! {
+            result = server.serve() => result,
+            result = windows_interrupt_signal() => result,
+        }
     })
 }
