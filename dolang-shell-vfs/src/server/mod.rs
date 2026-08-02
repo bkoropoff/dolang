@@ -15,6 +15,8 @@ use tokio::net::windows::named_pipe::NamedPipeClient;
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream, unix::SocketAddr};
 use tokio::sync::{Mutex, watch};
+#[cfg(unix)]
+use tokio::task::{JoinError, JoinSet};
 
 use crate::{
     AnyFile, AnyVfs, Child as _, Command as _, Direct, FileHandle as _, OpenOptions as _,
@@ -237,7 +239,11 @@ impl Server {
     }
 
     #[cfg(unix)]
-    fn handle_accept(&self, res: io::Result<(UnixStream, SocketAddr)>) -> Result<(), io::Error> {
+    fn handle_accept(
+        &self,
+        res: io::Result<(UnixStream, SocketAddr)>,
+        handlers: &mut JoinSet<Result<(), dolang_rpc::Error>>,
+    ) -> Result<(), io::Error> {
         let (stream, _) = res?;
         let rpc = dolang_rpc::Server::<VfsProtocol>::from_unix_stream(stream.into_std()?)?;
         let connection = Arc::new(Connection {
@@ -245,14 +251,15 @@ impl Server {
             mode: SessionMode::Native,
             drain: Drain::new(),
         });
-        tokio::spawn(async move {
+        handlers.spawn(async move {
             let stop = Arc::new(AtomicBool::new(false));
             let stop_handler = stop.clone();
             let handler = connection.clone();
-            let _ = serve_connection(rpc, handler, stop_handler).await;
+            let result = serve_connection(rpc, handler, stop_handler).await;
             if stop.load(Ordering::Acquire) {
                 let _ = connection.server.shutdown_tx.send(());
             }
+            result
         });
         Ok(())
     }
@@ -263,17 +270,28 @@ impl Server {
     #[cfg(unix)]
     pub async fn accept(self) -> Result<(), io::Error> {
         let mut shutdown_rx = self.shared.shutdown_tx.subscribe();
+        let mut handlers = JoinSet::new();
 
         loop {
             tokio::select! {
                 res = self.listener.as_ref().unwrap().accept() => {
-                    let _ = self.handle_accept(res);
+                    if let Err(error) = self.handle_accept(res, &mut handlers) {
+                        eprintln!("VFS server failed to accept a connection: {error}");
+                    }
+                }
+                result = handlers.join_next(), if !handlers.is_empty() => {
+                    report_handler_exit(result.unwrap());
                 }
                 _ = shutdown_rx.changed() => {
-                    return Ok(());
+                    break;
                 }
             }
         }
+
+        while let Some(result) = handlers.join_next().await {
+            report_handler_exit(result);
+        }
+        Ok(())
     }
 
     /// Serves one connected VFS session.
@@ -290,19 +308,33 @@ impl Server {
             .expect("server does not own a connected session");
         match serve_connection(rpc, connection, stop).await {
             Ok(()) => Ok(()),
-            Err(dolang_rpc::Error::ConnectionClosed) => Ok(()),
-            Err(dolang_rpc::Error::Io(error))
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::UnexpectedEof
-                        | io::ErrorKind::BrokenPipe
-                        | io::ErrorKind::ConnectionReset
-                ) =>
-            {
-                Ok(())
-            }
+            Err(error) if orderly_disconnect(&error) => Ok(()),
             Err(error) => Err(io::Error::other(error)),
         }
+    }
+}
+
+#[cfg(unix)]
+fn report_handler_exit(result: Result<Result<(), dolang_rpc::Error>, JoinError>) {
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) if orderly_disconnect(&error) => {}
+        Ok(Err(error)) => eprintln!("VFS connection handler failed: {error}"),
+        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+        Err(error) => eprintln!("VFS connection handler task failed: {error}"),
+    }
+}
+
+fn orderly_disconnect(error: &dolang_rpc::Error) -> bool {
+    match error {
+        dolang_rpc::Error::ConnectionClosed => true,
+        dolang_rpc::Error::Io(error) => matches!(
+            error.kind(),
+            io::ErrorKind::UnexpectedEof
+                | io::ErrorKind::BrokenPipe
+                | io::ErrorKind::ConnectionReset
+        ),
+        _ => false,
     }
 }
 
@@ -1813,7 +1845,9 @@ fn wire_error(error: impl Into<crate::Error>) -> crate::protocol::WireError {
 
 #[cfg(test)]
 mod tests {
-    use super::Server;
+    #[cfg(unix)]
+    use super::report_handler_exit;
+    use super::{Server, orderly_disconnect};
     use crate::protocol::{
         OpenHandle, OpenHandlePreference, OpenRequest, Request, RequestKind, ResponseKind,
         VfsProtocol,
@@ -1821,6 +1855,30 @@ mod tests {
 
     fn request(kind: RequestKind) -> Request {
         Request { vfs: None, kind }
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    #[should_panic(expected = "connection handler panic")]
+    async fn connection_handler_panics_are_propagated() {
+        let mut handlers = tokio::task::JoinSet::new();
+        handlers.spawn(async {
+            panic!("connection handler panic");
+            #[allow(unreachable_code)]
+            Ok::<(), dolang_rpc::Error>(())
+        });
+        report_handler_exit(handlers.join_next().await.unwrap());
+    }
+
+    #[test]
+    fn orderly_connection_close_is_expected() {
+        assert!(orderly_disconnect(&dolang_rpc::Error::ConnectionClosed));
+        assert!(orderly_disconnect(&dolang_rpc::Error::Io(
+            std::io::Error::from(std::io::ErrorKind::ConnectionReset)
+        )));
+        assert!(!orderly_disconnect(&dolang_rpc::Error::Protocol(
+            "bad frame".into()
+        )));
     }
 
     #[tokio::test]
