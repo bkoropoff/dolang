@@ -389,6 +389,7 @@ async fn query_stdio_helper(args: &[&str], without: &[&str]) -> dolang_shell_vfs
     let query = client.query().await.expect("query should succeed");
 
     client.stop().await.expect("stop should succeed");
+    drop(client);
     let _ = child.wait().await;
 
     query
