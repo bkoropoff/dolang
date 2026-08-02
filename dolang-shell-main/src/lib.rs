@@ -67,9 +67,16 @@ async fn interrupt_signal() -> std::io::Result<()> {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 async fn interrupt_signal() -> std::io::Result<()> {
-    tokio::signal::ctrl_c().await
+    use tokio::signal::windows::{ctrl_break, ctrl_c};
+
+    let mut ctrl_c = ctrl_c()?;
+    let mut ctrl_break = ctrl_break()?;
+    tokio::select! {
+        _ = ctrl_c.recv() => Ok(()),
+        _ = ctrl_break.recv() => Ok(()),
+    }
 }
 
 /// Run a `dolang`-compatible CLI and return its process exit code.
