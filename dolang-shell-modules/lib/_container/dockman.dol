@@ -1,4 +1,4 @@
-import progress json patch strand proc term time transfer _vfs
+import progress json patch strand proc sys term time transfer _vfs
   std:
     - RuntimeError
   strand:
@@ -1010,6 +1010,35 @@ pub class Container
 
   pub def (str) self
     self.id
+
+  # Runs `func` in this running container through a VFS context.
+  #
+  # A matching `dolang-vfs` helper is copied to a session-specific path under
+  # `/tmp` and launched with the container runtime's `exec` command. The helper
+  # is removed after the VFS connection starts when the container user has
+  # permission to do so.
+  #
+  # `cd` selects the initial working directory. `env` applies initial
+  # environment overrides; `nil` unsets a variable and `:INHERIT:` copies its
+  # value from the calling context.
+  #
+  # Returns the result of `func`.
+  pub def with self func :cd = nil :env = {}
+    with_temp_dir parent: $runtime_dir() do |subdir|
+      let ctr_agent = Path "/tmp/dolang-vfs-$(subdir.name)"
+      self.#runtime.cli cp $(_vfs.bin()) "$(self.id):$ctr_agent"
+
+      let vfs = Vfs do self.#runtime.cli exec -i $self.id $ctr_agent
+        ...(_vfs.vfs_args cd env) --stdio
+      try
+        return vfs.with do
+          try
+            ctr_agent.remove()
+          catch sys.Error: _
+            nil
+          func()
+      finally
+        vfs.stop()
 
   # Current container state.
   pub def state self

@@ -255,6 +255,30 @@ def container_inspect_lifecycle()
     assert_eq $listed.len 1
     assert_eq $listed[0].id $ctr.id
 
+    let overrides = $
+      TEST_DOLANG_CONTAINER_WITH_SET: value
+      TEST_DOLANG_CONTAINER_WITH_UNSET: nil
+    let result = ctr.with cd: /tmp env: $overrides do
+      assert_eq $cd() (UnixPath "/tmp")
+      assert_eq $env["TEST_DOLANG_CONTAINER_WITH_SET"] value
+      assert_eq $env.get("TEST_DOLANG_CONTAINER_WITH_UNSET", default: nil) nil
+      assert $Path("/etc/os-release").exists()
+      for entry = Path("/tmp").entries()
+        assert (!entry.name.starts_with("dolang-vfs-"))
+      sub do run printf container-with
+    assert_eq $result container-with
+    assert_eq $ctr.state().state :RUNNING:
+
+    let unwound = try
+      ctr.with do throw "container with unwind"
+      false
+    catch e
+      assert_eq (str e) "container with unwind"
+      true
+    assert $unwound
+    let reentered = ctr.with do sub do run printf reentered
+    assert_eq $reentered reentered
+
     ctr.stop()
     assert_eq $ctr.state().state :EXITED:
 
@@ -276,3 +300,23 @@ def container_inspect_lifecycle()
     catch runtime.NoContainerError: _
       true
     assert $gone
+
+#[test]
+def container_with_non_root_user()
+  let name = "dolang-test-container-with-non-root"
+  remove_container $name
+
+  clean_container $name do
+    let lines = []
+    try
+      sub do container_cli run -d --name $name --user 65534:65534
+        "ubuntu:24.04" sleep infinity
+        stderr: $lines
+    catch proc.Error: e
+      echo $"\n".join(lines)
+      throw e
+
+    let ctr = runtime.container $name
+    let uid = ctr.with do sub do run id -u
+    assert_eq $uid "65534"
+    assert_eq $ctr.state().state :RUNNING:
