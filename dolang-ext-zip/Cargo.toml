@@ -18,7 +18,8 @@ tokio-util = { version = "0.7", features = ["compat"] }
 
 [dependencies.async_zip]
 package = "astral_async_zip"
-version = "0.0.20"
+git = "https://github.com/bkoropoff/rs-async-zip.git"
+branch = "short-read-fixes"
 default-features = false
 features = ["deflate", "jiff", "tokio", "zstd"]
 
