@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use dolang_rpc::{Client, Error, Protocol, Server};
+use dolang_rpc::{Client, Error, Limits, Protocol, Server};
 use serde::{Deserialize, Serialize};
 
 struct Test;
@@ -20,6 +20,8 @@ enum Request {
     Echo(u32),
     Delay(u64),
     Shutdown,
+    /// A large payload, used to force multi-fragment messages.
+    Bulk(Vec<u8>),
 }
 
 #[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -35,7 +37,7 @@ async fn multiplexes_out_of_order_calls() {
             tokio::time::sleep(Duration::from_millis(ms)).await;
             Response(ms as u32)
         }
-        Request::Shutdown => unreachable!(),
+        Request::Shutdown | Request::Bulk(_) => unreachable!(),
     }));
     let client = Client::<Test>::new(client_io);
     let slow = client.call(Request::Delay(30));
@@ -56,7 +58,7 @@ async fn split_transport_round_trip() {
             context.shutdown();
             Response(0)
         }
-        Request::Delay(_) => unreachable!(),
+        Request::Delay(_) | Request::Bulk(_) => unreachable!(),
     }));
     let client = Client::<Test>::new_split(client_reader, client_writer);
     assert_eq!(client.call(Request::Echo(7)).await.unwrap(), Response(7));
@@ -76,7 +78,7 @@ async fn split_transport_flushes_buffered_writers() {
             context.shutdown();
             Response(0)
         }
-        Request::Delay(_) => unreachable!(),
+        Request::Delay(_) | Request::Bulk(_) => unreachable!(),
     }));
     let client = Client::<Test>::new_split(client_reader, tokio::io::BufWriter::new(client_writer));
     assert_eq!(client.call(Request::Echo(7)).await.unwrap(), Response(7));
@@ -163,6 +165,7 @@ async fn server_shutdown_drains_outstanding_requests() {
             context.shutdown();
             Response(99)
         }
+        Request::Bulk(_) => unreachable!(),
     }));
     let client = Client::<Test>::new(client_io);
     let slow = client.call(Request::Delay(20));
@@ -171,6 +174,126 @@ async fn server_shutdown_drains_outstanding_requests() {
     assert_eq!(slow.await.unwrap(), Response(20));
     assert!(server.await.unwrap().is_ok());
     client.close().await;
+}
+
+#[tokio::test]
+async fn interleaves_large_and_small_messages_round_robin() {
+    let limits = Limits {
+        max_fragment_size: 256,
+        ..Limits::default()
+    };
+    let (client_io, server_io) = tokio::io::duplex(4096);
+    let server = Server::<Test>::new(server_io).with_limits(limits);
+    tokio::spawn(server.serve(async |_, request| match request {
+        Request::Echo(value) => Response(value),
+        Request::Bulk(data) => Response(data.len() as u32),
+        Request::Delay(_) | Request::Shutdown => unreachable!(),
+    }));
+    let client = Client::<Test>::with_limits(client_io, limits);
+    let bulk = client.call(Request::Bulk(vec![b'x'; 64 * 1024]));
+    let echo = client.call(Request::Echo(7));
+    assert_eq!(echo.await.unwrap(), Response(7));
+    assert_eq!(bulk.await.unwrap(), Response(64 * 1024));
+}
+
+#[tokio::test]
+async fn bounded_concurrency_limits_simultaneous_large_transfers() {
+    let limits = Limits {
+        max_fragment_size: 256,
+        max_incomplete_messages: 2,
+        ..Limits::default()
+    };
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    let server = Server::<Test>::new(server_io).with_limits(limits);
+    tokio::spawn(server.serve(async |_, request| match request {
+        Request::Echo(value) => Response(value),
+        Request::Bulk(data) => Response(data.len() as u32),
+        Request::Delay(_) | Request::Shutdown => unreachable!(),
+    }));
+    let client = Client::<Test>::with_limits(client_io, limits);
+    // More concurrent large transfers than `max_incomplete_messages`, so at
+    // least one must sit in the scheduler's `waiting` queue.
+    let bulk_a = client.call(Request::Bulk(vec![b'a'; 16 * 1024]));
+    let bulk_b = client.call(Request::Bulk(vec![b'b'; 16 * 1024]));
+    let bulk_c = client.call(Request::Bulk(vec![b'c'; 16 * 1024]));
+    let echo = client.call(Request::Echo(7));
+    assert_eq!(echo.await.unwrap(), Response(7));
+    assert_eq!(bulk_a.await.unwrap(), Response(16 * 1024));
+    assert_eq!(bulk_b.await.unwrap(), Response(16 * 1024));
+    assert_eq!(bulk_c.await.unwrap(), Response(16 * 1024));
+}
+
+#[tokio::test]
+async fn cancel_before_first_fragment_sent() {
+    let dispatched = Arc::new(AtomicBool::new(false));
+    let server_dispatched = dispatched.clone();
+    let (client_io, server_io) = tokio::io::duplex(4096);
+    let server = Server::<Test>::new(server_io);
+    tokio::spawn(server.serve(async move |_, request| {
+        server_dispatched.store(true, Ordering::Release);
+        match request {
+            Request::Bulk(data) => Response(data.len() as u32),
+            _ => unreachable!(),
+        }
+    }));
+    let client = Client::<Test>::new(client_io);
+    // `call` and `cancel` both enqueue onto the same channel without any
+    // intervening `.await`, so on the single-threaded test runtime the
+    // writer task cannot have run yet: it will see the request already
+    // cancelled before ever admitting it into the scheduler.
+    let mut call = client.call(Request::Bulk(vec![b'x'; 64 * 1024]));
+    call.cancel();
+    assert!(matches!(call.await, Err(Error::Cancelled)));
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(!dispatched.load(Ordering::Acquire));
+}
+
+#[tokio::test]
+async fn cancel_during_fragment_transmission_completes_without_hanging() {
+    let dispatched = Arc::new(AtomicBool::new(false));
+    let server_dispatched = dispatched.clone();
+    let limits = Limits {
+        max_fragment_size: 32,
+        ..Limits::default()
+    };
+    // A tiny duplex buffer forces many small read/write handoffs between
+    // the client writer and server reader tasks, spreading a large
+    // transfer out over many scheduling points so cancellation reliably
+    // lands mid-transmission rather than before or after it entirely.
+    let (client_io, server_io) = tokio::io::duplex(64);
+    let server = Server::<Test>::new(server_io).with_limits(limits);
+    tokio::spawn(server.serve(async move |_, request| {
+        server_dispatched.store(true, Ordering::Release);
+        match request {
+            Request::Bulk(data) => Response(data.len() as u32),
+            _ => unreachable!(),
+        }
+    }));
+    let client = Client::<Test>::with_limits(client_io, limits);
+    let mut call = client.call(Request::Bulk(vec![b'x'; 256 * 1024]));
+    tokio::time::sleep(Duration::from_micros(200)).await;
+    call.cancel();
+    assert!(matches!(call.await, Err(Error::Cancelled)));
+}
+
+#[tokio::test]
+async fn resource_limits_enforced_end_to_end() {
+    let limits = Limits {
+        max_message_size: 16,
+        ..Limits::default()
+    };
+    let (client_io, server_io) = tokio::io::duplex(4096);
+    let server = Server::<Test>::new(server_io).with_limits(limits);
+    tokio::spawn(server.serve(async |_, request| match request {
+        Request::Bulk(data) => Response(data.len() as u32),
+        _ => unreachable!(),
+    }));
+    let client = Client::<Test>::with_limits(client_io, limits);
+    let call = client.call(Request::Bulk(vec![b'x'; 1024]));
+    assert!(matches!(
+        call.await,
+        Err(Error::Protocol(_)) | Err(Error::ConnectionClosed) | Err(Error::Io(_))
+    ));
 }
 
 #[cfg(unix)]

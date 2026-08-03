@@ -179,13 +179,20 @@ impl<'frame> SendFrame<'frame> for UnixSend<'frame> {
         Ok(index)
     }
 
+    fn has_attachments(&self) -> bool {
+        !self.fds.is_empty()
+    }
+
     async fn finish<B: Buf>(self, buffer: &mut B) -> io::Result<()> {
         let raw_fds: Vec<_> = self.fds.iter().map(AsRawFd::as_raw_fd).collect();
         let mut attachments = raw_fds.as_slice();
         while buffer.has_remaining() {
             let mut ready = self.sender.common.socket.writable().await?;
-            let result =
-                ready.try_io(|socket| send_once(socket.as_raw_fd(), buffer.chunk(), attachments));
+            let result = ready.try_io(|socket| {
+                let mut slices = [IoSlice::new(&[]); MAX_VECTORED_SLICES];
+                let filled = buffer.chunks_vectored(&mut slices);
+                send_once(socket.as_raw_fd(), &slices[..filled], attachments)
+            });
             let sent = match result {
                 Ok(result) => result?,
                 Err(_) => continue,
@@ -203,19 +210,14 @@ impl<'frame> SendFrame<'frame> for UnixSend<'frame> {
     }
 }
 
-fn send_once(fd: RawFd, bytes: &[u8], fds: &[RawFd]) -> io::Result<usize> {
-    let iov = [IoSlice::new(bytes)];
+const MAX_VECTORED_SLICES: usize = 8;
+
+fn send_once(fd: RawFd, iov: &[IoSlice<'_>], fds: &[RawFd]) -> io::Result<usize> {
     loop {
         let result = if fds.is_empty() {
-            sendmsg::<()>(fd, &iov, &[], SEND_FLAGS, None)
+            sendmsg::<()>(fd, iov, &[], SEND_FLAGS, None)
         } else {
-            sendmsg::<()>(
-                fd,
-                &iov,
-                &[ControlMessage::ScmRights(fds)],
-                SEND_FLAGS,
-                None,
-            )
+            sendmsg::<()>(fd, iov, &[ControlMessage::ScmRights(fds)], SEND_FLAGS, None)
         };
         match result {
             Err(Errno::EINTR) => {}

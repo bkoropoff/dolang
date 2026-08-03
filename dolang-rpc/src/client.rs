@@ -10,7 +10,7 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 
-use bytes::BytesMut;
+use bytes::Buf;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     sync::{mpsc, oneshot},
@@ -26,7 +26,7 @@ use tokio::net::windows::named_pipe::{NamedPipeClient, NamedPipeServer};
 use windows_sys::Win32::System::Threading::GetProcessId;
 
 use crate::{
-    DEFAULT_MAX_FRAME_SIZE, Error, Kind, Protocol, decode, encode, encode_empty, read_message,
+    Error, Kind, Limits, Protocol, decode, encode_payload, fragment,
     transport::{self, Receiver, SendFrame, Sender},
 };
 
@@ -52,13 +52,13 @@ struct Writer<P: Protocol> {
     outgoing: mpsc::UnboundedReceiver<Message<P::Request>>,
     inner: Weak<Inner<P>>,
     keep_requests_alive: bool,
+    limits: Limits,
 }
 
 struct Reader<P: Protocol> {
     transport: transport::AnyReceiver,
     inner: Weak<Inner<P>>,
-    max_frame_size: usize,
-    buffered: BytesMut,
+    limits: Limits,
 }
 
 struct Tasks {
@@ -131,7 +131,7 @@ impl<P: Protocol> Client<P> {
     where
         T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        Self::with_max_frame_size(stream, DEFAULT_MAX_FRAME_SIZE)
+        Self::with_limits(stream, Limits::default())
     }
 
     /// Starts a client session on separate byte-stream reader and writer halves.
@@ -144,15 +144,15 @@ impl<P: Protocol> Client<P> {
         Self::from_transport(
             transport::AnySender::Generic(sender),
             transport::AnyReceiver::Generic(receiver),
-            DEFAULT_MAX_FRAME_SIZE,
+            Limits::default(),
             false,
             #[cfg(windows)]
             None,
         )
     }
 
-    /// Starts a client session with an explicit maximum inbound payload size.
-    pub fn with_max_frame_size<T>(stream: T, max_frame_size: usize) -> Self
+    /// Starts a client session with explicit size and concurrency limits.
+    pub fn with_limits<T>(stream: T, limits: Limits) -> Self
     where
         T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
@@ -160,7 +160,7 @@ impl<P: Protocol> Client<P> {
         Self::from_transport(
             transport::AnySender::Generic(sender),
             transport::AnyReceiver::Generic(receiver),
-            max_frame_size,
+            limits,
             false,
             #[cfg(windows)]
             None,
@@ -173,7 +173,7 @@ impl<P: Protocol> Client<P> {
         Ok(Self::from_transport(
             transport::AnySender::Unix(sender),
             transport::AnyReceiver::Unix(receiver),
-            DEFAULT_MAX_FRAME_SIZE,
+            Limits::default(),
             false,
             #[cfg(windows)]
             None,
@@ -204,7 +204,7 @@ impl<P: Protocol> Client<P> {
         Ok(Self::from_transport(
             transport::AnySender::Windows(sender),
             transport::AnyReceiver::Windows(receiver),
-            DEFAULT_MAX_FRAME_SIZE,
+            Limits::default(),
             true,
             Some(peer_process),
         ))
@@ -234,7 +234,7 @@ impl<P: Protocol> Client<P> {
         Ok(Self::from_transport(
             transport::AnySender::Windows(sender),
             transport::AnyReceiver::Windows(receiver),
-            DEFAULT_MAX_FRAME_SIZE,
+            Limits::default(),
             true,
             Some(peer_process),
         ))
@@ -243,7 +243,7 @@ impl<P: Protocol> Client<P> {
     fn from_transport(
         sender: transport::AnySender,
         receiver: transport::AnyReceiver,
-        max_frame_size: usize,
+        limits: Limits,
         keep_requests_alive: bool,
         #[cfg(windows)] peer_process: Option<OwnedHandle>,
     ) -> Self {
@@ -265,6 +265,7 @@ impl<P: Protocol> Client<P> {
                 outgoing: outgoing_rx,
                 inner: Arc::downgrade(&inner),
                 keep_requests_alive,
+                limits,
             }
             .run(writer_stop),
         );
@@ -272,8 +273,7 @@ impl<P: Protocol> Client<P> {
             Reader {
                 transport: receiver,
                 inner: Arc::downgrade(&inner),
-                max_frame_size,
-                buffered: BytesMut::with_capacity(8192),
+                limits,
             }
             .run(reader_stop),
         );
@@ -429,57 +429,120 @@ impl<P: Protocol> Drop for Call<P> {
 }
 
 impl<P: Protocol> Writer<P> {
-    async fn handle_request(&mut self, id: u64, value: P::Request) -> bool {
-        let mut frame = self.transport.send();
-        let result = match encode(Kind::Request, id, &value, &mut frame) {
-            Ok(mut message) => frame.finish(&mut message).await.map_err(Error::from),
-            Err(err) => {
-                if let Some(inner) = self.inner.upgrade() {
-                    inner.complete(id, Err(err));
-                } else {
-                    return true;
-                }
-                return false;
-            }
-        };
+    /// Completes a pending call with an error. Returns `true` if the
+    /// session is already gone and the writer should stop.
+    fn complete_err(&self, id: u64, error: Error) -> bool {
         let Some(inner) = self.inner.upgrade() else {
             return true;
         };
-        if result.is_ok() && self.keep_requests_alive {
-            inner.request_keepalive.lock().unwrap().insert(id, value);
+        inner.complete(id, Err(error));
+        false
+    }
+
+    /// Fails every pending call. Used for transport-level (I/O) failures,
+    /// which are fatal for the whole session rather than one call.
+    fn fail_all(&self, error: Error) {
+        if let Some(inner) = self.inner.upgrade() {
+            inner.fail(error);
         }
-        if let Err(err) = result {
-            inner.complete(id, Err(err));
-            return true;
+    }
+
+    /// Admits one queued item into the scheduler (or sends it immediately,
+    /// for the native-handle atomic path). Returns `true` if the writer
+    /// should stop.
+    async fn admit(
+        &mut self,
+        message: Message<P::Request>,
+        scheduler: &mut fragment::Scheduler,
+    ) -> bool {
+        match message {
+            Message::Request { id, value } => self.admit_request(id, value, scheduler).await,
+            Message::Cancel { id } => {
+                self.admit_cancel(id, scheduler);
+                false
+            }
+        }
+    }
+
+    async fn admit_request(
+        &mut self,
+        id: u64,
+        value: P::Request,
+        scheduler: &mut fragment::Scheduler,
+    ) -> bool {
+        let mut probe = self.transport.send();
+        let payload = match encode_payload(&value, &mut probe) {
+            Ok(payload) => payload,
+            Err(err) => {
+                drop(probe);
+                return self.complete_err(id, err);
+            }
+        };
+        if probe.has_attachments() {
+            let header = fragment::FragmentHeader {
+                flags: fragment::Flags::FIRST | fragment::Flags::LAST,
+                kind: Kind::Request,
+                id,
+                payload_len: payload.len(),
+            };
+            let mut buffer = header.encode().chain(payload);
+            if let Err(err) = probe.finish(&mut buffer).await {
+                self.fail_all(err.into());
+                return true;
+            }
+        } else {
+            drop(probe);
+            scheduler.admit_message(Kind::Request, id, payload);
+        }
+        if self.keep_requests_alive {
+            let Some(inner) = self.inner.upgrade() else {
+                return true;
+            };
+            inner.request_keepalive.lock().unwrap().insert(id, value);
         }
         false
     }
 
+    fn admit_cancel(&mut self, id: u64, scheduler: &mut fragment::Scheduler) {
+        match scheduler.try_cancel_active(id) {
+            fragment::AbortOutcome::NotActive => scheduler.admit_empty(Kind::Cancel, id),
+            fragment::AbortOutcome::Discarded { started } => {
+                if started {
+                    scheduler.admit_abort(id);
+                }
+                let _ = self.complete_err(id, Error::Cancelled);
+            }
+        }
+    }
+
     async fn run(mut self, mut shutdown: oneshot::Receiver<()>) {
+        let mut scheduler = fragment::Scheduler::new(&self.limits);
         loop {
-            let outgoing = tokio::select! {
-                outgoing = self.outgoing.recv() => outgoing,
+            while let Ok(message) = self.outgoing.try_recv() {
+                if self.admit(message, &mut scheduler).await {
+                    return;
+                }
+            }
+            if !scheduler.has_work() {
+                let message = tokio::select! {
+                    message = self.outgoing.recv() => message,
+                    _ = &mut shutdown => return,
+                };
+                let Some(message) = message else {
+                    return;
+                };
+                if self.admit(message, &mut scheduler).await {
+                    return;
+                }
+                continue;
+            }
+            let result = tokio::select! {
+                result = scheduler.advance(&mut self.transport) => result,
                 _ = &mut shutdown => return,
             };
-            let Some(outgoing) = outgoing else {
+            if let Err(err) = result {
+                self.fail_all(err);
                 return;
-            };
-            let exit = tokio::select! {
-                result = async {
-                    match outgoing {
-                        Message::Request { id, value } => self.handle_request(id, value).await,
-                        Message::Cancel { id } => {
-                            let mut message = encode_empty(Kind::Cancel, id);
-                            self.transport
-                                .send()
-                                .finish(&mut message).await.is_err()
-                        }
-                    }
-                } => result,
-                _ = &mut shutdown => return,
-            };
-            if exit {
-                break;
             }
         }
     }
@@ -487,17 +550,39 @@ impl<P: Protocol> Writer<P> {
 
 impl<P: Protocol> Reader<P> {
     async fn run(mut self, mut shutdown: oneshot::Receiver<()>) {
+        let mut reassembler = fragment::Reassembler::new(self.limits);
         loop {
             let mut frame = self.transport.recv();
-            let message = tokio::select! {
-                message = read_message(&mut frame, &mut self.buffered, self.max_frame_size) => message,
+            let header = tokio::select! {
+                header = fragment::read_fragment_header(&mut frame) => header,
                 _ = &mut shutdown => return,
+            };
+            let header = match header {
+                Ok(header) => header,
+                Err(error) => {
+                    fail(&self.inner, error);
+                    return;
+                }
+            };
+            let accepted = tokio::select! {
+                accepted = reassembler.accept_fragment(header, &mut frame) => accepted,
+                _ = &mut shutdown => return,
+            };
+            let complete = match accepted {
+                Ok(complete) => complete,
+                Err(error) => {
+                    fail(&self.inner, error);
+                    return;
+                }
+            };
+            let Some(fragment::CompleteMessage { kind, id, payload }) = complete else {
+                continue;
             };
             let Some(inner) = self.inner.upgrade() else {
                 return;
             };
-            match message {
-                Ok((Kind::Response, id, payload)) => match decode(&payload, &mut frame) {
+            match kind {
+                Kind::Response => match decode(&payload, &mut frame) {
                     Ok(response) => {
                         inner.request_keepalive.lock().unwrap().remove(&id);
                         inner.complete(id, Ok(response));
@@ -507,20 +592,26 @@ impl<P: Protocol> Reader<P> {
                         return;
                     }
                 },
-                Ok((Kind::Error, id, _)) => {
+                Kind::Error => {
                     inner.request_keepalive.lock().unwrap().remove(&id);
                     inner.complete(id, Err(Error::Cancelled));
                 }
-                Ok((kind, _, _)) => {
+                kind => {
                     inner.fail(Error::Protocol(format!("unexpected {kind:?} frame")));
-                    return;
-                }
-                Err(error) => {
-                    inner.fail(error);
                     return;
                 }
             }
         }
+    }
+}
+
+/// Fails every pending call. Takes `inner` by reference (rather than a
+/// `Reader` method borrowing `&self`) so it can be called while another
+/// field (e.g. a `RecvFrame` token borrowing `self.transport`) is still
+/// mutably borrowed.
+fn fail<P: Protocol>(inner: &Weak<Inner<P>>, error: Error) {
+    if let Some(inner) = inner.upgrade() {
+        inner.fail(error);
     }
 }
 

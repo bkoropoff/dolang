@@ -42,6 +42,12 @@ pub(crate) trait SendFrame<'frame> {
     #[cfg(windows)]
     fn attach_handle(&mut self, handle: BorrowedHandle<'_>) -> io::Result<usize>;
 
+    /// Whether serialization has staged any native-handle attachments on
+    /// this token. If true, the message must be sent as a single atomic
+    /// fragment via this same token rather than split across the
+    /// round-robin fragment scheduler.
+    fn has_attachments(&self) -> bool;
+
     async fn finish<B: Buf>(self, buffer: &mut B) -> io::Result<()>;
 }
 
@@ -103,6 +109,15 @@ impl<'frame> SendFrame<'frame> for AnySend<'frame> {
         match self {
             Self::Generic(frame) => frame.attach_handle(handle),
             Self::Windows(frame) => frame.attach_handle(handle),
+        }
+    }
+    fn has_attachments(&self) -> bool {
+        match self {
+            Self::Generic(frame) => frame.has_attachments(),
+            #[cfg(unix)]
+            Self::Unix(frame) => frame.has_attachments(),
+            #[cfg(windows)]
+            Self::Windows(frame) => frame.has_attachments(),
         }
     }
     async fn finish<B: Buf>(self, buffer: &mut B) -> io::Result<()> {
@@ -219,6 +234,10 @@ impl<'frame> SendFrame<'frame> for GenericSend<'frame> {
     #[cfg(windows)]
     fn attach_handle(&mut self, _handle: BorrowedHandle<'_>) -> io::Result<usize> {
         panic!("generic byte-stream transport does not support handles")
+    }
+
+    fn has_attachments(&self) -> bool {
+        false
     }
 
     async fn finish<B: Buf>(self, buffer: &mut B) -> io::Result<()> {

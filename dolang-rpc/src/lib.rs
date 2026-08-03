@@ -1,6 +1,7 @@
 //! Framed, multiplexed RPC sessions over asynchronous byte streams.
 
 mod client;
+mod fragment;
 mod handle;
 mod opaque;
 mod serde;
@@ -8,45 +9,35 @@ mod server;
 mod transport;
 
 use ::serde::{Serialize, de::DeserializeOwned};
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::Bytes;
 pub use client::{Call, Client};
 pub use handle::{DefaultHandle, OsHandle};
 pub use opaque::{InvalidOpaque, Opaque, OpaqueGuard, OpaqueResource};
 pub use server::{CallContext, RequestCancelled, Server};
 use transport::{RecvFrame, SendFrame};
 
-const DEFAULT_MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
-
-#[repr(C, packed)]
-struct Header {
-    kind: [u8; 1],
-    id: [u8; 8],
-    payload_len: [u8; 4],
+/// Configurable size and concurrency limits for a session.
+#[derive(Clone, Copy, Debug)]
+pub struct Limits {
+    /// Maximum payload size of one fragment. Bounds how much of a large
+    /// message is written per round-robin turn.
+    pub max_fragment_size: usize,
+    /// Maximum size of one complete (reassembled) message.
+    pub max_message_size: usize,
+    /// Maximum number of messages with fragments in flight at once.
+    pub max_incomplete_messages: usize,
+    /// Maximum aggregate bytes accumulated across all incomplete messages.
+    pub max_incomplete_bytes: usize,
 }
 
-impl Header {
-    const LEN: usize = size_of::<Self>();
-
-    fn new(kind: Kind, id: u64, payload_len: u32) -> Self {
+impl Default for Limits {
+    fn default() -> Self {
         Self {
-            kind: [kind as u8],
-            id: id.to_le_bytes(),
-            payload_len: payload_len.to_le_bytes(),
+            max_fragment_size: 64 * 1024,
+            max_message_size: 16 * 1024 * 1024,
+            max_incomplete_messages: 64,
+            max_incomplete_bytes: 64 * 1024 * 1024,
         }
-    }
-
-    fn as_bytes(&self) -> &[u8] {
-        // SAFETY: Header is packed, contains no padding, and consists only of byte arrays.
-        unsafe { std::slice::from_raw_parts(std::ptr::from_ref(self).cast(), Self::LEN) }
-    }
-
-    fn decode(bytes: &[u8; Self::LEN]) -> Result<(Kind, u64, usize), Error> {
-        let header = unsafe { &*bytes.as_ptr().cast::<Self>() };
-        Ok((
-            Kind::try_from(header.kind[0])?,
-            u64::from_le_bytes(header.id),
-            u32::from_le_bytes(header.payload_len) as usize,
-        ))
     }
 }
 
@@ -91,7 +82,7 @@ impl Error {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
-enum Kind {
+pub(crate) enum Kind {
     Request = 1,
     Response = 2,
     Error = 3,
@@ -114,53 +105,18 @@ impl TryFrom<u8> for Kind {
     }
 }
 
-async fn read_message<T: RecvFrame>(
-    transport: &mut T,
-    buffered: &mut BytesMut,
-    max: usize,
-) -> Result<(Kind, u64, Bytes), Error> {
-    loop {
-        if buffered.len() >= Header::LEN {
-            let header: &[u8; Header::LEN] = buffered[..Header::LEN].try_into().unwrap();
-            let (kind, id, len) = Header::decode(header)?;
-            if len > max {
-                return Err(Error::Protocol(format!(
-                    "frame length {len} exceeds limit {max}"
-                )));
-            }
-            let total = Header::LEN + len;
-            if buffered.len() >= total {
-                let mut message = buffered.split_to(total).freeze();
-                message.advance(Header::LEN);
-                return Ok((kind, id, message));
-            }
-            buffered.reserve(total - buffered.len());
-        } else {
-            buffered.reserve(8192 - buffered.len());
-        }
-        if transport.recv(buffered).await? == 0 {
-            return Err(Error::ConnectionClosed);
-        }
-    }
-}
-
-fn encode<'frame, T: Serialize, F: SendFrame<'frame>>(
-    kind: Kind,
-    id: u64,
+/// Serializes `value` into a plain payload buffer (no fragment header).
+/// `frame` is a probe token: if serialization attaches any native-handle
+/// descriptors to it, the caller must send the resulting payload as a
+/// single atomic fragment via that same token, bypassing the round-robin
+/// scheduler entirely.
+fn encode_payload<'frame, T: Serialize, F: SendFrame<'frame>>(
     value: &'frame T,
     frame: &mut F,
 ) -> Result<Bytes, Error> {
-    let buffer = vec![0; Header::LEN];
-    let mut buffer =
-        serde::to_extend(value, frame, buffer).map_err(|e| Error::Serialize(e.to_string()))?;
-    let payload_len = u32::try_from(buffer.len() - Header::LEN)
-        .map_err(|_| Error::Protocol("frame is too large".into()))?;
-    buffer[..Header::LEN].copy_from_slice(Header::new(kind, id, payload_len).as_bytes());
+    let buffer =
+        serde::to_extend(value, frame, Vec::new()).map_err(|e| Error::Serialize(e.to_string()))?;
     Ok(buffer.into())
-}
-
-fn encode_empty(kind: Kind, id: u64) -> Bytes {
-    Bytes::copy_from_slice(Header::new(kind, id, 0).as_bytes())
 }
 
 fn decode<T: DeserializeOwned>(bytes: &[u8], frame: &mut impl RecvFrame) -> Result<T, Error> {

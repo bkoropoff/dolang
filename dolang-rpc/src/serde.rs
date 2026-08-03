@@ -982,6 +982,9 @@ mod tests {
             self.0.push(fd);
             Ok(index)
         }
+        fn has_attachments(&self) -> bool {
+            !self.0.is_empty()
+        }
         async fn finish<B: Buf>(self, _buffer: &mut B) -> io::Result<()> {
             Ok(())
         }
@@ -1095,6 +1098,10 @@ mod windows_tests {
             let raw = handle.as_raw_handle() as usize;
             self.0 = Some(raw);
             Ok(raw)
+        }
+
+        fn has_attachments(&self) -> bool {
+            self.0.is_some()
         }
 
         async fn finish<B: Buf>(self, _buffer: &mut B) -> io::Result<()> {

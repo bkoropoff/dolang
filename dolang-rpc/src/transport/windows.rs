@@ -219,6 +219,10 @@ impl SendFrame<'_> for WindowsSend<'_> {
         }
     }
 
+    fn has_attachments(&self) -> bool {
+        !self.duplicated.is_empty()
+    }
+
     async fn finish<B: Buf>(mut self, buffer: &mut B) -> io::Result<()> {
         // Once transmission begins, delivery is ambiguous. Leaking a handle is
         // safer than closing one the peer may already have adopted.

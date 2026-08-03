@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use bytes::BytesMut;
+use bytes::Buf;
 use futures::{
     StreamExt,
     future::{AbortHandle, Abortable},
@@ -17,8 +17,8 @@ use tokio::{
 };
 
 use crate::{
-    DEFAULT_MAX_FRAME_SIZE, Error, InvalidOpaque, Kind, Opaque, OpaqueGuard, OpaqueResource,
-    Protocol, decode, encode, encode_empty, opaque, read_message,
+    Error, InvalidOpaque, Kind, Limits, Opaque, OpaqueGuard, OpaqueResource, Protocol, decode,
+    encode_payload, fragment, opaque,
     transport::{self, Receiver, SendFrame, Sender},
 };
 
@@ -29,7 +29,7 @@ pub struct Server<P: Protocol> {
     outgoing: mpsc::UnboundedSender<Message<P::Response>>,
     outgoing_rx: mpsc::UnboundedReceiver<Message<P::Response>>,
     inner: Arc<Mutex<Inner>>,
-    max: usize,
+    limits: Limits,
     marker: PhantomData<fn() -> P>,
 }
 
@@ -111,9 +111,16 @@ impl<P: Protocol> Server<P> {
                 objects: opaque::ObjectTable::default(),
                 shutdown: None,
             })),
-            max: DEFAULT_MAX_FRAME_SIZE,
+            limits: Limits::default(),
             marker: PhantomData,
         }
+    }
+
+    /// Sets explicit size and concurrency limits. Must be called before
+    /// [`Server::serve`].
+    pub fn with_limits(mut self, limits: Limits) -> Self {
+        self.limits = limits;
+        self
     }
 
     /// Serves requests until the peer disconnects or the session fails.
@@ -127,34 +134,52 @@ impl<P: Protocol> Server<P> {
             outgoing,
             outgoing_rx,
             inner,
-            max,
+            limits,
             marker: _,
         } = self;
         let (writer_shutdown, writer_stop) = oneshot::channel();
-        let mut writer = tokio::spawn(writer::<P>(sender, outgoing_rx, writer_stop));
+        let mut writer = tokio::spawn(writer::<P>(sender, outgoing_rx, writer_stop, limits));
         let (shutdown, mut shutdown_requested) = oneshot::channel();
         inner.lock().unwrap().shutdown = Some(shutdown);
         let handler = Arc::new(handler);
-        let mut buffered = BytesMut::with_capacity(8192);
+        let mut reassembler = fragment::Reassembler::new(limits);
         let mut tasks = futures::stream::FuturesUnordered::new();
-        let (mut result, mut writer_finished, mut graceful) = loop {
+        let (mut result, mut writer_finished, mut graceful) = 'main: loop {
             let mut frame = receiver.recv();
-            let message = tokio::select! {
-                message = read_message(&mut frame, &mut buffered, max) => match message {
-                    Ok(message) => message,
-                    Err(error) => break (Err(error), false, false),
-                },
-                Some(_) = tasks.next(), if !tasks.is_empty() => continue,
-                _ = &mut shutdown_requested => break (Ok(()), false, true),
-                result = &mut writer => {
-                    let result = match result {
-                        Ok(result) => result,
-                        Err(error) => Err(Error::Protocol(format!("server writer task failed: {error}"))),
-                    };
-                    break (result, true, false);
+            // The header/payload reads must not be dropped and restarted
+            // once they've begun: any bytes already consumed from the
+            // transport into their local buffers would otherwise be lost,
+            // desynchronizing the stream. `step` is polled repeatedly by
+            // the inner loop below (never recreated) so that racing it
+            // against `tasks.next()` and `continue`-ing loses no progress.
+            let complete = {
+                let step = async {
+                    let header = fragment::read_fragment_header(&mut frame).await?;
+                    reassembler.accept_fragment(header, &mut frame).await
+                };
+                tokio::pin!(step);
+                loop {
+                    tokio::select! {
+                        result = &mut step => break result,
+                        Some(_) = tasks.next(), if !tasks.is_empty() => continue,
+                        _ = &mut shutdown_requested => break 'main (Ok(()), false, true),
+                        result = &mut writer => {
+                            let result = match result {
+                                Ok(result) => result,
+                                Err(error) => Err(Error::Protocol(format!("server writer task failed: {error}"))),
+                            };
+                            break 'main (result, true, false);
+                        }
+                    }
                 }
             };
-            let (kind, id, payload) = message;
+            let complete = match complete {
+                Ok(complete) => complete,
+                Err(error) => break 'main (Err(error), false, false),
+            };
+            let Some(fragment::CompleteMessage { kind, id, payload }) = complete else {
+                continue;
+            };
             match kind {
                 Kind::Request => {
                     let request = match decode(&payload, &mut frame) {
@@ -253,34 +278,61 @@ async fn writer<P: Protocol>(
     mut sender: transport::AnySender,
     mut outgoing: mpsc::UnboundedReceiver<Message<P::Response>>,
     mut shutdown: oneshot::Receiver<()>,
+    limits: Limits,
 ) -> Result<(), Error> {
+    let mut scheduler = fragment::Scheduler::new(&limits);
     loop {
-        let outgoing = tokio::select! {
-            outgoing = outgoing.recv() => outgoing,
-            _ = &mut shutdown => return Ok(()),
-        };
-        let Some(outgoing) = outgoing else {
-            return Ok(());
-        };
-        let result = async {
-            match outgoing {
-                Message::Response { id, value } => {
-                    let mut frame = sender.send();
-                    let mut message = encode(Kind::Response, id, &value, &mut frame)?;
-                    frame.finish(&mut message).await?;
-                }
-                Message::Error { id } => {
-                    let mut message = encode_empty(Kind::Error, id);
-                    sender.send().finish(&mut message).await?;
-                }
-            }
-            Ok::<(), Error>(())
-        };
+        while let Ok(message) = outgoing.try_recv() {
+            admit::<P>(&mut sender, &mut scheduler, message).await?;
+        }
+        if !scheduler.has_work() {
+            let message = tokio::select! {
+                message = outgoing.recv() => message,
+                _ = &mut shutdown => return Ok(()),
+            };
+            let Some(message) = message else {
+                return Ok(());
+            };
+            admit::<P>(&mut sender, &mut scheduler, message).await?;
+            continue;
+        }
         tokio::select! {
-            result = result => result?,
+            result = scheduler.advance(&mut sender) => result?,
             _ = &mut shutdown => return Ok(()),
         }
     }
+}
+
+/// Admits one outgoing item. `Response` payloads are probed for native-
+/// handle attachments and, if present, sent as a single atomic fragment
+/// immediately (bypassing the round-robin scheduler); everything else is
+/// handed to `scheduler`.
+async fn admit<P: Protocol>(
+    sender: &mut transport::AnySender,
+    scheduler: &mut fragment::Scheduler,
+    message: Message<P::Response>,
+) -> Result<(), Error> {
+    match message {
+        Message::Response { id, value } => {
+            let mut probe = sender.send();
+            let payload = encode_payload(&value, &mut probe)?;
+            if probe.has_attachments() {
+                let header = fragment::FragmentHeader {
+                    flags: fragment::Flags::FIRST | fragment::Flags::LAST,
+                    kind: Kind::Response,
+                    id,
+                    payload_len: payload.len(),
+                };
+                let mut buffer = header.encode().chain(payload);
+                probe.finish(&mut buffer).await?;
+            } else {
+                drop(probe);
+                scheduler.admit_message(Kind::Response, id, payload);
+            }
+        }
+        Message::Error { id } => scheduler.admit_empty(Kind::Error, id),
+    }
+    Ok(())
 }
 
 /// Services available while processing one request.
