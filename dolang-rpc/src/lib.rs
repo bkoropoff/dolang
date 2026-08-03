@@ -1,3 +1,4 @@
+#![deny(warnings)]
 //! Framed, multiplexed RPC sessions over asynchronous byte streams.
 
 mod client;
@@ -6,6 +7,7 @@ mod handle;
 mod opaque;
 mod serde;
 mod server;
+mod trailer;
 mod transport;
 
 use ::serde::{Serialize, de::DeserializeOwned};
@@ -14,6 +16,7 @@ pub use client::{Call, Client};
 pub use handle::{DefaultHandle, OsHandle};
 pub use opaque::{InvalidOpaque, Opaque, OpaqueGuard, OpaqueResource};
 pub use server::{CallContext, RequestCancelled, Server};
+pub use trailer::{TrailerRecv, TrailerSend};
 use transport::{RecvFrame, SendFrame};
 
 /// Configurable size and concurrency limits for a session.
@@ -22,21 +25,28 @@ pub struct Limits {
     /// Maximum payload size of one fragment. Bounds how much of a large
     /// message is written per round-robin turn.
     pub max_fragment_size: usize,
-    /// Maximum size of one complete (reassembled) message.
-    pub max_message_size: usize,
+    /// Maximum size of one complete (reassembled) message's postcard
+    /// payload, excluding any trailer.
+    pub max_payload_size: usize,
+    /// Maximum size of one message's trailer. Trailers stream a known,
+    /// bounded suffix in chunks rather than acting as an open-ended
+    /// channel, so this should be reasonably bounded.
+    pub max_trailer_size: usize,
     /// Maximum number of messages with fragments in flight at once.
     pub max_incomplete_messages: usize,
-    /// Maximum aggregate bytes accumulated across all incomplete messages.
-    pub max_incomplete_bytes: usize,
+    /// Maximum number of those messages that may have an open trailer at
+    /// once, further restricting `max_incomplete_messages`.
+    pub max_incomplete_trailers: usize,
 }
 
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_fragment_size: 64 * 1024,
-            max_message_size: 16 * 1024 * 1024,
+            max_fragment_size: 512 * 1024,
+            max_payload_size: 2 * 1024 * 1024,
+            max_trailer_size: 2 * 1024 * 1024,
             max_incomplete_messages: 64,
-            max_incomplete_bytes: 64 * 1024 * 1024,
+            max_incomplete_trailers: 16,
         }
     }
 }
@@ -88,6 +98,11 @@ pub(crate) enum Kind {
     Error = 3,
     Cancel = 4,
     Notify = 5,
+    /// Advisory: the sender no longer wants any more `TRAILER` fragments for
+    /// the given message id. Unlike `Cancel`, this never affects the
+    /// message's own request/response outcome — it only tells the peer to
+    /// stop streaming a trailer it already committed to sending.
+    Discard = 6,
 }
 
 impl TryFrom<u8> for Kind {
@@ -100,6 +115,7 @@ impl TryFrom<u8> for Kind {
             3 => Ok(Self::Error),
             4 => Ok(Self::Cancel),
             5 => Ok(Self::Notify),
+            6 => Ok(Self::Discard),
             _ => Err(Error::Protocol(format!("unknown frame kind {value}"))),
         }
     }

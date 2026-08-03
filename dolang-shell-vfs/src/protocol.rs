@@ -557,7 +557,6 @@ pub(crate) enum RequestKind {
     },
     FileWrite {
         file: Opaque<crate::FileMarker>,
-        data: Vec<u8>,
     },
     FileSeek {
         file: Opaque<crate::FileMarker>,
@@ -589,7 +588,6 @@ pub(crate) enum RequestKind {
     },
     StdioSendWrite {
         stdio: Opaque<crate::StdioSendMarker>,
-        data: Vec<u8>,
     },
     StdioSendClone {
         stdio: Opaque<crate::StdioSendMarker>,
@@ -705,7 +703,7 @@ pub(crate) enum ResponseKind {
     ClearCache(Result<(), WireError>),
     Pipe(Result<PipeResponse, WireError>),
     Open(Result<OpenHandle, WireError>),
-    FileRead(Result<Vec<u8>, WireError>),
+    FileRead(Result<(), WireError>),
     FileWrite(Result<usize, WireError>),
     FileSeek(Result<u64, WireError>),
     FileFlush(Result<(), WireError>),
@@ -718,7 +716,7 @@ pub(crate) enum ResponseKind {
     StdioSendWrite(Result<usize, WireError>),
     StdioSendClone(Result<Opaque<crate::StdioSendMarker>, WireError>),
     StdioRecvClose(Result<(), WireError>),
-    StdioRecvRead(Result<Vec<u8>, WireError>),
+    StdioRecvRead(Result<(), WireError>),
     StdioRecvClone(Result<Opaque<crate::StdioRecvMarker>, WireError>),
     FileMetadata(Result<Metadata, WireError>),
     FileFsMetadata(Result<FsMetadata, WireError>),

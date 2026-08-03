@@ -963,6 +963,14 @@ async fn regular_file_round_trip_over_generic_stream() {
     let stdio = file.to_stdio_recv().await.unwrap();
     drop(stdio);
     assert_eq!(file.seek(SeekFrom::Start(0)).await.unwrap(), 0);
+    let mut prefix = [0; 4];
+    file.read_exact(&mut prefix).await.unwrap();
+    assert_eq!(&prefix, b"abcd");
+    assert_eq!(file.seek(SeekFrom::Start(0)).await.unwrap(), 0);
+    let mut oversized = [0; 64];
+    assert_eq!(file.read(&mut oversized).await.unwrap(), 6);
+    assert_eq!(&oversized[..6], b"abcdef");
+    assert_eq!(file.seek(SeekFrom::Start(0)).await.unwrap(), 0);
     let mut data = Vec::new();
     file.read_to_end(&mut data).await.unwrap();
     assert_eq!(data, b"abcdef");

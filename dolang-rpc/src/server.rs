@@ -1,7 +1,10 @@
 use std::{
     collections::HashMap,
     marker::PhantomData,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use bytes::Buf;
@@ -34,8 +37,29 @@ pub struct Server<P: Protocol> {
 }
 
 enum Message<R> {
-    Response { id: u64, value: R },
-    Error { id: u64 },
+    Response {
+        id: u64,
+        value: R,
+        trailer: fragment::Trailer,
+    },
+    Error {
+        id: u64,
+    },
+    Cancel {
+        id: u64,
+    },
+    /// We stopped reading a request trailer (it arrived unwanted) and want
+    /// to tell the peer to stop sending it. Always results in a wire
+    /// `Kind::Discard` fragment.
+    DiscardTrailer {
+        id: u64,
+    },
+    /// A wire `Kind::Discard` fragment arrived, telling us the peer no
+    /// longer wants our response trailer. Applied to our own active send;
+    /// never re-sent to the peer.
+    PeerDiscarded {
+        id: u64,
+    },
 }
 
 struct Inner {
@@ -126,7 +150,7 @@ impl<P: Protocol> Server<P> {
     /// Serves requests until the peer disconnects or the session fails.
     pub async fn serve<H>(self, handler: H) -> Result<(), Error>
     where
-        H: AsyncFn(&mut CallContext<P>, P::Request) -> P::Response + Send + Sync + 'static,
+        H: AsyncFn(CallContext<P>, P::Request) + Send + Sync + 'static,
     {
         let Server {
             sender,
@@ -142,7 +166,7 @@ impl<P: Protocol> Server<P> {
         let (shutdown, mut shutdown_requested) = oneshot::channel();
         inner.lock().unwrap().shutdown = Some(shutdown);
         let handler = Arc::new(handler);
-        let mut reassembler = fragment::Reassembler::new(limits);
+        let mut reassembler = fragment::StreamReassembler::new(limits);
         let mut tasks = futures::stream::FuturesUnordered::new();
         let (mut result, mut writer_finished, mut graceful) = 'main: loop {
             let mut frame = receiver.recv();
@@ -155,7 +179,7 @@ impl<P: Protocol> Server<P> {
             let complete = {
                 let step = async {
                     let header = fragment::read_fragment_header(&mut frame).await?;
-                    reassembler.accept_fragment(header, &mut frame).await
+                    reassembler.accept(header, &mut frame).await
                 };
                 tokio::pin!(step);
                 loop {
@@ -177,63 +201,123 @@ impl<P: Protocol> Server<P> {
                 Ok(complete) => complete,
                 Err(error) => break 'main (Err(error), false, false),
             };
-            let Some(fragment::CompleteMessage { kind, id, payload }) = complete else {
-                continue;
-            };
-            match kind {
-                Kind::Request => {
-                    let request = match decode(&payload, &mut frame) {
-                        Ok(request) => request,
-                        Err(error) => break (Err(error), false, false),
-                    };
-                    let handler = handler.clone();
-                    let task_inner = inner.clone();
-                    let task_outgoing = outgoing.clone();
-                    let (abort, registration) = AbortHandle::new_pair();
-                    tasks.push(Abortable::new(
-                        async move {
-                            let mut context = CallContext {
-                                id,
-                                inner: task_inner.clone(),
-                                marker: PhantomData,
-                            };
-                            let response = handler(&mut context, request).await;
-                            task_inner.lock().unwrap().outstanding.remove(&id);
-                            let _ = task_outgoing.send(Message::Response {
-                                id,
-                                value: response,
-                            });
-                        },
-                        registration,
-                    ));
-                    inner.lock().unwrap().outstanding.insert(
-                        id,
-                        Cancellation {
-                            signal: None,
-                            abort,
-                        },
+            let (message, live_trailer) = match complete {
+                fragment::StreamEvent::None => (None, None),
+                fragment::StreamEvent::Aborted {
+                    kind: Kind::Request,
+                    ..
+                } => (None, None),
+                fragment::StreamEvent::Aborted { kind, .. } => {
+                    break 'main (
+                        Err(Error::Protocol(format!(
+                            "unexpected aborted {kind:?} message"
+                        ))),
+                        false,
+                        false,
                     );
                 }
-                Kind::Cancel => {
-                    let mut state = inner.lock().unwrap();
-                    if let Some(signal) = state
-                        .outstanding
-                        .get_mut(&id)
-                        .and_then(|cancel| cancel.signal.take())
-                    {
-                        let _ = signal.send(());
-                    } else if let Some(cancel) = state.outstanding.remove(&id) {
-                        cancel.abort.abort();
-                        let _ = outgoing.send(Message::Error { id });
+                fragment::StreamEvent::Message(message) => (Some(message), None),
+                fragment::StreamEvent::Trailer {
+                    id,
+                    message,
+                    shared,
+                    len,
+                    notify_discard,
+                } => (message, Some((id, shared, len, notify_discard))),
+            };
+            if let Some(fragment::StreamMessage {
+                kind,
+                id,
+                payload,
+                trailer,
+            }) = message
+            {
+                match kind {
+                    Kind::Request => {
+                        let request = match decode(&payload, &mut frame) {
+                            Ok(request) => request,
+                            Err(error) => break (Err(error), false, false),
+                        };
+                        let trailer = trailer.map(crate::TrailerRecv::new);
+                        let handler = handler.clone();
+                        let task_inner = inner.clone();
+                        let task_outgoing = outgoing.clone();
+                        let (abort, registration) = AbortHandle::new_pair();
+                        tasks.push(Abortable::new(
+                            async move {
+                                let context = CallContext {
+                                    id,
+                                    inner: task_inner.clone(),
+                                    request_trailer: trailer,
+                                    outgoing: task_outgoing,
+                                    responded: false,
+                                    shutdown_on_respond: AtomicBool::new(false),
+                                    limits,
+                                    marker: PhantomData,
+                                };
+                                handler(context, request).await;
+                            },
+                            registration,
+                        ));
+                        inner.lock().unwrap().outstanding.insert(
+                            id,
+                            Cancellation {
+                                signal: None,
+                                abort,
+                            },
+                        );
+                    }
+                    Kind::Cancel => {
+                        let mut state = inner.lock().unwrap();
+                        if let Some(signal) = state
+                            .outstanding
+                            .get_mut(&id)
+                            .and_then(|cancel| cancel.signal.take())
+                        {
+                            let _ = signal.send(());
+                        } else if let Some(cancel) = state.outstanding.remove(&id) {
+                            cancel.abort.abort();
+                        } else {
+                            let _ = outgoing.send(Message::Cancel { id });
+                        }
+                    }
+                    Kind::Discard => {
+                        let _ = outgoing.send(Message::PeerDiscarded { id });
+                    }
+                    _ => {
+                        break (
+                            Err(Error::Protocol(format!("unexpected {kind:?} frame"))),
+                            false,
+                            false,
+                        );
                     }
                 }
-                _ => {
-                    break (
-                        Err(Error::Protocol(format!("unexpected {kind:?} frame"))),
-                        false,
-                        false,
-                    );
+            }
+            if let Some((id, shared, len, notify_discard)) = live_trailer {
+                if notify_discard {
+                    let _ = outgoing.send(Message::DiscardTrailer { id });
                 }
+                // SAFETY: the lease retains the receiver borrow and clears
+                // the erased token before it ends.
+                let lease = unsafe { crate::trailer::RecvShared::grant(&shared, frame, len) };
+                let result = loop {
+                    tokio::select! {
+                        result = crate::trailer::RecvShared::wait_fragment(&shared) => break result,
+                        Some(_) = tasks.next(), if !tasks.is_empty() => continue,
+                        _ = &mut shutdown_requested => break 'main (Ok(()), false, true),
+                        result = &mut writer => {
+                            let result = match result {
+                                Ok(result) => result,
+                                Err(error) => Err(Error::Protocol(format!("server writer task failed: {error}"))),
+                            };
+                            break 'main (result, true, false);
+                        }
+                    }
+                };
+                if let Err(error) = result {
+                    break 'main (Err(error.into()), false, false);
+                }
+                lease.complete();
             }
         };
         drop(receiver);
@@ -296,9 +380,26 @@ async fn writer<P: Protocol>(
             admit::<P>(&mut sender, &mut scheduler, message).await?;
             continue;
         }
-        tokio::select! {
-            result = scheduler.advance(&mut sender) => result?,
+        let ready = tokio::select! {
+            _ = std::future::poll_fn(|cx| scheduler.poll_ready(cx)) => true,
+            message = outgoing.recv() => {
+                if let Some(message) = message {
+                    admit::<P>(&mut sender, &mut scheduler, message).await?;
+                    false
+                } else {
+                    // The last producer was dropped, but already-admitted
+                    // responses still have to drain before the transport is
+                    // closed.
+                    true
+                }
+            }
             _ = &mut shutdown => return Ok(()),
+        };
+        if ready {
+            tokio::select! {
+                result = scheduler.advance(&mut sender) => { result?; }
+                _ = &mut shutdown => return Ok(()),
+            }
         }
     }
 }
@@ -313,10 +414,16 @@ async fn admit<P: Protocol>(
     message: Message<P::Response>,
 ) -> Result<(), Error> {
     match message {
-        Message::Response { id, value } => {
+        Message::Response { id, value, trailer } => {
             let mut probe = sender.send();
             let payload = encode_payload(&value, &mut probe)?;
             if probe.has_attachments() {
+                if !matches!(&trailer, fragment::Trailer::None) {
+                    return Err(Error::Protocol(
+                        "responses with both native-handle attachments and a trailer are not supported"
+                            .into(),
+                    ));
+                }
                 let header = fragment::FragmentHeader {
                     flags: fragment::Flags::FIRST | fragment::Flags::LAST,
                     kind: Kind::Response,
@@ -327,25 +434,83 @@ async fn admit<P: Protocol>(
                 probe.finish(&mut buffer).await?;
             } else {
                 drop(probe);
-                scheduler.admit_message(Kind::Response, id, payload);
+                scheduler.admit_message(Kind::Response, id, payload, trailer);
             }
         }
         Message::Error { id } => scheduler.admit_empty(Kind::Error, id),
+        Message::Cancel { id } => match scheduler.try_cancel_active(id) {
+            fragment::AbortOutcome::NotActive => {}
+            fragment::AbortOutcome::Discarded { started } => {
+                if started {
+                    scheduler.admit_abort(id);
+                }
+            }
+        },
+        Message::DiscardTrailer { id } => scheduler.admit_empty(Kind::Discard, id),
+        Message::PeerDiscarded { id } => scheduler.discard_active_trailer(id),
     }
     Ok(())
 }
 
 /// Services available while processing one request.
-pub struct CallContext<P> {
+pub struct CallContext<P: Protocol> {
     id: u64,
     inner: Arc<Mutex<Inner>>,
+    request_trailer: Option<crate::TrailerRecv>,
+    outgoing: mpsc::UnboundedSender<Message<P::Response>>,
+    responded: bool,
+    shutdown_on_respond: AtomicBool,
+    limits: Limits,
     marker: PhantomData<fn() -> P>,
 }
 
-impl<P> CallContext<P> {
+impl<P: Protocol> CallContext<P> {
+    /// Returns this request's streaming trailer body, if present.
+    pub fn request_trailer(&mut self) -> Option<&mut crate::TrailerRecv> {
+        self.request_trailer.as_mut()
+    }
+
+    /// Sends an ordinary response and consumes this call context.
+    pub fn respond(mut self, response: P::Response) {
+        if let Some(trailer) = self.request_trailer.as_mut() {
+            trailer.discard();
+        }
+        self.responded = true;
+        self.inner.lock().unwrap().outstanding.remove(&self.id);
+        let _ = self.outgoing.send(Message::Response {
+            id: self.id,
+            value: response,
+            trailer: fragment::Trailer::None,
+        });
+        self.finish_shutdown();
+    }
+
+    /// Sends a response head and returns its streaming trailer body.
+    pub fn respond_with_trailer(mut self, response: P::Response) -> crate::TrailerSend<()> {
+        if let Some(trailer) = self.request_trailer.as_mut() {
+            trailer.discard();
+        }
+        let shared = crate::trailer::SendShared::new(self.limits.max_trailer_size);
+        self.responded = true;
+        self.inner.lock().unwrap().outstanding.remove(&self.id);
+        let _ = self.outgoing.send(Message::Response {
+            id: self.id,
+            value: response,
+            trailer: fragment::Trailer::Stream(shared.clone()),
+        });
+        self.finish_shutdown();
+        crate::TrailerSend::new(shared, ())
+    }
+
     /// Stops accepting requests and gracefully drains the connection.
     pub fn shutdown(&self) {
-        if let Some(shutdown) = self.inner.lock().unwrap().shutdown.take() {
+        self.shutdown_on_respond.store(true, Ordering::Release);
+    }
+
+    fn finish_shutdown(&self) {
+        if self.shutdown_on_respond.load(Ordering::Acquire)
+            && let Some(shutdown) = self.inner.lock().unwrap().shutdown.take()
+        {
             let _ = shutdown.send(());
         }
     }
@@ -408,6 +573,15 @@ impl<P> CallContext<P> {
         value: Opaque<T::Marker>,
     ) -> Result<Option<T>, InvalidOpaque> {
         self.inner.lock().unwrap().objects.unregister::<T>(value)
+    }
+}
+
+impl<P: Protocol> Drop for CallContext<P> {
+    fn drop(&mut self) {
+        if !self.responded {
+            self.inner.lock().unwrap().outstanding.remove(&self.id);
+            let _ = self.outgoing.send(Message::Error { id: self.id });
+        }
     }
 }
 

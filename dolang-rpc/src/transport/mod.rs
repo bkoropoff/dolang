@@ -2,10 +2,19 @@
 use std::os::fd::{BorrowedFd, OwnedFd};
 #[cfg(windows)]
 use std::os::windows::io::{BorrowedHandle, OwnedHandle};
-use std::{io, pin::Pin};
+use std::{
+    future::poll_fn,
+    io::{self, IoSlice},
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 use bytes::{Buf, BufMut};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+/// Bound on the number of `IoSlice`s gathered from a chained `Buf` for one
+/// vectored write attempt.
+pub(crate) const MAX_VECTORED_SLICES: usize = 8;
 
 #[cfg(unix)]
 pub(crate) mod unix;
@@ -28,15 +37,28 @@ pub(crate) trait Receiver: Send + 'static {
     fn recv(&mut self) -> Self::Recv<'_>;
 }
 
-pub(crate) trait RecvFrame {
+pub(crate) trait RecvFrame: Send {
     #[cfg(unix)]
     fn take_fd(&mut self, index: u32) -> io::Result<OwnedFd>;
     #[cfg(windows)]
     fn take_handle(&mut self, value: usize) -> io::Result<OwnedHandle>;
-    async fn recv<B: BufMut>(&mut self, buffer: &mut B) -> io::Result<usize>;
+    fn poll_read_once<B: BufMut>(
+        &mut self,
+        _cx: &mut Context<'_>,
+        _buffer: &mut B,
+    ) -> Poll<io::Result<usize>> {
+        Poll::Ready(Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "frame does not support direct polling",
+        )))
+    }
+
+    async fn recv<B: BufMut>(&mut self, buffer: &mut B) -> io::Result<usize> {
+        poll_fn(|cx| self.poll_read_once(cx, buffer)).await
+    }
 }
 
-pub(crate) trait SendFrame<'frame> {
+pub(crate) trait SendFrame<'frame>: Send {
     #[cfg(unix)]
     fn attach_fd(&mut self, fd: BorrowedFd<'frame>) -> io::Result<u32>;
     #[cfg(windows)]
@@ -48,7 +70,73 @@ pub(crate) trait SendFrame<'frame> {
     /// round-robin fragment scheduler.
     fn has_attachments(&self) -> bool;
 
-    async fn finish<B: Buf>(self, buffer: &mut B) -> io::Result<()>;
+    /// Attempts one nonblocking write of `buf`, following the same
+    /// readiness/registration contract as `AsyncWrite::poll_write`. The one
+    /// low-level primitive each transport must implement; `finish` (below)
+    /// is provided in terms of it, mirroring how `AsyncWriteExt` methods are
+    /// built on `AsyncWrite::poll_write`.
+    ///
+    /// Also used directly by streaming trailer leases, which hold their
+    /// shared-state lock only for one synchronous poll.
+    fn poll_write_once(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>>;
+
+    /// Vectored variant. Default mirrors `AsyncWrite`'s default
+    /// `poll_write_vectored`: write the first non-empty slice via
+    /// `poll_write_once`. Transports with vectored-write support override this
+    /// so a frame header and payload can be submitted as one write operation.
+    fn poll_write_vectored_once(
+        &mut self,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let buf = bufs
+            .iter()
+            .find(|slice| !slice.is_empty())
+            .map_or(&[][..], |slice| &**slice);
+        self.poll_write_once(cx, buf)
+    }
+
+    /// Flushes any internally buffered bytes. Default no-op (raw sockets
+    /// need none); `GenericSend` overrides this to flush its wrapped
+    /// `AsyncWrite`.
+    fn poll_flush_once(&mut self, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    /// Writes all of `buffer`'s remaining bytes, looping
+    /// `poll_write_vectored_once` via `Buf::chunks_vectored`, then flushes.
+    /// Provided — no transport implements this directly.
+    ///
+    /// Returns whether the whole buffer was drained by a single successful
+    /// `poll_write_vectored_once` call (`true`), as opposed to needing more
+    /// than one write to fully drain (`false`) — a "short write" signal
+    /// callers use to adapt future fragment sizing to the transport's
+    /// actual atomic write capacity.
+    async fn finish<B: Buf>(mut self, buffer: &mut B) -> io::Result<bool>
+    where
+        Self: Sized,
+    {
+        let mut atomic = true;
+        let mut first = true;
+        while buffer.has_remaining() {
+            if !first {
+                atomic = false;
+            }
+            first = false;
+            let mut slices = [IoSlice::new(&[]); MAX_VECTORED_SLICES];
+            let filled = buffer.chunks_vectored(&mut slices);
+            let sent = poll_fn(|cx| self.poll_write_vectored_once(cx, &slices[..filled])).await?;
+            if sent == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "failed to write frame",
+                ));
+            }
+            buffer.advance(sent);
+        }
+        poll_fn(|cx| self.poll_flush_once(cx)).await?;
+        Ok(atomic)
+    }
 }
 
 pub(crate) enum AnySender {
@@ -120,13 +208,35 @@ impl<'frame> SendFrame<'frame> for AnySend<'frame> {
             Self::Windows(frame) => frame.has_attachments(),
         }
     }
-    async fn finish<B: Buf>(self, buffer: &mut B) -> io::Result<()> {
+    fn poll_write_once(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
         match self {
-            Self::Generic(frame) => frame.finish(buffer).await,
+            Self::Generic(frame) => frame.poll_write_once(cx, buf),
             #[cfg(unix)]
-            Self::Unix(frame) => frame.finish(buffer).await,
+            Self::Unix(frame) => frame.poll_write_once(cx, buf),
             #[cfg(windows)]
-            Self::Windows(frame) => frame.finish(buffer).await,
+            Self::Windows(frame) => frame.poll_write_once(cx, buf),
+        }
+    }
+    fn poll_write_vectored_once(
+        &mut self,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        match self {
+            Self::Generic(frame) => frame.poll_write_vectored_once(cx, bufs),
+            #[cfg(unix)]
+            Self::Unix(frame) => frame.poll_write_vectored_once(cx, bufs),
+            #[cfg(windows)]
+            Self::Windows(frame) => frame.poll_write_vectored_once(cx, bufs),
+        }
+    }
+    fn poll_flush_once(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self {
+            Self::Generic(frame) => frame.poll_flush_once(cx),
+            #[cfg(unix)]
+            Self::Unix(frame) => frame.poll_flush_once(cx),
+            #[cfg(windows)]
+            Self::Windows(frame) => frame.poll_flush_once(cx),
         }
     }
 }
@@ -160,13 +270,17 @@ impl RecvFrame for AnyRecv<'_> {
             Self::Windows(frame) => frame.take_handle(value),
         }
     }
-    async fn recv<B: BufMut>(&mut self, buffer: &mut B) -> io::Result<usize> {
+    fn poll_read_once<B: BufMut>(
+        &mut self,
+        cx: &mut Context<'_>,
+        buffer: &mut B,
+    ) -> Poll<io::Result<usize>> {
         match self {
-            Self::Generic(frame) => frame.recv(buffer).await,
+            Self::Generic(frame) => frame.poll_read_once(cx, buffer),
             #[cfg(unix)]
-            Self::Unix(frame) => frame.recv(buffer).await,
+            Self::Unix(frame) => frame.poll_read_once(cx, buffer),
             #[cfg(windows)]
-            Self::Windows(frame) => frame.recv(buffer).await,
+            Self::Windows(frame) => frame.poll_read_once(cx, buffer),
         }
     }
 }
@@ -221,8 +335,25 @@ impl RecvFrame for GenericRecv<'_> {
         panic!("generic byte-stream transport does not support handles")
     }
 
-    async fn recv<B: BufMut>(&mut self, buffer: &mut B) -> io::Result<usize> {
-        self.0.0.read_buf(buffer).await
+    fn poll_read_once<B: BufMut>(
+        &mut self,
+        cx: &mut Context<'_>,
+        buffer: &mut B,
+    ) -> Poll<io::Result<usize>> {
+        let chunk = buffer.chunk_mut();
+        let mut read_buf = ReadBuf::uninit(unsafe {
+            std::slice::from_raw_parts_mut(chunk.as_mut_ptr().cast(), chunk.len())
+        });
+        match self.0.0.as_mut().poll_read(cx, &mut read_buf) {
+            Poll::Ready(Ok(())) => {
+                let n = read_buf.filled().len();
+                // SAFETY: `poll_read` initialized the reported filled bytes.
+                unsafe { buffer.advance_mut(n) };
+                Poll::Ready(Ok(n))
+            }
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
@@ -240,22 +371,28 @@ impl<'frame> SendFrame<'frame> for GenericSend<'frame> {
         false
     }
 
-    async fn finish<B: Buf>(self, buffer: &mut B) -> io::Result<()> {
-        while buffer.has_remaining() {
-            if self.0.0.write_buf(buffer).await? == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "failed to write frame",
-                ));
-            }
-        }
-        self.0.0.flush().await
+    fn poll_write_once(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+        self.0.0.as_mut().poll_write(cx, buf)
+    }
+
+    fn poll_write_vectored_once(
+        &mut self,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        self.0.0.as_mut().poll_write_vectored(cx, bufs)
+    }
+
+    fn poll_flush_once(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.0.0.as_mut().poll_flush(cx)
     }
 }
 
 #[cfg(all(test, unix))]
 mod tests {
     use std::os::fd::AsFd;
+
+    use tokio::io::AsyncReadExt;
 
     use super::*;
 
@@ -274,6 +411,19 @@ mod tests {
         let (stream, _) = tokio::io::duplex(64);
         let (_, mut receiver) = generic_duplex(stream);
         receiver.recv().take_fd(0).unwrap();
+    }
+
+    #[tokio::test]
+    async fn generic_poll_write_once_writes_directly() {
+        let (stream, mut other) = tokio::io::duplex(64);
+        let (mut sender, _) = generic_duplex(stream);
+        let mut send = sender.send();
+        poll_fn(|cx| send.poll_write_once(cx, b"direct"))
+            .await
+            .unwrap();
+        let mut buf = [0u8; 6];
+        other.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"direct");
     }
 }
 

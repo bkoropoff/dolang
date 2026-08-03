@@ -343,24 +343,37 @@ async fn serve_connection(
     connection: Arc<Connection>,
     stop: Arc<AtomicBool>,
 ) -> Result<(), dolang_rpc::Error> {
-    rpc.serve(async move |context, Request { vfs, kind }| {
-        if matches!(kind, RequestKind::Stop) {
-            return connection.handle_stop(context, vfs, &stop).await;
-        }
-        let connection = match connection.select(context, vfs) {
-            Ok(connection) => connection,
-            Err(error) => return ResponseKind::Error(error),
-        };
-        match kind {
-            RequestKind::Spawn(request) => connection.handle_spawn_rpc(context, request).await,
-            RequestKind::ChildWait { child } => connection.handle_child_wait(context, child).await,
-            RequestKind::ChildTerminate { child } => {
-                connection.handle_child_terminate(context, child).await
+    rpc.serve(async move |mut context, Request { vfs, kind }| {
+        let response = if matches!(kind, RequestKind::Stop) {
+            connection.handle_stop(&context, vfs, &stop).await
+        } else if let Err(error) = connection.select(&context, vfs.clone()) {
+            ResponseKind::Error(error)
+        } else {
+            let connection = connection.select(&context, vfs).unwrap();
+            match kind {
+                RequestKind::Spawn(request) => {
+                    connection.handle_spawn_rpc(&mut context, request).await
+                }
+                RequestKind::ChildWait { child } => {
+                    connection.handle_child_wait(&mut context, child).await
+                }
+                RequestKind::ChildTerminate { child } => {
+                    connection.handle_child_terminate(&context, child).await
+                }
+                RequestKind::ChildClose { child } => connection.handle_child_close(&context, child),
+                RequestKind::FileRead { file, len } => {
+                    connection.handle_file_read(context, file, len).await;
+                    return;
+                }
+                RequestKind::StdioRecvRead { stdio, len } => {
+                    connection.handle_stdio_recv_read(context, stdio, len).await;
+                    return;
+                }
+                RequestKind::Stop => unreachable!(),
+                request => connection.handle(&mut context, request).await,
             }
-            RequestKind::ChildClose { child } => connection.handle_child_close(context, child),
-            RequestKind::Stop => unreachable!(),
-            request => connection.handle(context, request).await,
-        }
+        };
+        context.respond(response);
     })
     .await
 }
@@ -491,10 +504,8 @@ impl Connection {
             }
             RequestKind::Pipe => self.handle_pipe(context).await,
             RequestKind::Open(request) => self.handle_open(context, request).await,
-            RequestKind::FileRead { file, len } => self.handle_file_read(context, file, len).await,
-            RequestKind::FileWrite { file, data } => {
-                self.handle_file_write(context, file, data).await
-            }
+            RequestKind::FileRead { .. } => unreachable!(),
+            RequestKind::FileWrite { file } => self.handle_file_write(context, file).await,
             RequestKind::FileSeek { file, position } => {
                 self.handle_file_seek(context, file, position.into()).await
             }
@@ -517,8 +528,8 @@ impl Connection {
             RequestKind::StdioSendClose { stdio } => {
                 ResponseKind::StdioSendClose(self.close_stdio_send(context, stdio))
             }
-            RequestKind::StdioSendWrite { stdio, data } => {
-                self.handle_stdio_send_write(context, stdio, data).await
+            RequestKind::StdioSendWrite { stdio } => {
+                self.handle_stdio_send_write(context, stdio).await
             }
             RequestKind::StdioSendClone { stdio } => {
                 self.handle_stdio_send_clone(context, stdio).await
@@ -526,9 +537,7 @@ impl Connection {
             RequestKind::StdioRecvClose { stdio } => {
                 ResponseKind::StdioRecvClose(self.close_stdio_recv(context, stdio))
             }
-            RequestKind::StdioRecvRead { stdio, len } => {
-                self.handle_stdio_recv_read(context, stdio, len).await
-            }
+            RequestKind::StdioRecvRead { .. } => unreachable!(),
             RequestKind::StdioRecvClone { stdio } => {
                 self.handle_stdio_recv_clone(context, stdio).await
             }
@@ -959,13 +968,26 @@ impl Connection {
 
     async fn handle_stdio_send_write(
         &self,
-        context: &CallContext<VfsProtocol>,
+        context: &mut CallContext<VfsProtocol>,
         stdio: dolang_rpc::Opaque<crate::StdioSendMarker>,
-        data: Vec<u8>,
     ) -> ResponseKind {
         let result = async {
             let stdio = self.retained_stdio_send(context, stdio)?;
-            stdio.0.lock().await.write(&data).await.map_err(wire_error)
+            let trailer = context.request_trailer().ok_or_else(|| {
+                wire_error(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "stdio write request is missing its data trailer",
+                ))
+            })?;
+            let len = io::copy(trailer, &mut *stdio.0.lock().await)
+                .await
+                .map_err(wire_error)?;
+            usize::try_from(len).map_err(|_| {
+                wire_error(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "stdio trailer length does not fit in usize",
+                ))
+            })
         }
         .await;
         ResponseKind::StdioSendWrite(result)
@@ -988,25 +1010,23 @@ impl Connection {
 
     async fn handle_stdio_recv_read(
         &self,
-        context: &CallContext<VfsProtocol>,
+        context: CallContext<VfsProtocol>,
         stdio: dolang_rpc::Opaque<crate::StdioRecvMarker>,
         len: usize,
-    ) -> ResponseKind {
-        let result = async {
-            let stdio = self.retained_stdio_recv(context, stdio)?;
-            let mut data = vec![0; len];
-            let got_len = stdio
-                .0
-                .lock()
-                .await
-                .read(&mut data)
-                .await
-                .map_err(wire_error)?;
-            data.truncate(got_len);
-            Ok(data)
+    ) {
+        let stdio = match self.retained_stdio_recv(&context, stdio) {
+            Ok(stdio) => stdio,
+            Err(error) => {
+                context.respond(ResponseKind::StdioRecvRead(Err(error)));
+                return;
+            }
+        };
+        let mut send = context.respond_with_trailer(ResponseKind::StdioRecvRead(Ok(())));
+        let mut stdio = stdio.0.lock().await;
+        let mut source = (&mut *stdio).take(len as u64);
+        if io::copy(&mut source, &mut send).await.is_ok() {
+            send.finish();
         }
-        .await;
-        ResponseKind::StdioRecvRead(result)
     }
 
     async fn handle_stdio_recv_clone(
@@ -1073,31 +1093,47 @@ impl Connection {
 
     async fn handle_file_read(
         &self,
-        context: &CallContext<VfsProtocol>,
+        context: CallContext<VfsProtocol>,
         file: dolang_rpc::Opaque<crate::FileMarker>,
         len: usize,
-    ) -> ResponseKind {
-        let result = async {
-            let file = self.retained_file(context, file)?;
-            let mut file = file.0.lock().await;
-            let mut data = vec![0; len];
-            let len = file.read(&mut data).await.map_err(wire_error)?;
-            data.truncate(len);
-            Ok(data)
+    ) {
+        let file = match self.retained_file(&context, file) {
+            Ok(file) => file,
+            Err(error) => {
+                context.respond(ResponseKind::FileRead(Err(error)));
+                return;
+            }
+        };
+        let mut send = context.respond_with_trailer(ResponseKind::FileRead(Ok(())));
+        let mut file = file.0.lock().await;
+        let mut source = (&mut *file).take(len as u64);
+        if io::copy(&mut source, &mut send).await.is_ok() {
+            send.finish();
         }
-        .await;
-        ResponseKind::FileRead(result)
     }
 
     async fn handle_file_write(
         &self,
-        context: &CallContext<VfsProtocol>,
+        context: &mut CallContext<VfsProtocol>,
         file: dolang_rpc::Opaque<crate::FileMarker>,
-        data: Vec<u8>,
     ) -> ResponseKind {
         let result = async {
             let file = self.retained_file(context, file)?;
-            file.0.lock().await.write(&data).await.map_err(wire_error)
+            let trailer = context.request_trailer().ok_or_else(|| {
+                wire_error(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "file write request is missing its data trailer",
+                ))
+            })?;
+            let len = io::copy(trailer, &mut *file.0.lock().await)
+                .await
+                .map_err(wire_error)?;
+            usize::try_from(len).map_err(|_| {
+                wire_error(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "file trailer length does not fit in usize",
+                ))
+            })
         }
         .await;
         ResponseKind::FileWrite(result)
@@ -1904,7 +1940,8 @@ mod tests {
                 handle_preference: OpenHandlePreference::NativePreferred,
             })))
             .await
-            .unwrap();
+            .unwrap()
+            .into_response();
         let ResponseKind::Open(Ok(OpenHandle::Opaque(file))) = response else {
             panic!("remote open did not return an opaque file");
         };
@@ -1912,6 +1949,7 @@ mod tests {
             .call(request(RequestKind::FileClose { file: file.clone() }))
             .await
             .unwrap()
+            .into_response()
         else {
             panic!("file close returned the wrong response");
         };
@@ -1920,6 +1958,7 @@ mod tests {
             .call(request(RequestKind::FileClose { file }))
             .await
             .unwrap()
+            .into_response()
         else {
             panic!("duplicate file close returned the wrong response");
         };

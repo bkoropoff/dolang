@@ -27,14 +27,41 @@ use windows_sys::Win32::System::Threading::GetProcessId;
 
 use crate::{
     Error, Kind, Limits, Protocol, decode, encode_payload, fragment,
+    trailer::{SendShared, TrailerSend},
     transport::{self, Receiver, SendFrame, Sender},
 };
 
-type Pending<R> = HashMap<u64, oneshot::Sender<Result<R, Error>>>;
+type Pending<R> = HashMap<u64, oneshot::Sender<Result<CallResult<R>, Error>>>;
+
+/// `(id, response receiver, cancel_sent)`, returned by `Client::begin`.
+type BeginResult<P> = (
+    u64,
+    oneshot::Receiver<Result<CallResult<<P as Protocol>::Response>, Error>>,
+    bool,
+);
 
 enum Message<Q> {
-    Request { id: u64, value: Q },
-    Cancel { id: u64 },
+    Request {
+        id: u64,
+        value: Q,
+        trailer: fragment::Trailer,
+    },
+    Cancel {
+        id: u64,
+    },
+    /// We stopped reading a response trailer (it arrived unwanted) and want
+    /// to tell the peer to stop sending it. Always results in a wire
+    /// `Kind::Discard` fragment — this connection never has an active
+    /// outgoing send under a response id to abort locally instead.
+    DiscardTrailer {
+        id: u64,
+    },
+    /// A wire `Kind::Discard` fragment arrived, telling us the peer no
+    /// longer wants our request trailer. Applied to our own active send;
+    /// never re-sent to the peer.
+    PeerDiscarded {
+        id: u64,
+    },
 }
 
 struct Inner<P: Protocol> {
@@ -43,6 +70,7 @@ struct Inner<P: Protocol> {
     next_id: Mutex<u64>,
     tasks: Mutex<Option<Tasks>>,
     request_keepalive: Mutex<HashMap<u64, P::Request>>,
+    limits: Limits,
     #[cfg(windows)]
     _peer_process: Option<OwnedHandle>,
 }
@@ -94,7 +122,7 @@ impl<P: Protocol> Drop for Inner<P> {
 }
 
 impl<P: Protocol> Inner<P> {
-    fn complete(&self, id: u64, result: Result<P::Response, Error>) {
+    fn complete(&self, id: u64, result: Result<CallResult<P::Response>, Error>) {
         if let Some(tx) = self.pending.lock().unwrap().remove(&id) {
             let _ = tx.send(result);
         }
@@ -254,6 +282,7 @@ impl<P: Protocol> Client<P> {
             next_id: Mutex::new(0),
             tasks: Mutex::new(None),
             request_keepalive: Mutex::new(HashMap::new()),
+            limits,
             #[cfg(windows)]
             _peer_process: peer_process,
         });
@@ -297,6 +326,44 @@ impl<P: Protocol> Client<P> {
 
     /// Begins one request.
     pub fn call(&self, request: P::Request) -> Call<P> {
+        let (id, rx, cancel_sent) = self.begin(|id| Message::Request {
+            id,
+            value: request,
+            trailer: fragment::Trailer::None,
+        });
+        Call {
+            id,
+            rx,
+            inner: self.inner.clone(),
+            cancel_sent,
+        }
+    }
+
+    /// Begins one request whose raw byte trailer is written through the
+    /// returned streaming body.
+    pub fn call_with_trailer(&self, request: P::Request) -> TrailerSend<Call<P>> {
+        let shared = SendShared::new(self.inner.limits.max_trailer_size);
+        let (id, rx, cancel_sent) = self.begin(|id| Message::Request {
+            id,
+            value: request,
+            trailer: fragment::Trailer::Stream(shared.clone()),
+        });
+        TrailerSend::new(
+            shared,
+            Call {
+                id,
+                rx,
+                inner: self.inner.clone(),
+                cancel_sent,
+            },
+        )
+    }
+
+    /// Shared id-allocation/pending-registration logic for `call` and
+    /// `call_with_trailer`. `build` constructs the outgoing message once the
+    /// id is known. Returns the id, the response receiver, and whether a
+    /// cancel has effectively already been sent (nothing left to cancel).
+    fn begin(&self, build: impl FnOnce(u64) -> Message<P::Request>) -> BeginResult<P> {
         let (tx, rx) = oneshot::channel();
         let tasks = self.inner.tasks.lock().unwrap();
         let id = {
@@ -307,29 +374,15 @@ impl<P: Protocol> Client<P> {
         };
         if tasks.is_none() {
             let _ = tx.send(Err(Error::ConnectionClosed));
-            return Call {
-                id,
-                rx,
-                inner: self.inner.clone(),
-                cancel_sent: true,
-            };
+            return (id, rx, true);
         }
         self.inner.pending.lock().unwrap().insert(id, tx);
-        let queued = self
-            .inner
-            .outgoing
-            .send(Message::Request { id, value: request })
-            .is_ok();
+        let queued = self.inner.outgoing.send(build(id)).is_ok();
         drop(tasks);
         if !queued {
             self.inner.complete(id, Err(Error::ConnectionClosed));
         }
-        Call {
-            id,
-            rx,
-            inner: self.inner.clone(),
-            cancel_sent: !queued,
-        }
+        (id, rx, !queued)
     }
 }
 
@@ -382,10 +435,30 @@ mod windows_tests {
     }
 }
 
+/// A completed call's response, plus an optional raw trailer sent alongside
+/// it. Wrapping the pair (rather than returning a bare tuple) leaves room to
+/// add further metadata later without another breaking change.
+pub struct CallResult<R> {
+    response: R,
+    trailer: Option<crate::TrailerRecv>,
+}
+
+impl<R> CallResult<R> {
+    /// Discards any trailer and returns just the response.
+    pub fn into_response(self) -> R {
+        self.response
+    }
+
+    /// Decomposes into the response and its trailer, if any.
+    pub fn into_response_trailer(self) -> (R, Option<crate::TrailerRecv>) {
+        (self.response, self.trailer)
+    }
+}
+
 /// An in-progress RPC request.
 pub struct Call<P: Protocol> {
     id: u64,
-    rx: oneshot::Receiver<Result<P::Response, Error>>,
+    rx: oneshot::Receiver<Result<CallResult<P::Response>, Error>>,
     inner: Arc<Inner<P>>,
     cancel_sent: bool,
 }
@@ -401,11 +474,11 @@ impl<P: Protocol> Call<P> {
 }
 
 impl<P: Protocol> Future for Call<P> {
-    type Output = Result<P::Response, Error>;
+    type Output = Result<CallResult<P::Response>, Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match Pin::new(&mut self.rx).poll(cx) {
-            Poll::Ready(Ok(Ok(response))) => Poll::Ready(Ok(response)),
+            Poll::Ready(Ok(Ok(result))) => Poll::Ready(Ok(result)),
             Poll::Ready(Ok(Err(e))) => Poll::Ready(Err(e)),
             Poll::Ready(Err(_)) => Poll::Ready(Err(Error::ConnectionClosed)),
             Poll::Pending => Poll::Pending,
@@ -456,9 +529,19 @@ impl<P: Protocol> Writer<P> {
         scheduler: &mut fragment::Scheduler,
     ) -> bool {
         match message {
-            Message::Request { id, value } => self.admit_request(id, value, scheduler).await,
+            Message::Request { id, value, trailer } => {
+                self.admit_request(id, value, trailer, scheduler).await
+            }
             Message::Cancel { id } => {
                 self.admit_cancel(id, scheduler);
+                false
+            }
+            Message::DiscardTrailer { id } => {
+                scheduler.admit_empty(Kind::Discard, id);
+                false
+            }
+            Message::PeerDiscarded { id } => {
+                scheduler.discard_active_trailer(id);
                 false
             }
         }
@@ -468,6 +551,7 @@ impl<P: Protocol> Writer<P> {
         &mut self,
         id: u64,
         value: P::Request,
+        trailer: fragment::Trailer,
         scheduler: &mut fragment::Scheduler,
     ) -> bool {
         let mut probe = self.transport.send();
@@ -479,6 +563,14 @@ impl<P: Protocol> Writer<P> {
             }
         };
         if probe.has_attachments() {
+            if !matches!(&trailer, fragment::Trailer::None) {
+                drop(probe);
+                self.fail_all(Error::Protocol(
+                    "requests with both native-handle attachments and a trailer are not supported"
+                        .into(),
+                ));
+                return true;
+            }
             let header = fragment::FragmentHeader {
                 flags: fragment::Flags::FIRST | fragment::Flags::LAST,
                 kind: Kind::Request,
@@ -492,7 +584,7 @@ impl<P: Protocol> Writer<P> {
             }
         } else {
             drop(probe);
-            scheduler.admit_message(Kind::Request, id, payload);
+            scheduler.admit_message(Kind::Request, id, payload, trailer);
         }
         if self.keep_requests_alive {
             let Some(inner) = self.inner.upgrade() else {
@@ -536,13 +628,35 @@ impl<P: Protocol> Writer<P> {
                 }
                 continue;
             }
+            let ready = tokio::select! {
+                _ = std::future::poll_fn(|cx| scheduler.poll_ready(cx)) => true,
+                message = self.outgoing.recv() => {
+                    let Some(message) = message else { return; };
+                    if self.admit(message, &mut scheduler).await { return; }
+                    false
+                }
+                _ = &mut shutdown => return,
+            };
+            if !ready {
+                continue;
+            }
+            // Do not race an actual fragment write against admission. A
+            // dropped send future could otherwise leave a committed partial
+            // fragment on the transport.
             let result = tokio::select! {
                 result = scheduler.advance(&mut self.transport) => result,
                 _ = &mut shutdown => return,
             };
-            if let Err(err) = result {
-                self.fail_all(err);
-                return;
+            match result {
+                // A streaming trailer producer was dropped mid-message.
+                Ok(Some(id)) => {
+                    let _ = self.complete_err(id, Error::Cancelled);
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    self.fail_all(err);
+                    return;
+                }
             }
         }
     }
@@ -550,7 +664,7 @@ impl<P: Protocol> Writer<P> {
 
 impl<P: Protocol> Reader<P> {
     async fn run(mut self, mut shutdown: oneshot::Receiver<()>) {
-        let mut reassembler = fragment::Reassembler::new(self.limits);
+        let mut reassembler = fragment::StreamReassembler::new(self.limits);
         loop {
             let mut frame = self.transport.recv();
             let header = tokio::select! {
@@ -565,7 +679,7 @@ impl<P: Protocol> Reader<P> {
                 }
             };
             let accepted = tokio::select! {
-                accepted = reassembler.accept_fragment(header, &mut frame) => accepted,
+                accepted = reassembler.accept(header, &mut frame) => accepted,
                 _ = &mut shutdown => return,
             };
             let complete = match accepted {
@@ -575,30 +689,85 @@ impl<P: Protocol> Reader<P> {
                     return;
                 }
             };
-            let Some(fragment::CompleteMessage { kind, id, payload }) = complete else {
-                continue;
-            };
-            let Some(inner) = self.inner.upgrade() else {
-                return;
-            };
-            match kind {
-                Kind::Response => match decode(&payload, &mut frame) {
-                    Ok(response) => {
+            let dispatch = |message: fragment::StreamMessage,
+                            frame: &mut transport::AnyRecv<'_>|
+             -> Result<(), Error> {
+                let Some(inner) = self.inner.upgrade() else {
+                    return Ok(());
+                };
+                let fragment::StreamMessage {
+                    kind,
+                    id,
+                    payload,
+                    trailer,
+                } = message;
+                match kind {
+                    Kind::Response => {
+                        let response = decode(&payload, frame)?;
+                        let trailer = trailer.map(crate::TrailerRecv::new);
                         inner.request_keepalive.lock().unwrap().remove(&id);
-                        inner.complete(id, Ok(response));
+                        inner.complete(id, Ok(CallResult { response, trailer }));
                     }
-                    Err(error) => {
-                        inner.fail(error);
+                    Kind::Error => {
+                        inner.request_keepalive.lock().unwrap().remove(&id);
+                        inner.complete(id, Err(Error::Cancelled));
+                    }
+                    Kind::Discard => {
+                        let _ = inner.outgoing.send(Message::PeerDiscarded { id });
+                    }
+                    kind => return Err(Error::Protocol(format!("unexpected {kind:?} frame"))),
+                }
+                Ok(())
+            };
+            match complete {
+                fragment::StreamEvent::None => {}
+                fragment::StreamEvent::Aborted {
+                    kind,
+                    id,
+                    dispatched,
+                } => {
+                    if kind != Kind::Response {
+                        fail(
+                            &self.inner,
+                            Error::Protocol(format!("unexpected aborted {kind:?} message")),
+                        );
                         return;
                     }
-                },
-                Kind::Error => {
-                    inner.request_keepalive.lock().unwrap().remove(&id);
-                    inner.complete(id, Err(Error::Cancelled));
+                    if !dispatched && let Some(inner) = self.inner.upgrade() {
+                        inner.request_keepalive.lock().unwrap().remove(&id);
+                        inner.complete(id, Err(Error::Cancelled));
+                    }
                 }
-                kind => {
-                    inner.fail(Error::Protocol(format!("unexpected {kind:?} frame")));
-                    return;
+                fragment::StreamEvent::Message(message) => {
+                    if let Err(error) = dispatch(message, &mut frame) {
+                        fail(&self.inner, error);
+                        return;
+                    }
+                }
+                fragment::StreamEvent::Trailer {
+                    id,
+                    message,
+                    shared,
+                    len,
+                    notify_discard,
+                } => {
+                    if let Some(message) = message
+                        && let Err(error) = dispatch(message, &mut frame)
+                    {
+                        fail(&self.inner, error);
+                        return;
+                    }
+                    if notify_discard && let Some(inner) = self.inner.upgrade() {
+                        let _ = inner.outgoing.send(Message::DiscardTrailer { id });
+                    }
+                    // SAFETY: the lease retains the receiver borrow and
+                    // clears the erased token before it ends.
+                    let lease = unsafe { crate::trailer::RecvShared::grant(&shared, frame, len) };
+                    if let Err(error) = crate::trailer::RecvShared::wait_fragment(&shared).await {
+                        fail(&self.inner, error.into());
+                        return;
+                    }
+                    lease.complete();
                 }
             }
         }
@@ -634,6 +803,7 @@ mod tests {
             next_id: Mutex::new(1),
             tasks: Mutex::new(None),
             request_keepalive: Mutex::new(HashMap::new()),
+            limits: Limits::default(),
             #[cfg(windows)]
             _peer_process: None,
         });
@@ -654,8 +824,14 @@ mod tests {
     async fn completed_call_does_not_send_cancel_when_dropped() {
         let (call, mut outgoing) = pending_call();
         let inner = call.inner.clone();
-        call.inner.complete(call.id, Ok(7));
-        assert_eq!(call.await.unwrap(), 7);
+        call.inner.complete(
+            call.id,
+            Ok(CallResult {
+                response: 7,
+                trailer: None,
+            }),
+        );
+        assert_eq!(call.await.unwrap().into_response(), 7);
         assert!(matches!(
             outgoing.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
