@@ -19,9 +19,9 @@ A protocol is a marker type. It keeps endpoint type signatures short and is
 the future home for protocol-wide static configuration.
 
 ```rust
-trait Protocol {
-    type Request: Serialize + DeserializeOwned;
-    type Response: Serialize + DeserializeOwned;
+trait Protocol: Send + Sync + 'static {
+    type Request: Serialize + DeserializeOwned + Send + 'static;
+    type Response: Serialize + DeserializeOwned + Send + 'static;
 }
 
 struct Vfs;
@@ -37,9 +37,15 @@ semantically significant for call direction and native-handle transfer. A
 client sends `P::Request` and receives the correlated `P::Response`; the server
 receives requests and sends responses.
 
+Neither type has a public constructor. Both are obtained only by binding an
+already-negotiated [`UnboundClient`/`UnboundServer`](#session-establishment)
+to a concrete `P`, which guarantees every `Client<P>`/`Server<P>` has already
+completed the handshake before an application can call or serve through it.
+
 ```rust
 impl<P: Protocol> Client<P> {
     fn call(&self, request: P::Request) -> Call<P>;
+    fn call_with_trailer(&self, request: P::Request) -> TrailerSend<Call<P>>;
 }
 
 impl<P: Protocol> Call<P> {
@@ -47,10 +53,15 @@ impl<P: Protocol> Call<P> {
 }
 
 impl<P: Protocol> Future for Call<P> {
-    type Output = Result<P::Response, Error>;
+    type Output = Result<CallResult<P::Response>, Error>;
     // ...
 }
 ```
+
+`CallResult<R>` wraps the response together with an optional inbound trailer:
+`into_response(self) -> R` discards any trailer, `into_response_trailer(self)
+-> (R, Option<TrailerRecv>)` retains it. See
+[Payload Trailers](#payload-trailers-and-fragmentation).
 
 Per-variant request/response typing is intentionally deferred. An
 application-level macro can later generate a dispatch enum and a trait that
@@ -61,32 +72,110 @@ Callbacks and server-initiated requests are also deferred. They should use an
 explicitly separate reverse-direction protocol rather than assuming that
 `Response` is a callback request type.
 
+## Session Establishment
+
+`Client<P>`/`Server<P>` are reached only through `Builder`, which runs the
+handshake described in [Framing And Multiplexing](#framing-and-multiplexing)
+before an application ever picks a `P` to bind to:
+
+```rust
+let unbound = Builder::new("vfs", &[1])
+    .max_payload_size(4 * 1024 * 1024)
+    .client(stream)     // or .client_split/.client_unix/.client_named_pipe_*
+    .await?;
+
+assert_eq!(unbound.name(), "vfs");
+let client: Client<Vfs> = unbound.bind();
+```
+
+`Builder::new(name, versions)` takes the mandatory application-protocol
+descriptor as two plain arguments. Chainable setters
+(`max_fragment_size`, `max_payload_size`, `max_trailer_size`,
+`trailer_recv_copy_threshold`, `trailer_recv_demand_copy_threshold`,
+`trailer_send_copy_threshold`, `max_incomplete_messages`,
+`max_incomplete_trailers`) override individual size and concurrency limits;
+these compose the crate-private `Limits` struct, which is not itself public.
+Terminal `async` methods consume the builder and negotiate over a specific
+transport shape, one set for each endpoint role:
+
+- Client: `client`, `client_split`, `client_unix`, and, on Windows, the
+  `unsafe` `client_named_pipe_server`/`client_named_pipe_client` (peer-process
+  trust, see [Direct Native Handles](#direct-native-handles)).
+- Server: `server`, `server_split`, `server_unix`, and, on Windows,
+  `server_named_pipe_server`/`server_named_pipe_client`.
+
+Each returns `Result<UnboundClient, Error>` or `Result<UnboundServer, Error>`.
+An `Unbound*` value has already completed the handshake and always carries a
+resolved application-protocol name and negotiated version.
+
+```rust
+impl UnboundClient {
+    fn name(&self) -> &str;      // negotiated application-protocol name
+    fn version(&self) -> u16;    // negotiated application-protocol version
+    fn bind<P: Protocol>(self) -> Client<P>;
+}
+
+impl UnboundServer {
+    fn name(&self) -> &str;
+    fn version(&self) -> u16;
+    fn bind<P: Protocol>(self) -> Server<P>;
+}
+```
+
+`version()` reports the negotiated **application**-protocol version, not the
+RPC framing version — the framing version is an implementation detail of
+`dolang-rpc` itself, uninteresting to a caller choosing which `P` to bind to.
+
+Deferring the choice of `P` this way lets a listener accept a connection,
+inspect which application protocol and version the peer actually offered, and
+only then decide how to bind it — without requiring the caller to guess `P`
+before the handshake runs.
+
 ## Server Dispatch
 
 `Server::serve` owns the receive loop and dispatches incoming requests to an
 application handler. The session runs each request independently and can
-cancel it later. The handler receives an exclusive `CallContext<P>` tied to
+cancel it later. The handler receives its `CallContext<P>` by value, tied to
 that request:
 
 ```rust
 impl<P: Protocol> Server<P> {
     async fn serve<H>(self, handler: H) -> Result<(), Error>
     where
-        H: AsyncFn(&mut CallContext<P>, P::Request) -> P::Response
-            + Send
-            + Sync
-            + 'static;
+        H: AsyncFn(CallContext<P>, P::Request) + Send + Sync + 'static;
 }
 ```
 
 The handler is shared between independently dispatched requests and may be
 called concurrently. The session owns each returned future, so an unguarded
-request remains abortable. Application-level failures belong in `P::Response`.
+request remains abortable. The handler responds by consuming its context —
+`context.respond(response)` or `context.respond_with_trailer(response)` — not
+by returning a value; application-level failures still belong in
+`P::Response`. A handler that drops its context without responding causes the
+session to send `Error { id }` for that request.
 
-`CallContext<P>` is not `Server<P>` and is not cloneable. Its exclusive borrow
-makes request-scoped state linear. It provides session services appropriate to
-request processing, including opaque object registration, acquisition, and
-unregistering, and any future callbacks.
+`CallContext<P>` is not `Server<P>` and is not cloneable. Its exclusive
+ownership makes request-scoped state linear. It provides session services
+appropriate to request processing:
+
+```rust
+impl<P: Protocol> CallContext<P> {
+    fn request_trailer(&mut self) -> Option<&mut TrailerRecv>;
+    fn respond(self, response: P::Response);
+    fn respond_with_trailer(self, response: P::Response) -> TrailerSend<()>;
+    fn shutdown(&self);
+    async fn cancel_guard<T, F>(&mut self, operation: F) -> Result<T, RequestCancelled>
+    where
+        F: AsyncFnOnce(&mut CallContext<P>) -> T;
+    fn register<T: OpaqueResource>(&self, value: T) -> Opaque<T::Marker>;
+    fn acquire<T: OpaqueResource>(&self, value: Opaque<T::Marker>) -> Result<OpaqueGuard<T>, InvalidOpaque>;
+    fn unregister<T: OpaqueResource>(&self, value: Opaque<T::Marker>) -> Result<Option<T>, InvalidOpaque>;
+}
+```
+
+`shutdown` stops the server from accepting new requests and lets `serve`
+return once in-flight ones finish, without severing the transport out from
+under them.
 
 ## Cancellation Guards
 
@@ -124,101 +213,182 @@ counter in practice, so IDs are never reused during a session. When both peers
 originate a class of ID, the frame format identifies the origin role, or the
 protocol uses independent directional ID spaces.
 
-Initial frame kinds are:
+Frame kinds are:
 
 ```text
-Request  { id, payload }
-Response { id, payload }
-Error    { id, kind }
-Notify   { id, payload }
-Cancel   { id }
+Request   { id, payload }
+Response  { id, payload }
+Error     { id, kind }
+Notify    { id, payload }
+Cancel    { id }
+Discard   { id }
+Negotiate { id, payload }
 ```
 
 `Request` and `Response` provide ordinary RPC correlation. `Notify` is for
 one-way protocol messages. `Error` is a terminal session-level failure for the
 correlated request, initially including cancellation. `Cancel` controls a
-request already in flight. The exact binary envelope is an implementation
-detail, but it must preserve frame boundaries and associate native-handle
-attachment serialization state with precisely one frame. Attachment counts are
-not part of the envelope: attachment representations in the serialized payload
-implicitly determine which handles its deserializer consumes.
+request already in flight. `Discard` is an advisory, non-fatal signal that the
+receiver no longer wants a request's or response's trailer; see
+[Payload Trailers](#payload-trailers-and-fragmentation). `Negotiate` is the
+handshake message described below, and must run to completion before any
+other kind is valid on a connection.
 
-Session establishment may later negotiate protocol version, maximum frame
-size, and optional capabilities.
+The exact binary envelope is an implementation detail, but it must preserve
+frame boundaries and associate native-handle attachment serialization state
+with precisely one frame. Attachment counts are not part of the envelope:
+attachment representations in the serialized payload implicitly determine
+which handles its deserializer consumes.
 
-## Future Payload Trailers And Fragmentation
+### Header Layout
 
-Bulk byte data should not have to pass through postcard when its structure is
-already described by the request or response. A future message envelope may
-therefore carry a raw payload trailer after the postcard payload. Owned
-trailers use `Bytes`, allowing existing immutable buffers to enter the writer
-without another copy. On receive, the session can read directly into a
-preallocated per-message `BytesMut` and expose the resulting `Bytes` through
-`CallContext` for requests and a trailer-aware client call API for responses.
-Per-message and connection-wide limits must include both postcard and trailer
-bytes.
+Every frame (fragment) is preceded by a 16-byte header:
 
-Large messages and trailers may be fragmented and interleaved by message ID.
-Each fragment header carries a small flags field including `IS_FIRST` and
-`IS_LAST`. The first fragment contains the message kind, postcard payload, and
-total trailer length; continuation fragments contain trailer bytes. A fragment
-with both flags set is a complete unfragmented message, so ordinary small calls
-retain the one-frame fast path. An abort indicator terminates an incomplete
-message with an error.
-
-```text
-Fragment { id, flags: IS_FIRST | IS_LAST, message }
-Fragment { id, flags: IS_FIRST, message, trailer_len }
-Fragment { id, flags: 0, trailer_bytes }
-Fragment { id, flags: IS_LAST, bytes: [] }
-Fragment { id, flags: ABORT, error }
+```rust
+struct RawFragmentHeader {
+    flags: [u8; 1],
+    kind: [u8; 1],
+    reserved: [u8; 2],
+    payload_len: [u8; 4],
+    id: [u8; 8],
+}
 ```
 
-The session writer can schedule one bounded fragment from each active message
-before checking newly queued messages, preventing a bulk transfer from
-blocking small calls and control messages. Abort and cancellation fragments
-receive priority. The receiver retains incomplete assemblies by message ID;
-`IS_LAST` dispatches a request or completes a response, while `ABORT` discards
-an incomplete request or completes an incomplete response with an error.
-Unknown, duplicate, and terminally completed fragment sequences are protocol
-errors or defined late-message no-ops as appropriate.
+`reserved` is always zero on write and is read but never validated on
+receive — a peer sending non-zero reserved bytes today must not be rejected,
+which keeps it available for a future header-level extension without a
+breaking wire change.
+
+### Handshake And Application-Protocol Negotiation
+
+Session establishment negotiates two independent things over a single
+`Negotiate` message exchange, before any other frame kind is valid:
+
+- The RPC framing version itself: each peer's `id` field (normally an 8-byte
+  message ID) is repurposed during negotiation to carry that peer's sorted
+  ascending, zero-terminated list of supported `u8` framing versions (up to 8
+  fit). Each peer independently selects the maximum mutually supported
+  version from the intersection — no acknowledgement round trip is needed. A
+  process implementing this crate today only ever offers version `1`.
+- A mandatory application-protocol name and version, carried in the payload
+  rather than the `id` field: `{ version_blobs: Vec<Vec<u8>>, app_protocol:
+  (String, Vec<u16>) }` (a struct — postcard serializes it identically to a
+  plain tuple of its field types, so this is purely a readability choice, not
+  a wire format one), where `version_blobs` is one length-prefixed handshake
+  blob per offered RPC version (reserved for future per-version handshake
+  data; not yet consulted by either endpoint) and `app_protocol` is this
+  peer's application protocol name plus a sorted ascending list of supported
+  `u16` versions. Application-protocol versions are `u16` rather than `u8`
+  because application protocols built on top of `dolang-rpc` are expected to
+  revise much more often than the RPC framing itself, and they aren't
+  limited by the `id` field's 8-slot capacity.
+
+There is no way to negotiate a session without an application protocol —
+`negotiate()` requires both peers to supply a name and version list, with no
+skip/opt-out path, since [`Builder`](#session-establishment) is the only way
+to reach it and always has one to offer. This keeps `NegotiationResult` and
+every caller of it free of an `Option` that could never actually be `None`
+in practice.
+
+A mismatch — no mutually supported RPC version, a mismatched application
+protocol name, or no mutually supported application-protocol version — makes
+the detecting side send a zero-payload `Negotiate` fragment with `FIRST |
+ABORT` set, best-effort, then fail locally. The three cases produce distinct
+local error messages (though the wire-level abort signal itself is
+undifferentiated, matching the ordinary fragment abort mechanism below), so a
+caller can tell an RPC-framing incompatibility from an application-protocol
+name or version mismatch.
+
+Each side drives its own write and its peer's read concurrently rather than
+sequentially, so a handshake payload large enough to need more than one
+read/write pass on either end cannot deadlock waiting for the other side to
+finish sending first.
+
+## Payload Trailers And Fragmentation
+
+Bulk byte data does not have to pass through postcard when its structure is
+already described by the request or response. A message envelope can
+therefore carry a raw payload trailer after the postcard payload, streamed
+through `AsyncWrite`/`AsyncRead` rather than buffered whole:
+
+```rust
+impl<P: Protocol> Client<P> {
+    fn call_with_trailer(&self, request: P::Request) -> TrailerSend<Call<P>>;
+}
+impl<R> CallResult<R> {
+    fn into_response_trailer(self) -> (R, Option<TrailerRecv>);
+}
+impl<P: Protocol> CallContext<P> {
+    fn request_trailer(&mut self) -> Option<&mut TrailerRecv>;
+    fn respond_with_trailer(self, response: P::Response) -> TrailerSend<()>;
+}
+```
+
+`TrailerSend<T>` implements `AsyncWrite`; `finish(self) -> T` completes the
+trailer and returns the wrapped value (`Call<P>` or `()`). `TrailerRecv`
+implements `AsyncRead`.
+
+Internally, sends stage through a `BytesMut` buffer below
+`trailer_send_copy_threshold` and switch to zero-copy vectored writes above
+it; receives use `trailer_recv_copy_threshold` and
+`trailer_recv_demand_copy_threshold` the same way on the read side. All three
+thresholds, plus `max_trailer_size`, `max_incomplete_messages`, and
+`max_incomplete_trailers`, are `Limits` fields configured through
+[`Builder`](#session-establishment). Per-message and connection-wide limits
+cover both the postcard payload and the trailer.
+
+Large messages and trailers are fragmented and interleaved by message ID.
+Each fragment header carries a flags byte:
+
+```text
+FIRST   0b0001  # first fragment of a message
+LAST    0b0010  # commits/completes the message or trailer
+ABORT   0b0100  # discards an incomplete message or trailer with an error
+TRAILER 0b1000  # fragment carries trailer bytes, not postcard payload
+```
+
+The first fragment of a message carries its kind and postcard payload;
+`FIRST | LAST` together is a complete unfragmented message, so ordinary small
+calls keep the one-frame fast path with no reassembly bookkeeping at all. A
+trailer cannot complete within the message's `FIRST` fragment (`FIRST | LAST
+| TRAILER` together is rejected as malformed) — a trailer-bearing message is
+always dispatched to the application (request handler or waiting `Call`)
+before its trailer, if any, is known to be complete, and the trailer itself
+always ends with a separate zero-length `TRAILER | LAST` fragment even when
+the preceding data fragment contained the trailer's last byte, so the
+message is never committed while a caller-visible `TrailerSend`/`TrailerRecv`
+transfer could still be outstanding.
+
+The sender-side scheduler sends one bounded fragment from each active message
+before revisiting the queue, so a bulk transfer cannot starve small calls or
+control messages; `Cancel`/`Error`/`ABORT` fragments are queued ahead of
+ordinary ones. It also tracks whether each write completed atomically and
+shrinks its target fragment size after a short write, growing it back after
+subsequent atomic ones — this keeps fragment sizes adaptive to what the
+transport can actually accept in one write, and is intentionally
+future-extensible to a peer-signaled throttling hint.
+
+The receiver retains incomplete assemblies by message ID, bounded by
+`max_incomplete_messages`/`max_incomplete_trailers`/`max_fragment_size`/
+`max_payload_size`/`max_trailer_size`. `LAST` dispatches a request or
+completes a response; `ABORT` discards an incomplete request or completes an
+incomplete response with an error. Unknown, duplicate, and
+terminally-completed fragment sequences are protocol errors or defined
+late-message no-ops as appropriate.
+
+A receiver that no longer wants an in-progress trailer (e.g. the application
+dropped it) does not need to send anything immediately — it becomes an issue
+only if the peer keeps sending `TRAILER` fragments for that ID, at which point
+the receiver sends a `Discard { id }` notice once. `Discard` is advisory: it
+never changes the outcome of the request or response it names, it only tells
+the sender it can stop spending bandwidth on a trailer nobody will read.
 
 Unix messages carrying `SCM_RIGHTS` ancillary data remain unfragmented. The
-association between descriptors, stream fragments, and future interleaved
-message assemblies is too platform-dependent to make fragmentation a useful
-V1 extension. The sender must be able to query whether serialization attached
-descriptors and select the atomic path. Such messages remain subject to the
-ordinary maximum frame size.
-
-A later optimization may send a trailer borrowed from storage which is not
-independently owned or `'static`, such as a Do GC object. The `Call` retains the
-Rust borrow, while shared state contains a lifetime-erased slice which the
-writer may access only while holding a lock. Dropping the call invalidates the
-slice under the same lock before the borrow ends. The writer awaits readiness
-without touching the pointer and holds the lock only around each nonblocking
-write.
-
-Invalidation can race with a partially transmitted data fragment. Once a
-fragment header declares `N` bytes, the sender must finish that fragment's
-declared length to preserve stream synchronization. If its borrowed slice is
-invalidated, it pads the unsent portion with arbitrary owned bytes and then
-sends `ABORT`; the receiver drops all accumulated bytes.
-
-Raw trailers always use a separate zero-length `IS_LAST` fragment, even when
-the preceding data fragment contains the end of the trailer. Marking the data
-fragment itself `IS_LAST` would commit the message before a borrowed slice was
-fully written. With vectored I/O, the writer may attempt the final trailer data
-and the owned terminal header in one operation. If the write reaches any part
-of the terminal header, all trailer bytes were written first, so the writer can
-safely finish that partial header. If the borrowed payload must instead be
-aborted before any terminal-header byte was written, the writer completes the
-declared data-fragment length with padding and substitutes an `ABORT` fragment.
-
-This is an unsafe implementation technique, not a public promise that
-arbitrary non-`Send` or movable storage can be borrowed. The backing storage
-must remain stable and safe for immutable cross-thread access until
-invalidation completes. Owned `Bytes` trailers are the preferred initial
-implementation.
+association between descriptors, stream fragments, and interleaved message
+assemblies is too platform-dependent to make fragmentation apply there. The
+sender queries whether serialization attached descriptors and selects the
+atomic path instead. Such messages remain subject to the ordinary maximum
+frame size.
 
 ## Cancellation
 
@@ -339,12 +509,13 @@ holds the process-handle rights needed to duplicate in both directions. The
 named-pipe endpoint role is independent of the RPC role and is used only to
 discover the peer process ID.
 
-Windows named-pipe client construction takes ownership of a trusted peer
-process handle. It verifies that the process ID represented by the handle
-matches the process ID reported by the named pipe, then retains the handle for
-the lifetime of the session. The handle must grant query and synchronization
-access so a future shared-memory handle-transfer implementation can fence
-cleanup on peer process exit.
+Windows named-pipe client construction (`Builder::client_named_pipe_server`/
+`client_named_pipe_client`, both `unsafe fn`) takes ownership of a trusted
+peer process handle. It verifies that the process ID represented by the
+handle matches the process ID reported by the named pipe, then retains the
+handle for the lifetime of the session. The handle must grant query and
+synchronization access so a future shared-memory handle-transfer
+implementation can fence cleanup on peer process exit.
 
 The Windows client retains each outbound request value until its correlated
 response or error arrives, ensuring any process-local handle values remain
@@ -423,12 +594,14 @@ trait OpaqueResource: Send + Sync + 'static {
     type Marker: ?Sized + 'static;
 }
 
+// Available on `CallContext<P>`:
 fn register<T: OpaqueResource>(&self, value: T) -> Opaque<T::Marker>;
 
-fn acquire<T>(&self, opaque: Opaque<T::Marker>)
-    -> Result<OpaqueGuard<T>, InvalidOpaque>
-where
-    T: OpaqueResource;
+fn acquire<T: OpaqueResource>(&self, value: Opaque<T::Marker>)
+    -> Result<OpaqueGuard<T>, InvalidOpaque>;
+
+fn unregister<T: OpaqueResource>(&self, value: Opaque<T::Marker>)
+    -> Result<Option<T>, InvalidOpaque>;
 ```
 
 `Opaque<T::Marker>` supplies the static protocol-level type. `acquire::<T>`
@@ -439,8 +612,10 @@ the downcast is valid.
 The owner stores each value as an erased, reference-counted object together
 with its concrete `TypeId`. Acquiring an object retains the entry before
 returning a typed `OpaqueGuard<T>`. Unregistering removes the table's public
-reference. Thus a concurrent acquire either fails with `InvalidOpaque`, or
-succeeds and its guard keeps the concrete object alive until the guard drops.
+reference and returns the resource when no acquired guard still shares its
+ownership, or `None` when one does. Thus a concurrent acquire either fails
+with `InvalidOpaque`, or succeeds and its guard keeps the concrete object
+alive until the guard drops.
 
 Opaque lifetime is an application convention: the owner explicitly registers
 and unregisters objects. Receiving, copying, or dropping an `Opaque<M>` does
@@ -457,21 +632,27 @@ to `Opaque<M>` for a remote one.
 ## Transport Abstraction
 
 A transport connection is split into `transport::Sender` and
-`transport::Receiver` halves. The session writer owns the sender and the receive
-loop owns the receiver, eliminating session-level transport mutexes and `Arc`
-wrappers. A backend may still share one internally synchronized full-duplex
-descriptor through an `Arc`, as the Unix `AsyncFd` and Windows named-pipe
-implementations do, while a stdio implementation may use unrelated output and
-input streams. The sender does not synchronize multiple frame writes; its
-session task remains the sole frame writer.
+`transport::Receiver` halves, both crate-internal (`pub(crate)`) — no part of
+the transport layer is public API; applications only ever see `Client<P>`/
+`Server<P>`/`UnboundClient`/`UnboundServer`. The session writer owns the
+sender and the receive loop owns the receiver, eliminating session-level
+transport mutexes and `Arc` wrappers. A backend may still share one
+internally synchronized full-duplex descriptor through an `Arc`, as the Unix
+`AsyncFd` and Windows named-pipe implementations do, while a stdio
+implementation may use unrelated output and input streams. The sender does
+not synchronize multiple frame writes; its session task remains the sole
+frame writer.
 
 `Sender` exposes an associated transactional `Send` type whose consuming
 `finish` method writes the completed frame. `Receiver`
 exposes an associated `RecvFrame<'_>` type which performs both byte reads and
 native-handle dequeues while preserving one frame's descriptor-index origin.
-Closed internal enums can select and delegate to byte-stream, Unix socket,
-Windows local, and pipe implementations without making the generic buffer
-methods object-safe.
+Closed internal enums (`AnySender`/`AnyReceiver`/`AnySend`/`AnyRecv`) select
+and delegate to byte-stream (stdio, TCP, or any other `AsyncRead`/
+`AsyncWrite`), Unix socket, and Windows named-pipe implementations without
+making the generic buffer methods object-safe. All frame kinds, including
+`Negotiate`, `Discard`, and fragmented/trailer-bearing messages, flow through
+this same abstraction regardless of backend.
 
 Transport support is summarized below:
 
@@ -491,12 +672,15 @@ have the peer process handle and the required duplication rights.
 - Generated IDL, request enums, and per-request response typing.
 - Server callbacks or a bidirectional application RPC model.
 - Winsock socket transfer.
-- Raw payload trailers and interleaved message fragmentation.
+- Borrowed (non-owned, non-`'static`) payload trailers.
 - Shared-memory reclamation of ambiguously transferred Windows handles.
 - Exactly-once delivery or distributed ownership certainty after connection
   failure.
 - Making direct handles work over remote transports.
 
-The initial implementation includes the session core, explicit serde context,
-request/response multiplexing, opaque-object table, Unix descriptor transfer,
-and role-specific Windows named-pipe handle transfer.
+The current implementation includes the session core, handshake with
+application-protocol negotiation, staged `Builder`/`UnboundClient`/
+`UnboundServer` construction, explicit serde context, request/response
+multiplexing, message fragmentation, streaming payload trailers,
+opaque-object table, Unix descriptor transfer, and role-specific Windows
+named-pipe handle transfer.

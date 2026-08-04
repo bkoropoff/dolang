@@ -16,18 +16,30 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 async fn connected_pair() -> (Client, tokio::task::JoinHandle<io::Result<()>>) {
     let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
-    let server = Server::new(server_stream);
-    let task = tokio::spawn(server.serve());
-    (Client::new(client_stream), task)
+    // `Server::new` itself now runs the RPC handshake, so it must be driven
+    // concurrently with the client's own construction below rather than
+    // completed first — otherwise each side blocks waiting for the other.
+    let task = tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
+    (Client::new(client_stream).await.unwrap(), task)
 }
 
 async fn connected_split_pair() -> (Client, tokio::task::JoinHandle<io::Result<()>>) {
     let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
     let (client_reader, client_writer) = tokio::io::split(client_stream);
     let (server_reader, server_writer) = tokio::io::split(server_stream);
-    let server = Server::new_split(server_reader, server_writer);
-    let task = tokio::spawn(server.serve());
-    (Client::new_split(client_reader, client_writer), task)
+    let task = tokio::spawn(async move {
+        Server::new_split(server_reader, server_writer)
+            .await
+            .unwrap()
+            .serve()
+            .await
+    });
+    (
+        Client::new_split(client_reader, client_writer)
+            .await
+            .unwrap(),
+        task,
+    )
 }
 
 #[cfg(not(windows))]

@@ -117,7 +117,7 @@ async fn client_from_owned_fd() {
 
     let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
     let fd: OwnedFd = stream.into_std().unwrap().into();
-    let client = Client::try_from(fd).unwrap();
+    let client = Client::from_owned_fd(fd).await.unwrap();
 
     let mut child = client.command(typed_str("true")).spawn().await.unwrap();
     let status = child.wait().await.unwrap();

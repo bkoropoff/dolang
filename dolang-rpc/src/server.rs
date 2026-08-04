@@ -1,10 +1,7 @@
 use std::{
     collections::HashMap,
     marker::PhantomData,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex},
 };
 
 use bytes::Buf;
@@ -12,12 +9,7 @@ use futures::{
     StreamExt,
     future::{AbortHandle, Abortable},
 };
-#[cfg(windows)]
-use tokio::net::windows::named_pipe::{NamedPipeClient, NamedPipeServer};
-use tokio::{
-    io::{AsyncRead, AsyncWrite},
-    sync::{mpsc, oneshot},
-};
+use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     Error, InvalidOpaque, Kind, Limits, Opaque, OpaqueGuard, OpaqueResource, Protocol, decode,
@@ -74,56 +66,16 @@ struct Cancellation {
 }
 
 impl<P: Protocol> Server<P> {
-    /// Creates a server over a bidirectional byte stream.
-    pub fn new<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(stream: T) -> Self {
-        let (sender, receiver) = transport::generic_duplex(stream);
-        Self::from_transport(
-            transport::AnySender::Generic(sender),
-            transport::AnyReceiver::Generic(receiver),
-        )
-    }
-
-    /// Creates a server over separate byte-stream reader and writer halves.
-    pub fn new_split<R, W>(reader: R, writer: W) -> Self
-    where
-        R: AsyncRead + Send + 'static,
-        W: AsyncWrite + Send + 'static,
-    {
-        let (sender, receiver) = transport::generic(reader, writer);
-        Self::from_transport(
-            transport::AnySender::Generic(sender),
-            transport::AnyReceiver::Generic(receiver),
-        )
-    }
-
-    #[cfg(unix)]
-    pub fn from_unix_stream(stream: std::os::unix::net::UnixStream) -> std::io::Result<Self> {
-        let (sender, receiver) = transport::unix::unix(stream)?;
-        Ok(Self::from_transport(
-            transport::AnySender::Unix(sender),
-            transport::AnyReceiver::Unix(receiver),
-        ))
-    }
-
-    #[cfg(windows)]
-    pub fn from_named_pipe_server(pipe: NamedPipeServer) -> std::io::Result<Self> {
-        let (sender, receiver) = transport::windows::server_pipe(pipe, true)?;
-        Ok(Self::from_transport(
-            transport::AnySender::Windows(sender),
-            transport::AnyReceiver::Windows(receiver),
-        ))
-    }
-
-    #[cfg(windows)]
-    pub fn from_named_pipe_client(pipe: NamedPipeClient) -> std::io::Result<Self> {
-        let (sender, receiver) = transport::windows::client_pipe(pipe, true)?;
-        Ok(Self::from_transport(
-            transport::AnySender::Windows(sender),
-            transport::AnyReceiver::Windows(receiver),
-        ))
-    }
-
-    fn from_transport(sender: transport::AnySender, receiver: transport::AnyReceiver) -> Self {
+    /// Builds a `Server` from an already-negotiated transport. Only reachable
+    /// via [`UnboundServer::bind`](crate::UnboundServer::bind) — `Server` has
+    /// no public constructors of its own, so it's never possible to hold one
+    /// that hasn't already completed `fragment::negotiate`, and `serve`
+    /// never needs to negotiate itself.
+    pub(crate) fn from_transport(
+        sender: transport::AnySender,
+        receiver: transport::AnyReceiver,
+        limits: Limits,
+    ) -> Self {
         let (outgoing, outgoing_rx) = mpsc::unbounded_channel();
         Self {
             sender,
@@ -135,16 +87,9 @@ impl<P: Protocol> Server<P> {
                 objects: opaque::ObjectTable::default(),
                 shutdown: None,
             })),
-            limits: Limits::default(),
+            limits,
             marker: PhantomData,
         }
-    }
-
-    /// Sets explicit size and concurrency limits. Must be called before
-    /// [`Server::serve`].
-    pub fn with_limits(mut self, limits: Limits) -> Self {
-        self.limits = limits;
-        self
     }
 
     /// Serves requests until the peer disconnects or the session fails.
@@ -251,7 +196,7 @@ impl<P: Protocol> Server<P> {
                                     request_trailer: trailer,
                                     outgoing: task_outgoing,
                                     responded: false,
-                                    shutdown_on_respond: AtomicBool::new(false),
+                                    shutdown_on_respond: false,
                                     limits,
                                     marker: PhantomData,
                                 };
@@ -459,7 +404,7 @@ pub struct CallContext<P: Protocol> {
     request_trailer: Option<crate::TrailerRecv>,
     outgoing: mpsc::UnboundedSender<Message<P::Response>>,
     responded: bool,
-    shutdown_on_respond: AtomicBool,
+    shutdown_on_respond: bool,
     limits: Limits,
     marker: PhantomData<fn() -> P>,
 }
@@ -472,9 +417,7 @@ impl<P: Protocol> CallContext<P> {
 
     /// Sends an ordinary response and consumes this call context.
     pub fn respond(mut self, response: P::Response) {
-        if let Some(trailer) = self.request_trailer.as_mut() {
-            trailer.discard();
-        }
+        drop(self.request_trailer.take());
         self.responded = true;
         self.inner.lock().unwrap().outstanding.remove(&self.id);
         let _ = self.outgoing.send(Message::Response {
@@ -487,9 +430,7 @@ impl<P: Protocol> CallContext<P> {
 
     /// Sends a response head and returns its streaming trailer body.
     pub fn respond_with_trailer(mut self, response: P::Response) -> crate::TrailerSend<()> {
-        if let Some(trailer) = self.request_trailer.as_mut() {
-            trailer.discard();
-        }
+        drop(self.request_trailer.take());
         let shared = crate::trailer::SendShared::new(Kind::Response, self.id, &self.limits);
         self.responded = true;
         self.inner.lock().unwrap().outstanding.remove(&self.id);
@@ -503,12 +444,12 @@ impl<P: Protocol> CallContext<P> {
     }
 
     /// Stops accepting requests and gracefully drains the connection.
-    pub fn shutdown(&self) {
-        self.shutdown_on_respond.store(true, Ordering::Release);
+    pub fn shutdown(&mut self) {
+        self.shutdown_on_respond = true;
     }
 
     fn finish_shutdown(&self) {
-        if self.shutdown_on_respond.load(Ordering::Acquire)
+        if self.shutdown_on_respond
             && let Some(shutdown) = self.inner.lock().unwrap().shutdown.take()
         {
             let _ = shutdown.send(());

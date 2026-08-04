@@ -264,7 +264,9 @@ fn serve_stdio() -> io::Result<()> {
         .enable_all()
         .build()?
         .block_on(async {
-            let server = Server::new_split(tokio::io::stdin(), tokio::io::stdout());
+            let server = Server::new_split(tokio::io::stdin(), tokio::io::stdout())
+                .await
+                .map_err(crate::Error::into_io_error)?;
             #[cfg(windows)]
             {
                 tokio::select! {
@@ -371,7 +373,7 @@ fn serve_named_pipe(pipe_name: &OsStr) -> io::Result<()> {
     let runtime = Builder::new_current_thread().enable_all().build()?;
     runtime.block_on(async move {
         let pipe = ClientOptions::new().open(pipe_name)?;
-        let server = Server::from_named_pipe_client(pipe)?;
+        let server = Server::from_named_pipe_client(pipe).await?;
         tokio::select! {
             result = server.serve() => result,
             result = windows_interrupt_signal() => result,

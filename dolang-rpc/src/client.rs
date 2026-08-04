@@ -1,26 +1,19 @@
 use std::{
     collections::HashMap,
     future::Future,
-    io,
     pin::Pin,
     sync::{Arc, Mutex, Weak},
     task::{Context, Poll},
 };
 
-#[cfg(unix)]
-use std::os::unix::net::UnixStream;
+#[cfg(windows)]
+use std::io;
 
 use bytes::Buf;
-use tokio::{
-    io::{AsyncRead, AsyncWrite},
-    sync::{mpsc, oneshot},
-};
+use tokio::sync::{mpsc, oneshot};
 
 #[cfg(windows)]
 use std::os::windows::io::{AsRawHandle, OwnedHandle};
-
-#[cfg(windows)]
-use tokio::net::windows::named_pipe::{NamedPipeClient, NamedPipeServer};
 
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::GetProcessId;
@@ -154,121 +147,11 @@ impl<P: Protocol> Client<P> {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
 
-    /// Starts a client session on a bidirectional byte stream.
-    pub fn new<T>(stream: T) -> Self
-    where
-        T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    {
-        Self::with_limits(stream, Limits::default())
-    }
-
-    /// Starts a client session on separate byte-stream reader and writer halves.
-    pub fn new_split<R, W>(reader: R, writer: W) -> Self
-    where
-        R: AsyncRead + Send + 'static,
-        W: AsyncWrite + Send + 'static,
-    {
-        let (sender, receiver) = transport::generic(reader, writer);
-        Self::from_transport(
-            transport::AnySender::Generic(sender),
-            transport::AnyReceiver::Generic(receiver),
-            Limits::default(),
-            false,
-            #[cfg(windows)]
-            None,
-        )
-    }
-
-    /// Starts a client session with explicit size and concurrency limits.
-    pub fn with_limits<T>(stream: T, limits: Limits) -> Self
-    where
-        T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    {
-        let (sender, receiver) = transport::generic_duplex(stream);
-        Self::from_transport(
-            transport::AnySender::Generic(sender),
-            transport::AnyReceiver::Generic(receiver),
-            limits,
-            false,
-            #[cfg(windows)]
-            None,
-        )
-    }
-
-    #[cfg(unix)]
-    pub fn from_unix_stream(stream: UnixStream) -> io::Result<Self> {
-        let (sender, receiver) = transport::unix::unix(stream)?;
-        Ok(Self::from_transport(
-            transport::AnySender::Unix(sender),
-            transport::AnyReceiver::Unix(receiver),
-            Limits::default(),
-            false,
-            #[cfg(windows)]
-            None,
-        ))
-    }
-
-    #[cfg(windows)]
-    /// Starts a client session on the server end of a Windows named pipe.
-    ///
-    /// `peer_process` is retained for the lifetime of the session and must
-    /// grant process-query and synchronization access. Construction fails if
-    /// it does not identify the named-pipe peer.
-    ///
-    /// # Safety
-    ///
-    /// The identified peer must be trusted to send only handle values that it
-    /// created in this process with `DuplicateHandle`. A malicious peer can
-    /// otherwise cause this process to close arbitrary handles.
-    pub unsafe fn from_named_pipe_server(
-        pipe: NamedPipeServer,
-        peer_process: OwnedHandle,
-    ) -> io::Result<Self> {
-        validate_peer_process(
-            &peer_process,
-            transport::windows::server_pipe_peer_pid(&pipe)?,
-        )?;
-        let (sender, receiver) = transport::windows::server_pipe(pipe, false)?;
-        Ok(Self::from_transport(
-            transport::AnySender::Windows(sender),
-            transport::AnyReceiver::Windows(receiver),
-            Limits::default(),
-            true,
-            Some(peer_process),
-        ))
-    }
-
-    #[cfg(windows)]
-    /// Starts a client session on the client end of a Windows named pipe.
-    ///
-    /// `peer_process` is retained for the lifetime of the session and must
-    /// grant process-query and synchronization access. Construction fails if
-    /// it does not identify the named-pipe peer.
-    ///
-    /// # Safety
-    ///
-    /// The identified peer must be trusted to send only handle values that it
-    /// created in this process with `DuplicateHandle`. A malicious peer can
-    /// otherwise cause this process to close arbitrary handles.
-    pub unsafe fn from_named_pipe_client(
-        pipe: NamedPipeClient,
-        peer_process: OwnedHandle,
-    ) -> io::Result<Self> {
-        validate_peer_process(
-            &peer_process,
-            transport::windows::client_pipe_peer_pid(&pipe)?,
-        )?;
-        let (sender, receiver) = transport::windows::client_pipe(pipe, false)?;
-        Ok(Self::from_transport(
-            transport::AnySender::Windows(sender),
-            transport::AnyReceiver::Windows(receiver),
-            Limits::default(),
-            true,
-            Some(peer_process),
-        ))
-    }
-
-    fn from_transport(
+    /// Builds a `Client` from an already-negotiated transport. Only reachable
+    /// via [`UnboundClient::bind`](crate::UnboundClient::bind) — `Client` has
+    /// no public constructors of its own, so every `Client<P>` has already
+    /// completed `fragment::negotiate` by the time it exists.
+    pub(crate) fn from_transport(
         sender: transport::AnySender,
         receiver: transport::AnyReceiver,
         limits: Limits,
@@ -401,7 +284,10 @@ impl<P: Protocol> Client<P> {
 }
 
 #[cfg(windows)]
-fn validate_peer_process(peer_process: &OwnedHandle, pipe_peer_pid: u32) -> io::Result<()> {
+pub(crate) fn validate_peer_process(
+    peer_process: &OwnedHandle,
+    pipe_peer_pid: u32,
+) -> io::Result<()> {
     let process_pid = unsafe { GetProcessId(peer_process.as_raw_handle() as _) };
     if process_pid == 0 {
         return Err(io::Error::last_os_error());

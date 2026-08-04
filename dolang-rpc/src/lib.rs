@@ -9,6 +9,7 @@ mod serde;
 mod server;
 mod trailer;
 mod transport;
+mod unbound;
 
 use ::serde::{Serialize, de::DeserializeOwned};
 use bytes::Bytes;
@@ -18,12 +19,15 @@ pub use opaque::{InvalidOpaque, Opaque, OpaqueGuard, OpaqueResource};
 pub use server::{CallContext, RequestCancelled, Server};
 pub use trailer::{TrailerRecv, TrailerSend};
 use transport::{RecvFrame, SendFrame};
+pub use unbound::{Builder, UnboundClient, UnboundServer};
 
-/// Configurable size and concurrency limits for a session.
+/// Configurable size and concurrency limits for a session. Not public — set
+/// via [`Builder`]'s chainable setters instead.
 #[derive(Clone, Copy, Debug)]
-pub struct Limits {
-    /// Maximum payload size of one fragment. Bounds how much of a large
-    /// message is written per round-robin turn.
+pub(crate) struct Limits {
+    /// Maximum size of one whole wire fragment, header included. Bounds how
+    /// much of a large message is written per round-robin turn; the header
+    /// is subtracted from this to get the actual payload budget per write.
     pub max_fragment_size: usize,
     /// Maximum size of one complete (reassembled) message's postcard
     /// payload, excluding any trailer.
@@ -65,6 +69,14 @@ impl Default for Limits {
         }
     }
 }
+
+/// Maximum size of a `Kind::Negotiate` fragment, tolerated by both ends of a
+/// connection regardless of their configured `Limits`. Negotiation must use a
+/// fixed, transport-independent bound rather than `Limits::max_fragment_size`
+/// because neither side knows what the peer will actually enforce until
+/// negotiation completes. Not configurable — a future refactor must not tie
+/// this to `Limits`.
+pub(crate) const NEGOTIATE_FRAGMENT_SIZE: usize = 1024;
 
 /// A family of request and response messages.
 pub trait Protocol: Send + Sync + 'static {
@@ -118,6 +130,10 @@ pub(crate) enum Kind {
     /// message's own request/response outcome — it only tells the peer to
     /// stop streaming a trailer it already committed to sending.
     Discard = 6,
+    /// Protocol handshake/version negotiation. Sent unprompted and first by
+    /// both ends of a connection before any other `Kind` is valid; see
+    /// `fragment::negotiate`.
+    Negotiate = 7,
 }
 
 impl TryFrom<u8> for Kind {
@@ -131,6 +147,7 @@ impl TryFrom<u8> for Kind {
             4 => Ok(Self::Cancel),
             5 => Ok(Self::Notify),
             6 => Ok(Self::Discard),
+            7 => Ok(Self::Negotiate),
             _ => Err(Error::Protocol(format!("unknown frame kind {value}"))),
         }
     }

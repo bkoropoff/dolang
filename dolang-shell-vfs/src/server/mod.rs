@@ -1,12 +1,15 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+use std::{
+    result,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
 };
 
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
 
-use dolang_rpc::{CallContext, DefaultHandle, OpaqueResource, OsHandle};
+use dolang_rpc::{CallContext, DefaultHandle, Opaque, OpaqueResource, OsHandle};
 #[cfg(unix)]
 use std::os::unix::io::OwnedFd;
 use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
@@ -19,8 +22,9 @@ use tokio::sync::{Mutex, watch};
 use tokio::task::{JoinError, JoinSet};
 
 use crate::{
-    AnyFile, AnyVfs, Child as _, Command as _, Direct, FileHandle as _, OpenOptions as _,
-    SessionMode, StdioRecv, StdioSend, Utf8TypedPath, Vfs,
+    AnyFile, AnyVfs, Child as _, Command as _, Direct, Error, FileHandle as _, FileLockRequest,
+    FileMarker, OpenOptions as _, PosixAcl, SecDesc, SessionMode, StdioRecv, StdioRecvMarker,
+    StdioSend, StdioSendMarker, Utf8TypedPath, Vfs,
     protocol::{
         AccessRequest, AclRequest, CanonicalizeRequest, CopyRequest, CreateDirRequest,
         FsMetadataRequest, GlobRequest, HardLinkRequest, MetadataRequest, MoveRequest, OpenHandle,
@@ -29,7 +33,8 @@ use crate::{
         RequestKind, ResponseKind, SecDescRequest, SetAclRequest, SetMetadataRequest,
         SetSecDescRequest, SetXattrRequest, SpawnRequest, StdioRecvTarget, StdioSendTarget,
         StreamsRequest, SymlinkKind, SymlinkRequest, UnixVfsRequest, VfsProtocol,
-        WellKnownPathRequest, WindowsAdminRequest, WirePath, XattrRequest, XattrsRequest,
+        WellKnownPathRequest, WindowsAdminRequest, WireError, WirePath, XattrNamespaceRequest,
+        XattrRequest, XattrsRequest, rpc_builder,
     },
 };
 
@@ -133,19 +138,19 @@ struct RetainedFile(
 );
 
 impl OpaqueResource for RetainedFile {
-    type Marker = crate::FileMarker;
+    type Marker = FileMarker;
 }
 
 struct RetainedStdioSend(Mutex<StdioSend>);
 
 impl OpaqueResource for RetainedStdioSend {
-    type Marker = crate::StdioSendMarker;
+    type Marker = StdioSendMarker;
 }
 
 struct RetainedStdioRecv(Mutex<StdioRecv>);
 
 impl OpaqueResource for RetainedStdioRecv {
-    type Marker = crate::StdioRecvMarker;
+    type Marker = StdioRecvMarker;
 }
 
 struct RetainedChild(Mutex<crate::AnyChild>);
@@ -171,32 +176,42 @@ pub struct Server {
 
 impl Server {
     /// Creates an opaque-only VFS server over a bidirectional byte stream.
-    pub fn new<T>(stream: T) -> Self
+    pub async fn new<T>(stream: T) -> crate::Result<Self>
     where
         T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        Self {
+        let rpc = rpc_builder()
+            .server(stream)
+            .await
+            .map_err(crate::client::rpc_error)?
+            .bind();
+        Ok(Self {
             #[cfg(unix)]
             listener: None,
-            rpc: Some(dolang_rpc::Server::new(stream)),
+            rpc: Some(rpc),
             mode: SessionMode::Remote,
             shared: Self::state(),
-        }
+        })
     }
 
     /// Creates an opaque-only VFS server on separate reader and writer streams.
-    pub fn new_split<R, W>(reader: R, writer: W) -> Self
+    pub async fn new_split<R, W>(reader: R, writer: W) -> crate::Result<Self>
     where
         R: AsyncRead + Send + 'static,
         W: AsyncWrite + Send + 'static,
     {
-        Self {
+        let rpc = rpc_builder()
+            .server_split(reader, writer)
+            .await
+            .map_err(crate::client::rpc_error)?
+            .bind();
+        Ok(Self {
             #[cfg(unix)]
             listener: None,
-            rpc: Some(dolang_rpc::Server::new_split(reader, writer)),
+            rpc: Some(rpc),
             mode: SessionMode::Remote,
             shared: Self::state(),
-        }
+        })
     }
 
     fn state() -> Arc<ServerState> {
@@ -228,11 +243,16 @@ impl Server {
 
     /// Creates a VFS RPC server on the client end of a connected Windows named pipe.
     #[cfg(windows)]
-    pub fn from_named_pipe_client(pipe: NamedPipeClient) -> Result<Self, io::Error> {
+    pub async fn from_named_pipe_client(pipe: NamedPipeClient) -> Result<Self, io::Error> {
+        let rpc = rpc_builder()
+            .server_named_pipe_client(pipe)
+            .await
+            .map_err(crate::client::rpc_error)?
+            .bind();
         Ok(Self {
             #[cfg(unix)]
             listener: None,
-            rpc: Some(dolang_rpc::Server::from_named_pipe_client(pipe)?),
+            rpc: Some(rpc),
             mode: SessionMode::Native,
             shared: Self::state(),
         })
@@ -245,13 +265,17 @@ impl Server {
         handlers: &mut JoinSet<Result<(), dolang_rpc::Error>>,
     ) -> Result<(), io::Error> {
         let (stream, _) = res?;
-        let rpc = dolang_rpc::Server::<VfsProtocol>::from_unix_stream(stream.into_std()?)?;
+        let stream = stream.into_std()?;
         let connection = Arc::new(Connection {
             server: self.shared.clone(),
             mode: SessionMode::Native,
             drain: Drain::new(),
         });
         handlers.spawn(async move {
+            // Negotiation (a real handshake over the wire) happens here,
+            // inside the per-connection task, so a slow or misbehaving peer
+            // can't stall the accept loop from taking new connections.
+            let rpc = rpc_builder().server_unix(stream).await?.bind();
             let stop = Arc::new(AtomicBool::new(false));
             let stop_handler = stop.clone();
             let handler = connection.clone();
@@ -345,7 +369,7 @@ async fn serve_connection(
 ) -> Result<(), dolang_rpc::Error> {
     rpc.serve(async move |mut context, Request { vfs, kind }| {
         let response = if matches!(kind, RequestKind::Stop) {
-            connection.handle_stop(&context, vfs, &stop).await
+            connection.handle_stop(&mut context, vfs, &stop).await
         } else if let Err(error) = connection.select(&context, vfs.clone()) {
             ResponseKind::Error(error)
         } else {
@@ -382,8 +406,8 @@ impl Connection {
     fn select(
         &self,
         context: &CallContext<VfsProtocol>,
-        vfs: Option<dolang_rpc::Opaque<crate::VfsMarker>>,
-    ) -> Result<Self, crate::protocol::WireError> {
+        vfs: Option<Opaque<crate::VfsMarker>>,
+    ) -> Result<Self, WireError> {
         let Some(vfs) = vfs else {
             return Ok(self.clone());
         };
@@ -403,8 +427,8 @@ impl Connection {
 
     async fn handle_stop(
         &self,
-        context: &CallContext<VfsProtocol>,
-        vfs: Option<dolang_rpc::Opaque<crate::VfsMarker>>,
+        context: &mut CallContext<VfsProtocol>,
+        vfs: Option<Opaque<crate::VfsMarker>>,
         stop: &AtomicBool,
     ) -> ResponseKind {
         let Some(vfs) = vfs else {
@@ -440,27 +464,25 @@ impl Connection {
         }
     }
 
-    fn unsupported(operation: &str) -> crate::protocol::WireError {
-        crate::Error::new(
+    fn unsupported(operation: &str) -> WireError {
+        Error::new(
             crate::ErrorKind::Unsupported,
             format!("{operation} is not supported by a remote VFS session"),
         )
         .into()
     }
 
-    fn invalid_opaque(kind: &str) -> crate::protocol::WireError {
-        crate::Error::new(
+    fn invalid_opaque(kind: &str) -> WireError {
+        Error::new(
             crate::ErrorKind::InvalidInput,
             format!("invalid opaque {kind}"),
         )
         .into()
     }
 
-    fn wire_result<T, E>(
-        result: std::result::Result<T, E>,
-    ) -> std::result::Result<T, crate::protocol::WireError>
+    fn wire_result<T, E>(result: result::Result<T, E>) -> result::Result<T, WireError>
     where
-        E: Into<crate::Error>,
+        E: Into<Error>,
     {
         result.map_err(wire_error)
     }
@@ -694,7 +716,7 @@ impl Connection {
         &self,
         context: &CallContext<VfsProtocol>,
         target: StdioRecvTarget,
-    ) -> Result<Option<StdioRecv>, crate::protocol::WireError> {
+    ) -> Result<Option<StdioRecv>, WireError> {
         match target {
             StdioRecvTarget::Null => Ok(None),
             StdioRecvTarget::Native(handle) => {
@@ -725,7 +747,7 @@ impl Connection {
         &self,
         context: &CallContext<VfsProtocol>,
         target: StdioSendTarget,
-    ) -> Result<Option<StdioSend>, crate::protocol::WireError> {
+    ) -> Result<Option<StdioSend>, WireError> {
         match target {
             StdioSendTarget::Null => Ok(None),
             StdioSendTarget::Native(handle) => {
@@ -759,7 +781,7 @@ impl Connection {
         stdin: StdioRecvTarget,
         stdout: StdioSendTarget,
         stderr: StdioSendTarget,
-    ) -> Result<(), crate::protocol::WireError> {
+    ) -> Result<(), WireError> {
         let stdin = self.spawn_stdio_recv(context, stdin);
         let stdout = self.spawn_stdio_send(context, stdout);
         let stderr = self.spawn_stdio_send(context, stderr);
@@ -786,8 +808,8 @@ impl Connection {
     fn take_child(
         &self,
         context: &CallContext<VfsProtocol>,
-        child: dolang_rpc::Opaque<crate::ChildMarker>,
-    ) -> Result<RetainedChild, crate::protocol::WireError> {
+        child: Opaque<crate::ChildMarker>,
+    ) -> Result<RetainedChild, WireError> {
         context
             .unregister::<RetainedChild>(child)
             .map_err(|_| {
@@ -807,7 +829,7 @@ impl Connection {
     async fn handle_child_wait(
         &self,
         context: &mut CallContext<VfsProtocol>,
-        child: dolang_rpc::Opaque<crate::ChildMarker>,
+        child: Opaque<crate::ChildMarker>,
     ) -> ResponseKind {
         let result = match self.take_child(context, child) {
             Ok(child) => {
@@ -830,7 +852,7 @@ impl Connection {
     async fn handle_child_terminate(
         &self,
         context: &CallContext<VfsProtocol>,
-        child: dolang_rpc::Opaque<crate::ChildMarker>,
+        child: Opaque<crate::ChildMarker>,
     ) -> ResponseKind {
         let result = match self.take_child(context, child) {
             Ok(child) => child.0.into_inner().terminate().await.map_err(wire_error),
@@ -842,7 +864,7 @@ impl Connection {
     fn handle_child_close(
         &self,
         context: &CallContext<VfsProtocol>,
-        child: dolang_rpc::Opaque<crate::ChildMarker>,
+        child: Opaque<crate::ChildMarker>,
     ) -> ResponseKind {
         let result = context
             .unregister::<RetainedChild>(child)
@@ -874,7 +896,7 @@ impl Connection {
     /// available while stopping: they create no stdio endpoint of their own,
     /// and refusing a spawn could break the very in-flight pipeline stage the
     /// drain exists to protect.
-    fn reserve_stdio(&self, count: usize) -> Result<(), crate::protocol::WireError> {
+    fn reserve_stdio(&self, count: usize) -> Result<(), WireError> {
         if self.drain.try_acquire(count) {
             Ok(())
         } else {
@@ -901,8 +923,8 @@ impl Connection {
     fn retained_stdio_send(
         &self,
         context: &CallContext<VfsProtocol>,
-        stdio: dolang_rpc::Opaque<crate::StdioSendMarker>,
-    ) -> Result<dolang_rpc::OpaqueGuard<RetainedStdioSend>, crate::protocol::WireError> {
+        stdio: Opaque<StdioSendMarker>,
+    ) -> Result<dolang_rpc::OpaqueGuard<RetainedStdioSend>, WireError> {
         context
             .acquire::<RetainedStdioSend>(stdio)
             .map_err(|_| Self::invalid_opaque("stdio send"))
@@ -911,8 +933,8 @@ impl Connection {
     fn retained_stdio_recv(
         &self,
         context: &CallContext<VfsProtocol>,
-        stdio: dolang_rpc::Opaque<crate::StdioRecvMarker>,
-    ) -> Result<dolang_rpc::OpaqueGuard<RetainedStdioRecv>, crate::protocol::WireError> {
+        stdio: Opaque<StdioRecvMarker>,
+    ) -> Result<dolang_rpc::OpaqueGuard<RetainedStdioRecv>, WireError> {
         context
             .acquire::<RetainedStdioRecv>(stdio)
             .map_err(|_| Self::invalid_opaque("stdio receive"))
@@ -921,8 +943,8 @@ impl Connection {
     fn close_stdio_send(
         &self,
         context: &CallContext<VfsProtocol>,
-        stdio: dolang_rpc::Opaque<crate::StdioSendMarker>,
-    ) -> Result<(), crate::protocol::WireError> {
+        stdio: Opaque<StdioSendMarker>,
+    ) -> Result<(), WireError> {
         let retained = self.retained_stdio_send(context, stdio.clone())?;
         drop(retained);
         let retained = context
@@ -945,8 +967,8 @@ impl Connection {
     fn close_stdio_recv(
         &self,
         context: &CallContext<VfsProtocol>,
-        stdio: dolang_rpc::Opaque<crate::StdioRecvMarker>,
-    ) -> Result<(), crate::protocol::WireError> {
+        stdio: Opaque<StdioRecvMarker>,
+    ) -> Result<(), WireError> {
         let retained = self.retained_stdio_recv(context, stdio.clone())?;
         drop(retained);
         let retained = context
@@ -969,7 +991,7 @@ impl Connection {
     async fn handle_stdio_send_write(
         &self,
         context: &mut CallContext<VfsProtocol>,
-        stdio: dolang_rpc::Opaque<crate::StdioSendMarker>,
+        stdio: Opaque<StdioSendMarker>,
     ) -> ResponseKind {
         let result = async {
             let stdio = self.retained_stdio_send(context, stdio)?;
@@ -996,7 +1018,7 @@ impl Connection {
     async fn handle_stdio_send_clone(
         &self,
         context: &CallContext<VfsProtocol>,
-        stdio: dolang_rpc::Opaque<crate::StdioSendMarker>,
+        stdio: Opaque<StdioSendMarker>,
     ) -> ResponseKind {
         let result = async {
             let stdio = self.retained_stdio_send(context, stdio)?;
@@ -1011,7 +1033,7 @@ impl Connection {
     async fn handle_stdio_recv_read(
         &self,
         context: CallContext<VfsProtocol>,
-        stdio: dolang_rpc::Opaque<crate::StdioRecvMarker>,
+        stdio: Opaque<StdioRecvMarker>,
         len: usize,
     ) {
         let stdio = match self.retained_stdio_recv(&context, stdio) {
@@ -1032,7 +1054,7 @@ impl Connection {
     async fn handle_stdio_recv_clone(
         &self,
         context: &CallContext<VfsProtocol>,
-        stdio: dolang_rpc::Opaque<crate::StdioRecvMarker>,
+        stdio: Opaque<StdioRecvMarker>,
     ) -> ResponseKind {
         let result = async {
             let stdio = self.retained_stdio_recv(context, stdio)?;
@@ -1081,8 +1103,8 @@ impl Connection {
     fn retained_file(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: dolang_rpc::Opaque<crate::FileMarker>,
-    ) -> Result<dolang_rpc::OpaqueGuard<RetainedFile>, crate::protocol::WireError> {
+        file: Opaque<FileMarker>,
+    ) -> Result<dolang_rpc::OpaqueGuard<RetainedFile>, WireError> {
         context.acquire::<RetainedFile>(file).map_err(|_| {
             wire_error(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1094,7 +1116,7 @@ impl Connection {
     async fn handle_file_read(
         &self,
         context: CallContext<VfsProtocol>,
-        file: dolang_rpc::Opaque<crate::FileMarker>,
+        file: Opaque<FileMarker>,
         len: usize,
     ) {
         let file = match self.retained_file(&context, file) {
@@ -1115,7 +1137,7 @@ impl Connection {
     async fn handle_file_write(
         &self,
         context: &mut CallContext<VfsProtocol>,
-        file: dolang_rpc::Opaque<crate::FileMarker>,
+        file: Opaque<FileMarker>,
     ) -> ResponseKind {
         let result = async {
             let file = self.retained_file(context, file)?;
@@ -1142,7 +1164,7 @@ impl Connection {
     async fn handle_file_seek(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: dolang_rpc::Opaque<crate::FileMarker>,
+        file: Opaque<FileMarker>,
         position: io::SeekFrom,
     ) -> ResponseKind {
         let result = async {
@@ -1156,7 +1178,7 @@ impl Connection {
     async fn handle_file_flush(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: dolang_rpc::Opaque<crate::FileMarker>,
+        file: Opaque<FileMarker>,
     ) -> ResponseKind {
         let result = async {
             let file = self.retained_file(context, file)?;
@@ -1169,7 +1191,7 @@ impl Connection {
     async fn handle_file_set_size(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: dolang_rpc::Opaque<crate::FileMarker>,
+        file: Opaque<FileMarker>,
         size: u64,
     ) -> ResponseKind {
         let result = async {
@@ -1183,7 +1205,7 @@ impl Connection {
     async fn handle_file_to_stdio_send(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: dolang_rpc::Opaque<crate::FileMarker>,
+        file: Opaque<FileMarker>,
     ) -> ResponseKind {
         let result = async {
             let file = self.retained_file(context, file)?;
@@ -1204,7 +1226,7 @@ impl Connection {
     async fn handle_file_to_stdio_recv(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: dolang_rpc::Opaque<crate::FileMarker>,
+        file: Opaque<FileMarker>,
     ) -> ResponseKind {
         let result = async {
             let file = self.retained_file(context, file)?;
@@ -1225,7 +1247,7 @@ impl Connection {
     async fn handle_file_metadata(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: dolang_rpc::Opaque<crate::FileMarker>,
+        file: Opaque<FileMarker>,
     ) -> ResponseKind {
         let result = async {
             let file = self.retained_file(context, file)?;
@@ -1238,7 +1260,7 @@ impl Connection {
     async fn handle_file_fs_metadata(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: dolang_rpc::Opaque<crate::FileMarker>,
+        file: Opaque<FileMarker>,
     ) -> ResponseKind {
         let result = async {
             let file = self.retained_file(context, file)?;
@@ -1251,7 +1273,7 @@ impl Connection {
     async fn handle_file_sec_desc(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: dolang_rpc::Opaque<crate::FileMarker>,
+        file: Opaque<FileMarker>,
         mask: u32,
     ) -> ResponseKind {
         let result = async {
@@ -1265,7 +1287,7 @@ impl Connection {
     async fn handle_file_acl(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: dolang_rpc::Opaque<crate::FileMarker>,
+        file: Opaque<FileMarker>,
         default: bool,
     ) -> ResponseKind {
         let result = async {
@@ -1279,8 +1301,8 @@ impl Connection {
     async fn handle_file_set_acl(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: dolang_rpc::Opaque<crate::FileMarker>,
-        acl: Option<crate::PosixAcl>,
+        file: Opaque<FileMarker>,
+        acl: Option<PosixAcl>,
         default: bool,
     ) -> ResponseKind {
         let result = async {
@@ -1299,8 +1321,8 @@ impl Connection {
     async fn handle_file_set_sec_desc(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: dolang_rpc::Opaque<crate::FileMarker>,
-        sec_desc: crate::SecDesc,
+        file: Opaque<FileMarker>,
+        sec_desc: SecDesc,
     ) -> ResponseKind {
         let result = async {
             let file = self.retained_file(context, file)?;
@@ -1318,8 +1340,8 @@ impl Connection {
     async fn handle_file_xattrs(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: dolang_rpc::Opaque<crate::FileMarker>,
-        namespace: crate::protocol::XattrNamespaceRequest,
+        file: Opaque<FileMarker>,
+        namespace: XattrNamespaceRequest,
     ) -> ResponseKind {
         let result = async {
             let file = self.retained_file(context, file)?;
@@ -1337,7 +1359,7 @@ impl Connection {
     async fn handle_file_xattr(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: dolang_rpc::Opaque<crate::FileMarker>,
+        file: Opaque<FileMarker>,
         name: String,
         namespace: Option<String>,
     ) -> ResponseKind {
@@ -1357,7 +1379,7 @@ impl Connection {
     async fn handle_file_streams(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: dolang_rpc::Opaque<crate::FileMarker>,
+        file: Opaque<FileMarker>,
     ) -> ResponseKind {
         let result = async {
             let file = self.retained_file(context, file)?;
@@ -1370,7 +1392,7 @@ impl Connection {
     async fn handle_file_set_xattr(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: dolang_rpc::Opaque<crate::FileMarker>,
+        file: Opaque<FileMarker>,
         name: String,
         namespace: Option<String>,
         value: Vec<u8>,
@@ -1391,7 +1413,7 @@ impl Connection {
     async fn handle_file_remove_xattr(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: dolang_rpc::Opaque<crate::FileMarker>,
+        file: Opaque<FileMarker>,
         name: String,
         namespace: Option<String>,
     ) -> ResponseKind {
@@ -1411,8 +1433,8 @@ impl Connection {
     async fn handle_file_lock(
         &self,
         context: &mut CallContext<VfsProtocol>,
-        file: dolang_rpc::Opaque<crate::FileMarker>,
-        request: crate::FileLockRequest,
+        file: Opaque<FileMarker>,
+        request: FileLockRequest,
     ) -> ResponseKind {
         let retained = match self.retained_file(context, file) {
             Ok(retained) => retained,
@@ -1448,7 +1470,7 @@ impl Connection {
     async fn handle_file_unlock(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: dolang_rpc::Opaque<crate::FileMarker>,
+        file: Opaque<FileMarker>,
         lock: u64,
     ) -> ResponseKind {
         let retained = match self.retained_file(context, file) {
@@ -1474,7 +1496,7 @@ impl Connection {
     async fn handle_file_close(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: dolang_rpc::Opaque<crate::FileMarker>,
+        file: Opaque<FileMarker>,
     ) -> ResponseKind {
         let retained = match self.retained_file(context, file.clone()) {
             Ok(retained) => retained,
@@ -1765,29 +1787,24 @@ impl Connection {
             let path = match PathBuf::try_from(path) {
                 Ok(path) => path,
                 Err(_) => {
-                    return ResponseKind::Access(Err(crate::Error::from_raw_os_error(
-                        libc::EINVAL,
-                    )
-                    .into()));
+                    return ResponseKind::Access(
+                        Err(Error::from_raw_os_error(libc::EINVAL).into()),
+                    );
                 }
             };
             let flags = AccessFlags::from_bits(mode).unwrap_or(AccessFlags::empty());
             match access(&path, flags) {
                 Ok(()) => ResponseKind::Access(Ok(())),
-                Err(e) => {
-                    ResponseKind::Access(Err(crate::Error::from_raw_os_error(e as i32).into()))
-                }
+                Err(e) => ResponseKind::Access(Err(Error::from_raw_os_error(e as i32).into())),
             }
         })
         .await
-        .unwrap_or_else(|_| {
-            ResponseKind::Access(Err(crate::Error::from_raw_os_error(libc::EIO).into()))
-        })
+        .unwrap_or_else(|_| ResponseKind::Access(Err(Error::from_raw_os_error(libc::EIO).into())))
     }
 
     #[cfg(not(unix))]
     async fn handle_access(&self, _req: AccessRequest) -> ResponseKind {
-        ResponseKind::Access(Err(crate::Error::new(
+        ResponseKind::Access(Err(Error::new(
             crate::ErrorKind::Unsupported,
             "POSIX access checks are not supported on this platform",
         )
@@ -1875,7 +1892,7 @@ impl Connection {
     }
 }
 
-fn wire_error(error: impl Into<crate::Error>) -> crate::protocol::WireError {
+fn wire_error(error: impl Into<Error>) -> WireError {
     error.into().into()
 }
 
@@ -1920,8 +1937,13 @@ mod tests {
     #[tokio::test]
     async fn remote_server_replies_without_serializing_a_handle() {
         let (client_stream, server_stream) = tokio::io::duplex(4096);
-        let server = tokio::spawn(Server::new(server_stream).serve());
-        let client = dolang_rpc::Client::<VfsProtocol>::new(client_stream);
+        let server =
+            tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
+        let client = crate::protocol::rpc_builder()
+            .client(client_stream)
+            .await
+            .unwrap()
+            .bind::<VfsProtocol>();
 
         let temp = tempfile::NamedTempFile::new().unwrap();
         let response = client

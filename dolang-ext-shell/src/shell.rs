@@ -451,7 +451,16 @@ impl<'v> Object<'v> for Vfs {
                     global.local.get(strand).set_pending_pipe_buffer_size(None);
                     let (recv_guard, recv, send_guard, send) = negotiated?;
 
-                    let client = Client::new_split(recv, send);
+                    let client = match Client::new_split(recv, send).await {
+                        Ok(client) => client,
+                        Err(negotiate_error) => {
+                            let join = global.syms.join;
+                            return match method!(strand, &stream, join, &mut module).await {
+                                Ok(()) => Err(negotiate_error.into_sys(strand)),
+                                Err(launcher_error) => Err(launcher_error),
+                            };
+                        }
+                    };
                     let query = match client.query().await {
                         Ok(query) => query,
                         Err(query_error) => {

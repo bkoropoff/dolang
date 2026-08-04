@@ -42,6 +42,7 @@ use crate::{
         SetXattrRequest, SpawnRequest, StdioRecvTarget, StdioSendTarget, StreamsRequest,
         SymlinkKind, SymlinkRequest, UnixVfsRequest, VfsProtocol, WellKnownPathRequest,
         WindowsAdminRequest, WirePath, XattrNamespaceRequest, XattrRequest, XattrsRequest,
+        rpc_builder,
     },
 };
 
@@ -914,28 +915,36 @@ impl Client {
     }
 
     /// Starts an opaque-only VFS client on a bidirectional byte stream.
-    pub fn new<T>(stream: T) -> Self
+    pub async fn new<T>(stream: T) -> crate::Result<Self>
     where
         T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        Self {
-            rpc: dolang_rpc::Client::new(stream),
+        Ok(Self {
+            rpc: rpc_builder()
+                .client(stream)
+                .await
+                .map_err(rpc_error)?
+                .bind(),
             mode: SessionMode::Remote,
             vfs: None,
-        }
+        })
     }
 
     /// Starts an opaque-only VFS client on separate reader and writer streams.
-    pub fn new_split<R, W>(reader: R, writer: W) -> Self
+    pub async fn new_split<R, W>(reader: R, writer: W) -> crate::Result<Self>
     where
         R: AsyncRead + Send + 'static,
         W: AsyncWrite + Send + 'static,
     {
-        Self {
-            rpc: dolang_rpc::Client::new_split(reader, writer),
+        Ok(Self {
+            rpc: rpc_builder()
+                .client_split(reader, writer)
+                .await
+                .map_err(rpc_error)?
+                .bind(),
             mode: SessionMode::Remote,
             vfs: None,
-        }
+        })
     }
 
     /// Connect to an agent daemon at the given socket path.
@@ -947,17 +956,30 @@ impl Client {
     /// Connect using an existing `UnixStream`.
     #[cfg(unix)]
     pub async fn from_stream(stream: UnixStream) -> crate::Result<Self> {
-        Self::from_std_stream(stream.into_std()?)
+        Self::from_std_stream(stream.into_std()?).await
     }
 
     #[cfg(unix)]
-    fn from_std_stream(stream: StdUnixStream) -> crate::Result<Self> {
-        let rpc = dolang_rpc::Client::from_unix_stream(stream)?;
+    async fn from_std_stream(stream: StdUnixStream) -> crate::Result<Self> {
+        let rpc = rpc_builder()
+            .client_unix(stream)
+            .await
+            .map_err(rpc_error)?
+            .bind();
         Ok(Self {
             rpc,
             mode: SessionMode::Native,
             vfs: None,
         })
+    }
+
+    /// Starts a VFS client on an already-connected Unix domain socket file
+    /// descriptor.
+    #[cfg(unix)]
+    pub async fn from_owned_fd(value: OwnedFd) -> crate::Result<Self> {
+        let stream = StdUnixStream::from(value);
+        stream.set_nonblocking(true)?;
+        Self::from_std_stream(stream).await
     }
 
     /// Starts a VFS client on the server end of a connected Windows named pipe.
@@ -967,11 +989,14 @@ impl Client {
     /// `server_process` must identify the trusted process at the other end of
     /// the pipe. That process can transfer handles which this process adopts.
     #[cfg(windows)]
-    pub unsafe fn from_named_pipe_server(
+    pub async unsafe fn from_named_pipe_server(
         pipe: NamedPipeServer,
         server_process: OwnedHandle,
     ) -> crate::Result<Self> {
-        let rpc = unsafe { dolang_rpc::Client::from_named_pipe_server(pipe, server_process)? };
+        let rpc = unsafe { rpc_builder().client_named_pipe_server(pipe, server_process) }
+            .await
+            .map_err(rpc_error)?
+            .bind();
         Ok(Self {
             rpc,
             mode: SessionMode::Native,
@@ -1021,7 +1046,7 @@ impl Client {
                 OpenVfsHandle::Native(handle) => {
                     #[cfg(unix)]
                     {
-                        Ok(Self::try_from(handle.into_inner())?.into())
+                        Ok(Self::from_owned_fd(handle.into_inner()).await?.into())
                     }
                     #[cfg(not(unix))]
                     {
@@ -1232,18 +1257,7 @@ impl Client {
     }
 }
 
-#[cfg(unix)]
-impl TryFrom<OwnedFd> for Client {
-    type Error = crate::Error;
-
-    fn try_from(value: OwnedFd) -> Result<Self, Self::Error> {
-        let stream = StdUnixStream::from(value);
-        stream.set_nonblocking(true)?;
-        Self::from_std_stream(stream)
-    }
-}
-
-fn rpc_error(error: dolang_rpc::Error) -> io::Error {
+pub(crate) fn rpc_error(error: dolang_rpc::Error) -> io::Error {
     match error {
         dolang_rpc::Error::Io(error) => error,
         dolang_rpc::Error::ConnectionClosed => {
@@ -2982,8 +2996,9 @@ mod tests {
     #[tokio::test]
     async fn dropping_remote_file_unregisters_opaque_identity() {
         let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
-        let server = tokio::spawn(Server::new(server_stream).serve());
-        let client = Client::new(client_stream);
+        let server =
+            tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
+        let client = Client::new(client_stream).await.unwrap();
         let temp = tempdir().unwrap();
         let path = crate::typed_path(temp.path().join("file")).unwrap();
         let file = open_remote_file(&client, path.to_path()).await;
@@ -3024,8 +3039,9 @@ mod tests {
     #[tokio::test]
     async fn opaque_pipe_rejects_wrong_type_and_stale_identity() {
         let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
-        let server = tokio::spawn(Server::new(server_stream).serve());
-        let client = Client::new(client_stream);
+        let server =
+            tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
+        let client = Client::new(client_stream).await.unwrap();
         let (mut send, mut recv) = client.pipe().await.unwrap();
         let send_opaque = match &send {
             crate::StdioSend::Remote(send) => send.stdio.as_ref().unwrap().clone(),
@@ -3080,8 +3096,9 @@ mod tests {
         let inner_task = tokio::spawn(inner_server.accept());
 
         let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
-        let outer_task = tokio::spawn(Server::new(server_stream).serve());
-        let root = Client::new(client_stream);
+        let outer_task =
+            tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
+        let root = Client::new(client_stream).await.unwrap();
         let path = crate::typed_path(socket).unwrap();
         let selected = root
             .unix_socket(path.to_path())
@@ -3144,8 +3161,11 @@ mod tests {
             .unwrap();
         let (file, client, server, temp) = runtime.block_on(async {
             let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
-            let server = tokio::spawn(Server::new(server_stream).serve());
-            let client = Client::new(client_stream);
+            let server =
+                tokio::spawn(
+                    async move { Server::new(server_stream).await.unwrap().serve().await },
+                );
+            let client = Client::new(client_stream).await.unwrap();
             let temp = tempdir().unwrap();
             let path = crate::typed_path(temp.path().join("file")).unwrap();
             let file = open_remote_file(&client, path.to_path()).await;
@@ -3162,8 +3182,9 @@ mod tests {
     #[tokio::test]
     async fn explicit_close_consumes_remote_cleanup_identity() {
         let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
-        let server = tokio::spawn(Server::new(server_stream).serve());
-        let client = Client::new(client_stream);
+        let server =
+            tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
+        let client = Client::new(client_stream).await.unwrap();
         let temp = tempdir().unwrap();
         let path = crate::typed_path(temp.path().join("file")).unwrap();
         let file = open_remote_file(&client, path.to_path()).await;
@@ -3177,8 +3198,9 @@ mod tests {
     #[tokio::test]
     async fn child_wait_caches_wire_error() {
         let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
-        let server = tokio::spawn(Server::new(server_stream).serve());
-        let client = Client::new(client_stream);
+        let server =
+            tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
+        let client = Client::new(client_stream).await.unwrap();
         let mut child = successful_command(&client).spawn().await.unwrap();
         let ClientChildState::Live(opaque) = &child.state else {
             panic!("new child is not live");

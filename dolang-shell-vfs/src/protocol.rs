@@ -32,6 +32,17 @@ impl Protocol for VfsProtocol {
     type Response = ResponseKind;
 }
 
+/// Application-protocol name/version advertised during the RPC handshake.
+/// `dolang_rpc::Server`/`Client` are only reachable via `UnboundServer`/
+/// `UnboundClient`, which require this descriptor.
+pub(crate) const APP_PROTOCOL: (&str, &[u16]) = ("dolang-vfs", &[1]);
+
+/// Starts a fresh [`dolang_rpc::Builder`] preconfigured with
+/// [`APP_PROTOCOL`].
+pub(crate) fn rpc_builder() -> dolang_rpc::Builder {
+    dolang_rpc::Builder::new(APP_PROTOCOL.0, APP_PROTOCOL.1)
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct Request {
     pub(crate) vfs: Option<Opaque<crate::VfsMarker>>,
