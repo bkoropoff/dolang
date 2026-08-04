@@ -122,8 +122,11 @@ async fn rename_replaces_an_open_destination() {
 #[cfg(unix)]
 async fn wait_for_pid(path: &Path) -> libc::pid_t {
     for _ in 0..200 {
-        if let Ok(pid) = tokio::fs::read_to_string(path).await {
-            return pid.trim().parse().unwrap();
+        if let Ok(pid) = tokio::fs::read_to_string(path)
+            .await
+            .and_then(|pid| pid.trim().parse::<libc::pid_t>().map_err(io::Error::other))
+        {
+            return pid;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
