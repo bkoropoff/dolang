@@ -490,7 +490,7 @@ impl<P: Protocol> CallContext<P> {
         if let Some(trailer) = self.request_trailer.as_mut() {
             trailer.discard();
         }
-        let shared = crate::trailer::SendShared::new(self.limits.max_trailer_size);
+        let shared = crate::trailer::SendShared::new(Kind::Response, self.id, &self.limits);
         self.responded = true;
         self.inner.lock().unwrap().outstanding.remove(&self.id);
         let _ = self.outgoing.send(Message::Response {

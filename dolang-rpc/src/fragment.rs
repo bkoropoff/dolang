@@ -320,7 +320,15 @@ impl StreamReassembler {
             } else {
                 self.incomplete_trailers -= 1;
             }
-            let shared = entry.trailer.get_or_insert_with(RecvShared::new).clone();
+            let shared = entry
+                .trailer
+                .get_or_insert_with(|| {
+                    RecvShared::new(
+                        self.limits.trailer_recv_copy_threshold,
+                        self.limits.trailer_recv_demand_copy_threshold,
+                    )
+                })
+                .clone();
             RecvShared::finish(&shared);
             if entry.dispatched {
                 return Ok(StreamEvent::None);
@@ -383,7 +391,15 @@ impl StreamReassembler {
                 self.incomplete_trailers += 1;
             }
             entry.trailer_len += payload_len;
-            let shared = entry.trailer.get_or_insert_with(RecvShared::new).clone();
+            let shared = entry
+                .trailer
+                .get_or_insert_with(|| {
+                    RecvShared::new(
+                        self.limits.trailer_recv_copy_threshold,
+                        self.limits.trailer_recv_demand_copy_threshold,
+                    )
+                })
+                .clone();
             let message = if entry.dispatched {
                 None
             } else {
@@ -779,15 +795,8 @@ impl Scheduler {
                     let token = transport.send();
                     // SAFETY: the lease retains `token`'s mutable borrow and
                     // clears its erased representation before it ends.
-                    let lease = unsafe {
-                        SendShared::grant(
-                            shared,
-                            token,
-                            send.kind,
-                            send.id,
-                            self.effective_fragment_size(),
-                        )
-                    };
+                    let lease =
+                        unsafe { SendShared::grant(shared, token, self.effective_fragment_size()) };
                     let (action, atomic) = SendShared::wait_fragment(shared).await?;
                     lease.complete();
                     send.started = true;
@@ -1822,7 +1831,14 @@ mod tests {
             Kind::Request,
             1,
             Bytes::from_static(b"hi"),
-            Trailer::Stream(SendShared::new(usize::MAX)),
+            Trailer::Stream(SendShared::new(
+                Kind::Request,
+                1,
+                &Limits {
+                    max_trailer_size: usize::MAX,
+                    ..limits
+                },
+            )),
         );
         assert_eq!(scheduler.active.len(), 1);
         assert_eq!(scheduler.active_fragmented, 1);
@@ -1902,7 +1918,14 @@ mod tests {
 
         let limits = Limits::default();
         let mut scheduler = Scheduler::new(&limits);
-        let shared = SendShared::new(usize::MAX);
+        let shared = SendShared::new(
+            Kind::Request,
+            1,
+            &Limits {
+                max_trailer_size: usize::MAX,
+                ..limits
+            },
+        );
         scheduler.admit_message(
             Kind::Request,
             1,
@@ -1919,10 +1942,8 @@ mod tests {
         assert_eq!(id, 1);
         assert_eq!(payload, b"hi");
 
-        // One trailer data fragment. The writer's first `poll_write` only
-        // asks to be scheduled and returns Pending until `advance` grants
-        // it a token, so drive the write on a separate task concurrently
-        // with `advance`.
+        // One small trailer data fragment is staged without waiting for a
+        // grant, then flushed by the scheduler.
         let writer = tokio::spawn(async move {
             trailer.write_all(b"data").await.unwrap();
             trailer

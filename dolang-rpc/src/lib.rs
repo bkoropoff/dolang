@@ -32,6 +32,18 @@ pub struct Limits {
     /// bounded suffix in chunks rather than acting as an open-ended
     /// channel, so this should be reasonably bounded.
     pub max_trailer_size: usize,
+    /// Maximum trailer fragment payload copied immediately by the receive
+    /// driver when the consumer has not yet requested that fragment. Set to
+    /// zero to disable copying nonempty fragments on this path.
+    pub trailer_recv_copy_threshold: usize,
+    /// Maximum trailer fragment payload copied immediately by the receive
+    /// driver when the consumer is already waiting for that fragment. Set to
+    /// zero to disable copying nonempty fragments on this path.
+    pub trailer_recv_demand_copy_threshold: usize,
+    /// Maximum trailer fragment payload copied into staging by
+    /// `TrailerSend::poll_write` without first waiting for a transport grant.
+    /// Set to zero to disable copying nonempty fragments on this path.
+    pub trailer_send_copy_threshold: usize,
     /// Maximum number of messages with fragments in flight at once.
     pub max_incomplete_messages: usize,
     /// Maximum number of those messages that may have an open trailer at
@@ -45,6 +57,9 @@ impl Default for Limits {
             max_fragment_size: 512 * 1024,
             max_payload_size: 2 * 1024 * 1024,
             max_trailer_size: 2 * 1024 * 1024,
+            trailer_recv_copy_threshold: 64 * 1024,
+            trailer_recv_demand_copy_threshold: 256 * 1024,
+            trailer_send_copy_threshold: 64 * 1024,
             max_incomplete_messages: 64,
             max_incomplete_trailers: 16,
         }

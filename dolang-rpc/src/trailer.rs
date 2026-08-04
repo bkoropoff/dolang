@@ -12,7 +12,7 @@ use bytes::{Buf, BufMut, BytesMut, buf::UninitSlice};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::{
-    Kind,
+    Kind, Limits,
     fragment::{Flags, FragmentHeader},
     transport::{AnyRecv, AnySend, RecvFrame, SendFrame},
 };
@@ -89,6 +89,7 @@ pub(crate) struct SendShared {
     kind: Kind,
     id: u64,
     max_fragment_size: usize,
+    copy_threshold: usize,
     /// Configured cap on the total bytes this trailer may carry (see
     /// `crate::Limits::max_trailer_size`). Fixed for the lifetime of this
     /// `SendShared` — unlike `max_fragment_size`, it isn't reset per grant.
@@ -111,13 +112,14 @@ pub(crate) struct SendShared {
 }
 
 impl SendShared {
-    pub(crate) fn new(max_trailer_size: usize) -> Arc<Mutex<Self>> {
+    pub(crate) fn new(kind: Kind, id: u64, limits: &Limits) -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self {
             token: None,
-            kind: Kind::Request,
-            id: 0,
-            max_fragment_size: 0,
-            max_trailer_size,
+            kind,
+            id,
+            max_fragment_size: limits.max_fragment_size,
+            copy_threshold: limits.trailer_send_copy_threshold,
+            max_trailer_size: limits.max_trailer_size,
             written: 0,
             buffer: BytesMut::new(),
             state: SendState::Idle,
@@ -166,8 +168,6 @@ impl SendShared {
     pub(crate) unsafe fn grant<'a>(
         shared: &Arc<Mutex<Self>>,
         token: AnySend<'a>,
-        kind: Kind,
-        id: u64,
         max_fragment_size: usize,
     ) -> SendLease<'a> {
         // SAFETY: `SendLease` retains the source mutable borrow and clears the
@@ -179,8 +179,6 @@ impl SendShared {
             inner.state = SendState::Granted;
         }
         inner.token = Some(token);
-        inner.kind = kind;
-        inner.id = id;
         inner.max_fragment_size = max_fragment_size;
         let writer = inner.writer_waker.take();
         drop(inner);
@@ -498,8 +496,30 @@ impl<T: Unpin> AsyncWrite for TrailerSend<T> {
                 Poll::Pending
             }
             SendState::Idle => {
-                // First write with nothing scheduled: ask to be granted a
-                // token and wait.
+                if let Some(error) = reject_if_trailer_size_exceeded(&mut inner) {
+                    return Poll::Ready(Err(error));
+                }
+                let len = buf
+                    .len()
+                    .min(inner.max_fragment_size.max(1))
+                    .min(inner.max_trailer_size - inner.written);
+                if len <= inner.copy_threshold {
+                    FragmentHeader {
+                        flags: Flags::TRAILER,
+                        kind: inner.kind,
+                        id: inner.id,
+                        payload_len: len,
+                    }
+                    .encode_into(&mut inner.buffer);
+                    inner.buffer.extend_from_slice(&buf[..len]);
+                    inner.written += len;
+                    inner.state = SendState::Fragment;
+                    let driver = inner.driver_waker.take();
+                    drop(inner);
+                    wake(driver);
+                    return Poll::Ready(Ok(len));
+                }
+                // A large write asks to be granted a token for direct I/O.
                 inner.state = SendState::Demand;
                 register_waker(&mut inner.writer_waker, cx.waker());
                 let driver = inner.driver_waker.take();
@@ -635,12 +655,12 @@ impl<T> Drop for TrailerSend<T> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RecvState {
     Idle,
-    /// A fragment is granted and something already guarantees the consumer
-    /// will be polled again — either the token's own readiness waker
-    /// (registered by a zero-copy read that came back `Pending`, still
-    /// waiting on the transport) or `reader_waker`. `wait_fragment` trusts
-    /// this and just waits to be woken, rather than taking over draining
-    /// itself.
+    /// The consumer polled while no fragment was granted and is waiting for
+    /// the next fragment specifically.
+    Demand,
+    /// A fragment is granted and a zero-copy read returned `Pending`, so the
+    /// transport registered the consumer's waker. `wait_fragment` trusts
+    /// that registration instead of taking over draining itself.
     Reading,
     /// A fragment is granted, but nothing yet guarantees the consumer will
     /// be polled again — either it hasn't asked for this fragment at all
@@ -656,6 +676,9 @@ enum RecvState {
     /// for more. The consumer now only reads from `stage`.
     Draining,
     Fragment,
+    /// The current fragment is complete, but its lease has not yet been
+    /// released and the consumer has already polled for the next fragment.
+    FragmentDemand,
     Eof,
     Discard,
     /// A read failed, or the grant/connection was aborted/revoked. `error`
@@ -672,6 +695,8 @@ pub(crate) struct RecvShared {
     /// consumed via `RecvState::Discard`). Always drained to the consumer
     /// before anything else — see `TrailerRecv::poll_read`.
     stage: BytesMut,
+    copy_threshold: usize,
+    demand_copy_threshold: usize,
     state: RecvState,
     /// Set exactly when `state` is `Failed`, cleared never.
     error: Option<(io::ErrorKind, String)>,
@@ -680,11 +705,13 @@ pub(crate) struct RecvShared {
 }
 
 impl RecvShared {
-    pub(crate) fn new() -> Arc<Mutex<Self>> {
+    pub(crate) fn new(copy_threshold: usize, demand_copy_threshold: usize) -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self {
             token: None,
             remaining: 0,
             stage: BytesMut::new(),
+            copy_threshold,
+            demand_copy_threshold,
             state: RecvState::Idle,
             error: None,
             reader_waker: None,
@@ -692,12 +719,8 @@ impl RecvShared {
         }))
     }
 
-    /// A fresh grant always starts `Unclaimed`, never `Reading`: reaching
-    /// this point requires the previous fragment's read to have already
-    /// resolved (`remaining` hit zero), which only happens via a
-    /// `poll_read` outcome that itself moves state to `Fragment` or
-    /// `Draining` — never one that leaves anything registered behind. So
-    /// there is never a live registration to trust yet for the new grant.
+    /// Installs a fresh fragment and selects copying or rendezvous according
+    /// to whether the consumer demanded this specific fragment.
     pub(crate) unsafe fn grant<'a>(
         shared: &Arc<Mutex<Self>>,
         token: AnyRecv<'a>,
@@ -709,15 +732,31 @@ impl RecvShared {
         let mut inner = lock(shared);
         assert!(inner.token.is_none());
         if inner.state != RecvState::Discard {
+            let demanded = inner.state == RecvState::Demand;
+            let copy_threshold = if demanded {
+                inner.demand_copy_threshold
+            } else {
+                inner.copy_threshold
+            };
             inner.state = if remaining == 0 {
-                RecvState::Fragment
+                if demanded {
+                    RecvState::FragmentDemand
+                } else {
+                    RecvState::Fragment
+                }
+            } else if remaining <= copy_threshold {
+                RecvState::Draining
             } else {
                 RecvState::Unclaimed
             };
         }
         inner.token = Some(token);
         inner.remaining = remaining;
-        let reader = inner.reader_waker.take();
+        let reader = if inner.state == RecvState::Unclaimed {
+            inner.reader_waker.take()
+        } else {
+            None
+        };
         drop(inner);
         wake(reader);
         RecvLease {
@@ -748,7 +787,9 @@ impl RecvShared {
             inner.driver_waker.take();
             loop {
                 match inner.state {
-                    RecvState::Fragment => return Poll::Ready(Ok(false)),
+                    RecvState::Fragment | RecvState::FragmentDemand => {
+                        return Poll::Ready(Ok(false));
+                    }
                     RecvState::Discard if inner.remaining == 0 => return Poll::Ready(Ok(true)),
                     RecvState::Draining | RecvState::Discard => {}
                     RecvState::Reading => {
@@ -772,7 +813,7 @@ impl RecvShared {
                         }
                         inner.state = RecvState::Draining;
                     }
-                    RecvState::Idle | RecvState::Eof => {
+                    RecvState::Idle | RecvState::Demand | RecvState::Eof => {
                         register_waker(&mut inner.driver_waker, cx.waker());
                         return Poll::Pending;
                     }
@@ -886,9 +927,11 @@ impl RecvLease<'_> {
         let mut shared = lock(&self.shared);
         shared.token.take();
         shared.remaining = 0;
-        if shared.state == RecvState::Fragment {
-            shared.state = RecvState::Idle;
-        }
+        shared.state = match shared.state {
+            RecvState::Fragment => RecvState::Idle,
+            RecvState::FragmentDemand => RecvState::Demand,
+            state => state,
+        };
         self.armed = false;
     }
 }
@@ -983,13 +1026,24 @@ impl AsyncRead for TrailerRecv {
                 Poll::Ready(Err(io::Error::new(kind, message)))
             }
             RecvState::Eof => Poll::Ready(Ok(())),
-            RecvState::Idle | RecvState::Fragment | RecvState::Draining | RecvState::Discard => {
-                // No fragment granted yet (`Idle`); the current grant is
-                // fully received but not yet handed back for the next one
-                // (`Fragment`); or the driver already owns pulling bytes
-                // off the wire (`Draining`/`Discard`) — either way `stage`
+            RecvState::Idle => {
+                inner.state = RecvState::Demand;
+                register_waker(&mut inner.reader_waker, cx.waker());
+                Poll::Pending
+            }
+            RecvState::Fragment => {
+                inner.state = RecvState::FragmentDemand;
+                register_waker(&mut inner.reader_waker, cx.waker());
+                Poll::Pending
+            }
+            RecvState::Demand | RecvState::FragmentDemand => {
+                register_waker(&mut inner.reader_waker, cx.waker());
+                Poll::Pending
+            }
+            RecvState::Draining | RecvState::Discard => {
+                // The driver owns pulling bytes off the wire, so `stage`
                 // (checked above) is the only thing we can serve from until
-                // it's refilled or the fragment/trailer completes.
+                // it is refilled or the fragment/trailer completes.
                 register_waker(&mut inner.reader_waker, cx.waker());
                 Poll::Pending
             }
@@ -1084,7 +1138,17 @@ unsafe impl BufMut for ReadBufMut<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::{AnySender, Sender, generic};
+    use crate::transport::{AnyReceiver, AnySender, Receiver, Sender, generic};
+
+    fn poll_read_once(trailer: &mut TrailerRecv, output: &mut [u8]) -> Poll<io::Result<usize>> {
+        let mut read = ReadBuf::new(output);
+        let mut cx = Context::from_waker(Waker::noop());
+        match Pin::new(trailer).poll_read(&mut cx, &mut read) {
+            Poll::Ready(Ok(())) => Poll::Ready(Ok(read.filled().len())),
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
 
     struct CappedSink {
         bytes: Arc<Mutex<Vec<u8>>>,
@@ -1131,6 +1195,125 @@ mod tests {
         }
     }
 
+    #[test]
+    fn small_send_stages_without_a_grant_and_large_send_demands_one() {
+        let limits = Limits {
+            max_fragment_size: 8,
+            trailer_send_copy_threshold: 4,
+            ..Limits::default()
+        };
+
+        let small_shared = SendShared::new(Kind::Request, 1, &limits);
+        let mut small = TrailerSend::new(small_shared.clone(), ());
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            Pin::new(&mut small).poll_write(&mut cx, b"data"),
+            Poll::Ready(Ok(4))
+        ));
+        let header = FragmentHeader {
+            flags: Flags::TRAILER,
+            kind: Kind::Request,
+            id: 1,
+            payload_len: 4,
+        }
+        .encode();
+        assert_eq!(
+            &small_shared.lock().unwrap().buffer[..],
+            [&header[..], b"data"].concat()
+        );
+        assert_eq!(small_shared.lock().unwrap().state, SendState::Fragment);
+
+        let large_shared = SendShared::new(Kind::Request, 2, &limits);
+        let mut large = TrailerSend::new(large_shared.clone(), ());
+        assert!(
+            Pin::new(&mut large)
+                .poll_write(&mut cx, b"large")
+                .is_pending()
+        );
+        assert_eq!(large_shared.lock().unwrap().state, SendState::Demand);
+        assert!(large_shared.lock().unwrap().buffer.is_empty());
+    }
+
+    #[test]
+    fn receive_copy_threshold_depends_on_demand_for_this_fragment() {
+        let undemanded = RecvShared::new(1, 4);
+        let (_, receiver) = generic(tokio::io::empty(), tokio::io::sink());
+        let mut receiver = AnyReceiver::Generic(receiver);
+        let lease = unsafe { RecvShared::grant(&undemanded, receiver.recv(), 4) };
+        assert_eq!(undemanded.lock().unwrap().state, RecvState::Unclaimed);
+        drop(lease);
+
+        let demanded = RecvShared::new(1, 4);
+        let mut trailer = TrailerRecv::new(demanded.clone());
+        let mut output = [0; 4];
+        assert!(poll_read_once(&mut trailer, &mut output).is_pending());
+        assert_eq!(demanded.lock().unwrap().state, RecvState::Demand);
+        let (_, receiver) = generic(tokio::io::empty(), tokio::io::sink());
+        let mut receiver = AnyReceiver::Generic(receiver);
+        let lease = unsafe { RecvShared::grant(&demanded, receiver.recv(), 4) };
+        assert_eq!(demanded.lock().unwrap().state, RecvState::Draining);
+        drop(lease);
+    }
+
+    #[test]
+    fn demand_at_a_completed_fragment_boundary_applies_to_the_next_fragment() {
+        let shared = RecvShared::new(0, 0);
+        let mut trailer = TrailerRecv::new(shared.clone());
+        let (_, receiver) = generic(tokio::io::empty(), tokio::io::sink());
+        let mut receiver = AnyReceiver::Generic(receiver);
+        let lease = unsafe { RecvShared::grant(&shared, receiver.recv(), 0) };
+        assert_eq!(shared.lock().unwrap().state, RecvState::Fragment);
+
+        let mut output = [0; 1];
+        assert!(poll_read_once(&mut trailer, &mut output).is_pending());
+        assert_eq!(shared.lock().unwrap().state, RecvState::FragmentDemand);
+        lease.complete();
+        assert_eq!(shared.lock().unwrap().state, RecvState::Demand);
+    }
+
+    #[tokio::test]
+    async fn unclaimed_large_receive_falls_back_to_driver_draining() {
+        use tokio::io::AsyncWriteExt;
+
+        let shared = RecvShared::new(0, 0);
+        let (mut writer, reader) = tokio::io::duplex(16);
+        writer.write_all(b"data").await.unwrap();
+        let (_, receiver) = generic(reader, tokio::io::sink());
+        let mut receiver = AnyReceiver::Generic(receiver);
+        let lease = unsafe { RecvShared::grant(&shared, receiver.recv(), 4) };
+        assert_eq!(shared.lock().unwrap().state, RecvState::Unclaimed);
+
+        assert!(!RecvShared::wait_fragment(&shared).await.unwrap());
+        assert_eq!(shared.lock().unwrap().state, RecvState::Fragment);
+        assert_eq!(&shared.lock().unwrap().stage[..], b"data");
+        lease.complete();
+    }
+
+    #[tokio::test]
+    async fn demanded_large_receive_can_claim_the_grant_directly() {
+        use tokio::io::AsyncWriteExt;
+
+        let shared = RecvShared::new(0, 0);
+        let mut trailer = TrailerRecv::new(shared.clone());
+        let mut output = [0; 4];
+        assert!(poll_read_once(&mut trailer, &mut output).is_pending());
+
+        let (mut writer, reader) = tokio::io::duplex(16);
+        writer.write_all(b"data").await.unwrap();
+        let (_, receiver) = generic(reader, tokio::io::sink());
+        let mut receiver = AnyReceiver::Generic(receiver);
+        let lease = unsafe { RecvShared::grant(&shared, receiver.recv(), 4) };
+        assert_eq!(shared.lock().unwrap().state, RecvState::Unclaimed);
+        assert!(matches!(
+            poll_read_once(&mut trailer, &mut output),
+            Poll::Ready(Ok(4))
+        ));
+        assert_eq!(&output, b"data");
+        assert!(!RecvShared::wait_fragment(&shared).await.unwrap());
+        lease.complete();
+        assert_eq!(shared.lock().unwrap().state, RecvState::Idle);
+    }
+
     #[tokio::test]
     async fn abandoned_fragment_flushes_only_its_real_staged_suffix() {
         let output = Arc::new(Mutex::new(Vec::new()));
@@ -1142,8 +1325,15 @@ mod tests {
             },
         );
         let mut sender = AnySender::Generic(sender);
-        let shared = SendShared::new(usize::MAX);
-        let lease = unsafe { SendShared::grant(&shared, sender.send(), Kind::Request, 1, 1024) };
+        let shared = SendShared::new(
+            Kind::Request,
+            1,
+            &Limits {
+                max_trailer_size: usize::MAX,
+                ..Limits::default()
+            },
+        );
+        let lease = unsafe { SendShared::grant(&shared, sender.send(), 1024) };
         let data = (0..100).map(|value| value as u8).collect::<Vec<_>>();
         let mut trailer = TrailerSend::new(shared.clone(), ());
 
@@ -1192,8 +1382,15 @@ mod tests {
             },
         );
         let mut sender = AnySender::Generic(sender);
-        let shared = SendShared::new(usize::MAX);
-        let lease = unsafe { SendShared::grant(&shared, sender.send(), Kind::Request, 7, 1024) };
+        let shared = SendShared::new(
+            Kind::Request,
+            7,
+            &Limits {
+                max_trailer_size: usize::MAX,
+                ..Limits::default()
+            },
+        );
+        let lease = unsafe { SendShared::grant(&shared, sender.send(), 1024) };
         let data = (0..32).map(|value| value as u8).collect::<Vec<_>>();
         let mut trailer = TrailerSend::new(shared.clone(), ());
 
@@ -1225,8 +1422,15 @@ mod tests {
     async fn finish_releases_an_unused_live_grant() {
         let (sender, _) = generic(tokio::io::empty(), tokio::io::sink());
         let mut sender = AnySender::Generic(sender);
-        let shared = SendShared::new(usize::MAX);
-        let lease = unsafe { SendShared::grant(&shared, sender.send(), Kind::Request, 9, 1024) };
+        let shared = SendShared::new(
+            Kind::Request,
+            9,
+            &Limits {
+                max_trailer_size: usize::MAX,
+                ..Limits::default()
+            },
+        );
+        let lease = unsafe { SendShared::grant(&shared, sender.send(), 1024) };
 
         TrailerSend::new(shared.clone(), ()).finish();
         assert_eq!(
@@ -1240,8 +1444,15 @@ mod tests {
     async fn write_past_max_trailer_size_aborts_instead_of_silently_truncating() {
         let (sender, _) = generic(tokio::io::empty(), tokio::io::sink());
         let mut sender = AnySender::Generic(sender);
-        let shared = SendShared::new(4);
-        let lease = unsafe { SendShared::grant(&shared, sender.send(), Kind::Request, 1, 1024) };
+        let shared = SendShared::new(
+            Kind::Request,
+            1,
+            &Limits {
+                max_trailer_size: 4,
+                ..Limits::default()
+            },
+        );
+        let lease = unsafe { SendShared::grant(&shared, sender.send(), 1024) };
         let mut trailer = TrailerSend::new(shared.clone(), ());
 
         // Exhaust the 4-byte budget in a single write.
@@ -1257,7 +1468,7 @@ mod tests {
         // through the zero-copy `Granted` path — which must reject
         // immediately rather than trying to write anything, since the
         // budget is already spent.
-        let lease = unsafe { SendShared::grant(&shared, sender.send(), Kind::Request, 1, 1024) };
+        let lease = unsafe { SendShared::grant(&shared, sender.send(), 1024) };
         let error = std::future::poll_fn(|cx| Pin::new(&mut trailer).poll_write(cx, b"e"))
             .await
             .unwrap_err();

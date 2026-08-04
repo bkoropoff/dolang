@@ -326,10 +326,15 @@ impl<P: Protocol> Client<P> {
 
     /// Begins one request.
     pub fn call(&self, request: P::Request) -> Call<P> {
-        let (id, rx, cancel_sent) = self.begin(|id| Message::Request {
-            id,
-            value: request,
-            trailer: fragment::Trailer::None,
+        let ((id, rx, cancel_sent), ()) = self.begin(|id| {
+            (
+                Message::Request {
+                    id,
+                    value: request,
+                    trailer: fragment::Trailer::None,
+                },
+                (),
+            )
         });
         Call {
             id,
@@ -342,12 +347,20 @@ impl<P: Protocol> Client<P> {
     /// Begins one request whose raw byte trailer is written through the
     /// returned streaming body.
     pub fn call_with_trailer(&self, request: P::Request) -> TrailerSend<Call<P>> {
-        let shared = SendShared::new(self.inner.limits.max_trailer_size);
-        let (id, rx, cancel_sent) = self.begin(|id| Message::Request {
-            id,
-            value: request,
-            trailer: fragment::Trailer::Stream(shared.clone()),
+        let ((id, rx, cancel_sent), shared) = self.begin(|id| {
+            let shared = SendShared::new(Kind::Request, id, &self.inner.limits);
+            (
+                Message::Request {
+                    id,
+                    value: request,
+                    trailer: fragment::Trailer::Stream(shared.clone()),
+                },
+                shared,
+            )
         });
+        if cancel_sent {
+            SendShared::discard(&shared);
+        }
         TrailerSend::new(
             shared,
             Call {
@@ -363,7 +376,7 @@ impl<P: Protocol> Client<P> {
     /// `call_with_trailer`. `build` constructs the outgoing message once the
     /// id is known. Returns the id, the response receiver, and whether a
     /// cancel has effectively already been sent (nothing left to cancel).
-    fn begin(&self, build: impl FnOnce(u64) -> Message<P::Request>) -> BeginResult<P> {
+    fn begin<T>(&self, build: impl FnOnce(u64) -> (Message<P::Request>, T)) -> (BeginResult<P>, T) {
         let (tx, rx) = oneshot::channel();
         let tasks = self.inner.tasks.lock().unwrap();
         let id = {
@@ -372,17 +385,18 @@ impl<P: Protocol> Client<P> {
             *next = id.checked_add(1).expect("request identifiers exhausted");
             id
         };
+        let (message, value) = build(id);
         if tasks.is_none() {
             let _ = tx.send(Err(Error::ConnectionClosed));
-            return (id, rx, true);
+            return ((id, rx, true), value);
         }
         self.inner.pending.lock().unwrap().insert(id, tx);
-        let queued = self.inner.outgoing.send(build(id)).is_ok();
+        let queued = self.inner.outgoing.send(message).is_ok();
         drop(tasks);
         if !queued {
             self.inner.complete(id, Err(Error::ConnectionClosed));
         }
-        (id, rx, !queued)
+        ((id, rx, !queued), value)
     }
 }
 
