@@ -515,12 +515,11 @@ pub(crate) async fn negotiate_recv<'v, 's>(
                     || matches!(inner.state, PipeState::Draining) && !inner.send_closed
             };
             if needs_pipe && fresh_pipe.is_none() {
+                let local = global.local.get(strand);
                 fresh_pipe = Some(
-                    global
-                        .local
-                        .get(strand)
+                    local
                         .vfs()
-                        .pipe()
+                        .pipe_sized(local.pending_pipe_buffer_size())
                         .await
                         .into_sys(strand)?,
                 );
@@ -625,12 +624,11 @@ pub(crate) async fn negotiate_send<'v, 's>(
                 PipeState::Value | PipeState::Draining
             );
             if needs_pipe && fresh_pipe.is_none() {
+                let local = global.local.get(strand);
                 fresh_pipe = Some(
-                    global
-                        .local
-                        .get(strand)
+                    local
                         .vfs()
-                        .pipe()
+                        .pipe_sized(local.pending_pipe_buffer_size())
                         .await
                         .into_sys(strand)?,
                 );

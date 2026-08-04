@@ -31,8 +31,8 @@ use crate::{
 };
 use dolang::runtime::value::View;
 use dolang_shell_vfs::{
-    AnyVfs, Client, OperatingSystem, Query, SecurityInfo, TargetInfo, Utf8TypedPathBuf, Vfs as _,
-    VfsSession,
+    AnyVfs, Client, OperatingSystem, Query, SecurityInfo, StdioRecv, StdioSend, TargetInfo,
+    Utf8TypedPathBuf, Vfs as _, VfsSession,
 };
 use std::collections::HashMap;
 
@@ -352,6 +352,43 @@ impl<'v> Object<'v> for Stderr {
     }
 }
 
+/// Kernel buffer size requested for the local pipe pair carrying a remote
+/// `shell.Vfs` connection's RPC framing. Bigger than the OS default so
+/// short reads/writes (and the send-side fragment-size backoff they
+/// trigger) are the exception rather than routine.
+const REMOTE_VFS_PIPE_BUFFER_SIZE: usize = 1024 * 1024;
+
+/// Negotiates both ends of a `shell.Vfs` stream's pipe channel into real OS
+/// pipes. Factored out of `Vfs::new` so the caller can unconditionally
+/// clear the pending pipe-buffer-size hint afterward, success or failure.
+async fn negotiate_stream_pipes<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    input: &Value<'v>,
+    output: &Value<'v>,
+) -> Result<
+    'v,
+    's,
+    (
+        pipe_channel::RecvGuard,
+        StdioRecv,
+        pipe_channel::SendGuard,
+        StdioSend,
+    ),
+> {
+    let recv_guard = pipe_channel::negotiate_recv(input, strand, global)
+        .await?
+        .ok_or_else(|| Error::type_error(strand, "Vfs: stream iterator is not a pipe channel"))?;
+    let recv = recv_guard.recv_pipe().await.into_sys(strand)?;
+
+    let send_guard = pipe_channel::negotiate_send(output, strand, global)
+        .await?
+        .ok_or_else(|| Error::type_error(strand, "Vfs: stream sink is not a pipe channel"))?;
+    let send = send_guard.send_pipe().await.into_sys(strand)?;
+
+    Ok((recv_guard, recv, send_guard, send))
+}
+
 pub(crate) struct Vfs;
 
 pub(crate) struct VfsAnnex<'v> {
@@ -402,23 +439,27 @@ impl<'v> Object<'v> for Vfs {
             .with_slots(
                 async move |strand, [mut module, mut stream, mut input, mut output]| {
                     strand.import("strand", &mut module).await?;
+                    // The remote VFS connection's RPC framing runs over
+                    // this pipe pair, so it wants a generous kernel buffer
+                    // to make short reads/writes (and the fragment-size
+                    // backoff they trigger) rare rather than routine. Read
+                    // and cleared by `pipe_channel`'s factory closure; not
+                    // threaded through `stream`'s public signature, since
+                    // the pipe factory override is already internal-only.
+                    global
+                        .local
+                        .get(strand)
+                        .set_pending_pipe_buffer_size(Some(REMOTE_VFS_PIPE_BUFFER_SIZE));
                     method!(strand, &module, global.syms.stream, &mut stream, callable).await?;
                     stream.iter(strand, &mut input).await?;
                     stream.sink(strand, &mut output).await?;
 
-                    let recv_guard = pipe_channel::negotiate_recv(&input, strand, global)
-                        .await?
-                        .ok_or_else(|| {
-                            Error::type_error(strand, "Vfs: stream iterator is not a pipe channel")
-                        })?;
-                    let recv = recv_guard.recv_pipe().await.into_sys(strand)?;
-
-                    let send_guard = pipe_channel::negotiate_send(&output, strand, global)
-                        .await?
-                        .ok_or_else(|| {
-                            Error::type_error(strand, "Vfs: stream sink is not a pipe channel")
-                        })?;
-                    let send = send_guard.send_pipe().await.into_sys(strand)?;
+                    // However this comes out, the pending buffer size hint
+                    // must not leak into unrelated later pipe creation on
+                    // this strand.
+                    let negotiated = negotiate_stream_pipes(strand, global, &input, &output).await;
+                    global.local.get(strand).set_pending_pipe_buffer_size(None);
+                    let (recv_guard, recv, send_guard, send) = negotiated?;
 
                     let client = Client::new_split(recv, send);
                     let query = match client.query().await {

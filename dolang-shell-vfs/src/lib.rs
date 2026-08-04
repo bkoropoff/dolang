@@ -1313,6 +1313,15 @@ pub trait Vfs {
         elevate: bool,
     ) -> Result<VfsSession>;
     async fn pipe(&self) -> Result<(Self::StdioSend, Self::StdioRecv)>;
+    /// Like [`pipe`](Self::pipe), with a best-effort kernel buffer size
+    /// hint. Backends that can't honor the hint (e.g. a pipe created on a
+    /// remote peer) fall back to the default via this provided impl.
+    async fn pipe_sized(
+        &self,
+        _buf_size: Option<usize>,
+    ) -> Result<(Self::StdioSend, Self::StdioRecv)> {
+        self.pipe().await
+    }
     async fn query(&self) -> Result<Query>;
     async fn user_name(&self, uid: u32) -> Result<String>;
     async fn user_id(&self, name: &str) -> Result<u32>;
@@ -2282,6 +2291,13 @@ impl Vfs for AnyVfs {
         match self {
             Self::Client(client) => client.pipe().await,
             Self::Direct(direct) => direct.pipe().await,
+        }
+    }
+
+    async fn pipe_sized(&self, buf_size: Option<usize>) -> crate::Result<(StdioSend, StdioRecv)> {
+        match self {
+            Self::Client(client) => client.pipe_sized(buf_size).await,
+            Self::Direct(direct) => direct.pipe_sized(buf_size).await,
         }
     }
 

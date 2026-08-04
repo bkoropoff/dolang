@@ -221,6 +221,13 @@ pub(crate) struct Local {
     capture_is_tty: Cell<bool>,
     termination_policy: RefCell<TerminationPolicy>,
     invocation: RefCell<InvocationOverride>,
+    /// One-shot hint consumed by `pipe_channel`'s pipe factory: the buffer
+    /// size the *next* native OS pipe it creates on this strand should be
+    /// given, if any. Set immediately before triggering pipe creation and
+    /// cleared immediately after, rather than plumbed through `stream`'s
+    /// public signature — the pipe factory override is already an
+    /// internal-only mechanism, so this stays consistent with that.
+    pending_pipe_buffer_size: Cell<Option<usize>>,
 }
 
 impl<'v> strand::Local<'v> for Local {
@@ -242,6 +249,7 @@ impl<'v> strand::Local<'v> for Local {
             capture_is_tty: Cell::new(false),
             termination_policy: RefCell::new(TerminationPolicy::default()),
             invocation: RefCell::new(InvocationOverride::default()),
+            pending_pipe_buffer_size: Cell::new(None),
         }
     }
 
@@ -264,6 +272,8 @@ impl<'v> strand::Local<'v> for Local {
             capture_is_tty: Cell::new(self.capture_is_tty.get()),
             termination_policy: self.termination_policy.clone(),
             invocation: self.invocation.clone(),
+            // Transient, one-shot; never meant to cross a strand boundary.
+            pending_pipe_buffer_size: Cell::new(None),
         }
     }
 }
@@ -326,6 +336,14 @@ impl Local {
 
     pub(crate) fn set_io_mode(&self, v: IoMode) {
         self.io_mode.set(v);
+    }
+
+    pub(crate) fn set_pending_pipe_buffer_size(&self, size: Option<usize>) {
+        self.pending_pipe_buffer_size.set(size);
+    }
+
+    pub(crate) fn pending_pipe_buffer_size(&self) -> Option<usize> {
+        self.pending_pipe_buffer_size.get()
     }
 
     pub(crate) fn background(&self) -> bool {
