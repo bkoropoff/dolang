@@ -24,7 +24,7 @@ use crate::{
     error::{ErrorExt, ResultExt as _},
     fs::path::{PathAnnex, create_path_annex, path_from_value},
     global::{Global, ProgramSource},
-    io_mode::{IoMode, ReadValue, ValueEncoding, encode_value, read_raw, read_value, write_raw},
+    io_mode::{IoMode, ValueEncoding, encode_value, read_raw, read_value, write_raw},
     local::{Env as LocalEnv, ProgramOverride},
     pipe_channel,
     shell_args::Args as ShellArgs,
@@ -162,27 +162,17 @@ impl<'v> Object<'v> for Stdin {
     async fn next<'a, 's>(
         _this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        out: Slot<'v, 'a>,
+        mut out: Slot<'v, 'a>,
     ) -> Result<'v, 's, bool> {
         let global = strand.state::<Global<'v>>();
         let mode = global.local.get(strand).io_mode();
-        let value = {
+        let read = {
             let mut reader = global.stdio.stdin.lock().await;
-            read_value(&mut *reader, mode)
+            read_value(&mut *reader, mode, strand, &mut out)
                 .await
                 .map_err(|err| err.into_sys(strand))?
         };
-        match value {
-            Some(ReadValue::Line(line)) => {
-                Output::set(strand, out, line.as_str());
-                Ok(true)
-            }
-            Some(ReadValue::Chunk(chunk)) => {
-                Output::set(strand, out, chunk.as_slice());
-                Ok(true)
-            }
-            None => Ok(false),
-        }
+        Ok(read)
     }
 }
 

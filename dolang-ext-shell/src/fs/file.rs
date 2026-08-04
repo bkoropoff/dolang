@@ -5,7 +5,8 @@ use std::{
 
 use bstr::ByteSlice;
 use dolang::runtime::{
-    Error, Instance, Object, Output, Result, Slot, State, Strand, call, method,
+    BYTE_STREAM_CHUNK_SIZE, Error, Instance, Object, Output, Result, Slot, State, Strand, call,
+    method,
     object::TypeBuilder,
     unpack,
     value::{BinEmbryo, TypeObject, View},
@@ -27,7 +28,7 @@ use crate::{
     util,
 };
 
-const CHUNK_SIZE: usize = 8192;
+const TEXT_BUFFER_SIZE: usize = 8192;
 
 fn lock_endpoint<'v, 's>(
     strand: &mut Strand<'v, 's>,
@@ -475,7 +476,7 @@ impl<'v> Object<'v> for File<'v> {
         if is_binary {
             // Binary mode: read a chunk of data
             let mut buf = mem::take(&mut borrow.buf);
-            buf.reserve(strand, CHUNK_SIZE.saturating_sub(buf.len()));
+            buf.reserve(strand, BYTE_STREAM_CHUNK_SIZE.saturating_sub(buf.len()));
 
             let file_ref = borrow
                 .file
@@ -515,7 +516,7 @@ impl<'v> Object<'v> for File<'v> {
                 }
 
                 // Need to read more data
-                buf.reserve(strand, CHUNK_SIZE);
+                buf.reserve(strand, TEXT_BUFFER_SIZE);
 
                 let file_ref = borrow
                     .file

@@ -20,7 +20,7 @@ use dolang_shell_vfs::{AnyVfs, Vfs};
 use crate::{
     error::{ErrorExt as _, ResultExt as _},
     global::Global,
-    io_mode::{IoMode, ReadValue, ValueEncoding, encode_value, read_value},
+    io_mode::{IoMode, ValueEncoding, encode_value, read_value},
 };
 
 type StdioSend = <AnyVfs as Vfs>::StdioSend;
@@ -779,7 +779,7 @@ impl<'v> Object<'v> for PipeReceiver {
     async fn next<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        out: Slot<'v, 'a>,
+        mut out: Slot<'v, 'a>,
     ) -> Result<'v, 's, bool> {
         let shared = &this.annex().shared;
         let io_mode = this.annex().global.local.get(strand).io_mode();
@@ -854,8 +854,8 @@ impl<'v> Object<'v> for PipeReceiver {
             };
 
             if let Some(mut reader) = recv_end {
-                match read_value(&mut *reader, io_mode).await {
-                    Ok(None) => {
+                match read_value(&mut *reader, io_mode, strand, &mut out).await {
+                    Ok(false) => {
                         reader.discard();
                         let mut inner = shared.borrow_mut();
                         inner.state = PipeState::Value;
@@ -864,14 +864,7 @@ impl<'v> Object<'v> for PipeReceiver {
                         inner.wake_negotiators();
                         continue;
                     }
-                    Ok(Some(ReadValue::Line(line))) => {
-                        Output::set(strand, out, line.as_str());
-                        return Ok(true);
-                    }
-                    Ok(Some(ReadValue::Chunk(chunk))) => {
-                        Output::set(strand, out, chunk.as_slice());
-                        return Ok(true);
-                    }
+                    Ok(true) => return Ok(true),
                     Err(e) => {
                         return Err(e.into_sys(strand));
                     }

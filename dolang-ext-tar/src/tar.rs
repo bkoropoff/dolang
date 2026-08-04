@@ -1,5 +1,6 @@
 use std::{
-    io::SeekFrom,
+    future::poll_fn,
+    io::{self, SeekFrom},
     path::Path,
     pin::Pin,
     str,
@@ -11,22 +12,23 @@ use async_compression::tokio::{
     write::{GzipEncoder, ZstdEncoder},
 };
 use dolang::runtime::{
-    Error, Instance, Object, Output, Result, Slot, State, Strand, call,
+    BYTE_STREAM_CHUNK_SIZE, Error, Instance, Object, Output, Result, Slot, State, Strand, call,
     error::ResultExt,
     object::{Mut, Ref, TypeBuilder},
     unpack,
-    value::{Nil, TypeObject, View},
+    value::{BinEmbryo, Nil, TypeObject, View},
     vm::Builder,
 };
 use tokio::io::{
     AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt, BufReader, DuplexStream,
+    ReadBuf,
 };
 use tokio_stream::StreamExt;
 use tokio_tar::{Archive, Builder as TarBuilder, Entries, Entry, EntryType, Header};
 
 use crate::global::Global;
 
-const CHUNK_SIZE: usize = 8192;
+const INTERNAL_BUFFER_SIZE: usize = 8192;
 const GZIP_MAGIC: &[u8] = b"\x1f\x8b";
 const ZSTD_MAGIC: &[u8] = b"\x28\xb5\x2f\xfd";
 
@@ -35,6 +37,17 @@ type DynWriter = Pin<Box<dyn AsyncWrite + Send>>;
 type NativeEntries = Entries<DynReader>;
 type NativeEntry = Entry<Archive<DynReader>>;
 type NativeBuilder = TarBuilder<DynWriter>;
+
+async fn read_into_embryo(
+    reader: &mut (impl AsyncRead + Unpin),
+    embryo: &mut BinEmbryo<'_>,
+) -> io::Result<usize> {
+    let mut buf = ReadBuf::uninit(embryo.spare_capacity_mut());
+    poll_fn(|cx| Pin::new(&mut *reader).poll_read(cx, &mut buf)).await?;
+    let read = buf.filled().len();
+    unsafe { embryo.advance(read) };
+    Ok(read)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Compression {
@@ -568,16 +581,11 @@ impl<'v> Object<'v> for TarEntry {
                                 "tar entry is no longer active",
                             ));
                         }
-                        let mut data = vec![0; size];
-                        let count = borrow
-                            .current
-                            .as_mut()
-                            .unwrap()
-                            .read(&mut data)
+                        let mut data = BinEmbryo::new_with_capacity(strand, size);
+                        read_into_embryo(borrow.current.as_mut().unwrap(), &mut data)
                             .await
                             .into_do(strand)?;
-                        data.truncate(count);
-                        Output::set(strand, out, data.as_slice());
+                        data.finish(strand, out);
                         Ok(())
                     })
                     .await
@@ -610,19 +618,14 @@ impl<'v> Object<'v> for TarEntry {
                 if borrow.generation != generation {
                     return Err(Error::state_error(strand, "tar entry is no longer active"));
                 }
-                let mut data = vec![0; CHUNK_SIZE];
-                let count = borrow
-                    .current
-                    .as_mut()
-                    .unwrap()
-                    .read(&mut data)
+                let mut data = BinEmbryo::new_with_capacity(strand, BYTE_STREAM_CHUNK_SIZE);
+                let count = read_into_embryo(borrow.current.as_mut().unwrap(), &mut data)
                     .await
                     .into_do(strand)?;
                 if count == 0 {
                     return Ok(false);
                 }
-                data.truncate(count);
-                Output::set(strand, out, data.as_slice());
+                data.finish(strand, out);
                 Ok(true)
             })
             .await
@@ -768,7 +771,8 @@ impl<'v> Object<'v> for TarWriter {
                     let mut header =
                         build_header(strand, EntryType::Regular, size, &opts, None)?;
 
-                    let (entry_stream, archive_stream) = tokio::io::duplex(CHUNK_SIZE * 2);
+                    let (entry_stream, archive_stream) =
+                        tokio::io::duplex(INTERNAL_BUFFER_SIZE * 2);
                     global.types.entry_writer.create_with_annex(
                         strand,
                         TarEntryWriter {
@@ -919,7 +923,7 @@ async fn open_reader<'v, 's>(
     } else {
         Compression::None
     };
-    let buffered = BufReader::with_capacity(CHUNK_SIZE, file);
+    let buffered = BufReader::with_capacity(BYTE_STREAM_CHUNK_SIZE, file);
     let reader: DynReader = match compression {
         Compression::None => Box::pin(buffered),
         Compression::Gzip => Box::pin(GzipDecoder::new(buffered)),
