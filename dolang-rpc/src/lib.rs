@@ -78,6 +78,15 @@ impl Default for Limits {
 /// this to `Limits`.
 pub(crate) const NEGOTIATE_FRAGMENT_SIZE: usize = 1024;
 
+/// Maximum total size of a reassembled `Kind::Negotiate` message payload,
+/// across all of its fragments. Bounds how much a peer can make the
+/// receiving end buffer before negotiation (and with it, the negotiated
+/// `Limits`) is in force. A real handshake payload — version blobs plus an
+/// application-protocol name and version list — is at most a few hundred
+/// bytes; this leaves generous headroom without allowing unbounded growth.
+/// Not configurable, for the same reason as `NEGOTIATE_FRAGMENT_SIZE`.
+pub(crate) const NEGOTIATE_MAX_PAYLOAD_SIZE: usize = 64 * 1024;
+
 /// A family of request and response messages.
 pub trait Protocol: Send + Sync + 'static {
     type Request: Serialize + DeserializeOwned + Send + 'static;
@@ -104,7 +113,7 @@ pub enum Error {
 }
 
 impl Error {
-    fn copy(&self) -> Self {
+    pub(crate) fn copy(&self) -> Self {
         match self {
             Self::Io(e) => Self::Io(std::io::Error::new(e.kind(), e.to_string())),
             Self::Serialize(e) => Self::Serialize(e.clone()),

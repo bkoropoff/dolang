@@ -88,7 +88,7 @@ struct Reader<P: Protocol> {
 
 struct Tasks {
     reader_shutdown: Option<oneshot::Sender<()>>,
-    writer: tokio::task::JoinHandle<()>,
+    writer: tokio::task::JoinHandle<Result<(), Error>>,
     reader: tokio::task::JoinHandle<()>,
 }
 
@@ -412,14 +412,16 @@ impl<P: Protocol> Drop for Call<P> {
 }
 
 impl<P: Protocol> Writer<P> {
-    /// Completes a pending call with an error. Returns `true` if the
-    /// session is already gone and the writer should stop.
-    fn complete_err(&self, id: u64, error: Error) -> bool {
-        let Some(inner) = self.inner.upgrade() else {
-            return true;
-        };
-        inner.complete(id, Err(error));
-        false
+    /// Best-effort completion of a pending call with an error; a no-op if
+    /// the session is already gone. Also drops any retained request kept
+    /// alive for a native-handle resend (see `keep_requests_alive`) — the
+    /// call is done, so nothing will resend it, and leaving the entry in
+    /// place would leak it until the whole session closes.
+    fn complete_err(&self, id: u64, error: Error) {
+        if let Some(inner) = self.inner.upgrade() {
+            inner.request_keepalive.lock().unwrap().remove(&id);
+            inner.complete(id, Err(error));
+        }
     }
 
     /// Fails every pending call. Used for transport-level (I/O) failures,
@@ -431,28 +433,29 @@ impl<P: Protocol> Writer<P> {
     }
 
     /// Admits one queued item into the scheduler (or sends it immediately,
-    /// for the native-handle atomic path). Returns `true` if the writer
-    /// should stop.
+    /// for the native-handle atomic path). Returns `Err` on a fatal
+    /// transport/protocol error, which the caller must treat as fatal for
+    /// the whole session, not just this one message.
     async fn admit(
         &mut self,
         message: Message<P::Request>,
         scheduler: &mut fragment::Scheduler,
-    ) -> bool {
+    ) -> Result<(), Error> {
         match message {
             Message::Request { id, value, trailer } => {
                 self.admit_request(id, value, trailer, scheduler).await
             }
             Message::Cancel { id } => {
                 self.admit_cancel(id, scheduler);
-                false
+                Ok(())
             }
             Message::DiscardTrailer { id } => {
                 scheduler.admit_empty(Kind::Discard, id);
-                false
+                Ok(())
             }
             Message::PeerDiscarded { id } => {
                 scheduler.discard_active_trailer(id);
-                false
+                Ok(())
             }
         }
     }
@@ -463,23 +466,23 @@ impl<P: Protocol> Writer<P> {
         value: P::Request,
         trailer: fragment::Trailer,
         scheduler: &mut fragment::Scheduler,
-    ) -> bool {
+    ) -> Result<(), Error> {
         let mut probe = self.transport.send();
         let payload = match encode_payload(&value, &mut probe) {
             Ok(payload) => payload,
             Err(err) => {
                 drop(probe);
-                return self.complete_err(id, err);
+                self.complete_err(id, err);
+                return Ok(());
             }
         };
         if probe.has_attachments() {
             if !matches!(&trailer, fragment::Trailer::None) {
                 drop(probe);
-                self.fail_all(Error::Protocol(
+                return Err(Error::Protocol(
                     "requests with both native-handle attachments and a trailer are not supported"
                         .into(),
                 ));
-                return true;
             }
             let header = fragment::FragmentHeader {
                 flags: fragment::Flags::FIRST | fragment::Flags::LAST,
@@ -488,21 +491,17 @@ impl<P: Protocol> Writer<P> {
                 payload_len: payload.len(),
             };
             let mut buffer = header.encode().chain(payload);
-            if let Err(err) = probe.finish(&mut buffer).await {
-                self.fail_all(err.into());
-                return true;
-            }
+            probe.finish(&mut buffer).await?;
         } else {
             drop(probe);
             scheduler.admit_message(Kind::Request, id, payload, trailer);
         }
-        if self.keep_requests_alive {
-            let Some(inner) = self.inner.upgrade() else {
-                return true;
-            };
+        if self.keep_requests_alive
+            && let Some(inner) = self.inner.upgrade()
+        {
             inner.request_keepalive.lock().unwrap().insert(id, value);
         }
-        false
+        Ok(())
     }
 
     fn admit_cancel(&mut self, id: u64, scheduler: &mut fragment::Scheduler) {
@@ -512,12 +511,12 @@ impl<P: Protocol> Writer<P> {
                 if started {
                     scheduler.admit_abort(id);
                 }
-                let _ = self.complete_err(id, Error::Cancelled);
+                self.complete_err(id, Error::Cancelled);
             }
         }
     }
 
-    async fn run(mut self) {
+    async fn run(mut self) -> Result<(), Error> {
         let mut scheduler = fragment::Scheduler::new(&self.limits);
         // Holding a clone of `Inner::outgoing` is what represents the
         // ability to still get a message in (see its doc comment), so the
@@ -534,8 +533,9 @@ impl<P: Protocol> Writer<P> {
                         closed = true;
                         continue;
                     };
-                    if self.admit(message, &mut scheduler).await {
-                        return;
+                    if let Err(err) = self.admit(message, &mut scheduler).await {
+                        self.fail_all(err.copy());
+                        return Err(err);
                     }
                 }
                 // Not raced against anything: once ready, a fragment write
@@ -551,17 +551,18 @@ impl<P: Protocol> Writer<P> {
                     match result {
                         // A streaming trailer producer was dropped mid-message.
                         Ok(Some(id)) => {
-                            let _ = self.complete_err(id, Error::Cancelled);
+                            self.complete_err(id, Error::Cancelled);
                         }
                         Ok(None) => {}
                         Err(err) => {
-                            self.fail_all(err);
-                            return;
+                            self.fail_all(err.copy());
+                            return Err(err);
                         }
                     }
                 }
             }
         }
+        Ok(())
     }
 }
 
@@ -747,5 +748,38 @@ mod tests {
         let (call, mut outgoing) = pending_call();
         drop(call);
         assert!(matches!(outgoing.try_recv(), Ok(Message::Cancel { id: 0 })));
+    }
+
+    #[tokio::test]
+    async fn complete_err_clears_retained_keepalive_request() {
+        let (outgoing, _outgoing_rx) = mpsc::unbounded_channel();
+        let inner = Arc::new(Inner {
+            outgoing: Mutex::new(Some(outgoing)),
+            pending: Mutex::new(HashMap::new()),
+            next_id: Mutex::new(1),
+            tasks: Mutex::new(None),
+            request_keepalive: Mutex::new(HashMap::new()),
+            limits: Limits::default(),
+            #[cfg(windows)]
+            _peer_process: None,
+        });
+        let (tx, _rx) = oneshot::channel();
+        inner.pending.lock().unwrap().insert(0, tx);
+        inner.request_keepalive.lock().unwrap().insert(0, 7u8);
+
+        let (dummy_write, _unused) = tokio::io::duplex(64);
+        let (sender, _unused) = transport::generic_duplex(dummy_write);
+        let (_unused_tx, outgoing_rx) = mpsc::unbounded_channel();
+        let writer = Writer::<Test> {
+            transport: transport::AnySender::Generic(sender),
+            outgoing: outgoing_rx,
+            inner: Arc::downgrade(&inner),
+            keep_requests_alive: true,
+            limits: Limits::default(),
+        };
+
+        writer.complete_err(0, Error::Cancelled);
+
+        assert!(inner.request_keepalive.lock().unwrap().is_empty());
     }
 }

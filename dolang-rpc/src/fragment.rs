@@ -15,7 +15,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use ::serde::{Deserialize, Serialize};
 
 use crate::{
-    Error, Kind, Limits, NEGOTIATE_FRAGMENT_SIZE,
+    Error, Kind, Limits, NEGOTIATE_FRAGMENT_SIZE, NEGOTIATE_MAX_PAYLOAD_SIZE,
     trailer::{RecvShared, SendAction, SendShared},
     transport::{AnyReceiver, AnySender, Receiver, RecvFrame, SendFrame, Sender},
 };
@@ -471,6 +471,11 @@ async fn read_negotiate_message(receiver: &mut AnyReceiver) -> Result<([u8; 8], 
         if header.payload_len > NEGOTIATE_FRAGMENT_SIZE {
             return Err(Error::Protocol(
                 "negotiate fragment exceeds the minimum tolerated size".into(),
+            ));
+        }
+        if payload.len() + header.payload_len > NEGOTIATE_MAX_PAYLOAD_SIZE {
+            return Err(Error::Protocol(
+                "negotiate message exceeds the maximum tolerated total size".into(),
             ));
         }
         if first {
@@ -2505,6 +2510,28 @@ mod tests {
         let (got_id, got_payload) = read_result.unwrap();
         assert_eq!(got_id, id);
         assert_eq!(got_payload, payload);
+    }
+
+    #[tokio::test]
+    async fn negotiate_message_exceeding_max_total_size_is_rejected() {
+        let ((mut sender, _unused_receiver), (_unused_sender, mut receiver)) =
+            duplex_endpoint_pair(1 << 21);
+        let payload = vec![0u8; NEGOTIATE_MAX_PAYLOAD_SIZE + 1];
+        let mut id = [0u8; 8];
+        id[0] = 7;
+
+        let (write_result, read_result) = tokio::join!(
+            write_negotiate_message(&mut sender, id, &payload),
+            read_negotiate_message(&mut receiver),
+        );
+        // The writer has no size limit of its own; only the reader enforces
+        // the cap, so its write may or may not fail depending on how far
+        // the reader got before erroring out and dropping the connection.
+        let _ = write_result;
+        let error = read_result.unwrap_err();
+        assert!(
+            matches!(error, Error::Protocol(ref msg) if msg.contains("exceeds the maximum tolerated total size"))
+        );
     }
 
     #[tokio::test]
