@@ -42,6 +42,13 @@ use crate::{
 /// How often (in iterations) to check for interrupts in inner loops.
 pub(crate) const INTERRUPT_INTERVAL: usize = 1024;
 
+/// Default item size for iterators which produce a stream of bytes.
+///
+/// This is large enough to amortize file and remote-filesystem operations while
+/// still applying backpressure between individual [`Iter`](crate::value::TypeObject::Iter)
+/// and [`Sink`](crate::value::TypeObject::Sink) operations.
+pub const BYTE_STREAM_CHUNK_SIZE: usize = 512 * 1024;
+
 pub(crate) struct Runtime;
 
 impl Phase for Runtime {

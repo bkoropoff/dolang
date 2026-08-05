@@ -32,7 +32,9 @@ async fn embedded_vfs_mode_serves_and_stops() {
     let process = child.as_handle().try_clone_to_owned().unwrap();
     pipe.connect().await.unwrap();
 
-    let client = unsafe { Client::from_named_pipe_server(pipe, process).unwrap() };
+    let client = unsafe { Client::from_named_pipe_server(pipe, process) }
+        .await
+        .unwrap();
     let query = client.query().await.unwrap();
     assert_eq!(
         query.cwd,
@@ -58,7 +60,7 @@ async fn embedded_vfs_stdio_mode_serves_and_stops() {
         .unwrap();
     let stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
-    let client = Client::new_split(stdout, stdin);
+    let client = Client::new_split(stdout, stdin).await.unwrap();
 
     let query = client.query().await.unwrap();
     assert_eq!(

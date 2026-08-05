@@ -971,7 +971,7 @@ mod tests {
     use super::*;
     use crate::OsHandle;
     use ::serde::{Deserialize, Serialize};
-    use bytes::{Buf, BufMut};
+    use bytes::BufMut;
     use nix::unistd::pipe;
     use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
@@ -982,8 +982,15 @@ mod tests {
             self.0.push(fd);
             Ok(index)
         }
-        async fn finish<B: Buf>(self, _buffer: &mut B) -> io::Result<()> {
-            Ok(())
+        fn has_attachments(&self) -> bool {
+            !self.0.is_empty()
+        }
+        fn poll_write_once(
+            &mut self,
+            _cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<io::Result<usize>> {
+            std::task::Poll::Ready(Ok(buf.len()))
         }
     }
 
@@ -1082,7 +1089,7 @@ mod windows_tests {
     use std::os::windows::io::{FromRawHandle, IntoRawHandle, OwnedHandle};
 
     use ::serde::{Deserialize, Serialize};
-    use bytes::{Buf, BufMut};
+    use bytes::BufMut;
 
     use super::*;
     use crate::OsHandle;
@@ -1097,8 +1104,16 @@ mod windows_tests {
             Ok(raw)
         }
 
-        async fn finish<B: Buf>(self, _buffer: &mut B) -> io::Result<()> {
-            Ok(())
+        fn has_attachments(&self) -> bool {
+            self.0.is_some()
+        }
+
+        fn poll_write_once(
+            &mut self,
+            _cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<io::Result<usize>> {
+            std::task::Poll::Ready(Ok(buf.len()))
         }
     }
 

@@ -34,7 +34,7 @@ type ZipWriteEntry = EntrySeekableWriter<'static, Compat<AnyFile>>;
 
 enum ArchiveInner {
     Read(ZipReader),
-    Write(Box<ZipWriter>),
+    Write(ZipWriter),
 }
 
 enum FileInner {
@@ -388,7 +388,7 @@ impl<'v> Object<'v> for Archive {
                         file.close().await.into_do(strand)?;
                     }
                     Some(ArchiveInner::Write(writer)) => {
-                        let file = ZipFileWriter::close(*writer)
+                        let file = ZipFileWriter::close(writer)
                             .await
                             .into_do(strand)?
                             .into_inner();
@@ -851,7 +851,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                     let file = dolang_ext_shell::open(strand, path.as_ref(), "w")
                         .await
                         .into_do(strand)?;
-                    ArchiveInner::Write(Box::new(ZipWriter::with_tokio(file)))
+                    ArchiveInner::Write(ZipWriter::with_tokio(file))
                 }
                 _ => {
                     return Err(Error::value(

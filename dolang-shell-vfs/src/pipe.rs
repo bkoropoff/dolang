@@ -79,10 +79,18 @@ where
     let _ = dst.shutdown().await;
 }
 
-pub(crate) fn pipe() -> io::Result<(StdioSend, StdioRecv)> {
+/// Creates a native OS pipe, optionally hinting a kernel buffer size.
+///
+/// The hint is best-effort: on platforms/configurations where it can't be
+/// honored, the pipe is created with its default buffer size instead of
+/// failing outright.
+pub(crate) fn pipe(buf_size: Option<usize>) -> io::Result<(StdioSend, StdioRecv)> {
     #[cfg(unix)]
     {
         let (send, recv) = tokio::net::unix::pipe::pipe()?;
+        if let Some(size) = buf_size {
+            set_pipe_buffer_size(&send, size);
+        }
         Ok((
             StdioSend::Native(NativeStdioSend::Pipe(send)),
             StdioRecv::Native(NativeStdioRecv::Pipe(recv)),
@@ -90,7 +98,10 @@ pub(crate) fn pipe() -> io::Result<(StdioSend, StdioRecv)> {
     }
     #[cfg(windows)]
     {
-        let (recv, send) = std::io::pipe()?;
+        let (recv, send) = match buf_size {
+            Some(size) => create_pipe_sized(size)?,
+            None => std::io::pipe()?,
+        };
         Ok((
             StdioSend::Native(NativeStdioSend::Pipe {
                 inner: Arc::new(send),
@@ -103,6 +114,57 @@ pub(crate) fn pipe() -> io::Result<(StdioSend, StdioRecv)> {
             }),
         ))
     }
+}
+
+/// Resizes a pipe's kernel buffer via `fcntl(F_SETPIPE_SZ)`, applied to
+/// either end (the buffer is shared by both). No raw-handle bypass is
+/// needed: tokio's pipe types expose the fd directly via `AsRawFd`.
+#[cfg(target_os = "linux")]
+fn set_pipe_buffer_size(send: &tokio::net::unix::pipe::Sender, size: usize) {
+    use std::os::fd::AsRawFd;
+    let size = i32::try_from(size).unwrap_or(i32::MAX);
+    // Best-effort: failure (e.g. exceeding /proc/sys/fs/pipe-max-size
+    // without CAP_SYS_RESOURCE) just leaves the default buffer size.
+    unsafe {
+        libc::fcntl(send.as_raw_fd(), libc::F_SETPIPE_SZ, size);
+    }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn set_pipe_buffer_size(_send: &tokio::net::unix::pipe::Sender, _size: usize) {}
+
+/// Creates an anonymous pipe with a requested kernel buffer size.
+///
+/// `std::io::pipe` has no size parameter, so this bypasses it and calls
+/// `CreatePipe` directly with `bInheritHandle = FALSE`, matching the
+/// non-inheritable handles `std::io::pipe` itself produces.
+#[cfg(windows)]
+fn create_pipe_sized(size: usize) -> io::Result<(std::io::PipeReader, std::io::PipeWriter)> {
+    use std::os::windows::io::FromRawHandle;
+
+    use windows_sys::Win32::{
+        Foundation::HANDLE, Security::SECURITY_ATTRIBUTES, System::Pipes::CreatePipe,
+    };
+
+    let mut read_handle: HANDLE = std::ptr::null_mut();
+    let mut write_handle: HANDLE = std::ptr::null_mut();
+    let attrs = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: std::ptr::null_mut(),
+        bInheritHandle: 0,
+    };
+    let size = u32::try_from(size).unwrap_or(u32::MAX);
+    // SAFETY: `read_handle`/`write_handle` are valid out-params for the
+    // duration of this call; `attrs` lives on the stack until it returns.
+    let ok = unsafe { CreatePipe(&mut read_handle, &mut write_handle, &attrs, size) };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `read_handle`/`write_handle` are freshly created, uniquely
+    // owned handles from a successful `CreatePipe` call.
+    let reader = unsafe { std::io::PipeReader::from_raw_handle(read_handle as _) };
+    let writer = unsafe { std::io::PipeWriter::from_raw_handle(write_handle as _) };
+    Ok((reader, writer))
 }
 
 impl StdioSend {

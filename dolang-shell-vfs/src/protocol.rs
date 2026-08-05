@@ -32,6 +32,17 @@ impl Protocol for VfsProtocol {
     type Response = ResponseKind;
 }
 
+/// Application-protocol name/version advertised during the RPC handshake.
+/// `dolang_rpc::Server`/`Client` are only reachable via `UnboundServer`/
+/// `UnboundClient`, which require this descriptor.
+pub(crate) const APP_PROTOCOL: (&str, &[u16]) = ("dolang-vfs", &[1]);
+
+/// Starts a fresh [`dolang_rpc::Builder`] preconfigured with
+/// [`APP_PROTOCOL`].
+pub(crate) fn rpc_builder() -> dolang_rpc::Builder {
+    dolang_rpc::Builder::new(APP_PROTOCOL.0, APP_PROTOCOL.1)
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct Request {
     pub(crate) vfs: Option<Opaque<crate::VfsMarker>>,
@@ -557,7 +568,6 @@ pub(crate) enum RequestKind {
     },
     FileWrite {
         file: Opaque<crate::FileMarker>,
-        data: Vec<u8>,
     },
     FileSeek {
         file: Opaque<crate::FileMarker>,
@@ -589,7 +599,6 @@ pub(crate) enum RequestKind {
     },
     StdioSendWrite {
         stdio: Opaque<crate::StdioSendMarker>,
-        data: Vec<u8>,
     },
     StdioSendClone {
         stdio: Opaque<crate::StdioSendMarker>,
@@ -705,7 +714,7 @@ pub(crate) enum ResponseKind {
     ClearCache(Result<(), WireError>),
     Pipe(Result<PipeResponse, WireError>),
     Open(Result<OpenHandle, WireError>),
-    FileRead(Result<Vec<u8>, WireError>),
+    FileRead(Result<(), WireError>),
     FileWrite(Result<usize, WireError>),
     FileSeek(Result<u64, WireError>),
     FileFlush(Result<(), WireError>),
@@ -718,7 +727,7 @@ pub(crate) enum ResponseKind {
     StdioSendWrite(Result<usize, WireError>),
     StdioSendClone(Result<Opaque<crate::StdioSendMarker>, WireError>),
     StdioRecvClose(Result<(), WireError>),
-    StdioRecvRead(Result<Vec<u8>, WireError>),
+    StdioRecvRead(Result<(), WireError>),
     StdioRecvClone(Result<Opaque<crate::StdioRecvMarker>, WireError>),
     FileMetadata(Result<Metadata, WireError>),
     FileFsMetadata(Result<FsMetadata, WireError>),

@@ -1,48 +1,73 @@
 use std::{
     collections::HashMap,
     future::Future,
-    io,
     pin::Pin,
     sync::{Arc, Mutex, Weak},
     task::{Context, Poll},
 };
 
-#[cfg(unix)]
-use std::os::unix::net::UnixStream;
+#[cfg(windows)]
+use std::io;
 
-use bytes::BytesMut;
-use tokio::{
-    io::{AsyncRead, AsyncWrite},
-    sync::{mpsc, oneshot},
-};
+use bytes::Buf;
+use tokio::sync::{mpsc, oneshot};
 
 #[cfg(windows)]
 use std::os::windows::io::{AsRawHandle, OwnedHandle};
 
 #[cfg(windows)]
-use tokio::net::windows::named_pipe::{NamedPipeClient, NamedPipeServer};
-
-#[cfg(windows)]
 use windows_sys::Win32::System::Threading::GetProcessId;
 
 use crate::{
-    DEFAULT_MAX_FRAME_SIZE, Error, Kind, Protocol, decode, encode, encode_empty, read_message,
+    Error, Kind, Limits, Protocol, decode, encode_payload, fragment,
+    trailer::{SendShared, TrailerSend},
     transport::{self, Receiver, SendFrame, Sender},
 };
 
-type Pending<R> = HashMap<u64, oneshot::Sender<Result<R, Error>>>;
+type Pending<R> = HashMap<u64, oneshot::Sender<Result<CallResult<R>, Error>>>;
+
+/// `(id, response receiver, cancel_sent)`, returned by `Client::begin`.
+type BeginResult<P> = (
+    u64,
+    oneshot::Receiver<Result<CallResult<<P as Protocol>::Response>, Error>>,
+    bool,
+);
 
 enum Message<Q> {
-    Request { id: u64, value: Q },
-    Cancel { id: u64 },
+    Request {
+        id: u64,
+        value: Q,
+        trailer: fragment::Trailer,
+    },
+    Cancel {
+        id: u64,
+    },
+    /// We stopped reading a response trailer (it arrived unwanted) and want
+    /// to tell the peer to stop sending it. Always results in a wire
+    /// `Kind::Discard` fragment — this connection never has an active
+    /// outgoing send under a response id to abort locally instead.
+    DiscardTrailer {
+        id: u64,
+    },
+    /// A wire `Kind::Discard` fragment arrived, telling us the peer no
+    /// longer wants our request trailer. Applied to our own active send;
+    /// never re-sent to the peer.
+    PeerDiscarded {
+        id: u64,
+    },
 }
 
 struct Inner<P: Protocol> {
-    outgoing: mpsc::UnboundedSender<Message<P::Request>>,
+    // Holding a clone of this sender represents the ability to still get a
+    // message into the writer, so closing the channel — clearing this to
+    // `None` — is itself the writer's shutdown signal (see `Writer::run`):
+    // no separate oneshot needed.
+    outgoing: Mutex<Option<mpsc::UnboundedSender<Message<P::Request>>>>,
     pending: Mutex<Pending<P::Response>>,
     next_id: Mutex<u64>,
     tasks: Mutex<Option<Tasks>>,
     request_keepalive: Mutex<HashMap<u64, P::Request>>,
+    limits: Limits,
     #[cfg(windows)]
     _peer_process: Option<OwnedHandle>,
 }
@@ -52,27 +77,23 @@ struct Writer<P: Protocol> {
     outgoing: mpsc::UnboundedReceiver<Message<P::Request>>,
     inner: Weak<Inner<P>>,
     keep_requests_alive: bool,
+    limits: Limits,
 }
 
 struct Reader<P: Protocol> {
     transport: transport::AnyReceiver,
     inner: Weak<Inner<P>>,
-    max_frame_size: usize,
-    buffered: BytesMut,
+    limits: Limits,
 }
 
 struct Tasks {
-    writer_shutdown: Option<oneshot::Sender<()>>,
     reader_shutdown: Option<oneshot::Sender<()>>,
-    writer: tokio::task::JoinHandle<()>,
+    writer: tokio::task::JoinHandle<Result<(), Error>>,
     reader: tokio::task::JoinHandle<()>,
 }
 
 impl Tasks {
     fn shutdown(&mut self) {
-        if let Some(shutdown) = self.writer_shutdown.take() {
-            let _ = shutdown.send(());
-        }
         if let Some(shutdown) = self.reader_shutdown.take() {
             let _ = shutdown.send(());
         }
@@ -86,6 +107,8 @@ impl Tasks {
 
 impl<P: Protocol> Drop for Inner<P> {
     fn drop(&mut self) {
+        // Close the writer's channel first — see the comment on `outgoing`.
+        self.outgoing.lock().unwrap().take();
         if let Some(tasks) = self.tasks.get_mut().unwrap().as_mut() {
             tasks.shutdown();
         }
@@ -94,7 +117,15 @@ impl<P: Protocol> Drop for Inner<P> {
 }
 
 impl<P: Protocol> Inner<P> {
-    fn complete(&self, id: u64, result: Result<P::Response, Error>) {
+    /// Best-effort send: silently dropped if the writer's channel has
+    /// already been closed.
+    fn send(&self, message: Message<P::Request>) {
+        if let Some(sender) = self.outgoing.lock().unwrap().as_ref() {
+            let _ = sender.send(message);
+        }
+    }
+
+    fn complete(&self, id: u64, result: Result<CallResult<P::Response>, Error>) {
         if let Some(tx) = self.pending.lock().unwrap().remove(&id) {
             let _ = tx.send(result);
         }
@@ -126,138 +157,28 @@ impl<P: Protocol> Client<P> {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
 
-    /// Starts a client session on a bidirectional byte stream.
-    pub fn new<T>(stream: T) -> Self
-    where
-        T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    {
-        Self::with_max_frame_size(stream, DEFAULT_MAX_FRAME_SIZE)
-    }
-
-    /// Starts a client session on separate byte-stream reader and writer halves.
-    pub fn new_split<R, W>(reader: R, writer: W) -> Self
-    where
-        R: AsyncRead + Send + 'static,
-        W: AsyncWrite + Send + 'static,
-    {
-        let (sender, receiver) = transport::generic(reader, writer);
-        Self::from_transport(
-            transport::AnySender::Generic(sender),
-            transport::AnyReceiver::Generic(receiver),
-            DEFAULT_MAX_FRAME_SIZE,
-            false,
-            #[cfg(windows)]
-            None,
-        )
-    }
-
-    /// Starts a client session with an explicit maximum inbound payload size.
-    pub fn with_max_frame_size<T>(stream: T, max_frame_size: usize) -> Self
-    where
-        T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    {
-        let (sender, receiver) = transport::generic_duplex(stream);
-        Self::from_transport(
-            transport::AnySender::Generic(sender),
-            transport::AnyReceiver::Generic(receiver),
-            max_frame_size,
-            false,
-            #[cfg(windows)]
-            None,
-        )
-    }
-
-    #[cfg(unix)]
-    pub fn from_unix_stream(stream: UnixStream) -> io::Result<Self> {
-        let (sender, receiver) = transport::unix::unix(stream)?;
-        Ok(Self::from_transport(
-            transport::AnySender::Unix(sender),
-            transport::AnyReceiver::Unix(receiver),
-            DEFAULT_MAX_FRAME_SIZE,
-            false,
-            #[cfg(windows)]
-            None,
-        ))
-    }
-
-    #[cfg(windows)]
-    /// Starts a client session on the server end of a Windows named pipe.
-    ///
-    /// `peer_process` is retained for the lifetime of the session and must
-    /// grant process-query and synchronization access. Construction fails if
-    /// it does not identify the named-pipe peer.
-    ///
-    /// # Safety
-    ///
-    /// The identified peer must be trusted to send only handle values that it
-    /// created in this process with `DuplicateHandle`. A malicious peer can
-    /// otherwise cause this process to close arbitrary handles.
-    pub unsafe fn from_named_pipe_server(
-        pipe: NamedPipeServer,
-        peer_process: OwnedHandle,
-    ) -> io::Result<Self> {
-        validate_peer_process(
-            &peer_process,
-            transport::windows::server_pipe_peer_pid(&pipe)?,
-        )?;
-        let (sender, receiver) = transport::windows::server_pipe(pipe, false)?;
-        Ok(Self::from_transport(
-            transport::AnySender::Windows(sender),
-            transport::AnyReceiver::Windows(receiver),
-            DEFAULT_MAX_FRAME_SIZE,
-            true,
-            Some(peer_process),
-        ))
-    }
-
-    #[cfg(windows)]
-    /// Starts a client session on the client end of a Windows named pipe.
-    ///
-    /// `peer_process` is retained for the lifetime of the session and must
-    /// grant process-query and synchronization access. Construction fails if
-    /// it does not identify the named-pipe peer.
-    ///
-    /// # Safety
-    ///
-    /// The identified peer must be trusted to send only handle values that it
-    /// created in this process with `DuplicateHandle`. A malicious peer can
-    /// otherwise cause this process to close arbitrary handles.
-    pub unsafe fn from_named_pipe_client(
-        pipe: NamedPipeClient,
-        peer_process: OwnedHandle,
-    ) -> io::Result<Self> {
-        validate_peer_process(
-            &peer_process,
-            transport::windows::client_pipe_peer_pid(&pipe)?,
-        )?;
-        let (sender, receiver) = transport::windows::client_pipe(pipe, false)?;
-        Ok(Self::from_transport(
-            transport::AnySender::Windows(sender),
-            transport::AnyReceiver::Windows(receiver),
-            DEFAULT_MAX_FRAME_SIZE,
-            true,
-            Some(peer_process),
-        ))
-    }
-
-    fn from_transport(
+    /// Builds a `Client` from an already-negotiated transport. Only reachable
+    /// via [`UnboundClient::bind`](crate::UnboundClient::bind) — `Client` has
+    /// no public constructors of its own, so every `Client<P>` has already
+    /// completed `fragment::negotiate` by the time it exists.
+    pub(crate) fn from_transport(
         sender: transport::AnySender,
         receiver: transport::AnyReceiver,
-        max_frame_size: usize,
+        limits: Limits,
         keep_requests_alive: bool,
         #[cfg(windows)] peer_process: Option<OwnedHandle>,
     ) -> Self {
         let (outgoing, outgoing_rx) = mpsc::unbounded_channel();
         let inner = Arc::new(Inner {
-            outgoing,
+            outgoing: Mutex::new(Some(outgoing)),
             pending: Mutex::new(HashMap::new()),
             next_id: Mutex::new(0),
             tasks: Mutex::new(None),
             request_keepalive: Mutex::new(HashMap::new()),
+            limits,
             #[cfg(windows)]
             _peer_process: peer_process,
         });
-        let (writer_shutdown, writer_stop) = oneshot::channel();
         let (reader_shutdown, reader_stop) = oneshot::channel();
         let writer = tokio::spawn(
             Writer {
@@ -265,20 +186,19 @@ impl<P: Protocol> Client<P> {
                 outgoing: outgoing_rx,
                 inner: Arc::downgrade(&inner),
                 keep_requests_alive,
+                limits,
             }
-            .run(writer_stop),
+            .run(),
         );
         let reader = tokio::spawn(
             Reader {
                 transport: receiver,
                 inner: Arc::downgrade(&inner),
-                max_frame_size,
-                buffered: BytesMut::with_capacity(8192),
+                limits,
             }
             .run(reader_stop),
         );
         *inner.tasks.lock().unwrap() = Some(Tasks {
-            writer_shutdown: Some(writer_shutdown),
             reader_shutdown: Some(reader_shutdown),
             writer,
             reader,
@@ -289,6 +209,8 @@ impl<P: Protocol> Client<P> {
     /// Stops the session and waits for its background tasks to exit.
     pub async fn close(self) {
         let tasks = self.inner.tasks.lock().unwrap().take();
+        // Close the writer's channel first — see the comment on `outgoing`.
+        self.inner.outgoing.lock().unwrap().take();
         self.inner.fail(Error::ConnectionClosed);
         if let Some(tasks) = tasks {
             tasks.join().await;
@@ -297,44 +219,85 @@ impl<P: Protocol> Client<P> {
 
     /// Begins one request.
     pub fn call(&self, request: P::Request) -> Call<P> {
+        let ((id, rx, cancel_sent), ()) = self.begin(|id| {
+            (
+                Message::Request {
+                    id,
+                    value: request,
+                    trailer: fragment::Trailer::None,
+                },
+                (),
+            )
+        });
+        Call {
+            id,
+            rx,
+            inner: self.inner.clone(),
+            cancel_sent,
+        }
+    }
+
+    /// Begins one request whose raw byte trailer is written through the
+    /// returned streaming body.
+    pub fn call_with_trailer(&self, request: P::Request) -> TrailerSend<Call<P>> {
+        let ((id, rx, cancel_sent), shared) = self.begin(|id| {
+            let shared = SendShared::new(Kind::Request, id, &self.inner.limits);
+            (
+                Message::Request {
+                    id,
+                    value: request,
+                    trailer: fragment::Trailer::Stream(shared.clone()),
+                },
+                shared,
+            )
+        });
+        if cancel_sent {
+            SendShared::discard(&shared);
+        }
+        TrailerSend::new(
+            shared,
+            Call {
+                id,
+                rx,
+                inner: self.inner.clone(),
+                cancel_sent,
+            },
+        )
+    }
+
+    /// Shared id-allocation/pending-registration logic for `call` and
+    /// `call_with_trailer`. `build` constructs the outgoing message once the
+    /// id is known. Returns the id, the response receiver, and whether a
+    /// cancel has effectively already been sent (nothing left to cancel).
+    fn begin<T>(&self, build: impl FnOnce(u64) -> (Message<P::Request>, T)) -> (BeginResult<P>, T) {
         let (tx, rx) = oneshot::channel();
-        let tasks = self.inner.tasks.lock().unwrap();
         let id = {
             let mut next = self.inner.next_id.lock().unwrap();
             let id = *next;
             *next = id.checked_add(1).expect("request identifiers exhausted");
             id
         };
-        if tasks.is_none() {
-            let _ = tx.send(Err(Error::ConnectionClosed));
-            return Call {
-                id,
-                rx,
-                inner: self.inner.clone(),
-                cancel_sent: true,
-            };
-        }
+        let (message, value) = build(id);
         self.inner.pending.lock().unwrap().insert(id, tx);
         let queued = self
             .inner
             .outgoing
-            .send(Message::Request { id, value: request })
-            .is_ok();
-        drop(tasks);
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|sender| sender.send(message).is_ok());
         if !queued {
             self.inner.complete(id, Err(Error::ConnectionClosed));
         }
-        Call {
-            id,
-            rx,
-            inner: self.inner.clone(),
-            cancel_sent: !queued,
-        }
+        ((id, rx, !queued), value)
     }
 }
 
 #[cfg(windows)]
-fn validate_peer_process(peer_process: &OwnedHandle, pipe_peer_pid: u32) -> io::Result<()> {
+pub(crate) fn validate_peer_process(
+    peer_process: &OwnedHandle,
+    pipe_peer_pid: u32,
+) -> io::Result<()> {
     let process_pid = unsafe { GetProcessId(peer_process.as_raw_handle() as _) };
     if process_pid == 0 {
         return Err(io::Error::last_os_error());
@@ -382,10 +345,30 @@ mod windows_tests {
     }
 }
 
+/// A completed call's response, plus an optional raw trailer sent alongside
+/// it. Wrapping the pair (rather than returning a bare tuple) leaves room to
+/// add further metadata later without another breaking change.
+pub struct CallResult<R> {
+    response: R,
+    trailer: Option<crate::TrailerRecv>,
+}
+
+impl<R> CallResult<R> {
+    /// Discards any trailer and returns just the response.
+    pub fn into_response(self) -> R {
+        self.response
+    }
+
+    /// Decomposes into the response and its trailer, if any.
+    pub fn into_response_trailer(self) -> (R, Option<crate::TrailerRecv>) {
+        (self.response, self.trailer)
+    }
+}
+
 /// An in-progress RPC request.
 pub struct Call<P: Protocol> {
     id: u64,
-    rx: oneshot::Receiver<Result<P::Response, Error>>,
+    rx: oneshot::Receiver<Result<CallResult<P::Response>, Error>>,
     inner: Arc<Inner<P>>,
     cancel_sent: bool,
 }
@@ -395,17 +378,17 @@ impl<P: Protocol> Call<P> {
     pub fn cancel(&mut self) {
         if !self.cancel_sent {
             self.cancel_sent = true;
-            let _ = self.inner.outgoing.send(Message::Cancel { id: self.id });
+            self.inner.send(Message::Cancel { id: self.id });
         }
     }
 }
 
 impl<P: Protocol> Future for Call<P> {
-    type Output = Result<P::Response, Error>;
+    type Output = Result<CallResult<P::Response>, Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match Pin::new(&mut self.rx).poll(cx) {
-            Poll::Ready(Ok(Ok(response))) => Poll::Ready(Ok(response)),
+            Poll::Ready(Ok(Ok(result))) => Poll::Ready(Ok(result)),
             Poll::Ready(Ok(Err(e))) => Poll::Ready(Err(e)),
             Poll::Ready(Err(_)) => Poll::Ready(Err(Error::ConnectionClosed)),
             Poll::Pending => Poll::Pending,
@@ -429,98 +412,279 @@ impl<P: Protocol> Drop for Call<P> {
 }
 
 impl<P: Protocol> Writer<P> {
-    async fn handle_request(&mut self, id: u64, value: P::Request) -> bool {
-        let mut frame = self.transport.send();
-        let result = match encode(Kind::Request, id, &value, &mut frame) {
-            Ok(mut message) => frame.finish(&mut message).await.map_err(Error::from),
-            Err(err) => {
-                if let Some(inner) = self.inner.upgrade() {
-                    inner.complete(id, Err(err));
-                } else {
-                    return true;
-                }
-                return false;
-            }
-        };
-        let Some(inner) = self.inner.upgrade() else {
-            return true;
-        };
-        if result.is_ok() && self.keep_requests_alive {
-            inner.request_keepalive.lock().unwrap().insert(id, value);
+    /// Best-effort completion of a pending call with an error; a no-op if
+    /// the session is already gone. Also drops any retained request kept
+    /// alive for a native-handle resend (see `keep_requests_alive`) — the
+    /// call is done, so nothing will resend it, and leaving the entry in
+    /// place would leak it until the whole session closes.
+    fn complete_err(&self, id: u64, error: Error) {
+        if let Some(inner) = self.inner.upgrade() {
+            inner.request_keepalive.lock().unwrap().remove(&id);
+            inner.complete(id, Err(error));
         }
-        if let Err(err) = result {
-            inner.complete(id, Err(err));
-            return true;
-        }
-        false
     }
 
-    async fn run(mut self, mut shutdown: oneshot::Receiver<()>) {
-        loop {
-            let outgoing = tokio::select! {
-                outgoing = self.outgoing.recv() => outgoing,
-                _ = &mut shutdown => return,
-            };
-            let Some(outgoing) = outgoing else {
-                return;
-            };
-            let exit = tokio::select! {
-                result = async {
-                    match outgoing {
-                        Message::Request { id, value } => self.handle_request(id, value).await,
-                        Message::Cancel { id } => {
-                            let mut message = encode_empty(Kind::Cancel, id);
-                            self.transport
-                                .send()
-                                .finish(&mut message).await.is_err()
-                        }
-                    }
-                } => result,
-                _ = &mut shutdown => return,
-            };
-            if exit {
-                break;
+    /// Fails every pending call. Used for transport-level (I/O) failures,
+    /// which are fatal for the whole session rather than one call.
+    fn fail_all(&self, error: Error) {
+        if let Some(inner) = self.inner.upgrade() {
+            inner.fail(error);
+        }
+    }
+
+    /// Admits one queued item into the scheduler (or sends it immediately,
+    /// for the native-handle atomic path). Returns `Err` on a fatal
+    /// transport/protocol error, which the caller must treat as fatal for
+    /// the whole session, not just this one message.
+    async fn admit(
+        &mut self,
+        message: Message<P::Request>,
+        scheduler: &mut fragment::Scheduler,
+    ) -> Result<(), Error> {
+        match message {
+            Message::Request { id, value, trailer } => {
+                self.admit_request(id, value, trailer, scheduler).await
+            }
+            Message::Cancel { id } => {
+                self.admit_cancel(id, scheduler);
+                Ok(())
+            }
+            Message::DiscardTrailer { id } => {
+                scheduler.admit_empty(Kind::Discard, id);
+                Ok(())
+            }
+            Message::PeerDiscarded { id } => {
+                scheduler.discard_active_trailer(id);
+                Ok(())
             }
         }
+    }
+
+    async fn admit_request(
+        &mut self,
+        id: u64,
+        value: P::Request,
+        trailer: fragment::Trailer,
+        scheduler: &mut fragment::Scheduler,
+    ) -> Result<(), Error> {
+        let mut probe = self.transport.send();
+        let payload = match encode_payload(&value, &mut probe) {
+            Ok(payload) => payload,
+            Err(err) => {
+                drop(probe);
+                self.complete_err(id, err);
+                return Ok(());
+            }
+        };
+        if probe.has_attachments() {
+            if !matches!(&trailer, fragment::Trailer::None) {
+                drop(probe);
+                return Err(Error::Protocol(
+                    "requests with both native-handle attachments and a trailer are not supported"
+                        .into(),
+                ));
+            }
+            let header = fragment::FragmentHeader {
+                flags: fragment::Flags::FIRST | fragment::Flags::LAST,
+                kind: Kind::Request,
+                id,
+                payload_len: payload.len(),
+            };
+            let mut buffer = header.encode().chain(payload);
+            probe.finish(&mut buffer).await?;
+        } else {
+            drop(probe);
+            scheduler.admit_message(Kind::Request, id, payload, trailer);
+        }
+        if self.keep_requests_alive
+            && let Some(inner) = self.inner.upgrade()
+        {
+            inner.request_keepalive.lock().unwrap().insert(id, value);
+        }
+        Ok(())
+    }
+
+    fn admit_cancel(&mut self, id: u64, scheduler: &mut fragment::Scheduler) {
+        match scheduler.try_cancel_active(id) {
+            fragment::AbortOutcome::NotActive => scheduler.admit_empty(Kind::Cancel, id),
+            fragment::AbortOutcome::Discarded { started } => {
+                if started {
+                    scheduler.admit_abort(id);
+                }
+                self.complete_err(id, Error::Cancelled);
+            }
+        }
+    }
+
+    async fn run(mut self) -> Result<(), Error> {
+        let mut scheduler = fragment::Scheduler::new(&self.limits);
+        // Holding a clone of `Inner::outgoing` is what represents the
+        // ability to still get a message in (see its doc comment), so the
+        // channel closing — every clone gone — doubles as the shutdown
+        // signal: once `recv()` reports no more messages will ever arrive,
+        // admission of new work stops, and the loop keeps advancing the
+        // scheduler until it's fully drained before exiting, never
+        // abandoning a write already committed to it.
+        let mut closed = false;
+        while !closed || scheduler.has_work() {
+            tokio::select! {
+                message = self.outgoing.recv(), if !closed => {
+                    let Some(message) = message else {
+                        closed = true;
+                        continue;
+                    };
+                    if let Err(err) = self.admit(message, &mut scheduler).await {
+                        self.fail_all(err.copy());
+                        return Err(err);
+                    }
+                }
+                // Not raced against anything: once ready, a fragment write
+                // is committed to the scheduler and must run to completion.
+                // A dropped send future could otherwise leave a committed
+                // partial fragment on the transport, or — on transports
+                // whose writes are dispatched to a detached background task
+                // (e.g. the blocking-pool-backed Windows pipe transport) —
+                // let an abandoned write complete arbitrarily later,
+                // potentially after the peer has already torn down its end.
+                _ = scheduler.ready(), if scheduler.has_work() => {
+                    let result = scheduler.advance(&mut self.transport).await;
+                    match result {
+                        // A streaming trailer producer was dropped mid-message.
+                        Ok(Some(id)) => {
+                            self.complete_err(id, Error::Cancelled);
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            self.fail_all(err.copy());
+                            return Err(err);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 
 impl<P: Protocol> Reader<P> {
     async fn run(mut self, mut shutdown: oneshot::Receiver<()>) {
+        let mut reassembler = fragment::StreamReassembler::new(self.limits);
         loop {
             let mut frame = self.transport.recv();
-            let message = tokio::select! {
-                message = read_message(&mut frame, &mut self.buffered, self.max_frame_size) => message,
+            let header = tokio::select! {
+                header = fragment::read_fragment_header(&mut frame) => header,
                 _ = &mut shutdown => return,
             };
-            let Some(inner) = self.inner.upgrade() else {
-                return;
+            let header = match header {
+                Ok(header) => header,
+                Err(error) => {
+                    fail(&self.inner, error);
+                    return;
+                }
             };
-            match message {
-                Ok((Kind::Response, id, payload)) => match decode(&payload, &mut frame) {
-                    Ok(response) => {
+            let accepted = tokio::select! {
+                accepted = reassembler.accept(header, &mut frame) => accepted,
+                _ = &mut shutdown => return,
+            };
+            let complete = match accepted {
+                Ok(complete) => complete,
+                Err(error) => {
+                    fail(&self.inner, error);
+                    return;
+                }
+            };
+            let dispatch = |message: fragment::StreamMessage,
+                            frame: &mut transport::AnyRecv<'_>|
+             -> Result<(), Error> {
+                let Some(inner) = self.inner.upgrade() else {
+                    return Ok(());
+                };
+                let fragment::StreamMessage {
+                    kind,
+                    id,
+                    payload,
+                    trailer,
+                } = message;
+                match kind {
+                    Kind::Response => {
+                        let response = decode(&payload, frame)?;
+                        let trailer = trailer.map(crate::TrailerRecv::new);
                         inner.request_keepalive.lock().unwrap().remove(&id);
-                        inner.complete(id, Ok(response));
+                        inner.complete(id, Ok(CallResult { response, trailer }));
                     }
-                    Err(error) => {
-                        inner.fail(error);
+                    Kind::Error => {
+                        inner.request_keepalive.lock().unwrap().remove(&id);
+                        inner.complete(id, Err(Error::Cancelled));
+                    }
+                    Kind::Discard => {
+                        inner.send(Message::PeerDiscarded { id });
+                    }
+                    kind => return Err(Error::Protocol(format!("unexpected {kind:?} frame"))),
+                }
+                Ok(())
+            };
+            match complete {
+                fragment::StreamEvent::None => {}
+                fragment::StreamEvent::Aborted {
+                    kind,
+                    id,
+                    dispatched,
+                } => {
+                    if kind != Kind::Response {
+                        fail(
+                            &self.inner,
+                            Error::Protocol(format!("unexpected aborted {kind:?} message")),
+                        );
                         return;
                     }
-                },
-                Ok((Kind::Error, id, _)) => {
-                    inner.request_keepalive.lock().unwrap().remove(&id);
-                    inner.complete(id, Err(Error::Cancelled));
+                    if !dispatched && let Some(inner) = self.inner.upgrade() {
+                        inner.request_keepalive.lock().unwrap().remove(&id);
+                        inner.complete(id, Err(Error::Cancelled));
+                    }
                 }
-                Ok((kind, _, _)) => {
-                    inner.fail(Error::Protocol(format!("unexpected {kind:?} frame")));
-                    return;
+                fragment::StreamEvent::Message(message) => {
+                    if let Err(error) = dispatch(message, &mut frame) {
+                        fail(&self.inner, error);
+                        return;
+                    }
                 }
-                Err(error) => {
-                    inner.fail(error);
-                    return;
+                fragment::StreamEvent::Trailer {
+                    id,
+                    message,
+                    shared,
+                    len,
+                    notify_discard,
+                } => {
+                    if let Some(message) = message
+                        && let Err(error) = dispatch(message, &mut frame)
+                    {
+                        fail(&self.inner, error);
+                        return;
+                    }
+                    if notify_discard && let Some(inner) = self.inner.upgrade() {
+                        inner.send(Message::DiscardTrailer { id });
+                    }
+                    // SAFETY: the lease retains the receiver borrow and
+                    // clears the erased token before it ends.
+                    let lease = unsafe { crate::trailer::RecvShared::grant(&shared, frame, len) };
+                    if let Err(error) = crate::trailer::RecvShared::wait_fragment(&shared).await {
+                        fail(&self.inner, error.into());
+                        return;
+                    }
+                    lease.complete();
                 }
             }
         }
+    }
+}
+
+/// Fails every pending call. Takes `inner` by reference (rather than a
+/// `Reader` method borrowing `&self`) so it can be called while another
+/// field (e.g. a `RecvFrame` token borrowing `self.transport`) is still
+/// mutably borrowed.
+fn fail<P: Protocol>(inner: &Weak<Inner<P>>, error: Error) {
+    if let Some(inner) = inner.upgrade() {
+        inner.fail(error);
     }
 }
 
@@ -538,11 +702,12 @@ mod tests {
     fn pending_call() -> (Call<Test>, mpsc::UnboundedReceiver<Message<u8>>) {
         let (outgoing, outgoing_rx) = mpsc::unbounded_channel();
         let inner = Arc::new(Inner {
-            outgoing,
+            outgoing: Mutex::new(Some(outgoing)),
             pending: Mutex::new(HashMap::new()),
             next_id: Mutex::new(1),
             tasks: Mutex::new(None),
             request_keepalive: Mutex::new(HashMap::new()),
+            limits: Limits::default(),
             #[cfg(windows)]
             _peer_process: None,
         });
@@ -563,8 +728,14 @@ mod tests {
     async fn completed_call_does_not_send_cancel_when_dropped() {
         let (call, mut outgoing) = pending_call();
         let inner = call.inner.clone();
-        call.inner.complete(call.id, Ok(7));
-        assert_eq!(call.await.unwrap(), 7);
+        call.inner.complete(
+            call.id,
+            Ok(CallResult {
+                response: 7,
+                trailer: None,
+            }),
+        );
+        assert_eq!(call.await.unwrap().into_response(), 7);
         assert!(matches!(
             outgoing.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
@@ -577,5 +748,38 @@ mod tests {
         let (call, mut outgoing) = pending_call();
         drop(call);
         assert!(matches!(outgoing.try_recv(), Ok(Message::Cancel { id: 0 })));
+    }
+
+    #[tokio::test]
+    async fn complete_err_clears_retained_keepalive_request() {
+        let (outgoing, _outgoing_rx) = mpsc::unbounded_channel();
+        let inner = Arc::new(Inner {
+            outgoing: Mutex::new(Some(outgoing)),
+            pending: Mutex::new(HashMap::new()),
+            next_id: Mutex::new(1),
+            tasks: Mutex::new(None),
+            request_keepalive: Mutex::new(HashMap::new()),
+            limits: Limits::default(),
+            #[cfg(windows)]
+            _peer_process: None,
+        });
+        let (tx, _rx) = oneshot::channel();
+        inner.pending.lock().unwrap().insert(0, tx);
+        inner.request_keepalive.lock().unwrap().insert(0, 7u8);
+
+        let (dummy_write, _unused) = tokio::io::duplex(64);
+        let (sender, _unused) = transport::generic_duplex(dummy_write);
+        let (_unused_tx, outgoing_rx) = mpsc::unbounded_channel();
+        let writer = Writer::<Test> {
+            transport: transport::AnySender::Generic(sender),
+            outgoing: outgoing_rx,
+            inner: Arc::downgrade(&inner),
+            keep_requests_alive: true,
+            limits: Limits::default(),
+        };
+
+        writer.complete_err(0, Error::Cancelled);
+
+        assert!(inner.request_keepalive.lock().unwrap().is_empty());
     }
 }

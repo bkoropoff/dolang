@@ -21,7 +21,7 @@ use crate::{
         path::{PathAnnex, create_path_annex, path_from_value},
     },
     global::Global,
-    io_mode::{ReadValue, ValueEncoding, encode_value, read_value},
+    io_mode::{ValueEncoding, encode_value, read_value},
     pipe_channel::{self, RecvGuard, SendGuard},
     proc::{parse_policy_dict, vfs_policy},
 };
@@ -468,11 +468,10 @@ where
     strand
         .with_slots(async move |strand, [mut outval]| {
             let mut reader = BufReader::new(reader);
-            while let Some(value) = read_value(&mut reader, io_mode).await.into_sys(strand)? {
-                match value {
-                    ReadValue::Line(line) => Output::set(strand, &mut outval, line.as_str()),
-                    ReadValue::Chunk(chunk) => Output::set(strand, &mut outval, chunk.as_slice()),
-                }
+            while read_value(&mut reader, io_mode, strand, &mut outval)
+                .await
+                .into_sys(strand)?
+            {
                 output.put(strand, &mut outval).await?;
             }
             Ok(())

@@ -1,11 +1,11 @@
 use std::io;
 
 use dolang::runtime::{
-    Error, Output, Result, Slot, Strand, Value,
+    BYTE_STREAM_CHUNK_SIZE, Error, Output, Result, Slot, Strand, Value,
     value::{BinEmbryo, View},
 };
 use dolang_shell_vfs::OperatingSystem;
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWriteExt};
 
 use crate::{
     error::{ErrorExt as _, ResultExt as _},
@@ -18,42 +18,80 @@ pub(crate) enum IoMode {
     Chunk,
 }
 
-pub(crate) enum ReadValue {
-    Line(String),
-    Chunk(Vec<u8>),
-}
-
 #[derive(Clone, Copy)]
 pub(crate) enum ValueEncoding {
     Display,
     Argument,
 }
 
-pub(crate) async fn read_value<R>(reader: &mut R, mode: IoMode) -> io::Result<Option<ReadValue>>
+pub(crate) async fn read_value<'v, R>(
+    reader: &mut R,
+    mode: IoMode,
+    strand: &mut Strand<'v, '_>,
+    out: &mut impl Output<'v>,
+) -> io::Result<bool>
 where
     R: AsyncBufRead + Unpin,
 {
     match mode {
-        IoMode::Line => {
-            let mut line = String::new();
-            if reader.read_line(&mut line).await? == 0 {
-                Ok(None)
-            } else {
-                line.truncate(strip_line_ending(&line).len());
-                Ok(Some(ReadValue::Line(line)))
-            }
-        }
+        IoMode::Line => read_line_value(reader, strand, out).await,
         IoMode::Chunk => {
-            let mut chunk = vec![0; 8192];
-            let len = reader.read(&mut chunk).await?;
+            let mut chunk = BinEmbryo::new_with_capacity(strand, BYTE_STREAM_CHUNK_SIZE);
+            let len = read_into_spare(reader, chunk.spare_capacity_mut()).await?;
             if len == 0 {
-                Ok(None)
-            } else {
-                chunk.truncate(len);
-                Ok(Some(ReadValue::Chunk(chunk)))
+                return Ok(false);
             }
+            unsafe { chunk.advance(len) };
+            chunk.finish(strand, out);
+            Ok(true)
         }
     }
+}
+
+async fn read_line_value<'v, R>(
+    reader: &mut R,
+    strand: &mut Strand<'v, '_>,
+    out: &mut impl Output<'v>,
+) -> io::Result<bool>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut line = BinEmbryo::new();
+
+    loop {
+        let (consumed, complete) = {
+            let available = reader.fill_buf().await?;
+            if available.is_empty() {
+                if line.is_empty() {
+                    return Ok(false);
+                }
+                line.finish_str(strand, out).map_err(invalid_utf8)?;
+                return Ok(true);
+            }
+
+            let newline = available.iter().position(|&byte| byte == b'\n');
+            let consumed = newline.map_or(available.len(), |index| index + 1);
+            let content_len = newline.unwrap_or(consumed);
+            line.extend(strand, &available[..content_len]);
+            (consumed, newline.is_some())
+        };
+        reader.consume(consumed);
+
+        if complete {
+            if line.as_slice().ends_with(b"\r") {
+                line.truncate(line.len() - 1);
+            }
+            line.finish_str(strand, out).map_err(invalid_utf8)?;
+            return Ok(true);
+        }
+    }
+}
+
+fn invalid_utf8(error: std::str::Utf8Error) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("stream did not contain valid UTF-8: {error}"),
+    )
 }
 
 pub(crate) fn encode_value<'v, 's>(
@@ -171,43 +209,7 @@ pub(crate) fn strip_line_ending(value: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use tokio::io::BufReader;
-
     use super::*;
-
-    #[tokio::test]
-    async fn reader_honors_line_and_chunk_modes() {
-        let mut reader = BufReader::new(&b"first\r\nsecond\n"[..]);
-        let Some(ReadValue::Line(first)) = read_value(&mut reader, IoMode::Line).await.unwrap()
-        else {
-            panic!("expected line");
-        };
-        assert_eq!(first, "first");
-        let Some(ReadValue::Line(second)) = read_value(&mut reader, IoMode::Line).await.unwrap()
-        else {
-            panic!("expected line");
-        };
-        assert_eq!(second, "second");
-        assert!(
-            read_value(&mut reader, IoMode::Line)
-                .await
-                .unwrap()
-                .is_none()
-        );
-
-        let mut reader = BufReader::new(&b"\x00\xffraw"[..]);
-        let Some(ReadValue::Chunk(chunk)) = read_value(&mut reader, IoMode::Chunk).await.unwrap()
-        else {
-            panic!("expected chunk");
-        };
-        assert_eq!(chunk, b"\x00\xffraw");
-    }
-
-    #[tokio::test]
-    async fn line_reader_rejects_invalid_utf8() {
-        let mut reader = BufReader::new(&b"\xff\n"[..]);
-        assert!(read_value(&mut reader, IoMode::Line).await.is_err());
-    }
 
     #[test]
     fn framing_uses_target_line_endings_for_non_binary_values() {

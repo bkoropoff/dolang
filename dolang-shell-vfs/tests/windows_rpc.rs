@@ -102,10 +102,20 @@ async fn connected_pair() -> (Client, JoinHandle<std::io::Result<()>>) {
     let server_pipe = ClientOptions::new().open(&name).unwrap();
     client_pipe.connect().await.unwrap();
 
-    let server = Server::from_named_pipe_client(server_pipe).unwrap();
-    let server_task = tokio::spawn(server.serve());
-    let client =
-        unsafe { Client::from_named_pipe_server(client_pipe, current_process_handle()).unwrap() };
+    // `Server::from_named_pipe_client` itself runs the RPC handshake, so it
+    // must be driven concurrently with the client's own construction below
+    // rather than completed first — otherwise each side blocks waiting for
+    // the other.
+    let server_task = tokio::spawn(async move {
+        Server::from_named_pipe_client(server_pipe)
+            .await
+            .unwrap()
+            .serve()
+            .await
+    });
+    let client = unsafe { Client::from_named_pipe_server(client_pipe, current_process_handle()) }
+        .await
+        .unwrap();
     (client, server_task)
 }
 
@@ -384,7 +394,9 @@ async fn query_stdio_helper(args: &[&str], without: &[&str]) -> dolang_shell_vfs
 
     let stdout = child.stdout.take().expect("stdout not captured");
     let stdin = child.stdin.take().expect("stdin not captured");
-    let client = Client::new_split(stdout, stdin);
+    let client = Client::new_split(stdout, stdin)
+        .await
+        .expect("negotiation should succeed");
 
     let query = client.query().await.expect("query should succeed");
 

@@ -848,7 +848,9 @@ async fn login_env_profile_output_stays_out_of_stdio_stream() {
 
     let stdout = child.stdout.take().expect("stdout not captured");
     let stdin = child.stdin.take().expect("stdin not captured");
-    let client = dolang_shell_vfs::Client::new_split(stdout, stdin);
+    let client = dolang_shell_vfs::Client::new_split(stdout, stdin)
+        .await
+        .unwrap();
 
     // A single stray byte of profile output would desynchronize the frame
     // stream and this would fail.

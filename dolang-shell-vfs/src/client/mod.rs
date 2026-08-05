@@ -16,7 +16,7 @@ use std::os::unix::{
 #[cfg(windows)]
 use std::os::windows::io::{AsHandle, OwnedHandle};
 
-use dolang_rpc::{Call, DefaultHandle, Opaque, OsHandle};
+use dolang_rpc::{Call, DefaultHandle, Opaque, OsHandle, TrailerRecv, TrailerSend};
 #[cfg(unix)]
 use tokio::net::UnixStream;
 #[cfg(windows)]
@@ -42,6 +42,7 @@ use crate::{
         SetXattrRequest, SpawnRequest, StdioRecvTarget, StdioSendTarget, StreamsRequest,
         SymlinkKind, SymlinkRequest, UnixVfsRequest, VfsProtocol, WellKnownPathRequest,
         WindowsAdminRequest, WirePath, XattrNamespaceRequest, XattrRequest, XattrsRequest,
+        rpc_builder,
     },
 };
 
@@ -64,6 +65,8 @@ struct RemoteFile {
     client: Client,
     file: Option<Opaque<crate::FileMarker>>,
     pending: Option<PendingFileOperation>,
+    read_body: Option<PendingTrailerRead>,
+    write_body: Option<PendingTrailerWrite>,
 }
 
 pub(crate) struct RemoteFileLock {
@@ -116,10 +119,23 @@ struct PendingFileOperation {
     call: Call<VfsProtocol>,
 }
 
+struct PendingTrailerWrite {
+    send: Option<TrailerSend<Call<VfsProtocol>>>,
+    call: Option<Call<VfsProtocol>>,
+    target: usize,
+    sent: usize,
+    unreported: usize,
+}
+
+struct PendingTrailerRead {
+    recv: TrailerRecv,
+    remaining: usize,
+    read: usize,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FileOperationKind {
     Read,
-    Write,
     Flush,
     Seek,
 }
@@ -163,6 +179,8 @@ impl ClientFile {
             client,
             file: Some(file),
             pending: None,
+            read_body: None,
+            write_body: None,
         }))
     }
 }
@@ -179,12 +197,16 @@ impl RemoteFile {
         &mut self,
         cx: &mut Context<'_>,
         kind: FileOperationKind,
-        request: impl FnOnce(Opaque<crate::FileMarker>) -> RequestKind,
-    ) -> Poll<io::Result<ResponseKind>> {
+        request: impl FnOnce(Opaque<crate::FileMarker>) -> (RequestKind, Option<Vec<u8>>),
+    ) -> Poll<io::Result<(ResponseKind, Option<TrailerRecv>)>> {
         if self.pending.is_none() {
+            let (request, trailer) = request(self.opaque());
             self.pending = Some(PendingFileOperation {
                 kind,
-                call: self.client.call(request(self.opaque())),
+                call: {
+                    assert!(trailer.is_none());
+                    self.client.call(request)
+                },
             });
         }
         let pending = self.pending.as_mut().unwrap();
@@ -198,16 +220,24 @@ impl RemoteFile {
             Poll::Pending => Poll::Pending,
             Poll::Ready(result) => {
                 self.pending = None;
-                Poll::Ready(match result.map_err(rpc_error)? {
+                let (response, trailer) = result.map_err(rpc_error)?.into_response_trailer();
+                Poll::Ready(match response {
                     ResponseKind::Error(error) => Err(wire_io(error)),
-                    response => Ok(response),
+                    response => Ok((response, trailer)),
                 })
             }
         }
     }
 
     fn idle(&self) -> crate::Result<()> {
-        if let Some(pending) = &self.pending {
+        if self
+            .read_body
+            .as_ref()
+            .is_some_and(|body| body.remaining != 0)
+            || self.write_body.is_some()
+        {
+            Err(io::Error::other("file trailer operation is still pending").into())
+        } else if let Some(pending) = &self.pending {
             Err(io::Error::other(format!(
                 "file operation {:?} is still pending",
                 pending.kind
@@ -219,6 +249,13 @@ impl RemoteFile {
     }
 
     async fn cancel_pending(&mut self) {
+        self.read_body.take();
+        if let Some(mut pending) = self.write_body.take()
+            && let Some(mut call) = pending.call.take()
+        {
+            call.cancel();
+            let _ = call.await;
+        }
         if let Some(mut pending) = self.pending.take() {
             pending.call.cancel();
             let _ = pending.call.await;
@@ -250,31 +287,74 @@ impl AsyncRead for ClientFile {
     ) -> Poll<io::Result<()>> {
         match &mut self.0 {
             ClientFileInner::Direct(file) => Pin::new(file).poll_read(cx, buf),
-            ClientFileInner::Remote(file) => {
+            ClientFileInner::Remote(file) => loop {
                 if buf.remaining() == 0 {
                     return Poll::Ready(Ok(()));
                 }
-                match file.poll_request(cx, FileOperationKind::Read, |file| RequestKind::FileRead {
-                    file,
-                    len: buf.remaining(),
-                }) {
-                    Poll::Pending => Poll::Pending,
-                    Poll::Ready(Ok(ResponseKind::FileRead(result))) => {
-                        Poll::Ready(result.map_err(wire_io).and_then(|data| {
-                            if data.len() > buf.remaining() {
-                                return Err(io::Error::new(
+                if let Some(body) = file.read_body.as_mut() {
+                    let before = buf.filled().len();
+                    match Pin::new(&mut body.recv).poll_read(cx, buf) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Err(error)) => {
+                            file.read_body = None;
+                            return Poll::Ready(Err(error));
+                        }
+                        Poll::Ready(Ok(())) => {
+                            let read = buf.filled().len() - before;
+                            if read > body.remaining {
+                                file.read_body = None;
+                                return Poll::Ready(Err(io::Error::new(
                                     io::ErrorKind::InvalidData,
                                     "file read response exceeds requested length",
-                                ));
+                                )));
                             }
-                            buf.put_slice(&data);
-                            Ok(())
-                        }))
+                            body.remaining -= read;
+                            body.read += read;
+                            if read > 0 {
+                                return Poll::Ready(Ok(()));
+                            }
+                            let empty = body.read == 0;
+                            file.read_body = None;
+                            if empty {
+                                return Poll::Ready(Ok(()));
+                            }
+                            continue;
+                        }
                     }
-                    Poll::Ready(Ok(response)) => Poll::Ready(Err(unexpected(response))),
-                    Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
                 }
-            }
+                let requested = buf.remaining();
+                match file.poll_request(cx, FileOperationKind::Read, |file| {
+                    (
+                        RequestKind::FileRead {
+                            file,
+                            len: requested,
+                        },
+                        None,
+                    )
+                }) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Ok((ResponseKind::FileRead(result), trailer))) => {
+                        if let Err(error) = result.map_err(wire_io) {
+                            return Poll::Ready(Err(error));
+                        }
+                        let Some(trailer) = trailer else {
+                            return Poll::Ready(Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "file read response is missing its data trailer",
+                            )));
+                        };
+                        file.read_body = Some(PendingTrailerRead {
+                            recv: trailer,
+                            remaining: requested,
+                            read: 0,
+                        });
+                    }
+                    Poll::Ready(Ok((response, _))) => {
+                        return Poll::Ready(Err(unexpected(response)));
+                    }
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                }
+            },
         }
     }
 }
@@ -291,26 +371,61 @@ impl AsyncWrite for ClientFile {
                 if buf.is_empty() {
                     return Poll::Ready(Ok(0));
                 }
-                match file.poll_request(cx, FileOperationKind::Write, |file| {
-                    RequestKind::FileWrite {
-                        file,
-                        data: buf.to_vec(),
-                    }
-                }) {
-                    Poll::Pending => Poll::Pending,
-                    Poll::Ready(Ok(ResponseKind::FileWrite(result))) => {
-                        Poll::Ready(result.map_err(wire_io).and_then(|written| {
-                            if written > buf.len() {
-                                return Err(io::Error::new(
-                                    io::ErrorKind::InvalidData,
-                                    "file write response exceeds submitted length",
-                                ));
+                if file.write_body.is_none() {
+                    file.write_body = Some(PendingTrailerWrite {
+                        send: Some(file.client.call_with_trailer(RequestKind::FileWrite {
+                            file: file.opaque(),
+                        })),
+                        call: None,
+                        target: buf.len(),
+                        sent: 0,
+                        unreported: 0,
+                    });
+                }
+                let pending = file.write_body.as_mut().unwrap();
+                if let Some(call) = pending.call.as_mut() {
+                    match Pin::new(call).poll(cx) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(result) => {
+                            let target = pending.target;
+                            let unreported = pending.unreported;
+                            file.write_body = None;
+                            let response = result.map_err(rpc_error)?.into_response();
+                            match response {
+                                ResponseKind::Error(error) => {
+                                    return Poll::Ready(Err(wire_io(error)));
+                                }
+                                ResponseKind::FileWrite(result) => {
+                                    let written = result.map_err(wire_io)?;
+                                    if written != target {
+                                        return Poll::Ready(Err(io::Error::new(
+                                            io::ErrorKind::InvalidData,
+                                            "file write response does not acknowledge the submitted trailer",
+                                        )));
+                                    }
+                                    return Poll::Ready(Ok(unreported));
+                                }
+                                response => return Poll::Ready(Err(unexpected(response))),
                             }
-                            Ok(written)
-                        }))
+                        }
                     }
-                    Poll::Ready(Ok(response)) => Poll::Ready(Err(unexpected(response))),
+                }
+                let remaining = pending.target - pending.sent;
+                let send = pending.send.as_mut().unwrap();
+                match Pin::new(send).poll_write(cx, &buf[..buf.len().min(remaining)]) {
+                    Poll::Pending => Poll::Pending,
                     Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+                    Poll::Ready(Ok(n)) => {
+                        pending.sent += n;
+                        if pending.sent == pending.target {
+                            let send = pending.send.take().unwrap();
+                            pending.call = Some(send.finish());
+                            pending.unreported = n;
+                            cx.waker().wake_by_ref();
+                            return Poll::Pending;
+                        }
+                        Poll::Ready(Ok(n))
+                    }
                 }
             }
         }
@@ -320,14 +435,36 @@ impl AsyncWrite for ClientFile {
         match &mut self.0 {
             ClientFileInner::Direct(file) => Pin::new(file).poll_flush(cx),
             ClientFileInner::Remote(file) => {
+                if let Some(pending) = file.write_body.as_mut() {
+                    if pending.call.is_none() {
+                        let send = pending.send.take().unwrap();
+                        pending.call = Some(send.finish());
+                    }
+                    let call = pending.call.as_mut().unwrap();
+                    return match Pin::new(call).poll(cx) {
+                        Poll::Pending => Poll::Pending,
+                        Poll::Ready(result) => {
+                            file.write_body = None;
+                            Poll::Ready(result.map_err(rpc_error).and_then(|result| {
+                                match result.into_response() {
+                                    ResponseKind::FileWrite(result) => {
+                                        result.map(|_| ()).map_err(wire_io)
+                                    }
+                                    ResponseKind::Error(error) => Err(wire_io(error)),
+                                    response => Err(unexpected(response)),
+                                }
+                            }))
+                        }
+                    };
+                }
                 match file.poll_request(cx, FileOperationKind::Flush, |file| {
-                    RequestKind::FileFlush { file }
+                    (RequestKind::FileFlush { file }, None)
                 }) {
                     Poll::Pending => Poll::Pending,
-                    Poll::Ready(Ok(ResponseKind::FileFlush(result))) => {
+                    Poll::Ready(Ok((ResponseKind::FileFlush(result), _))) => {
                         Poll::Ready(result.map_err(wire_io))
                     }
-                    Poll::Ready(Ok(response)) => Poll::Ready(Err(unexpected(response))),
+                    Poll::Ready(Ok((response, _))) => Poll::Ready(Err(unexpected(response))),
                     Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
                 }
             }
@@ -347,6 +484,13 @@ impl AsyncSeek for ClientFile {
         match &mut self.0 {
             ClientFileInner::Direct(file) => Pin::new(file).start_seek(position),
             ClientFileInner::Remote(file) => {
+                if file
+                    .read_body
+                    .as_ref()
+                    .is_some_and(|body| body.remaining != 0)
+                {
+                    file.read_body.take();
+                }
                 file.idle().map_err(crate::Error::into_io_error)?;
                 file.pending = Some(PendingFileOperation {
                     kind: FileOperationKind::Seek,
@@ -364,15 +508,20 @@ impl AsyncSeek for ClientFile {
         match &mut self.0 {
             ClientFileInner::Direct(file) => Pin::new(file).poll_complete(cx),
             ClientFileInner::Remote(file) => {
-                match file.poll_request(cx, FileOperationKind::Seek, |file| RequestKind::FileSeek {
-                    file,
-                    position: io::SeekFrom::Current(0).into(),
+                match file.poll_request(cx, FileOperationKind::Seek, |file| {
+                    (
+                        RequestKind::FileSeek {
+                            file,
+                            position: io::SeekFrom::Current(0).into(),
+                        },
+                        None,
+                    )
                 }) {
                     Poll::Pending => Poll::Pending,
-                    Poll::Ready(Ok(ResponseKind::FileSeek(result))) => {
+                    Poll::Ready(Ok((ResponseKind::FileSeek(result), _))) => {
                         Poll::Ready(result.map_err(wire_io))
                     }
-                    Poll::Ready(Ok(response)) => Poll::Ready(Err(unexpected(response))),
+                    Poll::Ready(Ok((response, _))) => Poll::Ready(Err(unexpected(response))),
                     Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
                 }
             }
@@ -399,6 +548,7 @@ impl FileHandle for ClientFile {
                                 client: file.client.clone(),
                                 stdio: Some(stdio),
                                 pending: None,
+                                write_body: None,
                             })
                         })
                         .map_err(Into::into),
@@ -426,6 +576,7 @@ impl FileHandle for ClientFile {
                                 client: file.client.clone(),
                                 stdio: Some(stdio),
                                 pending: None,
+                                read_body: None,
                             })
                         })
                         .map_err(Into::into),
@@ -764,28 +915,36 @@ impl Client {
     }
 
     /// Starts an opaque-only VFS client on a bidirectional byte stream.
-    pub fn new<T>(stream: T) -> Self
+    pub async fn new<T>(stream: T) -> crate::Result<Self>
     where
         T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        Self {
-            rpc: dolang_rpc::Client::new(stream),
+        Ok(Self {
+            rpc: rpc_builder()
+                .client(stream)
+                .await
+                .map_err(rpc_error)?
+                .bind(),
             mode: SessionMode::Remote,
             vfs: None,
-        }
+        })
     }
 
     /// Starts an opaque-only VFS client on separate reader and writer streams.
-    pub fn new_split<R, W>(reader: R, writer: W) -> Self
+    pub async fn new_split<R, W>(reader: R, writer: W) -> crate::Result<Self>
     where
         R: AsyncRead + Send + 'static,
         W: AsyncWrite + Send + 'static,
     {
-        Self {
-            rpc: dolang_rpc::Client::new_split(reader, writer),
+        Ok(Self {
+            rpc: rpc_builder()
+                .client_split(reader, writer)
+                .await
+                .map_err(rpc_error)?
+                .bind(),
             mode: SessionMode::Remote,
             vfs: None,
-        }
+        })
     }
 
     /// Connect to an agent daemon at the given socket path.
@@ -797,17 +956,30 @@ impl Client {
     /// Connect using an existing `UnixStream`.
     #[cfg(unix)]
     pub async fn from_stream(stream: UnixStream) -> crate::Result<Self> {
-        Self::from_std_stream(stream.into_std()?)
+        Self::from_std_stream(stream.into_std()?).await
     }
 
     #[cfg(unix)]
-    fn from_std_stream(stream: StdUnixStream) -> crate::Result<Self> {
-        let rpc = dolang_rpc::Client::from_unix_stream(stream)?;
+    async fn from_std_stream(stream: StdUnixStream) -> crate::Result<Self> {
+        let rpc = rpc_builder()
+            .client_unix(stream)
+            .await
+            .map_err(rpc_error)?
+            .bind();
         Ok(Self {
             rpc,
             mode: SessionMode::Native,
             vfs: None,
         })
+    }
+
+    /// Starts a VFS client on an already-connected Unix domain socket file
+    /// descriptor.
+    #[cfg(unix)]
+    pub async fn from_owned_fd(value: OwnedFd) -> crate::Result<Self> {
+        let stream = StdUnixStream::from(value);
+        stream.set_nonblocking(true)?;
+        Self::from_std_stream(stream).await
     }
 
     /// Starts a VFS client on the server end of a connected Windows named pipe.
@@ -817,11 +989,14 @@ impl Client {
     /// `server_process` must identify the trusted process at the other end of
     /// the pipe. That process can transfer handles which this process adopts.
     #[cfg(windows)]
-    pub unsafe fn from_named_pipe_server(
+    pub async unsafe fn from_named_pipe_server(
         pipe: NamedPipeServer,
         server_process: OwnedHandle,
     ) -> crate::Result<Self> {
-        let rpc = unsafe { dolang_rpc::Client::from_named_pipe_server(pipe, server_process)? };
+        let rpc = unsafe { rpc_builder().client_named_pipe_server(pipe, server_process) }
+            .await
+            .map_err(rpc_error)?
+            .bind();
         Ok(Self {
             rpc,
             mode: SessionMode::Native,
@@ -844,12 +1019,20 @@ impl Client {
         })
     }
 
+    fn call_with_trailer(&self, request: RequestKind) -> TrailerSend<Call<VfsProtocol>> {
+        self.rpc.call_with_trailer(Request {
+            vfs: self.vfs.clone(),
+            kind: request,
+        })
+    }
+
     async fn request(&self, request: RequestKind) -> crate::Result<ResponseKind> {
         let response = self
             .call(request)
             .await
             .map_err(rpc_error)
-            .map_err(crate::Error::from)?;
+            .map_err(crate::Error::from)?
+            .into_response();
         match response {
             ResponseKind::Error(error) => Err(crate::Error::from(error)),
             response => Ok(response),
@@ -863,7 +1046,7 @@ impl Client {
                 OpenVfsHandle::Native(handle) => {
                     #[cfg(unix)]
                     {
-                        Ok(Self::try_from(handle.into_inner())?.into())
+                        Ok(Self::from_owned_fd(handle.into_inner()).await?.into())
                     }
                     #[cfg(not(unix))]
                     {
@@ -1074,18 +1257,7 @@ impl Client {
     }
 }
 
-#[cfg(unix)]
-impl TryFrom<OwnedFd> for Client {
-    type Error = crate::Error;
-
-    fn try_from(value: OwnedFd) -> Result<Self, Self::Error> {
-        let stream = StdUnixStream::from(value);
-        stream.set_nonblocking(true)?;
-        Self::from_std_stream(stream)
-    }
-}
-
-fn rpc_error(error: dolang_rpc::Error) -> io::Error {
+pub(crate) fn rpc_error(error: dolang_rpc::Error) -> io::Error {
     match error {
         dolang_rpc::Error::Io(error) => error,
         dolang_rpc::Error::ConnectionClosed => {
@@ -1198,17 +1370,18 @@ pub struct RemoteStdioSend {
     client: Client,
     stdio: Option<Opaque<crate::StdioSendMarker>>,
     pending: Option<(StdioSendOperation, Call<VfsProtocol>)>,
+    write_body: Option<PendingTrailerWrite>,
 }
 
 pub struct RemoteStdioRecv {
     client: Client,
     stdio: Option<Opaque<crate::StdioRecvMarker>>,
     pending: Option<Call<VfsProtocol>>,
+    read_body: Option<PendingTrailerRead>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StdioSendOperation {
-    Write,
     Close,
 }
 
@@ -1236,65 +1409,112 @@ impl AsyncWrite for RemoteStdioSend {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        if self.pending.is_none() {
-            let Some(stdio) = &self.stdio else {
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        if self.pending.is_some() {
+            return Poll::Ready(Err(io::Error::other(
+                "write polled while stdio close is pending",
+            )));
+        }
+        if self.write_body.is_none() {
+            let Some(stdio) = self.stdio.as_ref().cloned() else {
                 return Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::BrokenPipe,
                     "stdio send resource is closed",
                 )));
             };
-            self.pending = Some((
-                StdioSendOperation::Write,
-                self.client.call(RequestKind::StdioSendWrite {
-                    stdio: stdio.clone(),
-                    data: buf.to_vec(),
-                }),
-            ));
+            self.write_body = Some(PendingTrailerWrite {
+                send: Some(
+                    self.client
+                        .call_with_trailer(RequestKind::StdioSendWrite { stdio }),
+                ),
+                call: None,
+                target: buf.len(),
+                sent: 0,
+                unreported: 0,
+            });
         }
-        let (operation, call) = self.pending.as_mut().unwrap();
-        if *operation != StdioSendOperation::Write {
-            return Poll::Ready(Err(io::Error::other(
-                "write polled while stdio send close is pending",
-            )));
-        }
-        match Pin::new(call).poll(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(result) => {
-                self.pending = None;
-                match result.map_err(rpc_error)? {
-                    ResponseKind::Error(error) => Poll::Ready(Err(wire_io(error))),
-                    ResponseKind::StdioSendWrite(result) => Poll::Ready(result.map_err(wire_io)),
-                    response => Poll::Ready(Err(unexpected(response))),
+        let pending = self.write_body.as_mut().unwrap();
+        if let Some(call) = pending.call.as_mut() {
+            match Pin::new(call).poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(result) => {
+                    let target = pending.target;
+                    let unreported = pending.unreported;
+                    self.write_body = None;
+                    match result.map_err(rpc_error)?.into_response() {
+                        ResponseKind::StdioSendWrite(result) => {
+                            if result.map_err(wire_io)? != target {
+                                return Poll::Ready(Err(io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    "stdio write response does not acknowledge the submitted trailer",
+                                )));
+                            }
+                            return Poll::Ready(Ok(unreported));
+                        }
+                        ResponseKind::Error(error) => return Poll::Ready(Err(wire_io(error))),
+                        response => return Poll::Ready(Err(unexpected(response))),
+                    }
                 }
+            }
+        }
+        let remaining = pending.target - pending.sent;
+        match Pin::new(pending.send.as_mut().unwrap())
+            .poll_write(cx, &buf[..buf.len().min(remaining)])
+        {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Ready(Ok(n)) => {
+                pending.sent += n;
+                if pending.sent == pending.target {
+                    pending.call = Some(pending.send.take().unwrap().finish());
+                    pending.unreported = n;
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                Poll::Ready(Ok(n))
             }
         }
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let Some((operation, call)) = self.pending.as_mut() else {
+        if let Some(pending) = self.write_body.as_mut() {
+            if pending.call.is_none() {
+                pending.call = Some(pending.send.take().unwrap().finish());
+            }
+            return match Pin::new(pending.call.as_mut().unwrap()).poll(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(result) => {
+                    self.write_body = None;
+                    Poll::Ready(result.map_err(rpc_error).and_then(|result| {
+                        match result.into_response() {
+                            ResponseKind::StdioSendWrite(result) => {
+                                result.map(|_| ()).map_err(wire_io)
+                            }
+                            ResponseKind::Error(error) => Err(wire_io(error)),
+                            response => Err(unexpected(response)),
+                        }
+                    }))
+                }
+            };
+        }
+        let Some((_operation, _call)) = self.pending.as_mut() else {
             return Poll::Ready(Ok(()));
         };
-        if *operation != StdioSendOperation::Write {
-            return Poll::Ready(Err(io::Error::other(
-                "flush polled while stdio send close is pending",
-            )));
-        }
-        match Pin::new(call).poll(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(result) => {
-                self.pending = None;
-                match result.map_err(rpc_error)? {
-                    ResponseKind::Error(error) => Poll::Ready(Err(wire_io(error))),
-                    ResponseKind::StdioSendWrite(result) => {
-                        Poll::Ready(result.map(|_| ()).map_err(wire_io))
-                    }
-                    response => Poll::Ready(Err(unexpected(response))),
-                }
-            }
-        }
+        Poll::Ready(Err(io::Error::other(
+            "flush polled while stdio send close is pending",
+        )))
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.pending.is_none() {
+            match self.as_mut().poll_flush(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(())) => {}
+            }
+        }
         if self.stdio.is_none() {
             return Poll::Ready(Ok(()));
         }
@@ -1306,16 +1526,12 @@ impl AsyncWrite for RemoteStdioSend {
             ));
         }
         let (operation, call) = self.pending.as_mut().unwrap();
-        if *operation != StdioSendOperation::Close {
-            return Poll::Ready(Err(io::Error::other(
-                "shutdown polled while stdio send write is pending",
-            )));
-        }
+        debug_assert_eq!(*operation, StdioSendOperation::Close);
         match Pin::new(call).poll(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(result) => {
                 self.pending = None;
-                match result.map_err(rpc_error)? {
+                match result.map_err(rpc_error)?.into_response() {
                     ResponseKind::Error(error) => Poll::Ready(Err(wire_io(error))),
                     ResponseKind::StdioSendClose(result) => match result.map_err(wire_io) {
                         Ok(()) => {
@@ -1337,32 +1553,77 @@ impl AsyncRead for RemoteStdioRecv {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        if self.pending.is_none() {
-            if buf.remaining() == 0 {
-                return Poll::Ready(Ok(()));
-            }
-            let Some(stdio) = &self.stdio else {
-                return Poll::Ready(Ok(()));
-            };
-            self.pending = Some(self.client.call(RequestKind::StdioRecvRead {
-                stdio: stdio.clone(),
-                len: buf.remaining(),
-            }));
-        }
-        match Pin::new(self.pending.as_mut().unwrap()).poll(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(result) => {
-                self.pending = None;
-                match result.map_err(rpc_error)? {
-                    ResponseKind::Error(error) => Poll::Ready(Err(wire_io(error))),
-                    ResponseKind::StdioRecvRead(result) => match result.map_err(wire_io) {
-                        Ok(data) => {
-                            buf.put_slice(&data);
-                            Poll::Ready(Ok(()))
+        loop {
+            if let Some(body) = self.read_body.as_mut() {
+                let before = buf.filled().len();
+                match Pin::new(&mut body.recv).poll_read(cx, buf) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(error)) => {
+                        self.read_body = None;
+                        return Poll::Ready(Err(error));
+                    }
+                    Poll::Ready(Ok(())) => {
+                        let read = buf.filled().len() - before;
+                        if read > body.remaining {
+                            self.read_body = None;
+                            return Poll::Ready(Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "stdio read response exceeds requested length",
+                            )));
                         }
-                        Err(error) => Poll::Ready(Err(error)),
-                    },
-                    response => Poll::Ready(Err(unexpected(response))),
+                        body.remaining -= read;
+                        body.read += read;
+                        if read > 0 {
+                            return Poll::Ready(Ok(()));
+                        }
+                        let empty = body.read == 0;
+                        self.read_body = None;
+                        if empty {
+                            return Poll::Ready(Ok(()));
+                        }
+                        continue;
+                    }
+                }
+            }
+            if self.pending.is_none() {
+                if buf.remaining() == 0 {
+                    return Poll::Ready(Ok(()));
+                }
+                let Some(stdio) = &self.stdio else {
+                    return Poll::Ready(Ok(()));
+                };
+                self.pending = Some(self.client.call(RequestKind::StdioRecvRead {
+                    stdio: stdio.clone(),
+                    len: buf.remaining(),
+                }));
+            }
+            match Pin::new(self.pending.as_mut().unwrap()).poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(result) => {
+                    self.pending = None;
+                    let (response, trailer) = result.map_err(rpc_error)?.into_response_trailer();
+                    match response {
+                        ResponseKind::Error(error) => return Poll::Ready(Err(wire_io(error))),
+                        ResponseKind::StdioRecvRead(result) => match result.map_err(wire_io) {
+                            Ok(()) => {
+                                let Some(data) = trailer else {
+                                    return Poll::Ready(Err(io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        "stdio read response is missing its data trailer",
+                                    )));
+                                };
+                                let requested = buf.remaining();
+                                self.read_body = Some(PendingTrailerRead {
+                                    recv: data,
+                                    remaining: requested,
+                                    read: 0,
+                                });
+                                continue;
+                            }
+                            Err(error) => return Poll::Ready(Err(error)),
+                        },
+                        response => return Poll::Ready(Err(unexpected(response))),
+                    }
                 }
             }
         }
@@ -1457,6 +1718,7 @@ impl RemoteStdioSend {
                     client: self.client.clone(),
                     stdio: Some(stdio),
                     pending: None,
+                    write_body: None,
                 })
                 .map_err(wire_io),
             response => Err(unexpected(response)),
@@ -1511,6 +1773,7 @@ impl RemoteStdioRecv {
                     client: self.client.clone(),
                     stdio: Some(stdio),
                     pending: None,
+                    read_body: None,
                 })
                 .map_err(wire_io),
             response => Err(unexpected(response)),
@@ -2192,11 +2455,13 @@ impl Vfs for Client {
                             client: self.clone(),
                             stdio: Some(pipe.send),
                             pending: None,
+                            write_body: None,
                         }),
                         StdioRecv::Remote(RemoteStdioRecv {
                             client: self.clone(),
                             stdio: Some(pipe.recv),
                             pending: None,
+                            read_body: None,
                         }),
                     )
                 })
@@ -2731,8 +2996,9 @@ mod tests {
     #[tokio::test]
     async fn dropping_remote_file_unregisters_opaque_identity() {
         let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
-        let server = tokio::spawn(Server::new(server_stream).serve());
-        let client = Client::new(client_stream);
+        let server =
+            tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
+        let client = Client::new(client_stream).await.unwrap();
         let temp = tempdir().unwrap();
         let path = crate::typed_path(temp.path().join("file")).unwrap();
         let file = open_remote_file(&client, path.to_path()).await;
@@ -2773,8 +3039,9 @@ mod tests {
     #[tokio::test]
     async fn opaque_pipe_rejects_wrong_type_and_stale_identity() {
         let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
-        let server = tokio::spawn(Server::new(server_stream).serve());
-        let client = Client::new(client_stream);
+        let server =
+            tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
+        let client = Client::new(client_stream).await.unwrap();
         let (mut send, mut recv) = client.pipe().await.unwrap();
         let send_opaque = match &send {
             crate::StdioSend::Remote(send) => send.stdio.as_ref().unwrap().clone(),
@@ -2829,8 +3096,9 @@ mod tests {
         let inner_task = tokio::spawn(inner_server.accept());
 
         let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
-        let outer_task = tokio::spawn(Server::new(server_stream).serve());
-        let root = Client::new(client_stream);
+        let outer_task =
+            tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
+        let root = Client::new(client_stream).await.unwrap();
         let path = crate::typed_path(socket).unwrap();
         let selected = root
             .unix_socket(path.to_path())
@@ -2841,6 +3109,7 @@ mod tests {
 
         let (mut send, mut recv) = root.pipe().await.unwrap();
         send.write_all(b"root").await.unwrap();
+        send.flush().await.unwrap();
         let mut data = [0; 4];
         recv.read_exact(&mut data).await.unwrap();
         assert_eq!(&data, b"root");
@@ -2892,8 +3161,11 @@ mod tests {
             .unwrap();
         let (file, client, server, temp) = runtime.block_on(async {
             let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
-            let server = tokio::spawn(Server::new(server_stream).serve());
-            let client = Client::new(client_stream);
+            let server =
+                tokio::spawn(
+                    async move { Server::new(server_stream).await.unwrap().serve().await },
+                );
+            let client = Client::new(client_stream).await.unwrap();
             let temp = tempdir().unwrap();
             let path = crate::typed_path(temp.path().join("file")).unwrap();
             let file = open_remote_file(&client, path.to_path()).await;
@@ -2910,8 +3182,9 @@ mod tests {
     #[tokio::test]
     async fn explicit_close_consumes_remote_cleanup_identity() {
         let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
-        let server = tokio::spawn(Server::new(server_stream).serve());
-        let client = Client::new(client_stream);
+        let server =
+            tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
+        let client = Client::new(client_stream).await.unwrap();
         let temp = tempdir().unwrap();
         let path = crate::typed_path(temp.path().join("file")).unwrap();
         let file = open_remote_file(&client, path.to_path()).await;
@@ -2925,8 +3198,9 @@ mod tests {
     #[tokio::test]
     async fn child_wait_caches_wire_error() {
         let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
-        let server = tokio::spawn(Server::new(server_stream).serve());
-        let client = Client::new(client_stream);
+        let server =
+            tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
+        let client = Client::new(client_stream).await.unwrap();
         let mut child = successful_command(&client).spawn().await.unwrap();
         let ClientChildState::Live(opaque) = &child.state else {
             panic!("new child is not live");

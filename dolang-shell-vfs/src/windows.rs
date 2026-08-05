@@ -109,6 +109,7 @@ async fn launch_with(
     connect_or_exit(&pipe, &process).await?;
     let client_process = process.as_handle().try_clone_to_owned()?;
     let client = unsafe { Client::from_named_pipe_server(pipe, client_process) }
+        .await
         .map_err(crate::Error::into_io_error)?;
     let query = client.query().await.map_err(crate::Error::into_io_error)?;
     guard.disarm();

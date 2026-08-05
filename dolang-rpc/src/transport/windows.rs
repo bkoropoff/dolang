@@ -1,11 +1,12 @@
 use std::{
     collections::HashSet,
-    io,
+    io::{self, IoSlice},
     os::windows::io::{AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle},
     sync::Arc,
+    task::{Context, Poll},
 };
 
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
 use tokio::net::windows::named_pipe::{NamedPipeClient, NamedPipeServer};
 use windows_sys::Win32::{
     Foundation::{DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE},
@@ -30,17 +31,17 @@ impl Pipe {
         }
     }
 
-    async fn readable(&self) -> io::Result<()> {
+    fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match self {
-            Self::Server(pipe) => pipe.readable().await,
-            Self::Client(pipe) => pipe.readable().await,
+            Self::Server(pipe) => pipe.poll_read_ready(cx),
+            Self::Client(pipe) => pipe.poll_read_ready(cx),
         }
     }
 
-    async fn writable(&self) -> io::Result<()> {
+    fn poll_write_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match self {
-            Self::Server(pipe) => pipe.writable().await,
-            Self::Client(pipe) => pipe.writable().await,
+            Self::Server(pipe) => pipe.poll_write_ready(cx),
+            Self::Client(pipe) => pipe.poll_write_ready(cx),
         }
     }
 
@@ -51,10 +52,10 @@ impl Pipe {
         }
     }
 
-    fn try_write(&self, buffer: &[u8]) -> io::Result<usize> {
+    fn try_write_vectored(&self, buffers: &[IoSlice<'_>]) -> io::Result<usize> {
         match self {
-            Self::Server(pipe) => pipe.try_write(buffer),
-            Self::Client(pipe) => pipe.try_write(buffer),
+            Self::Server(pipe) => pipe.try_write_vectored(buffers),
+            Self::Client(pipe) => pipe.try_write_vectored(buffers),
         }
     }
 }
@@ -183,16 +184,24 @@ impl RecvFrame for WindowsRecv<'_> {
         }
     }
 
-    async fn recv<B: BufMut>(&mut self, buffer: &mut B) -> io::Result<usize> {
+    fn poll_read_once<B: BufMut>(
+        &mut self,
+        cx: &mut Context<'_>,
+        buffer: &mut B,
+    ) -> Poll<io::Result<usize>> {
         loop {
             // Use separate readable and try_read_buf operations to avoid
             // using `&mut self` methods on the named pipe, allowing sender
             // and receiver sides to share it via `Arc` without additional
             // synchronization.
-            self.receiver.0.pipe.readable().await?;
+            match self.receiver.0.pipe.poll_read_ready(cx) {
+                Poll::Ready(Ok(())) => {}
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Pending => return Poll::Pending,
+            }
             match self.receiver.0.pipe.try_read_buf(buffer) {
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-                result => return result,
+                result => return Poll::Ready(result),
             }
         }
     }
@@ -219,29 +228,39 @@ impl SendFrame<'_> for WindowsSend<'_> {
         }
     }
 
-    async fn finish<B: Buf>(mut self, buffer: &mut B) -> io::Result<()> {
-        // Once transmission begins, delivery is ambiguous. Leaking a handle is
-        // safer than closing one the peer may already have adopted.
+    fn has_attachments(&self) -> bool {
+        !self.duplicated.is_empty()
+    }
+
+    fn poll_write_once(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+        self.poll_write_vectored_once(cx, &[IoSlice::new(buf)])
+    }
+
+    fn poll_write_vectored_once(
+        &mut self,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        // Once transmission begins, delivery is ambiguous. Leaking a handle
+        // is safer than closing one the peer may already have adopted. A
+        // send that never writes a byte (e.g. dropped before any poll) still
+        // gets its staged handles closed by `Drop`, below.
         self.duplicated.clear();
-        while buffer.has_remaining() {
-            // Use separate writable and try_write operations to avoid
-            // using `&mut self` methods on the named pipe, allowing sender
-            // and receiver sides to share it via `Arc` without additional
-            // synchronization.
-            self.sender.0.pipe.writable().await?;
-            match self.sender.0.pipe.try_write(buffer.chunk()) {
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-                Ok(0) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::WriteZero,
-                        "failed to write frame",
-                    ));
-                }
-                Ok(written) => buffer.advance(written),
-                Err(error) => return Err(error),
+        loop {
+            // Use the raw, non-exclusive `poll_write_ready`/`try_write` pair
+            // (rather than `AsyncWrite::poll_write`, which needs `&mut` on
+            // the pipe itself) so the sender and receiver sides can share
+            // the pipe via `Arc` without additional synchronization.
+            match self.sender.0.pipe.poll_write_ready(cx) {
+                Poll::Ready(Ok(())) => {}
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Pending => return Poll::Pending,
+            }
+            match self.sender.0.pipe.try_write_vectored(bufs) {
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+                result => return Poll::Ready(result),
             }
         }
-        Ok(())
     }
 }
 

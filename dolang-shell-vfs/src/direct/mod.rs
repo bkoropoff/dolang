@@ -919,7 +919,11 @@ impl Vfs for Direct {
     }
 
     async fn pipe(&self) -> crate::Result<(StdioSend, StdioRecv)> {
-        crate::pipe::pipe().map_err(Into::into)
+        crate::pipe::pipe(None).map_err(Into::into)
+    }
+
+    async fn pipe_sized(&self, buf_size: Option<usize>) -> crate::Result<(StdioSend, StdioRecv)> {
+        crate::pipe::pipe(buf_size).map_err(Into::into)
     }
 
     async fn query(&self) -> crate::Result<Query> {

@@ -16,18 +16,30 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 async fn connected_pair() -> (Client, tokio::task::JoinHandle<io::Result<()>>) {
     let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
-    let server = Server::new(server_stream);
-    let task = tokio::spawn(server.serve());
-    (Client::new(client_stream), task)
+    // `Server::new` itself now runs the RPC handshake, so it must be driven
+    // concurrently with the client's own construction below rather than
+    // completed first — otherwise each side blocks waiting for the other.
+    let task = tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
+    (Client::new(client_stream).await.unwrap(), task)
 }
 
 async fn connected_split_pair() -> (Client, tokio::task::JoinHandle<io::Result<()>>) {
     let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
     let (client_reader, client_writer) = tokio::io::split(client_stream);
     let (server_reader, server_writer) = tokio::io::split(server_stream);
-    let server = Server::new_split(server_reader, server_writer);
-    let task = tokio::spawn(server.serve());
-    (Client::new_split(client_reader, client_writer), task)
+    let task = tokio::spawn(async move {
+        Server::new_split(server_reader, server_writer)
+            .await
+            .unwrap()
+            .serve()
+            .await
+    });
+    (
+        Client::new_split(client_reader, client_writer)
+            .await
+            .unwrap(),
+        task,
+    )
 }
 
 #[cfg(not(windows))]
@@ -962,6 +974,14 @@ async fn regular_file_round_trip_over_generic_stream() {
 
     let stdio = file.to_stdio_recv().await.unwrap();
     drop(stdio);
+    assert_eq!(file.seek(SeekFrom::Start(0)).await.unwrap(), 0);
+    let mut prefix = [0; 4];
+    file.read_exact(&mut prefix).await.unwrap();
+    assert_eq!(&prefix, b"abcd");
+    assert_eq!(file.seek(SeekFrom::Start(0)).await.unwrap(), 0);
+    let mut oversized = [0; 64];
+    assert_eq!(file.read(&mut oversized).await.unwrap(), 6);
+    assert_eq!(&oversized[..6], b"abcdef");
     assert_eq!(file.seek(SeekFrom::Start(0)).await.unwrap(), 0);
     let mut data = Vec::new();
     file.read_to_end(&mut data).await.unwrap();

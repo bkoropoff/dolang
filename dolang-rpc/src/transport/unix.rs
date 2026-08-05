@@ -4,9 +4,10 @@ use std::{
     os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd},
     os::unix::net::UnixStream,
     sync::Arc,
+    task::{Context, Poll},
 };
 
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
 use nix::{
     errno::Errno,
     sys::socket::{
@@ -89,6 +90,11 @@ pub(crate) fn unix(stream: UnixStream) -> io::Result<(UnixSender, UnixReceiver)>
 pub(crate) struct UnixSend<'a> {
     sender: &'a mut UnixSender,
     fds: Vec<BorrowedFd<'a>>,
+    /// Whether descriptors (if any) have already ridden along with a
+    /// successful `sendmsg`. `SCM_RIGHTS` ancillary data is not chunked
+    /// like the byte stream — it either accompanies a syscall or it
+    /// doesn't — so it must never be attached to more than the first one.
+    attached: bool,
 }
 
 pub(crate) struct UnixRecv<'a> {
@@ -103,6 +109,7 @@ impl Sender for UnixSender {
         UnixSend {
             sender: self,
             fds: Vec::new(),
+            attached: false,
         }
     }
 }
@@ -119,12 +126,21 @@ impl Receiver for UnixReceiver {
 }
 
 impl RecvFrame for UnixRecv<'_> {
-    async fn recv<B: BufMut>(&mut self, buffer: &mut B) -> io::Result<usize> {
+    fn poll_read_once<B: BufMut>(
+        &mut self,
+        cx: &mut Context<'_>,
+        buffer: &mut B,
+    ) -> Poll<io::Result<usize>> {
         loop {
-            let mut ready = self.receiver.common.socket.readable().await?;
+            let mut ready = match self.receiver.common.socket.poll_read_ready(cx) {
+                Poll::Ready(Ok(ready)) => ready,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Pending => return Poll::Pending,
+            };
             let result = ready.try_io(|socket| recv_once(socket.as_raw_fd(), buffer));
             let (bytes, fds) = match result {
-                Ok(result) => result?,
+                Ok(Ok(result)) => result,
+                Ok(Err(error)) => return Poll::Ready(Err(error)),
                 Err(_) => continue,
             };
             let received_fds = !fds.is_empty();
@@ -134,7 +150,7 @@ impl RecvFrame for UnixRecv<'_> {
             if bytes == 0 && received_fds {
                 continue;
             }
-            return Ok(bytes);
+            return Poll::Ready(Ok(bytes));
         }
     }
 
@@ -179,43 +195,51 @@ impl<'frame> SendFrame<'frame> for UnixSend<'frame> {
         Ok(index)
     }
 
-    async fn finish<B: Buf>(self, buffer: &mut B) -> io::Result<()> {
-        let raw_fds: Vec<_> = self.fds.iter().map(AsRawFd::as_raw_fd).collect();
-        let mut attachments = raw_fds.as_slice();
-        while buffer.has_remaining() {
-            let mut ready = self.sender.common.socket.writable().await?;
-            let result =
-                ready.try_io(|socket| send_once(socket.as_raw_fd(), buffer.chunk(), attachments));
-            let sent = match result {
-                Ok(result) => result?,
-                Err(_) => continue,
+    fn has_attachments(&self) -> bool {
+        !self.fds.is_empty()
+    }
+
+    fn poll_write_once(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+        self.poll_write_vectored_once(cx, &[IoSlice::new(buf)])
+    }
+
+    fn poll_write_vectored_once(
+        &mut self,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        loop {
+            let mut ready = match self.sender.common.socket.poll_write_ready(cx) {
+                Poll::Ready(Ok(ready)) => ready,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Pending => return Poll::Pending,
             };
-            if sent == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "failed to write frame",
-                ));
+            let attachments: Vec<RawFd> = if self.attached {
+                Vec::new()
+            } else {
+                self.fds.iter().map(AsRawFd::as_raw_fd).collect()
+            };
+            let result = ready.try_io(|socket| send_once(socket.as_raw_fd(), bufs, &attachments));
+            let sent = match result {
+                Ok(result) => result,
+                // Spurious readiness: `try_io` already cleared it, so
+                // looping back to `poll_write_ready` correctly re-arms.
+                Err(_would_block) => continue,
+            };
+            if sent.is_ok() {
+                self.attached = true;
             }
-            buffer.advance(sent);
-            attachments = &[];
+            return Poll::Ready(sent);
         }
-        Ok(())
     }
 }
 
-fn send_once(fd: RawFd, bytes: &[u8], fds: &[RawFd]) -> io::Result<usize> {
-    let iov = [IoSlice::new(bytes)];
+fn send_once(fd: RawFd, iov: &[IoSlice<'_>], fds: &[RawFd]) -> io::Result<usize> {
     loop {
         let result = if fds.is_empty() {
-            sendmsg::<()>(fd, &iov, &[], SEND_FLAGS, None)
+            sendmsg::<()>(fd, iov, &[], SEND_FLAGS, None)
         } else {
-            sendmsg::<()>(
-                fd,
-                &iov,
-                &[ControlMessage::ScmRights(fds)],
-                SEND_FLAGS,
-                None,
-            )
+            sendmsg::<()>(fd, iov, &[ControlMessage::ScmRights(fds)], SEND_FLAGS, None)
         };
         match result {
             Err(Errno::EINTR) => {}
@@ -307,6 +331,16 @@ mod tests {
         let mut sent = Bytes::from_static(b"hello");
         sender.send().finish(&mut sent).await.unwrap();
         assert_eq!(&receive(&mut receiver.recv(), 5).await[..], b"hello");
+    }
+
+    #[tokio::test]
+    async fn poll_write_once_writes_directly() {
+        let (mut sender, mut receiver) = pair();
+        let mut send = sender.send();
+        std::future::poll_fn(|cx| send.poll_write_once(cx, b"direct"))
+            .await
+            .unwrap();
+        assert_eq!(&receive(&mut receiver.recv(), 6).await[..], b"direct");
     }
 
     #[tokio::test]
