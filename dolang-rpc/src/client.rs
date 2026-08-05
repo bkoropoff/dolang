@@ -424,14 +424,6 @@ impl<P: Protocol> Writer<P> {
         }
     }
 
-    /// Fails every pending call. Used for transport-level (I/O) failures,
-    /// which are fatal for the whole session rather than one call.
-    fn fail_all(&self, error: Error) {
-        if let Some(inner) = self.inner.upgrade() {
-            inner.fail(error);
-        }
-    }
-
     /// Admits one queued item into the scheduler (or sends it immediately,
     /// for the native-handle atomic path). Returns `Err` on a fatal
     /// transport/protocol error, which the caller must treat as fatal for
@@ -491,7 +483,16 @@ impl<P: Protocol> Writer<P> {
                 payload_len: payload.len(),
             };
             let mut buffer = header.encode().chain(payload);
-            probe.finish(&mut buffer).await?;
+            if let Err(err) = probe.finish(&mut buffer).await {
+                let err = Error::Io(err);
+                self.complete_err(id, err.copy());
+                return Err(err);
+            }
+            if let Err(err) = self.transport.flush().await {
+                let err = Error::Io(err);
+                self.complete_err(id, err.copy());
+                return Err(err);
+            }
         } else {
             drop(probe);
             scheduler.admit_message(Kind::Request, id, payload, trailer);
@@ -533,10 +534,16 @@ impl<P: Protocol> Writer<P> {
                         closed = true;
                         continue;
                     };
-                    if let Err(err) = self.admit(message, &mut scheduler).await {
-                        self.fail_all(err.copy());
-                        return Err(err);
-                    }
+                    // No blanket `fail_all` here: `admit` already fails just
+                    // the one call whose request it couldn't get onto the
+                    // transport (see `admit_request`). Every other pending
+                    // call's request either already made it out, or is still
+                    // queued for a later turn of this same loop — a write
+                    // failure on one message doesn't mean every other one is
+                    // doomed, only that this connection is. The reader is
+                    // what authoritatively decides that (see the comment
+                    // after this loop).
+                    self.admit(message, &mut scheduler).await?;
                 }
                 // Not raced against anything: once ready, a fragment write
                 // is committed to the scheduler and must run to completion.
@@ -548,14 +555,21 @@ impl<P: Protocol> Writer<P> {
                 // potentially after the peer has already torn down its end.
                 _ = scheduler.ready(), if scheduler.has_work() => {
                     let result = scheduler.advance(&mut self.transport).await;
+                    // Flush anything sent by the scheduler
+                    let _ = self.transport.flush().await;
                     match result {
                         // A streaming trailer producer was dropped mid-message.
                         Ok(Some(id)) => {
                             self.complete_err(id, Error::Cancelled);
                         }
                         Ok(None) => {}
+                        // No blanket `fail_all`: a write failure here means
+                        // this connection is broken, not that every pending
+                        // call's already-sent request was never delivered.
+                        // The reader observes the same broken connection
+                        // (see the comment after this loop) and is what
+                        // authoritatively fails pending calls.
                         Err(err) => {
-                            self.fail_all(err.copy());
                             return Err(err);
                         }
                     }
