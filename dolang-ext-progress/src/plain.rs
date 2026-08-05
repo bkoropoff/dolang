@@ -5,9 +5,11 @@ use std::{
 };
 
 use indicatif as ix;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
-use crate::style::{self, ANSI_RESET, BAR_CHARS, ElementStyle, Style, Units};
+use crate::style::{
+    self, ANSI_RESET, BAR_CHARS, ElementStyle, Style, Units, cap_status, fit, write_styled,
+};
 
 /// Default minimum interval between non-forced plain-mode status lines for a
 /// single indicator, overridable via `progress.with`'s `interval:` kwarg.
@@ -53,6 +55,22 @@ pub(crate) struct PlainInfo {
     parent_id: Option<u64>,
     config: Rc<PlainConfig>,
     last_emit: Cell<Option<Instant>>,
+    /// `(sample time, position)` this indicator's throughput was last
+    /// measured from — the reference point the next `sample_rate` call
+    /// computes `delta_pos / delta_t` against. Left in place (not advanced)
+    /// across a call whose `delta_t` is too small to trust, so a burst of
+    /// closely-spaced calls doesn't reset the clock on every one of them.
+    rate_sample: Cell<Option<(Instant, u64)>>,
+    /// Exponentially-weighted average of the throughput samples so far, or
+    /// `None` before the first trustworthy one. Indicatif's own
+    /// `ProgressState::per_sec` estimator isn't used here on purpose: it's
+    /// only updated by `enable_steady_tick`'s background thread or by
+    /// position changes, and plain-mode output is sampled at its own, much
+    /// coarser `interval` cadence (default 5s vs. the interactive redraw's
+    /// ~80ms), so this keeps the rate's smoothing window matched to what's
+    /// actually being reported rather than to indicatif's redraw-oriented
+    /// one.
+    rate_smoothed: Cell<Option<f64>>,
 }
 
 impl PlainInfo {
@@ -76,6 +94,8 @@ impl PlainInfo {
             parent_id: (parent_id != 0).then_some(parent_id),
             config,
             last_emit: Cell::new(None),
+            rate_sample: Cell::new(None),
+            rate_smoothed: Cell::new(None),
         }
     }
 
@@ -84,6 +104,63 @@ impl PlainInfo {
     /// pick it up as their parent.
     pub(crate) fn id(&self) -> u64 {
         self.id
+    }
+
+    /// Half-life (in seconds) of the throughput EWA — a fresh sample and the
+    /// existing smoothed estimate are weighted equally after this much time,
+    /// so a stall or a burst is mostly forgotten after a couple of these.
+    /// Independent of `interval`: whatever cadence lines actually get
+    /// emitted at, samples further apart in time still count for more.
+    const RATE_HALF_LIFE_SECS: f64 = 15.0;
+
+    /// Shortest interval a rate is computed from. Below this, `delta_pos /
+    /// delta_t` is dividing by a duration too close to the clock's own
+    /// jitter/quantization to trust — e.g. a `BYTES` transfer that finishes
+    /// within a millisecond of starting isn't actually running at whatever
+    /// huge extrapolated rate that implies, it just completed too fast to
+    /// time. Below this threshold the sample is skipped rather than fed in.
+    const MIN_SAMPLE_DT_SECS: f64 = 0.05;
+
+    /// Updates and returns the smoothed byte-rate estimate for `BYTES`
+    /// indicators, sampled once per emitted line (not every `delta`/`update`
+    /// call — plain-mode output is already rate-limited to `interval`, so
+    /// sampling here reuses that same cadence rather than layering a second,
+    /// finer one under it). Returns `None` for non-`BYTES` indicators, or
+    /// when no trustworthy sample exists yet (nothing to compute a rate
+    /// from, or every sample so far has been too close together to time
+    /// accurately) — showing `0 B/s` in either case would be misleading,
+    /// not just empty.
+    fn sample_rate(&self, pos: u64, now: Instant) -> Option<f64> {
+        if !matches!(self.units, Some(Units::Bytes)) {
+            return None;
+        }
+        let Some((last_time, last_pos)) = self.rate_sample.get() else {
+            self.rate_sample.set(Some((now, pos)));
+            return None;
+        };
+        let dt = now.duration_since(last_time).as_secs_f64();
+        if dt < Self::MIN_SAMPLE_DT_SECS || pos < last_pos {
+            // Leave the reference sample in place — the next call's `dt`
+            // should accumulate from the last *trustworthy* point, not
+            // reset every time a burst of calls lands within a few
+            // milliseconds of each other.
+            return self.rate_smoothed.get();
+        }
+        self.rate_sample.set(Some((now, pos)));
+        let instantaneous = (pos - last_pos) as f64 / dt;
+        let smoothed = match self.rate_smoothed.get() {
+            // First trustworthy sample: take it as-is rather than blending
+            // against a fabricated zero-rate baseline, which would just
+            // dilute an accurate reading back toward "0 B/s" whenever this
+            // first sample's `dt` happens to be small.
+            None => instantaneous,
+            Some(prev) => {
+                let weight = 0.5_f64.powf(dt / Self::RATE_HALF_LIFE_SECS);
+                prev * weight + instantaneous * (1.0 - weight)
+            }
+        };
+        self.rate_smoothed.set(Some(smoothed));
+        Some(smoothed)
     }
 }
 
@@ -202,13 +279,32 @@ fn format_line(bar: &ix::ProgressBar, info: &PlainInfo, event: LineEvent) -> Str
     write_styled(&mut line, info.ansi, info.config.style.message(), &msg);
     line.push(' ');
 
+    let status_width = info.config.style.status_width as usize;
     if let Some(total) = bar.length() {
         write_bar(&mut line, info, bar_width, bar.position(), total);
         line.push(' ');
-        line.push_str(&format_position(info, bar.position(), Some(total)));
+        let rate = info.sample_rate(bar.position(), Instant::now());
+        line.push_str(&cap_status(
+            info.units,
+            bar.position(),
+            Some(total),
+            rate,
+            status_width,
+            info.ansi,
+            &info.config.style,
+        ));
         line.push(' ');
     } else if info.units.is_some() {
-        line.push_str(&format_position(info, bar.position(), None));
+        let rate = info.sample_rate(bar.position(), Instant::now());
+        line.push_str(&cap_status(
+            info.units,
+            bar.position(),
+            None,
+            rate,
+            status_width,
+            info.ansi,
+            &info.config.style,
+        ));
         line.push(' ');
     }
 
@@ -224,55 +320,6 @@ fn format_line(bar: &ix::ProgressBar, info: &PlainInfo, event: LineEvent) -> Str
         &elapsed_text,
     );
     line
-}
-
-/// Pads `text` with spaces to `width` columns, or truncates it to `width`
-/// columns (replacing the cut-off tail with a single `…`) if it's longer.
-/// Uses display width, not char count, so wide glyphs (most emoji, CJK
-/// text) don't throw off later columns.
-fn fit(text: &str, width: usize) -> String {
-    let text_width = UnicodeWidthStr::width(text);
-    if text_width <= width {
-        let mut s = text.to_string();
-        for _ in 0..width - text_width {
-            s.push(' ');
-        }
-        return s;
-    }
-    if width == 0 {
-        return String::new();
-    }
-    // Reserve 1 column for the ellipsis itself.
-    let budget = width - 1;
-    let mut truncated = String::new();
-    let mut used = 0;
-    for ch in text.chars() {
-        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if used + w > budget {
-            break;
-        }
-        truncated.push(ch);
-        used += w;
-    }
-    // The truncated prefix may be narrower than `budget` if the next
-    // character didn't fit (e.g. a wide char at the boundary) — pad so the
-    // field still ends at `width` columns.
-    for _ in 0..budget - used {
-        truncated.push(' ');
-    }
-    truncated.push('…');
-    truncated
-}
-
-fn format_position(info: &PlainInfo, pos: u64, total: Option<u64>) -> String {
-    match (info.units, total) {
-        (Some(Units::Bytes), Some(total)) => {
-            format!("{}/{}", ix::HumanBytes(pos), ix::HumanBytes(total))
-        }
-        (Some(Units::Bytes), None) => format!("{}", ix::HumanBytes(pos)),
-        (_, Some(total)) => format!("{pos}/{total}"),
-        (_, None) => format!("{pos}"),
-    }
 }
 
 fn write_bar(line: &mut String, info: &PlainInfo, width: usize, pos: u64, total: u64) {
@@ -326,20 +373,6 @@ fn write_styled_run(line: &mut String, ansi: bool, style: &ElementStyle, ch: cha
     for _ in 0..count {
         line.push(ch);
     }
-    if styled {
-        line.push_str(ANSI_RESET);
-    }
-}
-
-fn write_styled(line: &mut String, ansi: bool, style: &ElementStyle, text: &str) {
-    if !ansi {
-        line.push_str(text);
-        return;
-    }
-    let before = line.len();
-    style.write_ansi_prefix(line);
-    let styled = line.len() != before;
-    line.push_str(text);
     if styled {
         line.push_str(ANSI_RESET);
     }
