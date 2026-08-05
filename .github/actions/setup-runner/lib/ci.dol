@@ -110,9 +110,9 @@ def host_prereqs w
   let os = sys.os_info().os
 
   if (os == :MACOS:)
-    step $w 📦 "install llvm" do
-      run brew install llvm
-      export LIBCLANG_PATH /opt/homebrew/opt/llvm/lib
+    step $w 📦 "setup llvm" do
+      let prefix = sub do run brew --prefix llvm
+      export LIBCLANG_PATH "$prefix/lib"
   else if (os == :LINUX:)
     step $w 📦 "install llvm" do
       sudo.with do
