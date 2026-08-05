@@ -509,14 +509,15 @@ const BINARY_UNIT_PREFIXES: [&str; 9] = ["", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei",
 
 /// `value` scaled to the binary prefix at `exp`, formatted as a bare number
 /// with no unit suffix — 0 decimal places at `exp == 0` (a whole byte count
-/// looks odd as `"15.00"`), 2 otherwise, matching `HumanBytes`'s own
-/// precision.
+/// looks odd as `"15.00"`), 1 otherwise. `HumanBytes` itself uses 2, but a
+/// single fractional digit is plenty of precision for a live status readout
+/// and it's a couple of columns saved on every `BYTES` field.
 fn scaled_bytes_number(value: u64, exp: u32) -> String {
     let scaled = value as f64 / 1024f64.powi(exp as i32);
     if exp == 0 {
         format!("{scaled:.0}")
     } else {
-        format!("{scaled:.2}")
+        format!("{scaled:.1}")
     }
 }
 
@@ -563,11 +564,16 @@ pub(crate) fn write_status_text(
             );
         }
         (Some(Units::Bytes), None) => {
+            let exp = binary_exponent(pos);
             write_styled(
                 &mut s,
                 ansi,
                 position_style,
-                &ix::HumanBytes(pos).to_string(),
+                &format!(
+                    "{} {}B",
+                    scaled_bytes_number(pos, exp),
+                    binary_unit_suffix(exp)
+                ),
             );
         }
         (_, Some(total)) => {
@@ -580,12 +586,18 @@ pub(crate) fn write_status_text(
         }
     }
     if let (Some(Units::Bytes), Some(rate)) = (units, rate) {
+        let rate = rate.round() as u64;
+        let exp = binary_exponent(rate);
         s.push_str(" (");
         write_styled(
             &mut s,
             ansi,
             position_style,
-            &format!("{}/s", ix::HumanBytes(rate.round() as u64)),
+            &format!(
+                "{} {}B/s",
+                scaled_bytes_number(rate, exp),
+                binary_unit_suffix(exp)
+            ),
         );
         s.push(')');
     }
