@@ -89,7 +89,8 @@ pub(crate) fn pipe(buf_size: Option<usize>) -> io::Result<(StdioSend, StdioRecv)
     {
         let (send, recv) = tokio::net::unix::pipe::pipe()?;
         if let Some(size) = buf_size {
-            set_pipe_buffer_size(&send, size);
+            use std::os::fd::AsRawFd;
+            set_pipe_buffer_size(send.as_raw_fd(), size);
         }
         Ok((
             StdioSend::Native(NativeStdioSend::Pipe(send)),
@@ -120,18 +121,17 @@ pub(crate) fn pipe(buf_size: Option<usize>) -> io::Result<(StdioSend, StdioRecv)
 /// either end (the buffer is shared by both). No raw-handle bypass is
 /// needed: tokio's pipe types expose the fd directly via `AsRawFd`.
 #[cfg(target_os = "linux")]
-fn set_pipe_buffer_size(send: &tokio::net::unix::pipe::Sender, size: usize) {
-    use std::os::fd::AsRawFd;
+pub(crate) fn set_pipe_buffer_size(fd: std::os::fd::RawFd, size: usize) {
     let size = i32::try_from(size).unwrap_or(i32::MAX);
     // Best-effort: failure (e.g. exceeding /proc/sys/fs/pipe-max-size
     // without CAP_SYS_RESOURCE) just leaves the default buffer size.
     unsafe {
-        libc::fcntl(send.as_raw_fd(), libc::F_SETPIPE_SZ, size);
+        libc::fcntl(fd, libc::F_SETPIPE_SZ, size);
     }
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
-fn set_pipe_buffer_size(_send: &tokio::net::unix::pipe::Sender, _size: usize) {}
+pub(crate) fn set_pipe_buffer_size(_fd: std::os::fd::RawFd, _size: usize) {}
 
 /// Creates an anonymous pipe with a requested kernel buffer size.
 ///

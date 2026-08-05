@@ -267,7 +267,12 @@ fn serve_stdio() -> io::Result<()> {
         .enable_all()
         .build()?
         .block_on(async {
-            let server = Server::new_split(tokio::io::stdin(), tokio::io::stdout())
+            #[cfg(unix)]
+            let (stdin, stdout) = unix_stdio(io::stdin(), io::stdout())?;
+            #[cfg(not(unix))]
+            let (stdin, stdout) = (tokio::io::stdin(), tokio::io::stdout());
+
+            let server = Server::new_split(stdin, stdout)
                 .await
                 .map_err(crate::Error::into_io_error)?;
             #[cfg(windows)]
@@ -280,6 +285,68 @@ fn serve_stdio() -> io::Result<()> {
             #[cfg(not(windows))]
             server.serve().await
         })
+}
+
+/// Raised kernel pipe buffer size requested for the `--stdio` fast path.
+#[cfg(unix)]
+const STDIO_PIPE_BUFFER_SIZE: usize = 1024 * 1024;
+
+/// Wraps process stdin/stdout as non-blocking pipes, bypassing tokio's
+/// `tokio::io::stdin`/`stdout`, which shuttle every read and write through a
+/// dedicated blocking-pool thread since the standard library gives no other
+/// way to drive console/tty stdio asynchronously. `--stdio` mode always
+/// connects to a parent process speaking the VFS RPC protocol over a pipe —
+/// never a console, and never anything a human could usefully type into or
+/// capture from a file — so this requires both ends to actually be pipes
+/// and drives them directly through `tokio::net::unix::pipe`, which polls
+/// the raw fd itself with no intermediate thread. This also lets the
+/// outbound side request a larger kernel pipe buffer, which the
+/// blocking-pool path has no access to.
+#[cfg(unix)]
+fn unix_stdio(
+    stdin: io::Stdin,
+    stdout: io::Stdout,
+) -> io::Result<(
+    tokio::net::unix::pipe::Receiver,
+    tokio::net::unix::pipe::Sender,
+)> {
+    use std::os::fd::{AsFd, AsRawFd};
+
+    let stdin = tokio::net::unix::pipe::Receiver::from_owned_fd_unchecked(dup_nonblocking_pipe(
+        stdin.as_fd(),
+    )?)?;
+    let stdout = tokio::net::unix::pipe::Sender::from_owned_fd_unchecked(dup_nonblocking_pipe(
+        stdout.as_fd(),
+    )?)?;
+    // The buffer is a property of the pipe itself, shared by both ends, so
+    // either side can raise it.
+    crate::pipe::set_pipe_buffer_size(stdin.as_raw_fd(), STDIO_PIPE_BUFFER_SIZE);
+    crate::pipe::set_pipe_buffer_size(stdout.as_raw_fd(), STDIO_PIPE_BUFFER_SIZE);
+    Ok((stdin, stdout))
+}
+
+/// Duplicates `fd` and sets the dup non-blocking, failing if `fd` isn't
+/// actually a pipe (FIFO). `fcntl(F_SETFL)` applies to the open file
+/// description, so this only ever touches the dup — the original fd is left
+/// alone, and only the dup is handed to the caller for exclusive async use.
+#[cfg(unix)]
+fn dup_nonblocking_pipe(fd: std::os::fd::BorrowedFd<'_>) -> io::Result<std::os::fd::OwnedFd> {
+    use nix::{
+        fcntl::{FcntlArg, OFlag, fcntl},
+        sys::stat::{SFlag, fstat, mode_t},
+    };
+
+    let stat = fstat(fd)?;
+    if SFlag::from_bits_truncate(stat.st_mode as mode_t) & SFlag::S_IFMT != SFlag::S_IFIFO {
+        return Err(io::Error::other(
+            "--stdio requires stdin/stdout to be pipes",
+        ));
+    }
+
+    let dup = fd.try_clone_to_owned()?;
+    let flags = OFlag::from_bits_truncate(fcntl(&dup, FcntlArg::F_GETFL)?);
+    fcntl(&dup, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK))?;
+    Ok(dup)
 }
 
 #[cfg(windows)]
