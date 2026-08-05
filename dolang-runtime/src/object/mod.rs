@@ -3,6 +3,7 @@ pub(crate) mod array;
 pub mod array_view;
 pub(crate) mod backtrace;
 pub(crate) mod bin;
+pub(crate) mod binbuf;
 pub(crate) mod channel;
 pub(crate) mod class;
 pub(crate) mod dict;
@@ -22,6 +23,7 @@ pub(crate) mod record;
 pub(crate) mod set;
 pub(crate) mod str;
 pub(crate) mod strand;
+pub(crate) mod strbuf;
 pub(crate) mod sym;
 pub(crate) mod tuple;
 pub(crate) mod types;
@@ -105,6 +107,9 @@ pub(crate) struct BuiltinTypes<'v> {
     pub(crate) bin: TypeHandle<'v, [u8]>,
     pub(crate) bin_split: TypeHandle<'v, bin::Split<'v>>,
     pub(crate) bin_class: TypeHandle<'v, bin::Class>,
+    pub(crate) binbuf: TypeHandle<'v, binbuf::BinBuf<'v>>,
+    pub(crate) binbuf_class: TypeHandle<'v, binbuf::Class>,
+    pub(crate) binbuf_chunks: TypeHandle<'v, binbuf::Chunks<'v>>,
     pub(crate) bound_method: TypeHandle<'v, BoundMethod<'v>>,
     pub(crate) error: TypeHandle<'v, error::Boxed<'v>>,
     pub(crate) f64: TypeHandle<'v, f64>,
@@ -129,6 +134,8 @@ pub(crate) struct BuiltinTypes<'v> {
     pub(crate) namespace: TypeHandle<'v, module::Namespace<'v>>,
     pub(crate) str: TypeHandle<'v, str>,
     pub(crate) str_split: TypeHandle<'v, str::Split<'v>>,
+    pub(crate) strbuf: TypeHandle<'v, strbuf::StrBuf<'v>>,
+    pub(crate) strbuf_chunks: TypeHandle<'v, strbuf::Chunks<'v>>,
     pub(crate) sym: TypeHandle<'v, sym::SymObj>,
     pub(crate) verbatim_f64: TypeHandle<'v, float::Verbatim>,
     pub(crate) verbatim_int: TypeHandle<'v, int::Verbatim>,
@@ -174,6 +181,7 @@ pub(crate) struct BuiltinTypes<'v> {
     pub(crate) float_type: TypeHandle<'v, float::Float>,
     pub(crate) bool_type: TypeHandle<'v, types::Bool>,
     pub(crate) str_type: TypeHandle<'v, str::Type>,
+    pub(crate) strbuf_type: TypeHandle<'v, strbuf::Type>,
     pub(crate) sym_type: TypeHandle<'v, sym::Type>,
     pub(crate) array_type: TypeHandle<'v, array::Type>,
     pub(crate) dict_type: TypeHandle<'v, dict::Type>,
@@ -209,6 +217,9 @@ impl<'v> BuiltinTypes<'v> {
             bin: types.register_type_handle(),
             bin_class: types.register_type_handle(),
             bin_split: types.register_type_handle(),
+            binbuf: types.register_type_handle(),
+            binbuf_class: types.register_type_handle(),
+            binbuf_chunks: types.register_type_handle(),
             bound_method: types.register_type_handle(),
             channel_recv: types.register_type_handle(),
             channel_send: types.register_type_handle(),
@@ -248,6 +259,8 @@ impl<'v> BuiltinTypes<'v> {
             record_unpack: types.register_type_handle(),
             str_split: types.register_type_handle(),
             str: types.register_type_handle(),
+            strbuf: types.register_type_handle(),
+            strbuf_chunks: types.register_type_handle(),
             sym: types.register_type_handle(),
             tuple_iter: types.register_type_handle(),
             tuple_pairs: types.register_type_handle(),
@@ -262,6 +275,7 @@ impl<'v> BuiltinTypes<'v> {
             float_type: types.register_type_handle(),
             bool_type: types.register_type_handle(),
             str_type: types.register_type_handle(),
+            strbuf_type: types.register_type_handle(),
             sym_type: types.register_type_handle(),
             array_type: types.register_type_handle(),
             dict_type: types.register_type_handle(),
@@ -314,6 +328,7 @@ pub(crate) struct Singletons<'v> {
     pub(crate) float: Value<'v>,
     pub(crate) bool: Value<'v>,
     pub(crate) str: Value<'v>,
+    pub(crate) strbuf: Value<'v>,
     pub(crate) sym: Value<'v>,
     pub(crate) array: Value<'v>,
     pub(crate) dict: Value<'v>,
@@ -321,6 +336,7 @@ pub(crate) struct Singletons<'v> {
     pub(crate) record: Value<'v>,
     pub(crate) tuple: Value<'v>,
     pub(crate) bin: Value<'v>,
+    pub(crate) binbuf: Value<'v>,
     pub(crate) func: Value<'v>,
     pub(crate) range: Value<'v>,
     pub(crate) backtrace: Value<'v>,
@@ -387,6 +403,7 @@ impl<'v> Singletons<'v> {
             float: v!(builtin_types.float_type, float::Float),
             bool: v!(builtin_types.bool_type, types::Bool),
             str: v!(builtin_types.str_type, str::Type),
+            strbuf: v!(builtin_types.strbuf_type, strbuf::Type),
             sym: v!(builtin_types.sym_type, sym::Type),
             array: v!(builtin_types.array_type, array::Type),
             dict: v!(builtin_types.dict_type, dict::Type),
@@ -394,6 +411,7 @@ impl<'v> Singletons<'v> {
             record: v!(builtin_types.record_class, record::Class),
             tuple: v!(builtin_types.tuple_type, tuple::Type),
             bin: v!(builtin_types.bin_class, bin::Class),
+            binbuf: v!(builtin_types.binbuf_class, binbuf::Class),
             func: v!(builtin_types.func_type, function::Type),
             range: v!(builtin_types.range_type, range::Type),
             backtrace: v!(builtin_types.backtrace_type, backtrace::Type),

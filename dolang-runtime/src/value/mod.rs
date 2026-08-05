@@ -1685,6 +1685,62 @@ impl<'v> BinEmbryo<'v> {
         unsafe { self.embryo.as_mut().unwrap_unchecked().extend(slice) }
     }
 
+    /// Replaces `self[start..end]` with `replacement`, shifting the tail in place.
+    ///
+    /// This does not build a separate staging buffer: existing bytes are shifted within the
+    /// embryo's own allocation, growing first only if `replacement` is longer than the range
+    /// it replaces.
+    ///
+    /// # Panics
+    /// Panics if `start > end` or `end > self.len()`.
+    pub(crate) fn splice(
+        &mut self,
+        alloc: &mut impl Alloc<'v>,
+        start: usize,
+        end: usize,
+        replacement: &[u8],
+    ) {
+        assert!(start <= end && end <= self.len());
+        let growth = replacement.len().saturating_sub(end - start);
+        self.reserve(alloc, growth);
+        unsafe {
+            self.embryo
+                .as_mut()
+                .unwrap_unchecked()
+                .splice(start, end, replacement)
+        }
+    }
+
+    /// Like [`Self::splice`], but does not reserve capacity — the caller must have already
+    /// ensured enough spare capacity exists. Useful when the replacement bytes are borrowed
+    /// from a source that must not be interleaved with an allocating call (e.g. bytes
+    /// obtained under [`Strand::access`](crate::strand::Strand::access), which cannot
+    /// itself perform an allocating `Strand` call while the access token is live).
+    ///
+    /// # Panics
+    /// Panics if `start > end` or `end > self.len()`.
+    ///
+    /// # Safety
+    /// Spare capacity must be at least `replacement.len().saturating_sub(end - start)`.
+    pub(crate) unsafe fn splice_unchecked(&mut self, start: usize, end: usize, replacement: &[u8]) {
+        if start == end && replacement.is_empty() {
+            return;
+        }
+        assert!(start <= end && end <= self.len());
+        unsafe {
+            self.embryo
+                .as_mut()
+                .unwrap_unchecked()
+                .splice(start, end, replacement)
+        }
+    }
+
+    /// Finalizes the embryo into a Do `Bin`, writes it to `out`, and resets `self` to an
+    /// empty, unallocated embryo, leaving it usable afterward.
+    pub(crate) fn freeze_reset(&mut self, alloc: &mut impl Alloc<'v>, out: impl Output<'v>) {
+        mem::take(self).finish(alloc, out);
+    }
+
     /// Finalizes the embryo into a Do `Bin` and writes it to `out`.
     pub fn finish(self, alloc: &mut impl Alloc<'v>, mut out: impl Output<'v>) {
         let vm = alloc.alloc_vm(crate::vm::private::Sealed);
@@ -1757,6 +1813,23 @@ impl<'v> StrEmbryo<'v> {
         self.len() == 0
     }
 
+    /// Returns the total byte capacity currently available without reallocating.
+    pub fn capacity(&self) -> usize {
+        self.embryo.as_ref().map_or(0, gc::Embryo::capacity)
+    }
+
+    /// Shrinks the initialized length to `len`.
+    ///
+    /// If `len` is greater than the current length, this is a no-op.
+    ///
+    /// # Safety
+    /// `len` must fall on a UTF-8 character boundary.
+    pub(crate) unsafe fn truncate(&mut self, len: usize) {
+        if let Some(embryo) = self.embryo.as_mut() {
+            embryo.truncate(len);
+        }
+    }
+
     /// # Safety
     /// Bytes written into the returned spare capacity and later exposed via
     /// `advance` must keep the full initialized prefix valid UTF-8.
@@ -1813,6 +1886,62 @@ impl<'v> StrEmbryo<'v> {
         }
     }
 
+    /// Replaces `self[start..end]` with `replacement`, shifting the tail in place.
+    ///
+    /// This does not build a separate staging buffer: existing bytes are shifted within the
+    /// embryo's own allocation, growing first only if `replacement` is longer than the range
+    /// it replaces.
+    ///
+    /// # Safety
+    /// `start` and `end` must fall on UTF-8 character boundaries, and `replacement` must be
+    /// valid UTF-8 (so that the full initialized prefix remains valid UTF-8 afterward).
+    ///
+    /// # Panics
+    /// Panics if `start > end` or `end > self.len()`.
+    pub(crate) unsafe fn splice(
+        &mut self,
+        alloc: &mut impl Alloc<'v>,
+        start: usize,
+        end: usize,
+        replacement: &[u8],
+    ) {
+        assert!(start <= end && end <= self.len());
+        let growth = replacement.len().saturating_sub(end - start);
+        self.reserve(alloc, growth);
+        unsafe {
+            self.embryo
+                .as_mut()
+                .unwrap_unchecked()
+                .splice(start, end, replacement)
+        }
+    }
+
+    /// Like [`Self::splice`], but does not reserve capacity — the caller must have already
+    /// ensured enough spare capacity exists (see [`BinEmbryo::splice_unchecked`] for when
+    /// this is needed).
+    ///
+    /// # Safety
+    /// Same requirements as [`Self::splice`], plus: spare capacity must be at least
+    /// `replacement.len().saturating_sub(end - start)`.
+    pub(crate) unsafe fn splice_unchecked(&mut self, start: usize, end: usize, replacement: &[u8]) {
+        if start == end && replacement.is_empty() {
+            return;
+        }
+        assert!(start <= end && end <= self.len());
+        unsafe {
+            self.embryo
+                .as_mut()
+                .unwrap_unchecked()
+                .splice(start, end, replacement)
+        }
+    }
+
+    /// Finalizes the embryo into a Do `Str`, writes it to `out`, and resets `self` to an
+    /// empty, unallocated embryo, leaving it usable afterward.
+    pub(crate) fn freeze_reset(&mut self, alloc: &mut impl Alloc<'v>, out: impl Output<'v>) {
+        mem::take(self).finish(alloc, out);
+    }
+
     /// Finalizes the embryo into a Do `Str` and writes it to `out`.
     pub fn finish(self, alloc: &mut impl Alloc<'v>, mut out: impl Output<'v>) {
         let vm = alloc.alloc_vm(crate::vm::private::Sealed);
@@ -1832,6 +1961,13 @@ impl<'v> StrEmbryo<'v> {
 impl<'v> Format<'v> for StrEmbryo<'v> {
     fn write_str<'s>(&mut self, strand: &mut Strand<'v, 's>, s: &str) -> Result<'v, 's, ()> {
         self.extend(strand, s);
+        Ok(())
+    }
+}
+
+impl<'v> Format<'v> for BinEmbryo<'v> {
+    fn write_str<'s>(&mut self, strand: &mut Strand<'v, 's>, s: &str) -> Result<'v, 's, ()> {
+        self.extend(strand, s.as_bytes());
         Ok(())
     }
 }
