@@ -335,6 +335,8 @@ async fn writer<P: Protocol>(
             // later, after the peer has already torn down its end.
             _ = scheduler.ready(), if scheduler.has_work() => {
                 scheduler.advance(&mut sender).await?;
+                // Flush anything sent by the scheduler
+                let _ = sender.flush().await;
             }
         }
     }
@@ -369,6 +371,7 @@ async fn admit<P: Protocol>(
                 };
                 let mut buffer = header.encode().chain(payload);
                 probe.finish(&mut buffer).await?;
+                sender.flush().await?;
             } else {
                 drop(probe);
                 scheduler.admit_message(Kind::Response, id, payload, trailer);

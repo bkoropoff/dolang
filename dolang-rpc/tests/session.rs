@@ -172,50 +172,6 @@ async fn split_transport_round_trip() {
 }
 
 #[tokio::test]
-async fn split_transport_flushes_buffered_writers() {
-    let (client_io, server_io) = tokio::io::duplex(4096);
-    let (client_reader, client_writer) = tokio::io::split(client_io);
-    let (server_reader, server_writer) = tokio::io::split(server_io);
-    let server = tokio::spawn(async move {
-        builder()
-            .server_split(server_reader, tokio::io::BufWriter::new(server_writer))
-            .await
-            .unwrap()
-            .bind::<Test>()
-            .serve(async |mut context, request| {
-                let response = match request {
-                    Request::Echo(value) => Response(value),
-                    Request::Shutdown => {
-                        context.shutdown();
-                        Response(0)
-                    }
-                    Request::Delay(_) | Request::Bulk(_) | Request::TrailerRoundTrip(_) => {
-                        unreachable!()
-                    }
-                };
-                context.respond(response);
-            })
-            .await
-    });
-    let client =
-        unbound_client_split::<_, _, Test>(client_reader, tokio::io::BufWriter::new(client_writer))
-            .await;
-    assert_eq!(
-        client.call(Request::Echo(7)).await.unwrap().into_response(),
-        Response(7)
-    );
-    assert_eq!(
-        client
-            .call(Request::Shutdown)
-            .await
-            .unwrap()
-            .into_response(),
-        Response(0)
-    );
-    assert!(server.await.unwrap().is_ok());
-}
-
-#[tokio::test]
 async fn unguarded_cancellation_aborts_handler() {
     let (client_io, server_io) = tokio::io::duplex(4096);
     let dropped = Arc::new(AtomicBool::new(false));

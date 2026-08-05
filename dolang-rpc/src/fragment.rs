@@ -419,6 +419,7 @@ async fn write_negotiate_message(
         buffer.put_slice(chunk);
         let mut buffer = buffer.freeze();
         sender.send().finish(&mut buffer).await.map_err(Error::Io)?;
+        sender.flush().await?;
         offset = end;
         if last {
             break;
@@ -437,6 +438,7 @@ async fn send_negotiate_abort(sender: &mut AnySender) -> Result<(), Error> {
     };
     let mut buffer = header.encode();
     sender.send().finish(&mut buffer).await.map_err(Error::Io)?;
+    sender.flush().await?;
     Ok(())
 }
 

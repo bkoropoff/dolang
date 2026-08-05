@@ -10,7 +10,7 @@ use std::{
 };
 
 use bytes::{Buf, BufMut};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 /// Bound on the number of `IoSlice`s gathered from a chained `Buf` for one
 /// vectored write attempt.
@@ -27,6 +27,21 @@ pub(crate) trait Sender: Send + 'static {
         Self: 'a;
 
     fn send(&mut self) -> Self::Send<'_>;
+
+    /// Flushes any bytes buffered by the transport itself (as opposed to
+    /// bytes still queued in `fragment::Scheduler`, which is a layer above
+    /// this trait). Default no-op — raw sockets and pipes write straight
+    /// through — `GenericSender` overrides this to flush its wrapped
+    /// `AsyncWrite`. Callers are expected to call this once when they have no
+    /// more writes to issue for a while (e.g. a writer task about to become
+    /// idle or exit), not after every individual write: on transports like
+    /// stdio, where writes are dispatched to a background thread, flushing
+    /// makes the write visible to the peer but forces a round trip through
+    /// that thread, which would serialize otherwise-independent writes if
+    /// done after each one.
+    async fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 pub(crate) trait Receiver: Send + 'static {
@@ -96,16 +111,10 @@ pub(crate) trait SendFrame<'frame>: Send {
         self.poll_write_once(cx, buf)
     }
 
-    /// Flushes any internally buffered bytes. Default no-op (raw sockets
-    /// need none); `GenericSend` overrides this to flush its wrapped
-    /// `AsyncWrite`.
-    fn poll_flush_once(&mut self, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
-    }
-
     /// Writes all of `buffer`'s remaining bytes, looping
-    /// `poll_write_vectored_once` via `Buf::chunks_vectored`, then flushes.
-    /// Provided — no transport implements this directly.
+    /// `poll_write_vectored_once` via `Buf::chunks_vectored`. Provided — no
+    /// transport implements this directly. Does not flush; see
+    /// [`Sender::flush`].
     ///
     /// Returns whether the whole buffer was drained by a single successful
     /// `poll_write_vectored_once` call (`true`), as opposed to needing more
@@ -134,7 +143,6 @@ pub(crate) trait SendFrame<'frame>: Send {
             }
             buffer.advance(sent);
         }
-        poll_fn(|cx| self.poll_flush_once(cx)).await?;
         Ok(atomic)
     }
 }
@@ -180,6 +188,16 @@ impl Sender for AnySender {
             Self::Unix(sender) => AnySend::Unix(sender.send()),
             #[cfg(windows)]
             Self::Windows(sender) => AnySend::Windows(sender.send()),
+        }
+    }
+
+    async fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Generic(sender) => sender.flush().await,
+            #[cfg(unix)]
+            Self::Unix(sender) => sender.flush().await,
+            #[cfg(windows)]
+            Self::Windows(sender) => sender.flush().await,
         }
     }
 }
@@ -228,15 +246,6 @@ impl<'frame> SendFrame<'frame> for AnySend<'frame> {
             Self::Unix(frame) => frame.poll_write_vectored_once(cx, bufs),
             #[cfg(windows)]
             Self::Windows(frame) => frame.poll_write_vectored_once(cx, bufs),
-        }
-    }
-    fn poll_flush_once(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self {
-            Self::Generic(frame) => frame.poll_flush_once(cx),
-            #[cfg(unix)]
-            Self::Unix(frame) => frame.poll_flush_once(cx),
-            #[cfg(windows)]
-            Self::Windows(frame) => frame.poll_flush_once(cx),
         }
     }
 }
@@ -315,6 +324,10 @@ impl Sender for GenericSender {
     fn send(&mut self) -> Self::Send<'_> {
         GenericSend(self)
     }
+
+    async fn flush(&mut self) -> io::Result<()> {
+        self.0.as_mut().flush().await
+    }
 }
 
 impl Receiver for GenericReceiver {
@@ -381,10 +394,6 @@ impl<'frame> SendFrame<'frame> for GenericSend<'frame> {
         bufs: &[IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
         self.0.0.as_mut().poll_write_vectored(cx, bufs)
-    }
-
-    fn poll_flush_once(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.0.0.as_mut().poll_flush(cx)
     }
 }
 
