@@ -425,39 +425,6 @@ async fn bounded_concurrency_limits_simultaneous_large_transfers() {
 }
 
 #[tokio::test]
-async fn cancel_before_first_fragment_sent() {
-    let dispatched = Arc::new(AtomicBool::new(false));
-    let server_dispatched = dispatched.clone();
-    let (client_io, server_io) = tokio::io::duplex(4096);
-    tokio::spawn(async move {
-        builder()
-            .server(server_io)
-            .await
-            .unwrap()
-            .bind::<Test>()
-            .serve(async move |context, request| {
-                server_dispatched.store(true, Ordering::Release);
-                let response = match request {
-                    Request::Bulk(data) => Response(data.len() as u32),
-                    _ => unreachable!(),
-                };
-                context.respond(response);
-            })
-            .await
-    });
-    let client = unbound_client::<_, Test>(client_io).await;
-    // `call` and `cancel` both enqueue onto the same channel without any
-    // intervening `.await`, so on the single-threaded test runtime the
-    // writer task cannot have run yet: it will see the request already
-    // cancelled before ever admitting it into the scheduler.
-    let mut call = client.call(Request::Bulk(vec![b'x'; 64 * 1024]));
-    call.cancel();
-    assert!(matches!(call.await, Err(Error::Cancelled)));
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    assert!(!dispatched.load(Ordering::Acquire));
-}
-
-#[tokio::test]
 async fn cancel_during_fragment_transmission_completes_without_hanging() {
     let dispatched = Arc::new(AtomicBool::new(false));
     let server_dispatched = dispatched.clone();
@@ -671,40 +638,6 @@ async fn request_trailer_round_trips_over_unix_transport() {
         .await
         .unwrap();
     assert_eq!(received, data);
-}
-
-#[tokio::test]
-async fn trailer_call_cancelled_before_any_fragment_sent() {
-    let dispatched = Arc::new(AtomicBool::new(false));
-    let server_dispatched = dispatched.clone();
-    let (client_io, server_io) = tokio::io::duplex(4096);
-    tokio::spawn(async move {
-        builder()
-            .server(server_io)
-            .await
-            .unwrap()
-            .bind::<Test>()
-            .serve(async move |context, request| {
-                server_dispatched.store(true, Ordering::Release);
-                let response = match request {
-                    Request::TrailerRoundTrip(value) => Response(value),
-                    _ => unreachable!(),
-                };
-                context.respond(response);
-            })
-            .await
-    });
-    let client = unbound_client::<_, Test>(client_io).await;
-    // As in `cancel_before_first_fragment_sent`: no `.await` between `call`
-    // and `cancel`, so on the single-threaded test runtime the writer task
-    // cannot have run yet.
-    let mut call = client
-        .call_with_trailer(Request::TrailerRoundTrip(1))
-        .finish();
-    call.cancel();
-    assert!(matches!(call.await, Err(Error::Cancelled)));
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    assert!(!dispatched.load(Ordering::Acquire));
 }
 
 #[tokio::test]

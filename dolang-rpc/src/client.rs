@@ -58,7 +58,11 @@ enum Message<Q> {
 }
 
 struct Inner<P: Protocol> {
-    outgoing: mpsc::UnboundedSender<Message<P::Request>>,
+    // Holding a clone of this sender represents the ability to still get a
+    // message into the writer, so closing the channel — clearing this to
+    // `None` — is itself the writer's shutdown signal (see `Writer::run`):
+    // no separate oneshot needed.
+    outgoing: Mutex<Option<mpsc::UnboundedSender<Message<P::Request>>>>,
     pending: Mutex<Pending<P::Response>>,
     next_id: Mutex<u64>,
     tasks: Mutex<Option<Tasks>>,
@@ -83,7 +87,6 @@ struct Reader<P: Protocol> {
 }
 
 struct Tasks {
-    writer_shutdown: Option<oneshot::Sender<()>>,
     reader_shutdown: Option<oneshot::Sender<()>>,
     writer: tokio::task::JoinHandle<()>,
     reader: tokio::task::JoinHandle<()>,
@@ -91,9 +94,6 @@ struct Tasks {
 
 impl Tasks {
     fn shutdown(&mut self) {
-        if let Some(shutdown) = self.writer_shutdown.take() {
-            let _ = shutdown.send(());
-        }
         if let Some(shutdown) = self.reader_shutdown.take() {
             let _ = shutdown.send(());
         }
@@ -107,6 +107,8 @@ impl Tasks {
 
 impl<P: Protocol> Drop for Inner<P> {
     fn drop(&mut self) {
+        // Close the writer's channel first — see the comment on `outgoing`.
+        self.outgoing.lock().unwrap().take();
         if let Some(tasks) = self.tasks.get_mut().unwrap().as_mut() {
             tasks.shutdown();
         }
@@ -115,6 +117,14 @@ impl<P: Protocol> Drop for Inner<P> {
 }
 
 impl<P: Protocol> Inner<P> {
+    /// Best-effort send: silently dropped if the writer's channel has
+    /// already been closed.
+    fn send(&self, message: Message<P::Request>) {
+        if let Some(sender) = self.outgoing.lock().unwrap().as_ref() {
+            let _ = sender.send(message);
+        }
+    }
+
     fn complete(&self, id: u64, result: Result<CallResult<P::Response>, Error>) {
         if let Some(tx) = self.pending.lock().unwrap().remove(&id) {
             let _ = tx.send(result);
@@ -160,7 +170,7 @@ impl<P: Protocol> Client<P> {
     ) -> Self {
         let (outgoing, outgoing_rx) = mpsc::unbounded_channel();
         let inner = Arc::new(Inner {
-            outgoing,
+            outgoing: Mutex::new(Some(outgoing)),
             pending: Mutex::new(HashMap::new()),
             next_id: Mutex::new(0),
             tasks: Mutex::new(None),
@@ -169,7 +179,6 @@ impl<P: Protocol> Client<P> {
             #[cfg(windows)]
             _peer_process: peer_process,
         });
-        let (writer_shutdown, writer_stop) = oneshot::channel();
         let (reader_shutdown, reader_stop) = oneshot::channel();
         let writer = tokio::spawn(
             Writer {
@@ -179,7 +188,7 @@ impl<P: Protocol> Client<P> {
                 keep_requests_alive,
                 limits,
             }
-            .run(writer_stop),
+            .run(),
         );
         let reader = tokio::spawn(
             Reader {
@@ -190,7 +199,6 @@ impl<P: Protocol> Client<P> {
             .run(reader_stop),
         );
         *inner.tasks.lock().unwrap() = Some(Tasks {
-            writer_shutdown: Some(writer_shutdown),
             reader_shutdown: Some(reader_shutdown),
             writer,
             reader,
@@ -201,6 +209,8 @@ impl<P: Protocol> Client<P> {
     /// Stops the session and waits for its background tasks to exit.
     pub async fn close(self) {
         let tasks = self.inner.tasks.lock().unwrap().take();
+        // Close the writer's channel first — see the comment on `outgoing`.
+        self.inner.outgoing.lock().unwrap().take();
         self.inner.fail(Error::ConnectionClosed);
         if let Some(tasks) = tasks {
             tasks.join().await;
@@ -261,7 +271,6 @@ impl<P: Protocol> Client<P> {
     /// cancel has effectively already been sent (nothing left to cancel).
     fn begin<T>(&self, build: impl FnOnce(u64) -> (Message<P::Request>, T)) -> (BeginResult<P>, T) {
         let (tx, rx) = oneshot::channel();
-        let tasks = self.inner.tasks.lock().unwrap();
         let id = {
             let mut next = self.inner.next_id.lock().unwrap();
             let id = *next;
@@ -269,13 +278,14 @@ impl<P: Protocol> Client<P> {
             id
         };
         let (message, value) = build(id);
-        if tasks.is_none() {
-            let _ = tx.send(Err(Error::ConnectionClosed));
-            return ((id, rx, true), value);
-        }
         self.inner.pending.lock().unwrap().insert(id, tx);
-        let queued = self.inner.outgoing.send(message).is_ok();
-        drop(tasks);
+        let queued = self
+            .inner
+            .outgoing
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|sender| sender.send(message).is_ok());
         if !queued {
             self.inner.complete(id, Err(Error::ConnectionClosed));
         }
@@ -368,7 +378,7 @@ impl<P: Protocol> Call<P> {
     pub fn cancel(&mut self) {
         if !self.cancel_sent {
             self.cancel_sent = true;
-            let _ = self.inner.outgoing.send(Message::Cancel { id: self.id });
+            self.inner.send(Message::Cancel { id: self.id });
         }
     }
 }
@@ -507,55 +517,48 @@ impl<P: Protocol> Writer<P> {
         }
     }
 
-    async fn run(mut self, mut shutdown: oneshot::Receiver<()>) {
+    async fn run(mut self) {
         let mut scheduler = fragment::Scheduler::new(&self.limits);
-        loop {
-            while let Ok(message) = self.outgoing.try_recv() {
-                if self.admit(message, &mut scheduler).await {
-                    return;
+        // Holding a clone of `Inner::outgoing` is what represents the
+        // ability to still get a message in (see its doc comment), so the
+        // channel closing — every clone gone — doubles as the shutdown
+        // signal: once `recv()` reports no more messages will ever arrive,
+        // admission of new work stops, and the loop keeps advancing the
+        // scheduler until it's fully drained before exiting, never
+        // abandoning a write already committed to it.
+        let mut closed = false;
+        while !closed || scheduler.has_work() {
+            tokio::select! {
+                message = self.outgoing.recv(), if !closed => {
+                    let Some(message) = message else {
+                        closed = true;
+                        continue;
+                    };
+                    if self.admit(message, &mut scheduler).await {
+                        return;
+                    }
                 }
-            }
-            if !scheduler.has_work() {
-                let message = tokio::select! {
-                    message = self.outgoing.recv() => message,
-                    _ = &mut shutdown => return,
-                };
-                let Some(message) = message else {
-                    return;
-                };
-                if self.admit(message, &mut scheduler).await {
-                    return;
-                }
-                continue;
-            }
-            let ready = tokio::select! {
-                _ = std::future::poll_fn(|cx| scheduler.poll_ready(cx)) => true,
-                message = self.outgoing.recv() => {
-                    let Some(message) = message else { return; };
-                    if self.admit(message, &mut scheduler).await { return; }
-                    false
-                }
-                _ = &mut shutdown => return,
-            };
-            if !ready {
-                continue;
-            }
-            // Do not race an actual fragment write against admission. A
-            // dropped send future could otherwise leave a committed partial
-            // fragment on the transport.
-            let result = tokio::select! {
-                result = scheduler.advance(&mut self.transport) => result,
-                _ = &mut shutdown => return,
-            };
-            match result {
-                // A streaming trailer producer was dropped mid-message.
-                Ok(Some(id)) => {
-                    let _ = self.complete_err(id, Error::Cancelled);
-                }
-                Ok(None) => {}
-                Err(err) => {
-                    self.fail_all(err);
-                    return;
+                // Not raced against anything: once ready, a fragment write
+                // is committed to the scheduler and must run to completion.
+                // A dropped send future could otherwise leave a committed
+                // partial fragment on the transport, or — on transports
+                // whose writes are dispatched to a detached background task
+                // (e.g. the blocking-pool-backed Windows pipe transport) —
+                // let an abandoned write complete arbitrarily later,
+                // potentially after the peer has already torn down its end.
+                _ = scheduler.ready(), if scheduler.has_work() => {
+                    let result = scheduler.advance(&mut self.transport).await;
+                    match result {
+                        // A streaming trailer producer was dropped mid-message.
+                        Ok(Some(id)) => {
+                            let _ = self.complete_err(id, Error::Cancelled);
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            self.fail_all(err);
+                            return;
+                        }
+                    }
                 }
             }
         }
@@ -613,7 +616,7 @@ impl<P: Protocol> Reader<P> {
                         inner.complete(id, Err(Error::Cancelled));
                     }
                     Kind::Discard => {
-                        let _ = inner.outgoing.send(Message::PeerDiscarded { id });
+                        inner.send(Message::PeerDiscarded { id });
                     }
                     kind => return Err(Error::Protocol(format!("unexpected {kind:?} frame"))),
                 }
@@ -658,7 +661,7 @@ impl<P: Protocol> Reader<P> {
                         return;
                     }
                     if notify_discard && let Some(inner) = self.inner.upgrade() {
-                        let _ = inner.outgoing.send(Message::DiscardTrailer { id });
+                        inner.send(Message::DiscardTrailer { id });
                     }
                     // SAFETY: the lease retains the receiver borrow and
                     // clears the erased token before it ends.
@@ -698,7 +701,7 @@ mod tests {
     fn pending_call() -> (Call<Test>, mpsc::UnboundedReceiver<Message<u8>>) {
         let (outgoing, outgoing_rx) = mpsc::unbounded_channel();
         let inner = Arc::new(Inner {
-            outgoing,
+            outgoing: Mutex::new(Some(outgoing)),
             pending: Mutex::new(HashMap::new()),
             next_id: Mutex::new(1),
             tasks: Mutex::new(None),

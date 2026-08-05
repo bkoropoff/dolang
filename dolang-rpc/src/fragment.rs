@@ -7,7 +7,7 @@ use std::{
     collections::{HashMap, VecDeque},
     io,
     sync::Arc,
-    task::{Context, Poll},
+    task::Poll,
 };
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -1020,23 +1020,27 @@ impl Scheduler {
     }
 
     /// Waits until advancing the scheduler would not block on a trailer
-    /// producer. Once this reports ready, `advance` must be driven to
-    /// completion without racing ordinary message admission: it may commit
-    /// part of a fragment before yielding on transport readiness.
-    pub(crate) fn poll_ready(&self, cx: &mut Context<'_>) -> Poll<()> {
-        if !self.control.is_empty() {
-            return Poll::Ready(());
-        }
-        for send in &self.active {
-            if send.offset != send.payload.len() {
+    /// producer. Once this resolves, `advance` must be driven to completion
+    /// without racing ordinary message admission: it may commit part of a
+    /// fragment before yielding on transport readiness.
+    pub(crate) async fn ready(&self) {
+        std::future::poll_fn(|cx| {
+            if !self.control.is_empty() {
                 return Poll::Ready(());
             }
-            match &send.trailer {
-                Trailer::Stream(shared) if SendShared::poll_action(shared, cx).is_pending() => {}
-                _ => return Poll::Ready(()),
+            for send in &self.active {
+                if send.offset != send.payload.len() {
+                    return Poll::Ready(());
+                }
+                match &send.trailer {
+                    Trailer::Stream(shared) if SendShared::poll_action(shared, cx).is_pending() => {
+                    }
+                    _ => return Poll::Ready(()),
+                }
             }
-        }
-        Poll::Pending
+            Poll::Pending
+        })
+        .await
     }
 
     /// Sends one control fragment if any are queued (priority); otherwise

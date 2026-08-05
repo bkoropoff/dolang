@@ -106,8 +106,7 @@ impl<P: Protocol> Server<P> {
             limits,
             marker: _,
         } = self;
-        let (writer_shutdown, writer_stop) = oneshot::channel();
-        let mut writer = tokio::spawn(writer::<P>(sender, outgoing_rx, writer_stop, limits));
+        let mut writer = tokio::spawn(writer::<P>(sender, outgoing_rx, limits));
         let (shutdown, mut shutdown_requested) = oneshot::channel();
         inner.lock().unwrap().shutdown = Some(shutdown);
         let handler = Arc::new(handler);
@@ -284,6 +283,9 @@ impl<P: Protocol> Server<P> {
                 }
             }
         }
+        // Dropping `outgoing` and every task's clone of it (via `tasks`)
+        // closes the writer's channel — see the comment on `writer` below —
+        // which is what tells it to stop and, once drained, exit.
         drop(outgoing);
         drop(tasks);
         if !writer_finished {
@@ -295,7 +297,6 @@ impl<P: Protocol> Server<P> {
                     ))),
                 };
             } else {
-                let _ = writer_shutdown.send(());
                 let _ = writer.await;
             }
         }
@@ -306,47 +307,38 @@ impl<P: Protocol> Server<P> {
 async fn writer<P: Protocol>(
     mut sender: transport::AnySender,
     mut outgoing: mpsc::UnboundedReceiver<Message<P::Response>>,
-    mut shutdown: oneshot::Receiver<()>,
     limits: Limits,
 ) -> Result<(), Error> {
     let mut scheduler = fragment::Scheduler::new(&limits);
-    loop {
-        while let Ok(message) = outgoing.try_recv() {
-            admit::<P>(&mut sender, &mut scheduler, message).await?;
-        }
-        if !scheduler.has_work() {
-            let message = tokio::select! {
-                message = outgoing.recv() => message,
-                _ = &mut shutdown => return Ok(()),
-            };
-            let Some(message) = message else {
-                return Ok(());
-            };
-            admit::<P>(&mut sender, &mut scheduler, message).await?;
-            continue;
-        }
-        let ready = tokio::select! {
-            _ = std::future::poll_fn(|cx| scheduler.poll_ready(cx)) => true,
-            message = outgoing.recv() => {
-                if let Some(message) = message {
-                    admit::<P>(&mut sender, &mut scheduler, message).await?;
-                    false
-                } else {
-                    // The last producer was dropped, but already-admitted
-                    // responses still have to drain before the transport is
-                    // closed.
-                    true
-                }
+    // Holding a clone of `outgoing`'s sender half (the local `outgoing` in
+    // `serve`, or a `CallContext`'s) is what represents the ability to
+    // still get a message in, so the channel closing — every clone gone —
+    // doubles as this task's shutdown signal: once `recv()` reports no more
+    // messages will ever arrive, admission of new work stops, and the loop
+    // keeps advancing the scheduler until it's fully drained before
+    // exiting, never abandoning a write already committed to it.
+    let mut closed = false;
+    while !closed || scheduler.has_work() {
+        tokio::select! {
+            message = outgoing.recv(), if !closed => {
+                let Some(message) = message else {
+                    closed = true;
+                    continue;
+                };
+                admit::<P>(&mut sender, &mut scheduler, message).await?;
             }
-            _ = &mut shutdown => return Ok(()),
-        };
-        if ready {
-            tokio::select! {
-                result = scheduler.advance(&mut sender) => { result?; }
-                _ = &mut shutdown => return Ok(()),
+            // Not raced against anything — see the matching comment in
+            // client.rs's writer loop. A dropped send future could leave a
+            // committed partial fragment on the transport, or — on
+            // transports whose writes are dispatched to a detached
+            // background task — let an abandoned write complete arbitrarily
+            // later, after the peer has already torn down its end.
+            _ = scheduler.ready(), if scheduler.has_work() => {
+                scheduler.advance(&mut sender).await?;
             }
         }
     }
+    Ok(())
 }
 
 /// Admits one outgoing item. `Response` payloads are probed for native-
