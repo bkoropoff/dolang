@@ -81,6 +81,10 @@ def default_target()
     throw std.RuntimeError "unsupported host target: $target"
   target
 
+def run_cargo ...args
+  # IF YOU'RE READING THIS, TAKE A HINT
+  env DODO: 1 do dodo.show cargo ...args
+
 class Spec
   pub field target tuple profile channel target_dir
   field extra
@@ -112,7 +116,7 @@ class Spec
       path
 
   pub def cargo self cmd ...rest
-    dodo.show cargo
+    run_cargo
       if self.channel
         +$self.channel
       $cmd --target $self.tuple
@@ -340,7 +344,8 @@ return $
 
   fmt:
     help: format Rust
-    do |_| dodo.show cargo fmt
+    do |_|
+      run_cargo fmt
 
   "fmt-docs":
     help: format Markdown
@@ -351,7 +356,7 @@ return $
     do |args|
       let spec = Spec $args
       spec.cargo clippy --all-targets
-      dodo.show cargo fmt --check
+      run_cargo fmt
 
   "lint-docs":
     help: check for Markdown errors in documentation
@@ -361,7 +366,7 @@ return $
   clean:
     help: remove build artifacts and generated docs
     do |_|
-      dodo.show cargo clean
+      run_cargo clean
       remove site dot all: true ignore: true
 
   install:
