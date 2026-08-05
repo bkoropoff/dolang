@@ -55,6 +55,12 @@ struct Widget {
 struct ProgressState {
     multi: Option<MultiProgress>,
     style: Style,
+    /// Whether ANSI styling should be embedded in the `status` field's own
+    /// hand-rendered text (see `style::write_status_text`) — computed once
+    /// for the scope, mirroring `PlainInfo::ansi`, rather than re-queried on
+    /// every restyle, since none of the restyle call sites below have a
+    /// `Strand` handy.
+    ansi: bool,
     widgets: Vec<Widget>,
     next_id: u64,
 }
@@ -152,7 +158,14 @@ fn do_insert_bar(
     // If parent was a leaf spinner, it's now non-leaf — hide its spinner
     if parent_was_leaf && state.widgets[parent_idx].mode == Mode::Spinner {
         let pw = &state.widgets[parent_idx];
-        style::apply_spinner_style(&pw.bar, &state.style, pw.depth - 1, pw.units, false);
+        style::apply_spinner_style(
+            &pw.bar,
+            &state.style,
+            pw.depth - 1,
+            pw.units,
+            false,
+            state.ansi,
+        );
     }
 
     (pb, id)
@@ -184,7 +197,14 @@ fn do_remove(state: &mut ProgressState, multi: &MultiProgress, widget_id: u64) {
             && state.widgets[pi].mode == Mode::Spinner
         {
             let pw = &state.widgets[pi];
-            style::apply_spinner_style(&pw.bar, &state.style, pw.depth - 1, pw.units, true);
+            style::apply_spinner_style(
+                &pw.bar,
+                &state.style,
+                pw.depth - 1,
+                pw.units,
+                true,
+                state.ansi,
+            );
         }
     }
 }
@@ -417,10 +437,17 @@ async fn install_indicator<'v, 's>(
 
                 match mode {
                     Mode::Bar => {
-                        style::apply_bar_style(&pb, &state.style, depth, options.units);
+                        style::apply_bar_style(&pb, &state.style, depth, options.units, state.ansi);
                     }
                     Mode::Spinner => {
-                        style::apply_spinner_style(&pb, &state.style, depth, options.units, true);
+                        style::apply_spinner_style(
+                            &pb,
+                            &state.style,
+                            depth,
+                            options.units,
+                            true,
+                            state.ansi,
+                        );
                     }
                 }
                 drop(state);
@@ -670,6 +697,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         elapsed: builder.sym("elapsed"),
         position: builder.sym("position"),
         total: total_kw,
+        status: builder.sym("status"),
         width: builder.sym("width"),
         fg: builder.sym("fg"),
         bg: builder.sym("bg"),
@@ -686,7 +714,11 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
 
             let style = match style_val {
                 Some(sv) => style::parse_style(strand, &sv, &style_keys)?,
-                None => Style::default(),
+                // No explicit `style:` kwarg: size the message column to
+                // the terminal's actual width instead of the fixed
+                // built-in default, so the common case makes good use of
+                // whatever room is available.
+                None => Style::default_for_cols(dolang_ext_shell::stderr_cols(strand)),
             };
 
             // If stderr is not a terminal, use the plain (non-interactive)
@@ -718,9 +750,11 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             }
 
             let multi = MultiProgress::new();
+            let ansi = dolang_ext_shell::ansi_enabled(strand);
             let state_rc = Rc::new(RefCell::new(ProgressState {
                 multi: Some(multi.clone()),
                 style,
+                ansi,
                 widgets: vec![Widget {
                     id: 0,
                     depth: 0,
@@ -1040,6 +1074,7 @@ impl<'v> Object<'v> for Indicator {
                                     w.depth - 1,
                                     w.units,
                                     leaf,
+                                    state.ansi,
                                 );
                             }
                         }
@@ -1052,7 +1087,13 @@ impl<'v> Object<'v> for Indicator {
                             {
                                 state.widgets[idx].mode = Mode::Bar;
                                 let w = &state.widgets[idx];
-                                style::apply_bar_style(&w.bar, &state.style, w.depth - 1, w.units);
+                                style::apply_bar_style(
+                                    &w.bar,
+                                    &state.style,
+                                    w.depth - 1,
+                                    w.units,
+                                    state.ansi,
+                                );
                             }
                         }
                     }

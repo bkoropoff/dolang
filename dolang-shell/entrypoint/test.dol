@@ -51,18 +51,13 @@ args.with args: $shell.args
     default: 600
     meta: SECS
     help: Max seconds for each test and module load.
-  - opt: width
-    parse: $int
-    default: 60
-    meta: CELLS
-    help: Message width
   - arg: paths
     parse: $Path
     collect: true
     help: Test directories or files to run.
   do |p|
-    let :filter :jobs :module_jobs :timeout :paths :width ... = p
-    let rc = progress.with style: {message: {:width}} do
+    let :filter :jobs :module_jobs :timeout :paths ... = p
+    let rc = progress.with do
       test.run
         jobs: $jobs
         module_jobs: $module_jobs

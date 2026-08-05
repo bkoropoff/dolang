@@ -273,6 +273,18 @@ pub fn ansi_enabled<'v>(strand: &Strand<'v, '_>) -> bool {
     crate::console::ansi(strand)
 }
 
+/// Stderr's terminal width in columns, the same override-aware answer
+/// `term.console.geometry().cols` gives: `DOLANG_CONSOLE=cols=...` wins if
+/// set, otherwise the real terminal is queried. `None` if stderr isn't a
+/// terminal (or the terminal declines to report its size) and no override
+/// pins the column count down.
+pub fn stderr_cols<'v>(strand: &Strand<'v, '_>) -> Option<u16> {
+    let global = strand.state::<Global<'v>>();
+    let ov = &global.terminal.console_override;
+    ov.cols
+        .or_else(|| ::console::Term::stderr().size_checked().map(|(_, c)| c))
+}
+
 /// Write a line (newline appended) through the shared terminal writer,
 /// serialized with `term.echo`/`term.print`/diagnostic output.
 ///
