@@ -356,7 +356,7 @@ return $
     do |args|
       let spec = Spec $args
       spec.cargo clippy --all-targets
-      run_cargo fmt
+      run_cargo fmt --check
 
   "lint-docs":
     help: check for Markdown errors in documentation
