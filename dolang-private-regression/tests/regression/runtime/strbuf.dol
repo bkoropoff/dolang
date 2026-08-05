@@ -1,0 +1,186 @@
+# StrBuf: mutable UTF-8 string buffer
+
+def assert_err msg block
+  let res = try
+    block()
+    false
+  catch e
+    assert_eq (str e) $msg
+    true
+  assert $res
+
+# Construction
+let buf = StrBuf()
+assert_eq $buf.len 0
+assert (!(bool buf))
+
+let buf2 = StrBuf("hello")
+assert_eq $buf2.len 5
+assert (bool buf2)
+assert_eq $buf2.freeze() "hello"
+assert_eq $buf2.len 0
+
+# append: raw bytes for Str, display for everything else
+let buf3 = StrBuf()
+buf3.append "foo"
+buf3.append 42
+buf3.append 3.5
+assert_eq $buf3.freeze() "foo423.5"
+
+# append of a Bin value goes through display/UTF-8 validation, not a raw copy
+let buf3b = StrBuf()
+buf3b.append b"bar"
+assert_eq $buf3b.freeze() "bar"
+
+# extend requires Str
+let buf5 = StrBuf()
+buf5.extend "abc"
+buf5.extend "def"
+assert_eq $buf5.freeze() "abcdef"
+assert_err "type error: StrBuf.extend: expected Str" do
+  let b = StrBuf()
+  b.extend 42
+
+# indexing is range-only; no scalar index
+let buf7 = StrBuf("foobar")
+assert_eq $buf7[2..4] "ob"
+assert_err "index out of range or invalid" do buf7[0]
+
+# range assignment (growing/shrinking)
+let buf8 = StrBuf("foobar")
+buf8[1..3] = "XYZ"
+assert_eq $buf8.freeze() "fXYZbar"
+let buf9 = StrBuf("foobar")
+buf9[1..5] = "X"
+assert_eq $buf9.freeze() "fXr"
+
+# insert
+let buf10 = StrBuf("foobar")
+buf10.insert 3 "XYZ"
+assert_eq $buf10.freeze() "fooXYZbar"
+
+# insert/remove/truncate reject non-boundary UTF-8 indices
+let buf10b = StrBuf("féo")
+assert_err "invalid UTF-8 substring boundaries" do buf10b.insert 2 "x"
+
+# remove: range only, Int index is a type error
+let buf13 = StrBuf("foobar")
+assert_eq (buf13.remove (1..3)) "oo"
+assert_eq $buf13.freeze() "fbar"
+assert_err "type error: StrBuf.remove: expected a range" do
+  let b = StrBuf("foobar")
+  b.remove 0
+
+# truncate / clear
+let buf14 = StrBuf("foobar")
+buf14.truncate 3
+assert_eq $buf14.freeze() "foo"
+let buf15 = StrBuf("foobar")
+buf15.clear()
+assert_eq $buf15.len 0
+buf15.append "x"
+assert_eq $buf15.freeze() "x"
+
+# freeze leaves the buffer usable and empty; the frozen value is independent
+let buf16 = StrBuf("abc")
+let frozen = buf16.freeze()
+assert_eq $frozen "abc"
+assert_eq $buf16.len 0
+buf16.append "def"
+assert_eq $frozen "abc"
+assert_eq $buf16.freeze() "def"
+
+# freezing an empty buffer yields an empty Str
+assert_eq (StrBuf().freeze()) ""
+
+# read-only ops
+let buf17 = StrBuf("foobar")
+assert (buf17.starts_with "foo")
+assert (buf17.ends_with "bar")
+assert (buf17.contains "oob")
+assert_eq (buf17.sub 2) "obar"
+assert_eq (buf17.sub 2 4) "ob"
+
+# equality/ordering compare StrBuf to StrBuf only
+assert_eq (StrBuf("abc")) (StrBuf("abc"))
+assert (!(StrBuf("abc") == StrBuf("abd")))
+assert (StrBuf("abc") < StrBuf("abd"))
+assert (!(StrBuf("abc") == "abc"))
+
+# type
+assert_eq (type (StrBuf())) $StrBuf
+
+# Dict mutation hazard: mutating a key after insertion makes it unreachable
+# by its old bucket hash, even though op_eq reflects current content -- the
+# same footgun as any mutable hash key, not a bug to fix.
+let key = StrBuf("k1")
+let d = {}
+d[key] = "v1"
+assert_eq (d.get key default: "MISSING") "v1"
+key.append "-x"
+assert_eq (d.get key default: "MISSING") "MISSING"
+let key2 = StrBuf("k1-x")
+assert_eq (d.get key2 default: "MISSING") "MISSING"
+assert (key == key2)
+
+# drain: chunk iterator that consumes from the front in place
+let d1 = StrBuf("hello world")
+let chunks1 = []
+for chunk = d1.drain(4)
+  chunks1.push $chunk
+assert_eq $chunks1 ["hell", "o wo", "rld"]
+assert_eq $d1.len 0
+
+# default chunk size (no argument) is large enough to drain a small buffer in one step
+let d2 = StrBuf("small")
+let chunks2 = []
+for chunk = d2.drain()
+  chunks2.push $chunk
+assert_eq $chunks2 ["small"]
+
+# chunk boundaries are rounded down to the nearest UTF-8 code point boundary
+let d3 = StrBuf("héllo")
+let chunks3 = []
+for chunk = d3.drain(2)
+  chunks3.push $chunk
+assert_eq $chunks3 ["h", "é", "ll", "o"]
+
+# ...unless that would yield an empty chunk, in which case it rounds up instead
+let d4 = StrBuf("é")
+let chunks4 = []
+for chunk = d4.drain(1)
+  chunks4.push $chunk
+assert_eq $chunks4 ["é"]
+
+# chunk size must be positive
+assert_err "value error: chunk size must be positive" do
+  let b = StrBuf("x")
+  b.drain 0
+
+# draining settles the buffer: mutation and freeze after a partial drain reflect only
+# the remaining (undrained) content
+let d5 = StrBuf("hello world")
+let it5 = d5.drain(5)
+assert_eq (it5.next()) "hello"
+assert_eq $d5.len 6
+d5.append "!"
+assert_eq $d5.freeze() " world!"
+
+# other mutating methods settle the buffer too, so indices after a partial drain remain
+# relative to the remaining (undrained) content
+let d7 = StrBuf("abcdefgh")
+let it7 = d7.drain(3)
+assert_eq (it7.next()) "abc"
+d7.insert 1 "X"
+assert_eq $d7.freeze() "dXefgh"
+
+# multiple drain iterators over the same buffer share the drain cursor rather than each
+# independently redraining the same content
+let d6 = StrBuf("abcdefgh")
+let it6a = d6.drain(2)
+let it6b = d6.drain(2)
+assert_eq (it6a.next()) "ab"
+assert_eq (it6b.next()) "cd"
+assert_eq (it6a.next()) "ef"
+assert_eq (it6b.next()) "gh"
+assert_eq $d6.len 0

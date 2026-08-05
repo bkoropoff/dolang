@@ -528,8 +528,29 @@ where
         }
     }
 
-    fn data_ptr(&self) -> *mut u8 {
+    pub(crate) fn data_ptr(&self) -> *mut u8 {
         unsafe { self.ptr.as_ptr().add(size_of::<BoxedSlice<H, u8>>()) }
+    }
+
+    /// Replaces `self[start..end]` with `replacement`, shifting the remaining tail left or
+    /// right within the existing allocation as needed. No allocation is performed here; the
+    /// caller must have already reserved enough spare capacity to cover any growth
+    /// (`replacement.len().saturating_sub(end - start)`).
+    ///
+    /// # Safety
+    /// `start <= end <= self.len()`, and spare capacity must be at least
+    /// `replacement.len().saturating_sub(end - start)`.
+    pub(crate) unsafe fn splice(&mut self, start: usize, end: usize, replacement: &[u8]) {
+        debug_assert!(start <= end && end <= self.len());
+        let old_len = self.len();
+        let tail_len = old_len - end;
+        let new_tail_start = start + replacement.len();
+        unsafe {
+            let ptr = self.data_ptr();
+            ptr::copy(ptr.add(end), ptr.add(new_tail_start), tail_len);
+            ptr::copy_nonoverlapping(replacement.as_ptr(), ptr.add(start), replacement.len());
+            self.set_len(new_tail_start + tail_len);
+        }
     }
 
     fn realloc(&mut self, new_cap: usize) {
@@ -554,7 +575,7 @@ where
         unsafe { self.len_ptr().read() }
     }
 
-    unsafe fn set_len(&mut self, len: usize) {
+    pub(crate) unsafe fn set_len(&mut self, len: usize) {
         unsafe { self.len_ptr().write(len) }
     }
 

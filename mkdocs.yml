@@ -200,6 +200,7 @@ nav:
       - api/std/args.md
       - api/std/array.md
       - api/std/bin.md
+      - api/std/binbuf.md
       - api/std/bool.md
       - api/std/bytecode-error.md
       - api/std/canceled-error.md
@@ -233,6 +234,7 @@ nav:
       - api/std/sinkable.md
       - api/std/state-error.md
       - api/std/str.md
+      - api/std/strbuf.md
       - api/std/sym.md
       - api/std/timed-out-error.md
       - api/std/tuple.md

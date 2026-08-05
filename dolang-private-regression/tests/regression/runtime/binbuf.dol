@@ -1,0 +1,184 @@
+# BinBuf: mutable byte buffer
+
+def assert_err msg block
+  let res = try
+    block()
+    false
+  catch e
+    assert_eq (str e) $msg
+    true
+  assert $res
+
+# Construction
+let buf = BinBuf()
+assert_eq $buf.len 0
+assert (!(bool buf))
+
+let buf2 = BinBuf(b"hello")
+assert_eq $buf2.len 5
+assert (bool buf2)
+assert_eq $buf2.freeze() b"hello"
+assert_eq $buf2.len 0
+
+# append: raw bytes for Bin/Str, display for everything else
+let buf3 = BinBuf()
+buf3.append b"foo"
+buf3.append "bar"
+buf3.append 42
+assert_eq $buf3.freeze() b"foobar42"
+
+# append round-trips non-UTF8 bytes exactly (no lossy decode)
+let buf4 = BinBuf()
+buf4.append b"\xff\xfe"
+assert_eq $buf4.freeze() b"\xff\xfe"
+
+# extend requires Str/Bin
+let buf5 = BinBuf()
+buf5.extend b"abc"
+buf5.extend "def"
+assert_eq $buf5.freeze() b"abcdef"
+assert_err "type error: not binary data: unknown" do
+  let b = BinBuf()
+  b.extend 42
+
+# push appends raw bytes
+let buf6 = BinBuf()
+buf6.push 104 105
+assert_eq $buf6.freeze() b"hi"
+
+# indexing
+let buf7 = BinBuf(b"foobar")
+assert_eq $buf7[0] 102
+assert_eq $buf7[2..4] b"ob"
+buf7[0] = 70
+assert_eq $buf7.freeze() b"Foobar"
+
+# range assignment (growing/shrinking)
+let buf8 = BinBuf(b"foobar")
+buf8[1..3] = b"XYZ"
+assert_eq $buf8.freeze() b"fXYZbar"
+let buf9 = BinBuf(b"foobar")
+buf9[1..5] = b"X"
+assert_eq $buf9.freeze() b"fXr"
+
+# insert: Bin/Str slice or a single byte Int
+let buf10 = BinBuf(b"foobar")
+buf10.insert 3 b"XYZ"
+assert_eq $buf10.freeze() b"fooXYZbar"
+let buf11 = BinBuf(b"foobar")
+buf11.insert 0 65
+assert_eq $buf11.freeze() b"Afoobar"
+
+# remove: Int index -> removed byte, range -> removed Bin
+let buf12 = BinBuf(b"foobar")
+assert_eq (buf12.remove 0) 102
+assert_eq $buf12.freeze() b"oobar"
+let buf13 = BinBuf(b"foobar")
+assert_eq (buf13.remove (1..3)) b"oo"
+assert_eq $buf13.freeze() b"fbar"
+
+# truncate / clear
+let buf14 = BinBuf(b"foobar")
+buf14.truncate 3
+assert_eq $buf14.freeze() b"foo"
+let buf15 = BinBuf(b"foobar")
+buf15.clear()
+assert_eq $buf15.len 0
+buf15.append b"x"
+assert_eq $buf15.freeze() b"x"
+
+# freeze leaves the buffer usable and empty; the frozen value is independent
+let buf16 = BinBuf(b"abc")
+let frozen = buf16.freeze()
+assert_eq $frozen b"abc"
+assert_eq $buf16.len 0
+buf16.append b"def"
+assert_eq $frozen b"abc"
+assert_eq $buf16.freeze() b"def"
+
+# freezing an empty buffer yields an empty Bin
+assert_eq (BinBuf().freeze()) b""
+
+# read-only ops
+let buf17 = BinBuf(b"foobar")
+assert (buf17.starts_with b"foo")
+assert (buf17.ends_with b"bar")
+assert (buf17.contains b"oob")
+assert_eq (buf17.sub 2) b"obar"
+assert_eq (buf17.sub 2 4) b"ob"
+assert_eq (buf17.hex()) "666f6f626172"
+
+# equality/ordering compare BinBuf to BinBuf only
+assert_eq (BinBuf(b"abc")) (BinBuf(b"abc"))
+assert (!(BinBuf(b"abc") == BinBuf(b"abd")))
+assert (BinBuf(b"abc") < BinBuf(b"abd"))
+assert (!(BinBuf(b"abc") == b"abc"))
+
+# type
+assert_eq (type (BinBuf())) $BinBuf
+
+# append of an arbitrary value matches str()
+let buf18 = BinBuf()
+buf18.append 3.5
+assert_eq $buf18.freeze() b"3.5"
+
+# Dict mutation hazard: mutating a key after insertion makes it unreachable
+# by its old bucket hash, even though op_eq reflects current content -- the
+# same footgun as any mutable hash key, not a bug to fix.
+let key = BinBuf(b"k1")
+let d = {}
+d[key] = "v1"
+assert_eq (d.get key default: "MISSING") "v1"
+key.append b"-x"
+assert_eq (d.get key default: "MISSING") "MISSING"
+let key2 = BinBuf(b"k1-x")
+assert_eq (d.get key2 default: "MISSING") "MISSING"
+assert (key == key2)
+
+# drain: chunk iterator that consumes from the front in place
+let d1 = BinBuf(b"hello world")
+let chunks1 = []
+for chunk = d1.drain(4)
+  chunks1.push $chunk
+assert_eq $chunks1 [b"hell", b"o wo", b"rld"]
+assert_eq $d1.len 0
+
+# default chunk size (no argument) is large enough to drain a small buffer in one step
+let d2 = BinBuf(b"small")
+let chunks2 = []
+for chunk = d2.drain()
+  chunks2.push $chunk
+assert_eq $chunks2 [b"small"]
+
+# chunk size must be positive
+assert_err "value error: chunk size must be positive" do
+  let b = BinBuf(b"x")
+  b.drain 0
+
+# draining settles the buffer: mutation and freeze after a partial drain reflect only
+# the remaining (undrained) content
+let d5 = BinBuf(b"hello world")
+let it5 = d5.drain(5)
+assert_eq (it5.next()) b"hello"
+assert_eq $d5.len 6
+d5.append b"!"
+assert_eq $d5.freeze() b" world!"
+
+# other mutating methods settle the buffer too, so indices after a partial drain remain
+# relative to the remaining (undrained) content
+let d7 = BinBuf(b"abcdefgh")
+let it7 = d7.drain(3)
+assert_eq (it7.next()) b"abc"
+d7.insert 1 b"X"
+assert_eq $d7.freeze() b"dXefgh"
+
+# multiple drain iterators over the same buffer share the drain cursor rather than each
+# independently redraining the same content
+let d6 = BinBuf(b"abcdefgh")
+let it6a = d6.drain(2)
+let it6b = d6.drain(2)
+assert_eq (it6a.next()) b"ab"
+assert_eq (it6b.next()) b"cd"
+assert_eq (it6a.next()) b"ef"
+assert_eq (it6b.next()) b"gh"
+assert_eq $d6.len 0

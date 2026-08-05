@@ -9,6 +9,7 @@ The `std` module provides core language facilities.
 | [`Args`](./args.md)                               | Argument pack                              |
 | [`Array`](./array.md)                             | Mutable ordered sequence                   |
 | [`Bin`](./bin.md)                                 | Immutable binary data                      |
+| [`BinBuf`](./binbuf.md)                           | Mutable byte buffer                        |
 | [`BytecodeError`](./bytecode-error.md)            | Bytecode verification error                |
 | [`Bool`](./bool.md)                               | Boolean (`true` / `false`)                 |
 | [`CanceledError`](./canceled-error.md)            | Strand cancellation                        |
@@ -43,6 +44,7 @@ The `std` module provides core language facilities.
 | [`Sink`](./sink.md)                               | Abstract sink type                         |
 | [`SinkStop`](./sink-stop.md)                      | Error raised when a sink is closed         |
 | [`Str`](./str.md)                                 | Immutable UTF-8 string                     |
+| [`StrBuf`](./strbuf.md)                           | Mutable UTF-8 string buffer                |
 | [`Sym`](./sym.md)                                 | Interned symbol                            |
 | [`TimedOutError`](./timed-out-error.md)           | Strand timeout                             |
 | [`Tuple`](./tuple.md)                             | Immutable ordered sequence                 |

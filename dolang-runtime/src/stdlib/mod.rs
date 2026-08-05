@@ -24,6 +24,7 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
     let bool = bc.bool.dup();
     let nil = bc.nil.dup();
     let str = bc.str.dup();
+    let strbuf = bc.strbuf.dup();
     let sym = bc.sym.dup();
     let array = bc.array.dup();
     let dict = bc.dict.dup();
@@ -34,6 +35,7 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
     let module = bc.module.dup();
     let record = bc.record.dup();
     let bin = bc.bin.dup();
+    let binbuf = bc.binbuf.dup();
     let args = bc.args.dup();
 
     // Iterator protocol types (from former std.iter)
@@ -82,6 +84,7 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
         .value("Bool", &bool)
         .value("Nil", &nil)
         .value("Str", &str)
+        .value("StrBuf", &strbuf)
         .value("Sym", &sym)
         .value("Array", &array)
         .value("Dict", &dict)
@@ -94,6 +97,7 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
         .value("Module", &module)
         .value("Record", &record)
         .value("Bin", &bin)
+        .value("BinBuf", &binbuf)
         .value("Args", &args)
         // Iterator protocol types
         .value("Iterable", &iterable_type)
