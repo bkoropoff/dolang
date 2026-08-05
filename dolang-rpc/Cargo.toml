@@ -24,3 +24,15 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 
 [dev-dependencies]
 tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "time"] }
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Security"] }
+
+[[bench]]
+name = "pipe_trailer"
+harness = false
+
+[[bench]]
+name = "pipe_raw"
+harness = false

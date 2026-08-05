@@ -240,6 +240,15 @@ return $
     do |args|
       cargo_test (Spec args) $args.args
 
+  "cargo-bench":
+    help: run cargo benchmarks
+    - arg: args
+      help: "arguments to `cargo bench`"
+      collect: true
+    do |args|
+      let spec = Spec $args
+      spec.cargo bench ...args.args
+
   "gen-system-error-codes":
     help: generate system error code lookup tables from public source documents
     - arg: args

@@ -260,7 +260,10 @@ pub fn main(args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> io::Result<()>
 }
 
 fn serve_stdio() -> io::Result<()> {
-    Builder::new_multi_thread()
+    // Single-threaded: every used configuration serves a single client, and
+    // a multi-thread runtime measurably hurts single-stream pipe throughput
+    // (see dolang-rpc's benches/pipe_trailer.rs and benches/pipe_raw.rs).
+    Builder::new_current_thread()
         .enable_all()
         .build()?
         .block_on(async {
@@ -354,7 +357,10 @@ async fn accept_loop(server: Server, print_ready: bool) -> Result<(), io::Error>
 /// Returns an error if the socket cannot be bound.
 #[cfg(unix)]
 fn foreground(socket_path: &Path) -> io::Result<()> {
-    let rt = Builder::new_multi_thread().enable_all().build()?;
+    // Single-threaded: every used configuration serves a single client, and
+    // a multi-thread runtime measurably hurts single-stream pipe throughput
+    // (see dolang-rpc's benches/pipe_trailer.rs and benches/pipe_raw.rs).
+    let rt = Builder::new_current_thread().enable_all().build()?;
 
     rt.block_on(async move {
         let server = create_server(socket_path).await?;
