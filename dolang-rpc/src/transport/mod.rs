@@ -16,6 +16,8 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 /// vectored write attempt.
 pub(crate) const MAX_VECTORED_SLICES: usize = 8;
 
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg(unix)]
 pub(crate) mod unix;
 #[cfg(windows)]

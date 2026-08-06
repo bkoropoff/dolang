@@ -416,6 +416,22 @@ return $
           install_bin_symlink $spec $bin_dir dolang dolang-test
         install_bin $vfs_spec $bin_dir dolang-vfs
 
+  "verify-macos-interpose":
+    help: check that the macOS posix_spawn interpose section survived linking
+    - opt: bin
+      help: path to the built dolang binary to inspect
+      default: nil
+    do |args|
+      let bin = (args.bin || "release/bin/dolang")
+      echo "checking $bin for __DATA,__interpose survival"
+      let load_commands = sub do run.otool -lv $bin
+      if !(load_commands.contains "__interpose")
+        throw std.RuntimeError "__DATA,__interpose section missing from $bin -- posix_spawn guard was stripped"
+      let symbols = sub do run.nm $bin
+      if !(symbols.contains "posix_spawn" && symbols.contains "interposed")
+        throw std.RuntimeError "interposed posix_spawn symbols missing from $bin"
+      echo "OK: __DATA,__interpose section and interposed symbols present in $bin"
+
   publish:
     help: publish workspace crates in dependency order
     - arg: args
