@@ -1,21 +1,24 @@
-echo
+def args ...args
+  [...args.pos_only()]
+
+assert_eq [1, 2] $ args
   if true
     - 1
     - 2
-echo
+assert_eq [] $ args
   if false
     - 1
     - 2
 
-echo
+assert_eq [1, 2] $ args
   if false
     - false
   else
     - 1
     - 2
 
-# output: END
-# 1 2
-# 
-# 1 2
-# END
+assert
+  if true
+    true
+  else if true
+    false
