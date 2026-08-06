@@ -283,7 +283,6 @@ pub mod builtin {
     pub const IMPORT: usize = Import as usize;
     pub const ARRAY: usize = Array as usize;
     pub const DICT: usize = Dict as usize;
-    pub const RANGE: usize = Range as usize;
     pub const ITER: usize = Iter as usize;
     pub const CONCAT_STR: usize = ConcatStr as usize;
     pub const CONCAT_ARG: usize = ConcatArg as usize;
@@ -292,13 +291,13 @@ pub mod builtin {
     pub const GUARD: usize = Guard as usize;
     pub const THROW: usize = Throw as usize;
     pub const CONCAT_BIN: usize = ConcatBin as usize;
+    pub const RANGE: usize = Range as usize;
 }
 
 pub const BUILTINS: [&str; Builtin::_LEN as usize] = [
     "import",
     "array",
     "dict",
-    "range",
     "iter",
     "concat_str",
     "concat_arg",
@@ -307,6 +306,7 @@ pub const BUILTINS: [&str; Builtin::_LEN as usize] = [
     "guard",
     "throw",
     "concat_bin",
+    "range",
 ];
 
 trait Encode {
