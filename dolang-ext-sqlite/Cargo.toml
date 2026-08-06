@@ -31,3 +31,17 @@ sqlite-plugin= "0.11"
 [target.'cfg(unix)'.dependencies.dolang-shell-vfs]
 path = "../dolang-shell-vfs"
 version = "0.1.1"
+
+# Not used directly: this exists only to turn `runtime` back on for the bindgen
+# that `sqlite-plugin` builds with, which declares it `default-features = false`.
+# Build-dependency features unify across the graph, so declaring it here is
+# enough.
+#
+# Without `runtime`, clang-sys links libclang at build-script link time and
+# emits only a link-search path — no rpath. Homebrew's libclang.dylib has an
+# absolute install name so that happens to work; Xcode's is `@rpath/
+# libclang.dylib`, so the build script builds and then dies in dyld. With
+# `runtime`, clang-sys dlopens libclang by full path instead, and its search
+# includes the `xcode-select` toolchain — no Homebrew LLVM needed.
+[target.'cfg(unix)'.build-dependencies]
+bindgen = { version = "0.72", default-features = false, features = ["runtime"] }
