@@ -42,6 +42,7 @@ jobs:
         uses: ./.github/actions/setup-runner
         with:
           target: ${{ matrix.target }}
+          save-cache: ${{ github.ref == 'refs/heads/master' }}
 
       # Skipped in the VM: `clippy --all-targets` compiles the whole dependency
       # graph again without producing anything `cargo test` can reuse, so it
@@ -56,16 +57,31 @@ jobs:
 
       # Runs on the runner rather than in the VM, and before teardown: the
       # domain disk drops guest flushes, so the caches have to be copied out
-      # while it is still up. Skipped on an exact cache hit, where
-      # actions/cache would not save the repacked tarball anyway.
-      - name: Save build cache
+      # while it is still up. Skipped outside master, where nothing would
+      # ever restore a saved cache (see `save-cache` on the setup-runner
+      # action), and on an exact cache hit, where there's nothing new to pack.
+      - name: Pack build cache
         if: >
           always() && matrix.target == 'x86_64-freebsd' &&
+          github.ref == 'refs/heads/master' &&
           steps.setup.outputs.vm-cache-hit != 'true'
         shell: dolang --strict --no-cache --module-path .github/actions/setup-runner/lib {0}
         run: |
           import ci
           ci.save_cache()
+
+      # The counterpart to "Restore CI VM build cache" in the setup-runner
+      # action: that step only restores, so persisting what "Pack build
+      # cache" just produced is this workflow's job, once it exists.
+      - name: Save build cache
+        if: >
+          always() && matrix.target == 'x86_64-freebsd' &&
+          github.ref == 'refs/heads/master' &&
+          steps.setup.outputs.vm-cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/dolang-freebsd-cache
+          key: freebsd-cargo-v2-${{ hashFiles('Cargo.lock') }}
 
   extension:
     name: VS Code Extension
@@ -86,6 +102,8 @@ jobs:
 
       - name: Setup runner
         uses: ./.github/actions/setup-runner
+        with:
+          save-cache: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Setup Python
         uses: actions/setup-python@v6

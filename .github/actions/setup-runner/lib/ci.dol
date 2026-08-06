@@ -12,9 +12,6 @@ import std:
 # Libvirt domain name for the CI VM.
 pub let VM_NAME = "dolang-ci"
 
-# The one target that builds in a VM rather than on the runner.
-let VM_TARGET = "x86_64-freebsd"
-
 # Application name scoping the VM's cached assets. The runner cache paths in
 # ../action.yml are derived from it.
 let VM_APP = "dolang-freebsd-ci"
@@ -63,13 +60,6 @@ def dolang_version()
 def export name value
   fs.append $env["GITHUB_ENV"] "$name=$value\n"
 
-# Runs `block` under its own indicator nested beneath `parent`, then advances
-# `parent` by one step.
-def step parent icon message block
-  progress.show :icon :message do |_|
-    block()
-  parent.delta()
-
 # Installs the `dolang-ci` wrapper, which runs `shell` (the workflow shell
 # dispatcher next door) on each step script, and puts it on `PATH` for the
 # rest of the job.
@@ -105,27 +95,6 @@ def configure_cargo()
   export CARGO_PROFILE_DEV_DEBUG line-tables-only
   export CARGO_PROFILE_TEST_DEBUG line-tables-only
 
-# Installs the Rust build prerequisites on the runner itself.
-def host_prereqs w
-  let os = sys.os_info().os
-
-  if (os == :LINUX:)
-    step $w 📦 "install llvm" do
-      sudo.with do
-        run apt update
-        run apt install llvm libclang-dev
-    # `dodo install` links dolang-vfs against musl
-    step $w 🦀 "add musl target" do
-      run rustup target add x86_64-unknown-linux-musl
-
-# Steps `host_prereqs` reports on the runner it is running on.
-def host_prereq_steps()
-  let os = sys.os_info().os
-  if (os == :LINUX:)
-    2
-  else
-    0
-
 # Installs the virtualization packages a session-mode libvirt domain needs.
 def install_virt()
   sudo.with do
@@ -155,7 +124,7 @@ def unconfine()
       nil
 
 # Creates the CI VM and returns a handle to it.
-def create_vm disk_size
+def create_vm()
   libvirt.create
     image: $VM_IMAGE
     os: :FREEBSD:
@@ -164,7 +133,7 @@ def create_vm disk_size
     app: $VM_APP
     memory: 12288
     vcpus: 4
-    disk_size: $disk_size
+    disk_size: 50G
     # The domain is destroyed with the runner at the end of the job, so there
     # is nothing to lose by dropping guest flushes — and a great deal of the
     # build's write traffic is temporaries that then never need to reach the
@@ -220,28 +189,6 @@ def upload_workspace vm
     run tar -xzf dolang-src.tar.gz
     run rm -f dolang-src.tar.gz
 
-# Prepares the runner to host VMs, creates the CI VM, and points the
-# `dolang-ci` wrapper at it for the rest of the job.
-#
-# The VM is left running: GitHub runners are ephemeral, so it dies with the
-# job.
-def provision_vm w disk_size
-  step $w 📦 "install virtualization packages" do install_virt()
-  step $w 🔓 "unconfine user namespaces" do unconfine()
-  step $w 🧹 "reclaim runner disk space" do
-    sudo.with do fs.remove all: true ignore: true ...RUNNER_BALLAST
-
-  let vm = create_vm $disk_size
-  w.delta()
-
-  step $w ⬆️ "upload workspace" do upload_workspace $vm
-  step $w 📥 "restore build cache" do cache.restore $vm
-  # A restored cache already supplies a toolchain, so this is usually a no-op
-  step $w 🦀 "ensure rust" do
-    if !cache.has_rust(vm)
-      install_rust $vm
-  export DOLANG_CI_VM $VM_NAME
-
 # Packs the CI VM's build caches back onto the runner, for `actions/cache` to
 # save once the job ends.
 #
@@ -272,19 +219,57 @@ pub def setup
   :shell
   :target = nil
   :rust = true
-  :disk_size = "50G"
 do
-  let vm = (target == VM_TARGET)
-  # The wrapper and cargo configuration, plus VM provisioning or whatever a
-  # host build needs
-  let steps = (2 + (vm && 7 || rust && host_prereq_steps() || 0))
+  # Filled in by "create CI VM" below when `target` needs one.
+  let vm = nil
 
   progress.with style: $PROGRESS_STYLE do
-    progress.show icon: 🚀 message: "set up runner" total: $steps do |w|
-      step $w 🔧 "install dolang-ci wrapper" do install_wrapper $shell
-      step $w 🦀 "configure cargo" do configure_cargo()
-
-      if vm
-        provision_vm $w $disk_size
-      else if rust
-        host_prereqs $w
+    progress.steps message: "set up runner" icon: 🚀
+      - name: "install dolang-ci wrapper"
+        icon: 🔧
+        do install_wrapper $shell
+      if rust
+        - name: "configure cargo"
+          icon: 🦀
+          do configure_cargo()
+      if (target == "x86_64-freebsd")
+        # The VM is left running: GitHub runners are ephemeral, so it dies
+        # with the job. `setup` exports `DOLANG_CI_VM` below once these have
+        # run, pointing the `dolang-ci` wrapper at it for the rest of the job.
+        - name: "install virtualization packages"
+          icon: 📦
+          do 
+            install_virt()
+        - name: "unconfine user namespaces"
+          icon: 🔓
+          do unconfine()
+        - name: "reclaim runner disk space"
+          icon: 🧹
+          do sudo.with do fs.remove all: true ignore: true ...RUNNER_BALLAST
+        - name: "create CI VM"
+          icon: 🖥️
+          do 
+            vm = create_vm()
+            export DOLANG_CI_VM $VM_NAME
+        - name: "upload workspace"
+          icon: ⬆️
+          do upload_workspace $vm
+        - name: "restore build cache"
+          icon: 📥
+          do cache.restore $vm
+        # A restored cache already supplies a toolchain, so this is usually a no-op
+        - name: "ensure rust"
+          icon: 🦀
+          do if !cache.has_rust(vm)
+            install_rust $vm
+      if (rust && target == "x86_64-linux")
+        - name: "install llvm"
+          icon: 📦
+          do
+            sudo.with do
+              run apt update
+              run apt install llvm libclang-dev
+        # `dodo install` links dolang-vfs against musl
+        - name: "add musl target"
+          icon: 🦀
+          do run rustup target add x86_64-unknown-linux-musl

@@ -35,6 +35,11 @@ jobs:
 
       - name: Setup runner
         uses: ./.github/actions/setup-runner
+        with:
+          # This workflow only ever runs on pushes to master (see `on.push`
+          # above), so this is always true — spelled out for consistency with
+          # the other workflows rather than hardcoding "true".
+          save-cache: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Setup Python
         uses: actions/setup-python@v6
