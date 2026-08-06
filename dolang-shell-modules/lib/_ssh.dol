@@ -13,6 +13,9 @@ def yes_no value
   else
     "no"
 
+let HOST_KEY_VALID = $
+  :DEFAULT: :STRICT: :ACCEPT_NEW:
+
 pub def build_command
   host
   :user = nil
@@ -44,43 +47,42 @@ do
       else
         throw UnexpectedKeyError $key
 
-  let argv = ["ssh", "-T", "-e", "none"]
-  if forward_agent
-    argv.push -A
-  else
-    argv.push -a
-  argv.push -o "IdentitiesOnly=$(yes_no identities_only)"
-  argv.push -o "BatchMode=$(yes_no batch)"
-
-  if (user != nil)
-    argv.push -l $user
-  if (port != nil)
-    argv.push -p $port
-  for identity = identities
-    argv.push -i $identity
-  if (jumps.len > 0)
-    argv.push -J $(",".join jumps)
-  if (connect_timeout != nil)
-    argv.push -o "ConnectTimeout=$connect_timeout"
-  if (keepalive_interval != nil)
-    argv.push -o "ServerAliveInterval=$keepalive_interval"
-  if (keepalive_count != nil)
-    argv.push -o "ServerAliveCountMax=$keepalive_count"
-
-  if (host_key == :STRICT:)
-    argv.push -o StrictHostKeyChecking=yes
-  else if (host_key == :ACCEPT_NEW:)
-    argv.push -o StrictHostKeyChecking=accept-new
-  else if (host_key != :DEFAULT:)
+  if !(HOST_KEY_VALID.contains host_key)
     throw ValueError "ssh.with: invalid host-key policy: $host_key"
-  if (known_hosts != nil)
-    argv.push -o "UserKnownHostsFile=$known_hosts"
 
-  # ssh(1) joins everything past the host with spaces and the remote account's
-  # shell splits it again, so the VFS options are encoded rather than quoted.
   let vfs_args = _vfs.vfs_args $cd $env login: $login_env encode: true
-  argv.push -- $host ...command ...vfs_args --stdio
-  argv
+
+  $
+    ssh -T -e none
+    -o Compression=no
+    -o ClearAllForwardings=yes
+    -o IdentitiesOnly=$(yes_no identities_only)
+    -o BatchMode=$(yes_no batch)
+    if forward_agent
+      -A
+    else
+      -a
+    if (user != nil)
+      -l $user
+    if (port != nil)
+      -p $port
+    for identity = identities
+      -i $identity
+    if (jumps.len > 0)
+      -J $(",".join jumps)
+    if (connect_timeout != nil)
+      -o ConnectTimeout=$connect_timeout
+    if (keepalive_interval != nil)
+      -o ServerAliveInterval=$keepalive_interval
+    if (keepalive_count != nil)
+      -o ServerAliveCountMax=$keepalive_count
+    if (host_key == :STRICT:)
+      -o StrictHostKeyChecking=yes
+    else if (host_key == :ACCEPT_NEW:)
+      -o StrictHostKeyChecking=accept-new
+    if (known_hosts != nil)
+      -o UserKnownHostsFile=$known_hosts
+    -- $host ...command ...vfs_args --stdio
 
 pub def with_program
   executable
@@ -102,23 +104,11 @@ pub def with_program
   :login_env = true
   ...options
 do
-  let argv = build_command
-    $host
-    :user
-    :port
-    :identities_only
-    :forward_agent
-    :connect_timeout
-    :keepalive_interval
-    :keepalive_count
-    :batch
-    :host_key
-    :known_hosts
-    :command
-    :cd
-    :env
-    :login_env
-    ...options
+  let argv = build_command $host :user :port
+    :identities_only :forward_agent :connect_timeout
+    :keepalive_interval :keepalive_count :batch
+    :host_key :known_hosts :command :cd :env
+    :login_env ...options
   argv[0] = executable
   let vfs = Vfs do run ...argv
   try

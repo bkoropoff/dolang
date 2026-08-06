@@ -15,11 +15,16 @@
 # repository.
 #
 # `tar` and `zstd` run inside the guest rather than via `transfer.pack`, which
-# would stream every byte through the VFS, and the archive leaves over `scp`
-# (`Domain.fetch`) rather than `Domain.download` for the same reason: the VFS
-# data path manages ~0.7 MiB/s, or twenty minutes for a tarball this size. See
-# https://github.com/dolang-org/dolang/issues/354. The VFS is still the right
-# tool for the cheap metadata probes here — `fs.glob` and `exists`.
+# would stream every byte through the VFS: `fs.glob` and `exists` are cheap
+# enough over the VFS for the metadata probes here, but moving gigabytes
+# through it used to be a different story (see https://github.com/dolang-org/dolang/issues/354).
+#
+# The archive itself now moves over the VFS too (`Domain.download`/`upload`),
+# provisionally: it used to leave over `scp` (`Domain.fetch`/`send`) instead,
+# because the VFS data path measured ~0.7 MiB/s, twenty minutes for a tarball
+# this size. The stdio pipe optimization in #395 should have closed most of
+# that gap. If CI timings show the VFS path is still meaningfully slower,
+# switch `save`/`restore` below back to `fetch`/`send`.
 
 import fs proc progress sys toml
 import std:
@@ -190,11 +195,9 @@ pub def save vm
     fs.Path(GUEST_TARBALL).metadata().size
   echo "packed: $(packed // 1048576) MiB"
 
-  # `send`/`fetch` rather than `upload`/`download`: the VFS path was measured at
-  # ~0.7 MiB/s, which is 20 minutes for a tarball this size. No byte progress
-  # from scp, hence the sizes logged either side.
-  progress.show icon: ⬇️ message: "fetch build cache" do |_|
-    vm.fetch $GUEST_TARBALL $destination
+  # `download` rather than `fetch`/scp — see the module comment. It reports
+  # its own byte-level progress, hence no wrapping `progress.show` here.
+  vm.download $GUEST_TARBALL $destination
   vm.with do
     fs.remove $GUEST_TARBALL ignore: true
   true
@@ -207,8 +210,9 @@ pub def restore vm
   if !source.exists()
     return false
   echo "restoring: $(source.metadata().size // 1048576) MiB"
-  progress.show icon: ⬆️ message: "send build cache" do |_|
-    vm.send $source $GUEST_TARBALL
+  # `upload` rather than `send`/scp — see the module comment. It reports its
+  # own byte-level progress, hence no wrapping `progress.show` here.
+  vm.upload $source $GUEST_TARBALL
   progress.show icon: 🗜️ message: "unpack build cache" do |_|
     vm.with do
       pipeline

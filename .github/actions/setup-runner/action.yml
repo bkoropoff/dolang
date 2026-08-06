@@ -11,9 +11,15 @@ inputs:
   rust:
     description: Install the Rust toolchain and shared build cache
     default: "true"
-  vm-disk-size:
-    description: Disk size of the CI VM, for targets that build in one
-    default: 50G
+  save-cache:
+    description: >
+      Save updated caches for a later run to restore. Caches are scoped to the
+      branch that saved them (with a fallback to the default branch), so
+      saving on a branch besides the default one just spends cache storage
+      that only that branch's own later runs could ever restore, evicting
+      shared entries sooner. Leave this off except on the default branch (or,
+      in the future, release branches).
+    default: "false"
 
 outputs:
   vm-cache-hit:
@@ -38,11 +44,20 @@ runs:
     - name: Rust cache
       if: inputs.rust == 'true' && inputs.target != 'x86_64-freebsd'
       uses: Swatinem/rust-cache@v2
+      with:
+        save-if: ${{ inputs.save-cache == 'true' }}
 
-    # Paths follow the VM application name in lib/ci.dol
-    - name: Cache CI VM assets
+    # Paths follow the VM application name in lib/ci.dol. Restore and save are
+    # explicit steps rather than one `actions/cache@v4`: the assets are ready
+    # by the end of this action's own "Set up runner" step, so the save can
+    # run immediately after it instead of waiting for a post-job hook, and
+    # `save-cache` keeps the save from running at all on a branch whose cache
+    # nothing but its own later runs could restore (see the input's
+    # description).
+    - name: Restore CI VM assets
+      id: vm-assets-cache
       if: inputs.target == 'x86_64-freebsd'
-      uses: actions/cache@v4
+      uses: actions/cache/restore@v4
       with:
         path: |
           ~/.local/share/dolang-freebsd-ci/libvirt/ssh
@@ -60,18 +75,21 @@ runs:
         key: freebsd-libvirt-v3
 
     # The guest's cargo/rustup/target caches, tarred out of the VM at the end
-    # of the job by the workflow's save step. Keyed on the lockfile so a
-    # dependency change repacks; restore-keys let an unrelated lockfile change
-    # still start from the last good cache.
+    # of the job by the workflow's own save step (see test.yml) rather than
+    # here: that tarball isn't populated until the build has run, well after
+    # this action returns. Only the restore half belongs here.
+    #
+    # Keyed on the lockfile so a dependency change repacks; restore-keys let
+    # an unrelated lockfile change still start from the last good cache.
     #
     # The path is intentionally suffix-free — it is an archive whose format only
     # lib/cache.dol knows (see RUNNER_TARBALL there). Do not add one back: this
     # path and that constant must agree exactly, and a mismatch fails silently
     # as "Path(s) specified in the action for caching do(es) not exist".
-    - name: CI VM build cache
+    - name: Restore CI VM build cache
       id: vm-build-cache
       if: inputs.target == 'x86_64-freebsd'
-      uses: actions/cache@v4
+      uses: actions/cache/restore@v4
       with:
         path: ${{ runner.temp }}/dolang-freebsd-cache
         key: freebsd-cargo-v2-${{ hashFiles('Cargo.lock') }}
@@ -86,11 +104,31 @@ runs:
         CI_SHELL: ${{ github.action_path }}/lib/shell.dol
         CI_TARGET: ${{ inputs.target }}
         CI_RUST: ${{ inputs.rust }}
-        CI_DISK_SIZE: ${{ inputs.vm-disk-size }}
       run: |
         import ci
         ci.setup
           shell: $env["CI_SHELL"]
           target: $env["CI_TARGET"]
           rust: (env["CI_RUST"] == "true")
-          disk_size: $env["CI_DISK_SIZE"]
+
+    # The counterpart to "Restore CI VM assets" above. Placed here, right
+    # after the assets are created, rather than left to run automatically at
+    # the end of the job: this is a plain `actions/cache/save@v4` rather than
+    # the combined action's post-job hook, so it needs an explicit spot to run
+    # from. Skipped on an exact restore hit for the same reason the guest
+    # build cache is: nothing changed, so saving would only re-upload what is
+    # already there.
+    #
+    # `path`/`key` are repeated from "Restore CI VM assets" rather than
+    # shared via a YAML anchor: GitHub's workflow parser doesn't resolve them.
+    - name: Save CI VM assets
+      if: >
+        inputs.target == 'x86_64-freebsd' && inputs.save-cache == 'true' &&
+        steps.vm-assets-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          ~/.local/share/dolang-freebsd-ci/libvirt/ssh
+          ~/.local/share/dolang-freebsd-ci/libvirt/seeds
+          ~/.cache/dolang-freebsd-ci
+        key: freebsd-libvirt-v3
