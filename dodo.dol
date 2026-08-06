@@ -425,9 +425,11 @@ return $
       let bin = (args.bin || "release/bin/dolang")
       echo "checking $bin for __DATA,__interpose survival"
       let load_commands = sub do run.otool -lv $bin
+      echo "COMMANDS: $load_commands"
       if !(load_commands.contains "__interpose")
         throw std.RuntimeError "__DATA,__interpose section missing from $bin -- posix_spawn guard was stripped"
       let symbols = sub do run.nm $bin
+      echo "SYMBOLS: $symbols"
       if !(symbols.contains "posix_spawn" && symbols.contains "interposed")
         throw std.RuntimeError "interposed posix_spawn symbols missing from $bin"
       echo "OK: __DATA,__interpose section and interposed symbols present in $bin"
