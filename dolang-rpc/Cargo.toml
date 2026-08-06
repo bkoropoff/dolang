@@ -22,6 +22,19 @@ nix = { version = "0.31", features = ["fs", "socket", "uio"] }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Pipes", "Win32_System_Threading"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+ctor = { version = "0.2", optional = true }
+
+[features]
+default = ["macos-spawn-interpose"]
+# Interposes posix_spawn/posix_spawnp on macOS to atomically close the
+# SCM_RIGHTS FD_CLOEXEC race (see issue #384). Disable only if the embedding
+# host process already performs its own posix_spawn interposition (e.g. a
+# sanitizer or another embedded runtime) -- two interposers targeting the
+# same DYLD_INTERPOSE section can conflict. Disabling this reopens the exact
+# race it closes.
+macos-spawn-interpose = ["dep:ctor"]
+
 [dev-dependencies]
 tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "time"] }
 criterion = { version = "0.5", features = ["async_tokio"] }

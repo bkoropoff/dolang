@@ -263,6 +263,14 @@ fn recv_once<B: BufMut>(fd: RawFd, buffer: &mut B) -> io::Result<(usize, Vec<Own
     let bytes = unsafe { std::slice::from_raw_parts_mut(chunk.as_mut_ptr(), len) };
     let mut iov = [IoSliceMut::new(bytes)];
     let mut cmsg = vec![0; nix::sys::socket::cmsg_space::<[RawFd; MAX_FDS_PER_RECV]>()];
+    // Held across the recvmsg retry loop and the FIOCLEX fixup loop below:
+    // on macOS, recvmsg can't set CLOEXEC atomically, so this serializes
+    // fd receipt against every posix_spawn/posix_spawnp/fork in the process
+    // (see transport::macos) to close the window where a leaked fd could be
+    // inherited by a concurrently spawned child. No-op on other platforms,
+    // where MSG_CMSG_CLOEXEC already makes this atomic.
+    #[cfg(target_os = "macos")]
+    let _read_guard = super::macos::ReadGuard::acquire();
     let message = loop {
         match recvmsg::<()>(fd, &mut iov, Some(&mut cmsg), RECV_FLAGS) {
             Err(Errno::EINTR) => {}
