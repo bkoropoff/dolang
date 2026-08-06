@@ -1212,6 +1212,8 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
                     node.tbranch.span,
                 ));
 
+                let start = self.bb;
+
                 let next = self.graph.alloc_block(self.block.func, self.block.scope);
 
                 // Build control flow from inside out
@@ -1251,8 +1253,6 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
                     let current_fallback = fallback;
                     fallback = self.graph.alloc_block(self.block.func, self.block.scope);
 
-                    // Set up if condition and true branch
-                    self.lower_expr(&elif_branch.cond)?;
                     let tscope = self.graph.alloc_scope(
                         false,
                         false,
@@ -1279,12 +1279,14 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
                         },
                     });
 
-                    // Create conditional jump
+                    self.switch(fallback);
+                    self.lower_expr(&elif_branch.cond)?;
                     self.block.term = Term(TermInfo::If(tid, current_fallback), elif_branch.span);
                     self.link(tid);
                     self.link(current_fallback);
-                    self.switch(fallback);
                 }
+
+                self.switch(start);
 
                 // Finally, process initial if branch
                 let current_fallback = fallback;
