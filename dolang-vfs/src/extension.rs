@@ -49,9 +49,9 @@ pub mod __private {
 /// must be linked into both the caller and the server for remote dispatch.
 pub trait VfsExtension: Send + Sync + 'static {
     /// Extension request payload.
-    type Request: Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static;
+    type Request: Serialize + for<'de> Deserialize<'de> + Send + 'static;
     /// Extension response payload.
-    type Response: Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static;
+    type Response: Serialize + for<'de> Deserialize<'de> + Send + 'static;
 
     /// Extension name, used together with [`VERSION`](Self::VERSION) to route requests.
     const NAME: &'static str;
@@ -78,28 +78,23 @@ pub trait ErasedVfsExtension: Send + Sync + 'static {
     fn deserialize_request<'de>(
         &self,
         de: &mut dyn erased_serde::Deserializer<'de>,
-    ) -> erased_serde::Result<Box<dyn Any + Send + Sync>>;
+    ) -> erased_serde::Result<Box<dyn Any + Send>>;
 
     fn deserialize_response<'de>(
         &self,
         de: &mut dyn erased_serde::Deserializer<'de>,
-    ) -> erased_serde::Result<Box<dyn Any + Send + Sync>>;
+    ) -> erased_serde::Result<Box<dyn Any + Send>>;
 
-    fn erase_request<'a>(
-        &self,
-        request: &'a (dyn Any + Send + Sync),
-    ) -> &'a dyn erased_serde::Serialize;
+    fn erase_request<'a>(&self, request: &'a (dyn Any + Send)) -> &'a dyn erased_serde::Serialize;
 
-    fn erase_response<'a>(
-        &self,
-        response: &'a (dyn Any + Send + Sync),
-    ) -> &'a dyn erased_serde::Serialize;
+    fn erase_response<'a>(&self, response: &'a (dyn Any + Send))
+    -> &'a dyn erased_serde::Serialize;
 
     fn dispatch<'a>(
         &'a self,
         ctx: &'a mut ExtContext<'_>,
-        request: Box<dyn Any + Send + Sync>,
-    ) -> Pin<Box<dyn Future<Output = Box<dyn Any + Send + Sync>> + Send + 'a>>;
+        request: Box<dyn Any + Send>,
+    ) -> Pin<Box<dyn Future<Output = Box<dyn Any + Send>> + Send + 'a>>;
 }
 
 impl<T: VfsExtension> ErasedVfsExtension for T {
@@ -114,21 +109,18 @@ impl<T: VfsExtension> ErasedVfsExtension for T {
     fn deserialize_request<'de>(
         &self,
         de: &mut dyn erased_serde::Deserializer<'de>,
-    ) -> erased_serde::Result<Box<dyn Any + Send + Sync>> {
+    ) -> erased_serde::Result<Box<dyn Any + Send>> {
         Ok(Box::new(erased_serde::deserialize::<T::Request>(de)?))
     }
 
     fn deserialize_response<'de>(
         &self,
         de: &mut dyn erased_serde::Deserializer<'de>,
-    ) -> erased_serde::Result<Box<dyn Any + Send + Sync>> {
+    ) -> erased_serde::Result<Box<dyn Any + Send>> {
         Ok(Box::new(erased_serde::deserialize::<T::Response>(de)?))
     }
 
-    fn erase_request<'a>(
-        &self,
-        request: &'a (dyn Any + Send + Sync),
-    ) -> &'a dyn erased_serde::Serialize {
+    fn erase_request<'a>(&self, request: &'a (dyn Any + Send)) -> &'a dyn erased_serde::Serialize {
         request
             .downcast_ref::<T::Request>()
             .expect("request type matches the routed extension")
@@ -136,7 +128,7 @@ impl<T: VfsExtension> ErasedVfsExtension for T {
 
     fn erase_response<'a>(
         &self,
-        response: &'a (dyn Any + Send + Sync),
+        response: &'a (dyn Any + Send),
     ) -> &'a dyn erased_serde::Serialize {
         response
             .downcast_ref::<T::Response>()
@@ -146,14 +138,14 @@ impl<T: VfsExtension> ErasedVfsExtension for T {
     fn dispatch<'a>(
         &'a self,
         ctx: &'a mut ExtContext<'_>,
-        request: Box<dyn Any + Send + Sync>,
-    ) -> Pin<Box<dyn Future<Output = Box<dyn Any + Send + Sync>> + Send + 'a>> {
+        request: Box<dyn Any + Send>,
+    ) -> Pin<Box<dyn Future<Output = Box<dyn Any + Send>> + Send + 'a>> {
         let request = *request
             .downcast::<T::Request>()
             .expect("request type matches the routed extension");
         Box::pin(async move {
             let response = self.handle(ctx, request).await;
-            Box::new(response) as Box<dyn Any + Send + Sync>
+            Box::new(response) as Box<dyn Any + Send>
         })
     }
 }
