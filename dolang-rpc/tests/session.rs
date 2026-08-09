@@ -781,7 +781,7 @@ async fn client_discarding_a_response_trailer_errors_the_servers_writer() {
 
 #[cfg(unix)]
 mod unix_handles {
-    use std::{io::Read, os::fd::AsFd};
+    use std::io::Read;
 
     use dolang_rpc::handle::OsHandle;
     use nix::unistd::{pipe, write};
@@ -833,13 +833,6 @@ mod unix_handles {
         let mut bytes = [0; 2];
         file.read_exact(&mut bytes).unwrap();
         assert_eq!(&bytes, b"ok");
-    }
-
-    #[test]
-    fn os_handle_keeps_its_descriptor_borrowable() {
-        let (fd, _) = pipe().unwrap();
-        let handle = OsHandle::new(fd);
-        let _ = handle.as_inner().as_fd();
     }
 
     #[tokio::test]

@@ -67,11 +67,6 @@ impl<T> OsHandle<T> {
     pub fn into_inner(self) -> T {
         self.0
     }
-
-    /// Borrows the wrapped value.
-    pub fn as_inner(&self) -> &T {
-        &self.0
-    }
 }
 
 impl<T> From<T> for OsHandle<T> {
