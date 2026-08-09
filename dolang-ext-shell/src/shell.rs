@@ -11,7 +11,7 @@ use dolang::{
     compile::Compiler,
     runtime::{
         Arg, Error, Instance, Object, Output, Result, Slot, State, Strand, Value, call, method,
-        object::{Mut, TypeBuilder},
+        object::{Mut, Ref, TypeBuilder},
         unpack,
         value::{AsTuple, Nil, TypeObject},
         vm::Builder,
@@ -581,9 +581,36 @@ impl<'v> Object<'v> for Vfs {
             (builder, elevate_sym, cd_sym, env_sym)
         };
         let builder = builder.method("stop", async move |this, strand, _args, _out| {
+            if matches!(&this.annex().source, VfsSource::Stream) {
+                // Closing the RPC session drops its reader and writer tasks,
+                // which own the stdio pipe handles after negotiation. Joining
+                // then closes the stream endpoints and waits for the launcher
+                // to observe the helper's exit.
+                let client = this.annex().handle.client().clone();
+                let global = this.annex().global;
+                let stop_result = client.stop().await;
+                client.close().await;
+                let join_result = strand
+                    .with_slots(async move |strand, [mut stream, mut output]| {
+                        let borrow = this.borrow(strand)?;
+                        Output::set(strand, &mut stream, Ref::slot::<0>(&borrow));
+                        drop(borrow);
+                        method!(strand, &stream, global.syms.join, &mut output).await
+                    })
+                    .await;
+
+                return match (stop_result, join_result) {
+                    // Joining is cleanup, so it must happen even when the
+                    // stop request failed. Preserve that request's error when
+                    // both operations fail.
+                    (Err(error), _) => Err(error.into_sys(strand)),
+                    (Ok(()), result) => result,
+                };
+            }
+
             let borrow = this.annex();
             match &borrow.source {
-                VfsSource::Stream => error::io_result(strand, borrow.handle.client().stop().await)?,
+                VfsSource::Stream => unreachable!("stream VFS returned without joining"),
                 VfsSource::Unix(_) => {
                     error::io_result(strand, borrow.handle.client().stop().await)?
                 }
