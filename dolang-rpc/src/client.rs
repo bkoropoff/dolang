@@ -24,6 +24,12 @@ use crate::{
     transport::{self, Receiver, SendFrame, Sender},
 };
 
+/// A negotiated client endpoint that has not yet been bound to a [`Protocol`].
+///
+/// Inspect its negotiated application protocol, then consume it with
+/// [`bind`](Unbound::bind) to obtain a [`Client`].
+pub use crate::unbound::UnboundClient as Unbound;
+
 type Pending<R> = HashMap<u64, oneshot::Sender<Result<CallResult<R>, Error>>>;
 
 /// `(id, response receiver, cancel_sent)`, returned by `Client::begin`.
@@ -138,7 +144,10 @@ impl<P: Protocol> Inner<P> {
     }
 }
 
-/// A cloneable request endpoint.
+/// A cloneable endpoint for sending requests on one RPC session.
+///
+/// Clones share request IDs, pending calls, and session lifetime. Calling
+/// [`close`](Self::close) on any clone closes the shared session.
 pub struct Client<P: Protocol> {
     inner: Arc<Inner<P>>,
 }
@@ -158,7 +167,7 @@ impl<P: Protocol> Client<P> {
     }
 
     /// Builds a `Client` from an already-negotiated transport. Only reachable
-    /// via [`UnboundClient::bind`](crate::UnboundClient::bind) — `Client` has
+    /// via [`Unbound::bind`] — `Client` has
     /// no public constructors of its own, so every `Client<P>` has already
     /// completed `fragment::negotiate` by the time it exists.
     pub(crate) fn from_transport(
@@ -206,7 +215,11 @@ impl<P: Protocol> Client<P> {
         Self { inner }
     }
 
-    /// Stops the session and waits for its background tasks to exit.
+    /// Closes the shared session and waits for its background tasks to exit.
+    ///
+    /// This prevents new calls from being sent and completes all pending calls
+    /// with [`Error::ConnectionClosed`]. It affects every clone of this
+    /// client.
     pub async fn close(self) {
         let tasks = self.inner.tasks.lock().unwrap().take();
         // Close the writer's channel first — see the comment on `outgoing`.
@@ -217,7 +230,10 @@ impl<P: Protocol> Client<P> {
         }
     }
 
-    /// Begins one request.
+    /// Begins one request and returns a future for its response.
+    ///
+    /// Dropping the returned [`Call`] before it completes requests best-effort
+    /// cancellation from the peer.
     pub fn call(&self, request: P::Request) -> Call<P> {
         let ((id, rx, cancel_sent), ()) = self.begin(|id| {
             (
@@ -237,8 +253,13 @@ impl<P: Protocol> Client<P> {
         }
     }
 
-    /// Begins one request whose raw byte trailer is written through the
-    /// returned streaming body.
+    /// Begins one request with a streaming raw-byte trailer.
+    ///
+    /// Write the trailer through the returned [`TrailerSend`], then call
+    /// [`TrailerSend::finish`] (or asynchronously shut it down) to obtain the
+    /// [`Call`]. Dropping the sender without finishing aborts the trailer and
+    /// cancels the partially sent request. A request cannot carry both a
+    /// trailer and a direct [`OsHandle`](crate::handle::OsHandle) attachment.
     pub fn call_with_trailer(&self, request: P::Request) -> TrailerSend<Call<P>> {
         let ((id, rx, cancel_sent), shared) = self.begin(|id| {
             let shared = SendShared::new(Kind::Request, id, &self.inner.limits);
@@ -345,27 +366,32 @@ mod windows_tests {
     }
 }
 
-/// A completed call's response, plus an optional raw trailer sent alongside
-/// it. Wrapping the pair (rather than returning a bare tuple) leaves room to
-/// add further metadata later without another breaking change.
+/// A completed call's response and its optional raw-byte trailer.
+///
+/// Use [`into_response`](Self::into_response) when the trailer is not needed,
+/// or [`into_response_trailer`](Self::into_response_trailer) to retain it.
 pub struct CallResult<R> {
     response: R,
-    trailer: Option<crate::TrailerRecv>,
+    trailer: Option<crate::trailer::TrailerRecv>,
 }
 
 impl<R> CallResult<R> {
-    /// Discards any trailer and returns just the response.
+    /// Discards any response trailer and returns just the response.
     pub fn into_response(self) -> R {
         self.response
     }
 
-    /// Decomposes into the response and its trailer, if any.
-    pub fn into_response_trailer(self) -> (R, Option<crate::TrailerRecv>) {
+    /// Decomposes into the response and its readable trailer, if present.
+    pub fn into_response_trailer(self) -> (R, Option<crate::trailer::TrailerRecv>) {
         (self.response, self.trailer)
     }
 }
 
 /// An in-progress RPC request.
+///
+/// Await this future to receive the response and its optional trailer, or an
+/// [`Error`]. Dropping it before completion sends best-effort cancellation to
+/// the peer.
 pub struct Call<P: Protocol> {
     id: u64,
     rx: oneshot::Receiver<Result<CallResult<P::Response>, Error>>,
@@ -374,7 +400,10 @@ pub struct Call<P: Protocol> {
 }
 
 impl<P: Protocol> Call<P> {
-    /// Requests cancellation. The call remains awaitable.
+    /// Requests best-effort cancellation and leaves the call awaitable.
+    ///
+    /// This is idempotent. A response that races with cancellation may still
+    /// complete successfully.
     pub fn cancel(&mut self) {
         if !self.cancel_sent {
             self.cancel_sent = true;
@@ -622,7 +651,7 @@ impl<P: Protocol> Reader<P> {
                 match kind {
                     Kind::Response => {
                         let response = decode(&payload, frame)?;
-                        let trailer = trailer.map(crate::TrailerRecv::new);
+                        let trailer = trailer.map(crate::trailer::TrailerRecv::new);
                         inner.request_keepalive.lock().unwrap().remove(&id);
                         inner.complete(id, Ok(CallResult { response, trailer }));
                     }

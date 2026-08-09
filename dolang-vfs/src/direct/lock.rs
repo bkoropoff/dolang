@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex, OnceLock, Weak},
 };
 
-use crate::{FileLockBehavior, FileLockMode, FileLockRange, FileLockRequest};
+use crate::file::{FileLockBehavior, FileLockMode, FileLockRange, FileLockRequest};
 
 #[cfg(unix)]
 use std::os::fd::AsRawFd;

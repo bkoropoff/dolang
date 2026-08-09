@@ -17,7 +17,7 @@ mod support;
 use std::sync::Arc;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use dolang_rpc::{Builder, CallContext, Client, Protocol};
+use dolang_rpc::{Builder, Protocol, client::Client, server::CallContext};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 

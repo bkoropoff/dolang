@@ -9,7 +9,7 @@ use dolang::{
         vm::Builder,
     },
 };
-use dolang_vfs::Signal;
+use dolang_vfs::process::Signal;
 
 use crate::{
     global::Global,
@@ -166,8 +166,8 @@ pub(crate) fn parse_policy_dict<'v, 's>(
     })
 }
 
-pub(crate) fn vfs_policy(policy: &TerminationPolicy) -> dolang_vfs::TerminationPolicy {
-    dolang_vfs::TerminationPolicy {
+pub(crate) fn vfs_policy(policy: &TerminationPolicy) -> dolang_vfs::process::TerminationPolicy {
+    dolang_vfs::process::TerminationPolicy {
         signal: policy.signal,
         grace: policy.grace,
         force: policy.force,

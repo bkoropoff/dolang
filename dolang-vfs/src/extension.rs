@@ -4,11 +4,12 @@
 //! dispatched identically whether the call is served in-process ("direct",
 //! e.g. inside `dolang-shell`) or over a real RPC session ("remote", served
 //! by `dolang-vfs`). Extensions do not get their own `dolang_rpc::Protocol`;
-//! they ride as a single request/response variant carried by [`VfsProtocol`],
+//! they ride as a single request/response variant in the crate-private VFS
+//! protocol,
 //! routed to the right handler by `(name, version)`.
 //!
 //! Extension authors implement [`VfsExtension`] and register it with
-//! [`vfs_extension!`]. The macro links a `&'static dyn ErasedVfsExtension`
+//! `vfs_extension!`. The macro links a `&'static dyn ErasedVfsExtension`
 //! into a `linkme` distributed slice, so registration only requires linking
 //! the extension crate into the binary — no explicit call site is needed,
 //! and the same registration is picked up whether the binary serves direct
@@ -26,7 +27,11 @@ use std::{
     sync::Arc,
 };
 
-use dolang_rpc::{CallContext, DefaultHandle, InvalidOpaque, Opaque, OpaqueGuard, OpaqueResource};
+use dolang_rpc::{
+    handle::DefaultHandle,
+    server::CallContext,
+    session::{InvalidOpaque, Opaque, OpaqueGuard, OpaqueResource},
+};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::protocol::VfsProtocol;
@@ -37,7 +42,11 @@ pub mod __private {
     pub use linkme;
 }
 
-/// A single VFS extension: a named, versioned request/response pair plus a handler.
+/// A named, versioned VFS extension and its request handler.
+///
+/// Implement this trait for a zero-sized extension descriptor, then register
+/// it with the `vfs_extension!` macro. The extension
+/// must be linked into both the caller and the server for remote dispatch.
 pub trait VfsExtension: Send + Sync + 'static {
     /// Extension request payload.
     type Request: Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static;
@@ -167,6 +176,8 @@ macro_rules! vfs_extension {
     };
 }
 
+pub use crate::vfs_extension;
+
 /// Looks up a registered extension by name and version.
 pub(crate) fn lookup(name: &str, version: u16) -> Option<&'static dyn ErasedVfsExtension> {
     VFS_EXTENSIONS
@@ -196,12 +207,9 @@ pub struct DirectContext {
 /// real RPC session, mirroring the existing direct/remote enum-dispatch
 /// pattern used elsewhere in this crate (e.g. `AnyVfs`, `ClientFileInner`).
 ///
-/// The direct/remote split is deliberately not exposed as a public enum:
-/// `CallContext<VfsProtocol>` (the remote backing type) can only be named
-/// from outside this crate if `VfsProtocol`'s associated `Request`/
-/// `Response` types are also public, which would leak this crate's private
-/// wire protocol. Wrapping the split in a private `Inner` keeps `VfsProtocol`
-/// itself `pub(crate)`.
+/// The direct/remote backing types are intentionally private, so extension
+/// code can use this one context without depending on the crate's wire
+/// protocol.
 pub struct ExtContext<'a> {
     inner: Inner<'a>,
 }
@@ -253,7 +261,7 @@ impl<'a> ExtContext<'a> {
     pub async fn cancel_guard<T, F>(
         &mut self,
         operation: F,
-    ) -> Result<T, dolang_rpc::RequestCancelled>
+    ) -> Result<T, dolang_rpc::server::RequestCancelled>
     where
         F: for<'b> AsyncFnOnce(&'b mut ExtContext<'b>) -> T,
     {
@@ -335,7 +343,7 @@ impl<'a> ExtContext<'a> {
 /// A value that can be registered in an extension's opaque-object table via
 /// [`ExtContext::register`].
 ///
-/// This mirrors `dolang_rpc::OpaqueResource`, which extension authors do not
+/// This mirrors `dolang_rpc::session::OpaqueResource`, which extension authors do not
 /// implement directly — that would require depending on `dolang-rpc` and
 /// would leak its `Marker`-keyed object-table design into every extension
 /// crate's own trait-impl list.
@@ -343,7 +351,7 @@ pub trait ExtResource: Send + Sync + 'static {
     type Marker: ?Sized + 'static;
 }
 
-/// Private adapter bridging [`ExtResource`] to `dolang_rpc::OpaqueResource`
+/// Private adapter bridging [`ExtResource`] to `dolang_rpc::session::OpaqueResource`
 /// so [`ExtContext`] can delegate to `CallContext`'s real object table.
 struct Wrap<T>(T);
 
@@ -356,7 +364,7 @@ impl<T: ExtResource> OpaqueResource for Wrap<T> {
 /// Uses a distinct `Marker` type parameter rather than the concrete stored
 /// type so the handle a caller holds does not need to name (or even know)
 /// the private type actually retained behind it — the same design
-/// `dolang_rpc::Opaque` uses for its own object table.
+/// `dolang_rpc::session::Opaque` uses for its own object table.
 ///
 /// Opaque by design: the direct/remote split is an implementation detail,
 /// not something extension authors match on.
@@ -427,20 +435,22 @@ impl From<InvalidOpaque> for InvalidHandle {
 
 /// A native OS handle carried as an out-of-band attachment on the wire.
 ///
-/// Self-contained wrapper around `dolang_rpc::OsHandle`: constructing or
+/// Self-contained wrapper around `dolang_rpc::handle::OsHandle`: constructing or
 /// consuming one never requires an [`ExtContext`] — by the time a value is
 /// deserialized (a client reading a response, or a handler reading a
 /// request field), any attachment has already been resolved into a concrete
 /// local handle. Only *encoding a response* that carries one should be
 /// gated by [`ExtContext::native_capable`] first, since the underlying
 /// transport panics on attachment attempts if it does not support them.
-pub struct ExtOsHandle(dolang_rpc::OsHandle);
+pub struct ExtOsHandle(dolang_rpc::handle::OsHandle);
 
 impl ExtOsHandle {
+    /// Wraps a native handle for an extension response or request.
     pub fn new(handle: DefaultHandle) -> Self {
-        Self(dolang_rpc::OsHandle::new(handle))
+        Self(dolang_rpc::handle::OsHandle::new(handle))
     }
 
+    /// Returns the wrapped native handle.
     pub fn into_inner(self) -> DefaultHandle {
         self.0.into_inner()
     }
@@ -454,6 +464,6 @@ impl Serialize for ExtOsHandle {
 
 impl<'de> Deserialize<'de> for ExtOsHandle {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        dolang_rpc::OsHandle::deserialize(deserializer).map(Self)
+        dolang_rpc::handle::OsHandle::deserialize(deserializer).map(Self)
     }
 }

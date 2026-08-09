@@ -1,13 +1,19 @@
 #![deny(warnings)]
 #![cfg(unix)]
 use dolang_vfs::{
-    AccessFlags, Child, Client, Command, Direct, FileHandle, FileType, MetadataPatch,
-    OwnershipIdentity, SecurityInfo, TargetInfo, Utf8TypedPath, Utf8UnixPath, Vfs,
+    Child, Command, FileHandle, Vfs,
+    client::Client,
+    direct::Direct,
+    file::AccessFlags,
+    metadata::{FileType, MetadataPatch},
+    security::{OwnershipIdentity, SecurityInfo},
+    target::TargetInfo,
 };
 #[cfg(not(target_os = "macos"))]
 use nix::unistd::getgroups;
 use nix::unistd::{Group, User, getegid, geteuid, getgid, getuid};
 use std::{os::fd::OwnedFd, path::Path};
+use typed_path::{Utf8TypedPath, Utf8UnixPath};
 
 use tempfile::tempdir;
 use tokio::task::JoinHandle;
@@ -22,7 +28,7 @@ fn typed_str(path: &str) -> Utf8TypedPath<'_> {
 
 async fn start_server(socket_path: &Path) -> JoinHandle<()> {
     let path = socket_path.to_path_buf();
-    let server = dolang_vfs::Server::bind(&path).await.unwrap();
+    let server = dolang_vfs::server::Server::bind(&path).await.unwrap();
     tokio::spawn(async move {
         let _ = server.accept().await;
     })
@@ -110,7 +116,9 @@ async fn client_from_owned_fd() {
     let dir = tempdir().unwrap();
     let socket_path = dir.path().join("test.sock");
 
-    let server = dolang_vfs::Server::bind(&socket_path).await.unwrap();
+    let server = dolang_vfs::server::Server::bind(&socket_path)
+        .await
+        .unwrap();
     let accept_task = tokio::spawn(async move {
         let _ = server.accept().await;
     });

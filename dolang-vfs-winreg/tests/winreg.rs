@@ -1,6 +1,10 @@
 #![deny(warnings)]
 
-use dolang_vfs::{AnyVfs, Direct, Error, ErrorKind};
+use dolang_vfs::{
+    AnyVfs,
+    direct::Direct,
+    error::{Error, ErrorKind},
+};
 use dolang_vfs_winreg::{Access, Key, PredefinedRoot, View};
 
 /// `Result::unwrap_err` requires `T: Debug`, which `Key` intentionally
@@ -21,7 +25,7 @@ mod stub {
     //! real, catchable error rather than a routing failure indistinguishable
     //! from a typo in the extension name/version.
 
-    use dolang_vfs::{Client, Server};
+    use dolang_vfs::{client::Client, server::Server};
     use tempfile::tempdir;
     use tokio::task::JoinHandle;
 
@@ -84,7 +88,7 @@ mod live {
         sync::atomic::{AtomicU64, Ordering},
     };
 
-    use dolang_vfs::{Client, Server};
+    use dolang_vfs::{client::Client, server::Server};
     use dolang_vfs_winreg::Value;
     use tokio::{
         net::windows::named_pipe::{ClientOptions, ServerOptions},

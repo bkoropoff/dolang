@@ -1,25 +1,65 @@
 #![deny(warnings)]
 //! Framed, multiplexed RPC sessions over asynchronous byte streams.
+//!
+//! Define a [`Protocol`], negotiate a transport with [`Builder`], then bind
+//! the negotiated endpoint to that protocol. The client may issue concurrent
+//! calls; [`server::Server::serve`] dispatches concurrent request handlers.
+//!
+//! ```no_run
+//! use dolang_rpc::{Builder, Protocol, server::CallContext};
+//! use serde::{Deserialize, Serialize};
+//!
+//! #[derive(Deserialize, Serialize)]
+//! enum Request { Ping }
+//! #[derive(Deserialize, Serialize)]
+//! enum Response { Pong }
+//! struct Example;
+//! impl Protocol for Example {
+//!     type Request = Request;
+//!     type Response = Response;
+//! }
+//!
+//! async fn run() -> Result<(), Box<dyn std::error::Error>> {
+//!     let (client_io, server_io) = tokio::io::duplex(16 * 1024);
+//!     let (client, server) = tokio::try_join!(
+//!         Builder::new("example", &[1]).client(client_io),
+//!         Builder::new("example", &[1]).server(server_io),
+//!     )?;
+//!
+//!     let server = async {
+//!         server.bind::<Example>().serve(async |mut context: CallContext<Example>, request| {
+//!             context.shutdown();
+//!             match request {
+//!                 Request::Ping => context.respond(Response::Pong),
+//!             }
+//!         }).await
+//!     };
+//!     let client = async {
+//!         let response = client.bind::<Example>().call(Request::Ping).await?.into_response();
+//!         assert!(matches!(response, Response::Pong));
+//!         Ok::<_, dolang_rpc::Error>(())
+//!     };
+//!     let (server, client) = tokio::join!(server, client);
+//!     server?;
+//!     client?;
+//!     Ok(())
+//! }
+//! ```
 
-mod client;
+pub mod client;
 mod fragment;
-mod handle;
-mod opaque;
+pub mod handle;
 mod serde;
-mod server;
-mod trailer;
+pub mod server;
+pub mod session;
+pub mod trailer;
 mod transport;
 mod unbound;
 
 use ::serde::{Serialize, de::DeserializeOwned};
 use bytes::Bytes;
-pub use client::{Call, Client};
-pub use handle::{DefaultHandle, OsHandle};
-pub use opaque::{InvalidOpaque, Opaque, OpaqueGuard, OpaqueResource};
-pub use server::{CallContext, RequestCancelled, Server};
-pub use trailer::{TrailerRecv, TrailerSend};
 use transport::{RecvFrame, SendFrame};
-pub use unbound::{Builder, UnboundClient, UnboundServer};
+pub use unbound::Builder;
 
 /// Configurable size and concurrency limits for a session. Not public — set
 /// via [`Builder`]'s chainable setters instead.
@@ -87,27 +127,46 @@ pub(crate) const NEGOTIATE_FRAGMENT_SIZE: usize = 1024;
 /// Not configurable, for the same reason as `NEGOTIATE_FRAGMENT_SIZE`.
 pub(crate) const NEGOTIATE_MAX_PAYLOAD_SIZE: usize = 64 * 1024;
 
-/// A family of request and response messages.
+/// A family of messages exchanged by one RPC session.
+///
+/// Implement this marker trait once for each application protocol version
+/// represented by distinct Rust request and response types. Both peers must
+/// bind the negotiated connection to compatible implementations.
 pub trait Protocol: Send + Sync + 'static {
+    /// Messages sent by [`client::Client`] calls and received by
+    /// [`server::Server`] handlers.
     type Request: Serialize + DeserializeOwned + Send + 'static;
+    /// Messages returned by [`server::Server`] handlers and yielded by
+    /// completed [`client::Call`]s.
     type Response: Serialize + DeserializeOwned + Send + 'static;
 }
 
-/// An RPC session error.
+/// An error from session establishment, transport, or an individual call.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// The underlying transport failed.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+    /// Serializing an outgoing request or response failed.
     #[error("serialization error: {0}")]
     Serialize(String),
+    /// Deserializing an incoming request or response failed.
     #[error("deserialization error: {0}")]
     Deserialize(String),
+    /// The peer sent data that violates the RPC protocol.
     #[error("protocol error: {0}")]
     Protocol(String),
+    /// The local or peer session closed before the operation completed.
     #[error("connection closed")]
     ConnectionClosed,
+    /// The peer cancelled this call before it received a response.
     #[error("request cancelled")]
     Cancelled,
+    /// A requested transport capability is unavailable.
+    ///
+    /// This variant is reserved for capability-reporting APIs; direct handle
+    /// serialization on an unsupported generic transport currently panics
+    /// instead.
     #[error("transport does not support direct handles")]
     UnsupportedCapability,
 }

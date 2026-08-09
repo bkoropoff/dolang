@@ -24,6 +24,12 @@ let MKDOCS_BINS = $
   - dolang-highlight
   - dolang-doc
 
+let DOC_CRATES = $
+  - dolang
+  - dolang-rpc
+  - dolang-winterop
+  - dolang-vfs
+
 let PUBLISH_CRATES = $
   - dolang-rpc
   - dolang-private-build
@@ -336,12 +342,16 @@ return $
   rustdoc:
     help: build selected rustdoc packages
     do |_|
-      dodo.show cargo doc -p dolang-runtime -p dolang-compile -p dolang-ext-shell --no-deps
+      run_cargo doc --no-deps
+        for crate = DOC_CRATES
+          -p $crate
 
   "serve-rustdoc":
     help: build and serve rustdoc locally
     do |_|
-      dodo.show cargo doc --package dolang --package dolang-ext-shell --no-deps
+      run_cargo doc --no-deps
+        for crate = DOC_CRATES
+          -p $crate
       dodo.show python3 -m http.server 8080 -d target/doc -b localhost
 
   "serve-mkdocs":

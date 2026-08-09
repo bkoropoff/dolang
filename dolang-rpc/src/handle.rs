@@ -26,8 +26,13 @@ pub type DefaultHandle = std::os::windows::io::OwnedHandle;
 
 /// A native operating-system resource transferred as a frame attachment.
 ///
-/// Direct attachment serialization is available only through an
-/// attachment-capable session transport.
+/// Serialize this type only over an attachment-capable session transport:
+/// [`Builder::client_unix`](crate::Builder::client_unix) or
+/// [`Builder::server_unix`](crate::Builder::server_unix) on Unix, and the
+/// named-pipe constructors on Windows. Serializing it over a generic byte
+/// stream currently panics; use [`Opaque`](crate::session::Opaque) for resources that
+/// must work over every transport. A message cannot contain both an
+/// `OsHandle` attachment and a streaming trailer.
 pub struct OsHandle<T = DefaultHandle>(T);
 
 impl<T> fmt::Debug for OsHandle<T> {
@@ -37,12 +42,17 @@ impl<T> fmt::Debug for OsHandle<T> {
 }
 
 impl<T> OsHandle<T> {
+    /// Wraps a native handle-like value for direct attachment serialization.
     pub fn new(value: T) -> Self {
         Self(value)
     }
+
+    /// Returns the wrapped value.
     pub fn into_inner(self) -> T {
         self.0
     }
+
+    /// Borrows the wrapped value.
     pub fn as_inner(&self) -> &T {
         &self.0
     }

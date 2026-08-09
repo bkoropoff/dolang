@@ -2,7 +2,7 @@ use dolang::{
     compile::Compiler,
     runtime::{Error, Object, Output, State, Sym, object::TypeBuilder, unpack, vm::Builder},
 };
-use dolang_vfs::{Architecture, OperatingSystem, OperatingSystemFamily};
+use dolang_vfs::target::{Architecture, OperatingSystem, OperatingSystemFamily};
 
 use crate::global::Global;
 

@@ -1049,6 +1049,7 @@ dependencies = [
  "nix",
  "sqlite-plugin",
  "tokio",
+ "typed-path",
 ]
 
 [[package]]
@@ -1290,6 +1291,7 @@ dependencies = [
  "dolang-shell-modules",
  "dolang-vfs",
  "tokio",
+ "typed-path",
 ]
 
 [[package]]
@@ -1335,6 +1337,7 @@ dependencies = [
  "serde",
  "tempfile",
  "tokio",
+ "typed-path",
  "windows-sys 0.61.2",
 ]
 

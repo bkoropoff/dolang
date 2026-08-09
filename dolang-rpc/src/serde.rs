@@ -947,7 +947,7 @@ impl<'de, A: VariantAccess<'de>, H: RecvFrame> VariantAccess<'de> for VariantWra
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::OsHandle;
+    use crate::handle::OsHandle;
     use ::serde::{Deserialize, Serialize};
     use bytes::BufMut;
     use nix::unistd::pipe;
@@ -1072,7 +1072,7 @@ mod windows_tests {
     use bytes::BufMut;
 
     use super::*;
-    use crate::OsHandle;
+    use crate::handle::OsHandle;
 
     struct Frame(Option<usize>);
 

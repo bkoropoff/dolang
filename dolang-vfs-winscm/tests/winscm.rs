@@ -1,6 +1,10 @@
 #![deny(warnings)]
 
-use dolang_vfs::{AnyVfs, Direct, Error, ErrorKind};
+use dolang_vfs::{
+    AnyVfs,
+    direct::Direct,
+    error::{Error, ErrorKind},
+};
 use dolang_vfs_winscm::ScManager;
 
 /// `Result::unwrap_err` requires `T: Debug`, which `ScManager`/`Service`
@@ -21,7 +25,7 @@ mod stub {
     //! real, catchable error rather than a routing failure indistinguishable
     //! from a typo in the extension name/version.
 
-    use dolang_vfs::{Client, Server};
+    use dolang_vfs::{client::Client, server::Server};
     use dolang_vfs_winscm::ServiceAccess;
     use tempfile::tempdir;
     use tokio::task::JoinHandle;
@@ -74,12 +78,12 @@ mod live {
         time::Duration,
     };
 
-    use dolang_vfs::{Client, Server};
+    use dolang_vfs::{client::Client, server::Server};
     use dolang_vfs_winscm::{
         CreateServiceOptions, ErrorControl, NotifyMask, Service, ServiceAccess,
         ServiceConfigUpdate, ServiceState, ServiceStateFilter, ServiceType, StartType,
     };
-    use dolang_winterop::{DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION};
+    use dolang_winterop::security::{DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION};
     use tokio::{
         net::windows::named_pipe::{ClientOptions, ServerOptions},
         task::JoinHandle,

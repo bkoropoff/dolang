@@ -16,8 +16,13 @@ use std::os::unix::{
 #[cfg(windows)]
 use std::os::windows::io::{AsHandle, OwnedHandle};
 
-use dolang_rpc::{Call, DefaultHandle, Opaque, OsHandle, TrailerRecv, TrailerSend};
-use dolang_winterop::{SecDesc, Sid};
+use dolang_rpc::{
+    client::Call,
+    handle::{DefaultHandle, OsHandle},
+    session::Opaque,
+    trailer::{TrailerRecv, TrailerSend},
+};
+use dolang_winterop::security::{SecDesc, Sid};
 #[cfg(unix)]
 use tokio::net::UnixStream;
 #[cfg(windows)]
@@ -27,13 +32,15 @@ use tokio::{
     task::JoinHandle,
 };
 
+use crate::extension::VfsExtension;
 #[cfg(unix)]
 use crate::protocol::AccessRequest;
 use crate::{
     Child, Command, FileHandle, FsMetadata, Metadata, MetadataPatch, PosixAcl, ProcessStatus,
     Query, ReadDir, SessionMode, SidName, StdioRecv, StdioSend, StreamEntry, Utf8TypedPath,
-    Utf8TypedPathBuf, Vfs, VfsExtension, WellKnownPath, XattrEntry,
+    Utf8TypedPathBuf, Vfs, XattrEntry,
     direct::DirectFile,
+    path::WellKnownPath,
     protocol::{
         AclRequest, CanonicalizeRequest, CopyRequest, CreateDirRequest, ExtensionRequest,
         ExtensionResponse, FsMetadataRequest, GlobRequest, HardLinkRequest, MetadataRequest,
@@ -47,14 +54,24 @@ use crate::{
     },
 };
 
-/// Client for connecting to the agent daemon and spawning processes.
+/// Client for a VFS agent session.
+///
+/// Clones share one RPC connection. Generic-stream constructors create an
+/// opaque-only session; Unix-socket and Windows named-pipe constructors can
+/// use native handles when the peer supports them. Prefer the [`Vfs`]
+/// trait when code should work with local and remote backends alike.
 #[derive(Clone)]
 pub struct Client {
-    rpc: dolang_rpc::Client<VfsProtocol>,
+    rpc: dolang_rpc::client::Client<VfsProtocol>,
     mode: SessionMode,
-    vfs: Option<Opaque<crate::VfsMarker>>,
+    vfs: Option<Opaque<crate::session::VfsMarker>>,
 }
 
+/// A file handle returned by a [`Client`] operation.
+///
+/// Depending on the transport and the server's choice, this may hold a native
+/// local file descriptor/handle or an opaque remote file reference. It
+/// implements [`FileHandle`] in either case.
 pub struct ClientFile(ClientFileInner);
 
 enum ClientFileInner {
@@ -64,7 +81,7 @@ enum ClientFileInner {
 
 struct RemoteFile {
     client: Client,
-    file: Option<Opaque<crate::FileMarker>>,
+    file: Option<Opaque<crate::session::FileMarker>>,
     pending: Option<PendingFileOperation>,
     read_body: Option<PendingTrailerRead>,
     write_body: Option<PendingTrailerWrite>,
@@ -72,7 +89,7 @@ struct RemoteFile {
 
 pub(crate) struct RemoteFileLock {
     client: Client,
-    file: Opaque<crate::FileMarker>,
+    file: Opaque<crate::session::FileMarker>,
     lock: Option<u64>,
 }
 
@@ -175,7 +192,7 @@ impl ClientFile {
         )))
     }
 
-    fn from_remote(client: Client, file: Opaque<crate::FileMarker>) -> Self {
+    fn from_remote(client: Client, file: Opaque<crate::session::FileMarker>) -> Self {
         Self(ClientFileInner::Remote(RemoteFile {
             client,
             file: Some(file),
@@ -187,7 +204,7 @@ impl ClientFile {
 }
 
 impl RemoteFile {
-    fn opaque(&self) -> Opaque<crate::FileMarker> {
+    fn opaque(&self) -> Opaque<crate::session::FileMarker> {
         self.file
             .as_ref()
             .expect("live remote file has no opaque identity")
@@ -198,7 +215,7 @@ impl RemoteFile {
         &mut self,
         cx: &mut Context<'_>,
         kind: FileOperationKind,
-        request: impl FnOnce(Opaque<crate::FileMarker>) -> (RequestKind, Option<Vec<u8>>),
+        request: impl FnOnce(Opaque<crate::session::FileMarker>) -> (RequestKind, Option<Vec<u8>>),
     ) -> Poll<io::Result<(ResponseKind, Option<TrailerRecv>)>> {
         if self.pending.is_none() {
             let (request, trailer) = request(self.opaque());
@@ -860,8 +877,8 @@ impl FileHandle for ClientFile {
 
     async fn lock(
         &self,
-        request: crate::FileLockRequest,
-    ) -> crate::Result<Option<crate::FileLock>> {
+        request: crate::file::FileLockRequest,
+    ) -> crate::Result<Option<crate::file::FileLock>> {
         match &self.0 {
             ClientFileInner::Direct(file) => file.lock(request).await,
             ClientFileInner::Remote(file) => {
@@ -877,7 +894,7 @@ impl FileHandle for ClientFile {
                     ResponseKind::FileLock(result) => result
                         .map(|lock| {
                             lock.map(|lock| {
-                                crate::FileLock::remote(RemoteFileLock {
+                                crate::file::FileLock::remote(RemoteFileLock {
                                     client: file.client.clone(),
                                     file: file.opaque(),
                                     lock: Some(lock),
@@ -916,6 +933,9 @@ impl Client {
     }
 
     /// Starts an opaque-only VFS client on a bidirectional byte stream.
+    ///
+    /// This transport cannot transfer native handles, so files, subprocesses,
+    /// and stdio endpoints are represented by remote references and relays.
     pub async fn new<T>(stream: T) -> crate::Result<Self>
     where
         T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -932,6 +952,8 @@ impl Client {
     }
 
     /// Starts an opaque-only VFS client on separate reader and writer streams.
+    ///
+    /// This has the same opaque-only behavior as [`new`](Self::new).
     pub async fn new_split<R, W>(reader: R, writer: W) -> crate::Result<Self>
     where
         R: AsyncRead + Send + 'static,
@@ -956,13 +978,17 @@ impl Client {
         self.rpc.close().await;
     }
 
-    /// Connect to an agent daemon at the given socket path.
+    /// Connects to an agent daemon at a Unix-domain socket path.
+    ///
+    /// This transport supports native file-descriptor transfer.
     #[cfg(unix)]
     pub async fn connect(path: impl AsRef<Path>) -> crate::Result<Self> {
         Self::from_stream(UnixStream::connect(path).await?).await
     }
 
-    /// Connect using an existing `UnixStream`.
+    /// Connects using an existing Unix-domain stream.
+    ///
+    /// This transport supports native file-descriptor transfer.
     #[cfg(unix)]
     pub async fn from_stream(stream: UnixStream) -> crate::Result<Self> {
         Self::from_std_stream(stream.into_std()?).await
@@ -982,8 +1008,10 @@ impl Client {
         })
     }
 
-    /// Starts a VFS client on an already-connected Unix domain socket file
+    /// Starts a VFS client on an already-connected Unix-domain socket file
     /// descriptor.
+    ///
+    /// This transport supports native file-descriptor transfer.
     #[cfg(unix)]
     pub async fn from_owned_fd(value: OwnedFd) -> crate::Result<Self> {
         let stream = StdUnixStream::from(value);
@@ -1083,7 +1111,7 @@ impl Client {
         cwd: Utf8TypedPath<'_>,
         env: HashMap<String, Option<String>>,
         elevate: bool,
-    ) -> crate::Result<crate::VfsSession> {
+    ) -> crate::Result<crate::session::VfsSession> {
         let request = WindowsAdminRequest {
             cwd: cwd.into(),
             env,
@@ -1092,7 +1120,7 @@ impl Client {
         match self.request(RequestKind::WindowsAdmin(request)).await? {
             ResponseKind::WindowsAdmin(result) => {
                 let vfs = result.map_err(crate::Error::from)?;
-                Ok(crate::VfsSession::from_client(Self {
+                Ok(crate::session::VfsSession::from_client(Self {
                     rpc: self.rpc.clone(),
                     mode: self.mode,
                     vfs: Some(vfs),
@@ -1104,7 +1132,7 @@ impl Client {
 
     /// Check file accessibility.
     ///
-    /// Mode is a bitmask of accessibility flags from [`AccessFlags`](crate::AccessFlags):
+    /// Mode is a bitmask of accessibility flags from [`AccessFlags`](crate::file::AccessFlags):
     /// - `AccessFlags::F_OK`: Test for existence
     /// - `AccessFlags::R_OK`: Test for read permission
     /// - `AccessFlags::W_OK`: Test for write permission
@@ -1113,7 +1141,7 @@ impl Client {
     pub async fn access(
         &self,
         path: impl AsRef<Path>,
-        mode: crate::AccessFlags,
+        mode: crate::file::AccessFlags,
     ) -> crate::Result<()> {
         let request = AccessRequest {
             path: path.as_ref().to_path_buf().try_into()?,
@@ -1340,7 +1368,12 @@ fn clone_stderr_handle() -> io::Result<DefaultHandle> {
     }
 }
 
-/// Builder for constructing spawn requests.
+/// Builder for constructing a process-spawn request on a remote VFS.
+///
+/// Configure arguments, environment, working directory, and standard streams,
+/// then call [`spawn`](crate::Command::spawn). This concrete API accepts host
+/// [`Path`] values; use [`Vfs::command`]
+/// when the target's path syntax may differ from the host's.
 ///
 /// # Example
 ///
@@ -1369,6 +1402,10 @@ pub struct CommandBuilder<'a> {
     termination_policy: crate::TerminationPolicy,
 }
 
+/// A process spawned by a [`Client`].
+///
+/// It implements [`Child`]; any relay tasks for cross-domain
+/// standard streams are owned by this value.
 pub struct ClientChild {
     client: Client,
     state: ClientChildState,
@@ -1394,21 +1431,28 @@ struct PreparedRelays {
 }
 
 enum ClientChildState {
-    Live(Opaque<crate::ChildMarker>),
+    Live(Opaque<crate::session::ChildMarker>),
     Exited(ProcessStatus),
     Lost(crate::protocol::WireError),
 }
 
+/// A writable standard-stream endpoint owned by a remote VFS session.
+///
+/// This implements [`AsyncWrite`]. Shutting it down
+/// closes the corresponding remote endpoint.
 pub struct RemoteStdioSend {
     client: Client,
-    stdio: Option<Opaque<crate::StdioSendMarker>>,
+    stdio: Option<Opaque<crate::session::StdioSendMarker>>,
     pending: Option<(StdioSendOperation, Call<VfsProtocol>)>,
     write_body: Option<PendingTrailerWrite>,
 }
 
+/// A readable standard-stream endpoint owned by a remote VFS session.
+///
+/// This implements [`AsyncRead`].
 pub struct RemoteStdioRecv {
     client: Client,
-    stdio: Option<Opaque<crate::StdioRecvMarker>>,
+    stdio: Option<Opaque<crate::session::StdioRecvMarker>>,
     pending: Option<Call<VfsProtocol>>,
     read_body: Option<PendingTrailerRead>,
 }
@@ -1663,7 +1707,10 @@ impl AsyncRead for RemoteStdioRecv {
     }
 }
 
-async fn best_effort_close_stdio_send(client: Client, stdio: Opaque<crate::StdioSendMarker>) {
+async fn best_effort_close_stdio_send(
+    client: Client,
+    stdio: Opaque<crate::session::StdioSendMarker>,
+) {
     for _ in 0..4 {
         let Ok(ResponseKind::StdioSendClose(result)) = client
             .request(RequestKind::StdioSendClose {
@@ -1685,7 +1732,10 @@ async fn best_effort_close_stdio_send(client: Client, stdio: Opaque<crate::Stdio
     }
 }
 
-async fn best_effort_close_stdio_recv(client: Client, stdio: Opaque<crate::StdioRecvMarker>) {
+async fn best_effort_close_stdio_recv(
+    client: Client,
+    stdio: Opaque<crate::session::StdioRecvMarker>,
+) {
     for _ in 0..4 {
         let Ok(ResponseKind::StdioRecvClose(result)) = client
             .request(RequestKind::StdioRecvClose {
@@ -2288,7 +2338,12 @@ impl<'a> Command for CommandBuilder<'a> {
     }
 }
 
-/// Builder for opening files with configurable options.
+/// Builder for opening files through a [`Client`].
+///
+/// Configure access and creation modes, then call [`open`](Self::open). This
+/// concrete API accepts host [`Path`] values; use
+/// [`Vfs::open_options`] when the target's path
+/// syntax may differ from the host's.
 ///
 /// # Example
 ///
@@ -2399,7 +2454,9 @@ impl<'a> OpenOptions<'a> {
         }
     }
 
-    /// Open the file at the given path.
+    /// Opens the file at a path expressed in host syntax.
+    // FIXME: Align this concrete Client API with Vfs by accepting
+    // Utf8TypedPath, so remote targets need not share the caller's path style.
     pub async fn open(&self, path: impl AsRef<Path>) -> crate::Result<ClientFile> {
         self.open_wire(path.as_ref().to_path_buf().try_into()?)
             .await
@@ -2472,13 +2529,13 @@ impl Vfs for Client {
         cwd: Utf8TypedPath<'_>,
         env: HashMap<String, Option<String>>,
         elevate: bool,
-    ) -> crate::Result<crate::VfsSession> {
+    ) -> crate::Result<crate::session::VfsSession> {
         self.windows_admin_vfs(cwd, env, elevate).await
     }
 
     async fn pipe(&self) -> crate::Result<(StdioSend, StdioRecv)> {
         if self.mode == SessionMode::Native {
-            return crate::Direct::default().pipe().await;
+            return crate::direct::Direct::default().pipe().await;
         }
         match self.request(RequestKind::Pipe).await? {
             ResponseKind::Pipe(result) => result
@@ -3033,7 +3090,7 @@ mod tests {
             tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
         let client = Client::new(client_stream).await.unwrap();
         let temp = tempdir().unwrap();
-        let path = crate::typed_path(temp.path().join("file")).unwrap();
+        let path = crate::path::typed_path(temp.path().join("file")).unwrap();
         let file = open_remote_file(&client, path.to_path()).await;
         let opaque = match &file.0 {
             ClientFileInner::Remote(file) => file.opaque(),
@@ -3082,7 +3139,7 @@ mod tests {
         };
 
         let encoded = postcard::to_allocvec(&send_opaque).unwrap();
-        let wrong: dolang_rpc::Opaque<crate::StdioRecvMarker> =
+        let wrong: dolang_rpc::session::Opaque<crate::session::StdioRecvMarker> =
             postcard::from_bytes(&encoded).unwrap();
         let response = client
             .request(RequestKind::StdioRecvClose { stdio: wrong })
@@ -3132,7 +3189,7 @@ mod tests {
         let outer_task =
             tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
         let root = Client::new(client_stream).await.unwrap();
-        let path = crate::typed_path(socket).unwrap();
+        let path = crate::path::typed_path(socket).unwrap();
         let selected = root
             .unix_socket(path.to_path())
             .await
@@ -3165,7 +3222,7 @@ mod tests {
         assert_eq!(recv.read(&mut eof).await.unwrap(), 0);
 
         let encoded = postcard::to_allocvec(&send_opaque).unwrap();
-        let wrong_vfs: dolang_rpc::Opaque<crate::VfsMarker> =
+        let wrong_vfs: dolang_rpc::session::Opaque<crate::session::VfsMarker> =
             postcard::from_bytes(&encoded).unwrap();
         let mut wrong_client = root.clone();
         wrong_client.vfs = Some(wrong_vfs);
@@ -3200,7 +3257,7 @@ mod tests {
                 );
             let client = Client::new(client_stream).await.unwrap();
             let temp = tempdir().unwrap();
-            let path = crate::typed_path(temp.path().join("file")).unwrap();
+            let path = crate::path::typed_path(temp.path().join("file")).unwrap();
             let file = open_remote_file(&client, path.to_path()).await;
             (file, client, server, temp)
         });
@@ -3219,7 +3276,7 @@ mod tests {
             tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
         let client = Client::new(client_stream).await.unwrap();
         let temp = tempdir().unwrap();
-        let path = crate::typed_path(temp.path().join("file")).unwrap();
+        let path = crate::path::typed_path(temp.path().join("file")).unwrap();
         let file = open_remote_file(&client, path.to_path()).await;
 
         file.close().await.unwrap();

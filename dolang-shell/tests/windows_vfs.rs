@@ -7,9 +7,10 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use dolang_vfs::{Client, Utf8TypedPath, Utf8WindowsPath, Vfs as _};
+use dolang_vfs::{Vfs as _, client::Client};
 use tokio::net::windows::named_pipe::ServerOptions;
 use tokio::process::Command as TokioCommand;
+use typed_path::{Utf8TypedPath, Utf8WindowsPath};
 
 static NEXT_PIPE: AtomicU64 = AtomicU64::new(0);
 
@@ -38,7 +39,7 @@ async fn embedded_vfs_mode_serves_and_stops() {
     let query = client.query().await.unwrap();
     assert_eq!(
         query.cwd,
-        dolang_vfs::typed_path(std::env::current_dir().unwrap()).unwrap()
+        dolang_vfs::path::typed_path(std::env::current_dir().unwrap()).unwrap()
     );
 
     let current_exe = std::env::current_exe().unwrap();
@@ -65,7 +66,7 @@ async fn embedded_vfs_stdio_mode_serves_and_stops() {
     let query = client.query().await.unwrap();
     assert_eq!(
         query.cwd,
-        dolang_vfs::typed_path(std::env::current_dir().unwrap()).unwrap()
+        dolang_vfs::path::typed_path(std::env::current_dir().unwrap()).unwrap()
     );
 
     client.stop().await.unwrap();

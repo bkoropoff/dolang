@@ -12,6 +12,9 @@ const MAX_SUB_AUTHORITIES: usize = 15;
 const IDENTIFIER_AUTHORITY_MAX: u64 = (1 << 48) - 1;
 
 /// A Windows security identifier (SID).
+///
+/// The text form is canonical `S-1-...` notation and the binary helpers use
+/// the native Windows packet layout.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Sid {
     identifier_authority: u64,
@@ -19,7 +22,10 @@ pub struct Sid {
 }
 
 impl Sid {
-    /// Creates a SID from its identifier authority and sub-authorities.
+    /// Creates a revision-1 SID from its identifier authority and sub-authorities.
+    ///
+    /// The authority must fit in 48 bits and a SID must have one through 15
+    /// sub-authorities.
     pub fn new(identifier_authority: u64, sub_authorities: Vec<u32>) -> Result<Self, SidError> {
         if identifier_authority > IDENTIFIER_AUTHORITY_MAX {
             return Err(SidError::IdentifierAuthority);
@@ -240,10 +246,15 @@ impl<'de> Deserialize<'de> for Sid {
 /// Error returned when constructing or parsing a SID.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SidError {
+    /// The SID uses a revision other than revision 1.
     Revision(u8),
+    /// The SID has fewer than one or more than 15 sub-authorities.
     SubAuthorityCount(usize),
+    /// The identifier authority exceeds the 48-bit Windows field.
     IdentifierAuthority,
+    /// The binary packet length does not match its declared structure.
     PacketLength,
+    /// Text was not canonical SID notation.
     StringSyntax,
 }
 

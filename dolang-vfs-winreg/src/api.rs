@@ -7,8 +7,13 @@
 //! implementation detail, same as `dolang-vfs` never exposing its own
 //! `RequestKind`/`ResponseKind`/`VfsProtocol`.
 
-use dolang_vfs::{AnyVfs, Direct, Error, ErrorKind, ExtOpaque};
-use dolang_winterop::SecDesc;
+use dolang_vfs::extension::ExtOpaque;
+use dolang_vfs::{
+    AnyVfs,
+    direct::Direct,
+    error::{Error, ErrorKind},
+};
+use dolang_winterop::security::SecDesc;
 
 use crate::{
     value::Value,

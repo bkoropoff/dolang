@@ -1,3 +1,10 @@
+//! Session-scoped opaque resources.
+//!
+//! [`Opaque`] is a serializable identity token for a resource retained by one
+//! endpoint. It can be redeemed only through that endpoint's
+//! [`CallContext`](crate::server::CallContext) while the resource remains
+//! registered.
+
 use serde::{Deserialize, Serialize};
 use std::{
     any::{Any, TypeId},
@@ -7,11 +14,21 @@ use std::{
     sync::Arc,
 };
 
-/// A value which can be stored in a session's opaque-object table.
+/// A value that can be registered in a session's opaque-object table.
+///
+/// `Marker` is the public protocol-level type carried by [`Opaque`]. The
+/// concrete resource type may remain private. A marker does not by itself
+/// authorize a downcast:
+/// [`CallContext::acquire`](crate::server::CallContext::acquire)
+/// also verifies the concrete type.
 pub trait OpaqueResource: Send + Sync + 'static {
     type Marker: ?Sized + 'static;
 }
 
+/// A serializable, session-scoped reference to a registered resource.
+///
+/// This is an identity token, not the resource itself. It becomes invalid when
+/// its owner unregisters the resource or the session ends.
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct Opaque<M: ?Sized> {
@@ -46,7 +63,10 @@ impl<M: ?Sized> fmt::Debug for Opaque<M> {
     }
 }
 
-/// A retained, typed opaque object.
+/// A retained, typed guard for a registered opaque resource.
+///
+/// The resource remains alive until every guard is dropped, even if its owner
+/// unregisters it in the meantime.
 pub struct OpaqueGuard<T>(Arc<T>);
 impl<T> std::ops::Deref for OpaqueGuard<T> {
     type Target = T;
@@ -55,6 +75,7 @@ impl<T> std::ops::Deref for OpaqueGuard<T> {
     }
 }
 
+/// A handle that is stale, belongs to another session, or has the wrong type.
 #[derive(Clone, Copy, Debug, thiserror::Error)]
 #[error("invalid opaque object")]
 pub struct InvalidOpaque;

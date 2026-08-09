@@ -6,7 +6,8 @@
 //! `NotFound`-style "unknown extension" error indistinguishable from a typo
 //! in the extension name/version.
 
-use dolang_vfs::{Error, ErrorKind, ExtContext};
+use dolang_vfs::error::{Error, ErrorKind};
+use dolang_vfs::extension::ExtContext;
 
 use crate::wire::{WinScmRequest, WinScmResponse};
 

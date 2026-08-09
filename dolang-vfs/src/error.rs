@@ -2,41 +2,11 @@ use std::{fmt, io};
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum OperatingSystem {
-    FreeBsd,
-    Linux,
-    Macos,
-    Windows,
-}
+use crate::target::OperatingSystem;
 
-impl OperatingSystem {
-    pub fn current() -> Self {
-        #[cfg(target_os = "linux")]
-        return Self::Linux;
-        #[cfg(target_os = "macos")]
-        return Self::Macos;
-        #[cfg(target_os = "freebsd")]
-        return Self::FreeBsd;
-        #[cfg(windows)]
-        return Self::Windows;
-        #[cfg(not(any(
-            target_os = "linux",
-            target_os = "macos",
-            target_os = "freebsd",
-            windows
-        )))]
-        compile_error!("unsupported target operating system");
-    }
-
-    pub const fn path_type(&self) -> typed_path::PathType {
-        match self {
-            Self::Linux | Self::Macos | Self::FreeBsd => typed_path::PathType::Unix,
-            Self::Windows => typed_path::PathType::Windows,
-        }
-    }
-}
-
+/// Portable classification of an I/O or VFS error.
+///
+/// Most variants correspond directly to [`io::ErrorKind`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ErrorKind {
     NotFound,
@@ -184,6 +154,7 @@ impl PartialEq<ErrorKind> for io::ErrorKind {
     }
 }
 
+/// A native operating-system error number tagged with its source platform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SystemCode {
     operating_system: OperatingSystem,
@@ -191,6 +162,7 @@ pub struct SystemCode {
 }
 
 impl SystemCode {
+    /// Creates a tagged native error number.
     pub const fn new(operating_system: OperatingSystem, raw: i32) -> Self {
         Self {
             operating_system,
@@ -198,15 +170,21 @@ impl SystemCode {
         }
     }
 
+    /// Returns the platform whose numbering scheme produced this value.
     pub const fn operating_system(self) -> OperatingSystem {
         self.operating_system
     }
 
+    /// Returns the native error number.
     pub const fn raw(self) -> i32 {
         self.raw
     }
 }
 
+/// An error returned by a VFS operation.
+///
+/// In addition to a portable [`ErrorKind`], this retains the original message
+/// and, when available, the originating system's native error number.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Error {
     kind: ErrorKind,
@@ -215,6 +193,7 @@ pub struct Error {
 }
 
 impl Error {
+    /// Creates an error without a native error number.
     pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
         Self {
             kind,
@@ -223,6 +202,7 @@ impl Error {
         }
     }
 
+    /// Creates an error with a native error number and its source platform.
     pub fn from_system_code(
         kind: ErrorKind,
         message: impl Into<String>,
@@ -236,22 +216,27 @@ impl Error {
         }
     }
 
+    /// Converts a native error number from the current host.
     pub fn from_raw_os_error(raw: i32) -> Self {
         io::Error::from_raw_os_error(raw).into()
     }
 
+    /// Returns this error's portable classification.
     pub const fn kind(&self) -> ErrorKind {
         self.kind
     }
 
+    /// Returns the human-readable error message.
     pub fn message(&self) -> &str {
         &self.message
     }
 
+    /// Returns the tagged native error number, if one was supplied.
     pub const fn system_code(&self) -> Option<SystemCode> {
         self.system_code
     }
 
+    /// Returns the untagged native error number, if one was supplied.
     pub const fn raw_os_error(&self) -> Option<i32> {
         match self.system_code {
             Some(code) => Some(code.raw()),
@@ -259,6 +244,7 @@ impl Error {
         }
     }
 
+    /// Converts this error into [`io::Error`], preserving its portable kind.
     pub fn into_io_error(self) -> io::Error {
         io::Error::new(self.kind.into(), self)
     }
@@ -283,6 +269,7 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// The result type returned by VFS operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(test)]

@@ -10,8 +10,12 @@ use std::{
     ptr,
 };
 
-use dolang_vfs::{Error, ErrorKind, ExtContext, ExtOsHandle, InvalidHandle, OperatingSystem};
-use dolang_winterop::{
+use dolang_vfs::extension::{ExtContext, ExtOsHandle, InvalidHandle};
+use dolang_vfs::{
+    error::{Error, ErrorKind},
+    target::OperatingSystem,
+};
+use dolang_winterop::security::{
     ALL_SECURITY_INFORMATION, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
     SACL_SECURITY_INFORMATION, SecDesc as VfsSecDesc,
 };
@@ -119,7 +123,7 @@ fn open_key(parent: HKEY, subpath: &str, view: View, access: Access) -> Result<H
         Ok(out)
     };
     let result = if access.0 & ACCESS_SYSTEM_SECURITY != 0 {
-        dolang_winterop::with_security_privilege(open)
+        dolang_winterop::security::with_security_privilege(open)
     } else {
         open()
     };
@@ -151,7 +155,7 @@ fn create_key(parent: HKEY, subpath: &str, view: View, access: Access) -> Result
         Ok(out)
     };
     let result = if access.0 & ACCESS_SYSTEM_SECURITY != 0 {
-        dolang_winterop::with_security_privilege(create)
+        dolang_winterop::security::with_security_privilege(create)
     } else {
         create()
     };
@@ -460,7 +464,7 @@ fn set_sec_desc(handle: HKEY, descriptor: &VfsSecDesc) -> Result<(), Error> {
         }
     };
     let result = if mask & SACL_SECURITY_INFORMATION != 0 {
-        dolang_winterop::with_security_privilege(set)
+        dolang_winterop::security::with_security_privilege(set)
     } else {
         set()
     };
@@ -490,7 +494,7 @@ fn with_handle<R>(key: &Key, f: impl FnOnce(HKEY) -> R) -> R {
 /// Wraps a freshly-opened `HKEY` into the appropriate [`KeyHandle`]: a
 /// native out-of-band handle when the peer's transport supports it (no
 /// registration — ownership transfers fully to the peer), otherwise a
-/// registered [`dolang_vfs::ExtOpaque`].
+/// registered [`dolang_vfs::extension::ExtOpaque`].
 fn key_response(ctx: &ExtContext<'_>, handle: HKEY) -> WinRegResponse {
     if ctx.native_capable() {
         WinRegResponse::Key(KeyHandle::Native(ExtOsHandle::new(hkey_to_owned(handle))))

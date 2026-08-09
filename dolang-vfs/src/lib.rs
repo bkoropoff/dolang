@@ -1,41 +1,82 @@
 #![deny(warnings)]
 #![allow(async_fn_in_trait)]
+//! Filesystem and process operations over either a local or remote target.
+//!
+//! [`Direct`] performs operations in the current process's environment.
+//! [`Client`] performs the same broad class of operations through a
+//! `dolang-vfs` agent. [`AnyVfs`] lets an application carry either backend
+//! behind one value, while the [`Vfs`], [`OpenOptions`], [`FileHandle`], and
+//! [`Command`] traits abstract over a chosen backend.
+//!
+//! Paths passed through [`Vfs`] are [`Utf8TypedPath`] values. Their syntax
+//! belongs to the target VFS rather than necessarily to the host running this
+//! code, which lets a Unix host describe Windows paths and vice versa.
+//!
+//! ```no_run
+//! use dolang_vfs::{OpenOptions, Vfs, direct::Direct};
+//! use typed_path::{Utf8TypedPath, Utf8UnixPath, Utf8WindowsPath};
+//!
+//! async fn read_a_file() -> dolang_vfs::error::Result<()> {
+//!     let vfs = Direct::default();
+//!     let path = if cfg!(windows) {
+//!         Utf8TypedPath::Windows(Utf8WindowsPath::new(r"C:\\example.txt"))
+//!     } else {
+//!         Utf8TypedPath::Unix(Utf8UnixPath::new("/tmp/example.txt"))
+//!     };
+//!     let mut options = vfs.open_options();
+//!     options.read(true);
+//!     let _file = options.open(path).await?;
+//!     Ok(())
+//! }
+//! ```
 
-pub use dolang_rpc::DefaultHandle;
-use dolang_winterop::{SecDesc, Sid};
-use serde::{Deserialize, Serialize};
+use direct::{Direct, DirectFile, DirectOpenOptions};
+use dolang_winterop::security::{SecDesc, Sid};
+use extension::VfsExtension;
 use std::{
     collections::HashMap,
     io,
-    path::PathBuf,
     pin::Pin,
     task::{Context, Poll},
-    time::Duration,
 };
 use tokio::{
     io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf},
     task::JoinHandle,
 };
-pub use typed_path::{
-    PathType, Utf8TypedPath, Utf8TypedPathBuf, Utf8UnixPath, Utf8UnixPathBuf, Utf8WindowsPath,
-    Utf8WindowsPathBuf, Utf8WindowsPrefix,
-};
-mod client;
-mod direct;
-mod error;
+use typed_path::{Utf8TypedPath, Utf8TypedPathBuf, Utf8UnixPath, Utf8WindowsPath};
+pub mod client;
+pub mod direct;
+pub mod directory;
+pub mod error;
 pub mod extension;
-mod pipe;
+pub mod file;
+pub mod metadata;
+pub mod path;
 mod posix_acl;
 mod probe;
+pub mod process;
 mod protocol;
-mod read_dir;
-mod server;
-mod service;
+pub mod security;
+pub mod server;
+pub mod service;
+pub mod session;
+pub mod stream;
+pub mod target;
 #[cfg(windows)]
 mod windows;
+pub mod xattr;
 
-pub use error::{Error, ErrorKind, OperatingSystem, Result, SystemCode};
-pub use posix_acl::{PosixAce, PosixAcl, PosixAclError, PosixAclPermissions, PosixAclQualifier};
+use directory::DirEntry;
+pub(crate) use error::{Error, ErrorKind, Result};
+use file::{FileLock, FileLockRequest};
+use metadata::{AttrFlags, AttrsPatch, FileType, FsMetadata, Metadata, MetadataPatch};
+use path::WellKnownPath;
+use process::{ProcessControl, ProcessStatus, TerminationPolicy};
+use security::{OwnershipIdentity, PosixAcl, SecurityInfo, SidName};
+use session::{Query, VfsSession};
+use stream::StreamEntry;
+use target::TargetInfo;
+use xattr::{XattrEntry, XattrNamespace};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SessionMode {
@@ -43,1188 +84,35 @@ pub(crate) enum SessionMode {
     Remote,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Architecture {
-    X86_64,
-    Aarch64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ProcessStatus {
-    Exited(i32),
-    Signaled(i32),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ProcessControl {
-    Foreground,
-    Background,
-}
-
-/// A Unix process signal.
-///
-/// Named variants are resolved to native signal numbers by the VFS executing
-/// the process. `Number` is target-specific; the caller is responsible for
-/// using the numbering of the VFS that will execute the process.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Signal {
-    Hup,
-    Int,
-    Quit,
-    Ill,
-    Trap,
-    Abrt,
-    Emt,
-    Fpe,
-    Kill,
-    Bus,
-    Segv,
-    Sys,
-    Pipe,
-    Alrm,
-    Term,
-    Urg,
-    Stop,
-    Tstp,
-    Cont,
-    Chld,
-    Ttin,
-    Ttou,
-    Io,
-    Xcpu,
-    Xfsz,
-    Vtalrm,
-    Prof,
-    Winch,
-    Info,
-    Usr1,
-    Usr2,
-    Stkflt,
-    Pwr,
-    Thr,
-    Librt,
-    Number(i32),
-}
-
-impl Signal {
-    /// Returns whether this signal exists on an operating system.
-    pub fn is_supported(self, operating_system: OperatingSystem) -> bool {
-        use OperatingSystem::{FreeBsd, Linux, Macos, Windows};
-        match self {
-            Self::Emt | Self::Info => matches!(operating_system, FreeBsd | Macos),
-            Self::Stkflt | Self::Pwr => operating_system == Linux,
-            Self::Thr | Self::Librt => operating_system == FreeBsd,
-            Self::Number(_) => operating_system != Windows,
-            _ => operating_system != Windows,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TerminationPolicy {
-    pub signal: Signal,
-    pub grace: Duration,
-    pub force: bool,
-}
-
-impl Default for TerminationPolicy {
-    fn default() -> Self {
-        Self {
-            signal: Signal::Term,
-            grace: Duration::from_secs(5),
-            force: true,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum FileLockMode {
-    Exclusive,
-    Shared,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum FileLockBehavior {
-    Blocking,
-    Try,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct FileLockRange {
-    pub start: u64,
-    pub end: Option<u64>,
-}
-
-impl FileLockRange {
-    pub fn is_empty(self) -> bool {
-        self.end == Some(self.start)
-    }
-
-    fn conflicts(self, other: Self) -> bool {
-        match (self.is_empty(), other.is_empty()) {
-            (true, true) => return false,
-            (true, false) => {
-                return other.start < self.start && self.start < other.end.unwrap_or(u64::MAX);
-            }
-            (false, true) => {
-                return self.start < other.start && other.start < self.end.unwrap_or(u64::MAX);
-            }
-            (false, false) => {}
-        }
-        let self_end = self.end.unwrap_or(u64::MAX);
-        let other_end = other.end.unwrap_or(u64::MAX);
-        self.start < other_end && other.start < self_end
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct FileLockRequest {
-    pub range: FileLockRange,
-    pub mode: FileLockMode,
-    pub behavior: FileLockBehavior,
-}
-
-impl ProcessStatus {
-    pub const fn success(self) -> bool {
-        matches!(self, Self::Exited(0))
-    }
-
-    pub const fn code(self) -> Option<i32> {
-        match self {
-            Self::Exited(code) => Some(code),
-            Self::Signaled(_) => None,
-        }
-    }
-
-    pub const fn signal(self) -> Option<i32> {
-        match self {
-            Self::Exited(_) => None,
-            Self::Signaled(signal) => Some(signal),
-        }
-    }
-
-    pub(crate) fn from_native(status: std::process::ExitStatus) -> io::Result<Self> {
-        if let Some(code) = status.code() {
-            return Ok(Self::Exited(code));
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::ExitStatusExt;
-            if let Some(signal) = status.signal() {
-                return Ok(Self::Signaled(signal));
-            }
-        }
-        Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "process returned an unrepresentable terminal status",
-        ))
-    }
-}
-
-impl Architecture {
-    pub fn current() -> Self {
-        #[cfg(target_arch = "x86_64")]
-        return Self::X86_64;
-        #[cfg(target_arch = "aarch64")]
-        return Self::Aarch64;
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-        compile_error!("unsupported target architecture");
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OperatingSystemFamily {
-    Unix,
-    Windows,
-}
-
-impl OperatingSystem {
-    pub fn family(&self) -> OperatingSystemFamily {
-        match self {
-            Self::FreeBsd | Self::Linux | Self::Macos => OperatingSystemFamily::Unix,
-            Self::Windows => OperatingSystemFamily::Windows,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TargetInfo {
-    pub operating_system: OperatingSystem,
-    pub architecture: Architecture,
-    pub logical_cpu_count: u32,
-    pub is_wine: Option<bool>,
-}
-
-/// Snapshot of a VFS target's process security context.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SecurityInfo {
-    Unix(UnixSecurityInfo),
-    Windows(WindowsTokenInfo),
-}
-
-impl SecurityInfo {
-    pub fn current() -> crate::Result<Self> {
-        #[cfg(unix)]
-        return Ok(Self::Unix(UnixSecurityInfo::current()?));
-        #[cfg(windows)]
-        return Ok(Self::Windows(WindowsTokenInfo::current()?));
-    }
-}
-
-/// Unix identity information for a VFS target.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UnixSecurityInfo {
-    pub uid: u32,
-    pub gid: u32,
-    pub euid: u32,
-    pub egid: u32,
-    pub group_ids: Vec<u32>,
-}
-
-#[cfg(unix)]
-impl UnixSecurityInfo {
-    fn current() -> crate::Result<Self> {
-        use nix::unistd::{getegid, geteuid, getgid, getuid};
-
-        let euid = geteuid();
-        let egid = getegid();
-
-        Ok(Self {
-            uid: getuid().as_raw(),
-            gid: getgid().as_raw(),
-            euid: euid.as_raw(),
-            egid: egid.as_raw(),
-            group_ids: current_group_ids(euid, egid)?,
-        })
-    }
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn current_group_ids(_euid: nix::unistd::Uid, _egid: nix::unistd::Gid) -> crate::Result<Vec<u32>> {
-    Ok(nix::unistd::getgroups()
-        .map_err(io::Error::from)?
-        .into_iter()
-        .map(|gid| gid.as_raw())
-        .collect())
-}
-
-#[cfg(target_os = "macos")]
-fn current_group_ids(euid: nix::unistd::Uid, egid: nix::unistd::Gid) -> crate::Result<Vec<u32>> {
-    use std::{ffi::CString, ptr, slice};
-
-    // macOS limits the public getgroups/getgrouplist interfaces and resolves
-    // extended memberships through opendirectoryd. This SPI returns the full
-    // list in a libc-allocated buffer owned by the caller.
-    unsafe extern "C" {
-        fn getgrouplist_2(
-            name: *const libc::c_char,
-            base_gid: libc::gid_t,
-            groups: *mut *mut libc::gid_t,
-        ) -> i32;
-    }
-
-    let user = nix::unistd::User::from_uid(euid)
-        .map_err(io::Error::from)?
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "effective user not found"))?;
-    let name = CString::new(user.name)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "user name contains NUL"))?;
-    let mut groups = ptr::null_mut();
-    let count = unsafe { getgrouplist_2(name.as_ptr(), egid.as_raw(), &mut groups) };
-    if count < 0 {
-        if !groups.is_null() {
-            unsafe { libc::free(groups.cast()) };
-        }
-        return Err(io::Error::other("getgrouplist_2 failed").into());
-    }
-    if count == 0 {
-        if !groups.is_null() {
-            unsafe { libc::free(groups.cast()) };
-        }
-        return Ok(Vec::new());
-    }
-    if count > 0 && groups.is_null() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "getgrouplist_2 returned a null group list",
-        )
-        .into());
-    }
-    let result = unsafe { slice::from_raw_parts(groups, count as usize) }.to_vec();
-    unsafe { libc::free(groups.cast()) };
-    Ok(result)
-}
-
-/// Windows token information for a VFS target.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WindowsTokenInfo {
-    pub is_elevated: bool,
-    pub user_sid: Sid,
-    pub owner_sid: Sid,
-    pub primary_group_sid: Sid,
-    pub groups: Vec<TokenGroup>,
-}
-
-/// A Windows token group SID and its attribute mask.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TokenGroup {
-    pub sid: Sid,
-    pub attributes: u32,
-}
-
-/// Classification returned by Windows account-name lookup.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SidNameUse {
-    User,
-    Group,
-    Domain,
-    Alias,
-    WellKnownGroup,
-    DeletedAccount,
-    Invalid,
-    Unknown,
-    Computer,
-    Label,
-    LogonSession,
-}
-
-/// A Windows SID together with its resolved account name.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SidName {
-    pub sid: Sid,
-    pub name: String,
-    pub domain: String,
-    pub kind: SidNameUse,
-}
-
-impl WindowsTokenInfo {
-    /// Returns the logon SID identified by the token group attributes.
-    pub fn logon_sid(&self) -> Option<&Sid> {
-        const SE_GROUP_LOGON_ID: u32 = 0xC000_0000;
-        self.groups
-            .iter()
-            .find(|group| group.attributes & SE_GROUP_LOGON_ID == SE_GROUP_LOGON_ID)
-            .map(|group| &group.sid)
-    }
-}
-
-#[cfg(windows)]
-impl WindowsTokenInfo {
-    fn current() -> crate::Result<Self> {
-        use std::{
-            io, mem,
-            os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
-            ptr, slice,
-        };
-        use windows_sys::Win32::{
-            Foundation::HANDLE,
-            Security::{
-                GetLengthSid, GetTokenInformation, IsValidSid, PSID, TOKEN_ELEVATION, TOKEN_GROUPS,
-                TOKEN_INFORMATION_CLASS, TOKEN_OWNER, TOKEN_PRIMARY_GROUP, TOKEN_QUERY, TOKEN_USER,
-                TokenElevation, TokenGroups, TokenOwner, TokenPrimaryGroup, TokenUser,
-            },
-            System::Threading::{GetCurrentProcess, OpenProcessToken},
-        };
-
-        fn query(token: HANDLE, class: TOKEN_INFORMATION_CLASS) -> io::Result<Vec<usize>> {
-            let mut required = 0;
-            unsafe {
-                GetTokenInformation(token, class, ptr::null_mut(), 0, &mut required);
-            }
-            if required == 0 {
-                return Err(io::Error::last_os_error());
-            }
-            let word_size = mem::size_of::<usize>();
-            let mut buffer = vec![0usize; (required as usize).div_ceil(word_size)];
-            if unsafe {
-                GetTokenInformation(
-                    token,
-                    class,
-                    buffer.as_mut_ptr().cast(),
-                    required,
-                    &mut required,
-                )
-            } == 0
-            {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(buffer)
-        }
-
-        unsafe fn copy_sid(sid: PSID) -> io::Result<Sid> {
-            if sid.is_null() || unsafe { IsValidSid(sid) } == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "invalid token SID",
-                ));
-            }
-            let length = unsafe { GetLengthSid(sid) } as usize;
-            let bytes = unsafe { slice::from_raw_parts(sid.cast::<u8>(), length) };
-            Sid::from_bytes(bytes)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
-        }
-
-        unsafe fn view<T>(buffer: &[usize]) -> &T {
-            unsafe { &*buffer.as_ptr().cast::<T>() }
-        }
-
-        let mut token = ptr::null_mut();
-        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
-            return Err(io::Error::last_os_error().into());
-        }
-        let token = unsafe { OwnedHandle::from_raw_handle(token) };
-        let token = token.as_raw_handle();
-
-        let elevation = query(token, TokenElevation)?;
-        let user = query(token, TokenUser)?;
-        let owner = query(token, TokenOwner)?;
-        let primary_group = query(token, TokenPrimaryGroup)?;
-        let groups = query(token, TokenGroups)?;
-
-        let elevation = unsafe { view::<TOKEN_ELEVATION>(&elevation) };
-        let user = unsafe { copy_sid(view::<TOKEN_USER>(&user).User.Sid) }?;
-        let owner = unsafe { copy_sid(view::<TOKEN_OWNER>(&owner).Owner) }?;
-        let primary_group =
-            unsafe { copy_sid(view::<TOKEN_PRIMARY_GROUP>(&primary_group).PrimaryGroup) }?;
-        let groups_info = unsafe { view::<TOKEN_GROUPS>(&groups) };
-        let native_groups = unsafe {
-            slice::from_raw_parts(
-                groups_info.Groups.as_ptr(),
-                usize::try_from(groups_info.GroupCount).unwrap(),
-            )
-        };
-        let groups = native_groups
-            .iter()
-            .map(|group| {
-                Ok(TokenGroup {
-                    sid: unsafe { copy_sid(group.Sid) }?,
-                    attributes: group.Attributes,
-                })
-            })
-            .collect::<io::Result<Vec<_>>>()?;
-
-        Ok(Self {
-            is_elevated: elevation.TokenIsElevated != 0,
-            user_sid: user,
-            owner_sid: owner,
-            primary_group_sid: primary_group,
-            groups,
-        })
-    }
-}
-
-impl TargetInfo {
-    pub fn current() -> Self {
-        Self {
-            operating_system: OperatingSystem::current(),
-            architecture: Architecture::current(),
-            logical_cpu_count: std::thread::available_parallelism()
-                .map_or(1, |count| u32::try_from(count.get()).unwrap_or(u32::MAX)),
-            is_wine: current_wine_status(),
-        }
-    }
-}
-
-#[cfg(windows)]
-fn current_wine_status() -> Option<bool> {
-    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
-    use windows_sys::core::w;
-
-    const WINE_GET_VERSION: &[u8] = b"wine_get_version\0";
-
-    let ntdll = unsafe { GetModuleHandleW(w!("ntdll.dll")) };
-    Some(!ntdll.is_null() && unsafe { GetProcAddress(ntdll, WINE_GET_VERSION.as_ptr()) }.is_some())
-}
-
-#[cfg(not(windows))]
-fn current_wine_status() -> Option<bool> {
-    None
-}
-
-/// Snapshot of a VFS target's initial process context.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Query {
-    /// Environment variables from the target process.
-    pub env: HashMap<String, String>,
-    /// Target process's current working directory.
-    pub cwd: Utf8TypedPathBuf,
-    /// Path to the target process's current executable.
-    pub current_exe: Utf8TypedPathBuf,
-    /// Target operating system and processor information.
-    pub target: TargetInfo,
-    /// Target process security information.
-    pub security: SecurityInfo,
-}
-
-impl Query {
-    pub fn current() -> crate::Result<Self> {
-        Ok(Self {
-            // vars() would panic on a value that is not valid UTF-8, which the
-            // login environment probe can legitimately import. Such variables
-            // stay in the process environment (and are inherited by spawned
-            // commands); they are just absent from this snapshot.
-            env: std::env::vars_os()
-                .filter_map(|(name, value)| {
-                    Some((name.into_string().ok()?, value.into_string().ok()?))
-                })
-                .collect(),
-            cwd: typed_path(std::env::current_dir()?)?,
-            current_exe: typed_path(std::env::current_exe()?)?,
-            target: TargetInfo::current(),
-            security: SecurityInfo::current()?,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FileType {
-    File,
-    Dir,
-    Symlink,
-    Fifo,
-    CharacterDevice,
-    BlockDevice,
-    Socket,
-    Unknown,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Permissions {
-    mode: u32,
-}
-
-impl Permissions {
-    pub fn from_mode(mode: u32) -> Self {
-        Self { mode }
-    }
-
-    pub fn mode(&self) -> u32 {
-        self.mode
-    }
-
-    pub fn set_mode(&mut self, mode: u32) {
-        self.mode = mode;
-    }
-
-    pub fn readonly(&self) -> bool {
-        self.mode & 0o222 == 0
-    }
-
-    pub fn set_readonly(&mut self, readonly: bool) {
-        if readonly {
-            self.mode &= !0o222;
-        } else {
-            self.mode |= 0o200;
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Metadata {
-    pub len: u64,
-    pub file_type: FileType,
-    pub atime: i64,
-    pub atime_nsec: i64,
-    pub mtime: i64,
-    pub mtime_nsec: i64,
-    pub ctime: i64,
-    pub ctime_nsec: i64,
-    pub family: MetadataFamily,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum MetadataFamily {
-    Unix(UnixMetadata),
-    Windows(WindowsMetadata),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UnixMetadata {
-    pub mode: u32,
-    pub dev: u64,
-    pub ino: u64,
-    pub nlink: u64,
-    pub uid: u32,
-    pub gid: u32,
-    pub rdev: u64,
-    pub blksize: u64,
-    pub blocks: u64,
-    pub platform: UnixMetadataPlatform,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum UnixMetadataPlatform {
-    FreeBsd { attrs: u32 },
-    Linux { attrs: Option<u32> },
-    Macos { attrs: u32 },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WindowsMetadata {
-    pub mode: u32,
-    pub attrs: u32,
-    pub user: Option<Sid>,
-    pub group: Option<Sid>,
-}
-
-impl Metadata {
-    pub fn unix(&self) -> Option<&UnixMetadata> {
-        match &self.family {
-            MetadataFamily::Unix(metadata) => Some(metadata),
-            MetadataFamily::Windows(_) => None,
-        }
-    }
-
-    pub fn windows(&self) -> Option<&WindowsMetadata> {
-        match &self.family {
-            MetadataFamily::Unix(_) => None,
-            MetadataFamily::Windows(metadata) => Some(metadata),
-        }
-    }
-
-    pub fn permissions(&self) -> Permissions {
-        let mode = match &self.family {
-            MetadataFamily::Unix(metadata) => metadata.mode,
-            MetadataFamily::Windows(metadata) => metadata.mode,
-        };
-        Permissions::from_mode(mode)
-    }
-
-    pub const fn linux_attrs(&self) -> Option<u32> {
-        match &self.family {
-            MetadataFamily::Unix(UnixMetadata {
-                platform: UnixMetadataPlatform::Linux { attrs },
-                ..
-            }) => *attrs,
-            _ => None,
-        }
-    }
-
-    pub const fn freebsd_attrs(&self) -> Option<u32> {
-        match &self.family {
-            MetadataFamily::Unix(UnixMetadata {
-                platform: UnixMetadataPlatform::FreeBsd { attrs },
-                ..
-            }) => Some(*attrs),
-            _ => None,
-        }
-    }
-
-    pub const fn macos_attrs(&self) -> Option<u32> {
-        match &self.family {
-            MetadataFamily::Unix(UnixMetadata {
-                platform: UnixMetadataPlatform::Macos { attrs },
-                ..
-            }) => Some(*attrs),
-            _ => None,
-        }
-    }
-
-    pub const fn win_attrs(&self) -> Option<u32> {
-        match &self.family {
-            MetadataFamily::Windows(metadata) => Some(metadata.attrs),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FsMetadata {
-    pub capacity: u64,
-    pub free: u64,
-    pub available: u64,
-    pub block_size: u32,
-    pub family: FsMetadataFamily,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum FsMetadataFamily {
-    Unix(UnixFsMetadata),
-    Windows(WindowsFsMetadata),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UnixFsMetadata {
-    pub blocks: u64,
-    pub blocks_free: u64,
-    pub blocks_available: u64,
-    pub files: u64,
-    pub files_free: u64,
-    pub files_available: u64,
-    pub fragment_size: u32,
-    pub fsid: Option<u64>,
-    pub name_max: u32,
-    pub platform: UnixFsMetadataPlatform,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum UnixFsMetadataPlatform {
-    Linux { flags: u64 },
-    Macos { flags: u64 },
-    FreeBsd { flags: u64 },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WindowsFsMetadata {
-    pub flags: u32,
-    pub volume_serial_number: u32,
-    pub component_length_max: u32,
-}
-
-impl FsMetadata {
-    pub fn unix(&self) -> Option<&UnixFsMetadata> {
-        match &self.family {
-            FsMetadataFamily::Unix(metadata) => Some(metadata),
-            FsMetadataFamily::Windows(_) => None,
-        }
-    }
-
-    pub fn windows(&self) -> Option<&WindowsFsMetadata> {
-        match &self.family {
-            FsMetadataFamily::Unix(_) => None,
-            FsMetadataFamily::Windows(metadata) => Some(metadata),
-        }
-    }
-
-    #[allow(clippy::unnecessary_cast)]
-    pub fn read_only(&self) -> bool {
-        match &self.family {
-            FsMetadataFamily::Unix(metadata) => metadata.platform.flags() & 1 != 0,
-            FsMetadataFamily::Windows(metadata) => metadata.flags & 0x0008_0000 != 0,
-        }
-    }
-
-    #[allow(clippy::unnecessary_cast)]
-    pub fn no_suid(&self) -> Option<bool> {
-        match &self.family {
-            FsMetadataFamily::Unix(metadata) => Some(metadata.platform.flags() & 2 != 0),
-            FsMetadataFamily::Windows(_) => None,
-        }
-    }
-
-    #[allow(clippy::unnecessary_cast)]
-    pub fn no_exec(&self) -> Option<bool> {
-        self.linux_flag(8)
-    }
-
-    #[allow(clippy::unnecessary_cast)]
-    pub fn synchronous(&self) -> Option<bool> {
-        self.linux_flag(16)
-    }
-
-    #[allow(clippy::unnecessary_cast)]
-    pub fn no_dev(&self) -> Option<bool> {
-        self.linux_flag(4)
-    }
-
-    #[allow(clippy::unnecessary_cast)]
-    pub fn no_atime(&self) -> Option<bool> {
-        self.linux_flag(1024)
-    }
-
-    #[allow(clippy::unnecessary_cast)]
-    pub fn no_dir_atime(&self) -> Option<bool> {
-        self.linux_flag(2048)
-    }
-
-    #[allow(clippy::unnecessary_cast)]
-    pub fn relatime(&self) -> Option<bool> {
-        self.linux_flag(1 << 21)
-    }
-
-    fn linux_flag(&self, flag: u64) -> Option<bool> {
-        match &self.family {
-            FsMetadataFamily::Unix(UnixFsMetadata {
-                platform: UnixFsMetadataPlatform::Linux { flags },
-                ..
-            }) => Some(flags & flag != 0),
-            _ => None,
-        }
-    }
-}
-
-impl UnixFsMetadataPlatform {
-    pub fn flags(&self) -> u64 {
-        match self {
-            Self::FreeBsd { flags } | Self::Linux { flags } | Self::Macos { flags } => *flags,
-        }
-    }
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct AttrFlags(u64);
-
-impl AttrFlags {
-    pub const READONLY: Self = Self(1 << 0);
-    pub const HIDDEN: Self = Self(1 << 1);
-    pub const SYSTEM: Self = Self(1 << 2);
-    pub const ARCHIVE: Self = Self(1 << 3);
-    pub const COMPRESSED: Self = Self(1 << 4);
-    pub const TEMPORARY: Self = Self(1 << 5);
-    pub const OFFLINE: Self = Self(1 << 6);
-    pub const NOT_CONTENT_INDEXED: Self = Self(1 << 7);
-    pub const IMMUTABLE: Self = Self(1 << 8);
-    pub const APPEND_ONLY: Self = Self(1 << 9);
-    pub const NO_DUMP: Self = Self(1 << 10);
-    pub const NO_ATIME: Self = Self(1 << 11);
-    pub const NO_COPY_ON_WRITE: Self = Self(1 << 12);
-    pub const DIR_SYNC: Self = Self(1 << 13);
-    pub const CASEFOLD: Self = Self(1 << 14);
-    pub const DATA_JOURNALING: Self = Self(1 << 15);
-    pub const NO_COMPRESS: Self = Self(1 << 16);
-    pub const PROJECT_INHERIT: Self = Self(1 << 17);
-    pub const SECURE_DELETE: Self = Self(1 << 18);
-    pub const SYNC: Self = Self(1 << 19);
-    pub const NO_TAIL_MERGE: Self = Self(1 << 20);
-    pub const TOP_DIR: Self = Self(1 << 21);
-    pub const UNDELETE: Self = Self(1 << 22);
-    pub const DIRECT_ACCESS: Self = Self(1 << 23);
-    pub const EXTENT_FORMAT: Self = Self(1 << 24);
-    pub const OPAQUE: Self = Self(1 << 25);
-
-    pub const fn empty() -> Self {
-        Self(0)
-    }
-
-    pub const fn contains(self, flag: Self) -> bool {
-        self.0 & flag.0 != 0
-    }
-
-    pub const fn intersects(self, other: Self) -> bool {
-        self.0 & other.0 != 0
-    }
-
-    pub const fn union(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
-
-    pub const fn difference(self, other: Self) -> Self {
-        Self(self.0 & !other.0)
-    }
-
-    pub const fn is_empty(self) -> bool {
-        self.0 == 0
-    }
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AttrsPatch {
-    pub set: AttrFlags,
-    pub clear: AttrFlags,
-}
-
-impl AttrsPatch {
-    pub fn update(&mut self, flag: AttrFlags, value: Option<bool>) {
-        match value {
-            Some(true) => {
-                self.set = self.set.union(flag);
-                self.clear = self.clear.difference(flag);
-            }
-            Some(false) => {
-                self.clear = self.clear.union(flag);
-                self.set = self.set.difference(flag);
-            }
-            None => {}
-        }
-    }
-
-    pub const fn requested(self) -> AttrFlags {
-        self.set.union(self.clear)
-    }
-
-    pub const fn is_empty(self) -> bool {
-        self.set.is_empty() && self.clear.is_empty()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MetadataPatch {
-    pub mode: Option<u32>,
-    pub user: Option<OwnershipIdentity>,
-    pub group: Option<OwnershipIdentity>,
-    pub accessed: Option<i128>,
-    pub modified: Option<i128>,
-    pub created: Option<i128>,
-    pub attrs: AttrsPatch,
-    pub follow: bool,
-}
-
-impl Default for MetadataPatch {
-    fn default() -> Self {
-        Self {
-            mode: None,
-            user: None,
-            group: None,
-            accessed: None,
-            modified: None,
-            created: None,
-            attrs: AttrsPatch::default(),
-            follow: true,
-        }
-    }
-}
-
-impl MetadataPatch {
-    pub fn is_empty(&self) -> bool {
-        self.mode.is_none()
-            && self.user.is_none()
-            && self.group.is_none()
-            && self.accessed.is_none()
-            && self.modified.is_none()
-            && self.created.is_none()
-            && self.attrs.is_empty()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum WellKnownPath {
-    HomeDir,
-    CacheDir,
-    TempDir,
-}
-
-pub(crate) fn metadata_from_std(metadata: std::fs::Metadata) -> Metadata {
-    #[cfg(unix)]
-    {
-        use nix::sys::stat::{SFlag, mode_t};
-        #[cfg(target_os = "macos")]
-        use std::os::darwin::fs::MetadataExt as DarwinMetadataExt;
-        #[cfg(target_os = "freebsd")]
-        use std::os::freebsd::fs::MetadataExt as FreeBsdMetadataExt;
-        use std::os::unix::fs::MetadataExt;
-
-        let mode = metadata.mode();
-        let file_type = match SFlag::from_bits_truncate(mode as mode_t) & SFlag::S_IFMT {
-            SFlag::S_IFREG => crate::FileType::File,
-            SFlag::S_IFDIR => crate::FileType::Dir,
-            SFlag::S_IFLNK => crate::FileType::Symlink,
-            SFlag::S_IFIFO => crate::FileType::Fifo,
-            SFlag::S_IFCHR => crate::FileType::CharacterDevice,
-            SFlag::S_IFBLK => crate::FileType::BlockDevice,
-            SFlag::S_IFSOCK => crate::FileType::Socket,
-            _ => crate::FileType::Unknown,
-        };
-
-        Metadata {
-            len: metadata.len(),
-            file_type,
-            atime: metadata.atime(),
-            atime_nsec: metadata.atime_nsec(),
-            mtime: metadata.mtime(),
-            mtime_nsec: metadata.mtime_nsec(),
-            ctime: metadata.ctime(),
-            ctime_nsec: metadata.ctime_nsec(),
-            family: MetadataFamily::Unix(UnixMetadata {
-                mode,
-                dev: metadata.dev(),
-                ino: metadata.ino(),
-                nlink: metadata.nlink(),
-                uid: metadata.uid(),
-                gid: metadata.gid(),
-                rdev: metadata.rdev(),
-                blksize: metadata.blksize(),
-                blocks: metadata.blocks(),
-                #[cfg(target_os = "linux")]
-                platform: UnixMetadataPlatform::Linux { attrs: None },
-                #[cfg(target_os = "freebsd")]
-                platform: UnixMetadataPlatform::FreeBsd {
-                    attrs: metadata.st_flags(),
-                },
-                #[cfg(target_os = "macos")]
-                platform: UnixMetadataPlatform::Macos {
-                    attrs: metadata.st_flags(),
-                },
-            }),
-        }
-    }
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-
-        let file_type = if metadata.is_file() {
-            crate::FileType::File
-        } else if metadata.is_dir() {
-            crate::FileType::Dir
-        } else if metadata.file_type().is_symlink() {
-            crate::FileType::Symlink
-        } else {
-            crate::FileType::Unknown
-        };
-
-        Metadata {
-            len: metadata.len(),
-            file_type,
-            atime: system_time_to_parts(metadata.accessed().ok()).0,
-            atime_nsec: i64::from(system_time_to_parts(metadata.accessed().ok()).1),
-            mtime: system_time_to_parts(metadata.modified().ok()).0,
-            mtime_nsec: i64::from(system_time_to_parts(metadata.modified().ok()).1),
-            ctime: system_time_to_parts(metadata.created().ok()).0,
-            ctime_nsec: i64::from(system_time_to_parts(metadata.created().ok()).1),
-            family: MetadataFamily::Windows(WindowsMetadata {
-                mode: if metadata.permissions().readonly() {
-                    0o444
-                } else {
-                    0o666
-                },
-                attrs: metadata.file_attributes(),
-                user: None,
-                group: None,
-            }),
-        }
-    }
-}
-
-#[cfg(windows)]
-pub(crate) fn metadata_with_sids(
-    mut metadata: Metadata,
-    user: Option<Sid>,
-    group: Option<Sid>,
-) -> Metadata {
-    let MetadataFamily::Windows(windows) = &mut metadata.family else {
-        unreachable!();
-    };
-    windows.user = user;
-    windows.group = group;
-    metadata
-}
-
-#[cfg(windows)]
-fn system_time_to_parts(time: Option<std::time::SystemTime>) -> (i64, u32) {
-    use std::time::UNIX_EPOCH;
-
-    let Some(time) = time else {
-        return (0, 0);
-    };
-
-    match time.duration_since(UNIX_EPOCH) {
-        Ok(duration) => (
-            i64::try_from(duration.as_secs()).unwrap_or(i64::MAX),
-            duration.subsec_nanos(),
-        ),
-        Err(err) => {
-            let duration = err.duration();
-            let secs = i64::try_from(duration.as_secs()).unwrap_or(i64::MAX);
-            if duration.subsec_nanos() == 0 {
-                (-secs, 0)
-            } else {
-                (-secs - 1, 1_000_000_000 - duration.subsec_nanos())
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum OwnershipIdentity {
-    Id(u32),
-    Name(String),
-    Sid(Sid),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum XattrNamespace<'a> {
-    Default,
-    Named(&'a str),
-    Any,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct XattrEntry {
-    pub name: String,
-    pub namespace: Option<String>,
-    pub size: Option<u64>,
-    pub flags: Option<u8>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StreamEntry {
-    pub name: String,
-    pub r#type: String,
-    pub size: u64,
-    pub alloc_size: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DirEntry {
-    file_name: String,
-    file_type: FileType,
-    family: DirEntryFamily,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DirEntryFamily {
-    Unix { ino: u64 },
-    Windows,
-}
-
-impl DirEntry {
-    pub fn file_name(&self) -> &std::ffi::OsStr {
-        std::ffi::OsStr::new(&self.file_name)
-    }
-
-    pub fn ino(&self) -> Option<u64> {
-        match self.family {
-            DirEntryFamily::Unix { ino } => Some(ino),
-            DirEntryFamily::Windows => None,
-        }
-    }
-
-    pub fn file_type(&self) -> FileType {
-        self.file_type
-    }
-}
-
-pub use read_dir::ReadDir;
-
-pub fn native_path(path: Utf8TypedPath<'_>) -> io::Result<PathBuf> {
-    let matches_target = if cfg!(windows) {
-        path.is_windows()
-    } else {
-        path.is_unix()
-    };
-    if !matches_target {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "path style does not match VFS target",
-        ));
-    }
-    Ok(PathBuf::from(path.as_str()))
-}
-
-pub fn typed_path(path: PathBuf) -> io::Result<Utf8TypedPathBuf> {
-    let path = path
-        .into_os_string()
-        .into_string()
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "path is not valid UTF-8"))?;
-    Ok(if cfg!(windows) {
-        Utf8TypedPathBuf::from_windows(path)
-    } else {
-        Utf8TypedPathBuf::from_unix(path)
-    })
-}
-
-pub const fn target_path_type() -> PathType {
-    if cfg!(windows) {
-        PathType::Windows
-    } else {
-        PathType::Unix
-    }
-}
+pub(crate) use directory::ReadDir;
 
 #[allow(async_fn_in_trait)]
+/// Configures and opens a file on one [`Vfs`] backend.
 pub trait OpenOptions {
+    /// The file handle created by [`open`](Self::open).
     type File: FileHandle;
 
+    /// Enables or disables read access.
     fn read(&mut self, read: bool) -> &mut Self;
+    /// Enables or disables write access.
     fn write(&mut self, write: bool) -> &mut Self;
+    /// Enables or disables append mode.
     fn append(&mut self, append: bool) -> &mut Self;
+    /// Enables or disables creation when the file is absent.
     fn create(&mut self, create: bool) -> &mut Self;
+    /// Enables or disables exclusive creation.
     fn create_new(&mut self, create_new: bool) -> &mut Self;
+    /// Enables or disables truncation when opening.
     fn truncate(&mut self, truncate: bool) -> &mut Self;
+    /// Enables or disables following the final path component when it is a link.
     fn no_follow(&mut self, no_follow: bool) -> &mut Self;
+    /// Opens `path` using the configured options.
     async fn open(&self, path: Utf8TypedPath<'_>) -> Result<Self::File>;
 }
 
+/// An asynchronous file handle produced by a [`Vfs`].
+///
+/// File handles implement Tokio's asynchronous read, write, and seek traits.
 pub trait FileHandle: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Sized {
     async fn to_stdio_send(&self) -> Result<StdioSend>;
     async fn to_stdio_recv(&self) -> Result<StdioRecv>;
@@ -1246,6 +134,7 @@ pub trait FileHandle: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Sized {
 }
 
 #[allow(async_fn_in_trait)]
+/// A spawned process owned by a [`Command`] backend.
 pub trait Child {
     async fn wait(&mut self) -> Result<ProcessStatus>;
     async fn terminate(self) -> Result<Option<ProcessStatus>>
@@ -1254,6 +143,7 @@ pub trait Child {
 }
 
 #[allow(async_fn_in_trait)]
+/// Configures and spawns a process on a [`Vfs`] backend.
 pub trait Command {
     type Child: Child;
     type StdioSend: AsyncWrite + Unpin;
@@ -1284,6 +174,11 @@ pub trait Command {
 }
 
 #[allow(async_fn_in_trait)]
+/// A filesystem and process-execution backend.
+///
+/// Implementations may be local, remote, or a dispatcher over either. A
+/// value's path arguments always use the target's syntax; consult
+/// [`Query::target`] when selecting one for a remote VFS.
 pub trait Vfs {
     type File: FileHandle;
     type StdioSend: AsyncWrite + Unpin;
@@ -1420,80 +315,13 @@ pub trait Vfs {
     ) -> Result<Vec<Utf8TypedPathBuf>>;
 }
 
-pub use direct::{Direct, DirectFile, DirectOpenOptions};
-pub use extension::{
-    DirectContext, ExtContext, ExtGuard, ExtOpaque, ExtOsHandle, ExtResource, InvalidHandle,
-    VfsExtension,
-};
-pub use pipe::{StdioRecv, StdioSend};
+pub(crate) use process::{StdioRecv, StdioSend};
 
-/// Marker for a regular file retained by a VFS RPC session.
-#[derive(Debug)]
-pub struct FileMarker;
-
-/// Marker for another VFS retained by a VFS RPC session.
-#[derive(Debug)]
-pub struct VfsMarker;
-
-#[derive(Debug)]
-pub struct StdioSendMarker;
-
-#[derive(Debug)]
-pub struct StdioRecvMarker;
-
-/// Marker for a child process retained by a VFS RPC session.
-#[derive(Debug)]
-pub struct ChildMarker;
-
+/// A file handle backed by either a remote [`Client`] or local [`Direct`].
 #[derive(Debug)]
 pub enum AnyFile {
     Client(client::ClientFile),
     Direct(DirectFile),
-}
-
-pub struct FileLock {
-    inner: Option<FileLockInner>,
-}
-
-enum FileLockInner {
-    Direct(direct::DirectFileLock),
-    Remote(client::RemoteFileLock),
-}
-
-impl FileLock {
-    fn direct(lock: direct::DirectFileLock) -> Self {
-        Self {
-            inner: Some(FileLockInner::Direct(lock)),
-        }
-    }
-
-    fn remote(lock: client::RemoteFileLock) -> Self {
-        Self {
-            inner: Some(FileLockInner::Remote(lock)),
-        }
-    }
-
-    pub async fn release(&mut self) -> Result<()> {
-        let Some(lock) = self.inner.as_mut() else {
-            return Ok(());
-        };
-        let result = match lock {
-            FileLockInner::Direct(lock) => lock.release().await,
-            FileLockInner::Remote(lock) => lock.release().await,
-        };
-        if result.is_ok() {
-            self.inner = None;
-        }
-        result
-    }
-}
-
-impl std::fmt::Debug for FileLock {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FileLock")
-            .field("released", &self.inner.is_none())
-            .finish()
-    }
 }
 
 macro_rules! dispatch_file_mut {
@@ -1780,7 +608,7 @@ impl PendingRelays {
         let spawn_all = |pairs: Vec<(StdioRecv, StdioSend)>| {
             pairs
                 .into_iter()
-                .map(|(src, dst)| tokio::spawn(pipe::relay(src, dst)))
+                .map(|(src, dst)| tokio::spawn(process::relay(src, dst)))
                 .collect()
         };
         ActiveRelays {
@@ -2151,49 +979,11 @@ impl<'a> Command for AnyCommand<'a> {
     }
 }
 
+/// A VFS backed by either a remote client or the local process.
 #[derive(Clone)]
 pub enum AnyVfs {
     Client(client::Client),
     Direct(Direct),
-}
-
-/// An owned connection to a VFS process whose lifetime is tied to the connection.
-pub struct VfsSession {
-    client: Client,
-    #[cfg(windows)]
-    windows: Option<windows::AdminSession>,
-}
-
-impl VfsSession {
-    pub(crate) fn from_client(client: Client) -> Self {
-        Self {
-            client,
-            #[cfg(windows)]
-            windows: None,
-        }
-    }
-
-    #[cfg(windows)]
-    pub(crate) fn from_windows(session: windows::AdminSession) -> Self {
-        Self {
-            client: session.client().clone(),
-            windows: Some(session),
-        }
-    }
-
-    /// Returns the client for the owned VFS connection.
-    pub fn client(&self) -> &Client {
-        &self.client
-    }
-
-    /// Stops the VFS server and waits for an owned process to exit.
-    pub async fn stop(&self) -> Result<()> {
-        #[cfg(windows)]
-        if let Some(session) = &self.windows {
-            return session.stop().await.map_err(Into::into);
-        }
-        self.client.stop().await
-    }
 }
 
 impl Default for AnyVfs {
@@ -2215,6 +1005,7 @@ impl From<Direct> for AnyVfs {
 }
 
 impl AnyVfs {
+    /// Returns the remote client when this is the remote variant.
     pub fn as_client(&self) -> Option<&client::Client> {
         match self {
             Self::Client(client) => Some(client),
@@ -2222,6 +1013,7 @@ impl AnyVfs {
         }
     }
 
+    /// Returns the remote client when this is the remote variant.
     pub fn into_client(self) -> Option<client::Client> {
         match self {
             Self::Client(client) => Some(client),
@@ -2678,17 +1470,7 @@ impl Vfs for AnyVfs {
 }
 
 /// Client for connecting to the agent daemon and spawning processes.
-pub use client::Client;
+pub(crate) use client::Client;
 /// Builder for constructing spawn requests.
-pub use client::CommandBuilder;
 /// Agent server for VFS RPC connections.
-pub use server::Server;
-
-pub use service::main;
-
-/// Access permission flags for the `access` method.
-#[cfg(unix)]
-pub use nix::unistd::AccessFlags;
-
-#[cfg(windows)]
-pub use windows::AdminSession;
+pub(crate) use server::Server;

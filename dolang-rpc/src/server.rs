@@ -12,12 +12,20 @@ use futures::{
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
-    Error, InvalidOpaque, Kind, Limits, Opaque, OpaqueGuard, OpaqueResource, Protocol, decode,
-    encode_payload, fragment, opaque,
+    Error, Kind, Limits, Protocol, decode, encode_payload, fragment,
+    session::{self, InvalidOpaque, Opaque, OpaqueGuard, OpaqueResource},
     transport::{self, Receiver, SendFrame, Sender},
 };
 
+/// A negotiated server endpoint that has not yet been bound to a [`Protocol`].
+///
+/// Inspect its negotiated application protocol, then consume it with
+/// [`bind`](Unbound::bind) to obtain a [`Server`].
+pub use crate::unbound::UnboundServer as Unbound;
+
 /// A server endpoint for one connection.
+///
+/// Consume it with [`serve`](Self::serve) to dispatch requests from the peer.
 pub struct Server<P: Protocol> {
     sender: transport::AnySender,
     receiver: transport::AnyReceiver,
@@ -56,7 +64,7 @@ enum Message<R> {
 
 struct Inner {
     outstanding: HashMap<u64, Cancellation>,
-    objects: opaque::ObjectTable,
+    objects: session::ObjectTable,
     shutdown: Option<oneshot::Sender<()>>,
 }
 
@@ -67,7 +75,7 @@ struct Cancellation {
 
 impl<P: Protocol> Server<P> {
     /// Builds a `Server` from an already-negotiated transport. Only reachable
-    /// via [`UnboundServer::bind`](crate::UnboundServer::bind) — `Server` has
+    /// via [`Unbound::bind`] — `Server` has
     /// no public constructors of its own, so it's never possible to hold one
     /// that hasn't already completed `fragment::negotiate`, and `serve`
     /// never needs to negotiate itself.
@@ -84,7 +92,7 @@ impl<P: Protocol> Server<P> {
             outgoing_rx,
             inner: Arc::new(Mutex::new(Inner {
                 outstanding: HashMap::new(),
-                objects: opaque::ObjectTable::default(),
+                objects: session::ObjectTable::default(),
                 shutdown: None,
             })),
             limits,
@@ -92,7 +100,13 @@ impl<P: Protocol> Server<P> {
         }
     }
 
-    /// Serves requests until the peer disconnects or the session fails.
+    /// Serves requests until the peer disconnects, the session fails, or a
+    /// handler requests graceful shutdown.
+    ///
+    /// The handler may be called concurrently for independent requests. Each
+    /// invocation must consume its [`CallContext`] with [`CallContext::respond`]
+    /// or [`CallContext::respond_with_trailer`]; dropping the context without
+    /// responding reports a per-request error to the peer.
     pub async fn serve<H>(self, handler: H) -> Result<(), Error>
     where
         H: AsyncFn(CallContext<P>, P::Request) + Send + Sync + 'static,
@@ -182,7 +196,7 @@ impl<P: Protocol> Server<P> {
                             Ok(request) => request,
                             Err(error) => break (Err(error), false, false),
                         };
-                        let trailer = trailer.map(crate::TrailerRecv::new);
+                        let trailer = trailer.map(crate::trailer::TrailerRecv::new);
                         let handler = handler.clone();
                         let task_inner = inner.clone();
                         let task_outgoing = outgoing.clone();
@@ -392,11 +406,13 @@ async fn admit<P: Protocol>(
     Ok(())
 }
 
-/// Services available while processing one request.
+/// Request-scoped services supplied to a server handler.
+///
+/// A context is not cloneable and must be consumed to send a response.
 pub struct CallContext<P: Protocol> {
     id: u64,
     inner: Arc<Mutex<Inner>>,
-    request_trailer: Option<crate::TrailerRecv>,
+    request_trailer: Option<crate::trailer::TrailerRecv>,
     outgoing: mpsc::UnboundedSender<Message<P::Response>>,
     responded: bool,
     shutdown_on_respond: bool,
@@ -405,12 +421,19 @@ pub struct CallContext<P: Protocol> {
 }
 
 impl<P: Protocol> CallContext<P> {
-    /// Returns this request's streaming trailer body, if present.
-    pub fn request_trailer(&mut self) -> Option<&mut crate::TrailerRecv> {
+    /// Returns this request's raw-byte trailer, if present.
+    ///
+    /// The returned value implements [`AsyncRead`](tokio::io::AsyncRead).
+    /// Dropping it or calling [`TrailerRecv::discard`](crate::trailer::TrailerRecv::discard)
+    /// stops local consumption; the peer is notified only if it continues to
+    /// send trailer fragments.
+    pub fn request_trailer(&mut self) -> Option<&mut crate::trailer::TrailerRecv> {
         self.request_trailer.as_mut()
     }
 
-    /// Sends an ordinary response and consumes this call context.
+    /// Sends a response without a trailer and consumes this call context.
+    ///
+    /// Any unread request trailer is discarded.
     pub fn respond(mut self, response: P::Response) {
         drop(self.request_trailer.take());
         self.responded = true;
@@ -423,8 +446,17 @@ impl<P: Protocol> CallContext<P> {
         self.finish_shutdown();
     }
 
-    /// Sends a response head and returns its streaming trailer body.
-    pub fn respond_with_trailer(mut self, response: P::Response) -> crate::TrailerSend<()> {
+    /// Sends a response head and returns a writer for its raw-byte trailer.
+    ///
+    /// Call [`TrailerSend::finish`](crate::trailer::TrailerSend::finish), or
+    /// asynchronously shut down the returned writer, to commit the trailer.
+    /// Dropping it without finishing aborts the trailer. A response cannot
+    /// carry both a trailer and a direct [`OsHandle`](crate::handle::OsHandle)
+    /// attachment. Any unread request trailer is discarded.
+    pub fn respond_with_trailer(
+        mut self,
+        response: P::Response,
+    ) -> crate::trailer::TrailerSend<()> {
         drop(self.request_trailer.take());
         let shared = crate::trailer::SendShared::new(Kind::Response, self.id, &self.limits);
         self.responded = true;
@@ -435,10 +467,14 @@ impl<P: Protocol> CallContext<P> {
             trailer: fragment::Trailer::Stream(shared.clone()),
         });
         self.finish_shutdown();
-        crate::TrailerSend::new(shared, ())
+        crate::trailer::TrailerSend::new(shared, ())
     }
 
-    /// Stops accepting requests and gracefully drains the connection.
+    /// Requests graceful shutdown after this handler sends its response.
+    ///
+    /// The server stops accepting requests once this context is consumed by
+    /// [`respond`](Self::respond) or [`respond_with_trailer`](Self::respond_with_trailer),
+    /// then lets already-running handlers finish.
     pub fn shutdown(&mut self) {
         self.shutdown_on_respond = true;
     }
@@ -451,7 +487,14 @@ impl<P: Protocol> CallContext<P> {
         }
     }
 
-    /// Runs an operation which can observe request cancellation without dropping the handler.
+    /// Runs an operation that can observe request cancellation without dropping
+    /// the handler itself.
+    ///
+    /// If the peer cancels while `operation` is running, its future is dropped
+    /// and this method returns [`RequestCancelled`]. The handler regains the
+    /// context and may perform cleanup or send an application-level response.
+    /// Only one cancellation guard may be active at a time; nesting guards
+    /// panics.
     pub async fn cancel_guard<T, F>(&mut self, operation: F) -> Result<T, RequestCancelled>
     where
         F: AsyncFnOnce(&mut CallContext<P>) -> T,
@@ -489,10 +532,19 @@ impl<P: Protocol> CallContext<P> {
         }
     }
 
+    /// Registers a session-scoped resource and returns its serializable handle.
+    ///
+    /// The caller owns the resource's lifetime and must eventually unregister
+    /// it. Cloning, sending, or dropping the returned [`Opaque`] does not
+    /// affect the registration.
     pub fn register<T: OpaqueResource>(&self, value: T) -> Opaque<T::Marker> {
         self.inner.lock().unwrap().objects.register(value)
     }
 
+    /// Acquires a typed shared guard for a registered opaque resource.
+    ///
+    /// Returns [`InvalidOpaque`] if the handle belongs to another session, was
+    /// unregistered, or does not refer to a resource with concrete type `T`.
     pub fn acquire<T: OpaqueResource>(
         &self,
         value: Opaque<T::Marker>,

@@ -1,12 +1,48 @@
 use std::{io, path::Path};
 
-use crate::{DirEntry, DirEntryFamily, FileType};
+use crate::FileType;
 #[cfg(unix)]
 use nix::{
     dir::{Dir as NixDir, OwningIter, Type},
     fcntl::OFlag,
     sys::stat::Mode,
 };
+use serde::{Deserialize, Serialize};
+
+/// An entry returned by [`ReadDir`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirEntry {
+    file_name: String,
+    file_type: FileType,
+    family: DirEntryFamily,
+}
+
+/// Platform-specific fields carried by a directory entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DirEntryFamily {
+    Unix { ino: u64 },
+    Windows,
+}
+
+impl DirEntry {
+    /// Returns the entry name without its parent path.
+    pub fn file_name(&self) -> &std::ffi::OsStr {
+        std::ffi::OsStr::new(&self.file_name)
+    }
+
+    /// Returns the inode number when the target is Unix-like.
+    pub fn ino(&self) -> Option<u64> {
+        match self.family {
+            DirEntryFamily::Unix { ino } => Some(ino),
+            DirEntryFamily::Windows => None,
+        }
+    }
+
+    /// Returns the entry's file type.
+    pub fn file_type(&self) -> FileType {
+        self.file_type
+    }
+}
 
 #[derive(Debug)]
 pub struct ReadDir {

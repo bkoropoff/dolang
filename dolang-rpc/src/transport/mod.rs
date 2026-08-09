@@ -375,10 +375,14 @@ impl RecvFrame for GenericRecv<'_> {
 impl<'frame> SendFrame<'frame> for GenericSend<'frame> {
     #[cfg(unix)]
     fn attach_fd(&mut self, _fd: BorrowedFd<'frame>) -> io::Result<u32> {
+        // FIXME: Plumb a reportable capability error to the public API instead
+        // of panicking when an OsHandle is serialized on this transport.
         panic!("generic byte-stream transport does not support file descriptors")
     }
     #[cfg(windows)]
     fn attach_handle(&mut self, _handle: BorrowedHandle<'_>) -> io::Result<usize> {
+        // FIXME: Plumb a reportable capability error to the public API instead
+        // of panicking when an OsHandle is serialized on this transport.
         panic!("generic byte-stream transport does not support handles")
     }
 

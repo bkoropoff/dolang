@@ -4,10 +4,12 @@ use dolang::runtime::{
     vm::Builder,
 };
 use dolang_vfs::{
-    AttrFlags, AttrsPatch, FileHandle, FileType, OpenOptions, PosixAcl, Utf8TypedPath,
-    Utf8TypedPathBuf, Vfs, WellKnownPath,
+    FileHandle, OpenOptions, Vfs,
+    metadata::{AttrFlags, AttrsPatch, FileType},
+    path::WellKnownPath,
+    security::PosixAcl,
 };
-use dolang_winterop::{
+use dolang_winterop::security::{
     DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
     SACL_SECURITY_INFORMATION, SecDesc,
 };
@@ -19,6 +21,7 @@ use std::{
     str,
 };
 use tokio::io::{AsyncRead, AsyncWriteExt, ReadBuf};
+use typed_path::{Utf8TypedPath, Utf8TypedPathBuf};
 
 use rand::{RngExt, distr::Alphanumeric};
 
@@ -302,7 +305,7 @@ fn metadata_patch<'v, 's>(
     [modified, accessed, created]: [Option<Slot<'v, '_>>; 3],
     resolve: Option<Slot<'v, '_>>,
     attrs: AttrsPatch,
-) -> Result<'v, 's, dolang_vfs::MetadataPatch> {
+) -> Result<'v, 's, dolang_vfs::metadata::MetadataPatch> {
     let mode = mode.map(|mode| mode.to_u32(strand)).transpose()?;
     let user = user
         .map(|user| parse_ownership_identity(strand, global, &user, "user"))
@@ -314,7 +317,7 @@ fn metadata_patch<'v, 's>(
     let accessed = parse_timestamp_arg(strand, global, accessed, "accessed")?;
     let created = parse_timestamp_arg(strand, global, created, "created")?;
     let follow = resolve_sym(strand, global, resolve, true)?;
-    Ok(dolang_vfs::MetadataPatch {
+    Ok(dolang_vfs::metadata::MetadataPatch {
         mode,
         user,
         group,
@@ -330,7 +333,7 @@ async fn set_metadata<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
     paths: Vec<Utf8TypedPathBuf>,
-    patch: dolang_vfs::MetadataPatch,
+    patch: dolang_vfs::metadata::MetadataPatch,
 ) -> Result<'v, 's, ()> {
     let paths = paths
         .into_iter()
@@ -708,15 +711,17 @@ fn parse_ownership_identity<'v, 's>(
     global: State<'v, Global<'v>>,
     value: &Value<'v>,
     field: &'static str,
-) -> Result<'v, 's, dolang_vfs::OwnershipIdentity> {
+) -> Result<'v, 's, dolang_vfs::security::OwnershipIdentity> {
     if let Some(value) = value.as_int(strand) {
         let value = u32::try_from(value)
             .map_err(|_| Error::type_error(strand, "expected non-negative Int or Str"))?;
-        Ok(dolang_vfs::OwnershipIdentity::Id(value))
+        Ok(dolang_vfs::security::OwnershipIdentity::Id(value))
     } else if let Some(value) = value.as_str(strand) {
-        Ok(dolang_vfs::OwnershipIdentity::Name(value.to_string()))
+        Ok(dolang_vfs::security::OwnershipIdentity::Name(
+            value.to_string(),
+        ))
     } else if let Some(value) = global.types.sid.cast(value) {
-        Ok(dolang_vfs::OwnershipIdentity::Sid(
+        Ok(dolang_vfs::security::OwnershipIdentity::Sid(
             value.enter_sync(strand, |_strand, value| value.annex().clone()),
         ))
     } else {
@@ -826,9 +831,9 @@ async fn glob<'v, 's>(
             .operating_system
             .path_type()
         {
-            dolang_vfs::PathType::Unix => Utf8TypedPath::Unix(dolang_vfs::Utf8UnixPath::new("")),
-            dolang_vfs::PathType::Windows => {
-                Utf8TypedPath::Windows(dolang_vfs::Utf8WindowsPath::new(""))
+            typed_path::PathType::Unix => Utf8TypedPath::Unix(typed_path::Utf8UnixPath::new("")),
+            typed_path::PathType::Windows => {
+                Utf8TypedPath::Windows(typed_path::Utf8WindowsPath::new(""))
             }
         }
     });
@@ -858,7 +863,7 @@ async fn create_temp_dir<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
     parent: Utf8TypedPath<'_>,
-) -> dolang_vfs::Result<Utf8TypedPathBuf> {
+) -> dolang_vfs::error::Result<Utf8TypedPathBuf> {
     let mut rng = rand::rng();
     let vfs = global.local.get(strand).vfs();
     for attempt in 0..1000 {

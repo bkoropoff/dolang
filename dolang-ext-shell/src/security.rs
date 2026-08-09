@@ -16,15 +16,23 @@ use dolang::{
     },
 };
 use dolang_vfs::{
-    OperatingSystemFamily, PosixAce as VfsPosixAce, PosixAcl as VfsPosixAcl,
-    PosixAclPermissions as VfsPosixAclPermissions, PosixAclQualifier as VfsPosixAclQualifier,
-    SecurityInfo, SidName as VfsSidName, SidNameUse, TokenGroup as VfsTokenGroup, UnixSecurityInfo,
-    Vfs as _, WindowsTokenInfo,
+    Vfs as _,
+    security::{
+        PosixAce as VfsPosixAce, PosixAcl as VfsPosixAcl,
+        PosixAclPermissions as VfsPosixAclPermissions, PosixAclQualifier as VfsPosixAclQualifier,
+        SecurityInfo, SidName as VfsSidName, SidNameUse, TokenGroup as VfsTokenGroup,
+        UnixSecurityInfo, WindowsTokenInfo,
+    },
+    target::OperatingSystemFamily,
 };
+use dolang_winterop::security::AccessMask as WinAccessMask;
 use dolang_winterop::{
-    Ace as VfsAce, AceBuf as VfsAceBuf, AceBuildOptions, AceType as VfsAceType, Acl as VfsAcl,
-    AclBuf as VfsAclBuf, Guid as VfsGuid, SecDesc as VfsSecDesc, SecDescUpdate as VfsSecDescUpdate,
-    Sid as VfsSid,
+    guid::Guid as VfsGuid,
+    security::{
+        Ace as VfsAce, AceBuf as VfsAceBuf, AceBuildOptions, AceType as VfsAceType, Acl as VfsAcl,
+        AclBuf as VfsAclBuf, SecDesc as VfsSecDesc, SecDescUpdate as VfsSecDescUpdate,
+        Sid as VfsSid,
+    },
 };
 
 use crate::{error, global::Global, util};
@@ -42,31 +50,28 @@ const SE_GROUP_LOGON_ID: u32 = 0xC000_0000;
 pub(crate) fn configure_compiler<'a>(_compiler: &mut Compiler<'a>) {}
 
 /// Generic Windows `ACCESS_MASK` bits (`security.windows.AccessMask`), a
-/// local newtype over [`dolang_winterop::AccessMask`]'s bit values so
+/// local newtype over [`dolang_winterop::security::AccessMask`]'s bit values so
 /// [`FlagLike`] can be implemented here (both the trait and
-/// `dolang_winterop::AccessMask` are foreign to this crate).
+/// `dolang_winterop::security::AccessMask` are foreign to this crate).
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AccessMask(pub u32);
 
 impl AccessMask {
-    pub const DELETE: AccessMask = AccessMask(dolang_winterop::AccessMask::DELETE.0);
-    pub const READ_CONTROL: AccessMask = AccessMask(dolang_winterop::AccessMask::READ_CONTROL.0);
-    pub const WRITE_DAC: AccessMask = AccessMask(dolang_winterop::AccessMask::WRITE_DAC.0);
-    pub const WRITE_OWNER: AccessMask = AccessMask(dolang_winterop::AccessMask::WRITE_OWNER.0);
-    pub const SYNCHRONIZE: AccessMask = AccessMask(dolang_winterop::AccessMask::SYNCHRONIZE.0);
+    pub const DELETE: AccessMask = AccessMask(WinAccessMask::DELETE.0);
+    pub const READ_CONTROL: AccessMask = AccessMask(WinAccessMask::READ_CONTROL.0);
+    pub const WRITE_DAC: AccessMask = AccessMask(WinAccessMask::WRITE_DAC.0);
+    pub const WRITE_OWNER: AccessMask = AccessMask(WinAccessMask::WRITE_OWNER.0);
+    pub const SYNCHRONIZE: AccessMask = AccessMask(WinAccessMask::SYNCHRONIZE.0);
     pub const STANDARD_RIGHTS_REQUIRED: AccessMask =
-        AccessMask(dolang_winterop::AccessMask::STANDARD_RIGHTS_REQUIRED.0);
-    pub const STANDARD_RIGHTS_ALL: AccessMask =
-        AccessMask(dolang_winterop::AccessMask::STANDARD_RIGHTS_ALL.0);
+        AccessMask(WinAccessMask::STANDARD_RIGHTS_REQUIRED.0);
+    pub const STANDARD_RIGHTS_ALL: AccessMask = AccessMask(WinAccessMask::STANDARD_RIGHTS_ALL.0);
     pub const ACCESS_SYSTEM_SECURITY: AccessMask =
-        AccessMask(dolang_winterop::AccessMask::ACCESS_SYSTEM_SECURITY.0);
-    pub const MAXIMUM_ALLOWED: AccessMask =
-        AccessMask(dolang_winterop::AccessMask::MAXIMUM_ALLOWED.0);
-    pub const GENERIC_ALL: AccessMask = AccessMask(dolang_winterop::AccessMask::GENERIC_ALL.0);
-    pub const GENERIC_EXECUTE: AccessMask =
-        AccessMask(dolang_winterop::AccessMask::GENERIC_EXECUTE.0);
-    pub const GENERIC_WRITE: AccessMask = AccessMask(dolang_winterop::AccessMask::GENERIC_WRITE.0);
-    pub const GENERIC_READ: AccessMask = AccessMask(dolang_winterop::AccessMask::GENERIC_READ.0);
+        AccessMask(WinAccessMask::ACCESS_SYSTEM_SECURITY.0);
+    pub const MAXIMUM_ALLOWED: AccessMask = AccessMask(WinAccessMask::MAXIMUM_ALLOWED.0);
+    pub const GENERIC_ALL: AccessMask = AccessMask(WinAccessMask::GENERIC_ALL.0);
+    pub const GENERIC_EXECUTE: AccessMask = AccessMask(WinAccessMask::GENERIC_EXECUTE.0);
+    pub const GENERIC_WRITE: AccessMask = AccessMask(WinAccessMask::GENERIC_WRITE.0);
+    pub const GENERIC_READ: AccessMask = AccessMask(WinAccessMask::GENERIC_READ.0);
 }
 
 impl BitOr for AccessMask {
@@ -905,31 +910,31 @@ fn ace_options<'v, 's>(
             .map(|value| value.enter_sync(strand, |_strand, value| *value.annex()))
             .ok_or_else(|| Error::type_error(strand, format!("{name}: expected sys.windows.Guid")))
     };
-    Ok(AceBuildOptions {
-        flags: flags
-            .map(|value| ace_u8(strand, value, "flags"))
-            .transpose()?
-            .unwrap_or(0),
-        object_type: object_type
-            .map(|value| guid(strand, value, "object_type"))
-            .transpose()?,
-        inherited_object_type: inherited_object_type
-            .map(|value| guid(strand, value, "inherited_object_type"))
-            .transpose()?,
-        callback: callback
-            .map(|value| ace_bool(strand, value, "callback"))
-            .transpose()?
-            .unwrap_or(false),
-        application_data: application_data
-            .map(|value| {
-                value
-                    .as_bin(strand)
-                    .map(|value| value.to_vec())
-                    .ok_or_else(|| Error::type_error(strand, "application_data: expected Bin"))
-            })
-            .transpose()?
-            .unwrap_or_default(),
-    })
+    let mut options = AceBuildOptions::new();
+    if let Some(value) = flags {
+        options = options.flags(ace_u8(strand, value, "flags")?);
+    }
+    if let Some(value) = object_type {
+        options = options.object_type(guid(strand, value, "object_type")?);
+    }
+    if let Some(value) = inherited_object_type {
+        options = options.inherited_object_type(guid(strand, value, "inherited_object_type")?);
+    }
+    if callback
+        .map(|value| ace_bool(strand, value, "callback"))
+        .transpose()?
+        .unwrap_or(false)
+    {
+        options = options.callback();
+    }
+    if let Some(value) = application_data {
+        let value = value
+            .as_bin(strand)
+            .map(|value| value.to_vec())
+            .ok_or_else(|| Error::type_error(strand, "application_data: expected Bin"))?;
+        options = options.application_data(value);
+    }
+    Ok(options)
 }
 
 fn with_ace<'v, 's, T>(
@@ -1421,33 +1426,43 @@ fn sec_desc_update<'v, 's>(
             }
         })
         .transpose()?;
-    Ok(VfsSecDescUpdate {
-        owner: update_sid(strand, global, owner, "owner")?,
-        group: update_sid(strand, global, group, "group")?,
-        dacl: update_acl(strand, global, dacl, "dacl")?,
-        sacl: update_acl(strand, global, sacl, "sacl")?,
-        owner_defaulted: update_bool(strand, owner_defaulted, "owner_defaulted")?,
-        group_defaulted: update_bool(strand, group_defaulted, "group_defaulted")?,
-        dacl_present: update_bool(strand, dacl_present, "dacl_present")?,
-        dacl_defaulted: update_bool(strand, dacl_defaulted, "dacl_defaulted")?,
-        dacl_auto_inherit_required: update_bool(
-            strand,
-            dacl_auto_inherit_required,
-            "dacl_auto_inherit_required",
-        )?,
-        dacl_auto_inherited: update_bool(strand, dacl_auto_inherited, "dacl_auto_inherited")?,
-        dacl_protected: update_bool(strand, dacl_protected, "dacl_protected")?,
-        sacl_present: update_bool(strand, sacl_present, "sacl_present")?,
-        sacl_defaulted: update_bool(strand, sacl_defaulted, "sacl_defaulted")?,
-        sacl_auto_inherit_required: update_bool(
-            strand,
-            sacl_auto_inherit_required,
-            "sacl_auto_inherit_required",
-        )?,
-        sacl_auto_inherited: update_bool(strand, sacl_auto_inherited, "sacl_auto_inherited")?,
-        sacl_protected: update_bool(strand, sacl_protected, "sacl_protected")?,
-        rm_control,
-    })
+    let mut update = VfsSecDescUpdate::new();
+    if let Some(owner) = update_sid(strand, global, owner, "owner")? {
+        update = update.owner(owner);
+    }
+    if let Some(group) = update_sid(strand, global, group, "group")? {
+        update = update.group(group);
+    }
+    if let Some(dacl) = update_acl(strand, global, dacl, "dacl")? {
+        update = update.dacl(dacl);
+    }
+    if let Some(sacl) = update_acl(strand, global, sacl, "sacl")? {
+        update = update.sacl(sacl);
+    }
+
+    macro_rules! update_flag {
+        ($field:ident) => {
+            if let Some(value) = update_bool(strand, $field, stringify!($field))? {
+                update = update.$field(value);
+            }
+        };
+    }
+    update_flag!(owner_defaulted);
+    update_flag!(group_defaulted);
+    update_flag!(dacl_present);
+    update_flag!(dacl_defaulted);
+    update_flag!(dacl_auto_inherit_required);
+    update_flag!(dacl_auto_inherited);
+    update_flag!(dacl_protected);
+    update_flag!(sacl_present);
+    update_flag!(sacl_defaulted);
+    update_flag!(sacl_auto_inherit_required);
+    update_flag!(sacl_auto_inherited);
+    update_flag!(sacl_protected);
+    if let Some(rm_control) = rm_control {
+        update = update.rm_control(rm_control);
+    }
+    Ok(update)
 }
 
 pub(crate) fn create_sec_desc<'v>(

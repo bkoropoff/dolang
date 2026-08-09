@@ -520,7 +520,7 @@ pub(crate) enum StreamEvent {
         shared: Arc<std::sync::Mutex<RecvShared>>,
         len: usize,
         /// Set when the local consumer had already discarded this trailer
-        /// (via [`crate::TrailerRecv::discard`] or by dropping it) before
+        /// (via [`crate::trailer::TrailerRecv::discard`] or by dropping it) before
         /// this *subsequent* fragment arrived — i.e. the peer is still
         /// sending more than we want. Never set on the fragment that first
         /// hands the trailer to the application. The caller should tell the
@@ -2325,7 +2325,7 @@ mod tests {
             Bytes::from_static(b"hi"),
             Trailer::Stream(shared.clone()),
         );
-        let mut trailer = crate::TrailerSend::new(shared, ());
+        let mut trailer = crate::trailer::TrailerSend::new(shared, ());
         let (mut sender, mut reader) = sender_pair();
 
         // Postcard phase: FIRST, no LAST (a trailer is pending).

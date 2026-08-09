@@ -10,8 +10,12 @@ use std::{
 };
 
 use dolang_vfs::{
-    AnyVfs, Child, Client, Command, FileHandle, MetadataPatch, OpenOptions, OwnershipIdentity,
-    SecurityInfo, Server, TargetInfo, Utf8TypedPath, Utf8WindowsPath, Vfs,
+    AnyVfs, Child, Command, FileHandle, OpenOptions, Vfs,
+    client::Client,
+    metadata::MetadataPatch,
+    security::{OwnershipIdentity, SecurityInfo},
+    server::Server,
+    target::TargetInfo,
 };
 use tempfile::tempdir;
 use tokio::{
@@ -19,6 +23,7 @@ use tokio::{
     net::windows::named_pipe::{ClientOptions, ServerOptions},
     task::JoinHandle,
 };
+use typed_path::{Utf8TypedPath, Utf8WindowsPath};
 use windows_sys::Win32::Security::{
     GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
 };
@@ -425,10 +430,10 @@ async fn stock_binary_registers_vfs_extensions_over_stdio() {
 }
 
 /// Runs the VFS helper in stdio mode with the given extra arguments and
-/// returns its [`dolang_vfs::Query`]. Variables in `without` are removed
+/// returns its [`dolang_vfs::session::Query`]. Variables in `without` are removed
 /// from the child's environment, so anything that comes back must have been
 /// recovered by the helper itself.
-async fn query_stdio_helper(args: &[&str], without: &[&str]) -> dolang_vfs::Query {
+async fn query_stdio_helper(args: &[&str], without: &[&str]) -> dolang_vfs::session::Query {
     const AGENT_BIN: &str = env!("CARGO_BIN_EXE_dolang-vfs");
 
     let mut command = tokio::process::Command::new(AGENT_BIN);
