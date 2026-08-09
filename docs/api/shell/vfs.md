@@ -18,10 +18,6 @@ The `Vfs` retains the background stream for its lifetime.
 | ------ | -------- | --------------------------- |
 | `func` | callable | VFS server launcher         |
 
-#### Returns
-
-`Vfs`
-
 ```
 let remote = Vfs do run ssh host dolang-vfs --stdio
 ```

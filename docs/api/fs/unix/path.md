@@ -12,10 +12,6 @@
 | ------ | -------------------------------------------------- | ----------- |
 | `path` | [`Str`](../../std/str.md)\|[`fs.Path`](../path.md) | Path value  |
 
-#### Returns
-
-`Path`.
-
 Converting a Windows path is allowed only when it is relative and has no root,
 prefix, or alternate data stream.
 

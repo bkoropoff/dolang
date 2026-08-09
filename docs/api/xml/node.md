@@ -21,10 +21,6 @@ Creates an element, optionally with attributes and children.
 | `prefix`    | `str?`  | Preferred namespace prefix                                                 |
 | `attrs`     | `Dict?` | Unnamespaced attributes; keys may be `Sym` or `Str`, values must be `Str`  |
 
-#### Returns
-
-`Node`.
-
 **Errors:**
 
 - `TypeError` if `attrs` is not a `Dict`, or one of its values is not a `Str`.
@@ -115,10 +111,6 @@ Gets the first attribute matching an expanded name.
 | `default`   |        | Value returned when absent        |
 | `else`      |        | Callable evaluated when absent    |
 
-#### Returns
-
-The attribute value, `nil`, or the selected fallback.
-
 ```
 let id = node.attr "id" namespace: "urn:inventory"
 ```
@@ -139,10 +131,6 @@ because attribute identity fields are immutable.
 | `value`     | `Str`  | Attribute value                     |
 | `namespace` | `str?` | Namespace URI                       |
 | `prefix`    | `str?` | Preferred namespace prefix          |
-
-#### Returns
-
-`nil`.
 
 ### `delete_attr name :namespace?`
 
@@ -168,10 +156,6 @@ Appends a child.
 | Name    | Type          | Description |
 | ------- | ------------- | ----------- |
 | `child` | `Node`\|`Str` | Child value |
-
-#### Returns
-
-`nil`.
 
 ### `traverse`
 

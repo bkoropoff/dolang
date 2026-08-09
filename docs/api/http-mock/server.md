@@ -171,10 +171,6 @@ handle.unmount()
 Removes all mocks registered on the server and forgets all received
 requests.
 
-#### Returns
-
-`nil`
-
 ### `received_requests`
 
 Returns every request the server has received, regardless of which (if any)
@@ -189,7 +185,3 @@ shape.
 ### `close`
 
 Shuts down the server. Further requests to its address will fail.
-
-#### Returns
-
-`nil`

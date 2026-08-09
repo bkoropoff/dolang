@@ -173,10 +173,6 @@ are sanitized; direct [`Text`](./text.md) arguments retain their styling.
 | --------- | ---- | ---------------------------------------------- |
 | `...args` | *    | Values converted with `arg` and written safely |
 
-#### Returns
-
-`nil`
-
 ```
 echo status: ready count: 3
 ```
@@ -194,10 +190,6 @@ is omitted when stderr is not a terminal.
 
 Also accepts the module's [style options](#style-options). `:INHERIT:` is a
 no-op for `print`.
-
-#### Returns
-
-`nil`
 
 ```
 print "status: " ready fg: :GREEN: bold: true

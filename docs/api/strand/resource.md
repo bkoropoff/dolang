@@ -14,10 +14,6 @@ Creates a resource with `count` concurrent reservations.
 | ------- | ---------------------- | ----------------------------- |
 | `count` | [`Int`](../std/int.md) | maximum concurrent admissions |
 
-#### Returns
-
-`Resource`
-
 **Errors:**
 
 - Raises `ValueError` if `count` is zero.

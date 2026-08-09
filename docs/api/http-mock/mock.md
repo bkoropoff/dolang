@@ -33,10 +33,6 @@ server.mock
 Re-checks the `expect:` condition of every item registered by this handle
 (if any were given) against requests received so far.
 
-#### Returns
-
-`nil` if all are satisfied (or none had `expect:`)
-
 #### Errors
 
 Raises if any item's `expect:` is unsatisfied, same as at scoped-block exit
@@ -46,7 +42,3 @@ Raises if any item's `expect:` is unsatisfied, same as at scoped-block exit
 
 Unmounts every mock this handle registered. They stop matching further
 requests. Has no effect on items already unmounted.
-
-#### Returns
-
-`nil`

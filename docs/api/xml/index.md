@@ -80,10 +80,6 @@ contain invalid data while it is being edited.
 | ------ | ----------------------- | ------------ |
 | `node` | [`Node`](./node.md)     | Root element |
 
-#### Returns
-
-`nil`.
-
 **Errors:**
 
 - `ValueError` if the tree is invalid or cyclic.
