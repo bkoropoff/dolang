@@ -129,9 +129,9 @@ otherwise.
 
 ### `stop()`
 
-Sends a stop request to the connected VFS server. On Windows, it also waits for
-the elevated process to exit. For a callable-backed `Vfs`, it does not
-explicitly join the launcher strand.
+Sends a stop request to the connected VFS server. A callable-backed `Vfs` then
+closes and joins its launcher stream. On Windows, it also waits for the
+elevated process to exit.
 
 ```
 a.stop()

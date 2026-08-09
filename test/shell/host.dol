@@ -2,6 +2,7 @@ import sys agent _vfs
   strand:
     - stream
   test:
+    - assert
     - assert_eq
     - assert_throws
     - skip
@@ -69,6 +70,16 @@ def stdio_vfs_runs_over_strand_stream()
       vfs.stop()
 
     open $marker r do |file| assert_eq $file.read() "remote"
+
+#[test]
+def stopping_stdio_vfs_joins_launcher()
+  with_temp_dir do |dir|
+    let marker = (dir / "stopped")
+    let vfs = Vfs do
+      run $vfs_bin --stdio
+      open $marker w do |file| file.write "stopped"
+    vfs.stop()
+    assert $marker.exists()
 
 #[test]
 def stdio_vfs_reports_launcher_error()

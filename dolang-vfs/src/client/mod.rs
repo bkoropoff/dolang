@@ -948,6 +948,14 @@ impl Client {
         })
     }
 
+    /// Closes this client's RPC session and releases its transport handles.
+    ///
+    /// Closing any clone closes the shared session, so remaining clones can no
+    /// longer issue requests.
+    pub async fn close(self) {
+        self.rpc.close().await;
+    }
+
     /// Connect to an agent daemon at the given socket path.
     #[cfg(unix)]
     pub async fn connect(path: impl AsRef<Path>) -> crate::Result<Self> {
