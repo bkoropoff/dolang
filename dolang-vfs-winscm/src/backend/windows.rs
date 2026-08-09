@@ -66,6 +66,20 @@ unsafe fn from_wide(ptr: *const u16) -> String {
     String::from_utf16_lossy(slice)
 }
 
+/// Reads a possibly absent NUL-terminated wide string.
+///
+/// # Safety
+///
+/// `ptr` must be null or point to a valid NUL-terminated UTF-16 string.
+unsafe fn from_optional_wide(ptr: *const u16) -> Option<String> {
+    if ptr.is_null() {
+        None
+    } else {
+        // SAFETY: established by the non-null branch and the caller's contract.
+        Some(unsafe { from_wide(ptr) })
+    }
+}
+
 unsafe fn from_multi_wide(mut ptr: *const u16) -> Vec<String> {
     let mut values = Vec::new();
     if ptr.is_null() {
@@ -299,10 +313,12 @@ fn enum_services(
         };
         for entry in entries {
             services.push(ServiceInfo {
-                // SAFETY: NUL-terminated wide strings pointing into `buf`,
-                // per the slice's own safety comment above.
+                // SAFETY: the service name is a NUL-terminated wide string
+                // pointing into `buf`, per the slice's own safety comment.
                 name: unsafe { from_wide(entry.lpServiceName) },
-                display_name: unsafe { from_wide(entry.lpDisplayName) },
+                // Wine may return a null display-name pointer for built-in
+                // services; preserve that absence across the API boundary.
+                display_name: unsafe { from_optional_wide(entry.lpDisplayName) },
                 status: status_from_raw(&entry.ServiceStatusProcess),
             });
         }

@@ -220,7 +220,7 @@ mod live {
         let service = match manager
             .create_service_with_options(
                 &name,
-                None,
+                Some(&name),
                 ServiceType::WIN32_OWN_PROCESS,
                 StartType::DEMAND_START,
                 ErrorControl::NORMAL,

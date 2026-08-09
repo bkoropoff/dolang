@@ -12,7 +12,7 @@ Service name. **Type:** [`Str`](../std/str.md)
 
 ### `display_name`
 
-Display name. **Type:** [`Str`](../std/str.md)
+Display name. **Type:** [`Str`](../std/str.md)|`nil`
 
 ### `status`
 

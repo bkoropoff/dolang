@@ -243,7 +243,7 @@ impl ServiceStateFilter {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceInfo {
     pub name: String,
-    pub display_name: String,
+    pub display_name: Option<String>,
     pub status: ServiceStatus,
 }
 

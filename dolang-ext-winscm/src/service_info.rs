@@ -11,7 +11,7 @@ pub(crate) struct ServiceEntry;
 pub(crate) struct ServiceEntryAnnex<'v> {
     pub(crate) global: State<'v, Global<'v>>,
     pub(crate) name: String,
-    pub(crate) display_name: String,
+    pub(crate) display_name: Option<String>,
     pub(crate) status: ServiceStatus,
 }
 
@@ -29,7 +29,10 @@ impl<'v> Object<'v> for ServiceEntry {
                 Ok(())
             })
             .get("display_name", |this, strand, out| {
-                Output::set(strand, out, this.annex().display_name.as_str());
+                match this.annex().display_name.as_deref() {
+                    Some(display_name) => Output::set(strand, out, display_name),
+                    None => Output::set(strand, out, dolang::runtime::value::Nil),
+                }
                 Ok(())
             })
             .get("status", |this, strand, out| {
