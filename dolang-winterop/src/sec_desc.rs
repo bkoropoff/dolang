@@ -15,10 +15,15 @@ use crate::{Guid, Sid};
 
 const REVISION: u8 = 1;
 
+/// `SECURITY_INFORMATION` bit selecting the owner SID.
 pub const OWNER_SECURITY_INFORMATION: u32 = 0x0000_0001;
+/// `SECURITY_INFORMATION` bit selecting the primary group SID.
 pub const GROUP_SECURITY_INFORMATION: u32 = 0x0000_0002;
+/// `SECURITY_INFORMATION` bit selecting the discretionary ACL.
 pub const DACL_SECURITY_INFORMATION: u32 = 0x0000_0004;
+/// `SECURITY_INFORMATION` bit selecting the system ACL.
 pub const SACL_SECURITY_INFORMATION: u32 = 0x0000_0008;
+/// Mask selecting every supported security-descriptor component.
 pub const ALL_SECURITY_INFORMATION: u32 = OWNER_SECURITY_INFORMATION
     | GROUP_SECURITY_INFORMATION
     | DACL_SECURITY_INFORMATION
@@ -167,28 +172,51 @@ impl ExactSizeIterator for Aces<'_> {}
 /// A classified native ACE type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AceType {
+    /// Grants access.
     AccessAllowed,
+    /// Denies access.
     AccessDenied,
+    /// Emits an audit event.
     SystemAudit,
+    /// Raises a system alarm.
     SystemAlarm,
+    /// A compound access-allowed ACE.
     AccessAllowedCompound,
+    /// An object-specific access-allowed ACE.
     AccessAllowedObject,
+    /// An object-specific access-denied ACE.
     AccessDeniedObject,
+    /// An object-specific system-audit ACE.
     SystemAuditObject,
+    /// An object-specific system-alarm ACE.
     SystemAlarmObject,
+    /// A callback access-allowed ACE.
     AccessAllowedCallback,
+    /// A callback access-denied ACE.
     AccessDeniedCallback,
+    /// A callback object-specific access-allowed ACE.
     AccessAllowedCallbackObject,
+    /// A callback object-specific access-denied ACE.
     AccessDeniedCallbackObject,
+    /// A callback system-audit ACE.
     SystemAuditCallback,
+    /// A callback system-alarm ACE.
     SystemAlarmCallback,
+    /// A callback object-specific system-audit ACE.
     SystemAuditCallbackObject,
+    /// A callback object-specific system-alarm ACE.
     SystemAlarmCallbackObject,
+    /// A mandatory-integrity-label ACE.
     SystemMandatoryLabel,
+    /// A resource-attribute ACE.
     SystemResourceAttribute,
+    /// A scoped-policy-ID ACE.
     SystemScopedPolicyId,
+    /// A process-trust-label ACE.
     SystemProcessTrustLabel,
+    /// An access-filter ACE.
     SystemAccessFilter,
+    /// An unrecognized native ACE type code.
     Unknown(u8),
 }
 
@@ -402,10 +430,15 @@ impl AsRef<Ace> for Ace {
 /// Options shared by the supported ACE builders.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AceBuildOptions {
+    /// Native ACE inheritance and audit flags.
     pub flags: u8,
+    /// Object-type GUID for an object ACE.
     pub object_type: Option<Guid>,
+    /// Inherited-object-type GUID for an object ACE.
     pub inherited_object_type: Option<Guid>,
+    /// Uses the callback ACE variant.
     pub callback: bool,
+    /// Opaque data appended after the SID.
     pub application_data: Vec<u8>,
 }
 
@@ -677,8 +710,11 @@ impl<'de> Deserialize<'de> for AclBuf {
 /// Error returned when building an ACE.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AceBuildError {
+    /// An audit ACE selected neither successful nor failed access.
     AuditOutcome,
+    /// Audit outcome bits were supplied both explicitly and through `flags`.
     AuditFlags,
+    /// The generated packet exceeds the 16-bit native size field.
     Size(usize),
 }
 
@@ -697,9 +733,13 @@ impl error::Error for AceBuildError {}
 /// Error returned when building an ACL.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AclBuildError {
+    /// The requested ACL revision is unsupported.
     Revision(u8),
+    /// Revision 2 cannot encode an object ACE.
     ObjectRevision,
+    /// The ACL contains too many ACEs for its 16-bit count field.
     Count(usize),
+    /// The ACL packet exceeds its 16-bit size field.
     Size(usize),
 }
 
@@ -732,9 +772,13 @@ fn parse_ace_sid(bytes: &[u8], offset: usize) -> Result<(Sid, usize), AceError> 
 /// Error returned when parsing an ACL.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AclError {
+    /// The packet is shorter than an ACL header or is not DWORD-aligned.
     Length(usize),
+    /// The declared packet size differs from the supplied byte length.
     Size(u16, usize),
+    /// Fewer ACE packets could be read than the header declares.
     AceCount(u16, usize),
+    /// An ACE at the supplied index is malformed.
     Ace(usize, AceError),
 }
 
@@ -760,11 +804,17 @@ impl error::Error for AclError {}
 /// Error returned when parsing an ACE.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AceError {
+    /// The packet is shorter than an ACE header.
     Length(usize),
+    /// The declared packet size differs from the supplied byte length.
     Size(u16, usize),
+    /// The packet is not DWORD-aligned.
     Alignment(usize),
+    /// An ACE declared inside an ACL extends beyond that ACL's bytes.
     Bounds(usize),
+    /// A recognized ACE body is truncated or malformed.
     Body,
+    /// The ACE's embedded SID is malformed.
     Sid,
 }
 
@@ -786,7 +836,12 @@ impl fmt::Display for AceError {
 
 impl error::Error for AceError {}
 
-/// A portable representation of a Windows security descriptor.
+/// A validated, portable representation of a self-relative Windows security descriptor.
+///
+/// A descriptor tracks which components were loaded through its
+/// [`mask`](Self::mask), so partial security queries can be carried without
+/// pretending that omitted components were absent on the target. Use
+/// [`SecDescUpdate`] with [`with`](Self::with) to make a checked update.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecDesc {
     mask: u32,
@@ -802,22 +857,39 @@ pub struct SecDesc {
 /// A functional update to a [`SecDesc`].
 #[derive(Clone, Debug, Default)]
 pub struct SecDescUpdate {
+    /// Owner update: `Some(None)` clears it and `Some(Some(_))` replaces it.
     pub owner: Option<Option<Sid>>,
+    /// Primary-group update: `Some(None)` clears it and `Some(Some(_))` replaces it.
     pub group: Option<Option<Sid>>,
+    /// DACL update: `Some(None)` supplies a null DACL and `Some(Some(_))` replaces it.
     pub dacl: Option<Option<AclBuf>>,
+    /// SACL update: `Some(None)` supplies a null SACL and `Some(Some(_))` replaces it.
     pub sacl: Option<Option<AclBuf>>,
+    /// Sets the owner-defaulted control bit.
     pub owner_defaulted: Option<bool>,
+    /// Sets the group-defaulted control bit.
     pub group_defaulted: Option<bool>,
+    /// Sets whether a DACL is present.
     pub dacl_present: Option<bool>,
+    /// Sets the DACL-defaulted control bit.
     pub dacl_defaulted: Option<bool>,
+    /// Sets the DACL auto-inheritance-requested control bit.
     pub dacl_auto_inherit_required: Option<bool>,
+    /// Sets the DACL auto-inherited control bit.
     pub dacl_auto_inherited: Option<bool>,
+    /// Sets the DACL-protected control bit.
     pub dacl_protected: Option<bool>,
+    /// Sets whether a SACL is present.
     pub sacl_present: Option<bool>,
+    /// Sets the SACL-defaulted control bit.
     pub sacl_defaulted: Option<bool>,
+    /// Sets the SACL auto-inheritance-requested control bit.
     pub sacl_auto_inherit_required: Option<bool>,
+    /// Sets the SACL auto-inherited control bit.
     pub sacl_auto_inherited: Option<bool>,
+    /// Sets the SACL-protected control bit.
     pub sacl_protected: Option<bool>,
+    /// Resource-manager control update: `Some(None)` clears validity.
     pub rm_control: Option<Option<u8>>,
 }
 
@@ -1417,18 +1489,31 @@ impl<'de> Deserialize<'de> for SecDesc {
 /// Error returned when constructing or deserializing a security descriptor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SecDescError {
+    /// The descriptor uses an unsupported revision.
     Revision(u8),
+    /// An owner SID was supplied without loading the owner component.
     OwnerNotLoaded,
+    /// A group SID was supplied without loading the group component.
     GroupNotLoaded,
+    /// An ACL was supplied without loading its component.
     AclNotLoaded(&'static str),
+    /// An ACL was supplied while its present bit is clear.
     AclNotPresent(&'static str),
+    /// An update supplies an ACL while explicitly marking it absent.
     AclPresenceConflict(&'static str),
+    /// An update marks an unloaded or absent ACL present without supplying one.
     AclPresenceRequiresValue(&'static str),
+    /// An update changes a control bit for an unloaded component.
     ComponentNotLoaded(&'static str),
+    /// A supplied ACL packet is malformed.
     Acl(&'static str, AclError),
+    /// The self-relative descriptor header is truncated.
     PacketLength,
+    /// The descriptor is in absolute rather than self-relative form.
     NotSelfRelative,
+    /// A component offset is invalid or misaligned.
     PacketOffset(&'static str, u32),
+    /// A component packet is truncated or malformed.
     PacketComponent(&'static str),
 }
 

@@ -1,4 +1,9 @@
 //! Windows process command-line argument encoding and parsing.
+//!
+//! Windows process creation receives one command-line string, not an argv
+//! array. [`join_arguments`] encodes an argv-like input using the convention
+//! understood by the MSVC runtime and Rust's standard library; pair it with
+//! [`split_arguments`] when parsing that same convention.
 
 use std::{error::Error, fmt};
 
@@ -20,6 +25,9 @@ impl Error for NulError {}
 ///
 /// Callers that build a complete command line from untrusted arguments should
 /// prefer [`join_arguments`], which rejects NUL characters.
+///
+/// This low-level helper intentionally does not reject NUL characters because
+/// it appends into caller-owned output.
 pub fn quote_argument(argument: &str, output: &mut String) {
     let quote = argument.is_empty() || argument.contains([' ', '\t', '"']);
     if !quote {
@@ -49,6 +57,14 @@ pub fn quote_argument(argument: &str, output: &mut String) {
 /// Encodes arguments as one MSVC-compatible Windows command line.
 ///
 /// Returns [`NulError`] when an argument contains a NUL character.
+///
+/// ```
+/// use dolang_winterop::process::{join_arguments, split_arguments};
+///
+/// let command_line = join_arguments(["tool", "two words", r#"a\"quote"#])?;
+/// assert_eq!(split_arguments(&command_line), ["tool", "two words", r#"a\"quote"#]);
+/// # Ok::<(), dolang_winterop::process::NulError>(())
+/// ```
 pub fn join_arguments<I, S>(arguments: I) -> std::result::Result<String, NulError>
 where
     I: IntoIterator<Item = S>,

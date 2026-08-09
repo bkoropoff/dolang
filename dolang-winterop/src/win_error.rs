@@ -1,4 +1,7 @@
 //! Win32 error code name/value lookup, generated from MS-ERREF.
+//!
+//! The lookup table is static and works on non-Windows targets as well, which
+//! is useful when decoding an error returned by a remote Windows peer.
 
 macro_rules! error_codes {
     (
@@ -22,12 +25,16 @@ mod generated;
 
 /// Looks up the symbolic name of a Win32 error code (e.g.
 /// `ERROR_FILE_NOT_FOUND` for `2`).
+///
+/// The name is the Win32 symbolic constant, not a localized system message.
 pub fn win_error_name(code: u32) -> Option<&'static str> {
     generated::WIN_ERROR_BY_CODE.get(&code).copied()
 }
 
 /// Looks up the numeric value of a Win32 error code by its symbolic name
 /// (e.g. `2` for `ERROR_FILE_NOT_FOUND`), including known aliases.
+///
+/// Matching is exact and case-sensitive.
 pub fn win_error_code(name: &str) -> Option<u32> {
     generated::WIN_ERROR_BY_NAME.get(name).copied()
 }

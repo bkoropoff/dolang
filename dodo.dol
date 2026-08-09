@@ -27,6 +27,7 @@ let MKDOCS_BINS = $
 let DOC_CRATES = $
   - dolang
   - dolang-rpc
+  - dolang-winterop
   - dolang-vfs
 
 let PUBLISH_CRATES = $

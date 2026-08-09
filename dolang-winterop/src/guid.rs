@@ -3,11 +3,21 @@ use std::{error, fmt, str::FromStr};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 /// A Windows globally unique identifier (GUID).
+///
+/// Parse and format it using the canonical hyphenated form:
+///
+/// ```
+/// use dolang_winterop::Guid;
+///
+/// let guid: Guid = "00112233-4455-6677-8899-aabbccddeeff".parse()?;
+/// assert_eq!(guid.to_string(), "00112233-4455-6677-8899-aabbccddeeff");
+/// # Ok::<(), dolang_winterop::GuidError>(())
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Guid([u8; 16]);
 
 impl Guid {
-    /// Parses the native 16-byte Windows GUID representation.
+    /// Parses the 16-byte in-memory layout used by Windows APIs.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, GuidError> {
         let bytes = bytes.try_into().map_err(|_| GuidError::PacketLength)?;
         Ok(Self(bytes))
@@ -101,7 +111,9 @@ impl<'de> Deserialize<'de> for Guid {
 /// Error returned when parsing a GUID.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GuidError {
+    /// A binary packet was not exactly 16 bytes long.
     PacketLength,
+    /// Text was not a canonical hyphenated GUID.
     StringSyntax,
 }
 
