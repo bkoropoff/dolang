@@ -92,6 +92,7 @@ fn split_assignment(arg: &OsStr) -> Option<(OsString, OsString)> {
     }
 }
 
+/// Runs the VFS service using command-line `args`.
 pub fn main(args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> io::Result<()> {
     let mut env_ops = Vec::new();
     let mut cwd: Option<PathBuf> = None;

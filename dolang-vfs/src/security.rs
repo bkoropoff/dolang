@@ -23,63 +23,93 @@ pub enum OwnershipIdentity {
 /// Snapshot of a VFS target's process security context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SecurityInfo {
+    /// Unix identity information.
     Unix(UnixSecurityInfo),
+    /// Windows token information.
     Windows(WindowsTokenInfo),
 }
 
 /// Unix identity information for a VFS target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnixSecurityInfo {
+    /// Real user ID.
     pub uid: u32,
+    /// Real group ID.
     pub gid: u32,
+    /// Effective user ID.
     pub euid: u32,
+    /// Effective group ID.
     pub egid: u32,
+    /// Supplementary group IDs.
     pub group_ids: Vec<u32>,
 }
 
 /// Windows token information for a VFS target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WindowsTokenInfo {
+    /// Whether the token has elevated administrator privileges.
     pub is_elevated: bool,
+    /// Token user SID.
     pub user_sid: Sid,
+    /// Token owner SID.
     pub owner_sid: Sid,
+    /// Token primary group SID.
     pub primary_group_sid: Sid,
+    /// Token group memberships.
     pub groups: Vec<TokenGroup>,
 }
 
 /// A Windows token group SID and its attribute mask.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenGroup {
+    /// Group security identifier.
     pub sid: Sid,
+    /// Native group attributes bitmask.
     pub attributes: u32,
 }
 
 /// Classification returned by Windows account-name lookup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SidNameUse {
+    /// User account.
     User,
+    /// Group account.
     Group,
+    /// Domain account.
     Domain,
+    /// Local alias.
     Alias,
+    /// Well-known group.
     WellKnownGroup,
+    /// Deleted account.
     DeletedAccount,
+    /// Invalid SID type.
     Invalid,
+    /// Unrecognized SID type.
     Unknown,
+    /// Computer account.
     Computer,
+    /// Integrity label.
     Label,
+    /// Logon session.
     LogonSession,
 }
 
 /// A Windows SID together with its resolved account name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SidName {
+    /// Resolved security identifier.
     pub sid: Sid,
+    /// Account name.
     pub name: String,
+    /// Account domain.
     pub domain: String,
+    /// Account classification.
     pub kind: SidNameUse,
 }
 
 impl SecurityInfo {
+    /// Captures the security context of the current process.
     pub fn current() -> crate::Result<Self> {
         #[cfg(unix)]
         return Ok(Self::Unix(UnixSecurityInfo::current()?));

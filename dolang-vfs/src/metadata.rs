@@ -8,13 +8,21 @@ use crate::security::OwnershipIdentity;
 /// The kind of filesystem object described by [`Metadata`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FileType {
+    /// Regular file.
     File,
+    /// Directory.
     Dir,
+    /// Symbolic link.
     Symlink,
+    /// FIFO or named pipe.
     Fifo,
+    /// Character device.
     CharacterDevice,
+    /// Block device.
     BlockDevice,
+    /// Unix-domain socket.
     Socket,
+    /// Unrecognized file type.
     Unknown,
 }
 
@@ -25,18 +33,23 @@ pub struct Permissions {
 }
 
 impl Permissions {
+    /// Creates permissions from Unix-style mode bits.
     pub fn from_mode(mode: u32) -> Self {
         Self { mode }
     }
+    /// Returns the Unix-style mode bits.
     pub fn mode(&self) -> u32 {
         self.mode
     }
+    /// Replaces the Unix-style mode bits.
     pub fn set_mode(&mut self, mode: u32) {
         self.mode = mode;
     }
+    /// Returns whether no write permission bit is set.
     pub fn readonly(&self) -> bool {
         self.mode & 0o222 == 0
     }
+    /// Sets or clears the read-only state.
     pub fn set_readonly(&mut self, readonly: bool) {
         if readonly {
             self.mode &= !0o222;
@@ -49,34 +62,55 @@ impl Permissions {
 /// Metadata for one filesystem object.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Metadata {
+    /// File length in bytes.
     pub len: u64,
+    /// File kind.
     pub file_type: FileType,
+    /// Last-access time in seconds since the Unix epoch.
     pub atime: i64,
+    /// Nanosecond component of [`atime`](Self::atime).
     pub atime_nsec: i64,
+    /// Last-modification time in seconds since the Unix epoch.
     pub mtime: i64,
+    /// Nanosecond component of [`mtime`](Self::mtime).
     pub mtime_nsec: i64,
+    /// Metadata-change time in seconds since the Unix epoch.
     pub ctime: i64,
+    /// Nanosecond component of [`ctime`](Self::ctime).
     pub ctime_nsec: i64,
+    /// Platform-specific metadata.
     pub family: MetadataFamily,
 }
 
 /// Platform-specific metadata payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MetadataFamily {
+    /// Unix metadata.
     Unix(UnixMetadata),
+    /// Windows metadata.
     Windows(WindowsMetadata),
 }
 
+/// Metadata specific to Unix targets.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnixMetadata {
+    /// File mode bits.
     pub mode: u32,
+    /// Device ID containing the file.
     pub dev: u64,
+    /// File inode number.
     pub ino: u64,
+    /// Number of hard links.
     pub nlink: u64,
+    /// Owning user ID.
     pub uid: u32,
+    /// Owning group ID.
     pub gid: u32,
+    /// Device ID for special files.
     pub rdev: u64,
+    /// Preferred I/O block size.
     pub blksize: u64,
+    /// Number of allocated blocks.
     pub blocks: u64,
     pub platform: UnixMetadataPlatform,
 }

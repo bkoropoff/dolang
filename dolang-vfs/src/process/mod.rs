@@ -65,7 +65,9 @@ impl ProcessStatus {
 /// Whether a spawned process is attached to the foreground process group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProcessControl {
+    /// Run in the foreground process group.
     Foreground,
+    /// Run without foreground process-group control.
     Background,
 }
 
@@ -127,8 +129,11 @@ impl Signal {
 /// Policy used to terminate a spawned process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminationPolicy {
+    /// Signal sent to request graceful termination.
     pub signal: Signal,
+    /// Time to wait before optional forced termination.
     pub grace: Duration,
+    /// Whether to force termination after the grace period.
     pub force: bool,
 }
 
@@ -153,29 +158,41 @@ use std::{
 #[cfg(windows)]
 use tokio::task::JoinHandle;
 
+/// A writable standard-I/O endpoint from either a local or remote VFS.
 #[derive(Debug)]
 pub enum StdioSend {
+    /// Endpoint backed by a local OS resource.
     Native(NativeStdioSend),
+    /// Endpoint retained by a remote VFS session.
     Remote(crate::client::RemoteStdioSend),
 }
 
+/// A readable standard-I/O endpoint from either a local or remote VFS.
 #[derive(Debug)]
 pub enum StdioRecv {
+    /// Endpoint backed by a local OS resource.
     Native(NativeStdioRecv),
+    /// Endpoint retained by a remote VFS session.
     Remote(crate::client::RemoteStdioRecv),
 }
 
 #[cfg(unix)]
+/// Local writable standard-I/O resource on Unix.
 #[derive(Debug)]
 pub enum NativeStdioSend {
+    /// Unix pipe sender.
     Pipe(tokio::net::unix::pipe::Sender),
+    /// Asynchronous file.
     File(File),
 }
 
 #[cfg(unix)]
+/// Local readable standard-I/O resource on Unix.
 #[derive(Debug)]
 pub enum NativeStdioRecv {
+    /// Unix pipe receiver.
     Pipe(tokio::net::unix::pipe::Receiver),
+    /// Asynchronous file.
     File(File),
 }
 

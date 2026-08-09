@@ -20,7 +20,9 @@ pub struct DirEntry {
 /// Platform-specific fields carried by a directory entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DirEntryFamily {
+    /// Unix-specific entry information.
     Unix { ino: u64 },
+    /// Windows entry information.
     Windows,
 }
 
@@ -44,6 +46,7 @@ impl DirEntry {
     }
 }
 
+/// An asynchronous directory iterator.
 #[derive(Debug)]
 pub struct ReadDir {
     inner: ReadDirInner,
@@ -86,6 +89,7 @@ impl ReadDir {
         }
     }
 
+    /// Returns the next directory entry, or `None` after the iterator is exhausted.
     pub async fn next_entry(&mut self) -> io::Result<Option<DirEntry>> {
         match &mut self.inner {
             #[cfg(unix)]

@@ -5,9 +5,13 @@ use serde::{Deserialize, Serialize};
 /// Operating system that produced a target description or native error code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OperatingSystem {
+    /// FreeBSD.
     FreeBsd,
+    /// Linux.
     Linux,
+    /// macOS.
     Macos,
+    /// Windows.
     Windows,
 }
 
@@ -43,27 +47,36 @@ impl OperatingSystem {
 /// CPU architecture reported by a VFS target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Architecture {
+    /// 64-bit x86.
     X86_64,
+    /// 64-bit ARM.
     Aarch64,
 }
 
 /// Broad operating-system family used for platform-specific behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperatingSystemFamily {
+    /// Unix-like operating systems.
     Unix,
+    /// Windows operating systems.
     Windows,
 }
 
 /// Target operating-system and processor information.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TargetInfo {
+    /// Target operating system.
     pub operating_system: OperatingSystem,
+    /// Target CPU architecture.
     pub architecture: Architecture,
+    /// Number of logical CPUs available to the target.
     pub logical_cpu_count: u32,
+    /// Whether the target is Windows running under Wine, when applicable.
     pub is_wine: Option<bool>,
 }
 
 impl Architecture {
+    /// Returns the architecture of the current host.
     pub fn current() -> Self {
         #[cfg(target_arch = "x86_64")]
         return Self::X86_64;
@@ -75,6 +88,7 @@ impl Architecture {
 }
 
 impl OperatingSystem {
+    /// Returns the broad family containing this operating system.
     pub fn family(&self) -> OperatingSystemFamily {
         match self {
             Self::FreeBsd | Self::Linux | Self::Macos => OperatingSystemFamily::Unix,
@@ -83,6 +97,7 @@ impl OperatingSystem {
     }
 }
 impl TargetInfo {
+    /// Returns a description of the current host.
     pub fn current() -> Self {
         Self {
             operating_system: OperatingSystem::current(),
