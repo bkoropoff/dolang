@@ -1,6 +1,6 @@
 [package]
 name = "dolang-winterop"
-version = "0.1.0"
+version = "0.1.1"
 description = "Portable Windows security-descriptor/SID/GUID primitives."
 edition = "2024"
 license.workspace = true

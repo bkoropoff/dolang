@@ -41,11 +41,11 @@ features = ["diagnostic-rendering"]
 
 [dependencies.dolang-vfs]
 path = "../dolang-vfs"
-version = "0.1.0"
+version = "0.1.1"
 
 [dependencies.dolang-winterop]
 path = "../dolang-winterop"
-version = "0.1.0"
+version = "0.1.1"
 
 [target.'cfg(unix)'.dependencies.nix]
 version = "0.31"

@@ -30,7 +30,7 @@ sqlite-plugin= "0.11"
 
 [target.'cfg(unix)'.dependencies.dolang-vfs]
 path = "../dolang-vfs"
-version = "0.1.0"
+version = "0.1.1"
 
 # Not used directly: this exists only to turn `runtime` back on for the bindgen
 # that `sqlite-plugin` builds with, which declares it `default-features = false`.

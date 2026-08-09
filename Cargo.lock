@@ -1083,7 +1083,7 @@ dependencies = [
 
 [[package]]
 name = "dolang-ext-winreg"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dolang",
  "dolang-ext-shell",
@@ -1094,7 +1094,7 @@ dependencies = [
 
 [[package]]
 name = "dolang-ext-winscm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dolang",
  "dolang-ext-shell",
@@ -1339,7 +1339,7 @@ dependencies = [
 
 [[package]]
 name = "dolang-vfs"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "bytes",
@@ -1365,7 +1365,7 @@ dependencies = [
 
 [[package]]
 name = "dolang-vfs-winreg"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dolang-vfs",
  "dolang-winterop",
@@ -1377,7 +1377,7 @@ dependencies = [
 
 [[package]]
 name = "dolang-vfs-winscm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dolang-vfs",
  "dolang-winterop",
@@ -1390,7 +1390,7 @@ dependencies = [
 
 [[package]]
 name = "dolang-winterop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "futures",
  "phf",

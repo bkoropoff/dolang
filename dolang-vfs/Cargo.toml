@@ -1,6 +1,6 @@
 [package]
 name = "dolang-vfs"
-version = "0.1.0"
+version = "0.1.1"
 description = "Virtual filesystem library and extension interface for Do language integrations."
 edition = "2024"
 license.workspace = true
@@ -18,7 +18,7 @@ wax = { version = "0.7", features = ["walk"] }
 serde = { version = "1.0", features = ["derive"] }
 which = "8.0"
 dolang-rpc = { path = "../dolang-rpc", version = "0.1.1" }
-dolang-winterop = { path = "../dolang-winterop", version = "0.1.0" }
+dolang-winterop = { path = "../dolang-winterop", version = "0.1.1" }
 typed-path.workspace = true
 linkme = "0.3.35"
 erased-serde = "0.4"

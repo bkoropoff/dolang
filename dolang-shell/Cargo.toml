@@ -50,7 +50,7 @@ version = "0.1.1"
 
 [target.'cfg(windows)'.dependencies.dolang-vfs]
 path = "../dolang-vfs"
-version = "0.1.0"
+version = "0.1.1"
 
 [target.'cfg(windows)'.dev-dependencies]
 tokio = { version = "1.48.0", features = ["io-util", "macros", "net", "process", "rt"] }
@@ -152,12 +152,12 @@ optional = true
 
 [dependencies.dolang-ext-winreg]
 path = "../dolang-ext-winreg"
-version = "0.1.0"
+version = "0.1.1"
 optional = true
 
 [dependencies.dolang-ext-winscm]
 path = "../dolang-ext-winscm"
-version = "0.1.0"
+version = "0.1.1"
 optional = true
 
 [build-dependencies]

@@ -1,6 +1,6 @@
 [package]
 name = "dolang-vfs-winscm"
-version = "0.1.0"
+version = "0.1.1"
 description = "Windows Service Control Manager VFS extension for dolang-vfs."
 edition = "2024"
 license.workspace = true
@@ -12,8 +12,8 @@ test = true
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
-dolang-vfs = { path = "../dolang-vfs", version = "0.1.0" }
-dolang-winterop = { path = "../dolang-winterop", version = "0.1.0" }
+dolang-vfs = { path = "../dolang-vfs", version = "0.1.1" }
+dolang-winterop = { path = "../dolang-winterop", version = "0.1.1" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

@@ -19,9 +19,9 @@ winreg = ["dep:dolang-vfs-winreg"]
 winscm = ["dep:dolang-vfs-winscm"]
 
 [dependencies]
-dolang-vfs = { path = "../dolang-vfs", version = "0.1.0" }
-dolang-vfs-winreg = { path = "../dolang-vfs-winreg", version = "0.1.0", optional = true }
-dolang-vfs-winscm = { path = "../dolang-vfs-winscm", version = "0.1.0", optional = true }
+dolang-vfs = { path = "../dolang-vfs", version = "0.1.1" }
+dolang-vfs-winreg = { path = "../dolang-vfs-winreg", version = "0.1.1", optional = true }
+dolang-vfs-winscm = { path = "../dolang-vfs-winscm", version = "0.1.1", optional = true }
 
 [dev-dependencies]
 base64 = "0.22.1"
@@ -29,7 +29,7 @@ serde = { version = "1.0", features = ["derive"] }
 tempfile = "3"
 postcard = { version = "1.1.3", features = ["use-std"] }
 tokio = { version = "1.48.0", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
-dolang-winterop = { path = "../dolang-winterop", version = "0.1.0" }
+dolang-winterop = { path = "../dolang-winterop", version = "0.1.1" }
 
 [target.'cfg(unix)'.dev-dependencies]
 futures = "0.3"
