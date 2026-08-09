@@ -27,10 +27,14 @@ use tokio::net::windows::named_pipe::{NamedPipeClient, NamedPipeServer};
 
 use crate::{Client, Error, Limits, Protocol, Server, fragment, transport};
 
-/// Builds an [`UnboundClient`] or [`UnboundServer`], configuring the
-/// mandatory application-protocol descriptor and, optionally, individual
-/// size/concurrency limits (defaulted otherwise) before choosing a transport
-/// via one of the terminal `client*`/`server*` methods.
+/// Builds an [`UnboundClient`] or [`UnboundServer`].
+///
+/// A builder advertises one application-protocol name and supported versions.
+/// Its terminal `client*` or `server*` method consumes it, performs the
+/// handshake, and returns an unbound endpoint that can be inspected before
+/// binding it to a concrete [`Protocol`]. Limit setters override defaults;
+/// size and concurrency limits are negotiated to the more conservative value,
+/// while copy thresholds are local performance settings.
 pub struct Builder {
     name: String,
     versions: Vec<u16>,
@@ -38,9 +42,15 @@ pub struct Builder {
 }
 
 impl Builder {
-    /// Starts a builder for the given application-protocol name and
-    /// ascending list of supported versions.
+    /// Starts a builder for an application-protocol name and supported versions.
+    ///
+    /// `versions` must be nonempty, unique, and in ascending order. The
+    /// builder preserves the supplied order; violating this requirement can
+    /// prevent negotiation from selecting the highest mutually supported
+    /// version.
     pub fn new(name: &str, versions: &[u16]) -> Self {
+        // FIXME: Validate the documented nonempty, unique, ascending input
+        // rather than deferring a malformed list's consequences to handshake.
         Self {
             name: name.to_owned(),
             versions: versions.to_vec(),
@@ -48,59 +58,77 @@ impl Builder {
         }
     }
 
-    /// Maximum payload size of one fragment. Bounds how much of a large
-    /// message is written per round-robin turn.
+    /// Sets the maximum complete wire-fragment size, including its header.
+    ///
+    /// This bounds one round-robin write of a fragmented message. Defaults to
+    /// 512 KiB; the peer and local endpoint use the smaller advertised value.
     pub fn max_fragment_size(mut self, value: usize) -> Self {
         self.limits.max_fragment_size = value;
         self
     }
 
-    /// Maximum size of one complete (reassembled) message's postcard
-    /// payload, excluding any trailer.
+    /// Sets the maximum reassembled postcard payload, excluding a trailer.
+    ///
+    /// Defaults to 2 MiB; the peer and local endpoint use the smaller
+    /// advertised value.
     pub fn max_payload_size(mut self, value: usize) -> Self {
         self.limits.max_payload_size = value;
         self
     }
 
-    /// Maximum size of one message's trailer.
+    /// Sets the maximum total raw-byte trailer size for one message.
+    ///
+    /// Defaults to 2 MiB; the peer and local endpoint use the smaller
+    /// advertised value.
     pub fn max_trailer_size(mut self, value: usize) -> Self {
         self.limits.max_trailer_size = value;
         self
     }
 
-    /// Maximum trailer fragment payload copied immediately by the receive
-    /// driver when the consumer has not yet requested that fragment. Set to
-    /// zero to disable copying nonempty fragments on this path.
+    /// Sets the receive-side eager-copy threshold for an undemanded fragment.
+    ///
+    /// A fragment at or below this size is copied immediately, allowing the
+    /// connection receive loop to continue without waiting for the trailer
+    /// reader. Defaults to 64 KiB. Set zero to disable nonempty eager copies.
     pub fn trailer_recv_copy_threshold(mut self, value: usize) -> Self {
         self.limits.trailer_recv_copy_threshold = value;
         self
     }
 
-    /// Maximum trailer fragment payload copied immediately by the receive
-    /// driver when the consumer is already waiting for that fragment. Set to
-    /// zero to disable copying nonempty fragments on this path.
+    /// Sets the receive-side eager-copy threshold for a demanded fragment.
+    ///
+    /// This applies when the trailer reader is already waiting for the next
+    /// fragment. Defaults to 256 KiB. Set zero to disable nonempty eager
+    /// copies on this path.
     pub fn trailer_recv_demand_copy_threshold(mut self, value: usize) -> Self {
         self.limits.trailer_recv_demand_copy_threshold = value;
         self
     }
 
-    /// Maximum trailer fragment payload copied into staging by
-    /// `TrailerSend::poll_write` without first waiting for a transport
-    /// grant. Set to zero to disable copying nonempty fragments on this
-    /// path.
+    /// Sets the send-side staging threshold for a trailer fragment.
+    ///
+    /// A write at or below this size is copied into staging without waiting
+    /// for a transport grant. Defaults to 64 KiB. Set zero to disable
+    /// nonempty eager staging.
     pub fn trailer_send_copy_threshold(mut self, value: usize) -> Self {
         self.limits.trailer_send_copy_threshold = value;
         self
     }
 
-    /// Maximum number of messages with fragments in flight at once.
+    /// Sets the maximum number of messages with fragments in flight at once.
+    ///
+    /// Defaults to 64; the peer and local endpoint use the smaller advertised
+    /// value.
     pub fn max_incomplete_messages(mut self, value: usize) -> Self {
         self.limits.max_incomplete_messages = value;
         self
     }
 
-    /// Maximum number of those messages that may have an open trailer at
-    /// once, further restricting `max_incomplete_messages`.
+    /// Sets the maximum in-flight messages that may have an open trailer.
+    ///
+    /// This further restricts [`max_incomplete_messages`](Self::max_incomplete_messages).
+    /// Defaults to 16; the peer and local endpoint use the smaller advertised
+    /// value.
     pub fn max_incomplete_trailers(mut self, value: usize) -> Self {
         self.limits.max_incomplete_trailers = value;
         self
@@ -110,7 +138,7 @@ impl Builder {
         (&self.name, &self.versions)
     }
 
-    /// Starts a client session on a bidirectional byte stream.
+    /// Negotiates a client session over a bidirectional byte stream.
     pub async fn client<T>(self, stream: T) -> Result<UnboundClient, Error>
     where
         T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -128,7 +156,7 @@ impl Builder {
         .await
     }
 
-    /// Starts a client session on separate byte-stream reader and writer
+    /// Negotiates a client session over separate byte-stream reader and writer
     /// halves.
     pub async fn client_split<R, W>(self, reader: R, writer: W) -> Result<UnboundClient, Error>
     where
@@ -149,7 +177,10 @@ impl Builder {
     }
 
     #[cfg(unix)]
-    /// Starts a client session on a connected Unix domain socket.
+    /// Negotiates a client session over a connected Unix domain socket.
+    ///
+    /// Unlike [`client`](Self::client), this transport supports direct
+    /// [`OsHandle`](crate::OsHandle) attachments.
     pub async fn client_unix(self, stream: UnixStream) -> Result<UnboundClient, Error> {
         let (sender, receiver) = transport::unix::unix(stream)?;
         negotiate_client(
@@ -230,7 +261,7 @@ impl Builder {
         .await
     }
 
-    /// Creates a server over a bidirectional byte stream.
+    /// Negotiates a server session over a bidirectional byte stream.
     pub async fn server<T>(self, stream: T) -> Result<UnboundServer, Error>
     where
         T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -245,7 +276,8 @@ impl Builder {
         .await
     }
 
-    /// Creates a server over separate byte-stream reader and writer halves.
+    /// Negotiates a server session over separate byte-stream reader and writer
+    /// halves.
     pub async fn server_split<R, W>(self, reader: R, writer: W) -> Result<UnboundServer, Error>
     where
         R: AsyncRead + Send + 'static,
@@ -262,7 +294,10 @@ impl Builder {
     }
 
     #[cfg(unix)]
-    /// Creates a server over a connected Unix domain socket.
+    /// Negotiates a server session over a connected Unix domain socket.
+    ///
+    /// Unlike [`server`](Self::server), this transport supports direct
+    /// [`OsHandle`](crate::OsHandle) attachments.
     pub async fn server_unix(self, stream: UnixStream) -> Result<UnboundServer, Error> {
         let (sender, receiver) = transport::unix::unix(stream)?;
         negotiate_server(
@@ -348,9 +383,10 @@ async fn negotiate_server(
     })
 }
 
-/// A client transport that has completed the RPC handshake and negotiated
-/// an application protocol, but has not yet been bound to a concrete
-/// [`Protocol`] type. See the [module documentation](self).
+/// A negotiated client endpoint that has not yet been bound to a [`Protocol`].
+///
+/// Inspect [`name`](Self::name) and [`version`](Self::version), select the
+/// compatible Rust protocol type, then consume this value with [`bind`](Self::bind).
 pub struct UnboundClient {
     sender: transport::AnySender,
     receiver: transport::AnyReceiver,
@@ -375,7 +411,10 @@ impl UnboundClient {
         self.app_protocol.1
     }
 
-    /// Binds to a concrete protocol type, producing a usable [`Client<P>`].
+    /// Consumes this endpoint and binds it to a concrete protocol type.
+    ///
+    /// The caller is responsible for choosing a `P` compatible with the
+    /// negotiated application-protocol name and version.
     pub fn bind<P: Protocol>(self) -> Client<P> {
         Client::from_transport(
             self.sender,
@@ -388,9 +427,10 @@ impl UnboundClient {
     }
 }
 
-/// A server transport that has completed the RPC handshake and negotiated
-/// an application protocol, but has not yet been bound to a concrete
-/// [`Protocol`] type. See the [module documentation](self).
+/// A negotiated server endpoint that has not yet been bound to a [`Protocol`].
+///
+/// Inspect [`name`](Self::name) and [`version`](Self::version), select the
+/// compatible Rust protocol type, then consume this value with [`bind`](Self::bind).
 pub struct UnboundServer {
     sender: transport::AnySender,
     receiver: transport::AnyReceiver,
@@ -412,7 +452,10 @@ impl UnboundServer {
         self.app_protocol.1
     }
 
-    /// Binds to a concrete protocol type, producing a usable [`Server<P>`].
+    /// Consumes this endpoint and binds it to a concrete protocol type.
+    ///
+    /// The caller is responsible for choosing a `P` compatible with the
+    /// negotiated application-protocol name and version.
     pub fn bind<P: Protocol>(self) -> Server<P> {
         Server::from_transport(self.sender, self.receiver, self.limits)
     }

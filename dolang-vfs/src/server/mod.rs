@@ -166,7 +166,12 @@ struct ServerState {
     shutdown_tx: watch::Sender<()>,
 }
 
-/// Agent server that handles VFS RPC requests.
+/// VFS agent server.
+///
+/// Construct a connected server with [`new`](Self::new) or
+/// [`new_split`](Self::new_split) and call [`serve`](Self::serve). On Unix,
+/// [`bind`](Self::bind) constructs a listener that accepts sessions until a
+/// client requests shutdown.
 pub struct Server {
     #[cfg(unix)]
     listener: Option<UnixListener>,
@@ -225,7 +230,7 @@ impl Server {
         })
     }
 
-    /// Bind to a socket path and create a server.
+    /// Binds a Unix-domain listener for VFS agent connections.
     #[cfg(unix)]
     pub async fn bind(path: impl AsRef<Path>) -> Result<Self, io::Error> {
         Ok(Self::from_listener(UnixListener::bind(path)?))
@@ -289,9 +294,11 @@ impl Server {
         Ok(())
     }
 
-    /// Accept incoming connections in an infinite loop.
+    /// Accepts connections until a client requests server shutdown.
     ///
-    /// Each connection spawns a handler task that processes requests.
+    /// Each connection runs in an independent handler task. Routine client
+    /// disconnects are ignored; unexpected handler failures are reported to
+    /// standard error.
     #[cfg(unix)]
     pub async fn accept(self) -> Result<(), io::Error> {
         let mut shutdown_rx = self.shared.shutdown_tx.subscribe();
@@ -319,7 +326,7 @@ impl Server {
         Ok(())
     }
 
-    /// Serves one connected VFS session.
+    /// Serves one connected VFS session until it closes or fails.
     pub async fn serve(mut self) -> Result<(), io::Error> {
         let connection = Arc::new(Connection {
             server: self.shared,

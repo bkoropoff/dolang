@@ -4,11 +4,12 @@
 //! dispatched identically whether the call is served in-process ("direct",
 //! e.g. inside `dolang-shell`) or over a real RPC session ("remote", served
 //! by `dolang-vfs`). Extensions do not get their own `dolang_rpc::Protocol`;
-//! they ride as a single request/response variant carried by [`VfsProtocol`],
+//! they ride as a single request/response variant in the crate-private VFS
+//! protocol,
 //! routed to the right handler by `(name, version)`.
 //!
 //! Extension authors implement [`VfsExtension`] and register it with
-//! [`vfs_extension!`]. The macro links a `&'static dyn ErasedVfsExtension`
+//! `vfs_extension!`. The macro links a `&'static dyn ErasedVfsExtension`
 //! into a `linkme` distributed slice, so registration only requires linking
 //! the extension crate into the binary — no explicit call site is needed,
 //! and the same registration is picked up whether the binary serves direct
@@ -37,7 +38,11 @@ pub mod __private {
     pub use linkme;
 }
 
-/// A single VFS extension: a named, versioned request/response pair plus a handler.
+/// A named, versioned VFS extension and its request handler.
+///
+/// Implement this trait for a zero-sized extension descriptor, then register
+/// it with the `vfs_extension!` macro. The extension
+/// must be linked into both the caller and the server for remote dispatch.
 pub trait VfsExtension: Send + Sync + 'static {
     /// Extension request payload.
     type Request: Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static;
@@ -196,12 +201,9 @@ pub struct DirectContext {
 /// real RPC session, mirroring the existing direct/remote enum-dispatch
 /// pattern used elsewhere in this crate (e.g. `AnyVfs`, `ClientFileInner`).
 ///
-/// The direct/remote split is deliberately not exposed as a public enum:
-/// `CallContext<VfsProtocol>` (the remote backing type) can only be named
-/// from outside this crate if `VfsProtocol`'s associated `Request`/
-/// `Response` types are also public, which would leak this crate's private
-/// wire protocol. Wrapping the split in a private `Inner` keeps `VfsProtocol`
-/// itself `pub(crate)`.
+/// The direct/remote backing types are intentionally private, so extension
+/// code can use this one context without depending on the crate's wire
+/// protocol.
 pub struct ExtContext<'a> {
     inner: Inner<'a>,
 }
@@ -437,10 +439,12 @@ impl From<InvalidOpaque> for InvalidHandle {
 pub struct ExtOsHandle(dolang_rpc::OsHandle);
 
 impl ExtOsHandle {
+    /// Wraps a native handle for an extension response or request.
     pub fn new(handle: DefaultHandle) -> Self {
         Self(dolang_rpc::OsHandle::new(handle))
     }
 
+    /// Returns the wrapped native handle.
     pub fn into_inner(self) -> DefaultHandle {
         self.0.into_inner()
     }

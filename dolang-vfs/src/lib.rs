@@ -1,5 +1,33 @@
 #![deny(warnings)]
 #![allow(async_fn_in_trait)]
+//! Filesystem and process operations over either a local or remote target.
+//!
+//! [`Direct`] performs operations in the current process's environment.
+//! [`Client`] performs the same broad class of operations through a
+//! `dolang-vfs` agent. [`AnyVfs`] lets an application carry either backend
+//! behind one value, while the [`Vfs`], [`OpenOptions`], [`FileHandle`], and
+//! [`Command`] traits abstract over a chosen backend.
+//!
+//! Paths passed through [`Vfs`] are [`Utf8TypedPath`] values. Their syntax
+//! belongs to the target VFS rather than necessarily to the host running this
+//! code, which lets a Unix host describe Windows paths and vice versa.
+//!
+//! ```no_run
+//! use dolang_vfs::{Direct, OpenOptions, Utf8TypedPath, Utf8UnixPath, Utf8WindowsPath, Vfs};
+//!
+//! async fn read_a_file() -> dolang_vfs::Result<()> {
+//!     let vfs = Direct::default();
+//!     let path = if cfg!(windows) {
+//!         Utf8TypedPath::Windows(Utf8WindowsPath::new(r"C:\\example.txt"))
+//!     } else {
+//!         Utf8TypedPath::Unix(Utf8UnixPath::new("/tmp/example.txt"))
+//!     };
+//!     let mut options = vfs.open_options();
+//!     options.read(true);
+//!     let _file = options.open(path).await?;
+//!     Ok(())
+//! }
+//! ```
 
 pub use dolang_rpc::DefaultHandle;
 use dolang_winterop::{SecDesc, Sid};
@@ -43,18 +71,21 @@ pub(crate) enum SessionMode {
     Remote,
 }
 
+/// CPU architecture reported by a VFS target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Architecture {
     X86_64,
     Aarch64,
 }
 
+/// Terminal status of a spawned process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProcessStatus {
     Exited(i32),
     Signaled(i32),
 }
 
+/// Whether a spawned process is attached to the foreground process group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProcessControl {
     Foreground,
@@ -120,6 +151,7 @@ impl Signal {
     }
 }
 
+/// Policy used to terminate a spawned process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminationPolicy {
     pub signal: Signal,
@@ -137,18 +169,23 @@ impl Default for TerminationPolicy {
     }
 }
 
+/// Lock access requested for a byte range of a file.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum FileLockMode {
     Exclusive,
     Shared,
 }
 
+/// Whether acquiring a file lock may wait.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum FileLockBehavior {
     Blocking,
     Try,
 }
 
+/// A half-open byte range used for a file lock.
+///
+/// `None` as `end` extends the range to the end of the file.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct FileLockRange {
     pub start: u64,
@@ -156,6 +193,7 @@ pub struct FileLockRange {
 }
 
 impl FileLockRange {
+    /// Returns whether this range contains no bytes.
     pub fn is_empty(self) -> bool {
         self.end == Some(self.start)
     }
@@ -177,6 +215,7 @@ impl FileLockRange {
     }
 }
 
+/// A complete request to acquire a file lock.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct FileLockRequest {
     pub range: FileLockRange,
@@ -185,10 +224,12 @@ pub struct FileLockRequest {
 }
 
 impl ProcessStatus {
+    /// Returns whether the process exited successfully.
     pub const fn success(self) -> bool {
         matches!(self, Self::Exited(0))
     }
 
+    /// Returns the numeric exit code, if the process exited normally.
     pub const fn code(self) -> Option<i32> {
         match self {
             Self::Exited(code) => Some(code),
@@ -196,6 +237,7 @@ impl ProcessStatus {
         }
     }
 
+    /// Returns the native signal number, if a signal terminated the process.
     pub const fn signal(self) -> Option<i32> {
         match self {
             Self::Exited(_) => None,
@@ -1176,6 +1218,9 @@ impl DirEntry {
 
 pub use read_dir::ReadDir;
 
+/// Converts a path in this target's syntax into a native host path.
+///
+/// Returns an error if `path` uses the other platform's path syntax.
 pub fn native_path(path: Utf8TypedPath<'_>) -> io::Result<PathBuf> {
     let matches_target = if cfg!(windows) {
         path.is_windows()
@@ -1191,6 +1236,9 @@ pub fn native_path(path: Utf8TypedPath<'_>) -> io::Result<PathBuf> {
     Ok(PathBuf::from(path.as_str()))
 }
 
+/// Converts a native host path into a UTF-8 path tagged with host syntax.
+///
+/// Returns an error when the native path is not valid UTF-8.
 pub fn typed_path(path: PathBuf) -> io::Result<Utf8TypedPathBuf> {
     let path = path
         .into_os_string()
@@ -1203,6 +1251,7 @@ pub fn typed_path(path: PathBuf) -> io::Result<Utf8TypedPathBuf> {
     })
 }
 
+/// Returns the path syntax used by the host on which this code is running.
 pub const fn target_path_type() -> PathType {
     if cfg!(windows) {
         PathType::Windows
@@ -1212,19 +1261,32 @@ pub const fn target_path_type() -> PathType {
 }
 
 #[allow(async_fn_in_trait)]
+/// Configures and opens a file on one [`Vfs`] backend.
 pub trait OpenOptions {
+    /// The file handle created by [`open`](Self::open).
     type File: FileHandle;
 
+    /// Enables or disables read access.
     fn read(&mut self, read: bool) -> &mut Self;
+    /// Enables or disables write access.
     fn write(&mut self, write: bool) -> &mut Self;
+    /// Enables or disables append mode.
     fn append(&mut self, append: bool) -> &mut Self;
+    /// Enables or disables creation when the file is absent.
     fn create(&mut self, create: bool) -> &mut Self;
+    /// Enables or disables exclusive creation.
     fn create_new(&mut self, create_new: bool) -> &mut Self;
+    /// Enables or disables truncation when opening.
     fn truncate(&mut self, truncate: bool) -> &mut Self;
+    /// Enables or disables following the final path component when it is a link.
     fn no_follow(&mut self, no_follow: bool) -> &mut Self;
+    /// Opens `path` using the configured options.
     async fn open(&self, path: Utf8TypedPath<'_>) -> Result<Self::File>;
 }
 
+/// An asynchronous file handle produced by a [`Vfs`].
+///
+/// File handles implement Tokio's asynchronous read, write, and seek traits.
 pub trait FileHandle: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Sized {
     async fn to_stdio_send(&self) -> Result<StdioSend>;
     async fn to_stdio_recv(&self) -> Result<StdioRecv>;
@@ -1246,6 +1308,7 @@ pub trait FileHandle: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Sized {
 }
 
 #[allow(async_fn_in_trait)]
+/// A spawned process owned by a [`Command`] backend.
 pub trait Child {
     async fn wait(&mut self) -> Result<ProcessStatus>;
     async fn terminate(self) -> Result<Option<ProcessStatus>>
@@ -1254,6 +1317,7 @@ pub trait Child {
 }
 
 #[allow(async_fn_in_trait)]
+/// Configures and spawns a process on a [`Vfs`] backend.
 pub trait Command {
     type Child: Child;
     type StdioSend: AsyncWrite + Unpin;
@@ -1284,6 +1348,11 @@ pub trait Command {
 }
 
 #[allow(async_fn_in_trait)]
+/// A filesystem and process-execution backend.
+///
+/// Implementations may be local, remote, or a dispatcher over either. A
+/// value's path arguments always use the target's syntax; consult
+/// [`Query::target`] when selecting one for a remote VFS.
 pub trait Vfs {
     type File: FileHandle;
     type StdioSend: AsyncWrite + Unpin;
@@ -1445,12 +1514,14 @@ pub struct StdioRecvMarker;
 #[derive(Debug)]
 pub struct ChildMarker;
 
+/// A file handle backed by either a remote [`Client`] or local [`Direct`].
 #[derive(Debug)]
 pub enum AnyFile {
     Client(client::ClientFile),
     Direct(DirectFile),
 }
 
+/// A held file lock released explicitly or when dropped.
 pub struct FileLock {
     inner: Option<FileLockInner>,
 }
@@ -1473,6 +1544,7 @@ impl FileLock {
         }
     }
 
+    /// Releases the lock. Calling this after a successful release is a no-op.
     pub async fn release(&mut self) -> Result<()> {
         let Some(lock) = self.inner.as_mut() else {
             return Ok(());
@@ -2151,6 +2223,7 @@ impl<'a> Command for AnyCommand<'a> {
     }
 }
 
+/// A VFS backed by either a remote client or the local process.
 #[derive(Clone)]
 pub enum AnyVfs {
     Client(client::Client),
@@ -2215,6 +2288,7 @@ impl From<Direct> for AnyVfs {
 }
 
 impl AnyVfs {
+    /// Returns the remote client when this is the remote variant.
     pub fn as_client(&self) -> Option<&client::Client> {
         match self {
             Self::Client(client) => Some(client),
@@ -2222,6 +2296,7 @@ impl AnyVfs {
         }
     }
 
+    /// Returns the remote client when this is the remote variant.
     pub fn into_client(self) -> Option<client::Client> {
         match self {
             Self::Client(client) => Some(client),

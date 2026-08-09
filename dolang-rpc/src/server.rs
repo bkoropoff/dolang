@@ -18,6 +18,8 @@ use crate::{
 };
 
 /// A server endpoint for one connection.
+///
+/// Consume it with [`serve`](Self::serve) to dispatch requests from the peer.
 pub struct Server<P: Protocol> {
     sender: transport::AnySender,
     receiver: transport::AnyReceiver,
@@ -92,7 +94,13 @@ impl<P: Protocol> Server<P> {
         }
     }
 
-    /// Serves requests until the peer disconnects or the session fails.
+    /// Serves requests until the peer disconnects, the session fails, or a
+    /// handler requests graceful shutdown.
+    ///
+    /// The handler may be called concurrently for independent requests. Each
+    /// invocation must consume its [`CallContext`] with [`CallContext::respond`]
+    /// or [`CallContext::respond_with_trailer`]; dropping the context without
+    /// responding reports a per-request error to the peer.
     pub async fn serve<H>(self, handler: H) -> Result<(), Error>
     where
         H: AsyncFn(CallContext<P>, P::Request) + Send + Sync + 'static,
@@ -392,7 +400,9 @@ async fn admit<P: Protocol>(
     Ok(())
 }
 
-/// Services available while processing one request.
+/// Request-scoped services supplied to a server handler.
+///
+/// A context is not cloneable and must be consumed to send a response.
 pub struct CallContext<P: Protocol> {
     id: u64,
     inner: Arc<Mutex<Inner>>,
@@ -405,12 +415,19 @@ pub struct CallContext<P: Protocol> {
 }
 
 impl<P: Protocol> CallContext<P> {
-    /// Returns this request's streaming trailer body, if present.
+    /// Returns this request's raw-byte trailer, if present.
+    ///
+    /// The returned value implements [`AsyncRead`](tokio::io::AsyncRead).
+    /// Dropping it or calling [`TrailerRecv::discard`](crate::TrailerRecv::discard)
+    /// stops local consumption; the peer is notified only if it continues to
+    /// send trailer fragments.
     pub fn request_trailer(&mut self) -> Option<&mut crate::TrailerRecv> {
         self.request_trailer.as_mut()
     }
 
-    /// Sends an ordinary response and consumes this call context.
+    /// Sends a response without a trailer and consumes this call context.
+    ///
+    /// Any unread request trailer is discarded.
     pub fn respond(mut self, response: P::Response) {
         drop(self.request_trailer.take());
         self.responded = true;
@@ -423,7 +440,13 @@ impl<P: Protocol> CallContext<P> {
         self.finish_shutdown();
     }
 
-    /// Sends a response head and returns its streaming trailer body.
+    /// Sends a response head and returns a writer for its raw-byte trailer.
+    ///
+    /// Call [`TrailerSend::finish`](crate::TrailerSend::finish), or
+    /// asynchronously shut down the returned writer, to commit the trailer.
+    /// Dropping it without finishing aborts the trailer. A response cannot
+    /// carry both a trailer and a direct [`OsHandle`](crate::OsHandle)
+    /// attachment. Any unread request trailer is discarded.
     pub fn respond_with_trailer(mut self, response: P::Response) -> crate::TrailerSend<()> {
         drop(self.request_trailer.take());
         let shared = crate::trailer::SendShared::new(Kind::Response, self.id, &self.limits);
@@ -438,7 +461,11 @@ impl<P: Protocol> CallContext<P> {
         crate::TrailerSend::new(shared, ())
     }
 
-    /// Stops accepting requests and gracefully drains the connection.
+    /// Requests graceful shutdown after this handler sends its response.
+    ///
+    /// The server stops accepting requests once this context is consumed by
+    /// [`respond`](Self::respond) or [`respond_with_trailer`](Self::respond_with_trailer),
+    /// then lets already-running handlers finish.
     pub fn shutdown(&mut self) {
         self.shutdown_on_respond = true;
     }
@@ -451,7 +478,14 @@ impl<P: Protocol> CallContext<P> {
         }
     }
 
-    /// Runs an operation which can observe request cancellation without dropping the handler.
+    /// Runs an operation that can observe request cancellation without dropping
+    /// the handler itself.
+    ///
+    /// If the peer cancels while `operation` is running, its future is dropped
+    /// and this method returns [`RequestCancelled`]. The handler regains the
+    /// context and may perform cleanup or send an application-level response.
+    /// Only one cancellation guard may be active at a time; nesting guards
+    /// panics.
     pub async fn cancel_guard<T, F>(&mut self, operation: F) -> Result<T, RequestCancelled>
     where
         F: AsyncFnOnce(&mut CallContext<P>) -> T,
@@ -489,10 +523,19 @@ impl<P: Protocol> CallContext<P> {
         }
     }
 
+    /// Registers a session-scoped resource and returns its serializable handle.
+    ///
+    /// The caller owns the resource's lifetime and must eventually unregister
+    /// it. Cloning, sending, or dropping the returned [`Opaque`] does not
+    /// affect the registration.
     pub fn register<T: OpaqueResource>(&self, value: T) -> Opaque<T::Marker> {
         self.inner.lock().unwrap().objects.register(value)
     }
 
+    /// Acquires a typed shared guard for a registered opaque resource.
+    ///
+    /// Returns [`InvalidOpaque`] if the handle belongs to another session, was
+    /// unregistered, or does not refer to a resource with concrete type `T`.
     pub fn acquire<T: OpaqueResource>(
         &self,
         value: Opaque<T::Marker>,

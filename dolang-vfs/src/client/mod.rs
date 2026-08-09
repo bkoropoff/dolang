@@ -47,7 +47,12 @@ use crate::{
     },
 };
 
-/// Client for connecting to the agent daemon and spawning processes.
+/// Client for a VFS agent session.
+///
+/// Clones share one RPC connection. Generic-stream constructors create an
+/// opaque-only session; Unix-socket and Windows named-pipe constructors can
+/// use native handles when the peer supports them. Prefer the [`Vfs`](crate::Vfs)
+/// trait when code should work with local and remote backends alike.
 #[derive(Clone)]
 pub struct Client {
     rpc: dolang_rpc::Client<VfsProtocol>,
@@ -55,6 +60,11 @@ pub struct Client {
     vfs: Option<Opaque<crate::VfsMarker>>,
 }
 
+/// A file handle returned by a [`Client`] operation.
+///
+/// Depending on the transport and the server's choice, this may hold a native
+/// local file descriptor/handle or an opaque remote file reference. It
+/// implements [`FileHandle`](crate::FileHandle) in either case.
 pub struct ClientFile(ClientFileInner);
 
 enum ClientFileInner {
@@ -916,6 +926,9 @@ impl Client {
     }
 
     /// Starts an opaque-only VFS client on a bidirectional byte stream.
+    ///
+    /// This transport cannot transfer native handles, so files, subprocesses,
+    /// and stdio endpoints are represented by remote references and relays.
     pub async fn new<T>(stream: T) -> crate::Result<Self>
     where
         T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -932,6 +945,8 @@ impl Client {
     }
 
     /// Starts an opaque-only VFS client on separate reader and writer streams.
+    ///
+    /// This has the same opaque-only behavior as [`new`](Self::new).
     pub async fn new_split<R, W>(reader: R, writer: W) -> crate::Result<Self>
     where
         R: AsyncRead + Send + 'static,
@@ -956,13 +971,17 @@ impl Client {
         self.rpc.close().await;
     }
 
-    /// Connect to an agent daemon at the given socket path.
+    /// Connects to an agent daemon at a Unix-domain socket path.
+    ///
+    /// This transport supports native file-descriptor transfer.
     #[cfg(unix)]
     pub async fn connect(path: impl AsRef<Path>) -> crate::Result<Self> {
         Self::from_stream(UnixStream::connect(path).await?).await
     }
 
-    /// Connect using an existing `UnixStream`.
+    /// Connects using an existing Unix-domain stream.
+    ///
+    /// This transport supports native file-descriptor transfer.
     #[cfg(unix)]
     pub async fn from_stream(stream: UnixStream) -> crate::Result<Self> {
         Self::from_std_stream(stream.into_std()?).await
@@ -982,8 +1001,10 @@ impl Client {
         })
     }
 
-    /// Starts a VFS client on an already-connected Unix domain socket file
+    /// Starts a VFS client on an already-connected Unix-domain socket file
     /// descriptor.
+    ///
+    /// This transport supports native file-descriptor transfer.
     #[cfg(unix)]
     pub async fn from_owned_fd(value: OwnedFd) -> crate::Result<Self> {
         let stream = StdUnixStream::from(value);
@@ -1340,7 +1361,12 @@ fn clone_stderr_handle() -> io::Result<DefaultHandle> {
     }
 }
 
-/// Builder for constructing spawn requests.
+/// Builder for constructing a process-spawn request on a remote VFS.
+///
+/// Configure arguments, environment, working directory, and standard streams,
+/// then call [`spawn`](crate::Command::spawn). This concrete API accepts host
+/// [`Path`](std::path::Path) values; use [`Vfs::command`](crate::Vfs::command)
+/// when the target's path syntax may differ from the host's.
 ///
 /// # Example
 ///
@@ -1369,6 +1395,10 @@ pub struct CommandBuilder<'a> {
     termination_policy: crate::TerminationPolicy,
 }
 
+/// A process spawned by a [`Client`].
+///
+/// It implements [`Child`](crate::Child); any relay tasks for cross-domain
+/// standard streams are owned by this value.
 pub struct ClientChild {
     client: Client,
     state: ClientChildState,
@@ -1399,6 +1429,10 @@ enum ClientChildState {
     Lost(crate::protocol::WireError),
 }
 
+/// A writable standard-stream endpoint owned by a remote VFS session.
+///
+/// This implements [`AsyncWrite`](tokio::io::AsyncWrite). Shutting it down
+/// closes the corresponding remote endpoint.
 pub struct RemoteStdioSend {
     client: Client,
     stdio: Option<Opaque<crate::StdioSendMarker>>,
@@ -1406,6 +1440,9 @@ pub struct RemoteStdioSend {
     write_body: Option<PendingTrailerWrite>,
 }
 
+/// A readable standard-stream endpoint owned by a remote VFS session.
+///
+/// This implements [`AsyncRead`](tokio::io::AsyncRead).
 pub struct RemoteStdioRecv {
     client: Client,
     stdio: Option<Opaque<crate::StdioRecvMarker>>,
@@ -2288,7 +2325,12 @@ impl<'a> Command for CommandBuilder<'a> {
     }
 }
 
-/// Builder for opening files with configurable options.
+/// Builder for opening files through a [`Client`].
+///
+/// Configure access and creation modes, then call [`open`](Self::open). This
+/// concrete API accepts host [`Path`](std::path::Path) values; use
+/// [`Vfs::open_options`](crate::Vfs::open_options) when the target's path
+/// syntax may differ from the host's.
 ///
 /// # Example
 ///
@@ -2399,7 +2441,9 @@ impl<'a> OpenOptions<'a> {
         }
     }
 
-    /// Open the file at the given path.
+    /// Opens the file at a path expressed in host syntax.
+    // FIXME: Align this concrete Client API with Vfs by accepting
+    // Utf8TypedPath, so remote targets need not share the caller's path style.
     pub async fn open(&self, path: impl AsRef<Path>) -> crate::Result<ClientFile> {
         self.open_wire(path.as_ref().to_path_buf().try_into()?)
             .await

@@ -45,11 +45,13 @@ mod windows;
 
 pub(crate) use lock::{DirectFileLock, DirectFileLocks};
 
+/// A [`Vfs`](crate::Vfs) that operates in the local process environment.
 #[derive(Debug, Clone)]
 pub struct Direct {
     path_cache: Arc<PathCache>,
 }
 
+/// Local file-open options returned by [`Direct::open_options`](crate::Vfs::open_options).
 #[derive(Debug, Default)]
 pub struct DirectOpenOptions {
     read: bool,
@@ -61,6 +63,7 @@ pub struct DirectOpenOptions {
     no_follow: bool,
 }
 
+/// Local process-spawn options returned by [`Direct::command`](crate::Vfs::command).
 pub struct DirectCommand<'a> {
     direct: &'a Direct,
     program: PathBuf,
@@ -78,6 +81,7 @@ pub struct DirectCommand<'a> {
     error: Option<io::Error>,
 }
 
+/// A process spawned by [`Direct`].
 pub struct DirectChild {
     inner: tokio::process::Child,
     process_control: crate::ProcessControl,
@@ -86,6 +90,7 @@ pub struct DirectChild {
     job: Option<std::os::windows::io::OwnedHandle>,
 }
 
+/// A local asynchronous file handle.
 #[derive(Debug)]
 pub struct DirectFile {
     inner: TokioFile,
