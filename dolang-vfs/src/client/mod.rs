@@ -1,0 +1,3252 @@
+use std::{
+    collections::HashMap,
+    future::Future,
+    io,
+    io::IsTerminal,
+    path::{Path, PathBuf},
+    pin::Pin,
+    task::{Context, Poll},
+};
+
+#[cfg(unix)]
+use std::os::unix::{
+    io::{AsFd, OwnedFd},
+    net::UnixStream as StdUnixStream,
+};
+#[cfg(windows)]
+use std::os::windows::io::{AsHandle, OwnedHandle};
+
+use dolang_rpc::{Call, DefaultHandle, Opaque, OsHandle, TrailerRecv, TrailerSend};
+use dolang_winterop::{SecDesc, Sid};
+#[cfg(unix)]
+use tokio::net::UnixStream;
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::NamedPipeServer;
+use tokio::{
+    io::{AsyncRead, AsyncSeek, AsyncWrite, AsyncWriteExt, ReadBuf},
+    task::JoinHandle,
+};
+
+#[cfg(unix)]
+use crate::protocol::AccessRequest;
+use crate::{
+    Child, Command, FileHandle, FsMetadata, Metadata, MetadataPatch, PosixAcl, ProcessStatus,
+    Query, ReadDir, SessionMode, SidName, StdioRecv, StdioSend, StreamEntry, Utf8TypedPath,
+    Utf8TypedPathBuf, Vfs, VfsExtension, WellKnownPath, XattrEntry,
+    direct::DirectFile,
+    protocol::{
+        AclRequest, CanonicalizeRequest, CopyRequest, CreateDirRequest, ExtensionRequest,
+        ExtensionResponse, FsMetadataRequest, GlobRequest, HardLinkRequest, MetadataRequest,
+        MoveRequest, OpenHandle, OpenHandlePreference, OpenRequest, OpenVfsHandle, QueryResponse,
+        ReadDirResponse, ReadLinkRequest, RemoveDirRequest, RemoveRequest, RenameRequest, Request,
+        RequestKind, ResponseKind, SecDescRequest, SetAclRequest, SetMetadataRequest,
+        SetSecDescRequest, SetXattrRequest, SpawnRequest, StdioRecvTarget, StdioSendTarget,
+        StreamsRequest, SymlinkKind, SymlinkRequest, UnixVfsRequest, VfsProtocol,
+        WellKnownPathRequest, WindowsAdminRequest, WirePath, XattrNamespaceRequest, XattrRequest,
+        XattrsRequest, rpc_builder,
+    },
+};
+
+/// Client for connecting to the agent daemon and spawning processes.
+#[derive(Clone)]
+pub struct Client {
+    rpc: dolang_rpc::Client<VfsProtocol>,
+    mode: SessionMode,
+    vfs: Option<Opaque<crate::VfsMarker>>,
+}
+
+pub struct ClientFile(ClientFileInner);
+
+enum ClientFileInner {
+    Direct(DirectFile),
+    Remote(RemoteFile),
+}
+
+struct RemoteFile {
+    client: Client,
+    file: Option<Opaque<crate::FileMarker>>,
+    pending: Option<PendingFileOperation>,
+    read_body: Option<PendingTrailerRead>,
+    write_body: Option<PendingTrailerWrite>,
+}
+
+pub(crate) struct RemoteFileLock {
+    client: Client,
+    file: Opaque<crate::FileMarker>,
+    lock: Option<u64>,
+}
+
+impl RemoteFileLock {
+    pub(crate) async fn release(&mut self) -> crate::Result<()> {
+        let Some(lock) = self.lock else {
+            return Ok(());
+        };
+        match self
+            .client
+            .request(RequestKind::FileUnlock {
+                file: self.file.clone(),
+                lock,
+            })
+            .await?
+        {
+            ResponseKind::FileUnlock(result) => {
+                result.map_err(crate::Error::from)?;
+                self.lock = None;
+                Ok(())
+            }
+            response => Err(unexpected(response).into()),
+        }
+    }
+}
+
+impl Drop for RemoteFileLock {
+    fn drop(&mut self) {
+        let Some(lock) = self.lock.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let client = self.client.clone();
+        let file = self.file.clone();
+        runtime.spawn(async move {
+            let _ = client.request(RequestKind::FileUnlock { file, lock }).await;
+        });
+    }
+}
+
+struct PendingFileOperation {
+    kind: FileOperationKind,
+    call: Call<VfsProtocol>,
+}
+
+struct PendingTrailerWrite {
+    send: Option<TrailerSend<Call<VfsProtocol>>>,
+    call: Option<Call<VfsProtocol>>,
+    target: usize,
+    sent: usize,
+    unreported: usize,
+}
+
+struct PendingTrailerRead {
+    recv: TrailerRecv,
+    remaining: usize,
+    read: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FileOperationKind {
+    Read,
+    Flush,
+    Seek,
+}
+
+impl std::fmt::Debug for ClientFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ClientFile").field(&self.0).finish()
+    }
+}
+
+impl std::fmt::Debug for ClientFileInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Direct(file) => file.fmt(f),
+            Self::Remote(file) => file.fmt(f),
+        }
+    }
+}
+
+impl std::fmt::Debug for RemoteFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteFile")
+            .field("file", &self.file)
+            .field(
+                "pending",
+                &self.pending.as_ref().map(|pending| pending.kind),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl ClientFile {
+    fn from_std(file: std::fs::File, read: bool, write: bool, append: bool) -> Self {
+        Self(ClientFileInner::Direct(DirectFile::from_std(
+            file, read, write, append,
+        )))
+    }
+
+    fn from_remote(client: Client, file: Opaque<crate::FileMarker>) -> Self {
+        Self(ClientFileInner::Remote(RemoteFile {
+            client,
+            file: Some(file),
+            pending: None,
+            read_body: None,
+            write_body: None,
+        }))
+    }
+}
+
+impl RemoteFile {
+    fn opaque(&self) -> Opaque<crate::FileMarker> {
+        self.file
+            .as_ref()
+            .expect("live remote file has no opaque identity")
+            .clone()
+    }
+
+    fn poll_request(
+        &mut self,
+        cx: &mut Context<'_>,
+        kind: FileOperationKind,
+        request: impl FnOnce(Opaque<crate::FileMarker>) -> (RequestKind, Option<Vec<u8>>),
+    ) -> Poll<io::Result<(ResponseKind, Option<TrailerRecv>)>> {
+        if self.pending.is_none() {
+            let (request, trailer) = request(self.opaque());
+            self.pending = Some(PendingFileOperation {
+                kind,
+                call: {
+                    assert!(trailer.is_none());
+                    self.client.call(request)
+                },
+            });
+        }
+        let pending = self.pending.as_mut().unwrap();
+        if pending.kind != kind {
+            return Poll::Ready(Err(io::Error::other(format!(
+                "file operation {:?} polled while {:?} is pending",
+                kind, pending.kind
+            ))));
+        }
+        match Pin::new(&mut pending.call).poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(result) => {
+                self.pending = None;
+                let (response, trailer) = result.map_err(rpc_error)?.into_response_trailer();
+                Poll::Ready(match response {
+                    ResponseKind::Error(error) => Err(wire_io(error)),
+                    response => Ok((response, trailer)),
+                })
+            }
+        }
+    }
+
+    fn idle(&self) -> crate::Result<()> {
+        if self
+            .read_body
+            .as_ref()
+            .is_some_and(|body| body.remaining != 0)
+            || self.write_body.is_some()
+        {
+            Err(io::Error::other("file trailer operation is still pending").into())
+        } else if let Some(pending) = &self.pending {
+            Err(io::Error::other(format!(
+                "file operation {:?} is still pending",
+                pending.kind
+            ))
+            .into())
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn cancel_pending(&mut self) {
+        self.read_body.take();
+        if let Some(mut pending) = self.write_body.take()
+            && let Some(mut call) = pending.call.take()
+        {
+            call.cancel();
+            let _ = call.await;
+        }
+        if let Some(mut pending) = self.pending.take() {
+            pending.call.cancel();
+            let _ = pending.call.await;
+        }
+    }
+}
+
+impl Drop for RemoteFile {
+    fn drop(&mut self) {
+        self.pending.take();
+        let Some(file) = self.file.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let client = self.client.clone();
+        runtime.spawn(async move {
+            let _ = client.request(RequestKind::FileClose { file }).await;
+        });
+    }
+}
+
+impl AsyncRead for ClientFile {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match &mut self.0 {
+            ClientFileInner::Direct(file) => Pin::new(file).poll_read(cx, buf),
+            ClientFileInner::Remote(file) => loop {
+                if buf.remaining() == 0 {
+                    return Poll::Ready(Ok(()));
+                }
+                if let Some(body) = file.read_body.as_mut() {
+                    let before = buf.filled().len();
+                    match Pin::new(&mut body.recv).poll_read(cx, buf) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Err(error)) => {
+                            file.read_body = None;
+                            return Poll::Ready(Err(error));
+                        }
+                        Poll::Ready(Ok(())) => {
+                            let read = buf.filled().len() - before;
+                            if read > body.remaining {
+                                file.read_body = None;
+                                return Poll::Ready(Err(io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    "file read response exceeds requested length",
+                                )));
+                            }
+                            body.remaining -= read;
+                            body.read += read;
+                            if read > 0 {
+                                return Poll::Ready(Ok(()));
+                            }
+                            let empty = body.read == 0;
+                            file.read_body = None;
+                            if empty {
+                                return Poll::Ready(Ok(()));
+                            }
+                            continue;
+                        }
+                    }
+                }
+                let requested = buf.remaining();
+                match file.poll_request(cx, FileOperationKind::Read, |file| {
+                    (
+                        RequestKind::FileRead {
+                            file,
+                            len: requested,
+                        },
+                        None,
+                    )
+                }) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Ok((ResponseKind::FileRead(result), trailer))) => {
+                        if let Err(error) = result.map_err(wire_io) {
+                            return Poll::Ready(Err(error));
+                        }
+                        let Some(trailer) = trailer else {
+                            return Poll::Ready(Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "file read response is missing its data trailer",
+                            )));
+                        };
+                        file.read_body = Some(PendingTrailerRead {
+                            recv: trailer,
+                            remaining: requested,
+                            read: 0,
+                        });
+                    }
+                    Poll::Ready(Ok((response, _))) => {
+                        return Poll::Ready(Err(unexpected(response)));
+                    }
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                }
+            },
+        }
+    }
+}
+
+impl AsyncWrite for ClientFile {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match &mut self.0 {
+            ClientFileInner::Direct(file) => Pin::new(file).poll_write(cx, buf),
+            ClientFileInner::Remote(file) => {
+                if buf.is_empty() {
+                    return Poll::Ready(Ok(0));
+                }
+                if file.write_body.is_none() {
+                    file.write_body = Some(PendingTrailerWrite {
+                        send: Some(file.client.call_with_trailer(RequestKind::FileWrite {
+                            file: file.opaque(),
+                        })),
+                        call: None,
+                        target: buf.len(),
+                        sent: 0,
+                        unreported: 0,
+                    });
+                }
+                let pending = file.write_body.as_mut().unwrap();
+                if let Some(call) = pending.call.as_mut() {
+                    match Pin::new(call).poll(cx) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(result) => {
+                            let target = pending.target;
+                            let unreported = pending.unreported;
+                            file.write_body = None;
+                            let response = result.map_err(rpc_error)?.into_response();
+                            match response {
+                                ResponseKind::Error(error) => {
+                                    return Poll::Ready(Err(wire_io(error)));
+                                }
+                                ResponseKind::FileWrite(result) => {
+                                    let written = result.map_err(wire_io)?;
+                                    if written != target {
+                                        return Poll::Ready(Err(io::Error::new(
+                                            io::ErrorKind::InvalidData,
+                                            "file write response does not acknowledge the submitted trailer",
+                                        )));
+                                    }
+                                    return Poll::Ready(Ok(unreported));
+                                }
+                                response => return Poll::Ready(Err(unexpected(response))),
+                            }
+                        }
+                    }
+                }
+                let remaining = pending.target - pending.sent;
+                let send = pending.send.as_mut().unwrap();
+                match Pin::new(send).poll_write(cx, &buf[..buf.len().min(remaining)]) {
+                    Poll::Pending => Poll::Pending,
+                    Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+                    Poll::Ready(Ok(n)) => {
+                        pending.sent += n;
+                        if pending.sent == pending.target {
+                            let send = pending.send.take().unwrap();
+                            pending.call = Some(send.finish());
+                            pending.unreported = n;
+                            cx.waker().wake_by_ref();
+                            return Poll::Pending;
+                        }
+                        Poll::Ready(Ok(n))
+                    }
+                }
+            }
+        }
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match &mut self.0 {
+            ClientFileInner::Direct(file) => Pin::new(file).poll_flush(cx),
+            ClientFileInner::Remote(file) => {
+                if let Some(pending) = file.write_body.as_mut() {
+                    if pending.call.is_none() {
+                        let send = pending.send.take().unwrap();
+                        pending.call = Some(send.finish());
+                    }
+                    let call = pending.call.as_mut().unwrap();
+                    return match Pin::new(call).poll(cx) {
+                        Poll::Pending => Poll::Pending,
+                        Poll::Ready(result) => {
+                            file.write_body = None;
+                            Poll::Ready(result.map_err(rpc_error).and_then(|result| {
+                                match result.into_response() {
+                                    ResponseKind::FileWrite(result) => {
+                                        result.map(|_| ()).map_err(wire_io)
+                                    }
+                                    ResponseKind::Error(error) => Err(wire_io(error)),
+                                    response => Err(unexpected(response)),
+                                }
+                            }))
+                        }
+                    };
+                }
+                match file.poll_request(cx, FileOperationKind::Flush, |file| {
+                    (RequestKind::FileFlush { file }, None)
+                }) {
+                    Poll::Pending => Poll::Pending,
+                    Poll::Ready(Ok((ResponseKind::FileFlush(result), _))) => {
+                        Poll::Ready(result.map_err(wire_io))
+                    }
+                    Poll::Ready(Ok((response, _))) => Poll::Ready(Err(unexpected(response))),
+                    Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+                }
+            }
+        }
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match &mut self.0 {
+            ClientFileInner::Direct(file) => Pin::new(file).poll_shutdown(cx),
+            ClientFileInner::Remote(_) => self.as_mut().poll_flush(cx),
+        }
+    }
+}
+
+impl AsyncSeek for ClientFile {
+    fn start_seek(mut self: Pin<&mut Self>, position: io::SeekFrom) -> io::Result<()> {
+        match &mut self.0 {
+            ClientFileInner::Direct(file) => Pin::new(file).start_seek(position),
+            ClientFileInner::Remote(file) => {
+                if file
+                    .read_body
+                    .as_ref()
+                    .is_some_and(|body| body.remaining != 0)
+                {
+                    file.read_body.take();
+                }
+                file.idle().map_err(crate::Error::into_io_error)?;
+                file.pending = Some(PendingFileOperation {
+                    kind: FileOperationKind::Seek,
+                    call: file.client.call(RequestKind::FileSeek {
+                        file: file.opaque(),
+                        position: position.into(),
+                    }),
+                });
+                Ok(())
+            }
+        }
+    }
+
+    fn poll_complete(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<u64>> {
+        match &mut self.0 {
+            ClientFileInner::Direct(file) => Pin::new(file).poll_complete(cx),
+            ClientFileInner::Remote(file) => {
+                match file.poll_request(cx, FileOperationKind::Seek, |file| {
+                    (
+                        RequestKind::FileSeek {
+                            file,
+                            position: io::SeekFrom::Current(0).into(),
+                        },
+                        None,
+                    )
+                }) {
+                    Poll::Pending => Poll::Pending,
+                    Poll::Ready(Ok((ResponseKind::FileSeek(result), _))) => {
+                        Poll::Ready(result.map_err(wire_io))
+                    }
+                    Poll::Ready(Ok((response, _))) => Poll::Ready(Err(unexpected(response))),
+                    Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+                }
+            }
+        }
+    }
+}
+
+impl FileHandle for ClientFile {
+    async fn to_stdio_send(&self) -> crate::Result<StdioSend> {
+        match &self.0 {
+            ClientFileInner::Direct(file) => file.to_stdio_send().await,
+            ClientFileInner::Remote(file) => {
+                file.idle()?;
+                match file
+                    .client
+                    .request(RequestKind::FileToStdioSend {
+                        file: file.opaque(),
+                    })
+                    .await?
+                {
+                    ResponseKind::FileToStdioSend(result) => result
+                        .map(|stdio| {
+                            StdioSend::Remote(RemoteStdioSend {
+                                client: file.client.clone(),
+                                stdio: Some(stdio),
+                                pending: None,
+                                write_body: None,
+                            })
+                        })
+                        .map_err(Into::into),
+                    response => Err(unexpected(response).into()),
+                }
+            }
+        }
+    }
+
+    async fn to_stdio_recv(&self) -> crate::Result<StdioRecv> {
+        match &self.0 {
+            ClientFileInner::Direct(file) => file.to_stdio_recv().await,
+            ClientFileInner::Remote(file) => {
+                file.idle()?;
+                match file
+                    .client
+                    .request(RequestKind::FileToStdioRecv {
+                        file: file.opaque(),
+                    })
+                    .await?
+                {
+                    ResponseKind::FileToStdioRecv(result) => result
+                        .map(|stdio| {
+                            StdioRecv::Remote(RemoteStdioRecv {
+                                client: file.client.clone(),
+                                stdio: Some(stdio),
+                                pending: None,
+                                read_body: None,
+                            })
+                        })
+                        .map_err(Into::into),
+                    response => Err(unexpected(response).into()),
+                }
+            }
+        }
+    }
+
+    async fn close(self) -> crate::Result<()> {
+        match self.0 {
+            ClientFileInner::Direct(file) => file.close().await,
+            ClientFileInner::Remote(mut file) => {
+                file.cancel_pending().await;
+                let opaque = file
+                    .file
+                    .take()
+                    .expect("live remote file has no opaque identity");
+                match file
+                    .client
+                    .request(RequestKind::FileClose { file: opaque })
+                    .await?
+                {
+                    ResponseKind::FileClose(result) => result.map_err(Into::into),
+                    response => Err(unexpected(response).into()),
+                }
+            }
+        }
+    }
+
+    async fn set_size(&mut self, size: u64) -> crate::Result<()> {
+        match &mut self.0 {
+            ClientFileInner::Direct(file) => file.set_size(size).await,
+            ClientFileInner::Remote(file) => {
+                file.idle()?;
+                match file
+                    .client
+                    .request(RequestKind::FileSetSize {
+                        file: file.opaque(),
+                        size,
+                    })
+                    .await?
+                {
+                    ResponseKind::FileSetSize(result) => result.map_err(Into::into),
+                    response => Err(unexpected(response).into()),
+                }
+            }
+        }
+    }
+
+    async fn metadata(&mut self) -> crate::Result<Metadata> {
+        match &mut self.0 {
+            ClientFileInner::Direct(file) => file.metadata().await,
+            ClientFileInner::Remote(file) => {
+                file.idle()?;
+                match file
+                    .client
+                    .request(RequestKind::FileMetadata {
+                        file: file.opaque(),
+                    })
+                    .await?
+                {
+                    ResponseKind::FileMetadata(result) => result.map_err(Into::into),
+                    response => Err(unexpected(response).into()),
+                }
+            }
+        }
+    }
+
+    async fn fs_metadata(&mut self) -> crate::Result<FsMetadata> {
+        match &mut self.0 {
+            ClientFileInner::Direct(file) => file.fs_metadata().await,
+            ClientFileInner::Remote(file) => {
+                file.idle()?;
+                match file
+                    .client
+                    .request(RequestKind::FileFsMetadata {
+                        file: file.opaque(),
+                    })
+                    .await?
+                {
+                    ResponseKind::FileFsMetadata(result) => result.map_err(Into::into),
+                    response => Err(unexpected(response).into()),
+                }
+            }
+        }
+    }
+
+    async fn acl(&mut self, default: bool) -> crate::Result<Option<PosixAcl>> {
+        match &mut self.0 {
+            ClientFileInner::Direct(file) => file.acl(default).await,
+            ClientFileInner::Remote(file) => {
+                file.idle()?;
+                match file
+                    .client
+                    .request(RequestKind::FileAcl {
+                        file: file.opaque(),
+                        default,
+                    })
+                    .await?
+                {
+                    ResponseKind::FileAcl(result) => result.map_err(Into::into),
+                    response => Err(unexpected(response).into()),
+                }
+            }
+        }
+    }
+
+    async fn set_acl(&mut self, acl: Option<&PosixAcl>, default: bool) -> crate::Result<()> {
+        match &mut self.0 {
+            ClientFileInner::Direct(file) => file.set_acl(acl, default).await,
+            ClientFileInner::Remote(file) => {
+                file.idle()?;
+                match file
+                    .client
+                    .request(RequestKind::FileSetAcl {
+                        file: file.opaque(),
+                        acl: acl.cloned(),
+                        default,
+                    })
+                    .await?
+                {
+                    ResponseKind::FileSetAcl(result) => result.map_err(Into::into),
+                    response => Err(unexpected(response).into()),
+                }
+            }
+        }
+    }
+
+    async fn sec_desc(&mut self, mask: u32) -> crate::Result<SecDesc> {
+        match &mut self.0 {
+            ClientFileInner::Direct(file) => file.sec_desc(mask).await,
+            ClientFileInner::Remote(file) => {
+                file.idle()?;
+                match file
+                    .client
+                    .request(RequestKind::FileSecDesc {
+                        file: file.opaque(),
+                        mask,
+                    })
+                    .await?
+                {
+                    ResponseKind::FileSecDesc(result) => result.map_err(Into::into),
+                    response => Err(unexpected(response).into()),
+                }
+            }
+        }
+    }
+
+    async fn set_sec_desc(&mut self, sec_desc: &SecDesc) -> crate::Result<()> {
+        match &mut self.0 {
+            ClientFileInner::Direct(file) => file.set_sec_desc(sec_desc).await,
+            ClientFileInner::Remote(file) => {
+                file.idle()?;
+                match file
+                    .client
+                    .request(RequestKind::FileSetSecDesc {
+                        file: file.opaque(),
+                        sec_desc: sec_desc.clone(),
+                    })
+                    .await?
+                {
+                    ResponseKind::FileSetSecDesc(result) => result.map_err(Into::into),
+                    response => Err(unexpected(response).into()),
+                }
+            }
+        }
+    }
+
+    async fn xattrs(
+        &mut self,
+        namespace: crate::XattrNamespace<'_>,
+    ) -> crate::Result<Vec<XattrEntry>> {
+        match &mut self.0 {
+            ClientFileInner::Direct(file) => file.xattrs(namespace).await,
+            ClientFileInner::Remote(file) => {
+                file.idle()?;
+                match file
+                    .client
+                    .request(RequestKind::FileXattrs {
+                        file: file.opaque(),
+                        namespace: XattrNamespaceRequest::from(namespace),
+                    })
+                    .await?
+                {
+                    ResponseKind::FileXattrs(result) => result.map_err(Into::into),
+                    response => Err(unexpected(response).into()),
+                }
+            }
+        }
+    }
+
+    async fn xattr(&mut self, name: &str, namespace: Option<&str>) -> crate::Result<Vec<u8>> {
+        match &mut self.0 {
+            ClientFileInner::Direct(file) => file.xattr(name, namespace).await,
+            ClientFileInner::Remote(file) => {
+                file.idle()?;
+                match file
+                    .client
+                    .request(RequestKind::FileXattr {
+                        file: file.opaque(),
+                        name: name.to_owned(),
+                        namespace: namespace.map(str::to_owned),
+                    })
+                    .await?
+                {
+                    ResponseKind::FileXattr(result) => result.map_err(Into::into),
+                    response => Err(unexpected(response).into()),
+                }
+            }
+        }
+    }
+
+    async fn streams(&mut self) -> crate::Result<Vec<StreamEntry>> {
+        match &mut self.0 {
+            ClientFileInner::Direct(file) => file.streams().await,
+            ClientFileInner::Remote(file) => {
+                file.idle()?;
+                match file
+                    .client
+                    .request(RequestKind::FileStreams {
+                        file: file.opaque(),
+                    })
+                    .await?
+                {
+                    ResponseKind::FileStreams(result) => result.map_err(Into::into),
+                    response => Err(unexpected(response).into()),
+                }
+            }
+        }
+    }
+
+    async fn set_xattr(
+        &mut self,
+        name: &str,
+        namespace: Option<&str>,
+        value: &[u8],
+    ) -> crate::Result<()> {
+        match &mut self.0 {
+            ClientFileInner::Direct(file) => file.set_xattr(name, namespace, value).await,
+            ClientFileInner::Remote(file) => {
+                file.idle()?;
+                match file
+                    .client
+                    .request(RequestKind::FileSetXattr {
+                        file: file.opaque(),
+                        name: name.to_owned(),
+                        namespace: namespace.map(str::to_owned),
+                        value: value.to_vec(),
+                    })
+                    .await?
+                {
+                    ResponseKind::FileSetXattr(result) => result.map_err(Into::into),
+                    response => Err(unexpected(response).into()),
+                }
+            }
+        }
+    }
+
+    async fn remove_xattr(&mut self, name: &str, namespace: Option<&str>) -> crate::Result<()> {
+        match &mut self.0 {
+            ClientFileInner::Direct(file) => file.remove_xattr(name, namespace).await,
+            ClientFileInner::Remote(file) => {
+                file.idle()?;
+                match file
+                    .client
+                    .request(RequestKind::FileRemoveXattr {
+                        file: file.opaque(),
+                        name: name.to_owned(),
+                        namespace: namespace.map(str::to_owned),
+                    })
+                    .await?
+                {
+                    ResponseKind::FileRemoveXattr(result) => result.map_err(Into::into),
+                    response => Err(unexpected(response).into()),
+                }
+            }
+        }
+    }
+
+    async fn lock(
+        &self,
+        request: crate::FileLockRequest,
+    ) -> crate::Result<Option<crate::FileLock>> {
+        match &self.0 {
+            ClientFileInner::Direct(file) => file.lock(request).await,
+            ClientFileInner::Remote(file) => {
+                file.idle()?;
+                match file
+                    .client
+                    .request(RequestKind::FileLock {
+                        file: file.opaque(),
+                        request,
+                    })
+                    .await?
+                {
+                    ResponseKind::FileLock(result) => result
+                        .map(|lock| {
+                            lock.map(|lock| {
+                                crate::FileLock::remote(RemoteFileLock {
+                                    client: file.client.clone(),
+                                    file: file.opaque(),
+                                    lock: Some(lock),
+                                })
+                            })
+                        })
+                        .map_err(Into::into),
+                    response => Err(unexpected(response).into()),
+                }
+            }
+        }
+    }
+
+    async fn try_into_std(self) -> std::result::Result<std::fs::File, Self> {
+        match self.0 {
+            ClientFileInner::Direct(file) => file
+                .try_into_std()
+                .await
+                .map_err(|file| Self(ClientFileInner::Direct(file))),
+            ClientFileInner::Remote(file) => Err(Self(ClientFileInner::Remote(file))),
+        }
+    }
+}
+
+fn wire_io(error: crate::protocol::WireError) -> io::Error {
+    crate::Error::from(error).into_io_error()
+}
+
+impl Client {
+    pub(crate) fn is_same_vfs(&self, other: &Self) -> bool {
+        self.rpc.is_same_session(&other.rpc) && self.vfs == other.vfs
+    }
+
+    pub(crate) fn mode(&self) -> SessionMode {
+        self.mode
+    }
+
+    /// Starts an opaque-only VFS client on a bidirectional byte stream.
+    pub async fn new<T>(stream: T) -> crate::Result<Self>
+    where
+        T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        Ok(Self {
+            rpc: rpc_builder()
+                .client(stream)
+                .await
+                .map_err(rpc_error)?
+                .bind(),
+            mode: SessionMode::Remote,
+            vfs: None,
+        })
+    }
+
+    /// Starts an opaque-only VFS client on separate reader and writer streams.
+    pub async fn new_split<R, W>(reader: R, writer: W) -> crate::Result<Self>
+    where
+        R: AsyncRead + Send + 'static,
+        W: AsyncWrite + Send + 'static,
+    {
+        Ok(Self {
+            rpc: rpc_builder()
+                .client_split(reader, writer)
+                .await
+                .map_err(rpc_error)?
+                .bind(),
+            mode: SessionMode::Remote,
+            vfs: None,
+        })
+    }
+
+    /// Connect to an agent daemon at the given socket path.
+    #[cfg(unix)]
+    pub async fn connect(path: impl AsRef<Path>) -> crate::Result<Self> {
+        Self::from_stream(UnixStream::connect(path).await?).await
+    }
+
+    /// Connect using an existing `UnixStream`.
+    #[cfg(unix)]
+    pub async fn from_stream(stream: UnixStream) -> crate::Result<Self> {
+        Self::from_std_stream(stream.into_std()?).await
+    }
+
+    #[cfg(unix)]
+    async fn from_std_stream(stream: StdUnixStream) -> crate::Result<Self> {
+        let rpc = rpc_builder()
+            .client_unix(stream)
+            .await
+            .map_err(rpc_error)?
+            .bind();
+        Ok(Self {
+            rpc,
+            mode: SessionMode::Native,
+            vfs: None,
+        })
+    }
+
+    /// Starts a VFS client on an already-connected Unix domain socket file
+    /// descriptor.
+    #[cfg(unix)]
+    pub async fn from_owned_fd(value: OwnedFd) -> crate::Result<Self> {
+        let stream = StdUnixStream::from(value);
+        stream.set_nonblocking(true)?;
+        Self::from_std_stream(stream).await
+    }
+
+    /// Starts a VFS client on the server end of a connected Windows named pipe.
+    ///
+    /// # Safety
+    ///
+    /// `server_process` must identify the trusted process at the other end of
+    /// the pipe. That process can transfer handles which this process adopts.
+    #[cfg(windows)]
+    pub async unsafe fn from_named_pipe_server(
+        pipe: NamedPipeServer,
+        server_process: OwnedHandle,
+    ) -> crate::Result<Self> {
+        let rpc = unsafe { rpc_builder().client_named_pipe_server(pipe, server_process) }
+            .await
+            .map_err(rpc_error)?
+            .bind();
+        Ok(Self {
+            rpc,
+            mode: SessionMode::Native,
+            vfs: None,
+        })
+    }
+
+    fn unsupported<T>(&self, operation: &str) -> crate::Result<T> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("{operation} is not supported by a remote VFS session"),
+        )
+        .into())
+    }
+
+    fn call(&self, request: RequestKind) -> Call<VfsProtocol> {
+        self.rpc.call(Request {
+            vfs: self.vfs.clone(),
+            kind: request,
+        })
+    }
+
+    fn call_with_trailer(&self, request: RequestKind) -> TrailerSend<Call<VfsProtocol>> {
+        self.rpc.call_with_trailer(Request {
+            vfs: self.vfs.clone(),
+            kind: request,
+        })
+    }
+
+    async fn request(&self, request: RequestKind) -> crate::Result<ResponseKind> {
+        let response = self
+            .call(request)
+            .await
+            .map_err(rpc_error)
+            .map_err(crate::Error::from)?
+            .into_response();
+        match response {
+            ResponseKind::Error(error) => Err(crate::Error::from(error)),
+            response => Ok(response),
+        }
+    }
+
+    async fn unix_vfs(&self, path: Utf8TypedPath<'_>) -> crate::Result<crate::AnyVfs> {
+        let request = UnixVfsRequest { path: path.into() };
+        match self.request(RequestKind::UnixVfs(request)).await? {
+            ResponseKind::UnixVfs(result) => match result.map_err(crate::Error::from)? {
+                OpenVfsHandle::Native(handle) => {
+                    #[cfg(unix)]
+                    {
+                        Ok(Self::from_owned_fd(handle.into_inner()).await?.into())
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        let _ = handle;
+                        Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "received a native Unix VFS connection on a non-Unix host",
+                        )
+                        .into())
+                    }
+                }
+                OpenVfsHandle::Opaque(vfs) => Ok(Self {
+                    rpc: self.rpc.clone(),
+                    mode: self.mode,
+                    vfs: Some(vfs),
+                }
+                .into()),
+            },
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    async fn windows_admin_vfs(
+        &self,
+        cwd: Utf8TypedPath<'_>,
+        env: HashMap<String, Option<String>>,
+        elevate: bool,
+    ) -> crate::Result<crate::VfsSession> {
+        let request = WindowsAdminRequest {
+            cwd: cwd.into(),
+            env,
+            elevate,
+        };
+        match self.request(RequestKind::WindowsAdmin(request)).await? {
+            ResponseKind::WindowsAdmin(result) => {
+                let vfs = result.map_err(crate::Error::from)?;
+                Ok(crate::VfsSession::from_client(Self {
+                    rpc: self.rpc.clone(),
+                    mode: self.mode,
+                    vfs: Some(vfs),
+                }))
+            }
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    /// Check file accessibility.
+    ///
+    /// Mode is a bitmask of accessibility flags from [`AccessFlags`](crate::AccessFlags):
+    /// - `AccessFlags::F_OK`: Test for existence
+    /// - `AccessFlags::R_OK`: Test for read permission
+    /// - `AccessFlags::W_OK`: Test for write permission
+    /// - `AccessFlags::X_OK`: Test for execute permission
+    #[cfg(unix)]
+    pub async fn access(
+        &self,
+        path: impl AsRef<Path>,
+        mode: crate::AccessFlags,
+    ) -> crate::Result<()> {
+        let request = AccessRequest {
+            path: path.as_ref().to_path_buf().try_into()?,
+            mode: mode.bits(),
+        };
+        match self.request(RequestKind::Access(request)).await? {
+            ResponseKind::Access(result) => result.map_err(crate::Error::from),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    /// Calls a registered VFS extension.
+    ///
+    /// The extension must be linked into both this process and the peer
+    /// serving the connection (whether that peer is a remote `dolang-vfs`
+    /// process or, when `mode == SessionMode::Native`, this same process's
+    /// direct backend).
+    pub async fn call_extension<T: VfsExtension>(
+        &self,
+        request: T::Request,
+    ) -> crate::Result<T::Response> {
+        let wire = RequestKind::Extension(ExtensionRequest {
+            name: T::NAME.to_string(),
+            version: T::VERSION,
+            payload: Box::new(request),
+        });
+        match self.request(wire).await? {
+            ResponseKind::Extension(Ok(ExtensionResponse { payload, .. })) => Ok(*payload
+                .downcast::<T::Response>()
+                .expect("response type matches the extension that produced it")),
+            ResponseKind::Extension(Err(error)) => Err(error.into()),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    /// Query the daemon's initial process context.
+    pub async fn query(&self) -> crate::Result<Query> {
+        match self.request(RequestKind::Query).await? {
+            ResponseKind::Query(result) => result
+                .map(
+                    |QueryResponse {
+                         env,
+                         cwd,
+                         current_exe,
+                         target,
+                         security,
+                     }| Query {
+                        env,
+                        cwd: cwd.into(),
+                        current_exe: current_exe.into(),
+                        target,
+                        security,
+                    },
+                )
+                .map_err(crate::Error::from),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    pub async fn user_name(&self, uid: u32) -> crate::Result<String> {
+        match self.request(RequestKind::UserName { uid }).await? {
+            ResponseKind::UserName(result) => result.map_err(Into::into),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    pub async fn user_id(&self, name: &str) -> crate::Result<u32> {
+        match self
+            .request(RequestKind::UserId {
+                name: name.to_owned(),
+            })
+            .await?
+        {
+            ResponseKind::UserId(result) => result.map_err(Into::into),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    pub async fn group_name(&self, gid: u32) -> crate::Result<String> {
+        match self.request(RequestKind::GroupName { gid }).await? {
+            ResponseKind::GroupName(result) => result.map_err(Into::into),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    pub async fn group_id(&self, name: &str) -> crate::Result<u32> {
+        match self
+            .request(RequestKind::GroupId {
+                name: name.to_owned(),
+            })
+            .await?
+        {
+            ResponseKind::GroupId(result) => result.map_err(Into::into),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    pub async fn sid_name(&self, sid: &Sid) -> crate::Result<SidName> {
+        match self
+            .request(RequestKind::SidName { sid: sid.clone() })
+            .await?
+        {
+            ResponseKind::SidName(result) => result.map_err(Into::into),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    pub async fn account_name(&self, name: &str) -> crate::Result<SidName> {
+        match self
+            .request(RequestKind::AccountName {
+                name: name.to_owned(),
+            })
+            .await?
+        {
+            ResponseKind::AccountName(result) => result.map_err(Into::into),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    /// Resolve a program path using the daemon's PATH resolution.
+    pub async fn which(
+        &self,
+        program: impl AsRef<Path>,
+        path: Option<&str>,
+        cwd: Option<&Path>,
+    ) -> crate::Result<Option<PathBuf>> {
+        let request = RequestKind::Which {
+            program: program.as_ref().to_path_buf().try_into()?,
+            path: path.map(str::to_owned),
+            cwd: cwd
+                .map(|path| WirePath::try_from(path.to_path_buf()))
+                .transpose()?,
+        };
+        match self.request(request).await? {
+            ResponseKind::Which(result) => result
+                .map_err(crate::Error::from)?
+                .map(TryInto::try_into)
+                .transpose(),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    pub async fn well_known_path(
+        &self,
+        key: WellKnownPath,
+        app: Option<&str>,
+        env: &HashMap<String, Option<String>>,
+    ) -> crate::Result<PathBuf> {
+        let request = WellKnownPathRequest {
+            key,
+            app: app.map(str::to_owned),
+            env: env.clone(),
+        };
+        match self.request(RequestKind::WellKnownPath(request)).await? {
+            ResponseKind::WellKnownPath(result) => result.map_err(crate::Error::from)?.try_into(),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    /// Signal the daemon to stop accepting new connections.
+    pub async fn stop(&self) -> crate::Result<()> {
+        match self.request(RequestKind::Stop).await? {
+            ResponseKind::Stop => Ok(()),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    /// Clear the server's path resolution cache.
+    pub async fn clear_cache(&self) -> crate::Result<()> {
+        match self.request(RequestKind::ClearCache).await? {
+            ResponseKind::ClearCache(result) => result.map_err(crate::Error::from),
+            response => Err(unexpected(response).into()),
+        }
+    }
+}
+
+pub(crate) fn rpc_error(error: dolang_rpc::Error) -> io::Error {
+    match error {
+        dolang_rpc::Error::Io(error) => error,
+        dolang_rpc::Error::ConnectionClosed => {
+            io::Error::new(io::ErrorKind::ConnectionReset, error.to_string())
+        }
+        dolang_rpc::Error::Cancelled => {
+            io::Error::new(io::ErrorKind::Interrupted, error.to_string())
+        }
+        error => io::Error::other(error),
+    }
+}
+
+fn unexpected(response: ResponseKind) -> io::Error {
+    io::Error::other(format!("unexpected RPC response: {response:?}"))
+}
+
+fn clone_stdin_handle() -> io::Result<DefaultHandle> {
+    #[cfg(unix)]
+    {
+        std::io::stdin().as_fd().try_clone_to_owned()
+    }
+    #[cfg(windows)]
+    {
+        std::io::stdin().as_handle().try_clone_to_owned()
+    }
+}
+
+fn clone_stdout_handle() -> io::Result<DefaultHandle> {
+    #[cfg(unix)]
+    {
+        std::io::stdout().as_fd().try_clone_to_owned()
+    }
+    #[cfg(windows)]
+    {
+        std::io::stdout().as_handle().try_clone_to_owned()
+    }
+}
+
+fn clone_stderr_handle() -> io::Result<DefaultHandle> {
+    #[cfg(unix)]
+    {
+        std::io::stderr().as_fd().try_clone_to_owned()
+    }
+    #[cfg(windows)]
+    {
+        std::io::stderr().as_handle().try_clone_to_owned()
+    }
+}
+
+/// Builder for constructing spawn requests.
+///
+/// # Example
+///
+/// ```ignore
+/// let child = client
+///     .command("ls")
+///     .arg("-l")
+///     .arg("/tmp")
+///     .env("RUST_LOG", "info")
+///     .env_remove("DEBUG")
+///     .current_dir("/home")
+///     .stdin(fd)
+///     .spawn()
+///     .await?;
+/// ```
+pub struct CommandBuilder<'a> {
+    client: &'a Client,
+    program: WirePath,
+    args: Vec<String>,
+    env: HashMap<String, Option<String>>,
+    cwd: Option<WirePath>,
+    stdin: ClientRecv,
+    stdout: ClientSend,
+    stderr: ClientSend,
+    process_control: crate::ProcessControl,
+    termination_policy: crate::TerminationPolicy,
+}
+
+pub struct ClientChild {
+    client: Client,
+    state: ClientChildState,
+    relays: ClientRelays,
+}
+
+#[derive(Default)]
+struct ClientRelays {
+    stdin: Option<JoinHandle<()>>,
+    outputs: Vec<JoinHandle<()>>,
+}
+
+#[derive(Clone, Copy)]
+enum HostOutput {
+    Stdout,
+    Stderr,
+}
+
+#[derive(Default)]
+struct PreparedRelays {
+    stdin: Option<StdioSend>,
+    outputs: Vec<(StdioRecv, HostOutput)>,
+}
+
+enum ClientChildState {
+    Live(Opaque<crate::ChildMarker>),
+    Exited(ProcessStatus),
+    Lost(crate::protocol::WireError),
+}
+
+pub struct RemoteStdioSend {
+    client: Client,
+    stdio: Option<Opaque<crate::StdioSendMarker>>,
+    pending: Option<(StdioSendOperation, Call<VfsProtocol>)>,
+    write_body: Option<PendingTrailerWrite>,
+}
+
+pub struct RemoteStdioRecv {
+    client: Client,
+    stdio: Option<Opaque<crate::StdioRecvMarker>>,
+    pending: Option<Call<VfsProtocol>>,
+    read_body: Option<PendingTrailerRead>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StdioSendOperation {
+    Close,
+}
+
+impl std::fmt::Debug for RemoteStdioSend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteStdioSend")
+            .field("stdio", &self.stdio)
+            .field("pending", &self.pending.as_ref().map(|p| p.0))
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for RemoteStdioRecv {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteStdioRecv")
+            .field("stdio", &self.stdio)
+            .field("pending", &self.pending.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl AsyncWrite for RemoteStdioSend {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        if self.pending.is_some() {
+            return Poll::Ready(Err(io::Error::other(
+                "write polled while stdio close is pending",
+            )));
+        }
+        if self.write_body.is_none() {
+            let Some(stdio) = self.stdio.as_ref().cloned() else {
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "stdio send resource is closed",
+                )));
+            };
+            self.write_body = Some(PendingTrailerWrite {
+                send: Some(
+                    self.client
+                        .call_with_trailer(RequestKind::StdioSendWrite { stdio }),
+                ),
+                call: None,
+                target: buf.len(),
+                sent: 0,
+                unreported: 0,
+            });
+        }
+        let pending = self.write_body.as_mut().unwrap();
+        if let Some(call) = pending.call.as_mut() {
+            match Pin::new(call).poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(result) => {
+                    let target = pending.target;
+                    let unreported = pending.unreported;
+                    self.write_body = None;
+                    match result.map_err(rpc_error)?.into_response() {
+                        ResponseKind::StdioSendWrite(result) => {
+                            if result.map_err(wire_io)? != target {
+                                return Poll::Ready(Err(io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    "stdio write response does not acknowledge the submitted trailer",
+                                )));
+                            }
+                            return Poll::Ready(Ok(unreported));
+                        }
+                        ResponseKind::Error(error) => return Poll::Ready(Err(wire_io(error))),
+                        response => return Poll::Ready(Err(unexpected(response))),
+                    }
+                }
+            }
+        }
+        let remaining = pending.target - pending.sent;
+        match Pin::new(pending.send.as_mut().unwrap())
+            .poll_write(cx, &buf[..buf.len().min(remaining)])
+        {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Ready(Ok(n)) => {
+                pending.sent += n;
+                if pending.sent == pending.target {
+                    pending.call = Some(pending.send.take().unwrap().finish());
+                    pending.unreported = n;
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                Poll::Ready(Ok(n))
+            }
+        }
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if let Some(pending) = self.write_body.as_mut() {
+            if pending.call.is_none() {
+                pending.call = Some(pending.send.take().unwrap().finish());
+            }
+            return match Pin::new(pending.call.as_mut().unwrap()).poll(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(result) => {
+                    self.write_body = None;
+                    Poll::Ready(result.map_err(rpc_error).and_then(|result| {
+                        match result.into_response() {
+                            ResponseKind::StdioSendWrite(result) => {
+                                result.map(|_| ()).map_err(wire_io)
+                            }
+                            ResponseKind::Error(error) => Err(wire_io(error)),
+                            response => Err(unexpected(response)),
+                        }
+                    }))
+                }
+            };
+        }
+        let Some((_operation, _call)) = self.pending.as_mut() else {
+            return Poll::Ready(Ok(()));
+        };
+        Poll::Ready(Err(io::Error::other(
+            "flush polled while stdio send close is pending",
+        )))
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.pending.is_none() {
+            match self.as_mut().poll_flush(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(())) => {}
+            }
+        }
+        if self.stdio.is_none() {
+            return Poll::Ready(Ok(()));
+        }
+        if self.pending.is_none() {
+            let stdio = self.stdio.as_ref().unwrap().clone();
+            self.pending = Some((
+                StdioSendOperation::Close,
+                self.client.call(RequestKind::StdioSendClose { stdio }),
+            ));
+        }
+        let (operation, call) = self.pending.as_mut().unwrap();
+        debug_assert_eq!(*operation, StdioSendOperation::Close);
+        match Pin::new(call).poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(result) => {
+                self.pending = None;
+                match result.map_err(rpc_error)?.into_response() {
+                    ResponseKind::Error(error) => Poll::Ready(Err(wire_io(error))),
+                    ResponseKind::StdioSendClose(result) => match result.map_err(wire_io) {
+                        Ok(()) => {
+                            self.stdio.take();
+                            Poll::Ready(Ok(()))
+                        }
+                        Err(error) => Poll::Ready(Err(error)),
+                    },
+                    response => Poll::Ready(Err(unexpected(response))),
+                }
+            }
+        }
+    }
+}
+
+impl AsyncRead for RemoteStdioRecv {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        loop {
+            if let Some(body) = self.read_body.as_mut() {
+                let before = buf.filled().len();
+                match Pin::new(&mut body.recv).poll_read(cx, buf) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(error)) => {
+                        self.read_body = None;
+                        return Poll::Ready(Err(error));
+                    }
+                    Poll::Ready(Ok(())) => {
+                        let read = buf.filled().len() - before;
+                        if read > body.remaining {
+                            self.read_body = None;
+                            return Poll::Ready(Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "stdio read response exceeds requested length",
+                            )));
+                        }
+                        body.remaining -= read;
+                        body.read += read;
+                        if read > 0 {
+                            return Poll::Ready(Ok(()));
+                        }
+                        let empty = body.read == 0;
+                        self.read_body = None;
+                        if empty {
+                            return Poll::Ready(Ok(()));
+                        }
+                        continue;
+                    }
+                }
+            }
+            if self.pending.is_none() {
+                if buf.remaining() == 0 {
+                    return Poll::Ready(Ok(()));
+                }
+                let Some(stdio) = &self.stdio else {
+                    return Poll::Ready(Ok(()));
+                };
+                self.pending = Some(self.client.call(RequestKind::StdioRecvRead {
+                    stdio: stdio.clone(),
+                    len: buf.remaining(),
+                }));
+            }
+            match Pin::new(self.pending.as_mut().unwrap()).poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(result) => {
+                    self.pending = None;
+                    let (response, trailer) = result.map_err(rpc_error)?.into_response_trailer();
+                    match response {
+                        ResponseKind::Error(error) => return Poll::Ready(Err(wire_io(error))),
+                        ResponseKind::StdioRecvRead(result) => match result.map_err(wire_io) {
+                            Ok(()) => {
+                                let Some(data) = trailer else {
+                                    return Poll::Ready(Err(io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        "stdio read response is missing its data trailer",
+                                    )));
+                                };
+                                let requested = buf.remaining();
+                                self.read_body = Some(PendingTrailerRead {
+                                    recv: data,
+                                    remaining: requested,
+                                    read: 0,
+                                });
+                                continue;
+                            }
+                            Err(error) => return Poll::Ready(Err(error)),
+                        },
+                        response => return Poll::Ready(Err(unexpected(response))),
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn best_effort_close_stdio_send(client: Client, stdio: Opaque<crate::StdioSendMarker>) {
+    for _ in 0..4 {
+        let Ok(ResponseKind::StdioSendClose(result)) = client
+            .request(RequestKind::StdioSendClose {
+                stdio: stdio.clone(),
+            })
+            .await
+        else {
+            return;
+        };
+        match result {
+            Ok(()) => return,
+            Err(error)
+                if crate::Error::from(error.clone()).kind() == io::ErrorKind::ResourceBusy =>
+            {
+                tokio::task::yield_now().await;
+            }
+            Err(_) => return,
+        }
+    }
+}
+
+async fn best_effort_close_stdio_recv(client: Client, stdio: Opaque<crate::StdioRecvMarker>) {
+    for _ in 0..4 {
+        let Ok(ResponseKind::StdioRecvClose(result)) = client
+            .request(RequestKind::StdioRecvClose {
+                stdio: stdio.clone(),
+            })
+            .await
+        else {
+            return;
+        };
+        match result {
+            Ok(()) => return,
+            Err(error)
+                if crate::Error::from(error.clone()).kind() == io::ErrorKind::ResourceBusy =>
+            {
+                tokio::task::yield_now().await;
+            }
+            Err(_) => return,
+        }
+    }
+}
+
+impl Drop for RemoteStdioSend {
+    fn drop(&mut self) {
+        let Some(stdio) = self.stdio.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let client = self.client.clone();
+        runtime.spawn(best_effort_close_stdio_send(client, stdio));
+    }
+}
+
+impl RemoteStdioSend {
+    pub(crate) fn client(&self) -> &Client {
+        &self.client
+    }
+
+    pub(crate) fn disarm_cleanup(&mut self) {
+        self.stdio.take();
+    }
+
+    pub(crate) async fn try_clone(&self) -> io::Result<Self> {
+        if self.pending.is_some() {
+            return Err(io::Error::other(
+                "cannot clone stdio send while an operation is pending",
+            ));
+        }
+        let stdio = self.stdio.as_ref().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::BrokenPipe, "stdio send resource is closed")
+        })?;
+        match self
+            .client
+            .request(RequestKind::StdioSendClone {
+                stdio: stdio.clone(),
+            })
+            .await
+            .map_err(crate::Error::into_io_error)?
+        {
+            ResponseKind::StdioSendClone(result) => result
+                .map(|stdio| Self {
+                    client: self.client.clone(),
+                    stdio: Some(stdio),
+                    pending: None,
+                    write_body: None,
+                })
+                .map_err(wire_io),
+            response => Err(unexpected(response)),
+        }
+    }
+}
+
+impl Drop for RemoteStdioRecv {
+    fn drop(&mut self) {
+        let Some(stdio) = self.stdio.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let client = self.client.clone();
+        runtime.spawn(best_effort_close_stdio_recv(client, stdio));
+    }
+}
+
+impl RemoteStdioRecv {
+    pub(crate) fn client(&self) -> &Client {
+        &self.client
+    }
+
+    pub(crate) fn disarm_cleanup(&mut self) {
+        self.stdio.take();
+    }
+
+    pub(crate) async fn try_clone(&self) -> io::Result<Self> {
+        if self.pending.is_some() {
+            return Err(io::Error::other(
+                "cannot clone stdio receive while an operation is pending",
+            ));
+        }
+        let stdio = self.stdio.as_ref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "stdio receive resource is closed",
+            )
+        })?;
+        match self
+            .client
+            .request(RequestKind::StdioRecvClone {
+                stdio: stdio.clone(),
+            })
+            .await
+            .map_err(crate::Error::into_io_error)?
+        {
+            ResponseKind::StdioRecvClone(result) => result
+                .map(|stdio| Self {
+                    client: self.client.clone(),
+                    stdio: Some(stdio),
+                    pending: None,
+                    read_body: None,
+                })
+                .map_err(wire_io),
+            response => Err(unexpected(response)),
+        }
+    }
+}
+
+enum ClientRecv {
+    Null,
+    Inherit,
+    Native(DefaultHandle),
+    Resource(StdioRecv),
+}
+
+enum ClientSend {
+    Null,
+    Inherit(HostOutput),
+    Native(DefaultHandle),
+    Resource(StdioSend),
+}
+
+impl<'a> CommandBuilder<'a> {
+    fn new(client: &'a Client, program: Utf8TypedPath<'_>) -> Self {
+        Self {
+            client,
+            program: program.into(),
+            args: Vec::new(),
+            env: HashMap::new(),
+            cwd: None,
+            stdin: ClientRecv::Null,
+            stdout: ClientSend::Null,
+            stderr: ClientSend::Null,
+            process_control: crate::ProcessControl::Foreground,
+            termination_policy: crate::TerminationPolicy::default(),
+        }
+    }
+
+    async fn prepare_recv(
+        client: &Client,
+        stdio: ClientRecv,
+        relays: &mut PreparedRelays,
+    ) -> crate::Result<(StdioRecvTarget, Option<StdioRecv>)> {
+        match stdio {
+            ClientRecv::Null => Ok((StdioRecvTarget::Null, None)),
+            ClientRecv::Inherit => {
+                let (send, recv) = client.pipe().await?;
+                relays.stdin = Some(send);
+                let StdioRecv::Remote(remote) = recv else {
+                    return Err(io::Error::other(
+                        "remote pipe unexpectedly returned a native receive endpoint",
+                    )
+                    .into());
+                };
+                Self::prepare_remote_recv(client, remote)
+            }
+            ClientRecv::Native(handle) => {
+                if client.mode == SessionMode::Remote {
+                    return client.unsupported("native process stdio");
+                }
+                Ok((StdioRecvTarget::Native(OsHandle::new(handle)), None))
+            }
+            ClientRecv::Resource(stdio) => match stdio {
+                StdioRecv::Native(_) => {
+                    if client.mode == SessionMode::Remote {
+                        return client.unsupported("native process stdio");
+                    }
+                    let handle = stdio.into_blocking_handle().await?;
+                    Ok((StdioRecvTarget::Native(OsHandle::new(handle)), None))
+                }
+                StdioRecv::Remote(remote) => Self::prepare_remote_recv(client, remote),
+            },
+        }
+    }
+
+    fn prepare_remote_recv(
+        client: &Client,
+        remote: RemoteStdioRecv,
+    ) -> crate::Result<(StdioRecvTarget, Option<StdioRecv>)> {
+        if !client.is_same_vfs(&remote.client) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "stdio receive belongs to a different VFS session",
+            )
+            .into());
+        }
+        let opaque = remote.stdio.as_ref().unwrap().clone();
+        let stdio = StdioRecv::Remote(remote);
+        Ok((StdioRecvTarget::Opaque(opaque), Some(stdio)))
+    }
+
+    async fn prepare_send(
+        client: &Client,
+        stdio: ClientSend,
+        relays: &mut PreparedRelays,
+    ) -> crate::Result<(StdioSendTarget, Option<StdioSend>)> {
+        match stdio {
+            ClientSend::Null => Ok((StdioSendTarget::Null, None)),
+            ClientSend::Inherit(output) => {
+                let (send, recv) = client.pipe().await?;
+                relays.outputs.push((recv, output));
+                let StdioSend::Remote(remote) = send else {
+                    return Err(io::Error::other(
+                        "remote pipe unexpectedly returned a native send endpoint",
+                    )
+                    .into());
+                };
+                Self::prepare_remote_send(client, remote)
+            }
+            ClientSend::Native(handle) => {
+                if client.mode == SessionMode::Remote {
+                    return client.unsupported("native process stdio");
+                }
+                Ok((StdioSendTarget::Native(OsHandle::new(handle)), None))
+            }
+            ClientSend::Resource(stdio) => match stdio {
+                StdioSend::Native(_) => {
+                    if client.mode == SessionMode::Remote {
+                        return client.unsupported("native process stdio");
+                    }
+                    let handle = stdio.into_blocking_handle().await?;
+                    Ok((StdioSendTarget::Native(OsHandle::new(handle)), None))
+                }
+                StdioSend::Remote(remote) => Self::prepare_remote_send(client, remote),
+            },
+        }
+    }
+
+    fn prepare_remote_send(
+        client: &Client,
+        remote: RemoteStdioSend,
+    ) -> crate::Result<(StdioSendTarget, Option<StdioSend>)> {
+        if !client.is_same_vfs(&remote.client) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "stdio send belongs to a different VFS session",
+            )
+            .into());
+        }
+        let opaque = remote.stdio.as_ref().unwrap().clone();
+        let stdio = StdioSend::Remote(remote);
+        Ok((StdioSendTarget::Opaque(opaque), Some(stdio)))
+    }
+
+    async fn prepare_outputs(
+        client: &Client,
+        stdout: ClientSend,
+        stderr: ClientSend,
+        relays: &mut PreparedRelays,
+    ) -> crate::Result<(
+        (StdioSendTarget, Option<StdioSend>),
+        (StdioSendTarget, Option<StdioSend>),
+    )> {
+        if client.mode == SessionMode::Remote
+            && matches!(stdout, ClientSend::Inherit(HostOutput::Stdout))
+            && matches!(stderr, ClientSend::Inherit(HostOutput::Stdout))
+        {
+            let (send, recv) = client.pipe().await?;
+            let stderr = send.try_clone().await?;
+            relays.outputs.push((recv, HostOutput::Stdout));
+            let stdout = Self::prepare_send(client, ClientSend::Resource(send), relays).await?;
+            let stderr = Self::prepare_send(client, ClientSend::Resource(stderr), relays).await?;
+            Ok((stdout, stderr))
+        } else {
+            let stdout = Self::prepare_send(client, stdout, relays).await?;
+            let stderr = Self::prepare_send(client, stderr, relays).await?;
+            Ok((stdout, stderr))
+        }
+    }
+}
+
+async fn relay_stdin(mut send: StdioSend) {
+    let mut stdin = tokio::io::stdin();
+    let _ = tokio::io::copy(&mut stdin, &mut send).await;
+    let _ = send.shutdown().await;
+}
+
+async fn relay_output<W>(mut recv: StdioRecv, mut output: W)
+where
+    W: AsyncWrite + Unpin,
+{
+    let _ = tokio::io::copy(&mut recv, &mut output).await;
+    let _ = output.flush().await;
+}
+
+impl PreparedRelays {
+    fn start(self) -> ClientRelays {
+        let stdin = self.stdin.map(|send| tokio::spawn(relay_stdin(send)));
+        let outputs = self
+            .outputs
+            .into_iter()
+            .map(|(recv, output)| match output {
+                HostOutput::Stdout => tokio::spawn(relay_output(recv, tokio::io::stdout())),
+                HostOutput::Stderr => tokio::spawn(relay_output(recv, tokio::io::stderr())),
+            })
+            .collect();
+        ClientRelays { stdin, outputs }
+    }
+}
+
+impl ClientRelays {
+    fn abort_stdin(&mut self) {
+        if let Some(stdin) = self.stdin.take() {
+            stdin.abort();
+        }
+    }
+
+    fn finish(&mut self) {
+        self.abort_stdin();
+        self.outputs.clear();
+    }
+}
+
+impl ClientChild {
+    fn result(&self) -> Option<crate::Result<ProcessStatus>> {
+        match &self.state {
+            ClientChildState::Live(_) => None,
+            ClientChildState::Exited(status) => Some(Ok(*status)),
+            ClientChildState::Lost(error) => Some(Err(error.clone().into())),
+        }
+    }
+
+    fn store_result(
+        &mut self,
+        result: &std::result::Result<ProcessStatus, crate::protocol::WireError>,
+    ) {
+        self.state = match result {
+            Ok(status) => ClientChildState::Exited(*status),
+            Err(error) => ClientChildState::Lost(error.clone()),
+        };
+    }
+}
+
+impl Drop for ClientChild {
+    fn drop(&mut self) {
+        self.relays.finish();
+        let ClientChildState::Live(child) = &self.state else {
+            return;
+        };
+        let child = child.clone();
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let client = self.client.clone();
+        runtime.spawn(async move {
+            let _ = client.request(RequestKind::ChildClose { child }).await;
+        });
+    }
+}
+
+impl Child for ClientChild {
+    async fn wait(&mut self) -> crate::Result<ProcessStatus> {
+        if let Some(result) = self.result() {
+            return result;
+        }
+        let ClientChildState::Live(child) = &self.state else {
+            unreachable!();
+        };
+        match self
+            .client
+            .request(RequestKind::ChildWait {
+                child: child.clone(),
+            })
+            .await?
+        {
+            ResponseKind::ChildWait(result) => {
+                self.relays.finish();
+                self.store_result(&result);
+                self.result().unwrap()
+            }
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    async fn terminate(mut self) -> crate::Result<Option<ProcessStatus>> {
+        self.relays.abort_stdin();
+        if let Some(result) = self.result() {
+            return result.map(Some);
+        }
+        let ClientChildState::Live(child) = &self.state else {
+            unreachable!();
+        };
+        match self
+            .client
+            .request(RequestKind::ChildTerminate {
+                child: child.clone(),
+            })
+            .await?
+        {
+            ResponseKind::ChildTerminate(result) => {
+                self.relays.finish();
+                if let Ok(Some(status)) = result {
+                    self.state = ClientChildState::Exited(status);
+                }
+                result.map_err(Into::into)
+            }
+            response => Err(unexpected(response).into()),
+        }
+    }
+}
+
+impl<'a> Command for CommandBuilder<'a> {
+    type Child = ClientChild;
+    type StdioSend = StdioSend;
+    type StdioRecv = StdioRecv;
+
+    fn arg(&mut self, arg: &str) -> &mut Self {
+        self.args.push(arg.to_owned());
+        self
+    }
+
+    fn env(&mut self, key: &str, val: &str) -> &mut Self {
+        self.env.insert(key.to_owned(), Some(val.to_owned()));
+        self
+    }
+
+    fn env_remove(&mut self, key: &str) -> &mut Self {
+        self.env.insert(key.to_owned(), None);
+        self
+    }
+
+    fn current_dir(&mut self, dir: Utf8TypedPath<'_>) -> &mut Self {
+        self.cwd = Some(dir.into());
+        self
+    }
+
+    fn stdin(&mut self, stdio: StdioRecv) -> io::Result<&mut Self> {
+        if let StdioRecv::Remote(remote) = &stdio
+            && !self.client.is_same_vfs(&remote.client)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "stdio receive belongs to a different VFS session",
+            ));
+        }
+        self.stdin = ClientRecv::Resource(stdio);
+        Ok(self)
+    }
+
+    fn stdout(&mut self, stdio: StdioSend) -> io::Result<&mut Self> {
+        if let StdioSend::Remote(remote) = &stdio
+            && !self.client.is_same_vfs(&remote.client)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "stdio send belongs to a different VFS session",
+            ));
+        }
+        self.stdout = ClientSend::Resource(stdio);
+        Ok(self)
+    }
+
+    fn stdin_inherit(&mut self) -> io::Result<&mut Self> {
+        self.stdin = if self.client.mode == SessionMode::Remote {
+            if std::io::stdin().is_terminal() {
+                ClientRecv::Null
+            } else {
+                ClientRecv::Inherit
+            }
+        } else {
+            ClientRecv::Native(clone_stdin_handle()?)
+        };
+        Ok(self)
+    }
+
+    fn stdout_inherit(&mut self) -> io::Result<&mut Self> {
+        self.stdout = if self.client.mode == SessionMode::Remote {
+            ClientSend::Inherit(HostOutput::Stdout)
+        } else {
+            ClientSend::Native(clone_stdout_handle()?)
+        };
+        Ok(self)
+    }
+
+    fn stdin_null(&mut self) -> &mut Self {
+        self.stdin = ClientRecv::Null;
+        self
+    }
+
+    fn stdout_null(&mut self) -> &mut Self {
+        self.stdout = ClientSend::Null;
+        self
+    }
+
+    fn stderr(&mut self, stdio: StdioSend) -> io::Result<&mut Self> {
+        if let StdioSend::Remote(remote) = &stdio
+            && !self.client.is_same_vfs(&remote.client)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "stdio send belongs to a different VFS session",
+            ));
+        }
+        self.stderr = ClientSend::Resource(stdio);
+        Ok(self)
+    }
+
+    fn stderr_inherit(&mut self) -> io::Result<&mut Self> {
+        self.stderr = if self.client.mode == SessionMode::Remote {
+            ClientSend::Inherit(HostOutput::Stderr)
+        } else {
+            ClientSend::Native(clone_stderr_handle()?)
+        };
+        Ok(self)
+    }
+
+    fn stderr_inherit_stdout(&mut self) -> io::Result<&mut Self> {
+        self.stderr = if self.client.mode == SessionMode::Remote {
+            ClientSend::Inherit(HostOutput::Stdout)
+        } else {
+            ClientSend::Native(clone_stdout_handle()?)
+        };
+        Ok(self)
+    }
+
+    fn stderr_null(&mut self) -> &mut Self {
+        self.stderr = ClientSend::Null;
+        self
+    }
+
+    fn process_control(&mut self, control: crate::ProcessControl) -> &mut Self {
+        self.process_control = control;
+        self
+    }
+
+    fn termination_policy(&mut self, policy: crate::TerminationPolicy) -> &mut Self {
+        self.termination_policy = policy;
+        self
+    }
+
+    async fn spawn(self) -> crate::Result<Self::Child> {
+        let Self {
+            client,
+            program,
+            args,
+            env,
+            cwd,
+            stdin,
+            stdout,
+            stderr,
+            process_control,
+            termination_policy,
+        } = self;
+        let mut relays = PreparedRelays::default();
+        let (stdin, mut stdin_resource) = Self::prepare_recv(client, stdin, &mut relays).await?;
+        let ((stdout, mut stdout_resource), (stderr, mut stderr_resource)) =
+            Self::prepare_outputs(client, stdout, stderr, &mut relays).await?;
+        let req = SpawnRequest {
+            program,
+            args,
+            env,
+            cwd,
+            stdin,
+            stdout,
+            stderr,
+            process_control,
+            termination_policy,
+        };
+        match client.request(RequestKind::Spawn(req)).await? {
+            ResponseKind::Spawn(result) => {
+                if let Some(stdio) = &mut stdin_resource {
+                    stdio.disarm_remote_cleanup();
+                }
+                if let Some(stdio) = &mut stdout_resource {
+                    stdio.disarm_remote_cleanup();
+                }
+                if let Some(stdio) = &mut stderr_resource {
+                    stdio.disarm_remote_cleanup();
+                }
+                result
+                    .map(|child| ClientChild {
+                        client: client.clone(),
+                        state: ClientChildState::Live(child),
+                        relays: relays.start(),
+                    })
+                    .map_err(Into::into)
+            }
+            response => Err(unexpected(response).into()),
+        }
+    }
+}
+
+/// Builder for opening files with configurable options.
+///
+/// # Example
+///
+/// ```ignore
+/// let file = client
+///     .open_options()
+///     .read(true)
+///     .write(true)
+///     .create(true)
+///     .open("/tmp/myfile.txt")
+///     .await?;
+/// ```
+pub struct OpenOptions<'a> {
+    client: &'a Client,
+    read: bool,
+    write: bool,
+    append: bool,
+    create: bool,
+    create_new: bool,
+    truncate: bool,
+    no_follow: bool,
+}
+
+impl<'a> OpenOptions<'a> {
+    fn new(client: &'a Client) -> Self {
+        Self {
+            client,
+            read: false,
+            write: false,
+            append: false,
+            create: false,
+            create_new: false,
+            truncate: false,
+            no_follow: false,
+        }
+    }
+
+    /// Set read access mode.
+    pub fn read(&mut self, read: bool) -> &mut Self {
+        self.read = read;
+        self
+    }
+
+    /// Set write access mode.
+    pub fn write(&mut self, write: bool) -> &mut Self {
+        self.write = write;
+        self
+    }
+
+    /// Set append mode.
+    pub fn append(&mut self, append: bool) -> &mut Self {
+        self.append = append;
+        self
+    }
+
+    /// Set create mode (creates file if it doesn't exist).
+    pub fn create(&mut self, create: bool) -> &mut Self {
+        self.create = create;
+        self
+    }
+
+    /// Set create_new mode (fails if file already exists).
+    pub fn create_new(&mut self, create_new: bool) -> &mut Self {
+        self.create_new = create_new;
+        self
+    }
+
+    /// Set truncate mode (truncates file on open).
+    pub fn truncate(&mut self, truncate: bool) -> &mut Self {
+        self.truncate = truncate;
+        self
+    }
+
+    /// Set no-follow mode for the final path component.
+    pub fn no_follow(&mut self, no_follow: bool) -> &mut Self {
+        self.no_follow = no_follow;
+        self
+    }
+
+    async fn open_wire(&self, path: WirePath) -> crate::Result<ClientFile> {
+        let req = OpenRequest {
+            path,
+            read: self.read,
+            write: self.write,
+            append: self.append,
+            create: self.create,
+            create_new: self.create_new,
+            truncate: self.truncate,
+            no_follow: self.no_follow,
+            handle_preference: if self.client.mode == SessionMode::Remote {
+                OpenHandlePreference::Opaque
+            } else {
+                OpenHandlePreference::NativePreferred
+            },
+        };
+
+        match self.client.request(RequestKind::Open(req)).await? {
+            ResponseKind::Open(result) => match result.map_err(crate::Error::from)? {
+                OpenHandle::Native(handle) => Ok(ClientFile::from_std(
+                    handle.into_inner().into(),
+                    self.read,
+                    self.write,
+                    self.append,
+                )),
+                OpenHandle::Opaque(file) => Ok(ClientFile::from_remote(self.client.clone(), file)),
+            },
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    /// Open the file at the given path.
+    pub async fn open(&self, path: impl AsRef<Path>) -> crate::Result<ClientFile> {
+        self.open_wire(path.as_ref().to_path_buf().try_into()?)
+            .await
+    }
+}
+
+impl crate::OpenOptions for OpenOptions<'_> {
+    type File = ClientFile;
+
+    fn read(&mut self, read: bool) -> &mut Self {
+        self.read(read)
+    }
+
+    fn write(&mut self, write: bool) -> &mut Self {
+        self.write(write)
+    }
+
+    fn append(&mut self, append: bool) -> &mut Self {
+        self.append(append)
+    }
+
+    fn create(&mut self, create: bool) -> &mut Self {
+        self.create(create)
+    }
+
+    fn create_new(&mut self, create_new: bool) -> &mut Self {
+        self.create_new(create_new)
+    }
+
+    fn truncate(&mut self, truncate: bool) -> &mut Self {
+        self.truncate(truncate)
+    }
+
+    fn no_follow(&mut self, no_follow: bool) -> &mut Self {
+        self.no_follow(no_follow)
+    }
+
+    async fn open(&self, path: Utf8TypedPath<'_>) -> crate::Result<ClientFile> {
+        self.open_wire(path.into()).await
+    }
+}
+
+impl Vfs for Client {
+    type File = ClientFile;
+    type StdioSend = StdioSend;
+    type StdioRecv = StdioRecv;
+    type OpenOptions<'a>
+        = OpenOptions<'a>
+    where
+        Self: 'a;
+    type Command<'a>
+        = CommandBuilder<'a>
+    where
+        Self: 'a;
+
+    fn open_options(&self) -> Self::OpenOptions<'_> {
+        OpenOptions::new(self)
+    }
+
+    fn command(&self, program: Utf8TypedPath<'_>) -> Self::Command<'_> {
+        CommandBuilder::new(self, program)
+    }
+
+    async fn unix_socket(&self, path: Utf8TypedPath<'_>) -> crate::Result<crate::AnyVfs> {
+        self.unix_vfs(path).await
+    }
+
+    async fn windows_admin(
+        &self,
+        cwd: Utf8TypedPath<'_>,
+        env: HashMap<String, Option<String>>,
+        elevate: bool,
+    ) -> crate::Result<crate::VfsSession> {
+        self.windows_admin_vfs(cwd, env, elevate).await
+    }
+
+    async fn pipe(&self) -> crate::Result<(StdioSend, StdioRecv)> {
+        if self.mode == SessionMode::Native {
+            return crate::Direct::default().pipe().await;
+        }
+        match self.request(RequestKind::Pipe).await? {
+            ResponseKind::Pipe(result) => result
+                .map(|pipe| {
+                    (
+                        StdioSend::Remote(RemoteStdioSend {
+                            client: self.clone(),
+                            stdio: Some(pipe.send),
+                            pending: None,
+                            write_body: None,
+                        }),
+                        StdioRecv::Remote(RemoteStdioRecv {
+                            client: self.clone(),
+                            stdio: Some(pipe.recv),
+                            pending: None,
+                            read_body: None,
+                        }),
+                    )
+                })
+                .map_err(Into::into),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    async fn query(&self) -> crate::Result<Query> {
+        Client::query(self).await
+    }
+
+    async fn user_name(&self, uid: u32) -> crate::Result<String> {
+        Client::user_name(self, uid).await
+    }
+
+    async fn user_id(&self, name: &str) -> crate::Result<u32> {
+        Client::user_id(self, name).await
+    }
+
+    async fn group_name(&self, gid: u32) -> crate::Result<String> {
+        Client::group_name(self, gid).await
+    }
+
+    async fn group_id(&self, name: &str) -> crate::Result<u32> {
+        Client::group_id(self, name).await
+    }
+
+    async fn sid_name(&self, sid: &Sid) -> crate::Result<SidName> {
+        Client::sid_name(self, sid).await
+    }
+
+    async fn account_name(&self, name: &str) -> crate::Result<SidName> {
+        Client::account_name(self, name).await
+    }
+
+    async fn read_dir(&self, path: Utf8TypedPath<'_>) -> crate::Result<ReadDir> {
+        match self
+            .request(RequestKind::ReadDir { path: path.into() })
+            .await?
+        {
+            ResponseKind::ReadDir(result) => result
+                .map(|ReadDirResponse { entries }| ReadDir::from_entries(entries))
+                .map_err(crate::Error::from),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    async fn which(
+        &self,
+        program: Utf8TypedPath<'_>,
+        path: Option<&str>,
+        cwd: Option<Utf8TypedPath<'_>>,
+    ) -> crate::Result<Option<Utf8TypedPathBuf>> {
+        let request = RequestKind::Which {
+            program: program.into(),
+            path: path.map(str::to_owned),
+            cwd: cwd.map(Into::into),
+        };
+        match self.request(request).await? {
+            ResponseKind::Which(result) => result
+                .map(|path| path.map(Into::into))
+                .map_err(crate::Error::from),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    async fn well_known_path(
+        &self,
+        key: WellKnownPath,
+        app: Option<&str>,
+        env: &HashMap<String, Option<String>>,
+    ) -> crate::Result<Utf8TypedPathBuf> {
+        let request = WellKnownPathRequest {
+            key,
+            app: app.map(str::to_owned),
+            env: env.clone(),
+        };
+        match self.request(RequestKind::WellKnownPath(request)).await? {
+            ResponseKind::WellKnownPath(result) => {
+                result.map(Into::into).map_err(crate::Error::from)
+            }
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    async fn clear_cache(&self) -> crate::Result<()> {
+        Client::clear_cache(self).await
+    }
+
+    async fn xattrs(
+        &self,
+        path: Utf8TypedPath<'_>,
+        namespace: crate::XattrNamespace<'_>,
+        follow: bool,
+    ) -> crate::Result<Vec<XattrEntry>> {
+        let request = XattrsRequest {
+            path: path.into(),
+            namespace: namespace.into(),
+            follow,
+        };
+        match self.request(RequestKind::Xattrs(request)).await? {
+            ResponseKind::Xattrs(result) => result.map_err(crate::Error::from),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    async fn streams(
+        &self,
+        path: Utf8TypedPath<'_>,
+        follow: bool,
+    ) -> crate::Result<Vec<StreamEntry>> {
+        let request = StreamsRequest {
+            path: path.into(),
+            follow,
+        };
+        match self.request(RequestKind::Streams(request)).await? {
+            ResponseKind::Streams(result) => result.map_err(crate::Error::from),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    async fn xattr(
+        &self,
+        path: Utf8TypedPath<'_>,
+        name: &str,
+        namespace: Option<&str>,
+        follow: bool,
+    ) -> crate::Result<Vec<u8>> {
+        let request = XattrRequest {
+            path: path.into(),
+            name: name.to_owned(),
+            namespace: namespace.map(str::to_owned),
+            follow,
+        };
+        match self.request(RequestKind::Xattr(request)).await? {
+            ResponseKind::Xattr(result) => result.map_err(crate::Error::from),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    async fn set_xattr(
+        &self,
+        path: Utf8TypedPath<'_>,
+        name: &str,
+        namespace: Option<&str>,
+        value: &[u8],
+        follow: bool,
+    ) -> crate::Result<()> {
+        let request = SetXattrRequest {
+            path: path.into(),
+            name: name.to_owned(),
+            namespace: namespace.map(str::to_owned),
+            value: value.to_vec(),
+            follow,
+        };
+        match self.request(RequestKind::SetXattr(request)).await? {
+            ResponseKind::SetXattr(result) => result.map_err(crate::Error::from),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    async fn remove_xattr(
+        &self,
+        path: Utf8TypedPath<'_>,
+        name: &str,
+        namespace: Option<&str>,
+        follow: bool,
+    ) -> crate::Result<()> {
+        let request = XattrRequest {
+            path: path.into(),
+            name: name.to_owned(),
+            namespace: namespace.map(str::to_owned),
+            follow,
+        };
+        match self.request(RequestKind::RemoveXattr(request)).await? {
+            ResponseKind::RemoveXattr(result) => result.map_err(crate::Error::from),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    async fn remove(&self, path: Utf8TypedPath<'_>, all: bool, ignore: bool) -> crate::Result<()> {
+        let request = RemoveRequest {
+            path: path.into(),
+            all,
+            ignore,
+        };
+        match self.request(RequestKind::Remove(request)).await? {
+            ResponseKind::Remove(result) => result.map_err(crate::Error::from),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    async fn metadata(&self, path: Utf8TypedPath<'_>) -> crate::Result<Metadata> {
+        let request = MetadataRequest { path: path.into() };
+        match self.request(RequestKind::Metadata(request)).await? {
+            ResponseKind::Metadata(result) => result.map_err(crate::Error::from),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    async fn fs_metadata(
+        &self,
+        path: Utf8TypedPath<'_>,
+        follow: bool,
+    ) -> crate::Result<FsMetadata> {
+        let request = FsMetadataRequest {
+            path: path.into(),
+            follow,
+        };
+        match self.request(RequestKind::FsMetadata(request)).await? {
+            ResponseKind::FsMetadata(result) => result.map_err(crate::Error::from),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    async fn acl(
+        &self,
+        path: Utf8TypedPath<'_>,
+        default: bool,
+        follow: bool,
+    ) -> crate::Result<Option<PosixAcl>> {
+        let request = AclRequest {
+            path: path.into(),
+            default,
+            follow,
+        };
+        match self.request(RequestKind::Acl(request)).await? {
+            ResponseKind::Acl(result) => result.map_err(crate::Error::from),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    async fn set_acl(
+        &self,
+        path: Utf8TypedPath<'_>,
+        acl: Option<&PosixAcl>,
+        default: bool,
+        follow: bool,
+    ) -> crate::Result<()> {
+        let request = SetAclRequest {
+            path: path.into(),
+            acl: acl.cloned(),
+            default,
+            follow,
+        };
+        match self.request(RequestKind::SetAcl(request)).await? {
+            ResponseKind::SetAcl(result) => result.map_err(crate::Error::from),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    async fn sec_desc(
+        &self,
+        path: Utf8TypedPath<'_>,
+        mask: u32,
+        follow: bool,
+    ) -> crate::Result<SecDesc> {
+        let request = SecDescRequest {
+            path: path.into(),
+            mask,
+            follow,
+        };
+        match self.request(RequestKind::SecDesc(request)).await? {
+            ResponseKind::SecDesc(result) => result.map_err(crate::Error::from),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    async fn set_sec_desc(
+        &self,
+        path: Utf8TypedPath<'_>,
+        sec_desc: &SecDesc,
+        follow: bool,
+    ) -> crate::Result<()> {
+        let request = SetSecDescRequest {
+            path: path.into(),
+            sec_desc: sec_desc.clone(),
+            follow,
+        };
+        match self.request(RequestKind::SetSecDesc(request)).await? {
+            ResponseKind::SetSecDesc(result) => result.map_err(crate::Error::from),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    async fn create_dir(&self, path: Utf8TypedPath<'_>, all: bool) -> crate::Result<()> {
+        let request = CreateDirRequest {
+            path: path.into(),
+            all,
+        };
+        match self.request(RequestKind::CreateDir(request)).await? {
+            ResponseKind::CreateDir(result) => result.map_err(crate::Error::from),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    async fn remove_dir(
+        &self,
+        path: Utf8TypedPath<'_>,
+        all: bool,
+        ignore: bool,
+    ) -> crate::Result<()> {
+        let request = RemoveDirRequest {
+            path: path.into(),
+            ignore,
+            all,
+        };
+        match self.request(RequestKind::RemoveDir(request)).await? {
+            ResponseKind::RemoveDir(result) => result.map_err(crate::Error::from),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    async fn copy(
+        &self,
+        from: Utf8TypedPath<'_>,
+        to: Utf8TypedPath<'_>,
+        all: bool,
+    ) -> crate::Result<()> {
+        let request = CopyRequest {
+            from: from.into(),
+            to: to.into(),
+            all,
+        };
+        match self.request(RequestKind::Copy(request)).await? {
+            ResponseKind::Copy(result) => result.map_err(crate::Error::from),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    async fn rename(
+        &self,
+        from: Utf8TypedPath<'_>,
+        to: Utf8TypedPath<'_>,
+        replace: bool,
+    ) -> crate::Result<()> {
+        let request = RenameRequest {
+            from: from.into(),
+            to: to.into(),
+            replace,
+        };
+        match self.request(RequestKind::Rename(request)).await? {
+            ResponseKind::Rename(result) => result.map_err(crate::Error::from),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    async fn move_(
+        &self,
+        from: Utf8TypedPath<'_>,
+        to: Utf8TypedPath<'_>,
+        all: bool,
+    ) -> crate::Result<()> {
+        let request = MoveRequest {
+            from: from.into(),
+            to: to.into(),
+            all,
+        };
+        match self.request(RequestKind::Move(request)).await? {
+            ResponseKind::Move(result) => result.map_err(crate::Error::from),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    async fn symlink(
+        &self,
+        cwd: Utf8TypedPath<'_>,
+        src: Utf8TypedPath<'_>,
+        dst: Utf8TypedPath<'_>,
+    ) -> crate::Result<()> {
+        let request = SymlinkRequest {
+            cwd: cwd.into(),
+            src: src.into(),
+            dst: dst.into(),
+            kind: SymlinkKind::Infer,
+        };
+        match self.request(RequestKind::Symlink(request)).await? {
+            ResponseKind::Symlink(result) => result.map_err(crate::Error::from),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    async fn hard_link(&self, src: Utf8TypedPath<'_>, dst: Utf8TypedPath<'_>) -> crate::Result<()> {
+        let request = HardLinkRequest {
+            src: src.into(),
+            dst: dst.into(),
+        };
+        match self.request(RequestKind::HardLink(request)).await? {
+            ResponseKind::HardLink(result) => result.map_err(crate::Error::from),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    async fn symlink_dir(
+        &self,
+        src: Utf8TypedPath<'_>,
+        dst: Utf8TypedPath<'_>,
+    ) -> crate::Result<()> {
+        let request = SymlinkRequest {
+            cwd: WirePath::empty_like(src),
+            src: src.into(),
+            dst: dst.into(),
+            kind: SymlinkKind::Dir,
+        };
+        match self.request(RequestKind::Symlink(request)).await? {
+            ResponseKind::Symlink(result) => result.map_err(crate::Error::from),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    async fn symlink_file(
+        &self,
+        src: Utf8TypedPath<'_>,
+        dst: Utf8TypedPath<'_>,
+    ) -> crate::Result<()> {
+        let request = SymlinkRequest {
+            cwd: WirePath::empty_like(src),
+            src: src.into(),
+            dst: dst.into(),
+            kind: SymlinkKind::File,
+        };
+        match self.request(RequestKind::Symlink(request)).await? {
+            ResponseKind::Symlink(result) => result.map_err(crate::Error::from),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    async fn symlink_metadata(&self, path: Utf8TypedPath<'_>) -> crate::Result<Metadata> {
+        let request = MetadataRequest { path: path.into() };
+        match self.request(RequestKind::SymlinkMetadata(request)).await? {
+            ResponseKind::SymlinkMetadata(result) => result.map_err(crate::Error::from),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    async fn set_metadata(
+        &self,
+        paths: &[Utf8TypedPathBuf],
+        patch: MetadataPatch,
+    ) -> crate::Result<()> {
+        let request = SetMetadataRequest {
+            paths: paths.iter().map(|path| path.to_path().into()).collect(),
+            patch,
+        };
+        match self.request(RequestKind::SetMetadata(request)).await? {
+            ResponseKind::SetMetadata(result) => result.map_err(crate::Error::from),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    async fn canonicalize(&self, path: Utf8TypedPath<'_>) -> crate::Result<Utf8TypedPathBuf> {
+        let request = CanonicalizeRequest { path: path.into() };
+        match self.request(RequestKind::Canonicalize(request)).await? {
+            ResponseKind::Canonicalize(result) => {
+                result.map_err(crate::Error::from).map(Into::into)
+            }
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    async fn read_link(&self, path: Utf8TypedPath<'_>) -> crate::Result<Utf8TypedPathBuf> {
+        let request = ReadLinkRequest { path: path.into() };
+        match self.request(RequestKind::ReadLink(request)).await? {
+            ResponseKind::ReadLink(result) => result.map_err(crate::Error::from).map(Into::into),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    async fn glob(
+        &self,
+        pattern: impl Into<String>,
+        root: Utf8TypedPath<'_>,
+        follow_symlinks: bool,
+        max_depth: Option<usize>,
+    ) -> crate::Result<Vec<Utf8TypedPathBuf>> {
+        let request = GlobRequest {
+            pattern: pattern.into(),
+            root: root.into(),
+            follow_symlinks,
+            max_depth,
+        };
+        match self.request(RequestKind::Glob(request)).await? {
+            ResponseKind::Glob(result) => Ok(result
+                .map_err(crate::Error::from)?
+                .into_iter()
+                .map(Utf8TypedPathBuf::from)
+                .collect()),
+            response => Err(unexpected(response).into()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use tempfile::tempdir;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    use super::{Client, ClientChildState, ClientFileInner};
+    use crate::{
+        Child as _, Command as _, FileHandle as _, Server, Vfs as _, protocol::RequestKind,
+    };
+
+    #[cfg(unix)]
+    fn successful_command(client: &Client) -> super::CommandBuilder<'_> {
+        let mut command =
+            client.command(crate::Utf8TypedPath::Unix(crate::Utf8UnixPath::new("sh")));
+        command.arg("-c").arg("exit 0");
+        command
+    }
+
+    #[cfg(windows)]
+    fn successful_command(client: &Client) -> super::CommandBuilder<'_> {
+        let mut command = client.command(crate::Utf8TypedPath::Windows(
+            crate::Utf8WindowsPath::new("cmd"),
+        ));
+        command.arg("/C").arg("exit 0");
+        command
+    }
+
+    async fn open_remote_file(
+        client: &Client,
+        path: crate::Utf8TypedPath<'_>,
+    ) -> super::ClientFile {
+        let mut options = client.open_options();
+        options.read(true).write(true).create(true).truncate(true);
+        crate::OpenOptions::open(&options, path).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn dropping_remote_file_unregisters_opaque_identity() {
+        let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
+        let server =
+            tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
+        let client = Client::new(client_stream).await.unwrap();
+        let temp = tempdir().unwrap();
+        let path = crate::typed_path(temp.path().join("file")).unwrap();
+        let file = open_remote_file(&client, path.to_path()).await;
+        let opaque = match &file.0 {
+            ClientFileInner::Remote(file) => file.opaque(),
+            ClientFileInner::Direct(_) => panic!("remote open returned a direct file"),
+        };
+
+        drop(file);
+
+        for attempt in 0..100 {
+            let response = client
+                .request(RequestKind::FileMetadata {
+                    file: opaque.clone(),
+                })
+                .await
+                .unwrap();
+            let crate::protocol::ResponseKind::FileMetadata(result) = response else {
+                panic!("file metadata returned the wrong response");
+            };
+            match result {
+                Err(error) => {
+                    assert_eq!(
+                        crate::Error::from(error).kind(),
+                        io::ErrorKind::InvalidInput
+                    );
+                    break;
+                }
+                Ok(_) if attempt < 99 => tokio::task::yield_now().await,
+                Ok(_) => panic!("dropped opaque file remained registered"),
+            }
+        }
+
+        client.stop().await.unwrap();
+        server.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn opaque_pipe_rejects_wrong_type_and_stale_identity() {
+        let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
+        let server =
+            tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
+        let client = Client::new(client_stream).await.unwrap();
+        let (mut send, mut recv) = client.pipe().await.unwrap();
+        let send_opaque = match &send {
+            crate::StdioSend::Remote(send) => send.stdio.as_ref().unwrap().clone(),
+            crate::StdioSend::Native(_) => panic!("remote pipe returned a native send end"),
+        };
+
+        let encoded = postcard::to_allocvec(&send_opaque).unwrap();
+        let wrong: dolang_rpc::Opaque<crate::StdioRecvMarker> =
+            postcard::from_bytes(&encoded).unwrap();
+        let response = client
+            .request(RequestKind::StdioRecvClose { stdio: wrong })
+            .await
+            .unwrap();
+        let crate::protocol::ResponseKind::StdioRecvClose(result) = response else {
+            panic!("stdio receive close returned the wrong response");
+        };
+        assert_eq!(
+            crate::Error::from(result.unwrap_err()).kind(),
+            io::ErrorKind::InvalidInput
+        );
+
+        send.write_all(b"still live").await.unwrap();
+        let mut data = [0; 10];
+        recv.read_exact(&mut data).await.unwrap();
+        assert_eq!(&data, b"still live");
+        send.shutdown().await.unwrap();
+
+        let response = client
+            .request(RequestKind::StdioSendClose { stdio: send_opaque })
+            .await
+            .unwrap();
+        let crate::protocol::ResponseKind::StdioSendClose(result) = response else {
+            panic!("stdio send close returned the wrong response");
+        };
+        assert_eq!(
+            crate::Error::from(result.unwrap_err()).kind(),
+            io::ErrorKind::InvalidInput
+        );
+
+        // Stopping drains outstanding endpoints, so release this one first.
+        drop(recv);
+        client.stop().await.unwrap();
+        server.await.unwrap().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resource_operations_use_the_handle_route() {
+        let temp = tempdir().unwrap();
+        let socket = temp.path().join("inner.sock");
+        let inner_server = Server::bind(&socket).await.unwrap();
+        let inner_task = tokio::spawn(inner_server.accept());
+
+        let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
+        let outer_task =
+            tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
+        let root = Client::new(client_stream).await.unwrap();
+        let path = crate::typed_path(socket).unwrap();
+        let selected = root
+            .unix_socket(path.to_path())
+            .await
+            .unwrap()
+            .into_client()
+            .unwrap();
+
+        let (mut send, mut recv) = root.pipe().await.unwrap();
+        send.write_all(b"root").await.unwrap();
+        send.flush().await.unwrap();
+        let mut data = [0; 4];
+        recv.read_exact(&mut data).await.unwrap();
+        assert_eq!(&data, b"root");
+
+        let send_opaque = match &send {
+            crate::StdioSend::Remote(send) => send.stdio.as_ref().unwrap().clone(),
+            crate::StdioSend::Native(_) => panic!("remote pipe returned a native send end"),
+        };
+        let response = selected
+            .request(RequestKind::StdioSendClose {
+                stdio: send_opaque.clone(),
+            })
+            .await
+            .unwrap();
+        let crate::protocol::ResponseKind::StdioSendClose(result) = response else {
+            panic!("stdio close returned the wrong response");
+        };
+        result.unwrap();
+        let mut eof = [0; 1];
+        assert_eq!(recv.read(&mut eof).await.unwrap(), 0);
+
+        let encoded = postcard::to_allocvec(&send_opaque).unwrap();
+        let wrong_vfs: dolang_rpc::Opaque<crate::VfsMarker> =
+            postcard::from_bytes(&encoded).unwrap();
+        let mut wrong_client = root.clone();
+        wrong_client.vfs = Some(wrong_vfs);
+        assert_eq!(
+            wrong_client.query().await.unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+
+        selected.stop().await.unwrap();
+        assert_eq!(
+            selected.query().await.unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        inner_task.await.unwrap().unwrap();
+        // Stopping drains outstanding endpoints, so release this one first.
+        drop(recv);
+        root.stop().await.unwrap();
+        outer_task.await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn dropping_remote_file_without_runtime_does_not_panic() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (file, client, server, temp) = runtime.block_on(async {
+            let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
+            let server =
+                tokio::spawn(
+                    async move { Server::new(server_stream).await.unwrap().serve().await },
+                );
+            let client = Client::new(client_stream).await.unwrap();
+            let temp = tempdir().unwrap();
+            let path = crate::typed_path(temp.path().join("file")).unwrap();
+            let file = open_remote_file(&client, path.to_path()).await;
+            (file, client, server, temp)
+        });
+
+        drop(runtime);
+        drop(file);
+        drop(client);
+        drop(server);
+        drop(temp);
+    }
+
+    #[tokio::test]
+    async fn explicit_close_consumes_remote_cleanup_identity() {
+        let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
+        let server =
+            tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
+        let client = Client::new(client_stream).await.unwrap();
+        let temp = tempdir().unwrap();
+        let path = crate::typed_path(temp.path().join("file")).unwrap();
+        let file = open_remote_file(&client, path.to_path()).await;
+
+        file.close().await.unwrap();
+
+        client.stop().await.unwrap();
+        server.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn child_wait_caches_wire_error() {
+        let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
+        let server =
+            tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
+        let client = Client::new(client_stream).await.unwrap();
+        let mut child = successful_command(&client).spawn().await.unwrap();
+        let ClientChildState::Live(opaque) = &child.state else {
+            panic!("new child is not live");
+        };
+        let response = client
+            .request(RequestKind::ChildClose {
+                child: opaque.clone(),
+            })
+            .await
+            .unwrap();
+        let crate::protocol::ResponseKind::ChildClose(Ok(())) = response else {
+            panic!("child close returned the wrong response");
+        };
+
+        let first = child.wait().await.unwrap_err();
+        let second = child.wait().await.unwrap_err();
+        assert_eq!(first.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(second.kind(), first.kind());
+        assert_eq!(second.to_string(), first.to_string());
+
+        client.stop().await.unwrap();
+        server.await.unwrap().unwrap();
+    }
+}
