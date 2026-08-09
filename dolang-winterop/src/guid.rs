@@ -7,11 +7,11 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 /// Parse and format it using the canonical hyphenated form:
 ///
 /// ```
-/// use dolang_winterop::Guid;
+/// use dolang_winterop::guid::Guid;
 ///
 /// let guid: Guid = "00112233-4455-6677-8899-aabbccddeeff".parse()?;
 /// assert_eq!(guid.to_string(), "00112233-4455-6677-8899-aabbccddeeff");
-/// # Ok::<(), dolang_winterop::GuidError>(())
+/// # Ok::<(), dolang_winterop::guid::GuidError>(())
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Guid([u8; 16]);

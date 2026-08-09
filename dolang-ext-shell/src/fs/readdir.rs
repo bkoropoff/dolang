@@ -4,7 +4,10 @@ use dolang::runtime::{
     Error, Instance, Object, Output, Result, Slot, State, Strand, Value, object::TypeBuilder,
     value::TypeObject,
 };
-use dolang_vfs::{DirEntry as VfsDirEntry, FileType, ReadDir};
+use dolang_vfs::{
+    directory::{DirEntry as VfsDirEntry, ReadDir},
+    metadata::FileType,
+};
 use typed_path::{Utf8TypedPath, Utf8TypedPathBuf};
 
 use crate::error::ErrorExt as ShellErrorExt;

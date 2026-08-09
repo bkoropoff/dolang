@@ -7,7 +7,7 @@ use dolang::runtime::{
 };
 use dolang_ext_shell::ResultExt;
 use dolang_vfs_winscm::ServiceConfigUpdate;
-use dolang_winterop::{
+use dolang_winterop::security::{
     DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
     SACL_SECURITY_INFORMATION,
 };

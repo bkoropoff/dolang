@@ -1,10 +1,11 @@
 use super::{Direct, DirectChild, DirectCommand, DirectOpenOptions};
+use crate::metadata::{FsMetadataFamily, WindowsFsMetadata, metadata_from_std, metadata_with_sids};
 use crate::{
     AttrFlags, AttrsPatch, FsMetadata, Metadata, MetadataPatch, OpenOptions as _,
-    OwnershipIdentity, SidName, SidNameUse, StreamEntry, Utf8TypedPath, Utf8WindowsPath,
-    XattrEntry, XattrNamespace,
+    OwnershipIdentity, SidName, StreamEntry, Utf8TypedPath, Utf8WindowsPath, XattrEntry,
+    XattrNamespace, security::SidNameUse,
 };
-use dolang_winterop::{
+use dolang_winterop::security::{
     ALL_SECURITY_INFORMATION, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION,
     OWNER_SECURITY_INFORMATION, SACL_SECURITY_INFORMATION, SecDesc, Sid,
 };
@@ -269,7 +270,7 @@ impl Direct {
             Ok(unsafe { OwnedHandle::from_raw_handle(handle) })
         };
         if access & ACCESS_SYSTEM_SECURITY != 0 {
-            dolang_winterop::with_security_privilege(open)
+            dolang_winterop::security::with_security_privilege(open)
         } else {
             open()
         }
@@ -371,7 +372,7 @@ impl Direct {
             }
         };
         if mask & SACL_SECURITY_INFORMATION != 0 {
-            dolang_winterop::with_security_privilege(set)
+            dolang_winterop::security::with_security_privilege(set)
         } else {
             set()
         }
@@ -446,7 +447,7 @@ impl Direct {
             crate::Error::from_system_code(
                 crate::ErrorKind::NotFound,
                 error.to_string(),
-                crate::OperatingSystem::Windows,
+                crate::target::OperatingSystem::Windows,
                 ERROR_NONE_MAPPED as i32,
             )
         } else {
@@ -681,7 +682,7 @@ impl Direct {
             free,
             available,
             block_size: 0,
-            family: crate::FsMetadataFamily::Windows(crate::WindowsFsMetadata {
+            family: FsMetadataFamily::Windows(WindowsFsMetadata {
                 flags,
                 volume_serial_number: serial,
                 component_length_max: max_component,
@@ -701,8 +702,8 @@ impl Direct {
             file,
             OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION,
         )?;
-        Ok(crate::metadata_with_sids(
-            crate::metadata_from_std(metadata),
+        Ok(metadata_with_sids(
+            metadata_from_std(metadata),
             descriptor.owner().cloned(),
             descriptor.group().cloned(),
         ))
@@ -719,8 +720,8 @@ impl Direct {
             OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION,
             follow,
         )?;
-        Ok(crate::metadata_with_sids(
-            crate::metadata_from_std(metadata),
+        Ok(metadata_with_sids(
+            metadata_from_std(metadata),
             descriptor.owner().cloned(),
             descriptor.group().cloned(),
         ))
@@ -740,7 +741,7 @@ impl Direct {
             free,
             available,
             block_size: 0,
-            family: crate::FsMetadataFamily::Windows(crate::WindowsFsMetadata {
+            family: FsMetadataFamily::Windows(WindowsFsMetadata {
                 flags,
                 volume_serial_number: serial,
                 component_length_max: max_component,

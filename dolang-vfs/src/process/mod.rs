@@ -3,13 +3,144 @@ use std::{
     pin::Pin,
     process::Stdio,
     task::{Context, Poll},
+    time::Duration,
 };
 
 use dolang_rpc::handle::DefaultHandle;
+use serde::{Deserialize, Serialize};
 use tokio::{
     fs::File,
     io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf},
 };
+
+use crate::target::OperatingSystem;
+
+/// Terminal status of a spawned process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProcessStatus {
+    Exited(i32),
+    Signaled(i32),
+}
+
+impl ProcessStatus {
+    /// Returns whether the process exited successfully.
+    pub const fn success(self) -> bool {
+        matches!(self, Self::Exited(0))
+    }
+
+    /// Returns the numeric exit code, if the process exited normally.
+    pub const fn code(self) -> Option<i32> {
+        match self {
+            Self::Exited(code) => Some(code),
+            Self::Signaled(_) => None,
+        }
+    }
+
+    /// Returns the native signal number, if a signal terminated the process.
+    pub const fn signal(self) -> Option<i32> {
+        match self {
+            Self::Exited(_) => None,
+            Self::Signaled(signal) => Some(signal),
+        }
+    }
+
+    pub(crate) fn from_native(status: std::process::ExitStatus) -> io::Result<Self> {
+        if let Some(code) = status.code() {
+            return Ok(Self::Exited(code));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            if let Some(signal) = status.signal() {
+                return Ok(Self::Signaled(signal));
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "process returned an unrepresentable terminal status",
+        ))
+    }
+}
+
+/// Whether a spawned process is attached to the foreground process group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProcessControl {
+    Foreground,
+    Background,
+}
+
+/// A Unix process signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Signal {
+    Hup,
+    Int,
+    Quit,
+    Ill,
+    Trap,
+    Abrt,
+    Emt,
+    Fpe,
+    Kill,
+    Bus,
+    Segv,
+    Sys,
+    Pipe,
+    Alrm,
+    Term,
+    Urg,
+    Stop,
+    Tstp,
+    Cont,
+    Chld,
+    Ttin,
+    Ttou,
+    Io,
+    Xcpu,
+    Xfsz,
+    Vtalrm,
+    Prof,
+    Winch,
+    Info,
+    Usr1,
+    Usr2,
+    Stkflt,
+    Pwr,
+    Thr,
+    Librt,
+    Number(i32),
+}
+
+impl Signal {
+    /// Returns whether this signal exists on an operating system.
+    pub fn is_supported(self, operating_system: OperatingSystem) -> bool {
+        use OperatingSystem::{FreeBsd, Linux, Macos, Windows};
+        match self {
+            Self::Emt | Self::Info => matches!(operating_system, FreeBsd | Macos),
+            Self::Stkflt | Self::Pwr => operating_system == Linux,
+            Self::Thr | Self::Librt => operating_system == FreeBsd,
+            Self::Number(_) => operating_system != Windows,
+            _ => operating_system != Windows,
+        }
+    }
+}
+
+/// Policy used to terminate a spawned process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminationPolicy {
+    pub signal: Signal,
+    pub grace: Duration,
+    pub force: bool,
+}
+
+impl Default for TerminationPolicy {
+    fn default() -> Self {
+        Self {
+            signal: Signal::Term,
+            grace: Duration::from_secs(5),
+            force: true,
+        }
+    }
+}
 
 #[cfg(unix)]
 use std::os::fd::{AsFd, OwnedFd};

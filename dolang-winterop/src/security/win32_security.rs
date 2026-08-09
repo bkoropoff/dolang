@@ -2,8 +2,8 @@
 //!
 //! Only [`with_security_privilege`] lives here — everything else needed to
 //! get/set a security descriptor (native self-relative byte-form
-//! conversion via [`crate::SecDesc::from_bytes_with_mask`]/
-//! [`crate::SecDesc::to_bytes`], and the actual Win32 API call) is either
+//! conversion via [`super::SecDesc::from_bytes_with_mask`]/
+//! [`super::SecDesc::to_bytes`], and the actual Win32 API call) is either
 //! already public or specific enough to each object type (file handles vs.
 //! registry keys use different APIs entirely) that it doesn't belong here.
 

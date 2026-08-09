@@ -12,8 +12,10 @@ use dolang::runtime::{
     value::{BinEmbryo, TypeObject, View},
 };
 use dolang_vfs::{
-    AnyFile, FileHandle, FileLockBehavior, FileLockMode, FileLockRange, FileLockRequest,
-    OpenOptions, OperatingSystem, Vfs,
+    AnyFile, FileHandle, OpenOptions, Vfs,
+    file::{FileLockBehavior, FileLockMode, FileLockRange, FileLockRequest},
+    process::{StdioRecv, StdioSend},
+    target::OperatingSystem,
 };
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use typed_path::Utf8TypedPath;
@@ -157,7 +159,7 @@ pub(crate) async fn open_native<'v>(
     configure_options(&mut opts, mode);
     opts.open(path.to_path())
         .await
-        .map_err(dolang_vfs::Error::into_io_error)
+        .map_err(dolang_vfs::error::Error::into_io_error)
 }
 
 impl<'v> File<'v> {
@@ -183,7 +185,7 @@ impl<'v> File<'v> {
     pub(crate) async fn command_send<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &mut Strand<'v, 's>,
-    ) -> Result<'v, 's, Option<dolang_vfs::StdioSend>> {
+    ) -> Result<'v, 's, Option<StdioSend>> {
         let borrow = this.borrow(strand)?;
         if !borrow.buf.is_empty() {
             return Ok(None);
@@ -198,7 +200,7 @@ impl<'v> File<'v> {
     pub(crate) async fn command_recv<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &mut Strand<'v, 's>,
-    ) -> Result<'v, 's, Option<dolang_vfs::StdioRecv>> {
+    ) -> Result<'v, 's, Option<StdioRecv>> {
         let borrow = this.borrow(strand)?;
         if !borrow.buf.is_empty() {
             return Ok(None);
@@ -872,11 +874,11 @@ impl<'v> Object<'v> for File<'v> {
                         .as_mut()
                         .ok_or_else(|| Error::state_error(strand, "file is closed"))?;
                     file.xattrs(if any {
-                        dolang_vfs::XattrNamespace::Any
+                        dolang_vfs::xattr::XattrNamespace::Any
                     } else if let Some(ref namespace) = namespace {
-                        dolang_vfs::XattrNamespace::Named(namespace)
+                        dolang_vfs::xattr::XattrNamespace::Named(namespace)
                     } else {
-                        dolang_vfs::XattrNamespace::Default
+                        dolang_vfs::xattr::XattrNamespace::Default
                     })
                     .await
                     .into_sys(strand)?

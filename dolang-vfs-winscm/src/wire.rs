@@ -8,9 +8,9 @@
 //! types; the request/response enums here exist solely so [`WinScmExt`] can
 //! route and (de)serialize through the VFS extension mechanism.
 
-use dolang_vfs::Error;
+use dolang_vfs::error::Error;
 use dolang_vfs::extension::{ExtContext, ExtOpaque, VfsExtension};
-use dolang_winterop::SecDesc;
+use dolang_winterop::security::SecDesc;
 use serde::{Deserialize, Serialize};
 
 use crate::backend;

@@ -34,7 +34,11 @@ use sqlite_plugin::{
     vfs::{RegisterOpts, Vfs, VfsHandle, VfsResult, register_static},
 };
 
-use dolang_vfs::{Client, FileHandle as _, Vfs as _};
+use dolang_vfs::{
+    FileHandle as _, Vfs as _,
+    client::Client,
+    error::{Error, ErrorKind},
+};
 use typed_path::{Utf8TypedPath, Utf8UnixPath};
 
 // Shadow libc's F_RDLCK/F_WRLCK/F_UNLCK with i32 versions.
@@ -68,12 +72,10 @@ fn gen_temp_path() -> String {
 /// - `NotFound`        → `not_found_code` (caller supplies context-appropriate code)
 /// - `PermissionDenied`, `AlreadyExists` → `SQLITE_CANTOPEN`
 /// - Anything else    → `default_code`
-fn map_vfs_err(err: dolang_vfs::Error, not_found_code: i32, default_code: i32) -> i32 {
+fn map_vfs_err(err: Error, not_found_code: i32, default_code: i32) -> i32 {
     match err.kind() {
-        dolang_vfs::ErrorKind::NotFound => not_found_code,
-        dolang_vfs::ErrorKind::PermissionDenied | dolang_vfs::ErrorKind::AlreadyExists => {
-            SQLITE_CANTOPEN
-        }
+        ErrorKind::NotFound => not_found_code,
+        ErrorKind::PermissionDenied | ErrorKind::AlreadyExists => SQLITE_CANTOPEN,
         _ => default_code,
     }
 }
@@ -738,9 +740,11 @@ impl Vfs for ShellVfs {
 
         // Map sqlite_plugin AccessFlags to nix::unistd::AccessFlags
         let mode = match flags {
-            AccessFlags::Exists => dolang_vfs::AccessFlags::F_OK,
-            AccessFlags::Read => dolang_vfs::AccessFlags::R_OK,
-            AccessFlags::ReadWrite => dolang_vfs::AccessFlags::R_OK | dolang_vfs::AccessFlags::W_OK,
+            AccessFlags::Exists => dolang_vfs::file::AccessFlags::F_OK,
+            AccessFlags::Read => dolang_vfs::file::AccessFlags::R_OK,
+            AccessFlags::ReadWrite => {
+                dolang_vfs::file::AccessFlags::R_OK | dolang_vfs::file::AccessFlags::W_OK
+            }
         };
 
         block_on_shell(async move {

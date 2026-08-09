@@ -2,43 +2,7 @@ use std::{fmt, io};
 
 use serde::{Deserialize, Serialize};
 
-/// Operating system that produced a target description or native error code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum OperatingSystem {
-    FreeBsd,
-    Linux,
-    Macos,
-    Windows,
-}
-
-impl OperatingSystem {
-    /// Returns the operating system of the current host.
-    pub fn current() -> Self {
-        #[cfg(target_os = "linux")]
-        return Self::Linux;
-        #[cfg(target_os = "macos")]
-        return Self::Macos;
-        #[cfg(target_os = "freebsd")]
-        return Self::FreeBsd;
-        #[cfg(windows)]
-        return Self::Windows;
-        #[cfg(not(any(
-            target_os = "linux",
-            target_os = "macos",
-            target_os = "freebsd",
-            windows
-        )))]
-        compile_error!("unsupported target operating system");
-    }
-
-    /// Returns the path syntax associated with this operating system.
-    pub const fn path_type(&self) -> typed_path::PathType {
-        match self {
-            Self::Linux | Self::Macos | Self::FreeBsd => typed_path::PathType::Unix,
-            Self::Windows => typed_path::PathType::Windows,
-        }
-    }
-}
+use crate::target::OperatingSystem;
 
 /// Portable classification of an I/O or VFS error.
 ///

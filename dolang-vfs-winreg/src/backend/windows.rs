@@ -11,8 +11,11 @@ use std::{
 };
 
 use dolang_vfs::extension::{ExtContext, ExtOsHandle, InvalidHandle};
-use dolang_vfs::{Error, ErrorKind, OperatingSystem};
-use dolang_winterop::{
+use dolang_vfs::{
+    error::{Error, ErrorKind},
+    target::OperatingSystem,
+};
+use dolang_winterop::security::{
     ALL_SECURITY_INFORMATION, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
     SACL_SECURITY_INFORMATION, SecDesc as VfsSecDesc,
 };
@@ -120,7 +123,7 @@ fn open_key(parent: HKEY, subpath: &str, view: View, access: Access) -> Result<H
         Ok(out)
     };
     let result = if access.0 & ACCESS_SYSTEM_SECURITY != 0 {
-        dolang_winterop::with_security_privilege(open)
+        dolang_winterop::security::with_security_privilege(open)
     } else {
         open()
     };
@@ -152,7 +155,7 @@ fn create_key(parent: HKEY, subpath: &str, view: View, access: Access) -> Result
         Ok(out)
     };
     let result = if access.0 & ACCESS_SYSTEM_SECURITY != 0 {
-        dolang_winterop::with_security_privilege(create)
+        dolang_winterop::security::with_security_privilege(create)
     } else {
         create()
     };
@@ -461,7 +464,7 @@ fn set_sec_desc(handle: HKEY, descriptor: &VfsSecDesc) -> Result<(), Error> {
         }
     };
     let result = if mask & SACL_SECURITY_INFORMATION != 0 {
-        dolang_winterop::with_security_privilege(set)
+        dolang_winterop::security::with_security_privilege(set)
     } else {
         set()
     };

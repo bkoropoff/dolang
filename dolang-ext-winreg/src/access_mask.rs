@@ -6,6 +6,7 @@ use std::ops::{BitAnd, BitOr, BitXor, Not};
 
 use dolang::runtime::object::FlagLike;
 use dolang_vfs_winreg::Access as WireAccess;
+use dolang_winterop::security::AccessMask as WinAccessMask;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct AccessMask(pub(crate) u32);
@@ -14,30 +15,22 @@ impl AccessMask {
     pub(crate) const READ: AccessMask = AccessMask(WireAccess::READ.0);
     pub(crate) const WRITE: AccessMask = AccessMask(WireAccess::WRITE.0);
     pub(crate) const READ_WRITE: AccessMask = AccessMask(WireAccess::READ_WRITE.0);
-    pub(crate) const DELETE: AccessMask = AccessMask(dolang_winterop::AccessMask::DELETE.0);
-    pub(crate) const READ_CONTROL: AccessMask =
-        AccessMask(dolang_winterop::AccessMask::READ_CONTROL.0);
-    pub(crate) const WRITE_DAC: AccessMask = AccessMask(dolang_winterop::AccessMask::WRITE_DAC.0);
-    pub(crate) const WRITE_OWNER: AccessMask =
-        AccessMask(dolang_winterop::AccessMask::WRITE_OWNER.0);
-    pub(crate) const SYNCHRONIZE: AccessMask =
-        AccessMask(dolang_winterop::AccessMask::SYNCHRONIZE.0);
+    pub(crate) const DELETE: AccessMask = AccessMask(WinAccessMask::DELETE.0);
+    pub(crate) const READ_CONTROL: AccessMask = AccessMask(WinAccessMask::READ_CONTROL.0);
+    pub(crate) const WRITE_DAC: AccessMask = AccessMask(WinAccessMask::WRITE_DAC.0);
+    pub(crate) const WRITE_OWNER: AccessMask = AccessMask(WinAccessMask::WRITE_OWNER.0);
+    pub(crate) const SYNCHRONIZE: AccessMask = AccessMask(WinAccessMask::SYNCHRONIZE.0);
     pub(crate) const STANDARD_RIGHTS_REQUIRED: AccessMask =
-        AccessMask(dolang_winterop::AccessMask::STANDARD_RIGHTS_REQUIRED.0);
+        AccessMask(WinAccessMask::STANDARD_RIGHTS_REQUIRED.0);
     pub(crate) const STANDARD_RIGHTS_ALL: AccessMask =
-        AccessMask(dolang_winterop::AccessMask::STANDARD_RIGHTS_ALL.0);
+        AccessMask(WinAccessMask::STANDARD_RIGHTS_ALL.0);
     pub(crate) const ACCESS_SYSTEM_SECURITY: AccessMask =
-        AccessMask(dolang_winterop::AccessMask::ACCESS_SYSTEM_SECURITY.0);
-    pub(crate) const MAXIMUM_ALLOWED: AccessMask =
-        AccessMask(dolang_winterop::AccessMask::MAXIMUM_ALLOWED.0);
-    pub(crate) const GENERIC_READ: AccessMask =
-        AccessMask(dolang_winterop::AccessMask::GENERIC_READ.0);
-    pub(crate) const GENERIC_WRITE: AccessMask =
-        AccessMask(dolang_winterop::AccessMask::GENERIC_WRITE.0);
-    pub(crate) const GENERIC_EXECUTE: AccessMask =
-        AccessMask(dolang_winterop::AccessMask::GENERIC_EXECUTE.0);
-    pub(crate) const GENERIC_ALL: AccessMask =
-        AccessMask(dolang_winterop::AccessMask::GENERIC_ALL.0);
+        AccessMask(WinAccessMask::ACCESS_SYSTEM_SECURITY.0);
+    pub(crate) const MAXIMUM_ALLOWED: AccessMask = AccessMask(WinAccessMask::MAXIMUM_ALLOWED.0);
+    pub(crate) const GENERIC_READ: AccessMask = AccessMask(WinAccessMask::GENERIC_READ.0);
+    pub(crate) const GENERIC_WRITE: AccessMask = AccessMask(WinAccessMask::GENERIC_WRITE.0);
+    pub(crate) const GENERIC_EXECUTE: AccessMask = AccessMask(WinAccessMask::GENERIC_EXECUTE.0);
+    pub(crate) const GENERIC_ALL: AccessMask = AccessMask(WinAccessMask::GENERIC_ALL.0);
 }
 
 impl BitOr for AccessMask {

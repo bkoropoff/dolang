@@ -8,9 +8,12 @@ use std::{
 };
 
 use dolang::runtime::{Strand, strand};
-use dolang_vfs::typed_path;
+use dolang_vfs::path::typed_path;
 use dolang_vfs::{
-    AnyVfs, OperatingSystem, OperatingSystemFamily, SecurityInfo, Signal, TargetInfo,
+    AnyVfs,
+    process::Signal,
+    security::SecurityInfo,
+    target::{OperatingSystem, OperatingSystemFamily, TargetInfo},
 };
 use typed_path::Utf8TypedPathBuf;
 
@@ -398,7 +401,7 @@ impl Local {
 #[cfg(test)]
 mod tests {
     use super::Env;
-    use dolang_vfs::OperatingSystem;
+    use dolang_vfs::target::OperatingSystem;
     use std::{collections::HashMap, rc::Rc};
 
     #[test]

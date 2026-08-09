@@ -1,7 +1,7 @@
 use super::Direct;
 use crate::PosixAcl;
 #[cfg(any(target_os = "freebsd", target_os = "linux"))]
-use crate::{PosixAce, PosixAclPermissions, PosixAclQualifier};
+use crate::security::{PosixAce, PosixAclPermissions, PosixAclQualifier};
 #[cfg(target_os = "freebsd")]
 use std::os::fd::AsRawFd;
 #[cfg(any(target_os = "freebsd", target_os = "linux"))]

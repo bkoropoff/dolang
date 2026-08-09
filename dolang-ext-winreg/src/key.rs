@@ -9,7 +9,7 @@ use dolang::runtime::{
 };
 use dolang_ext_shell::{ErrorExt, ResultExt};
 use dolang_vfs_winreg::{PredefinedRoot, View};
-use dolang_winterop::{
+use dolang_winterop::security::{
     DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
     SACL_SECURITY_INFORMATION,
 };
@@ -389,8 +389,8 @@ impl<'v> Object<'v> for Key {
                     key.get_value(Some(&name)).await.into_sys(strand)?
                 };
                 let Some(value) = value else {
-                    let error = dolang_vfs::Error::new(
-                        dolang_vfs::ErrorKind::NotFound,
+                    let error = dolang_vfs::error::Error::new(
+                        dolang_vfs::error::ErrorKind::NotFound,
                         format!("no such value: {name}"),
                     );
                     return Err(error.into_sys(strand));

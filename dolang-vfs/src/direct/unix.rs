@@ -1,13 +1,14 @@
 use super::{Direct, DirectChild, DirectCommand};
+use crate::metadata::{FsMetadataFamily, Permissions, UnixFsMetadata, UnixFsMetadataPlatform};
+#[cfg(target_os = "linux")]
+use crate::metadata::{MetadataFamily, UnixMetadata, UnixMetadataPlatform};
 #[cfg(any(target_os = "freebsd", target_os = "linux", target_os = "macos"))]
 use crate::{AttrFlags, Metadata};
 use crate::{
-    AttrsPatch, FsMetadata, FsMetadataFamily, MetadataPatch, OwnershipIdentity, StreamEntry,
-    UnixFsMetadata, UnixFsMetadataPlatform, XattrEntry, XattrNamespace,
+    AttrsPatch, FsMetadata, MetadataPatch, OwnershipIdentity, StreamEntry, XattrEntry,
+    XattrNamespace,
 };
-#[cfg(target_os = "linux")]
-use crate::{MetadataFamily, UnixMetadata, UnixMetadataPlatform};
-use dolang_winterop::SecDesc;
+use dolang_winterop::security::SecDesc;
 #[cfg(target_os = "linux")]
 use std::os::fd::RawFd;
 use std::{
@@ -328,10 +329,10 @@ impl Direct {
         metadata: std::fs::Metadata,
         file: &File,
     ) -> io::Result<Metadata> {
-        let mut metadata = crate::metadata_from_std(metadata);
+        let mut metadata = crate::metadata::metadata_from_std(metadata);
         if !matches!(
             metadata.file_type,
-            crate::FileType::File | crate::FileType::Dir
+            crate::metadata::FileType::File | crate::metadata::FileType::Dir
         ) {
             return Ok(metadata);
         }
@@ -365,11 +366,11 @@ impl Direct {
         } else {
             std::fs::symlink_metadata(path)?
         };
-        let mut metadata = crate::metadata_from_std(std_metadata);
+        let mut metadata = crate::metadata::metadata_from_std(std_metadata);
         if !follow
             || !matches!(
                 metadata.file_type,
-                crate::FileType::File | crate::FileType::Dir
+                crate::metadata::FileType::File | crate::metadata::FileType::Dir
             )
         {
             return Ok(metadata);
@@ -471,7 +472,7 @@ impl Direct {
         metadata: std::fs::Metadata,
         _file: &File,
     ) -> io::Result<Metadata> {
-        Ok(crate::metadata_from_std(metadata))
+        Ok(crate::metadata::metadata_from_std(metadata))
     }
 
     #[cfg(any(target_os = "freebsd", target_os = "macos"))]
@@ -481,7 +482,7 @@ impl Direct {
         } else {
             std::fs::symlink_metadata(path)?
         };
-        Ok(crate::metadata_from_std(metadata))
+        Ok(crate::metadata::metadata_from_std(metadata))
     }
 
     #[cfg(target_os = "macos")]
@@ -1716,7 +1717,7 @@ impl Direct {
                     .await?;
             }
             if let Some(mode) = patch.mode {
-                self.impl_set_permissions(path, crate::Permissions::from_mode(mode))
+                self.impl_set_permissions(path, Permissions::from_mode(mode))
                     .await?;
             }
             if !patch.attrs.is_empty() {
@@ -1743,7 +1744,7 @@ impl Direct {
     pub(super) async fn impl_set_permissions(
         &self,
         path: &Path,
-        perm: crate::Permissions,
+        perm: Permissions,
     ) -> Result<(), io::Error> {
         use std::os::unix::fs::PermissionsExt;
 
@@ -1906,8 +1907,8 @@ impl DirectCommand<'_> {
     }
 }
 
-fn signal_to_raw(signal: crate::Signal) -> io::Result<libc::c_int> {
-    use crate::Signal;
+fn signal_to_raw(signal: crate::process::Signal) -> io::Result<libc::c_int> {
+    use crate::process::Signal;
     let signal = match signal {
         Signal::Hup => libc::SIGHUP,
         Signal::Int => libc::SIGINT,

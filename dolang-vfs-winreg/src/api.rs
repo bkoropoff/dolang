@@ -8,8 +8,12 @@
 //! `RequestKind`/`ResponseKind`/`VfsProtocol`.
 
 use dolang_vfs::extension::ExtOpaque;
-use dolang_vfs::{AnyVfs, Direct, Error, ErrorKind};
-use dolang_winterop::SecDesc;
+use dolang_vfs::{
+    AnyVfs,
+    direct::Direct,
+    error::{Error, ErrorKind},
+};
+use dolang_winterop::security::SecDesc;
 
 use crate::{
     value::Value,

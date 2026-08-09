@@ -1,6 +1,10 @@
 use std::{io, marker::PhantomData};
 
 use dolang::runtime::object::fmt;
+use dolang_vfs::{
+    error::{Error as VfsError, ErrorKind},
+    target::OperatingSystem,
+};
 
 use dolang::runtime::{
     Args, Error, Instance, Object, Output, Result, Slot, Strand, Type, object::TypeBuilder, unpack,
@@ -26,7 +30,7 @@ impl<T> Default for SysErrorObject<T> {
 
 pub(crate) struct SysErrorAnnex {
     pub(crate) message: String,
-    pub(crate) system_code: Option<(dolang_vfs::OperatingSystem, i32)>,
+    pub(crate) system_code: Option<(OperatingSystem, i32)>,
 }
 
 impl SysErrorAnnex {
@@ -144,13 +148,13 @@ enum SysErrorClass {
     UnsupportedError,
 }
 
-fn classify_error_kind(kind: dolang_vfs::ErrorKind) -> SysErrorClass {
+fn classify_error_kind(kind: ErrorKind) -> SysErrorClass {
     match kind {
-        dolang_vfs::ErrorKind::NotFound => SysErrorClass::NotFoundError,
-        dolang_vfs::ErrorKind::PermissionDenied => SysErrorClass::PermissionDeniedError,
-        dolang_vfs::ErrorKind::AlreadyExists => SysErrorClass::AlreadyExistsError,
-        dolang_vfs::ErrorKind::TimedOut => SysErrorClass::TimedOutError,
-        dolang_vfs::ErrorKind::Unsupported => SysErrorClass::UnsupportedError,
+        ErrorKind::NotFound => SysErrorClass::NotFoundError,
+        ErrorKind::PermissionDenied => SysErrorClass::PermissionDeniedError,
+        ErrorKind::AlreadyExists => SysErrorClass::AlreadyExistsError,
+        ErrorKind::TimedOut => SysErrorClass::TimedOutError,
+        ErrorKind::Unsupported => SysErrorClass::UnsupportedError,
         _ => SysErrorClass::Error,
     }
 }
@@ -159,7 +163,7 @@ fn create_sys_error<'v, 's, T: SysErrorType<'v>>(
     strand: &mut Strand<'v, 's>,
     ty: Type<'v, SysErrorObject<T>>,
     message: String,
-    system_code: Option<(dolang_vfs::OperatingSystem, i32)>,
+    system_code: Option<(OperatingSystem, i32)>,
 ) -> Error<'v, 's> {
     Error::object_with_annex(
         strand,
@@ -176,8 +180,8 @@ pub(crate) struct ProcError;
 
 pub(crate) struct ProcErrorAnnex {
     pub(crate) name: String,
-    pub(crate) status: dolang_vfs::ProcessStatus,
-    pub(crate) operating_system: dolang_vfs::OperatingSystem,
+    pub(crate) status: dolang_vfs::process::ProcessStatus,
+    pub(crate) operating_system: OperatingSystem,
 }
 
 impl ProcErrorAnnex {
@@ -213,10 +217,7 @@ impl<'v> Object<'v> for ProcError {
                 });
         let signal = builder.sym("signal");
         builder.get("signal", move |this, strand, out| {
-            if matches!(
-                this.annex().operating_system,
-                dolang_vfs::OperatingSystem::Windows
-            ) {
+            if matches!(this.annex().operating_system, OperatingSystem::Windows) {
                 return Err(Error::field(strand, signal));
             }
             if let Some(signal) = this.annex().status.signal() {
@@ -249,14 +250,11 @@ pub(crate) fn io_error<'v, 's>(strand: &mut Strand<'v, 's>, error: io::Error) ->
     vfs_error(strand, error.into())
 }
 
-pub(crate) fn vfs_error<'v, 's>(
-    strand: &mut Strand<'v, 's>,
-    error: dolang_vfs::Error,
-) -> Error<'v, 's> {
+pub(crate) fn vfs_error<'v, 's>(strand: &mut Strand<'v, 's>, error: VfsError) -> Error<'v, 's> {
     sys_error(strand, error)
 }
 
-fn sys_error<'v, 's>(strand: &mut Strand<'v, 's>, error: dolang_vfs::Error) -> Error<'v, 's> {
+fn sys_error<'v, 's>(strand: &mut Strand<'v, 's>, error: VfsError) -> Error<'v, 's> {
     let global = strand.state::<Global<'v>>();
     let message = error.message().to_owned();
     let system_code = error
@@ -303,7 +301,7 @@ impl ErrorExt for io::Error {
     }
 }
 
-impl ErrorExt for dolang_vfs::Error {
+impl ErrorExt for VfsError {
     fn into_sys<'v, 's>(self, strand: &mut Strand<'v, 's>) -> Error<'v, 's> {
         vfs_error(strand, self)
     }
@@ -328,7 +326,7 @@ impl<T, E: ErrorExt> ResultExt<T> for std::result::Result<T, E> {
 
 #[cfg(test)]
 mod tests {
-    use dolang_vfs::OperatingSystem;
+    use dolang_vfs::target::OperatingSystem;
 
     use super::SysErrorAnnex;
 
@@ -354,7 +352,7 @@ mod tests {
 pub(crate) fn proc_status_error<'v, 's>(
     strand: &mut Strand<'v, 's>,
     name: &str,
-    status: dolang_vfs::ProcessStatus,
+    status: dolang_vfs::process::ProcessStatus,
 ) -> Error<'v, 's> {
     let global = strand.state::<Global<'v>>();
     let operating_system = global.local.get(strand).target().operating_system;
@@ -373,7 +371,7 @@ pub(crate) fn proc_status_error<'v, 's>(
 #[cfg(test)]
 mod test {
     use super::{SysErrorClass, classify_error_kind};
-    use dolang_vfs::ErrorKind;
+    use dolang_vfs::error::ErrorKind;
 
     #[test]
     fn classify_common_io_kinds() {

@@ -12,6 +12,10 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 
 use crate::Server;
 
+/// Windows service session used to start an elevated or unelevated VFS target.
+#[cfg(windows)]
+pub use crate::windows::AdminSession;
+
 enum EnvOp {
     Set(OsString, OsString),
     Unset(OsString),
@@ -320,8 +324,8 @@ fn unix_stdio(
     )?)?;
     // The buffer is a property of the pipe itself, shared by both ends, so
     // either side can raise it.
-    crate::pipe::set_pipe_buffer_size(stdin.as_raw_fd(), STDIO_PIPE_BUFFER_SIZE);
-    crate::pipe::set_pipe_buffer_size(stdout.as_raw_fd(), STDIO_PIPE_BUFFER_SIZE);
+    crate::process::set_pipe_buffer_size(stdin.as_raw_fd(), STDIO_PIPE_BUFFER_SIZE);
+    crate::process::set_pipe_buffer_size(stdout.as_raw_fd(), STDIO_PIPE_BUFFER_SIZE);
     Ok((stdin, stdout))
 }
 

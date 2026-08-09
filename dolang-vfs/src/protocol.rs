@@ -12,9 +12,9 @@ use serde::{
 use crate::extension::ErasedVfsExtension;
 pub(crate) use crate::{
     DirEntry, FsMetadata, Metadata, MetadataPatch, PosixAcl, SecurityInfo, SidName, StreamEntry,
-    TargetInfo, WellKnownPath, XattrEntry, XattrNamespace,
+    TargetInfo, XattrEntry, XattrNamespace, path::WellKnownPath,
 };
-pub(crate) use dolang_winterop::{SecDesc, Sid};
+pub(crate) use dolang_winterop::security::{SecDesc, Sid};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(transparent)]
@@ -53,7 +53,7 @@ pub(crate) fn rpc_builder() -> dolang_rpc::Builder {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct Request {
-    pub(crate) vfs: Option<Opaque<crate::VfsMarker>>,
+    pub(crate) vfs: Option<Opaque<crate::session::VfsMarker>>,
     pub(crate) kind: RequestKind,
 }
 
@@ -135,7 +135,9 @@ impl TryFrom<PathBuf> for WirePath {
     type Error = crate::Error;
 
     fn try_from(path: PathBuf) -> Result<Self, Self::Error> {
-        crate::typed_path(path).map(Into::into).map_err(Into::into)
+        crate::path::typed_path(path)
+            .map(Into::into)
+            .map_err(Into::into)
     }
 }
 
@@ -143,7 +145,7 @@ impl TryFrom<WirePath> for PathBuf {
     type Error = crate::Error;
 
     fn try_from(path: WirePath) -> Result<Self, Self::Error> {
-        crate::native_path(crate::Utf8TypedPathBuf::from(path).to_path()).map_err(Into::into)
+        crate::path::native_path(crate::Utf8TypedPathBuf::from(path).to_path()).map_err(Into::into)
     }
 }
 
@@ -153,8 +155,8 @@ mod tests {
 
     use super::{WireError, WirePath, WirePathKind};
     use crate::{
-        Error, ErrorKind, OperatingSystem, Utf8TypedPath, Utf8TypedPathBuf, Utf8UnixPath,
-        Utf8WindowsPath,
+        Error, ErrorKind, Utf8TypedPath, Utf8TypedPathBuf, Utf8UnixPath, Utf8WindowsPath,
+        target::OperatingSystem,
     };
 
     #[test]
@@ -267,22 +269,22 @@ pub(crate) struct SpawnRequest {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct PipeResponse {
-    pub(crate) send: Opaque<crate::StdioSendMarker>,
-    pub(crate) recv: Opaque<crate::StdioRecvMarker>,
+    pub(crate) send: Opaque<crate::session::StdioSendMarker>,
+    pub(crate) recv: Opaque<crate::session::StdioRecvMarker>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) enum StdioRecvTarget {
     Null,
     Native(OsHandle),
-    Opaque(Opaque<crate::StdioRecvMarker>),
+    Opaque(Opaque<crate::session::StdioRecvMarker>),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) enum StdioSendTarget {
     Null,
     Native(OsHandle),
-    Opaque(Opaque<crate::StdioSendMarker>),
+    Opaque(Opaque<crate::session::StdioSendMarker>),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -312,7 +314,7 @@ pub(crate) enum OpenHandlePreference {
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) enum OpenHandle {
     Native(OsHandle),
-    Opaque(Opaque<crate::FileMarker>),
+    Opaque(Opaque<crate::session::FileMarker>),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
@@ -357,7 +359,7 @@ pub(crate) struct WindowsAdminRequest {
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) enum OpenVfsHandle {
     Native(OsHandle),
-    Opaque(Opaque<crate::VfsMarker>),
+    Opaque(Opaque<crate::session::VfsMarker>),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -693,13 +695,13 @@ impl<'de> Deserialize<'de> for ExtensionResponse {
 pub(crate) enum RequestKind {
     Spawn(SpawnRequest),
     ChildWait {
-        child: Opaque<crate::ChildMarker>,
+        child: Opaque<crate::session::ChildMarker>,
     },
     ChildTerminate {
-        child: Opaque<crate::ChildMarker>,
+        child: Opaque<crate::session::ChildMarker>,
     },
     ChildClose {
-        child: Opaque<crate::ChildMarker>,
+        child: Opaque<crate::session::ChildMarker>,
     },
     Query,
     UserName {
@@ -731,104 +733,104 @@ pub(crate) enum RequestKind {
     Pipe,
     Open(OpenRequest),
     FileRead {
-        file: Opaque<crate::FileMarker>,
+        file: Opaque<crate::session::FileMarker>,
         len: usize,
     },
     FileWrite {
-        file: Opaque<crate::FileMarker>,
+        file: Opaque<crate::session::FileMarker>,
     },
     FileSeek {
-        file: Opaque<crate::FileMarker>,
+        file: Opaque<crate::session::FileMarker>,
         position: FileSeekFrom,
     },
     FileFlush {
-        file: Opaque<crate::FileMarker>,
+        file: Opaque<crate::session::FileMarker>,
     },
     FileSetSize {
-        file: Opaque<crate::FileMarker>,
+        file: Opaque<crate::session::FileMarker>,
         size: u64,
     },
     FileLock {
-        file: Opaque<crate::FileMarker>,
-        request: crate::FileLockRequest,
+        file: Opaque<crate::session::FileMarker>,
+        request: crate::file::FileLockRequest,
     },
     FileUnlock {
-        file: Opaque<crate::FileMarker>,
+        file: Opaque<crate::session::FileMarker>,
         lock: u64,
     },
     FileToStdioSend {
-        file: Opaque<crate::FileMarker>,
+        file: Opaque<crate::session::FileMarker>,
     },
     FileToStdioRecv {
-        file: Opaque<crate::FileMarker>,
+        file: Opaque<crate::session::FileMarker>,
     },
     StdioSendClose {
-        stdio: Opaque<crate::StdioSendMarker>,
+        stdio: Opaque<crate::session::StdioSendMarker>,
     },
     StdioSendWrite {
-        stdio: Opaque<crate::StdioSendMarker>,
+        stdio: Opaque<crate::session::StdioSendMarker>,
     },
     StdioSendClone {
-        stdio: Opaque<crate::StdioSendMarker>,
+        stdio: Opaque<crate::session::StdioSendMarker>,
     },
     StdioRecvClose {
-        stdio: Opaque<crate::StdioRecvMarker>,
+        stdio: Opaque<crate::session::StdioRecvMarker>,
     },
     StdioRecvRead {
-        stdio: Opaque<crate::StdioRecvMarker>,
+        stdio: Opaque<crate::session::StdioRecvMarker>,
         len: usize,
     },
     StdioRecvClone {
-        stdio: Opaque<crate::StdioRecvMarker>,
+        stdio: Opaque<crate::session::StdioRecvMarker>,
     },
     FileMetadata {
-        file: Opaque<crate::FileMarker>,
+        file: Opaque<crate::session::FileMarker>,
     },
     FileFsMetadata {
-        file: Opaque<crate::FileMarker>,
+        file: Opaque<crate::session::FileMarker>,
     },
     FileAcl {
-        file: Opaque<crate::FileMarker>,
+        file: Opaque<crate::session::FileMarker>,
         default: bool,
     },
     FileSetAcl {
-        file: Opaque<crate::FileMarker>,
+        file: Opaque<crate::session::FileMarker>,
         acl: Option<PosixAcl>,
         default: bool,
     },
     FileSecDesc {
-        file: Opaque<crate::FileMarker>,
+        file: Opaque<crate::session::FileMarker>,
         mask: u32,
     },
     FileSetSecDesc {
-        file: Opaque<crate::FileMarker>,
+        file: Opaque<crate::session::FileMarker>,
         sec_desc: SecDesc,
     },
     FileXattrs {
-        file: Opaque<crate::FileMarker>,
+        file: Opaque<crate::session::FileMarker>,
         namespace: XattrNamespaceRequest,
     },
     FileXattr {
-        file: Opaque<crate::FileMarker>,
+        file: Opaque<crate::session::FileMarker>,
         name: String,
         namespace: Option<String>,
     },
     FileStreams {
-        file: Opaque<crate::FileMarker>,
+        file: Opaque<crate::session::FileMarker>,
     },
     FileSetXattr {
-        file: Opaque<crate::FileMarker>,
+        file: Opaque<crate::session::FileMarker>,
         name: String,
         namespace: Option<String>,
         value: Vec<u8>,
     },
     FileRemoveXattr {
-        file: Opaque<crate::FileMarker>,
+        file: Opaque<crate::session::FileMarker>,
         name: String,
         namespace: Option<String>,
     },
     FileClose {
-        file: Opaque<crate::FileMarker>,
+        file: Opaque<crate::session::FileMarker>,
     },
     UnixVfs(UnixVfsRequest),
     WindowsAdmin(WindowsAdminRequest),
@@ -866,7 +868,7 @@ pub(crate) enum RequestKind {
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) enum ResponseKind {
     Error(WireError),
-    Spawn(Result<Opaque<crate::ChildMarker>, WireError>),
+    Spawn(Result<Opaque<crate::session::ChildMarker>, WireError>),
     ChildWait(Result<crate::ProcessStatus, WireError>),
     ChildTerminate(Result<Option<crate::ProcessStatus>, WireError>),
     ChildClose(Result<(), WireError>),
@@ -890,14 +892,14 @@ pub(crate) enum ResponseKind {
     FileSetSize(Result<(), WireError>),
     FileLock(Result<Option<u64>, WireError>),
     FileUnlock(Result<(), WireError>),
-    FileToStdioSend(Result<Opaque<crate::StdioSendMarker>, WireError>),
-    FileToStdioRecv(Result<Opaque<crate::StdioRecvMarker>, WireError>),
+    FileToStdioSend(Result<Opaque<crate::session::StdioSendMarker>, WireError>),
+    FileToStdioRecv(Result<Opaque<crate::session::StdioRecvMarker>, WireError>),
     StdioSendClose(Result<(), WireError>),
     StdioSendWrite(Result<usize, WireError>),
-    StdioSendClone(Result<Opaque<crate::StdioSendMarker>, WireError>),
+    StdioSendClone(Result<Opaque<crate::session::StdioSendMarker>, WireError>),
     StdioRecvClose(Result<(), WireError>),
     StdioRecvRead(Result<(), WireError>),
-    StdioRecvClone(Result<Opaque<crate::StdioRecvMarker>, WireError>),
+    StdioRecvClone(Result<Opaque<crate::session::StdioRecvMarker>, WireError>),
     FileMetadata(Result<Metadata, WireError>),
     FileFsMetadata(Result<FsMetadata, WireError>),
     FileAcl(Result<Option<PosixAcl>, WireError>),
@@ -911,7 +913,7 @@ pub(crate) enum ResponseKind {
     FileRemoveXattr(Result<(), WireError>),
     FileClose(Result<(), WireError>),
     UnixVfs(Result<OpenVfsHandle, WireError>),
-    WindowsAdmin(Result<Opaque<crate::VfsMarker>, WireError>),
+    WindowsAdmin(Result<Opaque<crate::session::VfsMarker>, WireError>),
     ReadDir(Result<ReadDirResponse, WireError>),
     Remove(Result<(), WireError>),
     Metadata(Result<Metadata, WireError>),

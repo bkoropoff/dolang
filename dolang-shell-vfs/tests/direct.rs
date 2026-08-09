@@ -5,15 +5,17 @@ use std::collections::HashMap;
 use std::{io, path::Path};
 
 #[cfg(any(windows, target_os = "linux"))]
-use dolang_vfs::{AttrFlags, AttrsPatch};
-use dolang_vfs::{
-    Child, Command, Direct, FileHandle, FileLockBehavior, FileLockMode, FileLockRange,
-    FileLockRequest, FileType, MetadataPatch, OpenOptions, Vfs,
-};
+use dolang_vfs::metadata::{AttrFlags, AttrsPatch};
 #[cfg(any(unix, windows))]
-use dolang_vfs::{ProcessControl, Signal, TerminationPolicy};
+use dolang_vfs::process::{ProcessControl, Signal, TerminationPolicy};
+use dolang_vfs::{
+    Child, Command, FileHandle, OpenOptions, Vfs,
+    direct::Direct,
+    file::{FileLockBehavior, FileLockMode, FileLockRange, FileLockRequest},
+    metadata::{FileType, MetadataPatch},
+};
 #[cfg(windows)]
-use dolang_winterop::{
+use dolang_winterop::security::{
     DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
 };
 use tempfile::tempdir;
@@ -244,7 +246,7 @@ fn lock_request(
     }
 }
 
-async fn open_lock_file(direct: &Direct, path: &Path) -> dolang_vfs::DirectFile {
+async fn open_lock_file(direct: &Direct, path: &Path) -> dolang_vfs::direct::DirectFile {
     direct
         .open_options()
         .read(true)
@@ -1141,7 +1143,7 @@ async fn direct_well_known_home_dir_prefers_absolute_home_override() {
     let env = HashMap::from([(String::from("HOME"), Some(String::from("/tmp/test-home")))]);
 
     let path = direct
-        .well_known_path(dolang_vfs::WellKnownPath::HomeDir, None, &env)
+        .well_known_path(dolang_vfs::path::WellKnownPath::HomeDir, None, &env)
         .await
         .unwrap();
 
@@ -1155,7 +1157,7 @@ async fn direct_well_known_temp_dir_prefers_tmpdir_override() {
     let env = HashMap::from([(String::from("TMPDIR"), Some(String::from("/tmp/test-temp")))]);
 
     let path = direct
-        .well_known_path(dolang_vfs::WellKnownPath::TempDir, None, &env)
+        .well_known_path(dolang_vfs::path::WellKnownPath::TempDir, None, &env)
         .await
         .unwrap();
 
@@ -1169,7 +1171,7 @@ async fn direct_well_known_temp_dir_falls_back_to_tmp() {
     let env = HashMap::from([(String::from("TMPDIR"), None)]);
 
     let path = direct
-        .well_known_path(dolang_vfs::WellKnownPath::TempDir, None, &env)
+        .well_known_path(dolang_vfs::path::WellKnownPath::TempDir, None, &env)
         .await
         .unwrap();
 
@@ -1183,7 +1185,7 @@ async fn direct_well_known_home_dir_rejects_relative_home_override() {
     let env = HashMap::from([(String::from("HOME"), Some(String::from("relative-home")))]);
 
     let err = direct
-        .well_known_path(dolang_vfs::WellKnownPath::HomeDir, None, &env)
+        .well_known_path(dolang_vfs::path::WellKnownPath::HomeDir, None, &env)
         .await
         .unwrap_err();
 
@@ -1203,7 +1205,7 @@ async fn direct_well_known_cache_dir_prefers_xdg_override() {
     ]);
 
     let path = direct
-        .well_known_path(dolang_vfs::WellKnownPath::CacheDir, None, &env)
+        .well_known_path(dolang_vfs::path::WellKnownPath::CacheDir, None, &env)
         .await
         .unwrap();
 
@@ -1220,7 +1222,7 @@ async fn direct_well_known_cache_dir_falls_back_to_home() {
     ]);
 
     let path = direct
-        .well_known_path(dolang_vfs::WellKnownPath::CacheDir, None, &env)
+        .well_known_path(dolang_vfs::path::WellKnownPath::CacheDir, None, &env)
         .await
         .unwrap();
 
@@ -1240,7 +1242,7 @@ async fn direct_well_known_cache_dir_uses_macos_convention() {
     ]);
 
     let path = direct
-        .well_known_path(dolang_vfs::WellKnownPath::CacheDir, None, &env)
+        .well_known_path(dolang_vfs::path::WellKnownPath::CacheDir, None, &env)
         .await
         .unwrap();
 

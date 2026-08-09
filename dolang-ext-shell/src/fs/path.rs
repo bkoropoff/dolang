@@ -15,7 +15,7 @@ use dolang::runtime::{
     object::{ArrayLike, ArrayView, TypeBuilder},
     unpack,
 };
-use dolang_vfs::{AttrFlags, Vfs};
+use dolang_vfs::{Vfs, metadata::AttrFlags};
 use typed_path::{Utf8TypedPath, Utf8TypedPathBuf, Utf8WindowsPrefix};
 
 use super::file::File;

@@ -10,7 +10,9 @@ use dolang::runtime::{
     value::{Nil, Singleton},
     vm::Builder,
 };
-use dolang_vfs::{AnyVfs, Child as _, Command, OperatingSystem, ProcessControl, Vfs};
+use dolang_vfs::{
+    AnyVfs, Child as _, Command, Vfs, process::ProcessControl, target::OperatingSystem,
+};
 use typed_path::{PathType, Utf8TypedPath, Utf8UnixPath, Utf8WindowsPath};
 
 use crate::{

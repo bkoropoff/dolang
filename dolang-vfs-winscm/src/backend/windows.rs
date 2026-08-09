@@ -10,10 +10,16 @@ use std::{
 };
 
 use dolang_vfs::extension::{ExtContext, InvalidHandle};
-use dolang_vfs::{Error, ErrorKind, OperatingSystem};
+use dolang_vfs::{
+    error::{Error, ErrorKind},
+    target::OperatingSystem,
+};
 use dolang_winterop::{
-    ALL_SECURITY_INFORMATION, ApcCancelled, ApcContext, DACL_SECURITY_INFORMATION, Reactor,
-    SACL_SECURITY_INFORMATION, SecDesc as VfsSecDesc, with_security_privilege,
+    apc::{ApcCancelled, ApcContext, Reactor},
+    security::{
+        ALL_SECURITY_INFORMATION, DACL_SECURITY_INFORMATION, SACL_SECURITY_INFORMATION,
+        SecDesc as VfsSecDesc, with_security_privilege,
+    },
 };
 use futures::channel::oneshot;
 use windows_sys::Win32::{
@@ -582,7 +588,7 @@ fn from_io(operation: &str, err: io::Error) -> Error {
 fn sec_desc(handle: SC_HANDLE, mask: u32) -> Result<VfsSecDesc, Error> {
     let mask = mask & ALL_SECURITY_INFORMATION;
     let query_mask = if mask == 0 {
-        dolang_winterop::OWNER_SECURITY_INFORMATION
+        dolang_winterop::security::OWNER_SECURITY_INFORMATION
     } else {
         mask
     };

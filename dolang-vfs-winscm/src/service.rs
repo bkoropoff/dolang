@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use dolang_vfs::extension::ExtResource;
-use dolang_winterop::Reactor;
+use dolang_winterop::apc::Reactor;
 use windows_sys::Win32::System::Services::{CloseServiceHandle, SC_HANDLE};
 
 use crate::wire::ServiceMarker;

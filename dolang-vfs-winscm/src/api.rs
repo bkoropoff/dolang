@@ -8,8 +8,11 @@
 //! `VfsProtocol`.
 
 use dolang_vfs::extension::ExtOpaque;
-use dolang_vfs::{AnyVfs, Error, ErrorKind};
-use dolang_winterop::SecDesc;
+use dolang_vfs::{
+    AnyVfs,
+    error::{Error, ErrorKind},
+};
+use dolang_winterop::security::SecDesc;
 
 use crate::wire::{
     CreateServiceOptions, ErrorControl, NotifyMask, ScManagerMarker, ServiceAccess, ServiceConfig,

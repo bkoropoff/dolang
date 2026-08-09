@@ -2,7 +2,7 @@ use dolang::runtime::{
     Error, Object, Output, Result, State, Strand, Sym,
     object::{Instance, TypeBuilder},
 };
-use dolang_vfs::{FileType, Metadata as VfsMetadata};
+use dolang_vfs::metadata::{FileType, Metadata as VfsMetadata};
 
 use crate::{fs::attrs, global::Global, time::create_datetime, util};
 
@@ -254,10 +254,12 @@ impl<'v> Object<'v> for Metadata {
             })
             .get("linux_attrs", move |this, strand, out| {
                 match &this.annex().inner.family {
-                    dolang_vfs::MetadataFamily::Unix(dolang_vfs::UnixMetadata {
-                        platform: dolang_vfs::UnixMetadataPlatform::Linux { attrs },
-                        ..
-                    }) => {
+                    dolang_vfs::metadata::MetadataFamily::Unix(
+                        dolang_vfs::metadata::UnixMetadata {
+                            platform: dolang_vfs::metadata::UnixMetadataPlatform::Linux { attrs },
+                            ..
+                        },
+                    ) => {
                         if let Some(attrs) = attrs {
                             Output::set(strand, out, *attrs);
                         }

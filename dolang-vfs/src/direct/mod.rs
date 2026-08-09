@@ -26,9 +26,10 @@ use wax::{
 use crate::{
     Child, Command, FileHandle, FsMetadata, Metadata, MetadataPatch, PosixAcl, ProcessStatus,
     Query, ReadDir, SidName, StdioRecv, StdioSend, StreamEntry, Utf8TypedPath, Utf8TypedPathBuf,
-    Vfs, WellKnownPath, XattrEntry, XattrNamespace, native_path, typed_path,
+    Vfs, XattrEntry, XattrNamespace,
+    path::{WellKnownPath, native_path, typed_path},
 };
-use dolang_winterop::{SecDesc, Sid};
+use dolang_winterop::security::{SecDesc, Sid};
 
 use std::{
     pin::Pin,
@@ -45,7 +46,7 @@ mod windows;
 
 pub(crate) use lock::{DirectFileLock, DirectFileLocks};
 
-/// A [`Vfs`](crate::Vfs) that operates in the local process environment.
+/// A [`Vfs`] that operates in the local process environment.
 #[derive(Debug, Clone)]
 pub struct Direct {
     path_cache: Arc<PathCache>,
@@ -343,8 +344,8 @@ impl FileHandle for DirectFile {
 
     async fn lock(
         &self,
-        request: crate::FileLockRequest,
-    ) -> crate::Result<Option<crate::FileLock>> {
+        request: crate::file::FileLockRequest,
+    ) -> crate::Result<Option<crate::file::FileLock>> {
         #[cfg(unix)]
         let handle = self.inner.as_fd().try_clone_to_owned()?;
         #[cfg(windows)]
@@ -352,7 +353,7 @@ impl FileHandle for DirectFile {
         self.locks
             .acquire(handle, request)
             .await
-            .map(|lock| lock.map(crate::FileLock::direct))
+            .map(|lock| lock.map(crate::file::FileLock::direct))
             .map_err(Into::into)
     }
 
@@ -922,16 +923,16 @@ impl Vfs for Direct {
         cwd: Utf8TypedPath<'_>,
         env: HashMap<String, Option<String>>,
         elevate: bool,
-    ) -> crate::Result<crate::VfsSession> {
+    ) -> crate::Result<crate::session::VfsSession> {
         #[cfg(windows)]
         {
             let cwd = native_path(cwd)?;
             let (session, _) = if elevate {
-                crate::AdminSession::launch(cwd, env).await
+                crate::service::AdminSession::launch(cwd, env).await
             } else {
-                crate::AdminSession::launch_unelevated(cwd, env).await
+                crate::service::AdminSession::launch_unelevated(cwd, env).await
             }?;
-            Ok(crate::VfsSession::from_windows(session))
+            Ok(crate::session::VfsSession::from_windows(session))
         }
         #[cfg(not(windows))]
         {
@@ -945,11 +946,11 @@ impl Vfs for Direct {
     }
 
     async fn pipe(&self) -> crate::Result<(StdioSend, StdioRecv)> {
-        crate::pipe::pipe(None).map_err(Into::into)
+        crate::process::pipe(None).map_err(Into::into)
     }
 
     async fn pipe_sized(&self, buf_size: Option<usize>) -> crate::Result<(StdioSend, StdioRecv)> {
-        crate::pipe::pipe(buf_size).map_err(Into::into)
+        crate::process::pipe(buf_size).map_err(Into::into)
     }
 
     async fn query(&self) -> crate::Result<Query> {

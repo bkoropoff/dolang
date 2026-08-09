@@ -2,7 +2,7 @@
 #![cfg(unix)]
 
 use dolang_vfs::extension::{ExtContext, ExtOpaque, ExtResource, VfsExtension, vfs_extension};
-use dolang_vfs::{AnyVfs, Client, Direct};
+use dolang_vfs::{AnyVfs, client::Client, direct::Direct};
 use serde::{Deserialize, Serialize};
 use tempfile::tempdir;
 use tokio::task::JoinHandle;
@@ -113,7 +113,7 @@ async fn direct_dispatch_round_trips_through_opaque_handle() {
 
 async fn start_server(socket_path: &std::path::Path) -> JoinHandle<()> {
     let path = socket_path.to_path_buf();
-    let server = dolang_vfs::Server::bind(&path).await.unwrap();
+    let server = dolang_vfs::server::Server::bind(&path).await.unwrap();
     tokio::spawn(async move {
         let _ = server.accept().await;
     })

@@ -5,9 +5,9 @@
 //! request/response enums here exist solely so [`WinRegExt`] can route and
 //! (de)serialize through the VFS extension mechanism.
 
-use dolang_vfs::Error;
+use dolang_vfs::error::Error;
 use dolang_vfs::extension::{ExtContext, ExtOpaque, ExtOsHandle, VfsExtension};
-use dolang_winterop::SecDesc;
+use dolang_winterop::security::SecDesc;
 use serde::{Deserialize, Serialize};
 
 use crate::{backend, value::Value};
@@ -20,7 +20,7 @@ pub(crate) struct KeyMarker;
 /// On a same-machine, native-handle-capable session, the server hands back
 /// the raw `HKEY` as an out-of-band [`ExtOsHandle`] attachment instead of
 /// registering it in the session's opaque-object table — the caller can
-/// then operate on it directly through a local [`dolang_vfs::Direct`]
+/// then operate on it directly through a local [`dolang_vfs::direct::Direct`]
 /// VFS, without any further RPC round trips. See
 /// [`WinRegRequest::AdoptNative`] for how a `Native` handle is turned back
 /// into an [`ExtOpaque`].
