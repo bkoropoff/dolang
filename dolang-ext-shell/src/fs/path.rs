@@ -523,14 +523,6 @@ macro_rules! impl_concrete_path {
                 fmt!(strand, w, "{}", this.annex().display())
             }
 
-            fn display_arg<'a, 's>(
-                this: Instance<'v, 'a, Self>,
-                strand: &'a mut Strand<'v, 's>,
-                w: &mut dyn dolang::runtime::Format<'v>,
-            ) -> Result<'v, 's, ()> {
-                fmt!(strand, w, "{}", this.annex().display())
-            }
-
             fn build<'a>(mut builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
                 let all = builder.sym("all");
                 let ignore = builder.sym("ignore");

@@ -21,7 +21,7 @@ pub(crate) enum IoMode {
 #[derive(Clone, Copy)]
 pub(crate) enum ValueEncoding {
     Display,
-    Argument,
+    Verbatim,
 }
 
 pub(crate) async fn read_value<'v, R>(
@@ -107,7 +107,7 @@ pub(crate) fn encode_value<'v, 's>(
         _ => {
             let value = match encoding {
                 ValueEncoding::Display => value.to_string(strand)?,
-                ValueEncoding::Argument => value.to_arg(strand)?,
+                ValueEncoding::Verbatim => value.to_verbatim(strand)?,
             };
             (value.into_bytes(), false)
         }

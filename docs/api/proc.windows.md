@@ -12,9 +12,9 @@ Encodes one argument for a Windows process command line.
 
 **Parameters:**
 
-| Name  | Type | Description                                                |
-| ----- | ---- | ---------------------------------------------------------- |
-| `arg` |      | Value converted with [`std.arg`](./std/index.md#arg-value) |
+| Name  | Type | Description                                                          |
+| ----- | ---- | -------------------------------------------------------------------- |
+| `arg` |      | Value converted with [`std.verbatim`](./std/index.md#verbatim-value) |
 
 **Returns:** [`str`](./std/str.md)
 
@@ -28,9 +28,9 @@ Encodes an iterable of arguments as one Windows process command line.
 
 **Parameters:**
 
-| Name       | Type | Description                                                 |
-| ---------- | ---- | ----------------------------------------------------------- |
-| `iterable` |      | Values converted with [`std.arg`](./std/index.md#arg-value) |
+| Name       | Type | Description                                                           |
+| ---------- | ---- | --------------------------------------------------------------------- |
+| `iterable` |      | Values converted with [`std.verbatim`](./std/index.md#verbatim-value) |
 
 **Returns:** [`str`](./std/str.md)
 

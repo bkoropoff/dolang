@@ -335,7 +335,7 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
             self.block.insts.push(Inst(
                 InstInfo::Builtin(
                     if external {
-                        builtin::CONCAT_ARG
+                        builtin::CONCAT_VERBATIM
                     } else {
                         builtin::CONCAT_STR
                     },
@@ -406,8 +406,8 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
             Expr::Concat {
                 exprs,
                 delim_span,
-                arg: external,
-            } => self.lower_concat(exprs, *delim_span, *external)?,
+                verbatim,
+            } => self.lower_concat(exprs, *delim_span, *verbatim)?,
             Expr::Escape(char, span) => {
                 let cid = self.consttab.str(self.bintab.id_str(&format!("{char}")));
                 self.block.insts.push(Inst(InstInfo::LoadConst(cid), *span));

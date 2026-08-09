@@ -1,11 +1,55 @@
 import std:
-  - arg
+  - verbatim
 
 def assert_eq_ext value as_value as_str
   assert_eq $value $as_value
-  assert_eq (arg value) $as_str
+  assert_eq (verbatim value) $as_str
 
 assert_eq_ext 001 (1) "001"
 assert_eq_ext -0 (0) "-0"
 assert_eq_ext 1. (1.0) "1."
 assert_eq_ext 1e0 (1.0) "1e0"
+
+# Numeric constants in vertical data retain their verbatim representation.
+let items = $
+  - 001
+  - -0
+  - 1.
+  - 1e0
+
+assert_eq_ext $items[0] (1) "001"
+assert_eq_ext $items[1] (0) "-0"
+assert_eq_ext $items[2] (1.0) "1."
+assert_eq_ext $items[3] (1.0) "1e0"
+
+# This also includes dictionary values, numeric keys, and nested vertical data.
+let data = $
+  mode: 0644
+  exponent: 1e0
+  nested:
+    1e0: 001
+
+assert_eq_ext $data[:mode:] (644) "0644"
+assert_eq_ext $data[:exponent:] (1.0) "1e0"
+for key value = data[:nested:]
+  assert_eq_ext $key (1.0) "1e0"
+  assert_eq_ext $value (1) "001"
+
+# Vertical control-flow bodies use the same representation.
+let controlled = $
+  if true
+    - 007
+  for _ = [0]
+    - 2.
+
+assert_eq_ext $controlled[0] (7) "007"
+assert_eq_ext $controlled[1] (2.0) "2."
+
+class CustomVerbatim
+  def (str) _
+    "display"
+
+  def (verbatim) _
+    "literal"
+
+assert_eq (verbatim(CustomVerbatim())) literal

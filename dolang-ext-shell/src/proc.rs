@@ -360,7 +360,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         .module("proc.windows")
         .function("quote", async move |strand, args, out| {
             let ([argument], []) = unpack!(strand, args, 1, 0)?;
-            let argument = argument.to_arg(strand)?;
+            let argument = argument.to_verbatim(strand)?;
             if argument.contains('\0') {
                 return Err(Error::value(
                     strand,
@@ -379,7 +379,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 let mut arguments = Vec::new();
                 iterable.iter(strand, &mut iter).await?;
                 while iter.next(strand, &mut item).await? {
-                    arguments.push(item.to_arg(strand)?);
+                    arguments.push(item.to_verbatim(strand)?);
                 }
                 let command_line = dolang_winterop::process::join_arguments(arguments)
                     .map_err(|error| Error::value(strand, error.to_string()))?;

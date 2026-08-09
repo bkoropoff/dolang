@@ -169,7 +169,7 @@ pub(crate) trait Protocol<'v>: Boxable<Header> + Collect + 'v {
         Err(Error::type_error(strand, "fill not supported"))
     }
 
-    fn op_display_arg<'a, 's>(
+    fn op_verbatim<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
@@ -518,7 +518,7 @@ enum BinOp {
 
 #[derive(Clone, Copy)]
 enum FmtOp {
-    DisplayArg,
+    Verbatim,
     Display,
     Debug,
 }
@@ -1026,7 +1026,7 @@ fn op_fmt_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
     unsafe {
         let this = Recv::from_header(this);
         match op {
-            FmtOp::DisplayArg => T::op_display_arg(this, strand, w),
+            FmtOp::Verbatim => T::op_verbatim(this, strand, w),
             FmtOp::Display => T::op_display(this, strand, w),
             FmtOp::Debug => T::op_debug(this, strand, w),
         }
@@ -1359,7 +1359,7 @@ pub(crate) trait Dispatch<'v, 'a> {
 
     fn op_inspect(&self, vm: &Vm<'v>) -> Option<Inspect<'v, 'a>>;
 
-    fn op_display_arg<'s>(
+    fn op_verbatim<'s>(
         &self,
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
@@ -1634,12 +1634,12 @@ impl<'v, 'a, T: AsHeader> Dispatch<'v, 'a> for T {
         unsafe { invoke!(self, op_inspect, vm) }
     }
 
-    fn op_display_arg<'s>(
+    fn op_verbatim<'s>(
         &self,
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        unsafe { invoke!(self, op_fmt, strand, FmtOp::DisplayArg, w) }
+        unsafe { invoke!(self, op_fmt, strand, FmtOp::Verbatim, w) }
     }
 
     fn op_display<'s>(

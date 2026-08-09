@@ -1163,7 +1163,7 @@ impl<'a> Parser<'a> {
                 Ok(Expr::Concat {
                     exprs,
                     delim_span: Some(open | close),
-                    arg: false,
+                    verbatim: false,
                 })
             }
         })?;
@@ -1260,7 +1260,7 @@ impl<'a> Parser<'a> {
         Ok(Expr::Concat {
             exprs,
             delim_span: Some(pipe_span),
-            arg: false,
+            verbatim: false,
         }
         .optimize())
     }
@@ -1689,7 +1689,7 @@ impl<'a> Parser<'a> {
             Ok(Expr::Concat {
                 exprs,
                 delim_span: None,
-                arg: true,
+                verbatim: true,
             }
             .optimize())
         }
@@ -2186,7 +2186,7 @@ impl<'a> Parser<'a> {
             "put" => SpecialMethod::Put,
             "str" => SpecialMethod::Str,
             "dbg" => SpecialMethod::Dbg,
-            "arg" => SpecialMethod::Arg,
+            "verbatim" => SpecialMethod::Verbatim,
             "add" => SpecialMethod::Add,
             "sub" => SpecialMethod::Sub,
             "rsub" => SpecialMethod::Rsub,
@@ -2238,7 +2238,7 @@ impl<'a> Parser<'a> {
         use TokenInfo::*;
         match self.peek()? {
             Some(token!(expr_start!())) => {
-                let expr = self.parse_expr(scope, ExprMode::Compact)?;
+                let expr = self.parse_expr(scope, ExprMode::Shell)?;
                 if let Some(token!(Colon)) = self.peek()? {
                     let colon_span = self.advance();
                     let sep = self.expect(scope, &[ExpectKind::ArgSep])?;
@@ -3364,7 +3364,7 @@ impl<'a> Parser<'a> {
                                 Some(Expr::Concat {
                                     exprs: vec![Expr::Literal(span | span.after_right_char())],
                                     delim_span: None,
-                                    arg: true,
+                                    verbatim: true,
                                 }),
                                 UnquotedMode::Shell,
                             )?,

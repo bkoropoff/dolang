@@ -50,7 +50,7 @@ macro_rules! well_known_symbols {
 }
 
 well_known_symbols! {
-    (ArgMethod, "(arg)", ARG_METHOD),
+    (VerbatimMethod, "(verbatim)", VERBATIM_METHOD),
     (All, "all", ALL),
     (Any, "any", ANY),
     (Add, "add", ADD),

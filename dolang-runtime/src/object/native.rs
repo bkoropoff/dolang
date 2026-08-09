@@ -667,9 +667,8 @@ pub trait Object<'v>: Sized + 'v {
         future::ready(Err(Error::type_error(strand, "not instantiable")))
     }
 
-    /// Implements string conversion for external program arguments by writing a string
-    /// representation to `w`.
-    fn display_arg<'a, 's>(
+    /// Implements verbatim string conversion by writing a string representation to `w`.
+    fn verbatim<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
@@ -1401,7 +1400,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
         )
     }
 
-    fn op_display_arg<'a, 's>(
+    fn op_verbatim<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
@@ -1410,8 +1409,8 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             strand,
             Cow::Borrowed(T::MODULE),
             Cow::Borrowed(T::NAME),
-            Some(Cow::Borrowed("(arg)")),
-            |strand| T::display_arg(Instance::new(this.receiver), strand, w),
+            Some(Cow::Borrowed("(verbatim)")),
+            |strand| T::verbatim(Instance::new(this.receiver), strand, w),
         )
     }
 

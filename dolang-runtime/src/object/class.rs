@@ -767,7 +767,7 @@ impl<'v> Protocol<'v> for ClassInstance<'v> {
         }
     }
 
-    fn op_display_arg<'a, 's>(
+    fn op_verbatim<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
@@ -776,7 +776,7 @@ impl<'v> Protocol<'v> for ClassInstance<'v> {
             let w = &mut *w;
             let this = this.clone();
             let annex = this.annex();
-            match annex.class.entry_by_tag(sym::ARG_METHOD) {
+            match annex.class.entry_by_tag(sym::VERBATIM_METHOD) {
                 Some(ClassEntry::Method(v)) => {
                     strand.with_slots_sync(move |strand, [mut result]| {
                         strand.sync(async |strand| call!(strand, v, &mut result, &this).await)?;
@@ -791,7 +791,7 @@ impl<'v> Protocol<'v> for ClassInstance<'v> {
                     let native = annex.natives[*slot]
                         .get()
                         .ok_or_else(|| Error::runtime(strand, "native slot uninitialized"))?;
-                    strand.sync(async |strand| native.op_display_arg(strand, w))?;
+                    strand.sync(async |strand| native.op_verbatim(strand, w))?;
                     false
                 }
                 _ => true,

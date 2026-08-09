@@ -817,7 +817,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                     let mut values = Vec::new();
                     args.iter(strand, &mut iter).await?;
                     while iter.next(strand, &mut item).await? {
-                        values.push(item.to_arg(strand)?.into_boxed_str());
+                        values.push(item.to_verbatim(strand)?.into_boxed_str());
                     }
                     Some(values.into())
                 } else {

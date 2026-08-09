@@ -37,7 +37,7 @@ func $
   - 3
 ```
 
-## String Representations: `Str`, `dbg`, and `std.arg`
+## String Representations: `Str`, `dbg`, and `std.verbatim`
 
 Do has three builtins for converting values to strings, each serving a
 different purpose:
@@ -67,22 +67,21 @@ assert_eq (dbg 42) "42"
 assert_eq (dbg :foo:) "<sym foo>"
 ```
 
-### `std.arg` -- Program Argument Representation
+### `std.verbatim` -- Verbatim Representation
 
-`std.arg` produces a suitable form for passing a value to an external program
-as an argument. In particular, the textual forms of constants in Do source
-code are reproduced as faithfully as possible. To this end, numeric literals
-at statement level remember their verbatim text:
+`std.verbatim` produces a value's verbatim form. This is suitable for passing
+a value to an external program, and preserves the textual forms of constants
+in Do source code where possible. Numeric literals in unevaluated contexts
+remember their verbatim text:
 
 ```
-def print_arg x
-  echo (std.arg x)
+def print_verbatim x
+  echo (std.verbatim x)
 
-# At statement level, numeric literals remember their textual form
-print_arg 042   # prints "042"
-# Other contexts do not retain this information
-print_arg (042) # prints "42"
+# Statement and vertical-layout numeric literals remember their textual form.
+print_verbatim 042   # prints "042"
+print_verbatim (042) # prints "42"
 ```
 
 This is also the form used for concatenation or string interpolation in
-statement or vertical layout contexts.
+statement and vertical-layout contexts.

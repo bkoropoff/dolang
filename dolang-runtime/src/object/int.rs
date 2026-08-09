@@ -355,7 +355,7 @@ impl<'v> Protocol<'v> for Verbatim {
         Output::set(strand, out, &strand.singletons().int)
     }
 
-    fn op_display_arg<'a, 's>(
+    fn op_verbatim<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,

@@ -113,11 +113,11 @@ created within the call inherit the overrides.
 
 #### Parameters
 
-| Name      | Type                                              | Description                                              |
-| --------- | ------------------------------------------------- | -------------------------------------------------------- |
-| `func`    | callable                                          | Block to execute                                         |
-| `args`    | [`Iterable`](../std/iterable.md)?                 | Values converted with [`arg`](../std/index.md#arg-value) |
-| `program` | [`Str`](../std/str.md)?\|[`Path`](../fs/path.md)? | Program identity                                         |
+| Name      | Type                                              | Description                                                        |
+| --------- | ------------------------------------------------- | ------------------------------------------------------------------ |
+| `func`    | callable                                          | Block to execute                                                   |
+| `args`    | [`Iterable`](../std/iterable.md)?                 | Values converted with [`verbatim`](../std/index.md#verbatim-value) |
+| `program` | [`Str`](../std/str.md)?\|[`Path`](../fs/path.md)? | Program identity                                                   |
 
 #### Returns
 

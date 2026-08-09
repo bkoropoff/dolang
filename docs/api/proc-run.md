@@ -35,7 +35,7 @@ run cat Cargo.toml
 
 When a program object is called, it spawns the external program with the given
 arguments. Arguments are converted to strings using
-[`std.arg`](../api/std/index.md#arg-value).
+[`std.verbatim`](../api/std/index.md#verbatim-value).
 
 ```
 run.echo hello world

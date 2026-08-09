@@ -621,9 +621,11 @@ pub fn configure_vm<'v>(vm: &mut Builder<'v>) -> State<'v, TestState> {
                 }
                 space = true;
                 match arg {
-                    Arg::Pos(value) => write!(buf, "{}", value.to_arg(strand).unwrap()).unwrap(),
+                    Arg::Pos(value) => {
+                        write!(buf, "{}", value.to_verbatim(strand).unwrap()).unwrap()
+                    }
                     Arg::Key(sym, value) => {
-                        let str = value.to_arg(strand).unwrap();
+                        let str = value.to_verbatim(strand).unwrap();
                         write!(buf, "{}: {}", sym.as_str(strand), str).unwrap()
                     }
                 }

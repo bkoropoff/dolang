@@ -268,7 +268,7 @@ pub enum Builtin {
     Dict,
     Iter,
     ConcatStr,
-    ConcatArg,
+    ConcatVerbatim,
     Args,
     ClassCreate,
     Guard,
@@ -285,7 +285,7 @@ pub mod builtin {
     pub const DICT: usize = Dict as usize;
     pub const ITER: usize = Iter as usize;
     pub const CONCAT_STR: usize = ConcatStr as usize;
-    pub const CONCAT_ARG: usize = ConcatArg as usize;
+    pub const CONCAT_VERBATIM: usize = ConcatVerbatim as usize;
     pub const ARGS: usize = Args as usize;
     pub const CLASS_CREATE: usize = ClassCreate as usize;
     pub const GUARD: usize = Guard as usize;
@@ -300,7 +300,7 @@ pub const BUILTINS: [&str; Builtin::_LEN as usize] = [
     "dict",
     "iter",
     "concat_str",
-    "concat_arg",
+    "concat_verbatim",
     "args",
     "class_create",
     "guard",
