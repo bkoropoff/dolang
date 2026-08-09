@@ -108,10 +108,14 @@ nav:
       - api/fs/fs-metadata.md
       - api/fs/metadata.md
       - api/fs/path.md
-      - api/fs/stream-entry.md
-      - api/fs/unix-path.md
-      - api/fs/windows-path.md
       - api/fs/xattr-entry.md
+    - fs.unix:
+      - api/fs/unix/index.md
+      - api/fs/unix/path.md
+    - fs.windows:
+      - api/fs/windows/index.md
+      - api/fs/windows/path.md
+      - api/fs/windows/stream-entry.md
     - glob:
       - api/glob/index.md
       - api/glob/glob.md
@@ -169,6 +173,7 @@ nav:
       - api/security/unix/identity.md
     - security.windows:
       - api/security/windows/index.md
+      - api/security/windows/access-mask.md
       - api/security/windows/ace.md
       - api/security/windows/acl.md
       - api/security/windows/secdesc.md
@@ -309,6 +314,23 @@ nav:
     - url:
       - api/url/index.md
       - api/url/url.md
+    - winreg:
+      - api/winreg/index.md
+      - api/winreg/access-mask.md
+      - api/winreg/key.md
+      - api/winreg/value.md
+    - winscm:
+      - api/winscm/index.md
+      - api/winscm/sc-manager.md
+      - api/winscm/service.md
+      - api/winscm/service-config.md
+      - api/winscm/status.md
+      - api/winscm/service-info.md
+      - api/winscm/manager-access-mask.md
+      - api/winscm/service-access-mask.md
+      - api/winscm/service-type.md
+      - api/winscm/notify-mask.md
+      - api/winscm/service-controls-accepted.md
     - wsl: api/wsl.md
     - xdg: api/xdg.md
     - xml:
