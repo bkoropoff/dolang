@@ -68,6 +68,10 @@ impl FlagLike for ServiceType {
         ("DRIVER", ServiceType::DRIVER),
         ("WIN32", ServiceType::WIN32),
     ];
+
+    fn rank(self) -> usize {
+        self.0.count_ones() as usize
+    }
 }
 
 impl From<WireServiceType> for ServiceType {
@@ -142,6 +146,10 @@ impl FlagLike for NotifyMask {
         ("DELETED", NotifyMask::DELETED),
         ("DELETE_PENDING", NotifyMask::DELETE_PENDING),
     ];
+
+    fn rank(self) -> usize {
+        self.0.count_ones() as usize
+    }
 }
 
 impl From<NotifyMask> for WireNotifyMask {
@@ -226,6 +234,10 @@ impl FlagLike for ServiceControlsAccepted {
         ("TIMECHANGE", ServiceControlsAccepted::TIMECHANGE),
         ("TRIGGEREVENT", ServiceControlsAccepted::TRIGGEREVENT),
     ];
+
+    fn rank(self) -> usize {
+        self.0.count_ones() as usize
+    }
 }
 
 impl From<WireServiceControlsAccepted> for ServiceControlsAccepted {

@@ -15,6 +15,7 @@ let empty = TestFlags()
 assert_eq $empty (TestFlags())
 assert (!(empty.contains(:READ:)))
 assert_eq [...empty] []
+assert_eq [...TestFlags(:NONE:)] []
 
 let r = TestFlags(:READ:)
 assert (r.contains(:READ:))
@@ -23,6 +24,8 @@ assert_eq [...r] [:READ:]
 
 let rw = TestFlags(:READ:, :WRITE:)
 assert_eq [...rw] [:READ:, :WRITE:]
+assert_eq [...TestFlags(:READ_WRITE:)] [:READ:, :WRITE:]
+assert_eq (dbg rw) "<regression2.TestFlags: READ|WRITE>"
 
 let rw_seq = TestFlags([:READ:, :WRITE:])
 assert_eq $rw $rw_seq
