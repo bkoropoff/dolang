@@ -81,7 +81,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>) {
         .module("shlex")
         .function("quote", async move |strand, args, out| {
             let ([arg], []) = unpack!(strand, args, 1, 0)?;
-            let s = arg.to_arg(strand)?;
+            let s = arg.to_verbatim(strand)?;
             let quoted = shlex::try_quote(&s).into_do(strand)?;
             Output::set(strand, out, quoted.as_ref());
             Ok(())
@@ -116,7 +116,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>) {
                 let mut items = Vec::new();
                 iterable.iter(strand, &mut iter).await?;
                 while iter.next(strand, &mut item).await? {
-                    let s = item.to_arg(strand)?;
+                    let s = item.to_verbatim(strand)?;
                     items.push(s);
                 }
 

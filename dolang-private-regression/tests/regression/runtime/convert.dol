@@ -1,5 +1,5 @@
 import std:
-  - arg
+  - verbatim
 
 def assert_err block msg
   let res = try
@@ -82,6 +82,6 @@ assert_err (do Bin 5) "type error: Bin: expected Str or Bin"
 let foo = makefoo()
 assert_eq (str foo) "foo"
 assert_eq (dbg foo) "foo"
-assert_eq (arg foo) "foo"
+assert_eq (verbatim foo) "foo"
 assert_eq "before-$(foo)-after" "before-foo-after"
 assert_eq (",".join [foo, 2, [3]]) "foo,2,[3]"

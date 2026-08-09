@@ -666,10 +666,11 @@ class Node
     "Node($(self.val))"
 ```
 
-### `(arg)`: External Command Argument
+### `(verbatim)`: Verbatim Representation
 
-Called when an instance is interpolated into an external command as an argument
-(e.g. `echo $obj` in a shell context). Must return a `Str`. Falls back to
+Called when an instance is converted to its verbatim representation, including
+when it is interpolated into an external command (e.g. `echo $obj` in a shell
+context). Must return a `Str`. Falls back to
 `(str)` if not defined, which in turn falls back to `(dbg)`:
 
 ```
@@ -679,7 +680,7 @@ class Path
   def (init) self ...parts
     self.parts = parts
 
-  def (arg) self
+  def (verbatim) self
     self.parts.join("/")
 
   def (str) self

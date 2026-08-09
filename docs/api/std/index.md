@@ -183,10 +183,10 @@ Returns the general-purpose [`Str`](./str.md) representation of a value.
 
 Interns a string as a [`Sym`](./sym.md).
 
-### `arg value`
+### `verbatim value`
 
-Converts a value to its external argument representation. Preserves the literal
-textual form of values where possible, which is useful for passing values as
+Converts a value to its verbatim representation. Preserves the literal textual
+form of values where possible, which is useful for passing values as
 command-line arguments to external programs.
 
 #### Parameters

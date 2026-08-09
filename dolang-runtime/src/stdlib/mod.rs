@@ -203,10 +203,10 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
             }
         })
         // Core functions
-        .function("arg", async move |strand, args, out| {
+        .function("verbatim", async move |strand, args, out| {
             let ([value], _) = unpack!(strand, args, 1, 0)?;
             let mut format = StrEmbryo::new();
-            value.display_arg(strand, &mut format)?;
+            value.verbatim(strand, &mut format)?;
             format.finish(strand, out);
             Ok(())
         })

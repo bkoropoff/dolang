@@ -7,7 +7,7 @@ import sys
     - assert_type
     - test
   std:
-    - arg
+    - verbatim
     - FieldError
     - hash
     - TypeError
@@ -30,7 +30,7 @@ def path_api()
   else
     assert_eq (dbg p) "<fs.unix.Path \"foo/bar.txt\">"
   assert_eq (str p) "foo/bar.txt"
-  assert_eq (arg p) "foo/bar.txt"
+  assert_eq (verbatim p) "foo/bar.txt"
 
   # Test path name field
   let path1 = Path "foo/bar/baz.txt"

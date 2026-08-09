@@ -16,9 +16,9 @@ print "working...\n"
 These functions always output to `term.output()`. `echo` behaves similarly to
 the Unix program or shell builtin, separating its arguments with spaces and
 ending with a newline. Its arguments are converted to strings using the
-[`std.arg`](../api/std/index.md#arg-value) coercion, which preserves the
-syntactic form of arguments as best as possible. `print` concatenates all its
-arguments without spaces, does not append a newline, and uses ordinary `str`
+[`std.verbatim`](../api/std/index.md#verbatim-value) coercion, which preserves
+the syntactic form of arguments as best as possible. `print` concatenates all
+its arguments without spaces, does not append a newline, and uses ordinary `str`
 coercion.
 
 Newlines and tabs are preserved, but other C0/C1 controls and terminal escape

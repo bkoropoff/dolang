@@ -169,9 +169,9 @@ are sanitized; direct [`Text`](./text.md) arguments retain their styling.
 
 #### Parameters
 
-| Name      | Type | Description                                    |
-| --------- | ---- | ---------------------------------------------- |
-| `...args` | *    | Values converted with `arg` and written safely |
+| Name      | Type | Description                                         |
+| --------- | ---- | --------------------------------------------------- |
+| `...args` | *    | Values converted with `verbatim` and written safely |
 
 ```
 echo status: ready count: 3

@@ -630,7 +630,7 @@ fn append_value<'v, 's>(
     } else {
         let mut filter = Filter::new(out, FilterMode::Plain);
         if argument {
-            value.display_arg(strand, &mut filter)?;
+            value.verbatim(strand, &mut filter)?;
         } else {
             value.display(strand, &mut filter)?;
         }

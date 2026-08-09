@@ -438,14 +438,14 @@ impl<'v> Value<'v> {
         None
     }
 
-    pub(crate) fn op_display_arg<'a, 's>(
+    pub(crate) fn op_verbatim<'a, 's>(
         &'a self,
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         match self.case() {
             Case::Prim(prim) => crate::fmt!(strand, w, "{}", prim),
-            Case::Object(o) => o.op_display_arg(strand, w),
+            Case::Object(o) => o.op_verbatim(strand, w),
         }
     }
 
@@ -1087,14 +1087,14 @@ impl<'v> Value<'v> {
         self.to_prim(strand)?.to_index(strand)
     }
 
-    /// Writes the command-line argument representation of this value to `format`.
+    /// Writes the verbatim representation of this value to `format`.
     #[inline]
-    pub fn display_arg<'a, 's>(
+    pub fn verbatim<'a, 's>(
         &'a self,
         strand: &'a mut Strand<'v, 's>,
         format: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
-        self.op_display_arg(strand, format)
+        self.op_verbatim(strand, format)
     }
 
     /// Writes the human-readable representation of this value to `format`.
@@ -1117,12 +1117,12 @@ impl<'v> Value<'v> {
         self.op_debug(strand, format)
     }
 
-    /// Convert value to command-line argument string.
-    /// See the documentation for `std.arg` in the language documentation for details.
+    /// Converts a value to its verbatim representation.
+    /// See the documentation for `std.verbatim` in the language documentation for details.
     #[inline]
-    pub fn to_arg<'a, 's>(&'a self, strand: &'a mut Strand<'v, 's>) -> Result<'v, 's, String> {
+    pub fn to_verbatim<'a, 's>(&'a self, strand: &'a mut Strand<'v, 's>) -> Result<'v, 's, String> {
         let mut out = String::new();
-        self.display_arg(strand, &mut out)?;
+        self.verbatim(strand, &mut out)?;
         Ok(out)
     }
 

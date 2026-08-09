@@ -332,7 +332,7 @@ impl<'v> Vm<'v> {
         Ok(())
     }
 
-    fn concat_arg<'a, 's>(
+    fn concat_verbatim<'a, 's>(
         &self,
         strand: &'a mut Strand<'v, 's>,
         args: Args<'v, 'a>,
@@ -344,7 +344,7 @@ impl<'v> Vm<'v> {
                 Arg::Pos(mut slot) => slot.take(),
                 Arg::Key(sym, _) => return Err(Error::unexpected_key(strand, sym)),
             };
-            value.op_display_arg(strand, &mut acc)?;
+            value.op_verbatim(strand, &mut acc)?;
         }
         acc.finish(strand, out);
         Ok(())
@@ -1129,8 +1129,8 @@ impl<'v> Vm<'v> {
                         builtin::CONCAT_STR => {
                             self.concat_str(strand, args, Slot::reborrow(&mut res))
                         }
-                        builtin::CONCAT_ARG => {
-                            self.concat_arg(strand, args, Slot::reborrow(&mut res))
+                        builtin::CONCAT_VERBATIM => {
+                            self.concat_verbatim(strand, args, Slot::reborrow(&mut res))
                         }
                         builtin::ARGS => self.args(strand, args, Slot::reborrow(&mut res)),
                         builtin::CLASS_CREATE => {

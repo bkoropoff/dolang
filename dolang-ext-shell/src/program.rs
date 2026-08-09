@@ -366,7 +366,7 @@ fn apply_args<'v, 's, 'a>(
     for arg in args {
         match arg {
             Arg::Pos(slot) => {
-                command.arg(slot.to_arg(strand)?.as_str());
+                command.arg(slot.to_verbatim(strand)?.as_str());
             }
             Arg::Key(sym, _) => {
                 return Err(Error::unexpected_key(strand, sym));
@@ -394,7 +394,7 @@ where
                     strand,
                     &inval,
                     io_mode,
-                    ValueEncoding::Argument,
+                    ValueEncoding::Verbatim,
                     operating_system,
                 )?;
                 writer.write_all(&bytes).await.into_sys(strand)?;

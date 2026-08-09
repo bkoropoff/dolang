@@ -10,9 +10,9 @@ Quote a string for shell safety.
 
 #### Parameters
 
-| Name  | Type | Description                              |
-| ----- | ---- | ---------------------------------------- |
-| `obj` |      | value to quote (converted with `std.arg` |
+| Name  | Type | Description                                    |
+| ----- | ---- | ---------------------------------------------- |
+| `obj` |      | value to quote (converted with `std.verbatim`) |
 
 #### Returns
 
@@ -52,9 +52,9 @@ Join an iterable of arguments into a shell-quoted string.
 
 #### Parameters
 
-| Name       | Type | Description                                   |
-| ---------- | ---- | --------------------------------------------- |
-| `iterable` |      | iterable of values (converted with `std.arg`) |
+| Name       | Type | Description                                        |
+| ---------- | ---- | -------------------------------------------------- |
+| `iterable` |      | iterable of values (converted with `std.verbatim`) |
 
 #### Returns
 

@@ -395,7 +395,7 @@ pub(crate) enum Expr {
     Concat {
         exprs: Vec<Expr>,
         delim_span: Option<Span>,
-        arg: bool,
+        verbatim: bool,
     },
     Escape(char, Span),
     BinConcat {
@@ -554,7 +554,7 @@ impl Expr {
             Expr::Concat {
                 exprs,
                 delim_span,
-                arg: external,
+                verbatim,
             } if !exprs.is_empty() => {
                 let mut new_exprs = vec![];
                 let mut exprs = VecDeque::from(exprs);
@@ -564,17 +564,17 @@ impl Expr {
                         Expr::Concat {
                             exprs: subexprs,
                             delim_span: None,
-                            arg: subexternal,
-                        } if subexternal == external => {
+                            verbatim: subverbatim,
+                        } if subverbatim == verbatim => {
                             for expr in subexprs.into_iter().rev() {
                                 exprs.push_front(expr)
                             }
                         }
                         Expr::Literal(span) => Self::concat(&mut acc, &mut new_exprs, span),
-                        Expr::VerbatimInt(_, span) | Expr::VerbatimF64(_, span) if external => {
+                        Expr::VerbatimInt(_, span) | Expr::VerbatimF64(_, span) if verbatim => {
                             Self::concat(&mut acc, &mut new_exprs, span)
                         }
-                        Expr::Sym(span) if external => Self::concat(
+                        Expr::Sym(span) if verbatim => Self::concat(
                             &mut acc,
                             &mut new_exprs,
                             span.before_left_char() | span.after_right_char(),
@@ -594,7 +594,7 @@ impl Expr {
                 Expr::Concat {
                     exprs: new_exprs,
                     delim_span,
-                    arg: external,
+                    verbatim,
                 }
             }
             Expr::BinConcat { exprs, open, close } if !exprs.is_empty() => {
@@ -1682,7 +1682,7 @@ pub(crate) enum SpecialMethod {
     Put,
     Str,
     Dbg,
-    Arg,
+    Verbatim,
     Add,
     Sub,
     Rsub,
@@ -1722,7 +1722,7 @@ impl SpecialMethod {
             SpecialMethod::Put => "(put)",
             SpecialMethod::Str => "(str)",
             SpecialMethod::Dbg => "(dbg)",
-            SpecialMethod::Arg => "(arg)",
+            SpecialMethod::Verbatim => "(verbatim)",
             SpecialMethod::Add => "(add)",
             SpecialMethod::Sub => "(sub)",
             SpecialMethod::Rsub => "(rsub)",

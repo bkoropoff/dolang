@@ -43,7 +43,7 @@ impl<'v> Protocol<'v> for SymObj {
         Output::set(strand, out, &strand.singletons().sym)
     }
 
-    fn op_display_arg<'a, 's>(
+    fn op_verbatim<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
