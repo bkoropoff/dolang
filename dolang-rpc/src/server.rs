@@ -11,6 +11,9 @@ use futures::{
 };
 use tokio::sync::{mpsc, oneshot};
 
+#[cfg(unix)]
+use crate::attach_handles;
+
 use crate::{
     Error, Kind, Limits, Protocol, decode, encode_payload, fragment,
     session::{self, InvalidOpaque, Opaque, OpaqueGuard, OpaqueResource},
@@ -357,10 +360,9 @@ async fn writer<P: Protocol>(
     Ok(())
 }
 
-/// Admits one outgoing item. `Response` payloads are probed for native-
-/// handle attachments and, if present, sent as a single atomic fragment
-/// immediately (bypassing the round-robin scheduler); everything else is
-/// handed to `scheduler`.
+/// Admits one outgoing item. Responses with native-handle attachments are
+/// sent as a single atomic fragment immediately (bypassing the round-robin
+/// scheduler); everything else is handed to `scheduler`.
 async fn admit<P: Protocol>(
     sender: &mut transport::AnySender,
     scheduler: &mut fragment::Scheduler,
@@ -368,15 +370,23 @@ async fn admit<P: Protocol>(
 ) -> Result<(), Error> {
     match message {
         Message::Response { id, value, trailer } => {
-            let mut probe = sender.send();
-            let (payload, has_attachments) = encode_payload(&value, &mut probe)?;
-            if has_attachments {
+            #[cfg(unix)]
+            let (payload, handles) = encode_payload(&value)?;
+            #[cfg(windows)]
+            let mut frame = sender.send();
+            #[cfg(windows)]
+            let (payload, handles) = encode_payload(&value, &mut frame)?;
+            if !handles.is_empty() {
                 if !matches!(&trailer, fragment::Trailer::None) {
                     return Err(Error::Protocol(
                         "responses with both native-handle attachments and a trailer are not supported"
-                            .into(),
+                        .into(),
                     ));
                 }
+                #[cfg(unix)]
+                let mut frame = sender.send();
+                #[cfg(unix)]
+                attach_handles(&handles, &mut frame)?;
                 let header = fragment::FragmentHeader {
                     flags: fragment::Flags::FIRST | fragment::Flags::LAST,
                     kind: Kind::Response,
@@ -384,10 +394,11 @@ async fn admit<P: Protocol>(
                     payload_len: payload.len(),
                 };
                 let mut buffer = header.encode().chain(payload);
-                probe.finish(&mut buffer).await?;
+                frame.finish(&mut buffer).await?;
                 sender.flush().await?;
             } else {
-                drop(probe);
+                #[cfg(windows)]
+                drop(frame);
                 scheduler.admit_message(Kind::Response, id, payload, trailer);
             }
         }

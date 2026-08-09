@@ -58,7 +58,7 @@ mod unbound;
 
 use ::serde::{Serialize, de::DeserializeOwned};
 use bytes::Bytes;
-use handle::{PutHandle, TakeHandle};
+use handle::{ErasedHandle, PutHandle, TakeHandle};
 use transport::{RecvFrame, SendFrame};
 pub use unbound::Builder;
 
@@ -223,32 +223,94 @@ impl TryFrom<u8> for Kind {
 }
 
 /// Serializes `value` into a plain payload buffer (no fragment header).
-/// `frame` is a probe token: if serialization attaches any native-handle
-/// descriptors to it, the caller must send the resulting payload as a
-/// single atomic fragment via that same token, bypassing the round-robin
-/// scheduler entirely.
-struct FramePutHandle<'borrow, F> {
-    frame: &'borrow mut F,
-    attached: bool,
+/// Native handles are stolen from `value` only after serialization succeeds.
+#[cfg(unix)]
+struct FramePutHandle<'handle> {
+    handles: Vec<&'handle dyn ErasedHandle>,
 }
 
-impl<'frame, F: SendFrame<'frame>> PutHandle<'frame> for FramePutHandle<'_, F> {
-    #[cfg(unix)]
-    fn put_handle(&mut self, handle: std::os::fd::BorrowedFd<'frame>) -> std::io::Result<u32> {
-        let value = self.frame.attach_fd(handle)?;
-        self.attached = true;
-        Ok(value)
-    }
+#[cfg(windows)]
+struct FramePutHandle<'borrow, 'handle, F> {
+    frame: &'borrow mut F,
+    handles: Vec<&'handle dyn ErasedHandle>,
+}
 
-    #[cfg(windows)]
-    fn put_handle(
-        &mut self,
-        handle: std::os::windows::io::BorrowedHandle<'frame>,
-    ) -> std::io::Result<usize> {
-        let value = self.frame.attach_handle(handle)?;
-        self.attached = true;
+#[cfg(unix)]
+impl<'frame> PutHandle<'frame> for FramePutHandle<'frame> {
+    fn put_handle(&mut self, handle: &'frame dyn ErasedHandle) -> std::io::Result<u32> {
+        if self
+            .handles
+            .iter()
+            .any(|existing| std::ptr::eq(*existing, handle))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "the same operating-system handle was serialized more than once",
+            ));
+        }
+        let index = u32::try_from(self.handles.len()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "too many operating-system handles in one message",
+            )
+        })?;
+        self.handles.push(handle);
+        Ok(index)
+    }
+}
+
+#[cfg(windows)]
+impl<'frame, F: SendFrame<'frame>> PutHandle<'frame> for FramePutHandle<'_, 'frame, F> {
+    fn put_handle(&mut self, handle: &'frame dyn ErasedHandle) -> std::io::Result<usize> {
+        if self
+            .handles
+            .iter()
+            .any(|existing| std::ptr::eq(*existing, handle))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "the same operating-system handle was serialized more than once",
+            ));
+        }
+        let raw = handle.raw_handle();
+        // SAFETY: `handle` owns this raw handle until serialization succeeds,
+        // after which the returned owned vector keeps it alive through send.
+        let borrowed = unsafe { std::os::windows::io::BorrowedHandle::borrow_raw(raw) };
+        let value = self.frame.attach_handle(borrowed)?;
+        self.handles.push(handle);
         Ok(value)
     }
+}
+
+#[cfg(unix)]
+type OwnedHandles = Vec<std::os::fd::OwnedFd>;
+#[cfg(windows)]
+type OwnedHandles = Vec<std::os::windows::io::OwnedHandle>;
+
+fn steal_handles(handles: Vec<&dyn ErasedHandle>) -> OwnedHandles {
+    handles
+        .into_iter()
+        .map(ErasedHandle::steal_handle)
+        .collect()
+}
+
+#[cfg(unix)]
+fn attach_handles<'frame, F: SendFrame<'frame>>(
+    handles: &'frame OwnedHandles,
+    frame: &mut F,
+) -> std::io::Result<()> {
+    use std::os::fd::AsFd;
+
+    for (index, handle) in handles.iter().enumerate() {
+        let attached = frame.attach_fd(handle.as_fd())?;
+        if attached as usize != index {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "transport returned an unexpected handle attachment index",
+            ));
+        }
+    }
+    Ok(())
 }
 
 struct FrameTakeHandle<'borrow, F>(&'borrow mut F);
@@ -265,20 +327,123 @@ impl<F: RecvFrame> TakeHandle for FrameTakeHandle<'_, F> {
     }
 }
 
-fn encode_payload<'frame, T: Serialize, F: SendFrame<'frame>>(
-    value: &'frame T,
-    frame: &mut F,
-) -> Result<(Bytes, bool), Error> {
+#[cfg(unix)]
+fn encode_payload<T: Serialize>(value: &T) -> Result<(Bytes, OwnedHandles), Error> {
     let mut handles = FramePutHandle {
-        frame,
-        attached: false,
+        handles: Vec::new(),
     };
     let buffer = serde::to_extend(value, &mut handles, Vec::new())
         .map_err(|e| Error::Serialize(e.to_string()))?;
-    Ok((buffer.into(), handles.attached))
+    let handles = steal_handles(handles.handles);
+    Ok((buffer.into(), handles))
+}
+
+#[cfg(windows)]
+fn encode_payload<'frame, T: Serialize, F: SendFrame<'frame>>(
+    value: &'frame T,
+    frame: &mut F,
+) -> Result<(Bytes, OwnedHandles), Error> {
+    let mut handles = FramePutHandle {
+        frame,
+        handles: Vec::new(),
+    };
+    let buffer = serde::to_extend(value, &mut handles, Vec::new())
+        .map_err(|e| Error::Serialize(e.to_string()))?;
+    let handles = steal_handles(handles.handles);
+    Ok((buffer.into(), handles))
 }
 
 fn decode<T: DeserializeOwned>(bytes: &[u8], frame: &mut impl RecvFrame) -> Result<T, Error> {
     serde::from_bytes(bytes, &mut FrameTakeHandle(frame))
         .map_err(|e| Error::Deserialize(e.to_string()))
+}
+
+#[cfg(all(test, unix))]
+mod handle_tests {
+    use std::{
+        io,
+        os::fd::{BorrowedFd, OwnedFd},
+        task::{Context, Poll},
+    };
+
+    use ::serde::{Serialize, ser::SerializeStruct};
+    use nix::unistd::pipe;
+
+    use super::*;
+    use crate::handle::OsHandle;
+
+    struct TestFrame(Vec<i32>);
+
+    impl<'frame> SendFrame<'frame> for TestFrame {
+        fn attach_fd(&mut self, fd: BorrowedFd<'frame>) -> io::Result<u32> {
+            use std::os::fd::AsRawFd;
+
+            let index = self.0.len() as u32;
+            self.0.push(fd.as_raw_fd());
+            Ok(index)
+        }
+
+        fn poll_write_once(
+            &mut self,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            unreachable!()
+        }
+    }
+
+    #[derive(Serialize)]
+    struct OneHandle<'a> {
+        handle: &'a OsHandle<OwnedFd>,
+    }
+
+    #[derive(Serialize)]
+    struct RepeatedHandle<'a> {
+        first: &'a OsHandle<OwnedFd>,
+        second: &'a OsHandle<OwnedFd>,
+    }
+
+    struct FailsAfterHandle<'a>(&'a OsHandle<OwnedFd>);
+
+    impl Serialize for FailsAfterHandle<'_> {
+        fn serialize<S: ::serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let mut state = serializer.serialize_struct("FailsAfterHandle", 2)?;
+            state.serialize_field("handle", self.0)?;
+            Err(::serde::ser::Error::custom("intentional failure"))
+        }
+    }
+
+    #[test]
+    fn successful_serialization_steals_handle() {
+        let (fd, _) = pipe().unwrap();
+        let handle = OsHandle::new(fd);
+        let (_, owned) = encode_payload(&OneHandle { handle: &handle }).unwrap();
+        assert_eq!(owned.len(), 1);
+        let mut frame = TestFrame(Vec::new());
+        attach_handles(&owned, &mut frame).unwrap();
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { handle.into_inner() }))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn failed_serialization_does_not_steal_handle() {
+        let (fd, _) = pipe().unwrap();
+        let handle = OsHandle::new(fd);
+        assert!(encode_payload(&FailsAfterHandle(&handle)).is_err());
+        drop(handle.into_inner());
+    }
+
+    #[test]
+    fn repeated_handle_is_rejected_without_being_stolen() {
+        let (fd, _) = pipe().unwrap();
+        let handle = OsHandle::new(fd);
+        let value = RepeatedHandle {
+            first: &handle,
+            second: &handle,
+        };
+        assert!(encode_payload(&value).is_err());
+        drop(handle.into_inner());
+    }
 }

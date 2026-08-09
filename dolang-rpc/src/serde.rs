@@ -1,7 +1,7 @@
 #[cfg(unix)]
-use std::os::fd::{BorrowedFd, IntoRawFd};
+use std::os::fd::IntoRawFd;
 #[cfg(windows)]
-use std::os::windows::io::{BorrowedHandle, IntoRawHandle};
+use std::os::windows::io::IntoRawHandle;
 use std::{cell::RefCell, fmt, marker::PhantomData, ptr};
 
 use ::serde::{
@@ -15,7 +15,7 @@ use ::serde::{
 use dolang_util::debug_eprintln;
 use postcard::ser_flavors::{ExtendFlavor, Flavor};
 
-use crate::handle::{OS_HANDLE_TYPE, PutHandle, TakeHandle};
+use crate::handle::{HandleRef, OS_HANDLE_TYPE, PutHandle, TakeHandle};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
@@ -190,33 +190,29 @@ where
         value: &T,
     ) -> Result<Self::Ok, Self::Error> {
         if ptr::eq(name, OS_HANDLE_TYPE) {
+            let raw = value.serialize(RawHandleSerializer).map_err(ser_custom)?;
+            // SAFETY: only `OsHandle::serialize` can supply the private marker
+            // by identity. It passes a live `HandleRef` whose referent belongs
+            // to the message borrowed for `'frame`.
+            let handle = unsafe { (*(raw as *const HandleRef<'frame>)).0 };
             #[cfg(unix)]
-            {
-                let raw = value.serialize(RawHandleSerializer).map_err(ser_custom)?;
-                // SAFETY: the writer owns `value` until the frame's consuming
-                // `finish` future completes. The frame lifetime is therefore a
-                // valid extension of serde's erased raw descriptor borrow.
-                let fd = unsafe { BorrowedFd::borrow_raw(raw as i32) };
-                let index = self.frame.borrow_mut().put_handle(fd).map_err(ser_custom)?;
-                return self.inner.serialize_u32(index);
-            }
+            let value = self
+                .frame
+                .borrow_mut()
+                .put_handle(handle)
+                .map_err(ser_custom)?;
             #[cfg(windows)]
-            {
-                let raw = value.serialize(RawHandleSerializer).map_err(ser_custom)?;
-                // The serializer's value remains borrowed for this call. The
-                // Windows backend either copies the handle immediately or
-                // records only its process-local value.
-                let handle = unsafe { BorrowedHandle::borrow_raw(raw as _) };
-                let value = self
-                    .frame
-                    .borrow_mut()
-                    .put_handle(handle)
-                    .map_err(ser_custom)?;
-                #[cfg(target_pointer_width = "32")]
-                return self.inner.serialize_u32(value as u32);
-                #[cfg(target_pointer_width = "64")]
-                return self.inner.serialize_u64(value as u64);
-            }
+            let value = self
+                .frame
+                .borrow_mut()
+                .put_handle(handle)
+                .map_err(ser_custom)?;
+            #[cfg(unix)]
+            return self.inner.serialize_u32(value);
+            #[cfg(all(windows, target_pointer_width = "32"))]
+            return self.inner.serialize_u32(value as u32);
+            #[cfg(all(windows, target_pointer_width = "64"))]
+            return self.inner.serialize_u64(value as u64);
         }
         self.inner.serialize_newtype_struct(
             name,
@@ -465,16 +461,16 @@ impl ser::Serializer for RawHandleSerializer {
     }
     fn serialize_u32(self, v: u32) -> Result<usize, Error> {
         let _ = v;
-        #[cfg(all(windows, target_pointer_width = "32"))]
+        #[cfg(target_pointer_width = "32")]
         return Ok(v as usize);
-        #[cfg(not(all(windows, target_pointer_width = "32")))]
+        #[cfg(not(target_pointer_width = "32"))]
         return raw_error();
     }
     fn serialize_u64(self, v: u64) -> Result<usize, Error> {
         let _ = v;
-        #[cfg(all(windows, target_pointer_width = "64"))]
+        #[cfg(target_pointer_width = "64")]
         return Ok(v as usize);
-        #[cfg(not(all(windows, target_pointer_width = "64")))]
+        #[cfg(not(target_pointer_width = "64"))]
         return raw_error();
     }
     fn serialize_u128(self, _: u128) -> Result<usize, Error> {
@@ -948,13 +944,13 @@ mod tests {
     use ::serde::{Deserialize, Serialize};
     use nix::unistd::pipe;
     use std::io;
-    use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+    use std::os::fd::OwnedFd;
 
-    struct Frame<'a>(Vec<BorrowedFd<'a>>);
-    impl<'a> PutHandle<'a> for Frame<'a> {
-        fn put_handle(&mut self, fd: BorrowedFd<'a>) -> io::Result<u32> {
+    struct Frame(Vec<i32>);
+    impl<'a> PutHandle<'a> for Frame {
+        fn put_handle(&mut self, _fd: &'a dyn crate::handle::ErasedHandle) -> io::Result<u32> {
             let index = self.0.len() as u32;
-            self.0.push(fd);
+            self.0.push(index as i32);
             Ok(index)
         }
     }
@@ -1013,8 +1009,8 @@ mod tests {
     }
 
     #[derive(Serialize)]
-    struct Sending<'a> {
-        handles: Option<Vec<OsHandle<BorrowedFd<'a>>>>,
+    struct Sending {
+        handles: Option<Vec<OsHandle<OwnedFd>>>,
     }
     #[derive(Deserialize)]
     struct Receiving {
@@ -1025,12 +1021,14 @@ mod tests {
     fn nested_handles_round_trip_through_context() {
         let (fd, _) = pipe().unwrap();
         let value = Sending {
-            handles: Some(vec![OsHandle::new(fd.as_fd())]),
+            handles: Some(vec![OsHandle::new(fd)]),
         };
         let mut frame = Frame(Vec::new());
         let encoded = to_extend(&value, &mut frame, Vec::new()).unwrap();
         assert_eq!(frame.0.len(), 1);
-        let mut handles = TestReceiver(vec![Some(fd.as_fd().try_clone_to_owned().unwrap())]);
+        let mut handles = TestReceiver(vec![Some(
+            value.handles.unwrap().pop().unwrap().into_inner(),
+        )]);
         let decoded: Receiving = from_bytes(&encoded, &mut handles).unwrap();
         assert_eq!(decoded.handles.unwrap().len(), 1);
     }
@@ -1059,9 +1057,8 @@ mod windows_tests {
     struct Frame(Option<usize>);
 
     impl PutHandle<'_> for Frame {
-        fn put_handle(&mut self, handle: BorrowedHandle<'_>) -> io::Result<usize> {
-            use std::os::windows::io::AsRawHandle;
-            let raw = handle.as_raw_handle() as usize;
+        fn put_handle(&mut self, handle: &dyn crate::handle::ErasedHandle) -> io::Result<usize> {
+            let raw = handle.raw_handle() as usize;
             self.0 = Some(raw);
             Ok(raw)
         }

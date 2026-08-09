@@ -18,6 +18,9 @@ use std::os::windows::io::{AsRawHandle, OwnedHandle};
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::GetProcessId;
 
+#[cfg(unix)]
+use crate::attach_handles;
+
 use crate::{
     Error, Kind, Limits, Protocol, decode, encode_payload, fragment,
     trailer::{SendShared, TrailerSend},
@@ -72,7 +75,8 @@ struct Inner<P: Protocol> {
     pending: Mutex<Pending<P::Response>>,
     next_id: Mutex<u64>,
     tasks: Mutex<Option<Tasks>>,
-    request_keepalive: Mutex<HashMap<u64, P::Request>>,
+    #[cfg(windows)]
+    handle_escrow: Mutex<HashMap<u64, Vec<OwnedHandle>>>,
     limits: Limits,
     #[cfg(windows)]
     _peer_process: Option<OwnedHandle>,
@@ -82,7 +86,8 @@ struct Writer<P: Protocol> {
     transport: transport::AnySender,
     outgoing: mpsc::UnboundedReceiver<Message<P::Request>>,
     inner: Weak<Inner<P>>,
-    keep_requests_alive: bool,
+    #[cfg(windows)]
+    escrow_request_handles: bool,
     limits: Limits,
 }
 
@@ -174,16 +179,19 @@ impl<P: Protocol> Client<P> {
         sender: transport::AnySender,
         receiver: transport::AnyReceiver,
         limits: Limits,
-        keep_requests_alive: bool,
+        escrow_request_handles: bool,
         #[cfg(windows)] peer_process: Option<OwnedHandle>,
     ) -> Self {
         let (outgoing, outgoing_rx) = mpsc::unbounded_channel();
+        #[cfg(not(windows))]
+        let _ = escrow_request_handles;
         let inner = Arc::new(Inner {
             outgoing: Mutex::new(Some(outgoing)),
             pending: Mutex::new(HashMap::new()),
             next_id: Mutex::new(0),
             tasks: Mutex::new(None),
-            request_keepalive: Mutex::new(HashMap::new()),
+            #[cfg(windows)]
+            handle_escrow: Mutex::new(HashMap::new()),
             limits,
             #[cfg(windows)]
             _peer_process: peer_process,
@@ -194,7 +202,8 @@ impl<P: Protocol> Client<P> {
                 transport: sender,
                 outgoing: outgoing_rx,
                 inner: Arc::downgrade(&inner),
-                keep_requests_alive,
+                #[cfg(windows)]
+                escrow_request_handles,
                 limits,
             }
             .run(),
@@ -442,13 +451,12 @@ impl<P: Protocol> Drop for Call<P> {
 
 impl<P: Protocol> Writer<P> {
     /// Best-effort completion of a pending call with an error; a no-op if
-    /// the session is already gone. Also drops any retained request kept
-    /// alive for a native-handle resend (see `keep_requests_alive`) — the
-    /// call is done, so nothing will resend it, and leaving the entry in
-    /// place would leak it until the whole session closes.
+    /// the session is already gone. Also drops any handles escrowed until
+    /// the peer has had an opportunity to duplicate them.
     fn complete_err(&self, id: u64, error: Error) {
         if let Some(inner) = self.inner.upgrade() {
-            inner.request_keepalive.lock().unwrap().remove(&id);
+            #[cfg(windows)]
+            inner.handle_escrow.lock().unwrap().remove(&id);
             inner.complete(id, Err(error));
         }
     }
@@ -488,22 +496,45 @@ impl<P: Protocol> Writer<P> {
         trailer: fragment::Trailer,
         scheduler: &mut fragment::Scheduler,
     ) -> Result<(), Error> {
-        let mut probe = self.transport.send();
-        let (payload, has_attachments) = match encode_payload(&value, &mut probe) {
+        #[cfg(unix)]
+        let encoded = encode_payload(&value);
+        #[cfg(windows)]
+        let mut frame = self.transport.send();
+        #[cfg(windows)]
+        let encoded = encode_payload(&value, &mut frame);
+        let (payload, handles) = match encoded {
             Ok(payload) => payload,
             Err(err) => {
-                drop(probe);
+                #[cfg(windows)]
+                drop(frame);
                 self.complete_err(id, err);
                 return Ok(());
             }
         };
+        let has_attachments = !handles.is_empty();
         if has_attachments {
             if !matches!(&trailer, fragment::Trailer::None) {
-                drop(probe);
+                #[cfg(windows)]
+                drop(frame);
                 return Err(Error::Protocol(
                     "requests with both native-handle attachments and a trailer are not supported"
                         .into(),
                 ));
+            }
+            #[cfg(unix)]
+            let mut frame = self.transport.send();
+            #[cfg(unix)]
+            if let Err(err) = attach_handles(&handles, &mut frame) {
+                drop(frame);
+                let err = Error::Io(err);
+                self.complete_err(id, err.copy());
+                return Err(err);
+            }
+            #[cfg(windows)]
+            if self.escrow_request_handles
+                && let Some(inner) = self.inner.upgrade()
+            {
+                inner.handle_escrow.lock().unwrap().insert(id, handles);
             }
             let header = fragment::FragmentHeader {
                 flags: fragment::Flags::FIRST | fragment::Flags::LAST,
@@ -512,7 +543,7 @@ impl<P: Protocol> Writer<P> {
                 payload_len: payload.len(),
             };
             let mut buffer = header.encode().chain(payload);
-            if let Err(err) = probe.finish(&mut buffer).await {
+            if let Err(err) = frame.finish(&mut buffer).await {
                 let err = Error::Io(err);
                 self.complete_err(id, err.copy());
                 return Err(err);
@@ -523,13 +554,9 @@ impl<P: Protocol> Writer<P> {
                 return Err(err);
             }
         } else {
-            drop(probe);
+            #[cfg(windows)]
+            drop(frame);
             scheduler.admit_message(Kind::Request, id, payload, trailer);
-        }
-        if self.keep_requests_alive
-            && let Some(inner) = self.inner.upgrade()
-        {
-            inner.request_keepalive.lock().unwrap().insert(id, value);
         }
         Ok(())
     }
@@ -652,11 +679,13 @@ impl<P: Protocol> Reader<P> {
                     Kind::Response => {
                         let response = decode(&payload, frame)?;
                         let trailer = trailer.map(crate::trailer::TrailerRecv::new);
-                        inner.request_keepalive.lock().unwrap().remove(&id);
+                        #[cfg(windows)]
+                        inner.handle_escrow.lock().unwrap().remove(&id);
                         inner.complete(id, Ok(CallResult { response, trailer }));
                     }
                     Kind::Error => {
-                        inner.request_keepalive.lock().unwrap().remove(&id);
+                        #[cfg(windows)]
+                        inner.handle_escrow.lock().unwrap().remove(&id);
                         inner.complete(id, Err(Error::Cancelled));
                     }
                     Kind::Discard => {
@@ -681,7 +710,8 @@ impl<P: Protocol> Reader<P> {
                         return;
                     }
                     if !dispatched && let Some(inner) = self.inner.upgrade() {
-                        inner.request_keepalive.lock().unwrap().remove(&id);
+                        #[cfg(windows)]
+                        inner.handle_escrow.lock().unwrap().remove(&id);
                         inner.complete(id, Err(Error::Cancelled));
                     }
                 }
@@ -749,7 +779,8 @@ mod tests {
             pending: Mutex::new(HashMap::new()),
             next_id: Mutex::new(1),
             tasks: Mutex::new(None),
-            request_keepalive: Mutex::new(HashMap::new()),
+            #[cfg(windows)]
+            handle_escrow: Mutex::new(HashMap::new()),
             limits: Limits::default(),
             #[cfg(windows)]
             _peer_process: None,
@@ -793,22 +824,23 @@ mod tests {
         assert!(matches!(outgoing.try_recv(), Ok(Message::Cancel { id: 0 })));
     }
 
+    #[cfg(windows)]
     #[tokio::test]
-    async fn complete_err_clears_retained_keepalive_request() {
+    async fn complete_err_clears_handle_escrow() {
         let (outgoing, _outgoing_rx) = mpsc::unbounded_channel();
         let inner = Arc::new(Inner {
             outgoing: Mutex::new(Some(outgoing)),
             pending: Mutex::new(HashMap::new()),
             next_id: Mutex::new(1),
             tasks: Mutex::new(None),
-            request_keepalive: Mutex::new(HashMap::new()),
+            handle_escrow: Mutex::new(HashMap::new()),
             limits: Limits::default(),
             #[cfg(windows)]
             _peer_process: None,
         });
         let (tx, _rx) = oneshot::channel();
         inner.pending.lock().unwrap().insert(0, tx);
-        inner.request_keepalive.lock().unwrap().insert(0, 7u8);
+        inner.handle_escrow.lock().unwrap().insert(0, Vec::new());
 
         let (dummy_write, _unused) = tokio::io::duplex(64);
         let (sender, _unused) = transport::generic_duplex(dummy_write);
@@ -817,12 +849,12 @@ mod tests {
             transport: transport::AnySender::Generic(sender),
             outgoing: outgoing_rx,
             inner: Arc::downgrade(&inner),
-            keep_requests_alive: true,
+            escrow_request_handles: true,
             limits: Limits::default(),
         };
 
         writer.complete_err(0, Error::Cancelled);
 
-        assert!(inner.request_keepalive.lock().unwrap().is_empty());
+        assert!(inner.handle_escrow.lock().unwrap().is_empty());
     }
 }

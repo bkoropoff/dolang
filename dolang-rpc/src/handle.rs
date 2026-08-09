@@ -1,10 +1,10 @@
-use std::{fmt, fmt::Formatter, io, marker::PhantomData, str};
+use std::{cell::Cell, fmt, fmt::Formatter, io, marker::PhantomData, str};
 
 #[cfg(unix)]
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, OwnedFd};
 
 #[cfg(windows)]
-use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle};
+use std::os::windows::io::{AsHandle, AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
@@ -27,9 +27,29 @@ pub type DefaultHandle = std::os::windows::io::OwnedHandle;
 /// Supplies native handles encountered during serialization.
 pub(crate) trait PutHandle<'handle> {
     #[cfg(unix)]
-    fn put_handle(&mut self, handle: BorrowedFd<'handle>) -> io::Result<u32>;
+    fn put_handle(&mut self, handle: &'handle dyn ErasedHandle) -> io::Result<u32>;
     #[cfg(windows)]
-    fn put_handle(&mut self, handle: BorrowedHandle<'handle>) -> io::Result<usize>;
+    fn put_handle(&mut self, handle: &'handle dyn ErasedHandle) -> io::Result<usize>;
+}
+
+pub(crate) trait ErasedHandle {
+    #[cfg(unix)]
+    fn steal_handle(&self) -> OwnedFd;
+    #[cfg(windows)]
+    fn raw_handle(&self) -> RawHandle;
+    #[cfg(windows)]
+    fn steal_handle(&self) -> OwnedHandle;
+}
+
+pub(crate) struct HandleRef<'handle>(pub(crate) &'handle dyn ErasedHandle);
+
+impl Serialize for HandleRef<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[cfg(target_pointer_width = "32")]
+        return serializer.serialize_u32(self as *const Self as usize as u32);
+        #[cfg(target_pointer_width = "64")]
+        return serializer.serialize_u64(self as *const Self as usize as u64);
+    }
 }
 
 /// Consumes native handles encountered during deserialization.
@@ -49,7 +69,7 @@ pub(crate) trait TakeHandle {
 /// stream currently panics; use [`Opaque`](crate::session::Opaque) for resources that
 /// must work over every transport. A message cannot contain both an
 /// `OsHandle` attachment and a streaming trailer.
-pub struct OsHandle<T = DefaultHandle>(T);
+pub struct OsHandle<T = DefaultHandle>(Cell<Option<T>>);
 
 impl<T> fmt::Debug for OsHandle<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -60,25 +80,41 @@ impl<T> fmt::Debug for OsHandle<T> {
 impl<T> OsHandle<T> {
     /// Wraps a native handle-like value for direct attachment serialization.
     pub fn new(value: T) -> Self {
-        Self(value)
+        Self(Cell::new(Some(value)))
     }
 
     /// Returns the wrapped value.
+    ///
+    /// # Panics
+    ///
+    /// Panics if successful serialization already consumed the handle.
     pub fn into_inner(self) -> T {
         self.0
+            .into_inner()
+            .expect("operating-system handle was already consumed")
     }
 }
 
 impl<T> From<T> for OsHandle<T> {
     fn from(value: T) -> Self {
-        Self(value)
+        Self::new(value)
     }
 }
 
 #[cfg(unix)]
-impl<T: AsFd> Serialize for OsHandle<T> {
+impl<T: AsFd + Into<OwnedFd>> ErasedHandle for OsHandle<T> {
+    fn steal_handle(&self) -> OwnedFd {
+        self.0
+            .take()
+            .expect("operating-system handle was already consumed")
+            .into()
+    }
+}
+
+#[cfg(unix)]
+impl<T: AsFd + Into<OwnedFd>> Serialize for OsHandle<T> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_newtype_struct(OS_HANDLE_TYPE, &self.0.as_fd().as_raw_fd())
+        serializer.serialize_newtype_struct(OS_HANDLE_TYPE, &HandleRef(self))
     }
 }
 
@@ -100,7 +136,7 @@ impl<'de, T: From<OwnedFd>> Deserialize<'de> for OsHandle<T> {
             ) -> Result<Self::Value, D::Error> {
                 use std::os::fd::FromRawFd;
                 let raw = i32::deserialize(deserializer)?;
-                Ok(OsHandle(T::from(unsafe { OwnedFd::from_raw_fd(raw) })))
+                Ok(OsHandle::new(T::from(unsafe { OwnedFd::from_raw_fd(raw) })))
             }
         }
 
@@ -109,13 +145,29 @@ impl<'de, T: From<OwnedFd>> Deserialize<'de> for OsHandle<T> {
 }
 
 #[cfg(windows)]
-impl<T: AsHandle> Serialize for OsHandle<T> {
+impl<T: AsHandle + Into<OwnedHandle>> ErasedHandle for OsHandle<T> {
+    fn raw_handle(&self) -> RawHandle {
+        let value = self
+            .0
+            .take()
+            .expect("operating-system handle was already consumed");
+        let raw = value.as_handle().as_raw_handle();
+        self.0.set(Some(value));
+        raw
+    }
+
+    fn steal_handle(&self) -> OwnedHandle {
+        self.0
+            .take()
+            .expect("operating-system handle was already consumed")
+            .into()
+    }
+}
+
+#[cfg(windows)]
+impl<T: AsHandle + Into<OwnedHandle>> Serialize for OsHandle<T> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let raw = self.0.as_handle().as_raw_handle() as usize;
-        #[cfg(target_pointer_width = "32")]
-        return serializer.serialize_newtype_struct(OS_HANDLE_TYPE, &(raw as u32));
-        #[cfg(target_pointer_width = "64")]
-        return serializer.serialize_newtype_struct(OS_HANDLE_TYPE, &(raw as u64));
+        serializer.serialize_newtype_struct(OS_HANDLE_TYPE, &HandleRef(self))
     }
 }
 
@@ -139,7 +191,7 @@ impl<'de, T: From<OwnedHandle>> Deserialize<'de> for OsHandle<T> {
                 let raw = u32::deserialize(deserializer)? as usize;
                 #[cfg(target_pointer_width = "64")]
                 let raw = u64::deserialize(deserializer)? as usize;
-                Ok(OsHandle(T::from(unsafe {
+                Ok(OsHandle::new(T::from(unsafe {
                     OwnedHandle::from_raw_handle(raw as _)
                 })))
             }

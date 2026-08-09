@@ -354,7 +354,7 @@ async fn negotiate_client(
     mut sender: transport::AnySender,
     mut receiver: transport::AnyReceiver,
     limits: Limits,
-    keep_requests_alive: bool,
+    escrow_request_handles: bool,
     #[cfg(windows)] peer_process: Option<OwnedHandle>,
     app_protocol: (&str, &[u16]),
 ) -> Result<UnboundClient, Error> {
@@ -366,7 +366,7 @@ async fn negotiate_client(
         sender,
         receiver,
         limits: negotiated.limits,
-        keep_requests_alive,
+        escrow_request_handles,
         #[cfg(windows)]
         peer_process,
         app_protocol: negotiated.app_protocol,
@@ -396,7 +396,7 @@ pub struct UnboundClient {
     sender: transport::AnySender,
     receiver: transport::AnyReceiver,
     limits: Limits,
-    keep_requests_alive: bool,
+    escrow_request_handles: bool,
     #[cfg(windows)]
     peer_process: Option<OwnedHandle>,
     app_protocol: (String, u16),
@@ -425,7 +425,7 @@ impl UnboundClient {
             self.sender,
             self.receiver,
             self.limits,
-            self.keep_requests_alive,
+            self.escrow_request_handles,
             #[cfg(windows)]
             self.peer_process,
         )
