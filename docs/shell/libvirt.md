@@ -1,7 +1,7 @@
 # libvirt
 
 The `libvirt` module provisions cloud-init guests and exposes them as
-[VFS](./index.md) contexts over SSH. It uses an unprivileged
+[VFS](./vfs.md) contexts over SSH. It uses an unprivileged
 `qemu:///session` connection, passt networking, and a host-loopback SSH port
 forward by default.
 
@@ -107,7 +107,7 @@ dolang -m libvirt --connect-uri qemu:///system freebsd-build build.dol
 
 `os:` is required, and `arch:` defaults to the host architecture. Both use the
 same symbol vocabulary as
-[`sys.os_info().os`](../../api/sys/index.md)/[`sys.cpu_info().arch`](../../api/sys/index.md).
+[`sys.os_info().os`](../api/sys/index.md)/[`sys.cpu_info().arch`](../api/sys/index.md).
 
 The domain is defined for KVM with a `host-passthrough` CPU, so `arch:` must be
 the host architecture; a foreign one is rejected rather than emulated.
@@ -117,14 +117,14 @@ the host architecture; a foreign one is rejected rather than emulated.
 `dolang:` controls whether and how Do (particularly `dolang-vfs`) gets
 installed into the guest before it's considered ready:
 
-| Value                              | Behavior                                                                                                                                                                                       |
-| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `false`                            | Skip installation. The domain won't support `with`, `upload`, or `download`.                                                                                                                   |
-| `true` (default)                   | Best-effort: fetch the release matching the running interpreter's version ([`shell.VERSION`](../../api/shell/index.md)) for `os:`/`arch:`, silently skipping if none exists for that platform. |
-| a version tag, e.g. `"v0.1.1"`     | Fetch that release's artifact for `os:`/`arch:`. Throws an error if unavailable.                                                                                                               |
-| a [`Path`](../../api/fs/path.md)   | Use a local archive directly.                                                                                                                                                                  |
-| a [`Url`](../../api/url/index.md)  | Fetch that archive directly, bypassing release resolution.                                                                                                                                     |
-| `{archive: path_or_url, :digest?}` | Explicit form that allows pinning a digest.                                                                                                                                                    |
+| Value                              | Behavior                                                                                                                                                                                    |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `false`                            | Skip installation. The domain won't support `with`, `upload`, or `download`.                                                                                                                |
+| `true` (default)                   | Best-effort: fetch the release matching the running interpreter's version ([`shell.VERSION`](../api/shell/index.md)) for `os:`/`arch:`, silently skipping if none exists for that platform. |
+| a version tag, e.g. `"v0.1.1"`     | Fetch that release's artifact for `os:`/`arch:`. Throws an error if unavailable.                                                                                                            |
+| a [`Path`](../api/fs/path.md)      | Use a local archive directly.                                                                                                                                                               |
+| a [`Url`](../api/url/index.md)     | Fetch that archive directly, bypassing release resolution.                                                                                                                                  |
+| `{archive: path_or_url, :digest?}` | Explicit form that allows pinning a digest.                                                                                                                                                 |
 
 Except for the implicit `true` default, a failed fetch always throws an error.
 
@@ -138,7 +138,7 @@ considered complete; these may be repeated.
 `run:` keys; however, `run:` only supports raw commands as strings or string
 arrays.
 
-Both forms of `add:` take `chmod:` as an [`Int`](../../api/std/int.md) mode
+Both forms of `add:` take `chmod:` as an [`Int`](../api/std/int.md) mode
 such as `0o644`.
 
 ```

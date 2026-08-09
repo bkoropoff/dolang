@@ -11,7 +11,7 @@ ordinary functions, structured concurrency, and remote-capable system APIs.
 
 ## What Makes Do Different?
 
-The interpreter stays local while a [VFS context](./shell/vfs/index.md) selects
+The interpreter stays local while a [VFS context](./shell/vfs.md) selects
 where system work happens. The same function can operate on the local system, a
 container, an SSH host, across WSL, or with administrator privileges.
 Filesystem access, external programs, environment variables, system
@@ -147,4 +147,4 @@ a Linux host can remotely modify security descriptors on Windows, etc.
 **Building a script?** Follow the
 [command-line tool worked example](./shell/cli-tools.md).
 
-**Targeting another system?** Read the [VFS Guide](./shell/vfs/index.md).
+**Targeting another system?** Read the [VFS Guide](./shell/vfs.md).

@@ -1,6 +1,6 @@
 # Containers
 
-The `docker` and `podman` modules use [VFS contexts](./index.md) to run Do
+The `docker` and `podman` modules use [VFS contexts](./vfs.md) to run Do
 functions in the context of containers. Filesystem operations, external program
 launching, and other supported APIs target the container, while the interpreter
 remains on the host.
@@ -27,7 +27,7 @@ pull only if the image isn't present locally) or `:always:`.
 Starting a container waits for its VFS agent to come up with no built-in
 timeout; wrap the call in `time.timeout` if a bound is needed.
 
-Use [`with_host`](./index.md#returning-to-the-host) to temporarily return to the
+Use [`with_host`](./vfs.md#returning-to-the-host) to temporarily return to the
 host VFS context:
 
 ```
@@ -93,8 +93,8 @@ The Docker and Podman modules also provide a small management API:
 - `Container`s expose metadata and can be started, stopped, killed, restarted,
   or removed.
 
-See the [`docker`](../../api/docker/index.md) and
-[`podman`](../../api/podman/index.md) references for the complete interfaces.
+See the [`docker`](../api/docker/index.md) and
+[`podman`](../api/podman/index.md) references for the complete interfaces.
 
 `Container` objects inspect and change the lifecycle of existing containers.
 Their `with` method copies `dolang-vfs` to a session-specific path under
