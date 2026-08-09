@@ -9,6 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 bytes = "1"
+dolang-util = { package = "dolang-private-util", path = "../dolang-private-util", version = "0.1.1" }
 futures = "0.3.31"
 postcard = { version = "1.1.3", features = ["use-std"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -34,6 +35,7 @@ default = ["macos-spawn-interpose"]
 # same DYLD_INTERPOSE section can conflict. Disabling this reopens the exact
 # race it closes.
 macos-spawn-interpose = ["dep:ctor"]
+debug = ["dolang-util/debug"]
 
 [dev-dependencies]
 tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "time"] }

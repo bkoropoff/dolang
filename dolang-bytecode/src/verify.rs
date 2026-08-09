@@ -8,6 +8,7 @@ use super::{
     Arg, BUILTINS, BlockState, Certificate, DecError, Func, Inst, InstDecoder, InstOffsets,
     LocalState, Phase, limit,
 };
+use dolang_util::debug_eprintln;
 
 #[derive(PartialEq, Eq)]
 pub(crate) enum InstError {
@@ -859,8 +860,7 @@ impl<'a, C: Context> FuncVerifier<'a, C> {
                 self.blocks[bb].mark = false;
             }
 
-            #[cfg(feature = "debug")]
-            eprintln!("  bb #{bb}: {}", block);
+            debug_eprintln!("  bb #{bb}: {}", block);
 
             // Dummy value, immediately overwritten
             let mut last = InstOffsets {
@@ -876,12 +876,10 @@ impl<'a, C: Context> FuncVerifier<'a, C> {
             // Step over all instructions in block
             for item in Self::insts_verified(slice, start) {
                 last = item;
-                #[cfg(feature = "debug")]
-                eprintln!("    {:0width$x} {}", last.before, last.inst);
+                debug_eprintln!("    {:0width$x} {}", last.before, last.inst);
                 self.step(&mut block, &last.inst)
                     .map_err(|e| FuncError::inst(slice, last.before, e))?;
-                #[cfg(feature = "debug")]
-                eprintln!("      ⮡ {}", block);
+                debug_eprintln!("      ⮡ {}", block);
                 if block.operands > self.max_operand_depth {
                     self.max_operand_depth = block.operands
                 }
@@ -924,8 +922,7 @@ impl<'a, C: Context> FuncVerifier<'a, C> {
                     // Mark block as reached
                     if !succ.mark {
                         succ.mark = true;
-                        #[cfg(feature = "debug")]
-                        eprintln!("    mark #{}", sid);
+                        debug_eprintln!("    mark #{}", sid);
                         self.queue.push(sid);
                     }
                     // Check that claimed successor state is unchanged by merge
@@ -944,8 +941,7 @@ impl<'a, C: Context> FuncVerifier<'a, C> {
                 } else if succ.mark {
                     // Certificate generation case, block is already marked for visit
                     // Just merge predecessor state into it
-                    #[cfg(feature = "debug")]
-                    eprintln!("    merge #{}", sid);
+                    debug_eprintln!("    merge #{}", sid);
                     block
                         .merge(&mut succ.state)
                         .map_err(|e| FuncError::inst(bytecode, succ.offset, e))?
@@ -958,8 +954,7 @@ impl<'a, C: Context> FuncVerifier<'a, C> {
                         .map_err(|e| FuncError::inst(bytecode, succ.offset, e))?;
                     // If the state did change, mark and queue block for visit
                     if succ.state != prev {
-                        #[cfg(feature = "debug")]
-                        eprintln!("    changed #{}", sid);
+                        debug_eprintln!("    changed #{}", sid);
                         succ.mark = true;
                         self.queue.push(sid);
                     }
@@ -1067,8 +1062,7 @@ impl<'a, C: Context> Verifier<'a, C> {
         let funcs: Vec<_> = funcs.into_iter().collect();
         let mut used = vec![Default::default(); funcs.len()];
         for (i, func) in funcs.into_iter().enumerate() {
-            #[cfg(feature = "debug")]
-            eprintln!("Compute cert #{i}:");
+            debug_eprintln!("Compute cert #{i}:");
             let verifier = FuncVerifier::new(self.ctx, i, func, &mut used);
             certs.push(
                 verifier
@@ -1089,8 +1083,7 @@ impl<'a, C: Context> Verifier<'a, C> {
         let funcs: Vec<_> = funcs.into_iter().collect();
         let mut used = vec![Default::default(); funcs.len()];
         for (i, (func, cert)) in funcs.into_iter().enumerate() {
-            #[cfg(feature = "debug")]
-            eprintln!("Check cert #{i}:");
+            debug_eprintln!("Check cert #{i}:");
             let mut verifier = FuncVerifier::new(self.ctx, i, func, &mut used);
             verifier
                 .check(cert)
