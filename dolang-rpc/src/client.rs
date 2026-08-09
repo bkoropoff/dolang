@@ -489,7 +489,7 @@ impl<P: Protocol> Writer<P> {
         scheduler: &mut fragment::Scheduler,
     ) -> Result<(), Error> {
         let mut probe = self.transport.send();
-        let payload = match encode_payload(&value, &mut probe) {
+        let (payload, has_attachments) = match encode_payload(&value, &mut probe) {
             Ok(payload) => payload,
             Err(err) => {
                 drop(probe);
@@ -497,7 +497,7 @@ impl<P: Protocol> Writer<P> {
                 return Ok(());
             }
         };
-        if probe.has_attachments() {
+        if has_attachments {
             if !matches!(&trailer, fragment::Trailer::None) {
                 drop(probe);
                 return Err(Error::Protocol(

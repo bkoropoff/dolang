@@ -15,10 +15,7 @@ use ::serde::{
 use dolang_util::debug_eprintln;
 use postcard::ser_flavors::{ExtendFlavor, Flavor};
 
-use crate::{
-    handle::OS_HANDLE_TYPE,
-    transport::{RecvFrame, SendFrame},
-};
+use crate::handle::{OS_HANDLE_TYPE, PutHandle, TakeHandle};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
@@ -59,7 +56,7 @@ pub(crate) fn to_extend<'frame, T, F>(
 ) -> Result<Vec<u8>, Error>
 where
     T: Serialize + ?Sized,
-    F: SendFrame<'frame>,
+    F: PutHandle<'frame>,
 {
     let mut postcard = postcard::Serializer {
         output: ExtendFlavor::new(output),
@@ -76,7 +73,7 @@ where
 pub(crate) fn from_bytes<'de, T, H>(bytes: &'de [u8], handles: &mut H) -> Result<T, Error>
 where
     T: Deserialize<'de>,
-    H: RecvFrame,
+    H: TakeHandle,
 {
     let mut postcard = postcard::Deserializer::from_bytes(bytes);
     let value = T::deserialize(Deserializer {
@@ -106,7 +103,7 @@ struct Compound<'cell, 'borrow, 'frame, C, F> {
     marker: PhantomData<&'frame ()>,
 }
 
-impl<'frame, T: Serialize + ?Sized, F: SendFrame<'frame>> Serialize
+impl<'frame, T: Serialize + ?Sized, F: PutHandle<'frame>> Serialize
     for WithFrame<'_, '_, '_, 'frame, T, F>
 {
     fn serialize<S: ser::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -128,7 +125,7 @@ macro_rules! forward_ser {
 
 impl<'cell, 'borrow, 'frame, S, F> ser::Serializer for Serializer<'cell, 'borrow, 'frame, S, F>
 where
-    F: SendFrame<'frame>,
+    F: PutHandle<'frame>,
     S: ser::Serializer,
 {
     type Ok = S::Ok;
@@ -200,7 +197,7 @@ where
                 // `finish` future completes. The frame lifetime is therefore a
                 // valid extension of serde's erased raw descriptor borrow.
                 let fd = unsafe { BorrowedFd::borrow_raw(raw as i32) };
-                let index = self.frame.borrow_mut().attach_fd(fd).map_err(ser_custom)?;
+                let index = self.frame.borrow_mut().put_handle(fd).map_err(ser_custom)?;
                 return self.inner.serialize_u32(index);
             }
             #[cfg(windows)]
@@ -213,7 +210,7 @@ where
                 let value = self
                     .frame
                     .borrow_mut()
-                    .attach_handle(handle)
+                    .put_handle(handle)
                     .map_err(ser_custom)?;
                 #[cfg(target_pointer_width = "32")]
                 return self.inner.serialize_u32(value as u32);
@@ -331,7 +328,7 @@ where
 
 macro_rules! compound {
     ($trait:ident,$method:ident) => {
-        impl<'frame, C: ser::$trait, F: SendFrame<'frame>> ser::$trait
+        impl<'frame, C: ser::$trait, F: PutHandle<'frame>> ser::$trait
             for Compound<'_, '_, 'frame, C, F>
         {
             type Ok = C::Ok;
@@ -353,7 +350,7 @@ compound!(SerializeSeq, serialize_element);
 compound!(SerializeTuple, serialize_element);
 compound!(SerializeTupleStruct, serialize_field);
 compound!(SerializeTupleVariant, serialize_field);
-impl<'frame, C: ser::SerializeMap, F: SendFrame<'frame>> ser::SerializeMap
+impl<'frame, C: ser::SerializeMap, F: PutHandle<'frame>> ser::SerializeMap
     for Compound<'_, '_, 'frame, C, F>
 {
     type Ok = C::Ok;
@@ -376,7 +373,7 @@ impl<'frame, C: ser::SerializeMap, F: SendFrame<'frame>> ser::SerializeMap
         self.inner.end()
     }
 }
-impl<'frame, C: ser::SerializeStruct, F: SendFrame<'frame>> ser::SerializeStruct
+impl<'frame, C: ser::SerializeStruct, F: PutHandle<'frame>> ser::SerializeStruct
     for Compound<'_, '_, 'frame, C, F>
 {
     type Ok = C::Ok;
@@ -399,7 +396,7 @@ impl<'frame, C: ser::SerializeStruct, F: SendFrame<'frame>> ser::SerializeStruct
         self.inner.end()
     }
 }
-impl<'frame, C: ser::SerializeStructVariant, F: SendFrame<'frame>> ser::SerializeStructVariant
+impl<'frame, C: ser::SerializeStructVariant, F: PutHandle<'frame>> ser::SerializeStructVariant
     for Compound<'_, '_, 'frame, C, F>
 {
     type Ok = C::Ok;
@@ -617,7 +614,7 @@ macro_rules! forward_de {
 impl<'de, D, H> de::Deserializer<'de> for Deserializer<'_, D, H>
 where
     D: de::Deserializer<'de>,
-    H: RecvFrame,
+    H: TakeHandle,
 {
     type Error = D::Error;
     forward_de!(
@@ -669,7 +666,7 @@ where
             #[cfg(unix)]
             {
                 let index = u32::deserialize(self.inner)?;
-                let fd = self.handles.take_fd(index).map_err(de_custom)?;
+                let fd = self.handles.take_handle(index).map_err(de_custom)?;
                 // The private OsHandle visitor immediately adopts this raw fd.
                 // No other visitor can request the reserved newtype identity.
                 let raw = fd.into_raw_fd();
@@ -763,7 +760,7 @@ where
 impl<'de, S, H> DeserializeSeed<'de> for SeedWrap<'_, S, H>
 where
     S: DeserializeSeed<'de>,
-    H: RecvFrame,
+    H: TakeHandle,
 {
     type Value = S::Value;
     fn deserialize<D: de::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
@@ -777,7 +774,7 @@ where
 macro_rules! visit_scalar { ($($name:ident($ty:ty)),* $(,)?) => {$(
  fn $name<E:de::Error>(self,v:$ty)->Result<Self::Value,E>{self.inner.$name(v)}
  )*}; }
-impl<'de, V: Visitor<'de>, H: RecvFrame> Visitor<'de> for VisitorWrap<'_, V, H> {
+impl<'de, V: Visitor<'de>, H: TakeHandle> Visitor<'de> for VisitorWrap<'_, V, H> {
     type Value = V::Value;
     fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.inner.expecting(f)
@@ -853,7 +850,7 @@ impl<'de, V: Visitor<'de>, H: RecvFrame> Visitor<'de> for VisitorWrap<'_, V, H> 
         })
     }
 }
-impl<'de, A: SeqAccess<'de>, H: RecvFrame> SeqAccess<'de> for SeqWrap<'_, A, H> {
+impl<'de, A: SeqAccess<'de>, H: TakeHandle> SeqAccess<'de> for SeqWrap<'_, A, H> {
     type Error = A::Error;
     fn next_element_seed<T: DeserializeSeed<'de>>(
         &mut self,
@@ -868,7 +865,7 @@ impl<'de, A: SeqAccess<'de>, H: RecvFrame> SeqAccess<'de> for SeqWrap<'_, A, H> 
         self.inner.size_hint()
     }
 }
-impl<'de, A: MapAccess<'de>, H: RecvFrame> MapAccess<'de> for MapWrap<'_, A, H> {
+impl<'de, A: MapAccess<'de>, H: TakeHandle> MapAccess<'de> for MapWrap<'_, A, H> {
     type Error = A::Error;
     fn next_key_seed<K: DeserializeSeed<'de>>(
         &mut self,
@@ -889,7 +886,7 @@ impl<'de, A: MapAccess<'de>, H: RecvFrame> MapAccess<'de> for MapWrap<'_, A, H> 
         self.inner.size_hint()
     }
 }
-impl<'a, 'de, A: EnumAccess<'de>, H: RecvFrame> EnumAccess<'de> for EnumWrap<'a, A, H> {
+impl<'a, 'de, A: EnumAccess<'de>, H: TakeHandle> EnumAccess<'de> for EnumWrap<'a, A, H> {
     type Error = A::Error;
     type Variant = VariantWrap<'a, A::Variant, H>;
     fn variant_seed<V: DeserializeSeed<'de>>(
@@ -909,7 +906,7 @@ impl<'a, 'de, A: EnumAccess<'de>, H: RecvFrame> EnumAccess<'de> for EnumWrap<'a,
         ))
     }
 }
-impl<'de, A: VariantAccess<'de>, H: RecvFrame> VariantAccess<'de> for VariantWrap<'_, A, H> {
+impl<'de, A: VariantAccess<'de>, H: TakeHandle> VariantAccess<'de> for VariantWrap<'_, A, H> {
     type Error = A::Error;
     fn unit_variant(self) -> Result<(), A::Error> {
         self.inner.unit_variant()
@@ -949,40 +946,26 @@ mod tests {
     use super::*;
     use crate::handle::OsHandle;
     use ::serde::{Deserialize, Serialize};
-    use bytes::BufMut;
     use nix::unistd::pipe;
     use std::io;
     use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
     struct Frame<'a>(Vec<BorrowedFd<'a>>);
-    impl<'a> SendFrame<'a> for Frame<'a> {
-        fn attach_fd(&mut self, fd: BorrowedFd<'a>) -> io::Result<u32> {
+    impl<'a> PutHandle<'a> for Frame<'a> {
+        fn put_handle(&mut self, fd: BorrowedFd<'a>) -> io::Result<u32> {
             let index = self.0.len() as u32;
             self.0.push(fd);
             Ok(index)
         }
-        fn has_attachments(&self) -> bool {
-            !self.0.is_empty()
-        }
-        fn poll_write_once(
-            &mut self,
-            _cx: &mut std::task::Context<'_>,
-            buf: &[u8],
-        ) -> std::task::Poll<io::Result<usize>> {
-            std::task::Poll::Ready(Ok(buf.len()))
-        }
     }
 
     struct TestReceiver(Vec<Option<OwnedFd>>);
-    impl RecvFrame for TestReceiver {
-        fn take_fd(&mut self, index: u32) -> io::Result<OwnedFd> {
+    impl TakeHandle for TestReceiver {
+        fn take_handle(&mut self, index: u32) -> io::Result<OwnedFd> {
             self.0
                 .get_mut(index as usize)
                 .and_then(Option::take)
                 .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid fd"))
-        }
-        async fn recv<B: BufMut>(&mut self, _buffer: &mut B) -> io::Result<usize> {
-            unreachable!()
         }
     }
 
@@ -1069,46 +1052,29 @@ mod windows_tests {
     use std::os::windows::io::{FromRawHandle, IntoRawHandle, OwnedHandle};
 
     use ::serde::{Deserialize, Serialize};
-    use bytes::BufMut;
 
     use super::*;
     use crate::handle::OsHandle;
 
     struct Frame(Option<usize>);
 
-    impl SendFrame<'_> for Frame {
-        fn attach_handle(&mut self, handle: BorrowedHandle<'_>) -> io::Result<usize> {
+    impl PutHandle<'_> for Frame {
+        fn put_handle(&mut self, handle: BorrowedHandle<'_>) -> io::Result<usize> {
             use std::os::windows::io::AsRawHandle;
             let raw = handle.as_raw_handle() as usize;
             self.0 = Some(raw);
             Ok(raw)
         }
-
-        fn has_attachments(&self) -> bool {
-            self.0.is_some()
-        }
-
-        fn poll_write_once(
-            &mut self,
-            _cx: &mut std::task::Context<'_>,
-            buf: &[u8],
-        ) -> std::task::Poll<io::Result<usize>> {
-            std::task::Poll::Ready(Ok(buf.len()))
-        }
     }
 
     struct TestReceiver(Option<OwnedHandle>);
 
-    impl RecvFrame for TestReceiver {
+    impl TakeHandle for TestReceiver {
         fn take_handle(&mut self, value: usize) -> io::Result<OwnedHandle> {
             use std::os::windows::io::AsRawHandle;
             let handle = self.0.take().unwrap();
             assert_eq!(handle.as_raw_handle() as usize, value);
             Ok(handle)
-        }
-
-        async fn recv<B: BufMut>(&mut self, _buffer: &mut B) -> io::Result<usize> {
-            unreachable!()
         }
     }
 

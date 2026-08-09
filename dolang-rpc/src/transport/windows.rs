@@ -228,10 +228,6 @@ impl SendFrame<'_> for WindowsSend<'_> {
         }
     }
 
-    fn has_attachments(&self) -> bool {
-        !self.duplicated.is_empty()
-    }
-
     fn poll_write_once(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
         self.poll_write_vectored_once(cx, &[IoSlice::new(buf)])
     }

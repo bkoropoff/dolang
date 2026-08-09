@@ -58,6 +58,7 @@ mod unbound;
 
 use ::serde::{Serialize, de::DeserializeOwned};
 use bytes::Bytes;
+use handle::{PutHandle, TakeHandle};
 use transport::{RecvFrame, SendFrame};
 pub use unbound::Builder;
 
@@ -226,15 +227,58 @@ impl TryFrom<u8> for Kind {
 /// descriptors to it, the caller must send the resulting payload as a
 /// single atomic fragment via that same token, bypassing the round-robin
 /// scheduler entirely.
+struct FramePutHandle<'borrow, F> {
+    frame: &'borrow mut F,
+    attached: bool,
+}
+
+impl<'frame, F: SendFrame<'frame>> PutHandle<'frame> for FramePutHandle<'_, F> {
+    #[cfg(unix)]
+    fn put_handle(&mut self, handle: std::os::fd::BorrowedFd<'frame>) -> std::io::Result<u32> {
+        let value = self.frame.attach_fd(handle)?;
+        self.attached = true;
+        Ok(value)
+    }
+
+    #[cfg(windows)]
+    fn put_handle(
+        &mut self,
+        handle: std::os::windows::io::BorrowedHandle<'frame>,
+    ) -> std::io::Result<usize> {
+        let value = self.frame.attach_handle(handle)?;
+        self.attached = true;
+        Ok(value)
+    }
+}
+
+struct FrameTakeHandle<'borrow, F>(&'borrow mut F);
+
+impl<F: RecvFrame> TakeHandle for FrameTakeHandle<'_, F> {
+    #[cfg(unix)]
+    fn take_handle(&mut self, index: u32) -> std::io::Result<std::os::fd::OwnedFd> {
+        self.0.take_fd(index)
+    }
+
+    #[cfg(windows)]
+    fn take_handle(&mut self, value: usize) -> std::io::Result<std::os::windows::io::OwnedHandle> {
+        self.0.take_handle(value)
+    }
+}
+
 fn encode_payload<'frame, T: Serialize, F: SendFrame<'frame>>(
     value: &'frame T,
     frame: &mut F,
-) -> Result<Bytes, Error> {
-    let buffer =
-        serde::to_extend(value, frame, Vec::new()).map_err(|e| Error::Serialize(e.to_string()))?;
-    Ok(buffer.into())
+) -> Result<(Bytes, bool), Error> {
+    let mut handles = FramePutHandle {
+        frame,
+        attached: false,
+    };
+    let buffer = serde::to_extend(value, &mut handles, Vec::new())
+        .map_err(|e| Error::Serialize(e.to_string()))?;
+    Ok((buffer.into(), handles.attached))
 }
 
 fn decode<T: DeserializeOwned>(bytes: &[u8], frame: &mut impl RecvFrame) -> Result<T, Error> {
-    serde::from_bytes(bytes, frame).map_err(|e| Error::Deserialize(e.to_string()))
+    serde::from_bytes(bytes, &mut FrameTakeHandle(frame))
+        .map_err(|e| Error::Deserialize(e.to_string()))
 }

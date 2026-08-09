@@ -369,8 +369,8 @@ async fn admit<P: Protocol>(
     match message {
         Message::Response { id, value, trailer } => {
             let mut probe = sender.send();
-            let payload = encode_payload(&value, &mut probe)?;
-            if probe.has_attachments() {
+            let (payload, has_attachments) = encode_payload(&value, &mut probe)?;
+            if has_attachments {
                 if !matches!(&trailer, fragment::Trailer::None) {
                     return Err(Error::Protocol(
                         "responses with both native-handle attachments and a trailer are not supported"

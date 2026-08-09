@@ -81,12 +81,6 @@ pub(crate) trait SendFrame<'frame>: Send {
     #[cfg(windows)]
     fn attach_handle(&mut self, handle: BorrowedHandle<'_>) -> io::Result<usize>;
 
-    /// Whether serialization has staged any native-handle attachments on
-    /// this token. If true, the message must be sent as a single atomic
-    /// fragment via this same token rather than split across the
-    /// round-robin fragment scheduler.
-    fn has_attachments(&self) -> bool;
-
     /// Attempts one nonblocking write of `buf`, following the same
     /// readiness/registration contract as `AsyncWrite::poll_write`. The one
     /// low-level primitive each transport must implement; `finish` (below)
@@ -217,15 +211,6 @@ impl<'frame> SendFrame<'frame> for AnySend<'frame> {
         match self {
             Self::Generic(frame) => frame.attach_handle(handle),
             Self::Windows(frame) => frame.attach_handle(handle),
-        }
-    }
-    fn has_attachments(&self) -> bool {
-        match self {
-            Self::Generic(frame) => frame.has_attachments(),
-            #[cfg(unix)]
-            Self::Unix(frame) => frame.has_attachments(),
-            #[cfg(windows)]
-            Self::Windows(frame) => frame.has_attachments(),
         }
     }
     fn poll_write_once(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
@@ -384,10 +369,6 @@ impl<'frame> SendFrame<'frame> for GenericSend<'frame> {
         // FIXME: Plumb a reportable capability error to the public API instead
         // of panicking when an OsHandle is serialized on this transport.
         panic!("generic byte-stream transport does not support handles")
-    }
-
-    fn has_attachments(&self) -> bool {
-        false
     }
 
     fn poll_write_once(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {

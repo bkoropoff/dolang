@@ -1,10 +1,10 @@
-use std::{fmt, fmt::Formatter, marker::PhantomData, str};
+use std::{fmt, fmt::Formatter, io, marker::PhantomData, str};
 
 #[cfg(unix)]
-use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 
 #[cfg(windows)]
-use std::os::windows::io::{AsHandle, AsRawHandle, FromRawHandle, OwnedHandle};
+use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
@@ -23,6 +23,22 @@ pub type DefaultHandle = OwnedFd;
 /// The platform's default owned native handle type.
 #[cfg(windows)]
 pub type DefaultHandle = std::os::windows::io::OwnedHandle;
+
+/// Supplies native handles encountered during serialization.
+pub(crate) trait PutHandle<'handle> {
+    #[cfg(unix)]
+    fn put_handle(&mut self, handle: BorrowedFd<'handle>) -> io::Result<u32>;
+    #[cfg(windows)]
+    fn put_handle(&mut self, handle: BorrowedHandle<'handle>) -> io::Result<usize>;
+}
+
+/// Consumes native handles encountered during deserialization.
+pub(crate) trait TakeHandle {
+    #[cfg(unix)]
+    fn take_handle(&mut self, index: u32) -> io::Result<OwnedFd>;
+    #[cfg(windows)]
+    fn take_handle(&mut self, value: usize) -> io::Result<OwnedHandle>;
+}
 
 /// A native operating-system resource transferred as a frame attachment.
 ///
