@@ -38,6 +38,8 @@ use self::{
 
 pub use ast::{Context, visit::Token};
 
+#[cfg(feature = "debug")]
+use dolang_util::debug_eprintln;
 use dolang_util::intern::{self, BinTable};
 
 use ast::Res;
@@ -651,13 +653,13 @@ impl<'a> Compiler<'a> {
         let mut ast = ast?;
         #[cfg(feature = "debug")]
         if let Err(e) = self.export_ast_dot(&ast, false) {
-            eprintln!("AST DOT export failed: {e}")
+            debug_eprintln!("AST DOT export failed: {e}")
         }
         let mut elab = self.elaborater(&ds);
         let res = elab.elaborate(&mut ast, &mut prelude, ignore_errors);
         #[cfg(feature = "debug")]
         if let Err(e) = self.export_ast_dot(&ast, true) {
-            eprintln!("Resolved AST DOT export failed: {e}")
+            debug_eprintln!("Resolved AST DOT export failed: {e}")
         }
         self.drain_diags(&mut ds, diags)?;
         res?;
@@ -678,10 +680,10 @@ impl<'a> Compiler<'a> {
             #[cfg(feature = "debug")]
             {
                 // Export DOT file if environment variable is set
-                if let Ok(output) = std::env::var("DO_EXPORT_DOT")
+                if let Ok(output) = std::env::var("DOLANG_EXPORT_DOT")
                     && let Err(e) = self.export_cfg_dot(&graph, output)
                 {
-                    eprintln!("dot export failed: {e}");
+                    debug_eprintln!("DOT export failed: {e}");
                 }
             }
             let mut emitter = self.emitter(&graph);
@@ -815,7 +817,7 @@ impl Compiler<'_> {
         }
     }
 
-    /// Export AST to a DOT file based on the DO_EXPORT_DOT environment variable
+    /// Export AST to a DOT file based on the DOLANG_EXPORT_DOT environment variable
     /// Similar to the CFG export functionality
     fn export_ast_dot<N: Node + ?Sized>(&self, ast: &N, res: bool) -> io::Result<()> {
         use std::{
@@ -823,7 +825,7 @@ impl Compiler<'_> {
             path::{self, Component},
         };
 
-        if let Ok(output) = std::env::var("DO_EXPORT_DOT") {
+        if let Ok(output) = std::env::var("DOLANG_EXPORT_DOT") {
             let src = path::absolute(self.file.path())?;
             let cwd = std::env::current_dir()?;
             let rel = src.strip_prefix(&cwd).unwrap_or(&src);
@@ -845,7 +847,7 @@ impl Compiler<'_> {
             let mut file = fs::File::create(&out)?;
 
             self.ast_to_dot(ast, &mut file)?;
-            eprintln!("AST DOT exported to: {}", out.display());
+            debug_eprintln!("AST DOT exported to: {}", out.display());
         }
 
         Ok(())

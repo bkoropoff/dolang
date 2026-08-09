@@ -12,6 +12,7 @@ use ::serde::{
     },
     ser::{self},
 };
+use dolang_util::debug_eprintln;
 use postcard::ser_flavors::{ExtendFlavor, Flavor};
 
 use crate::{
@@ -40,14 +41,14 @@ impl de::Error for Error {
 
 // postcard's `custom` error constructors discard the message and return a
 // fixed generic variant (`SerdeSerCustom`/`SerdeDeCustom`), so anything
-// converted through them is otherwise unrecoverable. Log it to stderr first
-// so it's not lost entirely.
+// converted through them is otherwise unrecoverable. Debug builds can log it
+// to stderr when DOLANG_DEBUG is set so it is not lost entirely.
 fn ser_custom<E: ser::Error>(err: impl fmt::Display) -> E {
-    eprintln!("dolang-rpc: serialization error: {err}");
+    debug_eprintln!("dolang-rpc: serialization error: {err}");
     E::custom(err)
 }
 fn de_custom<E: de::Error>(err: impl fmt::Display) -> E {
-    eprintln!("dolang-rpc: deserialization error: {err}");
+    debug_eprintln!("dolang-rpc: deserialization error: {err}");
     E::custom(err)
 }
 

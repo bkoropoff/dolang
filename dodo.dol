@@ -291,7 +291,7 @@ return $
       collect: true
     do |args|
       run_cargo run --bin gen-bytecode-seeds
-      dodo.show cargo +nightly fuzz run bytecode_deserialize
+      run_cargo cargo +nightly fuzz run bytecode_deserialize
         target/fuzz-corpus/bytecode_deserialize
         -- ...args.args
 
@@ -303,13 +303,13 @@ return $
         extra:
           --all-features
       spec.cargo llvm-cov clean
-      spec.cargo llvm-cov --no-report run --ignore-run-fail --bin dolang-vfs
-      spec.cargo llvm-cov --no-report run --ignore-run-fail --bin dolang-private-polyfill
+      spec.cargo llvm-cov run --no-report --ignore-run-fail --bin dolang-vfs
+      spec.cargo llvm-cov run --no-report --ignore-run-fail --bin dolang-private-polyfill
       env
-        DO_EXPORT_DOT: $Path("dot").absolute()
+        DOLANG_EXPORT_DOT: $Path("dot").absolute()
         VFS: (spec.bin "dolang-vfs")
         do
-          spec.cargo llvm-cov --no-report test
+          spec.cargo llvm-cov test --no-report
           spec.cargo llvm-cov run --no-report --bin dolang --
             --module-path testlib -m test ...default_shell_tests()
 

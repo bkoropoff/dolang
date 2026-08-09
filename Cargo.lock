@@ -1236,6 +1236,7 @@ dependencies = [
  "bytes",
  "criterion",
  "ctor",
+ "dolang-private-util",
  "futures",
  "libc",
  "nix",

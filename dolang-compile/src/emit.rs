@@ -7,6 +7,8 @@ use std::{
 };
 
 use bytecode::Inst as BcInst;
+#[cfg(feature = "debug")]
+use dolang_util::debug_eprintln;
 use dolang_util::{alias::Box, intern::BinTable};
 
 use dolang_bytecode::{
@@ -419,11 +421,11 @@ impl<'a> Emitter<'a> {
                 use dolang_bytecode::InstDecoder;
 
                 let cursor = io::Cursor::new(&bytecode);
-                eprintln!("Function #{} bytecode:", id.index());
+                debug_eprintln!("Function #{} bytecode:", id.index());
                 let width = ((bytecode.len() - 1).max(1).ilog2() + 1).div_ceil(4).max(2) as usize;
                 for item in InstDecoder::new(cursor).with_offsets() {
                     let item = item.unwrap();
-                    eprintln!("  {:0width$x} {}", item.before, item.inst)
+                    debug_eprintln!("  {:0width$x} {}", item.before, item.inst)
                 }
             }
             funcs.push(EmitFunc {
