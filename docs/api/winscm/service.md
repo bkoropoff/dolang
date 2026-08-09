@@ -16,7 +16,7 @@ Closes the service. Closing an already-closed service is a no-op.
 
 Starts the service with optional string arguments.
 
-**Parameters:**
+#### Parameters
 
 | Name   | Type                        | Description       |
 | ------ | --------------------------- | ----------------- |
@@ -26,47 +26,55 @@ Starts the service with optional string arguments.
 
 Sends a control request and returns the resulting status.
 
-**Parameters:**
+#### Parameters
 
-| Name      | Type | Description                                                       |
-| --------- | ---- | ----------------------------------------------------------------- |
-| `control` | sym  | `:STOP:`, `:PAUSE:`, `:CONTINUE:`, or `:INTERROGATE:`             |
+| Name      | Type | Description                                  |
+| --------- | ---- | -------------------------------------------- |
+| `control` | sym  | [Control request](./index.md#control-values) |
 
-**Returns:** [`Status`](./status.md)
+#### Returns
+
+[`Status`](./status.md)
 
 ### `query_status()`
 
 Fetches the current service status.
 
-**Returns:** [`Status`](./status.md)
+#### Returns
+
+[`Status`](./status.md)
 
 ### `config()`
 
 Fetches the current service configuration.
 
-**Returns:** Immutable [`ServiceConfig`](./service-config.md) snapshot
+#### Returns
 
-### `set_config ...options`
+Immutable [`ServiceConfig`](./service-config.md) snapshot
+
+### `set_config :...options`
 
 Updates the supplied configuration fields. Omitted fields are unchanged.
 
-**Parameters:**
+#### Parameters
 
-| Name                 | Type                                               | Description                       |
-| -------------------- | -------------------------------------------------- | --------------------------------- |
-| `service_type`       | [`ServiceType`](./service-type.md)\|sym\|iterable? | Service type flags                |
-| `start_type`         | sym?                                               | Service start mode                |
-| `error_control`      | sym?                                               | Startup error severity            |
-| `binary_path`        | [`Str`](../std/str.md)?                            | Service command line              |
-| `load_order_group`   | [`Str`](../std/str.md)?                            | Load-order group                  |
-| `dependencies`       | iterable?                                          | Service or load-order-group names |
-| `service_start_name` | [`Str`](../std/str.md)?                            | Account name                      |
-| `password`           | [`Str`](../std/str.md)?                            | Account password                  |
-| `display_name`       | [`Str`](../std/str.md)?                            | Display name                      |
+| Name                 | Type                                                                          | Description                       |
+| -------------------- | ----------------------------------------------------------------------------- | --------------------------------- |
+| `service_type`       | [`ServiceType`](./service-type.md)\|sym\|iterable?                            | Service type flags                |
+| `start_type`         | sym?                                                                          | Service start mode                |
+| `error_control`      | sym?                                                                          | Startup error severity            |
+| `binary_path`        | [`Str`](../std/str.md)\|[`fs.windows.Path`](../fs/windows/path.md)\|iterable? | Service command line              |
+| `load_order_group`   | [`Str`](../std/str.md)?                                                       | Load-order group                  |
+| `dependencies`       | iterable?                                                                     | Service or load-order-group names |
+| `service_start_name` | [`Str`](../std/str.md)?                                                       | Account name                      |
+| `password`           | [`Str`](../std/str.md)?                                                       | Account password                  |
+| `display_name`       | [`Str`](../std/str.md)?                                                       | Display name                      |
 
-`start_type` accepts `:BOOT_START:`, `:SYSTEM_START:`, `:AUTO_START:`,
-`:DEMAND_START:`, or `:DISABLED:`. `error_control` accepts `:IGNORE:`,
-`:NORMAL:`, `:SEVERE:`, or `:CRITICAL:`.
+For `start_type` and `error_control` values, see
+[`winscm` enumeration values](./index.md#enumeration-values). `binary_path`
+uses the [`ScManager.create_service` rules](./sc-manager.md#binary_path).
+
+#### Example
 
 ```
 service.set_config
@@ -78,35 +86,38 @@ service.set_config
 
 Waits until one of the requested service status changes occurs.
 
-**Parameters:**
+#### Parameters
 
 | Name   | Type                                            | Description        |
 | ------ | ----------------------------------------------- | ------------------ |
 | `mask` | [`NotifyMask`](./notify-mask.md)\|sym\|iterable | Changes to observe |
 
-**Returns:** [`Status`](./status.md)
+#### Returns
+
+[`Status`](./status.md)
 
 ### `sec_desc :owner? :group? :dacl? :sacl?`
 
-Gets selected parts of the service's Windows security descriptor. Owner,
-group, and DACL default to `true`; SACL defaults to `false`.
+Gets selected parts of the service's Windows security descriptor.
 
-**Parameters:**
+#### Parameters
 
-| Name    | Type                     | Description                |
-| ------- | ------------------------ | -------------------------- |
-| `owner` | [`Bool`](../std/bool.md) | Load the owner SID         |
-| `group` | [`Bool`](../std/bool.md) | Load the primary group SID |
-| `dacl`  | [`Bool`](../std/bool.md) | Load the discretionary ACL |
-| `sacl`  | [`Bool`](../std/bool.md) | Load the system ACL        |
+| Name    | Type                      | Description                                  |
+| ------- | ------------------------- | -------------------------------------------- |
+| `owner` | [`Bool`](../std/bool.md)? | Load the owner SID (default: `true`)         |
+| `group` | [`Bool`](../std/bool.md)? | Load the primary group SID (default: `true`) |
+| `dacl`  | [`Bool`](../std/bool.md)? | Load the discretionary ACL (default: `true`) |
+| `sacl`  | [`Bool`](../std/bool.md)? | Load the system ACL (default: `false`)       |
 
-**Returns:** [`security.windows.SecDesc`](../security/windows/secdesc.md)
+#### Returns
+
+[`security.windows.SecDesc`](../security/windows/secdesc.md)
 
 ### `set_sec_desc desc`
 
 Applies the components selected by a Windows security descriptor's `mask`.
 
-**Parameters:**
+#### Parameters
 
 | Name   | Type                                                         | Description                  |
 | ------ | ------------------------------------------------------------ | ---------------------------- |

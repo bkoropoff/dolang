@@ -13,13 +13,15 @@ Returns a user name from the active VFS target. With no argument, resolves the
 real user ID on Unix or the access token's user SID on Windows. With a user ID,
 resolves that ID on Unix.
 
-**Parameters:**
+#### Parameters
 
 | Name  | Type   | Description                   |
 | ----- | ------ | ----------------------------- |
 | `uid` | `Int`? | Unix user ID; defaults to UID |
 
-**Returns:** [`Str`](../std/str.md)
+#### Returns
+
+[`Str`](../std/str.md)
 
 **Errors:**
 
@@ -31,7 +33,9 @@ resolves that ID on Unix.
 
 Resolves a Unix user name in the active VFS target.
 
-**Returns:** [`Int`](../std/int.md)
+#### Returns
+
+[`Int`](../std/int.md)
 
 **Errors:**
 
@@ -43,7 +47,9 @@ Resolves a Unix user name in the active VFS target.
 
 Resolves a Unix group ID in the active VFS target.
 
-**Returns:** [`Str`](../std/str.md)
+#### Returns
+
+[`Str`](../std/str.md)
 
 **Errors:**
 
@@ -55,7 +61,9 @@ Resolves a Unix group ID in the active VFS target.
 
 Resolves a Unix group name in the active VFS target.
 
-**Returns:** [`Int`](../std/int.md)
+#### Returns
+
+[`Int`](../std/int.md)
 
 **Errors:**
 
@@ -67,7 +75,9 @@ Resolves a Unix group name in the active VFS target.
 
 Returns Unix security information captured for the active VFS context.
 
-**Returns:** [`security.unix.Identity`](./unix/identity.md)
+#### Returns
+
+[`security.unix.Identity`](./unix/identity.md)
 
 **Errors:**
 
@@ -82,7 +92,9 @@ echo "uid=$info.uid euid=$info.euid"
 
 Returns Windows token information captured for the active VFS context.
 
-**Returns:** [`security.windows.TokenInfo`](./windows/tokeninfo.md)
+#### Returns
+
+[`security.windows.TokenInfo`](./windows/tokeninfo.md)
 
 **Errors:**
 

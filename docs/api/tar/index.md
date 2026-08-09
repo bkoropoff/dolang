@@ -18,14 +18,16 @@ Streams TAR archives with optional gzip or zstd compression.
 Opens an archive and calls `func` with a [`Reader`](./tar-reader.md).
 Compression is detected from gzip or zstd magic bytes.
 
-**Parameters:**
+#### Parameters
 
 | Name   | Type                                            | Description  |
 | ------ | ----------------------------------------------- | ------------ |
 | `path` | [`Str`](../std/str.md)\|[`Path`](../fs/path.md) | Archive path |
 | `func` | callable                                        | Reader scope |
 
-**Returns:** the result of `func`.
+#### Returns
+
+the result of `func`.
 
 ```
 read "archive.tar.gz" do |archive|
@@ -37,7 +39,7 @@ read "archive.tar.gz" do |archive|
 
 Creates an archive and calls `func` with a [`Writer`](./tar-writer.md).
 
-**Parameters:**
+#### Parameters
 
 | Name          | Type                                            | Description                          |
 | ------------- | ----------------------------------------------- | ------------------------------------ |
@@ -49,7 +51,9 @@ When `compression` is omitted, `.gz` and `.tgz` select gzip, `.zst` and
 `.tzst` select zstd, and other extensions select no compression. Extension
 matching is case-insensitive. An explicit `compression` overrides the path.
 
-**Returns:** the result of `func`.
+#### Returns
+
+the result of `func`.
 
 ```
 write "archive.tar.zst" do |archive|

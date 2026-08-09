@@ -8,7 +8,7 @@ Immutable view of a native Windows access-control entry.
 
 Constructs an access-allowed ACE.
 
-**Parameters:**
+#### Parameters
 
 | Name                    | Type                                             | Description               |
 | ----------------------- | ------------------------------------------------ | ------------------------- |
@@ -20,7 +20,9 @@ Constructs an access-allowed ACE.
 | `callback`              | [`Bool`](../../std/bool.md)?                     | Build a callback ACE      |
 | `application_data`      | [`Bin`](../../std/bin.md)?                       | Trailing application data |
 
-**Returns:** `Ace`
+#### Returns
+
+`Ace`
 
 Application data is zero-padded to DWORD (32-bit) alignment.
 
@@ -29,13 +31,15 @@ Application data is zero-padded to DWORD (32-bit) alignment.
 Constructs an access-denied ACE. Parameters match
 [`allow`](#allow-sid-mask-options).
 
-**Returns:** `Ace`
+#### Returns
+
+`Ace`
 
 ### `audit sid mask :successful :failed ...options`
 
 Constructs a system-audit ACE.
 
-**Parameters:**
+#### Parameters
 
 | Name         | Type                        | Description             |
 | ------------ | --------------------------- | ----------------------- |
@@ -47,9 +51,11 @@ Constructs a system-audit ACE.
 The remaining optional parameters match
 [`allow`](#allow-sid-mask-options).
 
-**Returns:** `Ace`
+#### Returns
 
-**Errors:**
+`Ace`
+
+#### Errors
 
 - Raises `ValueError` when both outcomes are false or `flags` contains audit
   outcome bits.
@@ -60,30 +66,7 @@ The remaining optional parameters match
 
 Symbolic native ACE type, or `:UNKNOWN:` for an unrecognized type code.
 
-| Code | Symbol                             |
-| ---- | ---------------------------------- |
-| 0    | `:ACCESS_ALLOWED:`                 |
-| 1    | `:ACCESS_DENIED:`                  |
-| 2    | `:SYSTEM_AUDIT:`                   |
-| 3    | `:SYSTEM_ALARM:`                   |
-| 4    | `:ACCESS_ALLOWED_COMPOUND:`        |
-| 5    | `:ACCESS_ALLOWED_OBJECT:`          |
-| 6    | `:ACCESS_DENIED_OBJECT:`           |
-| 7    | `:SYSTEM_AUDIT_OBJECT:`            |
-| 8    | `:SYSTEM_ALARM_OBJECT:`            |
-| 9    | `:ACCESS_ALLOWED_CALLBACK:`        |
-| 10   | `:ACCESS_DENIED_CALLBACK:`         |
-| 11   | `:ACCESS_ALLOWED_CALLBACK_OBJECT:` |
-| 12   | `:ACCESS_DENIED_CALLBACK_OBJECT:`  |
-| 13   | `:SYSTEM_AUDIT_CALLBACK:`          |
-| 14   | `:SYSTEM_ALARM_CALLBACK:`          |
-| 15   | `:SYSTEM_AUDIT_CALLBACK_OBJECT:`   |
-| 16   | `:SYSTEM_ALARM_CALLBACK_OBJECT:`   |
-| 17   | `:SYSTEM_MANDATORY_LABEL:`         |
-| 18   | `:SYSTEM_RESOURCE_ATTRIBUTE:`      |
-| 19   | `:SYSTEM_SCOPED_POLICY_ID:`        |
-| 20   | `:SYSTEM_PROCESS_TRUST_LABEL:`     |
-| 21   | `:SYSTEM_ACCESS_FILTER:`           |
+For recognized values, see [ACE type values](./index.md#ace-type-values).
 
 ### `type_code`
 
@@ -183,4 +166,6 @@ Raises `FieldError` for other ACE types.
 
 Returns the exact native ACE packet, including application or unknown data.
 
-**Returns:** [`Bin`](../../std/bin.md)
+#### Returns
+
+[`Bin`](../../std/bin.md)

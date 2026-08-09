@@ -8,9 +8,17 @@ Windows service type flags.
 
 Constructs a value from symbols or one iterable of symbols.
 
-Supported symbols are `:KERNEL_DRIVER:`, `:FILE_SYSTEM_DRIVER:`,
-`:WIN32_OWN_PROCESS:`, `:WIN32_SHARE_PROCESS:`, `:INTERACTIVE_PROCESS:`,
-`:DRIVER:`, and `:WIN32:`.
+#### Supported symbols
+
+| Symbol                  | Meaning                                             |
+| ----------------------- | --------------------------------------------------- |
+| `:KERNEL_DRIVER:`       | Kernel-mode device driver                           |
+| `:FILE_SYSTEM_DRIVER:`  | File-system driver                                  |
+| `:WIN32_OWN_PROCESS:`   | Win32 service running in its own process            |
+| `:WIN32_SHARE_PROCESS:` | Win32 service sharing a process with other services |
+| `:INTERACTIVE_PROCESS:` | Service that can interact with the desktop          |
+| `:DRIVER:`              | Either kind of driver                               |
+| `:WIN32:`               | Either kind of Win32 service                        |
 
 ## Methods
 
@@ -18,7 +26,9 @@ Supported symbols are `:KERNEL_DRIVER:`, `:FILE_SYSTEM_DRIVER:`,
 
 Tests whether all bits represented by a symbol are set.
 
-**Returns:** [`Bool`](../std/bool.md)
+#### Returns
+
+[`Bool`](../std/bool.md)
 
 ## Operators
 

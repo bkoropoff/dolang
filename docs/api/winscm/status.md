@@ -12,9 +12,9 @@ Service type flags. **Type:** [`ServiceType`](./service-type.md)
 
 Current state. **Type:** sym|[`Int`](../std/int.md)
 
-Recognized values are `:STOPPED:`, `:START_PENDING:`, `:STOP_PENDING:`,
-`:RUNNING:`, `:CONTINUE_PENDING:`, `:PAUSE_PENDING:`, and `:PAUSED:`. An
-unrecognized native value is returned as an `Int`.
+For recognized values, see
+[service state values](./index.md#service-state-values). An unrecognized native
+value is returned as an `Int`.
 
 ### `controls_accepted`
 

@@ -8,17 +8,24 @@ Windows service access rights.
 
 Constructs a mask from symbols or one iterable of symbols.
 
-Supported service-specific symbols are `:SERVICE_QUERY_CONFIG:`,
-`:SERVICE_CHANGE_CONFIG:`, `:SERVICE_QUERY_STATUS:`,
-`:SERVICE_ENUMERATE_DEPENDENTS:`, `:SERVICE_START:`, `:SERVICE_STOP:`,
-`:SERVICE_PAUSE_CONTINUE:`, `:SERVICE_INTERROGATE:`,
-`:SERVICE_USER_DEFINED_CONTROL:`, and `:SERVICE_ALL_ACCESS:`.
+#### Supported symbols
 
-The generic rights `:DELETE:`, `:READ_CONTROL:`, `:WRITE_DAC:`,
-`:WRITE_OWNER:`, `:SYNCHRONIZE:`, `:STANDARD_RIGHTS_REQUIRED:`,
-`:STANDARD_RIGHTS_ALL:`, `:ACCESS_SYSTEM_SECURITY:`, `:MAXIMUM_ALLOWED:`,
-`:GENERIC_READ:`, `:GENERIC_WRITE:`, `:GENERIC_EXECUTE:`, and `:GENERIC_ALL:`
-are also supported.
+| Symbol                              | Meaning                                         |
+| ----------------------------------- | ----------------------------------------------- |
+| `:SERVICE_QUERY_CONFIG:`            | Query the service configuration                 |
+| `:SERVICE_CHANGE_CONFIG:`           | Change the service configuration                |
+| `:SERVICE_QUERY_STATUS:`            | Query the current service status                |
+| `:SERVICE_ENUMERATE_DEPENDENTS:`    | Enumerate dependent services                    |
+| `:SERVICE_START:`                   | Start the service                               |
+| `:SERVICE_STOP:`                    | Stop the service                                |
+| `:SERVICE_PAUSE_CONTINUE:`          | Pause or resume the service                     |
+| `:SERVICE_INTERROGATE:`             | Request that the service report its status      |
+| `:SERVICE_USER_DEFINED_CONTROL:`    | Send user-defined control codes to the service  |
+| `:SERVICE_ALL_ACCESS:`              | All service-specific rights                     |
+
+The generic object rights in
+[`security.windows.AccessMask`](../security/windows/access-mask.md) are also
+supported.
 
 ## Methods
 
@@ -26,7 +33,9 @@ are also supported.
 
 Tests whether all bits represented by a symbol are set.
 
-**Returns:** [`Bool`](../std/bool.md)
+#### Returns
+
+[`Bool`](../std/bool.md)
 
 ## Operators
 

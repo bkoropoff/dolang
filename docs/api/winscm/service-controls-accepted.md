@@ -8,9 +8,21 @@ Controls accepted by a running service.
 
 Constructs a value from symbols or one iterable of symbols.
 
-Supported symbols are `:STOP:`, `:PAUSE_CONTINUE:`, `:SHUTDOWN:`,
-`:PARAMCHANGE:`, `:NETBINDCHANGE:`, `:HARDWAREPROFILECHANGE:`, `:POWEREVENT:`,
-`:SESSIONCHANGE:`, `:PRESHUTDOWN:`, `:TIMECHANGE:`, and `:TRIGGEREVENT:`.
+#### Supported symbols
+
+| Symbol                    | Accepts control requests to                       |
+| ------------------------- | ------------------------------------------------- |
+| `:STOP:`                  | Stop the service                                  |
+| `:PAUSE_CONTINUE:`        | Pause or continue the service                     |
+| `:SHUTDOWN:`              | Prepare for system shutdown                       |
+| `:PARAMCHANGE:`           | Reload configuration parameters                   |
+| `:NETBINDCHANGE:`         | Handle a network binding change                   |
+| `:HARDWAREPROFILECHANGE:` | Handle a hardware-profile change                  |
+| `:POWEREVENT:`            | Handle a power event                              |
+| `:SESSIONCHANGE:`         | Handle a terminal-services session change         |
+| `:PRESHUTDOWN:`           | Prepare for system shutdown before other services |
+| `:TIMECHANGE:`            | Handle a system-time change                       |
+| `:TRIGGEREVENT:`          | Handle a service-trigger event                    |
 
 ## Methods
 
@@ -18,7 +30,9 @@ Supported symbols are `:STOP:`, `:PAUSE_CONTINUE:`, `:SHUTDOWN:`,
 
 Tests whether all bits represented by a symbol are set.
 
-**Returns:** [`Bool`](../std/bool.md)
+#### Returns
+
+[`Bool`](../std/bool.md)
 
 ## Operators
 

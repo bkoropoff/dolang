@@ -8,7 +8,7 @@ An XML attribute.
 
 Creates an attribute.
 
-**Parameters:**
+#### Parameters
 
 | Name        | Type   | Description                  |
 | ----------- | ------ | ---------------------------- |
@@ -17,7 +17,9 @@ Creates an attribute.
 | `namespace` | `str?` | Namespace URI                |
 | `prefix`    | `str?` | Preferred namespace prefix   |
 
-**Returns:** `Attr`.
+#### Returns
+
+`Attr`.
 
 ```
 let attr = Attr "id" "123" namespace: "urn:inventory" prefix: "inv"

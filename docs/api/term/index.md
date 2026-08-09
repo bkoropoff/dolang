@@ -71,7 +71,9 @@ Returns the current output console: the one installed by an enclosing
 none. This is where `echo`, `print`, diagnostics, and unredirected child
 process output go.
 
-**Returns:** [`Console`](./console.md)
+#### Returns
+
+[`Console`](./console.md)
 
 ### `capture console func ...args`
 
@@ -85,7 +87,7 @@ it and restores the previous one.
 
 The override is inherited by all strands spawned inside the call.
 
-**Parameters:**
+#### Parameters
 
 | Name      | Type                            | Description                           |
 | --------- | ------------------------------- | ------------------------------------- |
@@ -93,7 +95,9 @@ The override is inherited by all strands spawned inside the call.
 | `func`    | callable                        | Block to run                          |
 | `...`     |                                 | Additional arguments passed to `func` |
 
-**Returns:** Return value of `func`.
+#### Returns
+
+Return value of `func`.
 
 ```
 let lines = []
@@ -119,7 +123,7 @@ strand's implicit output stream.
 Verbatim output is captured, which must be valid UTF-8. One final line ending
 (LF or CRLF) is removed unless `trim: false`.
 
-**Parameters:**
+#### Parameters
 
 | Name        | Type                      | Description                                     |
 | ----------- | ------------------------- | ----------------------------------------------- |
@@ -128,7 +132,9 @@ Verbatim output is captured, which must be valid UTF-8. One final line ending
 | `can_style` | [`Bool`](../std/bool.md)? | Keep ANSI styling (default `false`)             |
 | `...`       |                           | Additional arguments passed to `func`           |
 
-**Returns:** [`Str`](../std/str.md)
+#### Returns
+
+[`Str`](../std/str.md)
 
 ```
 let greeting = term.sub do greet Alice
@@ -140,14 +146,16 @@ assert_eq $greeting "Hello, Alice!"
 Runs a function with default console-bound output silenced: `echo`, `print`,
 unredirected program `stderr`, etc.
 
-**Parameters:**
+#### Parameters
 
 | Name      | Type     | Description                           |
 | --------- | -------- | ------------------------------------- |
 | `func`    | callable | Block to run                          |
 | `...args` |          | Additional arguments passed to `func` |
 
-**Returns:** Return value of `func`.
+#### Returns
+
+Return value of `func`.
 
 ```
 # Nothing from this reaches the terminal.
@@ -159,13 +167,15 @@ mute do run printf "this will not be printed"
 Prints arguments separated by spaces, followed by a newline. Ordinary values
 are sanitized; direct [`Text`](./text.md) arguments retain their styling.
 
-**Parameters:**
+#### Parameters
 
 | Name      | Type | Description                                    |
 | --------- | ---- | ---------------------------------------------- |
 | `...args` | *    | Values converted with `arg` and written safely |
 
-**Returns:** `nil`
+#### Returns
+
+`nil`
 
 ```
 echo status: ready count: 3
@@ -176,7 +186,7 @@ echo status: ready count: 3
 Prints concatenated values without separators or a trailing newline. Styling
 is omitted when stderr is not a terminal.
 
-**Parameters:**
+#### Parameters
 
 | Name      | Type | Description                         |
 | --------- | ---- | ----------------------------------- |
@@ -185,7 +195,9 @@ is omitted when stderr is not a terminal.
 Also accepts the module's [style options](#style-options). `:INHERIT:` is a
 no-op for `print`.
 
-**Returns:** `nil`
+#### Returns
+
+`nil`
 
 ```
 print "status: " ready fg: :GREEN: bold: true
@@ -196,7 +208,7 @@ print "status: " ready fg: :GREEN: bold: true
 Constructs styled terminal text from concatenated values. With no positional
 arguments, it returns a reusable [`Style`](./style.md) instead.
 
-**Parameters:**
+#### Parameters
 
 | Name      | Type | Description                         |
 | --------- | ---- | ----------------------------------- |
@@ -206,7 +218,9 @@ Also accepts the module's [style options](#style-options). `:INHERIT:` leaves
 a setting to the surrounding style. This is normally the default, but clears
 a saved setting when deriving a [`Style`](./style.md).
 
-**Returns:** [`Text`](./text.md) when positional arguments are provided;
+#### Returns
+
+[`Text`](./text.md) when positional arguments are provided;
 otherwise [`Style`](./style.md)
 
 ```
@@ -219,13 +233,15 @@ echo $warning
 Validates existing ANSI-styled text. SGR styling is canonicalized; other
 terminal controls, including hyperlinks, are removed.
 
-**Parameters:**
+#### Parameters
 
 | Name   | Type                   | Description              |
 | ------ | ---------------------- | ------------------------ |
 | `text` | [`Str`](../std/str.md) | ANSI-formatted input     |
 
-**Returns:** [`Text`](./text.md)
+#### Returns
+
+[`Text`](./text.md)
 
 ```
 let formatted = preformat input
@@ -237,14 +253,16 @@ echo $formatted
 Formats an error value and backtrace for terminal presentation.
 The returned text does not include a final newline.
 
-**Parameters:**
+#### Parameters
 
 | Name        | Type                                      | Description                            |
 | ----------- | ----------------------------------------- | -------------------------------------- |
 | `error`     |                                           | Error value or message                 |
 | `backtrace` | [`strand.Backtrace`](../strand/index.md)? | Explicit backtrace; defaults to active |
 
-**Returns:** [`Text`](./text.md)
+#### Returns
+
+[`Text`](./text.md)
 
 **Errors:**
 

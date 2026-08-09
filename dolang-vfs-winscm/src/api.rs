@@ -75,11 +75,11 @@ impl ScManager {
     pub async fn create_service(
         &self,
         name: &str,
-        display_name: &str,
+        display_name: Option<&str>,
         service_type: ServiceType,
         start_type: StartType,
         error_control: ErrorControl,
-        binary_path: &str,
+        binary_path: Option<&str>,
         access: ServiceAccess,
     ) -> Result<Service, Error> {
         self.create_service_with_options(
@@ -101,11 +101,11 @@ impl ScManager {
     pub async fn create_service_with_options(
         &self,
         name: &str,
-        display_name: &str,
+        display_name: Option<&str>,
         service_type: ServiceType,
         start_type: StartType,
         error_control: ErrorControl,
-        binary_path: &str,
+        binary_path: Option<&str>,
         options: CreateServiceOptions,
         access: ServiceAccess,
     ) -> Result<Service, Error> {
@@ -114,11 +114,11 @@ impl ScManager {
             .call_extension::<WinScmExt>(WinScmRequest::CreateService {
                 manager: self.handle.clone(),
                 name: name.to_string(),
-                display_name: display_name.to_string(),
+                display_name: display_name.map(str::to_owned),
                 service_type,
                 start_type,
                 error_control,
-                binary_path: binary_path.to_string(),
+                binary_path: binary_path.map(str::to_owned),
                 options,
                 access,
             })

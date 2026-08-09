@@ -16,7 +16,7 @@ use crate::{
     config::{Config, ConfigAnnex},
     convert,
     global::Global,
-    manager::{expect_str, expect_str_iterable},
+    manager::{binary_path_from_value, expect_str, expect_str_iterable},
     status,
 };
 
@@ -262,9 +262,10 @@ impl<'v> Object<'v> for Service {
                     service_type: service_type.map(Into::into),
                     start_type,
                     error_control,
-                    binary_path: binary_path
-                        .map(|value| expect_str(strand, value, "binary_path"))
-                        .transpose()?,
+                    binary_path: match binary_path {
+                        Some(value) => Some(binary_path_from_value(strand, value).await?),
+                        None => None,
+                    },
                     load_order_group: load_order_group
                         .map(|value| expect_str(strand, value, "load_order_group"))
                         .transpose()?,

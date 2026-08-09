@@ -10,7 +10,7 @@ It can be subclassed for library-specific operational failures.
 
 Creates a system error.
 
-**Parameters:**
+#### Parameters
 
 | Name    | Type                            | Description              |
 | ------- | ------------------------------- | ------------------------ |

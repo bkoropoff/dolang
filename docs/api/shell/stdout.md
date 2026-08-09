@@ -9,13 +9,15 @@ Handle for the process's standard output, obtained as
 
 Writes bytes verbatim and reports how many were written.
 
-**Parameters:**
+#### Parameters
 
 | Name   | Type                                           | Description    |
 | ------ | ---------------------------------------------- | -------------- |
 | `data` | [`Str`](../std/str.md)\|[`Bin`](../std/bin.md) | Bytes to write |
 
-**Returns:** [`Int`](../std/int.md) — bytes written. For a `Str`, this is the
+#### Returns
+
+[`Int`](../std/int.md) — bytes written. For a `Str`, this is the
 UTF-8 byte count, not the character count.
 
 **Errors:**

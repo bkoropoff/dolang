@@ -36,7 +36,9 @@ def scm_crud_round_trips()
   # covering the trailing-block idiom's auto-close branch.
   winscm.open access: [:SC_MANAGER_CREATE_SERVICE:, :SC_MANAGER_ENUMERATE_SERVICE:] do |manager|
     let service = try
-      manager.create_service $name $display_name $binary_path
+      manager.create_service $name
+        display_name: $display_name
+        binary_path: $binary_path
         access: :SERVICE_ALL_ACCESS:
         service_start_name: "LocalSystem"
     catch PermissionDeniedError: _
@@ -56,6 +58,7 @@ def scm_crud_round_trips()
     let updated_display_name = "$display_name updated"
     service.set_config
       display_name: $updated_display_name
+      binary_path: [binary_path]
       dependencies: []
     let updated_config = service.config()
     assert_eq $updated_config.display_name $updated_display_name

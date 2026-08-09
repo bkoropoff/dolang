@@ -12,13 +12,15 @@ Runs `func` on a background stream and connects to a VFS server over its input
 and output. The function must launch a program that speaks the VFS protocol.
 The `Vfs` retains the background stream for its lifetime.
 
-**Parameters:**
+#### Parameters
 
 | Name   | Type     | Description                 |
 | ------ | -------- | --------------------------- |
 | `func` | callable | VFS server launcher         |
 
-**Returns:** `Vfs`
+#### Returns
+
+`Vfs`
 
 ```
 let remote = Vfs do run ssh host dolang-vfs --stdio
@@ -43,13 +45,15 @@ non-Unix context reports that Unix VFS connections are unsupported.
 The working directory in which the `dolang-vfs` process started becomes
 the context's initial working directory.
 
-**Parameters:**
+#### Parameters
 
 | Name   | Type                    | Description      |
 | ------ | ----------------------- | ---------------- |
 | `path` | [`Path`](../fs/path.md) | Unix socket path |
 
-**Returns:** `Vfs`
+#### Returns
+
+`Vfs`
 
 ```
 let a = Vfs.unix_socket /tmp/agent/socket
@@ -70,7 +74,7 @@ working directory unless `cd:` overrides it. `env:` accepts string or symbol
 keys; `nil` unsets a variable and `:INHERIT:` captures the calling strand's
 current value.
 
-**Parameters:**
+#### Parameters
 
 | Name  | Type                     | Description           |
 | ----- | ------------------------ | --------------------- |
@@ -85,7 +89,9 @@ from the non-elevated caller. Console programs using inherited terminal I/O may
 hang, fail, or produce no output. Redirected and captured output uses ordinary
 handles and works across the elevated VFS boundary.
 
-**Returns:** `Vfs`
+#### Returns
+
+`Vfs`
 
 ```
 let admin = Vfs.windows_admin()

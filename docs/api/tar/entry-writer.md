@@ -8,13 +8,15 @@ Writes content to one scoped TAR entry.
 
 Writes raw string or binary bytes.
 
-**Parameters:**
+#### Parameters
 
 | Name   | Type                                           | Description    |
 | ------ | ---------------------------------------------- | -------------- |
 | `data` | [`Str`](../std/str.md)\|[`Bin`](../std/bin.md) | Bytes to write |
 
-**Returns:** `nil`.
+#### Returns
+
+`nil`.
 
 ```
 entry.write header

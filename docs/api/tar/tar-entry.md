@@ -62,13 +62,15 @@ Device minor number, or `nil` when absent.
 
 Reads up to `size` bytes from the current content position.
 
-**Parameters:**
+#### Parameters
 
 | Name   | Type                    | Description             |
 | ------ | ----------------------- | ----------------------- |
 | `size` | [`Int`](../std/int.md)  | Maximum bytes to read   |
 
-**Returns:** [`Bin`](../std/bin.md).
+#### Returns
+
+[`Bin`](../std/bin.md).
 
 ```
 let prefix = entry.read 512

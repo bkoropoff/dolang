@@ -6,13 +6,11 @@
 
 ### `Path path`
 
-**Parameters:**
+#### Parameters
 
 | Name   | Type                                               | Description |
 | ------ | -------------------------------------------------- | ----------- |
 | `path` | [`Str`](../../std/str.md)\|[`fs.Path`](../path.md) | Path value  |
-
-**Returns:** `Path`.
 
 Converting a Unix path is allowed only when it is relative.
 
@@ -24,6 +22,8 @@ See [`fs.Path`](../path.md) for shared fields, methods, and operators.
 
 Drive letter for `C:`-style and `\\?\C:`-style prefixes, or `nil` otherwise.
 
+#### Example
+
 ```
 let path = Path "C:/work/file.txt"
 echo $path.disk  # C
@@ -32,6 +32,8 @@ echo $path.disk  # C
 ### `server`
 
 UNC server name, or `nil` if the path does not use a UNC prefix.
+
+#### Example
 
 ```
 let path = Path "//server/share/file.txt"
@@ -42,6 +44,8 @@ echo $path.server  # server
 
 UNC share name, or `nil` if the path does not use a UNC prefix.
 
+#### Example
+
 ```
 let path = Path "//server/share/file.txt"
 echo $path.share  # share
@@ -50,6 +54,8 @@ echo $path.share  # share
 ### `device`
 
 Device namespace name for `\\.\name` paths, or `nil` otherwise.
+
+#### Example
 
 ```
 let path = Path r"\\.\COM42"
@@ -60,6 +66,8 @@ echo $path.device  # COM42
 
 Returns whether the path uses a verbatim `\\?\...` prefix.
 
+#### Example
+
 ```
 let path = Path r"\\?\C:\work\file.txt"
 echo $path.is_verbatim  # true
@@ -68,6 +76,8 @@ echo $path.is_verbatim  # true
 ### `stream_name`
 
 Alternate data stream name, or `nil` if no stream is specified.
+
+#### Example
 
 ```
 let path = Path "file.txt:zone"
@@ -81,6 +91,8 @@ Alternate data stream type without the leading `$`, or `nil` if no alternate
 data stream was specified, or an alternate data stream was specified without an
 explicit type.
 
+#### Example
+
 ```
 let path = Path "file.txt:zone:$DATA"
 echo $path.stream_type  # DATA
@@ -88,51 +100,55 @@ echo $path.stream_type  # DATA
 
 ## Methods
 
-### `sec_desc :resolve? = :TARGET: ...`
+### `sec_desc :owner? :group? :dacl? :sacl? :resolve?`
 
 Gets selected parts of the Windows security descriptor.
 
-**Optional Parameters:**
+#### Parameters
 
-| Name       | Type                        | Description                                              |
-| ---------- | --------------------------- | -------------------------------------------------------- |
-| `owner:`   | [`Bool`](../../std/bool.md) | Load the owner SID                                       |
-| `group:`   | [`Bool`](../../std/bool.md) | Load the primary group SID                               |
-| `dacl:`    | [`Bool`](../../std/bool.md) | Load the discretionary ACL                               |
-| `sacl:`    | [`Bool`](../../std/bool.md) | Load the system ACL                                      |
-| `resolve:` | `:TARGET:`\|`:LINK:`        | Resolution mode (see [fs](../index.md#resolution-modes)) |
+| Name      | Type                         | Description                                                                   |
+| --------- | ---------------------------- | ----------------------------------------------------------------------------- |
+| `owner`   | [`Bool`](../../std/bool.md)? | Load the owner SID (default: `true`)                                          |
+| `group`   | [`Bool`](../../std/bool.md)? | Load the primary group SID (default: `true`)                                  |
+| `dacl`    | [`Bool`](../../std/bool.md)? | Load the discretionary ACL (default: `true`)                                  |
+| `sacl`    | [`Bool`](../../std/bool.md)? | Load the system ACL (default: `false`)                                        |
+| `resolve` | `:TARGET:`\|`:LINK:`?        | Resolution mode (default: `:TARGET:`; see [fs](../index.md#resolution-modes)) |
 
-**Returns:** [`security.windows.SecDesc`](../../security/windows/secdesc.md)
+#### Returns
+
+[`security.windows.SecDesc`](../../security/windows/secdesc.md)
 
 SACL access requires `SeSecurityPrivilege`.
 
-### `set_sec_desc desc :resolve = :TARGET:`
+### `set_sec_desc desc :resolve?`
 
 Applies the components selected by a `SecDesc`'s `mask`.
 
-**Parameters:**
+#### Parameters
 
-| Name      | Type                                                            | Description                                              |
-| --------- | --------------------------------------------------------------- | -------------------------------------------------------- |
-| `desc`    | [`security.windows.SecDesc`](../../security/windows/secdesc.md) | Security descriptor to apply                             |
-| `resolve` | `:TARGET:`\|`:LINK:`                                            | Resolution mode (see [fs](../index.md#resolution-modes)) |
+| Name      | Type                                                            | Description                                                                   |
+| --------- | --------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `desc`    | [`security.windows.SecDesc`](../../security/windows/secdesc.md) | Security descriptor to apply                                                  |
+| `resolve` | `:TARGET:`\|`:LINK:`?                                           | Resolution mode (default: `:TARGET:`; see [fs](../index.md#resolution-modes)) |
 
 Windows may normalize the descriptor when associating it with the
 filesystem object.
 
-### `streams :resolve = :TARGET:`
+### `streams :resolve?`
 
 Lists alternate data streams for this path.
 
 #### Parameters
 
-| Name      | Type                 | Description                                              |
-| --------- | -------------------- | -------------------------------------------------------- |
-| `resolve` | `:TARGET:`\|`:LINK:` | Resolution mode (see [fs](../index.md#resolution-modes)) |
+| Name      | Type                  | Description                                                                   |
+| --------- | --------------------- | ----------------------------------------------------------------------------- |
+| `resolve` | `:TARGET:`\|`:LINK:`? | Resolution mode (default: `:TARGET:`; see [fs](../index.md#resolution-modes)) |
 
 #### Returns
 
 iterator of [`StreamEntry`](stream-entry.md)
+
+#### Example
 
 ```
 let path = Path "data.txt"

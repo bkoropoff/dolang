@@ -34,7 +34,9 @@ assert_eq $pack.len 3
 
 Appends positional and keyed arguments to the pack.
 
-**Returns:** `nil`
+#### Returns
+
+`nil`
 
 ```
 let pack = args 1

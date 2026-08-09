@@ -23,13 +23,15 @@ that simply cannot report its size.
 
 Writes bytes verbatim and reports how many were written.
 
-**Parameters:**
+#### Parameters
 
 | Name   | Type                                           | Description    |
 | ------ | ---------------------------------------------- | -------------- |
 | `data` | [`Str`](../std/str.md)\|[`Bin`](../std/bin.md) | Bytes to write |
 
-**Returns:** [`Int`](../std/int.md) byte count
+#### Returns
+
+[`Int`](../std/int.md) byte count
 
 ```
 term.console.write b"\x1b[2K"
@@ -39,13 +41,15 @@ term.console.write b"\x1b[2K"
 
 Writes bytes followed by *this console's* line ending.
 
-**Parameters:**
+#### Parameters
 
 | Name   | Type                                           | Description    |
 | ------ | ---------------------------------------------- | -------------- |
 | `data` | [`Str`](../std/str.md)\|[`Bin`](../std/bin.md) | Bytes to write |
 
-**Returns:** [`Int`](../std/int.md) byte count, excluding the line ending
+#### Returns
+
+[`Int`](../std/int.md) byte count, excluding the line ending
 
 ### `flush()`
 
@@ -55,7 +59,9 @@ Makes buffered output visible.
 
 The console's dimensions, or `nil` if it is just a stream.
 
-**Returns:** [`Geometry`](./geometry.md) or `nil`
+#### Returns
+
+[`Geometry`](./geometry.md) or `nil`
 
 ```
 let g = term.console.geometry()

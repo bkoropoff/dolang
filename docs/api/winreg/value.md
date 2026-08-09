@@ -16,10 +16,10 @@ The default value of a key has the name `""`.
 
 The value's `REG_*` kind. **Type:** sym|[`Int`](../std/int.md)
 
-One of `:SZ:`, `:EXPAND_SZ:`, `:MULTI_SZ:`, `:DWORD:`, `:DWORD_BIG_ENDIAN:`,
-`:QWORD:`, `:BINARY:`, or `:NONE:` for a recognized kind. For an
-unrecognized `REG_*` kind, this is the raw kind number instead, and `value`
-is the raw [`Bin`](../std/bin.md) payload.
+For recognized values, see
+[registry value kind values](./index.md#registry-value-kind-values). An
+unrecognized `REG_*` kind is returned as its raw kind number instead, and
+`value` is the raw [`Bin`](../std/bin.md) payload.
 
 ### `value`
 
@@ -34,6 +34,8 @@ The value's data, in its natural Do representation. **Type:**
 | `:BINARY:`                                 | `Bin`               |
 | `:NONE:`                                   | `nil`               |
 | unrecognized (int `kind`)                  | `Bin` (raw payload) |
+
+#### Example
 
 ```
 for :name :kind :value = key.values()

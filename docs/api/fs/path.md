@@ -7,13 +7,15 @@ Abstract supertype of [`fs.unix.Path`](unix/path.md) and
 
 ### `Path path`
 
-**Parameters:**
+#### Parameters
 
 | Name   | Type                                      | Description |
 | ------ | ----------------------------------------- | ----------- |
 | `path` | [`Str`](../std/str.md)\|[`Path`](path.md) | Path value  |
 
-**Returns:** [`fs.unix.Path`](unix/path.md) or
+#### Returns
+
+[`fs.unix.Path`](unix/path.md) or
 [`fs.windows.Path`](windows/path.md).
 
 The returned path type is chosen according to the current VFS context.

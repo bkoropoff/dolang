@@ -25,7 +25,9 @@ assert_eq (int 3.14) 3
 
 Formats the integer in base 2.
 
-**Returns:** [`Str`](./str.md)
+#### Returns
+
+[`Str`](./str.md)
 
 ```
 assert_eq ((10).binary()) "1010"
@@ -36,7 +38,9 @@ assert_eq ((-10).binary()) "-1010"
 
 Formats the integer in base 8.
 
-**Returns:** [`Str`](./str.md)
+#### Returns
+
+[`Str`](./str.md)
 
 ```
 assert_eq ((10).octal()) "12"
@@ -47,7 +51,9 @@ assert_eq ((-10).octal()) "-12"
 
 Formats the integer in lowercase base 16.
 
-**Returns:** [`Str`](./str.md)
+#### Returns
+
+[`Str`](./str.md)
 
 ```
 assert_eq ((255).hex()) "ff"

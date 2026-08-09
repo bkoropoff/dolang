@@ -8,11 +8,19 @@ Registry key access rights.
 
 Constructs a mask from symbols or one iterable of symbols.
 
-Supported symbols are `:READ:`, `:WRITE:`, `:READ_WRITE:`, `:DELETE:`,
-`:READ_CONTROL:`, `:WRITE_DAC:`, `:WRITE_OWNER:`, `:SYNCHRONIZE:`,
-`:STANDARD_RIGHTS_REQUIRED:`, `:STANDARD_RIGHTS_ALL:`,
-`:ACCESS_SYSTEM_SECURITY:`, `:MAXIMUM_ALLOWED:`, `:GENERIC_READ:`,
-`:GENERIC_WRITE:`, `:GENERIC_EXECUTE:`, and `:GENERIC_ALL:`.
+#### Supported symbols
+
+| Symbol         | Meaning                                                                                      |
+| -------------- | -------------------------------------------------------------------------------------------- |
+| `:READ:`       | Query values, enumerate subkeys, receive change notifications, and read security information |
+| `:WRITE:`      | Set values, create subkeys, and read security information                                    |
+| `:READ_WRITE:` | Combines `:READ:` and `:WRITE:`                                                              |
+
+The generic object rights in
+[`security.windows.AccessMask`](../security/windows/access-mask.md) are also
+supported.
+
+#### Example
 
 ```
 let access = AccessMask :READ: :WRITE_DAC:
@@ -24,7 +32,9 @@ let access = AccessMask :READ: :WRITE_DAC:
 
 Tests whether all bits represented by a symbol are set.
 
-**Returns:** [`Bool`](../std/bool.md)
+#### Returns
+
+[`Bool`](../std/bool.md)
 
 ## Operators
 

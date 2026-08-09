@@ -8,9 +8,20 @@ Service status changes to observe.
 
 Constructs a mask from symbols or one iterable of symbols.
 
-Supported symbols are `:STOPPED:`, `:START_PENDING:`, `:STOP_PENDING:`,
-`:RUNNING:`, `:CONTINUE_PENDING:`, `:PAUSE_PENDING:`, `:PAUSED:`, `:CREATED:`,
-`:DELETED:`, and `:DELETE_PENDING:`.
+#### Supported symbols
+
+| Symbol              | Observes a change to                                       |
+| ------------------- | ---------------------------------------------------------- |
+| `:STOPPED:`         | The stopped state                                          |
+| `:START_PENDING:`   | The start-pending state                                    |
+| `:STOP_PENDING:`    | The stop-pending state                                     |
+| `:RUNNING:`         | The running state                                          |
+| `:CONTINUE_PENDING:`| The continue-pending state                                 |
+| `:PAUSE_PENDING:`   | The pause-pending state                                    |
+| `:PAUSED:`          | The paused state                                           |
+| `:CREATED:`         | Service creation                                           |
+| `:DELETED:`         | Service deletion                                           |
+| `:DELETE_PENDING:`  | A service becoming marked for deletion                     |
 
 ## Methods
 
@@ -18,7 +29,9 @@ Supported symbols are `:STOPPED:`, `:START_PENDING:`, `:STOP_PENDING:`,
 
 Tests whether all bits represented by a symbol are set.
 
-**Returns:** [`Bool`](../std/bool.md)
+#### Returns
+
+[`Bool`](../std/bool.md)
 
 ## Operators
 

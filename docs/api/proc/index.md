@@ -15,7 +15,7 @@ output capture.
 
 Runs a callable with temporary process termination defaults.
 
-**Parameters:**
+#### Parameters
 
 | Name     | Type                                                          | Description                                         |
 | -------- | ------------------------------------------------------------- | --------------------------------------------------- |
@@ -25,7 +25,7 @@ Runs a callable with temporary process termination defaults.
 | `force`  | [`bool`](../std/bool.md)                                      | Force termination after the grace period            |
 | `...`    |                                                               | Additional arguments passed to `func`               |
 
-**Returns:**
+#### Returns
 
 The return value of `func`.
 

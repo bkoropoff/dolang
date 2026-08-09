@@ -353,17 +353,17 @@ impl Drop for AutoCloseHandle {
 fn create_service(
     manager: SC_HANDLE,
     name: &str,
-    display_name: &str,
+    display_name: Option<&str>,
     service_type: u32,
     start_type: u32,
     error_control: u32,
-    binary_path: &str,
+    binary_path: Option<&str>,
     options: &CreateServiceOptions,
     access: ServiceAccess,
 ) -> Result<SC_HANDLE, Error> {
     let name = wide(name);
-    let display_name = wide(display_name);
-    let binary_path = wide(binary_path);
+    let display_name = optional_wide(display_name);
+    let binary_path = optional_wide(binary_path);
     let load_order_group = optional_wide(options.load_order_group.as_deref());
     let dependencies =
         (!options.dependencies.is_empty()).then(|| multi_wide(&options.dependencies));
@@ -376,12 +376,12 @@ fn create_service(
             CreateServiceW(
                 manager,
                 name.as_ptr(),
-                display_name.as_ptr(),
+                optional_ptr(display_name.as_ref()),
                 access.0,
                 service_type,
                 start_type,
                 error_control,
-                binary_path.as_ptr(),
+                optional_ptr(binary_path.as_ref()),
                 optional_ptr(load_order_group.as_ref()),
                 ptr::null_mut(),
                 optional_ptr(dependencies.as_ref()),
@@ -796,11 +796,11 @@ pub(crate) async fn handle(
             let handle = create_service(
                 guard.0,
                 &name,
-                &display_name,
+                display_name.as_deref(),
                 service_type.0,
                 start_type.0,
                 error_control.0,
-                &binary_path,
+                binary_path.as_deref(),
                 &options,
                 access,
             )?;
