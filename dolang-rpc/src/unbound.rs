@@ -1,13 +1,13 @@
 //! Staged construction: negotiate first, choose a concrete [`Protocol`]
 //! afterward.
 //!
-//! [`Client<P>`](crate::Client)/[`Server<P>`](crate::Server) are generic over
+//! [`Client<P>`](crate::client::Client)/[`Server<P>`](crate::server::Server) are generic over
 //! a statically known `P`, but which concrete `P` to use can depend on the
 //! *negotiated* application-protocol version (e.g. a future protocol
-//! revision might be represented as a distinct Rust type). [`UnboundClient`]
-//! and [`UnboundServer`] negotiate an application protocol first, expose
-//! what was negotiated, and only then let the caller [`bind`](UnboundClient::bind)
-//! to a concrete `P`.
+//! revision might be represented as a distinct Rust type). The client and
+//! server [`Unbound`](crate::client::Unbound) endpoints negotiate an
+//! application protocol first, expose what was negotiated, and only then let
+//! the caller bind to a concrete `P`.
 //!
 //! [`Builder`] is the sole entry point for constructing either one: it takes
 //! the mandatory application-protocol descriptor up front, offers chainable
@@ -25,9 +25,9 @@ use std::os::windows::io::OwnedHandle;
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::{NamedPipeClient, NamedPipeServer};
 
-use crate::{Client, Error, Limits, Protocol, Server, fragment, transport};
+use crate::{Error, Limits, Protocol, client::Client, fragment, server::Server, transport};
 
-/// Builds an [`UnboundClient`] or [`UnboundServer`].
+/// Builds an unbound client or server endpoint.
 ///
 /// A builder advertises one application-protocol name and supported versions.
 /// Its terminal `client*` or `server*` method consumes it, performs the
@@ -139,7 +139,7 @@ impl Builder {
     }
 
     /// Negotiates a client session over a bidirectional byte stream.
-    pub async fn client<T>(self, stream: T) -> Result<UnboundClient, Error>
+    pub async fn client<T>(self, stream: T) -> Result<crate::client::Unbound, Error>
     where
         T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
@@ -158,7 +158,11 @@ impl Builder {
 
     /// Negotiates a client session over separate byte-stream reader and writer
     /// halves.
-    pub async fn client_split<R, W>(self, reader: R, writer: W) -> Result<UnboundClient, Error>
+    pub async fn client_split<R, W>(
+        self,
+        reader: R,
+        writer: W,
+    ) -> Result<crate::client::Unbound, Error>
     where
         R: AsyncRead + Send + 'static,
         W: AsyncWrite + Send + 'static,
@@ -180,8 +184,8 @@ impl Builder {
     /// Negotiates a client session over a connected Unix domain socket.
     ///
     /// Unlike [`client`](Self::client), this transport supports direct
-    /// [`OsHandle`](crate::OsHandle) attachments.
-    pub async fn client_unix(self, stream: UnixStream) -> Result<UnboundClient, Error> {
+    /// [`OsHandle`](crate::handle::OsHandle) attachments.
+    pub async fn client_unix(self, stream: UnixStream) -> Result<crate::client::Unbound, Error> {
         let (sender, receiver) = transport::unix::unix(stream)?;
         negotiate_client(
             transport::AnySender::Unix(sender),
@@ -211,7 +215,7 @@ impl Builder {
         self,
         pipe: NamedPipeServer,
         peer_process: OwnedHandle,
-    ) -> Result<UnboundClient, Error> {
+    ) -> Result<crate::client::Unbound, Error> {
         crate::client::validate_peer_process(
             &peer_process,
             transport::windows::server_pipe_peer_pid(&pipe)?,
@@ -244,7 +248,7 @@ impl Builder {
         self,
         pipe: NamedPipeClient,
         peer_process: OwnedHandle,
-    ) -> Result<UnboundClient, Error> {
+    ) -> Result<crate::client::Unbound, Error> {
         crate::client::validate_peer_process(
             &peer_process,
             transport::windows::client_pipe_peer_pid(&pipe)?,
@@ -262,7 +266,7 @@ impl Builder {
     }
 
     /// Negotiates a server session over a bidirectional byte stream.
-    pub async fn server<T>(self, stream: T) -> Result<UnboundServer, Error>
+    pub async fn server<T>(self, stream: T) -> Result<crate::server::Unbound, Error>
     where
         T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
@@ -278,7 +282,11 @@ impl Builder {
 
     /// Negotiates a server session over separate byte-stream reader and writer
     /// halves.
-    pub async fn server_split<R, W>(self, reader: R, writer: W) -> Result<UnboundServer, Error>
+    pub async fn server_split<R, W>(
+        self,
+        reader: R,
+        writer: W,
+    ) -> Result<crate::server::Unbound, Error>
     where
         R: AsyncRead + Send + 'static,
         W: AsyncWrite + Send + 'static,
@@ -297,8 +305,8 @@ impl Builder {
     /// Negotiates a server session over a connected Unix domain socket.
     ///
     /// Unlike [`server`](Self::server), this transport supports direct
-    /// [`OsHandle`](crate::OsHandle) attachments.
-    pub async fn server_unix(self, stream: UnixStream) -> Result<UnboundServer, Error> {
+    /// [`OsHandle`](crate::handle::OsHandle) attachments.
+    pub async fn server_unix(self, stream: UnixStream) -> Result<crate::server::Unbound, Error> {
         let (sender, receiver) = transport::unix::unix(stream)?;
         negotiate_server(
             transport::AnySender::Unix(sender),
@@ -314,7 +322,7 @@ impl Builder {
     pub async fn server_named_pipe_server(
         self,
         pipe: NamedPipeServer,
-    ) -> Result<UnboundServer, Error> {
+    ) -> Result<crate::server::Unbound, Error> {
         let (sender, receiver) = transport::windows::server_pipe(pipe, true)?;
         negotiate_server(
             transport::AnySender::Windows(sender),
@@ -330,7 +338,7 @@ impl Builder {
     pub async fn server_named_pipe_client(
         self,
         pipe: NamedPipeClient,
-    ) -> Result<UnboundServer, Error> {
+    ) -> Result<crate::server::Unbound, Error> {
         let (sender, receiver) = transport::windows::client_pipe(pipe, true)?;
         negotiate_server(
             transport::AnySender::Windows(sender),
@@ -383,10 +391,7 @@ async fn negotiate_server(
     })
 }
 
-/// A negotiated client endpoint that has not yet been bound to a [`Protocol`].
-///
-/// Inspect [`name`](Self::name) and [`version`](Self::version), select the
-/// compatible Rust protocol type, then consume this value with [`bind`](Self::bind).
+/// Implementation of [`crate::client::Unbound`].
 pub struct UnboundClient {
     sender: transport::AnySender,
     receiver: transport::AnyReceiver,
@@ -427,10 +432,7 @@ impl UnboundClient {
     }
 }
 
-/// A negotiated server endpoint that has not yet been bound to a [`Protocol`].
-///
-/// Inspect [`name`](Self::name) and [`version`](Self::version), select the
-/// compatible Rust protocol type, then consume this value with [`bind`](Self::bind).
+/// Implementation of [`crate::server::Unbound`].
 pub struct UnboundServer {
     sender: transport::AnySender,
     receiver: transport::AnyReceiver,

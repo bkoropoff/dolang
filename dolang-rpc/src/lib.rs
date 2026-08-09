@@ -3,10 +3,10 @@
 //!
 //! Define a [`Protocol`], negotiate a transport with [`Builder`], then bind
 //! the negotiated endpoint to that protocol. The client may issue concurrent
-//! calls; [`Server::serve`] dispatches concurrent request handlers.
+//! calls; [`server::Server::serve`] dispatches concurrent request handlers.
 //!
 //! ```no_run
-//! use dolang_rpc::{Builder, CallContext, Protocol};
+//! use dolang_rpc::{Builder, Protocol, server::CallContext};
 //! use serde::{Deserialize, Serialize};
 //!
 //! #[derive(Deserialize, Serialize)]
@@ -46,28 +46,20 @@
 //! }
 //! ```
 
-mod client;
+pub mod client;
 mod fragment;
-mod handle;
-mod opaque;
+pub mod handle;
 mod serde;
-mod server;
-mod trailer;
+pub mod server;
+pub mod session;
+pub mod trailer;
 mod transport;
 mod unbound;
 
 use ::serde::{Serialize, de::DeserializeOwned};
 use bytes::Bytes;
-pub use client::{Call, Client};
-pub use handle::{DefaultHandle, OsHandle};
-pub use opaque::{InvalidOpaque, Opaque, OpaqueGuard, OpaqueResource};
-pub use server::{CallContext, RequestCancelled, Server};
-pub use trailer::{TrailerRecv, TrailerSend};
 use transport::{RecvFrame, SendFrame};
-pub use unbound::{Builder, UnboundClient, UnboundServer};
-
-// FIXME: Re-export CallResult before presenting Call's Future output as a
-// stable, explicitly nameable public API type.
+pub use unbound::Builder;
 
 /// Configurable size and concurrency limits for a session. Not public — set
 /// via [`Builder`]'s chainable setters instead.
@@ -141,10 +133,11 @@ pub(crate) const NEGOTIATE_MAX_PAYLOAD_SIZE: usize = 64 * 1024;
 /// represented by distinct Rust request and response types. Both peers must
 /// bind the negotiated connection to compatible implementations.
 pub trait Protocol: Send + Sync + 'static {
-    /// Messages sent by [`Client`] calls and received by [`Server`] handlers.
+    /// Messages sent by [`client::Client`] calls and received by
+    /// [`server::Server`] handlers.
     type Request: Serialize + DeserializeOwned + Send + 'static;
-    /// Messages returned by [`Server`] handlers and yielded by completed
-    /// [`Call`]s.
+    /// Messages returned by [`server::Server`] handlers and yielded by
+    /// completed [`client::Call`]s.
     type Response: Serialize + DeserializeOwned + Send + 'static;
 }
 

@@ -16,7 +16,12 @@ use std::os::unix::{
 #[cfg(windows)]
 use std::os::windows::io::{AsHandle, OwnedHandle};
 
-use dolang_rpc::{Call, DefaultHandle, Opaque, OsHandle, TrailerRecv, TrailerSend};
+use dolang_rpc::{
+    client::Call,
+    handle::{DefaultHandle, OsHandle},
+    session::Opaque,
+    trailer::{TrailerRecv, TrailerSend},
+};
 use dolang_winterop::{SecDesc, Sid};
 #[cfg(unix)]
 use tokio::net::UnixStream;
@@ -27,12 +32,13 @@ use tokio::{
     task::JoinHandle,
 };
 
+use crate::extension::VfsExtension;
 #[cfg(unix)]
 use crate::protocol::AccessRequest;
 use crate::{
     Child, Command, FileHandle, FsMetadata, Metadata, MetadataPatch, PosixAcl, ProcessStatus,
     Query, ReadDir, SessionMode, SidName, StdioRecv, StdioSend, StreamEntry, Utf8TypedPath,
-    Utf8TypedPathBuf, Vfs, VfsExtension, WellKnownPath, XattrEntry,
+    Utf8TypedPathBuf, Vfs, WellKnownPath, XattrEntry,
     direct::DirectFile,
     protocol::{
         AclRequest, CanonicalizeRequest, CopyRequest, CreateDirRequest, ExtensionRequest,
@@ -55,7 +61,7 @@ use crate::{
 /// trait when code should work with local and remote backends alike.
 #[derive(Clone)]
 pub struct Client {
-    rpc: dolang_rpc::Client<VfsProtocol>,
+    rpc: dolang_rpc::client::Client<VfsProtocol>,
     mode: SessionMode,
     vfs: Option<Opaque<crate::VfsMarker>>,
 }
@@ -3126,7 +3132,7 @@ mod tests {
         };
 
         let encoded = postcard::to_allocvec(&send_opaque).unwrap();
-        let wrong: dolang_rpc::Opaque<crate::StdioRecvMarker> =
+        let wrong: dolang_rpc::session::Opaque<crate::StdioRecvMarker> =
             postcard::from_bytes(&encoded).unwrap();
         let response = client
             .request(RequestKind::StdioRecvClose { stdio: wrong })
@@ -3209,7 +3215,7 @@ mod tests {
         assert_eq!(recv.read(&mut eof).await.unwrap(), 0);
 
         let encoded = postcard::to_allocvec(&send_opaque).unwrap();
-        let wrong_vfs: dolang_rpc::Opaque<crate::VfsMarker> =
+        let wrong_vfs: dolang_rpc::session::Opaque<crate::VfsMarker> =
             postcard::from_bytes(&encoded).unwrap();
         let mut wrong_client = root.clone();
         wrong_client.vfs = Some(wrong_vfs);

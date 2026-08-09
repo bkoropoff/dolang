@@ -5,7 +5,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use dolang_rpc::DefaultHandle;
+use dolang_rpc::handle::DefaultHandle;
 use tokio::{
     fs::File,
     io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf},

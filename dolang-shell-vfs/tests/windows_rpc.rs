@@ -11,7 +11,7 @@ use std::{
 
 use dolang_vfs::{
     AnyVfs, Child, Client, Command, FileHandle, MetadataPatch, OpenOptions, OwnershipIdentity,
-    SecurityInfo, Server, TargetInfo, Utf8TypedPath, Utf8WindowsPath, Vfs,
+    SecurityInfo, Server, TargetInfo, Vfs,
 };
 use tempfile::tempdir;
 use tokio::{
@@ -19,6 +19,7 @@ use tokio::{
     net::windows::named_pipe::{ClientOptions, ServerOptions},
     task::JoinHandle,
 };
+use typed_path::{Utf8TypedPath, Utf8WindowsPath};
 use windows_sys::Win32::Security::{
     GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
 };

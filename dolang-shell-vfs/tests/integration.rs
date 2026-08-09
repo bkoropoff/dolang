@@ -1,6 +1,6 @@
 #![deny(warnings)]
 #![cfg(unix)]
-use dolang_vfs::{Child, Command, SecurityInfo, TargetInfo, Utf8TypedPath, Utf8UnixPath, Vfs};
+use dolang_vfs::{Child, Command, SecurityInfo, TargetInfo, Vfs};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
@@ -8,6 +8,7 @@ use std::path::Path;
 use std::time::Duration;
 use tempfile::tempdir;
 use tokio::time::timeout;
+use typed_path::{Utf8TypedPath, Utf8UnixPath};
 
 const AGENT_BIN: &str = env!("CARGO_BIN_EXE_dolang-vfs");
 

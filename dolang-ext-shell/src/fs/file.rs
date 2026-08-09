@@ -13,9 +13,10 @@ use dolang::runtime::{
 };
 use dolang_vfs::{
     AnyFile, FileHandle, FileLockBehavior, FileLockMode, FileLockRange, FileLockRequest,
-    OpenOptions, OperatingSystem, Utf8TypedPath, Vfs,
+    OpenOptions, OperatingSystem, Vfs,
 };
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use typed_path::Utf8TypedPath;
 
 use crate::{
     error::{ErrorExt as _, ResultExt as _},

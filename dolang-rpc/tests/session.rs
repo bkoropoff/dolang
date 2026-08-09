@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 
-use dolang_rpc::{Builder, CallContext, Client, Error, Protocol};
+use dolang_rpc::{Builder, Error, Protocol, client::Client, server::CallContext};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -783,7 +783,7 @@ async fn client_discarding_a_response_trailer_errors_the_servers_writer() {
 mod unix_handles {
     use std::{io::Read, os::fd::AsFd};
 
-    use dolang_rpc::OsHandle;
+    use dolang_rpc::handle::OsHandle;
     use nix::unistd::{pipe, write};
     use serde::{Deserialize, Serialize};
 
@@ -879,7 +879,7 @@ mod windows_handles {
         sync::atomic::{AtomicU64, Ordering},
     };
 
-    use dolang_rpc::OsHandle;
+    use dolang_rpc::handle::OsHandle;
     use serde::{Deserialize, Serialize};
     use tokio::net::windows::named_pipe::{
         ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions,

@@ -10,7 +10,8 @@ use std::{
     ptr,
 };
 
-use dolang_vfs::{Error, ErrorKind, ExtContext, ExtOsHandle, InvalidHandle, OperatingSystem};
+use dolang_vfs::extension::{ExtContext, ExtOsHandle, InvalidHandle};
+use dolang_vfs::{Error, ErrorKind, OperatingSystem};
 use dolang_winterop::{
     ALL_SECURITY_INFORMATION, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
     SACL_SECURITY_INFORMATION, SecDesc as VfsSecDesc,
@@ -490,7 +491,7 @@ fn with_handle<R>(key: &Key, f: impl FnOnce(HKEY) -> R) -> R {
 /// Wraps a freshly-opened `HKEY` into the appropriate [`KeyHandle`]: a
 /// native out-of-band handle when the peer's transport supports it (no
 /// registration — ownership transfers fully to the peer), otherwise a
-/// registered [`dolang_vfs::ExtOpaque`].
+/// registered [`dolang_vfs::extension::ExtOpaque`].
 fn key_response(ctx: &ExtContext<'_>, handle: HKEY) -> WinRegResponse {
     if ctx.native_capable() {
         WinRegResponse::Key(KeyHandle::Native(ExtOsHandle::new(hkey_to_owned(handle))))

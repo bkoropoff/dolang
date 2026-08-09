@@ -726,7 +726,7 @@ impl crate::OpenOptions for DirectOpenOptions {
 impl Direct {
     /// Calls a registered VFS extension in-process, with no RPC session or
     /// serialization involved.
-    pub async fn call_extension<T: crate::VfsExtension>(
+    pub async fn call_extension<T: crate::extension::VfsExtension>(
         &self,
         request: T::Request,
     ) -> crate::Result<T::Response> {
@@ -736,8 +736,8 @@ impl Direct {
                 format!("VFS extension {} v{} is not available", T::NAME, T::VERSION),
             )
         })?;
-        let mut state = crate::DirectContext::default();
-        let mut ctx = crate::ExtContext::direct(&mut state);
+        let mut state = crate::extension::DirectContext::default();
+        let mut ctx = crate::extension::ExtContext::direct(&mut state);
         let response = ext.dispatch(&mut ctx, Box::new(request)).await;
         Ok(*response
             .downcast::<T::Response>()

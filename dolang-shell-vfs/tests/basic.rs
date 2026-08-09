@@ -2,12 +2,13 @@
 #![cfg(unix)]
 use dolang_vfs::{
     AccessFlags, Child, Client, Command, Direct, FileHandle, FileType, MetadataPatch,
-    OwnershipIdentity, SecurityInfo, TargetInfo, Utf8TypedPath, Utf8UnixPath, Vfs,
+    OwnershipIdentity, SecurityInfo, TargetInfo, Vfs,
 };
 #[cfg(not(target_os = "macos"))]
 use nix::unistd::getgroups;
 use nix::unistd::{Group, User, getegid, geteuid, getgid, getuid};
 use std::{os::fd::OwnedFd, path::Path};
+use typed_path::{Utf8TypedPath, Utf8UnixPath};
 
 use tempfile::tempdir;
 use tokio::task::JoinHandle;

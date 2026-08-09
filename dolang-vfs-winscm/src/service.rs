@@ -1,14 +1,14 @@
 //! Backend service resource.
 //!
 //! Only exists under `#[cfg(windows)]`: the stub backend never calls
-//! [`dolang_vfs::ExtContext::register`], so there is nothing to hold
+//! [`dolang_vfs::extension::ExtContext::register`], so there is nothing to hold
 //! on other platforms.
 
 #![cfg(windows)]
 
 use std::sync::Arc;
 
-use dolang_vfs::ExtResource;
+use dolang_vfs::extension::ExtResource;
 use dolang_winterop::Reactor;
 use windows_sys::Win32::System::Services::{CloseServiceHandle, SC_HANDLE};
 

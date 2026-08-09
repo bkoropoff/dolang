@@ -13,7 +13,8 @@
 //! code, which lets a Unix host describe Windows paths and vice versa.
 //!
 //! ```no_run
-//! use dolang_vfs::{Direct, OpenOptions, Utf8TypedPath, Utf8UnixPath, Utf8WindowsPath, Vfs};
+//! use dolang_vfs::{Direct, OpenOptions, Vfs};
+//! use typed_path::{Utf8TypedPath, Utf8UnixPath, Utf8WindowsPath};
 //!
 //! async fn read_a_file() -> dolang_vfs::Result<()> {
 //!     let vfs = Direct::default();
@@ -29,8 +30,8 @@
 //! }
 //! ```
 
-pub use dolang_rpc::DefaultHandle;
 use dolang_winterop::{SecDesc, Sid};
+use extension::VfsExtension;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -44,10 +45,7 @@ use tokio::{
     io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf},
     task::JoinHandle,
 };
-pub use typed_path::{
-    PathType, Utf8TypedPath, Utf8TypedPathBuf, Utf8UnixPath, Utf8UnixPathBuf, Utf8WindowsPath,
-    Utf8WindowsPathBuf, Utf8WindowsPrefix,
-};
+use typed_path::{PathType, Utf8TypedPath, Utf8TypedPathBuf, Utf8UnixPath, Utf8WindowsPath};
 mod client;
 mod direct;
 mod error;
@@ -1490,10 +1488,6 @@ pub trait Vfs {
 }
 
 pub use direct::{Direct, DirectFile, DirectOpenOptions};
-pub use extension::{
-    DirectContext, ExtContext, ExtGuard, ExtOpaque, ExtOsHandle, ExtResource, InvalidHandle,
-    VfsExtension,
-};
 pub use pipe::{StdioRecv, StdioSend};
 
 /// Marker for a regular file retained by a VFS RPC session.

@@ -2,7 +2,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::{io, path::PathBuf};
 
-use dolang_rpc::{Opaque, OsHandle, Protocol};
+use dolang_rpc::{Protocol, handle::OsHandle, session::Opaque};
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
     de::{Error as _, SeqAccess, Visitor},
@@ -40,8 +40,9 @@ impl Protocol for VfsProtocol {
 }
 
 /// Application-protocol name/version advertised during the RPC handshake.
-/// `dolang_rpc::Server`/`Client` are only reachable via `UnboundServer`/
-/// `UnboundClient`, which require this descriptor.
+/// `dolang_rpc::server::Server` and `dolang_rpc::client::Client` are only
+/// reachable via their respective `Unbound` endpoints, which require this
+/// descriptor.
 pub(crate) const APP_PROTOCOL: (&str, &[u16]) = ("dolang-vfs", &[1]);
 
 /// Starts a fresh [`dolang_rpc::Builder`] preconfigured with

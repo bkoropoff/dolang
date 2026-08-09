@@ -10,9 +10,8 @@ use dolang::runtime::{
     value::{Nil, Singleton},
     vm::Builder,
 };
-use dolang_vfs::{
-    AnyVfs, Child as _, Command, OperatingSystem, ProcessControl, Utf8TypedPath, Vfs,
-};
+use dolang_vfs::{AnyVfs, Child as _, Command, OperatingSystem, ProcessControl, Vfs};
+use typed_path::{PathType, Utf8TypedPath, Utf8UnixPath, Utf8WindowsPath};
 
 use crate::{
     error::{self, ResultExt as _},
@@ -632,10 +631,8 @@ async fn run<'v, 's>(
     };
     let operating_system = target.operating_system;
     let program = match operating_system.path_type() {
-        dolang_vfs::PathType::Unix => Utf8TypedPath::Unix(dolang_vfs::Utf8UnixPath::new(name)),
-        dolang_vfs::PathType::Windows => {
-            Utf8TypedPath::Windows(dolang_vfs::Utf8WindowsPath::new(name))
-        }
+        PathType::Unix => Utf8TypedPath::Unix(Utf8UnixPath::new(name)),
+        PathType::Windows => Utf8TypedPath::Windows(Utf8WindowsPath::new(name)),
     };
     let mut command = vfs.command(program);
     if let Some(policy_override) = io.policy_override {
@@ -892,11 +889,9 @@ impl<'v> Object<'v> for Program {
             let resolved = vfs
                 .which(
                     match cwd.to_path() {
-                        Utf8TypedPath::Unix(_) => {
-                            Utf8TypedPath::Unix(dolang_vfs::Utf8UnixPath::new(name))
-                        }
+                        Utf8TypedPath::Unix(_) => Utf8TypedPath::Unix(Utf8UnixPath::new(name)),
                         Utf8TypedPath::Windows(_) => {
-                            Utf8TypedPath::Windows(dolang_vfs::Utf8WindowsPath::new(name))
+                            Utf8TypedPath::Windows(Utf8WindowsPath::new(name))
                         }
                     },
                     paths.as_deref(),

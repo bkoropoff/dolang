@@ -8,8 +8,7 @@ use std::{io, path::Path};
 use dolang_vfs::{AttrFlags, AttrsPatch};
 use dolang_vfs::{
     Child, Command, Direct, FileHandle, FileLockBehavior, FileLockMode, FileLockRange,
-    FileLockRequest, FileType, MetadataPatch, OpenOptions, Utf8TypedPath, Utf8UnixPath,
-    Utf8WindowsPath, Vfs,
+    FileLockRequest, FileType, MetadataPatch, OpenOptions, Vfs,
 };
 #[cfg(any(unix, windows))]
 use dolang_vfs::{ProcessControl, Signal, TerminationPolicy};
@@ -18,6 +17,7 @@ use dolang_winterop::{
     DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
 };
 use tempfile::tempdir;
+use typed_path::{Utf8TypedPath, Utf8UnixPath, Utf8WindowsPath};
 
 fn typed(path: &Path) -> Utf8TypedPath<'_> {
     let path = path.to_str().unwrap();

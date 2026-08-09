@@ -9,7 +9,8 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 
-use dolang_vfs::{Error, ErrorKind, ExtContext, InvalidHandle, OperatingSystem};
+use dolang_vfs::extension::{ExtContext, InvalidHandle};
+use dolang_vfs::{Error, ErrorKind, OperatingSystem};
 use dolang_winterop::{
     ALL_SECURITY_INFORMATION, ApcCancelled, ApcContext, DACL_SECURITY_INFORMATION, Reactor,
     SACL_SECURITY_INFORMATION, SecDesc as VfsSecDesc, with_security_privilege,

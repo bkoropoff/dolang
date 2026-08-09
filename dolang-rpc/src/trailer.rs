@@ -442,10 +442,11 @@ impl Drop for SendLease<'_> {
 
 /// A streaming request or response trailer.
 ///
-/// This type implements [`AsyncWrite`](tokio::io::AsyncWrite). Call
+/// This type implements [`AsyncWrite`]. Call
 /// [`finish`](Self::finish), or asynchronously shut down the writer, to
 /// commit the trailer; dropping it first aborts the trailer. `finish` returns
-/// the value wrapped by the operation that created it, such as a [`Call`](crate::Call).
+/// the value wrapped by the operation that created it, such as a
+/// [`Call`](crate::client::Call).
 pub struct TrailerSend<T> {
     shared: Arc<Mutex<SendShared>>,
     completion: Option<T>,
@@ -972,7 +973,7 @@ impl Drop for RecvLease<'_> {
 
 /// A streaming request or response trailer.
 ///
-/// This type implements [`AsyncRead`](tokio::io::AsyncRead). End of file
+/// This type implements [`AsyncRead`]. End of file
 /// means the peer finished the trailer.
 ///
 /// Dropping or [`discard`](TrailerRecv::discard)ing a `TrailerRecv` before

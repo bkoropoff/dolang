@@ -6,13 +6,14 @@ use std::io::{self, SeekFrom};
 use dolang_vfs::XattrNamespace;
 use dolang_vfs::{
     AnyCommand, AnyVfs, Child, Client, Command, DirEntry, Direct, FileHandle, FileLockBehavior,
-    FileLockMode, FileLockRange, FileLockRequest, FileType, OpenOptions, ReadDir, Server,
-    Utf8TypedPath, Utf8UnixPath, Utf8WindowsPath, Vfs, typed_path,
+    FileLockMode, FileLockRange, FileLockRequest, FileType, OpenOptions, ReadDir, Server, Vfs,
+    typed_path,
 };
 #[cfg(windows)]
 use dolang_winterop::{DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION};
 use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use typed_path::{Utf8TypedPath, Utf8UnixPath, Utf8WindowsPath};
 
 async fn connected_pair() -> (Client, tokio::task::JoinHandle<io::Result<()>>) {
     let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);

@@ -8,10 +8,11 @@ use std::{
 };
 
 use dolang::runtime::{Strand, strand};
+use dolang_vfs::typed_path;
 use dolang_vfs::{
     AnyVfs, OperatingSystem, OperatingSystemFamily, SecurityInfo, Signal, TargetInfo,
 };
-use dolang_vfs::{Utf8TypedPathBuf, typed_path};
+use typed_path::Utf8TypedPathBuf;
 
 use crate::{io_mode::IoMode, shell_args::ArgsData};
 

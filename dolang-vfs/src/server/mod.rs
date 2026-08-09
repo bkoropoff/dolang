@@ -9,7 +9,11 @@ use std::{
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
 
-use dolang_rpc::{CallContext, DefaultHandle, Opaque, OpaqueResource, OsHandle};
+use dolang_rpc::{
+    handle::{DefaultHandle, OsHandle},
+    server::CallContext,
+    session::{Opaque, OpaqueGuard, OpaqueResource},
+};
 use dolang_winterop::SecDesc;
 #[cfg(unix)]
 use std::os::unix::io::OwnedFd;
@@ -22,10 +26,11 @@ use tokio::sync::{Mutex, watch};
 #[cfg(unix)]
 use tokio::task::{JoinError, JoinSet};
 
+use crate::extension::ExtContext;
 use crate::{
-    AnyFile, AnyVfs, Child as _, Command as _, Direct, Error, ExtContext, FileHandle as _,
-    FileLockRequest, FileMarker, OpenOptions as _, PosixAcl, SessionMode, StdioRecv,
-    StdioRecvMarker, StdioSend, StdioSendMarker, Utf8TypedPath, Vfs,
+    AnyFile, AnyVfs, Child as _, Command as _, Direct, Error, FileHandle as _, FileLockRequest,
+    FileMarker, OpenOptions as _, PosixAcl, SessionMode, StdioRecv, StdioRecvMarker, StdioSend,
+    StdioSendMarker, Utf8TypedPath, Vfs,
     protocol::{
         AccessRequest, AclRequest, CanonicalizeRequest, CopyRequest, CreateDirRequest,
         ExtensionRequest, ExtensionResponse, FsMetadataRequest, GlobRequest, HardLinkRequest,
@@ -175,7 +180,7 @@ struct ServerState {
 pub struct Server {
     #[cfg(unix)]
     listener: Option<UnixListener>,
-    rpc: Option<dolang_rpc::Server<VfsProtocol>>,
+    rpc: Option<dolang_rpc::server::Server<VfsProtocol>>,
     mode: SessionMode,
     shared: Arc<ServerState>,
 }
@@ -371,7 +376,7 @@ fn orderly_disconnect(error: &dolang_rpc::Error) -> bool {
 }
 
 async fn serve_connection(
-    rpc: dolang_rpc::Server<VfsProtocol>,
+    rpc: dolang_rpc::server::Server<VfsProtocol>,
     connection: Arc<Connection>,
     stop: Arc<AtomicBool>,
 ) -> Result<(), dolang_rpc::Error> {
@@ -957,7 +962,7 @@ impl Connection {
         &self,
         context: &CallContext<VfsProtocol>,
         stdio: Opaque<StdioSendMarker>,
-    ) -> Result<dolang_rpc::OpaqueGuard<RetainedStdioSend>, WireError> {
+    ) -> Result<OpaqueGuard<RetainedStdioSend>, WireError> {
         context
             .acquire::<RetainedStdioSend>(stdio)
             .map_err(|_| Self::invalid_opaque("stdio send"))
@@ -967,7 +972,7 @@ impl Connection {
         &self,
         context: &CallContext<VfsProtocol>,
         stdio: Opaque<StdioRecvMarker>,
-    ) -> Result<dolang_rpc::OpaqueGuard<RetainedStdioRecv>, WireError> {
+    ) -> Result<OpaqueGuard<RetainedStdioRecv>, WireError> {
         context
             .acquire::<RetainedStdioRecv>(stdio)
             .map_err(|_| Self::invalid_opaque("stdio receive"))
@@ -1137,7 +1142,7 @@ impl Connection {
         &self,
         context: &CallContext<VfsProtocol>,
         file: Opaque<FileMarker>,
-    ) -> Result<dolang_rpc::OpaqueGuard<RetainedFile>, WireError> {
+    ) -> Result<OpaqueGuard<RetainedFile>, WireError> {
         context.acquire::<RetainedFile>(file).map_err(|_| {
             wire_error(io::Error::new(
                 io::ErrorKind::InvalidInput,

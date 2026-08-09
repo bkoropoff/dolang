@@ -30,7 +30,7 @@ pub type DefaultHandle = std::os::windows::io::OwnedHandle;
 /// [`Builder::client_unix`](crate::Builder::client_unix) or
 /// [`Builder::server_unix`](crate::Builder::server_unix) on Unix, and the
 /// named-pipe constructors on Windows. Serializing it over a generic byte
-/// stream currently panics; use [`Opaque`](crate::Opaque) for resources that
+/// stream currently panics; use [`Opaque`](crate::session::Opaque) for resources that
 /// must work over every transport. A message cannot contain both an
 /// `OsHandle` attachment and a streaming trailer.
 pub struct OsHandle<T = DefaultHandle>(T);

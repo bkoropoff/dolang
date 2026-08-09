@@ -1,6 +1,6 @@
 //! Windows Service Control Manager VFS extension for `dolang-vfs`.
 //!
-//! Registers a remoteable [`dolang_vfs::VfsExtension`] providing
+//! Registers a remoteable [`dolang_vfs::extension::VfsExtension`] providing
 //! typed access to the Windows Service Control Manager, dispatched
 //! identically whether served in-process or over a real VFS RPC session.
 //! See [`ScManager`] for the public entry point.

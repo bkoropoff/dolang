@@ -4,8 +4,7 @@ use dolang::runtime::{
     vm::Builder,
 };
 use dolang_vfs::{
-    AttrFlags, AttrsPatch, FileHandle, FileType, OpenOptions, PosixAcl, Utf8TypedPath,
-    Utf8TypedPathBuf, Vfs, WellKnownPath,
+    AttrFlags, AttrsPatch, FileHandle, FileType, OpenOptions, PosixAcl, Vfs, WellKnownPath,
 };
 use dolang_winterop::{
     DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
@@ -19,6 +18,7 @@ use std::{
     str,
 };
 use tokio::io::{AsyncRead, AsyncWriteExt, ReadBuf};
+use typed_path::{Utf8TypedPath, Utf8TypedPathBuf};
 
 use rand::{RngExt, distr::Alphanumeric};
 
@@ -826,9 +826,9 @@ async fn glob<'v, 's>(
             .operating_system
             .path_type()
         {
-            dolang_vfs::PathType::Unix => Utf8TypedPath::Unix(dolang_vfs::Utf8UnixPath::new("")),
-            dolang_vfs::PathType::Windows => {
-                Utf8TypedPath::Windows(dolang_vfs::Utf8WindowsPath::new(""))
+            typed_path::PathType::Unix => Utf8TypedPath::Unix(typed_path::Utf8UnixPath::new("")),
+            typed_path::PathType::Windows => {
+                Utf8TypedPath::Windows(typed_path::Utf8WindowsPath::new(""))
             }
         }
     });

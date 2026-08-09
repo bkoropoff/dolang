@@ -5,7 +5,8 @@
 //! request/response enums here exist solely so [`WinRegExt`] can route and
 //! (de)serialize through the VFS extension mechanism.
 
-use dolang_vfs::{Error, ExtContext, ExtOpaque, ExtOsHandle, VfsExtension};
+use dolang_vfs::Error;
+use dolang_vfs::extension::{ExtContext, ExtOpaque, ExtOsHandle, VfsExtension};
 use dolang_winterop::SecDesc;
 use serde::{Deserialize, Serialize};
 
@@ -191,4 +192,4 @@ impl VfsExtension for WinRegExt {
     }
 }
 
-dolang_vfs::vfs_extension!(WinRegExt);
+dolang_vfs::extension::vfs_extension!(WinRegExt);

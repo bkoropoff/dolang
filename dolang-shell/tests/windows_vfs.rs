@@ -7,9 +7,10 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use dolang_vfs::{Client, Utf8TypedPath, Utf8WindowsPath, Vfs as _};
+use dolang_vfs::{Client, Vfs as _};
 use tokio::net::windows::named_pipe::ServerOptions;
 use tokio::process::Command as TokioCommand;
+use typed_path::{Utf8TypedPath, Utf8WindowsPath};
 
 static NEXT_PIPE: AtomicU64 = AtomicU64::new(0);
 

@@ -32,9 +32,10 @@ use crate::{
 use dolang::runtime::value::View;
 use dolang_vfs::{
     AnyVfs, Client, OperatingSystem, Query, SecurityInfo, StdioRecv, StdioSend, TargetInfo,
-    Utf8TypedPathBuf, Vfs as _, VfsSession,
+    Vfs as _, VfsSession,
 };
 use std::collections::HashMap;
+use typed_path::Utf8TypedPathBuf;
 
 use crate::error;
 

@@ -1,6 +1,6 @@
 //! Windows registry VFS extension for `dolang-vfs`.
 //!
-//! Registers a remoteable [`dolang_vfs::VfsExtension`] providing
+//! Registers a remoteable [`dolang_vfs::extension::VfsExtension`] providing
 //! typed CRUD access to the Windows registry, dispatched identically
 //! whether served in-process or over a real VFS RPC session. See
 //! [`Key`] for the public entry point.

@@ -1,3 +1,10 @@
+//! Session-scoped opaque resources.
+//!
+//! [`Opaque`] is a serializable identity token for a resource retained by one
+//! endpoint. It can be redeemed only through that endpoint's
+//! [`CallContext`](crate::server::CallContext) while the resource remains
+//! registered.
+
 use serde::{Deserialize, Serialize};
 use std::{
     any::{Any, TypeId},
@@ -11,7 +18,8 @@ use std::{
 ///
 /// `Marker` is the public protocol-level type carried by [`Opaque`]. The
 /// concrete resource type may remain private. A marker does not by itself
-/// authorize a downcast: [`CallContext::acquire`](crate::CallContext::acquire)
+/// authorize a downcast:
+/// [`CallContext::acquire`](crate::server::CallContext::acquire)
 /// also verifies the concrete type.
 pub trait OpaqueResource: Send + Sync + 'static {
     type Marker: ?Sized + 'static;

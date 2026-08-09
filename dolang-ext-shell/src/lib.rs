@@ -190,14 +190,14 @@ pub fn as_path<'v, 's>(strand: &mut Strand<'v, 's>, value: &Value<'v>) -> Option
 pub fn as_unix_path<'v, 's>(
     strand: &mut Strand<'v, 's>,
     value: &Value<'v>,
-) -> Option<dolang_vfs::Utf8UnixPathBuf> {
+) -> Option<typed_path::Utf8UnixPathBuf> {
     let global = strand.state::<Global<'v>>();
     let path = global.types.unix_path.cast(value)?;
     path.enter_sync(strand, |_strand, inst| {
         let annex = inst.annex();
         match &annex.inner {
-            dolang_vfs::Utf8TypedPathBuf::Unix(path) => Some(path.clone()),
-            dolang_vfs::Utf8TypedPathBuf::Windows(_) => None,
+            typed_path::Utf8TypedPathBuf::Unix(path) => Some(path.clone()),
+            typed_path::Utf8TypedPathBuf::Windows(_) => None,
         }
     })
 }
@@ -212,7 +212,7 @@ pub fn unix_path<'v, 's>(
     fs::path::create_path(
         strand,
         global,
-        dolang_vfs::Utf8TypedPathBuf::from_unix(path.as_ref()),
+        typed_path::Utf8TypedPathBuf::from_unix(path.as_ref()),
         out,
     )
 }
