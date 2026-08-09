@@ -134,6 +134,10 @@ impl FlagLike for ManagerAccessMask {
         ("GENERIC_EXECUTE", ManagerAccessMask::GENERIC_EXECUTE),
         ("GENERIC_ALL", ManagerAccessMask::GENERIC_ALL),
     ];
+
+    fn rank(self) -> usize {
+        self.0.count_ones() as usize
+    }
 }
 
 impl From<ManagerAccessMask> for WireServiceAccess {
@@ -281,6 +285,10 @@ impl FlagLike for ServiceAccessMask {
         ("GENERIC_EXECUTE", ServiceAccessMask::GENERIC_EXECUTE),
         ("GENERIC_ALL", ServiceAccessMask::GENERIC_ALL),
     ];
+
+    fn rank(self) -> usize {
+        self.0.count_ones() as usize
+    }
 }
 
 impl From<ServiceAccessMask> for WireServiceAccess {

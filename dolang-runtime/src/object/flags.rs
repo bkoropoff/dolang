@@ -10,19 +10,21 @@
 //! output — all implemented once, generically, in [`Flags`].
 
 use std::{
+    cell::Cell,
     future::Future,
     hash::{Hash, Hasher},
     marker::PhantomData,
+    ops::ControlFlow,
     ops::{BitAnd, BitOr, BitXor, Not},
 };
 
 use crate::{
     arg::{Arg, Args},
     error::{Error, Result},
+    gc::{Collect, arena::Visit},
     object::{
-        array,
         native::{Instance, Object, Type, TypeBuilder},
-        protocol::{Spread, SpreadContext},
+        protocol::{Protocol, Recv, Spread, SpreadContext},
     },
     strand::Strand,
     sym::Sym,
@@ -56,9 +58,15 @@ pub trait FlagLike:
     /// Name <-> bit table, in declaration order. Also defines validity:
     /// symbols outside this table are rejected on construction. A "named
     /// combination" entry (a value that is itself the union of other
-    /// entries) is fine — [`Flags`]'s iteration/debug output includes any
-    /// entry whose bits are a subset of the value being examined.
+    /// entries) is fine — [`Flags`]'s iteration/debug output decomposes
+    /// values into the most granular matching entries.
     const BITS: &'static [(&'static str, Self)];
+
+    /// The granularity of this set of bits. Lower-ranked entries are used
+    /// first when decomposing a value for iteration and debug output.
+    ///
+    /// For ordinary integer bitflags, return the population count.
+    fn rank(self) -> usize;
 
     /// Registers `Flags<Self>` as a Do-visible native type.
     fn build_type<'v, 'a>(builder: &'a mut Builder<'v>) -> TypeBuilder<'v, 'a, Flags<Self>>
@@ -68,9 +76,32 @@ pub trait FlagLike:
         let mut entries = Vec::with_capacity(Self::BITS.len());
         let mut all = Self::ZERO;
         for &(name, bits) in Self::BITS {
-            entries.push((builder.sym(name), bits));
+            entries.push(FlagEntry {
+                sym: builder.sym(name),
+                bits,
+                rank: bits.rank(),
+                non_decomposable: false,
+            });
             all = all | bits;
         }
+        for index in 0..entries.len() {
+            if entries[index].rank > 1 {
+                entries[index].non_decomposable =
+                    !can_decompose(&entries, entries[index].bits, index);
+            }
+        }
+        entries.sort_by_key(|entry| {
+            (
+                if entry.non_decomposable {
+                    0
+                } else if entry.rank == 1 {
+                    1
+                } else {
+                    2
+                },
+                entry.rank,
+            )
+        });
         let table = FlagTable {
             entries: entries.into_boxed_slice(),
             all,
@@ -94,24 +125,133 @@ pub struct Flags<F>(PhantomData<F>);
 /// `TypeAnnex` for [`Flags`]: interned `Sym`s for every [`FlagLike::BITS`]
 /// entry, plus their precomputed union. Opaque — fields are private.
 pub struct FlagTable<'v, F> {
-    entries: Box<[(Sym<'v, 'v>, F)]>,
+    entries: Box<[FlagEntry<'v, F>]>,
     all: F,
+}
+
+struct FlagEntry<'v, F> {
+    sym: Sym<'v, 'v>,
+    bits: F,
+    rank: usize,
+    non_decomposable: bool,
 }
 
 impl<'v, F: FlagLike> FlagTable<'v, F> {
     fn resolve(&self, sym: Sym<'v, '_>) -> Option<F> {
         self.entries
             .iter()
-            .find(|(s, _)| *s == sym)
-            .map(|(_, bits)| *bits)
+            .find(|entry| entry.sym == sym)
+            .map(|entry| entry.bits)
     }
 
-    /// Every table entry whose bits are fully contained in `bits`.
-    fn names(&self, bits: F) -> impl Iterator<Item = Sym<'v, 'v>> + '_ {
-        self.entries
-            .iter()
-            .filter(move |(_, entry)| (*entry & bits) == *entry && *entry != F::ZERO)
-            .map(|(sym, _)| *sym)
+    /// Decomposes `bits` in the precomputed granularity order.
+    fn names(&self, bits: F) -> Vec<Sym<'v, 'v>> {
+        let mut remaining = bits;
+        let mut names = Vec::new();
+        for entry in &self.entries {
+            if entry.rank != 0 && (entry.bits & remaining) == entry.bits {
+                remaining = remaining & !entry.bits;
+                names.push(entry.sym);
+            }
+        }
+        names
+    }
+}
+
+fn can_decompose<F: FlagLike>(entries: &[FlagEntry<'_, F>], bits: F, skip: usize) -> bool {
+    if bits == F::ZERO {
+        return true;
+    }
+    entries.iter().enumerate().any(|(index, entry)| {
+        index != skip
+            && entry.rank != 0
+            && (entry.bits & bits) == entry.bits
+            && can_decompose(entries, bits & !entry.bits, skip)
+    })
+}
+
+/// Shared iterator for the symbols yielded by any [`Flags`] value.
+///
+/// Each flags type has its own `FlagTable`, but all flag iterators share this
+/// one runtime type. The small boxed slice keeps the iterator independent of
+/// the source flags object.
+pub(crate) struct Iter<'v> {
+    symbols: Box<[Sym<'v, 'v>]>,
+    index: Cell<usize>,
+}
+
+unsafe impl<'v> Collect for Iter<'v> {
+    const CYCLIC: bool = false;
+    const IMMUTABLE: bool = true;
+    type Annex = ();
+
+    fn accept(&self, _visit: &mut dyn Visit) -> ControlFlow<()> {
+        ControlFlow::Continue(())
+    }
+
+    fn clear(&mut self) {
+        unreachable!("immutable flags iterator")
+    }
+}
+
+impl<'v> Protocol<'v> for Iter<'v> {
+    fn op_type<'a, 's>(
+        _this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        out: Slot<'v, 'a>,
+    ) {
+        Output::set(strand, out, &strand.singletons().input_iter)
+    }
+
+    fn op_debug<'a, 's>(
+        _this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        w: &mut dyn Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        crate::fmt!(strand, w, "<flags iterator>")
+    }
+
+    async fn op_iter<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        Output::set(strand, out, &this);
+        Ok(())
+    }
+
+    async fn op_next<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, bool> {
+        let iter = this.get();
+        let index = iter.index.get();
+        let Some(sym) = iter.symbols.get(index) else {
+            return Ok(false);
+        };
+        Output::set(strand, out, *sym);
+        iter.index.set(index + 1);
+        Ok(true)
+    }
+
+    fn op_get<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        field: Sym<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        super::iter::iter_get(strand, &this, field, out)
+    }
+
+    async fn op_mcall<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        method: Sym<'v, 'a>,
+        args: Args<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        super::iter::iter_mcall(strand, &this, method, args, out).await
     }
 }
 
@@ -289,7 +429,7 @@ impl<'v, F: FlagLike> Object<'v> for Flags<F> {
         let vm = strand.vm();
         let table = this.ty(vm).annex(vm);
         crate::fmt!(strand, w, "<{}.{}:", F::MODULE, F::NAME)?;
-        for (i, sym) in table.names(*this.annex()).enumerate() {
+        for (i, sym) in table.names(*this.annex()).into_iter().enumerate() {
             let sep = if i == 0 { " " } else { "|" };
             crate::fmt!(strand, w, "{sep}{}", sym.as_str(vm))?;
         }
@@ -303,16 +443,16 @@ impl<'v, F: FlagLike> Object<'v> for Flags<F> {
     ) -> Result<'v, 's, ()> {
         let vm = strand.vm();
         let table = this.ty(vm).annex(vm);
-        let mut array = array::Array::new();
-        for sym in table.names(*this.annex()) {
-            array.inner.push(Value::from_input(strand, sym));
-        }
-        let mut arr_val = Value::NIL;
-        strand
-            .builtin_types()
-            .array
-            .create(strand, array, Slot::new(&mut arr_val));
-        arr_val.op_iter(strand, out).await
+        let symbols = table.names(*this.annex()).into_boxed_slice();
+        strand.builtin_types().flags_iter.create(
+            strand,
+            Iter {
+                symbols,
+                index: Cell::new(0),
+            },
+            out,
+        );
+        Ok(())
     }
 
     fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {

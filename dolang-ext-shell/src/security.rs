@@ -119,6 +119,10 @@ impl FlagLike for AccessMask {
         ("GENERIC_EXECUTE", AccessMask::GENERIC_EXECUTE),
         ("GENERIC_ALL", AccessMask::GENERIC_ALL),
     ];
+
+    fn rank(self) -> usize {
+        self.0.count_ones() as usize
+    }
 }
 
 pub(crate) struct Identity;

@@ -34,6 +34,8 @@ import agent proc sys sys.unix sys.windows _vfs
     - sleep
   proc:
     - with_policy
+import proc.windows: windows
+import shlex
 
 let is_windows = (sys.os_info().family == :WINDOWS:)
 let vfs_bin = _vfs.bin()
@@ -46,6 +48,25 @@ class Rendered
 
 def yield()
   sleep 0.01
+
+#[test]
+def windows_process_arguments()
+  assert_eq (windows.quote "") "\"\""
+  assert_eq (windows.quote "two words") r#""two words""#
+  assert_eq (windows.quote r#"a\"b"#) r#""a\\\"b""#
+  assert_eq (windows.quote "C:\\path with space\\") "\"C:\\path with space\\\\\""
+
+  let arguments = ["", "plain", "two words", "two\twords", r#"a\"b"#, "trailing\\"]
+  let command_line = windows.join $arguments
+  assert_eq [...(windows.split command_line)] $arguments
+  let nul = str b"\x00"
+  assert_throws $ValueError do windows.quote $nul
+  assert_throws $ValueError do windows.join [nul]
+
+  # Shell utilities remain POSIX-shell utilities, even when Windows argument
+  # handling is available.
+  assert_eq (shlex.quote "two words") "'two words'"
+  assert_eq [...(shlex.split "'two words'")] ["two words"]
 
 #[agent.test]
 def termination_policy_options()

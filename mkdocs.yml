@@ -64,13 +64,12 @@ nav:
     - shell/terminal-output.md
     - shell/system-errors.md
     - shell/security.md
-    - VFS:
-      - shell/vfs/index.md
-      - shell/vfs/containers.md
-      - shell/vfs/ssh.md
-      - shell/vfs/libvirt.md
-      - shell/vfs/wsl.md
-      - shell/vfs/admin.md
+    - shell/vfs.md
+    - shell/containers.md
+    - shell/ssh.md
+    - shell/libvirt.md
+    - shell/wsl.md
+    - shell/admin.md
   - lsp.md
   - Reference:
     - admin: api/admin.md
@@ -154,6 +153,7 @@ nav:
       - api/proc/index.md
       - api/proc/error.md
     - proc.run: api/proc-run.md
+    - proc.windows: api/proc.windows.md
     - progress:
       - api/progress/index.md
       - api/progress/indicator.md

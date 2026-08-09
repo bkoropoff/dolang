@@ -9,13 +9,15 @@ Handle for the process's standard input, obtained as
 
 Reads raw bytes.
 
-**Parameters:**
+#### Parameters
 
 | Name   | Type                    | Description                                   |
 | ------ | ----------------------- | --------------------------------------------- |
 | `size` | [`Int`](../std/int.md)? | Maximum bytes to read; unbounded when omitted |
 
-**Returns:** [`Bin`](../std/bin.md). Empty means end of stream.
+#### Returns
+
+[`Bin`](../std/bin.md). Empty means end of stream.
 
 With a `size`, this is a single read and may return fewer bytes than requested,
 as [`fs.File.read`](../fs/file.md) does. Without one, it reads to end of stream.

@@ -39,7 +39,9 @@ An array of [`Patch`](./patch.md) objects describing suggested edits.
 Renders the diagnostic for terminal presentation. The rendered value does not
 include a final newline.
 
-**Returns:** [`term.Text`](../term/text.md)
+#### Returns
+
+[`term.Text`](../term/text.md)
 
 ## Example
 

@@ -52,13 +52,15 @@ the stored timestamp cannot be represented.
 
 Opens the entry for reading.
 
-**Parameters:**
+#### Parameters
 
 | Name    | Type | Description                                          |
 | ------- | ---- | ---------------------------------------------------- |
 | `block` | func | Callable to run with the file; auto-closes when done |
 
-**Returns:** [`File`](./file.md) when no block is provided, otherwise the
+#### Returns
+
+[`File`](./file.md) when no block is provided, otherwise the
 result of calling `block`.
 
 **Errors:**

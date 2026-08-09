@@ -132,10 +132,6 @@ Shuffles an array in place using a uniform Fisher-Yates pass.
 | ------- | ------- | ---------------- |
 | `array` | `array` | array to mutate  |
 
-#### Returns
-
-`nil`
-
 #### Errors
 
 | Exception   | Condition               |

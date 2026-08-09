@@ -67,9 +67,9 @@ dolang -m libvirt freebsd-build build.dol
 ```
 
 Installed aliases such as `dodo` and `dolang-test` select the corresponding
-entrypoint implicitly when available. The [`ssh` entrypoint](./vfs/ssh.md)
+entrypoint implicitly when available. The [`ssh` entrypoint](./ssh.md)
 compiles a local script and executes it through a remote VFS context. The
-[`libvirt` entrypoint](./vfs/libvirt.md#running-a-script-in-a-domain) does the
+[`libvirt` entrypoint](./libvirt.md#running-a-script-in-a-domain) does the
 same through an existing domain created by the `libvirt` module.
 
 ### Companion Programs

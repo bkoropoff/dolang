@@ -21,7 +21,7 @@ entries, use
 instead — none of them carry content, so none of them have any use for a write
 handle.
 
-**Parameters:**
+#### Parameters
 
 | Name         | Type                                                         | Description                           |
 | ------------ | ------------------------------------------------------------ | ------------------------------------- |
@@ -35,7 +35,9 @@ handle.
 | `group_name` | [`Str`](../std/str.md)?                                      | Group name                            |
 | `func`       | callable                                                     | Entry writer scope                    |
 
-**Returns:** the result of `func`.
+#### Returns
+
+the result of `func`.
 
 **Errors:**
 
@@ -52,7 +54,7 @@ archive.entry data.bin size: 4 mode: 0o600 do |entry|
 
 Creates a directory entry.
 
-**Parameters:**
+#### Parameters
 
 | Name         | Type                                                         | Description                           |
 | ------------ | ------------------------------------------------------------ | ------------------------------------- |
@@ -73,7 +75,7 @@ archive.create_dir "subdir" mode: 0o755
 Creates a symbolic link entry pointing to `target`. Argument order matches
 [`fs.symlink_file`](../fs/index.md#symlink_file-src-dst).
 
-**Parameters:**
+#### Parameters
 
 | Name         | Type                                                         | Description                           |
 | ------------ | ------------------------------------------------------------ | ------------------------------------- |
@@ -95,7 +97,7 @@ archive.symlink "target.txt" "link.txt"
 Creates a hard-link entry pointing to `target`. Argument order matches
 [`fs.hard_link`](../fs/index.md#hard_link-src-dst).
 
-**Parameters:**
+#### Parameters
 
 | Name         | Type                                                         | Description                           |
 | ------------ | ------------------------------------------------------------ | ------------------------------------- |

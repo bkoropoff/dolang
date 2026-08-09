@@ -19,13 +19,15 @@ ANSI representation.
 Adds spaces to the beginning of each line without changing ANSI formatting. A
 terminal newline does not gain a trailing indentation prefix.
 
-**Parameters:**
+#### Parameters
 
 | Name     | Type                   | Description                   |
 | -------- | ---------------------- | ----------------------------- |
 | `spaces` | [`Int`](../std/int.md) | Non-negative number of spaces |
 
-**Returns:** `Text`
+#### Returns
+
+`Text`
 
 ```
 let diagnostic = result.diagnostics[0].render()

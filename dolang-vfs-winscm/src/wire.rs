@@ -243,7 +243,7 @@ impl ServiceStateFilter {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceInfo {
     pub name: String,
-    pub display_name: String,
+    pub display_name: Option<String>,
     pub status: ServiceStatus,
 }
 
@@ -301,11 +301,11 @@ pub(crate) enum WinScmRequest {
     CreateService {
         manager: ExtOpaque<ScManagerMarker>,
         name: String,
-        display_name: String,
+        display_name: Option<String>,
         service_type: ServiceType,
         start_type: StartType,
         error_control: ErrorControl,
-        binary_path: String,
+        binary_path: Option<String>,
         options: CreateServiceOptions,
         access: ServiceAccess,
     },

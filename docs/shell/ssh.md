@@ -1,7 +1,7 @@
 # SSH Remoting
 
 The `ssh` module runs a block on another host through a remote
-[VFS context](./index.md). Filesystem access, external programs,
+[VFS context](./vfs.md). Filesystem access, external programs,
 environment, working directory, system information, and security queries use
 the remote host for the duration of the block.
 

@@ -8,7 +8,7 @@
 
 Creates a FreeBSD error number.
 
-**Parameters:**
+#### Parameters
 
 | Name  | Type                      | Description      |
 | ----- | ------------------------- | ---------------- |

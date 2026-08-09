@@ -73,6 +73,52 @@ pub(crate) fn expect_str<'v, 's>(
         .ok_or_else(|| Error::type_error(strand, format!("{what}: expected Str")))
 }
 
+fn binary_path_arg_from_value<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    value: Slot<'v, '_>,
+) -> Result<'v, 's, String> {
+    if let Some(value) = value.as_str(strand) {
+        Ok(value.to_string())
+    } else if let Some(path) = dolang_ext_shell::as_path(strand, &value) {
+        if !path.is_absolute() {
+            return Err(Error::value(
+                strand,
+                "binary_path: expected an absolute fs.windows.Path",
+            ));
+        }
+        Ok(path.to_string_lossy().into_owned())
+    } else {
+        Err(Error::type_error(
+            strand,
+            "binary_path: expected fs.windows.Path or Str",
+        ))
+    }
+}
+
+pub(crate) async fn binary_path_from_value<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    value: Slot<'v, '_>,
+) -> Result<'v, 's, String> {
+    if value.as_str(strand).is_some() || dolang_ext_shell::as_path(strand, &value).is_some() {
+        return binary_path_arg_from_value(strand, value);
+    }
+
+    strand
+        .with_slots(async move |strand, [mut iter, mut item]| {
+            value.iter(strand, &mut iter).await?;
+            let mut arguments = Vec::new();
+            while iter.next(strand, &mut item).await? {
+                arguments.push(binary_path_arg_from_value(
+                    strand,
+                    Slot::reborrow(&mut item),
+                )?);
+            }
+            dolang_winterop::process::join_arguments(arguments)
+                .map_err(|error| Error::value(strand, error.to_string()))
+        })
+        .await
+}
+
 pub(crate) async fn expect_str_iterable<'v, 's>(
     strand: &mut Strand<'v, 's>,
     slot: Slot<'v, '_>,
@@ -174,14 +220,18 @@ impl<'v> Object<'v> for ScManager {
                 let start_type_sym = global.syms.start_type;
                 let error_control_sym = global.syms.error_control;
                 let access_sym = global.syms.access;
+                let display_name_sym = global.syms.display_name;
+                let binary_path_sym = global.syms.binary_path;
                 let load_order_group_sym = global.syms.load_order_group;
                 let dependencies_sym = global.syms.dependencies;
                 let service_start_name_sym = global.syms.service_start_name;
                 let password_sym = global.syms.password;
                 let (
-                    [name, display_name, binary_path],
+                    [name],
                     [
                         block,
+                        display_name,
+                        binary_path,
                         service_type,
                         start_type,
                         error_control,
@@ -194,8 +244,10 @@ impl<'v> Object<'v> for ScManager {
                 ) = unpack!(
                     strand,
                     args,
-                    3,
                     1,
+                    1,
+                    display_name_sym = None,
+                    binary_path_sym = None,
                     service_type_sym = None,
                     start_type_sym = None,
                     error_control_sym = None,
@@ -206,8 +258,13 @@ impl<'v> Object<'v> for ScManager {
                     password_sym = None
                 )?;
                 let name = expect_str(strand, name, "name")?;
-                let display_name = expect_str(strand, display_name, "display_name")?;
-                let binary_path = expect_str(strand, binary_path, "binary_path")?;
+                let display_name = display_name
+                    .map(|value| expect_str(strand, value, "display_name"))
+                    .transpose()?;
+                let binary_path = match binary_path {
+                    Some(value) => Some(binary_path_from_value(strand, value).await?),
+                    None => None,
+                };
                 let service_type = service_type_from_value(
                     strand,
                     global,
@@ -253,11 +310,11 @@ impl<'v> Object<'v> for ScManager {
                     manager
                         .create_service_with_options(
                             &name,
-                            &display_name,
+                            display_name.as_deref(),
                             service_type.into(),
                             start_type,
                             error_control,
-                            &binary_path,
+                            binary_path.as_deref(),
                             options,
                             access.into(),
                         )

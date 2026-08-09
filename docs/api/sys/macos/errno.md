@@ -8,7 +8,7 @@
 
 Creates a macOS error number.
 
-**Parameters:**
+#### Parameters
 
 | Name  | Type                      | Description      |
 | ----- | ------------------------- | ---------------- |

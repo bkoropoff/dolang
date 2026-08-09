@@ -13,7 +13,7 @@ colors or enable additional attributes. Omitted options retain saved settings;
 
 Applies or derives the saved style.
 
-**Parameters:**
+#### Parameters
 
 | Name      | Type | Description                         |
 | --------- | ---- | ----------------------------------- |
@@ -21,7 +21,9 @@ Applies or derives the saved style.
 
 Also accepts the [`term` style options](./index.md#style-options).
 
-**Returns:** [`Text`](./text.md) when positional arguments are provided;
+#### Returns
+
+[`Text`](./text.md) when positional arguments are provided;
 otherwise a derived `Style`
 
 ```

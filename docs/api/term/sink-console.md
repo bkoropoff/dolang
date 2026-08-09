@@ -34,7 +34,7 @@ The line ending is arbitarily chosen to be the interpreter's host platform's.
 
 Wraps `sink`.
 
-**Parameters:**
+#### Parameters
 
 | Name        | Type                     | Description                       |
 | ----------- | ------------------------ | --------------------------------- |

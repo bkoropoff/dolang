@@ -216,14 +216,15 @@ mod live {
             .unwrap()
             .as_nanos();
         let name = format!("dolang-vfs-winscm-test-{}-{now}-{id}", std::process::id());
+        let binary_path = dummy_binary_path();
         let service = match manager
             .create_service_with_options(
                 &name,
-                &name,
+                Some(&name),
                 ServiceType::WIN32_OWN_PROCESS,
                 StartType::DEMAND_START,
                 ErrorControl::NORMAL,
-                &dummy_binary_path(),
+                Some(&binary_path),
                 CreateServiceOptions {
                     service_start_name: Some("LocalSystem".to_string()),
                     ..CreateServiceOptions::default()

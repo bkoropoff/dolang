@@ -8,7 +8,7 @@ Windows security identifier.
 
 Constructs a SID from its canonical string or native binary representation.
 
-**Parameters:**
+#### Parameters
 
 | Name    | Type                                                 | Description        |
 | ------- | ---------------------------------------------------- | ------------------ |
@@ -38,9 +38,11 @@ Sub-authorities as an immutable [`Tuple`](../../std/tuple.md).
 
 Resolves the SID in the active Windows VFS target.
 
-**Returns:** [`SidName`](./sidname.md)
+#### Returns
 
-**Errors:**
+[`SidName`](./sidname.md)
+
+#### Errors
 
 - Raises [`sys.NotFoundError`](../../sys/not-found-error.md) when the SID is
   unmapped.
@@ -50,7 +52,11 @@ Resolves the SID in the active Windows VFS target.
 
 Returns the native Windows packet representation.
 
-**Returns:** [`Bin`](../../std/bin.md)
+#### Returns
+
+[`Bin`](../../std/bin.md)
+
+#### Example
 
 ```
 let sid = Sid S-1-5-32-544

@@ -61,7 +61,7 @@ open data.bin r+ do |file|
 
 Acquires a byte-range lock while `func` runs.
 
-**Parameters:**
+#### Parameters
 
 | Name     | Type                       | Description                                    |
 | -------- | -------------------------- | ---------------------------------------------- |
@@ -69,7 +69,9 @@ Acquires a byte-range lock while `func` runs.
 | `shared` | [`Bool`](../std/bool.md)?  | Acquire a shared lock                          |
 | `func`   | [`Func`](../std/func.md)   | Block receiving a [`FileLock`](./file-lock.md) |
 
-**Returns:** the block's result
+#### Returns
+
+the block's result
 
 The lock is exclusive unless `shared` is true. It is released before the
 method returns, including when the block raises an error or is canceled.
@@ -100,7 +102,7 @@ file.lock (0..128) do |lock|
 
 Attempts to acquire a byte-range lock without waiting.
 
-**Parameters:**
+#### Parameters
 
 | Name     | Type                       | Description                                    |
 | -------- | -------------------------- | ---------------------------------------------- |
@@ -108,7 +110,9 @@ Attempts to acquire a byte-range lock without waiting.
 | `shared` | [`Bool`](../std/bool.md)?  | Acquire a shared lock                          |
 | `func`   | [`Func`](../std/func.md)   | Block receiving a [`FileLock`](./file-lock.md) |
 
-**Returns:** the block's result
+#### Returns
+
+the block's result
 
 The block always runs. `lock.held` is false when another handle holds a
 conflicting lock. Other acquisition failures raise errors.
@@ -225,21 +229,23 @@ open data.txt r do |file|
   echo "Available: $(meta.available)"
 ```
 
-### `sec_desc :owner = true :group = true :dacl = true :sacl = false`
+### `sec_desc :owner? :group? :dacl? :sacl?`
 
 Gets selected parts of the Windows security descriptor through this file's
 existing handle.
 
-**Parameters:**
+#### Parameters
 
-| Name    | Type                     | Description                |
-| ------- | ------------------------ | -------------------------- |
-| `owner` | [`Bool`](../std/bool.md) | Load the owner SID         |
-| `group` | [`Bool`](../std/bool.md) | Load the primary group SID |
-| `dacl`  | [`Bool`](../std/bool.md) | Load the discretionary ACL |
-| `sacl`  | [`Bool`](../std/bool.md) | Load the system ACL        |
+| Name    | Type                      | Description                                  |
+| ------- | ------------------------- | -------------------------------------------- |
+| `owner` | [`Bool`](../std/bool.md)? | Load the owner SID (default: `true`)         |
+| `group` | [`Bool`](../std/bool.md)? | Load the primary group SID (default: `true`) |
+| `dacl`  | [`Bool`](../std/bool.md)? | Load the discretionary ACL (default: `true`) |
+| `sacl`  | [`Bool`](../std/bool.md)? | Load the system ACL (default: `false`)       |
 
-**Returns:** [`security.windows.SecDesc`](../security/windows/secdesc.md)
+#### Returns
+
+[`security.windows.SecDesc`](../security/windows/secdesc.md)
 
 The operation raises a permission error if the file was opened without the
 necessary Windows access rights. Other platforms raise `UnsupportedError`.
@@ -249,7 +255,7 @@ necessary Windows access rights. Other platforms raise `UnsupportedError`.
 Applies the components selected by a security descriptor's `mask` through
 this file's existing handle.
 
-**Parameters:**
+#### Parameters
 
 | Name   | Type                                                         | Description                  |
 | ------ | ------------------------------------------------------------ | ---------------------------- |
@@ -263,19 +269,21 @@ descriptor. Other platforms raise `UnsupportedError`.
 
 Gets the POSIX.1e ACL stored on the open file.
 
-**Parameters:**
+#### Parameters
 
 | Name      | Type                      | Description                                   |
 | --------- | ------------------------- | --------------------------------------------- |
 | `default` | [`Bool`](../std/bool.md)? | Query the directory's inheritable default ACL |
 
-**Returns:** [`security.unix.Acl`](../security/unix/acl.md), or `nil`
+#### Returns
+
+[`security.unix.Acl`](../security/unix/acl.md), or `nil`
 
 ### `set_acl acl :default?`
 
 Sets or removes a POSIX.1e ACL on the open file.
 
-**Parameters:**
+#### Parameters
 
 | Name      | Type                                                                   | Description                                    |
 | --------- | ---------------------------------------------------------------------- | ---------------------------------------------- |

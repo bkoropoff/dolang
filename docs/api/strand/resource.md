@@ -8,13 +8,11 @@ Limits concurrent entry into application-defined scopes.
 
 Creates a resource with `count` concurrent reservations.
 
-**Parameters:**
+#### Parameters
 
 | Name    | Type                   | Description                   |
 | ------- | ---------------------- | ----------------------------- |
 | `count` | [`Int`](../std/int.md) | maximum concurrent admissions |
-
-**Returns:** `Resource`
 
 **Errors:**
 
@@ -40,13 +38,15 @@ must use a consistent acquisition order.
 Resources limit admission only and must not be used to protect critical-section
 invariants.
 
-**Parameters:**
+#### Parameters
 
 | Name    | Type | Description             |
 | ------- | ---- | ----------------------- |
 | `block` | func | scoped work to execute  |
 
-**Returns:** the block result
+#### Returns
+
+the block result
 
 ```
 network.with do

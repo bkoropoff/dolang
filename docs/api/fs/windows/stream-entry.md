@@ -11,6 +11,8 @@ This is only supported on Windows.
 
 Stream name. The unnamed default stream is reported as `""`.
 
+#### Example
+
 ```
 for stream = streams "data.txt"
   echo $stream.name
@@ -19,6 +21,8 @@ for stream = streams "data.txt"
 ### `type`
 
 Stream type without the leading `$`.
+
+#### Example
 
 ```
 for stream = streams "data.txt"
@@ -34,6 +38,8 @@ Logical stream size in bytes.
 Allocated stream size in bytes.
 
 ## Operators
+
+### Example
 
 ```
 for stream = streams "data.txt"

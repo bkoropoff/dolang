@@ -8,7 +8,7 @@ Immutable view of a native Windows access-control list.
 
 Constructs an ACL from an iterable of [`Ace`](./ace.md) values.
 
-**Parameters:**
+#### Parameters
 
 | Name       | Type                       | Description             |
 | ---------- | -------------------------- | ----------------------- |
@@ -42,4 +42,6 @@ Immutable array-like view of [`Ace`](./ace.md) values.
 
 Returns the exact native ACL packet.
 
-**Returns:** [`Bin`](../../std/bin.md)
+#### Returns
+
+[`Bin`](../../std/bin.md)

@@ -170,10 +170,16 @@ mod detail {
         const MODULE: &'static str = "regression2";
         const NAME: &'static str = "TestFlags";
         const BITS: &'static [(&'static str, Self)] = &[
+            ("NONE", TestFlags(0)),
+            ("READ_WRITE", TestFlags(3)),
             ("READ", TestFlags(1)),
             ("WRITE", TestFlags(2)),
             ("EXEC", TestFlags(4)),
         ];
+
+        fn rank(self) -> usize {
+            self.0.count_ones() as usize
+        }
     }
 
     async fn vm_main<'v>(

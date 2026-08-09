@@ -8,13 +8,13 @@ Windows security descriptor.
 
 Parses a self-relative security descriptor.
 
-**Parameters:**
+#### Parameters
 
 | Name    | Type                      | Description                 |
 | ------- | ------------------------- | --------------------------- |
 | `value` | [`Bin`](../../std/bin.md) | Native self-relative packet |
 
-**Errors:**
+#### Errors
 
 - Raises `ValueError` when the packet is malformed or is not self-relative.
 
@@ -160,10 +160,14 @@ loaded.
 
 Returns a descriptor with selected components or control fields replaced.
 
-**Returns:** `SecDesc`
+#### Returns
+
+`SecDesc`
 
 ### `to_bin()`
 
 Returns a canonical self-relative security descriptor packet.
 
-**Returns:** [`Bin`](../../std/bin.md)
+#### Returns
+
+[`Bin`](../../std/bin.md)

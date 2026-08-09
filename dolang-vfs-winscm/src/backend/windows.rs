@@ -66,6 +66,20 @@ unsafe fn from_wide(ptr: *const u16) -> String {
     String::from_utf16_lossy(slice)
 }
 
+/// Reads a possibly absent NUL-terminated wide string.
+///
+/// # Safety
+///
+/// `ptr` must be null or point to a valid NUL-terminated UTF-16 string.
+unsafe fn from_optional_wide(ptr: *const u16) -> Option<String> {
+    if ptr.is_null() {
+        None
+    } else {
+        // SAFETY: established by the non-null branch and the caller's contract.
+        Some(unsafe { from_wide(ptr) })
+    }
+}
+
 unsafe fn from_multi_wide(mut ptr: *const u16) -> Vec<String> {
     let mut values = Vec::new();
     if ptr.is_null() {
@@ -299,10 +313,12 @@ fn enum_services(
         };
         for entry in entries {
             services.push(ServiceInfo {
-                // SAFETY: NUL-terminated wide strings pointing into `buf`,
-                // per the slice's own safety comment above.
+                // SAFETY: the service name is a NUL-terminated wide string
+                // pointing into `buf`, per the slice's own safety comment.
                 name: unsafe { from_wide(entry.lpServiceName) },
-                display_name: unsafe { from_wide(entry.lpDisplayName) },
+                // Wine may return a null display-name pointer for built-in
+                // services; preserve that absence across the API boundary.
+                display_name: unsafe { from_optional_wide(entry.lpDisplayName) },
                 status: status_from_raw(&entry.ServiceStatusProcess),
             });
         }
@@ -353,17 +369,17 @@ impl Drop for AutoCloseHandle {
 fn create_service(
     manager: SC_HANDLE,
     name: &str,
-    display_name: &str,
+    display_name: Option<&str>,
     service_type: u32,
     start_type: u32,
     error_control: u32,
-    binary_path: &str,
+    binary_path: Option<&str>,
     options: &CreateServiceOptions,
     access: ServiceAccess,
 ) -> Result<SC_HANDLE, Error> {
     let name = wide(name);
-    let display_name = wide(display_name);
-    let binary_path = wide(binary_path);
+    let display_name = optional_wide(display_name);
+    let binary_path = optional_wide(binary_path);
     let load_order_group = optional_wide(options.load_order_group.as_deref());
     let dependencies =
         (!options.dependencies.is_empty()).then(|| multi_wide(&options.dependencies));
@@ -376,12 +392,12 @@ fn create_service(
             CreateServiceW(
                 manager,
                 name.as_ptr(),
-                display_name.as_ptr(),
+                optional_ptr(display_name.as_ref()),
                 access.0,
                 service_type,
                 start_type,
                 error_control,
-                binary_path.as_ptr(),
+                optional_ptr(binary_path.as_ref()),
                 optional_ptr(load_order_group.as_ref()),
                 ptr::null_mut(),
                 optional_ptr(dependencies.as_ref()),
@@ -796,11 +812,11 @@ pub(crate) async fn handle(
             let handle = create_service(
                 guard.0,
                 &name,
-                &display_name,
+                display_name.as_deref(),
                 service_type.0,
                 start_type.0,
                 error_control.0,
-                &binary_path,
+                binary_path.as_deref(),
                 &options,
                 access,
             )?;

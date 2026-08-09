@@ -11,7 +11,7 @@ namespace declarations from each node rather than from parent pointers.
 
 Creates an element, optionally with attributes and children.
 
-**Parameters:**
+#### Parameters
 
 | Name        | Type    | Description                                                                |
 | ----------- | ------- | -------------------------------------------------------------------------- |
@@ -20,8 +20,6 @@ Creates an element, optionally with attributes and children.
 | `namespace` | `str?`  | Namespace URI                                                              |
 | `prefix`    | `str?`  | Preferred namespace prefix                                                 |
 | `attrs`     | `Dict?` | Unnamespaced attributes; keys may be `Sym` or `Str`, values must be `Str`  |
-
-**Returns:** `Node`.
 
 **Errors:**
 
@@ -104,7 +102,7 @@ can be detached and serialized independently.
 
 Gets the first attribute matching an expanded name.
 
-**Parameters:**
+#### Parameters
 
 | Name        | Type   | Description                       |
 | ----------- | ------ | --------------------------------- |
@@ -112,8 +110,6 @@ Gets the first attribute matching an expanded name.
 | `namespace` | `str?` | Namespace URI                     |
 | `default`   |        | Value returned when absent        |
 | `else`      |        | Callable evaluated when absent    |
-
-**Returns:** The attribute value, `nil`, or the selected fallback.
 
 ```
 let id = node.attr "id" namespace: "urn:inventory"
@@ -127,7 +123,7 @@ An omitted `prefix` mutates the existing attribute's value in place. An
 explicit prefix, including `prefix: nil`, replaces the matching attribute
 because attribute identity fields are immutable.
 
-**Parameters:**
+#### Parameters
 
 | Name        | Type   | Description                         |
 | ----------- | ------ | ----------------------------------- |
@@ -136,38 +132,38 @@ because attribute identity fields are immutable.
 | `namespace` | `str?` | Namespace URI                       |
 | `prefix`    | `str?` | Preferred namespace prefix          |
 
-**Returns:** `nil`.
-
 ### `delete_attr name :namespace?`
 
 Deletes all attributes matching an expanded name.
 
-**Parameters:**
+#### Parameters
 
 | Name        | Type   | Description             |
 | ----------- | ------ | ----------------------- |
 | `name`      | `Str`  | Local attribute name    |
 | `namespace` | `str?` | Namespace URI           |
 
-**Returns:** `Bool`, whether an attribute was deleted.
+#### Returns
+
+`Bool`, whether an attribute was deleted.
 
 ### `push child`
 
 Appends a child.
 
-**Parameters:**
+#### Parameters
 
 | Name    | Type          | Description |
 | ------- | ------------- | ----------- |
 | `child` | `Node`\|`Str` | Child value |
 
-**Returns:** `nil`.
-
 ### `traverse`
 
 Returns a depth-first, parent-first iterator over the node and its descendants.
 
-**Returns:** An iterator of nodes and text values in document order.
+#### Returns
+
+An iterator of nodes and text values in document order.
 
 ## Operators
 

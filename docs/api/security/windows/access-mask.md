@@ -8,10 +8,23 @@ Generic Windows object access rights.
 
 Constructs a mask from symbols or one iterable of symbols.
 
-Supported symbols are `:DELETE:`, `:READ_CONTROL:`, `:WRITE_DAC:`,
-`:WRITE_OWNER:`, `:SYNCHRONIZE:`, `:STANDARD_RIGHTS_REQUIRED:`,
-`:STANDARD_RIGHTS_ALL:`, `:ACCESS_SYSTEM_SECURITY:`, `:MAXIMUM_ALLOWED:`,
-`:GENERIC_READ:`, `:GENERIC_WRITE:`, `:GENERIC_EXECUTE:`, and `:GENERIC_ALL:`.
+#### Supported symbols
+
+| Symbol                       | Meaning                                          |
+| ---------------------------- | ------------------------------------------------ |
+| `:DELETE:`                   | Delete the object                                |
+| `:READ_CONTROL:`             | Read its security descriptor, except the SACL    |
+| `:WRITE_DAC:`                | Change its discretionary access-control list     |
+| `:WRITE_OWNER:`              | Change its owner                                 |
+| `:SYNCHRONIZE:`              | Synchronize access to the object                 |
+| `:STANDARD_RIGHTS_REQUIRED:` | The standard rights required by most objects     |
+| `:STANDARD_RIGHTS_ALL:`      | All standard rights                              |
+| `:ACCESS_SYSTEM_SECURITY:`   | Access its system access-control list            |
+| `:MAXIMUM_ALLOWED:`          | Request the maximum rights allowed to the caller |
+| `:GENERIC_READ:`             | Request object-specific read access              |
+| `:GENERIC_WRITE:`            | Request object-specific write access             |
+| `:GENERIC_EXECUTE:`          | Request object-specific execute access           |
+| `:GENERIC_ALL:`              | Request all object-specific access               |
 
 ## Methods
 
@@ -19,7 +32,9 @@ Supported symbols are `:DELETE:`, `:READ_CONTROL:`, `:WRITE_DAC:`,
 
 Tests whether all bits represented by a symbol are set.
 
-**Returns:** [`Bool`](../../std/bool.md)
+#### Returns
+
+[`Bool`](../../std/bool.md)
 
 ## Operators
 

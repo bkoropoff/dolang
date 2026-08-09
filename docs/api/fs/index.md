@@ -424,14 +424,14 @@ Gets selected parts of a Windows security descriptor.
 
 #### Parameters
 
-| Name      | Type                                      | Description                                      |
-| --------- | ----------------------------------------- | ------------------------------------------------ |
-| `path`    | [`Str`](../std/str.md)\|[`Path`](path.md) | Path to query                                    |
-| `owner`   | [`Bool`](../std/bool.md)                  | Load the owner SID                               |
-| `group`   | [`Bool`](../std/bool.md)                  | Load the primary group SID                       |
-| `dacl`    | [`Bool`](../std/bool.md)                  | Load the discretionary ACL                       |
-| `sacl`    | [`Bool`](../std/bool.md)                  | Load the system ACL                              |
-| `resolve` | `:TARGET:`\|`:LINK:`                      | Resolution mode (see [above](#resolution-modes)) |
+| Name      | Type                                      | Description                                                           |
+| --------- | ----------------------------------------- | --------------------------------------------------------------------- |
+| `path`    | [`Str`](../std/str.md)\|[`Path`](path.md) | Path to query                                                         |
+| `owner`   | [`Bool`](../std/bool.md)?                 | Load the owner SID (default: `true`)                                  |
+| `group`   | [`Bool`](../std/bool.md)?                 | Load the primary group SID (default: `true`)                          |
+| `dacl`    | [`Bool`](../std/bool.md)?                 | Load the discretionary ACL (default: `true`)                          |
+| `sacl`    | [`Bool`](../std/bool.md)?                 | Load the system ACL (default: `false`)                                |
+| `resolve` | `:TARGET:`\|`:LINK:`?                     | Resolution mode (default: `:TARGET:`; see [above](#resolution-modes)) |
 
 #### Returns
 

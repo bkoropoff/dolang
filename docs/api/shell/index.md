@@ -40,7 +40,7 @@ communicate directly in raw bytes.
 Opened file handles always use line/chunk mode according to whether the `b`
 mode was specified during open, not the strand-local mode.
 
-**Parameters:**
+#### Parameters
 
 | Name   | Type                   | Description                           |
 | ------ | ---------------------- | ------------------------------------- |
@@ -48,7 +48,9 @@ mode was specified during open, not the strand-local mode.
 | `func` | callable               | Block to run                          |
 | `...`  |                        | Additional arguments passed to `func` |
 
-**Returns:** Return value of `func`.
+#### Returns
+
+Return value of `func`.
 
 ```
 let chunks = []
@@ -109,7 +111,7 @@ Return value of the executed callable
 Runs `func` with scoped command-line arguments or program identity. Strands
 created within the call inherit the overrides.
 
-**Parameters:**
+#### Parameters
 
 | Name      | Type                                              | Description                                              |
 | --------- | ------------------------------------------------- | -------------------------------------------------------- |
@@ -117,7 +119,9 @@ created within the call inherit the overrides.
 | `args`    | [`Iterable`](../std/iterable.md)?                 | Values converted with [`arg`](../std/index.md#arg-value) |
 | `program` | [`Str`](../std/str.md)?\|[`Path`](../fs/path.md)? | Program identity                                         |
 
-**Returns:** Return value of `func`.
+#### Returns
+
+Return value of `func`.
 
 `args:` and `program:` are independent. An omitted argument retains its
 current value, so nested calls can override only one part of the invocation
@@ -144,7 +148,7 @@ when running on the host.
 Runs `func` with scoped environment overrides. Keys may be strings or symbols.
 `nil` unsets a variable and `:INHERIT:` captures its current strand value.
 
-**Parameters:**
+#### Parameters
 
 | Name        | Type                     | Description           |
 | ----------- | ------------------------ | --------------------- |

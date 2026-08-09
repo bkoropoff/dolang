@@ -4,6 +4,7 @@ mod access_mask;
 #[cfg(windows)]
 mod apc;
 mod guid;
+pub mod process;
 mod sec_desc;
 mod sid;
 #[cfg(windows)]

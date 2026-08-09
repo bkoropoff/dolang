@@ -15,13 +15,15 @@ Parses, edits, validates, and serializes XML element trees.
 
 Parses an XML document into a parentless element tree.
 
-**Parameters:**
+#### Parameters
 
 | Name  | Type  | Description         |
 | ----- | ----- | ------------------- |
 | `xml` | `Str` | XML document        |
 
-**Returns:** [`Node`](./node.md), the root element.
+#### Returns
+
+[`Node`](./node.md), the root element.
 
 **Errors:**
 
@@ -44,13 +46,15 @@ Namespace declarations are generated from expanded names and namespace
 snapshots. Prefix spelling and declaration placement can differ from the input,
 but element and attribute namespace semantics are preserved.
 
-**Parameters:**
+#### Parameters
 
 | Name   | Type                         | Description          |
 | ------ | ---------------------------- | -------------------- |
 | `node` | [`Node`](./node.md)\|`Str`   | XML node or text     |
 
-**Returns:** `Str`, the serialized XML.
+#### Returns
+
+`Str`, the serialized XML.
 
 **Errors:**
 
@@ -70,13 +74,11 @@ Validation includes names, namespace bindings, attribute uniqueness by
 expanded name, child and attribute types, and cycles. A node can temporarily
 contain invalid data while it is being edited.
 
-**Parameters:**
+#### Parameters
 
 | Name   | Type                    | Description  |
 | ------ | ----------------------- | ------------ |
 | `node` | [`Node`](./node.md)     | Root element |
-
-**Returns:** `nil`.
 
 **Errors:**
 
