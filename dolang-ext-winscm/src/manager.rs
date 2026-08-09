@@ -106,15 +106,15 @@ pub(crate) async fn binary_path_from_value<'v, 's>(
     strand
         .with_slots(async move |strand, [mut iter, mut item]| {
             value.iter(strand, &mut iter).await?;
-            let mut command_line = String::new();
+            let mut arguments = Vec::new();
             while iter.next(strand, &mut item).await? {
-                if !command_line.is_empty() {
-                    command_line.push(' ');
-                }
-                let argument = binary_path_arg_from_value(strand, Slot::reborrow(&mut item))?;
-                dolang_winterop::quote_windows_argument(&argument, &mut command_line);
+                arguments.push(binary_path_arg_from_value(
+                    strand,
+                    Slot::reborrow(&mut item),
+                )?);
             }
-            Ok(command_line)
+            dolang_winterop::process::join_arguments(arguments)
+                .map_err(|error| Error::value(strand, error.to_string()))
         })
         .await
 }

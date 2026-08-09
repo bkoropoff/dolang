@@ -3,8 +3,8 @@
 mod access_mask;
 #[cfg(windows)]
 mod apc;
-mod command_line;
 mod guid;
+pub mod process;
 mod sec_desc;
 mod sid;
 #[cfg(windows)]
@@ -14,7 +14,6 @@ mod win_error;
 pub use access_mask::AccessMask;
 #[cfg(windows)]
 pub use apc::{ApcCancelled, ApcContext, ApcTask, Closed, Reactor, ReactorControl, TaskCancelled};
-pub use command_line::quote_windows_argument;
 pub use guid::{Guid, GuidError};
 pub use sec_desc::{
     ALL_SECURITY_INFORMATION, Ace, AceBuf, AceBuildError, AceBuildOptions, AceError, AceType, Aces,

@@ -243,6 +243,48 @@ impl<'v> Object<'v> for Capture {
     }
 }
 
+/// Iterator over arguments decoded from a Windows process command line.
+struct WindowsArguments {
+    arguments: Vec<String>,
+    index: usize,
+}
+
+impl<'v> Object<'v> for WindowsArguments {
+    const NAME: &'v str = "Iter";
+    const MODULE: &'v str = "proc.windows";
+    type Annex = ();
+    type Type = ();
+    type TypeAnnex = ();
+
+    fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
+        builder.supertype(TypeObject::Iter)
+    }
+
+    async fn iter<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        Output::set(strand, out, this);
+        Ok(())
+    }
+
+    async fn next<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, bool> {
+        let mut arguments = this.borrow_mut(strand)?;
+        let Some(argument) = arguments.arguments.get(arguments.index) else {
+            return Ok(false);
+        };
+        let argument = argument.clone();
+        arguments.index += 1;
+        Output::set(strand, out, argument.as_str());
+        Ok(true)
+    }
+}
+
 pub(crate) fn configure_compiler<'a>(compiler: &mut Compiler<'a>) {
     compiler
         .prelude()
@@ -254,6 +296,7 @@ pub(crate) fn configure_compiler<'a>(compiler: &mut Compiler<'a>) {
 
 pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Global<'v>>) {
     let capture_ty = global.types.capture;
+    let windows_arguments_ty = builder.register_type::<WindowsArguments>();
     let trim = builder.sym("trim");
 
     builder
@@ -311,5 +354,56 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 })
         })
         .value("Error", global.types.proc_error)
+        .commit();
+
+    builder
+        .module("proc.windows")
+        .function("quote", async move |strand, args, out| {
+            let ([argument], []) = unpack!(strand, args, 1, 0)?;
+            let argument = argument.to_arg(strand)?;
+            if argument.contains('\0') {
+                return Err(Error::value(
+                    strand,
+                    "Windows process arguments cannot contain NUL characters",
+                ));
+            }
+            let mut command_line = String::new();
+            dolang_winterop::process::quote_argument(&argument, &mut command_line);
+            Output::set(strand, out, command_line.as_str());
+            Ok(())
+        })
+        .function_with_slots(
+            "join",
+            async move |strand, args, out, [mut iter, mut item]| {
+                let ([iterable], []) = unpack!(strand, args, 1, 0)?;
+                let mut arguments = Vec::new();
+                iterable.iter(strand, &mut iter).await?;
+                while iter.next(strand, &mut item).await? {
+                    arguments.push(item.to_arg(strand)?);
+                }
+                let command_line = dolang_winterop::process::join_arguments(arguments)
+                    .map_err(|error| Error::value(strand, error.to_string()))?;
+                Output::set(strand, out, command_line.as_str());
+                Ok(())
+            },
+        )
+        .function("split", async move |strand, args, mut out| {
+            let ([command_line], []) = unpack!(strand, args, 1, 0)?;
+            let command_line = command_line
+                .as_str(strand)
+                .ok_or_else(|| Error::type_error(strand, "expected `Str`"))?;
+            let arguments = strand.access(|access| {
+                dolang_winterop::process::split_arguments(command_line.as_str(access))
+            });
+            windows_arguments_ty.create(
+                strand,
+                WindowsArguments {
+                    arguments,
+                    index: 0,
+                },
+                &mut out,
+            );
+            Ok(())
+        })
         .commit();
 }
