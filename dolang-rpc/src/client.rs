@@ -86,8 +86,6 @@ struct Writer<P: Protocol> {
     transport: transport::AnySender,
     outgoing: mpsc::UnboundedReceiver<Message<P::Request>>,
     inner: Weak<Inner<P>>,
-    #[cfg(windows)]
-    escrow_request_handles: bool,
     limits: Limits,
 }
 
@@ -179,12 +177,9 @@ impl<P: Protocol> Client<P> {
         sender: transport::AnySender,
         receiver: transport::AnyReceiver,
         limits: Limits,
-        escrow_request_handles: bool,
         #[cfg(windows)] peer_process: Option<OwnedHandle>,
     ) -> Self {
         let (outgoing, outgoing_rx) = mpsc::unbounded_channel();
-        #[cfg(not(windows))]
-        let _ = escrow_request_handles;
         let inner = Arc::new(Inner {
             outgoing: Mutex::new(Some(outgoing)),
             pending: Mutex::new(HashMap::new()),
@@ -202,8 +197,6 @@ impl<P: Protocol> Client<P> {
                 transport: sender,
                 outgoing: outgoing_rx,
                 inner: Arc::downgrade(&inner),
-                #[cfg(windows)]
-                escrow_request_handles,
                 limits,
             }
             .run(),
@@ -499,28 +492,49 @@ impl<P: Protocol> Writer<P> {
         #[cfg(unix)]
         let encoded = encode_payload(&value);
         #[cfg(windows)]
-        let mut frame = self.transport.send();
-        #[cfg(windows)]
-        let encoded = encode_payload(&value, &mut frame);
+        let (payload, handles) = {
+            let mut put_handles = self.transport.put_handles();
+            let payload = match encode_payload(&value, &mut put_handles) {
+                Ok(payload) => payload,
+                Err(err) => {
+                    self.complete_err(id, err);
+                    return Ok(());
+                }
+            };
+            if put_handles.is_empty() {
+                (payload, None)
+            } else {
+                if !matches!(&trailer, fragment::Trailer::None) {
+                    return Err(Error::Protocol(
+                        "requests with both native-handle attachments and a trailer are not supported"
+                            .into(),
+                    ));
+                }
+                (payload, Some(put_handles.finish()))
+            }
+        };
+        #[cfg(unix)]
         let (payload, handles) = match encoded {
             Ok(payload) => payload,
             Err(err) => {
-                #[cfg(windows)]
-                drop(frame);
                 self.complete_err(id, err);
                 return Ok(());
             }
         };
+        #[cfg(unix)]
         let has_attachments = !handles.is_empty();
+        #[cfg(windows)]
+        let has_attachments = handles.is_some();
         if has_attachments {
+            #[cfg(unix)]
             if !matches!(&trailer, fragment::Trailer::None) {
-                #[cfg(windows)]
-                drop(frame);
                 return Err(Error::Protocol(
                     "requests with both native-handle attachments and a trailer are not supported"
                         .into(),
                 ));
             }
+            #[cfg(windows)]
+            let handles = handles.unwrap();
             #[cfg(unix)]
             let mut frame = self.transport.send();
             #[cfg(unix)]
@@ -531,11 +545,11 @@ impl<P: Protocol> Writer<P> {
                 return Err(err);
             }
             #[cfg(windows)]
-            if self.escrow_request_handles
-                && let Some(inner) = self.inner.upgrade()
-            {
+            if let Some(inner) = self.inner.upgrade() {
                 inner.handle_escrow.lock().unwrap().insert(id, handles);
             }
+            #[cfg(windows)]
+            let frame = self.transport.send();
             let header = fragment::FragmentHeader {
                 flags: fragment::Flags::FIRST | fragment::Flags::LAST,
                 kind: Kind::Request,
@@ -554,8 +568,6 @@ impl<P: Protocol> Writer<P> {
                 return Err(err);
             }
         } else {
-            #[cfg(windows)]
-            drop(frame);
             scheduler.admit_message(Kind::Request, id, payload, trailer);
         }
         Ok(())
@@ -849,7 +861,6 @@ mod tests {
             transport: transport::AnySender::Generic(sender),
             outgoing: outgoing_rx,
             inner: Arc::downgrade(&inner),
-            escrow_request_handles: true,
             limits: Limits::default(),
         };
 

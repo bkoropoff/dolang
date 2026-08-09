@@ -1,7 +1,7 @@
 #[cfg(unix)]
 use std::os::fd::{BorrowedFd, OwnedFd};
 #[cfg(windows)]
-use std::os::windows::io::{BorrowedHandle, OwnedHandle};
+use std::os::windows::io::OwnedHandle;
 use std::{
     future::poll_fn,
     io::{self, IoSlice},
@@ -11,6 +11,9 @@ use std::{
 
 use bytes::{Buf, BufMut};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
+
+#[cfg(windows)]
+use crate::handle::{ErasedHandle, PutHandle};
 
 /// Bound on the number of `IoSlice`s gathered from a chained `Buf` for one
 /// vectored write attempt.
@@ -78,9 +81,6 @@ pub(crate) trait RecvFrame: Send {
 pub(crate) trait SendFrame<'frame>: Send {
     #[cfg(unix)]
     fn attach_fd(&mut self, fd: BorrowedFd<'frame>) -> io::Result<u32>;
-    #[cfg(windows)]
-    fn attach_handle(&mut self, handle: BorrowedHandle<'_>) -> io::Result<usize>;
-
     /// Attempts one nonblocking write of `buf`, following the same
     /// readiness/registration contract as `AsyncWrite::poll_write`. The one
     /// low-level primitive each transport must implement; `finish` (below)
@@ -175,6 +175,52 @@ pub(crate) enum AnyRecv<'a> {
     Windows(windows::WindowsRecv<'a>),
 }
 
+#[cfg(windows)]
+pub(crate) enum AnyPutHandle<'handle> {
+    Generic(std::marker::PhantomData<&'handle ()>),
+    Windows(windows::WindowsPutHandle<'handle>),
+}
+
+#[cfg(windows)]
+impl AnySender {
+    pub(crate) fn put_handles<'handle>(&self) -> AnyPutHandle<'handle> {
+        match self {
+            Self::Generic(_) => AnyPutHandle::Generic(std::marker::PhantomData),
+            Self::Windows(sender) => AnyPutHandle::Windows(sender.put_handles()),
+        }
+    }
+}
+
+#[cfg(windows)]
+impl AnyPutHandle<'_> {
+    pub(crate) fn is_empty(&self) -> bool {
+        match self {
+            Self::Generic(_) => true,
+            Self::Windows(handles) => handles.is_empty(),
+        }
+    }
+
+    pub(crate) fn finish(self) -> Vec<OwnedHandle> {
+        match self {
+            Self::Generic(_) => Vec::new(),
+            Self::Windows(handles) => handles.finish(),
+        }
+    }
+}
+
+#[cfg(windows)]
+impl<'handle> PutHandle<'handle> for AnyPutHandle<'handle> {
+    fn put_handle(&mut self, handle: &'handle dyn ErasedHandle) -> io::Result<usize> {
+        match self {
+            Self::Generic(_) => {
+                let _ = handle;
+                panic!("generic byte-stream transport does not support handles")
+            }
+            Self::Windows(handles) => handles.put_handle(handle),
+        }
+    }
+}
+
 impl Sender for AnySender {
     type Send<'a> = AnySend<'a>;
     fn send(&mut self) -> Self::Send<'_> {
@@ -204,13 +250,6 @@ impl<'frame> SendFrame<'frame> for AnySend<'frame> {
         match self {
             Self::Generic(frame) => frame.attach_fd(fd),
             Self::Unix(frame) => frame.attach_fd(fd),
-        }
-    }
-    #[cfg(windows)]
-    fn attach_handle(&mut self, handle: BorrowedHandle<'_>) -> io::Result<usize> {
-        match self {
-            Self::Generic(frame) => frame.attach_handle(handle),
-            Self::Windows(frame) => frame.attach_handle(handle),
         }
     }
     fn poll_write_once(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
@@ -364,13 +403,6 @@ impl<'frame> SendFrame<'frame> for GenericSend<'frame> {
         // of panicking when an OsHandle is serialized on this transport.
         panic!("generic byte-stream transport does not support file descriptors")
     }
-    #[cfg(windows)]
-    fn attach_handle(&mut self, _handle: BorrowedHandle<'_>) -> io::Result<usize> {
-        // FIXME: Plumb a reportable capability error to the public API instead
-        // of panicking when an OsHandle is serialized on this transport.
-        panic!("generic byte-stream transport does not support handles")
-    }
-
     fn poll_write_once(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
         self.0.0.as_mut().poll_write(cx, buf)
     }
@@ -425,17 +457,20 @@ mod tests {
 
 #[cfg(all(test, windows))]
 mod windows_tests {
-    use std::os::windows::io::AsHandle;
+    use std::os::windows::io::OwnedHandle;
 
     use super::*;
+    use crate::handle::OsHandle;
 
     #[tokio::test]
     #[should_panic(expected = "generic byte-stream transport does not support handles")]
     async fn generic_send_rejects_handles() {
         let (stream, _) = tokio::io::duplex(64);
-        let (mut sender, _) = generic_duplex(stream);
+        let (sender, _) = generic_duplex(stream);
+        let sender = AnySender::Generic(sender);
         let file = std::fs::File::open(std::env::current_exe().unwrap()).unwrap();
-        sender.send().attach_handle(file.as_handle()).unwrap();
+        let handle = OsHandle::new(OwnedHandle::from(file));
+        sender.put_handles().put_handle(&handle).unwrap();
     }
 
     #[tokio::test]

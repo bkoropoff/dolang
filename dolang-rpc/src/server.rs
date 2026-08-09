@@ -373,10 +373,27 @@ async fn admit<P: Protocol>(
             #[cfg(unix)]
             let (payload, handles) = encode_payload(&value)?;
             #[cfg(windows)]
-            let mut frame = sender.send();
+            let (payload, handles) = {
+                let mut put_handles = sender.put_handles();
+                let payload = encode_payload(&value, &mut put_handles)?;
+                if put_handles.is_empty() {
+                    (payload, None)
+                } else {
+                    if !matches!(&trailer, fragment::Trailer::None) {
+                        return Err(Error::Protocol(
+                            "responses with both native-handle attachments and a trailer are not supported"
+                                .into(),
+                        ));
+                    }
+                    (payload, Some(put_handles.finish()))
+                }
+            };
+            #[cfg(unix)]
+            let has_attachments = !handles.is_empty();
             #[cfg(windows)]
-            let (payload, handles) = encode_payload(&value, &mut frame)?;
-            if !handles.is_empty() {
+            let has_attachments = handles.is_some();
+            if has_attachments {
+                #[cfg(unix)]
                 if !matches!(&trailer, fragment::Trailer::None) {
                     return Err(Error::Protocol(
                         "responses with both native-handle attachments and a trailer are not supported"
@@ -387,6 +404,10 @@ async fn admit<P: Protocol>(
                 let mut frame = sender.send();
                 #[cfg(unix)]
                 attach_handles(&handles, &mut frame)?;
+                #[cfg(windows)]
+                drop(handles.unwrap());
+                #[cfg(windows)]
+                let frame = sender.send();
                 let header = fragment::FragmentHeader {
                     flags: fragment::Flags::FIRST | fragment::Flags::LAST,
                     kind: Kind::Response,
@@ -397,8 +418,6 @@ async fn admit<P: Protocol>(
                 frame.finish(&mut buffer).await?;
                 sender.flush().await?;
             } else {
-                #[cfg(windows)]
-                drop(frame);
                 scheduler.admit_message(Kind::Response, id, payload, trailer);
             }
         }

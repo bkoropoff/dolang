@@ -58,8 +58,12 @@ mod unbound;
 
 use ::serde::{Serialize, de::DeserializeOwned};
 use bytes::Bytes;
-use handle::{ErasedHandle, PutHandle, TakeHandle};
-use transport::{RecvFrame, SendFrame};
+#[cfg(unix)]
+use handle::ErasedHandle;
+use handle::{PutHandle, TakeHandle};
+use transport::RecvFrame;
+#[cfg(unix)]
+use transport::SendFrame;
 pub use unbound::Builder;
 
 /// Configurable size and concurrency limits for a session. Not public — set
@@ -229,12 +233,6 @@ struct FramePutHandle<'handle> {
     handles: Vec<&'handle dyn ErasedHandle>,
 }
 
-#[cfg(windows)]
-struct FramePutHandle<'borrow, 'handle, F> {
-    frame: &'borrow mut F,
-    handles: Vec<&'handle dyn ErasedHandle>,
-}
-
 #[cfg(unix)]
 impl<'frame> PutHandle<'frame> for FramePutHandle<'frame> {
     fn put_handle(&mut self, handle: &'frame dyn ErasedHandle) -> std::io::Result<u32> {
@@ -259,34 +257,10 @@ impl<'frame> PutHandle<'frame> for FramePutHandle<'frame> {
     }
 }
 
-#[cfg(windows)]
-impl<'frame, F: SendFrame<'frame>> PutHandle<'frame> for FramePutHandle<'_, 'frame, F> {
-    fn put_handle(&mut self, handle: &'frame dyn ErasedHandle) -> std::io::Result<usize> {
-        if self
-            .handles
-            .iter()
-            .any(|existing| std::ptr::eq(*existing, handle))
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "the same operating-system handle was serialized more than once",
-            ));
-        }
-        let raw = handle.raw_handle();
-        // SAFETY: `handle` owns this raw handle until serialization succeeds,
-        // after which the returned owned vector keeps it alive through send.
-        let borrowed = unsafe { std::os::windows::io::BorrowedHandle::borrow_raw(raw) };
-        let value = self.frame.attach_handle(borrowed)?;
-        self.handles.push(handle);
-        Ok(value)
-    }
-}
-
 #[cfg(unix)]
 type OwnedHandles = Vec<std::os::fd::OwnedFd>;
-#[cfg(windows)]
-type OwnedHandles = Vec<std::os::windows::io::OwnedHandle>;
 
+#[cfg(unix)]
 fn steal_handles(handles: Vec<&dyn ErasedHandle>) -> OwnedHandles {
     handles
         .into_iter()
@@ -339,18 +313,13 @@ fn encode_payload<T: Serialize>(value: &T) -> Result<(Bytes, OwnedHandles), Erro
 }
 
 #[cfg(windows)]
-fn encode_payload<'frame, T: Serialize, F: SendFrame<'frame>>(
-    value: &'frame T,
-    frame: &mut F,
-) -> Result<(Bytes, OwnedHandles), Error> {
-    let mut handles = FramePutHandle {
-        frame,
-        handles: Vec::new(),
-    };
-    let buffer = serde::to_extend(value, &mut handles, Vec::new())
+fn encode_payload<'handle, T: Serialize, H: PutHandle<'handle>>(
+    value: &'handle T,
+    handles: &mut H,
+) -> Result<Bytes, Error> {
+    let buffer = serde::to_extend(value, handles, Vec::new())
         .map_err(|e| Error::Serialize(e.to_string()))?;
-    let handles = steal_handles(handles.handles);
-    Ok((buffer.into(), handles))
+    Ok(buffer.into())
 }
 
 fn decode<T: DeserializeOwned>(bytes: &[u8], frame: &mut impl RecvFrame) -> Result<T, Error> {

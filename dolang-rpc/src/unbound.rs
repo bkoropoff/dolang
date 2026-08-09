@@ -148,7 +148,6 @@ impl Builder {
             transport::AnySender::Generic(sender),
             transport::AnyReceiver::Generic(receiver),
             self.limits,
-            false,
             #[cfg(windows)]
             None,
             self.app_protocol(),
@@ -172,7 +171,6 @@ impl Builder {
             transport::AnySender::Generic(sender),
             transport::AnyReceiver::Generic(receiver),
             self.limits,
-            false,
             #[cfg(windows)]
             None,
             self.app_protocol(),
@@ -191,7 +189,6 @@ impl Builder {
             transport::AnySender::Unix(sender),
             transport::AnyReceiver::Unix(receiver),
             self.limits,
-            false,
             #[cfg(windows)]
             None,
             self.app_protocol(),
@@ -225,7 +222,6 @@ impl Builder {
             transport::AnySender::Windows(sender),
             transport::AnyReceiver::Windows(receiver),
             self.limits,
-            true,
             Some(peer_process),
             self.app_protocol(),
         )
@@ -258,7 +254,6 @@ impl Builder {
             transport::AnySender::Windows(sender),
             transport::AnyReceiver::Windows(receiver),
             self.limits,
-            true,
             Some(peer_process),
             self.app_protocol(),
         )
@@ -354,7 +349,6 @@ async fn negotiate_client(
     mut sender: transport::AnySender,
     mut receiver: transport::AnyReceiver,
     limits: Limits,
-    escrow_request_handles: bool,
     #[cfg(windows)] peer_process: Option<OwnedHandle>,
     app_protocol: (&str, &[u16]),
 ) -> Result<UnboundClient, Error> {
@@ -366,7 +360,6 @@ async fn negotiate_client(
         sender,
         receiver,
         limits: negotiated.limits,
-        escrow_request_handles,
         #[cfg(windows)]
         peer_process,
         app_protocol: negotiated.app_protocol,
@@ -396,7 +389,6 @@ pub struct UnboundClient {
     sender: transport::AnySender,
     receiver: transport::AnyReceiver,
     limits: Limits,
-    escrow_request_handles: bool,
     #[cfg(windows)]
     peer_process: Option<OwnedHandle>,
     app_protocol: (String, u16),
@@ -425,7 +417,6 @@ impl UnboundClient {
             self.sender,
             self.receiver,
             self.limits,
-            self.escrow_request_handles,
             #[cfg(windows)]
             self.peer_process,
         )
