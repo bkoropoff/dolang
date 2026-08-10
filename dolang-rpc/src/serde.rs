@@ -1,7 +1,7 @@
 #[cfg(unix)]
-use std::os::fd::{BorrowedFd, IntoRawFd};
+use std::os::fd::IntoRawFd;
 #[cfg(windows)]
-use std::os::windows::io::{BorrowedHandle, IntoRawHandle};
+use std::os::windows::io::IntoRawHandle;
 use std::{cell::RefCell, fmt, marker::PhantomData, ptr};
 
 use ::serde::{
@@ -12,13 +12,36 @@ use ::serde::{
     },
     ser::{self},
 };
+use bytes::Bytes;
 use dolang_util::debug_eprintln;
 use postcard::ser_flavors::{ExtendFlavor, Flavor};
 
 use crate::{
-    handle::OS_HANDLE_TYPE,
-    transport::{RecvFrame, SendFrame},
+    Error as RpcError,
+    handle::{HandleRef, OS_HANDLE_TYPE, PutHandle, TakeHandle},
 };
+
+pub(crate) fn encode_payload<'handle, T: Serialize, H: PutHandle<'handle>>(
+    value: &'handle T,
+    handles: &mut H,
+) -> Result<Bytes, RpcError> {
+    let buffer = to_extend(value, handles, Vec::new())
+        .map_err(|error| RpcError::Serialize(error.to_string()))?;
+    Ok(buffer.into())
+}
+
+pub(crate) fn decode_payload<T: de::DeserializeOwned>(
+    bytes: &[u8],
+    handles: &mut impl TakeHandle,
+) -> Result<T, RpcError> {
+    let value = from_bytes(bytes, &mut *handles)
+        .map_err(|error| RpcError::Deserialize(error.to_string()))?;
+    if let Err(error) = handles.finish() {
+        drop(value);
+        return Err(RpcError::Deserialize(error.to_string()));
+    }
+    Ok(value)
+}
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
@@ -59,7 +82,7 @@ pub(crate) fn to_extend<'frame, T, F>(
 ) -> Result<Vec<u8>, Error>
 where
     T: Serialize + ?Sized,
-    F: SendFrame<'frame>,
+    F: PutHandle<'frame>,
 {
     let mut postcard = postcard::Serializer {
         output: ExtendFlavor::new(output),
@@ -76,7 +99,7 @@ where
 pub(crate) fn from_bytes<'de, T, H>(bytes: &'de [u8], handles: &mut H) -> Result<T, Error>
 where
     T: Deserialize<'de>,
-    H: RecvFrame,
+    H: TakeHandle,
 {
     let mut postcard = postcard::Deserializer::from_bytes(bytes);
     let value = T::deserialize(Deserializer {
@@ -106,7 +129,7 @@ struct Compound<'cell, 'borrow, 'frame, C, F> {
     marker: PhantomData<&'frame ()>,
 }
 
-impl<'frame, T: Serialize + ?Sized, F: SendFrame<'frame>> Serialize
+impl<'frame, T: Serialize + ?Sized, F: PutHandle<'frame>> Serialize
     for WithFrame<'_, '_, '_, 'frame, T, F>
 {
     fn serialize<S: ser::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -128,7 +151,7 @@ macro_rules! forward_ser {
 
 impl<'cell, 'borrow, 'frame, S, F> ser::Serializer for Serializer<'cell, 'borrow, 'frame, S, F>
 where
-    F: SendFrame<'frame>,
+    F: PutHandle<'frame>,
     S: ser::Serializer,
 {
     type Ok = S::Ok;
@@ -193,33 +216,29 @@ where
         value: &T,
     ) -> Result<Self::Ok, Self::Error> {
         if ptr::eq(name, OS_HANDLE_TYPE) {
+            let raw = value.serialize(RawHandleSerializer).map_err(ser_custom)?;
+            // SAFETY: only `OsHandle::serialize` can supply the private marker
+            // by identity. It passes a live `HandleRef` whose referent belongs
+            // to the message borrowed for `'frame`.
+            let handle = unsafe { (*(raw as *const HandleRef<'frame>)).0 };
             #[cfg(unix)]
-            {
-                let raw = value.serialize(RawHandleSerializer).map_err(ser_custom)?;
-                // SAFETY: the writer owns `value` until the frame's consuming
-                // `finish` future completes. The frame lifetime is therefore a
-                // valid extension of serde's erased raw descriptor borrow.
-                let fd = unsafe { BorrowedFd::borrow_raw(raw as i32) };
-                let index = self.frame.borrow_mut().attach_fd(fd).map_err(ser_custom)?;
-                return self.inner.serialize_u32(index);
-            }
+            let value = self
+                .frame
+                .borrow_mut()
+                .put_handle(handle)
+                .map_err(ser_custom)?;
             #[cfg(windows)]
-            {
-                let raw = value.serialize(RawHandleSerializer).map_err(ser_custom)?;
-                // The serializer's value remains borrowed for this call. The
-                // Windows backend either copies the handle immediately or
-                // records only its process-local value.
-                let handle = unsafe { BorrowedHandle::borrow_raw(raw as _) };
-                let value = self
-                    .frame
-                    .borrow_mut()
-                    .attach_handle(handle)
-                    .map_err(ser_custom)?;
-                #[cfg(target_pointer_width = "32")]
-                return self.inner.serialize_u32(value as u32);
-                #[cfg(target_pointer_width = "64")]
-                return self.inner.serialize_u64(value as u64);
-            }
+            let value = self
+                .frame
+                .borrow_mut()
+                .put_handle(handle)
+                .map_err(ser_custom)?;
+            #[cfg(unix)]
+            return self.inner.serialize_u32(value);
+            #[cfg(all(windows, target_pointer_width = "32"))]
+            return self.inner.serialize_u32(value as u32);
+            #[cfg(all(windows, target_pointer_width = "64"))]
+            return self.inner.serialize_u64(value as u64);
         }
         self.inner.serialize_newtype_struct(
             name,
@@ -331,7 +350,7 @@ where
 
 macro_rules! compound {
     ($trait:ident,$method:ident) => {
-        impl<'frame, C: ser::$trait, F: SendFrame<'frame>> ser::$trait
+        impl<'frame, C: ser::$trait, F: PutHandle<'frame>> ser::$trait
             for Compound<'_, '_, 'frame, C, F>
         {
             type Ok = C::Ok;
@@ -353,7 +372,7 @@ compound!(SerializeSeq, serialize_element);
 compound!(SerializeTuple, serialize_element);
 compound!(SerializeTupleStruct, serialize_field);
 compound!(SerializeTupleVariant, serialize_field);
-impl<'frame, C: ser::SerializeMap, F: SendFrame<'frame>> ser::SerializeMap
+impl<'frame, C: ser::SerializeMap, F: PutHandle<'frame>> ser::SerializeMap
     for Compound<'_, '_, 'frame, C, F>
 {
     type Ok = C::Ok;
@@ -376,7 +395,7 @@ impl<'frame, C: ser::SerializeMap, F: SendFrame<'frame>> ser::SerializeMap
         self.inner.end()
     }
 }
-impl<'frame, C: ser::SerializeStruct, F: SendFrame<'frame>> ser::SerializeStruct
+impl<'frame, C: ser::SerializeStruct, F: PutHandle<'frame>> ser::SerializeStruct
     for Compound<'_, '_, 'frame, C, F>
 {
     type Ok = C::Ok;
@@ -399,7 +418,7 @@ impl<'frame, C: ser::SerializeStruct, F: SendFrame<'frame>> ser::SerializeStruct
         self.inner.end()
     }
 }
-impl<'frame, C: ser::SerializeStructVariant, F: SendFrame<'frame>> ser::SerializeStructVariant
+impl<'frame, C: ser::SerializeStructVariant, F: PutHandle<'frame>> ser::SerializeStructVariant
     for Compound<'_, '_, 'frame, C, F>
 {
     type Ok = C::Ok;
@@ -468,16 +487,16 @@ impl ser::Serializer for RawHandleSerializer {
     }
     fn serialize_u32(self, v: u32) -> Result<usize, Error> {
         let _ = v;
-        #[cfg(all(windows, target_pointer_width = "32"))]
+        #[cfg(target_pointer_width = "32")]
         return Ok(v as usize);
-        #[cfg(not(all(windows, target_pointer_width = "32")))]
+        #[cfg(not(target_pointer_width = "32"))]
         return raw_error();
     }
     fn serialize_u64(self, v: u64) -> Result<usize, Error> {
         let _ = v;
-        #[cfg(all(windows, target_pointer_width = "64"))]
+        #[cfg(target_pointer_width = "64")]
         return Ok(v as usize);
-        #[cfg(not(all(windows, target_pointer_width = "64")))]
+        #[cfg(not(target_pointer_width = "64"))]
         return raw_error();
     }
     fn serialize_u128(self, _: u128) -> Result<usize, Error> {
@@ -617,7 +636,7 @@ macro_rules! forward_de {
 impl<'de, D, H> de::Deserializer<'de> for Deserializer<'_, D, H>
 where
     D: de::Deserializer<'de>,
-    H: RecvFrame,
+    H: TakeHandle,
 {
     type Error = D::Error;
     forward_de!(
@@ -669,7 +688,7 @@ where
             #[cfg(unix)]
             {
                 let index = u32::deserialize(self.inner)?;
-                let fd = self.handles.take_fd(index).map_err(de_custom)?;
+                let fd = self.handles.take_handle(index).map_err(de_custom)?;
                 // The private OsHandle visitor immediately adopts this raw fd.
                 // No other visitor can request the reserved newtype identity.
                 let raw = fd.into_raw_fd();
@@ -763,7 +782,7 @@ where
 impl<'de, S, H> DeserializeSeed<'de> for SeedWrap<'_, S, H>
 where
     S: DeserializeSeed<'de>,
-    H: RecvFrame,
+    H: TakeHandle,
 {
     type Value = S::Value;
     fn deserialize<D: de::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
@@ -777,7 +796,7 @@ where
 macro_rules! visit_scalar { ($($name:ident($ty:ty)),* $(,)?) => {$(
  fn $name<E:de::Error>(self,v:$ty)->Result<Self::Value,E>{self.inner.$name(v)}
  )*}; }
-impl<'de, V: Visitor<'de>, H: RecvFrame> Visitor<'de> for VisitorWrap<'_, V, H> {
+impl<'de, V: Visitor<'de>, H: TakeHandle> Visitor<'de> for VisitorWrap<'_, V, H> {
     type Value = V::Value;
     fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.inner.expecting(f)
@@ -853,7 +872,7 @@ impl<'de, V: Visitor<'de>, H: RecvFrame> Visitor<'de> for VisitorWrap<'_, V, H> 
         })
     }
 }
-impl<'de, A: SeqAccess<'de>, H: RecvFrame> SeqAccess<'de> for SeqWrap<'_, A, H> {
+impl<'de, A: SeqAccess<'de>, H: TakeHandle> SeqAccess<'de> for SeqWrap<'_, A, H> {
     type Error = A::Error;
     fn next_element_seed<T: DeserializeSeed<'de>>(
         &mut self,
@@ -868,7 +887,7 @@ impl<'de, A: SeqAccess<'de>, H: RecvFrame> SeqAccess<'de> for SeqWrap<'_, A, H> 
         self.inner.size_hint()
     }
 }
-impl<'de, A: MapAccess<'de>, H: RecvFrame> MapAccess<'de> for MapWrap<'_, A, H> {
+impl<'de, A: MapAccess<'de>, H: TakeHandle> MapAccess<'de> for MapWrap<'_, A, H> {
     type Error = A::Error;
     fn next_key_seed<K: DeserializeSeed<'de>>(
         &mut self,
@@ -889,7 +908,7 @@ impl<'de, A: MapAccess<'de>, H: RecvFrame> MapAccess<'de> for MapWrap<'_, A, H> 
         self.inner.size_hint()
     }
 }
-impl<'a, 'de, A: EnumAccess<'de>, H: RecvFrame> EnumAccess<'de> for EnumWrap<'a, A, H> {
+impl<'a, 'de, A: EnumAccess<'de>, H: TakeHandle> EnumAccess<'de> for EnumWrap<'a, A, H> {
     type Error = A::Error;
     type Variant = VariantWrap<'a, A::Variant, H>;
     fn variant_seed<V: DeserializeSeed<'de>>(
@@ -909,7 +928,7 @@ impl<'a, 'de, A: EnumAccess<'de>, H: RecvFrame> EnumAccess<'de> for EnumWrap<'a,
         ))
     }
 }
-impl<'de, A: VariantAccess<'de>, H: RecvFrame> VariantAccess<'de> for VariantWrap<'_, A, H> {
+impl<'de, A: VariantAccess<'de>, H: TakeHandle> VariantAccess<'de> for VariantWrap<'_, A, H> {
     type Error = A::Error;
     fn unit_variant(self) -> Result<(), A::Error> {
         self.inner.unit_variant()
@@ -947,42 +966,28 @@ impl<'de, A: VariantAccess<'de>, H: RecvFrame> VariantAccess<'de> for VariantWra
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::handle::OsHandle;
-    use ::serde::{Deserialize, Serialize};
-    use bytes::BufMut;
+    use crate::{handle::OsHandle, transport::EncodeHandles};
+    use ::serde::{Deserialize, Serialize, ser::SerializeStruct};
     use nix::unistd::pipe;
     use std::io;
-    use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+    use std::os::fd::OwnedFd;
 
-    struct Frame<'a>(Vec<BorrowedFd<'a>>);
-    impl<'a> SendFrame<'a> for Frame<'a> {
-        fn attach_fd(&mut self, fd: BorrowedFd<'a>) -> io::Result<u32> {
+    struct Frame(Vec<i32>);
+    impl<'a> PutHandle<'a> for Frame {
+        fn put_handle(&mut self, _fd: &'a dyn crate::handle::ErasedHandle) -> io::Result<u32> {
             let index = self.0.len() as u32;
-            self.0.push(fd);
+            self.0.push(index as i32);
             Ok(index)
-        }
-        fn has_attachments(&self) -> bool {
-            !self.0.is_empty()
-        }
-        fn poll_write_once(
-            &mut self,
-            _cx: &mut std::task::Context<'_>,
-            buf: &[u8],
-        ) -> std::task::Poll<io::Result<usize>> {
-            std::task::Poll::Ready(Ok(buf.len()))
         }
     }
 
     struct TestReceiver(Vec<Option<OwnedFd>>);
-    impl RecvFrame for TestReceiver {
-        fn take_fd(&mut self, index: u32) -> io::Result<OwnedFd> {
+    impl TakeHandle for TestReceiver {
+        fn take_handle(&mut self, index: u32) -> io::Result<OwnedFd> {
             self.0
                 .get_mut(index as usize)
                 .and_then(Option::take)
                 .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid fd"))
-        }
-        async fn recv<B: BufMut>(&mut self, _buffer: &mut B) -> io::Result<usize> {
-            unreachable!()
         }
     }
 
@@ -1002,6 +1007,27 @@ mod tests {
         none: Option<u8>,
         map: std::collections::BTreeMap<String, Ordinary>,
         variants: Vec<Ordinary>,
+    }
+
+    #[derive(Serialize)]
+    struct OneHandle<'a> {
+        handle: &'a OsHandle<OwnedFd>,
+    }
+
+    #[derive(Serialize)]
+    struct RepeatedHandle<'a> {
+        first: &'a OsHandle<OwnedFd>,
+        second: &'a OsHandle<OwnedFd>,
+    }
+
+    struct FailsAfterHandle<'a>(&'a OsHandle<OwnedFd>);
+
+    impl Serialize for FailsAfterHandle<'_> {
+        fn serialize<S: ::serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let mut state = serializer.serialize_struct("FailsAfterHandle", 2)?;
+            state.serialize_field("handle", self.0)?;
+            Err(::serde::ser::Error::custom("intentional failure"))
+        }
     }
 
     #[test]
@@ -1030,8 +1056,8 @@ mod tests {
     }
 
     #[derive(Serialize)]
-    struct Sending<'a> {
-        handles: Option<Vec<OsHandle<BorrowedFd<'a>>>>,
+    struct Sending {
+        handles: Option<Vec<OsHandle<OwnedFd>>>,
     }
     #[derive(Deserialize)]
     struct Receiving {
@@ -1042,12 +1068,14 @@ mod tests {
     fn nested_handles_round_trip_through_context() {
         let (fd, _) = pipe().unwrap();
         let value = Sending {
-            handles: Some(vec![OsHandle::new(fd.as_fd())]),
+            handles: Some(vec![OsHandle::new(fd)]),
         };
         let mut frame = Frame(Vec::new());
         let encoded = to_extend(&value, &mut frame, Vec::new()).unwrap();
         assert_eq!(frame.0.len(), 1);
-        let mut handles = TestReceiver(vec![Some(fd.as_fd().try_clone_to_owned().unwrap())]);
+        let mut handles = TestReceiver(vec![Some(
+            value.handles.unwrap().pop().unwrap().into_inner(),
+        )]);
         let decoded: Receiving = from_bytes(&encoded, &mut handles).unwrap();
         assert_eq!(decoded.handles.unwrap().len(), 1);
     }
@@ -1061,6 +1089,52 @@ mod tests {
             matches!(from_bytes::<u32, _>(&encoded, &mut handles), Err(Error::Message(message)) if message == "trailing bytes in payload")
         );
     }
+
+    #[test]
+    fn successful_serialization_steals_handle() {
+        let (fd, _) = pipe().unwrap();
+        let handle = OsHandle::new(fd);
+        let value = OneHandle { handle: &handle };
+        let mut handles = EncodeHandles::for_test(usize::MAX);
+        encode_payload(&value, &mut handles).unwrap();
+        let owned = handles.finish();
+        assert_eq!(owned.fds.len(), 1);
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { handle.into_inner() }))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn failed_serialization_does_not_steal_handle() {
+        let (fd, _) = pipe().unwrap();
+        let handle = OsHandle::new(fd);
+        let mut handles = EncodeHandles::for_test(usize::MAX);
+        assert!(encode_payload(&FailsAfterHandle(&handle), &mut handles).is_err());
+        drop(handle.into_inner());
+    }
+
+    #[test]
+    fn handle_limit_is_checked_before_stealing() {
+        let (fd, _) = pipe().unwrap();
+        let handle = OsHandle::new(fd);
+        let mut handles = EncodeHandles::for_test(0);
+        assert!(encode_payload(&OneHandle { handle: &handle }, &mut handles).is_err());
+        drop(handle.into_inner());
+    }
+
+    #[test]
+    fn repeated_handle_is_rejected_without_being_stolen() {
+        let (fd, _) = pipe().unwrap();
+        let handle = OsHandle::new(fd);
+        let value = RepeatedHandle {
+            first: &handle,
+            second: &handle,
+        };
+        let mut handles = EncodeHandles::for_test(usize::MAX);
+        assert!(encode_payload(&value, &mut handles).is_err());
+        drop(handle.into_inner());
+    }
 }
 
 #[cfg(all(test, windows))]
@@ -1069,46 +1143,28 @@ mod windows_tests {
     use std::os::windows::io::{FromRawHandle, IntoRawHandle, OwnedHandle};
 
     use ::serde::{Deserialize, Serialize};
-    use bytes::BufMut;
 
     use super::*;
     use crate::handle::OsHandle;
 
     struct Frame(Option<usize>);
 
-    impl SendFrame<'_> for Frame {
-        fn attach_handle(&mut self, handle: BorrowedHandle<'_>) -> io::Result<usize> {
-            use std::os::windows::io::AsRawHandle;
-            let raw = handle.as_raw_handle() as usize;
+    impl PutHandle<'_> for Frame {
+        fn put_handle(&mut self, handle: &dyn crate::handle::ErasedHandle) -> io::Result<usize> {
+            let raw = handle.raw_handle() as usize;
             self.0 = Some(raw);
             Ok(raw)
-        }
-
-        fn has_attachments(&self) -> bool {
-            self.0.is_some()
-        }
-
-        fn poll_write_once(
-            &mut self,
-            _cx: &mut std::task::Context<'_>,
-            buf: &[u8],
-        ) -> std::task::Poll<io::Result<usize>> {
-            std::task::Poll::Ready(Ok(buf.len()))
         }
     }
 
     struct TestReceiver(Option<OwnedHandle>);
 
-    impl RecvFrame for TestReceiver {
+    impl TakeHandle for TestReceiver {
         fn take_handle(&mut self, value: usize) -> io::Result<OwnedHandle> {
             use std::os::windows::io::AsRawHandle;
             let handle = self.0.take().unwrap();
             assert_eq!(handle.as_raw_handle() as usize, value);
             Ok(handle)
-        }
-
-        async fn recv<B: BufMut>(&mut self, _buffer: &mut B) -> io::Result<usize> {
-            unreachable!()
         }
     }
 

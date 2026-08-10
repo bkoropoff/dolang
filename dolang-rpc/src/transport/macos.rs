@@ -271,9 +271,10 @@ mod tests {
         let (left, right) = UnixStream::pair().unwrap();
         let (mut sender, _) = unix::unix(left).unwrap();
         let (_, mut receiver) = unix::unix(right).unwrap();
+        receiver.set_max_fds_per_fragment(1);
         let (read_fd, _write_fd) = nix::unistd::pipe().unwrap();
         let mut frame = sender.send();
-        frame.attach_fd(read_fd.as_fd()).unwrap();
+        assert_eq!(frame.attach_fds(std::slice::from_ref(&read_fd)).unwrap(), 1);
         let mut sent = Bytes::from_static(b"x");
         frame.finish(&mut sent).await.unwrap();
         let mut frame = receiver.recv();
@@ -281,7 +282,7 @@ mod tests {
         while buf.is_empty() {
             frame.recv(&mut buf).await.unwrap();
         }
-        frame.take_fd(0).unwrap()
+        frame.drain_fds().pop().unwrap()
     }
 
     /// A background thread hammering `Command::spawn()` for the duration of

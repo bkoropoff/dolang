@@ -370,10 +370,10 @@ future-extensible to a peer-signaled throttling hint.
 
 The receiver retains incomplete assemblies by message ID, bounded by
 `max_incomplete_messages`/`max_incomplete_trailers`/`max_fragment_size`/
-`max_payload_size`/`max_trailer_size`. `LAST` dispatches a request or
-completes a response; `ABORT` discards an incomplete request or completes an
-incomplete response with an error. Unknown, duplicate, and
-terminally-completed fragment sequences are protocol errors or defined
+`max_payload_size`/`max_trailer_size`/`max_handles_per_message`. `LAST`
+dispatches a request or completes a response; `ABORT` discards an incomplete
+request or completes an incomplete response with an error. Unknown, duplicate,
+and terminally-completed fragment sequences are protocol errors or defined
 late-message no-ops as appropriate.
 
 A receiver that no longer wants an in-progress trailer (e.g. the application
@@ -383,12 +383,28 @@ the receiver sends a `Discard { id }` notice once. `Discard` is advisory: it
 never changes the outcome of the request or response it names, it only tells
 the sender it can stop spending bandwidth on a trailer nobody will read.
 
-Unix messages carrying `SCM_RIGHTS` ancillary data remain unfragmented. The
-association between descriptors, stream fragments, and interleaved message
-assemblies is too platform-dependent to make fragmentation apply there. The
-sender queries whether serialization attached descriptors and selects the
-atomic path instead. Such messages remain subject to the ordinary maximum
-frame size.
+Unix `SCM_RIGHTS` descriptors are attached to postcard fragments in serialized
+index order. Each fragment carries at most the negotiated
+`max_handles_per_fragment`, itself capped to the operating system's ancillary
+data limit, and the receiver sizes its control-message buffer accordingly.
+The reassembler accumulates descriptors per message across interleaved
+fragments. If all postcard bytes have been sent before all descriptors, the
+scheduler emits zero-payload postcard fragments until the attachment phase is
+complete; only then may it complete the message or enter its trailer phase.
+
+`WANT_ACK` marks the final non-trailer fragment of a request or response. The
+receiver queues an empty, single-fragment `Ack` for the message ID immediately
+after reassembly accepts that boundary and before it starts consuming any
+trailer. A message may request at most one acknowledgement; `Ack` itself cannot
+request one. An unsolicited, duplicate, or late acknowledgement is a protocol
+error.
+
+On macOS, messages carrying file descriptors set `WANT_ACK` to work around XNU
+collecting reachable sockets while processing `SCM_RIGHTS`. The scheduler moves
+every successfully transmitted `OwnedFd` into message-ID escrow instead of
+dropping it, without testing its descriptor type. Receipt of `Ack` releases the
+escrow. Other platforms honor `WANT_ACK`; Windows does not yet use it for its
+own outgoing handle escrow.
 
 ## Cancellation
 
@@ -517,11 +533,10 @@ handle for the lifetime of the session. The handle must grant query and
 synchronization access so a future shared-memory handle-transfer
 implementation can fence cleanup on peer process exit.
 
-The Windows client retains each outbound request value until its correlated
-response or error arrives, ensuring any process-local handle values remain
-valid while the server decodes them. After a connection failure, those values
-remain retained until the client session itself is dropped so a racing server
-decode cannot observe a prematurely closed handle.
+The Windows client retains the owned handles stolen from each outbound request
+in a session escrow table until its correlated response or error arrives,
+ensuring process-local handle values remain valid while the server decodes
+them. Session failure drops the remaining escrow entries.
 
 V1 does not acknowledge server-to-client handle adoption. The send frame
 records handles duplicated during serialization and makes a best-effort

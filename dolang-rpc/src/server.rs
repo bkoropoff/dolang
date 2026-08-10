@@ -4,7 +4,6 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use bytes::Buf;
 use futures::{
     StreamExt,
     future::{AbortHandle, Abortable},
@@ -12,10 +11,33 @@ use futures::{
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
-    Error, Kind, Limits, Protocol, decode, encode_payload, fragment,
+    Error, Limits, Protocol,
+    fragment::{self, Kind},
+    serde::{decode_payload, encode_payload},
     session::{self, InvalidOpaque, Opaque, OpaqueGuard, OpaqueResource},
-    transport::{self, Receiver, SendFrame, Sender},
+    transport::{self, EncodeHandles, Receiver, Sender},
 };
+
+#[cfg(windows)]
+struct DecodeHandles<'a> {
+    receiver: &'a transport::AnyReceiver,
+    count: usize,
+    max_handles: usize,
+}
+
+#[cfg(windows)]
+impl crate::handle::TakeHandle for DecodeHandles<'_> {
+    fn take_handle(&mut self, value: usize) -> std::io::Result<std::os::windows::io::OwnedHandle> {
+        if self.count == self.max_handles {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "message contains too many handle attachments",
+            ));
+        }
+        self.count += 1;
+        self.receiver.duplicate_peer_handle(value)
+    }
+}
 
 /// A negotiated server endpoint that has not yet been bound to a [`Protocol`].
 ///
@@ -60,12 +82,17 @@ enum Message<R> {
     PeerDiscarded {
         id: u64,
     },
+    Ack {
+        id: u64,
+    },
 }
 
 struct Inner {
     outstanding: HashMap<u64, Cancellation>,
     objects: session::ObjectTable,
     shutdown: Option<oneshot::Sender<()>>,
+    #[cfg(target_os = "macos")]
+    fd_escrow: crate::escrow::FdEscrow,
 }
 
 struct Cancellation {
@@ -94,6 +121,8 @@ impl<P: Protocol> Server<P> {
                 outstanding: HashMap::new(),
                 objects: session::ObjectTable::default(),
                 shutdown: None,
+                #[cfg(target_os = "macos")]
+                fd_escrow: Default::default(),
             })),
             limits,
             marker: PhantomData,
@@ -120,11 +149,11 @@ impl<P: Protocol> Server<P> {
             limits,
             marker: _,
         } = self;
-        let mut writer = tokio::spawn(writer::<P>(sender, outgoing_rx, limits));
+        let mut writer = tokio::spawn(writer::<P>(sender, outgoing_rx, inner.clone(), limits));
         let (shutdown, mut shutdown_requested) = oneshot::channel();
         inner.lock().unwrap().shutdown = Some(shutdown);
         let handler = Arc::new(handler);
-        let mut reassembler = fragment::StreamReassembler::new(limits);
+        let mut reassembler = fragment::Reassembler::new(limits);
         let mut tasks = futures::stream::FuturesUnordered::new();
         let (mut result, mut writer_finished, mut graceful) = 'main: loop {
             let mut frame = receiver.recv();
@@ -160,12 +189,12 @@ impl<P: Protocol> Server<P> {
                 Err(error) => break 'main (Err(error), false, false),
             };
             let (message, live_trailer) = match complete {
-                fragment::StreamEvent::None => (None, None),
-                fragment::StreamEvent::Aborted {
+                fragment::Event::None => (None, None),
+                fragment::Event::Aborted {
                     kind: Kind::Request,
                     ..
                 } => (None, None),
-                fragment::StreamEvent::Aborted { kind, .. } => {
+                fragment::Event::Aborted { kind, .. } => {
                     break 'main (
                         Err(Error::Protocol(format!(
                             "unexpected aborted {kind:?} message"
@@ -174,8 +203,12 @@ impl<P: Protocol> Server<P> {
                         false,
                     );
                 }
-                fragment::StreamEvent::Message(message) => (Some(message), None),
-                fragment::StreamEvent::Trailer {
+                fragment::Event::Message(message) => (Some(message), None),
+                fragment::Event::Ack { id, message } => {
+                    let _ = outgoing.send(Message::Ack { id });
+                    (message, None)
+                }
+                fragment::Event::Trailer {
                     id,
                     message,
                     shared,
@@ -183,16 +216,30 @@ impl<P: Protocol> Server<P> {
                     notify_discard,
                 } => (message, Some((id, shared, len, notify_discard))),
             };
-            if let Some(fragment::StreamMessage {
+            if let Some(fragment::Message {
                 kind,
                 id,
                 payload,
+                handles,
                 trailer,
             }) = message
             {
+                #[cfg(windows)]
+                let _ = handles;
                 match kind {
                     Kind::Request => {
-                        let request = match decode(&payload, &mut frame) {
+                        #[cfg(unix)]
+                        let request = decode_payload(&payload, &mut { handles });
+                        #[cfg(windows)]
+                        let request = decode_payload(
+                            &payload,
+                            &mut DecodeHandles {
+                                receiver: &receiver,
+                                count: 0,
+                                max_handles: limits.max_handles_per_message,
+                            },
+                        );
+                        let request = match request {
                             Ok(request) => request,
                             Err(error) => break (Err(error), false, false),
                         };
@@ -242,6 +289,26 @@ impl<P: Protocol> Server<P> {
                     Kind::Discard => {
                         let _ = outgoing.send(Message::PeerDiscarded { id });
                     }
+                    Kind::Ack => {
+                        #[cfg(target_os = "macos")]
+                        if !inner.lock().unwrap().fd_escrow.release(id) {
+                            break (
+                                Err(Error::Protocol(format!(
+                                    "Ack for response {id} with no active file descriptor escrow"
+                                ))),
+                                false,
+                                false,
+                            );
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        break (
+                            Err(Error::Protocol(format!(
+                                "Ack for response {id} with no active escrow"
+                            ))),
+                            false,
+                            false,
+                        );
+                    }
                     _ => {
                         break (
                             Err(Error::Protocol(format!("unexpected {kind:?} frame"))),
@@ -255,6 +322,7 @@ impl<P: Protocol> Server<P> {
                 if notify_discard {
                     let _ = outgoing.send(Message::DiscardTrailer { id });
                 }
+                let frame = receiver.recv();
                 // SAFETY: the lease retains the receiver borrow and clears
                 // the erased token before it ends.
                 let lease = unsafe { crate::trailer::RecvShared::grant(&shared, frame, len) };
@@ -321,6 +389,7 @@ impl<P: Protocol> Server<P> {
 async fn writer<P: Protocol>(
     mut sender: transport::AnySender,
     mut outgoing: mpsc::UnboundedReceiver<Message<P::Response>>,
+    inner: Arc<Mutex<Inner>>,
     limits: Limits,
 ) -> Result<(), Error> {
     let mut scheduler = fragment::Scheduler::new(&limits);
@@ -339,7 +408,7 @@ async fn writer<P: Protocol>(
                     closed = true;
                     continue;
                 };
-                admit::<P>(&mut sender, &mut scheduler, message).await?;
+                admit::<P>(&mut sender, &mut scheduler, &inner, &limits, message).await?;
             }
             // Not raced against anything — see the matching comment in
             // client.rs's writer loop. A dropped send future could leave a
@@ -348,7 +417,13 @@ async fn writer<P: Protocol>(
             // background task — let an abandoned write complete arbitrarily
             // later, after the peer has already torn down its end.
             _ = scheduler.ready(), if scheduler.has_work() => {
-                scheduler.advance(&mut sender).await?;
+                match scheduler.advance(&mut sender).await? {
+                    fragment::AdvanceOutcome::None | fragment::AdvanceOutcome::Aborted(_) => {}
+                    #[cfg(target_os = "macos")]
+                    fragment::AdvanceOutcome::Escrow { id, fds, handles_done } => {
+                        inner.lock().unwrap().fd_escrow.sent(id, fds, handles_done);
+                    }
+                }
                 // Flush anything sent by the scheduler
                 let _ = sender.flush().await;
             }
@@ -357,39 +432,39 @@ async fn writer<P: Protocol>(
     Ok(())
 }
 
-/// Admits one outgoing item. `Response` payloads are probed for native-
-/// handle attachments and, if present, sent as a single atomic fragment
-/// immediately (bypassing the round-robin scheduler); everything else is
-/// handed to `scheduler`.
+/// Admits one outgoing item to the fragment scheduler.
 async fn admit<P: Protocol>(
     sender: &mut transport::AnySender,
     scheduler: &mut fragment::Scheduler,
+    inner: &Arc<Mutex<Inner>>,
+    limits: &Limits,
     message: Message<P::Response>,
 ) -> Result<(), Error> {
+    #[cfg(not(target_os = "macos"))]
+    let _ = inner;
     match message {
         Message::Response { id, value, trailer } => {
-            let mut probe = sender.send();
-            let payload = encode_payload(&value, &mut probe)?;
-            if probe.has_attachments() {
-                if !matches!(&trailer, fragment::Trailer::None) {
-                    return Err(Error::Protocol(
-                        "responses with both native-handle attachments and a trailer are not supported"
-                            .into(),
-                    ));
-                }
-                let header = fragment::FragmentHeader {
-                    flags: fragment::Flags::FIRST | fragment::Flags::LAST,
-                    kind: Kind::Response,
-                    id,
-                    payload_len: payload.len(),
-                };
-                let mut buffer = header.encode().chain(payload);
-                probe.finish(&mut buffer).await?;
-                sender.flush().await?;
+            #[cfg(unix)]
+            let max_handles = if limits.max_handles_per_fragment == 0 {
+                0
             } else {
-                drop(probe);
-                scheduler.admit_message(Kind::Response, id, payload, trailer);
+                limits.max_handles_per_message
+            };
+            #[cfg(windows)]
+            let max_handles = limits.max_handles_per_message;
+            let mut put_handles = EncodeHandles::new(sender, max_handles);
+            let payload = encode_payload(&value, &mut put_handles)?;
+            #[cfg(unix)]
+            let handles = put_handles.finish();
+            #[cfg(target_os = "macos")]
+            if handles.needs_ack() {
+                inner.lock().unwrap().fd_escrow.register(id);
             }
+            #[cfg(windows)]
+            let (handles, escrow) = put_handles.finish();
+            #[cfg(windows)]
+            drop(escrow);
+            scheduler.admit_message(Kind::Response, id, payload, handles, trailer);
         }
         Message::Error { id } => scheduler.admit_empty(Kind::Error, id),
         Message::Cancel { id } => match scheduler.try_cancel_active(id) {
@@ -398,10 +473,15 @@ async fn admit<P: Protocol>(
                 if started {
                     scheduler.admit_abort(id);
                 }
+                #[cfg(target_os = "macos")]
+                if !started {
+                    inner.lock().unwrap().fd_escrow.discard_unsent(id);
+                }
             }
         },
         Message::DiscardTrailer { id } => scheduler.admit_empty(Kind::Discard, id),
         Message::PeerDiscarded { id } => scheduler.discard_active_trailer(id),
+        Message::Ack { id } => scheduler.admit_empty(Kind::Ack, id),
     }
     Ok(())
 }
@@ -450,9 +530,8 @@ impl<P: Protocol> CallContext<P> {
     ///
     /// Call [`TrailerSend::finish`](crate::trailer::TrailerSend::finish), or
     /// asynchronously shut down the returned writer, to commit the trailer.
-    /// Dropping it without finishing aborts the trailer. A response cannot
-    /// carry both a trailer and a direct [`OsHandle`](crate::handle::OsHandle)
-    /// attachment. Any unread request trailer is discarded.
+    /// Dropping it without finishing aborts the trailer. Any unread request
+    /// trailer is discarded.
     pub fn respond_with_trailer(
         mut self,
         response: P::Response,

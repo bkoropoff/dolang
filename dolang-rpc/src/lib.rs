@@ -47,6 +47,8 @@
 //! ```
 
 pub mod client;
+#[cfg(target_os = "macos")]
+mod escrow;
 mod fragment;
 pub mod handle;
 mod serde;
@@ -56,9 +58,9 @@ pub mod trailer;
 mod transport;
 mod unbound;
 
+use std::io;
+
 use ::serde::{Serialize, de::DeserializeOwned};
-use bytes::Bytes;
-use transport::{RecvFrame, SendFrame};
 pub use unbound::Builder;
 
 /// Configurable size and concurrency limits for a session. Not public — set
@@ -76,6 +78,10 @@ pub(crate) struct Limits {
     /// bounded suffix in chunks rather than acting as an open-ended
     /// channel, so this should be reasonably bounded.
     pub max_trailer_size: usize,
+    /// Maximum number of native handles attached to one wire fragment.
+    pub max_handles_per_fragment: usize,
+    /// Maximum number of native handles carried by one message.
+    pub max_handles_per_message: usize,
     /// Maximum trailer fragment payload copied immediately by the receive
     /// driver when the consumer has not yet requested that fragment. Set to
     /// zero to disable copying nonempty fragments on this path.
@@ -101,6 +107,8 @@ impl Default for Limits {
             max_fragment_size: 512 * 1024,
             max_payload_size: 2 * 1024 * 1024,
             max_trailer_size: 2 * 1024 * 1024,
+            max_handles_per_fragment: 64,
+            max_handles_per_message: 1024,
             trailer_recv_copy_threshold: 64 * 1024,
             trailer_recv_demand_copy_threshold: 256 * 1024,
             trailer_send_copy_threshold: 64 * 1024,
@@ -110,7 +118,7 @@ impl Default for Limits {
     }
 }
 
-/// Maximum size of a `Kind::Negotiate` fragment, tolerated by both ends of a
+/// Maximum size of a `fragment::Kind::Negotiate` fragment, tolerated by both ends of a
 /// connection regardless of their configured `Limits`. Negotiation must use a
 /// fixed, transport-independent bound rather than `Limits::max_fragment_size`
 /// because neither side knows what the peer will actually enforce until
@@ -118,7 +126,7 @@ impl Default for Limits {
 /// this to `Limits`.
 pub(crate) const NEGOTIATE_FRAGMENT_SIZE: usize = 1024;
 
-/// Maximum total size of a reassembled `Kind::Negotiate` message payload,
+/// Maximum total size of a reassembled `fragment::Kind::Negotiate` message payload,
 /// across all of its fragments. Bounds how much a peer can make the
 /// receiving end buffer before negotiation (and with it, the negotiated
 /// `Limits`) is in force. A real handshake payload — version blobs plus an
@@ -146,7 +154,7 @@ pub trait Protocol: Send + Sync + 'static {
 pub enum Error {
     /// The underlying transport failed.
     #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(#[from] io::Error),
     /// Serializing an outgoing request or response failed.
     #[error("serialization error: {0}")]
     Serialize(String),
@@ -174,7 +182,7 @@ pub enum Error {
 impl Error {
     pub(crate) fn copy(&self) -> Self {
         match self {
-            Self::Io(e) => Self::Io(std::io::Error::new(e.kind(), e.to_string())),
+            Self::Io(e) => Self::Io(io::Error::new(e.kind(), e.to_string())),
             Self::Serialize(e) => Self::Serialize(e.clone()),
             Self::Deserialize(e) => Self::Deserialize(e.clone()),
             Self::Protocol(e) => Self::Protocol(e.clone()),
@@ -183,58 +191,4 @@ impl Error {
             Self::UnsupportedCapability => Self::UnsupportedCapability,
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-pub(crate) enum Kind {
-    Request = 1,
-    Response = 2,
-    Error = 3,
-    Cancel = 4,
-    Notify = 5,
-    /// Advisory: the sender no longer wants any more `TRAILER` fragments for
-    /// the given message id. Unlike `Cancel`, this never affects the
-    /// message's own request/response outcome — it only tells the peer to
-    /// stop streaming a trailer it already committed to sending.
-    Discard = 6,
-    /// Protocol handshake/version negotiation. Sent unprompted and first by
-    /// both ends of a connection before any other `Kind` is valid; see
-    /// `fragment::negotiate`.
-    Negotiate = 7,
-}
-
-impl TryFrom<u8> for Kind {
-    type Error = Error;
-
-    fn try_from(value: u8) -> Result<Self, Error> {
-        match value {
-            1 => Ok(Self::Request),
-            2 => Ok(Self::Response),
-            3 => Ok(Self::Error),
-            4 => Ok(Self::Cancel),
-            5 => Ok(Self::Notify),
-            6 => Ok(Self::Discard),
-            7 => Ok(Self::Negotiate),
-            _ => Err(Error::Protocol(format!("unknown frame kind {value}"))),
-        }
-    }
-}
-
-/// Serializes `value` into a plain payload buffer (no fragment header).
-/// `frame` is a probe token: if serialization attaches any native-handle
-/// descriptors to it, the caller must send the resulting payload as a
-/// single atomic fragment via that same token, bypassing the round-robin
-/// scheduler entirely.
-fn encode_payload<'frame, T: Serialize, F: SendFrame<'frame>>(
-    value: &'frame T,
-    frame: &mut F,
-) -> Result<Bytes, Error> {
-    let buffer =
-        serde::to_extend(value, frame, Vec::new()).map_err(|e| Error::Serialize(e.to_string()))?;
-    Ok(buffer.into())
-}
-
-fn decode<T: DeserializeOwned>(bytes: &[u8], frame: &mut impl RecvFrame) -> Result<T, Error> {
-    serde::from_bytes(bytes, frame).map_err(|e| Error::Deserialize(e.to_string()))
 }
