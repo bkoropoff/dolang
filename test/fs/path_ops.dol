@@ -5,6 +5,7 @@ import sys agent
     - assert_throws
     - assert_type
     - skip
+    - test
   std:
     - RuntimeError
   fs:
@@ -17,7 +18,7 @@ import sys agent
 
 import fs.windows: windows_fs
 
-#[agent.test]
+#[test]
 def parent_field()
   let child = (Path "subdir" / "file.txt")
   let parent = child.parent
@@ -63,14 +64,14 @@ def read_link_method()
   let resolved = link.read_link()
   assert_eq $resolved $target
 
-#[agent.test]
+#[test]
 def division_operator()
   let base = Path "."
   let child = (base / "subdir" / "file.txt")
 
   assert_eq $child (Path "./subdir" / "file.txt")
 
-#[agent.test]
+#[test]
 def components_absolute_path()
   let path = (Path "subdir" / "file.txt")
   let parts = [...path.components]

@@ -24,3 +24,21 @@ pub mod error;
 pub mod guid;
 pub mod process;
 pub mod security;
+
+/// Returns whether the current process is running under Wine.
+#[cfg(windows)]
+pub fn is_wine() -> bool {
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+    use windows_sys::core::w;
+
+    const WINE_GET_VERSION: &[u8] = b"wine_get_version\0";
+
+    let ntdll = unsafe { GetModuleHandleW(w!("ntdll.dll")) };
+    !ntdll.is_null() && unsafe { GetProcAddress(ntdll, WINE_GET_VERSION.as_ptr()) }.is_some()
+}
+
+/// Returns whether the current process is running under Wine.
+#[cfg(not(windows))]
+pub const fn is_wine() -> bool {
+    false
+}

@@ -100,17 +100,6 @@ mod live {
 
     use super::*;
 
-    fn is_wine() -> bool {
-        use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
-
-        const NTDLL: &[u8] = b"ntdll.dll\0";
-        const WINE_GET_VERSION: &[u8] = b"wine_get_version\0";
-        unsafe {
-            let module = GetModuleHandleA(NTDLL.as_ptr());
-            !module.is_null() && GetProcAddress(module, WINE_GET_VERSION.as_ptr()).is_some()
-        }
-    }
-
     fn current_process_handle() -> OwnedHandle {
         let handle = unsafe {
             OpenProcess(
@@ -334,7 +323,7 @@ mod live {
         // just checks that the View::Wow32/View::Wow64 SAM flags are
         // accepted and don't break ordinary key/value operations, not that
         // isolation actually occurs.
-        if !is_wine() {
+        if !dolang_winterop::is_wine() {
             let wow32 = parent
                 .create("view-probe", View::Wow32, Access::READ_WRITE)
                 .await
