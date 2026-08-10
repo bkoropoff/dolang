@@ -44,9 +44,13 @@ use tokio::{
     task::JoinHandle,
 };
 use typed_path::{Utf8TypedPath, Utf8TypedPathBuf, Utf8UnixPath, Utf8WindowsPath};
+/// Remote VFS client implementation.
 pub mod client;
+/// Local-process VFS implementation.
 pub mod direct;
+/// Directory iteration types.
 pub mod directory;
+/// Error types returned by VFS operations.
 pub mod error;
 pub mod extension;
 pub mod file;
@@ -54,10 +58,13 @@ pub mod metadata;
 pub mod path;
 mod posix_acl;
 mod probe;
+/// Process status, control, and standard-I/O types.
 pub mod process;
 mod protocol;
 pub mod security;
+/// RPC server implementation.
 pub mod server;
+/// VFS service executable support.
 pub mod service;
 pub mod session;
 pub mod stream;
@@ -114,29 +121,48 @@ pub trait OpenOptions {
 ///
 /// File handles implement Tokio's asynchronous read, write, and seek traits.
 pub trait FileHandle: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Sized {
+    /// Converts this handle into a standard-output or standard-error endpoint.
     async fn to_stdio_send(&self) -> Result<StdioSend>;
+    /// Converts this handle into a standard-input endpoint.
     async fn to_stdio_recv(&self) -> Result<StdioRecv>;
+    /// Closes this handle.
     async fn close(self) -> Result<()>;
+    /// Changes the file length to `size` bytes.
     async fn set_size(&mut self, size: u64) -> Result<()>;
+    /// Returns metadata for the open file.
     async fn metadata(&mut self) -> Result<Metadata>;
+    /// Returns metadata for the filesystem containing the open file.
     async fn fs_metadata(&mut self) -> Result<FsMetadata>;
+    /// Returns the POSIX ACL, optionally its default ACL when this is a directory.
     async fn acl(&mut self, default: bool) -> Result<Option<PosixAcl>>;
+    /// Sets or removes the POSIX ACL, optionally its default ACL.
     async fn set_acl(&mut self, acl: Option<&PosixAcl>, default: bool) -> Result<()>;
+    /// Returns the Windows security descriptor selected by `mask`.
     async fn sec_desc(&mut self, mask: u32) -> Result<SecDesc>;
+    /// Replaces the Windows security descriptor.
     async fn set_sec_desc(&mut self, sec_desc: &SecDesc) -> Result<()>;
+    /// Lists extended attributes in `namespace`.
     async fn xattrs(&mut self, namespace: XattrNamespace<'_>) -> Result<Vec<XattrEntry>>;
+    /// Reads one extended attribute.
     async fn xattr(&mut self, name: &str, namespace: Option<&str>) -> Result<Vec<u8>>;
+    /// Lists alternate data streams.
     async fn streams(&mut self) -> Result<Vec<StreamEntry>>;
+    /// Creates or replaces an extended attribute.
     async fn set_xattr(&mut self, name: &str, namespace: Option<&str>, value: &[u8]) -> Result<()>;
+    /// Removes an extended attribute.
     async fn remove_xattr(&mut self, name: &str, namespace: Option<&str>) -> Result<()>;
+    /// Acquires a byte-range lock according to `request`.
     async fn lock(&self, request: FileLockRequest) -> Result<Option<FileLock>>;
+    /// Converts this handle into a local standard-library file when possible.
     async fn try_into_std(self) -> std::result::Result<std::fs::File, Self>;
 }
 
 #[allow(async_fn_in_trait)]
 /// A spawned process owned by a [`Command`] backend.
 pub trait Child {
+    /// Waits for the process to exit.
     async fn wait(&mut self) -> Result<ProcessStatus>;
+    /// Terminates the process and returns its status when it has exited.
     async fn terminate(self) -> Result<Option<ProcessStatus>>
     where
         Self: Sized;
@@ -145,15 +171,24 @@ pub trait Child {
 #[allow(async_fn_in_trait)]
 /// Configures and spawns a process on a [`Vfs`] backend.
 pub trait Command {
+    /// Child process returned by [`spawn`](Self::spawn).
     type Child: Child;
+    /// Writable endpoint accepted for standard output and error.
     type StdioSend: AsyncWrite + Unpin;
+    /// Readable endpoint accepted for standard input.
     type StdioRecv: AsyncRead + Unpin;
 
+    /// Appends an argument to the program invocation.
     fn arg(&mut self, arg: &str) -> &mut Self;
+    /// Sets an environment variable for the child.
     fn env(&mut self, key: &str, val: &str) -> &mut Self;
+    /// Removes an environment variable from the child.
     fn env_remove(&mut self, key: &str) -> &mut Self;
+    /// Sets the child's working directory.
     fn current_dir(&mut self, dir: Utf8TypedPath<'_>) -> &mut Self;
+    /// Sets the child's standard input.
     fn stdin(&mut self, stdio: Self::StdioRecv) -> io::Result<&mut Self>;
+    /// Sets the child's standard output.
     fn stdout(&mut self, stdio: Self::StdioSend) -> io::Result<&mut Self>;
     /// Inherit the host process's standard input.
     ///
@@ -161,15 +196,25 @@ pub trait Command {
     /// cancel an outstanding terminal read. Redirected input is relayed to the
     /// remote process.
     fn stdin_inherit(&mut self) -> io::Result<&mut Self>;
+    /// Inherits the host process's standard output.
     fn stdout_inherit(&mut self) -> io::Result<&mut Self>;
+    /// Connects the child's standard input to the null device.
     fn stdin_null(&mut self) -> &mut Self;
+    /// Connects the child's standard output to the null device.
     fn stdout_null(&mut self) -> &mut Self;
+    /// Sets the child's standard error.
     fn stderr(&mut self, stdio: Self::StdioSend) -> io::Result<&mut Self>;
+    /// Inherits the host process's standard error.
     fn stderr_inherit(&mut self) -> io::Result<&mut Self>;
+    /// Redirects the child's standard error to its standard output.
     fn stderr_inherit_stdout(&mut self) -> io::Result<&mut Self>;
+    /// Connects the child's standard error to the null device.
     fn stderr_null(&mut self) -> &mut Self;
+    /// Sets foreground or background process control behavior.
     fn process_control(&mut self, control: ProcessControl) -> &mut Self;
+    /// Sets the policy used to terminate the child.
     fn termination_policy(&mut self, policy: TerminationPolicy) -> &mut Self;
+    /// Spawns the configured process.
     async fn spawn(self) -> Result<Self::Child>;
 }
 
@@ -180,25 +225,35 @@ pub trait Command {
 /// value's path arguments always use the target's syntax; consult
 /// [`Query::target`] when selecting one for a remote VFS.
 pub trait Vfs {
+    /// File handle returned by this backend.
     type File: FileHandle;
+    /// Writable standard-I/O endpoint produced by this backend.
     type StdioSend: AsyncWrite + Unpin;
+    /// Readable standard-I/O endpoint produced by this backend.
     type StdioRecv: AsyncRead + Unpin;
+    /// File-open options builder for this backend.
     type OpenOptions<'a>: OpenOptions<File = Self::File>
     where
         Self: 'a;
+    /// Command builder for this backend.
     type Command<'a>: Command<StdioSend = Self::StdioSend, StdioRecv = Self::StdioRecv>
     where
         Self: 'a;
 
+    /// Creates a file-open options builder.
     fn open_options(&self) -> Self::OpenOptions<'_>;
+    /// Creates a command builder for `program`.
     fn command(&self, program: Utf8TypedPath<'_>) -> Self::Command<'_>;
+    /// Connects to a VFS agent over a Unix-domain socket.
     async fn unix_socket(&self, path: Utf8TypedPath<'_>) -> Result<AnyVfs>;
+    /// Starts a Windows administrative VFS session.
     async fn windows_admin(
         &self,
         cwd: Utf8TypedPath<'_>,
         env: HashMap<String, Option<String>>,
         elevate: bool,
     ) -> Result<VfsSession>;
+    /// Creates a connected writable and readable pipe endpoint.
     async fn pipe(&self) -> Result<(Self::StdioSend, Self::StdioRecv)>;
     /// Like [`pipe`](Self::pipe), with a best-effort kernel buffer size
     /// hint. Backends that can't honor the hint (e.g. a pipe created on a
@@ -209,33 +264,46 @@ pub trait Vfs {
     ) -> Result<(Self::StdioSend, Self::StdioRecv)> {
         self.pipe().await
     }
+    /// Queries the target environment and identity.
     async fn query(&self) -> Result<Query>;
+    /// Resolves a Unix user ID to a name.
     async fn user_name(&self, uid: u32) -> Result<String>;
+    /// Resolves a Unix user name to an ID.
     async fn user_id(&self, name: &str) -> Result<u32>;
+    /// Resolves a Unix group ID to a name.
     async fn group_name(&self, gid: u32) -> Result<String>;
+    /// Resolves a Unix group name to an ID.
     async fn group_id(&self, name: &str) -> Result<u32>;
+    /// Resolves a Windows SID to its account name.
     async fn sid_name(&self, sid: &Sid) -> Result<SidName>;
+    /// Resolves a Windows account name to its SID.
     async fn account_name(&self, name: &str) -> Result<SidName>;
+    /// Opens a directory iterator.
     async fn read_dir(&self, path: Utf8TypedPath<'_>) -> Result<ReadDir>;
+    /// Finds an executable using a target search path.
     async fn which(
         &self,
         program: Utf8TypedPath<'_>,
         path: Option<&str>,
         cwd: Option<Utf8TypedPath<'_>>,
     ) -> Result<Option<Utf8TypedPathBuf>>;
+    /// Resolves a target-specific well-known path.
     async fn well_known_path(
         &self,
         key: WellKnownPath,
         app: Option<&str>,
         env: &HashMap<String, Option<String>>,
     ) -> Result<Utf8TypedPathBuf>;
+    /// Clears target-side cached state.
     async fn clear_cache(&self) -> Result<()>;
+    /// Lists extended attributes for a path.
     async fn xattrs(
         &self,
         path: Utf8TypedPath<'_>,
         namespace: XattrNamespace<'_>,
         follow: bool,
     ) -> Result<Vec<XattrEntry>>;
+    /// Reads an extended attribute for a path.
     async fn xattr(
         &self,
         path: Utf8TypedPath<'_>,
@@ -243,6 +311,7 @@ pub trait Vfs {
         namespace: Option<&str>,
         follow: bool,
     ) -> Result<Vec<u8>>;
+    /// Creates or replaces an extended attribute for a path.
     async fn set_xattr(
         &self,
         path: Utf8TypedPath<'_>,
@@ -251,6 +320,7 @@ pub trait Vfs {
         value: &[u8],
         follow: bool,
     ) -> Result<()>;
+    /// Removes an extended attribute from a path.
     async fn remove_xattr(
         &self,
         path: Utf8TypedPath<'_>,
@@ -258,17 +328,23 @@ pub trait Vfs {
         namespace: Option<&str>,
         follow: bool,
     ) -> Result<()>;
+    /// Lists alternate data streams for a path.
     async fn streams(&self, path: Utf8TypedPath<'_>, follow: bool) -> Result<Vec<StreamEntry>>;
 
+    /// Removes a file or symlink.
     async fn remove(&self, path: Utf8TypedPath<'_>, all: bool, ignore: bool) -> Result<()>;
+    /// Returns metadata without following the final symlink.
     async fn metadata(&self, path: Utf8TypedPath<'_>) -> Result<Metadata>;
+    /// Returns filesystem metadata for a path.
     async fn fs_metadata(&self, path: Utf8TypedPath<'_>, follow: bool) -> Result<FsMetadata>;
+    /// Returns the POSIX ACL for a path.
     async fn acl(
         &self,
         path: Utf8TypedPath<'_>,
         default: bool,
         follow: bool,
     ) -> Result<Option<PosixAcl>>;
+    /// Sets or removes the POSIX ACL for a path.
     async fn set_acl(
         &self,
         path: Utf8TypedPath<'_>,
@@ -276,36 +352,52 @@ pub trait Vfs {
         default: bool,
         follow: bool,
     ) -> Result<()>;
+    /// Returns the Windows security descriptor for a path.
     async fn sec_desc(&self, path: Utf8TypedPath<'_>, mask: u32, follow: bool) -> Result<SecDesc>;
+    /// Replaces the Windows security descriptor for a path.
     async fn set_sec_desc(
         &self,
         path: Utf8TypedPath<'_>,
         sec_desc: &SecDesc,
         follow: bool,
     ) -> Result<()>;
+    /// Creates a directory, optionally including missing parents.
     async fn create_dir(&self, path: Utf8TypedPath<'_>, all: bool) -> Result<()>;
+    /// Removes a directory.
     async fn remove_dir(&self, path: Utf8TypedPath<'_>, all: bool, ignore: bool) -> Result<()>;
+    /// Copies a path, optionally including directory contents.
     async fn copy(&self, from: Utf8TypedPath<'_>, to: Utf8TypedPath<'_>, all: bool) -> Result<()>;
+    /// Renames a path.
     async fn rename(
         &self,
         from: Utf8TypedPath<'_>,
         to: Utf8TypedPath<'_>,
         replace: bool,
     ) -> Result<()>;
+    /// Moves a path, optionally including directory contents.
     async fn move_(&self, from: Utf8TypedPath<'_>, to: Utf8TypedPath<'_>, all: bool) -> Result<()>;
+    /// Creates a symbolic link using `cwd` to interpret relative source paths.
     async fn symlink(
         &self,
         cwd: Utf8TypedPath<'_>,
         src: Utf8TypedPath<'_>,
         dst: Utf8TypedPath<'_>,
     ) -> Result<()>;
+    /// Creates a hard link.
     async fn hard_link(&self, src: Utf8TypedPath<'_>, dst: Utf8TypedPath<'_>) -> Result<()>;
+    /// Creates a symbolic link to a directory.
     async fn symlink_dir(&self, src: Utf8TypedPath<'_>, dst: Utf8TypedPath<'_>) -> Result<()>;
+    /// Creates a symbolic link to a file.
     async fn symlink_file(&self, src: Utf8TypedPath<'_>, dst: Utf8TypedPath<'_>) -> Result<()>;
+    /// Returns metadata without following the final symlink.
     async fn symlink_metadata(&self, path: Utf8TypedPath<'_>) -> Result<Metadata>;
+    /// Applies a metadata patch to every path.
     async fn set_metadata(&self, paths: &[Utf8TypedPathBuf], patch: MetadataPatch) -> Result<()>;
+    /// Resolves a path to its canonical absolute form.
     async fn canonicalize(&self, path: Utf8TypedPath<'_>) -> Result<Utf8TypedPathBuf>;
+    /// Returns the destination of a symbolic link.
     async fn read_link(&self, path: Utf8TypedPath<'_>) -> Result<Utf8TypedPathBuf>;
+    /// Expands a glob pattern beneath `root`.
     async fn glob(
         &self,
         pattern: impl Into<String>,

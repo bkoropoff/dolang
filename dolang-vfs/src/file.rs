@@ -9,21 +9,27 @@ pub use nix::unistd::AccessFlags;
 /// Lock access requested for a byte range of a file.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum FileLockMode {
+    /// Prevents other exclusive or shared locks from overlapping this range.
     Exclusive,
+    /// Allows other shared locks but not exclusive locks to overlap this range.
     Shared,
 }
 
 /// Whether acquiring a file lock may wait.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum FileLockBehavior {
+    /// Waits until the lock can be acquired.
     Blocking,
+    /// Returns without waiting when the lock cannot be acquired.
     Try,
 }
 
 /// A half-open byte range used for a file lock.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct FileLockRange {
+    /// Inclusive byte offset at which the range starts.
     pub start: u64,
+    /// Exclusive byte offset at which the range ends, or no end for EOF.
     pub end: Option<u64>,
 }
 
@@ -51,8 +57,11 @@ impl FileLockRange {
 /// A complete request to acquire a file lock.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct FileLockRequest {
+    /// Byte range to lock.
     pub range: FileLockRange,
+    /// Access mode to acquire.
     pub mode: FileLockMode,
+    /// Whether acquisition may block.
     pub behavior: FileLockBehavior,
 }
 

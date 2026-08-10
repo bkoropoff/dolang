@@ -544,7 +544,7 @@ pub(crate) struct SetXattrRequest {
 pub(crate) struct ExtensionRequest {
     pub(crate) name: String,
     pub(crate) version: u16,
-    pub(crate) payload: Box<dyn Any + Send + Sync>,
+    pub(crate) payload: Box<dyn Any + Send>,
 }
 
 impl std::fmt::Debug for ExtensionRequest {
@@ -571,7 +571,7 @@ impl Serialize for ExtensionRequest {
 struct ExtensionRequestSeed(&'static dyn ErasedVfsExtension);
 
 impl<'de> serde::de::DeserializeSeed<'de> for ExtensionRequestSeed {
-    type Value = Box<dyn Any + Send + Sync>;
+    type Value = Box<dyn Any + Send>;
     fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
         let mut erased = <dyn erased_serde::Deserializer>::erase(deserializer);
         self.0
@@ -622,7 +622,7 @@ impl<'de> Deserialize<'de> for ExtensionRequest {
 pub(crate) struct ExtensionResponse {
     pub(crate) name: String,
     pub(crate) version: u16,
-    pub(crate) payload: Box<dyn Any + Send + Sync>,
+    pub(crate) payload: Box<dyn Any + Send>,
 }
 
 impl std::fmt::Debug for ExtensionResponse {
@@ -649,7 +649,7 @@ impl Serialize for ExtensionResponse {
 struct ExtensionResponseSeed(&'static dyn ErasedVfsExtension);
 
 impl<'de> serde::de::DeserializeSeed<'de> for ExtensionResponseSeed {
-    type Value = Box<dyn Any + Send + Sync>;
+    type Value = Box<dyn Any + Send>;
     fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
         let mut erased = <dyn erased_serde::Deserializer>::erase(deserializer);
         self.0

@@ -4,26 +4,37 @@ use std::{collections::HashSet, error, fmt};
 /// POSIX.1e ACL permissions.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PosixAclPermissions {
+    /// Permission to read.
     pub read: bool,
+    /// Permission to write.
     pub write: bool,
+    /// Permission to execute or search.
     pub execute: bool,
 }
 
 /// The principal or class selected by a POSIX.1e ACL entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PosixAclQualifier {
+    /// Owning user entry.
     UserObj,
+    /// Named user entry.
     User(u32),
+    /// Owning group entry.
     GroupObj,
+    /// Named group entry.
     Group(u32),
+    /// Maximum permissions for named users and groups.
     Mask,
+    /// Other users entry.
     Other,
 }
 
 /// A portable POSIX.1e ACL entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PosixAce {
+    /// Principal or class controlled by this entry.
     pub qualifier: PosixAclQualifier,
+    /// Permissions granted by this entry.
     pub permissions: PosixAclPermissions,
 }
 
@@ -34,11 +45,13 @@ pub struct PosixAcl {
 }
 
 impl PosixAcl {
+    /// Validates `entries` and constructs an access-control list.
     pub fn new(entries: Vec<PosixAce>) -> Result<Self, PosixAclError> {
         validate(&entries)?;
         Ok(Self { entries })
     }
 
+    /// Returns the ACL entries in their stored order.
     pub fn entries(&self) -> &[PosixAce] {
         &self.entries
     }
@@ -58,11 +71,16 @@ impl<'de> Deserialize<'de> for PosixAcl {
     }
 }
 
+/// Validation error returned while constructing a POSIX ACL.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PosixAclError {
+    /// The ACL contains no entries.
     Empty,
+    /// A required entry is absent.
     Missing(PosixAclQualifier),
+    /// An entry qualifier occurs more than once.
     Duplicate(PosixAclQualifier),
+    /// Named entries require a mask entry.
     MissingMask,
 }
 

@@ -1201,6 +1201,7 @@ impl Client {
         }
     }
 
+    /// Resolves a Unix user ID on the target.
     pub async fn user_name(&self, uid: u32) -> crate::Result<String> {
         match self.request(RequestKind::UserName { uid }).await? {
             ResponseKind::UserName(result) => result.map_err(Into::into),
@@ -1208,6 +1209,7 @@ impl Client {
         }
     }
 
+    /// Resolves a Unix user name on the target.
     pub async fn user_id(&self, name: &str) -> crate::Result<u32> {
         match self
             .request(RequestKind::UserId {
@@ -1220,6 +1222,7 @@ impl Client {
         }
     }
 
+    /// Resolves a Unix group ID on the target.
     pub async fn group_name(&self, gid: u32) -> crate::Result<String> {
         match self.request(RequestKind::GroupName { gid }).await? {
             ResponseKind::GroupName(result) => result.map_err(Into::into),
@@ -1227,6 +1230,7 @@ impl Client {
         }
     }
 
+    /// Resolves a Unix group name on the target.
     pub async fn group_id(&self, name: &str) -> crate::Result<u32> {
         match self
             .request(RequestKind::GroupId {
@@ -1239,6 +1243,7 @@ impl Client {
         }
     }
 
+    /// Resolves a Windows SID on the target.
     pub async fn sid_name(&self, sid: &Sid) -> crate::Result<SidName> {
         match self
             .request(RequestKind::SidName { sid: sid.clone() })
@@ -1249,6 +1254,7 @@ impl Client {
         }
     }
 
+    /// Resolves a Windows account name on the target.
     pub async fn account_name(&self, name: &str) -> crate::Result<SidName> {
         match self
             .request(RequestKind::AccountName {
@@ -1284,6 +1290,7 @@ impl Client {
         }
     }
 
+    /// Resolves a target-specific well-known path.
     pub async fn well_known_path(
         &self,
         key: WellKnownPath,

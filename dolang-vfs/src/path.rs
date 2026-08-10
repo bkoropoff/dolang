@@ -7,8 +7,11 @@ use typed_path::{PathType, Utf8TypedPath, Utf8TypedPathBuf};
 /// A standard location resolved by a VFS target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WellKnownPath {
+    /// User's home directory.
     HomeDir,
+    /// Per-user cache directory.
     CacheDir,
+    /// Directory for temporary files.
     TempDir,
 }
 

@@ -19,10 +19,12 @@ use dolang::{
 
 use dolang_ext_shell::Exit;
 
-use crate::batch::Action;
-use crate::cli::{Cli, ParseOutcome};
-use crate::interactive::{DYNAMIC_PRELUDE, DynamicPrelude};
-use crate::terminal_state::TerminalRestoreGuard;
+use crate::{
+    batch::Action,
+    cli::{Cli, ParseOutcome},
+    interactive::{DYNAMIC_PRELUDE, DynamicPrelude},
+    terminal_state::TerminalRestoreGuard,
+};
 
 mod batch;
 mod cli;
@@ -136,8 +138,9 @@ fn run(config: Arc<dyn Config>) -> i32 {
             }
 
             let compile_prelude = cli.prelude.clone();
-            let compile_strict = cli.strict;
-            let compile_cache = cli.cache;
+            let importer_config = config.clone();
+            let batch_config = config.clone();
+
             builder
                 .module("_shell")
                 .function("compile_script", async move |strand, args, out| {
@@ -149,43 +152,34 @@ fn run(config: Arc<dyn Config>) -> i32 {
                         strand,
                         &path,
                         &compile_prelude,
-                        compile_strict,
-                        compile_cache,
+                        cli.strict,
+                        cli.cache,
                     )
                     .await?;
                     Output::set(strand, out, bytecode.as_slice());
                     Ok(())
                 })
-                .commit();
-
-            let strict_mode = cli.strict;
-            let cache = cli.cache;
-            let module_paths = cli.module_paths.clone();
-            builder.importer(async move |strand, name, out| {
-                let path = load::find_module_file(strand, name, &module_paths).await?;
-                load::load(
-                    strand,
-                    &path,
-                    compile::Mode::Module { name },
-                    &[],
-                    strict_mode,
-                    cache,
-                    out,
-                )
-                .await
-            });
-
-            let importer_config = Arc::clone(&config);
-            builder.importer(async move |strand, name, mut out| {
-                if let Some(bytes) = importer_config.bundled_module(name) {
-                    runtime::Bytecode::new(bytes).run(strand, &mut out).await
-                } else {
-                    Err(runtime::Error::import(strand, name))
-                }
-            });
-
-            let batch_config = Arc::clone(&config);
-            builder
+                .commit()
+                .importer(async move |strand, name, out| {
+                    let path = load::find_module_file(strand, name, &cli.module_paths).await?;
+                    load::load(
+                        strand,
+                        &path,
+                        compile::Mode::Module { name },
+                        &[],
+                        cli.strict,
+                        cli.cache,
+                        out,
+                    )
+                    .await
+                })
+                .importer(async move |strand, name, mut out| {
+                    if let Some(bytes) = importer_config.bundled_module(name) {
+                        runtime::Bytecode::new(bytes).run(strand, &mut out).await
+                    } else {
+                        Err(runtime::Error::import(strand, name))
+                    }
+                })
                 .enter_with_slots(async move |strand, [mut stdin, mut stdout]| {
                     dolang_ext_shell::stdin(strand, &mut stdin);
                     dolang_ext_shell::default_output(strand, &mut stdout);
