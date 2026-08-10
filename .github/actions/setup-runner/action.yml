@@ -48,7 +48,7 @@ runs:
         save-if: ${{ inputs.save-cache == 'true' }}
 
     # Paths follow the VM application name in lib/ci.dol. Restore and save are
-    # explicit steps rather than one `actions/cache@v4`: the assets are ready
+    # explicit steps rather than one `actions/cache@v5`: the assets are ready
     # by the end of this action's own "Set up runner" step, so the save can
     # run immediately after it instead of waiting for a post-job hook, and
     # `save-cache` keeps the save from running at all on a branch whose cache
@@ -57,7 +57,7 @@ runs:
     - name: Restore CI VM assets
       id: vm-assets-cache
       if: inputs.target == 'x86_64-freebsd'
-      uses: actions/cache/restore@v4
+      uses: actions/cache/restore@v5
       with:
         path: |
           ~/.local/share/dolang-freebsd-ci/libvirt/ssh
@@ -89,7 +89,7 @@ runs:
     - name: Restore CI VM build cache
       id: vm-build-cache
       if: inputs.target == 'x86_64-freebsd'
-      uses: actions/cache/restore@v4
+      uses: actions/cache/restore@v5
       with:
         path: ${{ runner.temp }}/dolang-freebsd-cache
         key: freebsd-cargo-v2-${{ hashFiles('Cargo.lock') }}
@@ -113,7 +113,7 @@ runs:
 
     # The counterpart to "Restore CI VM assets" above. Placed here, right
     # after the assets are created, rather than left to run automatically at
-    # the end of the job: this is a plain `actions/cache/save@v4` rather than
+    # the end of the job: this is a plain `actions/cache/save@v5` rather than
     # the combined action's post-job hook, so it needs an explicit spot to run
     # from. Skipped on an exact restore hit for the same reason the guest
     # build cache is: nothing changed, so saving would only re-upload what is
@@ -125,7 +125,7 @@ runs:
       if: >
         inputs.target == 'x86_64-freebsd' && inputs.save-cache == 'true' &&
         steps.vm-assets-cache.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v4
+      uses: actions/cache/save@v5
       with:
         path: |
           ~/.local/share/dolang-freebsd-ci/libvirt/ssh

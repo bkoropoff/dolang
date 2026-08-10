@@ -78,7 +78,7 @@ jobs:
           always() && matrix.target == 'x86_64-freebsd' &&
           github.ref == 'refs/heads/master' &&
           steps.setup.outputs.vm-cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: ${{ runner.temp }}/dolang-freebsd-cache
           key: freebsd-cargo-v2-${{ hashFiles('Cargo.lock') }}
