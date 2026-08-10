@@ -82,12 +82,17 @@ enum Message<R> {
     PeerDiscarded {
         id: u64,
     },
+    Ack {
+        id: u64,
+    },
 }
 
 struct Inner {
     outstanding: HashMap<u64, Cancellation>,
     objects: session::ObjectTable,
     shutdown: Option<oneshot::Sender<()>>,
+    #[cfg(target_os = "macos")]
+    fd_escrow: crate::escrow::FdEscrow,
 }
 
 struct Cancellation {
@@ -116,6 +121,8 @@ impl<P: Protocol> Server<P> {
                 outstanding: HashMap::new(),
                 objects: session::ObjectTable::default(),
                 shutdown: None,
+                #[cfg(target_os = "macos")]
+                fd_escrow: Default::default(),
             })),
             limits,
             marker: PhantomData,
@@ -142,7 +149,7 @@ impl<P: Protocol> Server<P> {
             limits,
             marker: _,
         } = self;
-        let mut writer = tokio::spawn(writer::<P>(sender, outgoing_rx, limits));
+        let mut writer = tokio::spawn(writer::<P>(sender, outgoing_rx, inner.clone(), limits));
         let (shutdown, mut shutdown_requested) = oneshot::channel();
         inner.lock().unwrap().shutdown = Some(shutdown);
         let handler = Arc::new(handler);
@@ -197,6 +204,10 @@ impl<P: Protocol> Server<P> {
                     );
                 }
                 fragment::Event::Message(message) => (Some(message), None),
+                fragment::Event::Ack { id, message } => {
+                    let _ = outgoing.send(Message::Ack { id });
+                    (message, None)
+                }
                 fragment::Event::Trailer {
                     id,
                     message,
@@ -278,6 +289,26 @@ impl<P: Protocol> Server<P> {
                     Kind::Discard => {
                         let _ = outgoing.send(Message::PeerDiscarded { id });
                     }
+                    Kind::Ack => {
+                        #[cfg(target_os = "macos")]
+                        if !inner.lock().unwrap().fd_escrow.release(id) {
+                            break (
+                                Err(Error::Protocol(format!(
+                                    "Ack for response {id} with no active file descriptor escrow"
+                                ))),
+                                false,
+                                false,
+                            );
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        break (
+                            Err(Error::Protocol(format!(
+                                "Ack for response {id} with no active escrow"
+                            ))),
+                            false,
+                            false,
+                        );
+                    }
                     _ => {
                         break (
                             Err(Error::Protocol(format!("unexpected {kind:?} frame"))),
@@ -358,6 +389,7 @@ impl<P: Protocol> Server<P> {
 async fn writer<P: Protocol>(
     mut sender: transport::AnySender,
     mut outgoing: mpsc::UnboundedReceiver<Message<P::Response>>,
+    inner: Arc<Mutex<Inner>>,
     limits: Limits,
 ) -> Result<(), Error> {
     let mut scheduler = fragment::Scheduler::new(&limits);
@@ -376,7 +408,7 @@ async fn writer<P: Protocol>(
                     closed = true;
                     continue;
                 };
-                admit::<P>(&mut sender, &mut scheduler, &limits, message).await?;
+                admit::<P>(&mut sender, &mut scheduler, &inner, &limits, message).await?;
             }
             // Not raced against anything — see the matching comment in
             // client.rs's writer loop. A dropped send future could leave a
@@ -385,7 +417,13 @@ async fn writer<P: Protocol>(
             // background task — let an abandoned write complete arbitrarily
             // later, after the peer has already torn down its end.
             _ = scheduler.ready(), if scheduler.has_work() => {
-                scheduler.advance(&mut sender).await?;
+                match scheduler.advance(&mut sender).await? {
+                    fragment::AdvanceOutcome::None | fragment::AdvanceOutcome::Aborted(_) => {}
+                    #[cfg(target_os = "macos")]
+                    fragment::AdvanceOutcome::Escrow { id, fds, handles_done } => {
+                        inner.lock().unwrap().fd_escrow.sent(id, fds, handles_done);
+                    }
+                }
                 // Flush anything sent by the scheduler
                 let _ = sender.flush().await;
             }
@@ -398,9 +436,12 @@ async fn writer<P: Protocol>(
 async fn admit<P: Protocol>(
     sender: &mut transport::AnySender,
     scheduler: &mut fragment::Scheduler,
+    inner: &Arc<Mutex<Inner>>,
     limits: &Limits,
     message: Message<P::Response>,
 ) -> Result<(), Error> {
+    #[cfg(not(target_os = "macos"))]
+    let _ = inner;
     match message {
         Message::Response { id, value, trailer } => {
             #[cfg(unix)]
@@ -415,6 +456,10 @@ async fn admit<P: Protocol>(
             let payload = encode_payload(&value, &mut put_handles)?;
             #[cfg(unix)]
             let handles = put_handles.finish();
+            #[cfg(target_os = "macos")]
+            if handles.needs_ack() {
+                inner.lock().unwrap().fd_escrow.register(id);
+            }
             #[cfg(windows)]
             let (handles, escrow) = put_handles.finish();
             #[cfg(windows)]
@@ -428,10 +473,15 @@ async fn admit<P: Protocol>(
                 if started {
                     scheduler.admit_abort(id);
                 }
+                #[cfg(target_os = "macos")]
+                if !started {
+                    inner.lock().unwrap().fd_escrow.discard_unsent(id);
+                }
             }
         },
         Message::DiscardTrailer { id } => scheduler.admit_empty(Kind::Discard, id),
         Message::PeerDiscarded { id } => scheduler.discard_active_trailer(id),
+        Message::Ack { id } => scheduler.admit_empty(Kind::Ack, id),
     }
     Ok(())
 }

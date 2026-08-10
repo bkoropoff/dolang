@@ -39,6 +39,9 @@ pub(crate) enum Kind {
     /// both ends of a connection before any other `Kind` is valid; see
     /// [`negotiate`].
     Negotiate = 5,
+    /// Confirms receipt of the final non-trailer fragment carrying
+    /// `WANT_ACK` for the message identified by `id`.
+    Ack = 6,
 }
 
 impl TryFrom<u8> for Kind {
@@ -52,6 +55,7 @@ impl TryFrom<u8> for Kind {
             3 => Ok(Self::Cancel),
             4 => Ok(Self::Discard),
             5 => Ok(Self::Negotiate),
+            6 => Ok(Self::Ack),
             _ => Err(Error::Protocol(format!("unknown frame kind {value}"))),
         }
     }
@@ -67,7 +71,9 @@ impl Flags {
     pub(crate) const LAST: Flags = Flags(0b0010);
     pub(crate) const ABORT: Flags = Flags(0b0100);
     pub(crate) const TRAILER: Flags = Flags(0b1000);
-    const VALID: u8 = Self::FIRST.0 | Self::LAST.0 | Self::ABORT.0 | Self::TRAILER.0;
+    pub(crate) const WANT_ACK: Flags = Flags(0b1_0000);
+    const VALID: u8 =
+        Self::FIRST.0 | Self::LAST.0 | Self::ABORT.0 | Self::TRAILER.0 | Self::WANT_ACK.0;
 
     pub(crate) fn contains(self, other: Flags) -> bool {
         self.0 & other.0 == other.0
@@ -521,6 +527,11 @@ async fn read_negotiate_message(receiver: &mut AnyReceiver) -> Result<([u8; 8], 
         let first = header.flags.contains(Flags::FIRST);
         let last = header.flags.contains(Flags::LAST);
         let abort = header.flags.contains(Flags::ABORT);
+        if header.flags.contains(Flags::WANT_ACK) {
+            return Err(Error::Protocol(
+                "negotiate fragment cannot request an acknowledgement".into(),
+            ));
+        }
         if abort {
             if !first || last || header.flags.contains(Flags::TRAILER) || header.payload_len != 0 {
                 return Err(Error::Protocol("invalid negotiate ABORT fragment".into()));
@@ -574,6 +585,12 @@ pub(crate) enum Event {
         dispatched: bool,
     },
     Message(Message),
+    /// The final non-trailer fragment requested an acknowledgment. `message`
+    /// is present when that fragment also completed a trailerless message.
+    Ack {
+        id: u64,
+        message: Option<Message>,
+    },
     Trailer {
         id: u64,
         message: Option<Message>,
@@ -598,6 +615,7 @@ struct Incomplete {
     trailer_len: usize,
     dispatched: bool,
     discard_notified: bool,
+    postcard_done: bool,
 }
 
 /// Reassembles postcard data while handing trailer fragments to a live
@@ -635,6 +653,7 @@ impl Reassembler {
         let last = flags.contains(Flags::LAST);
         let abort = flags.contains(Flags::ABORT);
         let trailer = flags.contains(Flags::TRAILER);
+        let want_ack = flags.contains(Flags::WANT_ACK);
         #[cfg(unix)]
         let mut fragment_handles = frame.drain_fds();
         #[cfg(unix)]
@@ -642,6 +661,20 @@ impl Reassembler {
             return Err(Error::Protocol(format!(
                 "fragment for message {id} exceeds the maximum native-handle count"
             )));
+        }
+
+        if kind == Kind::Ack {
+            #[cfg(unix)]
+            let has_handles = !fragment_handles.is_empty();
+            #[cfg(not(unix))]
+            let has_handles = false;
+            if !first || !last || abort || trailer || want_ack || payload_len != 0 || has_handles {
+                return Err(Error::Protocol("invalid Ack fragment".into()));
+            }
+        }
+
+        if want_ack && (trailer || abort || !matches!(kind, Kind::Request | Kind::Response)) {
+            return Err(Error::Protocol("invalid WANT_ACK fragment".into()));
         }
 
         if abort {
@@ -707,6 +740,11 @@ impl Reassembler {
             if entry.trailer.is_some() && !trailer {
                 return Err(Error::Protocol(format!(
                     "message {id} cannot return to postcard fragments once its trailer has started"
+                )));
+            }
+            if entry.postcard_done && !trailer {
+                return Err(Error::Protocol(format!(
+                    "message {id} cannot continue after a WANT_ACK boundary"
                 )));
             }
         }
@@ -794,13 +832,21 @@ impl Reassembler {
             let mut handles: ReceivedHandles = Default::default();
             #[cfg(unix)]
             handles.extend(fragment_handles);
-            return Ok(Event::Message(Message {
+            let message = Message {
                 kind,
                 id,
                 payload: payload.freeze(),
                 handles,
                 trailer: None,
-            }));
+            };
+            return Ok(if want_ack {
+                Event::Ack {
+                    id,
+                    message: Some(message),
+                }
+            } else {
+                Event::Message(message)
+            });
         }
 
         if first {
@@ -814,6 +860,7 @@ impl Reassembler {
                     trailer_len: 0,
                     dispatched: false,
                     discard_notified: false,
+                    postcard_done: false,
                 },
             );
         }
@@ -899,15 +946,30 @@ impl Reassembler {
             entry.handles.extend(fragment_handles);
         }
 
+        if want_ack {
+            entry.postcard_done = true;
+        }
+
         if last {
             let entry = self.incomplete.remove(&id).unwrap();
-            return Ok(Event::Message(Message {
+            let message = Message {
                 kind,
                 id,
                 payload: entry.postcard.freeze(),
                 handles: entry.handles,
                 trailer: None,
-            }));
+            };
+            return Ok(if want_ack {
+                Event::Ack {
+                    id,
+                    message: Some(message),
+                }
+            } else {
+                Event::Message(message)
+            });
+        }
+        if want_ack {
+            return Ok(Event::Ack { id, message: None });
         }
         Ok(Event::None)
     }
@@ -957,7 +1019,7 @@ struct ActiveSend {
     multi_fragment: bool,
 }
 
-/// A control-priority item: a zero-payload `Cancel`/`Error`, or an `ABORT`
+/// A control-priority item: a zero-payload `Cancel`/`Error`/`Ack`, or an `ABORT`
 /// for a message whose FIRST fragment already went out.
 enum ControlSend {
     Empty { kind: Kind, id: u64 },
@@ -974,6 +1036,17 @@ pub(crate) enum AbortOutcome {
     /// whether any bytes (a FIRST fragment) were already sent, in which
     /// case the caller must send `ControlSend::Abort` for `id`.
     Discarded { started: bool },
+}
+
+pub(crate) enum AdvanceOutcome {
+    None,
+    Aborted(u64),
+    #[cfg(target_os = "macos")]
+    Escrow {
+        id: u64,
+        fds: Vec<std::os::fd::OwnedFd>,
+        handles_done: bool,
+    },
 }
 
 /// Send-side round-robin fragment scheduler, self-throttled so it never
@@ -1104,7 +1177,7 @@ impl Scheduler {
         }
     }
 
-    /// Admits a zero-payload control message (`Cancel`/`Error`), always
+    /// Admits a zero-payload control message (`Cancel`/`Error`/`Ack`), always
     /// sent as a single `FIRST|LAST` fragment ahead of ordinary sends.
     pub(crate) fn admit_empty(&mut self, kind: Kind, id: u64) {
         self.control.push_back(ControlSend::Empty { kind, id });
@@ -1213,16 +1286,15 @@ impl Scheduler {
     /// trailer bytes, or the trailer's terminal commit, whichever phase it's
     /// in), re-queuing it at the back if not yet complete.
     ///
-    /// Returns `Ok(Some(id))` when a streaming producer was dropped and this
-    /// call aborted its partially sent message. The caller uses the id to
-    /// complete any still-pending local call.
+    /// Reports when a streaming producer was dropped, or (on macOS) when
+    /// successfully transmitted file descriptors must move into escrow.
     pub(crate) async fn advance(
         &mut self,
         transport: &mut AnySender,
-    ) -> Result<Option<u64>, Error> {
+    ) -> Result<AdvanceOutcome, Error> {
         if let Some(control) = self.control.pop_front() {
             self.send_control(transport, control).await?;
-            return Ok(None);
+            return Ok(AdvanceOutcome::None);
         }
         let mut send = std::future::poll_fn(|cx| {
             let count = self.active.len();
@@ -1286,6 +1358,10 @@ impl Scheduler {
             if postcard_done && handles_done && send.trailer.is_none() {
                 flags = flags | Flags::LAST;
             }
+            #[cfg(target_os = "macos")]
+            if postcard_done && handles_done && send.handles.escrow_tracking() {
+                flags = flags | Flags::WANT_ACK;
+            }
             let header = FragmentHeader {
                 flags,
                 kind: send.kind,
@@ -1296,11 +1372,17 @@ impl Scheduler {
             let atomic = frame.finish(&mut buffer).await?;
             self.record_write_atomicity(atomic);
             send.offset = end;
-            #[cfg(unix)]
+            #[cfg(target_os = "macos")]
+            let escrow = send.handles.finish_attached(attached);
+            #[cfg(target_os = "macos")]
+            let escrow_tracking = send.handles.escrow_tracking();
+            #[cfg(all(unix, not(target_os = "macos")))]
             {
                 send.handle_offset += attached;
             }
             send.started = true;
+            #[cfg(target_os = "macos")]
+            let id = send.id;
             if postcard_done && handles_done && send.trailer.is_none() {
                 if send.multi_fragment {
                     self.free_fragmented_slot();
@@ -1308,7 +1390,15 @@ impl Scheduler {
             } else {
                 self.active.push_back(send);
             }
-            return Ok(None);
+            #[cfg(target_os = "macos")]
+            if !escrow.is_empty() || escrow_tracking && handles_done {
+                return Ok(AdvanceOutcome::Escrow {
+                    id,
+                    fds: escrow,
+                    handles_done,
+                });
+            }
+            return Ok(AdvanceOutcome::None);
         }
 
         if let Trailer::Stream(shared) = &send.trailer {
@@ -1319,7 +1409,7 @@ impl Scheduler {
                     if send.multi_fragment {
                         self.free_fragmented_slot();
                     }
-                    return Ok(Some(send.id));
+                    return Ok(AdvanceOutcome::Aborted(send.id));
                 }
                 SendAction::Fragment => {
                     debug_assert!(send.started, "trailer cannot be the first fragment");
@@ -1335,7 +1425,7 @@ impl Scheduler {
                         SendAction::Fragment => {
                             self.record_write_atomicity(atomic);
                             self.active.push_back(send);
-                            return Ok(None);
+                            return Ok(AdvanceOutcome::None);
                         }
                         SendAction::Finish => {}
                         SendAction::Abort => {
@@ -1343,7 +1433,7 @@ impl Scheduler {
                             if send.multi_fragment {
                                 self.free_fragmented_slot();
                             }
-                            return Ok(Some(send.id));
+                            return Ok(AdvanceOutcome::Aborted(send.id));
                         }
                     }
                 }
@@ -1364,7 +1454,7 @@ impl Scheduler {
         if send.multi_fragment {
             self.free_fragmented_slot();
         }
-        Ok(None)
+        Ok(AdvanceOutcome::None)
     }
 
     async fn send_control(
@@ -1499,6 +1589,132 @@ mod tests {
         assert_eq!(kind, header.kind);
         assert_eq!(id, header.id);
         assert_eq!(payload_len, header.payload_len);
+    }
+
+    #[tokio::test]
+    async fn ack_is_a_single_empty_message() {
+        let mut reassembler = Reassembler::new(Limits::default());
+        let mut frame = FakeRecvFrame::new(Bytes::new());
+        let event = reassembler
+            .accept(
+                FragmentHeader {
+                    flags: Flags::FIRST | Flags::LAST,
+                    kind: Kind::Ack,
+                    id: 42,
+                    payload_len: 0,
+                },
+                &mut frame,
+            )
+            .await
+            .unwrap();
+        let Event::Message(message) = event else {
+            panic!("Ack did not produce a message");
+        };
+        assert_eq!(message.kind, Kind::Ack);
+        assert_eq!(message.id, 42);
+        assert!(message.payload.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rejects_malformed_ack() {
+        for (flags, payload_len) in [
+            (Flags::FIRST, 0),
+            (Flags::LAST, 0),
+            (Flags::FIRST | Flags::LAST | Flags::TRAILER, 0),
+            (Flags::ABORT, 0),
+            (Flags::FIRST | Flags::LAST, 1),
+            (Flags::FIRST | Flags::LAST | Flags::WANT_ACK, 0),
+        ] {
+            let mut reassembler = Reassembler::new(Limits::default());
+            let mut frame = FakeRecvFrame::new(Bytes::new());
+            assert!(matches!(
+                reassembler
+                    .accept(
+                        FragmentHeader {
+                            flags,
+                            kind: Kind::Ack,
+                            id: 1,
+                            payload_len,
+                        },
+                        &mut frame,
+                    )
+                    .await,
+                Err(Error::Protocol(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn last_want_ack_emits_ack_and_completed_message() {
+        let mut frame = FakeRecvFrame::new(fragment_bytes(
+            Flags::FIRST | Flags::LAST | Flags::WANT_ACK,
+            7,
+            Kind::Response,
+            b"done",
+        ));
+        let mut reassembler = Reassembler::new(Limits::default());
+        let header = read_fragment_header(&mut frame).await.unwrap();
+        let Event::Ack {
+            id,
+            message: Some(message),
+        } = reassembler.accept(header, &mut frame).await.unwrap()
+        else {
+            panic!("WANT_ACK and LAST must emit both results");
+        };
+        assert_eq!(id, 7);
+        assert_eq!(&message.payload[..], b"done");
+    }
+
+    #[tokio::test]
+    async fn want_ack_marks_the_boundary_before_a_trailer() {
+        let mut frame = FakeRecvFrame::new(fragment_bytes(
+            Flags::FIRST | Flags::WANT_ACK,
+            7,
+            Kind::Response,
+            b"done",
+        ));
+        let mut reassembler = Reassembler::new(Limits::default());
+        let header = read_fragment_header(&mut frame).await.unwrap();
+        assert!(matches!(
+            reassembler.accept(header, &mut frame).await.unwrap(),
+            Event::Ack {
+                id: 7,
+                message: None
+            }
+        ));
+
+        let mut frame = FakeRecvFrame::new(fragment_bytes(
+            Flags::TRAILER | Flags::LAST,
+            7,
+            Kind::Response,
+            b"",
+        ));
+        let header = read_fragment_header(&mut frame).await.unwrap();
+        let Event::Message(message) = reassembler.accept(header, &mut frame).await.unwrap() else {
+            panic!("terminal trailer commit completes the message");
+        };
+        assert_eq!(&message.payload[..], b"done");
+        assert!(message.trailer.is_some());
+    }
+
+    #[tokio::test]
+    async fn rejects_a_second_postcard_fragment_after_want_ack() {
+        let mut frame = FakeRecvFrame::new(fragment_bytes(
+            Flags::FIRST | Flags::WANT_ACK,
+            7,
+            Kind::Request,
+            b"done",
+        ));
+        let mut reassembler = Reassembler::new(Limits::default());
+        let header = read_fragment_header(&mut frame).await.unwrap();
+        reassembler.accept(header, &mut frame).await.unwrap();
+
+        let mut frame = FakeRecvFrame::new(fragment_bytes(Flags::LAST, 7, Kind::Request, b"more"));
+        let header = read_fragment_header(&mut frame).await.unwrap();
+        assert!(matches!(
+            reassembler.accept(header, &mut frame).await,
+            Err(Error::Protocol(_))
+        ));
     }
 
     #[tokio::test]
@@ -2184,6 +2400,27 @@ mod tests {
             id, 2,
             "second turn should serve the other message, not repeat id 1"
         );
+    }
+
+    #[tokio::test]
+    async fn scheduler_prioritizes_ack() {
+        let mut scheduler = Scheduler::new(&Limits::default());
+        scheduler.admit_message(
+            Kind::Request,
+            1,
+            Bytes::from_static(b"request"),
+            Default::default(),
+            Trailer::None,
+        );
+        scheduler.admit_empty(Kind::Ack, 2);
+        let (mut sender, mut reader) = sender_pair();
+
+        scheduler.advance(&mut sender).await.unwrap();
+        let (flags, kind, id, payload) = read_wire_fragment(&mut reader).await;
+        assert_eq!(kind, Kind::Ack);
+        assert_eq!(id, 2);
+        assert!(flags.contains(Flags::FIRST) && flags.contains(Flags::LAST));
+        assert!(payload.is_empty());
     }
 
     #[tokio::test]

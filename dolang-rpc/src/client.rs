@@ -112,6 +112,9 @@ enum Outgoing<Q> {
     PeerDiscarded {
         id: u64,
     },
+    Ack {
+        id: u64,
+    },
 }
 
 struct Inner<P: Protocol> {
@@ -125,6 +128,8 @@ struct Inner<P: Protocol> {
     tasks: Mutex<Option<Tasks>>,
     #[cfg(windows)]
     handle_escrow: Mutex<HashMap<u64, Vec<OwnedHandle>>>,
+    #[cfg(target_os = "macos")]
+    fd_escrow: Mutex<crate::escrow::FdEscrow>,
     limits: Limits,
     #[cfg(windows)]
     _peer_process: Option<OwnedHandle>,
@@ -235,6 +240,8 @@ impl<P: Protocol> Client<P> {
             tasks: Mutex::new(None),
             #[cfg(windows)]
             handle_escrow: Mutex::new(HashMap::new()),
+            #[cfg(target_os = "macos")]
+            fd_escrow: Mutex::new(Default::default()),
             limits,
             #[cfg(windows)]
             _peer_process: peer_process,
@@ -494,6 +501,10 @@ impl<P: Protocol> Writer<P> {
                 scheduler.discard_active_trailer(id);
                 Ok(())
             }
+            Outgoing::Ack { id } => {
+                scheduler.admit_empty(Kind::Ack, id);
+                Ok(())
+            }
         }
     }
 
@@ -522,6 +533,12 @@ impl<P: Protocol> Writer<P> {
         };
         #[cfg(unix)]
         let handles = put_handles.finish();
+        #[cfg(target_os = "macos")]
+        if handles.needs_ack()
+            && let Some(inner) = self.inner.upgrade()
+        {
+            inner.fd_escrow.lock().unwrap().register(id);
+        }
         #[cfg(windows)]
         let (handles, escrow) = put_handles.finish();
         #[cfg(windows)]
@@ -540,6 +557,10 @@ impl<P: Protocol> Writer<P> {
             AbortOutcome::Discarded { started } => {
                 if started {
                     scheduler.admit_abort(id);
+                }
+                #[cfg(target_os = "macos")]
+                if !started && let Some(inner) = self.inner.upgrade() {
+                    inner.fd_escrow.lock().unwrap().discard_unsent(id);
                 }
                 self.complete_err(id, Error::Cancelled);
             }
@@ -588,10 +609,16 @@ impl<P: Protocol> Writer<P> {
                     let _ = self.transport.flush().await;
                     match result {
                         // A streaming trailer producer was dropped mid-message.
-                        Ok(Some(id)) => {
+                        Ok(fragment::AdvanceOutcome::Aborted(id)) => {
                             self.complete_err(id, Error::Cancelled);
                         }
-                        Ok(None) => {}
+                        Ok(fragment::AdvanceOutcome::None) => {}
+                        #[cfg(target_os = "macos")]
+                        Ok(fragment::AdvanceOutcome::Escrow { id, fds, handles_done }) => {
+                            if let Some(inner) = self.inner.upgrade() {
+                                inner.fd_escrow.lock().unwrap().sent(id, fds, handles_done);
+                            }
+                        }
                         // No blanket `fail_all`: a write failure here means
                         // this connection is broken, not that every pending
                         // call's already-sent request was never delivered.
@@ -641,6 +668,14 @@ impl<P: Protocol> Reader<P> {
                 #[cfg(windows)]
                 inner.handle_escrow.lock().unwrap().remove(&id);
                 inner.complete(id, Err(Error::Cancelled));
+            }
+            #[cfg(target_os = "macos")]
+            Kind::Ack => {
+                if !inner.fd_escrow.lock().unwrap().release(id) {
+                    return Err(Error::Protocol(format!(
+                        "Ack for request {id} with no active escrow"
+                    )));
+                }
             }
             Kind::Discard => inner.send(Outgoing::PeerDiscarded { id }),
             kind => return Err(Error::Protocol(format!("unexpected {kind:?} frame"))),
@@ -696,6 +731,17 @@ impl<P: Protocol> Reader<P> {
                 }
                 Event::Message(message) => {
                     if let Err(error) = self.dispatch(message) {
+                        fail(&self.inner, error);
+                        return;
+                    }
+                }
+                Event::Ack { id, message } => {
+                    if let Some(inner) = self.inner.upgrade() {
+                        inner.send(Outgoing::Ack { id });
+                    }
+                    if let Some(message) = message
+                        && let Err(error) = self.dispatch(message)
+                    {
                         fail(&self.inner, error);
                         return;
                     }
@@ -761,6 +807,8 @@ mod tests {
             tasks: Mutex::new(None),
             #[cfg(windows)]
             handle_escrow: Mutex::new(HashMap::new()),
+            #[cfg(target_os = "macos")]
+            fd_escrow: Mutex::new(Default::default()),
             limits: Limits::default(),
             #[cfg(windows)]
             _peer_process: None,
@@ -817,6 +865,8 @@ mod tests {
             next_id: Mutex::new(1),
             tasks: Mutex::new(None),
             handle_escrow: Mutex::new(HashMap::new()),
+            #[cfg(target_os = "macos")]
+            fd_escrow: Mutex::new(Default::default()),
             limits: Limits::default(),
             #[cfg(windows)]
             _peer_process: None,

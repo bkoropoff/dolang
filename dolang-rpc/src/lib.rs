@@ -47,6 +47,8 @@
 //! ```
 
 pub mod client;
+#[cfg(target_os = "macos")]
+mod escrow;
 mod fragment;
 pub mod handle;
 mod serde;

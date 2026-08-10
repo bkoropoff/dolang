@@ -392,6 +392,20 @@ fragments. If all postcard bytes have been sent before all descriptors, the
 scheduler emits zero-payload postcard fragments until the attachment phase is
 complete; only then may it complete the message or enter its trailer phase.
 
+`WANT_ACK` marks the final non-trailer fragment of a request or response. The
+receiver queues an empty, single-fragment `Ack` for the message ID immediately
+after reassembly accepts that boundary and before it starts consuming any
+trailer. A message may request at most one acknowledgement; `Ack` itself cannot
+request one. An unsolicited, duplicate, or late acknowledgement is a protocol
+error.
+
+On macOS, messages carrying file descriptors set `WANT_ACK` to work around XNU
+collecting reachable sockets while processing `SCM_RIGHTS`. The scheduler moves
+every successfully transmitted `OwnedFd` into message-ID escrow instead of
+dropping it, without testing its descriptor type. Receipt of `Ack` releases the
+escrow. Other platforms honor `WANT_ACK`; Windows does not yet use it for its
+own outgoing handle escrow.
+
 ## Cancellation
 
 A client may cancel any of its still-pending request IDs through

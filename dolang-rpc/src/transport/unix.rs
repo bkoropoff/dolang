@@ -34,12 +34,17 @@ impl<'handle> EncodeHandles<'handle> {
     }
 
     pub(crate) fn finish(self) -> OutgoingHandles {
+        let fds: Vec<_> = self
+            .handles
+            .into_iter()
+            .map(ErasedHandle::steal_handle)
+            .collect();
+        #[cfg(target_os = "macos")]
+        let escrow = !fds.is_empty();
         OutgoingHandles {
-            fds: self
-                .handles
-                .into_iter()
-                .map(ErasedHandle::steal_handle)
-                .collect(),
+            fds,
+            #[cfg(target_os = "macos")]
+            escrow,
         }
     }
 
@@ -84,6 +89,23 @@ impl<'handle> PutHandle<'handle> for EncodeHandles<'handle> {
 #[derive(Default)]
 pub(crate) struct OutgoingHandles {
     pub(crate) fds: Vec<OwnedFd>,
+    #[cfg(target_os = "macos")]
+    escrow: bool,
+}
+
+#[cfg(target_os = "macos")]
+impl OutgoingHandles {
+    pub(crate) fn needs_ack(&self) -> bool {
+        self.escrow
+    }
+
+    pub(crate) fn finish_attached(&mut self, count: usize) -> Vec<OwnedFd> {
+        self.fds.drain(..count).collect()
+    }
+
+    pub(crate) fn escrow_tracking(&self) -> bool {
+        self.escrow
+    }
 }
 
 #[derive(Default)]

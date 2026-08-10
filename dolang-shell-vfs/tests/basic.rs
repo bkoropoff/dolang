@@ -495,8 +495,6 @@ async fn file_create_new() {
 }
 
 #[tokio::test]
-// See https://github.com/dolang-org/dolang/issues/381
-#[cfg_attr(target_os = "macos", ignore)]
 async fn unix_vfs_connects_to_another_server() {
     let dir = tempdir().unwrap();
     let socket_path = dir.path().join("outer.sock");
