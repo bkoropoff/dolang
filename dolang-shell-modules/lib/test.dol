@@ -63,11 +63,12 @@ class Harness
       self.#record_error $e $(strand.error_backtrace()) $path $name
 
   def run_module self path tests
-    progress.show message: (module_name path) total: $tests.len do |w|
+    progress.show message: (module_name path) icon: ▶ total: $tests.len do |w|
       strand.fork
         for name func = tests
           do self.#jobs.with do
             progress.show message: $name do |_|
+              w.update icon: ▼
               self.#run_test $path $name $func
               w.delta()
 
@@ -122,7 +123,7 @@ class Harness
     rc
 
   pub def run self files
-    progress.show message: modules total: $files.len do |w|
+    progress.show message: modules icon: 🗂️ total: $files.len do |w|
       strand.fork
         for path = files
           do self.#module_jobs.with do
