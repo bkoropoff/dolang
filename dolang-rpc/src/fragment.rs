@@ -15,10 +15,47 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use ::serde::{Deserialize, Serialize};
 
 use crate::{
-    Error, Kind, Limits, NEGOTIATE_FRAGMENT_SIZE, NEGOTIATE_MAX_PAYLOAD_SIZE,
+    Error, Limits, NEGOTIATE_FRAGMENT_SIZE, NEGOTIATE_MAX_PAYLOAD_SIZE,
     trailer::{RecvShared, SendAction, SendShared},
-    transport::{AnyReceiver, AnySender, Receiver, RecvFrame, SendFrame, Sender},
+    transport::{
+        AnyReceiver, AnySender, OutgoingHandles, ReceivedHandles, Receiver, RecvFrame, SendFrame,
+        Sender,
+    },
 };
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum Kind {
+    Request = 0,
+    Response = 1,
+    Error = 2,
+    Cancel = 3,
+    /// Advisory: the sender no longer wants any more `TRAILER` fragments for
+    /// the given message id. Unlike `Cancel`, this never affects the
+    /// message's own request/response outcome — it only tells the peer to
+    /// stop streaming a trailer it already committed to sending.
+    Discard = 4,
+    /// Protocol handshake/version negotiation. Sent unprompted and first by
+    /// both ends of a connection before any other `Kind` is valid; see
+    /// [`negotiate`].
+    Negotiate = 5,
+}
+
+impl TryFrom<u8> for Kind {
+    type Error = Error;
+
+    fn try_from(value: u8) -> Result<Self, Error> {
+        match value {
+            0 => Ok(Self::Request),
+            1 => Ok(Self::Response),
+            2 => Ok(Self::Error),
+            3 => Ok(Self::Cancel),
+            4 => Ok(Self::Discard),
+            5 => Ok(Self::Negotiate),
+            _ => Err(Error::Protocol(format!("unknown frame kind {value}"))),
+        }
+    }
+}
 
 /// Fragment header flag bits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -196,6 +233,8 @@ struct HandshakeV1 {
     max_fragment_size: u32,
     max_payload_size: u32,
     max_trailer_size: u32,
+    max_handles_per_fragment: u32,
+    max_handles_per_message: u32,
     max_incomplete_messages: u32,
     max_incomplete_trailers: u32,
 }
@@ -203,10 +242,18 @@ struct HandshakeV1 {
 impl HandshakeV1 {
     fn from_limits(limits: &Limits) -> Self {
         let clamp = |v: usize| u32::try_from(v).unwrap_or(u32::MAX);
+        #[cfg(unix)]
+        let max_handles_per_fragment = limits
+            .max_handles_per_fragment
+            .min(crate::transport::unix::MAX_FDS_PER_FRAGMENT);
+        #[cfg(not(unix))]
+        let max_handles_per_fragment = limits.max_handles_per_fragment;
         Self {
             max_fragment_size: clamp(limits.max_fragment_size),
             max_payload_size: clamp(limits.max_payload_size),
             max_trailer_size: clamp(limits.max_trailer_size),
+            max_handles_per_fragment: clamp(max_handles_per_fragment),
+            max_handles_per_message: clamp(limits.max_handles_per_message),
             max_incomplete_messages: clamp(limits.max_incomplete_messages),
             max_incomplete_trailers: clamp(limits.max_incomplete_trailers),
         }
@@ -223,6 +270,18 @@ impl HandshakeV1 {
             .min(self.max_fragment_size as usize);
         limits.max_payload_size = limits.max_payload_size.min(self.max_payload_size as usize);
         limits.max_trailer_size = limits.max_trailer_size.min(self.max_trailer_size as usize);
+        limits.max_handles_per_fragment = limits
+            .max_handles_per_fragment
+            .min(self.max_handles_per_fragment as usize);
+        #[cfg(unix)]
+        {
+            limits.max_handles_per_fragment = limits
+                .max_handles_per_fragment
+                .min(crate::transport::unix::MAX_FDS_PER_FRAGMENT);
+        }
+        limits.max_handles_per_message = limits
+            .max_handles_per_message
+            .min(self.max_handles_per_message as usize);
         limits.max_incomplete_messages = limits
             .max_incomplete_messages
             .min(self.max_incomplete_messages as usize);
@@ -499,24 +558,25 @@ async fn read_negotiate_message(receiver: &mut AnyReceiver) -> Result<([u8; 8], 
     Ok((id, payload.to_vec()))
 }
 
-pub(crate) struct StreamMessage {
+pub(crate) struct Message {
     pub(crate) kind: Kind,
     pub(crate) id: u64,
     pub(crate) payload: Bytes,
+    pub(crate) handles: ReceivedHandles,
     pub(crate) trailer: Option<Arc<std::sync::Mutex<RecvShared>>>,
 }
 
-pub(crate) enum StreamEvent {
+pub(crate) enum Event {
     None,
     Aborted {
         kind: Kind,
         id: u64,
         dispatched: bool,
     },
-    Message(StreamMessage),
+    Message(Message),
     Trailer {
         id: u64,
-        message: Option<StreamMessage>,
+        message: Option<Message>,
         shared: Arc<std::sync::Mutex<RecvShared>>,
         len: usize,
         /// Set when the local consumer had already discarded this trailer
@@ -530,9 +590,10 @@ pub(crate) enum StreamEvent {
     },
 }
 
-struct StreamIncomplete {
+struct Incomplete {
     kind: Kind,
     postcard: BytesMut,
+    handles: ReceivedHandles,
     trailer: Option<Arc<std::sync::Mutex<RecvShared>>>,
     trailer_len: usize,
     dispatched: bool,
@@ -541,16 +602,16 @@ struct StreamIncomplete {
 
 /// Reassembles postcard data while handing trailer fragments to a live
 /// [`RecvShared`] without buffering their bytes.
-pub(crate) struct StreamReassembler {
+pub(crate) struct Reassembler {
     limits: Limits,
-    incomplete: HashMap<u64, StreamIncomplete>,
+    incomplete: HashMap<u64, Incomplete>,
     /// Number of `incomplete` entries whose `trailer` is (or was, at some
     /// point while incomplete) `Some`. Enforces `max_incomplete_trailers`
     /// independent of `max_incomplete_messages`.
     incomplete_trailers: usize,
 }
 
-impl StreamReassembler {
+impl Reassembler {
     pub(crate) fn new(limits: Limits) -> Self {
         Self {
             limits,
@@ -563,7 +624,7 @@ impl StreamReassembler {
         &mut self,
         header: FragmentHeader,
         frame: &mut F,
-    ) -> Result<StreamEvent, Error> {
+    ) -> Result<Event, Error> {
         let FragmentHeader {
             flags,
             kind,
@@ -574,8 +635,22 @@ impl StreamReassembler {
         let last = flags.contains(Flags::LAST);
         let abort = flags.contains(Flags::ABORT);
         let trailer = flags.contains(Flags::TRAILER);
+        #[cfg(unix)]
+        let mut fragment_handles = frame.drain_fds();
+        #[cfg(unix)]
+        if fragment_handles.len() > self.limits.max_handles_per_fragment {
+            return Err(Error::Protocol(format!(
+                "fragment for message {id} exceeds the maximum native-handle count"
+            )));
+        }
 
         if abort {
+            #[cfg(unix)]
+            if !fragment_handles.is_empty() {
+                return Err(Error::Protocol(
+                    "ABORT fragment contains file descriptor attachments".into(),
+                ));
+            }
             if first || last || trailer || payload_len != 0 {
                 return Err(Error::Protocol("invalid ABORT fragment".into()));
             }
@@ -589,7 +664,7 @@ impl StreamReassembler {
                     io::Error::new(io::ErrorKind::Interrupted, "trailer was aborted"),
                 );
             }
-            return Ok(StreamEvent::Aborted {
+            return Ok(Event::Aborted {
                 kind: entry.kind,
                 id,
                 dispatched: entry.dispatched,
@@ -599,6 +674,13 @@ impl StreamReassembler {
         if first && last && trailer {
             return Err(Error::Protocol(
                 "a trailer-bearing message cannot complete in its FIRST fragment".into(),
+            ));
+        }
+
+        #[cfg(unix)]
+        if trailer && !fragment_handles.is_empty() {
+            return Err(Error::Protocol(
+                "trailer fragment contains file descriptor attachments".into(),
             ));
         }
 
@@ -663,12 +745,13 @@ impl StreamReassembler {
                 .clone();
             RecvShared::finish(&shared);
             if entry.dispatched {
-                return Ok(StreamEvent::None);
+                return Ok(Event::None);
             }
-            return Ok(StreamEvent::Message(StreamMessage {
+            return Ok(Event::Message(Message {
                 kind,
                 id,
                 payload: entry.postcard.freeze(),
+                handles: entry.handles,
                 trailer: Some(shared),
             }));
         }
@@ -687,10 +770,35 @@ impl StreamReassembler {
         if first && last {
             let mut payload = BytesMut::with_capacity(payload_len);
             read_payload(frame, &mut payload, payload_len).await?;
-            return Ok(StreamEvent::Message(StreamMessage {
+            #[cfg(unix)]
+            fragment_handles.extend(frame.drain_fds());
+            #[cfg(unix)]
+            if fragment_handles.len() > self.limits.max_handles_per_fragment {
+                return Err(Error::Protocol(format!(
+                    "fragment for message {id} exceeds the maximum native-handle count"
+                )));
+            }
+            #[cfg(unix)]
+            if fragment_handles.len() > self.limits.max_handles_per_message {
+                return Err(Error::Protocol(format!(
+                    "message {id} exceeds the maximum native-handle count"
+                )));
+            }
+            #[cfg(unix)]
+            if !matches!(kind, Kind::Request | Kind::Response) && !fragment_handles.is_empty() {
+                return Err(Error::Protocol(format!(
+                    "{kind:?} fragment contains file descriptor attachments"
+                )));
+            }
+            #[allow(unused_mut)]
+            let mut handles: ReceivedHandles = Default::default();
+            #[cfg(unix)]
+            handles.extend(fragment_handles);
+            return Ok(Event::Message(Message {
                 kind,
                 id,
                 payload: payload.freeze(),
+                handles,
                 trailer: None,
             }));
         }
@@ -698,9 +806,10 @@ impl StreamReassembler {
         if first {
             self.incomplete.insert(
                 id,
-                StreamIncomplete {
+                Incomplete {
                     kind,
                     postcard: BytesMut::new(),
+                    handles: Default::default(),
                     trailer: None,
                     trailer_len: 0,
                     dispatched: false,
@@ -736,10 +845,11 @@ impl StreamReassembler {
                 None
             } else {
                 entry.dispatched = true;
-                Some(StreamMessage {
+                Some(Message {
                     kind,
                     id,
                     payload: entry.postcard.clone().freeze(),
+                    handles: std::mem::take(&mut entry.handles),
                     trailer: Some(shared.clone()),
                 })
             };
@@ -752,7 +862,7 @@ impl StreamReassembler {
             if notify_discard {
                 entry.discard_notified = true;
             }
-            return Ok(StreamEvent::Trailer {
+            return Ok(Event::Trailer {
                 id,
                 message,
                 shared,
@@ -768,17 +878,38 @@ impl StreamReassembler {
         }
         entry.postcard.reserve(payload_len);
         read_payload(frame, &mut entry.postcard, payload_len).await?;
+        #[cfg(unix)]
+        {
+            fragment_handles.extend(frame.drain_fds());
+            if fragment_handles.len() > self.limits.max_handles_per_fragment {
+                return Err(Error::Protocol(format!(
+                    "fragment for message {id} exceeds the maximum native-handle count"
+                )));
+            }
+            if entry.handles.len() + fragment_handles.len() > self.limits.max_handles_per_message {
+                return Err(Error::Protocol(format!(
+                    "message {id} exceeds the maximum native-handle count"
+                )));
+            }
+            if !matches!(kind, Kind::Request | Kind::Response) && !fragment_handles.is_empty() {
+                return Err(Error::Protocol(format!(
+                    "{kind:?} fragment contains file descriptor attachments"
+                )));
+            }
+            entry.handles.extend(fragment_handles);
+        }
 
         if last {
             let entry = self.incomplete.remove(&id).unwrap();
-            return Ok(StreamEvent::Message(StreamMessage {
+            return Ok(Event::Message(Message {
                 kind,
                 id,
                 payload: entry.postcard.freeze(),
+                handles: entry.handles,
                 trailer: None,
             }));
         }
-        Ok(StreamEvent::None)
+        Ok(Event::None)
     }
 }
 
@@ -808,6 +939,10 @@ struct ActiveSend {
     kind: Kind,
     payload: Bytes,
     offset: usize,
+    #[cfg(unix)]
+    handles: OutgoingHandles,
+    #[cfg(unix)]
+    handle_offset: usize,
     trailer: Trailer,
     /// Progress through `trailer`'s bytes, once the postcard phase (`offset
     /// == payload.len()`) is done.
@@ -863,6 +998,8 @@ pub(crate) struct Scheduler {
     /// `limits.max_fragment_size` bounds the whole wire fragment (header +
     /// payload) actually written per round-robin turn, not just the payload.
     max_fragment_size: usize,
+    #[cfg(unix)]
+    max_handles_per_fragment: usize,
     /// `log2` of the current backoff factor applied to `max_fragment_size`
     /// for actual fragment writes: `effective_fragment_size() ==
     /// max_fragment_size >> fragment_shift`. Storing the shift rather than
@@ -888,6 +1025,8 @@ impl Scheduler {
                 .max_fragment_size
                 .saturating_sub(RawFragmentHeader::LEN)
                 .max(1),
+            #[cfg(unix)]
+            max_handles_per_fragment: limits.max_handles_per_fragment,
             fragment_shift: 0,
         }
     }
@@ -914,15 +1053,30 @@ impl Scheduler {
         }
     }
 
-    /// Admits a request/response payload, with an optional trailer, for
-    /// sending.
-    pub(crate) fn admit_message(&mut self, kind: Kind, id: u64, payload: Bytes, trailer: Trailer) {
-        if trailer.is_none() && payload.len() <= self.max_fragment_size {
+    pub(crate) fn admit_message(
+        &mut self,
+        kind: Kind,
+        id: u64,
+        payload: Bytes,
+        handles: OutgoingHandles,
+        trailer: Trailer,
+    ) {
+        #[cfg(unix)]
+        let handles_fit = handles.fds.len() <= self.max_handles_per_fragment;
+        #[cfg(not(unix))]
+        let handles_fit = true;
+        #[cfg(not(unix))]
+        let _ = handles;
+        if trailer.is_none() && payload.len() <= self.max_fragment_size && handles_fit {
             self.active.push_back(ActiveSend {
                 id,
                 kind,
                 payload,
                 offset: 0,
+                #[cfg(unix)]
+                handles,
+                #[cfg(unix)]
+                handle_offset: 0,
                 trailer,
                 started: false,
                 multi_fragment: false,
@@ -934,6 +1088,10 @@ impl Scheduler {
             kind,
             payload,
             offset: 0,
+            #[cfg(unix)]
+            handles,
+            #[cfg(unix)]
+            handle_offset: 0,
             trailer,
             started: false,
             multi_fragment: true,
@@ -1091,15 +1249,41 @@ impl Scheduler {
         // once, which is rejected on receipt.
         let must_open_with_postcard = first && send.trailer.total_len() == 0;
 
-        if send.offset < send.payload.len() || must_open_with_postcard {
+        #[cfg(unix)]
+        let handles_pending = send.handle_offset < send.handles.fds.len();
+        #[cfg(not(unix))]
+        let handles_pending = false;
+        if send.offset < send.payload.len() || handles_pending || must_open_with_postcard {
             let start = send.offset;
             let end = (start + self.effective_fragment_size()).min(send.payload.len());
             let postcard_done = end == send.payload.len();
+            #[allow(unused_mut)]
+            let mut frame = transport.send();
+            #[cfg(unix)]
+            let attached = if handles_pending {
+                let batch_end = (send.handle_offset + self.max_handles_per_fragment)
+                    .min(send.handles.fds.len());
+                let attached =
+                    frame.attach_fds(&send.handles.fds[send.handle_offset..batch_end])?;
+                if attached == 0 || attached > batch_end - send.handle_offset {
+                    return Err(Error::Io(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "transport accepted an invalid native-handle batch size",
+                    )));
+                }
+                attached
+            } else {
+                0
+            };
+            #[cfg(unix)]
+            let handles_done = send.handle_offset + attached == send.handles.fds.len();
+            #[cfg(not(unix))]
+            let handles_done = true;
             let mut flags = Flags::NONE;
             if first {
                 flags = flags | Flags::FIRST;
             }
-            if postcard_done && send.trailer.is_none() {
+            if postcard_done && handles_done && send.trailer.is_none() {
                 flags = flags | Flags::LAST;
             }
             let header = FragmentHeader {
@@ -1109,11 +1293,15 @@ impl Scheduler {
                 payload_len: end - start,
             };
             let mut buffer = header.encode().chain(send.payload.slice(start..end));
-            let atomic = transport.send().finish(&mut buffer).await?;
+            let atomic = frame.finish(&mut buffer).await?;
             self.record_write_atomicity(atomic);
             send.offset = end;
+            #[cfg(unix)]
+            {
+                send.handle_offset += attached;
+            }
             send.started = true;
-            if postcard_done && send.trailer.is_none() {
+            if postcard_done && handles_done && send.trailer.is_none() {
                 if send.multi_fragment {
                     self.free_fragmented_slot();
                 }
@@ -1209,8 +1397,6 @@ mod tests {
     use std::io;
     #[cfg(unix)]
     use std::os::fd::OwnedFd;
-    #[cfg(windows)]
-    use std::os::windows::io::OwnedHandle;
 
     use super::*;
 
@@ -1234,14 +1420,9 @@ mod tests {
 
     impl RecvFrame for FakeRecvFrame {
         #[cfg(unix)]
-        fn take_fd(&mut self, _index: u32) -> io::Result<OwnedFd> {
-            unimplemented!("fake transport does not carry descriptors")
+        fn drain_fds(&mut self) -> Vec<OwnedFd> {
+            Vec::new()
         }
-        #[cfg(windows)]
-        fn take_handle(&mut self, _value: usize) -> io::Result<OwnedHandle> {
-            unimplemented!("fake transport does not carry handles")
-        }
-
         async fn recv<B: BufMut>(&mut self, buffer: &mut B) -> io::Result<usize> {
             let Some(front) = self.chunks.front_mut() else {
                 return Ok(0);
@@ -1323,10 +1504,9 @@ mod tests {
     #[tokio::test]
     async fn first_last_fragment_is_the_fast_path_and_bypasses_incomplete_bookkeeping() {
         let mut frame = FakeRecvFrame::new(fast_path_bytes(1, Kind::Request, b"hello"));
-        let mut reassembler = StreamReassembler::new(Limits::default());
+        let mut reassembler = Reassembler::new(Limits::default());
         let header = read_fragment_header(&mut frame).await.unwrap();
-        let StreamEvent::Message(msg) = reassembler.accept(header, &mut frame).await.unwrap()
-        else {
+        let Event::Message(msg) = reassembler.accept(header, &mut frame).await.unwrap() else {
             panic!("fast path completes immediately");
         };
         assert_eq!(msg.kind, Kind::Request);
@@ -1341,18 +1521,17 @@ mod tests {
         bytes.extend(fragment_bytes(Flags::NONE, 1, Kind::Request, b"world"));
         bytes.extend(fragment_bytes(Flags::LAST, 1, Kind::Request, b"!"));
         let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = StreamReassembler::new(Limits::default());
+        let mut reassembler = Reassembler::new(Limits::default());
 
         for _ in 0..2 {
             let header = read_fragment_header(&mut frame).await.unwrap();
             assert!(matches!(
                 reassembler.accept(header, &mut frame).await.unwrap(),
-                StreamEvent::None
+                Event::None
             ));
         }
         let header = read_fragment_header(&mut frame).await.unwrap();
-        let StreamEvent::Message(msg) = reassembler.accept(header, &mut frame).await.unwrap()
-        else {
+        let Event::Message(msg) = reassembler.accept(header, &mut frame).await.unwrap() else {
             panic!("LAST completes the message");
         };
         assert_eq!(&msg.payload[..], b"hello, world!");
@@ -1371,19 +1550,17 @@ mod tests {
         // observe bytes belonging to the second fragment while reading the
         // first, if the read weren't correctly bounded.
         let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = StreamReassembler::new(Limits::default());
+        let mut reassembler = Reassembler::new(Limits::default());
 
         let header = read_fragment_header(&mut frame).await.unwrap();
-        let StreamEvent::Message(msg) = reassembler.accept(header, &mut frame).await.unwrap()
-        else {
+        let Event::Message(msg) = reassembler.accept(header, &mut frame).await.unwrap() else {
             panic!("expected a completed message");
         };
         assert_eq!(&msg.payload[..], b"one");
 
         let header = read_fragment_header(&mut frame).await.unwrap();
         assert_eq!(header.id, 2);
-        let StreamEvent::Message(msg) = reassembler.accept(header, &mut frame).await.unwrap()
-        else {
+        let Event::Message(msg) = reassembler.accept(header, &mut frame).await.unwrap() else {
             panic!("expected a completed message");
         };
         assert_eq!(&msg.payload[..], b"two");
@@ -1396,10 +1573,9 @@ mod tests {
         // `recv()` calls across both the header and payload reads.
         let pieces = bytes.into_iter().map(|b| vec![b]).collect();
         let mut frame = FakeRecvFrame::chunked(pieces);
-        let mut reassembler = StreamReassembler::new(Limits::default());
+        let mut reassembler = Reassembler::new(Limits::default());
         let header = read_fragment_header(&mut frame).await.unwrap();
-        let StreamEvent::Message(msg) = reassembler.accept(header, &mut frame).await.unwrap()
-        else {
+        let Event::Message(msg) = reassembler.accept(header, &mut frame).await.unwrap() else {
             panic!("expected a completed message");
         };
         assert_eq!(&msg.payload[..], b"hello");
@@ -1408,7 +1584,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_duplicate_first_fragment() {
         let mut frame = FakeRecvFrame::new(fragment_bytes(Flags::FIRST, 1, Kind::Request, b"a"));
-        let mut reassembler = StreamReassembler::new(Limits::default());
+        let mut reassembler = Reassembler::new(Limits::default());
         let header = read_fragment_header(&mut frame).await.unwrap();
         reassembler.accept(header, &mut frame).await.unwrap();
 
@@ -1423,7 +1599,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_continuation_without_active_message() {
         let mut frame = FakeRecvFrame::new(fragment_bytes(Flags::NONE, 1, Kind::Request, b"a"));
-        let mut reassembler = StreamReassembler::new(Limits::default());
+        let mut reassembler = Reassembler::new(Limits::default());
         let header = read_fragment_header(&mut frame).await.unwrap();
         assert!(matches!(
             reassembler.accept(header, &mut frame).await,
@@ -1436,7 +1612,7 @@ mod tests {
         let mut bytes = fragment_bytes(Flags::FIRST | Flags::LAST, 1, Kind::Request, b"a");
         bytes.extend(fragment_bytes(Flags::NONE, 1, Kind::Request, b"b"));
         let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = StreamReassembler::new(Limits::default());
+        let mut reassembler = Reassembler::new(Limits::default());
         let header = read_fragment_header(&mut frame).await.unwrap();
         reassembler.accept(header, &mut frame).await.unwrap();
         let header = read_fragment_header(&mut frame).await.unwrap();
@@ -1451,7 +1627,7 @@ mod tests {
         let mut bytes = fragment_bytes(Flags::FIRST, 1, Kind::Request, b"a");
         bytes.extend(fragment_bytes(Flags::LAST, 1, Kind::Response, b"b"));
         let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = StreamReassembler::new(Limits::default());
+        let mut reassembler = Reassembler::new(Limits::default());
         let header = read_fragment_header(&mut frame).await.unwrap();
         reassembler.accept(header, &mut frame).await.unwrap();
         let header = read_fragment_header(&mut frame).await.unwrap();
@@ -1469,7 +1645,7 @@ mod tests {
         };
         let mut frame =
             FakeRecvFrame::new(fragment_bytes(Flags::FIRST, 1, Kind::Request, b"hello"));
-        let mut reassembler = StreamReassembler::new(limits);
+        let mut reassembler = Reassembler::new(limits);
         let header = read_fragment_header(&mut frame).await.unwrap();
         assert!(matches!(
             reassembler.accept(header, &mut frame).await,
@@ -1484,7 +1660,7 @@ mod tests {
             ..Limits::default()
         };
         let mut frame = FakeRecvFrame::new(fast_path_bytes(1, Kind::Request, b"hello"));
-        let mut reassembler = StreamReassembler::new(limits);
+        let mut reassembler = Reassembler::new(limits);
         let header = read_fragment_header(&mut frame).await.unwrap();
         assert!(matches!(
             reassembler.accept(header, &mut frame).await,
@@ -1502,7 +1678,7 @@ mod tests {
         let mut bytes = fragment_bytes(Flags::FIRST, 1, Kind::Request, b"abcd");
         bytes.extend(fragment_bytes(Flags::LAST, 1, Kind::Request, b"abcd"));
         let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = StreamReassembler::new(limits);
+        let mut reassembler = Reassembler::new(limits);
         let header = read_fragment_header(&mut frame).await.unwrap();
         reassembler.accept(header, &mut frame).await.unwrap();
         let header = read_fragment_header(&mut frame).await.unwrap();
@@ -1518,7 +1694,7 @@ mod tests {
             max_incomplete_messages: 1,
             ..Limits::default()
         };
-        let mut reassembler = StreamReassembler::new(limits);
+        let mut reassembler = Reassembler::new(limits);
         let mut frame = FakeRecvFrame::new(fragment_bytes(Flags::FIRST, 1, Kind::Request, b"a"));
         let header = read_fragment_header(&mut frame).await.unwrap();
         reassembler.accept(header, &mut frame).await.unwrap();
@@ -1537,7 +1713,7 @@ mod tests {
             max_incomplete_trailers: 1,
             ..Limits::default()
         };
-        let mut reassembler = StreamReassembler::new(limits);
+        let mut reassembler = Reassembler::new(limits);
         let mut frame = FakeRecvFrame::new(fragment_bytes(
             Flags::FIRST | Flags::TRAILER,
             1,
@@ -1547,7 +1723,7 @@ mod tests {
         let header = read_fragment_header(&mut frame).await.unwrap();
         assert!(matches!(
             reassembler.accept(header, &mut frame).await.unwrap(),
-            StreamEvent::Trailer { .. }
+            Event::Trailer { .. }
         ));
 
         let mut frame = FakeRecvFrame::new(fragment_bytes(
@@ -1568,7 +1744,7 @@ mod tests {
         let mut bytes = fragment_bytes(Flags::FIRST, 1, Kind::Request, b"a");
         bytes.extend(fragment_bytes(Flags::ABORT, 1, Kind::Request, b"x"));
         let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = StreamReassembler::new(Limits::default());
+        let mut reassembler = Reassembler::new(Limits::default());
         let header = read_fragment_header(&mut frame).await.unwrap();
         reassembler.accept(header, &mut frame).await.unwrap();
         let header = read_fragment_header(&mut frame).await.unwrap();
@@ -1583,14 +1759,14 @@ mod tests {
         let mut bytes = fragment_bytes(Flags::FIRST, 1, Kind::Request, b"abcd");
         bytes.extend(fragment_bytes(Flags::ABORT, 1, Kind::Request, b""));
         let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = StreamReassembler::new(Limits::default());
+        let mut reassembler = Reassembler::new(Limits::default());
         let header = read_fragment_header(&mut frame).await.unwrap();
         reassembler.accept(header, &mut frame).await.unwrap();
         let header = read_fragment_header(&mut frame).await.unwrap();
         let event = reassembler.accept(header, &mut frame).await.unwrap();
         assert!(matches!(
             event,
-            StreamEvent::Aborted {
+            Event::Aborted {
                 dispatched: false,
                 ..
             }
@@ -1601,7 +1777,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_abort_for_unknown_message() {
         let mut frame = FakeRecvFrame::new(fragment_bytes(Flags::ABORT, 1, Kind::Request, b""));
-        let mut reassembler = StreamReassembler::new(Limits::default());
+        let mut reassembler = Reassembler::new(Limits::default());
         let header = read_fragment_header(&mut frame).await.unwrap();
         assert!(matches!(
             reassembler.accept(header, &mut frame).await,
@@ -1614,10 +1790,9 @@ mod tests {
     #[tokio::test]
     async fn message_without_any_trailer_fragment_has_no_trailer() {
         let mut frame = FakeRecvFrame::new(fast_path_bytes(1, Kind::Request, b"hello"));
-        let mut reassembler = StreamReassembler::new(Limits::default());
+        let mut reassembler = Reassembler::new(Limits::default());
         let header = read_fragment_header(&mut frame).await.unwrap();
-        let StreamEvent::Message(msg) = reassembler.accept(header, &mut frame).await.unwrap()
-        else {
+        let Event::Message(msg) = reassembler.accept(header, &mut frame).await.unwrap() else {
             panic!("expected a completed message");
         };
         assert_eq!(&msg.payload[..], b"hello");
@@ -1634,15 +1809,14 @@ mod tests {
             b"",
         ));
         let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = StreamReassembler::new(Limits::default());
+        let mut reassembler = Reassembler::new(Limits::default());
         let header = read_fragment_header(&mut frame).await.unwrap();
         assert!(matches!(
             reassembler.accept(header, &mut frame).await.unwrap(),
-            StreamEvent::None
+            Event::None
         ));
         let header = read_fragment_header(&mut frame).await.unwrap();
-        let StreamEvent::Message(msg) = reassembler.accept(header, &mut frame).await.unwrap()
-        else {
+        let Event::Message(msg) = reassembler.accept(header, &mut frame).await.unwrap() else {
             panic!("TRAILER|LAST completes the message");
         };
         assert_eq!(&msg.payload[..], b"hello");
@@ -1663,16 +1837,16 @@ mod tests {
             b"",
         ));
         let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = StreamReassembler::new(Limits::default());
+        let mut reassembler = Reassembler::new(Limits::default());
 
         let header = read_fragment_header(&mut frame).await.unwrap();
         assert!(matches!(
             reassembler.accept(header, &mut frame).await.unwrap(),
-            StreamEvent::None
+            Event::None
         ));
 
         let header = read_fragment_header(&mut frame).await.unwrap();
-        let StreamEvent::Trailer {
+        let Event::Trailer {
             message: Some(msg),
             len,
             ..
@@ -1686,7 +1860,7 @@ mod tests {
         let header = read_fragment_header(&mut frame).await.unwrap();
         assert!(matches!(
             reassembler.accept(header, &mut frame).await.unwrap(),
-            StreamEvent::None
+            Event::None
         ));
     }
 
@@ -1702,16 +1876,16 @@ mod tests {
             b"",
         ));
         let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = StreamReassembler::new(Limits::default());
+        let mut reassembler = Reassembler::new(Limits::default());
 
         let header = read_fragment_header(&mut frame).await.unwrap();
         assert!(matches!(
             reassembler.accept(header, &mut frame).await.unwrap(),
-            StreamEvent::None
+            Event::None
         ));
 
         let header = read_fragment_header(&mut frame).await.unwrap();
-        let StreamEvent::Trailer {
+        let Event::Trailer {
             message: Some(msg),
             len,
             ..
@@ -1723,7 +1897,7 @@ mod tests {
         assert_eq!(&drain_trailer_bytes(&mut frame, len).await[..], b"ab");
 
         let header = read_fragment_header(&mut frame).await.unwrap();
-        let StreamEvent::Trailer {
+        let Event::Trailer {
             message: None, len, ..
         } = reassembler.accept(header, &mut frame).await.unwrap()
         else {
@@ -1734,7 +1908,7 @@ mod tests {
         let header = read_fragment_header(&mut frame).await.unwrap();
         assert!(matches!(
             reassembler.accept(header, &mut frame).await.unwrap(),
-            StreamEvent::None
+            Event::None
         ));
     }
 
@@ -1749,14 +1923,13 @@ mod tests {
             b"x",
         ));
         let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = StreamReassembler::new(Limits::default());
+        let mut reassembler = Reassembler::new(Limits::default());
 
         let header = read_fragment_header(&mut frame).await.unwrap();
         reassembler.accept(header, &mut frame).await.unwrap();
 
         let header = read_fragment_header(&mut frame).await.unwrap();
-        let StreamEvent::Trailer { len, .. } =
-            reassembler.accept(header, &mut frame).await.unwrap()
+        let Event::Trailer { len, .. } = reassembler.accept(header, &mut frame).await.unwrap()
         else {
             panic!("expected a TRAILER data event");
         };
@@ -1779,10 +1952,10 @@ mod tests {
             b"",
         ));
         let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = StreamReassembler::new(Limits::default());
+        let mut reassembler = Reassembler::new(Limits::default());
 
         let header = read_fragment_header(&mut frame).await.unwrap();
-        let StreamEvent::Trailer {
+        let Event::Trailer {
             message: Some(msg),
             len,
             ..
@@ -1796,7 +1969,7 @@ mod tests {
         let header = read_fragment_header(&mut frame).await.unwrap();
         assert!(matches!(
             reassembler.accept(header, &mut frame).await.unwrap(),
-            StreamEvent::None
+            Event::None
         ));
     }
 
@@ -1808,7 +1981,7 @@ mod tests {
             Kind::Request,
             b"",
         ));
-        let mut reassembler = StreamReassembler::new(Limits::default());
+        let mut reassembler = Reassembler::new(Limits::default());
         let header = read_fragment_header(&mut frame).await.unwrap();
         assert!(matches!(
             reassembler.accept(header, &mut frame).await,
@@ -1822,14 +1995,13 @@ mod tests {
         bytes.extend(fragment_bytes(Flags::TRAILER, 1, Kind::Request, b"a"));
         bytes.extend(fragment_bytes(Flags::NONE, 1, Kind::Request, b"b"));
         let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = StreamReassembler::new(Limits::default());
+        let mut reassembler = Reassembler::new(Limits::default());
 
         let header = read_fragment_header(&mut frame).await.unwrap();
         reassembler.accept(header, &mut frame).await.unwrap();
 
         let header = read_fragment_header(&mut frame).await.unwrap();
-        let StreamEvent::Trailer { len, .. } =
-            reassembler.accept(header, &mut frame).await.unwrap()
+        let Event::Trailer { len, .. } = reassembler.accept(header, &mut frame).await.unwrap()
         else {
             panic!("expected a TRAILER data event");
         };
@@ -1857,12 +2029,11 @@ mod tests {
         let mut bytes = fragment_bytes(Flags::FIRST, 1, Kind::Request, b"abcd");
         bytes.extend(fragment_bytes(Flags::TRAILER, 1, Kind::Request, b"ab"));
         let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = StreamReassembler::new(limits);
+        let mut reassembler = Reassembler::new(limits);
         let header = read_fragment_header(&mut frame).await.unwrap();
         reassembler.accept(header, &mut frame).await.unwrap();
         let header = read_fragment_header(&mut frame).await.unwrap();
-        let StreamEvent::Trailer { len, .. } =
-            reassembler.accept(header, &mut frame).await.unwrap()
+        let Event::Trailer { len, .. } = reassembler.accept(header, &mut frame).await.unwrap()
         else {
             panic!("expected a TRAILER data event, not rejection");
         };
@@ -1879,7 +2050,7 @@ mod tests {
         let mut bytes = fragment_bytes(Flags::FIRST, 1, Kind::Request, b"");
         bytes.extend(fragment_bytes(Flags::TRAILER, 1, Kind::Request, b"abcd"));
         let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = StreamReassembler::new(limits);
+        let mut reassembler = Reassembler::new(limits);
         let header = read_fragment_header(&mut frame).await.unwrap();
         reassembler.accept(header, &mut frame).await.unwrap();
         let header = read_fragment_header(&mut frame).await.unwrap();
@@ -1895,14 +2066,13 @@ mod tests {
         bytes.extend(fragment_bytes(Flags::TRAILER, 1, Kind::Request, b"cd"));
         bytes.extend(fragment_bytes(Flags::ABORT, 1, Kind::Request, b""));
         let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = StreamReassembler::new(Limits::default());
+        let mut reassembler = Reassembler::new(Limits::default());
 
         let header = read_fragment_header(&mut frame).await.unwrap();
         reassembler.accept(header, &mut frame).await.unwrap();
 
         let header = read_fragment_header(&mut frame).await.unwrap();
-        let StreamEvent::Trailer { len, .. } =
-            reassembler.accept(header, &mut frame).await.unwrap()
+        let Event::Trailer { len, .. } = reassembler.accept(header, &mut frame).await.unwrap()
         else {
             panic!("expected a TRAILER data event");
         };
@@ -1913,7 +2083,7 @@ mod tests {
         let event = reassembler.accept(header, &mut frame).await.unwrap();
         assert!(matches!(
             event,
-            StreamEvent::Aborted {
+            Event::Aborted {
                 dispatched: true,
                 ..
             }
@@ -1992,12 +2162,14 @@ mod tests {
             Kind::Request,
             1,
             Bytes::from_static(b"AAAAAAAA"),
+            Default::default(),
             Trailer::None,
         );
         scheduler.admit_message(
             Kind::Request,
             2,
             Bytes::from_static(b"BBBBBBBB"),
+            Default::default(),
             Trailer::None,
         );
         let (mut sender, mut reader) = sender_pair();
@@ -2027,10 +2199,17 @@ mod tests {
             Kind::Request,
             1,
             Bytes::from_static(b"AAAAAAAA"),
+            Default::default(),
             Trailer::None,
         );
         // Fits in one fragment; must not be blocked by the slot above.
-        scheduler.admit_message(Kind::Request, 2, Bytes::from_static(b"hi"), Trailer::None);
+        scheduler.admit_message(
+            Kind::Request,
+            2,
+            Bytes::from_static(b"hi"),
+            Default::default(),
+            Trailer::None,
+        );
         let (mut sender, mut reader) = sender_pair();
 
         scheduler.advance(&mut sender).await.unwrap();
@@ -2056,12 +2235,14 @@ mod tests {
             Kind::Request,
             1,
             Bytes::from_static(b"AAAAAAAA"),
+            Default::default(),
             Trailer::None,
         );
         scheduler.admit_message(
             Kind::Request,
             2,
             Bytes::from_static(b"BBBBBBBB"),
+            Default::default(),
             Trailer::None,
         );
         assert_eq!(scheduler.active.len(), 1);
@@ -2080,6 +2261,7 @@ mod tests {
             Kind::Request,
             1,
             Bytes::from_static(b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+            Default::default(),
             Trailer::None,
         );
         let (mut sender, mut reader) = sender_pair();
@@ -2105,12 +2287,14 @@ mod tests {
             Kind::Request,
             1,
             Bytes::from_static(b"AAAAAAAA"),
+            Default::default(),
             Trailer::None,
         );
         scheduler.admit_message(
             Kind::Request,
             2,
             Bytes::from_static(b"BBBBBBBB"),
+            Default::default(),
             Trailer::None,
         );
         assert_eq!(scheduler.waiting.len(), 1);
@@ -2133,7 +2317,13 @@ mod tests {
     #[test]
     fn scheduler_try_cancel_active_reports_not_active_after_terminal_sent() {
         let mut scheduler = Scheduler::new(&Limits::default());
-        scheduler.admit_message(Kind::Request, 1, Bytes::from_static(b"hi"), Trailer::None);
+        scheduler.admit_message(
+            Kind::Request,
+            1,
+            Bytes::from_static(b"hi"),
+            Default::default(),
+            Trailer::None,
+        );
         scheduler.active.pop_front();
         assert!(matches!(
             scheduler.try_cancel_active(1),
@@ -2148,6 +2338,7 @@ mod tests {
             Kind::Request,
             1,
             Bytes::from_static(b"AAAAAAAA"),
+            Default::default(),
             Trailer::None,
         );
         match scheduler.try_cancel_active(1) {
@@ -2167,6 +2358,7 @@ mod tests {
             Kind::Request,
             1,
             Bytes::from_static(b"AAAAAAAA"),
+            Default::default(),
             Trailer::None,
         );
         if let Some(send) = scheduler.active.front_mut() {
@@ -2191,12 +2383,14 @@ mod tests {
             Kind::Request,
             1,
             Bytes::from_static(b"AAAAAAAA"),
+            Default::default(),
             Trailer::None,
         );
         scheduler.admit_message(
             Kind::Request,
             2,
             Bytes::from_static(b"BBBBBBBB"),
+            Default::default(),
             Trailer::None,
         );
         assert_eq!(scheduler.waiting.len(), 1);
@@ -2224,6 +2418,7 @@ mod tests {
             Kind::Request,
             1,
             Bytes::from_static(b"hi"),
+            Default::default(),
             Trailer::Stream(SendShared::new(
                 Kind::Request,
                 1,
@@ -2237,7 +2432,13 @@ mod tests {
         assert_eq!(scheduler.active_fragmented, 1);
         // A second, ordinary small message with no trailer must not be
         // starved by the trailer message occupying the only slot.
-        scheduler.admit_message(Kind::Request, 2, Bytes::from_static(b"hi"), Trailer::None);
+        scheduler.admit_message(
+            Kind::Request,
+            2,
+            Bytes::from_static(b"hi"),
+            Default::default(),
+            Trailer::None,
+        );
         assert_eq!(scheduler.active.len(), 2);
         assert_eq!(scheduler.waiting.len(), 0);
     }
@@ -2249,7 +2450,7 @@ mod tests {
         bytes.extend(fragment_bytes(Flags::TRAILER, 1, Kind::Request, b"b"));
         bytes.extend(fragment_bytes(Flags::TRAILER, 1, Kind::Request, b"c"));
         let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = StreamReassembler::new(Limits::default());
+        let mut reassembler = Reassembler::new(Limits::default());
 
         let header = read_fragment_header(&mut frame).await.unwrap();
         reassembler.accept(header, &mut frame).await.unwrap();
@@ -2258,7 +2459,7 @@ mod tests {
         // must never fire here — the application hasn't had a chance to
         // discard anything yet.
         let header = read_fragment_header(&mut frame).await.unwrap();
-        let StreamEvent::Trailer {
+        let Event::Trailer {
             message: Some(_),
             shared,
             len,
@@ -2277,7 +2478,7 @@ mod tests {
         // Second TRAILER fragment: arrives after the discard, so this is
         // the point where the peer should be told to stop.
         let header = read_fragment_header(&mut frame).await.unwrap();
-        let StreamEvent::Trailer {
+        let Event::Trailer {
             message: None,
             len,
             notify_discard,
@@ -2292,7 +2493,7 @@ mod tests {
         // Third TRAILER fragment: already notified once, must not fire
         // again for the same message.
         let header = read_fragment_header(&mut frame).await.unwrap();
-        let StreamEvent::Trailer {
+        let Event::Trailer {
             message: None,
             len,
             notify_discard,
@@ -2323,6 +2524,7 @@ mod tests {
             Kind::Request,
             1,
             Bytes::from_static(b"hi"),
+            Default::default(),
             Trailer::Stream(shared.clone()),
         );
         let mut trailer = crate::trailer::TrailerSend::new(shared, ());

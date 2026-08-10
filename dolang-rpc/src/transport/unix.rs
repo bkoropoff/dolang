@@ -1,7 +1,6 @@
 use std::{
-    collections::VecDeque,
     io::{self, IoSlice, IoSliceMut},
-    os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd},
+    os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd},
     os::unix::net::UnixStream,
     sync::Arc,
     task::{Context, Poll},
@@ -16,9 +15,125 @@ use nix::{
 };
 use tokio::io::unix::AsyncFd;
 
-use super::{Receiver, RecvFrame, SendFrame, Sender};
+use super::{AnySender, Receiver, RecvFrame, SendFrame, Sender};
+use crate::handle::{ErasedHandle, PutHandle, TakeHandle};
 
-const MAX_FDS_PER_RECV: usize = 256;
+pub(crate) struct EncodeHandles<'handle> {
+    handles: Vec<&'handle dyn ErasedHandle>,
+    max_handles: usize,
+    supported: bool,
+}
+
+impl<'handle> EncodeHandles<'handle> {
+    pub(crate) fn new(sender: &AnySender, max_handles: usize) -> Self {
+        Self {
+            handles: Vec::new(),
+            max_handles,
+            supported: matches!(sender, AnySender::Unix(_)),
+        }
+    }
+
+    pub(crate) fn finish(self) -> OutgoingHandles {
+        OutgoingHandles {
+            fds: self
+                .handles
+                .into_iter()
+                .map(ErasedHandle::steal_handle)
+                .collect(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(max_handles: usize) -> Self {
+        Self {
+            handles: Vec::new(),
+            max_handles,
+            supported: true,
+        }
+    }
+}
+
+impl<'handle> PutHandle<'handle> for EncodeHandles<'handle> {
+    fn put_handle(&mut self, handle: &'handle dyn ErasedHandle) -> io::Result<u32> {
+        assert!(
+            self.supported,
+            "generic byte-stream transport does not support handles"
+        );
+        if self.handles.len() == self.max_handles {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "message contains too many handle attachments",
+            ));
+        }
+        if self
+            .handles
+            .iter()
+            .any(|existing| std::ptr::eq(*existing, handle))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the same handle was serialized more than once",
+            ));
+        }
+        let index = u32::try_from(self.handles.len()).unwrap();
+        self.handles.push(handle);
+        Ok(index)
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct OutgoingHandles {
+    pub(crate) fds: Vec<OwnedFd>,
+}
+
+#[derive(Default)]
+pub(crate) struct ReceivedHandles {
+    fds: Vec<Option<OwnedFd>>,
+}
+
+impl ReceivedHandles {
+    pub(crate) fn extend(&mut self, fds: Vec<OwnedFd>) {
+        self.fds.extend(fds.into_iter().map(Some));
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.fds.len()
+    }
+}
+
+impl TakeHandle for ReceivedHandles {
+    fn take_handle(&mut self, index: u32) -> io::Result<OwnedFd> {
+        let index = usize::try_from(index).unwrap();
+        self.fds
+            .get_mut(index)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "file descriptor index is unavailable",
+                )
+            })?
+            .take()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "file descriptor index was already consumed",
+                )
+            })
+    }
+
+    fn finish(&mut self) -> io::Result<()> {
+        if self.fds.iter().any(Option::is_some) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "message contains unused file descriptor attachments",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Hard upper bound accepted by `SCM_RIGHTS` on the supported Unix kernels.
+pub(crate) const MAX_FDS_PER_FRAGMENT: usize = 253;
 
 #[cfg(any(target_os = "android", target_os = "linux"))]
 const SEND_FLAGS: MsgFlags = MsgFlags::MSG_NOSIGNAL;
@@ -56,7 +171,7 @@ pub(crate) struct UnixSender {
 
 pub(crate) struct UnixReceiver {
     common: Arc<Common>,
-    incoming: VecDeque<Option<OwnedFd>>,
+    max_fds_per_fragment: usize,
 }
 
 impl Drop for UnixSender {
@@ -82,9 +197,15 @@ pub(crate) fn unix(stream: UnixStream) -> io::Result<(UnixSender, UnixReceiver)>
         },
         UnixReceiver {
             common,
-            incoming: VecDeque::new(),
+            max_fds_per_fragment: 0,
         },
     ))
+}
+
+impl UnixReceiver {
+    pub(crate) fn set_max_fds_per_fragment(&mut self, value: usize) {
+        self.max_fds_per_fragment = value.min(MAX_FDS_PER_FRAGMENT);
+    }
 }
 
 pub(crate) struct UnixSend<'a> {
@@ -99,7 +220,7 @@ pub(crate) struct UnixSend<'a> {
 
 pub(crate) struct UnixRecv<'a> {
     receiver: &'a mut UnixReceiver,
-    max_index: Option<usize>,
+    incoming: Vec<OwnedFd>,
 }
 
 impl Sender for UnixSender {
@@ -120,7 +241,7 @@ impl Receiver for UnixReceiver {
     fn recv(&mut self) -> Self::Recv<'_> {
         UnixRecv {
             receiver: self,
-            max_index: None,
+            incoming: Vec::new(),
         }
     }
 }
@@ -137,7 +258,8 @@ impl RecvFrame for UnixRecv<'_> {
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 Poll::Pending => return Poll::Pending,
             };
-            let result = ready.try_io(|socket| recv_once(socket.as_raw_fd(), buffer));
+            let max_fds = self.receiver.max_fds_per_fragment;
+            let result = ready.try_io(|socket| recv_once(socket.as_raw_fd(), buffer, max_fds));
             let (bytes, fds) = match result {
                 Ok(Ok(result)) => result,
                 Ok(Err(error)) => return Poll::Ready(Err(error)),
@@ -145,7 +267,7 @@ impl RecvFrame for UnixRecv<'_> {
             };
             let received_fds = !fds.is_empty();
             if received_fds {
-                self.receiver.incoming.extend(fds.into_iter().map(Some));
+                self.incoming.extend(fds);
             }
             if bytes == 0 && received_fds {
                 continue;
@@ -154,45 +276,18 @@ impl RecvFrame for UnixRecv<'_> {
         }
     }
 
-    fn take_fd(&mut self, index: u32) -> io::Result<OwnedFd> {
-        let index = usize::try_from(index).unwrap();
-        let fd = self
-            .receiver
-            .incoming
-            .get_mut(index)
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "file descriptor index is unavailable",
-                )
-            })?
-            .take()
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "file descriptor index was already consumed",
-                )
-            })?;
-        self.max_index = Some(self.max_index.map_or(index, |max| max.max(index)));
-        Ok(fd)
-    }
-}
-
-impl Drop for UnixRecv<'_> {
-    fn drop(&mut self) {
-        let Some(max_index) = self.max_index else {
-            return;
-        };
-        self.receiver.incoming.drain(..=max_index);
+    fn drain_fds(&mut self) -> Vec<OwnedFd> {
+        std::mem::take(&mut self.incoming)
     }
 }
 
 impl<'frame> SendFrame<'frame> for UnixSend<'frame> {
-    fn attach_fd(&mut self, fd: BorrowedFd<'frame>) -> io::Result<u32> {
-        let index = u32::try_from(self.fds.len())
-            .map_err(|_| io::Error::other("too many file descriptors in frame"))?;
-        self.fds.push(fd);
-        Ok(index)
+    fn attach_fds(&mut self, fds: &'frame [OwnedFd]) -> io::Result<usize> {
+        let count = fds
+            .len()
+            .min(MAX_FDS_PER_FRAGMENT.saturating_sub(self.fds.len()));
+        self.fds.extend(fds[..count].iter().map(AsFd::as_fd));
+        Ok(count)
     }
 
     fn poll_write_once(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
@@ -245,7 +340,11 @@ fn send_once(fd: RawFd, iov: &[IoSlice<'_>], fds: &[RawFd]) -> io::Result<usize>
     }
 }
 
-fn recv_once<B: BufMut>(fd: RawFd, buffer: &mut B) -> io::Result<(usize, Vec<OwnedFd>)> {
+fn recv_once<B: BufMut>(
+    fd: RawFd,
+    buffer: &mut B,
+    max_fds: usize,
+) -> io::Result<(usize, Vec<OwnedFd>)> {
     let chunk = buffer.chunk_mut();
     if chunk.len() == 0 {
         return Err(io::Error::new(
@@ -258,7 +357,13 @@ fn recv_once<B: BufMut>(fd: RawFd, buffer: &mut B) -> io::Result<(usize, Vec<Own
     unsafe { std::ptr::write_bytes(chunk.as_mut_ptr(), 0, len) };
     let bytes = unsafe { std::slice::from_raw_parts_mut(chunk.as_mut_ptr(), len) };
     let mut iov = [IoSliceMut::new(bytes)];
-    let mut cmsg = vec![0; nix::sys::socket::cmsg_space::<[RawFd; MAX_FDS_PER_RECV]>()];
+    // Include the platform-required trailing alignment. The padding can make
+    // room for an extra descriptor, but the reassembler validates the actual
+    // count against the negotiated per-fragment limit.
+    let cmsg_len = unsafe {
+        libc::CMSG_SPACE((max_fds * std::mem::size_of::<RawFd>()) as libc::c_uint) as usize
+    };
+    let mut cmsg = vec![0; cmsg_len];
     // Held across the recvmsg retry loop and the FIOCLEX fixup loop below:
     // on macOS, recvmsg can't set CLOEXEC atomically, so this serializes
     // fd receipt against every posix_spawn/posix_spawnp/fork in the process
@@ -297,6 +402,12 @@ fn recv_once<B: BufMut>(fd: RawFd, buffer: &mut B) -> io::Result<(usize, Vec<Own
             fds.extend(new_fds);
         }
     }
+    if fds.len() > max_fds {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "ancillary data exceeds the negotiated file descriptor limit",
+        ));
+    }
     unsafe { buffer.advance_mut(received) };
     Ok((received, fds))
 }
@@ -318,6 +429,8 @@ mod tests {
         let (left, right) = UnixStream::pair().unwrap();
         let (sender, _) = unix(left).unwrap();
         let (_, receiver) = unix(right).unwrap();
+        let mut receiver = receiver;
+        receiver.set_max_fds_per_fragment(64);
         (sender, receiver)
     }
 
@@ -385,13 +498,13 @@ mod tests {
         let (mut sender, mut receiver) = pair();
         let (read_fd, write_fd) = pipe().unwrap();
         let mut frame = sender.send();
-        assert_eq!(frame.attach_fd(read_fd.as_fd()).unwrap(), 0);
+        assert_eq!(frame.attach_fds(std::slice::from_ref(&read_fd)).unwrap(), 1);
         let mut sent = Bytes::from_static(b"x");
         frame.finish(&mut sent).await.unwrap();
         drop(read_fd);
         let mut frame = receiver.recv();
         receive(&mut frame, 1).await;
-        let received = frame.take_fd(0).unwrap();
+        let received = frame.drain_fds().remove(0);
         drop(frame);
         write(&write_fd, b"ok").unwrap();
         let mut file = std::fs::File::from(received);
@@ -405,15 +518,16 @@ mod tests {
         let (mut sender, mut receiver) = pair();
         let (read_a, write_a) = pipe().unwrap();
         let (read_b, write_b) = pipe().unwrap();
+        let handles = [read_a, read_b];
         let mut frame = sender.send();
-        assert_eq!(frame.attach_fd(read_a.as_fd()).unwrap(), 0);
-        assert_eq!(frame.attach_fd(read_b.as_fd()).unwrap(), 1);
+        assert_eq!(frame.attach_fds(&handles).unwrap(), 2);
         let mut sent = Bytes::from_static(b"x");
         frame.finish(&mut sent).await.unwrap();
         let mut frame = receiver.recv();
         receive(&mut frame, 1).await;
-        let received_b = frame.take_fd(1).unwrap();
-        let received_a = frame.take_fd(0).unwrap();
+        let mut received = frame.drain_fds();
+        let received_a = received.remove(0);
+        let received_b = received.remove(0);
         drop(frame);
         write(&write_a, b"a").unwrap();
         write(&write_b, b"b").unwrap();
@@ -429,43 +543,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preserves_descriptors_for_the_next_frame() {
+    async fn keeps_descriptors_on_their_protocol_frame() {
         let (mut sender, mut receiver) = pair();
         let (read_a, _write_a) = pipe().unwrap();
         let (read_b, _write_b) = pipe().unwrap();
-        for fd in [&read_a, &read_b] {
+        for fd in [read_a, read_b] {
             let mut frame = sender.send();
-            frame.attach_fd(fd.as_fd()).unwrap();
+            frame.attach_fds(std::slice::from_ref(&fd)).unwrap();
             let mut sent = Bytes::from_static(b"x");
             frame.finish(&mut sent).await.unwrap();
         }
-        while receiver.incoming.len() < 2 {
-            receive(&mut receiver.recv(), 1).await;
-        }
         let mut first = receiver.recv();
-        first.take_fd(0).unwrap();
+        receive(&mut first, 1).await;
+        assert_eq!(first.drain_fds().len(), 1);
         drop(first);
         let mut second = receiver.recv();
-        second.take_fd(0).unwrap();
+        receive(&mut second, 1).await;
+        assert_eq!(second.drain_fds().len(), 1);
     }
 
     #[tokio::test]
-    async fn rejects_duplicate_and_unavailable_indexes() {
+    async fn draining_descriptors_is_idempotent() {
         let (mut sender, mut receiver) = pair();
         let (read_fd, _write_fd) = pipe().unwrap();
         let mut frame = sender.send();
-        frame.attach_fd(read_fd.as_fd()).unwrap();
+        frame.attach_fds(std::slice::from_ref(&read_fd)).unwrap();
         let mut sent = Bytes::from_static(b"x");
         frame.finish(&mut sent).await.unwrap();
         let mut frame = receiver.recv();
         receive(&mut frame, 1).await;
-        frame.take_fd(0).unwrap();
+        assert_eq!(frame.drain_fds().len(), 1);
+        assert!(frame.drain_fds().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rejects_ancillary_data_larger_than_the_receive_cap() {
+        let (mut sender, mut receiver) = pair();
+        receiver.set_max_fds_per_fragment(1);
+        let (read_a, _write_a) = pipe().unwrap();
+        let (read_b, _write_b) = pipe().unwrap();
+        let handles = [read_a, read_b];
+        let mut frame = sender.send();
+        assert_eq!(frame.attach_fds(&handles).unwrap(), 2);
+        let mut sent = Bytes::from_static(b"x");
+        frame.finish(&mut sent).await.unwrap();
+
+        let mut frame = receiver.recv();
+        let mut received = BytesMut::with_capacity(1);
         assert_eq!(
-            frame.take_fd(0).unwrap_err().kind(),
-            io::ErrorKind::InvalidData
-        );
-        assert_eq!(
-            frame.take_fd(1).unwrap_err().kind(),
+            frame.recv(&mut received).await.unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
     }
@@ -475,12 +601,12 @@ mod tests {
         let (mut sender, mut receiver) = pair();
         let (read_fd, _write_fd) = pipe().unwrap();
         let mut frame = sender.send();
-        frame.attach_fd(read_fd.as_fd()).unwrap();
+        frame.attach_fds(std::slice::from_ref(&read_fd)).unwrap();
         let mut sent = Bytes::from_static(b"x");
         frame.finish(&mut sent).await.unwrap();
         let mut frame = receiver.recv();
         receive(&mut frame, 1).await;
-        let received = frame.take_fd(0).unwrap();
+        let received = frame.drain_fds().remove(0);
         let flags = fcntl(received.as_fd(), FcntlArg::F_GETFD).unwrap();
         assert!(FdFlag::from_bits_retain(flags).contains(FdFlag::FD_CLOEXEC));
     }
@@ -490,7 +616,7 @@ mod tests {
         let (mut sender, _receiver) = pair();
         let (read_fd, write_fd) = pipe().unwrap();
         let mut frame = sender.send();
-        frame.attach_fd(write_fd.as_fd()).unwrap();
+        frame.attach_fds(std::slice::from_ref(&write_fd)).unwrap();
         drop(frame);
         drop(write_fd);
         let mut file = std::fs::File::from(read_fd);

@@ -1,7 +1,6 @@
 use std::{
-    collections::HashSet,
     io::{self, IoSlice},
-    os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+    os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle},
     sync::Arc,
     task::{Context, Poll},
 };
@@ -16,9 +15,72 @@ use windows_sys::Win32::{
     },
 };
 
+use super::{AnyAttachments, AnySender, Receiver, RecvFrame, SendFrame, Sender};
 use crate::handle::{ErasedHandle, PutHandle};
 
-use super::{Receiver, RecvFrame, SendFrame, Sender};
+pub(crate) struct EncodeHandles<'handle> {
+    handles: Vec<&'handle dyn ErasedHandle>,
+    max_handles: usize,
+    attachments: AnyAttachments,
+}
+
+impl<'handle> EncodeHandles<'handle> {
+    pub(crate) fn new(sender: &AnySender, max_handles: usize) -> Self {
+        Self {
+            handles: Vec::new(),
+            max_handles,
+            attachments: sender.attachments(),
+        }
+    }
+
+    pub(crate) fn finish(self) -> (OutgoingHandles, Vec<OwnedHandle>) {
+        let escrow = self
+            .handles
+            .into_iter()
+            .map(ErasedHandle::steal_handle)
+            .collect();
+        match self.attachments {
+            AnyAttachments::Generic => {}
+            AnyAttachments::Windows(attachments) => attachments.finish(),
+        }
+        (OutgoingHandles, escrow)
+    }
+}
+
+impl<'handle> PutHandle<'handle> for EncodeHandles<'handle> {
+    fn put_handle(&mut self, handle: &'handle dyn ErasedHandle) -> io::Result<usize> {
+        if self.handles.len() == self.max_handles {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "message contains too many handle attachments",
+            ));
+        }
+        if self
+            .handles
+            .iter()
+            .any(|existing| std::ptr::eq(*existing, handle))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the same handle was serialized more than once",
+            ));
+        }
+        let value = match &mut self.attachments {
+            AnyAttachments::Generic => {
+                panic!("generic byte-stream transport does not support handles")
+            }
+            AnyAttachments::Windows(attachments) => attachments.attach(handle.raw_handle())?,
+        };
+        self.handles.push(handle);
+        Ok(value)
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct OutgoingHandles;
+
+#[derive(Default)]
+pub(crate) struct ReceivedHandles;
 
 enum Pipe {
     Server(NamedPipeServer),
@@ -125,15 +187,13 @@ fn new(pipe: Pipe, is_server: bool) -> io::Result<(WindowsSender, WindowsReceive
 
 pub(crate) struct WindowsSend<'a>(&'a mut WindowsSender);
 
-pub(crate) struct WindowsPutHandle<'handle> {
+pub(crate) struct WindowsAttachments {
     common: Arc<Common>,
-    handles: Vec<&'handle dyn ErasedHandle>,
     duplicated: Vec<HANDLE>,
 }
 
 pub(crate) struct WindowsRecv<'a> {
     receiver: &'a mut WindowsReceiver,
-    consumed: HashSet<usize>,
 }
 
 impl Sender for WindowsSender {
@@ -145,49 +205,17 @@ impl Sender for WindowsSender {
 }
 
 impl WindowsSender {
-    pub(crate) fn put_handles<'handle>(&self) -> WindowsPutHandle<'handle> {
-        WindowsPutHandle {
+    pub(crate) fn attachments(&self) -> WindowsAttachments {
+        WindowsAttachments {
             common: self.0.clone(),
-            handles: Vec::new(),
             duplicated: Vec::new(),
         }
     }
 }
 
-impl WindowsPutHandle<'_> {
-    pub(crate) fn is_empty(&self) -> bool {
-        self.handles.is_empty()
-    }
-
-    /// Steals the serialized source handles and relinquishes rollback of
-    /// handles already duplicated into the peer process.
-    pub(crate) fn finish(mut self) -> Vec<OwnedHandle> {
-        let handles = self
-            .handles
-            .drain(..)
-            .map(ErasedHandle::steal_handle)
-            .collect();
-        self.duplicated.clear();
-        handles
-    }
-}
-
-impl<'handle> PutHandle<'handle> for WindowsPutHandle<'handle> {
-    fn put_handle(&mut self, handle: &'handle dyn ErasedHandle) -> io::Result<usize> {
-        if self
-            .handles
-            .iter()
-            .any(|existing| std::ptr::eq(*existing, handle))
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "the same operating-system handle was serialized more than once",
-            ));
-        }
-        let raw = handle.raw_handle();
+impl WindowsAttachments {
+    pub(crate) fn attach(&mut self, raw: RawHandle) -> io::Result<usize> {
         let value = if self.common.is_server {
-            // SAFETY: both process handles and the source handle are valid.
-            // The result is an opaque value owned by the peer process.
             let duplicated = unsafe {
                 duplicate_raw(
                     GetCurrentProcess(),
@@ -200,8 +228,11 @@ impl<'handle> PutHandle<'handle> for WindowsPutHandle<'handle> {
         } else {
             raw as usize
         };
-        self.handles.push(handle);
         Ok(value)
+    }
+
+    pub(crate) fn finish(mut self) {
+        self.duplicated.clear();
     }
 }
 
@@ -209,40 +240,27 @@ impl Receiver for WindowsReceiver {
     type Recv<'a> = WindowsRecv<'a>;
 
     fn recv(&mut self) -> Self::Recv<'_> {
-        WindowsRecv {
-            receiver: self,
-            consumed: HashSet::new(),
-        }
+        WindowsRecv { receiver: self }
+    }
+}
+
+impl WindowsReceiver {
+    pub(crate) fn duplicate_peer_handle(&self, value: usize) -> io::Result<OwnedHandle> {
+        assert!(self.0.is_server);
+        // SAFETY: the trusted peer serialized a handle valid in its own
+        // process. The duplicated result is valid in the current process.
+        let raw = unsafe {
+            duplicate_raw(
+                self.0.peer_process.as_ref().unwrap().as_raw_handle() as HANDLE,
+                value as HANDLE,
+                GetCurrentProcess(),
+            )?
+        };
+        Ok(unsafe { OwnedHandle::from_raw_handle(raw as _) })
     }
 }
 
 impl RecvFrame for WindowsRecv<'_> {
-    fn take_handle(&mut self, value: usize) -> io::Result<OwnedHandle> {
-        let common = &self.receiver.0;
-        if !common.is_server && !self.consumed.insert(value) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "handle value was already consumed",
-            ));
-        }
-        if common.is_server {
-            // SAFETY: the trusted peer serialized a handle valid in its own
-            // process. The duplicated result is valid in the current process.
-            let raw = unsafe {
-                duplicate_raw(
-                    common.peer_process.as_ref().unwrap().as_raw_handle() as HANDLE,
-                    value as HANDLE,
-                    GetCurrentProcess(),
-                )?
-            };
-            Ok(unsafe { OwnedHandle::from_raw_handle(raw as _) })
-        } else {
-            // SAFETY: the trusted server created this value in our process
-            // with DuplicateHandle before transmitting the frame.
-            Ok(unsafe { OwnedHandle::from_raw_handle(value as _) })
-        }
-    }
-
     fn poll_read_once<B: BufMut>(
         &mut self,
         cx: &mut Context<'_>,
@@ -294,7 +312,7 @@ impl SendFrame<'_> for WindowsSend<'_> {
     }
 }
 
-impl Drop for WindowsPutHandle<'_> {
+impl Drop for WindowsAttachments {
     fn drop(&mut self) {
         if !self.common.is_server {
             return;
@@ -375,8 +393,6 @@ mod tests {
     use windows_sys::Win32::Foundation::CompareObjectHandles;
 
     use super::*;
-    use crate::handle::OsHandle;
-
     static NEXT_PIPE: AtomicU64 = AtomicU64::new(0);
 
     async fn pipe_pair() -> (NamedPipeServer, NamedPipeClient) {
@@ -399,40 +415,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_duplicate_client_adoption() {
-        let (pipe_server, pipe_client) = pipe_pair().await;
-        let (_, mut client_receiver) = server_pipe(pipe_server, false).unwrap();
-        let (server_sender, _) = client_pipe(pipe_client, true).unwrap();
-        let file = std::fs::File::open(std::env::current_exe().unwrap()).unwrap();
-        let handle = OsHandle::new(OwnedHandle::from(file));
-        let mut handles = server_sender.put_handles();
-        let value = handles.put_handle(&handle).unwrap();
-        drop(handles.finish());
-
-        let mut frame = client_receiver.recv();
-        let received = frame.take_handle(value).unwrap();
-        assert_eq!(
-            frame.take_handle(value).unwrap_err().kind(),
-            io::ErrorKind::InvalidData
-        );
-        drop(received);
-    }
-
-    #[tokio::test]
     async fn dropping_unfinished_handle_transaction_closes_duplicates() {
         let (pipe_server, pipe_client) = pipe_pair().await;
         let _client = server_pipe(pipe_server, false).unwrap();
         let (server_sender, _) = client_pipe(pipe_client, true).unwrap();
         let file = std::fs::File::open(std::env::current_exe().unwrap()).unwrap();
-        let handle = OsHandle::new(OwnedHandle::from(file.try_clone().unwrap()));
-        let mut handles = server_sender.put_handles();
-        let value = handles.put_handle(&handle).unwrap();
+        let handle = OwnedHandle::from(file.try_clone().unwrap());
+        let mut attachments = server_sender.attachments();
+        let value = attachments.attach(handle.as_raw_handle()).unwrap();
 
         assert_ne!(
             unsafe { CompareObjectHandles(value as HANDLE, file.as_raw_handle() as HANDLE) },
             0
         );
-        drop(handles);
+        drop(attachments);
         assert_eq!(
             unsafe { CompareObjectHandles(value as HANDLE, file.as_raw_handle() as HANDLE) },
             0
@@ -443,14 +439,13 @@ mod tests {
     async fn duplicates_client_handle_into_server() {
         let (pipe_server, pipe_client) = pipe_pair().await;
         let (client_sender, _) = server_pipe(pipe_server, false).unwrap();
-        let (_, mut server_receiver) = client_pipe(pipe_client, true).unwrap();
+        let (_, server_receiver) = client_pipe(pipe_client, true).unwrap();
         let file = std::fs::File::open(std::env::current_exe().unwrap()).unwrap();
-        let handle = OsHandle::new(OwnedHandle::from(file));
-        let mut handles = client_sender.put_handles();
-        let value = handles.put_handle(&handle).unwrap();
-        let handles = handles.finish();
-        let received = server_receiver.recv().take_handle(value).unwrap();
+        let handle = OwnedHandle::from(file);
+        let mut attachments = client_sender.attachments();
+        let value = attachments.attach(handle.as_raw_handle()).unwrap();
+        attachments.finish();
+        let received = server_receiver.duplicate_peer_handle(value).unwrap();
         drop(received);
-        drop(handles);
     }
 }

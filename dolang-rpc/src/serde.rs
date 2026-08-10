@@ -12,10 +12,36 @@ use ::serde::{
     },
     ser::{self},
 };
+use bytes::Bytes;
 use dolang_util::debug_eprintln;
 use postcard::ser_flavors::{ExtendFlavor, Flavor};
 
-use crate::handle::{HandleRef, OS_HANDLE_TYPE, PutHandle, TakeHandle};
+use crate::{
+    Error as RpcError,
+    handle::{HandleRef, OS_HANDLE_TYPE, PutHandle, TakeHandle},
+};
+
+pub(crate) fn encode_payload<'handle, T: Serialize, H: PutHandle<'handle>>(
+    value: &'handle T,
+    handles: &mut H,
+) -> Result<Bytes, RpcError> {
+    let buffer = to_extend(value, handles, Vec::new())
+        .map_err(|error| RpcError::Serialize(error.to_string()))?;
+    Ok(buffer.into())
+}
+
+pub(crate) fn decode_payload<T: de::DeserializeOwned>(
+    bytes: &[u8],
+    handles: &mut impl TakeHandle,
+) -> Result<T, RpcError> {
+    let value = from_bytes(bytes, &mut *handles)
+        .map_err(|error| RpcError::Deserialize(error.to_string()))?;
+    if let Err(error) = handles.finish() {
+        drop(value);
+        return Err(RpcError::Deserialize(error.to_string()));
+    }
+    Ok(value)
+}
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
@@ -940,8 +966,8 @@ impl<'de, A: VariantAccess<'de>, H: TakeHandle> VariantAccess<'de> for VariantWr
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::handle::OsHandle;
-    use ::serde::{Deserialize, Serialize};
+    use crate::{handle::OsHandle, transport::EncodeHandles};
+    use ::serde::{Deserialize, Serialize, ser::SerializeStruct};
     use nix::unistd::pipe;
     use std::io;
     use std::os::fd::OwnedFd;
@@ -981,6 +1007,27 @@ mod tests {
         none: Option<u8>,
         map: std::collections::BTreeMap<String, Ordinary>,
         variants: Vec<Ordinary>,
+    }
+
+    #[derive(Serialize)]
+    struct OneHandle<'a> {
+        handle: &'a OsHandle<OwnedFd>,
+    }
+
+    #[derive(Serialize)]
+    struct RepeatedHandle<'a> {
+        first: &'a OsHandle<OwnedFd>,
+        second: &'a OsHandle<OwnedFd>,
+    }
+
+    struct FailsAfterHandle<'a>(&'a OsHandle<OwnedFd>);
+
+    impl Serialize for FailsAfterHandle<'_> {
+        fn serialize<S: ::serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let mut state = serializer.serialize_struct("FailsAfterHandle", 2)?;
+            state.serialize_field("handle", self.0)?;
+            Err(::serde::ser::Error::custom("intentional failure"))
+        }
     }
 
     #[test]
@@ -1041,6 +1088,52 @@ mod tests {
         assert!(
             matches!(from_bytes::<u32, _>(&encoded, &mut handles), Err(Error::Message(message)) if message == "trailing bytes in payload")
         );
+    }
+
+    #[test]
+    fn successful_serialization_steals_handle() {
+        let (fd, _) = pipe().unwrap();
+        let handle = OsHandle::new(fd);
+        let value = OneHandle { handle: &handle };
+        let mut handles = EncodeHandles::for_test(usize::MAX);
+        encode_payload(&value, &mut handles).unwrap();
+        let owned = handles.finish();
+        assert_eq!(owned.fds.len(), 1);
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { handle.into_inner() }))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn failed_serialization_does_not_steal_handle() {
+        let (fd, _) = pipe().unwrap();
+        let handle = OsHandle::new(fd);
+        let mut handles = EncodeHandles::for_test(usize::MAX);
+        assert!(encode_payload(&FailsAfterHandle(&handle), &mut handles).is_err());
+        drop(handle.into_inner());
+    }
+
+    #[test]
+    fn handle_limit_is_checked_before_stealing() {
+        let (fd, _) = pipe().unwrap();
+        let handle = OsHandle::new(fd);
+        let mut handles = EncodeHandles::for_test(0);
+        assert!(encode_payload(&OneHandle { handle: &handle }, &mut handles).is_err());
+        drop(handle.into_inner());
+    }
+
+    #[test]
+    fn repeated_handle_is_rejected_without_being_stolen() {
+        let (fd, _) = pipe().unwrap();
+        let handle = OsHandle::new(fd);
+        let value = RepeatedHandle {
+            first: &handle,
+            second: &handle,
+        };
+        let mut handles = EncodeHandles::for_test(usize::MAX);
+        assert!(encode_payload(&value, &mut handles).is_err());
+        drop(handle.into_inner());
     }
 }
 

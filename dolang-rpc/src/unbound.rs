@@ -85,6 +85,24 @@ impl Builder {
         self
     }
 
+    /// Sets the maximum native handles carried by one wire fragment.
+    ///
+    /// Defaults to 64, is capped to the transport's operating-system limit,
+    /// and is negotiated down to the peer's advertised value.
+    pub fn max_handles_per_fragment(mut self, value: usize) -> Self {
+        self.limits.max_handles_per_fragment = value;
+        self
+    }
+
+    /// Sets the maximum native handles carried by one message.
+    ///
+    /// Defaults to 1,024; the peer and local endpoint use the smaller
+    /// advertised value.
+    pub fn max_handles_per_message(mut self, value: usize) -> Self {
+        self.limits.max_handles_per_message = value;
+        self
+    }
+
     /// Sets the receive-side eager-copy threshold for an undemanded fragment.
     ///
     /// A fragment at or below this size is copied immediately, allowing the
@@ -356,6 +374,7 @@ async fn negotiate_client(
     // uninteresting once binding to `P` — only the application-protocol
     // version negotiated below is surfaced.
     let negotiated = fragment::negotiate(&mut sender, &mut receiver, &limits, app_protocol).await?;
+    receiver.set_max_handles_per_fragment(negotiated.limits.max_handles_per_fragment);
     Ok(UnboundClient {
         sender,
         receiver,
@@ -376,6 +395,7 @@ async fn negotiate_server(
     // uninteresting once binding to `P` — only the application-protocol
     // version negotiated below is surfaced.
     let negotiated = fragment::negotiate(&mut sender, &mut receiver, &limits, app_protocol).await?;
+    receiver.set_max_handles_per_fragment(negotiated.limits.max_handles_per_fragment);
     Ok(UnboundServer {
         sender,
         receiver,

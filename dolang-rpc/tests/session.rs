@@ -802,7 +802,7 @@ mod unix_handles {
 
     #[derive(Serialize, Deserialize)]
     struct HandleResponse {
-        handle: Option<OsHandle>,
+        handles: Vec<OsHandle>,
     }
 
     #[tokio::test]
@@ -814,9 +814,9 @@ mod unix_handles {
                 .await
                 .unwrap()
                 .bind::<HandlesProtocol>()
-                .serve(async |context, mut request| {
+                .serve(async |context, request| {
                     context.respond(HandleResponse {
-                        handle: request.handles.pop(),
+                        handles: request.handles,
                     });
                 })
                 .await
@@ -827,7 +827,7 @@ mod unix_handles {
             handles: vec![OsHandle::new(read_fd)],
         });
         let response = call.await.unwrap().into_response();
-        let received = response.handle.unwrap().into_inner();
+        let received = response.handles.into_iter().next().unwrap().into_inner();
         write(&write_fd, b"ok").unwrap();
         let mut file = std::fs::File::from(received);
         let mut bytes = [0; 2];
@@ -836,7 +836,7 @@ mod unix_handles {
     }
 
     #[tokio::test]
-    async fn attachments_with_trailer_fails_as_a_session_error() {
+    async fn attachments_can_be_combined_with_a_trailer() {
         let (client_stream, server_stream) = std::os::unix::net::UnixStream::pair().unwrap();
         tokio::spawn(async move {
             builder()
@@ -844,22 +844,114 @@ mod unix_handles {
                 .await
                 .unwrap()
                 .bind::<HandlesProtocol>()
-                .serve(async |context, mut request| {
+                .serve(async |context, request| {
                     context.respond(HandleResponse {
-                        handle: request.handles.pop(),
+                        handles: request.handles,
                     });
                 })
                 .await
         });
         let client = unbound_client_unix::<HandlesProtocol>(client_stream).await;
-        let (read_fd, _write_fd) = pipe().unwrap();
-        let send = client.call_with_trailer(HandleRequest {
+        let (read_fd, write_fd) = pipe().unwrap();
+        let mut send = client.call_with_trailer(HandleRequest {
             handles: vec![OsHandle::new(read_fd)],
         });
+        send.write_all(b"trailer").await.unwrap();
         let call = send.finish();
+        let response = call.await.unwrap().into_response();
+        let received = response.handles.into_iter().next().unwrap().into_inner();
+        write(&write_fd, b"ok").unwrap();
+        let mut file = std::fs::File::from(received);
+        let mut bytes = [0; 2];
+        file.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"ok");
+    }
+
+    #[tokio::test]
+    async fn transfers_handles_across_multiple_attachment_fragments() {
+        let (client_stream, server_stream) = std::os::unix::net::UnixStream::pair().unwrap();
+        tokio::spawn(async move {
+            builder()
+                .server_unix(server_stream)
+                .await
+                .unwrap()
+                .bind::<HandlesProtocol>()
+                .serve(async |context, request| {
+                    context.respond(HandleResponse {
+                        handles: request.handles,
+                    });
+                })
+                .await
+        });
+        let client = unbound_client_unix::<HandlesProtocol>(client_stream).await;
+        let mut reads = Vec::new();
+        let mut writes = Vec::new();
+        for _ in 0..65 {
+            let (read, write) = pipe().unwrap();
+            reads.push(OsHandle::new(read));
+            writes.push(write);
+        }
+        let response = client
+            .call(HandleRequest { handles: reads })
+            .await
+            .unwrap()
+            .into_response();
+        assert_eq!(response.handles.len(), 65);
+        for (index, (handle, write_fd)) in response
+            .handles
+            .into_iter()
+            .zip(writes.into_iter())
+            .enumerate()
+        {
+            write(&write_fd, &[index as u8]).unwrap();
+            let mut file = std::fs::File::from(handle.into_inner());
+            let mut byte = [0];
+            file.read_exact(&mut byte).unwrap();
+            assert_eq!(byte[0], index as u8);
+        }
+    }
+
+    #[tokio::test]
+    async fn negotiates_handle_fragment_and_message_limits() {
+        let (client_stream, server_stream) = std::os::unix::net::UnixStream::pair().unwrap();
+        tokio::spawn(async move {
+            builder()
+                .max_handles_per_fragment(1)
+                .max_handles_per_message(2)
+                .server_unix(server_stream)
+                .await
+                .unwrap()
+                .bind::<HandlesProtocol>()
+                .serve(async |context, request| {
+                    context.respond(HandleResponse {
+                        handles: request.handles,
+                    });
+                })
+                .await
+        });
+        let client = unbound_client_unix::<HandlesProtocol>(client_stream).await;
+        let mut reads = Vec::new();
+        let mut writes = Vec::new();
+        for _ in 0..2 {
+            let (read, write) = pipe().unwrap();
+            reads.push(OsHandle::new(read));
+            writes.push(write);
+        }
+        let response = client
+            .call(HandleRequest { handles: reads })
+            .await
+            .unwrap()
+            .into_response();
+        assert_eq!(response.handles.len(), 2);
+
+        let mut excess = Vec::new();
+        for _ in 0..3 {
+            let (read, _write) = pipe().unwrap();
+            excess.push(OsHandle::new(read));
+        }
         assert!(matches!(
-            call.await,
-            Err(Error::Protocol(_)) | Err(Error::ConnectionClosed) | Err(Error::Io(_))
+            client.call(HandleRequest { handles: excess }).await,
+            Err(Error::Serialize(_))
         ));
     }
 }

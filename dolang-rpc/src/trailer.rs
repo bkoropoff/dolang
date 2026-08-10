@@ -12,7 +12,8 @@ use bytes::{Buf, BufMut, BytesMut, buf::UninitSlice};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::{
-    Kind, Limits,
+    Limits,
+    fragment::Kind,
     fragment::{Flags, FragmentHeader},
     transport::{AnyRecv, AnySend, RecvFrame, SendFrame},
 };

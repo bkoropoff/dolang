@@ -58,6 +58,10 @@ pub(crate) trait TakeHandle {
     fn take_handle(&mut self, index: u32) -> io::Result<OwnedFd>;
     #[cfg(windows)]
     fn take_handle(&mut self, value: usize) -> io::Result<OwnedHandle>;
+
+    fn finish(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// A native operating-system resource transferred as a frame attachment.
@@ -67,8 +71,7 @@ pub(crate) trait TakeHandle {
 /// [`Builder::server_unix`](crate::Builder::server_unix) on Unix, and the
 /// named-pipe constructors on Windows. Serializing it over a generic byte
 /// stream currently panics; use [`Opaque`](crate::session::Opaque) for resources that
-/// must work over every transport. A message cannot contain both an
-/// `OsHandle` attachment and a streaming trailer.
+/// must work over every transport.
 pub struct OsHandle<T = DefaultHandle>(Cell<Option<T>>);
 
 impl<T> fmt::Debug for OsHandle<T> {
