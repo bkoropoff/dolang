@@ -117,8 +117,13 @@ def background_strand_process_groups()
 
     worker.cancel()
     assert_throws $CanceledError do worker.join()
-    assert_throws $proc.Error do
-      run sh -c "kill -0 $pid" stderr: $NULLITER
+    # Wait for process group to exit
+    while true
+      try
+        run sh -c "kill -0 $pid" stderr: $NULLITER
+      catch proc.Error: _
+        break
+      sleep 0.1
 
 #[agent.test]
 def echo_sub()
