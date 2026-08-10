@@ -109,18 +109,7 @@ mod live {
     /// but this suite can't assume that without running there, so it
     /// degrades gracefully instead of hard-failing under Wine.
     fn supports_async_notification() -> bool {
-        !is_wine()
-    }
-
-    fn is_wine() -> bool {
-        use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
-
-        const NTDLL: &[u8] = b"ntdll.dll\0";
-        const WINE_GET_VERSION: &[u8] = b"wine_get_version\0";
-        unsafe {
-            let module = GetModuleHandleA(NTDLL.as_ptr());
-            !module.is_null() && GetProcAddress(module, WINE_GET_VERSION.as_ptr()).is_some()
-        }
+        !dolang_winterop::is_wine()
     }
 
     fn current_process_handle() -> OwnedHandle {
@@ -334,7 +323,7 @@ mod live {
         // set back without error) still proves the wire plumbing works, so
         // only the owner-presence assertion is skipped there.
         let descriptor = service.sec_desc(OWNER_SECURITY_INFORMATION).await.unwrap();
-        if !is_wine() {
+        if !dolang_winterop::is_wine() {
             assert!(descriptor.owner().is_some(), "expected an owner SID");
         }
         let descriptor = service.sec_desc(DACL_SECURITY_INFORMATION).await.unwrap();

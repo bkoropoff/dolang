@@ -98,7 +98,7 @@ async fn rename_replaces_an_open_destination() {
         FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
     };
 
-    if is_wine() {
+    if dolang_winterop::is_wine() {
         return;
     }
 
@@ -615,17 +615,6 @@ fn successful_command() -> (&'static str, [&'static str; 2]) {
     ("cmd", ["/C", "exit 0"])
 }
 
-#[cfg(windows)]
-fn is_wine() -> bool {
-    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
-    use windows_sys::core::w;
-
-    const WINE_GET_VERSION: &[u8] = b"wine_get_version\0";
-
-    let ntdll = unsafe { GetModuleHandleW(w!("ntdll.dll")) };
-    !ntdll.is_null() && unsafe { GetProcAddress(ntdll, WINE_GET_VERSION.as_ptr()) }.is_some()
-}
-
 #[tokio::test]
 async fn direct_open_options_round_trip() {
     let direct = Direct::default();
@@ -864,7 +853,7 @@ async fn direct_windows_attrs() {
         .unwrap();
     assert_eq!(attrs & 0x1, 0);
 
-    if is_wine() {
+    if dolang_winterop::is_wine() {
         return;
     }
 
@@ -910,7 +899,7 @@ async fn direct_windows_attrs() {
 #[cfg(windows)]
 #[tokio::test]
 async fn direct_windows_streams() {
-    if is_wine() {
+    if dolang_winterop::is_wine() {
         return;
     }
 

@@ -32,17 +32,6 @@ use windows_sys::Win32::System::Threading::{
     PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
 };
 
-fn is_wine() -> bool {
-    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
-
-    const NTDLL: &[u8] = b"ntdll.dll\0";
-    const WINE_GET_VERSION: &[u8] = b"wine_get_version\0";
-    unsafe {
-        let module = GetModuleHandleA(NTDLL.as_ptr());
-        !module.is_null() && GetProcAddress(module, WINE_GET_VERSION.as_ptr()).is_some()
-    }
-}
-
 fn is_elevated() -> bool {
     let mut token = ptr::null_mut();
     assert_ne!(
@@ -130,7 +119,7 @@ async fn query_reports_server_target_including_wine() {
 
     let query = client.query().await.unwrap();
     assert_eq!(query.target, TargetInfo::current());
-    assert_eq!(query.target.is_wine, Some(is_wine()));
+    assert_eq!(query.target.is_wine, Some(dolang_winterop::is_wine()));
     assert_eq!(query.security, SecurityInfo::current().unwrap());
 
     client.stop().await.unwrap();
@@ -354,7 +343,7 @@ async fn spawn_failure_returns_remote_os_error() {
 
 #[tokio::test]
 async fn streams_run_in_the_server_namespace() {
-    if is_wine() {
+    if dolang_winterop::is_wine() {
         return;
     }
     let dir = tempdir().unwrap();

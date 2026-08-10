@@ -111,13 +111,7 @@ impl TargetInfo {
 
 #[cfg(windows)]
 fn current_wine_status() -> Option<bool> {
-    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
-    use windows_sys::core::w;
-
-    const WINE_GET_VERSION: &[u8] = b"wine_get_version\0";
-
-    let ntdll = unsafe { GetModuleHandleW(w!("ntdll.dll")) };
-    Some(!ntdll.is_null() && unsafe { GetProcAddress(ntdll, WINE_GET_VERSION.as_ptr()) }.is_some())
+    Some(dolang_winterop::is_wine())
 }
 
 #[cfg(not(windows))]
