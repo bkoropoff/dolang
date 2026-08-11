@@ -268,28 +268,51 @@ fn serve_stdio() -> io::Result<()> {
     // Single-threaded: every used configuration serves a single client, and
     // a multi-thread runtime measurably hurts single-stream pipe throughput
     // (see dolang-rpc's benches/pipe_trailer.rs and benches/pipe_raw.rs).
-    Builder::new_current_thread()
-        .enable_all()
-        .build()?
-        .block_on(async {
-            #[cfg(unix)]
-            let (stdin, stdout) = unix_stdio(io::stdin(), io::stdout())?;
-            #[cfg(not(unix))]
-            let (stdin, stdout) = (tokio::io::stdin(), tokio::io::stdout());
+    let runtime = Builder::new_current_thread().enable_all().build()?;
+    let result = runtime.block_on(async {
+        #[cfg(unix)]
+        let (stdin, stdout) = unix_stdio(io::stdin(), io::stdout())?;
+        #[cfg(not(unix))]
+        let (stdin, stdout) = (tokio::io::stdin(), tokio::io::stdout());
 
-            let server = Server::new_split(stdin, stdout)
-                .await
-                .map_err(crate::Error::into_io_error)?;
-            #[cfg(windows)]
-            {
-                tokio::select! {
-                    result = server.serve() => result,
-                    result = windows_interrupt_signal() => result,
-                }
+        let server = Server::new_split(stdin, stdout)
+            .await
+            .map_err(crate::Error::into_io_error)?;
+        #[cfg(windows)]
+        {
+            tokio::select! {
+                result = server.serve() => result,
+                result = windows_interrupt_signal() => result,
             }
-            #[cfg(not(windows))]
-            server.serve().await
-        })
+        }
+        #[cfg(unix)]
+        {
+            tokio::select! {
+                result = server.serve() => result,
+                result = unix_interrupt_signal() => result,
+            }
+        }
+        #[cfg(not(any(windows, unix)))]
+        server.serve().await
+    });
+
+    // By this point the server has already been torn down and its output
+    // fully flushed, so nothing further depends on the runtime's blocking
+    // pool. On Windows, `tokio::io::stdin()` shuttles reads through a
+    // dedicated blocking-pool thread (there is no async console/pipe
+    // primitive to poll instead, unlike `unix_stdio` above), and that thread
+    // stays parked in a blocking read until the remote peer closes its end.
+    // The default `Runtime` shutdown (as run by `Drop`) waits for the
+    // blocking pool to drain, so if the remote hasn't closed its handle yet
+    // — which happens on this test path — it would hang the process for no
+    // benefit. `shutdown_background` abandons that thread instead of
+    // waiting on it; it gets reaped at process exit.
+    #[cfg(windows)]
+    runtime.shutdown_background();
+    #[cfg(not(windows))]
+    drop(runtime);
+
+    result
 }
 
 /// Raised kernel pipe buffer size requested for the `--stdio` fast path.
@@ -363,6 +386,23 @@ async fn windows_interrupt_signal() -> io::Result<()> {
     tokio::select! {
         _ = ctrl_c.recv() => Ok(()),
         _ = ctrl_break.recv() => Ok(()),
+    }
+}
+
+/// Unix counterpart to [`windows_interrupt_signal`], used so `--stdio` reacts
+/// to a graceful stop request (`SIGTERM`, the default sent by
+/// [`crate::process`]'s termination policy, or `SIGINT`) the same way it
+/// already does for `CTRL_C`/`CTRL_BREAK` on Windows, instead of only ever
+/// exiting when the peer closes the pipe.
+#[cfg(unix)]
+async fn unix_interrupt_signal() -> io::Result<()> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut sigint = signal(SignalKind::interrupt())?;
+    let mut sigterm = signal(SignalKind::terminate())?;
+    tokio::select! {
+        _ = sigint.recv() => Ok(()),
+        _ = sigterm.recv() => Ok(()),
     }
 }
 
