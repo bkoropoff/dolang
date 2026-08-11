@@ -1329,16 +1329,11 @@ dependencies = [
  "dolang-vfs",
  "dolang-vfs-winreg",
  "dolang-vfs-winscm",
- "dolang-winterop",
  "futures",
  "libc",
- "nix",
- "postcard",
- "serde",
  "tempfile",
  "tokio",
  "typed-path",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
