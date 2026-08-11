@@ -1,7 +1,7 @@
 #![deny(warnings)]
 #![cfg(unix)]
 use dolang_vfs::{
-    Child, Command, FileHandle, Vfs,
+    Child, Command, FileHandle, OpenOptions, Vfs,
     client::Client,
     direct::Direct,
     file::AccessFlags,
@@ -344,7 +344,7 @@ async fn fd_passing() {
     let output = client
         .open_options()
         .write(true)
-        .open(file.path())
+        .open(file.path().to_str().unwrap().into())
         .await
         .unwrap();
     let mut command = client.command(typed_str("echo"));
@@ -381,7 +381,7 @@ async fn file_open_read() {
     let file = client
         .open_options()
         .read(true)
-        .open(&test_file)
+        .open(test_file.to_str().unwrap().into())
         .await
         .unwrap();
 
@@ -409,7 +409,7 @@ async fn file_open_write() {
         .open_options()
         .write(true)
         .truncate(true)
-        .open(&test_file)
+        .open(test_file.to_str().unwrap().into())
         .await
         .unwrap();
 
@@ -439,7 +439,7 @@ async fn file_create() {
         .open_options()
         .write(true)
         .create(true)
-        .open(&test_file)
+        .open(test_file.to_str().unwrap().into())
         .await
         .unwrap();
 
@@ -473,7 +473,7 @@ async fn file_create_new() {
         .open_options()
         .write(true)
         .create_new(true)
-        .open(&test_file)
+        .open(test_file.to_str().unwrap().into())
         .await
         .unwrap();
     drop(file);
@@ -485,7 +485,7 @@ async fn file_create_new() {
         .open_options()
         .write(true)
         .create_new(true)
-        .open(&test_file)
+        .open(test_file.to_str().unwrap().into())
         .await;
 
     assert!(result.is_err());
@@ -538,7 +538,11 @@ async fn file_open_error() {
     let test_file = dir.path().join("nonexistent.txt");
 
     let client = connect_client(&socket_path).await;
-    let result = client.open_options().read(true).open(&test_file).await;
+    let result = client
+        .open_options()
+        .read(true)
+        .open(test_file.to_str().unwrap().into())
+        .await;
 
     assert!(result.is_err());
 

@@ -35,7 +35,7 @@ use sqlite_plugin::{
 };
 
 use dolang_vfs::{
-    FileHandle as _, Vfs as _,
+    FileHandle as _, OpenOptions, Vfs as _,
     client::Client,
     error::{Error, ErrorKind},
 };
@@ -524,7 +524,7 @@ fn open_or_join_shm(handle: &mut ShellFileHandle) -> VfsResult<()> {
                     .read(true)
                     .write(true)
                     .create(true)
-                    .open(&shm_path_clone)
+                    .open(shm_path_clone.as_str().into())
                     .await
                 {
                     Ok(f) => Ok((f.try_into_std().await.map_err(|_| SQLITE_CANTOPEN)?, false)),
@@ -533,7 +533,7 @@ fn open_or_join_shm(handle: &mut ShellFileHandle) -> VfsResult<()> {
                         let f = client
                             .open_options()
                             .read(true)
-                            .open(&shm_path_clone)
+                            .open(shm_path_clone.as_str().into())
                             .await
                             .map_err(|e| map_vfs_err(e, SQLITE_CANTOPEN, SQLITE_IOERR_SHMOPEN))?;
                         Ok::<_, i32>((f.try_into_std().await.map_err(|_| SQLITE_CANTOPEN)?, true))
@@ -662,7 +662,7 @@ impl Vfs for ShellVfs {
                     }
                 }
                 let tokio_file = open_opts
-                    .open(&path)
+                    .open(path.as_str().into())
                     .await
                     .map_err(|e| map_vfs_err(e, SQLITE_CANTOPEN, SQLITE_IOERR))?;
                 tokio_file.try_into_std().await.map_err(|_| SQLITE_CANTOPEN)
@@ -679,7 +679,7 @@ impl Vfs for ShellVfs {
                     .read(true)
                     .write(true)
                     .create_new(true)
-                    .open(&tp)
+                    .open(tp.as_str().into())
                     .await
                     .map_err(|e| map_vfs_err(e, SQLITE_CANTOPEN, SQLITE_IOERR))?;
                 tokio_file.try_into_std().await.map_err(|_| SQLITE_CANTOPEN)
