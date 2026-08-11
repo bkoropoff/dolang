@@ -185,9 +185,10 @@ impl AnyReceiver {
     #[cfg(windows)]
     pub(crate) fn duplicate_peer_handle(&self, value: usize) -> io::Result<OwnedHandle> {
         match self {
-            Self::Generic(_) => {
-                panic!("generic byte-stream transport does not support handles")
-            }
+            Self::Generic(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "generic byte-stream transport does not support handle attachments",
+            )),
             Self::Windows(receiver) => receiver.duplicate_peer_handle(value),
         }
     }
@@ -381,9 +382,9 @@ impl<'frame> SendFrame<'frame> for GenericSend<'frame> {
         if fds.is_empty() {
             return Ok(0);
         }
-        // FIXME: Plumb a reportable capability error to the public API instead
-        // of panicking when an OsHandle is serialized on this transport.
-        panic!("generic byte-stream transport does not support file descriptors")
+        // Unreachable: `EncodeHandles::put_handle` rejects handle attachments
+        // before a message reaches this point, so `fds` is always empty here.
+        unreachable!("generic byte-stream transport does not support file descriptors")
     }
     fn poll_write_once(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
         self.0.0.as_mut().poll_write(cx, buf)

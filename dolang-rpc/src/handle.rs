@@ -70,8 +70,8 @@ pub(crate) trait TakeHandle {
 /// [`Builder::client_unix`](crate::Builder::client_unix) or
 /// [`Builder::server_unix`](crate::Builder::server_unix) on Unix, and the
 /// named-pipe constructors on Windows. Serializing it over a generic byte
-/// stream currently panics; use [`Opaque`](crate::session::Opaque) for resources that
-/// must work over every transport.
+/// stream fails the call with an error; use [`Opaque`](crate::session::Opaque)
+/// for resources that must work over every transport.
 pub struct OsHandle<T = DefaultHandle>(Cell<Option<T>>);
 
 impl<T> fmt::Debug for OsHandle<T> {

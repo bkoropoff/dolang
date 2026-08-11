@@ -67,7 +67,10 @@ impl<'handle> PutHandle<'handle> for EncodeHandles<'handle> {
         }
         let value = match &mut self.attachments {
             AnyAttachments::Generic => {
-                panic!("generic byte-stream transport does not support handles")
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "generic byte-stream transport does not support handle attachments",
+                ));
             }
             AnyAttachments::Windows(attachments) => attachments.attach(handle.raw_handle())?,
         };
@@ -447,5 +450,26 @@ mod tests {
         attachments.finish();
         let received = server_receiver.duplicate_peer_handle(value).unwrap();
         drop(received);
+    }
+
+    #[tokio::test]
+    async fn put_handle_on_generic_transport_reports_unsupported_instead_of_panicking() {
+        let (stream, _) = tokio::io::duplex(64);
+        let (sender, _) = super::super::generic_duplex(stream);
+        let any = AnySender::Generic(sender);
+        let mut encode = EncodeHandles::new(&any, 1);
+        let file = std::fs::File::open(std::env::current_exe().unwrap()).unwrap();
+        let handle = crate::handle::OsHandle::new(OwnedHandle::from(file));
+        let err = encode.put_handle(&handle).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+    }
+
+    #[tokio::test]
+    async fn duplicate_peer_handle_on_generic_transport_reports_unsupported_instead_of_panicking() {
+        let (stream, _) = tokio::io::duplex(64);
+        let (_, receiver) = super::super::generic_duplex(stream);
+        let any = super::super::AnyReceiver::Generic(receiver);
+        let err = any.duplicate_peer_handle(0).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 }

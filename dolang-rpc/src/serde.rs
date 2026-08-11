@@ -2,7 +2,7 @@
 use std::os::fd::IntoRawFd;
 #[cfg(windows)]
 use std::os::windows::io::IntoRawHandle;
-use std::{cell::RefCell, fmt, marker::PhantomData, ptr};
+use std::{cell::RefCell, fmt, io, marker::PhantomData, ptr};
 
 use ::serde::{
     Deserialize, Serialize,
@@ -13,7 +13,6 @@ use ::serde::{
     ser::{self},
 };
 use bytes::Bytes;
-use dolang_util::debug_eprintln;
 use postcard::ser_flavors::{ExtendFlavor, Flavor};
 
 use crate::{
@@ -25,8 +24,10 @@ pub(crate) fn encode_payload<'handle, T: Serialize, H: PutHandle<'handle>>(
     value: &'handle T,
     handles: &mut H,
 ) -> Result<Bytes, RpcError> {
-    let buffer = to_extend(value, handles, Vec::new())
-        .map_err(|error| RpcError::Serialize(error.to_string()))?;
+    let buffer = to_extend(value, handles, Vec::new()).map_err(|error| match error {
+        Error::UnsupportedCapability => RpcError::UnsupportedCapability,
+        error => RpcError::Serialize(error.to_string()),
+    })?;
     Ok(buffer.into())
 }
 
@@ -49,6 +50,9 @@ pub(crate) enum Error {
     Postcard(#[from] postcard::Error),
     #[error("{0}")]
     Message(String),
+    /// A handle was serialized over a transport that cannot carry one.
+    #[error("transport does not support direct handles")]
+    UnsupportedCapability,
 }
 
 impl ser::Error for Error {
@@ -62,17 +66,36 @@ impl de::Error for Error {
     }
 }
 
-// postcard's `custom` error constructors discard the message and return a
-// fixed generic variant (`SerdeSerCustom`/`SerdeDeCustom`), so anything
-// converted through them is otherwise unrecoverable. Debug builds can log it
-// to stderr when DOLANG_DEBUG is set so it is not lost entirely.
-fn ser_custom<E: ser::Error>(err: impl fmt::Display) -> E {
-    debug_eprintln!("dolang-rpc: serialization error: {err}");
-    E::custom(err)
+// `Serializer`/`Deserializer` below use our own rich `Error` as their
+// associated error type throughout, so ordinary structural failures (a full
+// buffer, a malformed tag, ...) just convert via `Display` and nothing is
+// lost. But a handful of methods (`WithFrame::serialize`,
+// `SeedWrap::deserialize`, and the `VisitorWrap` methods that hand back a
+// fresh (de)serializer) are constrained by the external `serde` trait
+// signature that invokes them to return the *caller's* generic `S::Error`/
+// `D::Error` — ultimately postcard's own error type once the recursion
+// bottoms out. postcard's `custom` constructor for that type discards its
+// message and returns a fixed generic variant
+// (`SerdeSerCustom`/`SerdeDeCustom`), so a rich error can't just be converted
+// there. Instead we stash it on the `RefCell` threaded through the
+// (de)serialization context and raise a placeholder in its place;
+// `to_extend`/`from_bytes` prefer the stashed error over whatever
+// placeholder bubbles up through postcard.
+fn convert_ser_error<E: ser::Error>(err: E) -> Error {
+    Error::Message(err.to_string())
 }
-fn de_custom<E: de::Error>(err: impl fmt::Display) -> E {
-    debug_eprintln!("dolang-rpc: deserialization error: {err}");
-    E::custom(err)
+fn convert_de_error<E: de::Error>(err: E) -> Error {
+    Error::Message(err.to_string())
+}
+fn stash_ser_error<E: ser::Error>(slot: &RefCell<Option<Error>>, err: Error) -> E {
+    let message = err.to_string();
+    *slot.borrow_mut() = Some(err);
+    E::custom(message)
+}
+fn stash_de_error<E: de::Error>(slot: &RefCell<Option<Error>>, err: Error) -> E {
+    let message = err.to_string();
+    *slot.borrow_mut() = Some(err);
+    E::custom(message)
 }
 
 pub(crate) fn to_extend<'frame, T, F>(
@@ -88,11 +111,15 @@ where
         output: ExtendFlavor::new(output),
     };
     let frame = RefCell::new(frame);
-    value.serialize(Serializer {
+    let error = RefCell::new(None);
+    if let Err(err) = value.serialize(Serializer {
         inner: &mut postcard,
         frame: &frame,
+        error: &error,
         marker: PhantomData,
-    })?;
+    }) {
+        return Err(error.into_inner().unwrap_or(err));
+    }
     Ok(postcard.output.finalize()?)
 }
 
@@ -102,10 +129,15 @@ where
     H: TakeHandle,
 {
     let mut postcard = postcard::Deserializer::from_bytes(bytes);
-    let value = T::deserialize(Deserializer {
+    let error = RefCell::new(None);
+    let value = match T::deserialize(Deserializer {
         inner: &mut postcard,
         handles,
-    })?;
+        error: &error,
+    }) {
+        Ok(value) => value,
+        Err(err) => return Err(error.into_inner().unwrap_or(err)),
+    };
     let remaining = postcard.finalize()?;
     if !remaining.is_empty() {
         return Err(Error::Message("trailing bytes in payload".into()));
@@ -116,16 +148,19 @@ where
 struct Serializer<'cell, 'borrow, 'frame, S, F> {
     inner: S,
     frame: &'cell RefCell<&'borrow mut F>,
+    error: &'cell RefCell<Option<Error>>,
     marker: PhantomData<&'frame ()>,
 }
 struct WithFrame<'value, 'cell, 'borrow, 'frame, T: ?Sized, F> {
     value: &'value T,
     frame: &'cell RefCell<&'borrow mut F>,
+    error: &'cell RefCell<Option<Error>>,
     marker: PhantomData<&'frame ()>,
 }
 struct Compound<'cell, 'borrow, 'frame, C, F> {
     inner: C,
     frame: &'cell RefCell<&'borrow mut F>,
+    error: &'cell RefCell<Option<Error>>,
     marker: PhantomData<&'frame ()>,
 }
 
@@ -133,18 +168,21 @@ impl<'frame, T: Serialize + ?Sized, F: PutHandle<'frame>> Serialize
     for WithFrame<'_, '_, '_, 'frame, T, F>
 {
     fn serialize<S: ser::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.value.serialize(Serializer {
-            inner: serializer,
-            frame: self.frame,
-            marker: PhantomData,
-        })
+        self.value
+            .serialize(Serializer {
+                inner: serializer,
+                frame: self.frame,
+                error: self.error,
+                marker: PhantomData,
+            })
+            .map_err(|err| stash_ser_error(self.error, err))
     }
 }
 
 macro_rules! forward_ser {
     ($($name:ident($ty:ty)),* $(,)?) => {$(
         fn $name(self, value: $ty) -> Result<Self::Ok, Self::Error> {
-            self.inner.$name(value)
+            self.inner.$name(value).map_err(convert_ser_error)
         }
     )*};
 }
@@ -155,7 +193,7 @@ where
     S: ser::Serializer,
 {
     type Ok = S::Ok;
-    type Error = S::Error;
+    type Error = Error;
     type SerializeSeq = Compound<'cell, 'borrow, 'frame, S::SerializeSeq, F>;
     type SerializeTuple = Compound<'cell, 'borrow, 'frame, S::SerializeTuple, F>;
     type SerializeTupleStruct = Compound<'cell, 'borrow, 'frame, S::SerializeTupleStruct, F>;
@@ -181,26 +219,31 @@ where
         serialize_char(char)
     );
     fn serialize_str(self, v: &str) -> Result<Self::Ok, Self::Error> {
-        self.inner.serialize_str(v)
+        self.inner.serialize_str(v).map_err(convert_ser_error)
     }
     fn serialize_bytes(self, v: &[u8]) -> Result<Self::Ok, Self::Error> {
-        self.inner.serialize_bytes(v)
+        self.inner.serialize_bytes(v).map_err(convert_ser_error)
     }
     fn serialize_none(self) -> Result<Self::Ok, Self::Error> {
-        self.inner.serialize_none()
+        self.inner.serialize_none().map_err(convert_ser_error)
     }
     fn serialize_some<T: ?Sized + Serialize>(self, value: &T) -> Result<Self::Ok, Self::Error> {
-        self.inner.serialize_some(&WithFrame {
-            value,
-            frame: self.frame,
-            marker: PhantomData,
-        })
+        self.inner
+            .serialize_some(&WithFrame {
+                value,
+                frame: self.frame,
+                error: self.error,
+                marker: PhantomData,
+            })
+            .map_err(convert_ser_error)
     }
     fn serialize_unit(self) -> Result<Self::Ok, Self::Error> {
-        self.inner.serialize_unit()
+        self.inner.serialize_unit().map_err(convert_ser_error)
     }
     fn serialize_unit_struct(self, name: &'static str) -> Result<Self::Ok, Self::Error> {
-        self.inner.serialize_unit_struct(name)
+        self.inner
+            .serialize_unit_struct(name)
+            .map_err(convert_ser_error)
     }
     fn serialize_unit_variant(
         self,
@@ -208,7 +251,9 @@ where
         index: u32,
         variant: &'static str,
     ) -> Result<Self::Ok, Self::Error> {
-        self.inner.serialize_unit_variant(name, index, variant)
+        self.inner
+            .serialize_unit_variant(name, index, variant)
+            .map_err(convert_ser_error)
     }
     fn serialize_newtype_struct<T: ?Sized + Serialize>(
         self,
@@ -216,38 +261,42 @@ where
         value: &T,
     ) -> Result<Self::Ok, Self::Error> {
         if ptr::eq(name, OS_HANDLE_TYPE) {
-            let raw = value.serialize(RawHandleSerializer).map_err(ser_custom)?;
+            let raw = value.serialize(RawHandleSerializer)?;
             // SAFETY: only `OsHandle::serialize` can supply the private marker
             // by identity. It passes a live `HandleRef` whose referent belongs
             // to the message borrowed for `'frame`.
             let handle = unsafe { (*(raw as *const HandleRef<'frame>)).0 };
+            let value = self.frame.borrow_mut().put_handle(handle).map_err(|err| {
+                if err.kind() == io::ErrorKind::Unsupported {
+                    Error::UnsupportedCapability
+                } else {
+                    Error::Message(err.to_string())
+                }
+            })?;
             #[cfg(unix)]
-            let value = self
-                .frame
-                .borrow_mut()
-                .put_handle(handle)
-                .map_err(ser_custom)?;
-            #[cfg(windows)]
-            let value = self
-                .frame
-                .borrow_mut()
-                .put_handle(handle)
-                .map_err(ser_custom)?;
-            #[cfg(unix)]
-            return self.inner.serialize_u32(value);
+            return self.inner.serialize_u32(value).map_err(convert_ser_error);
             #[cfg(all(windows, target_pointer_width = "32"))]
-            return self.inner.serialize_u32(value as u32);
+            return self
+                .inner
+                .serialize_u32(value as u32)
+                .map_err(convert_ser_error);
             #[cfg(all(windows, target_pointer_width = "64"))]
-            return self.inner.serialize_u64(value as u64);
+            return self
+                .inner
+                .serialize_u64(value as u64)
+                .map_err(convert_ser_error);
         }
-        self.inner.serialize_newtype_struct(
-            name,
-            &WithFrame {
-                value,
-                frame: self.frame,
-                marker: PhantomData,
-            },
-        )
+        self.inner
+            .serialize_newtype_struct(
+                name,
+                &WithFrame {
+                    value,
+                    frame: self.frame,
+                    error: self.error,
+                    marker: PhantomData,
+                },
+            )
+            .map_err(convert_ser_error)
     }
     fn serialize_newtype_variant<T: ?Sized + Serialize>(
         self,
@@ -256,28 +305,33 @@ where
         variant: &'static str,
         value: &T,
     ) -> Result<Self::Ok, Self::Error> {
-        self.inner.serialize_newtype_variant(
-            name,
-            index,
-            variant,
-            &WithFrame {
-                value,
-                frame: self.frame,
-                marker: PhantomData,
-            },
-        )
+        self.inner
+            .serialize_newtype_variant(
+                name,
+                index,
+                variant,
+                &WithFrame {
+                    value,
+                    frame: self.frame,
+                    error: self.error,
+                    marker: PhantomData,
+                },
+            )
+            .map_err(convert_ser_error)
     }
     fn serialize_seq(self, len: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
         Ok(Compound {
-            inner: self.inner.serialize_seq(len)?,
+            inner: self.inner.serialize_seq(len).map_err(convert_ser_error)?,
             frame: self.frame,
+            error: self.error,
             marker: PhantomData,
         })
     }
     fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple, Self::Error> {
         Ok(Compound {
-            inner: self.inner.serialize_tuple(len)?,
+            inner: self.inner.serialize_tuple(len).map_err(convert_ser_error)?,
             frame: self.frame,
+            error: self.error,
             marker: PhantomData,
         })
     }
@@ -287,8 +341,12 @@ where
         len: usize,
     ) -> Result<Self::SerializeTupleStruct, Self::Error> {
         Ok(Compound {
-            inner: self.inner.serialize_tuple_struct(name, len)?,
+            inner: self
+                .inner
+                .serialize_tuple_struct(name, len)
+                .map_err(convert_ser_error)?,
             frame: self.frame,
+            error: self.error,
             marker: PhantomData,
         })
     }
@@ -302,15 +360,18 @@ where
         Ok(Compound {
             inner: self
                 .inner
-                .serialize_tuple_variant(name, index, variant, len)?,
+                .serialize_tuple_variant(name, index, variant, len)
+                .map_err(convert_ser_error)?,
             frame: self.frame,
+            error: self.error,
             marker: PhantomData,
         })
     }
     fn serialize_map(self, len: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
         Ok(Compound {
-            inner: self.inner.serialize_map(len)?,
+            inner: self.inner.serialize_map(len).map_err(convert_ser_error)?,
             frame: self.frame,
+            error: self.error,
             marker: PhantomData,
         })
     }
@@ -320,8 +381,12 @@ where
         len: usize,
     ) -> Result<Self::SerializeStruct, Self::Error> {
         Ok(Compound {
-            inner: self.inner.serialize_struct(name, len)?,
+            inner: self
+                .inner
+                .serialize_struct(name, len)
+                .map_err(convert_ser_error)?,
             frame: self.frame,
+            error: self.error,
             marker: PhantomData,
         })
     }
@@ -335,13 +400,15 @@ where
         Ok(Compound {
             inner: self
                 .inner
-                .serialize_struct_variant(name, index, variant, len)?,
+                .serialize_struct_variant(name, index, variant, len)
+                .map_err(convert_ser_error)?,
             frame: self.frame,
+            error: self.error,
             marker: PhantomData,
         })
     }
     fn collect_str<T: ?Sized + fmt::Display>(self, value: &T) -> Result<Self::Ok, Self::Error> {
-        self.inner.collect_str(value)
+        self.inner.collect_str(value).map_err(convert_ser_error)
     }
     fn is_human_readable(&self) -> bool {
         self.inner.is_human_readable()
@@ -354,16 +421,19 @@ macro_rules! compound {
             for Compound<'_, '_, 'frame, C, F>
         {
             type Ok = C::Ok;
-            type Error = C::Error;
+            type Error = Error;
             fn $method<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Self::Error> {
-                self.inner.$method(&WithFrame {
-                    value,
-                    frame: self.frame,
-                    marker: PhantomData,
-                })
+                self.inner
+                    .$method(&WithFrame {
+                        value,
+                        frame: self.frame,
+                        error: self.error,
+                        marker: PhantomData,
+                    })
+                    .map_err(convert_ser_error)
             }
             fn end(self) -> Result<Self::Ok, Self::Error> {
-                self.inner.end()
+                self.inner.end().map_err(convert_ser_error)
             }
         }
     };
@@ -376,69 +446,81 @@ impl<'frame, C: ser::SerializeMap, F: PutHandle<'frame>> ser::SerializeMap
     for Compound<'_, '_, 'frame, C, F>
 {
     type Ok = C::Ok;
-    type Error = C::Error;
+    type Error = Error;
     fn serialize_key<T: ?Sized + Serialize>(&mut self, v: &T) -> Result<(), Self::Error> {
-        self.inner.serialize_key(&WithFrame {
-            value: v,
-            frame: self.frame,
-            marker: PhantomData,
-        })
+        self.inner
+            .serialize_key(&WithFrame {
+                value: v,
+                frame: self.frame,
+                error: self.error,
+                marker: PhantomData,
+            })
+            .map_err(convert_ser_error)
     }
     fn serialize_value<T: ?Sized + Serialize>(&mut self, v: &T) -> Result<(), Self::Error> {
-        self.inner.serialize_value(&WithFrame {
-            value: v,
-            frame: self.frame,
-            marker: PhantomData,
-        })
+        self.inner
+            .serialize_value(&WithFrame {
+                value: v,
+                frame: self.frame,
+                error: self.error,
+                marker: PhantomData,
+            })
+            .map_err(convert_ser_error)
     }
     fn end(self) -> Result<Self::Ok, Self::Error> {
-        self.inner.end()
+        self.inner.end().map_err(convert_ser_error)
     }
 }
 impl<'frame, C: ser::SerializeStruct, F: PutHandle<'frame>> ser::SerializeStruct
     for Compound<'_, '_, 'frame, C, F>
 {
     type Ok = C::Ok;
-    type Error = C::Error;
+    type Error = Error;
     fn serialize_field<T: ?Sized + Serialize>(
         &mut self,
         key: &'static str,
         v: &T,
     ) -> Result<(), Self::Error> {
-        self.inner.serialize_field(
-            key,
-            &WithFrame {
-                value: v,
-                frame: self.frame,
-                marker: PhantomData,
-            },
-        )
+        self.inner
+            .serialize_field(
+                key,
+                &WithFrame {
+                    value: v,
+                    frame: self.frame,
+                    error: self.error,
+                    marker: PhantomData,
+                },
+            )
+            .map_err(convert_ser_error)
     }
     fn end(self) -> Result<Self::Ok, Self::Error> {
-        self.inner.end()
+        self.inner.end().map_err(convert_ser_error)
     }
 }
 impl<'frame, C: ser::SerializeStructVariant, F: PutHandle<'frame>> ser::SerializeStructVariant
     for Compound<'_, '_, 'frame, C, F>
 {
     type Ok = C::Ok;
-    type Error = C::Error;
+    type Error = Error;
     fn serialize_field<T: ?Sized + Serialize>(
         &mut self,
         key: &'static str,
         v: &T,
     ) -> Result<(), Self::Error> {
-        self.inner.serialize_field(
-            key,
-            &WithFrame {
-                value: v,
-                frame: self.frame,
-                marker: PhantomData,
-            },
-        )
+        self.inner
+            .serialize_field(
+                key,
+                &WithFrame {
+                    value: v,
+                    frame: self.frame,
+                    error: self.error,
+                    marker: PhantomData,
+                },
+            )
+            .map_err(convert_ser_error)
     }
     fn end(self) -> Result<Self::Ok, Self::Error> {
-        self.inner.end()
+        self.inner.end().map_err(convert_ser_error)
     }
 }
 
@@ -599,36 +681,45 @@ fn raw_error<T>() -> Result<T, Error> {
 struct Deserializer<'a, D, H> {
     inner: D,
     handles: &'a mut H,
+    error: &'a RefCell<Option<Error>>,
 }
 struct VisitorWrap<'a, V, H> {
     inner: V,
     handles: &'a mut H,
+    error: &'a RefCell<Option<Error>>,
 }
 struct SeedWrap<'a, S, H> {
     inner: S,
     handles: &'a mut H,
+    error: &'a RefCell<Option<Error>>,
 }
 struct SeqWrap<'a, A, H> {
     inner: A,
     handles: &'a mut H,
+    error: &'a RefCell<Option<Error>>,
 }
 struct MapWrap<'a, A, H> {
     inner: A,
     handles: &'a mut H,
+    error: &'a RefCell<Option<Error>>,
 }
 struct EnumWrap<'a, A, H> {
     inner: A,
     handles: &'a mut H,
+    error: &'a RefCell<Option<Error>>,
 }
 struct VariantWrap<'a, A, H> {
     inner: A,
     handles: &'a mut H,
+    error: &'a RefCell<Option<Error>>,
 }
 
 macro_rules! forward_de {
     ($($method:ident),* $(,)?) => {$(
         fn $method<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-            self.inner.$method(VisitorWrap { inner: visitor, handles: self.handles })
+            self.inner
+                .$method(VisitorWrap { inner: visitor, handles: self.handles, error: self.error })
+                .map_err(convert_de_error)
         }
     )*};
 }
@@ -638,7 +729,7 @@ where
     D: de::Deserializer<'de>,
     H: TakeHandle,
 {
-    type Error = D::Error;
+    type Error = Error;
     forward_de!(
         deserialize_any,
         deserialize_bool,
@@ -670,109 +761,139 @@ where
         self,
         name: &'static str,
         visitor: V,
-    ) -> Result<V::Value, D::Error> {
-        self.inner.deserialize_unit_struct(
-            name,
-            VisitorWrap {
-                inner: visitor,
-                handles: self.handles,
-            },
-        )
+    ) -> Result<V::Value, Self::Error> {
+        self.inner
+            .deserialize_unit_struct(
+                name,
+                VisitorWrap {
+                    inner: visitor,
+                    handles: self.handles,
+                    error: self.error,
+                },
+            )
+            .map_err(convert_de_error)
     }
     fn deserialize_newtype_struct<V: Visitor<'de>>(
         self,
         name: &'static str,
         visitor: V,
-    ) -> Result<V::Value, D::Error> {
+    ) -> Result<V::Value, Self::Error> {
         if ptr::eq(name, OS_HANDLE_TYPE) {
             #[cfg(unix)]
             {
-                let index = u32::deserialize(self.inner)?;
-                let fd = self.handles.take_handle(index).map_err(de_custom)?;
+                let index = u32::deserialize(self.inner).map_err(convert_de_error)?;
+                let fd = self
+                    .handles
+                    .take_handle(index)
+                    .map_err(|err| Error::Message(err.to_string()))?;
                 // The private OsHandle visitor immediately adopts this raw fd.
                 // No other visitor can request the reserved newtype identity.
                 let raw = fd.into_raw_fd();
-                return visitor.visit_newtype_struct(raw.into_deserializer());
+                return visitor
+                    .visit_newtype_struct(IntoDeserializer::<Error>::into_deserializer(raw))
+                    .map_err(convert_de_error);
             }
             #[cfg(windows)]
             {
                 #[cfg(target_pointer_width = "32")]
-                let value = u32::deserialize(self.inner)? as usize;
+                let value = u32::deserialize(self.inner).map_err(convert_de_error)? as usize;
                 #[cfg(target_pointer_width = "64")]
-                let value = u64::deserialize(self.inner)? as usize;
-                let handle = self.handles.take_handle(value).map_err(de_custom)?;
+                let value = u64::deserialize(self.inner).map_err(convert_de_error)? as usize;
+                let handle = self
+                    .handles
+                    .take_handle(value)
+                    .map_err(|err| Error::Message(err.to_string()))?;
                 let raw = handle.into_raw_handle() as usize;
                 #[cfg(target_pointer_width = "32")]
-                return visitor.visit_newtype_struct((raw as u32).into_deserializer());
+                return visitor
+                    .visit_newtype_struct(IntoDeserializer::<Error>::into_deserializer(raw as u32))
+                    .map_err(convert_de_error);
                 #[cfg(target_pointer_width = "64")]
-                return visitor.visit_newtype_struct((raw as u64).into_deserializer());
+                return visitor
+                    .visit_newtype_struct(IntoDeserializer::<Error>::into_deserializer(raw as u64))
+                    .map_err(convert_de_error);
             }
         }
-        self.inner.deserialize_newtype_struct(
-            name,
-            VisitorWrap {
-                inner: visitor,
-                handles: self.handles,
-            },
-        )
+        self.inner
+            .deserialize_newtype_struct(
+                name,
+                VisitorWrap {
+                    inner: visitor,
+                    handles: self.handles,
+                    error: self.error,
+                },
+            )
+            .map_err(convert_de_error)
     }
     fn deserialize_tuple<V: Visitor<'de>>(
         self,
         len: usize,
         visitor: V,
-    ) -> Result<V::Value, D::Error> {
-        self.inner.deserialize_tuple(
-            len,
-            VisitorWrap {
-                inner: visitor,
-                handles: self.handles,
-            },
-        )
+    ) -> Result<V::Value, Self::Error> {
+        self.inner
+            .deserialize_tuple(
+                len,
+                VisitorWrap {
+                    inner: visitor,
+                    handles: self.handles,
+                    error: self.error,
+                },
+            )
+            .map_err(convert_de_error)
     }
     fn deserialize_tuple_struct<V: Visitor<'de>>(
         self,
         name: &'static str,
         len: usize,
         visitor: V,
-    ) -> Result<V::Value, D::Error> {
-        self.inner.deserialize_tuple_struct(
-            name,
-            len,
-            VisitorWrap {
-                inner: visitor,
-                handles: self.handles,
-            },
-        )
+    ) -> Result<V::Value, Self::Error> {
+        self.inner
+            .deserialize_tuple_struct(
+                name,
+                len,
+                VisitorWrap {
+                    inner: visitor,
+                    handles: self.handles,
+                    error: self.error,
+                },
+            )
+            .map_err(convert_de_error)
     }
     fn deserialize_struct<V: Visitor<'de>>(
         self,
         name: &'static str,
         fields: &'static [&'static str],
         visitor: V,
-    ) -> Result<V::Value, D::Error> {
-        self.inner.deserialize_struct(
-            name,
-            fields,
-            VisitorWrap {
-                inner: visitor,
-                handles: self.handles,
-            },
-        )
+    ) -> Result<V::Value, Self::Error> {
+        self.inner
+            .deserialize_struct(
+                name,
+                fields,
+                VisitorWrap {
+                    inner: visitor,
+                    handles: self.handles,
+                    error: self.error,
+                },
+            )
+            .map_err(convert_de_error)
     }
     fn deserialize_enum<V: Visitor<'de>>(
         self,
         name: &'static str,
         variants: &'static [&'static str],
         visitor: V,
-    ) -> Result<V::Value, D::Error> {
-        self.inner.deserialize_enum(
-            name,
-            variants,
-            VisitorWrap {
-                inner: visitor,
-                handles: self.handles,
-            },
-        )
+    ) -> Result<V::Value, Self::Error> {
+        self.inner
+            .deserialize_enum(
+                name,
+                variants,
+                VisitorWrap {
+                    inner: visitor,
+                    handles: self.handles,
+                    error: self.error,
+                },
+            )
+            .map_err(convert_de_error)
     }
     fn is_human_readable(&self) -> bool {
         false
@@ -786,10 +907,13 @@ where
 {
     type Value = S::Value;
     fn deserialize<D: de::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
-        self.inner.deserialize(Deserializer {
-            inner: d,
-            handles: self.handles,
-        })
+        self.inner
+            .deserialize(Deserializer {
+                inner: d,
+                handles: self.handles,
+                error: self.error,
+            })
+            .map_err(|err| stash_de_error(self.error, err))
     }
 }
 
@@ -839,36 +963,45 @@ impl<'de, V: Visitor<'de>, H: TakeHandle> Visitor<'de> for VisitorWrap<'_, V, H>
         self.inner.visit_none()
     }
     fn visit_some<D: de::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
-        self.inner.visit_some(Deserializer {
-            inner: d,
-            handles: self.handles,
-        })
+        self.inner
+            .visit_some(Deserializer {
+                inner: d,
+                handles: self.handles,
+                error: self.error,
+            })
+            .map_err(|err| stash_de_error(self.error, err))
     }
     fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
         self.inner.visit_unit()
     }
     fn visit_newtype_struct<D: de::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
-        self.inner.visit_newtype_struct(Deserializer {
-            inner: d,
-            handles: self.handles,
-        })
+        self.inner
+            .visit_newtype_struct(Deserializer {
+                inner: d,
+                handles: self.handles,
+                error: self.error,
+            })
+            .map_err(|err| stash_de_error(self.error, err))
     }
     fn visit_seq<A: SeqAccess<'de>>(self, a: A) -> Result<Self::Value, A::Error> {
         self.inner.visit_seq(SeqWrap {
             inner: a,
             handles: self.handles,
+            error: self.error,
         })
     }
     fn visit_map<A: MapAccess<'de>>(self, a: A) -> Result<Self::Value, A::Error> {
         self.inner.visit_map(MapWrap {
             inner: a,
             handles: self.handles,
+            error: self.error,
         })
     }
     fn visit_enum<A: EnumAccess<'de>>(self, a: A) -> Result<Self::Value, A::Error> {
         self.inner.visit_enum(EnumWrap {
             inner: a,
             handles: self.handles,
+            error: self.error,
         })
     }
 }
@@ -881,6 +1014,7 @@ impl<'de, A: SeqAccess<'de>, H: TakeHandle> SeqAccess<'de> for SeqWrap<'_, A, H>
         self.inner.next_element_seed(SeedWrap {
             inner: seed,
             handles: self.handles,
+            error: self.error,
         })
     }
     fn size_hint(&self) -> Option<usize> {
@@ -896,12 +1030,14 @@ impl<'de, A: MapAccess<'de>, H: TakeHandle> MapAccess<'de> for MapWrap<'_, A, H>
         self.inner.next_key_seed(SeedWrap {
             inner: seed,
             handles: self.handles,
+            error: self.error,
         })
     }
     fn next_value_seed<V: DeserializeSeed<'de>>(&mut self, seed: V) -> Result<V::Value, A::Error> {
         self.inner.next_value_seed(SeedWrap {
             inner: seed,
             handles: self.handles,
+            error: self.error,
         })
     }
     fn size_hint(&self) -> Option<usize> {
@@ -918,12 +1054,14 @@ impl<'a, 'de, A: EnumAccess<'de>, H: TakeHandle> EnumAccess<'de> for EnumWrap<'a
         let (v, a) = self.inner.variant_seed(SeedWrap {
             inner: seed,
             handles: self.handles,
+            error: self.error,
         })?;
         Ok((
             v,
             VariantWrap {
                 inner: a,
                 handles: self.handles,
+                error: self.error,
             },
         ))
     }
@@ -937,6 +1075,7 @@ impl<'de, A: VariantAccess<'de>, H: TakeHandle> VariantAccess<'de> for VariantWr
         self.inner.newtype_variant_seed(SeedWrap {
             inner: seed,
             handles: self.handles,
+            error: self.error,
         })
     }
     fn tuple_variant<V: Visitor<'de>>(self, len: usize, v: V) -> Result<V::Value, A::Error> {
@@ -945,6 +1084,7 @@ impl<'de, A: VariantAccess<'de>, H: TakeHandle> VariantAccess<'de> for VariantWr
             VisitorWrap {
                 inner: v,
                 handles: self.handles,
+                error: self.error,
             },
         )
     }
@@ -958,6 +1098,7 @@ impl<'de, A: VariantAccess<'de>, H: TakeHandle> VariantAccess<'de> for VariantWr
             VisitorWrap {
                 inner: v,
                 handles: self.handles,
+                error: self.error,
             },
         )
     }
@@ -1028,6 +1169,23 @@ mod tests {
             state.serialize_field("handle", self.0)?;
             Err(::serde::ser::Error::custom("intentional failure"))
         }
+    }
+
+    #[derive(Debug)]
+    struct AlwaysFailsToDeserialize;
+
+    impl<'de> Deserialize<'de> for AlwaysFailsToDeserialize {
+        fn deserialize<D: ::serde::Deserializer<'de>>(_d: D) -> Result<Self, D::Error> {
+            Err(::serde::de::Error::custom(
+                "intentional deserialize failure",
+            ))
+        }
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct WrapsFailingField {
+        #[allow(dead_code)]
+        inner: AlwaysFailsToDeserialize,
     }
 
     #[test]
@@ -1110,8 +1268,27 @@ mod tests {
         let (fd, _) = pipe().unwrap();
         let handle = OsHandle::new(fd);
         let mut handles = EncodeHandles::for_test(usize::MAX);
-        assert!(encode_payload(&FailsAfterHandle(&handle), &mut handles).is_err());
+        let error = encode_payload(&FailsAfterHandle(&handle), &mut handles).unwrap_err();
+        // Regression check for the postcard-discards-custom-errors plumbing:
+        // the message from the value's own `Serialize` impl must survive,
+        // not just a generic "something went wrong" from postcard.
+        assert!(error.to_string().contains("intentional failure"));
         drop(handle.into_inner());
+    }
+
+    #[test]
+    fn custom_deserialize_error_message_is_preserved() {
+        // Regression check for the postcard-discards-custom-errors plumbing,
+        // deserialize side: the field's own `Deserialize` impl calls
+        // `Error::custom` deep inside the recursive `SeedWrap` boundary, and
+        // the message must still make it back to the caller.
+        let mut handles = TestReceiver(Vec::new());
+        let error = from_bytes::<WrapsFailingField, _>(&[0u8], &mut handles).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("intentional deserialize failure")
+        );
     }
 
     #[test]

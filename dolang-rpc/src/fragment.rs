@@ -319,8 +319,9 @@ pub(crate) struct NegotiationResult {
 
 /// The negotiate payload's outer shape: RPC-framing-version blobs (see
 /// `negotiate`'s doc comment) alongside the mandatory application-protocol
-/// name + sorted ascending supported-version list. Application-protocol
-/// versions are `u16` rather than `u8` since application protocols are
+/// name + supported-version list (order does not matter; the receiver sorts
+/// it). Application-protocol versions are `u16` rather than `u8` since
+/// application protocols are
 /// expected to revise far more often than the RPC framing format, and they
 /// travel in the payload rather than the 8-slot wire `id` field, so they
 /// aren't bound by its capacity.
@@ -341,8 +342,9 @@ struct NegotiatePayload {
 /// accepted on `sender`/`receiver`.
 ///
 /// The wire `id` field of a `Negotiate` fragment is repurposed to hold this
-/// endpoint's sorted, ascending, zero-terminated list of supported 8-bit
-/// RPC framing version numbers (at most 8 fit in the 8-byte field). The
+/// endpoint's zero-terminated list of supported 8-bit RPC framing version
+/// numbers (at most 8 fit in the 8-byte field; order does not matter, since
+/// the receiver sorts it before use). The
 /// payload is a postcard-encoded [`NegotiatePayload`]: the first element is
 /// a `Vec<Vec<u8>>` of one length-prefixed, version-specific blob per
 /// non-zero entry in the id array, in the same order; the second is this
@@ -356,8 +358,8 @@ struct NegotiatePayload {
 /// round trip is needed. If there is no overlap, this sends a `FIRST|ABORT`
 /// fragment as a failsafe/diagnostic signal and returns an error.
 ///
-/// `app_protocol` is a mandatory `(name, sorted ascending supported
-/// versions)` pair for the application protocol layered on top of the RPC
+/// `app_protocol` is a mandatory `(name, supported versions)` pair — order
+/// does not matter — for the application protocol layered on top of the RPC
 /// framing — every caller has one to offer (there is no raw-RPC-only path;
 /// see the [module documentation](crate::unbound)), so there is no skip/opt-out
 /// case to represent. The peer's name must match exactly and there must be a
@@ -372,7 +374,12 @@ pub(crate) async fn negotiate(
     let local_blob =
         postcard::to_stdvec(&HandshakeV1::from_limits(limits)).map_err(postcard_err)?;
     let (local_name, local_versions) = app_protocol;
-    let local_app_protocol = (local_name.to_string(), local_versions.to_vec());
+    // Callers need not pre-sort `local_versions`: sort our own copy here so
+    // the `.rev().find(..)` below can cheaply pick the highest mutually
+    // supported version instead of requiring an externally-maintained order.
+    let mut local_versions = local_versions.to_vec();
+    local_versions.sort_unstable();
+    let local_app_protocol = (local_name.to_string(), local_versions.clone());
     let local_payload = NegotiatePayload {
         version_blobs: vec![local_blob],
         app_protocol: local_app_protocol,
