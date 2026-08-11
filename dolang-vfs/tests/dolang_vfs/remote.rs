@@ -1,5 +1,3 @@
-#![deny(warnings)]
-
 use std::io::{self, SeekFrom};
 
 #[cfg(target_os = "linux")]

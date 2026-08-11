@@ -1,5 +1,3 @@
-#![deny(warnings)]
-
 #[cfg(unix)]
 use std::collections::HashMap;
 use std::{io, path::Path};

@@ -1,4 +1,3 @@
-#![deny(warnings)]
 #![cfg(unix)]
 use dolang_vfs::{
     Child, Command, FileHandle, OpenOptions, Vfs,

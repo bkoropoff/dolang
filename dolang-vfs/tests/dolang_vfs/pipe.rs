@@ -1,5 +1,3 @@
-#![deny(warnings)]
-
 use std::process::Stdio;
 
 use dolang_vfs::{Vfs, direct::Direct};

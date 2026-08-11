@@ -1,5 +1,4 @@
 #![cfg(windows)]
-#![deny(warnings)]
 
 use std::{
     mem,
