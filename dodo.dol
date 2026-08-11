@@ -19,6 +19,8 @@ let COV_IGNORE = $
   - dolang-private-doc
   - dolang-private-highlight
   - dolang-private-build
+  - dolang-private-test
+  - dolang-private-polyfill
 
 let MKDOCS_BINS = $
   - dolang-highlight

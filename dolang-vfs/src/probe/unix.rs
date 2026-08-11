@@ -174,9 +174,33 @@ fn run(shell: &Path) -> io::Result<Vec<u8>> {
     // blocked in write().
     let snapshot = read_snapshot(File::from(read));
 
-    // Tear down the probe and everything it started. The group outlives the
-    // shell because the child has not been reaped yet, so its pid cannot have
-    // been recycled. A group that is already gone yields ESRCH, which is fine.
+    // Let the probe exit normally before tearing down anything its profile
+    // started. Besides preserving ordinary exit handling, this lets an
+    // instrumented probe finish writing its coverage profile. WNOWAIT leaves
+    // the leader as a zombie so its pid (and therefore its process-group id)
+    // cannot be recycled before the group is killed.
+    loop {
+        let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::uninit();
+        // SAFETY: `info` points to writable storage and `child` is our child.
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                child.id() as _,
+                info.as_mut_ptr(),
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        if result == 0 {
+            break;
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+
+    // Tear down everything else in the probe's process group. A group that is
+    // already gone yields ESRCH, which is fine.
     //
     // SAFETY: no preconditions beyond a valid pid, checked above.
     unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
