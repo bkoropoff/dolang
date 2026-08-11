@@ -1,0 +1,6 @@
+# `\` has no escape meaning in shell-like (bareword) position: it's always a
+# literal character, including as the very first character of a literal and
+# with multiple backslashes in one word.
+assert_eq foo\bar r"foo\bar"
+assert_eq \hello r"\hello"
+assert_eq C:\Users\Path r"C:\Users\Path"

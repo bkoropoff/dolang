@@ -253,6 +253,7 @@ enum RawToken {
 enum RawState {
     Amp,
     AmpAmp,
+    Backslash,
     Bang,
     BangEqual,
     Bar,
@@ -270,7 +271,6 @@ enum RawState {
     Equal,
     EqualEqual,
     Error,
-    Escape,
     Exponent,
     ExponentStart,
     Float,
@@ -581,7 +581,7 @@ macro_rules! lex {
                 Some(b' ' | b'\t') => return $self.token($token, Space),
                 Some(b'\r') => return $self.token($token, Cr),
                 Some(b'\n') => return $self.token($token, Indent),
-                Some(b'\\') if matches!($self.mode, Mode::String | Mode::Heredoc) => return $self.token($token, Escape)
+                Some(b'\\') if matches!($self.mode, Mode::Shell | Mode::String | Mode::Heredoc) => return $self.token($token, Backslash)
             };
             { $($rest)* }
         }
@@ -763,7 +763,7 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
     /// - **Identifier states**: `Ident`, `Key`, etc. - mostly alphanumeric tokens
     /// - **Number states**: `Signed`, `Unsigned`, `Float`, `Hex`, etc. - parse numeric literals
     /// - **Operator states**: `Bang`, `Minus`, `Slash`, etc. - recognize operators
-    /// - **String states**: `DQuote`, `Escape`, etc. - handle string literals
+    /// - **String states**: `DQuote`, `Backslash`, etc. - handle string literals
     /// - **Raw string states**: `RawHash`, `RawBody`, `RawCloseHash` - raw string handling
     ///
     /// ## Keyword Recognition
@@ -832,8 +832,8 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                                 emit!(self.emit, token, Hash)
                             },
                             match Some(b':') => emit!(self.emit, token, Colon),
-                            match Some(b'\\') if matches!(self.mode, Mode::String | Mode::Heredoc) => {
-                                emit!(self.emit, token, Escape)
+                            match Some(b'\\') if matches!(self.mode, Mode::Shell | Mode::String | Mode::Heredoc) => {
+                                emit!(self.emit, token, Backslash)
                             },
                             match Some(b'r') if matches!(self.mode, Mode::Shell | Mode::FullExpr) => {
                                 emit!(self.emit, token, R)
@@ -1222,7 +1222,16 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                         match Some(b'0'..=b'9') => (),
                         match Some(..) => self.trans(Literal),
                 }),
-                Escape => match self.advance() {
+                // A `\` was seen while its enclosing mode could still turn out to be
+                // Shell (or switch to Shell/RawHeredoc by the time we get here, since
+                // this token may have been buffered as lookahead under a since-replaced
+                // mode). Only String/Heredoc actually interpret escapes; everywhere else
+                // `\` is just an ordinary literal character, so resume accumulating a
+                // literal from here without consuming the byte after it.
+                Backslash if !matches!(self.mode, Mode::String | Mode::Heredoc) => {
+                    self.trans(Literal);
+                }
+                Backslash => match self.advance() {
                     Some(b't') => return self.token(RawToken::Escape('\t'), Empty),
                     Some(b'r') => return self.token(RawToken::Escape('\r'), Empty),
                     Some(b'n') => return self.token(RawToken::Escape('\n'), Empty),
