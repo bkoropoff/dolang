@@ -1,0 +1,10 @@
+# Regression test for issue #2: escape sequences other than \$ and \\ must
+# always be rejected in here-docs (previously silently accepted as literal
+# text).
+let s = |
+  x\q
+# error: unexpected escape sequence
+#   --> heredoc_bad_escape_unknown.dol:LL:LL
+#    |
+# LL |   x\q
+#    |    ^^

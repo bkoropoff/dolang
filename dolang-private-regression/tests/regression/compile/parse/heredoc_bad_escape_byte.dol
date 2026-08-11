@@ -1,0 +1,10 @@
+# Regression test for issue #2: \x escapes must be rejected in here-docs
+# rather than panicking (previously hit `unreachable!()` in
+# `Parser::parse_heredoc`).
+let s = |
+  "\x01"
+# error: \x escapes are not valid in here-docs
+#   --> heredoc_bad_escape_byte.dol:LL:LL
+#    |
+# LL |   "\x01"
+#    |    ^^^^
