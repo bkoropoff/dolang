@@ -2387,52 +2387,49 @@ impl<'a> OpenOptions<'a> {
             no_follow: false,
         }
     }
+}
 
-    /// Set read access mode.
-    pub fn read(&mut self, read: bool) -> &mut Self {
+impl crate::OpenOptions for OpenOptions<'_> {
+    type File = ClientFile;
+
+    fn read(&mut self, read: bool) -> &mut Self {
         self.read = read;
         self
     }
 
-    /// Set write access mode.
-    pub fn write(&mut self, write: bool) -> &mut Self {
+    fn write(&mut self, write: bool) -> &mut Self {
         self.write = write;
         self
     }
 
-    /// Set append mode.
-    pub fn append(&mut self, append: bool) -> &mut Self {
+    fn append(&mut self, append: bool) -> &mut Self {
         self.append = append;
         self
     }
 
-    /// Set create mode (creates file if it doesn't exist).
-    pub fn create(&mut self, create: bool) -> &mut Self {
+    fn create(&mut self, create: bool) -> &mut Self {
         self.create = create;
         self
     }
 
-    /// Set create_new mode (fails if file already exists).
-    pub fn create_new(&mut self, create_new: bool) -> &mut Self {
+    fn create_new(&mut self, create_new: bool) -> &mut Self {
         self.create_new = create_new;
         self
     }
 
-    /// Set truncate mode (truncates file on open).
-    pub fn truncate(&mut self, truncate: bool) -> &mut Self {
+    fn truncate(&mut self, truncate: bool) -> &mut Self {
         self.truncate = truncate;
         self
     }
 
-    /// Set no-follow mode for the final path component.
-    pub fn no_follow(&mut self, no_follow: bool) -> &mut Self {
+    fn no_follow(&mut self, no_follow: bool) -> &mut Self {
         self.no_follow = no_follow;
         self
     }
 
-    async fn open_wire(&self, path: WirePath) -> crate::Result<ClientFile> {
+    async fn open(&self, path: Utf8TypedPath<'_>) -> crate::Result<ClientFile> {
         let req = OpenRequest {
-            path,
+            path: path.into(),
             read: self.read,
             write: self.write,
             append: self.append,
@@ -2446,7 +2443,6 @@ impl<'a> OpenOptions<'a> {
                 OpenHandlePreference::NativePreferred
             },
         };
-
         match self.client.request(RequestKind::Open(req)).await? {
             ResponseKind::Open(result) => match result.map_err(crate::Error::from)? {
                 OpenHandle::Native(handle) => Ok(ClientFile::from_std(
@@ -2459,50 +2455,6 @@ impl<'a> OpenOptions<'a> {
             },
             response => Err(unexpected(response).into()),
         }
-    }
-
-    /// Opens the file at a path expressed in host syntax.
-    // FIXME: Align this concrete Client API with Vfs by accepting
-    // Utf8TypedPath, so remote targets need not share the caller's path style.
-    pub async fn open(&self, path: impl AsRef<Path>) -> crate::Result<ClientFile> {
-        self.open_wire(path.as_ref().to_path_buf().try_into()?)
-            .await
-    }
-}
-
-impl crate::OpenOptions for OpenOptions<'_> {
-    type File = ClientFile;
-
-    fn read(&mut self, read: bool) -> &mut Self {
-        self.read(read)
-    }
-
-    fn write(&mut self, write: bool) -> &mut Self {
-        self.write(write)
-    }
-
-    fn append(&mut self, append: bool) -> &mut Self {
-        self.append(append)
-    }
-
-    fn create(&mut self, create: bool) -> &mut Self {
-        self.create(create)
-    }
-
-    fn create_new(&mut self, create_new: bool) -> &mut Self {
-        self.create_new(create_new)
-    }
-
-    fn truncate(&mut self, truncate: bool) -> &mut Self {
-        self.truncate(truncate)
-    }
-
-    fn no_follow(&mut self, no_follow: bool) -> &mut Self {
-        self.no_follow(no_follow)
-    }
-
-    async fn open(&self, path: Utf8TypedPath<'_>) -> crate::Result<ClientFile> {
-        self.open_wire(path.into()).await
     }
 }
 
@@ -3061,7 +3013,8 @@ mod tests {
 
     use super::{Client, ClientChildState, ClientFileInner};
     use crate::{
-        Child as _, Command as _, FileHandle as _, Server, Vfs as _, protocol::RequestKind,
+        Child as _, Command as _, FileHandle as _, OpenOptions, Server, Vfs as _,
+        protocol::RequestKind,
     };
 
     #[cfg(unix)]

@@ -12,10 +12,11 @@ use dolang_winterop::security::{
 use std::{
     collections::HashMap,
     ffi::OsString,
-    fs::File as StdFile,
+    fs::{File as StdFile, OpenOptions as StdOpenOptions},
     io, mem,
     os::windows::{
         ffi::{OsStrExt, OsStringExt},
+        fs::OpenOptionsExt,
         io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle},
     },
     path::{Component, Path, PathBuf, Prefix},
@@ -61,8 +62,8 @@ use windows_sys::{
             FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STREAM_INFO, FileRenameInfo, FileRenameInfoEx,
             FileStreamInfo, GetDiskFreeSpaceExW, GetFileAttributesW, GetFileInformationByHandleEx,
             GetFinalPathNameByHandleW, GetVolumeInformationByHandleW, INVALID_FILE_ATTRIBUTES,
-            OPEN_EXISTING, READ_CONTROL, SetFileAttributesW, SetFileInformationByHandle,
-            VOLUME_NAME_DOS, WRITE_DAC, WRITE_OWNER,
+            MAXIMUM_REPARSE_DATA_BUFFER_SIZE, OPEN_EXISTING, READ_CONTROL, SetFileAttributesW,
+            SetFileInformationByHandle, VOLUME_NAME_DOS, WRITE_DAC, WRITE_OWNER,
         },
         System::{
             Com::CoTaskMemFree,
@@ -72,7 +73,7 @@ use windows_sys::{
                 Thread32Next,
             },
             IO::{DeviceIoControl, IO_STATUS_BLOCK},
-            Ioctl::FSCTL_SET_COMPRESSION,
+            Ioctl::{FSCTL_GET_REPARSE_POINT, FSCTL_SET_COMPRESSION, FSCTL_SET_REPARSE_POINT},
             JobObjects::{
                 AssignProcessToJobObject, CreateJobObjectW, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
                 JobObjectBasicAccountingInformation, QueryInformationJobObject, TerminateJobObject,
@@ -1333,6 +1334,97 @@ impl Direct {
         fs::symlink_file(src, dst).await
     }
 
+    pub(super) async fn impl_copy_symlink(src: &Path, dst: &Path) -> io::Result<()> {
+        let (src, dst) = (src.to_path_buf(), dst.to_path_buf());
+        tokio::task::spawn_blocking(move || Self::copy_reparse_point_sync(&src, &dst))
+            .await
+            .unwrap_or_else(|_| Err(io::Error::other("copy symlink task failed")))
+    }
+
+    /// Duplicates a reparse point (symlink, junction, or otherwise) byte for
+    /// byte, rather than reinterpreting its target. This preserves details
+    /// (relative vs. absolute, print name vs. substitute name, and the
+    /// reparse tag itself) that re-deriving a fresh reparse point from a
+    /// resolved target path cannot recover.
+    fn copy_reparse_point_sync(src: &Path, dst: &Path) -> io::Result<()> {
+        let is_dir = std::fs::symlink_metadata(src)?.is_dir();
+
+        let mut read_opts = StdOpenOptions::new();
+        read_opts
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+        let src_file = read_opts.open(src)?;
+
+        let mut buffer = vec![0u8; MAXIMUM_REPARSE_DATA_BUFFER_SIZE as usize];
+        let mut bytes_returned = 0u32;
+        if unsafe {
+            DeviceIoControl(
+                src_file.as_raw_handle(),
+                FSCTL_GET_REPARSE_POINT,
+                ptr::null(),
+                0,
+                buffer.as_mut_ptr().cast(),
+                u32::try_from(buffer.len()).unwrap(),
+                &mut bytes_returned,
+                ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        drop(src_file);
+
+        if is_dir {
+            std::fs::create_dir(dst)?;
+        } else {
+            StdOpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(dst)?;
+        }
+
+        let mut write_opts = StdOpenOptions::new();
+        write_opts
+            .write(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+        let dst_file = match write_opts.open(dst) {
+            Ok(file) => file,
+            Err(err) => {
+                Self::remove_reparse_placeholder(dst, is_dir);
+                return Err(err);
+            }
+        };
+
+        let mut written = 0u32;
+        let ok = unsafe {
+            DeviceIoControl(
+                dst_file.as_raw_handle(),
+                FSCTL_SET_REPARSE_POINT,
+                buffer.as_ptr().cast(),
+                bytes_returned,
+                ptr::null_mut(),
+                0,
+                &mut written,
+                ptr::null_mut(),
+            )
+        };
+        drop(dst_file);
+        if ok == 0 {
+            let err = io::Error::last_os_error();
+            Self::remove_reparse_placeholder(dst, is_dir);
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    fn remove_reparse_placeholder(dst: &Path, is_dir: bool) {
+        if is_dir {
+            let _ = std::fs::remove_dir(dst);
+        } else {
+            let _ = std::fs::remove_file(dst);
+        }
+    }
+
     pub(super) async fn impl_xattrs(
         &self,
         path: &Path,
@@ -1591,10 +1683,7 @@ impl Direct {
         created: Option<i128>,
         follow: bool,
     ) -> Result<(), io::Error> {
-        use std::{
-            fs::{FileTimes, OpenOptions as StdOpenOptions},
-            os::windows::fs::{FileTimesExt, OpenOptionsExt},
-        };
+        use std::{fs::FileTimes, os::windows::fs::FileTimesExt};
         use windows_sys::Win32::Storage::FileSystem::FILE_WRITE_ATTRIBUTES;
 
         let mut opts = StdOpenOptions::new();

@@ -1,5 +1,3 @@
-#![deny(warnings)]
-
 #[cfg(unix)]
 use std::collections::HashMap;
 use std::{io, path::Path};
@@ -656,6 +654,32 @@ async fn direct_symlink_metadata_and_read_link() {
     assert_eq!(metadata.file_type, FileType::Symlink);
     assert_eq!(
         direct.read_link(typed(&link)).await.unwrap().as_str(),
+        target.to_str().unwrap()
+    );
+}
+
+#[tokio::test]
+async fn direct_copy_symlink_preserves_link() {
+    let direct = Direct::default();
+    let dir = tempdir().unwrap();
+    let target = dir.path().join("target.txt");
+    let link = dir.path().join("link.txt");
+    let copied = dir.path().join("copied.txt");
+    tokio::fs::write(&target, "hello").await.unwrap();
+
+    direct
+        .symlink(typed_str(""), typed(&target), typed(&link))
+        .await
+        .unwrap();
+    direct
+        .copy(typed(&link), typed(&copied), false)
+        .await
+        .unwrap();
+
+    let metadata = direct.symlink_metadata(typed(&copied)).await.unwrap();
+    assert_eq!(metadata.file_type, FileType::Symlink);
+    assert_eq!(
+        direct.read_link(typed(&copied)).await.unwrap().as_str(),
         target.to_str().unwrap()
     );
 }

@@ -1,4 +1,3 @@
-#![deny(warnings)]
 #![cfg(unix)]
 
 use dolang_vfs::extension::{ExtContext, ExtOpaque, ExtResource, VfsExtension, vfs_extension};

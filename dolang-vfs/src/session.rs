@@ -27,7 +27,17 @@ impl Query {
         Ok(Self {
             env: std::env::vars_os()
                 .filter_map(|(name, value)| {
-                    Some((name.into_string().ok()?, value.into_string().ok()?))
+                    let name = name.into_string().ok()?;
+                    // Windows environment variable names are case-insensitive
+                    // and the OS preserves whatever casing a variable
+                    // happened to be created with, which can vary depending
+                    // on how it was inherited or last set (e.g. `Path` vs.
+                    // `PATH`). Normalize to uppercase so lookups against a
+                    // captured `Query::env` don't depend on that incidental
+                    // casing.
+                    #[cfg(windows)]
+                    let name = name.to_uppercase();
+                    Some((name, value.into_string().ok()?))
                 })
                 .collect(),
             cwd: typed_path(std::env::current_dir()?)?,
