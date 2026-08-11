@@ -1471,6 +1471,11 @@ impl Direct {
         .unwrap_or_else(|_| Err(io::Error::other("failed to join ownership update task")))
     }
 
+    pub(super) async fn impl_copy_symlink(src: &Path, dst: &Path) -> io::Result<()> {
+        let target = fs::read_link(src).await?;
+        Self::impl_symlink(Path::new(""), &target, dst).await
+    }
+
     pub(super) async fn impl_symlink(_cwd: &Path, src: &Path, dst: &Path) -> io::Result<()> {
         fs::symlink(src, dst).await
     }

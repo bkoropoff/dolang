@@ -8,6 +8,7 @@ import agent
     - open
     - copy
     - create_dir
+    - symlink
     - Path
 
 #[agent.test]
@@ -88,6 +89,22 @@ def path_copy_method()
   open $dst r do |f|
     let contents = f.read()
     assert_eq $contents "copied with method"
+
+#[agent.test]
+def copy_preserves_symlink()
+  let target = Path "target.txt"
+  let link = Path "link.txt"
+  let copied = Path "copied.txt"
+
+  open $target w do |f|
+    f.write "symlink target"
+
+  symlink $target $link
+  copy $link $copied
+
+  let meta = copied.metadata resolve: :LINK:
+  assert_eq $meta.type :SYMLINK:
+  assert_eq $copied.read_link() $target
 
 #[agent.test]
 def copy_to_non_existent_directory_fails()

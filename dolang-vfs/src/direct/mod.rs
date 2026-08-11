@@ -746,9 +746,7 @@ impl Direct {
     }
 
     async fn copy_symlink(src: &Path, dst: &Path) -> io::Result<()> {
-        let target = fs::read_link(src).await?;
-        // FIXME: this won't work on Windows
-        Self::impl_symlink(Path::new(""), &target, dst).await
+        Self::impl_copy_symlink(src, dst).await
     }
 
     async fn copy_local(from: &Path, to: &Path, all: bool) -> io::Result<()> {
