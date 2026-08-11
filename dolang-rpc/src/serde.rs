@@ -2,7 +2,7 @@
 use std::os::fd::IntoRawFd;
 #[cfg(windows)]
 use std::os::windows::io::IntoRawHandle;
-use std::{cell::RefCell, fmt, marker::PhantomData, ptr};
+use std::{cell::RefCell, fmt, io, marker::PhantomData, ptr};
 
 use ::serde::{
     Deserialize, Serialize,
@@ -24,8 +24,10 @@ pub(crate) fn encode_payload<'handle, T: Serialize, H: PutHandle<'handle>>(
     value: &'handle T,
     handles: &mut H,
 ) -> Result<Bytes, RpcError> {
-    let buffer = to_extend(value, handles, Vec::new())
-        .map_err(|error| RpcError::Serialize(error.to_string()))?;
+    let buffer = to_extend(value, handles, Vec::new()).map_err(|error| match error {
+        Error::UnsupportedCapability => RpcError::UnsupportedCapability,
+        error => RpcError::Serialize(error.to_string()),
+    })?;
     Ok(buffer.into())
 }
 
@@ -48,6 +50,9 @@ pub(crate) enum Error {
     Postcard(#[from] postcard::Error),
     #[error("{0}")]
     Message(String),
+    /// A handle was serialized over a transport that cannot carry one.
+    #[error("transport does not support direct handles")]
+    UnsupportedCapability,
 }
 
 impl ser::Error for Error {
@@ -261,11 +266,13 @@ where
             // by identity. It passes a live `HandleRef` whose referent belongs
             // to the message borrowed for `'frame`.
             let handle = unsafe { (*(raw as *const HandleRef<'frame>)).0 };
-            let value = self
-                .frame
-                .borrow_mut()
-                .put_handle(handle)
-                .map_err(|err| Error::Message(err.to_string()))?;
+            let value = self.frame.borrow_mut().put_handle(handle).map_err(|err| {
+                if err.kind() == io::ErrorKind::Unsupported {
+                    Error::UnsupportedCapability
+                } else {
+                    Error::Message(err.to_string())
+                }
+            })?;
             #[cfg(unix)]
             return self.inner.serialize_u32(value).map_err(convert_ser_error);
             #[cfg(all(windows, target_pointer_width = "32"))]

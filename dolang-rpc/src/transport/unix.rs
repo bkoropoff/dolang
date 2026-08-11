@@ -60,10 +60,12 @@ impl<'handle> EncodeHandles<'handle> {
 
 impl<'handle> PutHandle<'handle> for EncodeHandles<'handle> {
     fn put_handle(&mut self, handle: &'handle dyn ErasedHandle) -> io::Result<u32> {
-        assert!(
-            self.supported,
-            "generic byte-stream transport does not support handles"
-        );
+        if !self.supported {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "generic byte-stream transport does not support handle attachments",
+            ));
+        }
         if self.handles.len() == self.max_handles {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -674,5 +676,17 @@ mod tests {
         let (received_right, received_left) = tokio::join!(left, right);
         assert!(received_right.iter().all(|byte| *byte == b'r'));
         assert!(received_left.iter().all(|byte| *byte == b'l'));
+    }
+
+    #[test]
+    fn put_handle_on_generic_transport_reports_unsupported_instead_of_panicking() {
+        let (stream, _) = tokio::io::duplex(64);
+        let (sender, _) = super::super::generic_duplex(stream);
+        let any = super::super::AnySender::Generic(sender);
+        let mut encode = EncodeHandles::new(&any, 1);
+        let (fd, _) = std::os::unix::net::UnixStream::pair().unwrap();
+        let handle = crate::handle::OsHandle::new(OwnedFd::from(fd));
+        let err = encode.put_handle(&handle).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
     }
 }

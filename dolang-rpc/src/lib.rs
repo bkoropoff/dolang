@@ -172,9 +172,10 @@ pub enum Error {
     Cancelled,
     /// A requested transport capability is unavailable.
     ///
-    /// This variant is reserved for capability-reporting APIs; direct handle
-    /// serialization on an unsupported generic transport currently panics
-    /// instead.
+    /// Returned when an [`OsHandle`](crate::handle::OsHandle) is serialized
+    /// over a session whose transport cannot carry handle attachments (a
+    /// generic byte-stream transport rather than a Unix-domain socket or a
+    /// Windows named pipe).
     #[error("transport does not support direct handles")]
     UnsupportedCapability,
 }
