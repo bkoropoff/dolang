@@ -1,9 +1,11 @@
 # Regression test for issue #2: \x escapes must be rejected in here-docs
 # rather than panicking (previously hit `unreachable!()` in
-# `Parser::parse_heredoc`).
+# `Parser::parse_heredoc`). Non-raw here-docs otherwise support the full
+# escape repertoire of quoted strings, but \x byte escapes remain
+# binary-string-only.
 let s = |
   "\x01"
-# error: \x escapes are not valid in here-docs
+# error: \x escapes are only valid in binary strings
 #   --> heredoc_bad_escape_byte.dol:LL:LL
 #    |
 # LL |   "\x01"
