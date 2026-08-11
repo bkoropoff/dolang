@@ -72,6 +72,18 @@ doc = |
   foo \$bar \\
 assert_eq $doc "foo\$bar-\\\nfoo \$bar \\\n"
 
+# Non-raw here-docs support the full escape repertoire of quoted strings
+doc = |-
+  a\tb\nc\"d\0e
+assert_eq $doc "a\tb\nc\"d\0e"
+
+# An escape as the very first character of a here-doc body is recognized
+# correctly (regression test for a lexer mode-switch timing bug where the
+# first byte of the body was classified under the ambient ~pre-switch mode)
+doc = |-
+  \tfoo
+assert_eq $doc "\tfoo"
+
 # Raw here docs: $ and \ are literal
 doc = r|
   echo $name

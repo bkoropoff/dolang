@@ -1234,13 +1234,23 @@ impl<'a> Parser<'a> {
                             Some(token!(Sym, span)) => exprs.push(Expr::Literal(
                                 span.before_left_char() | span.after_right_char(),
                             )),
-                            Some(token!(Escape('$'), span)) if !raw => {
-                                exprs.push(Expr::Escape('$', span))
+                            Some(token!(Escape(c), span)) if !raw => {
+                                exprs.push(Expr::Escape(c, span))
                             }
-                            Some(token!(Escape('\\'), span)) if !raw => {
-                                exprs.push(Expr::Escape('\\', span))
+                            Some(token @ token!(Escape(_), _)) => {
+                                return Err(this.syntax_error(
+                                    scope,
+                                    Some(token),
+                                    "escape sequences are not valid in raw here-docs",
+                                ));
                             }
-                            Some(token!(Escape(_), span)) => exprs.push(Expr::Literal(span)),
+                            Some(token @ token!(EscapeByte(..), _)) => {
+                                return Err(this.syntax_error(
+                                    scope,
+                                    Some(token),
+                                    "\\x escapes are only valid in binary strings",
+                                ));
+                            }
                             Some(token!(Dollar, span)) => exprs.push(Expr::Literal(span)),
                             _ => unreachable!(),
                         },
