@@ -10,7 +10,7 @@ use std::{
     ptr,
 };
 
-use dolang_vfs::extension::{ExtContext, ExtOsHandle, InvalidHandle};
+use dolang_vfs::extension::{ExtContext, ExtGuard, ExtOsHandle, InvalidHandle};
 use dolang_vfs::{
     error::{Error, ErrorKind},
     target::OperatingSystem,
@@ -481,14 +481,55 @@ fn delete_value(handle: HKEY, name: Option<&str>) -> Result<(), Error> {
     Ok(())
 }
 
-/// Runs `f` while holding the key's cursor lock for the whole call, so
-/// concurrent operations on the same key never interleave.
-fn with_handle<R>(key: &Key, f: impl FnOnce(HKEY) -> R) -> R {
-    let guard = key
-        .0
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    f(*guard)
+/// Wraps a value so it can cross a [`tokio::task::spawn_blocking`] boundary
+/// even when it isn't `Send` — Win32 handles (`HKEY` and friends) are opaque
+/// pointer types Rust doesn't know are safe to move between threads, even
+/// though Microsoft documents them as such.
+struct SendValue<T>(T);
+// SAFETY: only used to ferry Win32 handle values (and results built from
+// them) across a `spawn_blocking` call; those are documented as usable from
+// any thread.
+unsafe impl<T> Send for SendValue<T> {}
+
+impl<T> SendValue<T> {
+    /// Consumes the wrapper, forcing a whole-value closure capture rather
+    /// than a disjoint capture of the (non-`Send`) inner field — see the
+    /// call site in `OpenRoot` below.
+    fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+/// Runs `f` on the blocking thread pool, since every registry API this
+/// backend calls is a synchronous Win32 call with no async equivalent —
+/// running it inline on the async task would block the executor thread.
+async fn blocking<T: 'static>(
+    f: impl FnOnce() -> Result<T, Error> + Send + 'static,
+) -> Result<T, Error> {
+    match tokio::task::spawn_blocking(move || SendValue(f())).await {
+        Ok(SendValue(result)) => result,
+        Err(_) => Err(Error::new(
+            ErrorKind::Other,
+            "registry operation task panicked",
+        )),
+    }
+}
+
+/// Runs `f` on the blocking thread pool while holding the key's cursor lock
+/// for the whole call, so concurrent operations on the same key never
+/// interleave.
+async fn with_handle<T: 'static>(
+    key: ExtGuard<Key>,
+    f: impl FnOnce(HKEY) -> Result<T, Error> + Send + 'static,
+) -> Result<T, Error> {
+    blocking(move || {
+        let guard = key
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        f(*guard)
+    })
+    .await
 }
 
 /// Wraps a freshly-opened `HKEY` into the appropriate [`KeyHandle`]: a
@@ -509,8 +550,15 @@ pub(crate) async fn handle(
 ) -> Result<WinRegResponse, Error> {
     match request {
         WinRegRequest::OpenRoot { root, view, access } => {
+            // The raw `HKEY` predefined-root constant isn't `Send`, so it
+            // can't be held live across the `.await` below (which would
+            // make this whole `handle` future non-`Send`). Recompute it
+            // afterward instead — `predefined_hkey` is a pure lookup.
+            let handle = {
+                let predefined = SendValue(predefined_hkey(root));
+                blocking(move || open_key(predefined.into_inner(), "", view, access)).await?
+            };
             let predefined = predefined_hkey(root);
-            let handle = open_key(predefined, "", view, access)?;
             // `RegOpenKeyExW` on a predefined root with an empty subkey
             // hands back the same `HKEY_*` pseudo-handle constant rather
             // than a fresh kernel object — those constants aren't real NT
@@ -536,7 +584,7 @@ pub(crate) async fn handle(
             access,
         } => {
             let guard = ctx.acquire::<Key>(parent).map_err(invalid_handle)?;
-            let handle = with_handle(&guard, |h| open_key(h, &subpath, view, access))?;
+            let handle = with_handle(guard, move |h| open_key(h, &subpath, view, access)).await?;
             // Also always use an opaque handle if `ACCESS_SYSTEM_SECURITY`
             // was requested so a later SACL update remains on this backend,
             // whose token was used to open the handle and can enable the
@@ -556,7 +604,7 @@ pub(crate) async fn handle(
             access,
         } => {
             let guard = ctx.acquire::<Key>(parent).map_err(invalid_handle)?;
-            let handle = with_handle(&guard, |h| create_key(h, &subpath, view, access))?;
+            let handle = with_handle(guard, move |h| create_key(h, &subpath, view, access)).await?;
             if access.0 & ACCESS_SYSTEM_SECURITY != 0 {
                 Ok(WinRegResponse::Key(KeyHandle::Opaque(
                     ctx.register(Key::new(handle)),
@@ -572,6 +620,9 @@ pub(crate) async fn handle(
             )))
         }
         WinRegRequest::CloseKey { key } => {
+            // Unlike `dolang-vfs-winscm`'s SC handles, `RegCloseKey` is
+            // local object-manager bookkeeping with no RPC involved, so
+            // there's no need to defer it to the blocking pool here.
             ctx.unregister::<Key>(key).map_err(invalid_handle)?;
             Ok(WinRegResponse::Closed)
         }
@@ -583,7 +634,7 @@ pub(crate) async fn handle(
             ignore,
         } => {
             let guard = ctx.acquire::<Key>(parent).map_err(invalid_handle)?;
-            let result = with_handle(&guard, |h| delete_key(h, &subpath, view, all));
+            let result = with_handle(guard, move |h| delete_key(h, &subpath, view, all)).await;
             match result {
                 Err(error) if ignore && error.kind() == ErrorKind::NotFound => {}
                 result => result?,
@@ -592,58 +643,56 @@ pub(crate) async fn handle(
         }
         WinRegRequest::EnumSubkey { key, index } => {
             let guard = ctx.acquire::<Key>(key).map_err(invalid_handle)?;
-            Ok(WinRegResponse::Name(with_handle(&guard, |h| {
-                enum_subkey(h, index)
-            })?))
+            Ok(WinRegResponse::Name(
+                with_handle(guard, move |h| enum_subkey(h, index)).await?,
+            ))
         }
         WinRegRequest::EnumAllSubkeys { key } => {
             let guard = ctx.acquire::<Key>(key).map_err(invalid_handle)?;
-            Ok(WinRegResponse::Subkeys(with_handle(
-                &guard,
-                enum_all_subkeys,
-            )?))
+            Ok(WinRegResponse::Subkeys(
+                with_handle(guard, enum_all_subkeys).await?,
+            ))
         }
         WinRegRequest::EnumValue { key, index } => {
             let guard = ctx.acquire::<Key>(key).map_err(invalid_handle)?;
-            Ok(WinRegResponse::Name(with_handle(&guard, |h| {
-                enum_value(h, index)
-            })?))
+            Ok(WinRegResponse::Name(
+                with_handle(guard, move |h| enum_value(h, index)).await?,
+            ))
         }
         WinRegRequest::EnumAllValues { key } => {
             let guard = ctx.acquire::<Key>(key).map_err(invalid_handle)?;
-            Ok(WinRegResponse::Values(with_handle(
-                &guard,
-                enum_all_values,
-            )?))
+            Ok(WinRegResponse::Values(
+                with_handle(guard, enum_all_values).await?,
+            ))
         }
         WinRegRequest::GetValue { key, name } => {
             let guard = ctx.acquire::<Key>(key).map_err(invalid_handle)?;
-            Ok(WinRegResponse::Value(with_handle(&guard, |h| {
-                get_value(h, name.as_deref())
-            })?))
+            Ok(WinRegResponse::Value(
+                with_handle(guard, move |h| get_value(h, name.as_deref())).await?,
+            ))
         }
         WinRegRequest::SetValue { key, name, value } => {
             let guard = ctx.acquire::<Key>(key).map_err(invalid_handle)?;
-            with_handle(&guard, |h| set_value(h, name.as_deref(), &value))?;
+            with_handle(guard, move |h| set_value(h, name.as_deref(), &value)).await?;
             Ok(WinRegResponse::Ack)
         }
         WinRegRequest::DeleteValue { key, name } => {
             let guard = ctx.acquire::<Key>(key).map_err(invalid_handle)?;
-            with_handle(&guard, |h| delete_value(h, name.as_deref()))?;
+            with_handle(guard, move |h| delete_value(h, name.as_deref())).await?;
             Ok(WinRegResponse::Ack)
         }
         WinRegRequest::GetSecDesc { key, mask } => {
             let guard = ctx.acquire::<Key>(key).map_err(invalid_handle)?;
-            Ok(WinRegResponse::SecDesc(with_handle(&guard, |h| {
-                sec_desc(h, mask)
-            })?))
+            Ok(WinRegResponse::SecDesc(
+                with_handle(guard, move |h| sec_desc(h, mask)).await?,
+            ))
         }
         WinRegRequest::SetSecDesc {
             key,
             sec_desc: descriptor,
         } => {
             let guard = ctx.acquire::<Key>(key).map_err(invalid_handle)?;
-            with_handle(&guard, |h| set_sec_desc(h, &descriptor))?;
+            with_handle(guard, move |h| set_sec_desc(h, &descriptor)).await?;
             Ok(WinRegResponse::Ack)
         }
     }

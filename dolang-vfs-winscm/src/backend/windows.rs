@@ -9,7 +9,7 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 
-use dolang_vfs::extension::{ExtContext, InvalidHandle};
+use dolang_vfs::extension::{ExtContext, ExtGuard, InvalidHandle};
 use dolang_vfs::{
     error::{Error, ErrorKind},
     target::OperatingSystem,
@@ -775,18 +775,69 @@ fn invalid_handle(_: InvalidHandle) -> Error {
     Error::new(ErrorKind::InvalidInput, "invalid SCM handle")
 }
 
+/// Wraps a value so it can cross a [`tokio::task::spawn_blocking`] boundary
+/// even when it isn't `Send` — Win32 handles (`SC_HANDLE` and friends) are
+/// opaque pointer types Rust doesn't know are safe to move between threads,
+/// even though Microsoft documents them as such.
+struct SendValue<T>(T);
+// SAFETY: only used to ferry Win32 handle values (and results built from
+// them) across a `spawn_blocking` call; those are documented as usable from
+// any thread.
+unsafe impl<T> Send for SendValue<T> {}
+
+/// Runs `f` on the blocking thread pool, since every SCM API this backend
+/// calls is a synchronous Win32 call with no async equivalent — running it
+/// inline on the async task would block the executor thread. This also
+/// covers closing a handle: unlike a registry `HKEY` close, closing an SC
+/// handle can involve an RPC to the services.exe SCM process, not just
+/// local object-manager bookkeeping.
+async fn blocking<T: 'static>(
+    f: impl FnOnce() -> Result<T, Error> + Send + 'static,
+) -> Result<T, Error> {
+    match tokio::task::spawn_blocking(move || SendValue(f())).await {
+        Ok(SendValue(result)) => result,
+        Err(_) => Err(Error::new(ErrorKind::Other, "SCM operation task panicked")),
+    }
+}
+
+/// Runs `f` on the blocking thread pool with the SC manager handle.
+async fn with_manager<T: 'static>(
+    manager: ExtGuard<ScManager>,
+    f: impl FnOnce(SC_HANDLE) -> Result<T, Error> + Send + 'static,
+) -> Result<T, Error> {
+    blocking(move || f(manager.handle())).await
+}
+
+/// Runs `f` on the blocking thread pool with the service handle.
+async fn with_service<T: 'static>(
+    service: ExtGuard<Service>,
+    f: impl FnOnce(SC_HANDLE) -> Result<T, Error> + Send + 'static,
+) -> Result<T, Error> {
+    blocking(move || f(service.handle())).await
+}
+
 pub(crate) async fn handle(
     ctx: &mut ExtContext<'_>,
     request: WinScmRequest,
 ) -> Result<WinScmResponse, Error> {
     match request {
         WinScmRequest::OpenManager { access } => {
-            let handle = open_manager(access)?;
-            Ok(WinScmResponse::Manager(ctx.register(ScManager(handle))))
+            let handle = blocking(move || open_manager(access)).await?;
+            Ok(WinScmResponse::Manager(
+                ctx.register(ScManager::new(handle)),
+            ))
         }
         WinScmRequest::CloseManager { manager } => {
-            ctx.unregister::<ScManager>(manager)
-                .map_err(invalid_handle)?;
+            if let Some(manager) = ctx
+                .unregister::<ScManager>(manager)
+                .map_err(invalid_handle)?
+            {
+                // Closing an SC handle can involve an RPC to services.exe;
+                // `close` runs it on the blocking pool and awaits
+                // completion, so this request doesn't return until the
+                // close has actually finished.
+                manager.close().await?;
+            }
             Ok(WinScmResponse::Closed)
         }
         WinScmRequest::OpenService {
@@ -795,14 +846,17 @@ pub(crate) async fn handle(
             access,
         } => {
             let guard = ctx.acquire::<ScManager>(manager).map_err(invalid_handle)?;
-            let handle = open_service(guard.0, &name, access)?;
-            let reactor =
-                reactor().map_err(|error| Error::new(ErrorKind::Other, error.to_string()))?;
-            Ok(WinScmResponse::Svc(ctx.register(Service {
-                handle,
-                reactor,
-                name,
-            })))
+            let name2 = name.clone();
+            let (handle, reactor) = with_manager(guard, move |m| {
+                let handle = open_service(m, &name2, access)?;
+                let reactor =
+                    reactor().map_err(|error| Error::new(ErrorKind::Other, error.to_string()))?;
+                Ok((handle, reactor))
+            })
+            .await?;
+            Ok(WinScmResponse::Svc(
+                ctx.register(Service::new(handle, reactor, name)),
+            ))
         }
         WinScmRequest::CreateService {
             manager,
@@ -816,24 +870,27 @@ pub(crate) async fn handle(
             access,
         } => {
             let guard = ctx.acquire::<ScManager>(manager).map_err(invalid_handle)?;
-            let handle = create_service(
-                guard.0,
-                &name,
-                display_name.as_deref(),
-                service_type.0,
-                start_type.0,
-                error_control.0,
-                binary_path.as_deref(),
-                &options,
-                access,
-            )?;
-            let reactor =
-                reactor().map_err(|error| Error::new(ErrorKind::Other, error.to_string()))?;
-            Ok(WinScmResponse::Svc(ctx.register(Service {
-                handle,
-                reactor,
-                name,
-            })))
+            let name2 = name.clone();
+            let (handle, reactor) = with_manager(guard, move |m| {
+                let handle = create_service(
+                    m,
+                    &name2,
+                    display_name.as_deref(),
+                    service_type.0,
+                    start_type.0,
+                    error_control.0,
+                    binary_path.as_deref(),
+                    &options,
+                    access,
+                )?;
+                let reactor =
+                    reactor().map_err(|error| Error::new(ErrorKind::Other, error.to_string()))?;
+                Ok((handle, reactor))
+            })
+            .await?;
+            Ok(WinScmResponse::Svc(
+                ctx.register(Service::new(handle, reactor, name)),
+            ))
         }
         WinScmRequest::EnumServices {
             manager,
@@ -841,45 +898,56 @@ pub(crate) async fn handle(
             state_filter,
         } => {
             let guard = ctx.acquire::<ScManager>(manager).map_err(invalid_handle)?;
-            let services = enum_services(guard.0, service_type.0, state_filter.0)?;
+            let services = with_manager(guard, move |m| {
+                enum_services(m, service_type.0, state_filter.0)
+            })
+            .await?;
             Ok(WinScmResponse::Services(services))
         }
         WinScmRequest::DeleteService { service } => {
             let guard = ctx.acquire::<Service>(service).map_err(invalid_handle)?;
-            delete_service(guard.handle)?;
+            with_service(guard, delete_service).await?;
             Ok(WinScmResponse::Deleted)
         }
         WinScmRequest::CloseService { service } => {
-            ctx.unregister::<Service>(service).map_err(invalid_handle)?;
+            if let Some(service) = ctx.unregister::<Service>(service).map_err(invalid_handle)? {
+                // Closing an SC handle can involve an RPC to services.exe;
+                // `close` runs it on the blocking pool and awaits
+                // completion, so this request doesn't return until the
+                // close has actually finished.
+                service.close().await?;
+            }
             Ok(WinScmResponse::Closed)
         }
         WinScmRequest::StartService { service, args } => {
             let guard = ctx.acquire::<Service>(service).map_err(invalid_handle)?;
-            start_service(guard.handle, &args)?;
+            with_service(guard, move |h| start_service(h, &args)).await?;
             Ok(WinScmResponse::Ack)
         }
         WinScmRequest::ControlService { service, control } => {
             let guard = ctx.acquire::<Service>(service).map_err(invalid_handle)?;
-            let status = control_service(guard.handle, control.0)?;
+            let status = with_service(guard, move |h| control_service(h, control.0)).await?;
             Ok(WinScmResponse::Status(status))
         }
         WinScmRequest::QueryStatus { service } => {
             let guard = ctx.acquire::<Service>(service).map_err(invalid_handle)?;
-            let status = query_status(guard.handle)?;
+            let status = with_service(guard, query_status).await?;
             Ok(WinScmResponse::Status(status))
         }
         WinScmRequest::QueryConfig { service } => {
             let guard = ctx.acquire::<Service>(service).map_err(invalid_handle)?;
-            Ok(WinScmResponse::Config(query_config(guard.handle)?))
+            Ok(WinScmResponse::Config(
+                with_service(guard, query_config).await?,
+            ))
         }
         WinScmRequest::ChangeConfig { service, update } => {
             let guard = ctx.acquire::<Service>(service).map_err(invalid_handle)?;
-            change_config(guard.handle, &update)?;
+            with_service(guard, move |h| change_config(h, &update)).await?;
             Ok(WinScmResponse::Ack)
         }
         WinScmRequest::GetSecDesc { service, mask } => {
             let guard = ctx.acquire::<Service>(service).map_err(invalid_handle)?;
-            let descriptor = sec_desc(guard.handle, mask)?;
+            let descriptor = with_service(guard, move |h| sec_desc(h, mask)).await?;
             Ok(WinScmResponse::SecDesc(descriptor))
         }
         WinScmRequest::SetSecDesc {
@@ -887,7 +955,7 @@ pub(crate) async fn handle(
             sec_desc: descriptor,
         } => {
             let guard = ctx.acquire::<Service>(service).map_err(invalid_handle)?;
-            set_sec_desc(guard.handle, &descriptor)?;
+            with_service(guard, move |h| set_sec_desc(h, &descriptor)).await?;
             Ok(WinScmResponse::Ack)
         }
         WinScmRequest::WaitForStatusChange { service, mask } => {
