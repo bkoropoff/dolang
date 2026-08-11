@@ -44,13 +44,8 @@ pub struct Builder {
 impl Builder {
     /// Starts a builder for an application-protocol name and supported versions.
     ///
-    /// `versions` must be nonempty, unique, and in ascending order. The
-    /// builder preserves the supplied order; violating this requirement can
-    /// prevent negotiation from selecting the highest mutually supported
-    /// version.
+    /// `versions` must be nonempty and unique.
     pub fn new(name: &str, versions: &[u16]) -> Self {
-        // FIXME: Validate the documented nonempty, unique, ascending input
-        // rather than deferring a malformed list's consequences to handshake.
         Self {
             name: name.to_owned(),
             versions: versions.to_vec(),
