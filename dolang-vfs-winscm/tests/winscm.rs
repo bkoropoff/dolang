@@ -293,14 +293,19 @@ mod live {
 
         // The scratch service shows up in an enumeration filtered to Win32
         // services in any state, with a status matching a direct query.
-        let services = manager
+        let mut services = manager
             .enumerate_services(ServiceType::WIN32, ServiceStateFilter::ALL)
             .await
             .unwrap();
-        let entry = services
-            .iter()
-            .find(|entry| entry.name == name)
-            .unwrap_or_else(|| panic!("scratch service {name} missing from enumeration"));
+        let mut found = None;
+        while let Some(entry) = services.next_entry().await.unwrap() {
+            if entry.name == name {
+                found = Some(entry);
+                break;
+            }
+        }
+        let entry =
+            found.unwrap_or_else(|| panic!("scratch service {name} missing from enumeration"));
         assert_eq!(entry.status.current_state, ServiceState::STOPPED);
 
         // Security descriptor round trip: fetch the owner for query coverage,

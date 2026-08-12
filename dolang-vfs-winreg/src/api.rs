@@ -14,6 +14,7 @@ use dolang_vfs::{
     error::{Error, ErrorKind},
 };
 use dolang_winterop::security::SecDesc;
+use std::sync::{Arc, Weak};
 
 use crate::{
     value::Value,
@@ -22,6 +23,8 @@ use crate::{
         WinRegResponse,
     },
 };
+
+const PAGE_SIZE: u32 = 64;
 
 /// A response variant didn't match what the request kind is documented to
 /// return.
@@ -53,7 +56,7 @@ async fn from_response(
     match response {
         WinRegResponse::Key(KeyHandle::Opaque(handle)) => Ok(Key {
             vfs: vfs.clone(),
-            handle,
+            handle: Arc::new(KeyState::new(vfs.clone(), handle)),
         }),
         WinRegResponse::Key(KeyHandle::Native(os_handle)) => {
             let local = AnyVfs::Direct(Direct::default());
@@ -61,7 +64,10 @@ async fn from_response(
                 .call_extension::<WinRegExt>(WinRegRequest::AdoptNative { handle: os_handle })
                 .await??;
             match adopted {
-                WinRegResponse::Key(KeyHandle::Opaque(handle)) => Ok(Key { vfs: local, handle }),
+                WinRegResponse::Key(KeyHandle::Opaque(handle)) => Ok(Key {
+                    vfs: local.clone(),
+                    handle: Arc::new(KeyState::new(local, handle)),
+                }),
                 _ => Err(unexpected("AdoptNative")),
             }
         }
@@ -79,7 +85,48 @@ async fn from_response(
 /// method after the bootstrap call accepts a `vfs` argument at all.
 pub struct Key {
     vfs: AnyVfs,
-    handle: ExtOpaque<KeyMarker>,
+    handle: Arc<KeyState>,
+}
+
+struct KeyState {
+    vfs: AnyVfs,
+    opaque: Option<ExtOpaque<KeyMarker>>,
+}
+
+impl KeyState {
+    fn new(vfs: AnyVfs, opaque: ExtOpaque<KeyMarker>) -> Self {
+        Self {
+            vfs,
+            opaque: Some(opaque),
+        }
+    }
+
+    fn opaque(&self) -> Result<ExtOpaque<KeyMarker>, Error> {
+        self.opaque
+            .clone()
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "registry key is closed"))
+    }
+
+    fn take_opaque(&mut self) -> ExtOpaque<KeyMarker> {
+        self.opaque.take().expect("live key state has no opaque")
+    }
+}
+
+impl Drop for KeyState {
+    fn drop(&mut self) {
+        let Some(key) = self.opaque.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let vfs = self.vfs.clone();
+        runtime.spawn(async move {
+            let _ = vfs
+                .call_extension::<WinRegExt>(WinRegRequest::CloseKey { key })
+                .await;
+        });
+    }
 }
 
 impl Key {
@@ -101,7 +148,7 @@ impl Key {
         let response = self
             .vfs
             .call_extension::<WinRegExt>(WinRegRequest::OpenKey {
-                parent: self.handle.clone(),
+                parent: self.handle.opaque()?,
                 subpath: subpath.to_string(),
                 view,
                 access,
@@ -116,7 +163,7 @@ impl Key {
         let response = self
             .vfs
             .call_extension::<WinRegExt>(WinRegRequest::CreateKey {
-                parent: self.handle.clone(),
+                parent: self.handle.opaque()?,
                 subpath: subpath.to_string(),
                 view,
                 access,
@@ -137,7 +184,7 @@ impl Key {
         let response = self
             .vfs
             .call_extension::<WinRegExt>(WinRegRequest::DeleteKey {
-                parent: self.handle.clone(),
+                parent: self.handle.opaque()?,
                 subpath: subpath.to_string(),
                 view,
                 all,
@@ -157,9 +204,17 @@ impl Key {
     /// object table is torn down) — but lets a well-behaved caller observe
     /// close failures immediately.
     pub async fn close(self) -> Result<(), Error> {
+        let mut state = Arc::try_unwrap(self.handle).map_err(|handle| {
+            drop(handle);
+            Error::new(
+                ErrorKind::ResourceBusy,
+                "registry key has an operation in progress",
+            )
+        })?;
+        let key = state.take_opaque();
         let response = self
             .vfs
-            .call_extension::<WinRegExt>(WinRegRequest::CloseKey { key: self.handle })
+            .call_extension::<WinRegExt>(WinRegRequest::CloseKey { key })
             .await??;
         match response {
             WinRegResponse::Closed => Ok(()),
@@ -172,7 +227,7 @@ impl Key {
         let response = self
             .vfs
             .call_extension::<WinRegExt>(WinRegRequest::EnumSubkey {
-                key: self.handle.clone(),
+                key: self.handle.opaque()?,
                 index,
             })
             .await??;
@@ -182,18 +237,24 @@ impl Key {
         }
     }
 
-    /// Fetches every subkey name under this key in one round trip, unlike
-    /// calling [`Key::enum_subkey`] for every index.
-    pub async fn subkeys(&self) -> Result<Vec<String>, Error> {
+    /// Opens a forward enumeration of this key's subkeys.
+    pub async fn subkeys(&self) -> Result<SubKeys, Error> {
         let response = self
             .vfs
-            .call_extension::<WinRegExt>(WinRegRequest::EnumAllSubkeys {
-                key: self.handle.clone(),
+            .call_extension::<WinRegExt>(WinRegRequest::OpenSubkeys {
+                key: self.handle.opaque()?,
             })
             .await??;
         match response {
-            WinRegResponse::Subkeys(names) => Ok(names),
-            _ => Err(unexpected("EnumAllSubkeys")),
+            WinRegResponse::EnumerationLen(len) => Ok(SubKeys {
+                vfs: self.vfs.clone(),
+                key: Arc::downgrade(&self.handle),
+                len,
+                index: 0,
+                entries: std::collections::VecDeque::new(),
+                done: false,
+            }),
+            _ => Err(unexpected("OpenSubkeys")),
         }
     }
 
@@ -202,7 +263,7 @@ impl Key {
         let response = self
             .vfs
             .call_extension::<WinRegExt>(WinRegRequest::EnumValue {
-                key: self.handle.clone(),
+                key: self.handle.opaque()?,
                 index,
             })
             .await??;
@@ -212,19 +273,24 @@ impl Key {
         }
     }
 
-    /// Fetches every value under this key (name, kind, and data) in one
-    /// round trip, unlike calling [`Key::enum_value`] + [`Key::get_value`]
-    /// for every index.
-    pub async fn values(&self) -> Result<Vec<(String, Value)>, Error> {
+    /// Opens a forward enumeration of this key's values.
+    pub async fn values(&self) -> Result<Values, Error> {
         let response = self
             .vfs
-            .call_extension::<WinRegExt>(WinRegRequest::EnumAllValues {
-                key: self.handle.clone(),
+            .call_extension::<WinRegExt>(WinRegRequest::OpenValues {
+                key: self.handle.opaque()?,
             })
             .await??;
         match response {
-            WinRegResponse::Values(values) => Ok(values),
-            _ => Err(unexpected("EnumAllValues")),
+            WinRegResponse::EnumerationLen(len) => Ok(Values {
+                vfs: self.vfs.clone(),
+                key: Arc::downgrade(&self.handle),
+                len,
+                index: 0,
+                entries: std::collections::VecDeque::new(),
+                done: false,
+            }),
+            _ => Err(unexpected("OpenValues")),
         }
     }
 
@@ -233,7 +299,7 @@ impl Key {
         let response = self
             .vfs
             .call_extension::<WinRegExt>(WinRegRequest::GetValue {
-                key: self.handle.clone(),
+                key: self.handle.opaque()?,
                 name: name.map(str::to_string),
             })
             .await??;
@@ -248,7 +314,7 @@ impl Key {
         let response = self
             .vfs
             .call_extension::<WinRegExt>(WinRegRequest::SetValue {
-                key: self.handle.clone(),
+                key: self.handle.opaque()?,
                 name: name.map(str::to_string),
                 value,
             })
@@ -264,7 +330,7 @@ impl Key {
         let response = self
             .vfs
             .call_extension::<WinRegExt>(WinRegRequest::DeleteValue {
-                key: self.handle.clone(),
+                key: self.handle.opaque()?,
                 name: name.map(str::to_string),
             })
             .await??;
@@ -287,7 +353,7 @@ impl Key {
         let response = self
             .vfs
             .call_extension::<WinRegExt>(WinRegRequest::GetSecDesc {
-                key: self.handle.clone(),
+                key: self.handle.opaque()?,
                 mask,
             })
             .await??;
@@ -309,7 +375,7 @@ impl Key {
         let response = self
             .vfs
             .call_extension::<WinRegExt>(WinRegRequest::SetSecDesc {
-                key: self.handle.clone(),
+                key: self.handle.opaque()?,
                 sec_desc: descriptor.clone(),
             })
             .await??;
@@ -317,6 +383,104 @@ impl Key {
             WinRegResponse::Ack => Ok(()),
             _ => Err(unexpected("SetSecDesc")),
         }
+    }
+}
+
+/// A live forward enumeration of registry subkey names.
+pub struct SubKeys {
+    vfs: AnyVfs,
+    key: Weak<KeyState>,
+    len: u32,
+    index: u32,
+    entries: std::collections::VecDeque<String>,
+    done: bool,
+}
+
+impl SubKeys {
+    /// Returns the subkey count captured when the enumeration was opened.
+    pub fn len(&self) -> u32 {
+        self.len
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+    /// Returns the next subkey name.
+    pub async fn next_entry(&mut self) -> Result<Option<String>, Error> {
+        let key = self
+            .key
+            .upgrade()
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "registry key is closed"))?;
+        key.opaque()?;
+        if let Some(entry) = self.entries.pop_front() {
+            return Ok(Some(entry));
+        }
+        if self.done {
+            return Ok(None);
+        }
+        let response = self
+            .vfs
+            .call_extension::<WinRegExt>(WinRegRequest::EnumSubkeysPage {
+                key: key.opaque()?,
+                index: self.index,
+                count: PAGE_SIZE,
+            })
+            .await??;
+        let WinRegResponse::SubkeysPage(entries) = response else {
+            return Err(unexpected("EnumSubkeysPage"));
+        };
+        self.index = self.index.saturating_add(entries.len() as u32);
+        self.done = entries.len() < PAGE_SIZE as usize;
+        self.entries = entries.into();
+        Ok(self.entries.pop_front())
+    }
+}
+
+/// A live forward enumeration of registry values.
+pub struct Values {
+    vfs: AnyVfs,
+    key: Weak<KeyState>,
+    len: u32,
+    index: u32,
+    entries: std::collections::VecDeque<(String, Value)>,
+    done: bool,
+}
+
+impl Values {
+    /// Returns the value count captured when the enumeration was opened.
+    pub fn len(&self) -> u32 {
+        self.len
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+    /// Returns the next value name and value.
+    pub async fn next_entry(&mut self) -> Result<Option<(String, Value)>, Error> {
+        let key = self
+            .key
+            .upgrade()
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "registry key is closed"))?;
+        key.opaque()?;
+        if let Some(entry) = self.entries.pop_front() {
+            return Ok(Some(entry));
+        }
+        if self.done {
+            return Ok(None);
+        }
+        let response = self
+            .vfs
+            .call_extension::<WinRegExt>(WinRegRequest::EnumValuesPage {
+                key: key.opaque()?,
+                index: self.index,
+                count: PAGE_SIZE,
+            })
+            .await??;
+        let WinRegResponse::ValuesPage(entries) = response else {
+            return Err(unexpected("EnumValuesPage"));
+        };
+        self.index = self.index.saturating_add(entries.len() as u32);
+        self.done = entries.len() < PAGE_SIZE as usize;
+        self.entries = entries.into();
+        Ok(self.entries.pop_front())
     }
 }
 

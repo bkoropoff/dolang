@@ -115,20 +115,25 @@ pub(crate) enum WinRegRequest {
         key: ExtOpaque<KeyMarker>,
         index: u32,
     },
-    /// Fetches every subkey name under a key in one round trip, unlike
-    /// [`WinRegRequest::EnumSubkey`] which needs one round trip per subkey.
-    EnumAllSubkeys {
+    OpenSubkeys {
         key: ExtOpaque<KeyMarker>,
+    },
+    EnumSubkeysPage {
+        key: ExtOpaque<KeyMarker>,
+        index: u32,
+        count: u32,
     },
     EnumValue {
         key: ExtOpaque<KeyMarker>,
         index: u32,
     },
-    /// Fetches every value under a key (name, kind, and data) in one round
-    /// trip, unlike [`WinRegRequest::EnumValue`] + [`WinRegRequest::GetValue`]
-    /// which need one round trip per value.
-    EnumAllValues {
+    OpenValues {
         key: ExtOpaque<KeyMarker>,
+    },
+    EnumValuesPage {
+        key: ExtOpaque<KeyMarker>,
+        index: u32,
+        count: u32,
     },
     GetValue {
         key: ExtOpaque<KeyMarker>,
@@ -171,9 +176,10 @@ pub(crate) enum WinRegResponse {
     Closed,
     Deleted,
     Name(Option<String>),
-    Subkeys(Vec<String>),
+    EnumerationLen(u32),
+    SubkeysPage(Vec<String>),
     Value(Option<(String, Value)>),
-    Values(Vec<(String, Value)>),
+    ValuesPage(Vec<(String, Value)>),
     SecDesc(SecDesc),
     Ack,
 }

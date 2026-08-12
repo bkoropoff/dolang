@@ -18,7 +18,7 @@ use crate::{
     access_mask::AccessMask,
     convert,
     global::Global,
-    subkeys::{SubKeys, SubKeysAnnex},
+    subkeys::SubKeys,
     value_entry::{ValueEntry, ValueEntryAnnex},
     values::{Values, ValuesAnnex},
 };
@@ -342,7 +342,7 @@ impl<'v> Object<'v> for Key {
             .method("subkeys", async move |this, strand, args, out| {
                 let global = strand.state::<Global<'v>>();
                 let ([], []) = unpack!(strand, args, 0, 0)?;
-                let names = {
+                let subkeys = {
                     let borrow = this.borrow(strand)?;
                     let key = borrow
                         .0
@@ -350,18 +350,16 @@ impl<'v> Object<'v> for Key {
                         .ok_or_else(|| Error::state_error(strand, "key is closed"))?;
                     key.subkeys().await.into_sys(strand)?
                 };
-                global.types.subkeys.create_with_annex(
-                    strand,
-                    SubKeys::new(),
-                    SubKeysAnnex { names },
-                    out,
-                );
+                global
+                    .types
+                    .subkeys
+                    .create_with_annex(strand, SubKeys(subkeys), (), out);
                 Ok(())
             })
             .method("values", async move |this, strand, args, out| {
                 let global = strand.state::<Global<'v>>();
                 let ([], []) = unpack!(strand, args, 0, 0)?;
-                let entries = {
+                let values = {
                     let borrow = this.borrow(strand)?;
                     let key = borrow
                         .0
@@ -371,8 +369,8 @@ impl<'v> Object<'v> for Key {
                 };
                 global.types.values.create_with_annex(
                     strand,
-                    Values::new(),
-                    ValuesAnnex { global, entries },
+                    Values(values),
+                    ValuesAnnex { global },
                     out,
                 );
                 Ok(())

@@ -941,14 +941,24 @@ async fn directory_enumeration_round_trip_over_generic_stream() {
     let empty = temp.path().join("empty");
     let small = temp.path().join("small");
     let mixed = temp.path().join("mixed");
+    let exact_page = temp.path().join("exact-page");
+    let multiple_pages = temp.path().join("multiple-pages");
     std::fs::create_dir(&empty).unwrap();
     std::fs::create_dir(&small).unwrap();
     std::fs::create_dir(&mixed).unwrap();
+    std::fs::create_dir(&exact_page).unwrap();
+    std::fs::create_dir(&multiple_pages).unwrap();
     std::fs::write(small.join("only.txt"), "one").unwrap();
     std::fs::write(mixed.join("file.txt"), "file").unwrap();
     std::fs::create_dir(mixed.join("directory")).unwrap();
+    for index in 0..64 {
+        std::fs::write(exact_page.join(format!("entry-{index:03}")), []).unwrap();
+    }
+    for index in 0..129 {
+        std::fs::write(multiple_pages.join(format!("entry-{index:03}")), []).unwrap();
+    }
 
-    for path in [&empty, &small, &mixed] {
+    for path in [&empty, &small, &mixed, &exact_page, &multiple_pages] {
         let path = typed_path(path.to_path_buf()).unwrap();
         let remote = collect_entries(client.read_dir(path.to_path()).await.unwrap()).await;
         let local = collect_entries(direct.read_dir(path.to_path()).await.unwrap()).await;

@@ -36,12 +36,12 @@ use crate::{
         AccessRequest, AclRequest, CanonicalizeRequest, CopyRequest, CreateDirRequest,
         ExtensionRequest, ExtensionResponse, FsMetadataRequest, GlobRequest, HardLinkRequest,
         MetadataRequest, MoveRequest, OpenHandle, OpenHandlePreference, OpenRequest, OpenVfsHandle,
-        PipeResponse, QueryResponse, ReadDirResponse, ReadLinkRequest, RemoveDirRequest,
-        RemoveRequest, RenameRequest, Request, RequestKind, ResponseKind, SecDescRequest,
-        SetAclRequest, SetMetadataRequest, SetSecDescRequest, SetXattrRequest, SpawnRequest,
-        StdioRecvTarget, StdioSendTarget, StreamsRequest, SymlinkKind, SymlinkRequest,
-        UnixVfsRequest, VfsProtocol, WellKnownPathRequest, WindowsAdminRequest, WireError,
-        WirePath, XattrNamespaceRequest, XattrRequest, XattrsRequest, rpc_builder,
+        PipeResponse, QueryResponse, ReadDirPage, ReadLinkRequest, RemoveDirRequest, RemoveRequest,
+        RenameRequest, Request, RequestKind, ResponseKind, SecDescRequest, SetAclRequest,
+        SetMetadataRequest, SetSecDescRequest, SetXattrRequest, SpawnRequest, StdioRecvTarget,
+        StdioSendTarget, StreamsRequest, SymlinkKind, SymlinkRequest, UnixVfsRequest, VfsProtocol,
+        WellKnownPathRequest, WindowsAdminRequest, WireError, WirePath, XattrNamespaceRequest,
+        XattrRequest, XattrsRequest, rpc_builder,
     },
     session::FileMarker,
     session::StdioRecvMarker,
@@ -146,6 +146,12 @@ struct RetainedFile(
     std::sync::Mutex<std::collections::HashMap<u64, Arc<tokio::sync::Mutex<FileLock>>>>,
     std::sync::atomic::AtomicU64,
 );
+
+struct RetainedReadDir(Mutex<crate::ReadDir>);
+
+impl OpaqueResource for RetainedReadDir {
+    type Marker = crate::session::ReadDirMarker;
+}
 
 impl OpaqueResource for RetainedFile {
     type Marker = FileMarker;
@@ -625,7 +631,11 @@ impl Connection {
             RequestKind::FileClose { file } => self.handle_file_close(context, file).await,
             RequestKind::UnixVfs(request) => self.handle_unix_vfs(context, request).await,
             RequestKind::WindowsAdmin(request) => self.handle_windows_admin(context, request).await,
-            RequestKind::ReadDir { path } => self.handle_read_dir(path).await,
+            RequestKind::ReadDir { path } => self.handle_read_dir(context, path).await,
+            RequestKind::ReadDirNext { read_dir } => {
+                self.handle_read_dir_next(context, read_dir).await
+            }
+            RequestKind::ReadDirClose { read_dir } => self.handle_read_dir_close(context, read_dir),
             RequestKind::Remove(request) => self.handle_remove(request).await,
             RequestKind::Metadata(request) => self.handle_metadata(request).await,
             RequestKind::FsMetadata(request) => self.handle_fs_metadata(request).await,
@@ -1573,17 +1583,64 @@ impl Connection {
         ResponseKind::FileClose(result)
     }
 
-    async fn handle_read_dir(&self, path: WirePath) -> ResponseKind {
-        let result: crate::Result<ReadDirResponse> = async {
-            let mut read_dir = self.server.vfs.read_dir(request_path(&path)).await?;
-            let mut entries = Vec::new();
-            while let Some(entry) = read_dir.next_entry().await? {
-                entries.push(entry);
+    async fn handle_read_dir(
+        &self,
+        context: &CallContext<VfsProtocol>,
+        path: WirePath,
+    ) -> ResponseKind {
+        let result = self
+            .server
+            .vfs
+            .read_dir(request_path(&path))
+            .await
+            .map(|read_dir| context.register(RetainedReadDir(Mutex::new(read_dir))));
+        ResponseKind::ReadDir(Self::wire_result(result))
+    }
+
+    async fn handle_read_dir_next(
+        &self,
+        context: &CallContext<VfsProtocol>,
+        read_dir: Opaque<crate::session::ReadDirMarker>,
+    ) -> ResponseKind {
+        let result: crate::Result<ReadDirPage> = async {
+            let retained = context
+                .acquire::<RetainedReadDir>(read_dir.clone())
+                .map_err(|_| {
+                    Error::new(crate::ErrorKind::InvalidInput, "invalid opaque directory")
+                })?;
+            let mut read_dir_guard = retained.0.lock().await;
+            let mut entries = Vec::with_capacity(64);
+            let mut done = false;
+            while entries.len() < 64 {
+                match read_dir_guard.next_entry().await? {
+                    Some(entry) => entries.push(entry),
+                    None => {
+                        done = true;
+                        break;
+                    }
+                }
             }
-            Ok(ReadDirResponse { entries })
+            drop(read_dir_guard);
+            drop(retained);
+            if done {
+                let _ = context.unregister::<RetainedReadDir>(read_dir);
+            }
+            Ok(ReadDirPage { entries, done })
         }
         .await;
-        ResponseKind::ReadDir(Self::wire_result(result))
+        ResponseKind::ReadDirNext(Self::wire_result(result))
+    }
+
+    fn handle_read_dir_close(
+        &self,
+        context: &CallContext<VfsProtocol>,
+        read_dir: Opaque<crate::session::ReadDirMarker>,
+    ) -> ResponseKind {
+        let result = context
+            .unregister::<RetainedReadDir>(read_dir)
+            .map(|_| ())
+            .map_err(|_| Self::invalid_opaque("directory"));
+        ResponseKind::ReadDirClose(result)
     }
 
     async fn handle_unix_vfs(

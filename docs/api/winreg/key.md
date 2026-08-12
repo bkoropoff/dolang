@@ -95,11 +95,13 @@ collected. Idempotent — closing an already-closed key is a no-op.
 
 ### `subkeys()`
 
-Lists the names of every immediate child key.
+Opens a live forward enumeration of immediate child-key names. Entries are
+fetched as iteration advances.
 
 #### Returns
 
-Iterable snapshot of [`Str`](../std/str.md)
+Iterable of [`Str`](../std/str.md). `.len` is the count captured when the
+enumeration is opened.
 
 #### Example
 
@@ -110,17 +112,19 @@ for name = key.subkeys()
 
 ### `values()`
 
-Reads every value under this key in a single call.
+Opens a live forward enumeration of this key's values. Entries are fetched as
+iteration advances.
 
 #### Returns
 
-An iterable, unpackable snapshot of [`Value`](./value.md) entries
+An iterable sequence of [`Value`](./value.md) entries. `.len` is the count
+captured when the enumeration is opened.
 
 #### Example
 
 ```
-for :name :kind :value = key.values()
-  echo "$name ($kind): $value"
+for entry = key.values()
+  echo "$(entry.name) ($(entry.kind)): $(entry.value)"
 ```
 
 ### `get name`

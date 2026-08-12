@@ -346,7 +346,7 @@ impl<'v> Object<'v> for ScManager {
                         state_filter,
                         ServiceStateFilter::ALL,
                     )?;
-                    let entries = {
+                    let services = {
                         let borrow = this.borrow(strand)?;
                         let manager = borrow
                             .0
@@ -359,8 +359,8 @@ impl<'v> Object<'v> for ScManager {
                     };
                     global.types.services.create_with_annex(
                         strand,
-                        crate::services::Services::new(),
-                        crate::services::ServicesAnnex { global, entries },
+                        crate::services::Services(services),
+                        crate::services::ServicesAnnex { global },
                         out,
                     );
                     Ok(())

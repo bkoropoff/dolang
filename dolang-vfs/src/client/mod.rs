@@ -45,12 +45,12 @@ use crate::{
         AclRequest, CanonicalizeRequest, CopyRequest, CreateDirRequest, ExtensionRequest,
         ExtensionResponse, FsMetadataRequest, GlobRequest, HardLinkRequest, MetadataRequest,
         MoveRequest, OpenHandle, OpenHandlePreference, OpenRequest, OpenVfsHandle, QueryResponse,
-        ReadDirResponse, ReadLinkRequest, RemoveDirRequest, RemoveRequest, RenameRequest, Request,
-        RequestKind, ResponseKind, SecDescRequest, SetAclRequest, SetMetadataRequest,
-        SetSecDescRequest, SetXattrRequest, SpawnRequest, StdioRecvTarget, StdioSendTarget,
-        StreamsRequest, SymlinkKind, SymlinkRequest, UnixVfsRequest, VfsProtocol,
-        WellKnownPathRequest, WindowsAdminRequest, WirePath, XattrNamespaceRequest, XattrRequest,
-        XattrsRequest, rpc_builder,
+        ReadLinkRequest, RemoveDirRequest, RemoveRequest, RenameRequest, Request, RequestKind,
+        ResponseKind, SecDescRequest, SetAclRequest, SetMetadataRequest, SetSecDescRequest,
+        SetXattrRequest, SpawnRequest, StdioRecvTarget, StdioSendTarget, StreamsRequest,
+        SymlinkKind, SymlinkRequest, UnixVfsRequest, VfsProtocol, WellKnownPathRequest,
+        WindowsAdminRequest, WirePath, XattrNamespaceRequest, XattrRequest, XattrsRequest,
+        rpc_builder,
     },
 };
 
@@ -1063,7 +1063,7 @@ impl Client {
         })
     }
 
-    async fn request(&self, request: RequestKind) -> crate::Result<ResponseKind> {
+    pub(crate) async fn request(&self, request: RequestKind) -> crate::Result<ResponseKind> {
         let response = self
             .call(request)
             .await
@@ -2553,7 +2553,7 @@ impl Vfs for Client {
             .await?
         {
             ResponseKind::ReadDir(result) => result
-                .map(|ReadDirResponse { entries }| ReadDir::from_entries(entries))
+                .map(|read_dir| ReadDir::from_remote(self.clone(), read_dir))
                 .map_err(crate::Error::from),
             response => Err(unexpected(response).into()),
         }

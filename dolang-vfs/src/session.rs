@@ -51,6 +51,9 @@ impl Query {
 /// Marker for a regular file retained by a VFS RPC session.
 #[derive(Debug)]
 pub(crate) struct FileMarker;
+/// Marker for a directory enumeration retained by a VFS RPC session.
+#[derive(Debug)]
+pub(crate) struct ReadDirMarker;
 /// Marker for another VFS retained by a VFS RPC session.
 #[derive(Debug)]
 pub(crate) struct VfsMarker;

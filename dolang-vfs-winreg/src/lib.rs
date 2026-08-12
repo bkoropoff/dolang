@@ -17,6 +17,6 @@ mod key;
 mod value;
 mod wire;
 
-pub use api::Key;
+pub use api::{Key, SubKeys, Values};
 pub use value::Value;
 pub use wire::{Access, PredefinedRoot, View};

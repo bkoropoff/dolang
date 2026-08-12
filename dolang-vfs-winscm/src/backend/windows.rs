@@ -239,50 +239,17 @@ fn open_service(manager: SC_HANDLE, name: &str, access: ServiceAccess) -> Result
 /// right-sized buffer for each chunk by first probing with a zero-length
 /// buffer — `needed` on that probe is the exact size required for the next
 /// chunk starting from the current resume position.
-fn enum_services(
+fn enum_services_page(
     manager: SC_HANDLE,
     service_type: u32,
     state_filter: u32,
-) -> Result<Vec<ServiceInfo>, Error> {
-    let mut resume_handle: u32 = 0;
-    let mut services = Vec::new();
+    mut resume_handle: u32,
+) -> Result<(Vec<ServiceInfo>, u32, bool), Error> {
+    let mut buffer_len = 64 * 1024usize;
     loop {
-        let mut needed = 0u32;
-        let mut returned = 0u32;
-        // SAFETY: `manager` is a live SC manager handle; a null/zero-length
-        // buffer is documented as valid for sizing the next chunk.
-        let probe_ok = unsafe {
-            EnumServicesStatusExW(
-                manager,
-                SC_ENUM_PROCESS_INFO,
-                service_type,
-                state_filter,
-                ptr::null_mut(),
-                0,
-                &mut needed,
-                &mut returned,
-                &mut resume_handle,
-                ptr::null(),
-            )
-        };
-        if probe_ok != 0 {
-            // Nothing left to enumerate.
-            break;
-        }
-        let probe_error = unsafe { GetLastError() };
-        if probe_error != ERROR_MORE_DATA {
-            return Err(from_win32("enumerate services", probe_error));
-        }
-        if needed == 0 {
-            break;
-        }
-
-        let mut buf = vec![0u8; needed as usize];
+        let mut buf = vec![0u8; buffer_len];
         let mut fetched = 0u32;
-        let mut needed2 = 0u32;
-        // SAFETY: `buf` is sized exactly to `needed` from the probe above,
-        // which `EnumServicesStatusExW` documents as sufficient for at
-        // least the next entry.
+        let mut needed = 0u32;
         let fetch_ok = unsafe {
             EnumServicesStatusExW(
                 manager,
@@ -291,7 +258,7 @@ fn enum_services(
                 state_filter,
                 buf.as_mut_ptr(),
                 buf.len() as u32,
-                &mut needed2,
+                &mut needed,
                 &mut fetched,
                 &mut resume_handle,
                 ptr::null(),
@@ -301,6 +268,10 @@ fn enum_services(
             let code = unsafe { GetLastError() };
             if code != ERROR_MORE_DATA {
                 return Err(from_win32("enumerate services", code));
+            }
+            if fetched == 0 && needed as usize > buffer_len {
+                buffer_len = needed as usize;
+                continue;
             }
             true
         } else {
@@ -318,8 +289,9 @@ fn enum_services(
                 fetched as usize,
             )
         };
-        for entry in entries {
-            services.push(ServiceInfo {
+        let services = entries
+            .iter()
+            .map(|entry| ServiceInfo {
                 // SAFETY: the service name is a NUL-terminated wide string
                 // pointing into `buf`, per the slice's own safety comment.
                 name: unsafe { from_wide(entry.lpServiceName) },
@@ -327,14 +299,10 @@ fn enum_services(
                 // services; preserve that absence across the API boundary.
                 display_name: unsafe { from_optional_wide(entry.lpDisplayName) },
                 status: status_from_raw(&entry.ServiceStatusProcess),
-            });
-        }
-
-        if !more {
-            break;
-        }
+            })
+            .collect();
+        return Ok((services, resume_handle, !more));
     }
-    Ok(services)
 }
 
 /// Opens a fresh handle to the service named `name`, scoped to
@@ -892,17 +860,22 @@ pub(crate) async fn handle(
                 ctx.register(Service::new(handle, reactor, name)),
             ))
         }
-        WinScmRequest::EnumServices {
+        WinScmRequest::EnumServicesPage {
             manager,
             service_type,
             state_filter,
+            resume,
         } => {
             let guard = ctx.acquire::<ScManager>(manager).map_err(invalid_handle)?;
-            let services = with_manager(guard, move |m| {
-                enum_services(m, service_type.0, state_filter.0)
+            let (services, resume, done) = with_manager(guard, move |m| {
+                enum_services_page(m, service_type.0, state_filter.0, resume)
             })
             .await?;
-            Ok(WinScmResponse::Services(services))
+            Ok(WinScmResponse::ServicesPage {
+                services,
+                resume,
+                done,
+            })
         }
         WinScmRequest::DeleteService { service } => {
             let guard = ctx.acquire::<Service>(service).map_err(invalid_handle)?;
