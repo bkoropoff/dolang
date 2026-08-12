@@ -103,6 +103,50 @@ def timeout_handles_completion_and_cancellation()
     worker.join()
 
 #[test]
+def timeout_inside_interrupted_finally()
+  let completed = false
+  assert_throws $TimedOutError do
+    timeout 0.01 do
+      try
+        sleep 10000
+      finally
+        timeout 1 do
+          sleep 0
+          completed = true
+  assert $completed
+
+  let caught_local_timeout = false
+  assert_throws $TimedOutError do
+    timeout 0.01 do
+      try
+        sleep 10000
+      finally
+        try
+          timeout 0 do sleep 10000
+        catch TimedOutError: _
+          caught_local_timeout = true
+  assert $caught_local_timeout
+
+#[test]
+def local_timeout_inside_canceled_finally_keeps_cancellation_masked()
+  let entered_send entered_recv = strand.channel()
+  let finished_send finished_recv = strand.channel()
+  let worker = strand.spawn do
+    try
+      sleep 10000
+    finally
+      entered_send.put ok
+      try
+        timeout 0.01 do sleep 10000
+      catch TimedOutError: _
+        finished_send.put ok
+
+  worker.cancel()
+  entered_recv.next()
+  finished_recv.next()
+  assert_throws $CanceledError do worker.join()
+
+#[test]
 def canceled_resource_acquisition_retains_outer_resource()
   let outer = strand.Resource 1
   let blocked = strand.Resource 1

@@ -1,5 +1,7 @@
 use dolang::runtime::{
-    Arg, Error, Output, Result, Slot, State, Strand, call, unpack,
+    Arg, Error, Output, Result, Slot, State, Strand, call,
+    strand::InterruptMask,
+    unpack,
     value::{BinEmbryo, View},
     vm::Builder,
 };
@@ -1427,7 +1429,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 create_path(strand, global, temp_path.clone(), &mut path)?;
                 let result = call!(strand, callable, out, &path).await;
                 let _ = strand
-                    .with_interrupt_mask(true, async move |strand| {
+                    .with_interrupt_mask(InterruptMask::all(), async move |strand| {
                         let local = global.local.get(strand);
                         let vfs = local.vfs();
                         vfs.remove(temp_path.to_path(), true, false).await

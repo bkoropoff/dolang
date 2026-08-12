@@ -5,6 +5,7 @@ use dolang::runtime::{
     error::ResultExt as _,
     method,
     object::{DictLike, DictView, DictViewSink, Instance, Mut, Ref, TypeBuilder},
+    strand::InterruptMask,
     unpack,
     value::{Array, Dict, Empty},
     vm::Builder,
@@ -941,7 +942,7 @@ impl<'v> Object<'v> for Server {
                         })?;
                     let res = call!(strand, func, out, &handle).await;
                     let _ = strand
-                        .with_interrupt_mask(true, async move |strand| {
+                        .with_interrupt_mask(InterruptMask::all(), async move |strand| {
                             method!(strand, handle, global.syms.close, tmp).await
                         })
                         .await;
@@ -1153,7 +1154,7 @@ impl<'v> Object<'v> for Server {
                                 let result = call!(strand, block, out, &item).await;
 
                                 let verify_result = strand
-                                    .with_interrupt_mask(true, async |strand| {
+                                    .with_interrupt_mask(InterruptMask::all(), async |strand| {
                                         let entries =
                                             global.types.mock.cast(&item).unwrap().enter_sync(
                                                 strand,
@@ -1168,7 +1169,7 @@ impl<'v> Object<'v> for Server {
                                     .await;
 
                                 let cancel_result = strand
-                                    .with_interrupt_mask(true, async |strand| {
+                                    .with_interrupt_mask(InterruptMask::all(), async |strand| {
                                         global
                                             .types
                                             .mock

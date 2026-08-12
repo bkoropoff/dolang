@@ -13,6 +13,17 @@ use std::{
 
 use dolang_util::{alias, pin::Arena, ring, ring::Link};
 
+bitflags::bitflags! {
+    /// Interrupt causes blocked by a strand scope or token boundary.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct InterruptMask: u8 {
+        /// Block cancellation.
+        const CANCELED = 1 << 0;
+        /// Block timeout.
+        const TIMED_OUT = 1 << 1;
+    }
+}
+
 use crate::{
     error::{Error, OwnedBacktraceIter, Result, UnwindEntry},
     frame::{self, FrameIter, Native},
@@ -34,35 +45,48 @@ struct InterruptInner {
     canceled: Cell<bool>,
     timed_out: Cell<bool>,
     next_id: Cell<InterruptId>,
-    wakers: RefCell<Vec<(InterruptId, Waker)>>,
-    children: RefCell<Vec<Weak<InterruptInner>>>,
+    wakers: RefCell<Vec<(InterruptId, Waker, InterruptMask)>>,
+    children: RefCell<Vec<(Weak<InterruptInner>, InterruptMask)>>,
 }
 
 impl InterruptInner {
     fn cancel(&self) {
         self.canceled.set(true);
-        self.wake();
+        self.wake(InterruptMask::CANCELED);
     }
 
     fn timeout(&self) {
         self.timed_out.set(true);
-        self.wake();
+        self.wake(InterruptMask::TIMED_OUT);
     }
 
-    fn wake(&self) {
-        for (_, waker) in mem::take(&mut *self.wakers.borrow_mut()).into_iter() {
-            waker.wake()
-        }
-        for child in self.children.borrow().iter() {
-            if let Some(child) = child.upgrade() {
-                if self.canceled.get() {
+    fn wake(&self, cause: InterruptMask) {
+        self.wakers.borrow_mut().retain(|(_, waker, mask)| {
+            if mask.contains(cause) {
+                true
+            } else {
+                waker.wake_by_ref();
+                false
+            }
+        });
+        self.children.borrow_mut().retain(|(child, filter)| {
+            let Some(child) = child.upgrade() else {
+                return false;
+            };
+            if !filter.contains(cause) {
+                if cause == InterruptMask::CANCELED {
                     child.cancel()
-                }
-                if self.timed_out.get() {
+                } else {
                     child.timeout()
                 }
             }
-        }
+            true
+        });
+    }
+
+    fn pending(&self, mask: InterruptMask) -> bool {
+        (self.canceled.get() && !mask.contains(InterruptMask::CANCELED))
+            || (self.timed_out.get() && !mask.contains(InterruptMask::TIMED_OUT))
     }
 }
 
@@ -92,34 +116,37 @@ impl<'v> InterruptToken<'v> {
         }
     }
 
-    pub(crate) fn register(&self, waker: &Waker) -> Option<InterruptId> {
-        if self.inner.canceled.get() || self.inner.timed_out.get() {
+    pub(crate) fn register(&self, waker: &Waker, mask: InterruptMask) -> Option<InterruptId> {
+        if self.inner.pending(mask) {
             return None;
         }
         let id = self.inner.next_id.get();
         self.inner.next_id.set(id.strict_add(1));
-        self.inner.wakers.borrow_mut().push((id, waker.clone()));
+        self.inner
+            .wakers
+            .borrow_mut()
+            .push((id, waker.clone(), mask));
         Some(id)
     }
 
     pub(crate) fn unregister(&self, id: InterruptId) {
-        self.inner.wakers.borrow_mut().retain(|(i, _)| *i != id);
+        self.inner.wakers.borrow_mut().retain(|(i, _, _)| *i != id);
     }
 
-    /// Creates a nested interrupt token. Parent cancellation/timeout propagates
-    /// to all nested tokens created this way.
-    pub fn nested(&self) -> Self {
+    /// Creates a nested interrupt token, blocking inherited causes in `filter`.
+    /// Direct interruption of the returned token is not filtered.
+    pub fn nested(&self, filter: InterruptMask) -> Self {
         let child = Self::new();
-        if self.inner.canceled.get() {
+        if self.inner.canceled.get() && !filter.contains(InterruptMask::CANCELED) {
             child.inner.canceled.set(true);
         }
-        if self.inner.timed_out.get() {
+        if self.inner.timed_out.get() && !filter.contains(InterruptMask::TIMED_OUT) {
             child.inner.timed_out.set(true);
         }
         self.inner
             .children
             .borrow_mut()
-            .push(Rc::downgrade(&child.inner));
+            .push((Rc::downgrade(&child.inner), filter));
         child
     }
 
@@ -283,7 +310,7 @@ pub(crate) struct StrandInner<'v> {
     arena: Arena,
     pub(crate) interrupt: RefCell<InterruptToken<'v>>,
     interrupt_registered: Cell<bool>,
-    interrupt_mask: Cell<bool>,
+    interrupt_mask: Cell<InterruptMask>,
     // Nested synchronous calls depth
     sync_depth: Cell<u32>,
     // Logical callable frame depth (Do + native frames only)
@@ -357,9 +384,10 @@ const MAX_CALL_DEPTH: u32 = 1000;
 impl<'v> StrandInner<'v> {
     pub(crate) fn interrupt_error(&self) -> Error<'v, '_> {
         let interrupt = self.interrupt.borrow();
-        if interrupt.is_canceled() {
+        let mask = self.interrupt_mask.get();
+        if interrupt.is_canceled() && !mask.contains(InterruptMask::CANCELED) {
             Error::canceled_raw(self)
-        } else if interrupt.is_timed_out() {
+        } else if interrupt.is_timed_out() && !mask.contains(InterruptMask::TIMED_OUT) {
             Error::timed_out_raw(self)
         } else {
             unreachable!("interrupt_error without pending interrupt")
@@ -389,7 +417,7 @@ impl<'v> StrandInner<'v> {
             arena: Arena::new(ARENA_DEFAULT_SIZE),
             interrupt: RefCell::new(interrupt.unwrap_or_else(InterruptToken::new)),
             interrupt_registered: Cell::new(false),
-            interrupt_mask: Cell::new(false),
+            interrupt_mask: Cell::new(InterruptMask::empty()),
             call_depth: Cell::new(0),
             sp: Cell::new(None),
             start: Value::NIL,
@@ -450,7 +478,7 @@ impl<'v> StrandInner<'v> {
                 interrupt.unwrap_or_else(|| strand.inner.interrupt.borrow().clone()),
             ),
             interrupt_registered: Cell::new(false),
-            interrupt_mask: Cell::new(false),
+            interrupt_mask: Cell::new(InterruptMask::empty()),
             call_depth: Cell::new(strand.inner.call_depth.get()),
             sp: Cell::new(None),
             start: Value::NIL,
@@ -626,15 +654,13 @@ impl<'v> StrandInner<'v> {
 ///
 /// ## Interrupt Masking
 ///
-/// If `interrupt_mask` is set on the strand, interruption checks are skipped
-/// and the future runs to completion normally. This is used for cleanup
-/// operations that must complete even during interruption.
+/// Causes in the strand's interrupt mask are ignored. Registrations snapshot
+/// the mask so a masked cause leaves them available for another cause.
 pub(crate) struct Pinned<'v, 's, 'a, R> {
     inner: dolang_util::pin::Pinned<'a, Result<'v, 's, R>>,
     strand: &'s StrandInner<'v>,
-    interrupt: InterruptToken<'v>,
     /// Interrupt registration ID. None if not yet registered or already cleaned up.
-    id: Option<InterruptId>,
+    registration: Option<(InterruptToken<'v>, InterruptId)>,
 }
 
 impl<'v, 's, 'a, R> Future for Pinned<'v, 's, 'a, R> {
@@ -644,8 +670,8 @@ impl<'v, 's, 'a, R> Future for Pinned<'v, 's, 'a, R> {
         match unsafe { Pin::new_unchecked(&mut self.inner) }.poll(cx) {
             Poll::Ready(res) => {
                 // Unregister from interrupt token if we were registered
-                if let Some(id) = self.id.take() {
-                    self.interrupt.unregister(id);
+                if let Some((interrupt, id)) = self.registration.take() {
+                    interrupt.unregister(id);
                     self.strand.interrupt_registered.set(false);
                 }
                 Poll::Ready(res)
@@ -659,23 +685,23 @@ impl<'v, 's, 'a, R> Future for Pinned<'v, 's, 'a, R> {
                 }
                 // FIXME: probably should move interrupt mask testing into one check here to
                 // avoid waking up and going to sleep uselessly
-                if self.id.is_none() && !self.strand.interrupt_registered.get() {
+                let interrupt = self.strand.interrupt.borrow().clone();
+                if self.registration.is_none() && !self.strand.interrupt_registered.get() {
                     // This strand is not registered with the interrupt token, so do it now
-                    if let Some(id) = self.interrupt.register(cx.waker()) {
-                        self.id = Some(id);
+                    let mask = self.strand.interrupt_mask.get();
+                    if let Some(id) = interrupt.register(cx.waker(), mask) {
+                        self.registration = Some((interrupt, id));
                         self.strand.interrupt_registered.set(true);
                         // If the interrupt token is triggered, it will wake the waker so
                         // we can re-check interrupt status
                         return Poll::Pending;
-                    } else if !self.strand.interrupt_mask.get() {
+                    } else {
                         return Poll::Ready(Err(self.strand.interrupt_error()));
                     }
-                } else if !self.strand.interrupt_mask.get()
-                    && (self.interrupt.is_canceled() || self.interrupt.is_timed_out())
-                {
+                } else if interrupt.inner.pending(self.strand.interrupt_mask.get()) {
                     // Interrupt token was triggered and interruption is not masked
-                    if let Some(id) = &self.id {
-                        self.interrupt.unregister(*id);
+                    if let Some((interrupt, id)) = self.registration.take() {
+                        interrupt.unregister(id);
                         self.strand.interrupt_registered.set(false);
                     }
                     return Poll::Ready(Err(self.strand.interrupt_error()));
@@ -999,7 +1025,7 @@ impl<'v, 's> Strand<'v, 's> {
     /// a `Canceled` or `TimedOut` error on the next poll, and the deepest future
     /// in the stack may be dropped entirely. This is the normal interruption behavior.
     ///
-    /// When `mask` is `true`, pending interruption is temporarily suppressed:
+    /// Causes present in `mask` are temporarily suppressed:
     /// - Do-related futures will continue to work normally
     /// - Futures won't be dropped on the floor
     /// - The strand won't see interrupt errors
@@ -1023,7 +1049,7 @@ impl<'v, 's> Strand<'v, 's> {
     ///
     /// ```ignore
     /// // In a cleanup handler
-    /// strand.with_interrupt_mask(true, async |strand| {
+    /// strand.with_interrupt_mask(InterruptMask::all(), async |strand| {
     ///     // This will complete even if the strand is interrupted
     ///     file.delete().await?;
     ///     conn.rollback().await?;
@@ -1032,13 +1058,18 @@ impl<'v, 's> Strand<'v, 's> {
     #[inline]
     pub async fn with_interrupt_mask<R>(
         &mut self,
-        mask: bool,
+        mask: InterruptMask,
         f: impl AsyncFnOnce(&mut Strand<'v, 's>) -> R,
     ) -> R {
         let orig = self.inner.interrupt_mask.replace(mask);
         let res = f(self).await;
         self.inner.interrupt_mask.set(orig);
         res
+    }
+
+    /// Return the currently active interrupt mask.
+    pub fn interrupt_mask(&self) -> InterruptMask {
+        self.inner.interrupt_mask.get()
     }
 
     /// Run function with interruption interception. If this strand is interrupted, the [`Future`]
@@ -1053,6 +1084,11 @@ impl<'v, 's> Strand<'v, 's> {
         self.pin_future_call(f).await
     }
 
+    /// Run `f` with `interrupt` as the strand's selected token.
+    ///
+    /// The selection is dynamically scoped: interrupt polling and futures
+    /// registered while `f` runs use this token, and the prior token is
+    /// restored when `f` finishes.
     pub async fn with_interrupt_token<R>(
         &mut self,
         interrupt: InterruptToken<'v>,
@@ -1299,7 +1335,7 @@ impl<'v, 's> Strand<'v, 's> {
     {
         let arg = Value::from_input(self, arg);
         let interrupt = interrupt
-            .map(|t| t.nested())
+            .map(|t| t.nested(InterruptMask::empty()))
             .unwrap_or_else(InterruptToken::new);
         let handle = self.spawn_background_raw(arg, interrupt, None, f)?;
         Output::set(self, &mut out, &Value::from_object(handle));
@@ -1326,12 +1362,10 @@ impl<'v, 's> Strand<'v, 's> {
         f: impl for<'c> AsyncFnOnce(&'c mut Strand<'v, 's>) -> Result<'v, 's, R> + 'b,
     ) -> Pinned<'v, 's, 'b, R> {
         let inner = self.inner;
-        let interrupt = self.interrupt_token();
         Pinned {
             inner: unsafe { inner.arena.pin_future_unchecked(f(self)) },
             strand: inner,
-            interrupt,
-            id: None,
+            registration: None,
         }
     }
 
@@ -1469,5 +1503,82 @@ impl<'v, 'a, 's> Redirect<'v, 'a, 's> {
             borrow.output = output;
         }
         res
+    }
+}
+
+#[cfg(test)]
+mod interrupt_tests {
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        task::{Wake, Waker},
+    };
+
+    use super::{InterruptMask, InterruptToken};
+
+    struct Counter(AtomicUsize);
+
+    impl Wake for Counter {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn counter_waker() -> (Arc<Counter>, Waker) {
+        let counter = Arc::new(Counter(AtomicUsize::new(0)));
+        (counter.clone(), counter.into())
+    }
+
+    #[test]
+    fn nested_tokens_filter_initial_and_subsequent_causes() {
+        let parent = InterruptToken::new();
+        parent.timeout();
+        let filtered = parent.nested(InterruptMask::TIMED_OUT);
+        let inherited = parent.nested(InterruptMask::empty());
+        assert!(!filtered.is_timed_out());
+        assert!(inherited.is_timed_out());
+
+        let parent = InterruptToken::new();
+        let filtered = parent.nested(InterruptMask::CANCELED);
+        let inherited = parent.nested(InterruptMask::empty());
+        parent.cancel();
+        assert!(!filtered.is_canceled());
+        assert!(inherited.is_canceled());
+    }
+
+    #[test]
+    fn masked_registration_remains_for_another_cause() {
+        let token = InterruptToken::new();
+        let (counter, waker) = counter_waker();
+        assert!(token.register(&waker, InterruptMask::TIMED_OUT).is_some());
+        token.timeout();
+        assert_eq!(counter.0.load(Ordering::Relaxed), 0);
+        token.cancel();
+        assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn registration_rejects_pending_unmasked_cause() {
+        let token = InterruptToken::new();
+        token.timeout();
+        let (_, waker) = counter_waker();
+        assert!(token.register(&waker, InterruptMask::empty()).is_none());
+        assert!(token.register(&waker, InterruptMask::TIMED_OUT).is_some());
+    }
+
+    #[test]
+    fn filtered_child_can_be_interrupted_directly() {
+        let parent = InterruptToken::new();
+        let child = parent.nested(InterruptMask::TIMED_OUT);
+        parent.timeout();
+        assert!(!child.is_timed_out());
+        child.timeout();
+        assert!(child.is_timed_out());
     }
 }

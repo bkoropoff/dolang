@@ -1252,6 +1252,7 @@ dependencies = [
 name = "dolang-runtime"
 version = "0.1.1"
 dependencies = [
+ "bitflags",
  "bitvec",
  "bstr",
  "dolang-bytecode",

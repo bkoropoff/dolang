@@ -15,6 +15,7 @@ use dolang::runtime::{
     error::ResultExt,
     method,
     object::{ArrayLike, ArrayView, Mut, Ref, TypeBuilder},
+    strand::InterruptMask,
     unpack,
     value::View,
     vm::Builder,
@@ -294,7 +295,7 @@ impl<'v> Object<'v> for Archive {
                     if let Some(block) = block {
                         let result = call!(strand, block, out, &file).await;
                         let close_result = strand
-                            .with_interrupt_mask(true, async move |strand| {
+                            .with_interrupt_mask(InterruptMask::all(), async move |strand| {
                                 method!(strand, &file, close, &mut tmp).await
                             })
                             .await;
@@ -630,9 +631,12 @@ impl<'v> Object<'v> for Entry {
                             if let Some(block) = block {
                                 let result = call!(strand, block, out, &file).await;
                                 let close_result = strand
-                                    .with_interrupt_mask(true, async move |strand| {
-                                        method!(strand, &file, close, &mut tmp).await
-                                    })
+                                    .with_interrupt_mask(
+                                        InterruptMask::all(),
+                                        async move |strand| {
+                                            method!(strand, &file, close, &mut tmp).await
+                                        },
+                                    )
                                     .await;
                                 result.and(close_result)
                             } else {
@@ -872,7 +876,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                         );
                         let result = call!(strand, block, out, &wrapper).await;
                         let close_result = strand
-                            .with_interrupt_mask(true, async move |strand| {
+                            .with_interrupt_mask(InterruptMask::all(), async move |strand| {
                                 method!(strand, &wrapper, close, &mut tmp).await
                             })
                             .await;

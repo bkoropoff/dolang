@@ -19,7 +19,9 @@ use crate::{
         native::{Object, Type, TypeBuilder},
         strand as strand_object, tuple,
     },
-    strand::{InheritKind, InterruptToken, Local, LocalKey, LocalRootKey, Redirect, Strand},
+    strand::{
+        InheritKind, InterruptMask, InterruptToken, Local, LocalKey, LocalRootKey, Redirect, Strand,
+    },
     unpack,
     value::{Empty, Output, Singleton, Slot, Value},
     vm::{Builder, State, Stateful},
@@ -444,12 +446,12 @@ async fn map_workers<'v, 's>(
     block: Slot<'v, '_>,
 ) -> Result<'v, 's, ()> {
     strand
-        .with_interrupt_mask(true, async move |strand| {
+        .with_interrupt_mask(InterruptMask::all(), async move |strand| {
             let shared_input = &input;
             let shared_output = &output;
             let shared_block = &block;
             let mut strands = Vec::with_capacity(count);
-            let interrupt = strand.interrupt_token().nested();
+            let interrupt = strand.interrupt_token().nested(InterruptMask::empty());
             for _ in 0..count {
                 strands.push(
                     strand.spawn_scoped(Some(interrupt.clone()), async move |strand| {
@@ -654,13 +656,13 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
 
             // We must avoid being dropped until we've awaited all strands we create
             strand
-                .with_interrupt_mask(true, async move |strand| {
+                .with_interrupt_mask(InterruptMask::all(), async move |strand| {
                     async {
                         let mut last_recv = Value::NIL;
                         let mut out = Some(out);
                         let mut strands = Vec::new();
                         let mut pipes = Vec::with_capacity(count.saturating_sub(1));
-                        let interrupt = strand.interrupt_token().nested();
+                        let interrupt = strand.interrupt_token().nested(InterruptMask::empty());
                         // Resolve the caller's redirects up front, in place.
                         // Doing this in the stage body would put a fallible
                         // await ahead of the call, and an early return from it
@@ -940,12 +942,12 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
             let count = thunks.len();
             // We must avoid being dropped until we've awaited all strands we create
             strand
-                .with_interrupt_mask(true, async move |strand| {
+                .with_interrupt_mask(InterruptMask::all(), async move |strand| {
                     let result = async {
                         let results =
                             RefCell::new((0..count).map(|_| Value::NIL).collect::<Vec<_>>());
                         let mut strands = Vec::with_capacity(count);
-                        let interrupt = strand.interrupt_token().nested();
+                        let interrupt = strand.interrupt_token().nested(InterruptMask::empty());
                         for (i, thunk) in thunks.into_iter().enumerate() {
                             let results = &results;
                             strands.push(strand.spawn_scoped(

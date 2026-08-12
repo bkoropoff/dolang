@@ -8,6 +8,7 @@ use dolang::runtime::{
     BYTE_STREAM_CHUNK_SIZE, Error, Instance, Object, Output, Result, Slot, State, Strand, call,
     method,
     object::TypeBuilder,
+    strand::InterruptMask,
     unpack,
     value::{BinEmbryo, TypeObject, View},
 };
@@ -646,7 +647,7 @@ impl<'v> Object<'v> for File<'v> {
                         FileLockObject::create(strand, lock_type, Some(lock), &mut guard);
                         let result = call!(strand, block, out, &guard).await;
                         let cleanup = strand
-                            .with_interrupt_mask(true, async move |strand| {
+                            .with_interrupt_mask(InterruptMask::all(), async move |strand| {
                                 lock_type
                                     .cast(&guard)
                                     .unwrap()
@@ -699,7 +700,7 @@ impl<'v> Object<'v> for File<'v> {
                         FileLockObject::create(strand, lock_type, lock, &mut guard);
                         let result = call!(strand, block, out, &guard).await;
                         let cleanup = strand
-                            .with_interrupt_mask(true, async move |strand| {
+                            .with_interrupt_mask(InterruptMask::all(), async move |strand| {
                                 lock_type
                                     .cast(&guard)
                                     .unwrap()

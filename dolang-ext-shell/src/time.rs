@@ -2,6 +2,7 @@ use std::{io, time::SystemTime};
 
 use dolang::runtime::object::fmt;
 
+use dolang::runtime::strand::InterruptMask;
 use dolang::{
     compile::Compiler,
     runtime::{
@@ -492,7 +493,9 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         .function("timeout", async move |strand, args, out| {
             let ([duration, block], []) = unpack!(strand, args, 2, 0)?;
             let duration = coerce_duration(strand, global, &duration, "timeout duration")?;
-            let interrupt = strand.interrupt_token().nested();
+            let mask = strand.interrupt_mask();
+            let timeout_mask = InterruptMask::TIMED_OUT;
+            let interrupt = strand.interrupt_token().nested(timeout_mask);
             let (abort, reg) = AbortHandle::new_pair();
             let interrupt_clone = interrupt.clone();
             strand.spawn_task(async move {
@@ -506,8 +509,12 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 .await;
             });
             let res = strand
-                .with_interrupt_token(interrupt, async move |strand| {
-                    call!(strand, block, out).await
+                .with_interrupt_mask(mask - timeout_mask, async move |strand| {
+                    strand
+                        .with_interrupt_token(interrupt, async move |strand| {
+                            call!(strand, block, out).await
+                        })
+                        .await
                 })
                 .await;
             abort.abort();

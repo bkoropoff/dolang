@@ -6,7 +6,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use dolang::runtime::object::fmt;
+use dolang::runtime::{object::fmt, strand::InterruptMask};
 
 use dolang::runtime::{
     Arg, Args, Error, Format, Instance, Object, Output, Result, Slot, State, Strand, Sym, Type,
@@ -981,7 +981,7 @@ async fn request<'v, 's>(
             if let Some(thunk) = thunk {
                 let res = call!(st, thunk, out, &value).await;
                 let _ = st
-                    .with_interrupt_mask(true, async move |st| {
+                    .with_interrupt_mask(InterruptMask::all(), async move |st| {
                         method!(st, value, global.syms.close, &mut tmp).await
                     })
                     .await;
@@ -1130,7 +1130,7 @@ impl<'v> Object<'v> for Client {
                     this.create_with_annex(strand, value, ClientAnnex { global }, &mut client);
                     let res = call!(strand, func, out, &client).await;
                     let _ = strand
-                        .with_interrupt_mask(true, async move |strand| {
+                        .with_interrupt_mask(InterruptMask::all(), async move |strand| {
                             method!(strand, client, global.syms.close, tmp).await
                         })
                         .await;
