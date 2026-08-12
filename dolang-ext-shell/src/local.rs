@@ -2,22 +2,21 @@ use std::{
     borrow::Cow,
     cell::{Cell, RefCell},
     collections::HashMap,
-    env, mem,
+    mem,
     ops::Deref,
     rc::Rc,
 };
 
-use dolang::runtime::{Strand, strand};
-use dolang_vfs::path::typed_path;
+use dolang::runtime::{State, Strand, strand};
 use dolang_vfs::{
-    AnyVfs,
+    AnyVfs, Vfs as _,
     process::Signal,
     security::SecurityInfo,
     target::{OperatingSystem, OperatingSystemFamily, TargetInfo},
 };
 use typed_path::Utf8TypedPathBuf;
 
-use crate::{io_mode::IoMode, shell_args::ArgsData};
+use crate::{global::Global, io_mode::IoMode, shell_args::ArgsData};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TerminationPolicy {
@@ -45,10 +44,6 @@ pub(crate) struct Env {
 }
 
 impl Env {
-    pub(crate) fn root() -> Self {
-        Self::new(None, true, env::vars(), OperatingSystem::current())
-    }
-
     pub(crate) fn new(
         parent: Option<Rc<Env>>,
         baseline: bool,
@@ -193,9 +188,6 @@ pub(crate) struct Local {
     cwd: RefCell<Utf8TypedPathBuf>,
     env: RefCell<Rc<Env>>,
     vfs: RefCell<AnyVfs>,
-    vfs_exe: RefCell<Option<Utf8TypedPathBuf>>,
-    target: RefCell<TargetInfo>,
-    security: RefCell<Option<SecurityInfo>>,
     io_mode: Cell<IoMode>,
     background: Cell<bool>,
     /// Set while dispatching a write into the ambient console.
@@ -236,16 +228,21 @@ pub(crate) struct Local {
 
 impl<'v> strand::Local<'v> for Local {
     fn init() -> Self {
+        let vfs = AnyVfs::from(
+            dolang_vfs::direct::Direct::new().expect("failed to initialize direct VFS"),
+        );
         Self {
-            cwd: RefCell::new(typed_path(env::current_dir().unwrap()).unwrap()),
+            cwd: RefCell::new(vfs.cwd().to_path_buf()),
             env: RefCell::new(Rc::new(Env::derived(
-                Rc::new(Env::root()),
+                Rc::new(Env::new(
+                    None,
+                    true,
+                    vfs.env(),
+                    vfs.target().operating_system,
+                )),
                 Default::default(),
             ))),
-            vfs: RefCell::new(AnyVfs::default()),
-            vfs_exe: RefCell::new(None),
-            target: RefCell::new(TargetInfo::current()),
-            security: RefCell::new(None),
+            vfs: RefCell::new(vfs),
             io_mode: Cell::new(IoMode::Line),
             background: Cell::new(false),
             capturing: Cell::new(false),
@@ -262,9 +259,6 @@ impl<'v> strand::Local<'v> for Local {
             cwd: self.cwd.clone(),
             env: self.env.clone(),
             vfs: self.vfs.clone(),
-            vfs_exe: self.vfs_exe.clone(),
-            target: self.target.clone(),
-            security: self.security.clone(),
             io_mode: Cell::new(self.io_mode.get()),
             background: Cell::new(self.background.get() || kind == strand::InheritKind::Background),
             // Inherited so that a strand spawned from inside a console's own
@@ -308,30 +302,44 @@ impl Local {
     }
 
     pub(crate) fn vfs_exe(&self) -> Option<Utf8TypedPathBuf> {
-        self.vfs_exe.borrow().clone()
-    }
-
-    pub(crate) fn replace_vfs_exe(
-        &self,
-        exe: Option<Utf8TypedPathBuf>,
-    ) -> Option<Utf8TypedPathBuf> {
-        mem::replace(&mut *self.vfs_exe.borrow_mut(), exe)
+        let vfs = self.vfs.borrow();
+        match &*vfs {
+            AnyVfs::Client(_) => Some(vfs.current_exe().to_path_buf()),
+            AnyVfs::Direct(_) => None,
+        }
     }
 
     pub(crate) fn target(&self) -> TargetInfo {
-        self.target.borrow().clone()
+        self.vfs.borrow().target().clone()
     }
 
-    pub(crate) fn replace_target(&self, target: TargetInfo) -> TargetInfo {
-        mem::replace(&mut *self.target.borrow_mut(), target)
+    pub(crate) fn security(&self) -> SecurityInfo {
+        self.vfs.borrow().security().clone()
     }
 
-    pub(crate) fn security(&self) -> Option<SecurityInfo> {
-        self.security.borrow().clone()
-    }
-
-    pub(crate) fn replace_security(&self, security: Option<SecurityInfo>) -> Option<SecurityInfo> {
-        mem::replace(&mut *self.security.borrow_mut(), security)
+    pub(crate) async fn with_vfs<'v, 's, R>(
+        strand: &mut Strand<'v, 's>,
+        global: State<'v, Global<'v>>,
+        vfs: AnyVfs,
+        f: impl AsyncFnOnce(&mut Strand<'v, 's>) -> R,
+    ) -> R {
+        let cwd = vfs.cwd().to_path_buf();
+        let env = Rc::new(Env::new(
+            None,
+            true,
+            vfs.env(),
+            vfs.target().operating_system,
+        ));
+        let local = global.local.get(strand);
+        let orig_vfs = local.replace_vfs(vfs);
+        let orig_cwd = local.replace_cwd(cwd);
+        let orig_env = local.replace_env(Rc::new(Env::derived(env, HashMap::new())));
+        let result = f(strand).await;
+        let local = global.local.get(strand);
+        local.replace_vfs(orig_vfs);
+        local.replace_cwd(orig_cwd);
+        local.replace_env(orig_env);
+        result
     }
 
     pub(crate) fn io_mode(&self) -> IoMode {

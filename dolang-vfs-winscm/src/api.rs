@@ -7,9 +7,9 @@
 //! `dolang-vfs` never exposing its own `RequestKind`/`ResponseKind`/
 //! `VfsProtocol`.
 
-use dolang_vfs::extension::ExtOpaque;
+use dolang_vfs::extension::{ExtOpaque, VfsExtension};
 use dolang_vfs::{
-    AnyVfs,
+    AnyVfs, Vfs,
     error::{Error, ErrorKind},
 };
 use dolang_winterop::security::SecDesc;
@@ -87,6 +87,16 @@ impl Drop for ScManagerState {
 impl ScManager {
     /// Opens the Service Control Manager database.
     pub async fn open(vfs: &AnyVfs, access: ServiceAccess) -> Result<ScManager, Error> {
+        if vfs
+            .extensions()
+            .maximum_common_version(WinScmExt::NAME, &[WinScmExt::VERSION])
+            .is_none()
+        {
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                "Windows Service Control Manager is not supported by this VFS backend",
+            ));
+        }
         let response = vfs
             .call_extension::<WinScmExt>(WinScmRequest::OpenManager { access })
             .await??;

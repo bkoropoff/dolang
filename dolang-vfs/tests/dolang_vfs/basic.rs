@@ -39,12 +39,12 @@ async fn connect_client(socket_path: &Path) -> Client {
 
 #[tokio::test]
 async fn direct_query_reports_host_target() {
-    let query = Direct::default().query().await.unwrap();
-    assert!(!query.env.is_empty());
-    assert!(query.cwd.is_absolute());
-    assert!(query.current_exe.is_absolute());
-    assert_eq!(query.target, TargetInfo::current());
-    let SecurityInfo::Unix(security) = query.security else {
+    let direct = Direct::new().unwrap();
+    assert!(direct.env().next().is_some());
+    assert!(direct.cwd().is_absolute());
+    assert!(direct.current_exe().is_absolute());
+    assert_eq!(direct.target(), &TargetInfo::current());
+    let SecurityInfo::Unix(security) = direct.security() else {
         panic!("Unix query returned Windows security information");
     };
     assert_eq!(security.uid, getuid().as_raw());
@@ -66,7 +66,7 @@ async fn direct_query_reports_host_target() {
 
 #[tokio::test]
 async fn direct_resolves_unix_user_and_group_names() {
-    let vfs = Direct::default();
+    let vfs = Direct::new().unwrap();
     let uid = geteuid().as_raw();
     let gid = getegid().as_raw();
     let user = vfs.user_name(uid).await.unwrap();
@@ -503,7 +503,7 @@ async fn unix_vfs_connects_to_another_server() {
 
     let client = connect_client(&socket_path).await;
     let inner = client.unix_socket(typed(&inner_path)).await.unwrap();
-    assert_eq!(inner.query().await.unwrap().target, TargetInfo::current());
+    assert_eq!(inner.target(), &TargetInfo::current());
 
     inner.as_client().unwrap().stop().await.unwrap();
     client.stop().await.unwrap();
@@ -1011,7 +1011,7 @@ async fn glob_invalid_pattern() {
 
 #[tokio::test]
 async fn glob_local_basic_matching() {
-    let direct = Direct::default();
+    let direct = Direct::new().unwrap();
     let dir = tempdir().unwrap();
 
     // Create test files
@@ -1032,7 +1032,7 @@ async fn glob_local_basic_matching() {
 
 #[tokio::test]
 async fn glob_local_recursive() {
-    let direct = Direct::default();
+    let direct = Direct::new().unwrap();
     let dir = tempdir().unwrap();
 
     // Create nested directory structure
@@ -1054,7 +1054,7 @@ async fn glob_local_recursive() {
 
 #[tokio::test]
 async fn glob_local_max_depth() {
-    let direct = Direct::default();
+    let direct = Direct::new().unwrap();
     let dir = tempdir().unwrap();
 
     // Create nested directory structure
@@ -1077,7 +1077,7 @@ async fn glob_local_max_depth() {
 
 #[tokio::test]
 async fn glob_local_no_matches() {
-    let direct = Direct::default();
+    let direct = Direct::new().unwrap();
     let dir = tempdir().unwrap();
 
     std::fs::write(dir.path().join("file.txt"), "content").unwrap();
@@ -1093,7 +1093,7 @@ async fn glob_local_no_matches() {
 
 #[tokio::test]
 async fn glob_local_invalid_pattern() {
-    let direct = Direct::default();
+    let direct = Direct::new().unwrap();
     let dir = tempdir().unwrap();
 
     // Test glob with invalid pattern (should return error)

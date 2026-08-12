@@ -36,10 +36,11 @@ async fn embedded_vfs_mode_serves_and_stops() {
     let client = unsafe { Client::from_named_pipe_server(pipe, process) }
         .await
         .unwrap();
-    let query = client.query().await.unwrap();
     assert_eq!(
-        query.cwd,
-        dolang_vfs::path::typed_path(std::env::current_dir().unwrap()).unwrap()
+        client.cwd(),
+        dolang_vfs::path::typed_path(std::env::current_dir().unwrap())
+            .unwrap()
+            .to_path()
     );
 
     let current_exe = std::env::current_exe().unwrap();
@@ -63,10 +64,11 @@ async fn embedded_vfs_stdio_mode_serves_and_stops() {
     let stdout = child.stdout.take().unwrap();
     let client = Client::new_split(stdout, stdin).await.unwrap();
 
-    let query = client.query().await.unwrap();
     assert_eq!(
-        query.cwd,
-        dolang_vfs::path::typed_path(std::env::current_dir().unwrap()).unwrap()
+        client.cwd(),
+        dolang_vfs::path::typed_path(std::env::current_dir().unwrap())
+            .unwrap()
+            .to_path()
     );
 
     client.stop().await.unwrap();

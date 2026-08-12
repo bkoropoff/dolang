@@ -7,9 +7,9 @@
 //! implementation detail, same as `dolang-vfs` never exposing its own
 //! `RequestKind`/`ResponseKind`/`VfsProtocol`.
 
-use dolang_vfs::extension::ExtOpaque;
+use dolang_vfs::extension::{ExtOpaque, VfsExtension};
 use dolang_vfs::{
-    AnyVfs,
+    AnyVfs, Vfs,
     direct::Direct,
     error::{Error, ErrorKind},
 };
@@ -59,7 +59,7 @@ async fn from_response(
             handle: Arc::new(KeyState::new(vfs.clone(), handle)),
         }),
         WinRegResponse::Key(KeyHandle::Native(os_handle)) => {
-            let local = AnyVfs::Direct(Direct::default());
+            let local = AnyVfs::Direct(Direct::new()?);
             let adopted = local
                 .call_extension::<WinRegExt>(WinRegRequest::AdoptNative { handle: os_handle })
                 .await??;
@@ -137,6 +137,16 @@ impl Key {
         view: View,
         access: Access,
     ) -> Result<Key, Error> {
+        if vfs
+            .extensions()
+            .maximum_common_version(WinRegExt::NAME, &[WinRegExt::VERSION])
+            .is_none()
+        {
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                "Windows registry is not supported by this VFS backend",
+            ));
+        }
         let response = vfs
             .call_extension::<WinRegExt>(WinRegRequest::OpenRoot { root, view, access })
             .await??;
@@ -490,7 +500,7 @@ mod tests {
 
     #[tokio::test]
     async fn unexpected_key_response_returns_error() {
-        let vfs = AnyVfs::Direct(Direct::default());
+        let vfs = AnyVfs::Direct(Direct::new().unwrap());
         let error = match from_response(&vfs, "OpenRoot", WinRegResponse::Ack).await {
             Ok(_) => panic!("expected an error"),
             Err(error) => error,

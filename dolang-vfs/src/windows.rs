@@ -32,7 +32,7 @@ use windows_sys::Win32::{
     },
 };
 
-use crate::{Client, Query};
+use crate::Client;
 
 const EXIT_STARTUP_FAILURE: u32 = 1;
 
@@ -48,7 +48,7 @@ impl AdminSession {
     pub async fn launch(
         cwd: impl Into<PathBuf>,
         env: HashMap<String, Option<String>>,
-    ) -> io::Result<(Self, Query)> {
+    ) -> io::Result<Self> {
         launch_with(cwd.into(), env, launch_elevated).await
     }
 
@@ -57,7 +57,7 @@ impl AdminSession {
     pub async fn launch_unelevated(
         cwd: impl Into<PathBuf>,
         env: HashMap<String, Option<String>>,
-    ) -> io::Result<(Self, Query)> {
+    ) -> io::Result<Self> {
         launch_with(cwd.into(), env, launch_process).await
     }
 
@@ -95,7 +95,7 @@ async fn launch_with(
     cwd: PathBuf,
     env: HashMap<String, Option<String>>,
     launcher: impl FnOnce(&Path, &[OsString], &Path) -> io::Result<OwnedHandle> + Send + 'static,
-) -> io::Result<(AdminSession, Query)> {
+) -> io::Result<AdminSession> {
     let pipe_name = random_pipe_name();
     let pipe = create_pipe(&pipe_name)?;
     let executable =
@@ -111,17 +111,13 @@ async fn launch_with(
     let client = unsafe { Client::from_named_pipe_server(pipe, client_process) }
         .await
         .map_err(crate::Error::into_io_error)?;
-    let query = client.query().await.map_err(crate::Error::into_io_error)?;
     guard.disarm();
 
-    Ok((
-        AdminSession {
-            client,
-            process,
-            stopped: AtomicBool::new(false),
-        },
-        query,
-    ))
+    Ok(AdminSession {
+        client,
+        process,
+        stopped: AtomicBool::new(false),
+    })
 }
 
 fn launch_args(

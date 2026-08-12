@@ -19,11 +19,8 @@ fn expect_err<T>(result: Result<T, Error>) -> Error {
 
 #[cfg(not(windows))]
 mod stub {
-    //! On non-Windows platforms the extension is registered but backed by a
-    //! stub that always reports `ErrorKind::Unsupported`. This is checked
-    //! against both dispatch modes so a caller on a non-Windows peer sees a
-    //! real, catchable error rather than a routing failure indistinguishable
-    //! from a typo in the extension name/version.
+    //! Non-Windows backends omit the extension capability. The public wrapper
+    //! converts that absence into a clear `Unsupported` error.
 
     use dolang_vfs::{client::Client, server::Server};
     use dolang_vfs_winscm::ServiceAccess;
@@ -42,7 +39,7 @@ mod stub {
 
     #[tokio::test]
     async fn direct_dispatch_reports_unsupported() {
-        let vfs = AnyVfs::Direct(Direct::default());
+        let vfs = AnyVfs::Direct(Direct::new().unwrap());
         let error = expect_err(ScManager::open(&vfs, ServiceAccess::SC_MANAGER_CONNECT).await);
         assert_eq!(error.kind(), ErrorKind::Unsupported);
     }
@@ -486,8 +483,8 @@ mod live {
     /// flakiness either way.
     #[tokio::test]
     async fn live_exercises_real_scm() {
-        exercise(&AnyVfs::Direct(Direct::default())).await;
-        exercise_cancellation(&AnyVfs::Direct(Direct::default())).await;
+        exercise(&AnyVfs::Direct(Direct::new().unwrap())).await;
+        exercise_cancellation(&AnyVfs::Direct(Direct::new().unwrap())).await;
 
         let (client, _server) = connected_client().await;
         exercise(&AnyVfs::Client(client)).await;

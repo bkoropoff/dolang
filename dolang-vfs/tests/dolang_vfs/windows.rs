@@ -116,10 +116,9 @@ async fn connected_pair() -> (Client, JoinHandle<std::io::Result<()>>) {
 async fn query_reports_server_target_including_wine() {
     let (client, server_task) = connected_pair().await;
 
-    let query = client.query().await.unwrap();
-    assert_eq!(query.target, TargetInfo::current());
-    assert_eq!(query.target.is_wine, Some(dolang_winterop::is_wine()));
-    assert_eq!(query.security, SecurityInfo::current().unwrap());
+    assert_eq!(client.target(), &TargetInfo::current());
+    assert_eq!(client.target().is_wine, Some(dolang_winterop::is_wine()));
+    assert_eq!(client.security(), &SecurityInfo::current().unwrap());
 
     client.stop().await.unwrap();
     server_task.await.unwrap().unwrap();

@@ -64,6 +64,7 @@ pub(crate) struct QueryResponse {
     pub(crate) current_exe: WirePath,
     pub(crate) target: TargetInfo,
     pub(crate) security: SecurityInfo,
+    pub(crate) extensions: crate::session::ExtensionSet,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]

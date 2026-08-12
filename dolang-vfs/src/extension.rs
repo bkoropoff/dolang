@@ -22,9 +22,10 @@
 
 use std::{
     any::{Any, TypeId},
+    collections::HashMap,
     future::Future,
     pin::Pin,
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 use dolang_rpc::{
@@ -35,6 +36,7 @@ use dolang_rpc::{
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::protocol::VfsProtocol;
+use crate::session::ExtensionSet;
 
 #[doc(hidden)]
 pub mod __private {
@@ -57,6 +59,8 @@ pub trait VfsExtension: Send + Sync + 'static {
     const NAME: &'static str;
     /// Extension version, used together with [`NAME`](Self::NAME) to route requests.
     const VERSION: u16;
+    /// Whether this process has a backend implementation for the extension.
+    const AVAILABLE: bool = true;
 
     /// Handles a single request.
     fn handle(
@@ -74,6 +78,7 @@ pub trait VfsExtension: Send + Sync + 'static {
 pub trait ErasedVfsExtension: Send + Sync + 'static {
     fn name(&self) -> &'static str;
     fn version(&self) -> u16;
+    fn available(&self) -> bool;
 
     fn deserialize_request<'de>(
         &self,
@@ -104,6 +109,10 @@ impl<T: VfsExtension> ErasedVfsExtension for T {
 
     fn version(&self) -> u16 {
         T::VERSION
+    }
+
+    fn available(&self) -> bool {
+        T::AVAILABLE
     }
 
     fn deserialize_request<'de>(
@@ -155,8 +164,53 @@ impl<T: VfsExtension> ErasedVfsExtension for T {
 #[linkme::distributed_slice]
 pub static VFS_EXTENSIONS: [&'static dyn ErasedVfsExtension];
 
-/// Registers a [`VfsExtension`], making it available for both direct and
-/// remote dispatch in any binary that links the crate calling this macro.
+struct Registry {
+    capabilities: ExtensionSet,
+    handlers: HashMap<(&'static str, u16), &'static dyn ErasedVfsExtension>,
+}
+
+static REGISTERED: OnceLock<crate::Result<Registry>> = OnceLock::new();
+
+fn registry() -> crate::Result<&'static Registry> {
+    REGISTERED
+        .get_or_init(|| {
+            let mut handlers = HashMap::new();
+            for extension in VFS_EXTENSIONS {
+                if handlers
+                    .insert((extension.name(), extension.version()), *extension)
+                    .is_some()
+                {
+                    return Err(crate::Error::new(
+                        crate::ErrorKind::AlreadyExists,
+                        format!(
+                            "duplicate VFS extension registration: {} version {}",
+                            extension.name(),
+                            extension.version()
+                        ),
+                    ));
+                }
+            }
+            let capabilities = ExtensionSet::from_pairs(
+                VFS_EXTENSIONS
+                    .iter()
+                    .filter(|extension| extension.available())
+                    .map(|extension| (extension.name().to_owned(), extension.version())),
+            )?;
+            Ok(Registry {
+                capabilities,
+                handlers,
+            })
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+pub(crate) fn registered() -> crate::Result<&'static ExtensionSet> {
+    Ok(&registry()?.capabilities)
+}
+
+/// Links a [`VfsExtension`]'s wire codec and, when
+/// [`AVAILABLE`](VfsExtension::AVAILABLE), its backend handler.
 #[macro_export]
 macro_rules! vfs_extension {
     ($expr:expr) => {
@@ -172,10 +226,7 @@ pub use crate::vfs_extension;
 
 /// Looks up a registered extension by name and version.
 pub(crate) fn lookup(name: &str, version: u16) -> Option<&'static dyn ErasedVfsExtension> {
-    VFS_EXTENSIONS
-        .iter()
-        .copied()
-        .find(|ext| ext.name() == name && ext.version() == version)
+    registry().ok()?.handlers.get(&(name, version)).copied()
 }
 
 /// State backing direct (in-process) extension dispatch.

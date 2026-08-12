@@ -1438,7 +1438,7 @@ impl Direct {
             .open(typed_windows_path(path)?)
             .await
             .map_err(crate::Error::into_io_error)?;
-        self.impl_file_xattrs(&file.inner, namespace).await
+        Self::impl_file_xattrs(&file.inner, namespace).await
     }
 
     pub(super) async fn impl_streams(
@@ -1447,7 +1447,7 @@ impl Direct {
         follow: bool,
     ) -> Result<Vec<StreamEntry>, io::Error> {
         let file = Self::open_for_metadata(path, follow)?;
-        self.impl_file_streams(&file).await
+        Self::impl_file_streams(&file).await
     }
 
     pub(super) async fn impl_xattr(
@@ -1464,7 +1464,7 @@ impl Direct {
             .open(typed_windows_path(path)?)
             .await
             .map_err(crate::Error::into_io_error)?;
-        self.impl_file_xattr(&file.inner, name, namespace).await
+        Self::impl_file_xattr(&file.inner, name, namespace).await
     }
 
     pub(super) async fn impl_set_xattr(
@@ -1482,8 +1482,7 @@ impl Direct {
             .open(typed_windows_path(path)?)
             .await
             .map_err(crate::Error::into_io_error)?;
-        self.impl_file_set_xattr(&file.inner, name, namespace, value)
-            .await
+        Self::impl_file_set_xattr(&file.inner, name, namespace, value).await
     }
 
     pub(super) async fn impl_remove_xattr(
@@ -1501,12 +1500,10 @@ impl Direct {
             .open(typed_windows_path(path)?)
             .await
             .map_err(crate::Error::into_io_error)?;
-        self.impl_file_remove_xattr(&file.inner, name, namespace)
-            .await
+        Self::impl_file_remove_xattr(&file.inner, name, namespace).await
     }
 
     pub(super) async fn impl_file_xattrs(
-        &self,
         file: &File,
         namespace: XattrNamespace<'_>,
     ) -> Result<Vec<XattrEntry>, io::Error> {
@@ -1523,7 +1520,6 @@ impl Direct {
     }
 
     pub(super) async fn impl_file_xattr(
-        &self,
         file: &File,
         name: &str,
         namespace: Option<&str>,
@@ -1537,10 +1533,7 @@ impl Direct {
         .unwrap_or_else(|e| Err(io::Error::other(e)))
     }
 
-    pub(super) async fn impl_file_streams(
-        &self,
-        file: &File,
-    ) -> Result<Vec<StreamEntry>, io::Error> {
+    pub(super) async fn impl_file_streams(file: &File) -> Result<Vec<StreamEntry>, io::Error> {
         let file = file.try_clone().await?;
         tokio::task::spawn_blocking(move || unsafe { Self::windows_list_streams(file.as_handle()) })
             .await
@@ -1548,7 +1541,6 @@ impl Direct {
     }
 
     pub(super) async fn impl_file_set_xattr(
-        &self,
         file: &File,
         name: &str,
         namespace: Option<&str>,
@@ -1571,7 +1563,6 @@ impl Direct {
     }
 
     pub(super) async fn impl_file_remove_xattr(
-        &self,
         file: &File,
         name: &str,
         namespace: Option<&str>,

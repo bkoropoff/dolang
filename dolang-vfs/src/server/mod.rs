@@ -211,7 +211,7 @@ impl Server {
             listener: None,
             rpc: Some(rpc),
             mode: SessionMode::Remote,
-            shared: Self::state(),
+            shared: Self::state()?,
         })
     }
 
@@ -231,35 +231,35 @@ impl Server {
             listener: None,
             rpc: Some(rpc),
             mode: SessionMode::Remote,
-            shared: Self::state(),
+            shared: Self::state()?,
         })
     }
 
-    fn state() -> Arc<ServerState> {
+    fn state() -> crate::Result<Arc<ServerState>> {
         #[cfg(unix)]
         let (shutdown_tx, _) = watch::channel(());
-        Arc::new(ServerState {
-            vfs: AnyVfs::from(Direct::default()),
+        Ok(Arc::new(ServerState {
+            vfs: AnyVfs::from(Direct::new()?),
             #[cfg(unix)]
             shutdown_tx,
-        })
+        }))
     }
 
     /// Binds a Unix-domain listener for VFS agent connections.
     #[cfg(unix)]
     pub async fn bind(path: impl AsRef<Path>) -> Result<Self, io::Error> {
-        Ok(Self::from_listener(UnixListener::bind(path)?))
+        Self::from_listener(UnixListener::bind(path)?)
     }
 
     /// Create a server from an existing `UnixListener`.
     #[cfg(unix)]
-    fn from_listener(listener: UnixListener) -> Self {
-        Self {
+    fn from_listener(listener: UnixListener) -> Result<Self, io::Error> {
+        Ok(Self {
             listener: Some(listener),
             rpc: None,
             mode: SessionMode::Native,
-            shared: Self::state(),
-        }
+            shared: Self::state().map_err(crate::Error::into_io_error)?,
+        })
     }
 
     /// Creates a VFS RPC server on the client end of a connected Windows named pipe.
@@ -275,7 +275,7 @@ impl Server {
             listener: None,
             rpc: Some(rpc),
             mode: SessionMode::Native,
-            shared: Self::state(),
+            shared: Self::state().map_err(crate::Error::into_io_error)?,
         })
     }
 
@@ -675,7 +675,9 @@ impl Connection {
             version,
             payload,
         } = request;
-        let Some(ext) = crate::extension::lookup(&name, version) else {
+        let Some(ext) =
+            crate::extension::lookup(&name, version).filter(|extension| extension.available())
+        else {
             return ResponseKind::Extension(Err(Self::unsupported(&format!(
                 "VFS extension {name} v{version}"
             ))));
@@ -931,15 +933,15 @@ impl Connection {
     }
 
     async fn handle_query(&self) -> ResponseKind {
-        ResponseKind::Query(Self::wire_result(self.server.vfs.query().await.map(
-            |query| QueryResponse {
-                env: query.env,
-                cwd: query.cwd.into(),
-                current_exe: query.current_exe.into(),
-                target: query.target,
-                security: query.security,
-            },
-        )))
+        let vfs = &self.server.vfs;
+        ResponseKind::Query(Ok(QueryResponse {
+            env: vfs.env().collect(),
+            cwd: vfs.cwd().into(),
+            current_exe: vfs.current_exe().into(),
+            target: vfs.target().clone(),
+            security: vfs.security().clone(),
+            extensions: vfs.extensions().clone(),
+        }))
     }
 
     /// Reserves a drain slot for an endpoint about to be handed to the peer.

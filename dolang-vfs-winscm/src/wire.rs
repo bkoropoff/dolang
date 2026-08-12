@@ -13,6 +13,7 @@ use dolang_vfs::extension::{ExtContext, ExtOpaque, VfsExtension};
 use dolang_winterop::security::SecDesc;
 use serde::{Deserialize, Serialize};
 
+#[cfg(windows)]
 use crate::backend;
 
 /// Marker for the opaque SC manager handle. Never named outside this crate.
@@ -379,9 +380,16 @@ impl VfsExtension for WinScmExt {
 
     const NAME: &'static str = "dolang-vfs-winscm";
     const VERSION: u16 = 1;
+    const AVAILABLE: bool = cfg!(windows);
 
     async fn handle(&self, ctx: &mut ExtContext<'_>, request: WinScmRequest) -> Self::Response {
-        backend::handle(ctx, request).await
+        #[cfg(windows)]
+        return backend::handle(ctx, request).await;
+        #[cfg(not(windows))]
+        {
+            let _ = (ctx, request);
+            unreachable!("unavailable VFS extension was dispatched")
+        }
     }
 }
 
