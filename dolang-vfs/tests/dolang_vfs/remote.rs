@@ -181,10 +181,7 @@ async fn opaque_session_chains_to_unix_vfs() {
 
     let socket = typed_path(socket).unwrap();
     let inner = outer.unix_socket(socket.to_path()).await.unwrap();
-    assert_eq!(
-        inner.query().await.unwrap().target,
-        dolang_vfs::target::TargetInfo::current()
-    );
+    assert_eq!(inner.target(), &dolang_vfs::target::TargetInfo::current());
 
     let dir = typed_path(temp.path().join("through-chain")).unwrap();
     inner.create_dir(dir.to_path(), false).await.unwrap();
@@ -210,10 +207,7 @@ async fn opaque_session_chains_to_unix_vfs() {
 
     inner.as_client().unwrap().stop().await.unwrap();
     inner_task.await.unwrap().unwrap();
-    assert_eq!(
-        outer.query().await.unwrap().target,
-        dolang_vfs::target::TargetInfo::current()
-    );
+    assert_eq!(outer.target(), &dolang_vfs::target::TargetInfo::current());
     outer.stop().await.unwrap();
     outer_task.await.unwrap().unwrap();
 }
@@ -232,10 +226,7 @@ async fn opaque_session_supports_multiple_vfs_hops() {
     let inner_path = typed_path(inner_socket).unwrap();
     let middle = outer.unix_socket(middle_path.to_path()).await.unwrap();
     let inner = middle.unix_socket(inner_path.to_path()).await.unwrap();
-    assert_eq!(
-        inner.query().await.unwrap().target,
-        dolang_vfs::target::TargetInfo::current()
-    );
+    assert_eq!(inner.target(), &dolang_vfs::target::TargetInfo::current());
 
     inner.as_client().unwrap().stop().await.unwrap();
     inner_task.await.unwrap().unwrap();
@@ -260,7 +251,7 @@ async fn outer_teardown_does_not_stop_retained_vfs_daemon() {
     outer_task.await.unwrap().unwrap();
 
     let direct = Client::connect(&socket).await.unwrap();
-    direct.query().await.unwrap();
+    assert!(direct.cwd().is_absolute());
     direct.stop().await.unwrap();
     inner_task.await.unwrap().unwrap();
 }
@@ -268,8 +259,7 @@ async fn outer_teardown_does_not_stop_retained_vfs_daemon() {
 #[tokio::test]
 async fn path_operations_work_over_generic_stream() {
     let (client, server_task) = connected_pair().await;
-    let query = client.query().await.unwrap();
-    assert_eq!(query.target, TargetInfo::current());
+    assert_eq!(client.target(), &TargetInfo::current());
 
     let temp = tempdir().unwrap();
     let first = typed_path(temp.path().join("first")).unwrap();
@@ -329,9 +319,10 @@ async fn rename_replace_flag_works_over_generic_stream() {
 #[tokio::test]
 async fn query_and_stop_work_over_split_streams() {
     let (client, server_task) = connected_split_pair().await;
-    let query = client.query().await.unwrap();
-    assert_eq!(query.target, TargetInfo::current());
+    assert_eq!(client.target(), &TargetInfo::current());
     client.stop().await.unwrap();
+    assert_eq!(client.target(), &TargetInfo::current());
+    assert!(client.cwd().is_absolute());
     server_task.await.unwrap().unwrap();
 }
 
@@ -591,7 +582,7 @@ async fn opaque_stdio_is_rejected_by_a_different_client_session() {
 async fn direct_file_relays_as_remote_process_stdin() {
     let (client, server_task) = connected_pair().await;
     let remote_vfs = AnyVfs::from(client.clone());
-    let direct = Direct::default();
+    let direct = Direct::new().unwrap();
     let temp = tempdir().unwrap();
     let stdin_path = typed_path(temp.path().join("stdin")).unwrap();
 
@@ -615,7 +606,7 @@ async fn direct_file_relays_as_remote_process_stdin() {
 #[tokio::test]
 async fn remote_file_relays_as_direct_process_stdin() {
     let (client, server_task) = connected_pair().await;
-    let direct_vfs = AnyVfs::from(Direct::default());
+    let direct_vfs = AnyVfs::from(Direct::new().unwrap());
     let temp = tempdir().unwrap();
     let stdin_path = typed_path(temp.path().join("stdin")).unwrap();
 
@@ -640,7 +631,7 @@ async fn remote_file_relays_as_direct_process_stdin() {
 async fn remote_process_stdout_relays_into_direct_file() {
     let (client, server_task) = connected_pair().await;
     let remote_vfs = AnyVfs::from(client.clone());
-    let direct = Direct::default();
+    let direct = Direct::new().unwrap();
     let temp = tempdir().unwrap();
     let stdout_path = typed_path(temp.path().join("stdout")).unwrap();
 
@@ -748,7 +739,7 @@ async fn pipeline_relays_across_three_domains() {
     let (b, b_server) = connected_pair().await;
     let a_vfs = AnyVfs::from(a.clone());
     let b_vfs = AnyVfs::from(b.clone());
-    let direct = Direct::default();
+    let direct = Direct::new().unwrap();
     let temp = tempdir().unwrap();
     let stdin_path = typed_path(temp.path().join("stdin")).unwrap();
     let stdout_path = typed_path(temp.path().join("stdout")).unwrap();
@@ -830,7 +821,7 @@ async fn same_domain_pipe_stays_direct_through_any_vfs() {
 async fn cross_domain_stdin_relay_is_aborted_on_terminate() {
     let (client, server_task) = connected_pair().await;
     let remote_vfs = AnyVfs::from(client.clone());
-    let direct = Direct::default();
+    let direct = Direct::new().unwrap();
     let (mut send, recv) = direct.pipe().await.unwrap();
 
     let mut command = command_with_args_any(&remote_vfs, long_running_command());
@@ -865,7 +856,7 @@ async fn cross_domain_stdin_relay_is_aborted_on_terminate() {
 async fn cross_domain_stdio_cleans_up_after_launch_failure() {
     let (client, server_task) = connected_pair().await;
     let remote_vfs = AnyVfs::from(client.clone());
-    let direct = Direct::default();
+    let direct = Direct::new().unwrap();
     let (_send, recv) = direct.pipe().await.unwrap();
 
     let mut command = remote_vfs.command(typed_str("nonexistent_command_12345"));
@@ -880,7 +871,7 @@ async fn cross_domain_stdio_cleans_up_after_launch_failure() {
 async fn dropping_any_child_aborts_cross_domain_relay() {
     let (client, server_task) = connected_pair().await;
     let remote_vfs = AnyVfs::from(client.clone());
-    let direct = Direct::default();
+    let direct = Direct::new().unwrap();
     let (mut send, recv) = direct.pipe().await.unwrap();
 
     let mut command = command_with_args_any(&remote_vfs, long_running_command());
@@ -935,7 +926,7 @@ async fn collect_entries(mut read_dir: ReadDir) -> Vec<DirEntry> {
 #[tokio::test]
 async fn directory_enumeration_round_trip_over_generic_stream() {
     let (client, server_task) = connected_pair().await;
-    let direct = Direct::default();
+    let direct = Direct::new().unwrap();
     let temp = tempdir().unwrap();
 
     let empty = temp.path().join("empty");

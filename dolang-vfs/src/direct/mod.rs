@@ -23,10 +23,11 @@ use wax::{
     walk::{DepthBehavior, DepthMax, Entry, LinkBehavior, WalkBehavior},
 };
 
+use crate::session::Query;
 use crate::{
     Child, Command, FileHandle, FsMetadata, Metadata, MetadataPatch, PosixAcl, ProcessStatus,
-    Query, ReadDir, SidName, StdioRecv, StdioSend, StreamEntry, Utf8TypedPath, Utf8TypedPathBuf,
-    Vfs, XattrEntry, XattrNamespace,
+    ReadDir, SidName, StdioRecv, StdioSend, StreamEntry, Utf8TypedPath, Utf8TypedPathBuf, Vfs,
+    XattrEntry, XattrNamespace,
     path::{WellKnownPath, native_path, typed_path},
 };
 use dolang_winterop::security::{SecDesc, Sid};
@@ -50,6 +51,7 @@ pub(crate) use lock::{DirectFileLock, DirectFileLocks};
 #[derive(Debug, Clone)]
 pub struct Direct {
     path_cache: Arc<PathCache>,
+    initial: Arc<Query>,
 }
 
 /// Local file-open options returned by [`Direct::open_options`](crate::Vfs::open_options).
@@ -303,22 +305,19 @@ impl FileHandle for DirectFile {
     }
 
     async fn xattrs(&mut self, namespace: XattrNamespace<'_>) -> crate::Result<Vec<XattrEntry>> {
-        Direct::default()
-            .impl_file_xattrs(&self.inner, namespace)
+        Direct::impl_file_xattrs(&self.inner, namespace)
             .await
             .map_err(Into::into)
     }
 
     async fn xattr(&mut self, name: &str, namespace: Option<&str>) -> crate::Result<Vec<u8>> {
-        Direct::default()
-            .impl_file_xattr(&self.inner, name, namespace)
+        Direct::impl_file_xattr(&self.inner, name, namespace)
             .await
             .map_err(Into::into)
     }
 
     async fn streams(&mut self) -> crate::Result<Vec<StreamEntry>> {
-        Direct::default()
-            .impl_file_streams(&self.inner)
+        Direct::impl_file_streams(&self.inner)
             .await
             .map_err(Into::into)
     }
@@ -329,15 +328,13 @@ impl FileHandle for DirectFile {
         namespace: Option<&str>,
         value: &[u8],
     ) -> crate::Result<()> {
-        Direct::default()
-            .impl_file_set_xattr(&self.inner, name, namespace, value)
+        Direct::impl_file_set_xattr(&self.inner, name, namespace, value)
             .await
             .map_err(Into::into)
     }
 
     async fn remove_xattr(&mut self, name: &str, namespace: Option<&str>) -> crate::Result<()> {
-        Direct::default()
-            .impl_file_remove_xattr(&self.inner, name, namespace)
+        Direct::impl_file_remove_xattr(&self.inner, name, namespace)
             .await
             .map_err(Into::into)
     }
@@ -434,11 +431,13 @@ impl PathCache {
     }
 }
 
-impl Default for Direct {
-    fn default() -> Self {
-        Self {
+impl Direct {
+    /// Captures the process context used by this direct backend.
+    pub fn new() -> crate::Result<Self> {
+        Ok(Self {
             path_cache: Arc::new(PathCache::new()),
-        }
+            initial: Arc::new(Query::current()?),
+        })
     }
 }
 
@@ -731,12 +730,14 @@ impl Direct {
         &self,
         request: T::Request,
     ) -> crate::Result<T::Response> {
-        let ext = crate::extension::lookup(T::NAME, T::VERSION).ok_or_else(|| {
-            crate::Error::new(
-                crate::ErrorKind::Unsupported,
-                format!("VFS extension {} v{} is not available", T::NAME, T::VERSION),
-            )
-        })?;
+        let ext = crate::extension::lookup(T::NAME, T::VERSION)
+            .filter(|extension| extension.available())
+            .ok_or_else(|| {
+                crate::Error::new(
+                    crate::ErrorKind::Unsupported,
+                    format!("VFS extension {} v{} is not available", T::NAME, T::VERSION),
+                )
+            })?;
         let mut state = crate::extension::DirectContext::default();
         let mut ctx = crate::extension::ExtContext::direct(&mut state);
         let response = ext.dispatch(&mut ctx, Box::new(request)).await;
@@ -890,6 +891,30 @@ impl Vfs for Direct {
     where
         Self: 'a;
 
+    fn env(&self) -> Box<dyn Iterator<Item = (String, String)> + '_> {
+        Box::new(crate::session::current_environment())
+    }
+
+    fn cwd(&self) -> Utf8TypedPath<'_> {
+        self.initial.cwd.to_path()
+    }
+
+    fn current_exe(&self) -> Utf8TypedPath<'_> {
+        self.initial.current_exe.to_path()
+    }
+
+    fn target(&self) -> &crate::TargetInfo {
+        &self.initial.target
+    }
+
+    fn security(&self) -> &crate::SecurityInfo {
+        &self.initial.security
+    }
+
+    fn extensions(&self) -> &crate::session::ExtensionSet {
+        &self.initial.extensions
+    }
+
     fn open_options(&self) -> Self::OpenOptions<'_> {
         DirectOpenOptions::default()
     }
@@ -925,7 +950,7 @@ impl Vfs for Direct {
         #[cfg(windows)]
         {
             let cwd = native_path(cwd)?;
-            let (session, _) = if elevate {
+            let session = if elevate {
                 crate::service::AdminSession::launch(cwd, env).await
             } else {
                 crate::service::AdminSession::launch_unelevated(cwd, env).await
@@ -949,10 +974,6 @@ impl Vfs for Direct {
 
     async fn pipe_sized(&self, buf_size: Option<usize>) -> crate::Result<(StdioSend, StdioRecv)> {
         crate::process::pipe(buf_size).map_err(Into::into)
-    }
-
-    async fn query(&self) -> crate::Result<Query> {
-        Query::current()
     }
 
     async fn user_name(&self, uid: u32) -> crate::Result<String> {

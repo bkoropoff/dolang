@@ -10,7 +10,9 @@ use dolang_vfs::extension::{ExtContext, ExtOpaque, ExtOsHandle, VfsExtension};
 use dolang_winterop::security::SecDesc;
 use serde::{Deserialize, Serialize};
 
-use crate::{backend, value::Value};
+#[cfg(windows)]
+use crate::backend;
+use crate::value::Value;
 
 /// Marker for the opaque registry key handle. Never named outside this crate.
 pub(crate) struct KeyMarker;
@@ -192,9 +194,16 @@ impl VfsExtension for WinRegExt {
 
     const NAME: &'static str = "dolang-vfs-winreg";
     const VERSION: u16 = 1;
+    const AVAILABLE: bool = cfg!(windows);
 
     async fn handle(&self, ctx: &mut ExtContext<'_>, request: WinRegRequest) -> Self::Response {
-        backend::handle(ctx, request).await
+        #[cfg(windows)]
+        return backend::handle(ctx, request).await;
+        #[cfg(not(windows))]
+        {
+            let _ = (ctx, request);
+            unreachable!("unavailable VFS extension was dispatched")
+        }
     }
 }
 

@@ -5,6 +5,7 @@ use std::{
     io::IsTerminal,
     path::{Path, PathBuf},
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
 };
 
@@ -35,9 +36,10 @@ use tokio::{
 use crate::extension::VfsExtension;
 #[cfg(unix)]
 use crate::protocol::AccessRequest;
+use crate::session::Query;
 use crate::{
     Child, Command, FileHandle, FsMetadata, Metadata, MetadataPatch, PosixAcl, ProcessStatus,
-    Query, ReadDir, SessionMode, SidName, StdioRecv, StdioSend, StreamEntry, Utf8TypedPath,
+    ReadDir, SessionMode, SidName, StdioRecv, StdioSend, StreamEntry, Utf8TypedPath,
     Utf8TypedPathBuf, Vfs, XattrEntry,
     direct::DirectFile,
     path::WellKnownPath,
@@ -62,9 +64,14 @@ use crate::{
 /// trait when code should work with local and remote backends alike.
 #[derive(Clone)]
 pub struct Client {
+    shared: Arc<ClientShared>,
+    vfs: Option<Opaque<crate::session::VfsMarker>>,
+}
+
+struct ClientShared {
     rpc: dolang_rpc::client::Client<VfsProtocol>,
     mode: SessionMode,
-    vfs: Option<Opaque<crate::session::VfsMarker>>,
+    query: Query,
 }
 
 /// A file handle returned by a [`Client`] operation.
@@ -923,13 +930,55 @@ fn wire_io(error: crate::protocol::WireError) -> io::Error {
     crate::Error::from(error).into_io_error()
 }
 
+fn query_from_wire(response: QueryResponse) -> Query {
+    let QueryResponse {
+        env,
+        cwd,
+        current_exe,
+        target,
+        security,
+        extensions,
+    } = response;
+    Query {
+        env,
+        cwd: cwd.into(),
+        current_exe: current_exe.into(),
+        target,
+        security,
+        extensions,
+    }
+}
+
 impl Client {
+    async fn initialize(
+        rpc: dolang_rpc::client::Client<VfsProtocol>,
+        mode: SessionMode,
+        vfs: Option<Opaque<crate::session::VfsMarker>>,
+    ) -> crate::Result<Self> {
+        let response = rpc
+            .call(Request {
+                vfs: vfs.clone(),
+                kind: RequestKind::Query,
+            })
+            .await
+            .map_err(rpc_error)?
+            .into_response();
+        let ResponseKind::Query(result) = response else {
+            return Err(unexpected(response).into());
+        };
+        let query = result.map_err(crate::Error::from).map(query_from_wire)?;
+        Ok(Self {
+            shared: Arc::new(ClientShared { rpc, mode, query }),
+            vfs,
+        })
+    }
+
     pub(crate) fn is_same_vfs(&self, other: &Self) -> bool {
-        self.rpc.is_same_session(&other.rpc) && self.vfs == other.vfs
+        self.shared.rpc.is_same_session(&other.shared.rpc) && self.vfs == other.vfs
     }
 
     pub(crate) fn mode(&self) -> SessionMode {
-        self.mode
+        self.shared.mode
     }
 
     /// Starts an opaque-only VFS client on a bidirectional byte stream.
@@ -940,15 +989,12 @@ impl Client {
     where
         T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        Ok(Self {
-            rpc: rpc_builder()
-                .client(stream)
-                .await
-                .map_err(rpc_error)?
-                .bind(),
-            mode: SessionMode::Remote,
-            vfs: None,
-        })
+        let rpc = rpc_builder()
+            .client(stream)
+            .await
+            .map_err(rpc_error)?
+            .bind();
+        Self::initialize(rpc, SessionMode::Remote, None).await
     }
 
     /// Starts an opaque-only VFS client on separate reader and writer streams.
@@ -959,15 +1005,12 @@ impl Client {
         R: AsyncRead + Send + 'static,
         W: AsyncWrite + Send + 'static,
     {
-        Ok(Self {
-            rpc: rpc_builder()
-                .client_split(reader, writer)
-                .await
-                .map_err(rpc_error)?
-                .bind(),
-            mode: SessionMode::Remote,
-            vfs: None,
-        })
+        let rpc = rpc_builder()
+            .client_split(reader, writer)
+            .await
+            .map_err(rpc_error)?
+            .bind();
+        Self::initialize(rpc, SessionMode::Remote, None).await
     }
 
     /// Closes this client's RPC session and releases its transport handles.
@@ -975,7 +1018,7 @@ impl Client {
     /// Closing any clone closes the shared session, so remaining clones can no
     /// longer issue requests.
     pub async fn close(self) {
-        self.rpc.close().await;
+        self.shared.rpc.clone().close().await;
     }
 
     /// Connects to an agent daemon at a Unix-domain socket path.
@@ -1001,11 +1044,7 @@ impl Client {
             .await
             .map_err(rpc_error)?
             .bind();
-        Ok(Self {
-            rpc,
-            mode: SessionMode::Native,
-            vfs: None,
-        })
+        Self::initialize(rpc, SessionMode::Native, None).await
     }
 
     /// Starts a VFS client on an already-connected Unix-domain socket file
@@ -1034,11 +1073,7 @@ impl Client {
             .await
             .map_err(rpc_error)?
             .bind();
-        Ok(Self {
-            rpc,
-            mode: SessionMode::Native,
-            vfs: None,
-        })
+        Self::initialize(rpc, SessionMode::Native, None).await
     }
 
     fn unsupported<T>(&self, operation: &str) -> crate::Result<T> {
@@ -1050,14 +1085,14 @@ impl Client {
     }
 
     fn call(&self, request: RequestKind) -> Call<VfsProtocol> {
-        self.rpc.call(Request {
+        self.shared.rpc.call(Request {
             vfs: self.vfs.clone(),
             kind: request,
         })
     }
 
     fn call_with_trailer(&self, request: RequestKind) -> TrailerSend<Call<VfsProtocol>> {
-        self.rpc.call_with_trailer(Request {
+        self.shared.rpc.call_with_trailer(Request {
             vfs: self.vfs.clone(),
             kind: request,
         })
@@ -1095,12 +1130,13 @@ impl Client {
                         .into())
                     }
                 }
-                OpenVfsHandle::Opaque(vfs) => Ok(Self {
-                    rpc: self.rpc.clone(),
-                    mode: self.mode,
-                    vfs: Some(vfs),
+                OpenVfsHandle::Opaque(vfs) => {
+                    Ok(
+                        Self::initialize(self.shared.rpc.clone(), self.shared.mode, Some(vfs))
+                            .await?
+                            .into(),
+                    )
                 }
-                .into()),
             },
             response => Err(unexpected(response).into()),
         }
@@ -1120,11 +1156,9 @@ impl Client {
         match self.request(RequestKind::WindowsAdmin(request)).await? {
             ResponseKind::WindowsAdmin(result) => {
                 let vfs = result.map_err(crate::Error::from)?;
-                Ok(crate::session::VfsSession::from_client(Self {
-                    rpc: self.rpc.clone(),
-                    mode: self.mode,
-                    vfs: Some(vfs),
-                }))
+                Ok(crate::session::VfsSession::from_client(
+                    Self::initialize(self.shared.rpc.clone(), self.shared.mode, Some(vfs)).await?,
+                ))
             }
             response => Err(unexpected(response).into()),
         }
@@ -1173,30 +1207,6 @@ impl Client {
                 .downcast::<T::Response>()
                 .expect("response type matches the extension that produced it")),
             ResponseKind::Extension(Err(error)) => Err(error.into()),
-            response => Err(unexpected(response).into()),
-        }
-    }
-
-    /// Query the daemon's initial process context.
-    pub async fn query(&self) -> crate::Result<Query> {
-        match self.request(RequestKind::Query).await? {
-            ResponseKind::Query(result) => result
-                .map(
-                    |QueryResponse {
-                         env,
-                         cwd,
-                         current_exe,
-                         target,
-                         security,
-                     }| Query {
-                        env,
-                        cwd: cwd.into(),
-                        current_exe: current_exe.into(),
-                        target,
-                        security,
-                    },
-                )
-                .map_err(crate::Error::from),
             response => Err(unexpected(response).into()),
         }
     }
@@ -1920,14 +1930,14 @@ impl<'a> CommandBuilder<'a> {
                 Self::prepare_remote_recv(client, remote)
             }
             ClientRecv::Native(handle) => {
-                if client.mode == SessionMode::Remote {
+                if client.mode() == SessionMode::Remote {
                     return client.unsupported("native process stdio");
                 }
                 Ok((StdioRecvTarget::Native(OsHandle::new(handle)), None))
             }
             ClientRecv::Resource(stdio) => match stdio {
                 StdioRecv::Native(_) => {
-                    if client.mode == SessionMode::Remote {
+                    if client.mode() == SessionMode::Remote {
                         return client.unsupported("native process stdio");
                     }
                     let handle = stdio.into_blocking_handle().await?;
@@ -1973,14 +1983,14 @@ impl<'a> CommandBuilder<'a> {
                 Self::prepare_remote_send(client, remote)
             }
             ClientSend::Native(handle) => {
-                if client.mode == SessionMode::Remote {
+                if client.mode() == SessionMode::Remote {
                     return client.unsupported("native process stdio");
                 }
                 Ok((StdioSendTarget::Native(OsHandle::new(handle)), None))
             }
             ClientSend::Resource(stdio) => match stdio {
                 StdioSend::Native(_) => {
-                    if client.mode == SessionMode::Remote {
+                    if client.mode() == SessionMode::Remote {
                         return client.unsupported("native process stdio");
                     }
                     let handle = stdio.into_blocking_handle().await?;
@@ -2016,7 +2026,7 @@ impl<'a> CommandBuilder<'a> {
         (StdioSendTarget, Option<StdioSend>),
         (StdioSendTarget, Option<StdioSend>),
     )> {
-        if client.mode == SessionMode::Remote
+        if client.mode() == SessionMode::Remote
             && matches!(stdout, ClientSend::Inherit(HostOutput::Stdout))
             && matches!(stderr, ClientSend::Inherit(HostOutput::Stdout))
         {
@@ -2216,7 +2226,7 @@ impl<'a> Command for CommandBuilder<'a> {
     }
 
     fn stdin_inherit(&mut self) -> io::Result<&mut Self> {
-        self.stdin = if self.client.mode == SessionMode::Remote {
+        self.stdin = if self.client.mode() == SessionMode::Remote {
             if std::io::stdin().is_terminal() {
                 ClientRecv::Null
             } else {
@@ -2229,7 +2239,7 @@ impl<'a> Command for CommandBuilder<'a> {
     }
 
     fn stdout_inherit(&mut self) -> io::Result<&mut Self> {
-        self.stdout = if self.client.mode == SessionMode::Remote {
+        self.stdout = if self.client.mode() == SessionMode::Remote {
             ClientSend::Inherit(HostOutput::Stdout)
         } else {
             ClientSend::Native(clone_stdout_handle()?)
@@ -2261,7 +2271,7 @@ impl<'a> Command for CommandBuilder<'a> {
     }
 
     fn stderr_inherit(&mut self) -> io::Result<&mut Self> {
-        self.stderr = if self.client.mode == SessionMode::Remote {
+        self.stderr = if self.client.mode() == SessionMode::Remote {
             ClientSend::Inherit(HostOutput::Stderr)
         } else {
             ClientSend::Native(clone_stderr_handle()?)
@@ -2270,7 +2280,7 @@ impl<'a> Command for CommandBuilder<'a> {
     }
 
     fn stderr_inherit_stdout(&mut self) -> io::Result<&mut Self> {
-        self.stderr = if self.client.mode == SessionMode::Remote {
+        self.stderr = if self.client.mode() == SessionMode::Remote {
             ClientSend::Inherit(HostOutput::Stdout)
         } else {
             ClientSend::Native(clone_stdout_handle()?)
@@ -2437,7 +2447,7 @@ impl crate::OpenOptions for OpenOptions<'_> {
             create_new: self.create_new,
             truncate: self.truncate,
             no_follow: self.no_follow,
-            handle_preference: if self.client.mode == SessionMode::Remote {
+            handle_preference: if self.client.mode() == SessionMode::Remote {
                 OpenHandlePreference::Opaque
             } else {
                 OpenHandlePreference::NativePreferred
@@ -2471,6 +2481,36 @@ impl Vfs for Client {
     where
         Self: 'a;
 
+    fn env(&self) -> Box<dyn Iterator<Item = (String, String)> + '_> {
+        Box::new(
+            self.shared
+                .query
+                .env
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        )
+    }
+
+    fn cwd(&self) -> Utf8TypedPath<'_> {
+        self.shared.query.cwd.to_path()
+    }
+
+    fn current_exe(&self) -> Utf8TypedPath<'_> {
+        self.shared.query.current_exe.to_path()
+    }
+
+    fn target(&self) -> &crate::TargetInfo {
+        &self.shared.query.target
+    }
+
+    fn security(&self) -> &crate::SecurityInfo {
+        &self.shared.query.security
+    }
+
+    fn extensions(&self) -> &crate::session::ExtensionSet {
+        &self.shared.query.extensions
+    }
+
     fn open_options(&self) -> Self::OpenOptions<'_> {
         OpenOptions::new(self)
     }
@@ -2493,8 +2533,8 @@ impl Vfs for Client {
     }
 
     async fn pipe(&self) -> crate::Result<(StdioSend, StdioRecv)> {
-        if self.mode == SessionMode::Native {
-            return crate::direct::Direct::default().pipe().await;
+        if self.mode() == SessionMode::Native {
+            return crate::process::pipe(None).map_err(Into::into);
         }
         match self.request(RequestKind::Pipe).await? {
             ResponseKind::Pipe(result) => result
@@ -2517,10 +2557,6 @@ impl Vfs for Client {
                 .map_err(Into::into),
             response => Err(unexpected(response).into()),
         }
-    }
-
-    async fn query(&self) -> crate::Result<Query> {
-        Client::query(self).await
     }
 
     async fn user_name(&self, uid: u32) -> crate::Result<String> {
@@ -3187,13 +3223,21 @@ mod tests {
         let mut wrong_client = root.clone();
         wrong_client.vfs = Some(wrong_vfs);
         assert_eq!(
-            wrong_client.query().await.unwrap_err().kind(),
+            wrong_client
+                .request(RequestKind::Query)
+                .await
+                .unwrap_err()
+                .kind(),
             io::ErrorKind::InvalidInput
         );
 
         selected.stop().await.unwrap();
         assert_eq!(
-            selected.query().await.unwrap_err().kind(),
+            selected
+                .request(RequestKind::Query)
+                .await
+                .unwrap_err()
+                .kind(),
             io::ErrorKind::InvalidInput
         );
         inner_task.await.unwrap().unwrap();

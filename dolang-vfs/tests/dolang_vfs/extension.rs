@@ -107,7 +107,7 @@ async fn exercise_counter(vfs: &AnyVfs) {
 
 #[tokio::test]
 async fn direct_dispatch_round_trips_through_opaque_handle() {
-    exercise_counter(&AnyVfs::Direct(Direct::default())).await;
+    exercise_counter(&AnyVfs::Direct(Direct::new().unwrap())).await;
 }
 
 async fn start_server(socket_path: &std::path::Path) -> JoinHandle<()> {

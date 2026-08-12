@@ -1,7 +1,4 @@
-use std::{
-    fmt::{self, Debug, Display},
-    rc::Rc,
-};
+use std::fmt::{self, Debug, Display};
 
 use tokio::io::AsyncWriteExt;
 
@@ -25,7 +22,7 @@ use crate::{
     fs::path::{PathAnnex, create_path_annex, path_from_value},
     global::{Global, ProgramSource},
     io_mode::{IoMode, ValueEncoding, encode_value, read_raw, read_value, write_raw},
-    local::{Env as LocalEnv, ProgramOverride},
+    local::{Local, ProgramOverride},
     pipe_channel,
     shell_args::Args as ShellArgs,
 };
@@ -34,9 +31,8 @@ use dolang_vfs::{
     AnyVfs, Vfs as _,
     client::Client,
     process::{StdioRecv, StdioSend},
-    security::SecurityInfo,
-    session::{Query, VfsSession},
-    target::{OperatingSystem, TargetInfo},
+    session::VfsSession,
+    target::OperatingSystem,
 };
 use std::collections::HashMap;
 use typed_path::Utf8TypedPathBuf;
@@ -61,47 +57,6 @@ impl Display for Exit {
 }
 
 impl std::error::Error for Exit {}
-
-#[derive(Clone)]
-pub(crate) struct Context {
-    client: Client,
-    cwd: Utf8TypedPathBuf,
-    current_exe: Utf8TypedPathBuf,
-    env: Rc<LocalEnv>,
-    target: TargetInfo,
-    security: SecurityInfo,
-}
-
-impl Context {
-    pub(crate) async fn enter<'v, 's, R>(
-        &self,
-        strand: &mut Strand<'v, 's>,
-        global: State<'v, Global<'v>>,
-        f: impl AsyncFnOnce(&mut Strand<'v, 's>) -> R,
-    ) -> R {
-        let local = global.local.get(strand);
-        let orig = local.replace_vfs(AnyVfs::from(self.client.clone()));
-        let orig_exe = local.replace_vfs_exe(Some(self.current_exe.clone()));
-        let orig_cwd = local.replace_cwd(self.cwd.clone());
-        let orig_env =
-            local.replace_env(Rc::new(LocalEnv::derived(self.env.clone(), HashMap::new())));
-        let orig_target = local.replace_target(self.target.clone());
-        let orig_security = local.replace_security(Some(self.security.clone()));
-        let res = f(strand).await;
-        let local = global.local.get(strand);
-        local.replace_vfs(orig);
-        local.replace_vfs_exe(orig_exe);
-        local.replace_cwd(orig_cwd);
-        local.replace_env(orig_env);
-        local.replace_target(orig_target);
-        local.replace_security(orig_security);
-        res
-    }
-
-    pub(crate) fn client(&self) -> &Client {
-        &self.client
-    }
-}
 
 /// The process's standard input, exported as `shell.stdin`.
 ///
@@ -387,7 +342,7 @@ async fn negotiate_stream_pipes<'v, 's>(
 pub(crate) struct Vfs;
 
 pub(crate) struct VfsAnnex<'v> {
-    handle: Context,
+    vfs: AnyVfs,
     source: VfsSource,
     global: State<'v, Global<'v>>,
 }
@@ -466,37 +421,12 @@ impl<'v> Object<'v> for Vfs {
                             };
                         }
                     };
-                    let query = match client.query().await {
-                        Ok(query) => query,
-                        Err(query_error) => {
-                            let join = global.syms.join;
-                            match method!(strand, &stream, join, &mut module).await {
-                                Ok(()) => return Err(query_error.into_sys(strand)),
-                                Err(launcher_error) => return Err(launcher_error),
-                            }
-                        }
-                    };
-                    let Query {
-                        env,
-                        cwd,
-                        current_exe,
-                        target,
-                        security,
-                    } = query;
                     drop((recv_guard, send_guard));
-                    let env = Rc::new(LocalEnv::new(None, true, env, target.operating_system));
                     global.types.vfs.create_with_annex(
                         strand,
                         Vfs,
                         VfsAnnex {
-                            handle: Context {
-                                client,
-                                env,
-                                cwd,
-                                current_exe,
-                                target,
-                                security,
-                            },
+                            vfs: client.into(),
                             source: VfsSource::Stream,
                             global,
                         },
@@ -533,28 +463,13 @@ impl<'v> Object<'v> for Vfs {
                     "Unix VFS connection did not return a client backend",
                 )
             })?;
-            let Query {
-                env,
-                cwd,
-                current_exe,
-                target,
-                security,
-            } = error::io_result(strand, client.query().await)?;
-            let env = Rc::new(LocalEnv::new(None, true, env, target.operating_system));
             let source = VfsSource::Unix(path.clone());
 
             global.types.vfs.create_with_annex(
                 strand,
                 Vfs,
                 VfsAnnex {
-                    handle: Context {
-                        client,
-                        env,
-                        cwd,
-                        current_exe,
-                        target,
-                        security,
-                    },
+                    vfs: client.into(),
                     source,
                     global,
                 },
@@ -570,12 +485,13 @@ impl<'v> Object<'v> for Vfs {
                 Some(Arg::Key(sym, _)) => return Err(Error::unexpected_key(strand, sym)),
             };
             let borrow = this.annex();
-            borrow
-                .handle
-                .enter(strand, borrow.global, async move |strand| {
-                    func.call(strand, args, out).await
-                })
-                .await
+            Local::with_vfs(
+                strand,
+                borrow.global,
+                borrow.vfs.clone(),
+                async move |strand| func.call(strand, args, out).await,
+            )
+            .await
         });
 
         let (builder, elevate_sym, cd_sym, env_sym) = {
@@ -591,7 +507,12 @@ impl<'v> Object<'v> for Vfs {
                 // which own the stdio pipe handles after negotiation. Joining
                 // then closes the stream endpoints and waits for the launcher
                 // to observe the helper's exit.
-                let client = this.annex().handle.client().clone();
+                let client = this
+                    .annex()
+                    .vfs
+                    .as_client()
+                    .expect("remote VFS is not a client")
+                    .clone();
                 let global = this.annex().global;
                 let stop_result = client.stop().await;
                 client.close().await;
@@ -616,9 +537,15 @@ impl<'v> Object<'v> for Vfs {
             let borrow = this.annex();
             match &borrow.source {
                 VfsSource::Stream => unreachable!("stream VFS returned without joining"),
-                VfsSource::Unix(_) => {
-                    error::io_result(strand, borrow.handle.client().stop().await)?
-                }
+                VfsSource::Unix(_) => error::io_result(
+                    strand,
+                    borrow
+                        .vfs
+                        .as_client()
+                        .expect("remote VFS is not a client")
+                        .stop()
+                        .await,
+                )?,
                 VfsSource::WindowsAdmin(session) => error::io_result(strand, session.stop().await)?,
             }
             Ok(())
@@ -692,26 +619,11 @@ impl<'v> Object<'v> for Vfs {
                     .await,
             )?;
             let client = session.client().clone();
-            let Query {
-                env,
-                cwd,
-                current_exe,
-                target,
-                security,
-            } = error::io_result(strand, client.query().await)?;
-            let env = Rc::new(LocalEnv::new(None, true, env, target.operating_system));
             global.types.vfs.create_with_annex(
                 strand,
                 Vfs,
                 VfsAnnex {
-                    handle: Context {
-                        client,
-                        env,
-                        cwd,
-                        current_exe,
-                        target,
-                        security,
-                    },
+                    vfs: client.into(),
                     source: VfsSource::WindowsAdmin(session),
                     global,
                 },
@@ -896,29 +808,11 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 Some(Arg::Key(sym, _)) => return Err(Error::unexpected_key(strand, sym)),
             };
 
-            let local = global.local.get(strand);
-
-            let orig_vfs = local.replace_vfs(Default::default());
-            let orig_vfs_exe = local.replace_vfs_exe(None);
-            let orig_cwd = local.replace_cwd(
-                dolang_vfs::path::typed_path(std::env::current_dir().unwrap())
-                    .expect("current directory is UTF-8"),
-            );
-            let orig_env = local.replace_env(Rc::new(LocalEnv::root()));
-            let orig_target = local.replace_target(TargetInfo::current());
-            let orig_security = local.replace_security(None);
-
-            let result = func.call(strand, args, out).await;
-
-            let local = global.local.get(strand);
-            local.replace_vfs(orig_vfs);
-            local.replace_vfs_exe(orig_vfs_exe);
-            local.replace_cwd(orig_cwd);
-            local.replace_env(orig_env);
-            local.replace_target(orig_target);
-            local.replace_security(orig_security);
-
-            result
+            let host_vfs = error::io_result(strand, dolang_vfs::direct::Direct::new())?;
+            Local::with_vfs(strand, global, host_vfs.into(), async move |strand| {
+                func.call(strand, args, out).await
+            })
+            .await
         })
         .function("cd", async move |strand, mut args, out| {
             use crate::fs::path::PathAnnex;

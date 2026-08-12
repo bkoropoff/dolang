@@ -2,9 +2,11 @@
 
 use std::time::Duration;
 
-use dolang_vfs::{client::Client, security::SecurityInfo, session::Query, target::TargetInfo};
+use dolang_vfs::{Vfs, client::Client, security::SecurityInfo, target::TargetInfo};
+use std::collections::HashMap;
 use tempfile::tempdir;
 use tokio::time::timeout;
+use typed_path::Utf8TypedPathBuf;
 
 const AGENT_BIN: &str = env!("CARGO_BIN_EXE_dolang-vfs");
 
@@ -41,17 +43,31 @@ async fn spawn_stdio(
 }
 
 /// Spawns the helper, runs [`Client::query`], then stops it and waits for
-/// exit. Used by tests that only care about the resulting [`Query`]. A
+/// exit. Used by tests that only care about the resulting initial snapshot. A
 /// single stray byte of profile or startup chatter on the helper's stdout
 /// would desynchronize the frame stream and fail the query, so this also
 /// covers stdio-stream cleanliness for every caller.
-async fn spawn_and_query(args: &[std::ffi::OsString]) -> Query {
+struct Snapshot {
+    env: HashMap<String, String>,
+    cwd: Utf8TypedPathBuf,
+    current_exe: Utf8TypedPathBuf,
+    target: TargetInfo,
+    security: SecurityInfo,
+}
+
+async fn spawn_and_query(args: &[std::ffi::OsString]) -> Snapshot {
     spawn_and_query_without(args, &[]).await
 }
 
-async fn spawn_and_query_without(args: &[std::ffi::OsString], without_env: &[&str]) -> Query {
+async fn spawn_and_query_without(args: &[std::ffi::OsString], without_env: &[&str]) -> Snapshot {
     let (client, mut child) = spawn_stdio(args, without_env).await;
-    let query = client.query().await.expect("query should succeed");
+    let query = Snapshot {
+        env: client.env().collect(),
+        cwd: client.cwd().to_path_buf(),
+        current_exe: client.current_exe().to_path_buf(),
+        target: client.target().clone(),
+        security: client.security().clone(),
+    };
     client.stop().await.expect("stop should succeed");
     drop(client);
     let _ = child.wait().await;
@@ -369,8 +385,7 @@ mod listen_mode {
         .expect("timeout connecting to agent")
         .expect("failed to connect");
 
-        let query = client.query().await.expect("query should succeed");
-        assert!(!query.env.is_empty(), "should have environment");
+        assert!(client.env().next().is_some(), "should have environment");
 
         send_signal(child.id(), libc::SIGINT);
         let _ = child.wait().expect("failed to wait on agent");
@@ -621,8 +636,7 @@ mod listen_mode {
         .expect("timeout connecting")
         .expect("failed to connect");
 
-        let query = client.query().await.expect("query should succeed");
-        assert!(!query.env.is_empty(), "agent should be responsive");
+        assert!(client.env().next().is_some(), "agent should be responsive");
 
         send_signal(child.id(), libc::SIGINT);
         let _ = child.wait().expect("failed to wait on agent");

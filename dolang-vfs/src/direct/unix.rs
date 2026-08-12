@@ -1565,7 +1565,6 @@ impl Direct {
     }
 
     pub(super) async fn impl_file_xattrs(
-        &self,
         file: &File,
         namespace: XattrNamespace<'_>,
     ) -> Result<Vec<XattrEntry>, io::Error> {
@@ -1579,7 +1578,6 @@ impl Direct {
     }
 
     pub(super) async fn impl_file_xattr(
-        &self,
         file: &File,
         name: &str,
         namespace: Option<&str>,
@@ -1593,10 +1591,7 @@ impl Direct {
         .unwrap_or_else(|_| Err(io::Error::from_raw_os_error(libc::EIO)))
     }
 
-    pub(super) async fn impl_file_streams(
-        &self,
-        _file: &File,
-    ) -> Result<Vec<StreamEntry>, io::Error> {
+    pub(super) async fn impl_file_streams(_file: &File) -> Result<Vec<StreamEntry>, io::Error> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "streams are not supported on this platform",
@@ -1604,7 +1599,6 @@ impl Direct {
     }
 
     pub(super) async fn impl_file_set_xattr(
-        &self,
         file: &File,
         name: &str,
         namespace: Option<&str>,
@@ -1621,7 +1615,6 @@ impl Direct {
     }
 
     pub(super) async fn impl_file_remove_xattr(
-        &self,
         file: &File,
         name: &str,
         namespace: Option<&str>,

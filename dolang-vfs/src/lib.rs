@@ -17,7 +17,7 @@
 //! use typed_path::{Utf8TypedPath, Utf8UnixPath, Utf8WindowsPath};
 //!
 //! async fn read_a_file() -> dolang_vfs::error::Result<()> {
-//!     let vfs = Direct::default();
+//!     let vfs = Direct::new()?;
 //!     let path = if cfg!(windows) {
 //!         Utf8TypedPath::Windows(Utf8WindowsPath::new(r"C:\\example.txt"))
 //!     } else {
@@ -80,7 +80,7 @@ use metadata::{AttrFlags, AttrsPatch, FileType, FsMetadata, Metadata, MetadataPa
 use path::WellKnownPath;
 use process::{ProcessControl, ProcessStatus, TerminationPolicy};
 use security::{OwnershipIdentity, PosixAcl, SecurityInfo, SidName};
-use session::{Query, VfsSession};
+use session::{ExtensionSet, VfsSession};
 use stream::StreamEntry;
 use target::TargetInfo;
 use xattr::{XattrEntry, XattrNamespace};
@@ -223,7 +223,7 @@ pub trait Command {
 ///
 /// Implementations may be local, remote, or a dispatcher over either. A
 /// value's path arguments always use the target's syntax; consult
-/// [`Query::target`] when selecting one for a remote VFS.
+/// [`Vfs::target`] when selecting one for a remote VFS.
 pub trait Vfs {
     /// File handle returned by this backend.
     type File: FileHandle;
@@ -239,6 +239,19 @@ pub trait Vfs {
     type Command<'a>: Command<StdioSend = Self::StdioSend, StdioRecv = Self::StdioRecv>
     where
         Self: 'a;
+
+    /// Iterates the target's initial process environment.
+    fn env(&self) -> Box<dyn Iterator<Item = (String, String)> + '_>;
+    /// Returns the target's initial working directory.
+    fn cwd(&self) -> Utf8TypedPath<'_>;
+    /// Returns the target process executable.
+    fn current_exe(&self) -> Utf8TypedPath<'_>;
+    /// Returns target platform information.
+    fn target(&self) -> &TargetInfo;
+    /// Returns the target's initial security context.
+    fn security(&self) -> &SecurityInfo;
+    /// Returns supported VFS extension protocol versions.
+    fn extensions(&self) -> &ExtensionSet;
 
     /// Creates a file-open options builder.
     fn open_options(&self) -> Self::OpenOptions<'_>;
@@ -264,8 +277,6 @@ pub trait Vfs {
     ) -> Result<(Self::StdioSend, Self::StdioRecv)> {
         self.pipe().await
     }
-    /// Queries the target environment and identity.
-    async fn query(&self) -> Result<Query>;
     /// Resolves a Unix user ID to a name.
     async fn user_name(&self, uid: u32) -> Result<String>;
     /// Resolves a Unix user name to an ID.
@@ -1078,12 +1089,6 @@ pub enum AnyVfs {
     Direct(Direct),
 }
 
-impl Default for AnyVfs {
-    fn default() -> Self {
-        Self::Direct(Direct::default())
-    }
-}
-
 impl From<client::Client> for AnyVfs {
     fn from(value: client::Client) -> Self {
         Self::Client(value)
@@ -1139,6 +1144,48 @@ impl Vfs for AnyVfs {
     where
         Self: 'a;
 
+    fn env(&self) -> Box<dyn Iterator<Item = (String, String)> + '_> {
+        match self {
+            Self::Client(client) => client.env(),
+            Self::Direct(direct) => direct.env(),
+        }
+    }
+
+    fn cwd(&self) -> Utf8TypedPath<'_> {
+        match self {
+            Self::Client(vfs) => vfs.cwd(),
+            Self::Direct(vfs) => vfs.cwd(),
+        }
+    }
+
+    fn current_exe(&self) -> Utf8TypedPath<'_> {
+        match self {
+            Self::Client(vfs) => vfs.current_exe(),
+            Self::Direct(vfs) => vfs.current_exe(),
+        }
+    }
+
+    fn target(&self) -> &TargetInfo {
+        match self {
+            Self::Client(vfs) => vfs.target(),
+            Self::Direct(vfs) => vfs.target(),
+        }
+    }
+
+    fn security(&self) -> &SecurityInfo {
+        match self {
+            Self::Client(vfs) => vfs.security(),
+            Self::Direct(vfs) => vfs.security(),
+        }
+    }
+
+    fn extensions(&self) -> &ExtensionSet {
+        match self {
+            Self::Client(vfs) => vfs.extensions(),
+            Self::Direct(vfs) => vfs.extensions(),
+        }
+    }
+
     fn open_options(&self) -> Self::OpenOptions<'_> {
         match self {
             Self::Client(client) => AnyOpenOptions::Client(client.open_options()),
@@ -1190,13 +1237,6 @@ impl Vfs for AnyVfs {
         match self {
             Self::Client(client) => client.pipe_sized(buf_size).await,
             Self::Direct(direct) => direct.pipe_sized(buf_size).await,
-        }
-    }
-
-    async fn query(&self) -> crate::Result<Query> {
-        match self {
-            Self::Client(client) => client.query().await,
-            Self::Direct(direct) => direct.query().await,
         }
     }
 

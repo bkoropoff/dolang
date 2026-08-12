@@ -2181,15 +2181,7 @@ fn security_info<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
 ) -> Result<'v, 's, SecurityInfo> {
-    if let Some(security) = global.local.get(strand).security() {
-        return Ok(security);
-    }
-    let security = error::io_result(strand, SecurityInfo::current())?;
-    global
-        .local
-        .get(strand)
-        .replace_security(Some(security.clone()));
-    Ok(security)
+    Ok(global.local.get(strand).security())
 }
 
 pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Global<'v>>) {

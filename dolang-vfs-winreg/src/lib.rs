@@ -5,11 +5,9 @@
 //! whether served in-process or over a real VFS RPC session. See
 //! [`Key`] for the public entry point.
 //!
-//! The extension is registered on every platform. On non-Windows targets
-//! every operation returns `Err` with [`dolang_vfs::error::ErrorKind::Unsupported`]
-//! rather than the extension being absent, so a caller sees a clear,
-//! catchable error instead of a routing failure indistinguishable from a
-//! typo in the extension name/version.
+//! Its wire codec is linked on every platform so cross-platform clients can
+//! communicate with Windows peers. Only Windows backends advertise and
+//! dispatch the extension.
 
 mod api;
 mod backend;
