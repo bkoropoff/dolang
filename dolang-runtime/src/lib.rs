@@ -22,6 +22,8 @@ pub(crate) mod sig;
 pub(crate) mod stdlib;
 pub mod strand;
 pub mod sym;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod value;
 pub mod vm;
 

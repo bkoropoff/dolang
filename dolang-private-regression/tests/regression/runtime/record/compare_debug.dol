@@ -1,0 +1,31 @@
+def assert_err msg block
+  let res = try
+    block()
+    false
+  catch e
+    assert_eq (str e) $msg
+    true
+  assert $res
+
+# str/debug formatting
+assert_eq (str (record())) "<record >"
+assert_eq (str (record(1, 2, a: 3))) "<record 1 2 a: 3>"
+assert_eq (str (record(a: "x", b: "y"))) "<record a: \"x\" b: \"y\">"
+
+# equality: length mismatch and value mismatch
+let r1 = record(1, 2, 3)
+let r2 = record(1, 2, 3)
+assert (r1 == r2)
+assert (!(r1 == (record(1, 2))))
+assert (!(r1 == (record(1, 2, 4))))
+
+# ordering: shorter-is-less, value ordering, equal-is-not-less
+assert ((record(1)) < (record(1, 2)))
+assert (!((record(1, 2)) < (record(1))))
+assert ((record(1)) < (record(2)))
+assert (!((record(2)) < (record(1))))
+assert (!((record(1)) < (record(1))))
+
+# indexing a missing key
+assert_err "index out of range or invalid" do (record(a: 1))[:z:]
+assert_err "index out of range or invalid" do (record(1))[5]

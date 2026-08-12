@@ -817,6 +817,50 @@ impl<'v, T: Protocol<'v>> TypeHandle<'v, T> {
     }
 }
 
+impl<'v, T: ?Sized + Protocol<'v>> TypeHandle<'v, T> {
+    /// Downcast `value` to this type, returning a [`RecvCast`] that must be entered via
+    /// [`RecvCast::enter`]/[`RecvCast::enter_sync`] to obtain a [`Recv`]. This scopes the
+    /// resulting borrow to the duration of a closure rather than handing back an
+    /// indefinitely-long-lived one, mirroring [`Type::cast`](super::native::Type::cast) in
+    /// the public extension API.
+    // Only exercised by in-crate unit tests so far (see `object::dict::tests` and
+    // `object::array_view::tests`); not yet adopted by any production call site, hence
+    // the dead-code allowance outside test builds.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn cast<'a>(&self, value: &'a Value<'v>) -> Option<RecvCast<'v, 'a, T>> {
+        value.downcast_ref(*self).map(|borrow| RecvCast { borrow })
+    }
+}
+
+/// Scoped downcast of a [`Value`] to a [`Recv`], obtained via [`TypeHandle::cast`].
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct RecvCast<'v, 'a, T: ?Sized + Protocol<'v>> {
+    borrow: gc::Borrow<'v, 'a, Header, T>,
+}
+
+impl<'v, 'a, T: ?Sized + Protocol<'v>> RecvCast<'v, 'a, T> {
+    /// Obtain a [`Recv`] for the duration of `f`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn enter<'s, R>(
+        self,
+        strand: &mut Strand<'v, 's>,
+        f: impl for<'x> AsyncFnOnce(&mut Strand<'v, 's>, Recv<'v, 'x, T>) -> R,
+    ) -> R {
+        f(strand, Recv::new(self.borrow)).await
+    }
+
+    /// Synchronous counterpart to [`RecvCast::enter`], for call sites that don't need to
+    /// hold the `Recv` across an `.await`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn enter_sync<'s, R>(
+        self,
+        strand: &mut Strand<'v, 's>,
+        f: impl for<'x> FnOnce(&mut Strand<'v, 's>, Recv<'v, 'x, T>) -> R,
+    ) -> R {
+        f(strand, Recv::new(self.borrow))
+    }
+}
+
 #[repr(C)]
 pub(crate) struct Header {
     base: arena::Header,

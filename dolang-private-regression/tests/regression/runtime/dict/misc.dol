@@ -2,6 +2,7 @@ import
   std:
     - Iter
     - IterStop
+    - MissingPosError
 
 def assert_err msg block
   let res = try
@@ -140,6 +141,13 @@ catch _
 assert $failed
 assert_eq (failed_key_unpack.next()) :a:
 assert_err_type $IterStop do failed_key_unpack.next()
+
+let failed_keyed_unpack = {a: 1, b: 2, a: 3}.values :a:
+assert_err_type $MissingPosError do
+  let _x _y _z = failed_keyed_unpack
+assert_eq (failed_keyed_unpack.next()) 1
+assert_eq (failed_keyed_unpack.next()) 3
+assert_err_type $IterStop do failed_keyed_unpack.next()
 
 let mapped = ({a: 1, b: 2, a: 3}.values()).map do |value| (value * 10)
 assert_eq [...mapped] [10, 20, 30]

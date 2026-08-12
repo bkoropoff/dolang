@@ -1,0 +1,84 @@
+import
+  std:
+    - Iter
+
+def assert_err msg block
+  let res = try
+    block()
+    false
+  catch e
+    assert_eq (str e) $msg
+    true
+  assert $res
+
+# Positional unpack against integer keys
+let x y = record("zero", "one")
+assert_eq $x zero
+assert_eq $y one
+assert_err "unexpected positional item: 2" do
+  let _a _b = record("zero", "one", "two")
+assert_err "missing positional item: 1" do
+  let _a _b = record("only-zero")
+
+# str() of the values/keys iterator types themselves
+assert_eq (str (Record.values (record(a: 1)))) "<values iterator>"
+assert_eq (str (Record.keys (record(a: 1)))) "<keys iterator>"
+assert_eq (str (Record.values (record(a: 1, b: 2, a: 3)) :a:)) "<key values iterator>"
+
+# ...rest captures remaining pairs as an Iter, continuing bucket order,
+# skipping already-consumed keys
+let :a ...rest = record(a: 1, b: 2, c: 3)
+assert_eq $a 1
+assert (type rest Iter)
+let pairs = $
+  for k v = rest
+    - (Tuple [k, v])
+assert_eq $pairs [(Tuple [:b:, 2]), (Tuple [:c:, 3])]
+
+# a stray out-of-sequence integer key is dropped by the rest iterator
+# rather than yielded out of order
+let r = record("zero", "one")
+Record.insert $r 3 "three"
+let x2 y2 ...rest2 = r
+assert_eq $x2 zero
+assert_eq $y2 one
+let pairs2 = $
+  for k v = rest2
+    - (Tuple [k, v])
+assert_eq $pairs2 []
+
+# integer keys out of storage order are still recovered in sequence
+let r3 = record()
+Record.insert $r3 2 "c"
+Record.insert $r3 0 "a"
+Record.insert $r3 1 "b"
+let ...rest3 = r3
+let pairs3 = $
+  for k v = rest3
+    - (Tuple [k, v])
+assert_eq $pairs3 [(Tuple [0, "a"]), (Tuple [1, "b"]), (Tuple [2, "c"])]
+
+# the rest iterator supports further keyed/positional unpacking
+let a: _a ...rest4 = record(a: 1, "zero", "one")
+let d e = rest4
+assert_eq $d zero
+assert_eq $e one
+
+let a: _a ...rest5 = record(a: 1, b: 2, c: 3)
+bind rest5
+  :b
+  :missing = "fallback"
+assert_eq $b 2
+assert_eq $missing fallback
+
+assert_err "missing key item: zzz" do
+  let a: _a ...rest6 = record(a: 1, b: 2, c: 3)
+  let zzz: _zzz = rest6
+
+assert_err "unexpected key item: ItemError" do
+  let a: _a ...rest7 = record(a: 1, b: 2, c: 3)
+  let b: _b = rest7
+
+assert_err "unexpected positional item: 2" do
+  let a: _a ...rest8 = record(a: 1, "zero", "one", "two")
+  let _d _e = rest8

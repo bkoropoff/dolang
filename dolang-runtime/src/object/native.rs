@@ -285,7 +285,7 @@ impl<'v, 'a, 'b> Iterator for UnpackIter<'v, 'a, 'b> {
         } else if i < unpack.inner.required + unpack.inner.optional.len() + unpack.inner.keys.len()
         {
             self.i += 1;
-            let key = &unpack.inner.keys[i];
+            let key = &unpack.inner.keys[i - unpack.inner.required - unpack.inner.optional.len()];
             match &key.kind {
                 sig::UnpackKeyKind::Sym(sym) => Some(UnpackItem::SymKey {
                     key: *sym,
@@ -3657,4 +3657,1317 @@ where
     // Reconstruct Type<'v, T> from the type object header.
     let ty = unsafe { Type::<T>::from_type_header(header.cast(), strand.vm()) };
     f(ty, strand, slot)
+}
+
+#[cfg(test)]
+mod tests {
+    use dolang_bytecode::Variadic;
+
+    use crate::{
+        error::ErrorKind,
+        sig, sym,
+        test_support::{args_from_slots, with_builder},
+        value::TypeObject,
+        vm::Stateful,
+    };
+
+    use super::*;
+
+    // ── Fixtures ────────────────────────────────────────────────────────────
+
+    /// A native object type that overrides none of `Object`'s methods. Used to
+    /// exercise the trait's default implementations, driven through
+    /// `ObjectWrap`'s `Protocol` dispatch (`op_*`) so both the dispatch glue
+    /// and the default bodies get covered together.
+    struct Fixture;
+
+    impl<'v> Object<'v> for Fixture {
+        const MODULE: &'v str = "test";
+        const NAME: &'v str = "Fixture";
+        type Annex = ();
+        type Type = ();
+        type TypeAnnex = ();
+    }
+
+    /// A native object type with a representative mix of `TypeBuilder`
+    /// registrations (method, getter, setter, property, scratch-slot method,
+    /// type-method, type-getter, type-setter), one GC slot, and non-trivial
+    /// `Annex`/`Type`/`TypeAnnex`. Used to exercise `TypeBuilder`, the
+    /// registered-entry dispatch paths in `op_mcall`/`op_get`/`op_set`, and
+    /// `Instance`/`Ref`/`Mut`/`Annex`/`Type` accessors.
+    struct SlotFixture {
+        counter: i64,
+    }
+
+    struct SlotAnnex {
+        tag: &'static str,
+    }
+
+    impl<'v> Object<'v> for SlotFixture {
+        const MODULE: &'v str = "test";
+        const NAME: &'v str = "SlotFixture";
+        const SLOTS: usize = 1;
+        type Annex = SlotAnnex;
+        type Type = i64;
+        type TypeAnnex = i64;
+
+        fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
+            builder
+                .method("bump", async move |this, strand, args, out| {
+                    let ([], []) = unpack!(strand, args, 0, 0)?;
+                    let value = {
+                        let mut m = this.borrow_mut(strand)?;
+                        m.counter += 1;
+                        m.counter
+                    };
+                    Output::set(strand, out, value);
+                    Ok(())
+                })
+                .get("counter", |this, strand, out| {
+                    let value = this.borrow(strand)?.counter;
+                    Output::set(strand, out, value);
+                    Ok(())
+                })
+                .get("prop", |_this, strand, out| {
+                    Output::set(strand, out, 11_i64);
+                    Ok(())
+                })
+                .set("prop", |_this, _strand, _value| Ok(()))
+                .set("write_only", |_this, _strand, _value| Ok(()))
+                .method_with_slots::<1, _>(
+                    "with_slot",
+                    async move |_this, strand, args, out, [mut scratch]| {
+                        let ([], []) = unpack!(strand, args, 0, 0)?;
+                        Output::set(strand, Slot::reborrow(&mut scratch), 5_i64);
+                        Output::set(strand, out, &scratch);
+                        Ok(())
+                    },
+                )
+                .type_method("make", async move |ty, strand, args, out| {
+                    let ([], []) = unpack!(strand, args, 0, 0)?;
+                    ty.create_with_annex(
+                        strand,
+                        SlotFixture { counter: 0 },
+                        SlotAnnex { tag: "made" },
+                        out,
+                    );
+                    Ok(())
+                })
+                .type_get("meta", |ty, strand, out| {
+                    let value = *ty.borrow(strand)?;
+                    Output::set(strand, out, value);
+                    Ok(())
+                })
+                .type_set("meta", |ty, strand, value| {
+                    let n = value.to_i64(strand)?;
+                    *ty.borrow_mut(strand)? = n;
+                    Ok(())
+                })
+                .type_get("readonly", |_ty, strand, out| {
+                    Output::set(strand, out, 5_i64);
+                    Ok(())
+                })
+        }
+    }
+
+    struct FixtureState<'v> {
+        fixture_ty: Type<'v, Fixture>,
+        slot_ty: Type<'v, SlotFixture>,
+        bump_sym: Sym<'v, 'v>,
+        counter_sym: Sym<'v, 'v>,
+        prop_sym: Sym<'v, 'v>,
+        write_only_sym: Sym<'v, 'v>,
+        with_slot_sym: Sym<'v, 'v>,
+        make_sym: Sym<'v, 'v>,
+        meta_sym: Sym<'v, 'v>,
+        readonly_sym: Sym<'v, 'v>,
+    }
+
+    struct FixtureStateTag;
+
+    impl<'v> Stateful<'v> for FixtureState<'v> {
+        type Tag = FixtureStateTag;
+    }
+
+    fn configure(vm: &mut Builder<'_>) {
+        let fixture_ty = vm.register_type::<Fixture>();
+        let slot_ty = vm.register_type::<SlotFixture>();
+        let bump_sym = vm.sym("bump");
+        let counter_sym = vm.sym("counter");
+        let prop_sym = vm.sym("prop");
+        let write_only_sym = vm.sym("write_only");
+        let with_slot_sym = vm.sym("with_slot");
+        let make_sym = vm.sym("make");
+        let meta_sym = vm.sym("meta");
+        let readonly_sym = vm.sym("readonly");
+        vm.register_state(FixtureState {
+            fixture_ty,
+            slot_ty,
+            bump_sym,
+            counter_sym,
+            prop_sym,
+            write_only_sym,
+            with_slot_sym,
+            make_sym,
+            meta_sym,
+            readonly_sym,
+        });
+    }
+
+    fn with_fixture_vm<const N: usize, R: 'static>(
+        body: impl for<'v, 's, 'b> AsyncFnOnce(&mut Strand<'v, 's>, [Slot<'v, 'b>; N]) -> R + 'static,
+    ) -> R {
+        with_builder(async move |vm| {
+            configure(vm);
+            vm.enter_with_slots::<N, _>(body).await
+        })
+    }
+
+    fn make_fixture<'v>(strand: &mut Strand<'v, '_>, out: impl Output<'v>) {
+        let ty = strand.vm().state::<FixtureState>().fixture_ty;
+        ty.create(strand, Fixture, out);
+    }
+
+    fn make_slot_fixture<'v>(
+        strand: &mut Strand<'v, '_>,
+        counter: i64,
+        tag: &'static str,
+        out: impl Output<'v>,
+    ) {
+        let ty = strand.vm().state::<FixtureState>().slot_ty;
+        ty.create_with_annex(strand, SlotFixture { counter }, SlotAnnex { tag }, out);
+    }
+
+    // ── `Unpack`/`UnpackIter`/`UnpackItem` ─────────────────────────────────
+
+    #[test]
+    fn unpack_iter_yields_required_optional_key_and_rest_items_in_order() {
+        with_fixture_vm(async |strand, []| {
+            let const_key = Value::from_i64(strand, 99);
+            let opt_default = Value::from_i64(strand, 7);
+            let key_default = Value::from_i64(strand, 8);
+            let sym_key = strand.vm().state::<FixtureState>().counter_sym;
+            let sig = sig::Unpack::new(
+                1,
+                vec![opt_default],
+                vec![
+                    sig::UnpackKey {
+                        kind: sig::UnpackKeyKind::Sym(sym_key),
+                        default: None,
+                    },
+                    sig::UnpackKey {
+                        kind: sig::UnpackKeyKind::Const(const_key),
+                        default: Some(key_default),
+                    },
+                ],
+                Variadic::Capture,
+            );
+            strand
+                .with_slots_dynamic(5, async |_strand, slots| {
+                    let mut unpack = Unpack { inner: &sig, slots };
+                    assert_eq!(unpack.required(), 1);
+                    assert_eq!(unpack.optional(), 1);
+                    assert_eq!(unpack.required_keys(), 1);
+                    assert_eq!(unpack.optional_keys(), 1);
+                    assert!(!unpack.exhaustive());
+                    assert!(unpack.rest());
+                    assert!(unpack.first_required_key().is_some());
+
+                    let items: Vec<_> = unpack.iter().collect();
+                    assert_eq!(items.len(), 5);
+                    assert!(matches!(&items[0], UnpackItem::Pos { default: None, .. }));
+                    assert!(matches!(
+                        &items[1],
+                        UnpackItem::Pos {
+                            default: Some(_),
+                            ..
+                        }
+                    ));
+                    assert!(matches!(
+                        &items[2],
+                        UnpackItem::SymKey { default: None, .. }
+                    ));
+                    assert!(matches!(
+                        &items[3],
+                        UnpackItem::ConstKey {
+                            default: Some(_),
+                            ..
+                        }
+                    ));
+                    assert!(matches!(&items[4], UnpackItem::Rest { .. }));
+                })
+                .await;
+        });
+    }
+
+    #[test]
+    fn unpack_iter_exhaustive_without_variadic_has_no_rest_item() {
+        with_fixture_vm(async |strand, []| {
+            let sig = sig::Unpack::new(0, vec![], vec![], Variadic::None);
+            strand
+                .with_slots_dynamic(0, async |_strand, slots| {
+                    let mut unpack = Unpack { inner: &sig, slots };
+                    assert!(unpack.exhaustive());
+                    assert!(!unpack.rest());
+                    assert_eq!(unpack.required_keys(), 0);
+                    assert_eq!(unpack.optional_keys(), 0);
+                    assert!(unpack.first_required_key().is_none());
+                    assert!(unpack.iter().next().is_none());
+                })
+                .await;
+        });
+    }
+
+    // ── `Object` defaults via `ObjectWrap`'s `Protocol` dispatch ──────────
+
+    #[test]
+    fn op_display_debug_verbatim_bool_use_defaults() {
+        with_fixture_vm(async |strand, [mut owner]| {
+            make_fixture(strand, Slot::reborrow(&mut owner));
+            let value: &Value = &owner;
+            let state = strand.vm().state::<FixtureState>();
+            state
+                .fixture_ty
+                .vtbl
+                .cast(value)
+                .unwrap()
+                .enter_sync(strand, |strand, recv| {
+                    let mut debug = String::new();
+                    ObjectWrap::<Fixture>::op_debug(recv.clone(), strand, &mut debug).unwrap();
+                    assert_eq!(debug, "<test.Fixture>");
+
+                    let mut display = String::new();
+                    ObjectWrap::<Fixture>::op_display(recv.clone(), strand, &mut display).unwrap();
+                    assert_eq!(display, "<test.Fixture>");
+
+                    let mut verbatim = String::new();
+                    ObjectWrap::<Fixture>::op_verbatim(recv.clone(), strand, &mut verbatim)
+                        .unwrap();
+                    assert_eq!(verbatim, "<test.Fixture>");
+
+                    assert!(ObjectWrap::<Fixture>::op_bool(recv, strand));
+                });
+        });
+    }
+
+    #[test]
+    fn op_call_and_type_object_op_call_use_default_errors() {
+        with_fixture_vm(async |strand, [mut owner, mut out]| {
+            make_fixture(strand, Slot::reborrow(&mut owner));
+            let value: &Value = &owner;
+            let state = strand.vm().state::<FixtureState>();
+            state
+                .fixture_ty
+                .vtbl
+                .cast(value)
+                .unwrap()
+                .enter(strand, async |strand, recv| {
+                    strand
+                        .with_slots_dynamic(0, async |strand, mut arg_slots| {
+                            let sig: [Option<Sym>; 0] = [];
+                            let args = args_from_slots(&mut arg_slots, &sig, 0);
+                            let err = ObjectWrap::<Fixture>::op_call(
+                                recv,
+                                strand,
+                                args,
+                                Slot::reborrow(&mut out),
+                            )
+                            .await
+                            .unwrap_err();
+                            assert_eq!(err.kind(), ErrorKind::Type);
+                        })
+                        .await;
+                })
+                .await;
+
+            let mut ty_slot = Value::NIL;
+            Output::set(strand, Slot::new(&mut ty_slot), state.fixture_ty);
+            let ty_value: &Value = &ty_slot;
+            state
+                .fixture_ty
+                .type_vtbl
+                .cast(ty_value)
+                .unwrap()
+                .enter(strand, async |strand, recv| {
+                    strand
+                        .with_slots_dynamic(0, async |strand, mut arg_slots| {
+                            let sig: [Option<Sym>; 0] = [];
+                            let args = args_from_slots(&mut arg_slots, &sig, 0);
+                            let err = TypeObjectWrap::<Fixture>::op_call(
+                                recv,
+                                strand,
+                                args,
+                                Slot::reborrow(&mut out),
+                            )
+                            .await
+                            .unwrap_err();
+                            assert_eq!(err.kind(), ErrorKind::Type);
+                        })
+                        .await;
+                })
+                .await;
+        });
+    }
+
+    #[test]
+    fn op_index_and_op_assign_use_default_type_error() {
+        with_fixture_vm(async |strand, [mut owner, mut out]| {
+            make_fixture(strand, Slot::reborrow(&mut owner));
+            let value: &Value = &owner;
+            let idx = Value::from_i64(strand, 0);
+            let state = strand.vm().state::<FixtureState>();
+            state
+                .fixture_ty
+                .vtbl
+                .cast(value)
+                .unwrap()
+                .enter_sync(strand, |strand, recv| {
+                    let err = ObjectWrap::<Fixture>::op_index(
+                        recv.clone(),
+                        strand,
+                        &idx,
+                        Slot::reborrow(&mut out),
+                    )
+                    .unwrap_err();
+                    assert_eq!(err.kind(), ErrorKind::Type);
+
+                    let mut idx_slot = idx.dup();
+                    let mut val_slot = Value::from_i64(strand, 1);
+                    let err = ObjectWrap::<Fixture>::op_assign(
+                        recv,
+                        strand,
+                        Slot::new(&mut idx_slot),
+                        Slot::new(&mut val_slot),
+                    )
+                    .unwrap_err();
+                    assert_eq!(err.kind(), ErrorKind::Type);
+                });
+        });
+    }
+
+    #[test]
+    fn op_iter_next_sink_put_use_default_type_error() {
+        with_fixture_vm(async |strand, [mut owner, mut out]| {
+            make_fixture(strand, Slot::reborrow(&mut owner));
+            let value: &Value = &owner;
+            let state = strand.vm().state::<FixtureState>();
+            state
+                .fixture_ty
+                .vtbl
+                .cast(value)
+                .unwrap()
+                .enter(strand, async |strand, recv| {
+                    let err = ObjectWrap::<Fixture>::op_iter(
+                        recv.clone(),
+                        strand,
+                        Slot::reborrow(&mut out),
+                    )
+                    .await
+                    .unwrap_err();
+                    assert_eq!(err.kind(), ErrorKind::Type);
+
+                    let err = ObjectWrap::<Fixture>::op_next(
+                        recv.clone(),
+                        strand,
+                        Slot::reborrow(&mut out),
+                    )
+                    .await
+                    .unwrap_err();
+                    assert_eq!(err.kind(), ErrorKind::Type);
+
+                    let err = ObjectWrap::<Fixture>::op_sink(
+                        recv.clone(),
+                        strand,
+                        Slot::reborrow(&mut out),
+                    )
+                    .await
+                    .unwrap_err();
+                    assert_eq!(err.kind(), ErrorKind::Type);
+
+                    let mut val = Value::from_i64(strand, 1);
+                    let err = ObjectWrap::<Fixture>::op_put(recv, strand, Slot::new(&mut val))
+                        .await
+                        .unwrap_err();
+                    assert_eq!(err.kind(), ErrorKind::Type);
+                })
+                .await;
+        });
+    }
+
+    #[test]
+    fn op_unpack_and_op_spread_use_default_errors() {
+        with_fixture_vm(async |strand, [mut owner, mut out]| {
+            make_fixture(strand, Slot::reborrow(&mut owner));
+            let value: &Value = &owner;
+            let state = strand.vm().state::<FixtureState>();
+            let sig = sig::Unpack::new(0, vec![], vec![], Variadic::None);
+            state
+                .fixture_ty
+                .vtbl
+                .cast(value)
+                .unwrap()
+                .enter(strand, async |strand, recv| {
+                    strand
+                        .with_slots_dynamic(0, async |strand, slots| {
+                            let err =
+                                ObjectWrap::<Fixture>::op_unpack(recv.clone(), strand, &sig, slots)
+                                    .await
+                                    .unwrap_err();
+                            assert_eq!(err.kind(), ErrorKind::Unsupported);
+                        })
+                        .await;
+
+                    struct NullSpread;
+                    impl<'v, 's> protocol::Spread<'v, 's> for NullSpread {
+                        fn positional(
+                            &mut self,
+                            _strand: &mut Strand<'v, 's>,
+                            _value: Slot<'v, '_>,
+                        ) -> Result<'v, 's, ()> {
+                            Ok(())
+                        }
+                        fn symbol(
+                            &mut self,
+                            _strand: &mut Strand<'v, 's>,
+                            _key: Sym<'v, '_>,
+                            _value: Slot<'v, '_>,
+                        ) -> Result<'v, 's, ()> {
+                            Ok(())
+                        }
+                        fn keyed(
+                            &mut self,
+                            _strand: &mut Strand<'v, 's>,
+                            _key: Slot<'v, '_>,
+                            _value: Slot<'v, '_>,
+                        ) -> Result<'v, 's, ()> {
+                            Ok(())
+                        }
+                    }
+                    let mut sink = NullSpread;
+                    // The default `spread` returns `Unsupported`, which `op_spread` catches
+                    // and retries via the generic `default_spread` adapter based on
+                    // iteration; since `Fixture` also doesn't support iteration, that
+                    // fails too, but with a `Type` error surfaced from `op_iter`.
+                    let err = ObjectWrap::<Fixture>::op_spread(
+                        recv,
+                        strand,
+                        protocol::SpreadContext::Sequence,
+                        &mut sink,
+                    )
+                    .await
+                    .unwrap_err();
+                    assert_eq!(err.kind(), ErrorKind::Type);
+                })
+                .await;
+            let _ = &mut out;
+        });
+    }
+
+    #[test]
+    fn op_hash_is_stable_and_op_eq_ne_use_default_type_error() {
+        with_fixture_vm(async |strand, [mut owner, mut other]| {
+            make_fixture(strand, Slot::reborrow(&mut owner));
+            make_fixture(strand, Slot::reborrow(&mut other));
+            let value: &Value = &owner;
+            let other_value: &Value = &other;
+            let state = strand.vm().state::<FixtureState>();
+            state
+                .fixture_ty
+                .vtbl
+                .cast(value)
+                .unwrap()
+                .enter_sync(strand, |strand, recv| {
+                    use std::{collections::hash_map::DefaultHasher, hash::Hasher};
+                    let mut h1 = DefaultHasher::new();
+                    ObjectWrap::<Fixture>::op_hash(recv.clone(), strand, &mut h1).unwrap();
+                    let mut h2 = DefaultHasher::new();
+                    ObjectWrap::<Fixture>::op_hash(recv.clone(), strand, &mut h2).unwrap();
+                    assert_eq!(h1.finish(), h2.finish());
+
+                    match ObjectWrap::<Fixture>::op_eq(recv.clone(), strand, other_value) {
+                        Err(err) => assert_eq!(err.kind(), ErrorKind::Type),
+                        Ok(_) => panic!("expected a type error"),
+                    }
+                    match ObjectWrap::<Fixture>::op_ne(recv, strand, other_value) {
+                        Err(err) => assert_eq!(err.kind(), ErrorKind::Type),
+                        Ok(_) => panic!("expected a type error"),
+                    }
+                });
+        });
+    }
+
+    #[test]
+    fn op_arithmetic_and_comparison_use_default_type_error() {
+        with_fixture_vm(async |strand, [mut owner, mut other]| {
+            make_fixture(strand, Slot::reborrow(&mut owner));
+            Output::set(strand, Slot::reborrow(&mut other), 1_i64);
+            let value: &Value = &owner;
+            let other_value: &Value = &other;
+            let state = strand.vm().state::<FixtureState>();
+            state
+                .fixture_ty
+                .vtbl
+                .cast(value)
+                .unwrap()
+                .enter_sync(strand, |strand, recv| {
+                    macro_rules! assert_type_err {
+                        ($e:expr) => {
+                            match $e {
+                                Err(err) => assert_eq!(err.kind(), ErrorKind::Type),
+                                Ok(_) => panic!("expected a type error"),
+                            }
+                        };
+                    }
+                    assert_type_err!(ObjectWrap::<Fixture>::op_neg(recv.clone(), strand));
+                    assert_type_err!(ObjectWrap::<Fixture>::op_bnot(recv.clone(), strand));
+                    assert_type_err!(ObjectWrap::<Fixture>::op_band(
+                        recv.clone(),
+                        strand,
+                        other_value
+                    ));
+                    assert_type_err!(ObjectWrap::<Fixture>::op_bor(
+                        recv.clone(),
+                        strand,
+                        other_value
+                    ));
+                    assert_type_err!(ObjectWrap::<Fixture>::op_bxor(
+                        recv.clone(),
+                        strand,
+                        other_value
+                    ));
+                    assert_type_err!(ObjectWrap::<Fixture>::op_shl(
+                        recv.clone(),
+                        strand,
+                        other_value
+                    ));
+                    assert_type_err!(ObjectWrap::<Fixture>::op_shr(
+                        recv.clone(),
+                        strand,
+                        other_value
+                    ));
+                    assert_type_err!(ObjectWrap::<Fixture>::op_add(
+                        recv.clone(),
+                        strand,
+                        other_value
+                    ));
+                    assert_type_err!(ObjectWrap::<Fixture>::op_sub(
+                        recv.clone(),
+                        strand,
+                        other_value
+                    ));
+                    assert_type_err!(ObjectWrap::<Fixture>::op_rsub(
+                        recv.clone(),
+                        strand,
+                        other_value
+                    ));
+                    assert_type_err!(ObjectWrap::<Fixture>::op_mul(
+                        recv.clone(),
+                        strand,
+                        other_value
+                    ));
+                    assert_type_err!(ObjectWrap::<Fixture>::op_div(
+                        recv.clone(),
+                        strand,
+                        other_value
+                    ));
+                    assert_type_err!(ObjectWrap::<Fixture>::op_rdiv(
+                        recv.clone(),
+                        strand,
+                        other_value
+                    ));
+                    assert_type_err!(ObjectWrap::<Fixture>::op_ediv(
+                        recv.clone(),
+                        strand,
+                        other_value
+                    ));
+                    assert_type_err!(ObjectWrap::<Fixture>::op_rediv(
+                        recv.clone(),
+                        strand,
+                        other_value
+                    ));
+                    assert_type_err!(ObjectWrap::<Fixture>::op_mod(
+                        recv.clone(),
+                        strand,
+                        other_value
+                    ));
+                    assert_type_err!(ObjectWrap::<Fixture>::op_rmod(
+                        recv.clone(),
+                        strand,
+                        other_value
+                    ));
+                    assert_type_err!(ObjectWrap::<Fixture>::op_lt(
+                        recv.clone(),
+                        strand,
+                        other_value
+                    ));
+                    assert_type_err!(ObjectWrap::<Fixture>::op_lte(
+                        recv.clone(),
+                        strand,
+                        other_value
+                    ));
+                    assert_type_err!(ObjectWrap::<Fixture>::op_gt(
+                        recv.clone(),
+                        strand,
+                        other_value
+                    ));
+                    assert_type_err!(ObjectWrap::<Fixture>::op_gte(recv, strand, other_value));
+                });
+        });
+    }
+
+    #[test]
+    fn op_dcall_falls_back_to_method_with_delegator_when_no_entry_matches() {
+        with_fixture_vm(async |strand, [mut owner, mut out]| {
+            make_fixture(strand, Slot::reborrow(&mut owner));
+            let value: &Value = &owner;
+            let delegator = value.dup();
+            let state = strand.vm().state::<FixtureState>();
+            state
+                .fixture_ty
+                .vtbl
+                .cast(value)
+                .unwrap()
+                .enter(strand, async |strand, recv| {
+                    strand
+                        .with_slots_dynamic(0, async |strand, mut arg_slots| {
+                            let sig: [Option<Sym>; 0] = [];
+                            let args = args_from_slots(&mut arg_slots, &sig, 0);
+                            let err = ObjectWrap::<Fixture>::op_dcall(
+                                recv,
+                                strand,
+                                &delegator,
+                                Sym::well_known(sym::LEN),
+                                args,
+                                Slot::reborrow(&mut out),
+                            )
+                            .await
+                            .unwrap_err();
+                            assert_eq!(err.kind(), ErrorKind::Field);
+                        })
+                        .await;
+                })
+                .await;
+        });
+    }
+
+    #[test]
+    fn op_dcall_invokes_registered_method_handler_with_delegator() {
+        with_fixture_vm(async |strand, [mut owner, mut out]| {
+            make_slot_fixture(strand, 0, "x", Slot::reborrow(&mut owner));
+            let value: &Value = &owner;
+            let delegator = value.dup();
+            let state = strand.vm().state::<FixtureState>();
+            state
+                .slot_ty
+                .vtbl
+                .cast(value)
+                .unwrap()
+                .enter(strand, async |strand, recv| {
+                    strand
+                        .with_slots_dynamic(0, async |strand, mut arg_slots| {
+                            let sig: [Option<Sym>; 0] = [];
+                            let args = args_from_slots(&mut arg_slots, &sig, 0);
+                            ObjectWrap::<SlotFixture>::op_dcall(
+                                recv,
+                                strand,
+                                &delegator,
+                                state.bump_sym,
+                                args,
+                                Slot::reborrow(&mut out),
+                            )
+                            .await
+                            .unwrap();
+                        })
+                        .await;
+                })
+                .await;
+            assert_eq!(out.to_i64(strand).unwrap(), 1);
+        });
+    }
+
+    // ── Registered-entry dispatch on `SlotFixture` instances ──────────────
+
+    #[test]
+    fn op_get_dispatches_getter_property_method_and_default_field() {
+        with_fixture_vm(async |strand, [mut owner, mut out]| {
+            make_slot_fixture(strand, 3, "x", Slot::reborrow(&mut owner));
+            let value: &Value = &owner;
+            let state = strand.vm().state::<FixtureState>();
+            state
+                .slot_ty
+                .vtbl
+                .cast(value)
+                .unwrap()
+                .enter_sync(strand, |strand, recv| {
+                    ObjectWrap::<SlotFixture>::op_get(
+                        recv.clone(),
+                        strand,
+                        state.counter_sym,
+                        Slot::reborrow(&mut out),
+                    )
+                    .unwrap();
+                    assert_eq!(out.to_i64(strand).unwrap(), 3);
+
+                    let prop_sym = state.prop_sym;
+                    ObjectWrap::<SlotFixture>::op_get(
+                        recv.clone(),
+                        strand,
+                        prop_sym,
+                        Slot::reborrow(&mut out),
+                    )
+                    .unwrap();
+                    assert_eq!(out.to_i64(strand).unwrap(), 11);
+
+                    ObjectWrap::<SlotFixture>::op_get(
+                        recv.clone(),
+                        strand,
+                        state.bump_sym,
+                        Slot::reborrow(&mut out),
+                    )
+                    .unwrap();
+
+                    let write_only_sym = state.write_only_sym;
+                    let err = ObjectWrap::<SlotFixture>::op_get(
+                        recv.clone(),
+                        strand,
+                        write_only_sym,
+                        Slot::reborrow(&mut out),
+                    )
+                    .unwrap_err();
+                    assert_eq!(err.kind(), ErrorKind::Field);
+
+                    let err = ObjectWrap::<SlotFixture>::op_get(
+                        recv,
+                        strand,
+                        Sym::well_known(sym::LEN),
+                        Slot::reborrow(&mut out),
+                    )
+                    .unwrap_err();
+                    assert_eq!(err.kind(), ErrorKind::Field);
+                });
+        });
+    }
+
+    #[test]
+    fn op_set_dispatches_setter_property_and_default_immutable_field() {
+        with_fixture_vm(async |strand, [mut owner, mut val]| {
+            make_slot_fixture(strand, 0, "x", Slot::reborrow(&mut owner));
+            let value: &Value = &owner;
+            let state = strand.vm().state::<FixtureState>();
+            state
+                .slot_ty
+                .vtbl
+                .cast(value)
+                .unwrap()
+                .enter_sync(strand, |strand, recv| {
+                    Output::set(strand, Slot::reborrow(&mut val), 1_i64);
+                    let prop_sym = state.prop_sym;
+                    ObjectWrap::<SlotFixture>::op_set(
+                        recv.clone(),
+                        strand,
+                        prop_sym,
+                        Slot::reborrow(&mut val),
+                    )
+                    .unwrap();
+
+                    let write_only_sym = state.write_only_sym;
+                    ObjectWrap::<SlotFixture>::op_set(
+                        recv.clone(),
+                        strand,
+                        write_only_sym,
+                        Slot::reborrow(&mut val),
+                    )
+                    .unwrap();
+
+                    let err = ObjectWrap::<SlotFixture>::op_set(
+                        recv.clone(),
+                        strand,
+                        state.counter_sym,
+                        Slot::reborrow(&mut val),
+                    )
+                    .unwrap_err();
+                    assert_eq!(err.kind(), ErrorKind::Immutable);
+
+                    let err = ObjectWrap::<SlotFixture>::op_set(
+                        recv,
+                        strand,
+                        Sym::well_known(sym::LEN),
+                        Slot::reborrow(&mut val),
+                    )
+                    .unwrap_err();
+                    assert_eq!(err.kind(), ErrorKind::Field);
+                });
+        });
+    }
+
+    #[test]
+    fn op_mcall_dispatches_method_synthetic_get_set_and_default_field() {
+        with_fixture_vm(async |strand, [mut owner, mut out]| {
+            make_slot_fixture(strand, 0, "x", Slot::reborrow(&mut owner));
+            let value: &Value = &owner;
+            let state = strand.vm().state::<FixtureState>();
+            state
+                .slot_ty
+                .vtbl
+                .cast(value)
+                .unwrap()
+                .enter(strand, async |strand, recv| {
+                    // Registered method entry.
+                    strand
+                        .with_slots_dynamic(0, async |strand, mut arg_slots| {
+                            let sig: [Option<Sym>; 0] = [];
+                            let args = args_from_slots(&mut arg_slots, &sig, 0);
+                            ObjectWrap::<SlotFixture>::op_mcall(
+                                recv.clone(),
+                                strand,
+                                state.bump_sym,
+                                args,
+                                Slot::reborrow(&mut out),
+                            )
+                            .await
+                            .unwrap();
+                        })
+                        .await;
+                    assert_eq!(out.to_i64(strand).unwrap(), 1);
+
+                    // Synthetic `(get)` special-cased inside `op_mcall`.
+                    strand
+                        .with_slots_dynamic(1, async |strand, mut arg_slots| {
+                            Output::set(strand, arg_slots.at(0), state.counter_sym);
+                            let sig = [None];
+                            let args = args_from_slots(&mut arg_slots, &sig, 0);
+                            ObjectWrap::<SlotFixture>::op_mcall(
+                                recv.clone(),
+                                strand,
+                                Sym::well_known(sym::GET_METHOD),
+                                args,
+                                Slot::reborrow(&mut out),
+                            )
+                            .await
+                            .unwrap();
+                        })
+                        .await;
+                    assert_eq!(out.to_i64(strand).unwrap(), 1);
+
+                    // Synthetic `(set)` special-cased inside `op_mcall`.
+                    strand
+                        .with_slots_dynamic(2, async |strand, mut arg_slots| {
+                            let prop_sym = state.prop_sym;
+                            Output::set(strand, arg_slots.at(0), prop_sym);
+                            Output::set(strand, arg_slots.at(1), 42_i64);
+                            let sig = [None, None];
+                            let args = args_from_slots(&mut arg_slots, &sig, 0);
+                            ObjectWrap::<SlotFixture>::op_mcall(
+                                recv.clone(),
+                                strand,
+                                Sym::well_known(sym::SET_METHOD),
+                                args,
+                                Slot::reborrow(&mut out),
+                            )
+                            .await
+                            .unwrap();
+                        })
+                        .await;
+
+                    // Falls through to `T::method`'s default field error.
+                    strand
+                        .with_slots_dynamic(0, async |strand, mut arg_slots| {
+                            let sig: [Option<Sym>; 0] = [];
+                            let args = args_from_slots(&mut arg_slots, &sig, 0);
+                            let err = ObjectWrap::<SlotFixture>::op_mcall(
+                                recv,
+                                strand,
+                                Sym::well_known(sym::LEN),
+                                args,
+                                Slot::reborrow(&mut out),
+                            )
+                            .await
+                            .unwrap_err();
+                            assert_eq!(err.kind(), ErrorKind::Field);
+                        })
+                        .await;
+                })
+                .await;
+        });
+    }
+
+    // ── `TypeObjectWrap` dispatch (type-object singleton) ──────────────────
+
+    fn type_value<'v, T: Object<'v>>(
+        strand: &mut Strand<'v, '_>,
+        ty: Type<'v, T>,
+        out: impl Output<'v>,
+    ) {
+        Output::set(strand, out, ty);
+    }
+
+    #[test]
+    fn type_object_op_mcall_type_method_unbound_method_and_default_field() {
+        with_fixture_vm(async |strand, [mut ty_slot, mut inst_slot, mut out]| {
+            let state = strand.vm().state::<FixtureState>();
+            type_value(strand, state.slot_ty, Slot::reborrow(&mut ty_slot));
+            make_slot_fixture(strand, 4, "u", Slot::reborrow(&mut inst_slot));
+            let ty_value: &Value = &ty_slot;
+            let inst_value = inst_slot.dup();
+
+            state
+                .slot_ty
+                .type_vtbl
+                .cast(ty_value)
+                .unwrap()
+                .enter(strand, async |strand, recv| {
+                    // Registered type-method entry: instantiates a fresh object.
+                    let make_sym = state.make_sym;
+                    strand
+                        .with_slots_dynamic(0, async |strand, mut arg_slots| {
+                            let sig: [Option<Sym>; 0] = [];
+                            let args = args_from_slots(&mut arg_slots, &sig, 0);
+                            TypeObjectWrap::<SlotFixture>::op_mcall(
+                                recv.clone(),
+                                strand,
+                                make_sym,
+                                args,
+                                Slot::reborrow(&mut out),
+                            )
+                            .await
+                            .unwrap();
+                        })
+                        .await;
+                    assert!(state.slot_ty.cast(&out).is_some());
+
+                    // Unbound instance-method call: `SlotFixture.bump(instance)`.
+                    strand
+                        .with_slots_dynamic(1, async |strand, mut arg_slots| {
+                            Output::set(strand, arg_slots.at(0), &inst_value);
+                            let sig = [None];
+                            let args = args_from_slots(&mut arg_slots, &sig, 0);
+                            TypeObjectWrap::<SlotFixture>::op_mcall(
+                                recv.clone(),
+                                strand,
+                                state.bump_sym,
+                                args,
+                                Slot::reborrow(&mut out),
+                            )
+                            .await
+                            .unwrap();
+                        })
+                        .await;
+                    assert_eq!(out.to_i64(strand).unwrap(), 5);
+
+                    // Falls through to `T::type_method`'s default field error.
+                    strand
+                        .with_slots_dynamic(0, async |strand, mut arg_slots| {
+                            let sig: [Option<Sym>; 0] = [];
+                            let args = args_from_slots(&mut arg_slots, &sig, 0);
+                            let err = TypeObjectWrap::<SlotFixture>::op_mcall(
+                                recv,
+                                strand,
+                                Sym::well_known(sym::LEN),
+                                args,
+                                Slot::reborrow(&mut out),
+                            )
+                            .await
+                            .unwrap_err();
+                            assert_eq!(err.kind(), ErrorKind::Field);
+                        })
+                        .await;
+                })
+                .await;
+        });
+    }
+
+    #[test]
+    fn type_object_op_get_op_set_dispatch() {
+        with_fixture_vm(async |strand, [mut ty_slot, mut out]| {
+            let state = strand.vm().state::<FixtureState>();
+            type_value(strand, state.slot_ty, Slot::reborrow(&mut ty_slot));
+            let ty_value: &Value = &ty_slot;
+
+            state
+                .slot_ty
+                .type_vtbl
+                .cast(ty_value)
+                .unwrap()
+                .enter_sync(strand, |strand, recv| {
+                    let meta_sym = state.meta_sym;
+                    // Registered type-level getter.
+                    TypeObjectWrap::<SlotFixture>::op_get(
+                        recv.clone(),
+                        strand,
+                        meta_sym,
+                        Slot::reborrow(&mut out),
+                    )
+                    .unwrap();
+                    assert_eq!(out.to_i64(strand).unwrap(), 0);
+
+                    // Registered type-level setter, then read back through the getter.
+                    let mut val = Value::from_i64(strand, 7);
+                    TypeObjectWrap::<SlotFixture>::op_set(
+                        recv.clone(),
+                        strand,
+                        meta_sym,
+                        Slot::new(&mut val),
+                    )
+                    .unwrap();
+                    TypeObjectWrap::<SlotFixture>::op_get(
+                        recv.clone(),
+                        strand,
+                        meta_sym,
+                        Slot::reborrow(&mut out),
+                    )
+                    .unwrap();
+                    assert_eq!(out.to_i64(strand).unwrap(), 7);
+
+                    // Unbound instance entries: bound-method creation via `op_get`.
+                    TypeObjectWrap::<SlotFixture>::op_get(
+                        recv.clone(),
+                        strand,
+                        state.bump_sym,
+                        Slot::reborrow(&mut out),
+                    )
+                    .unwrap();
+
+                    // `GET_METHOD`/protocol syms are always resolvable to a bound method.
+                    TypeObjectWrap::<SlotFixture>::op_get(
+                        recv.clone(),
+                        strand,
+                        Sym::well_known(sym::GET_METHOD),
+                        Slot::reborrow(&mut out),
+                    )
+                    .unwrap();
+
+                    // Getter-only type-level entry: setting it through the type object errors.
+                    let mut val2 = Value::from_i64(strand, 1);
+                    let err = TypeObjectWrap::<SlotFixture>::op_set(
+                        recv.clone(),
+                        strand,
+                        state.readonly_sym,
+                        Slot::new(&mut val2),
+                    )
+                    .unwrap_err();
+                    assert_eq!(err.kind(), ErrorKind::Immutable);
+
+                    // Falls through to `T::type_get`/`T::type_set` default field errors.
+                    let err = TypeObjectWrap::<SlotFixture>::op_get(
+                        recv.clone(),
+                        strand,
+                        Sym::well_known(sym::LEN),
+                        Slot::reborrow(&mut out),
+                    )
+                    .unwrap_err();
+                    assert_eq!(err.kind(), ErrorKind::Field);
+
+                    let mut val3 = Value::from_i64(strand, 1);
+                    let err = TypeObjectWrap::<SlotFixture>::op_set(
+                        recv,
+                        strand,
+                        Sym::well_known(sym::LEN),
+                        Slot::new(&mut val3),
+                    )
+                    .unwrap_err();
+                    assert_eq!(err.kind(), ErrorKind::Field);
+                });
+        });
+    }
+
+    #[test]
+    fn type_object_op_hash_op_eq_op_subtype() {
+        with_fixture_vm(async |strand, [mut ty_slot, mut other_ty_slot]| {
+            let state = strand.vm().state::<FixtureState>();
+            type_value(strand, state.slot_ty, Slot::reborrow(&mut ty_slot));
+            type_value(strand, state.fixture_ty, Slot::reborrow(&mut other_ty_slot));
+            let ty_value: &Value = &ty_slot;
+            let other_ty_value: &Value = &other_ty_slot;
+
+            state
+                .slot_ty
+                .type_vtbl
+                .cast(ty_value)
+                .unwrap()
+                .enter_sync(strand, |strand, recv| {
+                    use std::{collections::hash_map::DefaultHasher, hash::Hasher};
+                    let mut h1 = DefaultHasher::new();
+                    TypeObjectWrap::<SlotFixture>::op_hash(recv.clone(), strand, &mut h1).unwrap();
+                    let mut h2 = DefaultHasher::new();
+                    TypeObjectWrap::<SlotFixture>::op_hash(recv.clone(), strand, &mut h2).unwrap();
+                    assert_eq!(h1.finish(), h2.finish());
+
+                    let eq = TypeObjectWrap::<SlotFixture>::op_eq(recv.clone(), strand, ty_value)
+                        .unwrap();
+                    assert!(eq.to_bool(strand));
+                    let ne =
+                        TypeObjectWrap::<SlotFixture>::op_eq(recv.clone(), strand, other_ty_value)
+                            .unwrap();
+                    assert!(!ne.to_bool(strand));
+
+                    assert!(TypeObjectWrap::<SlotFixture>::op_subtype(
+                        recv.clone(),
+                        strand,
+                        ty_value
+                    ));
+                    let universal = Value::from_input(strand, TypeObject::Value);
+                    assert!(TypeObjectWrap::<SlotFixture>::op_subtype(
+                        recv.clone(),
+                        strand,
+                        &universal
+                    ));
+                    assert!(!TypeObjectWrap::<SlotFixture>::op_subtype(
+                        recv,
+                        strand,
+                        other_ty_value
+                    ));
+                });
+        });
+    }
+
+    // ── `Instance`/`Ref`/`Mut`/`Annex`/`Cast`/`Type` accessors ─────────────
+
+    #[test]
+    fn instance_borrow_borrow_mut_and_annex_access() {
+        with_fixture_vm(async |strand, [mut owner]| {
+            make_slot_fixture(strand, 3, "hello", Slot::reborrow(&mut owner));
+            let value: &Value = &owner;
+            let state = strand.vm().state::<FixtureState>();
+            state
+                .slot_ty
+                .cast(value)
+                .unwrap()
+                .enter_sync(strand, |strand, instance| {
+                    assert_eq!(instance.borrow(strand).unwrap().counter, 3);
+                    assert_eq!(instance.borrow_unwrap().counter, 3);
+                    {
+                        let mut m = instance.borrow_mut(strand).unwrap();
+                        m.counter = 9;
+                    }
+                    assert_eq!(instance.borrow_mut_unwrap().counter, 9);
+                    assert_eq!(instance.annex().tag, "hello");
+                });
+        });
+    }
+
+    #[test]
+    fn instance_slot_read_write_roundtrip() {
+        with_fixture_vm(async |strand, [mut owner]| {
+            make_slot_fixture(strand, 0, "x", Slot::reborrow(&mut owner));
+            let value: &Value = &owner;
+            let state = strand.vm().state::<FixtureState>();
+            state
+                .slot_ty
+                .cast(value)
+                .unwrap()
+                .enter_sync(strand, |strand, instance| {
+                    {
+                        let mut m = instance.borrow_mut_unwrap();
+                        Output::set(strand, Mut::slot_mut::<0>(&mut m), 77_i64);
+                    }
+                    let r = instance.borrow_unwrap();
+                    assert_eq!(Ref::slot::<0>(&r).to_i64(strand).unwrap(), 77);
+                    drop(r);
+                    let m = instance.borrow_mut_unwrap();
+                    assert_eq!(Mut::slot::<0>(&m).to_i64(strand).unwrap(), 77);
+                });
+        });
+    }
+
+    #[test]
+    fn instance_ty_reconstructs_a_type_handle_that_still_casts_the_value() {
+        with_fixture_vm(async |strand, [mut owner]| {
+            make_fixture(strand, Slot::reborrow(&mut owner));
+            let value: &Value = &owner;
+            let state = strand.vm().state::<FixtureState>();
+            state
+                .fixture_ty
+                .cast(value)
+                .unwrap()
+                .enter_sync(strand, |strand, instance| {
+                    let ty = instance.ty(strand.vm());
+                    assert!(ty.cast(value).is_some());
+                });
+        });
+    }
+
+    #[test]
+    fn cast_enter_finalize_runs_without_a_live_strand() {
+        with_fixture_vm(async |strand, [mut owner]| {
+            make_fixture(strand, Slot::reborrow(&mut owner));
+            let value: &Value = &owner;
+            let state = strand.vm().state::<FixtureState>();
+            let cast = state.fixture_ty.cast(value).unwrap();
+            let bool_result = cast.enter_finalize(|instance| Fixture::bool(instance, strand));
+            assert!(bool_result);
+        });
+    }
+
+    #[test]
+    fn type_borrow_and_annex_roundtrip() {
+        with_fixture_vm(async |strand, []| {
+            let state = strand.vm().state::<FixtureState>();
+            assert_eq!(*state.slot_ty.borrow(strand).unwrap(), 0);
+            {
+                let mut m = state.slot_ty.borrow_mut(strand).unwrap();
+                *m = 5;
+            }
+            assert_eq!(*state.slot_ty.borrow_unwrap(strand.vm()), 5);
+            {
+                let mut m = state.slot_ty.borrow_mut_unwrap(strand.vm());
+                *m = 6;
+            }
+            assert_eq!(*state.slot_ty.borrow(strand).unwrap(), 6);
+            assert_eq!(*state.slot_ty.annex(strand.vm()), 0);
+        });
+    }
+
+    #[test]
+    fn type_create_and_create_with_annex_produce_castable_instances() {
+        with_fixture_vm(async |strand, [mut out1, mut out2]| {
+            let state = strand.vm().state::<FixtureState>();
+            state
+                .fixture_ty
+                .create(strand, Fixture, Slot::reborrow(&mut out1));
+            assert!(state.fixture_ty.cast(&out1).is_some());
+
+            state.slot_ty.create_with_annex(
+                strand,
+                SlotFixture { counter: 1 },
+                SlotAnnex { tag: "y" },
+                Slot::reborrow(&mut out2),
+            );
+            assert!(state.slot_ty.cast(&out2).is_some());
+            assert!(state.fixture_ty.cast(&out2).is_none());
+        });
+    }
+
+    #[test]
+    fn method_with_slots_dispatch_uses_scratch_slot() {
+        with_fixture_vm(async |strand, [mut owner, mut out]| {
+            make_slot_fixture(strand, 0, "x", Slot::reborrow(&mut owner));
+            let value: &Value = &owner;
+            let state = strand.vm().state::<FixtureState>();
+            let with_slot_sym = state.with_slot_sym;
+            state
+                .slot_ty
+                .vtbl
+                .cast(value)
+                .unwrap()
+                .enter(strand, async |strand, recv| {
+                    strand
+                        .with_slots_dynamic(0, async |strand, mut arg_slots| {
+                            let sig: [Option<Sym>; 0] = [];
+                            let args = args_from_slots(&mut arg_slots, &sig, 0);
+                            ObjectWrap::<SlotFixture>::op_mcall(
+                                recv,
+                                strand,
+                                with_slot_sym,
+                                args,
+                                Slot::reborrow(&mut out),
+                            )
+                            .await
+                            .unwrap();
+                        })
+                        .await;
+                })
+                .await;
+            assert_eq!(out.to_i64(strand).unwrap(), 5);
+        });
+    }
 }

@@ -1,0 +1,41 @@
+def assert_err msg block
+  let res = try
+    block()
+    false
+  catch e
+    assert_eq (str e) $msg
+    true
+  assert $res
+
+# str/debug formatting
+assert_eq (str {}) "{}"
+assert_eq (str {a: 1, b: 2}) "{a: 1, b: 2}"
+# sequential int keys starting at 0 print bare, like a tuple
+assert_eq (str {0: "x", 1: "y"}) "{\"x\", \"y\"}"
+# a gap in the int-key sequence falls back to printing the key
+assert_eq (str {0: "x", 2: "y"}) "{\"x\", 2: \"y\"}"
+# non-symbol string keys print quoted
+assert_eq (str {"a-b": 1}) "{\"a-b\": 1}"
+
+# equality: length mismatch, key mismatch, value mismatch, and holes left
+# by deletion on both sides
+let d1 = {a: 1, b: 2, c: 3}
+d1.delete :b:
+let d2 = {a: 1, x: 99, c: 3}
+d2.delete :x:
+assert (d1 == d2)
+assert (!(d1 == {a: 1}))
+assert (!(d1 == {a: 1, c: 99}))
+assert (!(d1 == {a: 1, z: 3}))
+
+# ordering: shorter-is-less, key ordering, value ordering, equal-is-not-less
+assert ({1: "x"} < {1: "x", 2: "y"})
+assert (!({1: "x", 2: "y"} < {1: "x"}))
+assert ({1: "x"} < {2: "x"})
+assert (!({2: "x"} < {1: "x"}))
+assert ({1: "x"} < {1: "y"})
+assert (!({1: "y"} < {1: "x"}))
+assert (!({1: "x"} < {1: "x"}))
+
+# indexing a missing key
+assert_err "index out of range or invalid" do {a: 1}["z"]

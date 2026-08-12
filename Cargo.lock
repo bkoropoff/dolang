@@ -1255,6 +1255,7 @@ dependencies = [
  "bitvec",
  "bstr",
  "dolang-bytecode",
+ "dolang-compile",
  "dolang-private-util",
  "futures",
  "hex",
