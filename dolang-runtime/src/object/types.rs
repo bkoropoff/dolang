@@ -298,3 +298,165 @@ impl<'v> Protocol<'v> for NilType {
         crate::fmt!(strand, w, "<type std.Nil>")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{call, error::ErrorKind, method, test_support::with_vm};
+
+    use super::*;
+
+    #[test]
+    fn value_op_call_errors_not_instantiable() {
+        with_vm(async |strand, [mut out]| {
+            let err = call!(strand, &strand.singletons().value, &mut out)
+                .await
+                .unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::Type);
+        });
+    }
+
+    #[test]
+    fn type_op_call_errors_not_instantiable() {
+        with_vm(async |strand, [mut out]| {
+            let err = call!(strand, &strand.singletons().type_obj, &mut out)
+                .await
+                .unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::Type);
+        });
+    }
+
+    #[test]
+    fn bool_op_call_converts_bool_and_rejects_non_bool() {
+        with_vm(async |strand, [mut out]| {
+            call!(strand, &strand.singletons().bool, &mut out, true)
+                .await
+                .unwrap();
+            let result: &DoValue = &out;
+            assert!(result.to_bool(strand));
+
+            let err = call!(strand, &strand.singletons().bool, &mut out, 1_i64)
+                .await
+                .unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::Type);
+        });
+    }
+
+    #[test]
+    fn bool_op_get_known_method_succeeds_unknown_field_errors() {
+        with_vm(async |strand, [mut ok_out, unused_out]| {
+            let bool_recv = strand
+                .builtin_types()
+                .bool_type
+                .cast(&strand.singletons().bool)
+                .unwrap();
+            bool_recv.enter_sync(strand, |strand, recv| {
+                Bool::op_get(
+                    recv,
+                    strand,
+                    Sym::well_known(sym::STR_METHOD),
+                    Slot::reborrow(&mut ok_out),
+                )
+                .unwrap();
+            });
+            let bound: &DoValue = &ok_out;
+            assert!(!bound.is_nil());
+
+            let bool_recv = strand
+                .builtin_types()
+                .bool_type
+                .cast(&strand.singletons().bool)
+                .unwrap();
+            bool_recv.enter_sync(strand, |strand, recv| {
+                let err =
+                    Bool::op_get(recv, strand, Sym::well_known(sym::LEN), unused_out).unwrap_err();
+                assert_eq!(err.kind(), ErrorKind::Field);
+            });
+        });
+    }
+
+    #[test]
+    fn bool_op_mcall_default_dispatch_reaches_op_band() {
+        with_vm(async |strand, [mut out]| {
+            method!(
+                strand,
+                &strand.singletons().bool,
+                Sym::well_known(sym::BAND_METHOD),
+                &mut out,
+                true,
+                false
+            )
+            .await
+            .unwrap();
+            let result: &DoValue = &out;
+            assert!(!result.to_bool(strand));
+        });
+    }
+
+    #[test]
+    fn args_type_op_subtype_and_op_call() {
+        with_vm(async |strand, [mut out]| {
+            let args_recv = strand
+                .builtin_types()
+                .args_type
+                .cast(&strand.singletons().args)
+                .unwrap();
+            args_recv.enter_sync(strand, |strand, recv| {
+                assert!(ArgsType::op_subtype(
+                    recv,
+                    strand,
+                    &strand.singletons().args
+                ));
+            });
+            let args_recv = strand
+                .builtin_types()
+                .args_type
+                .cast(&strand.singletons().args)
+                .unwrap();
+            args_recv.enter_sync(strand, |strand, recv| {
+                assert!(ArgsType::op_subtype(
+                    recv,
+                    strand,
+                    &strand.singletons().iterable
+                ));
+            });
+            let args_recv = strand
+                .builtin_types()
+                .args_type
+                .cast(&strand.singletons().args)
+                .unwrap();
+            args_recv.enter_sync(strand, |strand, recv| {
+                assert!(!ArgsType::op_subtype(
+                    recv,
+                    strand,
+                    &strand.singletons().int
+                ));
+            });
+
+            call!(strand, &strand.singletons().args, &mut out)
+                .await
+                .unwrap();
+            let result: &DoValue = &out;
+            assert!(
+                result
+                    .downcast_ref(strand.builtin_types().arg_pack)
+                    .is_some()
+            );
+        });
+    }
+
+    #[test]
+    fn nil_type_op_debug() {
+        with_vm(async |strand, []| {
+            let nil_recv = strand
+                .builtin_types()
+                .nil_type
+                .cast(&strand.singletons().nil)
+                .unwrap();
+            let mut s = String::new();
+            nil_recv.enter_sync(strand, |strand, recv| {
+                NilType::op_debug(recv, strand, &mut s).unwrap();
+            });
+            assert_eq!(s, "<type std.Nil>");
+        });
+    }
+}

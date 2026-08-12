@@ -946,7 +946,91 @@ impl<'v> Protocol<'v> for Type {
 mod tests {
     use std::cell::Cell;
 
-    use super::MutationGuard;
+    use dolang_bytecode::Variadic;
+
+    use crate::{
+        error::ErrorKind,
+        object::native::Object,
+        sig,
+        sym::Sym,
+        test_support::with_builder,
+        vm::{Builder, Stateful},
+    };
+
+    use super::*;
+
+    // ── Fixture: a minimal `Object`/`ArrayLike` pair mirroring what an
+    // extension crate would write, used to exercise the generic `unpack_from`/
+    // `index_from` logic without a live `.dol` script.
+
+    struct FixtureArray<'v>(Vec<Value<'v>>);
+
+    impl<'v> Object<'v> for FixtureArray<'v> {
+        const NAME: &'v str = "FixtureArray";
+        const MODULE: &'v str = "test";
+        type Annex = ();
+        type Type = ();
+        type TypeAnnex = ();
+    }
+
+    struct FixtureGlue;
+
+    impl<'v> ArrayLike<'v> for FixtureGlue {
+        type Object = FixtureArray<'v>;
+
+        const MODULE: &'v str = "test";
+        const NAME: &'v str = "FixtureArrayView";
+
+        fn len(&self, this: Instance<'v, '_, Self::Object>, strand: &mut Strand<'v, '_>) -> usize {
+            this.borrow(strand).unwrap().0.len()
+        }
+
+        fn get<'a, 's>(
+            &self,
+            this: Instance<'v, '_, Self::Object>,
+            strand: &'a mut Strand<'v, 's>,
+            index: usize,
+            out: Slot<'v, 'a>,
+        ) -> Result<'v, 's, ()> {
+            let value = this.borrow(strand)?.0[index].dup();
+            Output::set(strand, out, &value);
+            Ok(())
+        }
+    }
+
+    struct FixtureState<'v> {
+        ty: crate::object::native::Type<'v, FixtureArray<'v>>,
+    }
+
+    struct FixtureStateTag;
+
+    impl<'v> Stateful<'v> for FixtureState<'v> {
+        type Tag = FixtureStateTag;
+    }
+
+    fn configure(vm: &mut Builder<'_>) {
+        let ty = vm.register_type::<FixtureArray>();
+        vm.register_state(FixtureState { ty });
+    }
+
+    /// Populates `out` (which must be a GC-rooted slot, e.g. from
+    /// `Strand::with_slots_dynamic`) with a `FixtureArray` containing `items`. Values are
+    /// never returned as bare, unrooted locals — every call site roots the owner for as
+    /// long as it's needed before this function returns.
+    fn make_owner<'v>(strand: &mut Strand<'v, '_>, items: &[i64], out: Slot<'v, '_>) {
+        let ty = strand.vm().state::<FixtureState>().ty;
+        let values = items.iter().map(|&i| Value::from_i64(strand, i)).collect();
+        ty.create_with_annex(strand, FixtureArray(values), (), out);
+    }
+
+    fn with_fixture_vm<const N: usize, R: 'static>(
+        body: impl for<'v, 's, 'b> AsyncFnOnce(&mut Strand<'v, 's>, [Slot<'v, 'b>; N]) -> R + 'static,
+    ) -> R {
+        with_builder(async move |vm| {
+            configure(vm);
+            vm.enter_with_slots::<N, _>(body).await
+        })
+    }
 
     #[test]
     fn mutation_guard_rejects_reentry_and_resets() {
@@ -955,5 +1039,144 @@ mod tests {
         assert!(MutationGuard::try_new(&busy).is_none());
         drop(guard);
         assert!(MutationGuard::try_new(&busy).is_some());
+    }
+
+    #[test]
+    fn unpack_from_errors_on_too_few_required_args() {
+        with_fixture_vm(async |strand, [mut owner_slot]| {
+            make_owner(strand, &[1, 2], Slot::reborrow(&mut owner_slot));
+            let owner: &Value = &owner_slot;
+            let glue = Glue(FixtureGlue);
+            let sig = sig::Unpack::new(3, vec![], vec![], Variadic::None);
+            strand
+                .with_slots_dynamic(3, async |strand, mut out| {
+                    let err = unpack_from(strand, &sig, &mut out, owner, &glue, 0).unwrap_err();
+                    assert_eq!(err.kind(), ErrorKind::MissingPos);
+                })
+                .await;
+        });
+    }
+
+    #[test]
+    fn unpack_from_errors_on_too_many_args_without_variadic() {
+        with_fixture_vm(async |strand, [mut owner_slot]| {
+            make_owner(strand, &[1, 2, 3], Slot::reborrow(&mut owner_slot));
+            let owner: &Value = &owner_slot;
+            let glue = Glue(FixtureGlue);
+            let sig = sig::Unpack::new(1, vec![], vec![], Variadic::None);
+            strand
+                .with_slots_dynamic(1, async |strand, mut out| {
+                    let err = unpack_from(strand, &sig, &mut out, owner, &glue, 0).unwrap_err();
+                    assert_eq!(err.kind(), ErrorKind::UnexpectedPos);
+                })
+                .await;
+        });
+    }
+
+    #[test]
+    fn unpack_from_variadic_captures_remainder() {
+        with_fixture_vm(async |strand, [mut owner_slot]| {
+            make_owner(strand, &[1, 2, 3], Slot::reborrow(&mut owner_slot));
+            let owner: &Value = &owner_slot;
+            let glue = Glue(FixtureGlue);
+            let sig = sig::Unpack::new(1, vec![], vec![], Variadic::Capture);
+            strand
+                .with_slots_dynamic(1, async |strand, mut out| {
+                    // `unpack_from` itself only fills the required/optional/key
+                    // slots; the variadic capture slot is filled by the caller
+                    // (see `View::op_unpack`). Here we only assert it doesn't
+                    // error and reports 1 item consumed.
+                    let consumed = unpack_from(strand, &sig, &mut out, owner, &glue, 0).unwrap();
+                    assert_eq!(consumed, 1);
+                })
+                .await;
+        });
+    }
+
+    #[test]
+    fn unpack_from_missing_key_without_default_errors() {
+        with_fixture_vm(async |strand, [mut owner_slot]| {
+            make_owner(strand, &[], Slot::reborrow(&mut owner_slot));
+            let owner: &Value = &owner_slot;
+            let glue = Glue(FixtureGlue);
+            let key_sym = Sym::well_known(sym::LEN);
+            let sig = sig::Unpack::new(
+                0,
+                vec![],
+                vec![sig::UnpackKey {
+                    kind: sig::UnpackKeyKind::Sym(key_sym),
+                    default: None,
+                }],
+                Variadic::None,
+            );
+            strand
+                .with_slots_dynamic(1, async |strand, mut out| {
+                    let err = unpack_from(strand, &sig, &mut out, owner, &glue, 0).unwrap_err();
+                    assert_eq!(err.kind(), ErrorKind::MissingKey);
+                })
+                .await;
+        });
+    }
+
+    #[test]
+    fn unpack_from_key_with_default_succeeds() {
+        with_fixture_vm(async |strand, [mut owner_slot]| {
+            make_owner(strand, &[], Slot::reborrow(&mut owner_slot));
+            let owner: &Value = &owner_slot;
+            let glue = Glue(FixtureGlue);
+            let key_sym = Sym::well_known(sym::LEN);
+            // Constructed and consumed in the same expression below, immediately
+            // embedded (by value) into `sig` — never a lingering, separately
+            // rooted local.
+            let sig = sig::Unpack::new(
+                0,
+                vec![],
+                vec![sig::UnpackKey {
+                    kind: sig::UnpackKeyKind::Sym(key_sym),
+                    default: Some(Value::from_i64(strand, 42)),
+                }],
+                Variadic::None,
+            );
+            strand
+                .with_slots_dynamic(1, async |strand, mut out| {
+                    unpack_from(strand, &sig, &mut out, owner, &glue, 0).unwrap();
+                    let filled = out.at(0).to_i64(strand).unwrap();
+                    assert_eq!(filled, 42);
+                })
+                .await;
+        });
+    }
+
+    #[test]
+    fn index_from_errors_when_slice_start_exceeds_end() {
+        with_fixture_vm(async |strand, [mut owner_slot]| {
+            make_owner(strand, &[1, 2, 3, 4, 5], Slot::reborrow(&mut owner_slot));
+            let owner: &Value = &owner_slot;
+            let glue = Glue(FixtureGlue);
+
+            // A contiguous range whose resolved start (5) is past its resolved end
+            // (2) — `Range::slice`/`index::position` each resolve fine in isolation,
+            // but the pair is nonsensical as a slice. `start`/`end` are constructed
+            // and consumed in the same expression, immediately embedded (by value)
+            // into the `Range`, which becomes GC-scanned as soon as it's rooted in
+            // `range_slot` below.
+            strand
+                .with_slots::<2, _>(async |strand, [mut range_slot, out_slot]| {
+                    let range = range::Range::new(
+                        Value::from_i64(strand, 5),
+                        Value::from_i64(strand, 2),
+                        Value::NIL,
+                    );
+                    strand.builtin_types().range.create(
+                        strand,
+                        range,
+                        Slot::reborrow(&mut range_slot),
+                    );
+                    let range_value: &Value = &range_slot;
+                    let err = index_from(owner, &glue, strand, range_value, out_slot).unwrap_err();
+                    assert_eq!(err.kind(), ErrorKind::Index);
+                })
+                .await;
+        });
     }
 }

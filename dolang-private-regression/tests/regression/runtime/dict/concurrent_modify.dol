@@ -1,26 +1,27 @@
+def assert_concurrency_err block
+  let res = try
+    block()
+    false
+  catch e
+    assert_eq (str e) "conflicting concurrent operation: collection was modified during iteration"
+    true
+  assert $res
+
 let map = {0: "foo", 1: "bar"}
-let caught = try
+assert_concurrency_err do
   for _ = map
     map.clear()
-  false
-catch _
-  true
-assert $caught
 
 let values = map.values()
-let caught_values = try
-  map.insert 2 baz
-  values.next()
-  false
-catch _
-  true
-assert $caught_values
+map.insert 2 baz
+assert_concurrency_err do values.next()
 
 let keys = map.keys()
-let caught_keys = try
-  map.insert 3 quux
-  keys.next()
-  false
-catch _
-  true
-assert $caught_keys
+map.insert 3 quux
+assert_concurrency_err do keys.next()
+
+map.insert 0 first
+map.insert 0 second
+let keyed = map.values 0
+map.insert 4 quux2
+assert_concurrency_err do keyed.next()

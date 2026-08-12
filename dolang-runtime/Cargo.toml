@@ -23,6 +23,10 @@ version = "0.1.1"
 path = "../dolang-bytecode"
 version = "0.1.1"
 
+[dev-dependencies.dolang-compile]
+path = "../dolang-compile"
+version = "0.1.1"
+
 [features]
 default = []
 debug = ["dolang-util/debug", "dolang-bytecode/debug"]
