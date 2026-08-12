@@ -27,7 +27,7 @@ use crate::{
         range,
     },
     sig::{self, Pack},
-    strand::{Strand, StrandInner},
+    strand::{InterruptMask, Strand, StrandInner},
     sym::{self, Sym},
     unpack,
     value::{Output, Slot, Slots, StrEmbryo, Value},
@@ -760,7 +760,7 @@ impl<'v> Vm<'v> {
                 // 3. Run finally under cancel mask
                 if !finally.is_nil() {
                     let finally_status = strand
-                        .with_interrupt_mask(true, async |strand| {
+                        .with_interrupt_mask(InterruptMask::all(), async |strand| {
                             call!(strand, &finally, &mut tmp).await
                         })
                         .await;

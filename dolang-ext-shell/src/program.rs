@@ -1,3 +1,4 @@
+use dolang::runtime::strand::InterruptMask;
 use futures::future::MaybeDone;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
@@ -196,7 +197,7 @@ async fn cleanup_io<'v, 's>(
     temp: Streams<bool>,
 ) {
     strand
-        .with_interrupt_mask(true, async move |strand| {
+        .with_interrupt_mask(InterruptMask::all(), async move |strand| {
             strand
                 .with_slots(async move |strand, [mut tmp]| {
                     for (temp, value) in [
@@ -806,7 +807,9 @@ async fn run<'v, 's>(
 
     if res.is_err() {
         let _ = strand
-            .with_interrupt_mask(true, async move |_strand| proc.terminate().await)
+            .with_interrupt_mask(InterruptMask::all(), async move |_strand| {
+                proc.terminate().await
+            })
             .await;
     }
 

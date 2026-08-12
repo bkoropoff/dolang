@@ -5,7 +5,7 @@ use std::{
     ptr,
 };
 
-use dolang::runtime::object::fmt;
+use dolang::runtime::{object::fmt, strand::InterruptMask};
 
 use dolang::runtime::{
     Error, Instance, Object, Result, State, Strand, call, error::ResultExt, method, unpack,
@@ -231,7 +231,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                         let result = call!(strand, block, out, &wrapper).await;
 
                         strand
-                            .with_interrupt_mask(true, async move |strand| {
+                            .with_interrupt_mask(InterruptMask::all(), async move |strand| {
                                 let _ = method!(strand, &wrapper, close, &mut tmp).await;
                             })
                             .await;

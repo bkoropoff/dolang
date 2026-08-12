@@ -1,4 +1,6 @@
-use dolang::runtime::{Instance, Object, Output, Result, Strand, object::TypeBuilder, unpack};
+use dolang::runtime::{
+    Instance, Object, Output, Result, Strand, object::TypeBuilder, strand::InterruptMask, unpack,
+};
 
 use crate::error::ResultExt as _;
 
@@ -48,7 +50,7 @@ impl<'v> Object<'v> for FileLock {
             .method("release", async move |this, strand, args, _out| {
                 let ([], []) = unpack!(strand, args, 0, 0)?;
                 strand
-                    .with_interrupt_mask(true, async move |strand| {
+                    .with_interrupt_mask(InterruptMask::all(), async move |strand| {
                         FileLock::release(this, strand).await
                     })
                     .await
