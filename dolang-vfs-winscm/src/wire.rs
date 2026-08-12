@@ -310,10 +310,11 @@ pub(crate) enum WinScmRequest {
         options: CreateServiceOptions,
         access: ServiceAccess,
     },
-    EnumServices {
+    EnumServicesPage {
         manager: ExtOpaque<ScManagerMarker>,
         service_type: ServiceType,
         state_filter: ServiceStateFilter,
+        resume: u32,
     },
     DeleteService {
         service: ExtOpaque<ServiceMarker>,
@@ -362,7 +363,11 @@ pub(crate) enum WinScmResponse {
     Ack,
     Status(ServiceStatus),
     Config(ServiceConfig),
-    Services(Vec<ServiceInfo>),
+    ServicesPage {
+        services: Vec<ServiceInfo>,
+        resume: u32,
+        done: bool,
+    },
     SecDesc(SecDesc),
 }
 

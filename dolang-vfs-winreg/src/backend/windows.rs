@@ -32,7 +32,8 @@ use windows_sys::Win32::{
         HKEY, HKEY_CLASSES_ROOT, HKEY_CURRENT_CONFIG, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE,
         HKEY_USERS, KEY_WOW64_32KEY, KEY_WOW64_64KEY, REG_OPTION_NON_VOLATILE, RegCreateKeyExW,
         RegDeleteKeyExW, RegDeleteTreeW, RegDeleteValueW, RegEnumKeyExW, RegEnumValueW,
-        RegGetKeySecurity, RegOpenKeyExW, RegQueryValueExW, RegSetKeySecurity, RegSetValueExW,
+        RegGetKeySecurity, RegOpenKeyExW, RegQueryInfoKeyW, RegQueryValueExW, RegSetKeySecurity,
+        RegSetValueExW,
     },
     System::SystemServices::ACCESS_SYSTEM_SECURITY,
 };
@@ -236,10 +237,12 @@ fn enum_subkey(handle: HKEY, index: u32) -> Result<Option<String>, Error> {
 
 /// Fetches every subkey name under `handle` in one pass, unlike calling
 /// [`enum_subkey`] for every index.
-fn enum_all_subkeys(handle: HKEY) -> Result<Vec<String>, Error> {
+fn enum_subkeys_page(handle: HKEY, mut index: u32, count: u32) -> Result<Vec<String>, Error> {
     let mut names = Vec::new();
-    let mut index = 0u32;
-    while let Some(name) = enum_subkey(handle, index)? {
+    while names.len() < count as usize {
+        let Some(name) = enum_subkey(handle, index)? else {
+            break;
+        };
         names.push(name);
         index += 1;
     }
@@ -286,12 +289,18 @@ fn enum_value(handle: HKEY, index: u32) -> Result<Option<String>, Error> {
 /// Fetches every value under `handle` (name, kind, and data) in one pass,
 /// using `RegEnumValueW`'s own data-return parameters instead of a separate
 /// `RegQueryValueExW` per value.
-fn enum_all_values(handle: HKEY) -> Result<Vec<(String, Value)>, Error> {
+fn enum_values_page(
+    handle: HKEY,
+    mut index: u32,
+    count: u32,
+) -> Result<Vec<(String, Value)>, Error> {
     let mut name = vec![0u16; 16_384];
     let mut data = vec![0u8; 256];
     let mut values = Vec::new();
-    let mut index = 0u32;
     loop {
+        if values.len() == count as usize {
+            return Ok(values);
+        }
         let mut name_len = name.len() as u32;
         let mut data_len = data.len() as u32;
         let mut kind = 0u32;
@@ -328,6 +337,33 @@ fn enum_all_values(handle: HKEY) -> Result<Vec<(String, Value)>, Error> {
             }
             other => return Err(from_win32("enumerate all values", other)),
         }
+    }
+}
+
+fn query_counts(handle: HKEY) -> Result<(u32, u32), Error> {
+    let mut subkeys = 0;
+    let mut values = 0;
+    // SAFETY: `handle` is live; all unused output pointers may be null.
+    let status = unsafe {
+        RegQueryInfoKeyW(
+            handle,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut subkeys,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut values,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+        )
+    };
+    if status == ERROR_SUCCESS {
+        Ok((subkeys, values))
+    } else {
+        Err(from_win32("query key info", status))
     }
 }
 
@@ -647,10 +683,16 @@ pub(crate) async fn handle(
                 with_handle(guard, move |h| enum_subkey(h, index)).await?,
             ))
         }
-        WinRegRequest::EnumAllSubkeys { key } => {
+        WinRegRequest::OpenSubkeys { key } => {
             let guard = ctx.acquire::<Key>(key).map_err(invalid_handle)?;
-            Ok(WinRegResponse::Subkeys(
-                with_handle(guard, enum_all_subkeys).await?,
+            Ok(WinRegResponse::EnumerationLen(
+                with_handle(guard, |h| Ok(query_counts(h)?.0)).await?,
+            ))
+        }
+        WinRegRequest::EnumSubkeysPage { key, index, count } => {
+            let guard = ctx.acquire::<Key>(key).map_err(invalid_handle)?;
+            Ok(WinRegResponse::SubkeysPage(
+                with_handle(guard, move |h| enum_subkeys_page(h, index, count)).await?,
             ))
         }
         WinRegRequest::EnumValue { key, index } => {
@@ -659,10 +701,16 @@ pub(crate) async fn handle(
                 with_handle(guard, move |h| enum_value(h, index)).await?,
             ))
         }
-        WinRegRequest::EnumAllValues { key } => {
+        WinRegRequest::OpenValues { key } => {
             let guard = ctx.acquire::<Key>(key).map_err(invalid_handle)?;
-            Ok(WinRegResponse::Values(
-                with_handle(guard, enum_all_values).await?,
+            Ok(WinRegResponse::EnumerationLen(
+                with_handle(guard, |h| Ok(query_counts(h)?.1)).await?,
+            ))
+        }
+        WinRegRequest::EnumValuesPage { key, index, count } => {
+            let guard = ctx.acquire::<Key>(key).map_err(invalid_handle)?;
+            Ok(WinRegResponse::ValuesPage(
+                with_handle(guard, move |h| enum_values_page(h, index, count)).await?,
             ))
         }
         WinRegRequest::GetValue { key, name } => {

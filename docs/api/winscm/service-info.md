@@ -1,6 +1,6 @@
 # ServiceInfo
 
-One entry in a service enumeration snapshot.
+One entry in a service enumeration.
 
 Supports keyword unpack.
 

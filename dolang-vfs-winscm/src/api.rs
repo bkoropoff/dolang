@@ -13,6 +13,7 @@ use dolang_vfs::{
     error::{Error, ErrorKind},
 };
 use dolang_winterop::security::SecDesc;
+use std::sync::{Arc, Weak};
 
 use crate::wire::{
     CreateServiceOptions, ErrorControl, NotifyMask, ScManagerMarker, ServiceAccess, ServiceConfig,
@@ -37,7 +38,50 @@ fn unexpected(request: &str) -> Error {
 /// An open handle to the Service Control Manager database.
 pub struct ScManager {
     vfs: AnyVfs,
-    handle: ExtOpaque<ScManagerMarker>,
+    handle: Arc<ScManagerState>,
+}
+
+struct ScManagerState {
+    vfs: AnyVfs,
+    opaque: Option<ExtOpaque<ScManagerMarker>>,
+}
+
+impl ScManagerState {
+    fn new(vfs: AnyVfs, opaque: ExtOpaque<ScManagerMarker>) -> Self {
+        Self {
+            vfs,
+            opaque: Some(opaque),
+        }
+    }
+
+    fn opaque(&self) -> Result<ExtOpaque<ScManagerMarker>, Error> {
+        self.opaque
+            .clone()
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "SC manager is closed"))
+    }
+
+    fn take_opaque(&mut self) -> ExtOpaque<ScManagerMarker> {
+        self.opaque
+            .take()
+            .expect("live manager state has no opaque")
+    }
+}
+
+impl Drop for ScManagerState {
+    fn drop(&mut self) {
+        let Some(manager) = self.opaque.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let vfs = self.vfs.clone();
+        runtime.spawn(async move {
+            let _ = vfs
+                .call_extension::<WinScmExt>(WinScmRequest::CloseManager { manager })
+                .await;
+        });
+    }
 }
 
 impl ScManager {
@@ -49,7 +93,7 @@ impl ScManager {
         match response {
             WinScmResponse::Manager(handle) => Ok(ScManager {
                 vfs: vfs.clone(),
-                handle,
+                handle: Arc::new(ScManagerState::new(vfs.clone(), handle)),
             }),
             _ => Err(unexpected("OpenManager")),
         }
@@ -60,7 +104,7 @@ impl ScManager {
         let response = self
             .vfs
             .call_extension::<WinScmExt>(WinScmRequest::OpenService {
-                manager: self.handle.clone(),
+                manager: self.handle.opaque()?,
                 name: name.to_string(),
                 access,
             })
@@ -116,7 +160,7 @@ impl ScManager {
         let response = self
             .vfs
             .call_extension::<WinScmExt>(WinScmRequest::CreateService {
-                manager: self.handle.clone(),
+                manager: self.handle.opaque()?,
                 name: name.to_string(),
                 display_name: display_name.map(str::to_owned),
                 service_type,
@@ -136,28 +180,21 @@ impl ScManager {
         }
     }
 
-    /// Enumerates services matching `service_type`/`state_filter`.
-    ///
-    /// One round trip regardless of how many services the underlying
-    /// `EnumServicesStatusExW` call needs to page through internally — same
-    /// rationale as `dolang-vfs-winreg`'s `EnumAllSubkeys`/`EnumAllValues`.
+    /// Opens a live forward enumeration of matching services.
     pub async fn enumerate_services(
         &self,
         service_type: ServiceType,
         state_filter: ServiceStateFilter,
-    ) -> Result<Vec<ServiceInfo>, Error> {
-        let response = self
-            .vfs
-            .call_extension::<WinScmExt>(WinScmRequest::EnumServices {
-                manager: self.handle.clone(),
-                service_type,
-                state_filter,
-            })
-            .await??;
-        match response {
-            WinScmResponse::Services(services) => Ok(services),
-            _ => Err(unexpected("EnumServices")),
-        }
+    ) -> Result<Services, Error> {
+        Ok(Services {
+            vfs: self.vfs.clone(),
+            manager: Arc::downgrade(&self.handle),
+            service_type,
+            state_filter,
+            resume: 0,
+            entries: std::collections::VecDeque::new(),
+            done: false,
+        })
     }
 
     /// Explicitly closes this manager handle.
@@ -167,16 +204,71 @@ impl ScManager {
     /// opaque object table is torn down) — but lets a well-behaved caller
     /// observe close failures immediately.
     pub async fn close(self) -> Result<(), Error> {
+        let mut state = Arc::try_unwrap(self.handle).map_err(|handle| {
+            drop(handle);
+            Error::new(
+                ErrorKind::ResourceBusy,
+                "SC manager has an operation in progress",
+            )
+        })?;
+        let manager = state.take_opaque();
         let response = self
             .vfs
-            .call_extension::<WinScmExt>(WinScmRequest::CloseManager {
-                manager: self.handle,
-            })
+            .call_extension::<WinScmExt>(WinScmRequest::CloseManager { manager })
             .await??;
         match response {
             WinScmResponse::Closed => Ok(()),
             _ => Err(unexpected("CloseManager")),
         }
+    }
+}
+
+/// A live forward enumeration of services.
+pub struct Services {
+    vfs: AnyVfs,
+    manager: Weak<ScManagerState>,
+    service_type: ServiceType,
+    state_filter: ServiceStateFilter,
+    resume: u32,
+    entries: std::collections::VecDeque<ServiceInfo>,
+    done: bool,
+}
+
+impl Services {
+    /// Returns the next matching service.
+    pub async fn next_entry(&mut self) -> Result<Option<ServiceInfo>, Error> {
+        let manager = self
+            .manager
+            .upgrade()
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "SC manager is closed"))?;
+        manager.opaque()?;
+        if let Some(entry) = self.entries.pop_front() {
+            return Ok(Some(entry));
+        }
+        if self.done {
+            return Ok(None);
+        }
+        let response = self
+            .vfs
+            .call_extension::<WinScmExt>(WinScmRequest::EnumServicesPage {
+                manager: manager.opaque()?,
+                service_type: self.service_type,
+                state_filter: self.state_filter,
+                resume: self.resume,
+            })
+            .await??;
+        let WinScmResponse::ServicesPage {
+            services,
+            resume,
+            done,
+        } = response
+        else {
+            return Err(unexpected("EnumServicesPage"));
+        };
+        self.resume = resume;
+        self.done = done;
+        self.entries = services.into();
+        Ok(self.entries.pop_front())
     }
 }
 

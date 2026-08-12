@@ -301,8 +301,9 @@ pub(crate) struct OpenRequest {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub(crate) struct ReadDirResponse {
+pub(crate) struct ReadDirPage {
     pub(crate) entries: Vec<DirEntry>,
+    pub(crate) done: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
@@ -837,6 +838,12 @@ pub(crate) enum RequestKind {
     ReadDir {
         path: WirePath,
     },
+    ReadDirNext {
+        read_dir: Opaque<crate::session::ReadDirMarker>,
+    },
+    ReadDirClose {
+        read_dir: Opaque<crate::session::ReadDirMarker>,
+    },
     Remove(RemoveRequest),
     Metadata(MetadataRequest),
     FsMetadata(FsMetadataRequest),
@@ -914,7 +921,9 @@ pub(crate) enum ResponseKind {
     FileClose(Result<(), WireError>),
     UnixVfs(Result<OpenVfsHandle, WireError>),
     WindowsAdmin(Result<Opaque<crate::session::VfsMarker>, WireError>),
-    ReadDir(Result<ReadDirResponse, WireError>),
+    ReadDir(Result<Opaque<crate::session::ReadDirMarker>, WireError>),
+    ReadDirNext(Result<ReadDirPage, WireError>),
+    ReadDirClose(Result<(), WireError>),
     Remove(Result<(), WireError>),
     Metadata(Result<Metadata, WireError>),
     FsMetadata(Result<FsMetadata, WireError>),

@@ -1,4 +1,6 @@
-use std::{io, path::Path};
+use std::{collections::VecDeque, io, path::Path};
+
+use dolang_rpc::session::Opaque;
 
 use crate::FileType;
 #[cfg(unix)]
@@ -58,7 +60,26 @@ enum ReadDirInner {
     Unix(Option<OwningIter>),
     #[cfg(windows)]
     Windows(Box<tokio::fs::ReadDir>),
-    Remote(std::vec::IntoIter<DirEntry>),
+    Remote(RemoteReadDir),
+}
+
+struct RemoteReadDir {
+    client: crate::Client,
+    handle: Option<Opaque<crate::session::ReadDirMarker>>,
+    entries: VecDeque<DirEntry>,
+}
+
+impl std::fmt::Debug for RemoteReadDir {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteReadDir")
+            .field("handle", &self.handle)
+            .field("buffered", &self.entries.len())
+            .finish()
+    }
+}
+
+fn vfs_io(error: crate::Error) -> io::Error {
+    io::Error::new(error.kind().into(), error.to_string())
 }
 
 impl ReadDir {
@@ -83,9 +104,16 @@ impl ReadDir {
         })
     }
 
-    pub(crate) fn from_entries(entries: Vec<DirEntry>) -> Self {
+    pub(crate) fn from_remote(
+        client: crate::Client,
+        handle: Opaque<crate::session::ReadDirMarker>,
+    ) -> Self {
         Self {
-            inner: ReadDirInner::Remote(entries.into_iter()),
+            inner: ReadDirInner::Remote(RemoteReadDir {
+                client,
+                handle: Some(handle),
+                entries: VecDeque::new(),
+            }),
         }
     }
 
@@ -96,7 +124,7 @@ impl ReadDir {
             ReadDirInner::Unix(iter) => Self::next_unix(iter).await,
             #[cfg(windows)]
             ReadDirInner::Windows(inner) => Self::next_windows(inner).await,
-            ReadDirInner::Remote(entries) => Ok(entries.next()),
+            ReadDirInner::Remote(remote) => remote.next_entry().await,
         }
     }
 
@@ -183,5 +211,49 @@ impl ReadDir {
             file_type,
             family: DirEntryFamily::Windows,
         }))
+    }
+}
+
+impl RemoteReadDir {
+    async fn next_entry(&mut self) -> io::Result<Option<DirEntry>> {
+        if let Some(entry) = self.entries.pop_front() {
+            return Ok(Some(entry));
+        }
+        let Some(handle) = self.handle.clone() else {
+            return Ok(None);
+        };
+        match self
+            .client
+            .request(crate::protocol::RequestKind::ReadDirNext { read_dir: handle })
+            .await
+            .map_err(vfs_io)?
+        {
+            crate::protocol::ResponseKind::ReadDirNext(result) => {
+                let page = result.map_err(crate::Error::from).map_err(vfs_io)?;
+                if page.done {
+                    self.handle = None;
+                }
+                self.entries = page.entries.into();
+                Ok(self.entries.pop_front())
+            }
+            _ => Err(io::Error::other("unexpected response for ReadDirNext")),
+        }
+    }
+}
+
+impl Drop for RemoteReadDir {
+    fn drop(&mut self) {
+        let Some(read_dir) = self.handle.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let client = self.client.clone();
+        runtime.spawn(async move {
+            let _ = client
+                .request(crate::protocol::RequestKind::ReadDirClose { read_dir })
+                .await;
+        });
     }
 }

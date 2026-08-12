@@ -71,7 +71,8 @@ let service = manager.create_service my-service
 
 ### `enumerate_services :service_type? :state_filter?`
 
-Fetches a snapshot of matching services.
+Opens a live forward enumeration of matching services. Entries are fetched as
+iteration advances.
 
 #### Parameters
 
@@ -82,7 +83,7 @@ Fetches a snapshot of matching services.
 
 #### Returns
 
-Iterable snapshot of [`ServiceInfo`](./service-info.md)
+Iterable of [`ServiceInfo`](./service-info.md)
 
 ### `close()`
 

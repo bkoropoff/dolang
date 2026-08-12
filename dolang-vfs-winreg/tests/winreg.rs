@@ -270,7 +270,11 @@ mod live {
 
         // Batched fetch reaches every name/value we set, matching indexed
         // enumeration + get_value.
-        let all = scratch.values().await.unwrap();
+        let mut enumeration = scratch.values().await.unwrap();
+        let mut all = Vec::new();
+        while let Some(entry) = enumeration.next_entry().await.unwrap() {
+            all.push(entry);
+        }
         for (name, value) in &values {
             assert!(
                 all.iter().any(|(n, v)| n == name && v == value),

@@ -2,7 +2,6 @@
 
 One named entry read from a key, returned by
 [`Key.values()`](./key.md#values) or [`Key.get_value`](./key.md#get_value-name).
-Supports keyword unpack, so `for :name :kind :value = key.values()` works.
 
 ## Fields
 
@@ -38,6 +37,6 @@ The value's data, in its natural Do representation. **Type:**
 #### Example
 
 ```
-for :name :kind :value = key.values()
-  echo "$name ($kind): $value"
+for entry = key.values()
+  echo "$(entry.name) ($(entry.kind)): $(entry.value)"
 ```

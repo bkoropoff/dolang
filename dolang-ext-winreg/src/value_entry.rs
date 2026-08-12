@@ -1,4 +1,4 @@
-//! `winreg.Value` — one entry of a [`crate::values::Values`] snapshot.
+//! `winreg.Value` — one entry of a live [`crate::values::Values`] enumeration.
 
 use dolang::runtime::{Object, Output, Result, Slot, State, Strand, object::TypeBuilder};
 use dolang_vfs_winreg::Value;

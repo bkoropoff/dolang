@@ -22,7 +22,7 @@ mod manager;
 mod service;
 mod wire;
 
-pub use api::{ScManager, Service};
+pub use api::{ScManager, Service, Services};
 pub use wire::{
     CreateServiceOptions, ErrorControl, NotifyMask, ServiceAccess, ServiceConfig,
     ServiceConfigUpdate, ServiceControl, ServiceControlsAccepted, ServiceInfo, ServiceState,
