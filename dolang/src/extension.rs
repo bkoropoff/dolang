@@ -132,6 +132,42 @@ impl Vtbl {
 #[distributed_slice]
 pub static EXTENSIONS: [Erased];
 
+// Keep the PE/COFF section non-empty. With no linked extensions, linkme's
+// start marker can resolve to null under Wine and constructing the empty slice
+// then trips Rust's `slice::from_raw_parts` precondition check.
+struct Anchor;
+
+impl Extension for Anchor {
+    type Error = std::convert::Infallible;
+
+    const NAME: &str = "";
+    const DESCRIPTION: &str = "";
+    const VERSION: Version = Version {
+        major: 0,
+        minor: 0,
+        patch: 0,
+    };
+
+    fn apply_compiler(&self, _compiler: &mut Compiler<'_>) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn apply_vm<'v>(&self, _builder: &mut Builder<'v>) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+static ANCHOR: Anchor = Anchor;
+
+#[distributed_slice(EXTENSIONS)]
+static EXTENSIONS_ANCHOR: Erased = Vtbl::erase(&ANCHOR);
+
+fn extensions() -> impl Iterator<Item = &'static Erased> {
+    EXTENSIONS
+        .iter()
+        .filter(|extension| !std::ptr::eq(*extension, &EXTENSIONS_ANCHOR))
+}
+
 /// Register extension.
 #[macro_export]
 macro_rules! extension {
@@ -180,9 +216,7 @@ pub trait CompilerExt {
 
 impl<'a> CompilerExt for Compiler<'a> {
     fn extensions(&mut self) -> impl Iterator<Item = CompilerExtension> + 'static {
-        EXTENSIONS
-            .iter()
-            .map(|Erased { vtbl, ext }| CompilerExtension { vtbl, ext: *ext })
+        extensions().map(|Erased { vtbl, ext }| CompilerExtension { vtbl, ext: *ext })
     }
 }
 
@@ -224,8 +258,6 @@ pub trait VmExt {
 
 impl<'a> VmExt for Builder<'a> {
     fn extensions(&self) -> impl Iterator<Item = VmExtension> + 'static {
-        EXTENSIONS
-            .iter()
-            .map(|Erased { vtbl, ext }| VmExtension { vtbl, ext: *ext })
+        extensions().map(|Erased { vtbl, ext }| VmExtension { vtbl, ext: *ext })
     }
 }
