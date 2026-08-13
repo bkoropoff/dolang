@@ -88,7 +88,7 @@ enum ClientFileInner {
 
 struct RemoteFile {
     client: Client,
-    file: Option<Opaque<crate::session::FileMarker>>,
+    file: Opaque<crate::session::FileMarker>,
     pending: Option<PendingFileOperation>,
     read_body: Option<PendingTrailerRead>,
     write_body: Option<PendingTrailerWrite>,
@@ -202,7 +202,7 @@ impl ClientFile {
     fn from_remote(client: Client, file: Opaque<crate::session::FileMarker>) -> Self {
         Self(ClientFileInner::Remote(RemoteFile {
             client,
-            file: Some(file),
+            file,
             pending: None,
             read_body: None,
             write_body: None,
@@ -212,10 +212,7 @@ impl ClientFile {
 
 impl RemoteFile {
     fn opaque(&self) -> Opaque<crate::session::FileMarker> {
-        self.file
-            .as_ref()
-            .expect("live remote file has no opaque identity")
-            .clone()
+        self.file.clone()
     }
 
     fn poll_request(
@@ -285,22 +282,6 @@ impl RemoteFile {
             pending.call.cancel();
             let _ = pending.call.await;
         }
-    }
-}
-
-impl Drop for RemoteFile {
-    fn drop(&mut self) {
-        self.pending.take();
-        let Some(file) = self.file.take() else {
-            return;
-        };
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
-        let client = self.client.clone();
-        runtime.spawn(async move {
-            let _ = client.request(RequestKind::FileClose { file }).await;
-        });
     }
 }
 
@@ -616,13 +597,9 @@ impl FileHandle for ClientFile {
             ClientFileInner::Direct(file) => file.close().await,
             ClientFileInner::Remote(mut file) => {
                 file.cancel_pending().await;
-                let opaque = file
-                    .file
-                    .take()
-                    .expect("live remote file has no opaque identity");
                 match file
                     .client
-                    .request(RequestKind::FileClose { file: opaque })
+                    .request(RequestKind::FileClose { file: file.file })
                     .await?
                 {
                     ResponseKind::FileClose(result) => result.map_err(Into::into),
@@ -2021,18 +1998,10 @@ impl ClientChild {
 
 impl Drop for ClientChild {
     fn drop(&mut self) {
+        // Reaping the child is the opaque's own business: dropping the last
+        // handle on it releases the registration, which drops the retained
+        // child on the server. Only the relays need winding down here.
         self.relays.finish();
-        let ClientChildState::Live(child) = &self.state else {
-            return;
-        };
-        let child = child.clone();
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
-        let client = self.client.clone();
-        runtime.spawn(async move {
-            let _ = client.request(RequestKind::ChildClose { child }).await;
-        });
     }
 }
 
@@ -2945,13 +2914,8 @@ impl Vfs for Client {
 mod tests {
     use std::io;
 
-    use tempfile::tempdir;
-
-    use super::{Client, ClientChildState, ClientFileInner};
-    use crate::{
-        Child as _, Command as _, FileHandle as _, OpenOptions, Server, Vfs as _,
-        protocol::RequestKind,
-    };
+    use super::{Client, ClientChildState};
+    use crate::{Child as _, Command as _, Server, Vfs as _, protocol::RequestKind};
 
     #[cfg(unix)]
     fn successful_command(client: &Client) -> super::CommandBuilder<'_> {
@@ -2968,100 +2932,6 @@ mod tests {
         ));
         command.arg("/C").arg("exit 0");
         command
-    }
-
-    async fn open_remote_file(
-        client: &Client,
-        path: crate::Utf8TypedPath<'_>,
-    ) -> super::ClientFile {
-        let mut options = client.open_options();
-        options.read(true).write(true).create(true).truncate(true);
-        crate::OpenOptions::open(&options, path).await.unwrap()
-    }
-
-    #[tokio::test]
-    async fn dropping_remote_file_unregisters_opaque_identity() {
-        let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
-        let server =
-            tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
-        let client = Client::new(client_stream).await.unwrap();
-        let temp = tempdir().unwrap();
-        let path = crate::path::typed_path(temp.path().join("file")).unwrap();
-        let file = open_remote_file(&client, path.to_path()).await;
-        let opaque = match &file.0 {
-            ClientFileInner::Remote(file) => file.opaque(),
-            ClientFileInner::Direct(_) => panic!("remote open returned a direct file"),
-        };
-
-        drop(file);
-
-        for attempt in 0..100 {
-            let response = client
-                .request(RequestKind::FileMetadata {
-                    file: opaque.clone(),
-                })
-                .await
-                .unwrap();
-            let crate::protocol::ResponseKind::FileMetadata(result) = response else {
-                panic!("file metadata returned the wrong response");
-            };
-            match result {
-                Err(error) => {
-                    assert_eq!(
-                        crate::Error::from(error).kind(),
-                        io::ErrorKind::InvalidInput
-                    );
-                    break;
-                }
-                Ok(_) if attempt < 99 => tokio::task::yield_now().await,
-                Ok(_) => panic!("dropped opaque file remained registered"),
-            }
-        }
-
-        client.stop().await.unwrap();
-        server.await.unwrap().unwrap();
-    }
-
-    #[test]
-    fn dropping_remote_file_without_runtime_does_not_panic() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let (file, client, server, temp) = runtime.block_on(async {
-            let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
-            let server =
-                tokio::spawn(
-                    async move { Server::new(server_stream).await.unwrap().serve().await },
-                );
-            let client = Client::new(client_stream).await.unwrap();
-            let temp = tempdir().unwrap();
-            let path = crate::path::typed_path(temp.path().join("file")).unwrap();
-            let file = open_remote_file(&client, path.to_path()).await;
-            (file, client, server, temp)
-        });
-
-        drop(runtime);
-        drop(file);
-        drop(client);
-        drop(server);
-        drop(temp);
-    }
-
-    #[tokio::test]
-    async fn explicit_close_consumes_remote_cleanup_identity() {
-        let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
-        let server =
-            tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
-        let client = Client::new(client_stream).await.unwrap();
-        let temp = tempdir().unwrap();
-        let path = crate::path::typed_path(temp.path().join("file")).unwrap();
-        let file = open_remote_file(&client, path.to_path()).await;
-
-        file.close().await.unwrap();
-
-        client.stop().await.unwrap();
-        server.await.unwrap().unwrap();
     }
 
     #[tokio::test]

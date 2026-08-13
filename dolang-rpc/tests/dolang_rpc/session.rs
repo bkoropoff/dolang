@@ -1225,3 +1225,37 @@ async fn a_claimed_gift_lives_exactly_as_long_as_the_caller_holds_it() {
         "the endpoint outlived the caller's last handle on it"
     );
 }
+
+/// Releasing an opaque must not need an ambient runtime. The caller's last
+/// handle on a gift routinely falls out of scope during teardown, after the
+/// runtime that carried the session is already gone, and a release that
+/// reached for `Handle::current` there would panic in a destructor.
+#[test]
+fn dropping_a_claimed_gift_outside_a_runtime_does_not_panic() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (endpoint, client, server) = runtime.block_on(async {
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let guarded = Arc::new(tokio::sync::Notify::new());
+        let respond_now = Arc::new(tokio::sync::Notify::new());
+        let server = serve_gifts(
+            server_io,
+            Arc::new(AtomicBool::new(false)),
+            guarded.clone(),
+            respond_now.clone(),
+        );
+        let client = unbound_client::<_, Gifts>(client_io).await;
+        let call = client.call(GiftRequest);
+        guarded.notified().await;
+        respond_now.notify_one();
+        let response = call.await.unwrap().into_response();
+        (response.endpoint, client, server)
+    });
+
+    drop(runtime);
+    drop(endpoint);
+    drop(client);
+    drop(server);
+}
