@@ -16,15 +16,15 @@ use windows_sys::Win32::{
 };
 
 use super::{AnyAttachments, AnySender, Receiver, RecvFrame, SendFrame, Sender};
-use crate::handle::{ErasedHandle, PutHandle};
+use crate::handle::ErasedHandle;
 
-pub(crate) struct EncodeHandles<'handle> {
-    handles: Vec<&'handle dyn ErasedHandle>,
+pub(crate) struct EncodeHandles {
+    handles: Vec<OwnedHandle>,
     max_handles: usize,
     attachments: AnyAttachments,
 }
 
-impl<'handle> EncodeHandles<'handle> {
+impl EncodeHandles {
     pub(crate) fn new(sender: &AnySender, max_handles: usize) -> Self {
         Self {
             handles: Vec::new(),
@@ -34,11 +34,7 @@ impl<'handle> EncodeHandles<'handle> {
     }
 
     pub(crate) fn finish(self) -> (OutgoingHandles, Vec<OwnedHandle>) {
-        let escrow = self
-            .handles
-            .into_iter()
-            .map(ErasedHandle::steal_handle)
-            .collect();
+        let escrow = self.handles;
         match self.attachments {
             AnyAttachments::Generic => {}
             AnyAttachments::Windows(attachments) => attachments.finish(),
@@ -47,32 +43,29 @@ impl<'handle> EncodeHandles<'handle> {
     }
 }
 
-impl<'handle> PutHandle<'handle> for EncodeHandles<'handle> {
-    fn put_handle(&mut self, handle: &'handle dyn ErasedHandle) -> io::Result<usize> {
+impl EncodeHandles {
+    pub(crate) fn put_handle(&mut self, handle: &dyn ErasedHandle) -> io::Result<usize> {
         if self.handles.len() == self.max_handles {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "message contains too many handle attachments",
             ));
         }
-        if self
-            .handles
-            .iter()
-            .any(|existing| std::ptr::eq(*existing, handle))
-        {
+        if matches!(self.attachments, AnyAttachments::Generic) {
             return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "the same handle was serialized more than once",
+                io::ErrorKind::Unsupported,
+                "generic byte-stream transport does not support handle attachments",
             ));
         }
+        let handle = handle.steal_handle().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the same handle was serialized more than once",
+            )
+        })?;
         let value = match &mut self.attachments {
-            AnyAttachments::Generic => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "generic byte-stream transport does not support handle attachments",
-                ));
-            }
-            AnyAttachments::Windows(attachments) => attachments.attach(handle.raw_handle())?,
+            AnyAttachments::Generic => unreachable!(),
+            AnyAttachments::Windows(attachments) => attachments.attach(handle.as_raw_handle())?,
         };
         self.handles.push(handle);
         Ok(value)

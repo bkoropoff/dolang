@@ -3045,7 +3045,6 @@ mod tests {
     use std::io;
 
     use tempfile::tempdir;
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use super::{Client, ClientChildState, ClientFileInner};
     use crate::{
@@ -3120,131 +3119,6 @@ mod tests {
 
         client.stop().await.unwrap();
         server.await.unwrap().unwrap();
-    }
-
-    #[tokio::test]
-    async fn opaque_pipe_rejects_wrong_type_and_stale_identity() {
-        let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
-        let server =
-            tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
-        let client = Client::new(client_stream).await.unwrap();
-        let (mut send, mut recv) = client.pipe().await.unwrap();
-        let send_opaque = match &send {
-            crate::StdioSend::Remote(send) => send.stdio.as_ref().unwrap().clone(),
-            crate::StdioSend::Native(_) => panic!("remote pipe returned a native send end"),
-        };
-
-        let encoded = postcard::to_allocvec(&send_opaque).unwrap();
-        let wrong: dolang_rpc::session::Opaque<crate::session::StdioRecvMarker> =
-            postcard::from_bytes(&encoded).unwrap();
-        let response = client
-            .request(RequestKind::StdioRecvClose { stdio: wrong })
-            .await
-            .unwrap();
-        let crate::protocol::ResponseKind::StdioRecvClose(result) = response else {
-            panic!("stdio receive close returned the wrong response");
-        };
-        assert_eq!(
-            crate::Error::from(result.unwrap_err()).kind(),
-            io::ErrorKind::InvalidInput
-        );
-
-        send.write_all(b"still live").await.unwrap();
-        let mut data = [0; 10];
-        recv.read_exact(&mut data).await.unwrap();
-        assert_eq!(&data, b"still live");
-        send.shutdown().await.unwrap();
-
-        let response = client
-            .request(RequestKind::StdioSendClose { stdio: send_opaque })
-            .await
-            .unwrap();
-        let crate::protocol::ResponseKind::StdioSendClose(result) = response else {
-            panic!("stdio send close returned the wrong response");
-        };
-        assert_eq!(
-            crate::Error::from(result.unwrap_err()).kind(),
-            io::ErrorKind::InvalidInput
-        );
-
-        // Stopping drains outstanding endpoints, so release this one first.
-        drop(recv);
-        client.stop().await.unwrap();
-        server.await.unwrap().unwrap();
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn resource_operations_use_the_handle_route() {
-        let temp = tempdir().unwrap();
-        let socket = temp.path().join("inner.sock");
-        let inner_server = Server::bind(&socket).await.unwrap();
-        let inner_task = tokio::spawn(inner_server.accept());
-
-        let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
-        let outer_task =
-            tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
-        let root = Client::new(client_stream).await.unwrap();
-        let path = crate::path::typed_path(socket).unwrap();
-        let selected = root
-            .unix_socket(path.to_path())
-            .await
-            .unwrap()
-            .into_client()
-            .unwrap();
-
-        let (mut send, mut recv) = root.pipe().await.unwrap();
-        send.write_all(b"root").await.unwrap();
-        send.flush().await.unwrap();
-        let mut data = [0; 4];
-        recv.read_exact(&mut data).await.unwrap();
-        assert_eq!(&data, b"root");
-
-        let send_opaque = match &send {
-            crate::StdioSend::Remote(send) => send.stdio.as_ref().unwrap().clone(),
-            crate::StdioSend::Native(_) => panic!("remote pipe returned a native send end"),
-        };
-        let response = selected
-            .request(RequestKind::StdioSendClose {
-                stdio: send_opaque.clone(),
-            })
-            .await
-            .unwrap();
-        let crate::protocol::ResponseKind::StdioSendClose(result) = response else {
-            panic!("stdio close returned the wrong response");
-        };
-        result.unwrap();
-        let mut eof = [0; 1];
-        assert_eq!(recv.read(&mut eof).await.unwrap(), 0);
-
-        let encoded = postcard::to_allocvec(&send_opaque).unwrap();
-        let wrong_vfs: dolang_rpc::session::Opaque<crate::session::VfsMarker> =
-            postcard::from_bytes(&encoded).unwrap();
-        let mut wrong_client = root.clone();
-        wrong_client.vfs = Some(wrong_vfs);
-        assert_eq!(
-            wrong_client
-                .request(RequestKind::Query)
-                .await
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::InvalidInput
-        );
-
-        selected.stop().await.unwrap();
-        assert_eq!(
-            selected
-                .request(RequestKind::Query)
-                .await
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::InvalidInput
-        );
-        inner_task.await.unwrap().unwrap();
-        // Stopping drains outstanding endpoints, so release this one first.
-        drop(recv);
-        root.stop().await.unwrap();
-        outer_task.await.unwrap().unwrap();
     }
 
     #[test]

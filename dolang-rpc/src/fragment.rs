@@ -16,6 +16,7 @@ use ::serde::{Deserialize, Serialize};
 
 use crate::{
     Error, Limits, NEGOTIATE_FRAGMENT_SIZE, NEGOTIATE_MAX_PAYLOAD_SIZE,
+    session::Ledger,
     trailer::{RecvShared, SendAction, SendShared},
     transport::{
         AnyReceiver, AnySender, OutgoingHandles, ReceivedHandles, Receiver, RecvFrame, SendFrame,
@@ -42,6 +43,22 @@ pub(crate) enum Kind {
     /// Confirms receipt of the final non-trailer fragment carrying
     /// `WANT_ACK` for the message identified by `id`.
     Ack = 6,
+    /// Drops references to a session opaque. `id` names the opaque rather
+    /// than a message, and the 4-byte payload carries how many references
+    /// are being dropped at once.
+    ///
+    /// This lives at transport level, not in any [`Protocol`](crate::Protocol),
+    /// because [`Opaque`](crate::session::Opaque) is generic over the
+    /// application protocol: releasing is the RPC runtime's business, and an
+    /// application that never names an opaque still needs its peer's
+    /// references collected.
+    ///
+    /// A release for an unknown `id` is ignored rather than treated as a
+    /// protocol error. The owner may legitimately have retired the entry
+    /// already — a consuming operation races the peer's release by
+    /// construction, and the counters are commutative, so both orders
+    /// converge.
+    Release = 7,
 }
 
 impl TryFrom<u8> for Kind {
@@ -56,6 +73,7 @@ impl TryFrom<u8> for Kind {
             4 => Ok(Self::Discard),
             5 => Ok(Self::Negotiate),
             6 => Ok(Self::Ack),
+            7 => Ok(Self::Release),
             _ => Err(Error::Protocol(format!("unknown frame kind {value}"))),
         }
     }
@@ -615,6 +633,12 @@ pub(crate) enum Event {
         /// (`Kind::Discard`) exactly once per message when this is set.
         notify_discard: bool,
     },
+    /// The peer dropped `count` references to the opaque named by `id`.
+    /// Unknown ids are tolerated; see [`Kind::Release`].
+    Release {
+        id: u64,
+        count: u32,
+    },
 }
 
 struct Incomplete {
@@ -688,6 +712,25 @@ impl Reassembler {
             if !first || !last || abort || trailer || want_ack || payload_len != 0 || has_handles {
                 return Err(Error::Protocol("invalid Ack fragment".into()));
             }
+        }
+
+        if kind == Kind::Release {
+            #[cfg(unix)]
+            let has_handles = !fragment_handles.is_empty();
+            #[cfg(not(unix))]
+            let has_handles = false;
+            if !first || !last || abort || trailer || want_ack || payload_len != 4 || has_handles {
+                return Err(Error::Protocol("invalid Release fragment".into()));
+            }
+            let mut payload = BytesMut::with_capacity(4);
+            read_payload(frame, &mut payload, 4).await?;
+            let count = payload.get_u32_le();
+            if count == 0 {
+                return Err(Error::Protocol(
+                    "Release fragment must drop at least one reference".into(),
+                ));
+            }
+            return Ok(Event::Release { id, count });
         }
 
         if want_ack && (abort || !matches!(kind, Kind::Request | Kind::Response)) {
@@ -1031,13 +1074,22 @@ struct ActiveSend {
     /// in one fragment at admission time, or a trailer is present — a
     /// trailer-bearing message is always at least two fragments).
     multi_fragment: bool,
+    /// Session opaque references this message's payload is holding.
+    ///
+    /// Cleared — which commits it — the instant the payload's last fragment
+    /// is written, and rescinded if the send is cancelled before then. Living
+    /// on the send rather than in the endpoints is what makes that boundary
+    /// unmissable: the scheduler is the only thing that knows where the
+    /// payload actually ends.
+    ledger: Option<Ledger>,
 }
 
-/// A control-priority item: a zero-payload `Cancel`/`Error`/`Ack`, or an `ABORT`
-/// for a message whose FIRST fragment already went out.
+/// A control-priority item: a zero-payload `Cancel`/`Error`/`Ack`, an `ABORT`
+/// for a message whose FIRST fragment already went out, or a `Release`.
 enum ControlSend {
     Empty { kind: Kind, id: u64 },
     Abort { id: u64 },
+    Release { id: u64, count: u32 },
 }
 
 /// Outcome of attempting to cancel an in-flight outbound send.
@@ -1147,6 +1199,7 @@ impl Scheduler {
         payload: Bytes,
         handles: OutgoingHandles,
         trailer: Trailer,
+        ledger: Ledger,
     ) {
         #[cfg(unix)]
         let handles_fit = handles.fds.len() <= self.max_handles_per_fragment;
@@ -1167,6 +1220,7 @@ impl Scheduler {
                 trailer,
                 started: false,
                 multi_fragment: false,
+                ledger: Some(ledger),
             });
             return;
         }
@@ -1182,6 +1236,7 @@ impl Scheduler {
             trailer,
             started: false,
             multi_fragment: true,
+            ledger: Some(ledger),
         };
         if self.active_fragmented < self.max_active_fragmented {
             self.active_fragmented += 1;
@@ -1203,6 +1258,19 @@ impl Scheduler {
         self.control.push_back(ControlSend::Abort { id });
     }
 
+    /// Admits a `Release` for `count` references to the opaque `id`, ahead of
+    /// ordinary sends.
+    ///
+    /// Ordering against ordinary sends is not a correctness requirement here:
+    /// a message that *cites* an opaque holds a reference in the send escrow
+    /// until its payload is fully written, so no release for a cited opaque
+    /// can be admitted before the citing message's last payload fragment
+    /// leaves.
+    pub(crate) fn admit_release(&mut self, id: u64, count: u32) {
+        debug_assert!(count > 0, "a release must drop at least one reference");
+        self.control.push_back(ControlSend::Release { id, count });
+    }
+
     /// Attempts to cancel an in-flight or not-yet-started outbound send.
     ///
     /// If the send carries a `Trailer::Stream`, its `SendShared` is put into
@@ -1212,17 +1280,27 @@ impl Scheduler {
     /// `Arc`, are gone after this call).
     pub(crate) fn try_cancel_active(&mut self, id: u64) -> AbortOutcome {
         if let Some(pos) = self.waiting.iter().position(|s| s.id == id) {
-            let send = self.waiting.remove(pos).expect("position was just found");
+            let mut send = self.waiting.remove(pos).expect("position was just found");
             if let Trailer::Stream(shared) = &send.trailer {
                 SendShared::discard(shared);
+            }
+            // Nothing of this message ever reached the wire.
+            if let Some(ledger) = send.ledger.take() {
+                ledger.rescind();
             }
             return AbortOutcome::Discarded { started: false };
         }
         if let Some(pos) = self.active.iter().position(|s| s.id == id) {
-            let send = self.active.remove(pos).expect("position was just found");
+            let mut send = self.active.remove(pos).expect("position was just found");
             let started = send.started;
             if let Trailer::Stream(shared) = &send.trailer {
                 SendShared::discard(shared);
+            }
+            // Present only while the payload is still incomplete: the write
+            // path clears it at the payload boundary. So this rescinds
+            // exactly the sends the peer cannot have decoded, and no others.
+            if let Some(ledger) = send.ledger.take() {
+                ledger.rescind();
             }
             if send.multi_fragment {
                 self.free_fragmented_slot();
@@ -1393,6 +1471,17 @@ impl Scheduler {
             let mut buffer = header.encode().chain(send.payload.slice(start..end));
             let atomic = frame.finish(&mut buffer).await?;
             self.record_write_atomicity(atomic);
+            if postcard_done && handles_done {
+                // The payload is irrevocably on the wire, so the peer will
+                // decode it and mirror every gift it carries even if it has
+                // already cancelled the call. Dropping the ledger commits it;
+                // a cancellation arriving from here on finds nothing left to
+                // rescind, which is the intended asymmetry — a stranded
+                // reference beats handing the peer a freed handle.
+                if let Some(ledger) = send.ledger.take() {
+                    ledger.commit();
+                }
+            }
             send.offset = end;
             #[cfg(target_os = "macos")]
             let escrow = send.handles.finish_attached(attached);
@@ -1486,21 +1575,44 @@ impl Scheduler {
         transport: &mut AnySender,
         control: ControlSend,
     ) -> Result<(), Error> {
-        let header = match control {
-            ControlSend::Empty { kind, id } => FragmentHeader {
-                flags: Flags::FIRST | Flags::LAST,
-                kind,
-                id,
-                payload_len: 0,
-            },
-            ControlSend::Abort { id } => FragmentHeader {
-                flags: Flags::ABORT,
-                kind: Kind::Request,
-                id,
-                payload_len: 0,
-            },
+        let (header, count) = match control {
+            ControlSend::Empty { kind, id } => (
+                FragmentHeader {
+                    flags: Flags::FIRST | Flags::LAST,
+                    kind,
+                    id,
+                    payload_len: 0,
+                },
+                None,
+            ),
+            ControlSend::Abort { id } => (
+                FragmentHeader {
+                    flags: Flags::ABORT,
+                    kind: Kind::Request,
+                    id,
+                    payload_len: 0,
+                },
+                None,
+            ),
+            ControlSend::Release { id, count } => (
+                FragmentHeader {
+                    flags: Flags::FIRST | Flags::LAST,
+                    kind: Kind::Release,
+                    id,
+                    payload_len: 4,
+                },
+                Some(count),
+            ),
         };
-        let mut buffer = header.encode();
+        let mut buffer = match count {
+            None => header.encode(),
+            Some(count) => {
+                let mut buffer = BytesMut::with_capacity(RawFragmentHeader::LEN + 4);
+                header.encode_into(&mut buffer);
+                buffer.put_u32_le(count);
+                buffer.freeze()
+            }
+        };
         transport.send().finish(&mut buffer).await?;
         Ok(())
     }
@@ -2375,6 +2487,7 @@ mod tests {
             Bytes::from_static(b"AAAAAAAA"),
             Default::default(),
             Trailer::None,
+            Default::default(),
         );
         scheduler.admit_message(
             Kind::Request,
@@ -2382,6 +2495,7 @@ mod tests {
             Bytes::from_static(b"BBBBBBBB"),
             Default::default(),
             Trailer::None,
+            Default::default(),
         );
         let (mut sender, mut reader) = sender_pair();
 
@@ -2406,6 +2520,7 @@ mod tests {
             Bytes::from_static(b"request"),
             Default::default(),
             Trailer::None,
+            Default::default(),
         );
         scheduler.admit_empty(Kind::Ack, 2);
         let (mut sender, mut reader) = sender_pair();
@@ -2433,6 +2548,7 @@ mod tests {
             Bytes::from_static(b"AAAAAAAA"),
             Default::default(),
             Trailer::None,
+            Default::default(),
         );
         // Fits in one fragment; must not be blocked by the slot above.
         scheduler.admit_message(
@@ -2441,6 +2557,7 @@ mod tests {
             Bytes::from_static(b"hi"),
             Default::default(),
             Trailer::None,
+            Default::default(),
         );
         let (mut sender, mut reader) = sender_pair();
 
@@ -2469,6 +2586,7 @@ mod tests {
             Bytes::from_static(b"AAAAAAAA"),
             Default::default(),
             Trailer::None,
+            Default::default(),
         );
         scheduler.admit_message(
             Kind::Request,
@@ -2476,6 +2594,7 @@ mod tests {
             Bytes::from_static(b"BBBBBBBB"),
             Default::default(),
             Trailer::None,
+            Default::default(),
         );
         assert_eq!(scheduler.active.len(), 1);
         assert_eq!(scheduler.waiting.len(), 1);
@@ -2495,6 +2614,7 @@ mod tests {
             Bytes::from_static(b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
             Default::default(),
             Trailer::None,
+            Default::default(),
         );
         let (mut sender, mut reader) = sender_pair();
         loop {
@@ -2521,6 +2641,7 @@ mod tests {
             Bytes::from_static(b"AAAAAAAA"),
             Default::default(),
             Trailer::None,
+            Default::default(),
         );
         scheduler.admit_message(
             Kind::Request,
@@ -2528,6 +2649,7 @@ mod tests {
             Bytes::from_static(b"BBBBBBBB"),
             Default::default(),
             Trailer::None,
+            Default::default(),
         );
         assert_eq!(scheduler.waiting.len(), 1);
         let (mut sender, mut reader) = sender_pair();
@@ -2555,6 +2677,7 @@ mod tests {
             Bytes::from_static(b"hi"),
             Default::default(),
             Trailer::None,
+            Default::default(),
         );
         scheduler.active.pop_front();
         assert!(matches!(
@@ -2572,6 +2695,7 @@ mod tests {
             Bytes::from_static(b"AAAAAAAA"),
             Default::default(),
             Trailer::None,
+            Default::default(),
         );
         match scheduler.try_cancel_active(1) {
             AbortOutcome::Discarded { started } => assert!(!started),
@@ -2592,6 +2716,7 @@ mod tests {
             Bytes::from_static(b"AAAAAAAA"),
             Default::default(),
             Trailer::None,
+            Default::default(),
         );
         if let Some(send) = scheduler.active.front_mut() {
             send.offset = 4;
@@ -2617,6 +2742,7 @@ mod tests {
             Bytes::from_static(b"AAAAAAAA"),
             Default::default(),
             Trailer::None,
+            Default::default(),
         );
         scheduler.admit_message(
             Kind::Request,
@@ -2624,6 +2750,7 @@ mod tests {
             Bytes::from_static(b"BBBBBBBB"),
             Default::default(),
             Trailer::None,
+            Default::default(),
         );
         assert_eq!(scheduler.waiting.len(), 1);
         match scheduler.try_cancel_active(2) {
@@ -2659,6 +2786,7 @@ mod tests {
                     ..limits
                 },
             )),
+            Default::default(),
         );
         assert_eq!(scheduler.active.len(), 1);
         assert_eq!(scheduler.active_fragmented, 1);
@@ -2670,6 +2798,7 @@ mod tests {
             Bytes::from_static(b"hi"),
             Default::default(),
             Trailer::None,
+            Default::default(),
         );
         assert_eq!(scheduler.active.len(), 2);
         assert_eq!(scheduler.waiting.len(), 0);
@@ -2742,6 +2871,7 @@ mod tests {
             Bytes::from_static(b"hi"),
             Default::default(),
             Trailer::Stream(shared.clone()),
+            Default::default(),
         );
         let mut trailer = crate::trailer::TrailerSend::new(shared, ());
         let (mut sender, mut reader) = sender_pair();

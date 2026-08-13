@@ -21,14 +21,20 @@ use std::{
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::GetProcessId;
 
-#[cfg(windows)]
-use crate::handle::TakeHandle;
+#[cfg(unix)]
+use crate::session::SessionHandles;
 use crate::{
     Error, Limits, Protocol,
     fragment::{self, AbortOutcome, Event, Kind, Message, Reassembler, Scheduler, Trailer},
     serde::{decode_payload, encode_payload},
+    session::{Ledger, Session, SessionFrame},
     trailer::{RecvShared, SendShared, TrailerRecv, TrailerSend},
     transport::{self, EncodeHandles, Receiver, Sender},
+};
+#[cfg(windows)]
+use crate::{
+    handle::TakeHandle,
+    session::{Ref, Session},
 };
 
 /// A negotiated client endpoint that has not yet been bound to a [`Protocol`].
@@ -40,25 +46,27 @@ pub use crate::unbound::UnboundClient as Unbound;
 type Pending<R> = HashMap<u64, oneshot::Sender<Result<CallResult<R>, Error>>>;
 
 #[cfg(windows)]
-struct DecodeHandles {
+struct DecodeHandles<'a> {
     consumed: HashSet<usize>,
     count: usize,
     max_handles: usize,
+    session: &'a Arc<Session>,
 }
 
 #[cfg(windows)]
-impl DecodeHandles {
-    fn new(max_handles: usize) -> Self {
+impl<'a> DecodeHandles<'a> {
+    fn new(max_handles: usize, session: &'a Arc<Session>) -> Self {
         Self {
             consumed: HashSet::new(),
             count: 0,
             max_handles,
+            session,
         }
     }
 }
 
 #[cfg(windows)]
-impl TakeHandle for DecodeHandles {
+impl TakeHandle for DecodeHandles<'_> {
     fn take_handle(&mut self, value: usize) -> io::Result<OwnedHandle> {
         if !self.consumed.insert(value) {
             return Err(io::Error::new(
@@ -80,6 +88,12 @@ impl TakeHandle for DecodeHandles {
             ));
         }
         Ok(())
+    }
+
+    fn take_opaque(&mut self, owner: u8, id: u64) -> io::Result<Ref> {
+        self.session
+            .take(owner, id)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid opaque reference"))
     }
 }
 
@@ -115,13 +129,30 @@ enum Outgoing<Q> {
     Ack {
         id: u64,
     },
+    /// Drops `count` of this endpoint's references to the peer's opaque `id`.
+    Release {
+        id: u64,
+        count: u32,
+    },
+}
+
+impl<Q: Send + 'static> crate::session::ReleaseSink for mpsc::WeakUnboundedSender<Outgoing<Q>> {
+    fn release(&self, id: u64, count: u32) {
+        // Called from `Drop`, so a departed channel is not an error: the
+        // writer is already gone and the peer's table dies with the session.
+        if let Some(outgoing) = self.upgrade() {
+            let _ = outgoing.send(Outgoing::Release { id, count });
+        }
+    }
 }
 
 struct Inner<P: Protocol> {
     // Holding a clone of this sender represents the ability to still get a
     // message into the writer, so closing the channel — clearing this to
     // `None` — is itself the writer's shutdown signal (see `Writer::run`):
-    // no separate oneshot needed.
+    // no separate oneshot needed. This is the only strong sender; the
+    // session's release sink holds a weak one so that it cannot keep the
+    // channel open past this point.
     outgoing: Mutex<Option<mpsc::UnboundedSender<Outgoing<P::Request>>>>,
     pending: Mutex<Pending<P::Response>>,
     next_id: Mutex<u64>,
@@ -130,6 +161,7 @@ struct Inner<P: Protocol> {
     handle_escrow: Mutex<HashMap<u64, Vec<OwnedHandle>>>,
     #[cfg(target_os = "macos")]
     fd_escrow: Mutex<crate::escrow::FdEscrow>,
+    session: Arc<Session>,
     limits: Limits,
     #[cfg(windows)]
     _peer_process: Option<OwnedHandle>,
@@ -233,6 +265,7 @@ impl<P: Protocol> Client<P> {
         #[cfg(windows)] peer_process: Option<OwnedHandle>,
     ) -> Self {
         let (outgoing, outgoing_rx) = mpsc::unbounded_channel();
+        let session = Session::new(Box::new(outgoing.downgrade()));
         let inner = Arc::new(Inner {
             outgoing: Mutex::new(Some(outgoing)),
             pending: Mutex::new(HashMap::new()),
@@ -242,6 +275,7 @@ impl<P: Protocol> Client<P> {
             handle_escrow: Mutex::new(HashMap::new()),
             #[cfg(target_os = "macos")]
             fd_escrow: Mutex::new(Default::default()),
+            session,
             limits,
             #[cfg(windows)]
             _peer_process: peer_process,
@@ -505,6 +539,10 @@ impl<P: Protocol> Writer<P> {
                 scheduler.admit_empty(Kind::Ack, id);
                 Ok(())
             }
+            Outgoing::Release { id, count } => {
+                scheduler.admit_release(id, count);
+                Ok(())
+            }
         }
     }
 
@@ -523,14 +561,28 @@ impl<P: Protocol> Writer<P> {
         };
         #[cfg(windows)]
         let max_handles = self.limits.max_handles_per_message;
-        let mut put_handles = EncodeHandles::new(&self.transport, max_handles);
+        let Some(inner) = self.inner.upgrade() else {
+            return Ok(());
+        };
+        let mut ledger = Ledger::default();
+        let mut put_handles = SessionFrame {
+            inner: EncodeHandles::new(&self.transport, max_handles),
+            session: &inner.session,
+            ledger: &mut ledger,
+        };
         let payload = match encode_payload(&value, &mut put_handles) {
             Ok(payload) => payload,
             Err(err) => {
+                // The ledger drops here without committing. Nothing of this
+                // message reached the wire, so any gift it named is rescinded
+                // by that drop path, not by a commit.
+                drop(put_handles);
+                ledger.rescind();
                 self.complete_err(id, err);
                 return Ok(());
             }
         };
+        let put_handles = put_handles.inner;
         #[cfg(unix)]
         let handles = put_handles.finish();
         #[cfg(target_os = "macos")]
@@ -547,7 +599,7 @@ impl<P: Protocol> Writer<P> {
         {
             inner.handle_escrow.lock().unwrap().insert(id, escrow);
         }
-        scheduler.admit_message(Kind::Request, id, payload, handles, trailer);
+        scheduler.admit_message(Kind::Request, id, payload, handles, trailer, ledger);
         Ok(())
     }
 
@@ -652,12 +704,28 @@ impl<P: Protocol> Reader<P> {
         let _ = handles;
         match kind {
             Kind::Response => {
+                // Decoding happens here, in the reader task, *before*
+                // `complete` discovers whether anyone still wants this
+                // response — and that ordering is load-bearing, not
+                // incidental. Decoding is what mirrors any opaque the payload
+                // carries; the resulting `CallResult` is then dropped
+                // normally when the call was cancelled, which releases those
+                // references back to the peer. Skipping the decode for a
+                // response nobody is waiting on would look like an
+                // optimization and would silently leak every handle in it —
+                // on a VFS pipe, a leak that hangs shutdown forever.
                 #[cfg(unix)]
-                let response = decode_payload(&payload, &mut { handles })?;
+                let response = decode_payload(
+                    &payload,
+                    &mut SessionHandles {
+                        inner: handles,
+                        session: &inner.session,
+                    },
+                )?;
                 #[cfg(windows)]
                 let response = decode_payload(
                     &payload,
-                    &mut DecodeHandles::new(self.limits.max_handles_per_message),
+                    &mut DecodeHandles::new(self.limits.max_handles_per_message, &inner.session),
                 )?;
                 let trailer = trailer.map(TrailerRecv::new);
                 #[cfg(windows)]
@@ -765,6 +833,11 @@ impl<P: Protocol> Reader<P> {
                     }
                     lease.complete();
                 }
+                Event::Release { id, count } => {
+                    if let Some(inner) = self.inner.upgrade() {
+                        inner.session.release(id, count);
+                    }
+                }
             }
         }
     }
@@ -794,7 +867,7 @@ mod tests {
     fn pending_call() -> (Call<Test>, mpsc::UnboundedReceiver<Outgoing<u8>>) {
         let (outgoing, outgoing_rx) = mpsc::unbounded_channel();
         let inner = Arc::new(Inner {
-            outgoing: Mutex::new(Some(outgoing)),
+            outgoing: Mutex::new(Some(outgoing.clone())),
             pending: Mutex::new(HashMap::new()),
             next_id: Mutex::new(1),
             tasks: Mutex::new(None),
@@ -802,6 +875,7 @@ mod tests {
             handle_escrow: Mutex::new(HashMap::new()),
             #[cfg(target_os = "macos")]
             fd_escrow: Mutex::new(Default::default()),
+            session: Session::new(Box::new(outgoing.downgrade())),
             limits: Limits::default(),
             #[cfg(windows)]
             _peer_process: None,
@@ -853,13 +927,14 @@ mod tests {
     async fn complete_err_clears_handle_escrow() {
         let (outgoing, _outgoing_rx) = mpsc::unbounded_channel();
         let inner = Arc::new(Inner {
-            outgoing: Mutex::new(Some(outgoing)),
+            outgoing: Mutex::new(Some(outgoing.clone())),
             pending: Mutex::new(HashMap::new()),
             next_id: Mutex::new(1),
             tasks: Mutex::new(None),
             handle_escrow: Mutex::new(HashMap::new()),
             #[cfg(target_os = "macos")]
             fd_escrow: Mutex::new(Default::default()),
+            session: Session::new(Box::new(outgoing.downgrade())),
             limits: Limits::default(),
             #[cfg(windows)]
             _peer_process: None,

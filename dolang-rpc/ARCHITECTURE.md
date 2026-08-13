@@ -437,28 +437,22 @@ local attachment-capable sessions.
 ## Serialization Context
 
 Direct handles require per-frame state while values are serialized and
-deserialized. The crate passes this state explicitly through wrapper
-`Serializer` and `Deserializer` implementations and serde seeds. The wrappers
-use transactional handle contexts supplied by the transport; application
-payload types never access the transport directly.
+deserialized. The crate installs the transport context in scoped thread-local
+storage around each synchronous postcard call. `Opaque` and `OsHandle` access
+that context directly from their serde implementations. A swap guard restores
+the previous context after normal return or unwinding, so nested serialization
+uses the innermost context. Using either type through serde outside an RPC
+session panics.
 
-Serialization obtains the transport's associated `Send` value. Serializing an
-`OsHandle` calls the platform-appropriate attachment method, which stages or
-copies the native handle and returns its wire representation. Unix descriptor
+Serializing an `OsHandle` transfers its owned handle into the transport context
+immediately and writes the returned wire representation. Unix descriptor
 attachment returns a queue index. Windows handle attachment returns the actual
-peer-local `HANDLE` value at pointer width. A self-by-value finishing method
-takes the complete header-and-payload buffer and sends it with all staged
-handles. Dropping a Unix `Send` before finishing clears its staged descriptors.
-Windows server-to-client duplication is immediate. The send frame records each
-peer-local result and makes a best-effort attempt to close them if the frame is
-dropped during serialization; once transmission starts, delivery is ambiguous
-and cleanup is deliberately disarmed.
-
-Unix `Send` retains `BorrowedFd`s for its full lifetime rather than duplicating
-them. Requests and responses are therefore moved to the writer task and kept
-alive until the consuming send operation completes. The contextual serializer
-is the only unsafe bridge from serde's erased raw descriptor representation to
-the frame lifetime.
+peer-local `HANDLE` value at pointer width. Serializing the same `OsHandle`
+again fails because it has already been emptied. Outgoing messages are owned by
+the RPC writer and discarded on serialization failure; the state of such a
+failed message is not part of the API contract. Windows server-to-client
+duplication is immediate, while Unix retains the stolen descriptors until
+attachment.
 
 The transport accumulates received native handles internally as reads
 complete. The receive loop obtains an associated `RecvFrame` value before
