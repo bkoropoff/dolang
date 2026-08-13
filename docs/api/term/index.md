@@ -51,7 +51,7 @@ The host [`Console`](./console.md), which may be taken over by an extension
 such a `progress.`
 
 Unlike [`output()`](#output), it is not intercepted by an enclosing
-[`capture`](#capture-console-func-args).
+[`capture`](#capture-console-func-args-mode).
 
 ### `default`
 
@@ -67,23 +67,22 @@ takeover for the life of the process — see
 ### `output()`
 
 Returns the current output console: the one installed by an enclosing
-[`capture`](#capture-console-func-args), or [`console`](#console) if there is
-none. This is where `echo`, `print`, diagnostics, and unredirected child
+[`capture`](#capture-console-func-args-mode), or [`console`](#console) if there
+is none. This is where `echo`, `print`, diagnostics, and unredirected child
 process output go.
 
 #### Returns
 
 [`Console`](./console.md)
 
-### `capture console func ...args`
+### `capture console func ...args :mode?`
 
 Runs a callable with `console` installed as the ambient console, then flushes
 it and restores the previous one.
 
 `console` may be any [`Console`](./console.md), or any
 [`Sink`](../std/sink.md) — a plain sink is wrapped in a
-[`SinkConsole`](./sink-console.md), which frames per the ambient
-[I/O mode](../shell/index.md#with_io_mode-mode-func).
+[`SinkConsole`](./sink-console.md), framed per `mode:`.
 
 The override is inherited by all strands spawned inside the call.
 
@@ -93,20 +92,39 @@ The override is inherited by all strands spawned inside the call.
 | --------- | ------------------------------- | ------------------------------------- |
 | `console` | [`Console`](./console.md)\|sink | Destination to install                |
 | `func`    | callable                        | Block to run                          |
+| `mode`    | [`sym`](../std/sym.md)?         | `:LINE:` (default) or `:CHUNK:`       |
 | `...`     |                                 | Additional arguments passed to `func` |
 
 #### Returns
 
 Return value of `func`.
 
+**Errors:**
+
+- Raises [`ValueError`](../std/value-error.md) if `mode:` is given when
+  `console` is already a `Console`, which carries its own framing.
+
+Captured lines keep their terminator, since the capture reproduces what was
+written rather than reinterpreting it:
+
 ```
 let lines = []
 term.capture $lines do
   echo "Hello, Alice!"
+assert_eq $lines ["Hello, Alice!\n"]
+```
+
+Put a [`prechomp`](../std/sink.md#prechomp) in front of the sink to strip them:
+
+```
+let lines = []
+term.capture (lines.prechomp()) do
+  echo "Hello, Alice!"
 assert_eq $lines ["Hello, Alice!"]
 ```
 
-The scope always ends with a flush, so an unterminated `print` still arrives:
+The scope always ends with a flush, so an unterminated `print` still arrives —
+with no terminator, because none was written:
 
 ```
 let out = []
@@ -114,21 +132,21 @@ term.capture $out do print hi
 assert_eq $out ["hi"]
 ```
 
-### `sub func :trim? :can_style? ...args`
+### `sub func :chomp? :can_style? ...args`
 
 Runs a callable and returns its console output as a string. The console
-counterpart to [`proc.sub`](../proc/index.md#sub-func-trim), which captures a
+counterpart to [`proc.sub`](../proc/index.md#sub-func-chomp), which captures a
 strand's implicit output stream.
 
 Verbatim output is captured, which must be valid UTF-8. One final line ending
-(LF or CRLF) is removed unless `trim: false`.
+(LF or CRLF) is removed unless `chomp: false`.
 
 #### Parameters
 
 | Name        | Type                      | Description                                     |
 | ----------- | ------------------------- | ----------------------------------------------- |
 | `func`      | callable                  | Block to run                                    |
-| `trim`      | [`Bool`](../std/bool.md)? | Strip one trailing line ending (default `true`) |
+| `chomp`     | [`Bool`](../std/bool.md)? | Strip one trailing line ending (default `true`) |
 | `can_style` | [`Bool`](../std/bool.md)? | Keep ANSI styling (default `false`)             |
 | `...`       |                           | Additional arguments passed to `func`           |
 

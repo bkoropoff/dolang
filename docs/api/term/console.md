@@ -17,6 +17,23 @@ Whether the console is a real terminal. This is the determinative test —
 unlike [`geometry()`](#geometry), which may answer `nil` for a real terminal
 that simply cannot report its size.
 
+### `line_ending`
+
+The line ending appropriate to this console's device, as a
+[`Str`](../std/str.md).
+
+The console owns the policy but does not apply it: a caller that wants a
+terminated line appends this itself, in a single `write`.
+
+```
+term.console.write "done$(term.console.line_ending)"
+```
+
+Every built-in console reports `"\n"`: a console is a terminal-shaped stream
+rather than a file, and `echo` writes LF on Windows too. A subclass may report
+something else, and `echo`/`print` will honor it. For a *file's* native ending
+use [`shell.line_ending()`](../shell/index.md#line_ending) instead.
+
 ## Methods
 
 ### `write data`
@@ -37,19 +54,9 @@ Writes bytes verbatim and reports how many were written.
 term.console.write b"\x1b[2K"
 ```
 
-### `writeln data`
-
-Writes bytes followed by *this console's* line ending.
-
-#### Parameters
-
-| Name   | Type                                           | Description    |
-| ------ | ---------------------------------------------- | -------------- |
-| `data` | [`Str`](../std/str.md)\|[`Bin`](../std/bin.md) | Bytes to write |
-
-#### Returns
-
-[`Int`](../std/int.md) byte count, excluding the line ending
+A caller that wants a terminated line assembles it and issues **one** `write`
+rather than two — concurrent strands writing to the same console would
+otherwise interleave between the text and its terminator.
 
 ### `flush()`
 
@@ -81,20 +88,19 @@ independently `nil` when unknown rather than the whole result being absent.
 
 ### Sink
 
-`Console` is a [sink](../std/sink.md). Values put into it are framed per the
-ambient [I/O mode](../shell/index.md#with_io_mode-mode-func) and then written
-as bytes:
+`Console` is a [sink](../std/sink.md). A value put into it contributes exactly
+its own bytes — no terminator is added. Use
+[`precrimp`](../std/sink.md#precrimp-terminator) to get one:
 
 ```
-strand.pipeline output: $term.console
+strand.pipeline output: (term.console.precrimp())
   do strand.from ["building", "linking"]
 ```
 
 ## Subclassing
 
-Do classes may subclass `Console` to implement one. Supply `write`, `writeln`,
-and `flush`; `put`, the sink protocol, and the capability members come from the
-base:
+Do classes may subclass `Console` to implement one. Supply `write` and `flush`;
+`put`, the sink protocol, and the capability members come from the base:
 
 | Console                            | `can_style`    | `is_tty`      | `geometry()`  |
 | ---------------------------------- | -------------- | ------------- | ------------- |
@@ -114,17 +120,15 @@ class Recorder: term.Console
     self.lines.push (str data)
     data.len
 
-  pub def writeln self data
-    self.lines.push (str data)
-    data.len
-
   pub def flush _self
     nil
 
 let recorder = Recorder()
 term.capture $recorder do echo hello
-assert_eq $recorder.lines ["hello"]
+assert_eq $recorder.lines ["hello\n"]
 ```
+
+Override `line_ending` to change what `echo` appends; the base reports `"\n"`.
 
 A console whose own methods call `echo` does not recurse: while a write is
 being dispatched, console output falls through to the host.

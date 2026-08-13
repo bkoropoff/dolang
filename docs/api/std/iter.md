@@ -129,6 +129,71 @@ the wrapper iterator.
 Creates a wrapper `Iter` which yields each `value` from the wrapper iterator
 only if `pred(value)` is truthy.
 
+### `chomp`
+
+Creates a wrapper `Iter` which removes one trailing line terminator from each
+item.
+
+[`Str.chomp`](./str.md#chomp) lifted over an iterator: equivalent to
+`.map do |x| x.chomp()`, with the mapping done inline rather than through a
+callable. So one complete terminator is removed — `\r\n` or `\n`, never a lone
+`\r` — and only from the end. An item with no terminator passes through
+unchanged, and [`Str`](./str.md) and [`Bin`](./bin.md) items keep their type.
+
+Values arriving from a byte stream keep their terminators, since that is what
+makes the framing lossless. `chomp` is how a caller says it wants them gone.
+
+#### Errors
+
+Raises [`TypeError`](./type-error.md) for an item that is neither a `Str` nor a
+`Bin`.
+
+```
+assert_eq [...["a\n", "b\r\n", "c"].chomp()] ["a", "b", "c"]
+
+for line = shell.stdin.chomp()
+  echo "got $line"
+```
+
+Distinct from [`Str.trim_end`](./str.md), which is about whitespace generally
+and takes an optional character set. `chomp` is about a line terminator
+specifically and takes nothing.
+
+### `crimp terminator?`
+
+Creates a wrapper `Iter` which appends a terminator to each item.
+
+The inverse of [`chomp`](#chomp), and the usual way to frame values on their
+way into a byte stream.
+
+The terminator is appended **unconditionally**: an item that already ends in
+one gets a second. "Ensure a terminator" would make the result depend on the
+item's content, which is what this pairing exists to avoid.
+
+#### Parameters
+
+| Name         | Type                                    | Description                    |
+| ------------ | --------------------------------------- | ------------------------------ |
+| `terminator` | [`Str`](./str.md)\|[`Bin`](./bin.md)?   | Appended to each item; `"\n"`  |
+
+[`Str`](./str.md) and [`Bin`](./bin.md) items keep their type. Every platform
+gets the same bytes unless asked otherwise — pass
+[`shell.line_ending()`](../shell/index.md#line_ending) for the target's native
+ending.
+
+#### Errors
+
+Raises [`TypeError`](./type-error.md) for an item, or a terminator, that is
+neither a `Str` nor a `Bin`, or if a `Bin` terminator would leave a `Str` item
+invalid UTF-8.
+
+```
+assert_eq [...["a", "b"].crimp()] ["a\n", "b\n"]
+assert_eq [...["a"].crimp("\r\n")] ["a\r\n"]
+
+run cmd stdin: (["one", "two"].crimp())
+```
+
 ### `find pred :default? :else?`
 
 Consumes the iterator and returns the first value where `pred(value)` is truthy.

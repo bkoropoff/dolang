@@ -68,3 +68,55 @@ out.put 1
 out.put 2
 assert_eq $acc [2]
 ```
+
+### `prechomp`
+
+Wraps the sink so one trailing line terminator is removed from each value
+before it is written.
+
+The contravariant [`Iter.chomp`](./iter.md#chomp): same rule — one complete
+`\r\n` or `\n`, never a lone `\r`, only at the end — applied on the way in.
+Reach for it when a sink is being fed by something that frames into terminated
+lines, such as
+[`term.capture`](../term/index.md#capture-console-func-args-mode).
+
+#### Errors
+
+Raises [`TypeError`](./type-error.md) for a value that is neither a
+[`Str`](./str.md) nor a [`Bin`](./bin.md).
+
+```
+let acc = []
+let out = acc.prechomp()
+out.put "line\n"
+assert_eq $acc ["line"]
+```
+
+### `precrimp terminator?`
+
+Wraps the sink so a terminator is appended to each value before it is written.
+
+The contravariant [`Iter.crimp`](./iter.md#crimp-terminator), and the usual way
+to terminate values headed for a byte stream, which never adds terminators of
+its own. Appended unconditionally, so a value that already ends in one gets a
+second.
+
+#### Parameters
+
+| Name         | Type                                    | Description                    |
+| ------------ | --------------------------------------- | ------------------------------ |
+| `terminator` | [`Str`](./str.md)\|[`Bin`](./bin.md)?   | Appended to each value; `"\n"` |
+
+#### Errors
+
+Raises [`TypeError`](./type-error.md) for a value, or a terminator, that is
+neither a `Str` nor a `Bin`, or if a `Bin` terminator would leave a `Str` value
+invalid UTF-8.
+
+```
+let out = shell.stdout.precrimp()
+out.put "hello"          # writes "hello\n"
+
+open $path w do |file|
+  file.precrimp(shell.line_ending()).put "native"
+```

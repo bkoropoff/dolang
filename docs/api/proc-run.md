@@ -50,6 +50,7 @@ run.echo hello world
 | `stdout`? | sink\|path\|handle      | Target for the program's standard output |
 | `stderr`? | sink\|path\|handle\|sym | Target for the program's standard error  |
 | `policy`? | [`dict`](./std/dict.md) | Termination policy overrides             |
+| `mode`?   | [`sym`](./std/sym.md)   | Framing for captured output              |
 
 ### I/O Redirection
 
@@ -76,9 +77,11 @@ Given explicitly, each accepts:
 - A [`str`](./std/str.md) or [`fs.Path`](./fs/path.md), which is opened as a
   file for the appropriate direction.
 - Any iterable (`stdin:`) or sink (`stdout:`/`stderr:`), including arrays,
-  pipeline ends, and [`fs.File`](./fs/file.md) handles. Values crossing this
-  boundary are framed per the ambient
-  [I/O mode](./shell/index.md#with_io_mode-mode-func).
+  pipeline ends, and [`fs.File`](./fs/file.md) handles. The crossing is
+  [lossless](./shell/index.md#stream-framing): a value put into `stdin:`
+  writes exactly its own bytes, and a value read out of `stdout:`/`stderr:`
+  keeps its line ending. `mode:` selects the framing for the values read back,
+  `:LINE:` by default.
 - One of the [`shell.stdin`](./shell/stdin.md),
   [`shell.stdout`](./shell/stdout.md), or [`shell.stderr`](./shell/stderr.md)
   handles, which hands the program the corresponding stream directly.
@@ -90,15 +93,43 @@ standard output is connected to.
 ```
 run.tar czf archive.tar.gz src stderr: :stdout:
 run.make -j8 stdout: build.log stderr: build.log
-run.sort stdin: ["c", "a", "b"] stdout: $sorted
+run.sort stdin: (["c", "a", "b"].crimp()) stdout: $sorted
 ```
 
 An omitted `stderr:` defaults to [`term.default`](./term/index.md#default),
 which follows console/terminal interception such as `progress` module
-indicators or [`term.capture`](./term/index.md#capture-console-func-args).
+indicators or [`term.capture`](./term/index.md#capture-console-func-args-mode).
 Naming `shell.stdout`/`shell.stderr` explicitly opts out of that entirely.
 
 See [Terminal output](../shell/terminal-output.md) for the full model.
+
+#### Framing
+
+`mode:` chooses how a program's output is cut into values when it is pumped
+into a sink: `:LINE:` (the default) for one [`str`](./std/str.md) per line with
+its terminator intact, `:CHUNK:` for arbitrary [`bin`](./std/bin.md) chunks. It
+applies to both `stdout:` and `stderr:` — a redirect that splits them is
+already naming two sinks and can adapt each one separately.
+
+```
+let chunks = []
+run gzip -c stdin: ["hello world"] stdout: $chunks mode: :CHUNK:
+assert (chunks[0].starts_with b"\x1f\x8b")
+
+let lines = []
+run.grep nologin stdin: $passwd stdout: (lines.prechomp())
+```
+
+`mode:` has no effect on `stdin:`, which is unframed: each value written
+contributes its own bytes and nothing else. Use
+[`crimp`](./std/iter.md#crimp-terminator) to terminate them.
+
+```
+run.sort stdin: (["c", "a", "b"].crimp()) stdout: $sorted
+```
+
+An [`fs.File`](./fs/file.md) read as `stdin:` brings its own framing, from the
+`b` flag it was opened with.
 
 ### Termination Policy
 
@@ -125,7 +156,7 @@ Windows target.
 
 ### Capturing Output
 
-Use [`sub`](proc/index.md#sub-func-trim) to capture a program's standard output
+Use [`sub`](proc/index.md#sub-func-chomp) to capture a program's standard output
 as a string:
 
 ```
@@ -134,7 +165,7 @@ echo "Kernel: $kernel"
 ```
 
 To capture all console-bound output, use
-[`term.sub`](./term/index.md#sub-func-trim-can_style-args); this picks up
+[`term.sub`](./term/index.md#sub-func-chomp-can_style-args); this picks up
 unredirected undirected stderr.
 
 ```

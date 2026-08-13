@@ -2,6 +2,50 @@
 
 The `shell` module provides shell-context values and functions.
 
+## Stream framing
+
+Wherever a byte stream is translated into discrete Do values — strand input,
+stdio handles, redirects to and from an external program — the translation is
+**lossless**: concatenating the values read from a stream reproduces that
+stream byte for byte, and putting a value into a stream writes exactly its own
+bytes and nothing else.
+
+Framing decides only *where* a stream is cut, never what the resulting values
+contain:
+
+| Framing   | Yields                                                            |
+| --------- | ----------------------------------------------------------------- |
+| `:LINE:`  | one [`Str`](../std/str.md) per line, **line ending included**     |
+| `:CHUNK:` | arbitrary-sized [`Bin`](../std/bin.md) values at read boundaries  |
+
+Line framing is the default. A stream whose last line has no terminator simply
+yields a final value with none, which is what makes the round trip exact.
+
+Framing is a property of the stream object or the redirect that reads it, never
+of the strand:
+
+- [`shell.stdin.lines()`](./stdin.md#lines) and
+  [`shell.stdin.chunks()`](./stdin.md#chunks)
+- the `mode:` keyword on a [`run`](../proc/index.md) redirect
+- [`term.SinkConsole`](../term/sink-console.md) and `term.capture`'s `mode:`
+- an [`fs.File`](../fs/file.md)'s `b` open flag
+
+Adding or removing a line ending is a separate, explicit step, spelled with the
+[`chomp`](../std/iter.md#chomp)/[`crimp`](../std/iter.md#crimp-terminator)
+combinators on an iterator and
+[`prechomp`](../std/sink.md#prechomp)/[`precrimp`](../std/sink.md#precrimp-terminator)
+on a sink:
+
+```
+for line = shell.stdin.chomp()
+  echo "got $line"
+
+run cmd stdin: (["a", "b"].crimp())
+```
+
+Adjacent external processes in a pipeline communicate directly in raw bytes, so
+no framing applies between them.
+
 ## Types
 
 | Name                    | Description                              |
@@ -13,50 +57,20 @@ The `shell` module provides shell-context values and functions.
 
 ## Functions
 
-### `with_io_mode mode func ...`
+### `line_ending()`
 
-Runs a callable with the current strand's adapter I/O mode set for the duration
-of the call. This controls behavior when using `Iter` or `Sink` adapters for
-anonymous byte/character-stream interfaces, such strand input or outputs
-connected to stdio or an external program.
-
-In `:LINE:` mode, iterator adapters decode UTF-8, split input on line
-boundaries, and yield [`Str`](../std/str.md) values with either an LF or CRLF
-line ending removed. Sink adapters append the target platform's line ending to
-the string form of each value. Interpreter stdin/stdout/stderr always use the
-host's native line ending. This is the default mode.
-
-In `:CHUNK:` mode, iterator adapters yield arbitrary-sized
-[`Bin`](../std/bin.md) values. Sink adapters write the string form of each value
-without adding a newline.
-
-Sink adapters always write `Bin` values verbatim with no line ending regardless
-of mode.
-
-The I/O mode is only used when translation between a byte stream and discrete Do
-values is required. For example, adjacent external processes in a pipeline
-communicate directly in raw bytes.
-
-Opened file handles always use line/chunk mode according to whether the `b`
-mode was specified during open, not the strand-local mode.
-
-#### Parameters
-
-| Name   | Type                   | Description                           |
-| ------ | ---------------------- | ------------------------------------- |
-| `mode` | [`sym`](../std/sym.md) | `:LINE:` or `:CHUNK:`                 |
-| `func` | callable               | Block to run                          |
-| `...`  |                        | Additional arguments passed to `func` |
+Returns the line ending native to the current [VFS](./vfs.md) target: `"\r\n"`
+on Windows, `"\n"` elsewhere.
 
 #### Returns
 
-Return value of `func`.
+[`Str`](../std/str.md).
+
+Values are never terminated implicitly, so a script that wants native endings
+asks for them by name:
 
 ```
-let chunks = []
-with_io_mode :CHUNK: do run gzip -c stdin: ["hello world"] stdout: $chunks
-
-assert (chunks[0].starts_with b"\x1f\x8b")
+run cmd stdout: (lines.precrimp(shell.line_ending()))
 ```
 
 ### `exit code?`

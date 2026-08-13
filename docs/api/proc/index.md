@@ -38,20 +38,23 @@ with_policy signal: :INT: grace: 2.5 do
   run worker
 ```
 
-### `sub func :trim?`
+### `sub func :chomp?`
 
 Captures the output of a function as a string.
 
-External process output is captured as a byte stream without line decoding or
-normalization. Value writes still cross the sink boundary and follow the
-current I/O mode.
+Everything written is captured as a byte stream, without line decoding or
+normalization — including values put into the strand's output, which
+contribute exactly their own bytes.
+
+`chomp:` is a whole-capture strip, not a per-value one: it removes at most one
+line ending, from the end of the finished string.
 
 #### Parameters
 
-| Name   | Type                     | Description                                      |
-| ------ | ------------------------ | ------------------------------------------------ |
-| `func` | `func`                   | function whose output to capture                 |
-| `trim` | [`Bool`](../std/bool.md) | Remove one trailing LF or CRLF (default: `true`) |
+| Name    | Type                     | Description                                      |
+| ------- | ------------------------ | ------------------------------------------------ |
+| `func`  | `func`                   | function whose output to capture                 |
+| `chomp` | [`Bool`](../std/bool.md) | Remove one trailing LF or CRLF (default: `true`) |
 
 #### Returns
 

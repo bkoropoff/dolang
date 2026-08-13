@@ -25,11 +25,13 @@ Returns a sink over the value.
 `x.foo(...)` on a `Sinkable` means `x.sink().foo(...)`, so [`Sink`](./sink.md)'s
 methods can be called on the value directly:
 
-| Method                        | Description                                   |
-| ----------------------------- | --------------------------------------------- |
-| [`put value`](./sink.md)      | Writes a value                                |
-| [`premap func`](./sink.md)    | Transforms each value before it is written    |
-| [`prefilter pred`](./sink.md) | Writes only values for which `pred` is truthy |
+| Method                                         | Description                                   |
+| ---------------------------------------------- | --------------------------------------------- |
+| [`put value`](./sink.md)                       | Writes a value                                |
+| [`premap func`](./sink.md)                     | Transforms each value before it is written    |
+| [`prefilter pred`](./sink.md)                  | Writes only values for which `pred` is truthy |
+| [`prechomp`](./sink.md#prechomp)               | Removes one trailing line terminator          |
+| [`precrimp t?`](./sink.md#precrimp-terminator) | Appends a line terminator                     |
 
 `premap`/`prefilter` are named for their direction — they act on values headed
 *into* the sink. A value that is both `Sinkable` and

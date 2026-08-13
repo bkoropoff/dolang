@@ -433,6 +433,32 @@ def do_console_declares_capabilities()
   assert_eq $g.cols 80
 
 #[test]
+def do_console_chooses_its_terminator()
+  # The console owns the terminator policy but does not apply it: `echo` reads
+  # `line_ending` off the installed console, so a subclass that declares its
+  # own gets it, still in a single write.
+  class Crlf: term.Console
+    pub field lines
+    pub field line_ending = "\r\n"
+
+    def (init) self
+      term.Console.(init) $self
+      self.lines = []
+
+    pub def write self data
+      self.lines.push (str data)
+      data.len
+
+    pub def flush _self
+      nil
+
+  let crlf = Crlf()
+  term.capture $crlf do
+    echo terminated
+    print bare
+  assert_eq $crlf.lines ["terminated\r\n", "bare"]
+
+#[test]
 def bare_geometry_refuses()
   # `term.Geometry` is the interface, so an instance of it has no dimensions to
   # report — the same refusal `term.Console`'s write methods make.
