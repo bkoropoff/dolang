@@ -13,7 +13,7 @@ def file_set_size_preserves_buffered_cursor()
   let path = "test_set_size_file.txt"
   write $path "alpha\nbeta\n"
   open $path r+ do |file|
-    assert_eq (file.next()) "alpha"
+    assert_eq (file.next()) "alpha\n"
     assert_eq (file.tell()) 6
     file.set_size 2
     assert_eq (file.tell()) 6

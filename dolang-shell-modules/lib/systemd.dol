@@ -5,7 +5,7 @@ import shlex
 def read_keys path
   open $path do |file|
     let res = {}
-    for line = file
+    for line = file.chomp()
       let k v = line.split = limit: 1
       res[k] = (shlex.split v).next()
     res

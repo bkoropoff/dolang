@@ -21,7 +21,7 @@ use crate::{
     error::{ErrorExt, ResultExt as _},
     fs::path::{PathAnnex, create_path_annex, path_from_value},
     global::{Global, ProgramSource},
-    io_mode::{IoMode, ValueEncoding, encode_value, read_raw, read_value, write_raw},
+    io_mode::{IoMode, encode_value, line_ending, read_raw, read_value, write_raw},
     local::{Local, ProgramOverride},
     pipe_channel,
     shell_args::Args as ShellArgs,
@@ -32,7 +32,6 @@ use dolang_vfs::{
     client::Client,
     process::{StdioRecv, StdioSend},
     session::VfsSession,
-    target::OperatingSystem,
 };
 use std::collections::HashMap;
 use typed_path::Utf8TypedPathBuf;
@@ -63,11 +62,24 @@ impl std::error::Error for Exit {}
 /// A handle, not a wrapper: the underlying reader lives in [`Global::stdio`] so
 /// that this object and the root strand's implicit input are the same buffered
 /// reader. See [`crate::global::Stdio`].
-pub(crate) struct Stdin;
+///
+/// The handle carries the framing it reads with. `lines()` and `chunks()`
+/// return handles onto the same stream that quantize it differently — the
+/// handles are distinct, the reader behind them is not, so taking one does not
+/// fork or buffer anything. Both framings are lossless.
+pub(crate) struct Stdin {
+    mode: IoMode,
+}
+
+impl Stdin {
+    pub(crate) fn new(mode: IoMode) -> Self {
+        Self { mode }
+    }
+}
 
 impl Default for Stdin {
     fn default() -> Self {
-        Self
+        Self::new(IoMode::Line)
     }
 }
 
@@ -97,17 +109,41 @@ impl<'v> Object<'v> for Stdin {
                 let mut reader = global.stdio.stdin.lock().await;
                 read_raw(&mut *reader, size, strand, out).await
             })
+            .method("lines", async move |_this, strand, args, out| {
+                let ([], []) = unpack!(strand, args, 0, 0)?;
+                let global = strand.state::<Global<'v>>();
+                global
+                    .types
+                    .stdin
+                    .create(strand, Stdin::new(IoMode::Line), out);
+                Ok(())
+            })
+            .method("chunks", async move |_this, strand, args, out| {
+                let ([], []) = unpack!(strand, args, 0, 0)?;
+                let global = strand.state::<Global<'v>>();
+                global
+                    .types
+                    .stdin
+                    .create(strand, Stdin::new(IoMode::Chunk), out);
+                Ok(())
+            })
     }
 
-    /// There is exactly one `Stdin` per VM, so having the type is having the
-    /// object.
+    /// All handles share the one reader in [`Global::stdio`], so two are the
+    /// same object exactly when they frame it the same way.
     fn eq<'a, 's>(
-        _this: Instance<'v, 'a, Self>,
+        this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         other: &Value<'v>,
     ) -> Result<'v, 's, bool> {
         let global = strand.state::<Global<'v>>();
-        Ok(global.types.stdin.cast(other).is_some())
+        let Some(other) = global.types.stdin.cast(other) else {
+            return Ok(false);
+        };
+        let mode = this.borrow(strand)?.mode;
+        other.enter_sync(strand, |strand, other| {
+            Ok(other.borrow(strand)?.mode == mode)
+        })
     }
 
     async fn iter<'a, 's>(
@@ -120,12 +156,12 @@ impl<'v> Object<'v> for Stdin {
     }
 
     async fn next<'a, 's>(
-        _this: Instance<'v, 'a, Self>,
+        this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         mut out: Slot<'v, 'a>,
     ) -> Result<'v, 's, bool> {
         let global = strand.state::<Global<'v>>();
-        let mode = global.local.get(strand).io_mode();
+        let mode = this.borrow(strand)?.mode;
         let read = {
             let mut reader = global.stdio.stdin.lock().await;
             read_value(&mut *reader, mode, strand, &mut out)
@@ -203,14 +239,7 @@ impl<'v> Object<'v> for Stdout {
         value: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
         let global = strand.state::<Global<'v>>();
-        let mode = global.local.get(strand).io_mode();
-        let bytes = encode_value(
-            strand,
-            &value,
-            mode,
-            ValueEncoding::Display,
-            OperatingSystem::current(),
-        )?;
+        let bytes = encode_value(strand, &value)?;
         let mut writer = global.stdio.stdout.lock().await;
         writer
             .write_all(&bytes)
@@ -286,14 +315,7 @@ impl<'v> Object<'v> for Stderr {
         value: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
         let global = strand.state::<Global<'v>>();
-        let mode = global.local.get(strand).io_mode();
-        let bytes = encode_value(
-            strand,
-            &value,
-            mode,
-            ValueEncoding::Display,
-            OperatingSystem::current(),
-        )?;
+        let bytes = encode_value(strand, &value)?;
         let mut writer = global.stdio.stderr.lock().await;
         writer
             .write_all(&bytes)
@@ -676,22 +698,15 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
 
     builder
         .module("shell")
-        .function("with_io_mode", async move |strand, args, out| {
-            let ([mode, func], [], rest) = unpack!(strand, args, 2, 0, ...)?;
-            let mode = match mode.as_sym(strand) {
-                Some(sym) if sym == global.syms.line => IoMode::Line,
-                Some(sym) if sym == global.syms.chunk => IoMode::Chunk,
-                _ => return Err(Error::value(strand, "mode must be :LINE: or :CHUNK:")),
-            };
-            let old_mode = {
-                let local = global.local.get(strand);
-                let old_mode = local.io_mode();
-                local.set_io_mode(mode);
-                old_mode
-            };
-            let res = func.call(strand, rest, out).await;
-            global.local.get(strand).set_io_mode(old_mode);
-            res
+        .function("line_ending", async move |strand, args, out| {
+            let ([], []) = unpack!(strand, args, 0, 0)?;
+            // A function rather than a getter: the answer follows the VFS
+            // target, so it is a question about the current context rather
+            // than a constant of the module.
+            let os = global.local.get(strand).target().operating_system;
+            let ending = std::str::from_utf8(line_ending(os)).unwrap();
+            Output::set(strand, out, ending);
+            Ok(())
         })
         .function(
             "exit",
@@ -876,7 +891,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         .value("Stdin", global.types.stdin)
         .value("Stdout", global.types.stdout)
         .value("Stderr", global.types.stderr)
-        .object("stdin", global.types.stdin, Stdin)
+        .object("stdin", global.types.stdin, Stdin::default())
         .object("stdout", global.types.stdout, Stdout)
         .object("stderr", global.types.stderr, Stderr)
         .commit();

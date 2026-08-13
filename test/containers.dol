@@ -238,7 +238,7 @@ def container_inspect_lifecycle()
     let lines = []
     try
       sub do container_cli run --init -d --name $name ubuntu:24.04 sleep infinity
-        stderr: $lines
+        stderr: $lines.prechomp()
     catch proc.Error: e
       echo $"\n".join(lines)
       throw e
@@ -312,7 +312,7 @@ def container_with_non_root_user()
     try
       sub do container_cli run -d --name $name --user 65534:65534
         "ubuntu:24.04" sleep infinity
-        stderr: $lines
+        stderr: $lines.prechomp()
     catch proc.Error: e
       echo $"\n".join(lines)
       throw e

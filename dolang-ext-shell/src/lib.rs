@@ -56,7 +56,10 @@ pub use syntax::{SemanticToken, highlight_range as highlight_source_range};
 /// this and `shell.stdin` read the same stream and cannot split its buffer.
 pub fn stdin<'v, 's>(strand: &mut Strand<'v, 's>, out: impl Output<'v>) {
     let global = strand.state::<Global<'v>>();
-    global.types.stdin.create(strand, shell::Stdin, out)
+    global
+        .types
+        .stdin
+        .create(strand, shell::Stdin::default(), out)
 }
 
 /// Instantiate the `shell.stdout` handle.

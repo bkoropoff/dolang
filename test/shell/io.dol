@@ -1,6 +1,5 @@
 import shell
 import term
-import sys
 import fs:
   - open
   - with_temp_dir
@@ -11,13 +10,6 @@ import test:
   - test
 import std:
   - TypeError
-
-# The line ending a sink adapter appends in `:LINE:` mode. Framed output picks
-# this up; `write` never does, which is what several tests below turn on.
-let NL = if (sys.os_info().family == :WINDOWS:)
-  "\r\n"
-else
-  "\n"
 
 # Writes `source` into the temp dir and returns the script path, so tests can
 # name it in a `run` invocation without the here string swallowing the
@@ -69,17 +61,16 @@ def stdin_handle_shares_the_buffered_reader()
     let path = script $dir read.dol $src
     let out = (dir / "out.txt")
     run $shell.exe --no-cache $path $out
-      stdin:
-        - one
-        - two
-        - three
+      stdin: (["one", "two", "three"].crimp())
 
-    # The remainder comes back exactly as the sink framed it, line endings and
-    # all — `read` is raw.
-    assert_eq $out.read() "one|two$(NL)three$(NL)"
+    # Values written to the child's stdin contribute their own bytes and
+    # nothing else, so the terminators here are the ones `crimp` put in.
+    assert_eq $out.read() "one\n|two\nthree\n"
 
+# Neither `put` nor `write` invents bytes: the value edge and the byte edge
+# agree, so what reaches the stream is exactly what the script supplied.
 #[test]
-def write_is_unframed_and_put_is_framed()
+def put_and_write_are_both_verbatim()
   with_temp_dir do |dir|
     let src = r|
       import shell
@@ -93,9 +84,55 @@ def write_is_unframed_and_put_is_framed()
     let out = (dir / "out.txt")
     run $shell.exe --no-cache $path stdout: $out
 
-    # `put` frames per the ambient I/O mode, so it appends the platform line
-    # ending; `write` adds nothing and the "\n" is the one in the source.
-    assert_eq $out.read() "a$(NL)bc\n"
+    assert_eq $out.read() "abc\n"
+
+# A terminator is something the script asks for by name, and `crimp` puts the
+# same bytes on every platform unless told to use the target's ending.
+#[test]
+def put_terminates_only_through_crimp()
+  with_temp_dir do |dir|
+    let src = r|
+      import shell
+      let out = shell.stdout.precrimp()
+      out.put a
+      out.put b
+
+    let path = script $dir crimp.dol $src
+    let out = (dir / "out.txt")
+    run $shell.exe --no-cache $path stdout: $out
+
+    assert_eq $out.read() "a\nb\n"
+
+# Reading a stream and writing it back reproduces it byte for byte, whichever
+# framing the reader chose and whatever line endings the data carries.
+#[test]
+def the_value_edge_round_trips()
+  with_temp_dir do |dir|
+    let src = r|
+      import shell
+      for value = shell.stdin
+        shell.stdout.put $value
+
+    let path = script $dir echo.dol $src
+    let mixed = "unix\nwindows\r\nbare"
+    let input = (dir / "in.txt")
+    input.write $mixed
+    let out = (dir / "out.txt")
+    open $input rb do |file|
+      run $shell.exe --no-cache $path stdin: $file stdout: $out
+    assert_eq $out.read() $mixed
+
+    # Chunk framing cuts the stream somewhere else and reproduces it just the
+    # same, which is what makes the two interchangeable.
+    let chunked = script $dir chunks.dol r|
+      import shell
+      for value = shell.stdin.chunks()
+        shell.stdout.put $value
+
+    let out2 = (dir / "out2.txt")
+    open $input rb do |file|
+      run $shell.exe --no-cache $chunked stdin: $file stdout: $out2
+    assert_eq $out2.read() $mixed
 
 #[test]
 def write_reports_bytes_not_characters()

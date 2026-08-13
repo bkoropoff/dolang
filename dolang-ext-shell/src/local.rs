@@ -16,7 +16,7 @@ use dolang_vfs::{
 };
 use typed_path::Utf8TypedPathBuf;
 
-use crate::{global::Global, io_mode::IoMode, shell_args::ArgsData};
+use crate::{global::Global, shell_args::ArgsData};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TerminationPolicy {
@@ -188,7 +188,6 @@ pub(crate) struct Local {
     cwd: RefCell<Utf8TypedPathBuf>,
     env: RefCell<Rc<Env>>,
     vfs: RefCell<AnyVfs>,
-    io_mode: Cell<IoMode>,
     background: Cell<bool>,
     /// Set while dispatching a write into the ambient console.
     ///
@@ -243,7 +242,6 @@ impl<'v> strand::Local<'v> for Local {
                 Default::default(),
             ))),
             vfs: RefCell::new(vfs),
-            io_mode: Cell::new(IoMode::Line),
             background: Cell::new(false),
             capturing: Cell::new(false),
             capture_can_style: Cell::new(false),
@@ -259,7 +257,6 @@ impl<'v> strand::Local<'v> for Local {
             cwd: self.cwd.clone(),
             env: self.env.clone(),
             vfs: self.vfs.clone(),
-            io_mode: Cell::new(self.io_mode.get()),
             background: Cell::new(self.background.get() || kind == strand::InheritKind::Background),
             // Inherited so that a strand spawned from inside a console's own
             // write stays guarded rather than routing back into it.
@@ -340,14 +337,6 @@ impl Local {
         local.replace_cwd(orig_cwd);
         local.replace_env(orig_env);
         result
-    }
-
-    pub(crate) fn io_mode(&self) -> IoMode {
-        self.io_mode.get()
-    }
-
-    pub(crate) fn set_io_mode(&self, v: IoMode) {
-        self.io_mode.set(v);
     }
 
     pub(crate) fn set_pending_pipe_buffer_size(&self, size: Option<usize>) {

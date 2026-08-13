@@ -23,7 +23,7 @@ use crate::{
         path::{PathAnnex, create_path_annex, path_from_value},
     },
     global::Global,
-    io_mode::{ValueEncoding, encode_value, read_value},
+    io_mode::{IoMode, encode_value, read_value},
     pipe_channel::{self, RecvGuard, SendGuard},
     proc::{parse_policy_dict, vfs_policy},
 };
@@ -85,6 +85,8 @@ struct ResolvedIo<'v, 'a> {
     explicit: Streams<bool>,
     /// The reserved `policy:` argument, if given.
     policy: Option<Slot<'v, 'a>>,
+    /// How a pumped output stream is quantized into values.
+    mode: IoMode,
 }
 
 async fn resolve_io<'v, 's, 'a>(
@@ -99,7 +101,8 @@ async fn resolve_io<'v, 's, 'a>(
     let stdout_sym = global.syms.stdout;
     let stderr_sym = global.syms.stderr;
     let policy_sym = global.syms.policy;
-    let ([], [stdin_key, stdout_key, stderr_key, policy_key], rest) = unpack!(
+    let mode_sym = global.syms.mode;
+    let ([], [stdin_key, stdout_key, stderr_key, policy_key, mode_key], rest) = unpack!(
         strand,
         args,
         0,
@@ -108,8 +111,13 @@ async fn resolve_io<'v, 's, 'a>(
         stdout_sym = None,
         stderr_sym = None,
         policy_sym = None,
+        mode_sym = None,
         ...
     )?;
+    // Framing for whichever output streams end up pumped into a sink. Applies
+    // to both, since a redirect that splits them is already naming two sinks
+    // and can chomp them independently.
+    let mode = crate::console::parse_mode(strand, mode_key.as_deref())?;
     let explicit = Streams {
         stdin: stdin_key.is_some(),
         stdout: stdout_key.is_some(),
@@ -167,6 +175,7 @@ async fn resolve_io<'v, 's, 'a>(
         },
         explicit,
         policy: policy_key,
+        mode,
     })
 }
 
@@ -386,19 +395,10 @@ async fn input_pump<'v, 's, W>(
 where
     W: AsyncWrite + Unpin,
 {
-    let local = strand.vm().state::<Global<'v>>().local.get(strand);
-    let io_mode = local.io_mode();
-    let operating_system = local.target().operating_system;
     strand
         .with_slots(async move |strand, [mut inval]| {
             while input.next(strand, &mut inval).await? {
-                let bytes = encode_value(
-                    strand,
-                    &inval,
-                    io_mode,
-                    ValueEncoding::Verbatim,
-                    operating_system,
-                )?;
+                let bytes = encode_value(strand, &inval)?;
                 writer.write_all(&bytes).await.into_sys(strand)?;
             }
             Ok(())
@@ -409,7 +409,9 @@ where
 /// Where a child's output is being pumped.
 #[derive(Clone, Copy)]
 enum PumpTarget<'v, 'a> {
-    /// A Do sink. Values are framed per the ambient I/O mode.
+    /// A Do sink. Bytes are quantized into values per the redirect's `mode:`,
+    /// losslessly either way — a sink that wants terminators gone asks with
+    /// `chomp`.
     Sink(&'a Value<'v>),
     /// The console, because an unnamed channel is following an extension that
     /// has taken the terminal over.
@@ -447,6 +449,7 @@ async fn output_pump<'v, 's, R>(
     strand: &mut Strand<'v, 's>,
     output: &Value<'v>,
     reader: R,
+    io_mode: IoMode,
 ) -> Result<'v, 's, ()>
 where
     R: AsyncRead + Unpin,
@@ -461,12 +464,6 @@ where
             Ok(())
         });
     }
-    let io_mode = strand
-        .vm()
-        .state::<Global<'v>>()
-        .local
-        .get(strand)
-        .io_mode();
     strand
         .with_slots(async move |strand, [mut outval]| {
             let mut reader = BufReader::new(reader);
@@ -496,6 +493,8 @@ struct Pipes {
 struct PumpTargets<'v, 'a> {
     stdin: &'a Value<'v>,
     stdout: PumpTarget<'v, 'a>,
+    /// Framing for whichever of the above are sinks.
+    mode: IoMode,
     /// `None` when stderr is inherited or merged into stdout, so nothing pumps
     /// it.
     stderr: Option<PumpTarget<'v, 'a>>,
@@ -525,8 +524,9 @@ async fn run_monitor<'v, 's>(
             None => MaybeDone::Done(Ok(())),
             Some(reader) => {
                 let output = target.stdout;
+                let mode = target.mode;
                 MaybeDone::Future(strand.spawn_scoped(None, async move |strand| match output {
-                    PumpTarget::Sink(output) => output_pump(strand, output, reader).await,
+                    PumpTarget::Sink(output) => output_pump(strand, output, reader, mode).await,
                     PumpTarget::Console => console_pump(strand, reader).await,
                 }))
             }
@@ -534,8 +534,9 @@ async fn run_monitor<'v, 's>(
 
         let epump = match (target.stderr, pipes.stderr) {
             (Some(output), Some(reader)) => {
+                let mode = target.mode;
                 MaybeDone::Future(strand.spawn_scoped(None, async move |strand| match output {
-                    PumpTarget::Sink(output) => output_pump(strand, output, reader).await,
+                    PumpTarget::Sink(output) => output_pump(strand, output, reader, mode).await,
                     PumpTarget::Console => console_pump(strand, reader).await,
                 }))
             }
@@ -614,6 +615,8 @@ struct RunIo<'v, 'a> {
     /// $shell.stdout` opts out of terminal takeover.
     explicit: Streams<bool>,
     policy_override: Option<Slot<'v, 'a>>,
+    /// Framing for output streams pumped into a sink.
+    mode: IoMode,
 }
 
 async fn run<'v, 's>(
@@ -791,6 +794,7 @@ async fn run<'v, 's>(
         } else {
             PumpTarget::Sink(io.value.stdout)
         },
+        mode: io.mode,
         stderr: (!stderr_inherit && !stderr_merge).then_some(if stderr_to_console {
             PumpTarget::Console
         } else {
@@ -848,6 +852,7 @@ async fn dispatch_run<'v, 's>(
                     value,
                     explicit: resolved.explicit,
                     policy_override: resolved.policy,
+                    mode: resolved.mode,
                 },
             )
             .await;

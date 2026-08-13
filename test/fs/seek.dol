@@ -34,9 +34,9 @@ def seek_clears_buffered_text_reads()
   let path = "test_fs_seek.txt"
   write $path "alpha\nbeta\n"
   open $path "r" do |file|
-    assert_eq (file.next()) "alpha"
+    assert_eq (file.next()) "alpha\n"
     assert_eq (file.seek start: 0) 0
-    assert_eq (file.next()) "alpha"
+    assert_eq (file.next()) "alpha\n"
   remove $path
 
 #[agent.test]

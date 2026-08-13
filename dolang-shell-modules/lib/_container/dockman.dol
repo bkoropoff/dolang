@@ -61,7 +61,7 @@ let NO_IMAGE_ERRORS = $
   - IMAGE NOT KNOWN
   - DOES NOT EXIST LOCALLY
   - MANIFEST UNKNOWN
-  - NOT FOUND
+  - FAILED TO RESOLVE REFERENCE
 
 let ARCHIVE_ERRORS = $
   - ARCHIVE
@@ -199,8 +199,8 @@ def output_lines output stderr
         lines.push $line
   for line = stderr
     line = line.trim()
-      if line
-        lines.push $line
+    if line
+      lines.push $line
   lines
 
 # Merges captured stdout and stderr line arrays, trimming and dropping blanks.
@@ -317,7 +317,7 @@ def parse_image_tags repo_tags
 def inspect_image runtime ref
   let lines = []
   let output = try
-    sub do runtime.cli inspect --type image $ref stderr: $lines
+    sub do runtime.cli inspect --type image $ref stderr: $lines.prechomp()
   catch proc.Error: e
     classify_image_error $ref $lines
     report_unknown $lines
@@ -327,7 +327,7 @@ def inspect_image runtime ref
 def inspect_container runtime ref
   let lines = []
   let output = try
-    sub do runtime.cli inspect --type container $ref stderr: $lines
+    sub do runtime.cli inspect --type container $ref stderr: $lines.prechomp()
   catch proc.Error: e
     classify_container_error $ref $lines
     report_unknown $lines
@@ -405,7 +405,7 @@ pub class Runtime
             -v $agent_bin:$ctr_agent:ro,z$uopt
             $ctr ...(_vfs.vfs_args cd env) --key-stdin --accept $ctr_socket
             stdin: (_vfs.key_input key)
-            stderr: $lines
+            stderr: $lines.prechomp()
           do
             strand.next()
             let agent = Vfs.unix_socket $socket :key
@@ -440,6 +440,7 @@ pub class Runtime
         if all
           --all
       do each do |id|
+        id = id.trim()
         let data = json.decode $ sub do self.cli inspect --type image $id
         Image $self $data[0]
 
@@ -451,6 +452,7 @@ pub class Runtime
         if (filter != nil)
           --filter $filter
       do each do |id|
+        id = id.trim()
         let data = inspect_container $self $id
         Container $self $data
 
@@ -486,7 +488,7 @@ pub class Runtime
         ...refs
         if spec.file
           stdout: $target
-        stderr: $lines
+        stderr: $lines.prechomp()
     catch proc.Error: e
       classify_image_error $refs[0] $lines
       classify_archive_error $(spec.file && target || path_target) $lines
@@ -503,7 +505,7 @@ pub class Runtime
         --input $source
         if (platform != nil)
           --platform $platform
-        stderr: $lines
+        stderr: $lines.prechomp()
     catch proc.Error: e
       classify_archive_error $source $lines
       report_unknown $lines
@@ -529,8 +531,8 @@ pub class Runtime
         if (platform != nil)
           --platform $platform
         $ref
-        stdout: $out
-        stderr: $lines
+        stdout: $out.prechomp()
+        stderr: $lines.prechomp()
     catch proc.Error: e
       # Capture both streams rather than `sub`bing stdout: on failure `sub`'s
       # value never materializes, so anything the CLI said there would be lost.
@@ -551,7 +553,7 @@ pub class Runtime
         if (platform != nil)
           --platform $platform
         $ref
-        stderr: $lines
+        stderr: $lines.prechomp()
     catch proc.Error: e
       classify_push_error $ref $lines
       report_unknown $lines
@@ -719,22 +721,22 @@ pub class Builder
       $img
       $self.#ctr_agent ...(_vfs.vfs_args self.#cd self.#env) --key-stdin --accept $self.#ctr_socket
       stdin: (_vfs.key_input key)
-      stderr: $lines
+      stderr: $lines.prechomp()
     # Recorded before the wait so a launch that never reports in still leaves
     # `cleanup` a container to remove.
     self.#ctr_name = name
     self.#handle = handle
     try
-      # The agent prints READY once the socket is bound and connectable, which
-      # beats polling for the path's existence. A failed `run` surfaces here:
-      # the output channel re-raises the strand's error once it is exhausted,
-      # so `default:` only covers a clean exit that said nothing.
+      # The agent writes a line once the socket is bound and connectable, which
+      # beats polling for the path's existence. Any line will do: it is a
+      # signal, not a message, and anything gone wrong reports itself on stderr
+      # and as a nonzero exit instead. A failed `run` surfaces here: the output
+      # channel re-raises the strand's error once it is exhausted, so
+      # `default:` only covers a clean exit that said nothing.
       let line = handle.iter().next default: nil
       if (line == nil)
         handle.join()
-        throw RuntimeError "container agent exited before reporting READY"
-      if (line != "READY")
-        throw RuntimeError "unexpected output from container agent: $line"
+        throw RuntimeError "container agent exited before reporting ready"
     catch proc.Error: e
       classify_image_error $img $lines
       report_unknown $lines
