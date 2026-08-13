@@ -1,0 +1,135 @@
+# `chomp` removes exactly one trailing terminator, LF or CRLF.
+let lines = ["a\n", "b\r\n", "c"]
+assert_eq [...lines.iter().chomp()] ["a", "b", "c"]
+
+# A lone `\r` is content, not a terminator, and only one terminator comes off.
+assert_eq [...["x\r", "y\n\n"].iter().chomp()] ["x\r", "y\n"]
+
+# Empty input and empty items are fine.
+assert_eq [...[].iter().chomp()] []
+assert_eq [...["", "\n"].iter().chomp()] ["", ""]
+
+# `chomp` preserves the item type: `Bin` in, `Bin` out.
+assert_eq [...[b"a\n", b"b\r\n"].iter().chomp()] [b"a", b"b"]
+
+# `crimp` appends LF by default, unconditionally -- an item that already ends
+# in a terminator gets another one.
+assert_eq [...["a", "b\n"].iter().crimp()] ["a\n", "b\n\n"]
+
+# The terminator is an optional positional argument.
+assert_eq [...["a", "b"].iter().crimp("\r\n")] ["a\r\n", "b\r\n"]
+assert_eq [...["a"].iter().crimp("")] ["a"]
+
+# `crimp` also preserves the item type.
+assert_eq [...[b"a"].iter().crimp()] [b"a\n"]
+
+# Round trip: crimp then chomp is the identity for items with no terminator.
+let items = ["one", "two", "three"]
+assert_eq [...items.iter().crimp().chomp()] $items
+
+# Non-Str/Bin items are a type error rather than being coerced.
+def assert_throws block
+  let threw = try
+    block()
+    false
+  catch _
+    true
+  assert $threw
+
+assert_throws do [...[1].iter().chomp()]
+assert_throws do [...[1].iter().crimp()]
+assert_throws do [...["a"].iter().crimp(1)]
+
+# ── Sink direction ──────────────────────────────────────────────────────
+
+let acc = []
+let out = acc.sink().prechomp()
+out.put "a\n"
+out.put "b\r\n"
+out.put "c"
+assert_eq $acc ["a", "b", "c"]
+
+let acc = []
+let out = acc.sink().precrimp()
+out.put "a"
+out.put "b"
+assert_eq $acc ["a\n", "b\n"]
+
+let acc = []
+let out = acc.sink().precrimp("\r\n")
+out.put "a"
+assert_eq $acc ["a\r\n"]
+
+# ── StrBuf/BinBuf are sinks ─────────────────────────────────────────────
+
+let buf = StrBuf()
+let out = buf.sink()
+out.put "a"
+out.put "b"
+assert_eq $buf.freeze() "ab"
+
+# `put` appends verbatim -- no line terminator is invented.
+let buf = StrBuf()
+buf.sink().put "no newline"
+assert_eq $buf.freeze() "no newline"
+
+# Framing is opt-in, and composes the same way it does for any other sink.
+let buf = StrBuf()
+let out = buf.sink().precrimp()
+out.put "a"
+out.put "b"
+assert_eq $buf.freeze() "a\nb\n"
+
+let buf = BinBuf()
+let out = buf.sink()
+out.put b"\x01"
+out.put "text"
+assert_eq $buf.freeze() b"\x01text"
+
+# Non-Str/Bin values stringify, matching every other byte sink.
+let buf = StrBuf()
+buf.sink().put 42
+assert_eq $buf.freeze() "42"
+
+# Buffers are sinkable, so the whole sink combinator surface forwards to them.
+let buf = StrBuf()
+let out = buf.premap (do |x| "[$x]")
+out.put "ab"
+assert_eq $buf.freeze() "[ab]"
+
+let buf = StrBuf()
+let out = buf.prefilter (do |x| x != "skip")
+out.put "keep"
+out.put "skip"
+assert_eq $buf.freeze() "keep"
+
+# ── `chomp` as a scalar method ──────────────────────────────────────────
+
+# The same operation the combinator applies, reachable directly on a value.
+# `str.split` and friends hand back plain strings, so a script that never
+# built a pipeline still needs a way to say this.
+assert_eq ("a\n".chomp()) "a"
+assert_eq ("b\r\n".chomp()) "b"
+assert_eq ("c".chomp()) "c"
+assert_eq ("".chomp()) ""
+
+# One terminator, and a lone `\r` is content -- matching the combinator.
+assert_eq ("x\r".chomp()) "x\r"
+assert_eq ("y\n\n".chomp()) "y\n"
+
+# Distinct from `trim_end`, which is about whitespace generally.
+assert_eq ("z  \n".chomp()) "z  "
+assert_eq ("z  \n".trim_end()) "z"
+
+# `Bin` chomps at the byte level and stays `Bin`.
+assert_eq (b"a\n".chomp()) b"a"
+assert_eq (b"b\r\n".chomp()) b"b"
+assert_eq (b"\x00\xff".chomp()) b"\x00\xff"
+
+# Reachable through the type object too, as every other Str/Bin method is.
+assert_eq (Str.chomp "a\n") "a"
+assert_eq (Bin.chomp b"a\n") b"a"
+
+# The scalar method and the combinator agree item for item.
+let items = ["a\n", "b\r\n", "c"]
+assert_eq [...items.iter().chomp()] [...items.iter().map(do |s| s.chomp())]

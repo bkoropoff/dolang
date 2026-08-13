@@ -15,7 +15,7 @@ use crate::{
     strand::Strand,
     sym::{self, Sym},
     unpack,
-    value::{Input, Output, Slot, Slots, TypeObject, Value},
+    value::{BinEmbryo, Input, Output, Slot, Slots, TypeObject, Value, view::View},
     vm::Vm,
 };
 
@@ -30,6 +30,8 @@ const ITERABLE_METHODS: &[sym::Tag] = &[
     sym::FOLD,
     sym::MAP,
     sym::FILTER,
+    sym::CHOMP,
+    sym::CRIMP,
     sym::CHAIN,
     sym::ZIP,
     sym::TAKE,
@@ -58,7 +60,14 @@ const ITER_ONLY_METHODS: &[sym::Tag] = &[sym::NEXT, sym::COUNT, sym::KV];
 /// `map`/`filter`, they transform values on the way *into* the sink. The
 /// distinct names are what let a value that is both surfaces (an `Array`, say)
 /// offer both without one spelling carrying two meanings.
-const SINKABLE_METHODS: &[sym::Tag] = &[sym::SINK, sym::PUT, sym::PREMAP, sym::PREFILTER];
+const SINKABLE_METHODS: &[sym::Tag] = &[
+    sym::SINK,
+    sym::PUT,
+    sym::PREMAP,
+    sym::PREFILTER,
+    sym::PRECHOMP,
+    sym::PRECRIMP,
+];
 
 /// Which abstract surface a method name belongs to, if any.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1385,6 +1394,15 @@ impl<'v> Protocol<'v> for Iter {
                 create_filter(strand, &obj, pred, out);
                 Ok(())
             }
+            sym::CHOMP => {
+                let ([obj], []) = unpack!(strand, args, 1, 0)?;
+                create_chomp(strand, &obj, out);
+                Ok(())
+            }
+            sym::CRIMP => {
+                let ([obj], [terminator]) = unpack!(strand, args, 1, 1)?;
+                create_crimp(strand, &obj, terminator.as_deref(), out)
+            }
             sym::CHAIN => create_chain_from_args(strand, args, out).await,
             sym::ZIP => create_zip_from_args(strand, args, out).await,
             sym::TAKE => {
@@ -1512,6 +1530,15 @@ impl<'v> Protocol<'v> for Sink {
                 let ([obj, pred], []) = unpack!(strand, args, 2, 0)?;
                 create_prefilter(strand, &obj, pred, out);
                 Ok(())
+            }
+            sym::PRECHOMP => {
+                let ([obj], []) = unpack!(strand, args, 1, 0)?;
+                create_prechomp(strand, &obj, out);
+                Ok(())
+            }
+            sym::PRECRIMP => {
+                let ([obj], [terminator]) = unpack!(strand, args, 1, 1)?;
+                create_precrimp(strand, &obj, terminator.as_deref(), out)
             }
             _ => Err(Error::field(strand, method)),
         }
@@ -1943,6 +1970,518 @@ impl<'v> Protocol<'v> for Prefilter<'v> {
     }
 }
 
+/// Length of the line terminator (`\r\n` or `\n`) ending `bytes`, or 0 if it
+/// ends with neither.
+///
+/// A lone `\r` is deliberately *not* a terminator. It is a legitimate content
+/// byte, and treating it as one would make `chomp` lossy on data that never
+/// had a line structure to begin with.
+pub(crate) fn line_terminator_len(bytes: &[u8]) -> usize {
+    if bytes.ends_with(b"\r\n") {
+        2
+    } else if bytes.ends_with(b"\n") {
+        1
+    } else {
+        0
+    }
+}
+
+/// Writes `value` with one trailing line terminator removed, preserving its
+/// `Str`/`Bin` type.
+fn chomp_value<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    value: &Value<'v>,
+    out: impl Output<'v>,
+    who: &str,
+) -> Result<'v, 's, ()> {
+    match value.view(strand) {
+        View::Str(str) => {
+            let str = str.pin();
+            let end = str.len() - line_terminator_len(str.as_bytes());
+            Output::set(strand, out, &str[..end]);
+        }
+        View::Bin(bin) => {
+            let bin = bin.pin();
+            let end = bin.len() - line_terminator_len(&bin);
+            Output::set(strand, out, &bin[..end]);
+        }
+        _ => {
+            return Err(Error::type_error(
+                strand,
+                format!("{who}: expected `Str` or `Bin`"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Writes `value` with `terminator` appended, preserving its `Str`/`Bin` type.
+///
+/// The terminator is appended unconditionally. "Append only if missing" would
+/// make the result depend on the item's own content, which is exactly the
+/// implicit behavior these combinators exist to replace.
+fn crimp_value<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    value: &Value<'v>,
+    terminator: Option<&Value<'v>>,
+    out: impl Output<'v>,
+    who: &str,
+) -> Result<'v, 's, ()> {
+    let term: Vec<u8> = match terminator {
+        None => b"\n".to_vec(),
+        Some(term) => match term.view(strand) {
+            View::Str(str) => str.pin().as_bytes().to_vec(),
+            View::Bin(bin) => bin.pin().to_vec(),
+            _ => {
+                return Err(Error::type_error(
+                    strand,
+                    format!("{who}: terminator must be `Str` or `Bin`"),
+                ));
+            }
+        },
+    };
+    let (bytes, is_str) = match value.view(strand) {
+        View::Str(str) => (str.pin().as_bytes().to_vec(), true),
+        View::Bin(bin) => (bin.pin().to_vec(), false),
+        _ => {
+            return Err(Error::type_error(
+                strand,
+                format!("{who}: expected `Str` or `Bin`"),
+            ));
+        }
+    };
+    let mut acc = BinEmbryo::new_with_capacity(strand, bytes.len() + term.len());
+    acc.extend(strand, &bytes);
+    acc.extend(strand, &term);
+    if is_str {
+        // Both halves were valid UTF-8 on their own, but a `Bin` terminator can
+        // still split a character boundary, so this is a real check.
+        acc.finish_str(strand, out)
+            .map_err(|_| Error::type_error(strand, format!("{who}: terminator is not valid UTF-8")))
+    } else {
+        acc.finish(strand, out);
+        Ok(())
+    }
+}
+
+/// Iterator adapter removing one trailing line terminator from each item.
+///
+/// The contravariant counterpart is [`Prechomp`]; see [`Map`] for why the two
+/// directions are separate types.
+pub(crate) struct Chomp<'v> {
+    obj: Value<'v>,
+}
+
+unsafe impl<'v> Collect for Chomp<'v> {
+    const CYCLIC: bool = true;
+    const IMMUTABLE: bool = false;
+    type Annex = ();
+
+    fn accept(&self, visit: &mut dyn Visit) -> ControlFlow<()> {
+        self.obj.accept(visit)?;
+        ControlFlow::Continue(())
+    }
+
+    fn clear(&mut self) {
+        self.obj.clear();
+    }
+}
+
+impl<'v> Protocol<'v> for Chomp<'v> {
+    fn op_type<'a, 's>(
+        _this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        out: Slot<'v, 'a>,
+    ) {
+        Output::set(strand, out, &strand.singletons().input_iter);
+    }
+
+    fn op_debug<'a, 's>(
+        _this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        w: &mut dyn crate::value::Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        crate::fmt!(strand, w, "<std.iter.Chomp>")
+    }
+
+    async fn op_iter<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        Output::set(strand, out, &this);
+        Ok(())
+    }
+
+    async fn op_next<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, bool> {
+        strand
+            .with_slots(async move |strand, [mut input, mut item]| {
+                let borrow = this.borrow(strand)?;
+                input.store(borrow.obj.dup());
+                drop(borrow);
+                if input.next(strand, &mut item).await? {
+                    chomp_value(strand, &item, out, "iter.chomp")?;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            })
+            .await
+    }
+
+    fn op_get<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        field: Sym<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        if field.tag() == sym::INIT_METHOD {
+            BoundMethod::create(strand, &this, field, out);
+            Ok(())
+        } else {
+            iter_get(strand, &this, field, out)
+        }
+    }
+
+    async fn op_mcall<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        method: Sym<'v, 'a>,
+        args: Args<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        match method.tag() {
+            sym::INIT_METHOD => {
+                let ([_self_val], []) = unpack!(strand, args, 1, 0)?;
+                Ok(())
+            }
+            _ => iter_mcall(strand, &this, method, args, out).await,
+        }
+    }
+}
+
+/// Sink adapter removing one trailing line terminator from each item on its way
+/// to the downstream sink. The covariant counterpart is [`Chomp`].
+pub(crate) struct Prechomp<'v> {
+    obj: Value<'v>,
+}
+
+unsafe impl<'v> Collect for Prechomp<'v> {
+    const CYCLIC: bool = true;
+    const IMMUTABLE: bool = false;
+    type Annex = ();
+
+    fn accept(&self, visit: &mut dyn Visit) -> ControlFlow<()> {
+        self.obj.accept(visit)?;
+        ControlFlow::Continue(())
+    }
+
+    fn clear(&mut self) {
+        self.obj.clear();
+    }
+}
+
+impl<'v> Protocol<'v> for Prechomp<'v> {
+    fn op_type<'a, 's>(
+        _this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        out: Slot<'v, 'a>,
+    ) {
+        Output::set(strand, out, &strand.singletons().output_iter);
+    }
+
+    fn op_debug<'a, 's>(
+        _this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        w: &mut dyn crate::value::Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        crate::fmt!(strand, w, "<std.iter.Prechomp>")
+    }
+
+    async fn op_sink<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        Output::set(strand, out, &this);
+        Ok(())
+    }
+
+    async fn op_put<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        value: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        strand
+            .with_slots(async move |strand, [mut output, mut chomped]| {
+                let borrow = this.borrow(strand)?;
+                output.store(borrow.obj.dup());
+                drop(borrow);
+                chomp_value(strand, &value, &mut chomped, "sink.prechomp")?;
+                output.put(strand, chomped).await
+            })
+            .await
+    }
+
+    fn op_get<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        field: Sym<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        if field.tag() == sym::INIT_METHOD {
+            BoundMethod::create(strand, &this, field, out);
+            Ok(())
+        } else {
+            sink_get(strand, &this, field, out)
+        }
+    }
+
+    async fn op_mcall<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        method: Sym<'v, 'a>,
+        args: Args<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        match method.tag() {
+            sym::INIT_METHOD => {
+                let ([_self_val], []) = unpack!(strand, args, 1, 0)?;
+                Ok(())
+            }
+            _ => sink_mcall(strand, &this, method, args, out).await,
+        }
+    }
+}
+
+/// Iterator adapter appending a line terminator to each item.
+///
+/// `terminator` is `None` when the default LF is in effect, which keeps the
+/// common case allocation-free and platform-independent.
+pub(crate) struct Crimp<'v> {
+    obj: Value<'v>,
+    terminator: Option<Value<'v>>,
+}
+
+unsafe impl<'v> Collect for Crimp<'v> {
+    const CYCLIC: bool = true;
+    const IMMUTABLE: bool = false;
+    type Annex = ();
+
+    fn accept(&self, visit: &mut dyn Visit) -> ControlFlow<()> {
+        self.obj.accept(visit)?;
+        if let Some(terminator) = &self.terminator {
+            terminator.accept(visit)?;
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn clear(&mut self) {
+        self.obj.clear();
+        if let Some(terminator) = &mut self.terminator {
+            terminator.clear();
+        }
+    }
+}
+
+impl<'v> Protocol<'v> for Crimp<'v> {
+    fn op_type<'a, 's>(
+        _this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        out: Slot<'v, 'a>,
+    ) {
+        Output::set(strand, out, &strand.singletons().input_iter);
+    }
+
+    fn op_debug<'a, 's>(
+        _this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        w: &mut dyn crate::value::Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        crate::fmt!(strand, w, "<std.iter.Crimp>")
+    }
+
+    async fn op_iter<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        Output::set(strand, out, &this);
+        Ok(())
+    }
+
+    async fn op_next<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, bool> {
+        strand
+            .with_slots(async move |strand, [mut input, mut item, mut term]| {
+                let borrow = this.borrow(strand)?;
+                input.store(borrow.obj.dup());
+                let has_term = match &borrow.terminator {
+                    Some(terminator) => {
+                        term.store(terminator.dup());
+                        true
+                    }
+                    None => false,
+                };
+                drop(borrow);
+                if input.next(strand, &mut item).await? {
+                    let term = has_term.then(|| &*term);
+                    crimp_value(strand, &item, term, out, "iter.crimp")?;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            })
+            .await
+    }
+
+    fn op_get<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        field: Sym<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        if field.tag() == sym::INIT_METHOD {
+            BoundMethod::create(strand, &this, field, out);
+            Ok(())
+        } else {
+            iter_get(strand, &this, field, out)
+        }
+    }
+
+    async fn op_mcall<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        method: Sym<'v, 'a>,
+        args: Args<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        match method.tag() {
+            sym::INIT_METHOD => {
+                let ([_self_val], []) = unpack!(strand, args, 1, 0)?;
+                Ok(())
+            }
+            _ => iter_mcall(strand, &this, method, args, out).await,
+        }
+    }
+}
+
+/// Sink adapter appending a line terminator to each item on its way to the
+/// downstream sink. The covariant counterpart is [`Crimp`].
+pub(crate) struct Precrimp<'v> {
+    obj: Value<'v>,
+    terminator: Option<Value<'v>>,
+}
+
+unsafe impl<'v> Collect for Precrimp<'v> {
+    const CYCLIC: bool = true;
+    const IMMUTABLE: bool = false;
+    type Annex = ();
+
+    fn accept(&self, visit: &mut dyn Visit) -> ControlFlow<()> {
+        self.obj.accept(visit)?;
+        if let Some(terminator) = &self.terminator {
+            terminator.accept(visit)?;
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn clear(&mut self) {
+        self.obj.clear();
+        if let Some(terminator) = &mut self.terminator {
+            terminator.clear();
+        }
+    }
+}
+
+impl<'v> Protocol<'v> for Precrimp<'v> {
+    fn op_type<'a, 's>(
+        _this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        out: Slot<'v, 'a>,
+    ) {
+        Output::set(strand, out, &strand.singletons().output_iter);
+    }
+
+    fn op_debug<'a, 's>(
+        _this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        w: &mut dyn crate::value::Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        crate::fmt!(strand, w, "<std.iter.Precrimp>")
+    }
+
+    async fn op_sink<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        Output::set(strand, out, &this);
+        Ok(())
+    }
+
+    async fn op_put<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        value: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        strand
+            .with_slots(async move |strand, [mut output, mut crimped, mut term]| {
+                let borrow = this.borrow(strand)?;
+                output.store(borrow.obj.dup());
+                let has_term = match &borrow.terminator {
+                    Some(terminator) => {
+                        term.store(terminator.dup());
+                        true
+                    }
+                    None => false,
+                };
+                drop(borrow);
+                let term = has_term.then(|| &*term);
+                crimp_value(strand, &value, term, &mut crimped, "sink.precrimp")?;
+                output.put(strand, crimped).await
+            })
+            .await
+    }
+
+    fn op_get<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        field: Sym<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        if field.tag() == sym::INIT_METHOD {
+            BoundMethod::create(strand, &this, field, out);
+            Ok(())
+        } else {
+            sink_get(strand, &this, field, out)
+        }
+    }
+
+    async fn op_mcall<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        method: Sym<'v, 'a>,
+        args: Args<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        match method.tag() {
+            sym::INIT_METHOD => {
+                let ([_self_val], []) = unpack!(strand, args, 1, 0)?;
+                Ok(())
+            }
+            _ => sink_mcall(strand, &this, method, args, out).await,
+        }
+    }
+}
+
 pub(crate) struct MapType;
 
 unsafe impl Collect for MapType {
@@ -2091,6 +2630,79 @@ pub(crate) fn create_prefilter<'v>(
         },
         out,
     );
+}
+
+pub(crate) fn create_chomp<'v>(strand: &mut Strand<'v, '_>, obj: &Value<'v>, out: impl Output<'v>) {
+    strand
+        .builtin_types()
+        .chomp_iter
+        .create(strand, Chomp { obj: obj.dup() }, out);
+}
+
+pub(crate) fn create_prechomp<'v>(
+    strand: &mut Strand<'v, '_>,
+    obj: &Value<'v>,
+    out: impl Output<'v>,
+) {
+    strand
+        .builtin_types()
+        .prechomp_iter
+        .create(strand, Prechomp { obj: obj.dup() }, out);
+}
+
+/// Validates an explicit `crimp`/`precrimp` terminator, rejecting anything that
+/// is not `Str` or `Bin` at construction rather than on the first item.
+fn check_terminator<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    terminator: Option<&Value<'v>>,
+    who: &str,
+) -> Result<'v, 's, Option<Value<'v>>> {
+    match terminator {
+        None => Ok(None),
+        Some(terminator) => match terminator.view(strand) {
+            View::Str(_) | View::Bin(_) => Ok(Some(terminator.dup())),
+            _ => Err(Error::type_error(
+                strand,
+                format!("{who}: terminator must be `Str` or `Bin`"),
+            )),
+        },
+    }
+}
+
+pub(crate) fn create_crimp<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    obj: &Value<'v>,
+    terminator: Option<&Value<'v>>,
+    out: impl Output<'v>,
+) -> Result<'v, 's, ()> {
+    let terminator = check_terminator(strand, terminator, "iter.crimp")?;
+    strand.builtin_types().crimp_iter.create(
+        strand,
+        Crimp {
+            obj: obj.dup(),
+            terminator,
+        },
+        out,
+    );
+    Ok(())
+}
+
+pub(crate) fn create_precrimp<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    obj: &Value<'v>,
+    terminator: Option<&Value<'v>>,
+    out: impl Output<'v>,
+) -> Result<'v, 's, ()> {
+    let terminator = check_terminator(strand, terminator, "sink.precrimp")?;
+    strand.builtin_types().precrimp_iter.create(
+        strand,
+        Precrimp {
+            obj: obj.dup(),
+            terminator,
+        },
+        out,
+    );
+    Ok(())
 }
 
 pub(crate) fn create_chain<'v>(
@@ -3670,6 +4282,66 @@ mod tests {
             create_prefilter(strand, &it, Slot::reborrow(&mut func), &mut wrapper);
             assert!(wrapper.is_instance_of(strand, TypeObject::Value));
             wrapper.sink(strand, &mut func).await.unwrap();
+        });
+    }
+
+    // ── `chomp`/`crimp` adapters ────────────────────────────────────────────
+
+    #[test]
+    fn chomp_and_crimp_adapters_report_their_own_debug_and_surface() {
+        with_vm(
+            async |strand, [mut arr, mut it, mut wrapper, mut sink, mut out]| {
+                let init_sym = Sym::well_known(sym::INIT_METHOD);
+
+                // Iter direction: each reports itself and satisfies `Iter`.
+                make_int_array(strand, &[1], Slot::reborrow(&mut arr));
+                arr.iter(strand, &mut it).await.unwrap();
+                create_chomp(strand, &it, &mut wrapper);
+                assert_eq!(wrapper.to_debug(strand).unwrap(), "<std.iter.Chomp>");
+                assert!(wrapper.is_instance_of(strand, TypeObject::Iter));
+                method!(strand, &wrapper, init_sym, &mut out, &wrapper)
+                    .await
+                    .unwrap();
+
+                arr.iter(strand, &mut it).await.unwrap();
+                create_crimp(strand, &it, None, &mut wrapper).unwrap();
+                assert_eq!(wrapper.to_debug(strand).unwrap(), "<std.iter.Crimp>");
+                assert!(wrapper.is_instance_of(strand, TypeObject::Iter));
+                method!(strand, &wrapper, init_sym, &mut out, &wrapper)
+                    .await
+                    .unwrap();
+
+                // Sink direction: each reports itself and satisfies `Sink`.
+                make_int_array(strand, &[], Slot::reborrow(&mut arr));
+                arr.sink(strand, &mut sink).await.unwrap();
+                create_prechomp(strand, &sink, &mut wrapper);
+                assert_eq!(wrapper.to_debug(strand).unwrap(), "<std.iter.Prechomp>");
+                assert!(wrapper.is_instance_of(strand, TypeObject::Sink));
+                method!(strand, &wrapper, init_sym, &mut out, &wrapper)
+                    .await
+                    .unwrap();
+
+                create_precrimp(strand, &sink, None, &mut wrapper).unwrap();
+                assert_eq!(wrapper.to_debug(strand).unwrap(), "<std.iter.Precrimp>");
+                assert!(wrapper.is_instance_of(strand, TypeObject::Sink));
+                method!(strand, &wrapper, init_sym, &mut out, &wrapper)
+                    .await
+                    .unwrap();
+            },
+        );
+    }
+
+    #[test]
+    fn crimp_rejects_a_non_string_terminator_at_construction() {
+        // Validating in the constructor rather than on the first item means a
+        // bad terminator surfaces where it was written, not wherever the
+        // pipeline happens to be drained.
+        with_vm(async |strand, [mut arr, mut it, mut term, mut wrapper]| {
+            make_int_array(strand, &[1], Slot::reborrow(&mut arr));
+            arr.iter(strand, &mut it).await.unwrap();
+            Output::set(strand, &mut term, 5i64);
+            let err = create_crimp(strand, &it, Some(&term), &mut wrapper).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::Type);
         });
     }
 

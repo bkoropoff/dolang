@@ -307,6 +307,13 @@ impl<'v> Protocol<'v> for [u8] {
                     })
                     .await
             }
+            sym::CHOMP => {
+                let me = this.receiver.get();
+                let ([], []) = unpack!(strand, args, 0, 0)?;
+                let end = me.len() - iter::line_terminator_len(me);
+                Output::set(strand, out, &me[..end]);
+                Ok(())
+            }
             sym::TRIM => {
                 let me = this.receiver.get();
                 let ([], [chars]) = unpack!(strand, args, 0, 1)?;
@@ -414,6 +421,7 @@ impl<'v> Protocol<'v> for [u8] {
             | sym::RSPLIT
             | sym::SUB
             | sym::JOIN
+            | sym::CHOMP
             | sym::TRIM
             | sym::TRIM_START
             | sym::TRIM_END
@@ -693,6 +701,7 @@ impl<'v> Protocol<'v> for Class {
                 Sym::well_known(sym::SPLIT),
                 Sym::well_known(sym::RSPLIT),
                 Sym::well_known(sym::JOIN),
+                Sym::well_known(sym::CHOMP),
                 Sym::well_known(sym::TRIM),
                 Sym::well_known(sym::TRIM_START),
                 Sym::well_known(sym::TRIM_END),
@@ -782,6 +791,7 @@ impl<'v> Protocol<'v> for Class {
             | sym::SPLIT
             | sym::RSPLIT
             | sym::JOIN
+            | sym::CHOMP
             | sym::TRIM
             | sym::TRIM_START
             | sym::TRIM_END
