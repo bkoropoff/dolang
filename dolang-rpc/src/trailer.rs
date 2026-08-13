@@ -516,7 +516,7 @@ impl<T: Unpin> AsyncWrite for TrailerSend<T> {
                     .min(inner.max_trailer_size - inner.written);
                 if len <= inner.copy_threshold {
                     FragmentHeader {
-                        flags: Flags::TRAILER,
+                        flags: Flags::NONE,
                         kind: inner.kind,
                         id: inner.id,
                         payload_len: len,
@@ -554,7 +554,7 @@ impl<T: Unpin> AsyncWrite for TrailerSend<T> {
                     .min(inner.max_fragment_size.max(1))
                     .min(inner.max_trailer_size - inner.written);
                 FragmentHeader {
-                    flags: Flags::TRAILER,
+                    flags: Flags::NONE,
                     kind: inner.kind,
                     id: inner.id,
                     payload_len: len,
@@ -579,7 +579,7 @@ impl<T: Unpin> AsyncWrite for TrailerSend<T> {
                     .min(inner.max_fragment_size.max(1))
                     .min(inner.max_trailer_size - inner.written);
                 FragmentHeader {
-                    flags: Flags::TRAILER,
+                    flags: Flags::NONE,
                     kind: inner.kind,
                     id: inner.id,
                     payload_len: len,
@@ -1225,7 +1225,7 @@ mod tests {
             Poll::Ready(Ok(4))
         ));
         let header = FragmentHeader {
-            flags: Flags::TRAILER,
+            flags: Flags::NONE,
             kind: Kind::Request,
             id: 1,
             payload_len: 4,
@@ -1358,7 +1358,7 @@ mod tests {
         {
             let inner = lock(&shared);
             let header_len = FragmentHeader {
-                flags: Flags::TRAILER,
+                flags: Flags::NONE,
                 kind: Kind::Request,
                 id: 1,
                 payload_len: data.len(),
@@ -1374,7 +1374,7 @@ mod tests {
             SendAction::Abort
         );
         let header_len = FragmentHeader {
-            flags: Flags::TRAILER,
+            flags: Flags::NONE,
             kind: Kind::Request,
             id: 1,
             payload_len: data.len(),
@@ -1414,7 +1414,7 @@ mod tests {
         assert_eq!(written, data.len());
 
         let header = FragmentHeader {
-            flags: Flags::TRAILER,
+            flags: Flags::NONE,
             kind: Kind::Request,
             id: 7,
             payload_len: data.len(),

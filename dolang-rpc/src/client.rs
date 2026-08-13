@@ -748,17 +748,10 @@ impl<P: Protocol> Reader<P> {
                 }
                 Event::Trailer {
                     id,
-                    message,
                     shared,
                     len,
                     notify_discard,
                 } => {
-                    if let Some(message) = message
-                        && let Err(error) = self.dispatch(message)
-                    {
-                        fail(&self.inner, error);
-                        return;
-                    }
                     if notify_discard && let Some(inner) = self.inner.upgrade() {
                         inner.send(Outgoing::DiscardTrailer { id });
                     }

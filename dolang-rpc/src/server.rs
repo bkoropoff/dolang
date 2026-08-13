@@ -210,11 +210,10 @@ impl<P: Protocol> Server<P> {
                 }
                 fragment::Event::Trailer {
                     id,
-                    message,
                     shared,
                     len,
                     notify_discard,
-                } => (message, Some((id, shared, len, notify_discard))),
+                } => (None, Some((id, shared, len, notify_discard))),
             };
             if let Some(fragment::Message {
                 kind,
