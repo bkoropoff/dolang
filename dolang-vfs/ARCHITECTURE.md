@@ -47,6 +47,49 @@ client and returns an opaque VFS selector instead. Stopping a selected VFS
 stops and releases only that backend. Outer-session teardown drops retained
 clients without stopping their independent daemons.
 
+A Unix-socket connection may carry a pre-shared key, which both ends prove
+knowledge of during the RPC handshake (see dolang-rpc's architecture notes).
+This matters because the agent widens its socket to `0666`: the uid that will
+connect is not knowable in advance when a container runtime chooses the id
+mapping, so the socket's permissions cannot identify the peer and the
+containing directory's `0700` mode is the only other barrier. The key is what
+distinguishes the intended client, and the intended agent.
+
+Which side authenticates depends on how the nested connection is made. On the
+handle-transferring path the peer returns a connected descriptor and
+negotiation happens locally, so the key never leaves this process; on the
+opaque path the peer establishes the connection on our behalf and the key
+travels in the request, over the already-trusted outer session. The request
+carries it either way, because which path the peer takes is its decision.
+
+### Single-Session Mode
+
+`--accept <path>` serves exactly one successfully negotiated client and then
+exits, unlinking the socket the moment that session is established rather than
+when it ends. Combined with a key it bounds exposure to the interval between
+`READY` and the first authenticated connection.
+
+Negotiation happens in per-connection tasks, so a failed or stalled attempt
+neither consumes the single session slot nor blocks the accept loop: losing the
+race to an impostor costs the intended client an attempt, not its session.
+Attempts are bounded by a negotiation timeout and a cap on how many may be
+in flight; once one succeeds, the rest are abandoned rather than drained.
+
+Unlike `--listen`, this mode binds directly at the final path. The staging
+rename `--listen` performs exists only so a client polling for the path's
+existence cannot find a socket that is not yet listening, and single-session
+clients have the `READY` line — printed after the mode is widened — which is a
+better readiness signal than the path's existence.
+
+The key reaches the agent through `--key-stdin`, as a single length byte
+followed by that many bytes. stdin is the only channel a launcher can write
+that leaves nothing a third party can read afterwards: an argument vector is
+world-visible through `/proc`, and an environment variable is both readable by
+anything that can reach the process's environ and inherited by every child the
+agent goes on to spawn. `--key-stdin` is rejected with `--stdio`, where stdin
+carries the transport itself and the channel's creator has already established
+who the peer is.
+
 The Unix socket VFS normally exchanges raw file descriptors with `SCM_RIGHTS`.
 An opaque-only client instead asks the server to retain regular files and
 performs byte I/O, seeking, flushing, and truncation through typed opaque RPC

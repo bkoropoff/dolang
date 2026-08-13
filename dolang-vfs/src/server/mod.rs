@@ -8,7 +8,11 @@ use std::{
 
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::time::Duration;
 
+#[cfg(unix)]
+use dolang_rpc::AuthKey;
 use dolang_rpc::{
     handle::{DefaultHandle, OsHandle},
     server::CallContext,
@@ -25,6 +29,8 @@ use tokio::net::{UnixListener, UnixStream, unix::SocketAddr};
 use tokio::sync::{Mutex, watch};
 #[cfg(unix)]
 use tokio::task::{JoinError, JoinSet};
+#[cfg(unix)]
+use tokio::{sync::mpsc, time::timeout};
 
 use crate::direct::Direct;
 use crate::extension::ExtContext;
@@ -203,6 +209,27 @@ struct ServerState {
     shutdown_tx: watch::Sender<()>,
 }
 
+/// How long a single connection may take to complete negotiation in
+/// single-session mode before it is dropped. Generous by handshake standards:
+/// the point is only to keep a peer that never speaks from occupying a slot
+/// indefinitely, not to police slow networks.
+#[cfg(unix)]
+const NEGOTIATE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How many connections may be negotiating at once in single-session mode.
+/// Bounds what a peer that opens connections without finishing them can tie
+/// up; the listener resumes accepting as attempts drain.
+#[cfg(unix)]
+const MAX_PENDING_CONNECTIONS: usize = 8;
+
+/// A connection that has completed negotiation, handed from a handler task
+/// back to [`Server::accept_one`].
+#[cfg(unix)]
+struct Negotiated {
+    rpc: dolang_rpc::server::Server<VfsProtocol>,
+    connection: Arc<Connection>,
+}
+
 /// VFS agent server.
 ///
 /// Construct a connected server with [`new`](Self::new) or
@@ -215,6 +242,11 @@ pub struct Server {
     rpc: Option<dolang_rpc::server::Server<VfsProtocol>>,
     mode: SessionMode,
     shared: Arc<ServerState>,
+    /// Key each accepted connection must prove knowledge of. Held here rather
+    /// than passed to [`bind`](Self::bind) because negotiation happens per
+    /// connection, long after the listener exists.
+    #[cfg(unix)]
+    key: Option<AuthKey>,
 }
 
 impl Server {
@@ -223,7 +255,7 @@ impl Server {
     where
         T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let rpc = rpc_builder()
+        let rpc = rpc_builder(None)
             .server(stream)
             .await
             .map_err(crate::client::rpc_error)?
@@ -234,6 +266,8 @@ impl Server {
             rpc: Some(rpc),
             mode: SessionMode::Remote,
             shared: Self::state()?,
+            #[cfg(unix)]
+            key: None,
         })
     }
 
@@ -243,7 +277,7 @@ impl Server {
         R: AsyncRead + Send + 'static,
         W: AsyncWrite + Send + 'static,
     {
-        let rpc = rpc_builder()
+        let rpc = rpc_builder(None)
             .server_split(reader, writer)
             .await
             .map_err(crate::client::rpc_error)?
@@ -254,6 +288,8 @@ impl Server {
             rpc: Some(rpc),
             mode: SessionMode::Remote,
             shared: Self::state()?,
+            #[cfg(unix)]
+            key: None,
         })
     }
 
@@ -270,24 +306,40 @@ impl Server {
     /// Binds a Unix-domain listener for VFS agent connections.
     #[cfg(unix)]
     pub async fn bind(path: impl AsRef<Path>) -> Result<Self, io::Error> {
-        Self::from_listener(UnixListener::bind(path)?)
+        Self::from_listener(UnixListener::bind(path)?, None)
+    }
+
+    /// Binds a Unix-domain listener that requires mutual proof of a pre-shared
+    /// key from every connection.
+    ///
+    /// The socket's permissions cannot distinguish the intended client when
+    /// the peer's uid is not knowable in advance; `key` is what does. A
+    /// connection that fails the check is dropped during negotiation, before
+    /// it can issue any request.
+    #[cfg(unix)]
+    pub async fn bind_with_key(
+        path: impl AsRef<Path>,
+        key: Option<AuthKey>,
+    ) -> Result<Self, io::Error> {
+        Self::from_listener(UnixListener::bind(path)?, key)
     }
 
     /// Create a server from an existing `UnixListener`.
     #[cfg(unix)]
-    fn from_listener(listener: UnixListener) -> Result<Self, io::Error> {
+    fn from_listener(listener: UnixListener, key: Option<AuthKey>) -> Result<Self, io::Error> {
         Ok(Self {
             listener: Some(listener),
             rpc: None,
             mode: SessionMode::Native,
             shared: Self::state().map_err(crate::Error::into_io_error)?,
+            key,
         })
     }
 
     /// Creates a VFS RPC server on the client end of a connected Windows named pipe.
     #[cfg(windows)]
     pub async fn from_named_pipe_client(pipe: NamedPipeClient) -> Result<Self, io::Error> {
-        let rpc = rpc_builder()
+        let rpc = rpc_builder(None)
             .server_named_pipe_client(pipe)
             .await
             .map_err(crate::client::rpc_error)?
@@ -314,11 +366,14 @@ impl Server {
             mode: SessionMode::Native,
             drain: Drain::new(),
         });
+        let key = self.key;
         handlers.spawn(async move {
             // Negotiation (a real handshake over the wire) happens here,
             // inside the per-connection task, so a slow or misbehaving peer
-            // can't stall the accept loop from taking new connections.
-            let rpc = rpc_builder().server_unix(stream).await?.bind();
+            // can't stall the accept loop from taking new connections. That
+            // includes authentication: an unauthenticated peer fails here and
+            // never reaches `serve_connection`.
+            let rpc = rpc_builder(key).server_unix(stream).await?.bind();
             let stop = Arc::new(AtomicBool::new(false));
             let stop_handler = stop.clone();
             let handler = connection.clone();
@@ -360,6 +415,110 @@ impl Server {
         while let Some(result) = handlers.join_next().await {
             report_handler_exit(result);
         }
+        Ok(())
+    }
+
+    /// Accepts connections until one completes negotiation, then serves that
+    /// session alone.
+    ///
+    /// `established` runs once, as soon as some connection has negotiated
+    /// successfully — the point at which the listening socket has done its job
+    /// and the caller can unlink it. Nothing is accepted afterwards.
+    ///
+    /// Connections that fail to negotiate (including failing authentication)
+    /// are dropped and do *not* consume the single slot, so an impostor that
+    /// reaches the socket first cannot deny the intended client its session;
+    /// it can only waste an attempt. Negotiation is bounded by
+    /// [`NEGOTIATE_TIMEOUT`] and the number of in-flight attempts by
+    /// [`MAX_PENDING_CONNECTIONS`], so a peer that connects and then says
+    /// nothing cannot stall or crowd out the real one either.
+    #[cfg(unix)]
+    pub async fn accept_one<F>(mut self, established: F) -> Result<(), io::Error>
+    where
+        F: FnOnce(),
+    {
+        let mut handlers = JoinSet::new();
+        // Capacity one, and only ever received from once: whichever connection
+        // negotiates first hands its session over and wins. A second one that
+        // finishes in the same instant finds the channel full and is dropped.
+        let (session_tx, mut session_rx) = mpsc::channel::<Negotiated>(1);
+
+        let session = loop {
+            tokio::select! {
+                res = self.listener.as_ref().unwrap().accept(),
+                    if handlers.len() < MAX_PENDING_CONNECTIONS =>
+                {
+                    if let Err(error) = self.handle_accept_one(res, &mut handlers, &session_tx) {
+                        eprintln!("VFS server failed to accept a connection: {error}");
+                    }
+                }
+                result = handlers.join_next(), if !handlers.is_empty() => {
+                    report_handler_exit(result.unwrap());
+                }
+                Some(session) = session_rx.recv() => break session,
+            }
+        };
+
+        // Stop listening before the session runs: the socket has done its job,
+        // and any connection still mid-handshake has already lost the race, so
+        // waiting for it would only delay the session (and, at shutdown, hold
+        // the process open for the length of a negotiation timeout).
+        self.listener.take();
+        handlers.abort_all();
+        while let Some(result) = handlers.join_next().await {
+            if matches!(&result, Err(error) if error.is_cancelled()) {
+                continue;
+            }
+            report_handler_exit(result);
+        }
+        established();
+
+        let Negotiated { rpc, connection } = session;
+        let stop = Arc::new(AtomicBool::new(false));
+        match serve_connection(rpc, connection, stop).await {
+            Ok(()) => Ok(()),
+            Err(error) if orderly_disconnect(&error) => Ok(()),
+            Err(error) => Err(io::Error::other(error)),
+        }
+    }
+
+    /// Spawns a handler that negotiates and offers the resulting session to
+    /// [`accept_one`](Self::accept_one), which serves it.
+    ///
+    /// The session is handed back rather than served in place so that the
+    /// accept loop can abandon every other in-flight attempt the moment one
+    /// succeeds.
+    #[cfg(unix)]
+    fn handle_accept_one(
+        &self,
+        res: io::Result<(UnixStream, SocketAddr)>,
+        handlers: &mut JoinSet<Result<(), dolang_rpc::Error>>,
+        session_tx: &mpsc::Sender<Negotiated>,
+    ) -> Result<(), io::Error> {
+        let (stream, _) = res?;
+        let stream = stream.into_std()?;
+        let connection = Arc::new(Connection {
+            server: self.shared.clone(),
+            mode: SessionMode::Native,
+            drain: Drain::new(),
+        });
+        let key = self.key;
+        let session_tx = session_tx.clone();
+        handlers.spawn(async move {
+            let negotiated = timeout(NEGOTIATE_TIMEOUT, rpc_builder(key).server_unix(stream)).await;
+            let rpc = match negotiated {
+                Ok(result) => result?.bind(),
+                Err(_elapsed) => {
+                    // Not worth reporting: a peer that connects and then says
+                    // nothing is exactly what the timeout is for.
+                    return Ok(());
+                }
+            };
+            // A full channel or a closed receiver both mean another connection
+            // got there first; drop this one.
+            let _ = session_tx.try_send(Negotiated { rpc, connection });
+            Ok(())
+        });
         Ok(())
     }
 
@@ -1710,7 +1869,7 @@ impl Connection {
         ResponseKind::UnixVfs(
             self.server
                 .vfs
-                .unix_socket(request_path(&req.path))
+                .unix_socket(request_path(&req.path), req.key.as_deref())
                 .await
                 .map(|vfs| OpenVfsHandle::Opaque(context.register(RetainedVfs::plain(vfs))))
                 .map_err(wire_error),
@@ -2082,7 +2241,7 @@ mod tests {
         let (client_stream, server_stream) = tokio::io::duplex(4096);
         let server =
             tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
-        let client = crate::protocol::rpc_builder()
+        let client = crate::protocol::rpc_builder(None)
             .client(client_stream)
             .await
             .unwrap()

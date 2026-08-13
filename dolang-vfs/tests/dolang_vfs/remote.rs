@@ -180,7 +180,7 @@ async fn opaque_session_chains_to_unix_vfs() {
     let (outer, outer_task) = connected_pair().await;
 
     let socket = typed_path(socket).unwrap();
-    let inner = outer.unix_socket(socket.to_path()).await.unwrap();
+    let inner = outer.unix_socket(socket.to_path(), None).await.unwrap();
     assert_eq!(inner.target(), &dolang_vfs::target::TargetInfo::current());
 
     let dir = typed_path(temp.path().join("through-chain")).unwrap();
@@ -224,8 +224,14 @@ async fn opaque_session_supports_multiple_vfs_hops() {
 
     let middle_path = typed_path(middle_socket).unwrap();
     let inner_path = typed_path(inner_socket).unwrap();
-    let middle = outer.unix_socket(middle_path.to_path()).await.unwrap();
-    let inner = middle.unix_socket(inner_path.to_path()).await.unwrap();
+    let middle = outer
+        .unix_socket(middle_path.to_path(), None)
+        .await
+        .unwrap();
+    let inner = middle
+        .unix_socket(inner_path.to_path(), None)
+        .await
+        .unwrap();
     assert_eq!(inner.target(), &dolang_vfs::target::TargetInfo::current());
 
     inner.as_client().unwrap().stop().await.unwrap();
@@ -245,7 +251,10 @@ async fn outer_teardown_does_not_stop_retained_vfs_daemon() {
     let (outer, outer_task) = connected_pair().await;
 
     let socket_path = typed_path(socket.clone()).unwrap();
-    let inner = outer.unix_socket(socket_path.to_path()).await.unwrap();
+    let inner = outer
+        .unix_socket(socket_path.to_path(), None)
+        .await
+        .unwrap();
     drop(inner);
     outer.stop().await.unwrap();
     outer_task.await.unwrap().unwrap();

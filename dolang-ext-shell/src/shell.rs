@@ -450,13 +450,20 @@ impl<'v> Object<'v> for Vfs {
             .await
     }
 
-    fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
+    fn build<'a>(mut builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
+        let key_sym = builder.sym("key");
         let builder = builder.type_method("unix_socket", async move |_this, strand, args, out| {
-            let ([path], []) = unpack!(strand, args, 1, 0)?;
+            let ([path], [key]) = unpack!(strand, args, 1, 0, key_sym = None)?;
             let global = strand.vm().state::<Global<'v>>();
             let path = path_from_value(strand, global, &path)?;
+            let key = key
+                .map(|key| bytes_from_value(strand, &key, "key"))
+                .transpose()?;
             let vfs = global.local.get(strand).vfs();
-            let vfs = error::io_result(strand, vfs.unix_socket(path.to_path()).await)?;
+            let vfs = error::io_result(
+                strand,
+                vfs.unix_socket(path.to_path(), key.as_deref()).await,
+            )?;
             let client = vfs.into_client().ok_or_else(|| {
                 Error::runtime(
                     strand,
@@ -631,6 +638,24 @@ impl<'v> Object<'v> for Vfs {
             );
             Ok(())
         })
+    }
+}
+
+/// Extracts raw bytes from a `Str` or `Bin` argument.
+fn bytes_from_value<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    value: &Value<'v>,
+    name: &str,
+) -> Result<'v, 's, Vec<u8>> {
+    if let Some(value) = value.as_str(strand) {
+        Ok(strand.access(|x| value.as_str(x).as_bytes().to_vec()))
+    } else if let Some(value) = value.as_bin(strand) {
+        Ok(value.to_vec())
+    } else {
+        Err(Error::type_error(
+            strand,
+            format!("{name}: expected Str or Bin"),
+        ))
     }
 }
 

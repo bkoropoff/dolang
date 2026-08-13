@@ -25,7 +25,10 @@ use std::os::windows::io::OwnedHandle;
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::{NamedPipeClient, NamedPipeServer};
 
-use crate::{Error, Limits, Protocol, client::Client, fragment, server::Server, transport};
+use crate::{
+    AuthKey, Error, Limits, Protocol, auth::Auth, client::Client, fragment, server::Server,
+    transport,
+};
 
 /// Builds an unbound client or server endpoint.
 ///
@@ -39,6 +42,7 @@ pub struct Builder {
     name: String,
     versions: Vec<u16>,
     limits: Limits,
+    key: Option<AuthKey>,
 }
 
 impl Builder {
@@ -50,7 +54,18 @@ impl Builder {
             name: name.to_owned(),
             versions: versions.to_vec(),
             limits: Limits::default(),
+            key: None,
         }
+    }
+
+    /// Requires mutual proof of a pre-shared key during negotiation.
+    ///
+    /// Both endpoints must be configured with the same key, or neither: a
+    /// mismatch in either direction aborts the handshake. See [`crate::auth`]
+    /// for what this does and does not protect against.
+    pub fn key(mut self, key: AuthKey) -> Self {
+        self.key = Some(key);
+        self
     }
 
     /// Sets the maximum complete wire-fragment size, including its header.
@@ -151,6 +166,14 @@ impl Builder {
         (&self.name, &self.versions)
     }
 
+    fn client_auth(&self) -> Option<Auth> {
+        self.key.map(|key| key.as_client())
+    }
+
+    fn server_auth(&self) -> Option<Auth> {
+        self.key.map(|key| key.as_server())
+    }
+
     /// Negotiates a client session over a bidirectional byte stream.
     pub async fn client<T>(self, stream: T) -> Result<crate::client::Unbound, Error>
     where
@@ -164,6 +187,7 @@ impl Builder {
             #[cfg(windows)]
             None,
             self.app_protocol(),
+            self.client_auth(),
         )
         .await
     }
@@ -187,6 +211,7 @@ impl Builder {
             #[cfg(windows)]
             None,
             self.app_protocol(),
+            self.client_auth(),
         )
         .await
     }
@@ -205,6 +230,7 @@ impl Builder {
             #[cfg(windows)]
             None,
             self.app_protocol(),
+            self.client_auth(),
         )
         .await
     }
@@ -237,6 +263,7 @@ impl Builder {
             self.limits,
             Some(peer_process),
             self.app_protocol(),
+            self.client_auth(),
         )
         .await
     }
@@ -269,6 +296,7 @@ impl Builder {
             self.limits,
             Some(peer_process),
             self.app_protocol(),
+            self.client_auth(),
         )
         .await
     }
@@ -284,6 +312,7 @@ impl Builder {
             transport::AnyReceiver::Generic(receiver),
             self.limits,
             self.app_protocol(),
+            self.server_auth(),
         )
         .await
     }
@@ -305,6 +334,7 @@ impl Builder {
             transport::AnyReceiver::Generic(receiver),
             self.limits,
             self.app_protocol(),
+            self.server_auth(),
         )
         .await
     }
@@ -321,6 +351,7 @@ impl Builder {
             transport::AnyReceiver::Unix(receiver),
             self.limits,
             self.app_protocol(),
+            self.server_auth(),
         )
         .await
     }
@@ -337,6 +368,7 @@ impl Builder {
             transport::AnyReceiver::Windows(receiver),
             self.limits,
             self.app_protocol(),
+            self.server_auth(),
         )
         .await
     }
@@ -353,6 +385,7 @@ impl Builder {
             transport::AnyReceiver::Windows(receiver),
             self.limits,
             self.app_protocol(),
+            self.server_auth(),
         )
         .await
     }
@@ -364,11 +397,13 @@ async fn negotiate_client(
     limits: Limits,
     #[cfg(windows)] peer_process: Option<OwnedHandle>,
     app_protocol: (&str, &[u16]),
+    auth: Option<Auth>,
 ) -> Result<UnboundClient, Error> {
     // The RPC framing version itself is an implementation detail,
     // uninteresting once binding to `P` — only the application-protocol
     // version negotiated below is surfaced.
-    let negotiated = fragment::negotiate(&mut sender, &mut receiver, &limits, app_protocol).await?;
+    let negotiated =
+        fragment::negotiate(&mut sender, &mut receiver, &limits, app_protocol, auth).await?;
     receiver.set_max_handles_per_fragment(negotiated.limits.max_handles_per_fragment);
     Ok(UnboundClient {
         sender,
@@ -385,11 +420,13 @@ async fn negotiate_server(
     mut receiver: transport::AnyReceiver,
     limits: Limits,
     app_protocol: (&str, &[u16]),
+    auth: Option<Auth>,
 ) -> Result<UnboundServer, Error> {
     // The RPC framing version itself is an implementation detail,
     // uninteresting once binding to `P` — only the application-protocol
     // version negotiated below is surfaced.
-    let negotiated = fragment::negotiate(&mut sender, &mut receiver, &limits, app_protocol).await?;
+    let negotiated =
+        fragment::negotiate(&mut sender, &mut receiver, &limits, app_protocol, auth).await?;
     receiver.set_max_handles_per_fragment(negotiated.limits.max_handles_per_fragment);
     Ok(UnboundServer {
         sender,

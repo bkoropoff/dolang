@@ -1,4 +1,5 @@
 #![cfg(unix)]
+use dolang_rpc::AuthKey;
 use dolang_vfs::{
     Child, Command, FileHandle, OpenOptions, Vfs,
     client::Client,
@@ -502,7 +503,7 @@ async fn unix_vfs_connects_to_another_server() {
     let inner_task = start_server(&inner_path).await;
 
     let client = connect_client(&socket_path).await;
-    let inner = client.unix_socket(typed(&inner_path)).await.unwrap();
+    let inner = client.unix_socket(typed(&inner_path), None).await.unwrap();
     assert_eq!(inner.target(), &TargetInfo::current());
 
     inner.as_client().unwrap().stop().await.unwrap();
@@ -520,7 +521,7 @@ async fn unix_vfs_connect_missing() {
     let server_task = start_server(&socket_path).await;
 
     let client = connect_client(&socket_path).await;
-    let result = client.unix_socket(typed(&missing_path)).await;
+    let result = client.unix_socket(typed(&missing_path), None).await;
     assert!(result.is_err());
 
     server_task.abort();
@@ -1102,4 +1103,84 @@ async fn glob_local_invalid_pattern() {
         .await;
 
     assert!(result.is_err());
+}
+
+// --- Pre-shared key authentication ---
+
+const TEST_KEY: &[u8] = b"a-sufficiently-long-test-key";
+
+async fn start_keyed_server(socket_path: &Path, key: &[u8]) -> JoinHandle<()> {
+    let key = AuthKey::new(key).unwrap();
+    let server = dolang_vfs::server::Server::bind_with_key(socket_path, Some(key))
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = server.accept().await;
+    })
+}
+
+#[tokio::test]
+async fn keyed_client_connects_to_keyed_server() {
+    let dir = tempdir().unwrap();
+    let socket_path = dir.path().join("test.sock");
+    let server_task = start_keyed_server(&socket_path, TEST_KEY).await;
+
+    let client = Client::connect_with_key(&socket_path, Some(AuthKey::new(TEST_KEY).unwrap()))
+        .await
+        .unwrap();
+    assert_eq!(client.target(), &TargetInfo::current());
+
+    client.stop().await.unwrap();
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn wrong_key_is_rejected_without_disturbing_the_server() {
+    let dir = tempdir().unwrap();
+    let socket_path = dir.path().join("test.sock");
+    let server_task = start_keyed_server(&socket_path, TEST_KEY).await;
+
+    let wrong = AuthKey::new(b"an-entirely-different-key").unwrap();
+    let result = Client::connect_with_key(&socket_path, Some(wrong)).await;
+    assert!(result.is_err(), "a client with the wrong key was accepted");
+
+    // The rejected attempt must not have cost the real client anything: the
+    // server is still listening and still accepts a correct key.
+    let client = Client::connect_with_key(&socket_path, Some(AuthKey::new(TEST_KEY).unwrap()))
+        .await
+        .unwrap();
+    assert_eq!(client.target(), &TargetInfo::current());
+
+    client.stop().await.unwrap();
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn unkeyed_client_is_rejected_by_a_keyed_server() {
+    let dir = tempdir().unwrap();
+    let socket_path = dir.path().join("test.sock");
+    let server_task = start_keyed_server(&socket_path, TEST_KEY).await;
+
+    let result = Client::connect(&socket_path).await;
+    assert!(result.is_err(), "an unkeyed client was accepted");
+
+    server_task.abort();
+    let _ = server_task.await;
+}
+
+#[tokio::test]
+async fn keyed_client_is_rejected_by_an_unkeyed_server() {
+    let dir = tempdir().unwrap();
+    let socket_path = dir.path().join("test.sock");
+    let server_task = start_server(&socket_path).await;
+
+    let result =
+        Client::connect_with_key(&socket_path, Some(AuthKey::new(TEST_KEY).unwrap())).await;
+    assert!(
+        result.is_err(),
+        "a keyed client was accepted by an unkeyed server"
+    );
+
+    server_task.abort();
+    let _ = server_task.await;
 }

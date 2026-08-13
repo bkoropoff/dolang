@@ -101,6 +101,8 @@ pub fn main(args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> io::Result<()>
     // Outer option: whether --login-env was given at all. Inner: the shell it
     // explicitly named, if any.
     let mut login_env: Option<Option<OsString>> = None;
+    #[cfg_attr(not(unix), allow(unused_mut, unused_variables))]
+    let mut key_stdin = false;
 
     let mut args = args.into_iter();
 
@@ -118,9 +120,18 @@ pub fn main(args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> io::Result<()>
             continue;
         }
         #[cfg(unix)]
-        if s == "--listen" {
+        if s == "--listen" || s == "--accept" {
             mode = Some(s);
             continue;
+        }
+        #[cfg(unix)]
+        if s == "--key-stdin" {
+            key_stdin = true;
+            continue;
+        }
+        #[cfg(not(unix))]
+        if s == "--key-stdin" {
+            return Err(io::Error::other("--key-stdin is only supported on Unix"));
         }
         #[cfg(windows)]
         if s == "--connect" {
@@ -133,8 +144,8 @@ pub fn main(args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> io::Result<()>
             continue;
         }
         #[cfg(not(unix))]
-        if s == "--listen" {
-            return Err(io::Error::other("--listen is only supported on Unix"));
+        if s == "--listen" || s == "--accept" {
+            return Err(io::Error::other(format!("{s} is only supported on Unix")));
         }
         #[cfg(not(windows))]
         if s == "--connect" {
@@ -195,8 +206,28 @@ pub fn main(args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> io::Result<()>
         return Err(io::Error::other(format!("unknown option: {}", s)));
     }
 
-    let mode = mode
-        .ok_or_else(|| io::Error::other("missing --stdio, --listen <path>, or --connect <path>"))?;
+    let mode = mode.ok_or_else(|| {
+        io::Error::other("missing --stdio, --listen <path>, --accept <path>, or --connect <path>")
+    })?;
+
+    // Read the key before anything binds a socket, so a listener never exists
+    // in an unauthenticated state, and before the environment is touched, so
+    // it stays adjacent to argument handling.
+    #[cfg(unix)]
+    let key = if key_stdin {
+        if mode == "--stdio" {
+            // stdin carries the RPC transport in that mode. A peer reached
+            // over stdio is authenticated by whatever established the channel
+            // (ssh, a pipe from a parent process), so there is nothing for a
+            // key to add and nowhere to read it from.
+            return Err(io::Error::other(
+                "--key-stdin cannot be combined with --stdio",
+            ));
+        }
+        Some(read_key_from_stdin()?)
+    } else {
+        None
+    };
 
     // The probe emits a snapshot of the environment we were started with, so
     // it must run before anything modifies it.
@@ -249,7 +280,14 @@ pub fn main(args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> io::Result<()>
             if mode_args.len() != 1 {
                 return Err(io::Error::other("--listen requires exactly one argument"));
             }
-            foreground(Path::new(&mode_args[0]))?;
+            foreground(Path::new(&mode_args[0]), key)?;
+        }
+        #[cfg(unix)]
+        "--accept" => {
+            if mode_args.len() != 1 {
+                return Err(io::Error::other("--accept requires exactly one argument"));
+            }
+            accept_one(Path::new(&mode_args[0]), key)?;
         }
         #[cfg(windows)]
         "--connect" => {
@@ -406,11 +444,48 @@ async fn unix_interrupt_signal() -> io::Result<()> {
     }
 }
 
+/// Reads a length-prefixed key from standard input: one byte of length,
+/// then exactly that many bytes.
+///
+/// Framing rather than a delimiter so the key may be arbitrary binary with no
+/// escaping and no forbidden bytes, and so the read consumes exactly the key
+/// and not a byte more. A single length byte caps it at 255, far above
+/// anything a key needs.
+///
+/// stdin is used because it is the one channel the launcher can write that
+/// leaves no trace a third party can read: an argument vector is world-visible
+/// through `/proc`, and an environment variable is both visible to anything
+/// that can read the process's environ and inherited by every child this agent
+/// goes on to spawn. What is read here is consumed, and afterwards there is
+/// nothing left to recover.
 #[cfg(unix)]
-async fn create_server(socket_path: &Path) -> Result<Server, io::Error> {
-    let parent = socket_path
-        .parent()
-        .ok_or_else(|| io::Error::other("socket path has no parent"))?;
+fn read_key_from_stdin() -> io::Result<dolang_rpc::AuthKey> {
+    use std::io::Read;
+
+    let mut stdin = io::stdin().lock();
+    let mut len = [0u8; 1];
+    stdin
+        .read_exact(&mut len)
+        .map_err(|error| io::Error::other(format!("--key-stdin: reading key length: {error}")))?;
+    let mut key = vec![0u8; usize::from(len[0])];
+    stdin
+        .read_exact(&mut key)
+        .map_err(|error| io::Error::other(format!("--key-stdin: reading key: {error}")))?;
+    dolang_rpc::AuthKey::new(&key).map_err(io::Error::other)
+}
+
+/// Checks the containing directory's permissions and binds `socket_path`.
+///
+/// The mode is loosened to 0666 because the peer's uid is not knowable in
+/// advance -- a container may map it arbitrarily -- which is precisely why a
+/// key is worth having. The directory check is what keeps the socket from
+/// being reachable by anyone who merely shares the filesystem.
+#[cfg(unix)]
+async fn bind_socket(
+    path: &Path,
+    parent: &Path,
+    key: Option<dolang_rpc::AuthKey>,
+) -> Result<Server, io::Error> {
     let mode = tokio::fs::metadata(&parent).await?.permissions().mode() & 0o777;
 
     if mode != 0o700 {
@@ -419,17 +494,38 @@ async fn create_server(socket_path: &Path) -> Result<Server, io::Error> {
         )));
     }
 
+    let server = Server::bind_with_key(path, key).await?;
+
+    let mut permissions = tokio::fs::metadata(path).await?.permissions();
+    permissions.set_mode(0o666);
+    tokio::fs::set_permissions(path, permissions).await?;
+
+    Ok(server)
+}
+
+#[cfg(unix)]
+fn socket_parent(socket_path: &Path) -> Result<&Path, io::Error> {
+    socket_path
+        .parent()
+        .ok_or_else(|| io::Error::other("socket path has no parent"))
+}
+
+#[cfg(unix)]
+async fn create_server(
+    socket_path: &Path,
+    key: Option<dolang_rpc::AuthKey>,
+) -> Result<Server, io::Error> {
+    let parent = socket_parent(socket_path)?;
     let tmp_path = socket_path.with_added_extension("incomplete");
 
     if tmp_path.exists() {
         let _ = std::fs::remove_file(&tmp_path);
     }
 
-    let server = Server::bind(&tmp_path).await?;
-
-    let mut permissions = tokio::fs::metadata(&tmp_path).await?.permissions();
-    permissions.set_mode(0o666);
-    tokio::fs::set_permissions(&tmp_path, permissions).await?;
+    // Bind under a temporary name and rename into place, so that the socket
+    // appearing at `socket_path` is proof it is ready: `--listen` clients find
+    // it by polling for its existence.
+    let server = bind_socket(&tmp_path, parent, key).await?;
     tokio::fs::rename(&tmp_path, socket_path).await?;
 
     Ok(server)
@@ -468,15 +564,65 @@ async fn accept_loop(server: Server, print_ready: bool) -> Result<(), io::Error>
 /// Returns `Ok(())` on successful socket bind and server start.
 /// Returns an error if the socket cannot be bound.
 #[cfg(unix)]
-fn foreground(socket_path: &Path) -> io::Result<()> {
+fn foreground(socket_path: &Path, key: Option<dolang_rpc::AuthKey>) -> io::Result<()> {
     // Single-threaded: every used configuration serves a single client, and
     // a multi-thread runtime measurably hurts single-stream pipe throughput
     // (see dolang-rpc's benches/pipe_trailer.rs and benches/pipe_raw.rs).
     let rt = Builder::new_current_thread().enable_all().build()?;
 
     rt.block_on(async move {
-        let server = create_server(socket_path).await?;
+        let server = create_server(socket_path, key).await?;
         let res = accept_loop(server, true).await;
+        if socket_path.exists() {
+            let _ = std::fs::remove_file(socket_path);
+        }
+        res
+    })
+}
+
+/// Serve exactly one successfully negotiated client, then exit.
+///
+/// The socket is unlinked as soon as a client authenticates, so the window in
+/// which anything can reach it is no longer than the session takes to start.
+/// A connection that fails to negotiate leaves the socket in place and the
+/// slot unclaimed: losing the race to an impostor costs the real client an
+/// attempt, not its session.
+///
+/// Unlike [`foreground`], this binds the socket directly at its final path.
+/// The staging rename exists only so that a client polling for the path's
+/// existence cannot find a socket that is not yet listening, and here the
+/// `READY` line -- printed after the mode is widened -- is a better signal
+/// than the path's existence ever was.
+#[cfg(unix)]
+fn accept_one(socket_path: &Path, key: Option<dolang_rpc::AuthKey>) -> io::Result<()> {
+    let rt = Builder::new_current_thread().enable_all().build()?;
+
+    rt.block_on(async move {
+        let parent = socket_parent(socket_path)?;
+        if socket_path.exists() {
+            let _ = std::fs::remove_file(socket_path);
+        }
+        let server = bind_socket(socket_path, parent, key).await?;
+
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigint = signal(SignalKind::interrupt())?;
+        let mut sigterm = signal(SignalKind::terminate())?;
+
+        println!("READY");
+
+        let serve = server.accept_one(|| {
+            // The listener has done its job. Unlinking here rather than after
+            // the session keeps the path exposed for the shortest time we can
+            // manage, and a crash afterwards cannot leave it behind.
+            let _ = std::fs::remove_file(socket_path);
+        });
+
+        let res = tokio::select! {
+            res = serve => res,
+            _ = sigint.recv() => Ok(()),
+            _ = sigterm.recv() => Ok(()),
+        };
+
         if socket_path.exists() {
             let _ = std::fs::remove_file(socket_path);
         }

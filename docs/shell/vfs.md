@@ -113,10 +113,21 @@ context, including its original working directory and environment.
 [`Vfs func`](../api/shell/vfs.md#vfs-func) connects to any strand which
 speaks the VFS protocol on its input and output pipe, typically by immediately
 running `dolang-vfs --stdio`.
-[`Vfs.unix_socket`](../api/shell/vfs.md#unix_socket-path) connects to a
+[`Vfs.unix_socket`](../api/shell/vfs.md#unix_socket-path-key) connects to a
 `dolang-vfs --listen <socket_path>` instance on Unix, and
 [`Vfs.windows_admin`](../api/shell/vfs.md#windows_admin-cd-env)
 performs Windows UAC elevation.
+
+A socket connection can be authenticated with a pre-shared key, which both
+ends prove knowledge of during the handshake. This is worth doing when the
+socket must be world-connectable because the uid that will connect is not
+knowable in advance — a container runtime may map ids however it likes, and a
+colliding uid would otherwise be enough to reach the agent, or to replace its
+socket. Start the agent with `dolang-vfs --key-stdin --accept <socket_path>`,
+write the key to its standard input as a single length byte followed by that
+many bytes, and pass the same key to `Vfs.unix_socket`. `--accept` serves one
+authenticated client and unlinks the socket as soon as that session is
+established.
 
 Unix-socket and Windows administrator connections are resolved through the
 active context. This makes it possible to enter an SSH host and then connect to
