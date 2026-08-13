@@ -425,6 +425,17 @@ def cross_domain_pipeline_relays_between_two_remote_vfs()
   assert_eq $res foo
 
 #[test]
+def stopping_remote_vfs_after_abandoned_pipeline()
+  # Throwing from a later stage cancels the pipe request that set the pipeline
+  # up, so its response comes back with nobody left to claim the stdio
+  # endpoints it carries. Those endpoints hold drain slots, so if nothing
+  # releases them the `stop` in `with_remote_vfs` waits on the drain forever.
+  assert_throws $RuntimeError do
+    with_remote_vfs do pipeline
+      do run echo hi
+      do throw RuntimeError "abandoned"
+
+#[test]
 def cross_domain_redirects_host_file_into_remote_process_stdin()
   with_temp_dir do |dir|
     let path = (dir / "input.txt")
