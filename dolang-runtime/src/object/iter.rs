@@ -5,7 +5,7 @@ use crate::{
     bytecode::Variadic,
     call,
     error::{Error, Result},
-    gc::{Annex, Collect, arena::Visit},
+    gc::{Collect, arena::Visit},
     object::{
         BoundMethod,
         protocol::{Inspect, Protocol, Recv, Spread, SpreadContext},
@@ -1377,11 +1377,13 @@ impl<'v> Protocol<'v> for Iter {
             }
             sym::MAP => {
                 let ([obj, func], []) = unpack!(strand, args, 2, 0)?;
-                create_map(strand, &obj, func, true, false, out).await
+                create_map(strand, &obj, func, out);
+                Ok(())
             }
             sym::FILTER => {
                 let ([obj, pred], []) = unpack!(strand, args, 2, 0)?;
-                create_filter(strand, &obj, pred, true, false, out).await
+                create_filter(strand, &obj, pred, out);
+                Ok(())
             }
             sym::CHAIN => create_chain_from_args(strand, args, out).await,
             sym::ZIP => create_zip_from_args(strand, args, out).await,
@@ -1503,11 +1505,13 @@ impl<'v> Protocol<'v> for Sink {
             }
             sym::PREMAP => {
                 let ([obj, func], []) = unpack!(strand, args, 2, 0)?;
-                create_map(strand, &obj, func, false, true, out).await
+                create_premap(strand, &obj, func, out);
+                Ok(())
             }
             sym::PREFILTER => {
                 let ([obj, pred], []) = unpack!(strand, args, 2, 0)?;
-                create_filter(strand, &obj, pred, false, true, out).await
+                create_prefilter(strand, &obj, pred, out);
+                Ok(())
             }
             _ => Err(Error::field(strand, method)),
         }
@@ -1526,28 +1530,21 @@ impl<'v> Protocol<'v> for Sink {
     }
 }
 
+/// Iterator adapter applying a function to each item yielded by the source.
+///
+/// The contravariant counterpart is [`Premap`]. The two are separate types
+/// rather than one type with a direction flag: `map` and `premap` are distinct
+/// names on disjoint surfaces (`ITERABLE_METHODS` vs `SINKABLE_METHODS`), so
+/// nothing needs to resolve a direction at runtime.
 pub(crate) struct Map<'v> {
     func: Value<'v>,
     obj: Value<'v>,
 }
 
-pub(crate) struct MapAnnex {
-    has_input: bool,
-    has_output: bool,
-}
-
-impl Annex for MapAnnex {
-    fn accept(&self, _visit: &mut dyn Visit) -> ControlFlow<()> {
-        ControlFlow::Continue(())
-    }
-
-    fn clear(&self) {}
-}
-
 unsafe impl<'v> Collect for Map<'v> {
     const CYCLIC: bool = true;
     const IMMUTABLE: bool = false;
-    type Annex = MapAnnex;
+    type Annex = ();
 
     fn accept(&self, visit: &mut dyn Visit) -> ControlFlow<()> {
         self.func.accept(visit)?;
@@ -1563,19 +1560,11 @@ unsafe impl<'v> Collect for Map<'v> {
 
 impl<'v> Protocol<'v> for Map<'v> {
     fn op_type<'a, 's>(
-        this: Recv<'v, 'a, Self>,
+        _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,
     ) {
-        Output::set(
-            strand,
-            out,
-            if this.annex().has_input {
-                &strand.singletons().map_iter
-            } else {
-                &strand.singletons().output_iter
-            },
-        );
+        Output::set(strand, out, &strand.singletons().map_iter);
     }
 
     fn op_debug<'a, 's>(
@@ -1591,9 +1580,6 @@ impl<'v> Protocol<'v> for Map<'v> {
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        if !this.annex().has_input {
-            return Err(Error::not_supported(strand));
-        }
         Output::set(strand, out, &this);
         Ok(())
     }
@@ -1603,9 +1589,6 @@ impl<'v> Protocol<'v> for Map<'v> {
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, bool> {
-        if !this.annex().has_input {
-            return Err(Error::not_supported(strand));
-        }
         strand
             .with_slots(async move |strand, [mut input, mut func, mut item]| {
                 let borrow = this.borrow(strand)?;
@@ -1622,14 +1605,83 @@ impl<'v> Protocol<'v> for Map<'v> {
             .await
     }
 
+    fn op_get<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        field: Sym<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        if field.tag() == sym::INIT_METHOD {
+            BoundMethod::create(strand, &this, field, out);
+            Ok(())
+        } else {
+            iter_get(strand, &this, field, out)
+        }
+    }
+
+    async fn op_mcall<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        method: Sym<'v, 'a>,
+        args: Args<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        match method.tag() {
+            sym::INIT_METHOD => {
+                let ([_self_val], []) = unpack!(strand, args, 1, 0)?;
+                Ok(())
+            }
+            _ => iter_mcall(strand, &this, method, args, out).await,
+        }
+    }
+}
+
+/// Sink adapter applying a function to each item on its way to the downstream
+/// sink. The covariant counterpart is [`Map`].
+pub(crate) struct Premap<'v> {
+    func: Value<'v>,
+    obj: Value<'v>,
+}
+
+unsafe impl<'v> Collect for Premap<'v> {
+    const CYCLIC: bool = true;
+    const IMMUTABLE: bool = false;
+    type Annex = ();
+
+    fn accept(&self, visit: &mut dyn Visit) -> ControlFlow<()> {
+        self.func.accept(visit)?;
+        self.obj.accept(visit)?;
+        ControlFlow::Continue(())
+    }
+
+    fn clear(&mut self) {
+        self.func.clear();
+        self.obj.clear();
+    }
+}
+
+impl<'v> Protocol<'v> for Premap<'v> {
+    fn op_type<'a, 's>(
+        _this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        out: Slot<'v, 'a>,
+    ) {
+        Output::set(strand, out, &strand.singletons().output_iter);
+    }
+
+    fn op_debug<'a, 's>(
+        _this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        w: &mut dyn crate::value::Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        crate::fmt!(strand, w, "<std.iter.Premap>")
+    }
+
     async fn op_sink<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        if !this.annex().has_output {
-            return Err(Error::not_supported(strand));
-        }
         Output::set(strand, out, &this);
         Ok(())
     }
@@ -1639,9 +1691,6 @@ impl<'v> Protocol<'v> for Map<'v> {
         strand: &'a mut Strand<'v, 's>,
         value: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        if !this.annex().has_output {
-            return Err(Error::not_supported(strand));
-        }
         strand
             .with_slots(async move |strand, [mut output, mut func]| {
                 let borrow = this.borrow(strand)?;
@@ -1663,10 +1712,8 @@ impl<'v> Protocol<'v> for Map<'v> {
         if field.tag() == sym::INIT_METHOD {
             BoundMethod::create(strand, &this, field, out);
             Ok(())
-        } else if this.annex().has_output {
-            sink_get(strand, &this, field, out)
         } else {
-            iter_get(strand, &this, field, out)
+            sink_get(strand, &this, field, out)
         }
     }
 
@@ -1682,34 +1729,24 @@ impl<'v> Protocol<'v> for Map<'v> {
                 let ([_self_val], []) = unpack!(strand, args, 1, 0)?;
                 Ok(())
             }
-            _ if this.annex().has_output => sink_mcall(strand, &this, method, args, out).await,
-            _ => iter_mcall(strand, &this, method, args, out).await,
+            _ => sink_mcall(strand, &this, method, args, out).await,
         }
     }
 }
 
+/// Iterator adapter yielding only the source items satisfying a predicate.
+///
+/// The contravariant counterpart is [`Prefilter`]; see [`Map`] for why the two
+/// directions are separate types.
 pub(crate) struct Filter<'v> {
     pred: Value<'v>,
     obj: Value<'v>,
 }
 
-pub(crate) struct FilterAnnex {
-    has_input: bool,
-    has_output: bool,
-}
-
-impl Annex for FilterAnnex {
-    fn accept(&self, _visit: &mut dyn Visit) -> ControlFlow<()> {
-        ControlFlow::Continue(())
-    }
-
-    fn clear(&self) {}
-}
-
 unsafe impl<'v> Collect for Filter<'v> {
     const CYCLIC: bool = true;
     const IMMUTABLE: bool = false;
-    type Annex = FilterAnnex;
+    type Annex = ();
 
     fn accept(&self, visit: &mut dyn Visit) -> ControlFlow<()> {
         self.pred.accept(visit)?;
@@ -1725,19 +1762,11 @@ unsafe impl<'v> Collect for Filter<'v> {
 
 impl<'v> Protocol<'v> for Filter<'v> {
     fn op_type<'a, 's>(
-        this: Recv<'v, 'a, Self>,
+        _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,
     ) {
-        Output::set(
-            strand,
-            out,
-            if this.annex().has_input {
-                &strand.singletons().filter_iter
-            } else {
-                &strand.singletons().output_iter
-            },
-        );
+        Output::set(strand, out, &strand.singletons().filter_iter);
     }
 
     fn op_debug<'a, 's>(
@@ -1753,9 +1782,6 @@ impl<'v> Protocol<'v> for Filter<'v> {
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        if !this.annex().has_input {
-            return Err(Error::not_supported(strand));
-        }
         Output::set(strand, out, &this);
         Ok(())
     }
@@ -1765,9 +1791,6 @@ impl<'v> Protocol<'v> for Filter<'v> {
         strand: &'a mut Strand<'v, 's>,
         mut out: Slot<'v, 'a>,
     ) -> Result<'v, 's, bool> {
-        if !this.annex().has_input {
-            return Err(Error::not_supported(strand));
-        }
         strand
             .with_slots(async move |strand, [mut input, mut pred, mut res]| {
                 let borrow = this.borrow(strand)?;
@@ -1787,14 +1810,83 @@ impl<'v> Protocol<'v> for Filter<'v> {
             .await
     }
 
+    fn op_get<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        field: Sym<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        if field.tag() == sym::INIT_METHOD {
+            BoundMethod::create(strand, &this, field, out);
+            Ok(())
+        } else {
+            iter_get(strand, &this, field, out)
+        }
+    }
+
+    async fn op_mcall<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        method: Sym<'v, 'a>,
+        args: Args<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        match method.tag() {
+            sym::INIT_METHOD => {
+                let ([_self_val], []) = unpack!(strand, args, 1, 0)?;
+                Ok(())
+            }
+            _ => iter_mcall(strand, &this, method, args, out).await,
+        }
+    }
+}
+
+/// Sink adapter forwarding to the downstream sink only the items satisfying a
+/// predicate. The covariant counterpart is [`Filter`].
+pub(crate) struct Prefilter<'v> {
+    pred: Value<'v>,
+    obj: Value<'v>,
+}
+
+unsafe impl<'v> Collect for Prefilter<'v> {
+    const CYCLIC: bool = true;
+    const IMMUTABLE: bool = false;
+    type Annex = ();
+
+    fn accept(&self, visit: &mut dyn Visit) -> ControlFlow<()> {
+        self.pred.accept(visit)?;
+        self.obj.accept(visit)?;
+        ControlFlow::Continue(())
+    }
+
+    fn clear(&mut self) {
+        self.pred.clear();
+        self.obj.clear();
+    }
+}
+
+impl<'v> Protocol<'v> for Prefilter<'v> {
+    fn op_type<'a, 's>(
+        _this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        out: Slot<'v, 'a>,
+    ) {
+        Output::set(strand, out, &strand.singletons().output_iter);
+    }
+
+    fn op_debug<'a, 's>(
+        _this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        w: &mut dyn crate::value::Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        crate::fmt!(strand, w, "<std.iter.Prefilter>")
+    }
+
     async fn op_sink<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        if !this.annex().has_output {
-            return Err(Error::not_supported(strand));
-        }
         Output::set(strand, out, &this);
         Ok(())
     }
@@ -1804,9 +1896,6 @@ impl<'v> Protocol<'v> for Filter<'v> {
         strand: &'a mut Strand<'v, 's>,
         value: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        if !this.annex().has_output {
-            return Err(Error::not_supported(strand));
-        }
         strand
             .with_slots(async move |strand, [mut output, mut pred]| {
                 let borrow = this.borrow(strand)?;
@@ -1832,10 +1921,8 @@ impl<'v> Protocol<'v> for Filter<'v> {
         if field.tag() == sym::INIT_METHOD {
             BoundMethod::create(strand, &this, field, out);
             Ok(())
-        } else if this.annex().has_output {
-            sink_get(strand, &this, field, out)
         } else {
-            iter_get(strand, &this, field, out)
+            sink_get(strand, &this, field, out)
         }
     }
 
@@ -1851,8 +1938,7 @@ impl<'v> Protocol<'v> for Filter<'v> {
                 let ([_self_val], []) = unpack!(strand, args, 1, 0)?;
                 Ok(())
             }
-            _ if this.annex().has_output => sink_mcall(strand, &this, method, args, out).await,
-            _ => iter_mcall(strand, &this, method, args, out).await,
+            _ => sink_mcall(strand, &this, method, args, out).await,
         }
     }
 }
@@ -1895,7 +1981,8 @@ impl<'v> Protocol<'v> for MapType {
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
         let ([func, obj], []) = unpack!(strand, args, 2, 0)?;
-        create_map(strand, &obj, func, true, false, out).await
+        create_map(strand, &obj, func, out);
+        Ok(())
     }
 }
 
@@ -1937,54 +2024,73 @@ impl<'v> Protocol<'v> for FilterType {
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
         let ([pred, obj], []) = unpack!(strand, args, 2, 0)?;
-        create_filter(strand, &obj, pred, true, false, out).await
+        create_filter(strand, &obj, pred, out);
+        Ok(())
     }
 }
 
-pub(crate) async fn create_map<'v, 's>(
-    strand: &mut Strand<'v, 's>,
+pub(crate) fn create_map<'v>(
+    strand: &mut Strand<'v, '_>,
     obj: &Value<'v>,
     mut func: Slot<'v, '_>,
-    has_input: bool,
-    has_output: bool,
     out: impl Output<'v>,
-) -> Result<'v, 's, ()> {
-    strand.builtin_types().map_iter.create_with_annex(
+) {
+    strand.builtin_types().map_iter.create(
         strand,
         Map {
             func: func.take(),
             obj: obj.dup(),
         },
-        MapAnnex {
-            has_input,
-            has_output,
+        out,
+    );
+}
+
+pub(crate) fn create_premap<'v>(
+    strand: &mut Strand<'v, '_>,
+    obj: &Value<'v>,
+    mut func: Slot<'v, '_>,
+    out: impl Output<'v>,
+) {
+    strand.builtin_types().premap_iter.create(
+        strand,
+        Premap {
+            func: func.take(),
+            obj: obj.dup(),
         },
         out,
     );
-    Ok(())
 }
 
-pub(crate) async fn create_filter<'v, 's>(
-    strand: &mut Strand<'v, 's>,
+pub(crate) fn create_filter<'v>(
+    strand: &mut Strand<'v, '_>,
     obj: &Value<'v>,
     mut pred: Slot<'v, '_>,
-    has_input: bool,
-    has_output: bool,
     out: impl Output<'v>,
-) -> Result<'v, 's, ()> {
-    strand.builtin_types().filter_iter.create_with_annex(
+) {
+    strand.builtin_types().filter_iter.create(
         strand,
         Filter {
             pred: pred.take(),
             obj: obj.dup(),
         },
-        FilterAnnex {
-            has_input,
-            has_output,
+        out,
+    );
+}
+
+pub(crate) fn create_prefilter<'v>(
+    strand: &mut Strand<'v, '_>,
+    obj: &Value<'v>,
+    mut pred: Slot<'v, '_>,
+    out: impl Output<'v>,
+) {
+    strand.builtin_types().prefilter_iter.create(
+        strand,
+        Prefilter {
+            pred: pred.take(),
+            obj: obj.dup(),
         },
         out,
     );
-    Ok(())
 }
 
 pub(crate) fn create_chain<'v>(
@@ -2180,10 +2286,11 @@ impl<'v> Protocol<'v> for Null {
 mod tests {
     use crate::{
         error::ErrorKind,
+        gc::Annex,
         method,
         object::native::{Instance, Object, Type},
         test_support::with_vm,
-        value::{Empty, Nil},
+        value::Empty,
         vm::{Builder, Stateful},
     };
 
@@ -3025,16 +3132,7 @@ mod tests {
                     },
                     Slot::reborrow(&mut func),
                 );
-                create_map(
-                    strand,
-                    &sink,
-                    Slot::reborrow(&mut func),
-                    false,
-                    true,
-                    &mut transformed,
-                )
-                .await
-                .unwrap();
+                create_premap(strand, &sink, Slot::reborrow(&mut func), &mut transformed);
                 transformed.put(strand, 1i64).await.unwrap();
                 transformed.put(strand, 2i64).await.unwrap();
                 assert_eq!(collect_ints(strand, &acc).await.unwrap(), vec![2, 4]);
@@ -3053,183 +3151,11 @@ mod tests {
                     },
                     Slot::reborrow(&mut func),
                 );
-                create_filter(
-                    strand,
-                    &sink,
-                    Slot::reborrow(&mut func),
-                    false,
-                    true,
-                    &mut transformed,
-                )
-                .await
-                .unwrap();
+                create_prefilter(strand, &sink, Slot::reborrow(&mut func), &mut transformed);
                 for v in [1i64, 2, 3, 4] {
                     transformed.put(strand, v).await.unwrap();
                 }
                 assert_eq!(collect_ints(strand, &acc).await.unwrap(), vec![2, 4]);
-            },
-        );
-    }
-
-    #[test]
-    fn map_and_filter_report_not_supported_outside_their_configured_mode() {
-        // `Map`/`Filter` created with `has_input: false` (e.g. via `premap`/`prefilter`)
-        // support only the sink half of the protocol, and vice versa for
-        // `has_output: false` (via `map`/`filter`). Reaching the `not_supported` guards
-        // in `op_iter`/`op_next`/`op_sink`/`op_put` requires calling the wrong half
-        // directly -- there's no `.dol` syntax that does this, since `iter_get`/
-        // `sink_get` already restrict which methods are reachable by name.
-        with_vm(
-            async |strand,
-                   [
-                mut func_a,
-                mut func_b,
-                mut map_out,
-                mut filter_out,
-                mut scratch,
-                mut nil,
-            ]| {
-                Output::set(strand, &mut nil, Nil);
-
-                create_map(
-                    strand,
-                    &nil,
-                    Slot::reborrow(&mut func_a),
-                    false,
-                    true,
-                    &mut map_out,
-                )
-                .await
-                .unwrap();
-                strand
-                    .builtin_types()
-                    .map_iter
-                    .cast(&map_out)
-                    .unwrap()
-                    .enter(strand, async |strand, recv| {
-                        let err = Map::op_iter(recv, strand, Slot::reborrow(&mut scratch))
-                            .await
-                            .unwrap_err();
-                        assert_eq!(err.kind(), ErrorKind::Unsupported);
-                    })
-                    .await;
-                strand
-                    .builtin_types()
-                    .map_iter
-                    .cast(&map_out)
-                    .unwrap()
-                    .enter(strand, async |strand, recv| {
-                        let err = Map::op_next(recv, strand, Slot::reborrow(&mut scratch))
-                            .await
-                            .unwrap_err();
-                        assert_eq!(err.kind(), ErrorKind::Unsupported);
-                    })
-                    .await;
-
-                create_map(
-                    strand,
-                    &nil,
-                    Slot::reborrow(&mut func_b),
-                    true,
-                    false,
-                    &mut map_out,
-                )
-                .await
-                .unwrap();
-                strand
-                    .builtin_types()
-                    .map_iter
-                    .cast(&map_out)
-                    .unwrap()
-                    .enter(strand, async |strand, recv| {
-                        let err = Map::op_sink(recv, strand, Slot::reborrow(&mut scratch))
-                            .await
-                            .unwrap_err();
-                        assert_eq!(err.kind(), ErrorKind::Unsupported);
-                    })
-                    .await;
-                strand
-                    .builtin_types()
-                    .map_iter
-                    .cast(&map_out)
-                    .unwrap()
-                    .enter(strand, async |strand, recv| {
-                        let err = Map::op_put(recv, strand, Slot::reborrow(&mut scratch))
-                            .await
-                            .unwrap_err();
-                        assert_eq!(err.kind(), ErrorKind::Unsupported);
-                    })
-                    .await;
-
-                create_filter(
-                    strand,
-                    &nil,
-                    Slot::reborrow(&mut func_a),
-                    false,
-                    true,
-                    &mut filter_out,
-                )
-                .await
-                .unwrap();
-                strand
-                    .builtin_types()
-                    .filter_iter
-                    .cast(&filter_out)
-                    .unwrap()
-                    .enter(strand, async |strand, recv| {
-                        let err = Filter::op_iter(recv, strand, Slot::reborrow(&mut scratch))
-                            .await
-                            .unwrap_err();
-                        assert_eq!(err.kind(), ErrorKind::Unsupported);
-                    })
-                    .await;
-                strand
-                    .builtin_types()
-                    .filter_iter
-                    .cast(&filter_out)
-                    .unwrap()
-                    .enter(strand, async |strand, recv| {
-                        let err = Filter::op_next(recv, strand, Slot::reborrow(&mut scratch))
-                            .await
-                            .unwrap_err();
-                        assert_eq!(err.kind(), ErrorKind::Unsupported);
-                    })
-                    .await;
-
-                create_filter(
-                    strand,
-                    &nil,
-                    Slot::reborrow(&mut func_b),
-                    true,
-                    false,
-                    &mut filter_out,
-                )
-                .await
-                .unwrap();
-                strand
-                    .builtin_types()
-                    .filter_iter
-                    .cast(&filter_out)
-                    .unwrap()
-                    .enter(strand, async |strand, recv| {
-                        let err = Filter::op_sink(recv, strand, Slot::reborrow(&mut scratch))
-                            .await
-                            .unwrap_err();
-                        assert_eq!(err.kind(), ErrorKind::Unsupported);
-                    })
-                    .await;
-                strand
-                    .builtin_types()
-                    .filter_iter
-                    .cast(&filter_out)
-                    .unwrap()
-                    .enter(strand, async |strand, recv| {
-                        let err = Filter::op_put(recv, strand, Slot::reborrow(&mut scratch))
-                            .await
-                            .unwrap_err();
-                        assert_eq!(err.kind(), ErrorKind::Unsupported);
-                    })
-                    .await;
             },
         );
     }
@@ -3554,16 +3480,7 @@ mod tests {
                     },
                     Slot::reborrow(&mut func),
                 );
-                create_map(
-                    strand,
-                    &it,
-                    Slot::reborrow(&mut func),
-                    true,
-                    false,
-                    &mut map_val,
-                )
-                .await
-                .unwrap();
+                create_map(strand, &it, Slot::reborrow(&mut func), &mut map_val);
                 assert_eq!(map_val.to_debug(strand).unwrap(), "<std.iter.Map>");
                 map_val.get(strand, init_sym, &mut out).unwrap();
                 assert!(out.to_debug(strand).unwrap().contains("bound method"));
@@ -3591,16 +3508,7 @@ mod tests {
                     },
                     Slot::reborrow(&mut func),
                 );
-                create_map(
-                    strand,
-                    &sink,
-                    Slot::reborrow(&mut func),
-                    false,
-                    true,
-                    &mut map_val,
-                )
-                .await
-                .unwrap();
+                create_premap(strand, &sink, Slot::reborrow(&mut func), &mut map_val);
                 map_val.get(strand, put_sym, &mut out).unwrap();
                 assert!(out.to_debug(strand).unwrap().contains("bound method"));
                 method!(strand, &map_val, init_sym, &mut out, &map_val)
@@ -3624,16 +3532,7 @@ mod tests {
                     },
                     Slot::reborrow(&mut func),
                 );
-                create_filter(
-                    strand,
-                    &it,
-                    Slot::reborrow(&mut func),
-                    true,
-                    false,
-                    &mut filter_val,
-                )
-                .await
-                .unwrap();
+                create_filter(strand, &it, Slot::reborrow(&mut func), &mut filter_val);
                 assert_eq!(filter_val.to_debug(strand).unwrap(), "<std.iter.Filter>");
                 filter_val.get(strand, init_sym, &mut out).unwrap();
                 assert!(out.to_debug(strand).unwrap().contains("bound method"));
@@ -3660,16 +3559,7 @@ mod tests {
                     },
                     Slot::reborrow(&mut func),
                 );
-                create_filter(
-                    strand,
-                    &sink,
-                    Slot::reborrow(&mut func),
-                    false,
-                    true,
-                    &mut filter_val,
-                )
-                .await
-                .unwrap();
+                create_prefilter(strand, &sink, Slot::reborrow(&mut func), &mut filter_val);
                 filter_val.get(strand, put_sym, &mut out).unwrap();
                 assert!(out.to_debug(strand).unwrap().contains("bound method"));
                 method!(strand, &filter_val, init_sym, &mut out, &filter_val)
@@ -3761,59 +3651,23 @@ mod tests {
             // `filter_iter`.
             arr.iter(strand, &mut it).await.unwrap();
             Output::set(strand, &mut func, 0i64);
-            create_map(
-                strand,
-                &it,
-                Slot::reborrow(&mut func),
-                true,
-                false,
-                &mut wrapper,
-            )
-            .await
-            .unwrap();
+            create_map(strand, &it, Slot::reborrow(&mut func), &mut wrapper);
             assert!(wrapper.is_instance_of(strand, TypeObject::Value));
 
             arr.iter(strand, &mut it).await.unwrap();
             Output::set(strand, &mut func, 0i64);
-            create_filter(
-                strand,
-                &it,
-                Slot::reborrow(&mut func),
-                true,
-                false,
-                &mut wrapper,
-            )
-            .await
-            .unwrap();
+            create_filter(strand, &it, Slot::reborrow(&mut func), &mut wrapper);
             assert!(wrapper.is_instance_of(strand, TypeObject::Value));
 
             // Map/Filter, has_output (no has_input): `op_type` falls through to the
             // `output_iter` singleton, and `op_sink` (via `Value::sink`) succeeds.
             Output::set(strand, &mut func, 0i64);
-            create_map(
-                strand,
-                &it,
-                Slot::reborrow(&mut func),
-                false,
-                true,
-                &mut wrapper,
-            )
-            .await
-            .unwrap();
+            create_premap(strand, &it, Slot::reborrow(&mut func), &mut wrapper);
             assert!(wrapper.is_instance_of(strand, TypeObject::Value));
             wrapper.sink(strand, &mut func).await.unwrap();
 
             Output::set(strand, &mut func, 0i64);
-            create_filter(
-                strand,
-                &it,
-                Slot::reborrow(&mut func),
-                false,
-                true,
-                &mut wrapper,
-            )
-            .await
-            .unwrap();
+            create_prefilter(strand, &it, Slot::reborrow(&mut func), &mut wrapper);
             assert!(wrapper.is_instance_of(strand, TypeObject::Value));
             wrapper.sink(strand, &mut func).await.unwrap();
         });
