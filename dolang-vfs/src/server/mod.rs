@@ -119,6 +119,20 @@ impl Drain {
     }
 }
 
+/// A reserved drain slot, returned when the endpoint holding it dies.
+///
+/// Accounting rides the endpoint's own lifetime rather than any particular
+/// message, so an endpoint reaches the drain exactly once however it ends:
+/// explicitly closed, consumed by a spawn, or released because the peer
+/// dropped the last opaque naming it.
+struct DrainSlot(Arc<Drain>);
+
+impl Drop for DrainSlot {
+    fn drop(&mut self) {
+        self.0.release(1);
+    }
+}
+
 struct RetainedVfs {
     vfs: AnyVfs,
     session: Option<crate::session::VfsSession>,
@@ -157,13 +171,21 @@ impl OpaqueResource for RetainedFile {
     type Marker = FileMarker;
 }
 
-struct RetainedStdioSend(Mutex<StdioSend>);
+struct RetainedStdioSend {
+    stdio: Mutex<StdioSend>,
+    /// Returned to the drain when the endpoint dies, however it ends.
+    _slot: DrainSlot,
+}
 
 impl OpaqueResource for RetainedStdioSend {
     type Marker = StdioSendMarker;
 }
 
-struct RetainedStdioRecv(Mutex<StdioRecv>);
+struct RetainedStdioRecv {
+    stdio: Mutex<StdioRecv>,
+    /// Returned to the drain when the endpoint dies, however it ends.
+    _slot: DrainSlot,
+}
 
 impl OpaqueResource for RetainedStdioRecv {
     type Marker = StdioRecvMarker;
@@ -782,17 +804,20 @@ impl Connection {
                 ))))
             }
             StdioRecvTarget::Opaque(stdio) => {
+                // Consuming the endpoint hands it to the child, which takes
+                // its drain slot along with it: once a child owns an endpoint
+                // the peer is no longer relaying through it, which is the only
+                // thing the drain protects.
                 let stdio = context
                     .unregister::<RetainedStdioRecv>(stdio)
                     .map_err(|_| Self::invalid_opaque("stdio receive"))?;
-                self.drain.release(1);
                 let Some(stdio) = stdio else {
                     return Err(wire_error(io::Error::new(
                         io::ErrorKind::ResourceBusy,
                         "opaque stdio receive is in use",
                     )));
                 };
-                Ok(Some(stdio.0.into_inner()))
+                Ok(Some(stdio.stdio.into_inner()))
             }
         }
     }
@@ -813,17 +838,20 @@ impl Connection {
                 ))))
             }
             StdioSendTarget::Opaque(stdio) => {
+                // Consuming the endpoint hands it to the child, which takes
+                // its drain slot along with it: once a child owns an endpoint
+                // the peer is no longer relaying through it, which is the only
+                // thing the drain protects.
                 let stdio = context
                     .unregister::<RetainedStdioSend>(stdio)
                     .map_err(|_| Self::invalid_opaque("stdio send"))?;
-                self.drain.release(1);
                 let Some(stdio) = stdio else {
                     return Err(wire_error(io::Error::new(
                         io::ErrorKind::ResourceBusy,
                         "opaque stdio send is in use",
                     )));
                 };
-                Ok(Some(stdio.0.into_inner()))
+                Ok(Some(stdio.stdio.into_inner()))
             }
         }
     }
@@ -950,9 +978,9 @@ impl Connection {
     /// available while stopping: they create no stdio endpoint of their own,
     /// and refusing a spawn could break the very in-flight pipeline stage the
     /// drain exists to protect.
-    fn reserve_stdio(&self, count: usize) -> Result<(), WireError> {
-        if self.drain.try_acquire(count) {
-            Ok(())
+    fn reserve_stdio(&self) -> Result<DrainSlot, WireError> {
+        if self.drain.try_acquire(1) {
+            Ok(DrainSlot(self.drain.clone()))
         } else {
             Err(wire_error(io::Error::new(
                 io::ErrorKind::NotConnected,
@@ -964,10 +992,17 @@ impl Connection {
     async fn handle_pipe(&self, context: &CallContext<VfsProtocol>) -> ResponseKind {
         let result = async {
             let (send, recv) = self.server.vfs.pipe().await.map_err(wire_error)?;
-            self.reserve_stdio(2)?;
+            let send_slot = self.reserve_stdio()?;
+            let recv_slot = self.reserve_stdio()?;
             Ok(PipeResponse {
-                send: context.register(RetainedStdioSend(Mutex::new(send))),
-                recv: context.register(RetainedStdioRecv(Mutex::new(recv))),
+                send: context.register(RetainedStdioSend {
+                    stdio: Mutex::new(send),
+                    _slot: send_slot,
+                }),
+                recv: context.register(RetainedStdioRecv {
+                    stdio: Mutex::new(recv),
+                    _slot: recv_slot,
+                }),
             })
         }
         .await;
@@ -994,28 +1029,24 @@ impl Connection {
             .map_err(|_| Self::invalid_opaque("stdio receive"))
     }
 
+    /// Empties an endpoint's contents, without waiting for the peer to stop
+    /// naming it.
+    ///
+    /// A close that races the endpoint's own read or write leaves the contents
+    /// alive until that operation finishes, and the registration alive until
+    /// the peer drops its last reference. Neither is worth reporting: a peer
+    /// closing while its own I/O is in flight has no flush guarantee to lose,
+    /// and the drain slot is returned when the endpoint actually dies rather
+    /// than when this request happens to be served.
     fn close_stdio_send(
         &self,
         context: &CallContext<VfsProtocol>,
         stdio: Opaque<StdioSendMarker>,
     ) -> Result<(), WireError> {
-        let retained = self.retained_stdio_send(context, stdio.clone())?;
-        drop(retained);
-        let retained = context
+        context
             .unregister::<RetainedStdioSend>(stdio)
             .map_err(|_| Self::invalid_opaque("stdio send"))?;
-        // The endpoint is out of the object table either way, so it no longer
-        // holds up a drain. A racing read or write can still be holding the
-        // last reference, but a peer doing that while closing has no flush
-        // guarantee to lose.
-        self.drain.release(1);
-        match retained {
-            Some(_) => Ok(()),
-            None => Err(wire_error(io::Error::new(
-                io::ErrorKind::ResourceBusy,
-                "opaque stdio send is in use",
-            ))),
-        }
+        Ok(())
     }
 
     fn close_stdio_recv(
@@ -1023,23 +1054,10 @@ impl Connection {
         context: &CallContext<VfsProtocol>,
         stdio: Opaque<StdioRecvMarker>,
     ) -> Result<(), WireError> {
-        let retained = self.retained_stdio_recv(context, stdio.clone())?;
-        drop(retained);
-        let retained = context
+        context
             .unregister::<RetainedStdioRecv>(stdio)
             .map_err(|_| Self::invalid_opaque("stdio receive"))?;
-        // The endpoint is out of the object table either way, so it no longer
-        // holds up a drain. A racing read or write can still be holding the
-        // last reference, but a peer doing that while closing has no flush
-        // guarantee to lose.
-        self.drain.release(1);
-        match retained {
-            Some(_) => Ok(()),
-            None => Err(wire_error(io::Error::new(
-                io::ErrorKind::ResourceBusy,
-                "opaque stdio receive is in use",
-            ))),
-        }
+        Ok(())
     }
 
     async fn handle_stdio_send_write(
@@ -1055,7 +1073,7 @@ impl Connection {
                     "stdio write request is missing its data trailer",
                 ))
             })?;
-            let len = io::copy(trailer, &mut *stdio.0.lock().await)
+            let len = io::copy(trailer, &mut *stdio.stdio.lock().await)
                 .await
                 .map_err(wire_error)?;
             usize::try_from(len).map_err(|_| {
@@ -1076,9 +1094,18 @@ impl Connection {
     ) -> ResponseKind {
         let result = async {
             let stdio = self.retained_stdio_send(context, stdio)?;
-            let clone = stdio.0.lock().await.try_clone().await.map_err(wire_error)?;
-            self.reserve_stdio(1)?;
-            Ok(context.register(RetainedStdioSend(Mutex::new(clone))))
+            let clone = stdio
+                .stdio
+                .lock()
+                .await
+                .try_clone()
+                .await
+                .map_err(wire_error)?;
+            let slot = self.reserve_stdio()?;
+            Ok(context.register(RetainedStdioSend {
+                stdio: Mutex::new(clone),
+                _slot: slot,
+            }))
         }
         .await;
         ResponseKind::StdioSendClone(result)
@@ -1098,7 +1125,7 @@ impl Connection {
             }
         };
         let mut send = context.respond_with_trailer(ResponseKind::StdioRecvRead(Ok(())));
-        let mut stdio = stdio.0.lock().await;
+        let mut stdio = stdio.stdio.lock().await;
         let mut source = (&mut *stdio).take(len as u64);
         if io::copy(&mut source, &mut send).await.is_ok() {
             send.finish();
@@ -1112,9 +1139,18 @@ impl Connection {
     ) -> ResponseKind {
         let result = async {
             let stdio = self.retained_stdio_recv(context, stdio)?;
-            let clone = stdio.0.lock().await.try_clone().await.map_err(wire_error)?;
-            self.reserve_stdio(1)?;
-            Ok(context.register(RetainedStdioRecv(Mutex::new(clone))))
+            let clone = stdio
+                .stdio
+                .lock()
+                .await
+                .try_clone()
+                .await
+                .map_err(wire_error)?;
+            let slot = self.reserve_stdio()?;
+            Ok(context.register(RetainedStdioRecv {
+                stdio: Mutex::new(clone),
+                _slot: slot,
+            }))
         }
         .await;
         ResponseKind::StdioRecvClone(result)
@@ -1270,8 +1306,11 @@ impl Connection {
                 .to_stdio_send()
                 .await
                 .map_err(wire_error)?;
-            self.reserve_stdio(1)?;
-            Ok(context.register(RetainedStdioSend(Mutex::new(stdio))))
+            let slot = self.reserve_stdio()?;
+            Ok(context.register(RetainedStdioSend {
+                stdio: Mutex::new(stdio),
+                _slot: slot,
+            }))
         }
         .await;
         ResponseKind::FileToStdioSend(result)
@@ -1291,8 +1330,11 @@ impl Connection {
                 .to_stdio_recv()
                 .await
                 .map_err(wire_error)?;
-            self.reserve_stdio(1)?;
-            Ok(context.register(RetainedStdioRecv(Mutex::new(stdio))))
+            let slot = self.reserve_stdio()?;
+            Ok(context.register(RetainedStdioRecv {
+                stdio: Mutex::new(stdio),
+                _slot: slot,
+            }))
         }
         .await;
         ResponseKind::FileToStdioRecv(result)

@@ -316,11 +316,6 @@ fn create_pipe_sized(size: usize) -> io::Result<(std::io::PipeReader, std::io::P
 }
 
 impl StdioSend {
-    pub(crate) fn disarm_remote_cleanup(&mut self) {
-        if let Self::Remote(remote) = self {
-            remote.disarm_cleanup();
-        }
-    }
     pub(crate) fn from_file(file: File) -> Self {
         Self::Native(NativeStdioSend::File(file))
     }
@@ -398,11 +393,6 @@ impl StdioSend {
 }
 
 impl StdioRecv {
-    pub(crate) fn disarm_remote_cleanup(&mut self) {
-        if let Self::Remote(remote) = self {
-            remote.disarm_cleanup();
-        }
-    }
     pub(crate) fn from_file(file: File) -> Self {
         Self::Native(NativeStdioRecv::File(file))
     }
