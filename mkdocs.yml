@@ -95,6 +95,7 @@ nav:
     - docker:
       - api/docker/index.md
       - api/docker/container.md
+      - api/docker/container-exit-error.md
       - api/docker/image.md
       - api/docker/noimageerror.md
     - exec:
@@ -147,6 +148,7 @@ nav:
     - podman:
       - api/podman/index.md
       - api/podman/container.md
+      - api/podman/container-exit-error.md
       - api/podman/image.md
       - api/podman/noimageerror.md
     - proc:

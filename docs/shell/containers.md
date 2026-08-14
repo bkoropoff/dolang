@@ -22,8 +22,8 @@ echo $release["PRETTY_NAME"]
 strings or symbols; `nil` unsets a variable and `:INHERIT:` copies its current
 strand value into the container.
 
-`run`, `with`, and `build` also accept `pull:`, either `:missing:` (default;
-pull only if the image isn't present locally) or `:always:`.
+`run`, `with`, and `build` also accept `pull:`: `:MISSING:` (default),
+`:ALWAYS:`, or `:NEVER:`.
 Starting a container waits for its VFS agent to come up with no built-in
 timeout; wrap the call in `time.timeout` if a bound is needed.
 
@@ -92,6 +92,45 @@ The Docker and Podman modules also provide a small management API:
   and pushed.
 - `Container`s expose metadata and can be started, stopped, killed, restarted,
   or removed.
+
+Use `create` when configuration and execution need separate phases:
+
+```
+import docker
+
+let ctr = docker.create ubuntu:24.04 -c "exit 42"
+  name: example
+  entrypoint: /bin/sh
+  env: {MODE: "batch"}
+  mounts:
+    - type: :BIND:
+      source: ./input
+      target: /input
+      readonly: true
+  labels: {app: "example"}
+  ports:
+    - container_port: 8080
+      protocol: :TCP:
+  networks:
+    - bridge
+  user: "1000:1000"
+  cd: /input
+  restart: {policy: :NO:}
+
+ctr.start()
+try
+  ctr.wait()
+catch docker.ContainerExitError: err
+  echo "container exited with status $err.rc"
+finally
+  ctr.remove force: true
+```
+
+Mount `type:` values are `:BIND:`, `:VOLUME:`, and `:TMPFS:`. Port
+`protocol:` values are `:TCP:`, `:UDP:`, and `:SCTP:`. Restart policies are
+`:NO:`, `:ON_FAILURE:`, `:ALWAYS:`, and `:UNLESS_STOPPED:`;
+`max_retries:` is valid only with `:ON_FAILURE:`. Dictionary and record keys
+remain lower-case symbols.
 
 See the [`docker`](../api/docker/index.md) and
 [`podman`](../api/podman/index.md) references for the complete interfaces.

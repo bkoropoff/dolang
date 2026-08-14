@@ -7,6 +7,7 @@ pub let Image = dockman.Image
 pub let Container = dockman.Container
 pub let NoImageError = dockman.NoImageError
 pub let NoContainerError = dockman.NoContainerError
+pub let ContainerExitError = dockman.ContainerExitError
 pub let InvalidImageReferenceError = dockman.InvalidImageReferenceError
 pub let RegistryAuthError = dockman.RegistryAuthError
 pub let ArchiveError = dockman.ArchiveError
@@ -22,25 +23,72 @@ let docker = DockerRuntime()
 
 # Run a direct command in a temporary Docker container from `image`.
 #
-# `pull` follows the same policy as `build`: `:missing:` (default) or
-# `:always:`.
+# `pull` is `:MISSING:` (default), `:ALWAYS:`, or `:NEVER:`.
 #
 # Returns `nil`.
-pub def run image cmd :cd = nil :env = {} :pull = :missing: ...args
-  docker.run $image $cmd :cd :env :pull ...args
+pub def run
+  image cmd
+  :cd = nil
+  :env = {}
+  :pull = :MISSING:
+  :name = nil
+  :mounts = []
+  :labels = {}
+  :ports = []
+  :networks = []
+  :user = nil
+  :entrypoint = nil
+  ...args
+do
+  docker.run $image $cmd :cd :env :pull :name :mounts :labels :ports :networks
+    :user :entrypoint ...args
+
+# Creates a stopped Docker container.
+#
+# `cmd` and trailing arguments override the image command. Configuration uses
+# keyword arguments: `env` and `labels` are dictionaries; `networks` is an
+# array of names or IDs; and `mounts` and `ports` are arrays of records.
+#
+# Mount records use `type:`, `target:`, and optional `source:` and `readonly:`.
+# `type:` is `:BIND:`, `:VOLUME:`, or `:TMPFS:`. Port records use
+# `container_port:` and optional `host_port:`, `host_ip:`, and `protocol:`;
+# `protocol:` defaults to `:TCP:` and also accepts `:UDP:` or `:SCTP:`.
+#
+# `restart` is a record with `policy:` and optional `max_retries:`. Policies
+# are `:NO:`, `:ON_FAILURE:`, `:ALWAYS:`, and `:UNLESS_STOPPED:`;
+# `max_retries:` is only valid with `:ON_FAILURE:`. `pull` is `:MISSING:`
+# (default), `:ALWAYS:`, or `:NEVER:`.
+#
+# Returns a `Container` in the `:CREATED:` state.
+pub def create
+  image cmd = nil
+  :name = nil
+  :env = {}
+  :mounts = []
+  :labels = {}
+  :ports = []
+  :networks = []
+  :user = nil
+  :cd = nil
+  :entrypoint = nil
+  :restart = nil
+  :pull = :MISSING:
+  ...args
+do
+  docker.create $image $cmd :name :env :mounts :labels :ports :networks :user
+    :cd :entrypoint :restart :pull ...args
 
 # Run a function in a temporary Docker container from `image`.
 #
 # Program execution and filesystem access will be redirected for the
 # duration of the function.
 #
-# `pull` follows the same policy as `build`: `:missing:` (default) or
-# `:always:`.
+# `pull` is `:MISSING:` (default), `:ALWAYS:`, or `:NEVER:`.
 #
 # # Returns
 #
 # The result of `func`
-pub def with image func :cd = nil :env = {} :pull = :missing:
+pub def with image func :cd = nil :env = {} :pull = :MISSING:
   docker.with $image $func :cd :env :pull
 
 # Build a Docker image.
@@ -49,8 +97,9 @@ pub def with image func :cd = nil :env = {} :pull = :missing:
 #
 # - `from`: base image
 # - `pull`:
-#     - `:missing:` (default): only pull missing images
-#     - `:always:`: always attempt to pull images
+#     - `:MISSING:` (default): only pull missing images
+#     - `:ALWAYS:`: always attempt to pull images
+#     - `:NEVER:`: never pull images
 # - `tag`: output image tag; may be omitted or repeated
 #
 # # Optional parameters
@@ -100,7 +149,7 @@ pub def with image func :cd = nil :env = {} :pull = :missing:
 # assert_eq $img.tags()[0].tag my-image
 # ```
 pub def build
-  :pull = :missing:
+  :pull = :MISSING:
   :mounts = []
   :cd = nil
   :env = {}

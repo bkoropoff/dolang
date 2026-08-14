@@ -1,6 +1,8 @@
 import progress json patch rand strand proc sys term transfer _vfs
   std:
     - RuntimeError
+    - TypeError
+    - ValueError
   strand:
     - pipeline
     - stream
@@ -46,6 +48,27 @@ let PORT_PROTOCOLS = $
   "tcp": :TCP:
   "udp": :UDP:
   "sctp": :SCTP:
+
+let CONTAINER_MOUNT_TYPES = $
+  BIND: bind
+  VOLUME: volume
+  TMPFS: tmpfs
+
+let CONTAINER_PORT_PROTOCOLS = $
+  TCP: tcp
+  UDP: udp
+  SCTP: sctp
+
+let RESTART_POLICIES = $
+  NO: no
+  ON_FAILURE: on-failure
+  ALWAYS: always
+  UNLESS_STOPPED: unless-stopped
+
+let PULL_POLICIES = $
+  MISSING: missing
+  ALWAYS: always
+  NEVER: never
 
 let INVALID_IMAGE_REFERENCE_ERRORS = $
   - INVALID REFERENCE FORMAT
@@ -144,6 +167,20 @@ pub class NoContainerError: RuntimeError
   pub def (dbg) self
     "<NoContainerError ref: $(dbg self.ref)>"
 
+# Raised by `Container.wait` when the container exits unsuccessfully.
+pub class ContainerExitError: RuntimeError
+  # Numeric container exit status.
+  pub field rc = nil
+
+  def (init) self rc
+    self.rc = rc
+
+  pub def (str) self
+    "container exited with status: $(self.rc)"
+
+  pub def (dbg) self
+    "<ContainerExitError rc: $(self.rc)>"
+
 # Applies a pull policy ("always" / "missing" / "never") up front, as a step
 # separate from starting a container. Docker/Podman's own inline
 # `run --pull=...` prints pull progress and "unable to find image locally"
@@ -152,6 +189,8 @@ pub class NoContainerError: RuntimeError
 # failures (`NoImageError`, `RegistryAuthError`, etc.) via known error
 # patterns.
 def ensure_image runtime img policy
+  policy = PULL_POLICIES.get $policy else: do
+    throw ValueError "unsupported pull policy: $policy"
   if (policy == "always")
     runtime.pull $img
   else if (policy == "missing")
@@ -165,6 +204,116 @@ def ensure_image runtime img policy
 
 def normalize_known mapping value
   mapping.get $value else: $value
+
+def container_env_args env
+  if !(type env Dict)
+    throw TypeError "env: expected Dict"
+  let args = []
+  for key value = env
+    if !(type key Str || type key Sym)
+      throw TypeError "env key: expected Str or Sym"
+    if (value == nil)
+      throw ValueError "env: nil values are not supported by create"
+    if (value == :INHERIT:)
+      args.push --env $key
+    else
+      args.push --env "$key=$value"
+  args
+
+def container_label_args labels
+  if !(type labels Dict)
+    throw TypeError "labels: expected Dict"
+  let args = []
+  for key value = labels
+    args.push --label "$key=$value"
+  args
+
+def container_port_args ports
+  let args = []
+  for port = ports
+    bind port
+      :container_port
+      :host_port = nil
+      :host_ip = nil
+      :protocol = :TCP:
+    let protocol = CONTAINER_PORT_PROTOCOLS.get $protocol else: do
+      throw ValueError "unsupported port protocol: $protocol"
+    let spec = "$container_port/$protocol"
+    if (host_port != nil)
+      spec = "$host_port:$spec"
+    if (host_ip != nil)
+      if (host_port == nil)
+        spec = "$host_ip::$spec"
+      else
+        spec = "$host_ip:$spec"
+    args.push --publish $spec
+  args
+
+def container_network_args networks
+  let args = []
+  for network = networks
+    args.push --network $network
+  args
+
+def container_restart_args restart
+  if (restart == nil)
+    return []
+  bind restart
+    :policy
+    :max_retries = nil
+  let policy = RESTART_POLICIES.get $policy else: do
+    throw ValueError "unsupported restart policy: $policy"
+  if (max_retries != nil)
+    if (policy != "on-failure")
+      throw ValueError "restart max_retries requires on-failure policy"
+    policy = "$policy:$max_retries"
+  ["--restart", policy]
+
+def container_create_args
+  :name
+  :env
+  :mounts
+  :labels
+  :ports
+  :networks
+  :user
+  :cd
+  :entrypoint
+  :restart
+do
+  return $
+    if (name != nil)
+      --name $name
+    ...(container_env_args env)
+    ...(container_mount_args mounts)
+    ...(container_label_args labels)
+    ...(container_port_args ports)
+    ...(container_network_args networks)
+    if (user != nil)
+      --user $user
+    if (cd != nil)
+      --workdir $cd
+    if (entrypoint != nil)
+      --entrypoint $entrypoint
+    ...(container_restart_args restart)
+
+def container_run_args
+  :name
+  :mounts
+  :labels
+  :ports
+  :networks
+  :user
+do
+  return $
+    if (name != nil)
+      --name $name
+    ...(container_mount_args mounts)
+    ...(container_label_args labels)
+    ...(container_port_args ports)
+    ...(container_network_args networks)
+    if (user != nil)
+      --user $user
 
 def normalize_save_format runtime format
   let cli = SAVE_FORMATS.get $format else: do
@@ -375,8 +524,8 @@ pub class Runtime
     else
       ""
 
-  pub def with self ctr thunk :cd = nil :env = {} :pull = :missing:
-    ensure_image $self $ctr (str(pull).lower())
+  pub def with self ctr thunk :cd = nil :env = {} :pull = :MISSING:
+    ensure_image $self $ctr $pull
     let ctr_subdir = Path /tmp/dolang-vfs-dir
     let ctr_socket = (ctr_subdir / "socket")
     let ctr_agent = Path "/tmp/dolang-vfs"
@@ -418,13 +567,82 @@ pub class Runtime
         report_unknown $lines
         throw e
 
-  def run_direct self ctr cmd cd env argv pull
-    ensure_image $self $ctr (str(pull).lower())
-    self.cli run --rm -i --pull=never --entrypoint env $ctr
-      ...(_vfs.env_args cd env) $cmd ...argv
+  def run_direct
+    self ctr cmd
+    :cd
+    :env
+    :argv
+    :pull
+    :name
+    :mounts
+    :labels
+    :ports
+    :networks
+    :user
+    :entrypoint
+  do
+    ensure_image $self $ctr $pull
+    let executable = (entrypoint || cmd)
+    let executable_args = if entrypoint
+      [cmd, ...argv]
+    else
+      argv
+    let config_args = container_run_args
+      :name :mounts :labels :ports :networks :user
+    self.cli run --rm -i --pull=never
+      ...config_args
+      --entrypoint env $ctr ...(_vfs.env_args cd env)
+      $executable ...executable_args
 
-  pub def run self ctr cmd :cd = nil :env = {} :pull = :missing: ...args
-    self.#run_direct $ctr $cmd $cd $env $args.pos_only() $pull
+  pub def run
+    self ctr cmd
+    :cd = nil
+    :env = {}
+    :pull = :MISSING:
+    :name = nil
+    :mounts = []
+    :labels = {}
+    :ports = []
+    :networks = []
+    :user = nil
+    :entrypoint = nil
+    ...args
+  do
+    self.#run_direct $ctr $cmd
+      :cd :env :pull :name :mounts :labels :ports :networks :user :entrypoint
+      argv: $args.pos_only()
+
+  pub def create
+    self image cmd = nil
+    :name = nil
+    :env = {}
+    :mounts = []
+    :labels = {}
+    :ports = []
+    :networks = []
+    :user = nil
+    :cd = nil
+    :entrypoint = nil
+    :restart = nil
+    :pull = :MISSING:
+    ...args
+  do
+    ensure_image $self $image $pull
+    let config_args = container_create_args
+      :name :env :mounts :labels :ports :networks :user :cd :entrypoint :restart
+    let lines = []
+    let output = try
+      sub do self.cli create --pull=never
+        ...config_args
+        $image
+        if (cmd != nil)
+          $cmd ...args.pos_only()
+        stderr: $lines.prechomp()
+    catch proc.Error: e
+      classify_image_error $image $lines
+      report_unknown $lines
+      throw e
+    self.container $output.trim()
 
   pub def build self :pull = :MISSING: :mounts = [] :cd = nil :env = {} :from ...args
     with_temp_dir parent: $runtime_dir() do |subdir|
@@ -611,6 +829,20 @@ pub def mount_args mounts
       args.push --mount=$(",".join parts)
   args
 
+def container_mount_args mounts
+  let normalized = []
+  for mount = mounts
+    bind mount
+      :type :target
+      :source = nil
+      :readonly = false
+    let type = CONTAINER_MOUNT_TYPES.get $type else: do
+      throw ValueError "unsupported container mount type: $type"
+    if (type == "bind" && source == nil)
+      throw ValueError "bind mount requires source"
+    normalized.push $ record :type :target :source :readonly
+  mount_args $normalized
+
 def path_leaf path
   let name = path.name
   if !name
@@ -703,7 +935,7 @@ pub class Builder
   def connect self img :pull = :NEVER:
     if self.#socket.exists()
       self.#socket.remove()
-    ensure_image $self.#runtime $img (str(pull).lower())
+    ensure_image $self.#runtime $img $pull
     let name = "dolang-vfs-$(rand.string 16)"
     # The socket's mode cannot identify the client: the container maps uids
     # however it likes, so it is bound 0666 and anything that can traverse the
@@ -1104,6 +1336,22 @@ pub class Container
 
   pub def start self
     term.mute do self.#runtime.cli start $self.id
+
+  # Waits for the container to stop.
+  #
+  # Returns `nil` when the container exits successfully. Raises
+  # `ContainerExitError` for a nonzero exit status.
+  pub def wait self
+    let lines = []
+    let output = try
+      sub do self.#runtime.cli wait $self.id stderr: $lines.prechomp()
+    catch proc.Error: e
+      classify_container_error $self.id $lines
+      report_unknown $lines
+      throw e
+    let rc = int $output.trim()
+    if (rc != 0)
+      throw ContainerExitError $rc
 
   pub def kill self
     term.mute do self.#runtime.cli kill $self.id
