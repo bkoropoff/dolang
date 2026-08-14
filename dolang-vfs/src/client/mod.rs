@@ -16,6 +16,8 @@ use std::os::unix::{
 };
 #[cfg(windows)]
 use std::os::windows::io::{AsHandle, OwnedHandle};
+#[cfg(all(docsrs, not(windows)))]
+struct OwnedHandle;
 
 #[cfg(unix)]
 use dolang_rpc::AuthKey;
@@ -30,6 +32,8 @@ use dolang_winterop::security::{SecDesc, Sid};
 use tokio::net::UnixStream;
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::NamedPipeServer;
+#[cfg(all(docsrs, not(windows)))]
+struct NamedPipeServer;
 use tokio::{
     io::{AsyncRead, AsyncSeek, AsyncWrite, AsyncWriteExt, ReadBuf},
     task::JoinHandle,
@@ -1063,16 +1067,26 @@ impl Client {
     ///
     /// `server_process` must identify the trusted process at the other end of
     /// the pipe. That process can transfer handles which this process adopts.
-    #[cfg(windows)]
+    #[cfg(any(windows, docsrs))]
+    #[cfg_attr(docsrs, doc(cfg(windows)))]
+    #[cfg_attr(all(docsrs, not(windows)), allow(private_interfaces))]
     pub async unsafe fn from_named_pipe_server(
         pipe: NamedPipeServer,
         server_process: OwnedHandle,
     ) -> crate::Result<Self> {
-        let rpc = unsafe { rpc_builder(None).client_named_pipe_server(pipe, server_process) }
-            .await
-            .map_err(rpc_error)?
-            .bind();
-        Self::initialize(rpc, SessionMode::Native, None).await
+        #[cfg(windows)]
+        {
+            let rpc = unsafe { rpc_builder(None).client_named_pipe_server(pipe, server_process) }
+                .await
+                .map_err(rpc_error)?
+                .bind();
+            Self::initialize(rpc, SessionMode::Native, None).await
+        }
+        #[cfg(all(docsrs, not(windows)))]
+        {
+            let _ = (pipe, server_process);
+            unreachable!()
+        }
     }
 
     fn unsupported<T>(&self, operation: &str) -> crate::Result<T> {

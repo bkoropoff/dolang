@@ -154,9 +154,10 @@ def mkdocs_build_tools spec
       --bin $bin
 
 def rustdoc_build()
-  run_cargo doc --no-deps
-    for crate = DOC_CRATES
-      -p $crate
+  env RUSTDOCFLAGS: "--cfg docsrs" do
+    run_cargo +nightly doc --no-deps
+      for crate = DOC_CRATES
+        -p $crate
 
 def with_mkdocs spec func
   env

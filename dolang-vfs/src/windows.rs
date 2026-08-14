@@ -37,7 +37,7 @@ use crate::Client;
 const EXIT_STARTUP_FAILURE: u32 = 1;
 
 /// An elevated Windows VFS session.
-pub struct AdminSession {
+pub(crate) struct AdminSession {
     client: Client,
     process: OwnedHandle,
     stopped: AtomicBool,
@@ -45,7 +45,7 @@ pub struct AdminSession {
 
 impl AdminSession {
     /// Launches an elevated copy of the current executable and connects to it.
-    pub async fn launch(
+    pub(crate) async fn launch(
         cwd: impl Into<PathBuf>,
         env: HashMap<String, Option<String>>,
     ) -> io::Result<Self> {
@@ -54,7 +54,7 @@ impl AdminSession {
 
     /// Launches a non-elevated copy of the current executable for automated tests.
     #[doc(hidden)]
-    pub async fn launch_unelevated(
+    pub(crate) async fn launch_unelevated(
         cwd: impl Into<PathBuf>,
         env: HashMap<String, Option<String>>,
     ) -> io::Result<Self> {
@@ -62,12 +62,12 @@ impl AdminSession {
     }
 
     /// Returns the VFS RPC client for this session.
-    pub fn client(&self) -> &Client {
+    pub(crate) fn client(&self) -> &Client {
         &self.client
     }
 
     /// Stops the VFS server and waits for the elevated process to exit.
-    pub async fn stop(&self) -> io::Result<()> {
+    pub(crate) async fn stop(&self) -> io::Result<()> {
         let should_stop = !self.stopped.swap(true, Ordering::AcqRel);
         let mut guard = should_stop.then(|| ProcessGuard::new(&self.process));
         let stop_result = if should_stop {

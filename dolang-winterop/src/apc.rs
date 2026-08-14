@@ -23,10 +23,12 @@
 //! drop, so the task's own code can run `.await`-based cleanup before
 //! finishing normally.
 
+use std::{error, fmt, io};
+
+#[cfg(windows)]
 use std::{
     cell::RefCell,
     collections::HashMap,
-    error, fmt, io,
     os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
     panic::{AssertUnwindSafe, catch_unwind},
     pin::Pin,
@@ -40,11 +42,13 @@ use std::{
     thread,
 };
 
+#[cfg(windows)]
 use futures::{
     channel::oneshot,
     future::{self, Either},
     task::ArcWake,
 };
+#[cfg(windows)]
 use windows_sys::Win32::{
     Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE, TRUE},
     System::Threading::{GetCurrentProcess, GetCurrentThread, INFINITE, QueueUserAPC, SleepEx},
@@ -55,15 +59,17 @@ use windows_sys::Win32::{
 /// itself (see [`Reactor::submit`]), never transported across a thread
 /// boundary — which also sidesteps `AsyncFnOnce`'s associated future type
 /// not being nameable as `Send` on stable Rust.
+#[cfg(windows)]
 type BoxedTask = Pin<Box<dyn Future<Output = ()>>>;
 
 /// Uniquely identifies a task within a single [`Reactor`]'s registry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg(windows)]
 struct TaskId(u64);
 
 /// Error returned by [`Reactor::submit`] when the reactor is no longer
-/// accepting new work (after [`Reactor::cancel`], or if the reactor thread
-/// has already exited).
+/// accepting new work (after [`ReactorControl::cancel`], or if the reactor
+/// thread has already exited).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Closed;
 
@@ -102,6 +108,7 @@ impl fmt::Display for ApcCancelled {
 impl error::Error for ApcCancelled {}
 
 /// A per-task registry slot. Only ever touched by the reactor thread.
+#[cfg(windows)]
 struct TaskSlot {
     /// Taken out for the duration of each poll so that reentrant access to
     /// this same slot's other fields (e.g. from `cancel_guard`, which runs
@@ -112,6 +119,7 @@ struct TaskSlot {
     guard_signal: Option<oneshot::Sender<()>>,
 }
 
+#[cfg(windows)]
 #[derive(Default)]
 struct Registry {
     tasks: HashMap<TaskId, TaskSlot>,
@@ -127,6 +135,7 @@ struct Registry {
     should_exit: bool,
 }
 
+#[cfg(windows)]
 thread_local! {
     /// Owned by the reactor thread's loop. Cross-thread requests
     /// (submission, cancellation) always arrive as a closure posted via a
@@ -156,6 +165,7 @@ thread_local! {
 /// the caller keeps open (e.g. via a live `OwnedHandle` it's borrowing
 /// from), or the `GetCurrentThread()` pseudo-handle used from within the
 /// thread it refers to.
+#[cfg(windows)]
 unsafe fn queue_apc(handle: HANDLE, f: impl FnOnce() + Send + 'static) -> io::Result<()> {
     unsafe extern "system" fn trampoline(param: usize) {
         // SAFETY: `param` was produced by `Box::into_raw` below, from a
@@ -195,6 +205,7 @@ unsafe fn queue_apc(handle: HANDLE, f: impl FnOnce() + Send + 'static) -> io::Re
 /// out to be everything (see [`post`] and `run`) — is structurally forced
 /// to go through the same lock, rather than relying on each call site to
 /// separately remember to.
+#[cfg(windows)]
 struct ReactorState {
     thread_handle: OwnedHandle,
     /// Set by [`ReactorControl::cancel`]. Once true, [`Reactor::submit`]
@@ -206,11 +217,13 @@ struct ReactorState {
 /// [`ReactorControl`], and the [`ApcContext`]/[`ApcTask`] belonging to each
 /// live task). Wrapped in a single `Arc` so there's one allocation and one
 /// refcount for the whole reactor rather than three.
+#[cfg(windows)]
 struct ReactorInner {
     state: Mutex<ReactorState>,
     next_id: AtomicU64,
 }
 
+#[cfg(windows)]
 impl Drop for ReactorInner {
     fn drop(&mut self) {
         // This only runs once every strong reference — every `Reactor`
@@ -243,6 +256,7 @@ impl Drop for ReactorInner {
 /// time it's posted (the OS's per-thread APC queue is FIFO) — so an APC
 /// queued while the reactor thread is still willing to accept it is
 /// guaranteed to run before the reactor exits, full stop.
+#[cfg(windows)]
 fn post(inner: &Arc<ReactorInner>, f: impl FnOnce() + Send + 'static) -> io::Result<()> {
     let guard = inner.state.lock().unwrap();
     // SAFETY: `guard.thread_handle` is a live `OwnedHandle`, kept open by
@@ -260,10 +274,12 @@ fn post(inner: &Arc<ReactorInner>, f: impl FnOnce() + Send + 'static) -> io::Res
 /// blocked on) for longer than the task itself, and a strong reference
 /// there would keep the whole reactor alive even after every real handle to
 /// it (`Reactor`, `ReactorControl`, the task itself) is gone.
+#[cfg(windows)]
 struct WakeSignal {
     inner: Weak<ReactorInner>,
 }
 
+#[cfg(windows)]
 impl ArcWake for WakeSignal {
     fn wake_by_ref(arc_self: &Arc<Self>) {
         // Best effort: failure, or the upgrade failing, means the reactor
@@ -284,6 +300,7 @@ impl ArcWake for WakeSignal {
 /// unilaterally shut it down for every other holder.
 #[derive(Clone)]
 pub struct Reactor {
+    #[cfg(windows)]
     inner: Arc<ReactorInner>,
 }
 
@@ -292,7 +309,9 @@ pub struct Reactor {
 /// a single owner's responsibility, distinct from the freely-shared
 /// submission capability held by [`Reactor`] clones.
 pub struct ReactorControl {
+    #[cfg(windows)]
     inner: Arc<ReactorInner>,
+    #[cfg(windows)]
     exit_rx: oneshot::Receiver<()>,
 }
 
@@ -306,99 +325,104 @@ impl Reactor {
     /// OS thread scheduling with no hard bound, so it shouldn't block
     /// whatever executor thread calls this.
     pub async fn new() -> io::Result<(Reactor, ReactorControl)> {
-        let (exit_tx, exit_rx) = oneshot::channel();
-        let (ready_tx, ready_rx) = oneshot::channel::<()>();
-        let (handle_tx, handle_rx) = mpsc::channel::<Weak<ReactorInner>>();
+        #[cfg(windows)]
+        {
+            let (exit_tx, exit_rx) = oneshot::channel();
+            let (ready_tx, ready_rx) = oneshot::channel::<()>();
+            let (handle_tx, handle_rx) = mpsc::channel::<Weak<ReactorInner>>();
 
-        let join_handle = thread::Builder::new()
-            .name("dolang-winterop-apc".into())
-            .spawn(move || {
-                // Signal that we are actually executing our own code before
-                // doing anything else. A freshly created Windows thread can
-                // still be inside the OS's own thread-startup sequence
-                // (loader/CRT init) for a little while after `CreateThread`
-                // returns a valid, already-usable handle; delivering a
-                // `QueueUserAPC` to it during that window races that
-                // startup and can corrupt it. Once *any* of our own code
-                // has run, that window is guaranteed to be over, so the
-                // spawning thread waits for this signal before it (or
-                // anyone else) is allowed to post anything to us.
-                let _ = ready_tx.send(());
+            let join_handle = thread::Builder::new()
+                .name("dolang-winterop-apc".into())
+                .spawn(move || {
+                    // Signal that we are actually executing our own code before
+                    // doing anything else. A freshly created Windows thread can
+                    // still be inside the OS's own thread-startup sequence
+                    // (loader/CRT init) for a little while after `CreateThread`
+                    // returns a valid, already-usable handle; delivering a
+                    // `QueueUserAPC` to it during that window races that
+                    // startup and can corrupt it. Once *any* of our own code
+                    // has run, that window is guaranteed to be over, so the
+                    // spawning thread waits for this signal before it (or
+                    // anyone else) is allowed to post anything to us.
+                    let _ = ready_tx.send(());
 
-                // Wait for a weak reference to the shared state, sent by
-                // the spawning thread right after this thread was created
-                // (see below — it can only be produced once the OS thread
-                // exists, since it wraps this thread's own duplicated
-                // handle). If the sender was dropped instead (spawning
-                // failed after this thread was already created), just exit
-                // without ever entering the alertable wait.
-                let Ok(weak_inner) = handle_rx.recv() else {
-                    return;
-                };
-                run(weak_inner);
-                let _ = exit_tx.send(());
-            })
-            .map_err(io::Error::other)?;
+                    // Wait for a weak reference to the shared state, sent by
+                    // the spawning thread right after this thread was created
+                    // (see below — it can only be produced once the OS thread
+                    // exists, since it wraps this thread's own duplicated
+                    // handle). If the sender was dropped instead (spawning
+                    // failed after this thread was already created), just exit
+                    // without ever entering the alertable wait.
+                    let Ok(weak_inner) = handle_rx.recv() else {
+                        return;
+                    };
+                    run(weak_inner);
+                    let _ = exit_tx.send(());
+                })
+                .map_err(io::Error::other)?;
 
-        if ready_rx.await.is_err() {
-            return Err(io::Error::other("apc reactor thread failed to start"));
+            if ready_rx.await.is_err() {
+                return Err(io::Error::other("apc reactor thread failed to start"));
+            }
+
+            // Duplicate a handle to the new thread that we own independent of
+            // the `JoinHandle` — we never block-join the OS thread (`join()`
+            // instead awaits `exit_rx`, signaled right before the thread's
+            // closure returns), and detach it below.
+            let mut dup: HANDLE = ptr::null_mut();
+            // SAFETY: `join_handle.as_raw_handle()` is a valid, currently-open
+            // thread handle for the thread we just spawned.
+            let ok = unsafe {
+                DuplicateHandle(
+                    GetCurrentProcess(),
+                    join_handle.as_raw_handle() as HANDLE,
+                    GetCurrentProcess(),
+                    &mut dup,
+                    0,
+                    0,
+                    DUPLICATE_SAME_ACCESS,
+                )
+            };
+            if ok == 0 {
+                let err = io::Error::last_os_error();
+                // Unblock the thread (it's parked on `handle_rx.recv()`) so it
+                // exits immediately instead of waiting forever.
+                drop(handle_tx);
+                return Err(err);
+            }
+            // SAFETY: `dup` is a valid, uniquely-owned handle from a successful
+            // `DuplicateHandle` call above.
+            let thread_handle = unsafe { OwnedHandle::from_raw_handle(dup as _) };
+
+            // Detach: dropping a `JoinHandle` without joining it just forfeits
+            // the ability to block-join or observe a panic through it; the OS
+            // thread keeps running independently, driven from here on by our
+            // duplicated `thread_handle`.
+            drop(join_handle);
+
+            let inner = Arc::new(ReactorInner {
+                state: Mutex::new(ReactorState {
+                    thread_handle,
+                    closed: false,
+                }),
+                next_id: AtomicU64::new(0),
+            });
+
+            // The receive end can only fail if the thread already exited
+            // (e.g. it panicked before reaching `handle_rx.recv()`), in which
+            // case there's nothing more to do — `exit_rx` will observe that on
+            // its own once `ReactorControl` gets used.
+            let _ = handle_tx.send(Arc::downgrade(&inner));
+
+            Ok((
+                Reactor {
+                    inner: inner.clone(),
+                },
+                ReactorControl { inner, exit_rx },
+            ))
         }
-
-        // Duplicate a handle to the new thread that we own independent of
-        // the `JoinHandle` — we never block-join the OS thread (`join()`
-        // instead awaits `exit_rx`, signaled right before the thread's
-        // closure returns), and detach it below.
-        let mut dup: HANDLE = ptr::null_mut();
-        // SAFETY: `join_handle.as_raw_handle()` is a valid, currently-open
-        // thread handle for the thread we just spawned.
-        let ok = unsafe {
-            DuplicateHandle(
-                GetCurrentProcess(),
-                join_handle.as_raw_handle() as HANDLE,
-                GetCurrentProcess(),
-                &mut dup,
-                0,
-                0,
-                DUPLICATE_SAME_ACCESS,
-            )
-        };
-        if ok == 0 {
-            let err = io::Error::last_os_error();
-            // Unblock the thread (it's parked on `handle_rx.recv()`) so it
-            // exits immediately instead of waiting forever.
-            drop(handle_tx);
-            return Err(err);
-        }
-        // SAFETY: `dup` is a valid, uniquely-owned handle from a successful
-        // `DuplicateHandle` call above.
-        let thread_handle = unsafe { OwnedHandle::from_raw_handle(dup as _) };
-
-        // Detach: dropping a `JoinHandle` without joining it just forfeits
-        // the ability to block-join or observe a panic through it; the OS
-        // thread keeps running independently, driven from here on by our
-        // duplicated `thread_handle`.
-        drop(join_handle);
-
-        let inner = Arc::new(ReactorInner {
-            state: Mutex::new(ReactorState {
-                thread_handle,
-                closed: false,
-            }),
-            next_id: AtomicU64::new(0),
-        });
-
-        // The receive end can only fail if the thread already exited
-        // (e.g. it panicked before reaching `handle_rx.recv()`), in which
-        // case there's nothing more to do — `exit_rx` will observe that on
-        // its own once `ReactorControl` gets used.
-        let _ = handle_tx.send(Arc::downgrade(&inner));
-
-        Ok((
-            Reactor {
-                inner: inner.clone(),
-            },
-            ReactorControl { inner, exit_rx },
-        ))
+        #[cfg(all(docsrs, not(windows)))]
+        unreachable!()
     }
 
     /// Submits `f` to run on the reactor thread, returning a future for its
@@ -408,52 +432,60 @@ impl Reactor {
     /// ([`ApcContext::cancel_guard`]) and raw APC posting
     /// ([`ApcContext::post_raw`]).
     ///
-    /// Fails with [`Closed`] once [`cancel`](Self::cancel) has been called.
+    /// Fails with [`Closed`] once [`ReactorControl::cancel`] has been called.
     pub fn submit<T, F>(&self, f: F) -> Result<ApcTask<T>, Closed>
     where
         T: Send + 'static,
         F: AsyncFnOnce(&mut ApcContext) -> T + Send + 'static,
     {
-        // `closed` is read here, separately from the `post` call below, on
-        // purpose: a submission that narrowly beats `cancel` (checks
-        // `closed` just before it's set) isn't a bug — its task-insertion
-        // APC simply shows up during the reactor's flush-and-recheck (see
-        // `run`), which correctly aborts the exit rather than dropping it.
-        if self.inner.state.lock().unwrap().closed {
-            return Err(Closed);
-        }
+        #[cfg(windows)]
+        {
+            // `closed` is read here, separately from the `post` call below, on
+            // purpose: a submission that narrowly beats `cancel` (checks
+            // `closed` just before it's set) isn't a bug — its task-insertion
+            // APC simply shows up during the reactor's flush-and-recheck (see
+            // `run`), which correctly aborts the exit rather than dropping it.
+            if self.inner.state.lock().unwrap().closed {
+                return Err(Closed);
+            }
 
-        let id = TaskId(self.inner.next_id.fetch_add(1, Ordering::Relaxed));
-        let (result_tx, result_rx) = oneshot::channel();
+            let id = TaskId(self.inner.next_id.fetch_add(1, Ordering::Relaxed));
+            let (result_tx, result_rx) = oneshot::channel();
 
-        let posted = post(&self.inner, move || {
-            // Only construct (and box) the task's future once actually
-            // running on the reactor thread — see `BoxedTask`'s doc comment
-            // for why that matters.
-            let task: BoxedTask = Box::pin(async move {
-                let mut ctx = ApcContext { id };
-                let value = f(&mut ctx).await;
-                let _ = result_tx.send(value);
+            let posted = post(&self.inner, move || {
+                // Only construct (and box) the task's future once actually
+                // running on the reactor thread — see `BoxedTask`'s doc comment
+                // for why that matters.
+                let task: BoxedTask = Box::pin(async move {
+                    let mut ctx = ApcContext { id };
+                    let value = f(&mut ctx).await;
+                    let _ = result_tx.send(value);
+                });
+                REGISTRY.with(|r| {
+                    r.borrow_mut().tasks.insert(
+                        id,
+                        TaskSlot {
+                            future: Some(task),
+                            in_guard: false,
+                            guard_signal: None,
+                        },
+                    );
+                });
             });
-            REGISTRY.with(|r| {
-                r.borrow_mut().tasks.insert(
+
+            match posted {
+                Ok(()) => Ok(ApcTask {
                     id,
-                    TaskSlot {
-                        future: Some(task),
-                        in_guard: false,
-                        guard_signal: None,
-                    },
-                );
-            });
-        });
-
-        match posted {
-            Ok(()) => Ok(ApcTask {
-                id,
-                rx: result_rx,
-                inner: self.inner.clone(),
-            }),
-            Err(_) => Err(Closed),
+                    rx: result_rx,
+                    inner: self.inner.clone(),
+                }),
+                Err(_) => Err(Closed),
+            }
+        }
+        #[cfg(all(docsrs, not(windows)))]
+        {
+            let _ = f;
+            unreachable!()
         }
     }
 }
@@ -462,25 +494,30 @@ impl ReactorControl {
     /// Stops accepting new [`Reactor::submit`] calls on every clone of the
     /// corresponding [`Reactor`].
     pub fn cancel(&self) {
-        // `closed` is set and the wake is posted in the *same* critical
-        // section — not two separate calls — because the reactor thread's
-        // own "read `closed`, and if true, start exiting" step (`run`)
-        // takes the same lock. Without that, the reactor could observe a
-        // stale `closed == false` via some unrelated wake, decide to keep
-        // looping, and go back to sleep with nothing left to ever wake it
-        // again before this call's own post — permanently hanging a
-        // reactor that had nothing else going on.
-        let mut guard = self.inner.state.lock().unwrap();
-        if guard.closed {
-            return;
+        #[cfg(windows)]
+        {
+            // `closed` is set and the wake is posted in the *same* critical
+            // section — not two separate calls — because the reactor thread's
+            // own "read `closed`, and if true, start exiting" step (`run`)
+            // takes the same lock. Without that, the reactor could observe a
+            // stale `closed == false` via some unrelated wake, decide to keep
+            // looping, and go back to sleep with nothing left to ever wake it
+            // again before this call's own post — permanently hanging a
+            // reactor that had nothing else going on.
+            let mut guard = self.inner.state.lock().unwrap();
+            if guard.closed {
+                return;
+            }
+            guard.closed = true;
+            // Best effort: if the reactor already fully exited in the
+            // meantime, this just fails harmlessly — there's nothing left to
+            // wake.
+            // SAFETY: `guard.thread_handle` is a live `OwnedHandle`, kept open
+            // by holding `guard` for the duration of this call.
+            let _ = unsafe { queue_apc(guard.thread_handle.as_raw_handle() as HANDLE, || {}) };
         }
-        guard.closed = true;
-        // Best effort: if the reactor already fully exited in the
-        // meantime, this just fails harmlessly — there's nothing left to
-        // wake.
-        // SAFETY: `guard.thread_handle` is a live `OwnedHandle`, kept open
-        // by holding `guard` for the duration of this call.
-        let _ = unsafe { queue_apc(guard.thread_handle.as_raw_handle() as HANDLE, || {}) };
+        #[cfg(all(docsrs, not(windows)))]
+        unreachable!()
     }
 
     /// Awaits the reactor thread's actual exit.
@@ -495,14 +532,20 @@ impl ReactorControl {
     /// Never resolves if a `Reactor` clone or live task is kept around
     /// forever without being dropped or cancelled.
     pub async fn join(self) {
-        let ReactorControl { inner, exit_rx } = self;
-        drop(inner);
-        let _ = exit_rx.await;
+        #[cfg(windows)]
+        {
+            let ReactorControl { inner, exit_rx } = self;
+            drop(inner);
+            let _ = exit_rx.await;
+        }
+        #[cfg(all(docsrs, not(windows)))]
+        unreachable!()
     }
 }
 
 /// The main reactor loop: sleep alertably, re-poll every registered task,
 /// repeat until [`Registry::should_exit`] says it's safe to stop.
+#[cfg(windows)]
 fn run(weak_inner: Weak<ReactorInner>) {
     let waker = futures::task::waker(Arc::new(WakeSignal {
         inner: weak_inner.clone(),
@@ -558,6 +601,7 @@ fn run(weak_inner: Weak<ReactorInner>) {
     }
 }
 
+#[cfg(windows)]
 fn poll_all(waker: &Waker) {
     let ids: Vec<TaskId> = REGISTRY.with(|r| r.borrow().tasks.keys().copied().collect());
     for id in ids {
@@ -609,6 +653,7 @@ fn poll_all(waker: &Waker) {
 /// the reactor thread, so [`post_raw`](Self::post_raw) can always reach it
 /// directly via `GetCurrentThread()` instead.
 pub struct ApcContext {
+    #[cfg(windows)]
     id: TaskId,
 }
 
@@ -630,41 +675,49 @@ impl ApcContext {
     where
         F: AsyncFnOnce(&mut ApcContext) -> T,
     {
-        let id = self.id;
-        let (tx, rx) = oneshot::channel::<()>();
+        #[cfg(windows)]
+        {
+            let id = self.id;
+            let (tx, rx) = oneshot::channel::<()>();
 
-        REGISTRY.with(|r| {
-            let mut reg = r.borrow_mut();
-            let slot = reg
-                .tasks
-                .get_mut(&id)
-                .expect("cancel_guard: task slot missing for the currently running task");
-            assert!(
-                !slot.in_guard,
-                "cancel_guard: already inside a guard for this task"
-            );
-            slot.in_guard = true;
-            slot.guard_signal = Some(tx);
-        });
+            REGISTRY.with(|r| {
+                let mut reg = r.borrow_mut();
+                let slot = reg
+                    .tasks
+                    .get_mut(&id)
+                    .expect("cancel_guard: task slot missing for the currently running task");
+                assert!(
+                    !slot.in_guard,
+                    "cancel_guard: already inside a guard for this task"
+                );
+                slot.in_guard = true;
+                slot.guard_signal = Some(tx);
+            });
 
-        struct Reset(TaskId);
-        impl Drop for Reset {
-            fn drop(&mut self) {
-                REGISTRY.with(|r| {
-                    if let Some(slot) = r.borrow_mut().tasks.get_mut(&self.0) {
-                        slot.in_guard = false;
-                        slot.guard_signal = None;
-                    }
-                });
+            struct Reset(TaskId);
+            impl Drop for Reset {
+                fn drop(&mut self) {
+                    REGISTRY.with(|r| {
+                        if let Some(slot) = r.borrow_mut().tasks.get_mut(&self.0) {
+                            slot.in_guard = false;
+                            slot.guard_signal = None;
+                        }
+                    });
+                }
+            }
+            let _reset = Reset(id);
+
+            let operation_future = operation(&mut *self);
+            futures::pin_mut!(operation_future);
+            match future::select(operation_future, rx).await {
+                Either::Left((value, _pending_cancel)) => Ok(value),
+                Either::Right((_signal, _dropped_operation)) => Err(ApcCancelled),
             }
         }
-        let _reset = Reset(id);
-
-        let operation_future = operation(&mut *self);
-        futures::pin_mut!(operation_future);
-        match future::select(operation_future, rx).await {
-            Either::Left((value, _pending_cancel)) => Ok(value),
-            Either::Right((_signal, _dropped_operation)) => Err(ApcCancelled),
+        #[cfg(all(docsrs, not(windows)))]
+        {
+            let _ = operation;
+            unreachable!()
         }
     }
 
@@ -681,10 +734,18 @@ impl ApcContext {
     /// APC immediately after closing the handle guarantees anything the
     /// kernel had already queued for that handle runs first.
     pub fn post_raw(&self, callback: impl FnOnce() + Send + 'static) -> io::Result<()> {
-        // SAFETY: `ApcContext` methods only ever run from within a task's
-        // poll, which only ever happens on the reactor thread — so
-        // `GetCurrentThread()`'s pseudo-handle correctly refers to it.
-        unsafe { queue_apc(GetCurrentThread(), callback) }
+        #[cfg(windows)]
+        {
+            // SAFETY: `ApcContext` methods only ever run from within a task's
+            // poll, which only ever happens on the reactor thread — so
+            // `GetCurrentThread()`'s pseudo-handle correctly refers to it.
+            unsafe { queue_apc(GetCurrentThread(), callback) }
+        }
+        #[cfg(all(docsrs, not(windows)))]
+        {
+            let _ = callback;
+            unreachable!()
+        }
     }
 }
 
@@ -694,11 +755,17 @@ impl ApcContext {
 /// [module docs](self) for what that means for a task inside
 /// [`ApcContext::cancel_guard`].
 pub struct ApcTask<T> {
+    #[cfg(windows)]
     id: TaskId,
+    #[cfg(windows)]
     rx: oneshot::Receiver<T>,
+    #[cfg(windows)]
     inner: Arc<ReactorInner>,
+    #[cfg(all(docsrs, not(windows)))]
+    marker: std::marker::PhantomData<T>,
 }
 
+#[cfg(windows)]
 impl<T> Future for ApcTask<T> {
     type Output = Result<T, TaskCancelled>;
 
@@ -710,6 +777,20 @@ impl<T> Future for ApcTask<T> {
     }
 }
 
+#[cfg(all(docsrs, not(windows)))]
+impl<T> std::future::Future for ApcTask<T> {
+    type Output = Result<T, TaskCancelled>;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let _ = (self, cx);
+        std::task::Poll::Pending
+    }
+}
+
+#[cfg(windows)]
 impl<T> Drop for ApcTask<T> {
     fn drop(&mut self) {
         let id = self.id;
@@ -734,6 +815,11 @@ impl<T> Drop for ApcTask<T> {
             drop(removed);
         });
     }
+}
+
+#[cfg(all(docsrs, not(windows)))]
+impl<T> Drop for ApcTask<T> {
+    fn drop(&mut self) {}
 }
 
 #[cfg(test)]

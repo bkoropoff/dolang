@@ -3,7 +3,7 @@
 mod access_mask;
 mod sec_desc;
 mod sid;
-#[cfg(windows)]
+#[cfg(any(windows, docsrs))]
 mod win32_security;
 
 pub use access_mask::AccessMask;
@@ -14,5 +14,6 @@ pub use sec_desc::{
     SecDescComponent, SecDescError, SecDescUpdate,
 };
 pub use sid::{Sid, SidError};
-#[cfg(windows)]
+#[cfg(any(windows, docsrs))]
+#[cfg_attr(docsrs, doc(cfg(windows)))]
 pub use win32_security::with_security_privilege;

@@ -12,10 +12,6 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 
 use crate::Server;
 
-/// Windows service session used to start an elevated or unelevated VFS target.
-#[cfg(windows)]
-pub use crate::windows::AdminSession;
-
 enum EnvOp {
     Set(OsString, OsString),
     Unset(OsString),
