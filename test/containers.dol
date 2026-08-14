@@ -85,6 +85,31 @@ def run_direct_command()
   assert $ release.contains "NAME=\"Ubuntu\""
   assert $ release.contains "VERSION_ID=\"24.04\""
 
+#[test]
+def run_structured_options()
+  let name = "dolang-test-run-structured-options"
+  remove_container $name
+  let script = r#"printf "%s\n%s\n%s\n" "$PWD" "$TEST_DOLANG_CREATE" "$(id -u)"; test -r /mnt/host-release"#
+  let output = sub do runtime.run ubuntu:24.04 -c $script
+    name: $name
+    entrypoint: /bin/sh
+    cd: /tmp
+    env: {TEST_DOLANG_CREATE: "value"}
+    mounts:
+      - type: :BIND:
+        source: /etc/os-release
+        target: /mnt/host-release
+        readonly: true
+    labels: {dolang_test: "structured-run"}
+    ports:
+      - container_port: 8080
+        host_ip: "127.0.0.1"
+        protocol: :TCP:
+    networks:
+      - bridge
+    user: "65534:65534"
+  assert_eq $output "/tmp\nvalue\n65534"
+
 let container_cli = if run.docker.which()
   run.docker
 else
@@ -301,6 +326,81 @@ def container_inspect_lifecycle()
     catch runtime.NoContainerError: _
       true
     assert $gone
+
+#[test]
+def container_create_structured_lifecycle()
+  let name = "dolang-test-container-create-structured"
+  remove_container $name
+
+  clean_container $name do
+    let ctr = runtime.create ubuntu:24.04 -c "sleep infinity"
+      name: $name
+      entrypoint: /bin/sh
+      cd: /tmp
+      env: {TEST_DOLANG_CREATE: "value"}
+      mounts:
+        - type: :BIND:
+          source: /etc/os-release
+          target: /mnt/host-release
+          readonly: true
+      labels: {dolang_test: "structured-create"}
+      ports:
+        - container_port: 8080
+          host_ip: "127.0.0.1"
+          protocol: :TCP:
+      networks:
+        - bridge
+      user: "65534:65534"
+      restart:
+        policy: :ON_FAILURE:
+        max_retries: 3
+
+    assert_eq $ctr.state().state :CREATED:
+    assert_eq $ctr.labels["dolang_test"] structured-create
+    assert_eq $ctr.entrypoint ["/bin/sh"]
+    assert_eq $ctr.cmd ["-c", "sleep infinity"]
+
+    ctr.start()
+    let configured = ctr.with do
+      let uid = sub do run id -u
+      record
+        cd: $cd()
+        env: $env["TEST_DOLANG_CREATE"]
+        uid: $uid
+        mounted: $Path("/mnt/host-release").exists()
+    assert_eq $configured.cd (unix_fs.Path "/tmp")
+    assert_eq $configured.env value
+    assert_eq $configured.uid "65534"
+    assert $configured.mounted
+
+    let state = ctr.state()
+    assert_eq $state.state :RUNNING:
+    assert_eq $state.ports.len 1
+    assert_eq $state.ports[0].container_port 8080
+    assert_eq $state.ports[0].protocol :TCP:
+
+#[test]
+def container_wait_status()
+  let success_name = "dolang-test-container-wait-success"
+  let failure_name = "dolang-test-container-wait-failure"
+  remove_container $success_name
+  remove_container $failure_name
+
+  clean_container $success_name do
+    let ctr = runtime.create ubuntu:24.04 /bin/sh -c "exit 0" name: $success_name
+    ctr.start()
+    assert_eq $ctr.wait() nil
+
+  clean_container $failure_name do
+    let ctr = runtime.create ubuntu:24.04 /bin/sh -c "exit 42" name: $failure_name
+    ctr.start()
+    let failed = try
+      ctr.wait()
+      false
+    catch runtime.ContainerExitError: e
+      assert_eq $e.rc 42
+      true
+    assert $failed
 
 #[test]
 def container_with_non_root_user()
