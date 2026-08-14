@@ -1,8 +1,6 @@
-import shell sys term strand progress
+import shell term strand progress
   fs:
     - with_temp_dir
-  shell:
-    - with_io_mode
   test:
     - assert
     - assert_eq
@@ -16,14 +14,6 @@ import shell sys term strand progress
 
 let ESC = str b"\x1b"
 
-# The line ending a console appends where it follows the platform: a
-# `SinkConsole`'s `writeln`, and `put` on any console (that one is value
-# framing, so it goes through the same path an `fs.File` sink would). `echo` on
-# the host console is deliberately *not* one of these — it is LF everywhere.
-let NL = if (sys.os_info().family == :WINDOWS:)
-  "\r\n"
-else
-  "\n"
 
 #[test]
 def console_geometry()
@@ -123,12 +113,12 @@ def capture_collects_echo_lines()
   term.capture $out do
     echo hello world
     echo second
-  assert_eq $out ["hello world", "second"]
+  assert_eq $out ["hello world\n", "second\n"]
 
 #[test]
 def sub_returns_captured_text()
   assert_eq (term.sub do echo("hi")) hi
-  assert_eq (term.sub trim: false do echo("hi")) "hi\n"
+  assert_eq (term.sub chomp: false do echo("hi")) "hi\n"
 
   # A CRLF written straight into the byte stream trims the same way.
   assert_eq (term.sub do term.output().write "hi\r\n") hi
@@ -143,29 +133,34 @@ def print_stays_unterminated()
     echo c
 
   assert_eq (term.sub mixed) abc
-  assert_eq (with_io_mode :CHUNK: do term.sub mixed) abc
 
+# Framing decides where the console's byte stream is cut into values and
+# nothing else, so the same bytes come out either way.
 #[test]
-def capture_into_sink_honors_io_mode()
-  # Crossing from the console's byte stream into a sink is a value conversion,
-  # which is exactly what the I/O mode governs.
+def capture_into_sink_frames_without_transforming()
+  # `echo`'s terminator went into the byte stream, so it is part of the value.
   let lines = []
   term.capture $lines do echo hello
+  assert_eq $lines ["hello\n"]
 
+  # `chomp` is how a caller asks for it back off, and composes with the sink
+  # the same way it would anywhere else.
+  let chomped = []
+  term.capture (chomped.sink().prechomp()) do echo hello
+  assert_eq $chomped ["hello"]
+
+  # Chunk framing cuts the stream elsewhere and reproduces it just the same.
   let chunks = []
-  with_io_mode :CHUNK: do term.capture $chunks do echo hello
-
-  assert_eq $lines ["hello"]
-  # The terminator survives the mode because `writeln` put it in the byte
-  # stream before any framing decision was made.
+  term.capture $chunks mode: :CHUNK: do echo hello
   let joined = ""
   for chunk = chunks
     joined = "$joined$(str(chunk))"
-  assert_eq $joined "hello$NL"
+  assert_eq $joined "hello\n"
 
 #[test]
 def capture_flushes_partial_line()
-  # An unterminated `print` is only visible once the scope ends and flushes.
+  # An unterminated `print` is only visible once the scope ends and flushes,
+  # and it has no terminator to carry.
   let out = []
   term.capture $out do print hi
   assert_eq $out ["hi"]
@@ -193,7 +188,7 @@ def capture_can_style_opt_in()
   term.capture (term.SinkConsole(out, can_style: true)) do
     assert_eq (term.output().can_style) true
     echo (term.style "warn" fg: :YELLOW:)
-  assert_eq $out [styled]
+  assert_eq $out ["$styled\n"]
 
 #[test]
 def capture_reports_no_geometry()
@@ -217,8 +212,8 @@ def nesting_composes()
     term.capture $inner do echo i1
     echo o2
 
-  assert_eq $outer ["o1", "o2"]
-  assert_eq $inner ["i1"]
+  assert_eq $outer ["o1\n", "o2\n"]
+  assert_eq $inner ["i1\n"]
 
 #[test]
 def spawn_inherits_capture()
@@ -226,7 +221,7 @@ def spawn_inherits_capture()
   term.capture $out do
     let s = strand.spawn do echo from-spawn
     s.join()
-  assert_eq $out ["from-spawn"]
+  assert_eq $out ["from-spawn\n"]
 
 #[test]
 def console_pins_past_capture()
@@ -253,10 +248,10 @@ def console_pins_past_capture()
     let err = (dir / "err.txt")
     run $shell.exe --no-cache $path $seen stderr: $err
 
-    assert_eq $seen.read() r#"["captured"]"#
-    # `write` is verbatim, so its LF is the one in the source; `put` is value
-    # framing, so it picks up the platform ending.
-    assert_eq $err.read() "pinned-write\npinned-put$NL"
+    assert_eq $seen.read() r#"["captured\n"]"#
+    # Both `write` and `put` are verbatim, so the only LF here is the one in
+    # the source.
+    assert_eq $err.read() "pinned-write\npinned-put"
 
 #[test]
 def concurrent_lines_do_not_interleave()
@@ -305,7 +300,7 @@ def child_stderr_is_captured()
     let human = term.sub do run $shell.exe --no-cache $path stdout: $out
 
     assert_eq $human child-err
-    assert_eq $out ["child-out"]
+    assert_eq $out ["child-out\n"]
 
 #[test]
 def mute_silences_echo_and_child_stderr()
@@ -318,7 +313,7 @@ def mute_silences_echo_and_child_stderr()
       echo hidden
       print more
     echo visible
-  assert_eq $out ["visible"]
+  assert_eq $out ["visible\n"]
 
   with_temp_dir do |dir|
     let src = r|
@@ -332,7 +327,7 @@ def mute_silences_echo_and_child_stderr()
       term.mute do run $shell.exe --no-cache $path stdout: $child_out
 
     assert_eq $human ""
-    assert_eq $child_out ["child-out"]
+    assert_eq $child_out ["child-out\n"]
 
 #[test]
 def mute_leaves_named_strand_output_alone()
@@ -380,10 +375,6 @@ def do_subclass_console()
       self.lines.push (str data)
       data.len
 
-    pub def writeln self data
-      self.lines.push "$(str data)|"
-      data.len
-
     pub def flush _self
       nil
 
@@ -391,10 +382,13 @@ def do_subclass_console()
   term.capture $recorder do
     echo terminated
     print bare
-  assert_eq $recorder.lines ["terminated|", "bare"]
+  # `echo` assembles payload and terminator and issues one `write`, so the
+  # subclass sees a single call with the line already terminated.
+  assert_eq $recorder.lines ["terminated\n", "bare"]
 
-  # Supplying only the three write members is enough: the capability members
-  # have safe defaults, which the subclass inherits from the base.
+  # Supplying only the two write members is enough: the capability members
+  # have safe defaults, which the subclass inherits from the base. That
+  # includes `line_ending`, which is what `echo` above terminated with.
   assert_eq $recorder.can_style false
   assert_eq $recorder.is_tty false
   assert_eq (recorder.geometry()) nil
@@ -423,10 +417,6 @@ def do_console_declares_capabilities()
       self.lines.push (str data)
       data.len
 
-    pub def writeln self data
-      self.lines.push (str data)
-      data.len
-
     pub def flush _self
       nil
 
@@ -435,12 +425,38 @@ def do_console_declares_capabilities()
 
   let fancy = Fancy()
   term.capture $fancy do echo (term.style "warn" fg: :YELLOW:)
-  assert_eq $fancy.lines ["$ESC[33mwarn$ESC[0m"]
+  assert_eq $fancy.lines ["$ESC[33mwarn$ESC[0m\n"]
 
   let g = fancy.geometry()
   assert (type g term.Geometry)
   assert_eq $g.rows 24
   assert_eq $g.cols 80
+
+#[test]
+def do_console_chooses_its_terminator()
+  # The console owns the terminator policy but does not apply it: `echo` reads
+  # `line_ending` off the installed console, so a subclass that declares its
+  # own gets it, still in a single write.
+  class Crlf: term.Console
+    pub field lines
+    pub field line_ending = "\r\n"
+
+    def (init) self
+      term.Console.(init) $self
+      self.lines = []
+
+    pub def write self data
+      self.lines.push (str data)
+      data.len
+
+    pub def flush _self
+      nil
+
+  let crlf = Crlf()
+  term.capture $crlf do
+    echo terminated
+    print bare
+  assert_eq $crlf.lines ["terminated\r\n", "bare"]
 
 #[test]
 def bare_geometry_refuses()
@@ -472,10 +488,6 @@ def reentrant_console_does_not_recurse()
 
         pub def write self data
           self.seen.push (str data)
-          data.len
-
-        pub def writeln self data
-          self.seen.push (str data)
           echo "loud: $(str data)"
           data.len
 
@@ -496,6 +508,8 @@ def reentrant_console_does_not_recurse()
     # The inner console saw the line, and the re-entrant `echo` skipped both
     # captures rather than landing in the enclosing one — which is what keeps
     # the guard simple.
-    assert_eq $seen.read() r#"["hello"] []"#
+    assert_eq $seen.read() r#"["hello\n"] []"#
     # It reached the host console, whose line ending is LF on every platform.
-    assert_eq $err.read() "loud: hello\n"
+    # Two of them: the data the console was handed already carried `echo`'s
+    # terminator, and the re-entrant `echo` adds its own.
+    assert_eq $err.read() "loud: hello\n\n"

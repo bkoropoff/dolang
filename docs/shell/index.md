@@ -122,9 +122,9 @@ and objects.
 
 ### `proc`
 
-| Name                                        | Description                       |
-| ------------------------------------------- | --------------------------------- |
-| [`sub`](../api/proc/index.md#sub-func-trim) | Capture func's output as a string |
+| Name                                         | Description                       |
+| -------------------------------------------- | --------------------------------- |
+| [`sub`](../api/proc/index.md#sub-func-chomp) | Capture func's output as a string |
 
 ### `proc.run`
 

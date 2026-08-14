@@ -217,6 +217,26 @@ Removes bytes (or specified characters) from the end.
 assert_eq (b"  hello  ".trim_end()) b"  hello"
 ```
 
+### `chomp`
+
+Removes one trailing line terminator.
+
+One complete terminator — `\r\n` or `\n`, never a lone `\r` — and nothing else.
+Data without one is returned unchanged.
+
+#### Returns
+
+[`Bin`](./bin.md)
+
+```
+assert_eq (b"line\n".chomp()) b"line"
+assert_eq (b"line\r\n".chomp()) b"line"
+```
+
+[`Iter.chomp`](./iter.md#chomp) lifts this over an iterator — it is exactly
+`.map do |x| x.chomp()`, with the mapping done inline. Distinct from
+[`trim_end`](#trim_end-chars), which strips whitespace generally.
+
 ### `contains needle`
 
 Tests whether the binary data contains the given bytes.

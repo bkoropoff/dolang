@@ -320,3 +320,22 @@ assert_eq $buf.freeze() b"FXYZbar"
 
 Range assignment may grow or shrink the buffer: the replacement doesn't need
 to be the same length as the range it replaces.
+
+### Sink
+
+`BinBuf` is a [sink](./sink.md), so it can be the target of a pipeline, of
+[`strand.put`](../strand/index.md), or of a
+[`run`](../proc-run.md#io-redirection) redirect. `put` is
+[`append`](#append-value): the value's bytes go in verbatim, with no line
+terminator added.
+
+```
+let buf = BinBuf()
+run gzip -c stdin: ["hello"] stdout: $buf mode: :CHUNK:
+assert (buf.starts_with b"\x1f\x8b")
+```
+
+Combined with [chunk framing](../shell/index.md#stream-framing), this makes a
+`BinBuf` an exact byte-for-byte capture of a stream. Framing is the caller's to
+choose — use [`precrimp`](./sink.md#precrimp-terminator) to terminate written
+values.

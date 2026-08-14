@@ -75,7 +75,7 @@ def virsh connect_uri ...args
   cli virsh --quiet --connect $connect_uri ...args
 
 def capture_virsh connect_uri stderr ...args
-  sub do virsh $connect_uri ...args stderr: $stderr
+  sub do virsh $connect_uri ...args stderr: $stderr.prechomp()
 
 def error_text lines
   "\n".join(lines).upper()
@@ -1290,7 +1290,7 @@ do
           raw_define $document $connect_uri $workdir
           let stderr = []
           try
-            virsh $connect_uri start $name stderr: $stderr
+            virsh $connect_uri start $name stderr: $stderr.prechomp()
             started = true
           catch proc.Error: e
             try

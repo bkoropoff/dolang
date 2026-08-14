@@ -15,7 +15,7 @@ use dolang::{
 use crate::{
     console::{self, DefaultOutput, HostConsole, SubConsole},
     global::Global,
-    io_mode::strip_line_ending,
+    io_mode::{IoMode, strip_line_ending},
 };
 
 /// Runs `f` with `console` installed as the ambient console for this strand.
@@ -1025,7 +1025,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         inherit,
     } = keys;
     let backtrace = builder.sym("backtrace");
-    let trim = builder.sym("trim");
+    let chomp_sym = builder.sym("chomp");
     let can_style = global.syms.can_style;
 
     builder
@@ -1053,18 +1053,28 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         .function_with_slots(
             "capture",
             async move |strand, args, out, [mut console, mut tmp]| {
-                let ([target, func], [], rest) = unpack!(strand, args, 2, 0, ...)?;
+                let mode_sym = global.syms.mode;
+                let ([target, func], [mode], rest) =
+                    unpack!(strand, args, 2, 0, mode_sym = None, ...)?;
                 if target.is_instance_of(strand, global.types.console) {
+                    if mode.is_some() {
+                        return Err(Error::value(
+                            strand,
+                            "mode: applies only when capturing into a plain sink",
+                        ));
+                    }
                     Output::set(strand, &mut console, target);
                 } else {
                     // Any ordinary sink works; the adapter supplies the rest of
                     // the console interface. A bare sink does not style — pass
                     // a `term.SinkConsole` built with `can_style: true` to say
                     // otherwise.
+                    let mode = console::parse_mode(strand, mode.as_deref())?;
                     console::create_sink_console(
                         strand,
                         &target,
                         false,
+                        mode,
                         Slot::reborrow(&mut console),
                     )
                     .await?;
@@ -1089,9 +1099,9 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         .function_with_slots(
             "sub",
             async move |strand, args, out, [mut console, mut tmp]| {
-                let ([func], [trim, can_style], rest) =
-                    unpack!(strand, args, 1, 0, trim = None, can_style = None, ...)?;
-                let trim = trim.map(|v| v.to_bool(strand)).unwrap_or(true);
+                let ([func], [chomp, can_style], rest) =
+                    unpack!(strand, args, 1, 0, chomp_sym = None, can_style = None, ...)?;
+                let chomp = chomp.map(|v| v.to_bool(strand)).unwrap_or(true);
                 let can_style = can_style.is_some_and(|v| v.to_bool(strand));
                 global
                     .types
@@ -1112,7 +1122,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                     |strand, inst| {
                         let sub = inst.borrow(strand)?;
                         let mut value = sub.text();
-                        if trim {
+                        if chomp {
                             value = strip_line_ending(value);
                         }
                         Output::set(strand, out, value);
@@ -1129,8 +1139,14 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 // the same mechanism `capture` uses, just wired to a sink that
                 // throws writes away instead of collecting them.
                 Output::set(strand, &mut scratch, Singleton::IterNull);
-                console::create_sink_console(strand, &scratch, false, Slot::reborrow(&mut console))
-                    .await?;
+                console::create_sink_console(
+                    strand,
+                    &scratch,
+                    false,
+                    IoMode::Line,
+                    Slot::reborrow(&mut console),
+                )
+                .await?;
                 // The strand's own implicit output only needs touching when it
                 // is still `term.default` — the startup placeholder that
                 // itself forwards through this same capture. Anything else

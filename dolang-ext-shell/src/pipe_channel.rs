@@ -20,7 +20,7 @@ use dolang_vfs::{AnyVfs, Vfs};
 use crate::{
     error::{ErrorExt as _, ResultExt as _},
     global::Global,
-    io_mode::{IoMode, ValueEncoding, encode_value, read_value},
+    io_mode::{IoMode, encode_value, read_value},
 };
 
 type StdioSend = <AnyVfs as Vfs>::StdioSend;
@@ -81,19 +81,18 @@ enum PipeState {
     Direct,
 }
 
-enum BufferedValue {
-    Empty,
-    Line,
-    Chunk,
-}
-
 // ---------------------------------------------------------------------------
 // Shared inner state
 // ---------------------------------------------------------------------------
 
 struct PipeChannelShared {
-    /// Whether PipeReceiver's GC slot 0 is logically occupied, and if so how it was written.
-    buffered: BufferedValue,
+    /// Whether `PipeReceiver`'s GC slot 0 is logically occupied.
+    ///
+    /// Just a flag: a value is written to the pipe exactly as its own bytes, so
+    /// if the channel later degrades to a real pipe the buffered value is
+    /// serialized the same way it would have been in the first place. Nothing
+    /// about how it was `put` needs remembering.
+    buffered: bool,
     state: PipeState,
     send_end: EndState<StdioSend>,
     recv_end: EndState<BufReader<StdioRecv>>,
@@ -107,7 +106,7 @@ struct PipeChannelShared {
 impl PipeChannelShared {
     fn new() -> Self {
         Self {
-            buffered: BufferedValue::Empty,
+            buffered: false,
             state: PipeState::Value,
             send_end: EndState::Absent,
             recv_end: EndState::Absent,
@@ -263,30 +262,15 @@ fn take_buffered_bytes<'v, 's>(
     strand: &mut Strand<'v, 's>,
     inner: &mut PipeChannelShared,
 ) -> Result<'v, 's, Option<Vec<u8>>> {
-    let io_mode = match inner.buffered {
-        BufferedValue::Empty => return Ok(None),
-        BufferedValue::Line => IoMode::Line,
-        BufferedValue::Chunk => IoMode::Chunk,
-    };
-    let operating_system = recv_inst
-        .annex()
-        .global
-        .local
-        .get(strand)
-        .target()
-        .operating_system;
+    if !inner.buffered {
+        return Ok(None);
+    }
 
     let mut recv_borrow = recv_inst.borrow_mut(strand)?;
     let mut slot = Mut::slot_mut::<0>(&mut recv_borrow);
-    let bytes = encode_value(
-        strand,
-        &Slot::reborrow(&mut slot),
-        io_mode,
-        ValueEncoding::Display,
-        operating_system,
-    )?;
+    let bytes = encode_value(strand, &Slot::reborrow(&mut slot))?;
     Output::set(strand, slot, Nil);
-    inner.buffered = BufferedValue::Empty;
+    inner.buffered = false;
     inner.wake_senders();
     inner.wake_negotiators();
     Ok(Some(bytes))
@@ -469,7 +453,15 @@ impl Drop for SendGuard {
 // GC object types
 // ---------------------------------------------------------------------------
 
-pub(crate) struct PipeReceiver;
+/// The reading end of a pipe channel.
+///
+/// Framing is a property of this end and nothing else: `lines()` and
+/// `chunks()` reconfigure it in place, which is well defined because a
+/// receiver end is uniquely owned. Both framings are lossless, so the choice
+/// only decides where the stream is cut.
+pub(crate) struct PipeReceiver {
+    mode: IoMode,
+}
 
 pub(crate) struct PipeSender;
 
@@ -726,7 +718,7 @@ pub(crate) fn make_pair<'v, 's>(
 
     global.types.pipe_receiver.create_with_annex(
         strand,
-        PipeReceiver,
+        PipeReceiver { mode: IoMode::Line },
         recv_annex,
         Slot::reborrow(&mut out_recv),
     );
@@ -757,14 +749,25 @@ impl<'v> Object<'v> for PipeReceiver {
     type TypeAnnex = ();
 
     fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
-        builder.supertype(TypeObject::Iter).method(
-            "close",
-            async move |this, strand, args, _out| {
+        builder
+            .supertype(TypeObject::Iter)
+            .method("close", async move |this, strand, args, _out| {
                 let ([], []) = unpack!(strand, args, 0, 0)?;
                 this.annex().shared.borrow_mut().close_recv();
                 Ok(())
-            },
-        )
+            })
+            .method("lines", async move |this, strand, args, out| {
+                let ([], []) = unpack!(strand, args, 0, 0)?;
+                this.borrow_mut(strand)?.mode = IoMode::Line;
+                Output::set(strand, out, this);
+                Ok(())
+            })
+            .method("chunks", async move |this, strand, args, out| {
+                let ([], []) = unpack!(strand, args, 0, 0)?;
+                this.borrow_mut(strand)?.mode = IoMode::Chunk;
+                Output::set(strand, out, this);
+                Ok(())
+            })
     }
 
     async fn iter<'a, 's>(
@@ -782,7 +785,7 @@ impl<'v> Object<'v> for PipeReceiver {
         mut out: Slot<'v, 'a>,
     ) -> Result<'v, 's, bool> {
         let shared = &this.annex().shared;
-        let io_mode = this.annex().global.local.get(strand).io_mode();
+        let io_mode = this.borrow(strand)?.mode;
 
         loop {
             let recv_end = {
@@ -793,8 +796,8 @@ impl<'v> Object<'v> for PipeReceiver {
                 let send_closed = inner.send_closed;
                 match &mut inner.state {
                     PipeState::Value => {
-                        if !matches!(inner.buffered, BufferedValue::Empty) {
-                            inner.buffered = BufferedValue::Empty;
+                        if inner.buffered {
+                            inner.buffered = false;
                             drop(inner);
                             let mut borrow = this.borrow_mut(strand)?;
                             Output::set(strand, out, Mut::slot_mut::<0>(&mut borrow));
@@ -874,11 +877,7 @@ impl<'v> Object<'v> for PipeReceiver {
             future::poll_fn(|cx| {
                 let mut inner = shared.borrow_mut();
                 let ready = match &inner.state {
-                    PipeState::Value => {
-                        !matches!(inner.buffered, BufferedValue::Empty)
-                            || inner.send_closed
-                            || inner.recv_closed
-                    }
+                    PipeState::Value => inner.buffered || inner.send_closed || inner.recv_closed,
                     PipeState::SendPipe | PipeState::Draining => {
                         inner.recv_end.is_present() || inner.send_closed || inner.recv_closed
                     }
@@ -962,9 +961,6 @@ impl<'v> Object<'v> for PipeSender {
     ) -> Result<'v, 's, ()> {
         let shared = &this.annex().shared;
         let global = this.annex().global;
-        let local = global.local.get(strand);
-        let io_mode = local.io_mode();
-        let operating_system = local.target().operating_system;
 
         loop {
             let send_end = {
@@ -977,14 +973,10 @@ impl<'v> Object<'v> for PipeSender {
                 }
                 match &mut inner.state {
                     PipeState::Value => {
-                        if !matches!(inner.buffered, BufferedValue::Empty) {
+                        if inner.buffered {
                             None
                         } else {
-                            inner.buffered = if io_mode == IoMode::Chunk {
-                                BufferedValue::Chunk
-                            } else {
-                                BufferedValue::Line
-                            };
+                            inner.buffered = true;
                             drop(inner);
                             let send_borrow = this.borrow(strand)?;
                             global
@@ -1022,13 +1014,7 @@ impl<'v> Object<'v> for PipeSender {
             };
 
             if let Some(mut writer) = send_end {
-                let bytes = encode_value(
-                    strand,
-                    &value,
-                    io_mode,
-                    ValueEncoding::Display,
-                    operating_system,
-                )?;
+                let bytes = encode_value(strand, &value)?;
                 match writer.write_all(&bytes).await {
                     Ok(()) => {
                         return Ok(());
@@ -1042,11 +1028,7 @@ impl<'v> Object<'v> for PipeSender {
             future::poll_fn(|cx| {
                 let mut inner = shared.borrow_mut();
                 let ready = match &inner.state {
-                    PipeState::Value => {
-                        matches!(inner.buffered, BufferedValue::Empty)
-                            || inner.send_closed
-                            || inner.recv_closed
-                    }
+                    PipeState::Value => !inner.buffered || inner.send_closed || inner.recv_closed,
                     PipeState::RecvPipe => {
                         inner.send_end.is_present() || inner.send_closed || inner.recv_closed
                     }

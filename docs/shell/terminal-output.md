@@ -26,8 +26,8 @@ sequences are sanitized before being output.
 
 ## Capturing the Console
 
-[`term.capture`](../api/term/index.md#capture-console-func-args)
-and [`term.sub`](../api/term/index.md#sub-func-trim-can_style-args) override
+[`term.capture`](../api/term/index.md#capture-console-func-args-mode)
+and [`term.sub`](../api/term/index.md#sub-func-chomp-can_style-args) override
 [`term.output()`](../api/term/index.md#output) for their duration.
 
 ```
@@ -42,9 +42,9 @@ The main strand's implicit output is set once at startup: to
 [`shell.stdout`](../api/shell/stdout.md) otherwise. A child process launched
 with no `stdout:` override inherits whichever one is current, so it follows
 console/terminal interception — `progress` indicators,
-[`term.capture`](../api/term/index.md#capture-console-func-args) — only when
-stdout was a terminal to begin with. An omitted `stderr:` always defaults to
-`term.default`.
+[`term.capture`](../api/term/index.md#capture-console-func-args-mode) — only
+when stdout was a terminal to begin with. An omitted `stderr:` always defaults
+to `term.default`.
 
 ## Styled Text
 
@@ -100,9 +100,9 @@ For the host console, it is the process-wide policy:
 3. Otherwise, a non-empty `NO_COLOR` disables styling.
 4. Otherwise, styling follows stderr terminal detection.
 
-For a [`capture`](../api/term/index.md#capture-console-func-args) it is `false`
-unless asked for, which is what keeps a test asserting on `echo`ed text behaving
-the same piped and on a developer's terminal:
+For a [`capture`](../api/term/index.md#capture-console-func-args-mode) it is
+`false` unless asked for, which is what keeps a test asserting on `echo`ed text
+behaving the same piped and on a developer's terminal:
 
 ```
 # Plain, on a terminal or not.

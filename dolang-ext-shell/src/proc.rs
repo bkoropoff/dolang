@@ -13,7 +13,7 @@ use dolang_vfs::process::Signal;
 
 use crate::{
     global::Global,
-    io_mode::{ValueEncoding, encode_value, strip_line_ending},
+    io_mode::{encode_value, strip_line_ending},
     local::TerminationPolicy,
     time::coerce_duration,
 };
@@ -226,15 +226,7 @@ impl<'v> Object<'v> for Capture {
         strand: &'a mut Strand<'v, 's>,
         value: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        let global = strand.state::<Global<'v>>();
-        let local = global.local.get(strand);
-        let bytes = encode_value(
-            strand,
-            &value,
-            local.io_mode(),
-            ValueEncoding::Display,
-            local.target().operating_system,
-        )?;
+        let bytes = encode_value(strand, &value)?;
         let value = std::str::from_utf8(&bytes)
             .map_err(|_| Error::runtime(strand, "sub: captured invalid UTF-8"))?;
         let mut capture = this.borrow_mut(strand)?;
@@ -297,7 +289,7 @@ pub(crate) fn configure_compiler<'a>(compiler: &mut Compiler<'a>) {
 pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Global<'v>>) {
     let capture_ty = global.types.capture;
     let windows_arguments_ty = builder.register_type::<WindowsArguments>();
-    let trim = builder.sym("trim");
+    let chomp_sym = builder.sym("chomp");
 
     builder
         .module("proc")
@@ -333,8 +325,8 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             result
         })
         .function_with_slots("sub", async move |strand, args, out, [mut cap, tmp]| {
-            let ([func], [trim], rest) = unpack!(strand, args, 1, 0, trim = None, ...)?;
-            let trim = trim.map(|v| v.to_bool(strand)).unwrap_or(true);
+            let ([func], [chomp], rest) = unpack!(strand, args, 1, 0, chomp_sym = None, ...)?;
+            let chomp = chomp.map(|v| v.to_bool(strand)).unwrap_or(true);
             capture_ty.create(strand, Capture::new(), &mut cap);
             Redirect::new(strand)
                 .output(&cap)
@@ -346,7 +338,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 .enter_sync(strand, |strand, inst| {
                     let capture = inst.borrow(strand)?;
                     let mut value = capture.0.as_str();
-                    if trim {
+                    if chomp {
                         value = strip_line_ending(value)
                     }
                     Output::set(strand, out, value);

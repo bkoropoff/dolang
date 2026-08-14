@@ -27,18 +27,43 @@ let rest = shell.stdin.read()
 let head = shell.stdin.read 64
 ```
 
+### `lines()`
+
+Returns a `Stdin` framed into lines. This is the default framing, so it is only
+needed to undo a previous `chunks()`.
+
+#### Returns
+
+`Stdin`.
+
+### `chunks()`
+
+Returns a `Stdin` framed into arbitrary-sized [`Bin`](../std/bin.md) chunks.
+
+#### Returns
+
+`Stdin`.
+
+```
+for chunk = shell.stdin.chunks()
+  hasher.update $chunk
+```
+
 ## Operators
 
 ### Iteration
 
-`Stdin` is an [iterator](../std/iter.md). Iteration is framed per the ambient
-[I/O mode](./index.md#with_io_mode-mode-func): `:LINE:` yields
-[`Str`](../std/str.md) values with the line ending removed, `:CHUNK:` yields
-[`Bin`](../std/bin.md) values.
+`Stdin` is an [iterator](../std/iter.md). Iteration yields whichever
+[framing](./index.md#stream-framing) the handle carries, defaulting to lines.
+A line **includes its terminator**, so [`chomp`](../std/iter.md#chomp) is how
+you ask for one without:
 
 ```
-for line = shell.stdin
+for line = shell.stdin.chomp()
   if (line == "--")
     break
 let body = shell.stdin.read()
 ```
+
+All `Stdin` handles read through one shared buffered reader, so mixing
+iteration with `read` picks up exactly where the other left off.

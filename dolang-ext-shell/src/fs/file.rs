@@ -16,7 +16,6 @@ use dolang_vfs::{
     AnyFile, FileHandle, OpenOptions, Vfs,
     file::{FileLockBehavior, FileLockMode, FileLockRange, FileLockRequest},
     process::{StdioRecv, StdioSend},
-    target::OperatingSystem,
 };
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use typed_path::Utf8TypedPath;
@@ -28,7 +27,7 @@ use crate::{
         metadata::create_metadata, read_all, read_into_spare, stream, xattr,
     },
     global::Global,
-    io_mode::{IoMode, ValueEncoding, encode_value},
+    io_mode::encode_value,
     util,
 };
 
@@ -130,7 +129,6 @@ pub(crate) struct File<'v> {
 pub(crate) struct FileAnnex<'v> {
     global: State<'v, Global<'v>>,
     is_binary: bool,
-    operating_system: OperatingSystem,
 }
 
 pub(crate) async fn open<'v, 's>(
@@ -165,7 +163,7 @@ pub(crate) async fn open_native<'v>(
 
 impl<'v> File<'v> {
     pub(crate) fn create(
-        strand: &Strand<'v, '_>,
+        _strand: &Strand<'v, '_>,
         global: State<'v, Global<'v>>,
         file: AnyFile,
         is_binary: bool,
@@ -175,11 +173,7 @@ impl<'v> File<'v> {
                 file: Some(file),
                 buf: BinEmbryo::new(),
             },
-            FileAnnex {
-                global,
-                is_binary,
-                operating_system: global.local.get(strand).target().operating_system,
-            },
+            FileAnnex { global, is_binary },
         )
     }
 
@@ -510,10 +504,12 @@ impl<'v> Object<'v> for File<'v> {
             loop {
                 // Check if we already have a complete line in the buffer
                 if let Some((line, _rest)) = buf.as_slice().split_once_str(b"\n") {
+                    // The terminator stays with the line: concatenating what a
+                    // file yields has to reproduce the file, `\r\n` included.
                     let line_len = line.len();
                     borrow.buf = BinEmbryo::new_with_capacity(strand, buf.len() - (line_len + 1));
                     borrow.buf.extend(strand, &buf.as_slice()[line_len + 1..]);
-                    buf.truncate(line_len - line.ends_with(b"\r") as usize);
+                    buf.truncate(line_len + 1);
                     buf.finish_str(strand, out)
                         .map_err(|_| Error::runtime(strand, "invalid UTF-8"))?;
                     return Ok(true);
@@ -567,19 +563,7 @@ impl<'v> Object<'v> for File<'v> {
         strand: &'a mut Strand<'v, 's>,
         value: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        let annex = this.annex();
-        let mode = if annex.is_binary {
-            IoMode::Chunk
-        } else {
-            IoMode::Line
-        };
-        let bytes = encode_value(
-            strand,
-            &value,
-            mode,
-            ValueEncoding::Display,
-            annex.operating_system,
-        )?;
+        let bytes = encode_value(strand, &value)?;
         let mut borrow = this.borrow_mut(strand)?;
         let file = borrow
             .file

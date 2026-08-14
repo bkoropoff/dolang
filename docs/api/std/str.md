@@ -247,6 +247,34 @@ Removes whitespace (or specified characters) from the end.
 assert_eq ("  hello  ".trim_end()) "  hello"
 ```
 
+### `chomp`
+
+Removes one trailing line terminator.
+
+One complete terminator — `\r\n` or `\n`, never a lone `\r` — and nothing else.
+A string without one is returned unchanged.
+
+#### Returns
+
+[`Str`](./str.md)
+
+```
+assert_eq ("line\n".chomp()) "line"
+assert_eq ("line\r\n".chomp()) "line"
+assert_eq ("line".chomp()) "line"
+```
+
+Distinct from [`trim_end`](#trim_end-chars), which is about whitespace
+generally and takes an optional character set:
+
+```
+assert_eq ("z  \n".chomp()) "z  "
+assert_eq ("z  \n".trim_end()) "z"
+```
+
+[`Iter.chomp`](./iter.md#chomp) lifts this over an iterator — it is exactly
+`.map do |x| x.chomp()`, with the mapping done inline.
+
 ### `contains needle`
 
 Tests whether the string contains the given substring.

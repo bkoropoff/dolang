@@ -305,6 +305,12 @@ impl<'v> Protocol<'v> for str {
                     })
                     .await
             }
+            sym::CHOMP => {
+                let ([], []) = unpack!(strand, args, 0, 0)?;
+                let end = me.len() - iter::line_terminator_len(me.as_bytes());
+                Output::set(strand, out, &me[..end]);
+                Ok(())
+            }
             sym::TRIM => {
                 let ([], [chars]) = unpack!(strand, args, 0, 1)?;
                 let trimmed = match chars {
@@ -431,6 +437,7 @@ impl<'v> Protocol<'v> for str {
             | sym::LOWER
             | sym::SUB
             | sym::JOIN
+            | sym::CHOMP
             | sym::TRIM
             | sym::TRIM_START
             | sym::TRIM_END
@@ -722,6 +729,7 @@ impl<'v> Protocol<'v> for Type {
                 Sym::well_known(sym::SPLIT),
                 Sym::well_known(sym::RSPLIT),
                 Sym::well_known(sym::JOIN),
+                Sym::well_known(sym::CHOMP),
                 Sym::well_known(sym::TRIM),
                 Sym::well_known(sym::TRIM_START),
                 Sym::well_known(sym::TRIM_END),
@@ -756,6 +764,7 @@ impl<'v> Protocol<'v> for Type {
             | sym::SPLIT
             | sym::RSPLIT
             | sym::JOIN
+            | sym::CHOMP
             | sym::TRIM
             | sym::TRIM_START
             | sym::TRIM_END

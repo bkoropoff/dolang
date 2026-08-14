@@ -10,7 +10,7 @@ use crate::{
     strand::Strand,
     sym::{self, Sym},
     unpack,
-    value::{Output, Slot, StrEmbryo, Value},
+    value::{Output, Slot, StrEmbryo, TypeObject, Value},
     vm::Vm,
 };
 
@@ -428,7 +428,7 @@ impl<'v> Protocol<'v> for StrBuf<'v> {
                 strand,
                 "StrBuf.len is a field, not a method",
             )),
-            _ => Err(Error::field(strand, method)),
+            _ => iter::sink_mcall(strand, &this, method, args, out).await,
         }
     }
 
@@ -459,8 +459,31 @@ impl<'v> Protocol<'v> for StrBuf<'v> {
                 BoundMethod::create(strand, &this, field, out);
                 Ok(())
             }
-            _ => Err(Error::field(strand, field)),
+            _ => iter::sink_get(strand, &this, field, out),
         }
+    }
+
+    async fn op_sink<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        Output::set(strand, out, &this);
+        Ok(())
+    }
+
+    /// Appends the value's string form verbatim.
+    ///
+    /// No line terminator is added: framing is the caller's decision, expressed
+    /// with `crimp`/`precrimp` when wanted. That is what lets a `StrBuf` stand in
+    /// for any other sink without changing what gets written.
+    async fn op_put<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        value: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        let mut borrow = this.borrow_mut(strand)?;
+        borrow.append(strand, &value)
     }
 }
 
@@ -493,6 +516,16 @@ impl<'v> Protocol<'v> for Type {
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<type std.StrBuf>")
+    }
+
+    fn op_subtype<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        supertype: &Value<'v>,
+    ) -> bool {
+        supertype.eq(strand, &this)
+            || supertype.eq(strand, &strand.singletons().sinkable)
+            || supertype.eq(strand, TypeObject::Value)
     }
 
     async fn op_call<'a, 's>(

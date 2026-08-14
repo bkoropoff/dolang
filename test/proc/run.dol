@@ -22,7 +22,6 @@ import agent proc sys sys.unix sys.windows _vfs
   shell:
     - Vfs
     - exe
-    - with_io_mode
   std:
     - FieldError
     - CanceledError
@@ -210,20 +209,19 @@ def pipe_receive_side_value_flush()
       cat()
   assert_eq $res foo
 
+# A value buffered on the send side is flushed into the pipe as its own bytes
+# when the channel degrades, so it lands exactly as it was put -- no separator
+# appears that the script did not write.
 #[agent.test]
 def pipe_send_side_value_flush()
   let res = sub do pipeline
     do
-      strand.put "foo"
+      strand.put "foo\n"
       echo "foo"
     do
       yield()
       cat()
-  let expected = if is_windows
-    "foo\r\nfoo"
-  else
-    "foo\nfoo"
-  assert_eq $res $expected
+  assert_eq $res "foo\nfoo"
 
 #[agent.test]
 def formatted_values_stream_to_capture_and_pipe()
@@ -235,96 +233,105 @@ def formatted_values_stream_to_capture_and_pipe()
     do cat()
   assert_eq $res rendered
 
+# Framing is chosen per redirect and never changes content, so what a stage
+# writes is what the next stage reads back -- whichever way either one frames.
 #[agent.test]
-def pipeline_and_with_io_mode_use_matching_encodings()
+def redirect_framing_is_lossless_in_both_modes()
+  # Values are written verbatim, so unterminated ones run together and the
+  # single line that results is what comes back.
   let out = []
-  with_io_mode :LINE: do cat stdin: ["foo", "bar"] stdout: $out
+  cat stdin: ["foo", "bar"] stdout: $out
+  assert_eq $out ["foobar"]
+
+  # `crimp` on the way in is what makes them separate lines, and the
+  # terminators survive into the values read back.
+  out = []
+  cat stdin: (["foo", "bar"].crimp()) stdout: $out
+  assert_eq $out ["foo\n", "bar\n"]
+
+  # `chomp` on the way out takes them off again, which is the line-oriented
+  # idiom now spelled explicitly.
+  out = []
+  cat stdin: (["foo", "bar"].crimp()) stdout: (out.sink().prechomp())
   assert_eq $out ["foo", "bar"]
 
+  # Chunk framing cuts the same stream somewhere else and loses nothing.
   out = []
-  sub do with_io_mode :CHUNK: do cat stdin: ["foo", "bar"] stdout: $out
+  cat stdin: ["foo", "bar"] stdout: $out mode: :CHUNK:
   assert_eq (b"".join out) b"foobar"
 
+  # A pipeline stage's `put` reaches the next stage byte for byte, so the
+  # reader's framing is the only thing that decides the shape.
   let res = pipeline
-    do with_io_mode :LINE: do strand.put "foo"
+    do strand.put "foo\n"
     do cat()
-    do with_io_mode :CHUNK: do collect()
-  let expected = if is_windows
-    [b"foo\r\n"]
-  else
-    [b"foo\n"]
-  assert_eq $res $expected
+    do collect()
+  assert_eq $res ["foo\n"]
 
-  let res = pipeline
-    do with_io_mode :CHUNK: do strand.put "foo"
+  res = pipeline
+    do strand.put "foo"
     do cat()
-    do with_io_mode :CHUNK: do collect()
-  assert_eq $res [b"foo"]
-
-  let res = pipeline
-    do echo foo
-    do with_io_mode :LINE: do collect()
+    do collect()
   assert_eq $res ["foo"]
 
-  let res = pipeline
+  # `echo`'s terminator goes into the byte stream, so it is there to be read
+  # back under either framing.
+  res = pipeline
     do echo foo
-    do with_io_mode :CHUNK: do collect()
+    do collect()
+  assert_eq $res ["foo\n"]
+
+  res = pipeline
+    do echo foo
+    do [...strand.input().chunks()]
   assert_eq $res [b"foo\n"]
 
+# Framing across a process boundary is decided independently on each side and
+# neither side's choice is visible in the bytes.
 #[agent.test]
-def stdio_adapters_honor_io_mode()
+def stdio_adapters_frame_without_transforming()
   let script = Path "stdio-child.dol"
   script.write r|
     import shell
     import strand
 
     if (shell.args[0] == "raw")
-      shell.with_io_mode :CHUNK: do strand.put b"first\r\nsecond\n\n"
+      strand.put b"first\r\nsecond\n\n"
     else if (shell.args[0] == "write")
-      if (shell.args[1] == "line")
-        shell.with_io_mode :LINE: do
-          strand.put "pipeline-echo-result: []"
-          strand.put b"BIN"
-      else
-        shell.with_io_mode :CHUNK: do
-          strand.put "pipeline-echo-result: []"
-          strand.put b"BIN"
+      strand.put "pipeline-echo-result: []"
+      strand.put b"BIN"
     else
       let values = if (shell.args[1] == "line")
-        shell.with_io_mode :LINE: do strand.collect()
+        strand.collect()
       else
-        shell.with_io_mode :CHUNK: do strand.collect()
-      shell.with_io_mode :CHUNK: do
-        if (shell.args[1] == "line")
-          strand.put ("|".join values)
-        else
-          strand.put (b"".join values)
+        [...strand.input().chunks()]
+      if (shell.args[1] == "line")
+        strand.put ("|".join $ values.iter().chomp())
+      else
+        strand.put (b"".join values)
 
+  # A `Bin` value is written the same way a `Str` is: its own bytes, nothing
+  # appended. The old carve-out that skipped framing for `Bin` alone is gone.
   let output = []
-  with_io_mode :CHUNK: do run $exe $script write line stdout: $output
-  let expected = if is_windows
-    b"pipeline-echo-result: []\r\nBIN"
-  else
-    b"pipeline-echo-result: []\nBIN"
-  assert_eq (b"".join output) $expected
-
-  output = []
-  with_io_mode :CHUNK: do run $exe $script write chunk stdout: $output
+  run $exe $script write stdout: $output mode: :CHUNK:
   assert_eq (b"".join output) b"pipeline-echo-result: []BIN"
 
+  # The child sees line values with their terminators intact, whatever endings
+  # the data actually carries, and chomps them itself.
   output = []
-  with_io_mode :CHUNK: do
-    run $exe $script read line stdin: [b"first\r\nsecond\n"] stdout: $output
+  run $exe $script read line stdin: [b"first\r\nsecond\n"] stdout: $output mode: :CHUNK:
   assert_eq (b"".join output) b"first|second"
 
+  # Chunk framing carries bytes that are not valid UTF-8 and not line-shaped.
   output = []
-  with_io_mode :CHUNK: do
-    run $exe $script read chunk stdin: [b"\x00\xffraw"] stdout: $output
+  run $exe $script read chunk stdin: [b"\x00\xffraw"] stdout: $output mode: :CHUNK:
   assert_eq (b"".join output) b"\x00\xffraw"
 
+  # `sub` chomps one terminator off the whole capture by default, and `chomp:
+  # false` reports the bytes exactly.
   let captured = sub do run $exe $script raw
   assert_eq $captured "first\r\nsecond\n"
-  captured = sub trim: false do run $exe $script raw
+  captured = sub chomp: false do run $exe $script raw
   assert_eq $captured "first\r\nsecond\n\n"
 
 #[agent.test]

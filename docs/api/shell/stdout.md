@@ -44,11 +44,17 @@ on exit.
 ### Sink
 
 `Stdout` is a [sink](../std/sink.md), so it can be the target of a pipeline or
-of [`strand.put`](../strand/index.md). Unlike `write`, values put into it are
-framed per the ambient [I/O mode](./index.md#with_io_mode-mode-func): in
-`:LINE:` mode each value is written with a trailing line ending, and `Bin`
-values are always written verbatim.
+of [`strand.put`](../strand/index.md). A value contributes exactly its own bytes
+and nothing else — no line ending is appended and none is translated. `put`
+differs from `write` only in stringifying values that are neither a `Str` nor a
+`Bin` rather than rejecting them, so `put 42` writes `42` the way `echo` would.
+
+To terminate values, say so with
+[`precrimp`](../std/sink.md#precrimp-terminator):
 
 ```
-shell.stdout.put "hello"
+shell.stdout.put "hello"          # writes "hello"
+
+let lines = shell.stdout.precrimp()
+lines.put "hello"                 # writes "hello\n"
 ```

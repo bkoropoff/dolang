@@ -131,6 +131,17 @@ import fs:
 open input.txt r do |in| open output.txt w do |out|
   pipeline input: $in output: $out
     do where do |line| line.contains "ERROR"
+```
+
+Lines read from a file keep their terminators and values written to one are
+written verbatim, so the terminators carry straight through. To work with
+unterminated lines in between, [`chomp`](../std/iter.md#chomp) the input and
+[`precrimp`](../std/sink.md#precrimp-terminator) the output:
+
+```
+open input.txt r do |in| open output.txt w do |out|
+  pipeline input: (in.chomp()) output: (out.precrimp())
+    do where do |line| line.contains "ERROR"
     do each do |line| line.trim()
 ```
 

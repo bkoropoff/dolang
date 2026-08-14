@@ -504,23 +504,39 @@ Returns the file as its own iterator and sink.
 
 The file object itself
 
+The open mode fixes the file's [framing](../shell/index.md#stream-framing) for
+its lifetime. Both framings are lossless — the values read from a file
+concatenate back to exactly the file's bytes.
+
 ### `next`
 
 Fetches the next item from the file.
 
-**Text mode:** Reads the next line (delimited by `\n`), stripping the line
-ending. Handles both `\n` and `\r\n` line endings.
+**Text mode:** Reads the next line as a [`Str`](../std/str.md), **including its
+terminator**, so a `\r\n` file stays `\r\n` and a final line without one yields
+a value without one. Use [`chomp`](../std/iter.md#chomp) to strip them:
+
+```
+for line = file.chomp()
+  echo $line
+```
 
 **Binary mode:** Reads a chunk of data of arbitrary length.
 
 ### `put`
 
-Writes a value to the file.
+Writes a value to the file, verbatim: a [`Str`](../std/str.md) or
+[`Bin`](../std/bin.md) contributes its own bytes and nothing else, and anything
+else is converted to a string first. No line ending is appended in either mode,
+and none is translated.
 
-**Text mode:**
+Use [`precrimp`](../std/sink.md#precrimp-terminator) to terminate written
+values, with [`shell.line_ending()`](../shell/index.md#line_ending) for the
+target's native ending:
 
-- If the value is binary data (`Bin`), writes it unmodified
-- Otherwise, converts to string and appends the line ending for the VFS target
-  on which the file handle was opened
-
-**Binary mode:** Writes bytes directly.
+```
+open $path w do |file|
+  let lines = file.precrimp()
+  lines.put "first"
+  lines.put "second"
+```

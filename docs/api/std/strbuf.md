@@ -287,3 +287,27 @@ assert_eq $buf.freeze() "fXYZbar"
 Range assignment may grow or shrink the buffer: the replacement doesn't need
 to be the same length as the range it replaces. Both the range and the
 assigned value's boundaries must land on UTF-8 code point boundaries.
+
+### Sink
+
+`StrBuf` is a [sink](./sink.md), so it can be the target of a pipeline, of
+[`strand.put`](../strand/index.md), or of a
+[`run`](../proc-run.md#io-redirection) redirect. `put` is
+[`append`](#append-value): the value's string form goes in verbatim, with no
+line terminator added.
+
+```
+let buf = StrBuf()
+run.uname -r stdout: $buf
+```
+
+Framing is the caller's to choose, which is what lets a `StrBuf` stand in for
+any other sink without changing what gets written:
+
+```
+let buf = StrBuf()
+let out = buf.precrimp()
+out.put "first"
+out.put "second"
+assert_eq $buf.freeze() "first\nsecond\n"
+```

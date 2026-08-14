@@ -7,23 +7,29 @@ use dolang::runtime::{
     unpack,
     value::{TypeObject, View},
 };
-use dolang_vfs::target::OperatingSystem;
 use tokio::io::AsyncWriteExt;
 
 use crate::{
     error::ErrorExt as _,
     geometry::{HostGeometry, HostGeometryAnnex},
     global::Global,
-    io_mode::{IoMode, ValueEncoding, encode_value, line_ending, strip_line_ending, write_raw},
+    io_mode::{IoMode, encode_value, write_raw},
 };
 
 /// The console interface: where human-readable output goes.
 ///
 /// A console is a *byte stream*, not merely a sink. `term.echo` always
-/// terminates a line and `term.print` never does, and neither is subject to the
-/// ambient I/O mode — so the line ending cannot be left to value framing. It is
-/// the console that knows its own terminator, which is what `writeln` is for.
-/// `put` is layered on top, so a console is usable as an ordinary sink too.
+/// terminates a line and `term.print` never does, so the terminator has to be
+/// materialized into the byte stream rather than left to value framing — and it
+/// is the console that knows which terminator to use, since that follows the
+/// device rather than the caller.
+///
+/// So a console *owns* the policy but does not *apply* it: `line_ending`
+/// reports the terminator and `write` writes exactly the bytes it is given.
+/// A caller that wants a line assembles it and issues one `write`, which is
+/// also what keeps concurrent writers from interleaving. `put` is layered on
+/// top and writes a value's own bytes verbatim, so a console is usable as an
+/// ordinary sink too.
 ///
 /// Native extension types cannot be abstract, so the methods here throw rather
 /// than being absent. The concrete implementations are `shell.Console` (the
@@ -61,17 +67,19 @@ impl<'v> Object<'v> for Console {
                 let ([_data], []) = unpack!(strand, args, 1, 0)?;
                 Err(Error::not_supported(strand))
             })
-            .method("writeln", async move |_this, strand, args, _out| {
-                let ([_data], []) = unpack!(strand, args, 1, 0)?;
-                Err(Error::not_supported(strand))
-            })
             .method("flush", async move |_this, strand, args, _out| {
                 let ([], []) = unpack!(strand, args, 0, 0)?;
                 Err(Error::not_supported(strand))
             })
             // Unlike the write methods, the capability members have a safe
-            // default, so a Do subclass that supplies only the three above
-            // still answers them — by delegating to these.
+            // default, so a Do subclass that supplies only the two above still
+            // answers them — by delegating to these.
+            .get("line_ending", |_this, strand, out| {
+                // LF unless a subclass says otherwise: a console is a stream
+                // for humans to read, and every terminal takes LF.
+                Output::set(strand, out, "\n");
+                Ok(())
+            })
             .get("can_style", |_this, strand, out| {
                 Output::set(strand, out, false);
                 Ok(())
@@ -97,22 +105,16 @@ impl<'v> Object<'v> for Console {
         Ok(())
     }
 
-    /// Framing on top of `write`, so a subclass only has to supply the byte
-    /// methods to be a working sink.
+    /// `put` on top of `write`, so a subclass only has to supply the byte
+    /// methods to be a working sink. Nothing is added: a value contributes its
+    /// own bytes and a terminator, if wanted, comes from `crimp`.
     async fn put<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         value: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
         let global = strand.state::<Global<'v>>();
-        let mode = global.local.get(strand).io_mode();
-        let bytes = encode_value(
-            strand,
-            &value,
-            mode,
-            ValueEncoding::Display,
-            OperatingSystem::current(),
-        )?;
+        let bytes = encode_value(strand, &value)?;
         strand
             .with_slots(async move |strand, [mut rcvr, mut out]| {
                 Output::set(strand, &mut rcvr, this);
@@ -154,16 +156,6 @@ impl<'v> Object<'v> for HostConsole {
                 let mut writer = global.terminal.writer.lock().await;
                 write_raw(&mut *writer, data, strand, out).await
             })
-            .method("writeln", async move |_this, strand, args, out| {
-                let ([data], []) = unpack!(strand, args, 1, 0)?;
-                let global = strand.state::<Global<'v>>();
-                let mut writer = global.terminal.writer.lock().await;
-                write_raw(&mut *writer, data, strand, out).await?;
-                writer
-                    .write_all(b"\n")
-                    .await
-                    .map_err(|error| error.into_sys(strand))
-            })
             .method("flush", async move |_this, strand, args, _out| {
                 let ([], []) = unpack!(strand, args, 0, 0)?;
                 let global = strand.state::<Global<'v>>();
@@ -175,6 +167,10 @@ impl<'v> Object<'v> for HostConsole {
                     .flush()
                     .await
                     .map_err(|error| error.into_sys(strand))
+            })
+            .get("line_ending", |_this, strand, out| {
+                Output::set(strand, out, HOST_LINE_ENDING);
+                Ok(())
             })
             .get("can_style", |_this, strand, out| {
                 let global = strand.state::<Global<'v>>();
@@ -246,15 +242,7 @@ impl<'v> Object<'v> for HostConsole {
         strand: &'a mut Strand<'v, 's>,
         value: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        let global = strand.state::<Global<'v>>();
-        let mode = global.local.get(strand).io_mode();
-        let bytes = encode_value(
-            strand,
-            &value,
-            mode,
-            ValueEncoding::Display,
-            OperatingSystem::current(),
-        )?;
+        let bytes = encode_value(strand, &value)?;
         write_host(strand, &bytes, false).await
     }
 }
@@ -297,16 +285,16 @@ impl<'v> Object<'v> for DefaultOutput {
                 Output::set(strand, out, bytes.len() as i64);
                 Ok(())
             })
-            .method("writeln", async move |_this, strand, args, out| {
-                let ([data], []) = unpack!(strand, args, 1, 0)?;
-                let bytes = data_bytes(strand, &data)?;
-                writeln(strand, &bytes).await?;
-                Output::set(strand, out, bytes.len() as i64);
-                Ok(())
-            })
             .method("flush", async move |_this, strand, args, _out| {
                 let ([], []) = unpack!(strand, args, 0, 0)?;
                 flush(strand).await
+            })
+            .get("line_ending", |_this, strand, out| {
+                // Resolved at call time like everything else here, so it
+                // follows an installed capture rather than the host.
+                let ending = ambient_line_ending(strand)?;
+                Output::set(strand, out, ending.as_slice());
+                Ok(())
             })
             .get("can_style", |_this, strand, out| {
                 Output::set(strand, out, ansi(strand));
@@ -347,28 +335,39 @@ impl<'v> Object<'v> for DefaultOutput {
         strand: &'a mut Strand<'v, 's>,
         value: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        let global = strand.state::<Global<'v>>();
-        let mode = global.local.get(strand).io_mode();
-        let bytes = encode_value(
-            strand,
-            &value,
-            mode,
-            ValueEncoding::Display,
-            OperatingSystem::current(),
-        )?;
+        let bytes = encode_value(strand, &value)?;
         write(strand, &bytes).await
     }
 }
 
-/// The line ending a `Console` that has no opinion of its own appends.
+/// The line ending of a console that has no opinion of its own.
 ///
-/// A `SinkConsole` has to pick something, and a console is a host-facing stream
-/// with no VFS target to consult, so the host's ending it is.
-fn host_line_ending() -> &'static [u8] {
-    line_ending(OperatingSystem::current())
+/// LF on every platform: a console is a terminal-shaped stream, not a file, and
+/// `echo` has always written LF on Windows too. Files get their ending from
+/// their VFS target instead — see `shell.line_ending()`.
+const HOST_LINE_ENDING: &str = "\n";
+
+/// The ambient console's `line_ending`, as bytes to append.
+///
+/// The host's outside a capture; otherwise whatever the installed console
+/// reports, so a Do-defined console's terminator is honored. Read live rather
+/// than snapshotted at install: unlike `can_style`/`is_tty` it is not part of
+/// the contract that it stays fixed, and it is only consulted on the `echo`
+/// path, which is already dispatching a method.
+fn ambient_line_ending<'v, 's>(strand: &mut Strand<'v, 's>) -> Result<'v, 's, Vec<u8>> {
+    if !captured(strand) {
+        return Ok(HOST_LINE_ENDING.as_bytes().to_vec());
+    }
+    let global = strand.state::<Global<'v>>();
+    strand.with_slots_sync(|strand, [mut rcvr, mut value]| {
+        let root = global.capture.slot(strand);
+        Output::set(strand, &mut rcvr, &root);
+        rcvr.get(strand, global.syms.line_ending, &mut value)?;
+        data_bytes(strand, &value)
+    })
 }
 
-/// The bytes of a `Str` or `Bin`, as any console's `write`/`writeln` accepts.
+/// The bytes of a `Str` or `Bin`, as any console's `write` accepts.
 fn data_bytes<'v, 's>(strand: &mut Strand<'v, 's>, data: &Slot<'v, '_>) -> Result<'v, 's, Vec<u8>> {
     match data.view(strand) {
         View::Str(value) => Ok(value.pin().as_bytes().to_vec()),
@@ -379,17 +378,24 @@ fn data_bytes<'v, 's>(strand: &mut Strand<'v, 's>, data: &Slot<'v, '_>) -> Resul
 
 /// A console over an ordinary sink, supplying the rest of the interface.
 ///
-/// This is a *bytestream-to-value* boundary, and that conversion is exactly
-/// what the ambient I/O mode governs — so it frames the way an external
-/// process's output does when it crosses into a sink, mirroring
-/// [`io_mode::read_value`](crate::io_mode::read_value) on the pull side. The
-/// line ending `writeln` appends is materialized into the bytestream *first*,
-/// so it survives every mode rather than being at the mercy of one.
+/// This is a *bytestream-to-value* boundary, so it has to decide where to cut
+/// the stream — mirroring [`io_mode::read_value`](crate::io_mode::read_value)
+/// on the pull side. That framing is fixed when the adapter is built rather
+/// than read from the surrounding context, so a capture drains the way it
+/// buffered; `term.capture` wraps a plain sink in one of these and forwards its
+/// own `mode:` to here.
+///
+/// Framing is all it does. Bytes are passed through exactly as written — the
+/// terminator that `echo` put into the stream stays in the value, and a `\r\n`
+/// is neither normalized nor produced. Removing it is `chomp`'s job, which the
+/// receiving sink can ask for the same way it would for any other stream.
 pub(crate) struct SinkConsole {
     /// Bytes written but not yet emitted as a value.
     ///
     /// Only ever non-empty in `:LINE:` mode, holding a partial final line.
     buf: Vec<u8>,
+    /// How the byte stream is quantized into values, fixed at construction.
+    mode: IoMode,
     /// Off unless the caller asked for styling, since the point of capturing
     /// into a sink is usually to assert on plain text.
     can_style: bool,
@@ -397,8 +403,8 @@ pub(crate) struct SinkConsole {
 
 impl SinkConsole {
     /// Splits off whatever is now emittable, leaving any partial line behind.
-    fn drain(&mut self, mode: IoMode, final_: bool) -> Vec<Vec<u8>> {
-        match mode {
+    fn drain(&mut self, final_: bool) -> Vec<Vec<u8>> {
+        match self.mode {
             IoMode::Chunk => {
                 if self.buf.is_empty() {
                     Vec::new()
@@ -434,10 +440,14 @@ impl<'v> Object<'v> for SinkConsole {
         args: dolang::runtime::Args<'v, 'a>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        let can_style_sym = strand.state::<Global<'v>>().syms.can_style;
-        let ([target], [can_style]) = unpack!(strand, args, 1, 0, can_style_sym = None)?;
+        let global = strand.state::<Global<'v>>();
+        let can_style_sym = global.syms.can_style;
+        let mode_sym = global.syms.mode;
+        let ([target], [can_style, mode]) =
+            unpack!(strand, args, 1, 0, can_style_sym = None, mode_sym = None)?;
         let can_style = can_style.is_some_and(|value| value.to_bool(strand));
-        create_sink_console(strand, &target, can_style, out).await
+        let mode = parse_mode(strand, mode.as_deref())?;
+        create_sink_console(strand, &target, can_style, mode, out).await
     }
 
     fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
@@ -457,24 +467,17 @@ impl<'v> Object<'v> for SinkConsole {
                 let ([], []) = unpack!(strand, args, 0, 0)?;
                 Ok(())
             })
+            .get("line_ending", |_this, strand, out| {
+                Output::set(strand, out, HOST_LINE_ENDING);
+                Ok(())
+            })
             .method_with_slots(
                 "write",
                 async move |this, strand, args, out, [sink, item]| {
                     let ([data], []) = unpack!(strand, args, 1, 0)?;
                     let bytes = data_bytes(strand, &data)?;
                     let count = bytes.len();
-                    feed(this, strand, &bytes, false, false, sink, item).await?;
-                    Output::set(strand, out, count);
-                    Ok(())
-                },
-            )
-            .method_with_slots(
-                "writeln",
-                async move |this, strand, args, out, [sink, item]| {
-                    let ([data], []) = unpack!(strand, args, 1, 0)?;
-                    let bytes = data_bytes(strand, &data)?;
-                    let count = bytes.len();
-                    feed(this, strand, &bytes, true, false, sink, item).await?;
+                    feed(this, strand, &bytes, false, sink, item).await?;
                     Output::set(strand, out, count);
                     Ok(())
                 },
@@ -483,7 +486,7 @@ impl<'v> Object<'v> for SinkConsole {
                 "flush",
                 async move |this, strand, args, _out, [sink, item]| {
                     let ([], []) = unpack!(strand, args, 0, 0)?;
-                    feed(this, strand, &[], false, true, sink, item).await
+                    feed(this, strand, &[], true, sink, item).await
                 },
             )
     }
@@ -510,18 +513,10 @@ impl<'v> Object<'v> for SinkConsole {
         strand: &'a mut Strand<'v, 's>,
         value: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        let global = strand.state::<Global<'v>>();
-        let mode = global.local.get(strand).io_mode();
-        let bytes = encode_value(
-            strand,
-            &value,
-            mode,
-            ValueEncoding::Display,
-            OperatingSystem::current(),
-        )?;
+        let bytes = encode_value(strand, &value)?;
         strand
             .with_slots(async move |strand, [sink, item]| {
-                feed(this, strand, &bytes, false, false, sink, item).await
+                feed(this, strand, &bytes, false, sink, item).await
             })
             .await
     }
@@ -532,6 +527,7 @@ pub(crate) async fn create_sink_console<'v, 'a, 's>(
     strand: &mut Strand<'v, 's>,
     target: &Value<'v>,
     can_style: bool,
+    mode: IoMode,
     mut out: Slot<'v, 'a>,
 ) -> Result<'v, 's, ()> {
     let global = strand.state::<Global<'v>>();
@@ -539,6 +535,7 @@ pub(crate) async fn create_sink_console<'v, 'a, 's>(
         strand,
         SinkConsole {
             buf: Vec::new(),
+            mode,
             can_style,
         },
         &mut out,
@@ -562,39 +559,34 @@ pub(crate) async fn create_sink_console<'v, 'a, 's>(
 
 /// Appends bytes and forwards whatever that completes to the downstream sink.
 ///
-/// `terminate` appends this console's line ending first; `final_` also emits a
-/// trailing partial line, which is what makes an unterminated `print` visible
-/// once the capture scope ends.
+/// `final_` also emits a trailing partial line, which is what makes an
+/// unterminated `print` visible once the capture scope ends.
 async fn feed<'v, 'a, 's>(
     this: Instance<'v, 'a, SinkConsole>,
     strand: &mut Strand<'v, 's>,
     bytes: &[u8],
-    terminate: bool,
     final_: bool,
     mut sink: Slot<'v, 'a>,
     mut item: Slot<'v, 'a>,
 ) -> Result<'v, 's, ()> {
-    let global = strand.state::<Global<'v>>();
-    let mode = global.local.get(strand).io_mode();
-
-    let pending = {
+    let (mode, pending) = {
         let mut me = this.borrow_mut(strand)?;
         me.buf.extend_from_slice(bytes);
-        if terminate {
-            me.buf.extend_from_slice(host_line_ending());
-        }
-        let pending = me.drain(mode, final_);
+        let mode = me.mode;
+        let pending = me.drain(final_);
         let downstream = Mut::slot_mut::<0>(&mut me);
         Output::set(strand, &mut sink, &downstream);
-        pending
+        (mode, pending)
     };
 
     for unit in pending {
         match mode {
             IoMode::Line => {
+                // The terminator stays: it is what the writer put into the
+                // stream, so the value reproduces the bytes exactly.
                 let text = String::from_utf8(unit)
                     .map_err(|_| Error::runtime(strand, "console capture: invalid UTF-8"))?;
-                Output::set(strand, &mut item, strip_line_ending(&text));
+                Output::set(strand, &mut item, text.as_str());
             }
             IoMode::Chunk => Output::set(strand, &mut item, unit.as_slice()),
         }
@@ -603,10 +595,26 @@ async fn feed<'v, 'a, 's>(
     Ok(())
 }
 
+/// Decodes a `:LINE:`/`:CHUNK:` framing argument, defaulting to line framing.
+pub(crate) fn parse_mode<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    mode: Option<&Value<'v>>,
+) -> Result<'v, 's, IoMode> {
+    let global = strand.state::<Global<'v>>();
+    match mode {
+        None => Ok(IoMode::Line),
+        Some(value) => match value.as_sym(strand) {
+            Some(sym) if sym == global.syms.line => Ok(IoMode::Line),
+            Some(sym) if sym == global.syms.chunk => Ok(IoMode::Chunk),
+            _ => Err(Error::value(strand, "mode must be :LINE: or :CHUNK:")),
+        },
+    }
+}
+
 /// The console behind `term.sub`: accumulates the byte stream verbatim.
 ///
-/// No framing and no I/O mode — `term.sub` reports exactly what was written,
-/// so `print a`, `print b`, `echo c` is `"abc"` whatever the mode.
+/// No framing at all — `term.sub` reports exactly what was written, so
+/// `print a`, `print b`, `echo c` is `"abc\n"`.
 pub(crate) struct SubConsole {
     text: String,
     can_style: bool,
@@ -649,17 +657,12 @@ impl<'v> Object<'v> for SubConsole {
                 Output::set(strand, out, bytes.len());
                 Ok(())
             })
-            .method("writeln", async move |this, strand, args, out| {
-                let ([data], []) = unpack!(strand, args, 1, 0)?;
-                let bytes = data_bytes(strand, &data)?;
-                let mut me = this.borrow_mut(strand)?;
-                me.append(strand, &bytes)?;
-                me.append(strand, b"\n")?;
-                Output::set(strand, out, bytes.len());
-                Ok(())
-            })
             .method("flush", async move |_this, strand, args, _out| {
                 let ([], []) = unpack!(strand, args, 0, 0)?;
+                Ok(())
+            })
+            .get("line_ending", |_this, strand, out| {
+                Output::set(strand, out, HOST_LINE_ENDING);
                 Ok(())
             })
             .get("can_style", |this, strand, out| {
@@ -700,15 +703,7 @@ impl<'v> Object<'v> for SubConsole {
         strand: &'a mut Strand<'v, 's>,
         value: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        let global = strand.state::<Global<'v>>();
-        let mode = global.local.get(strand).io_mode();
-        let bytes = encode_value(
-            strand,
-            &value,
-            mode,
-            ValueEncoding::Display,
-            OperatingSystem::current(),
-        )?;
+        let bytes = encode_value(strand, &value)?;
         this.borrow_mut(strand)?.append(strand, &bytes)
     }
 }
@@ -736,8 +731,10 @@ pub(crate) async fn write<'v, 's>(strand: &mut Strand<'v, 's>, bytes: &[u8]) -> 
 
 /// Writes bytes to the ambient console followed by its own line ending.
 ///
-/// Only the console knows its terminator, which is why this is not
-/// `write(b"...\n")`.
+/// Only the console knows its terminator, which is why the caller cannot just
+/// write `b"...\n"` itself. The terminated buffer goes out in a *single*
+/// `write`: two writes would let a concurrent strand slip its own line between
+/// the payload and the terminator, which shows up as overlapping output.
 pub(crate) async fn writeln<'v, 's>(
     strand: &mut Strand<'v, 's>,
     bytes: &[u8],
@@ -745,8 +742,11 @@ pub(crate) async fn writeln<'v, 's>(
     if !captured(strand) {
         return write_host(strand, bytes, true).await;
     }
+    let mut line = Vec::with_capacity(bytes.len() + 2);
+    line.extend_from_slice(bytes);
+    line.extend_from_slice(&ambient_line_ending(strand)?);
     let global = strand.state::<Global<'v>>();
-    dispatch(strand, global.syms.writeln, bytes).await
+    dispatch(strand, global.syms.write, &line[..]).await
 }
 
 /// Flushes the ambient console.
@@ -867,7 +867,7 @@ async fn write_host<'v, 's>(
         .map_err(|error| error.into_sys(strand))?;
     if terminate {
         writer
-            .write_all(b"\n")
+            .write_all(HOST_LINE_ENDING.as_bytes())
             .await
             .map_err(|error| error.into_sys(strand))?;
     }

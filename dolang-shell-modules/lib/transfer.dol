@@ -846,7 +846,7 @@ def decompress_raw source destination format
   let lines = []
   try
     destination.open wb do |file|
-      run $prog -dc -- $source stdout: $file stderr: $lines
+      run $prog -dc -- $source stdout: $file stderr: $lines.prechomp()
   catch proc.Error: e
     if (lines.len == 1)
       throw ArchiveError $source $lines[0]

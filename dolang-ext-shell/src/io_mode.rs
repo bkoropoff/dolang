@@ -12,16 +12,23 @@ use crate::{
     fs::{read_all, read_into_spare},
 };
 
+/// How a byte stream is quantized into values.
+///
+/// Framing only: it decides *where* a stream is cut, never what the resulting
+/// values contain. Both modes are lossless — concatenating the values read from
+/// a stream reproduces the stream byte for byte — so the choice is about the
+/// shape of the iteration, not about the data. Removing or adding a line
+/// terminator is a separate, explicit step (`chomp`/`crimp`).
+///
+/// A property of the stream object or redirect site that reads it, never of the
+/// ambient strand.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum IoMode {
+    /// One `Str` per line, terminator included. The final value of a stream
+    /// that does not end in a terminator simply has none.
     Line,
+    /// Arbitrary `Bin` chunks, at whatever boundaries the reads fall on.
     Chunk,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum ValueEncoding {
-    Display,
-    Verbatim,
 }
 
 pub(crate) async fn read_value<'v, R>(
@@ -48,6 +55,11 @@ where
     }
 }
 
+/// Reads one line, terminator included, as a `Str`.
+///
+/// The terminator is content: it is exactly the bytes the stream held, so a
+/// `\r\n` file stays `\r\n` and a final line with no terminator yields a value
+/// with none. Callers that want the terminator gone ask for it with `chomp`.
 async fn read_line_value<'v, R>(
     reader: &mut R,
     strand: &mut Strand<'v, '_>,
@@ -71,16 +83,12 @@ where
 
             let newline = available.iter().position(|&byte| byte == b'\n');
             let consumed = newline.map_or(available.len(), |index| index + 1);
-            let content_len = newline.unwrap_or(consumed);
-            line.extend(strand, &available[..content_len]);
+            line.extend(strand, &available[..consumed]);
             (consumed, newline.is_some())
         };
         reader.consume(consumed);
 
         if complete {
-            if line.as_slice().ends_with(b"\r") {
-                line.truncate(line.len() - 1);
-            }
             line.finish_str(strand, out).map_err(invalid_utf8)?;
             return Ok(true);
         }
@@ -94,25 +102,26 @@ fn invalid_utf8(error: std::str::Utf8Error) -> io::Error {
     )
 }
 
+/// Encodes a value as the bytes to write for it, adding nothing.
+///
+/// The value edge's write half, and the exact inverse of what [`read_value`]
+/// produces: a `Str` or `Bin` contributes its own bytes and nothing else, so
+/// putting back everything read from a stream reproduces that stream. No line
+/// terminator is appended and none is translated — a caller that wants one says
+/// so with `crimp`.
+///
+/// Differs from [`write_raw`] only in stringifying anything that is not a `Str`
+/// or `Bin` rather than rejecting it, so `put 42` writes `42` the way `echo`
+/// would.
 pub(crate) fn encode_value<'v, 's>(
     strand: &mut Strand<'v, 's>,
     value: &Value<'v>,
-    mode: IoMode,
-    encoding: ValueEncoding,
-    operating_system: OperatingSystem,
 ) -> Result<'v, 's, Vec<u8>> {
-    let (bytes, verbatim) = match value.view(strand) {
-        View::Str(value) => (value.pin().as_bytes().to_vec(), false),
-        View::Bin(value) => (value.pin().to_vec(), true),
-        _ => {
-            let value = match encoding {
-                ValueEncoding::Display => value.to_string(strand)?,
-                ValueEncoding::Verbatim => value.to_verbatim(strand)?,
-            };
-            (value.into_bytes(), false)
-        }
-    };
-    Ok(frame_value(bytes, mode, verbatim, operating_system))
+    Ok(match value.view(strand) {
+        View::Str(value) => value.pin().as_bytes().to_vec(),
+        View::Bin(value) => value.pin().to_vec(),
+        _ => value.to_string(strand)?.into_bytes(),
+    })
 }
 
 /// Reads up to `size` bytes, or to end of stream when `None`, as a `Bin`.
@@ -181,18 +190,11 @@ where
     Ok(())
 }
 
-fn frame_value(
-    mut bytes: Vec<u8>,
-    mode: IoMode,
-    verbatim: bool,
-    operating_system: OperatingSystem,
-) -> Vec<u8> {
-    if mode == IoMode::Line && !verbatim {
-        bytes.extend_from_slice(line_ending(operating_system));
-    }
-    bytes
-}
-
+/// The line terminator native to a platform.
+///
+/// Used at the *byte* edge — what `echo` puts into the stream, and what
+/// `shell.line_ending()` reports so a script can `crimp` with it — never
+/// applied implicitly to a value on its way out.
 pub(crate) fn line_ending(operating_system: OperatingSystem) -> &'static [u8] {
     match operating_system {
         OperatingSystem::Windows => b"\r\n",
@@ -212,43 +214,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn framing_uses_target_line_endings_for_non_binary_values() {
-        assert_eq!(
-            frame_value(
-                b"text".to_vec(),
-                IoMode::Line,
-                false,
-                OperatingSystem::Linux
-            ),
-            b"text\n"
-        );
-        assert_eq!(
-            frame_value(
-                b"text".to_vec(),
-                IoMode::Line,
-                false,
-                OperatingSystem::Windows
-            ),
-            b"text\r\n"
-        );
-        assert_eq!(
-            frame_value(
-                b"BIN".to_vec(),
-                IoMode::Line,
-                true,
-                OperatingSystem::Windows
-            ),
-            b"BIN"
-        );
-        assert_eq!(
-            frame_value(
-                b"text".to_vec(),
-                IoMode::Chunk,
-                false,
-                OperatingSystem::Windows
-            ),
-            b"text"
-        );
+    fn line_endings_are_native_to_the_platform() {
+        assert_eq!(line_ending(OperatingSystem::Linux), b"\n");
+        assert_eq!(line_ending(OperatingSystem::Macos), b"\n");
+        assert_eq!(line_ending(OperatingSystem::FreeBsd), b"\n");
+        assert_eq!(line_ending(OperatingSystem::Windows), b"\r\n");
     }
 
     #[test]

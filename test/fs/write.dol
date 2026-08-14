@@ -14,6 +14,7 @@ import fs:
 
 import agent
 import sys
+import shell
 import std:
   - RuntimeError
 
@@ -54,17 +55,40 @@ def write_binary_data()
     # Cleanup
     remove $test_path
 
+# `put` writes a value's own bytes and invents nothing -- no terminator, and
+# no type-dependent carve-out for `Bin`. What goes in is what lands on disk.
 #[agent.test]
-def sink_put_uses_handle_target_line_endings()
+def sink_put_is_verbatim_for_every_value_type()
     let test_path = "test_sink_put.txt"
     open $test_path w do |file|
       file.put "line"
       file.put b"BIN"
+      file.put 42
+
+    open $test_path rb do |file|
+      assert_eq $file.read() b"lineBIN42"
+
+# Terminators are opt-in, and come out identical on every platform unless the
+# script asks for the target's own ending.
+#[agent.test]
+def sink_put_terminates_only_when_asked()
+    let test_path = "test_sink_crimp.txt"
+    open $test_path w do |file|
+      let out = file.precrimp()
+      out.put "one"
+      out.put "two"
+
+    open $test_path rb do |file|
+      assert_eq $file.read() b"one\ntwo\n"
+
+    open $test_path w do |file|
+      let out = file.precrimp(shell.line_ending())
+      out.put "one"
 
     let expected = if (sys.os_info().family == :WINDOWS:)
-      b"line\r\nBIN"
+      b"one\r\n"
     else
-      b"line\nBIN"
+      b"one\n"
     open $test_path rb do |file|
       assert_eq $file.read() $expected
 

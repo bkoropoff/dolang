@@ -27,6 +27,5 @@ Flushes buffered output to the stream.
 
 ### Sink
 
-`Stderr` is a [sink](../std/sink.md). Values put into it are framed per the
-ambient [I/O mode](./index.md#with_io_mode-mode-func), as with
-[`Stdout`](./stdout.md#sink).
+`Stderr` is a [sink](../std/sink.md). Values put into it are written verbatim,
+as with [`Stdout`](./stdout.md#sink).
