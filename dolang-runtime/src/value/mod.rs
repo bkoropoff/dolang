@@ -2567,7 +2567,7 @@ impl<'v> Input<'v> for Empty {
 #[non_exhaustive]
 pub enum Singleton {
     /// `std.null`
-    IterNull,
+    Null,
 }
 
 impl<'v> Input<'v> for Singleton {
@@ -2575,7 +2575,7 @@ impl<'v> Input<'v> for Singleton {
     #[inline]
     fn input_take<'a>(&'a mut self, vm: &'a Vm<'v>, _: private::Sealed) -> InputBy<'v, 'a> {
         InputBy::Borrow(match self {
-            Singleton::IterNull => &vm.singletons().nulliter,
+            Singleton::Null => &vm.singletons().null,
         })
     }
 }

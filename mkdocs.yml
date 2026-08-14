@@ -59,6 +59,7 @@ nav:
     - language/prelude.md
   - Shell Guide:
     - shell/index.md
+    - shell/external-programs.md
     - shell/modules.md
     - shell/cli-tools.md
     - shell/terminal-output.md
@@ -230,6 +231,7 @@ nav:
       - api/std/missing-key-error.md
       - api/std/missing-pos-error.md
       - api/std/nil.md
+      - api/std/null.md
       - api/std/overflow-error.md
       - api/std/range.md
       - api/std/record.md

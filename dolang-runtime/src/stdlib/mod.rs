@@ -45,7 +45,7 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
     let sinkable_type = bc.sinkable.dup();
     let getter_type = bc.getter.dup();
     let setter_type = bc.setter.dup();
-    let nulliter = bc.nulliter.dup();
+    let null = bc.null.dup();
     let error_sink_stop = bc.error_sink_stop.dup();
     let error_iter_stop = bc.error_iter_stop.dup();
 
@@ -106,7 +106,8 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
         .value("Setter", &setter_type)
         .value("Iter", &iter_type)
         .value("Sink", &sink_type)
-        .value("NULLITER", &nulliter)
+        .value("Null", &null)
+        .value("null", &null)
         .value("SinkStop", &error_sink_stop)
         .value("IterStop", &error_iter_stop)
         // Error types

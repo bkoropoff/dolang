@@ -71,19 +71,15 @@ assert_eq $acc [2]
 
 ### `prechomp`
 
-Wraps the sink so one trailing line terminator is removed from each value
-before it is written.
-
-The contravariant [`Iter.chomp`](./iter.md#chomp): same rule — one complete
-`\r\n` or `\n`, never a lone `\r`, only at the end — applied on the way in.
-Reach for it when a sink is being fed by something that frames into terminated
-lines, such as
-[`term.capture`](../term/index.md#capture-console-func-args-mode).
+Creates a wrapper `Sink` which removes a trailing line terminator (`\n` or
+`\r\n`) from each item, if present, before it is written.
 
 #### Errors
 
-Raises [`TypeError`](./type-error.md) for a value that is neither a
-[`Str`](./str.md) nor a [`Bin`](./bin.md).
+Putting an item raises [`TypeError`](./type-error.md) if it is neither
+neither a `Str` nor a `Bin`.
+
+#### Example
 
 ```
 let acc = []
@@ -94,18 +90,15 @@ assert_eq $acc ["line"]
 
 ### `precrimp terminator?`
 
-Wraps the sink so a terminator is appended to each value before it is written.
-
-The contravariant [`Iter.crimp`](./iter.md#crimp-terminator), and the usual way
-to terminate values headed for a byte stream, which never adds terminators of
-its own. Appended unconditionally, so a value that already ends in one gets a
-second.
+Creates a wrapper `Sink` that appends a terminator to each value before it is
+written. The append is unconditional, so an item that already ends in one gets
+a second.
 
 #### Parameters
 
-| Name         | Type                                    | Description                    |
-| ------------ | --------------------------------------- | ------------------------------ |
-| `terminator` | [`Str`](./str.md)\|[`Bin`](./bin.md)?   | Appended to each value; `"\n"` |
+| Name         | Type                                  | Description                              |
+| ------------ | ------------------------------------- | ---------------------------------------- |
+| `terminator` | [`Str`](./str.md)\|[`Bin`](./bin.md)? | Appended to each value (default: `"\n"`) |
 
 #### Errors
 
@@ -115,7 +108,8 @@ invalid UTF-8.
 
 ```
 let out = shell.stdout.precrimp()
-out.put "hello"          # writes "hello\n"
+out.put "hello"
+# writes "hello\n"
 
 open $path w do |file|
   file.precrimp(shell.line_ending()).put "native"

@@ -34,6 +34,7 @@ The `std` module provides core language facilities.
 | [`MissingKeyError`](./missing-key-error.md)       | Required keyword argument not provided     |
 | [`MissingPosError`](./missing-pos-error.md)       | Required positional argument not provided  |
 | [`Nil`](./nil.md)                                 | Type object for `nil`                      |
+| [`Null`](./null.md)                               | Empty iterator and discarding sink         |
 | [`OverflowError`](./overflow-error.md)            | Integer overflow                           |
 | [`Range`](./range.md)                             | Numeric range for iteration                |
 | [`Record`](./record.md)                           | Record with dot-syntax access              |
@@ -59,12 +60,12 @@ The `std` module provides core language facilities.
 
 ## Values
 
-### `NULLITER`
+### `null`
 
-Acts as both an iterator and a sink that performs no operations.
+The singleton [`Null`](./null.md) value.
 
-- **As an iterator:** `NULLITER` never yields any items.
-- **As a sink:** `NULLITER` silently discards all items.
+- As an iterator, `null` immediately ends.
+- As a sink, `null` silently discards all values.
 
 ## Functions
 
@@ -135,19 +136,29 @@ Creates an array from positional arguments.
 
 Creates a dictionary from positional and keyword arguments.
 
+Positional arguments receive incrementing integer keys starting at `0`.
+Keyword arguments become symbol keys. The function-call syntax cannot specify
+other key types; use a [horizontal dictionary
+literal](../../language/data-structures.md#literals) or [vertical
+data](../../language/vertical-layout.md#vertical-data) instead.
+
 ### `tuple ...values`
 
 Creates a tuple from positional arguments.
 
 ### `record ...`
 
-Creates a record from keyword arguments.
+Creates a record from positional and keyword arguments.
+
+Positional arguments receive incrementing integer keys starting at `0`.
+Keyword arguments become symbol fields.
 
 #### Parameters
 
-| Name         | Type | Description   |
-| ------------ | ---- | ------------- |
-| keyword args |      | become fields |
+| Name                 | Type | Description                       |
+| -------------------- | ---- | --------------------------------- |
+| positional arguments | *    | Receive incrementing integer keys |
+| keyword arguments    |      | Become symbol fields              |
 
 #### Returns
 

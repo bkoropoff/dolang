@@ -926,7 +926,7 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
                     return Err(Error::value(strand, "strand.pool: count must be positive"));
                 }
                 arg_input.iter(strand, &mut input).await?;
-                Output::set(strand, &mut output, Singleton::IterNull);
+                Output::set(strand, &mut output, Singleton::Null);
                 map_workers(strand, count, input, output, block).await
             },
         )

@@ -1833,6 +1833,7 @@ enum ClientRecv {
 
 enum ClientSend {
     Null,
+    Stdout,
     Inherit(HostOutput),
     Native(DefaultHandle),
     Resource(StdioSend),
@@ -1914,6 +1915,7 @@ impl<'a> CommandBuilder<'a> {
     ) -> crate::Result<StdioSendTarget> {
         match stdio {
             ClientSend::Null => Ok(StdioSendTarget::Null),
+            ClientSend::Stdout => Ok(StdioSendTarget::Stdout),
             ClientSend::Inherit(output) => {
                 let (send, recv) = client.pipe().await?;
                 relays.outputs.push((recv, output));
@@ -1966,21 +1968,9 @@ impl<'a> CommandBuilder<'a> {
         stderr: ClientSend,
         relays: &mut PreparedRelays,
     ) -> crate::Result<(StdioSendTarget, StdioSendTarget)> {
-        if client.mode() == SessionMode::Remote
-            && matches!(stdout, ClientSend::Inherit(HostOutput::Stdout))
-            && matches!(stderr, ClientSend::Inherit(HostOutput::Stdout))
-        {
-            let (send, recv) = client.pipe().await?;
-            let stderr = send.try_clone().await?;
-            relays.outputs.push((recv, HostOutput::Stdout));
-            let stdout = Self::prepare_send(client, ClientSend::Resource(send), relays).await?;
-            let stderr = Self::prepare_send(client, ClientSend::Resource(stderr), relays).await?;
-            Ok((stdout, stderr))
-        } else {
-            let stdout = Self::prepare_send(client, stdout, relays).await?;
-            let stderr = Self::prepare_send(client, stderr, relays).await?;
-            Ok((stdout, stderr))
-        }
+        let stdout = Self::prepare_send(client, stdout, relays).await?;
+        let stderr = Self::prepare_send(client, stderr, relays).await?;
+        Ok((stdout, stderr))
     }
 }
 
@@ -2179,6 +2169,15 @@ impl<'a> Command for CommandBuilder<'a> {
         Ok(self)
     }
 
+    fn stdout_inherit_stderr(&mut self) -> io::Result<&mut Self> {
+        self.stdout = if self.client.mode() == SessionMode::Remote {
+            ClientSend::Inherit(HostOutput::Stderr)
+        } else {
+            ClientSend::Native(clone_stderr_handle()?)
+        };
+        Ok(self)
+    }
+
     fn stdin_null(&mut self) -> &mut Self {
         self.stdin = ClientRecv::Null;
         self
@@ -2208,6 +2207,11 @@ impl<'a> Command for CommandBuilder<'a> {
         } else {
             ClientSend::Native(clone_stderr_handle()?)
         };
+        Ok(self)
+    }
+
+    fn stderr_to_stdout(&mut self) -> io::Result<&mut Self> {
+        self.stderr = ClientSend::Stdout;
         Ok(self)
     }
 

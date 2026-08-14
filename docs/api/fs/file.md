@@ -504,9 +504,9 @@ Returns the file as its own iterator and sink.
 
 The file object itself
 
-The open mode fixes the file's [framing](../shell/index.md#stream-framing) for
-its lifetime. Both framings are lossless — the values read from a file
-concatenate back to exactly the file's bytes.
+The open mode determines whether iteration yields lines or binary chunks for
+the file's lifetime. In either mode, the values read from a file concatenate
+back to exactly the file's bytes.
 
 ### `next`
 

@@ -998,7 +998,7 @@ impl Connection {
         target: StdioSendTarget,
     ) -> Result<Option<StdioSend>, WireError> {
         match target {
-            StdioSendTarget::Null => Ok(None),
+            StdioSendTarget::Null | StdioSendTarget::Stdout => Ok(None),
             StdioSendTarget::Native(handle) => {
                 if self.mode == SessionMode::Remote {
                     return Err(Self::unsupported("native process stdio"));
@@ -1036,6 +1036,7 @@ impl Connection {
     ) -> Result<(), WireError> {
         let stdin = self.spawn_stdio_recv(context, stdin);
         let stdout = self.spawn_stdio_send(context, stdout);
+        let stderr_to_stdout = matches!(stderr, StdioSendTarget::Stdout);
         let stderr = self.spawn_stdio_send(context, stderr);
         let (stdin, stdout, stderr) = (stdin?, stdout?, stderr?);
 
@@ -1049,7 +1050,9 @@ impl Connection {
         } else {
             command.stdout_null();
         }
-        if let Some(stdio) = stderr {
+        if stderr_to_stdout {
+            command.stderr_to_stdout().map_err(wire_error)?;
+        } else if let Some(stdio) = stderr {
             command.stderr(stdio).map_err(wire_error)?;
         } else {
             command.stderr_null();

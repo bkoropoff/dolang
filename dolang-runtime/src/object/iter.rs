@@ -2789,7 +2789,7 @@ pub(crate) async fn create_zip_from_args<'v, 'a, 's>(
     Ok(())
 }
 
-/// Null iterator/sink that yields no items and discards all items.
+/// Singleton iterator/sink that yields no items and discards all items.
 pub(crate) struct Null;
 
 unsafe impl Collect for Null {
@@ -2818,7 +2818,7 @@ impl<'v> Protocol<'v> for Null {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "<std.NullIter>")
+        crate::fmt!(strand, w, "<std.Null>")
     }
 
     // Iter protocol: never yields any items
@@ -3621,7 +3621,7 @@ mod tests {
     #[test]
     fn null_iterator_yields_nothing_and_sink_discards_puts() {
         with_vm(async |strand, []| {
-            let null = strand.singletons().nulliter.dup();
+            let null = strand.singletons().null.dup();
             null.put(strand, 5i64).await.unwrap();
             null.put(strand, 6i64).await.unwrap();
             assert_eq!(
@@ -3976,8 +3976,8 @@ mod tests {
             let put_sym = Sym::well_known(sym::PUT);
             let init_sym = Sym::well_known(sym::INIT_METHOD);
 
-            Output::set(strand, &mut null_val, &strand.singletons().nulliter);
-            assert_eq!(null_val.to_debug(strand).unwrap(), "<std.NullIter>");
+            Output::set(strand, &mut null_val, &strand.singletons().null);
+            assert_eq!(null_val.to_debug(strand).unwrap(), "<std.Null>");
 
             // `INIT_METHOD` is special-cased ahead of both surfaces.
             null_val.get(strand, init_sym, &mut out).unwrap();

@@ -2,11 +2,9 @@
 
 ## Module Resolution
 
-The core Do language only supports built-in modules (like `base64`, `json`, and
-`strand`). Filesystem-based module importing is provided by `dolang`.
-
 When a script imports a module, the shell resolves it by searching configured
-module paths. The **current directory is not searched by default**.
+module paths, followed by bundled modules. The **current directory is not
+searched by default**.
 
 ### Module Search Paths
 

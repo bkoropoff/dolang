@@ -1135,10 +1135,10 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             "mute",
             async move |strand, args, out, [mut console, mut scratch]| {
                 let ([func], [], rest) = unpack!(strand, args, 1, 0, ...)?;
-                // A console over NULLITER discards everything written to it —
+                // A console over std.null discards everything written to it —
                 // the same mechanism `capture` uses, just wired to a sink that
                 // throws writes away instead of collecting them.
-                Output::set(strand, &mut scratch, Singleton::IterNull);
+                Output::set(strand, &mut scratch, Singleton::Null);
                 console::create_sink_console(
                     strand,
                     &scratch,

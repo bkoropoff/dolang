@@ -141,7 +141,7 @@ else
 Owner, group, and DACL are loaded by default. Request `sacl: true` only when
 the caller has the required Windows access rights and privileges.
 
-`SecDesc.with` creates a modified descriptor while preserving other components
+`SecDesc.with` creates a modified descriptor while preserving other components.
 Apply a modified descriptor with
 [`fs.set_sec_desc`](../api/fs/index.md#set_sec_desc-path-desc-resolve):
 

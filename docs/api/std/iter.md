@@ -131,22 +131,15 @@ only if `pred(value)` is truthy.
 
 ### `chomp`
 
-Creates a wrapper `Iter` which removes one trailing line terminator from each
-item.
-
-[`Str.chomp`](./str.md#chomp) lifted over an iterator: equivalent to
-`.map do |x| x.chomp()`, with the mapping done inline rather than through a
-callable. So one complete terminator is removed — `\r\n` or `\n`, never a lone
-`\r` — and only from the end. An item with no terminator passes through
-unchanged, and [`Str`](./str.md) and [`Bin`](./bin.md) items keep their type.
-
-Values arriving from a byte stream keep their terminators, since that is what
-makes the framing lossless. `chomp` is how a caller says it wants them gone.
+Creates a wrapper `Iter` which removes one trailing line terminator (`\r\n` or
+`\n`) from each item, if present.
 
 #### Errors
 
-Raises [`TypeError`](./type-error.md) for an item that is neither a `Str` nor a
-`Bin`.
+Getting an item raises [`TypeError`](./type-error.md) if the underlying
+`Iter` yields neither a `Str` nor a `Bin`.
+
+#### Example
 
 ```
 assert_eq [...["a\n", "b\r\n", "c"].chomp()] ["a", "b", "c"]
@@ -161,31 +154,31 @@ specifically and takes nothing.
 
 ### `crimp terminator?`
 
-Creates a wrapper `Iter` which appends a terminator to each item.
+Creates a wrapper `Iter` which appends a line terminator to each item.
 
-The inverse of [`chomp`](#chomp), and the usual way to frame values on their
-way into a byte stream.
+The inverse of [`chomp`](#chomp), and the usual way to terminate values on
+their way into a byte stream.
 
 The terminator is appended **unconditionally**: an item that already ends in
-one gets a second. "Ensure a terminator" would make the result depend on the
-item's content, which is what this pairing exists to avoid.
+one gets a second.
 
 #### Parameters
 
-| Name         | Type                                    | Description                    |
-| ------------ | --------------------------------------- | ------------------------------ |
-| `terminator` | [`Str`](./str.md)\|[`Bin`](./bin.md)?   | Appended to each item; `"\n"`  |
+| Name         | Type                                  | Description                         |
+| ------------ | ------------------------------------- | ----------------------------------- |
+| `terminator` | [`Str`](./str.md)\|[`Bin`](./bin.md)? | Appended to each item; default `\n` |
 
-[`Str`](./str.md) and [`Bin`](./bin.md) items keep their type. Every platform
-gets the same bytes unless asked otherwise — pass
-[`shell.line_ending()`](../shell/index.md#line_ending) for the target's native
-ending.
+Items must be [`Str`](./str.md) or [`Bin`](./bin.md), or a type error will
+result. Pass [`shell.line_ending()`](../shell/index.md#line_ending) for the
+current target's native ending.
 
 #### Errors
 
 Raises [`TypeError`](./type-error.md) for an item, or a terminator, that is
 neither a `Str` nor a `Bin`, or if a `Bin` terminator would leave a `Str` item
 invalid UTF-8.
+
+#### Example
 
 ```
 assert_eq [...["a", "b"].crimp()] ["a\n", "b\n"]

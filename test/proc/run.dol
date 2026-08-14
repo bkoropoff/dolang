@@ -25,7 +25,7 @@ import agent proc sys sys.unix sys.windows _vfs
   std:
     - FieldError
     - CanceledError
-    - NULLITER
+    - null
     - RuntimeError
     - TypeError
     - ValueError
@@ -119,7 +119,7 @@ def background_strand_process_groups()
     # Wait for process group to exit
     while true
       try
-        run sh -c "kill -0 $pid" stderr: $NULLITER
+        run sh -c "kill -0 $pid" stderr: $null
       catch proc.Error: _
         break
       sleep 0.1
@@ -183,7 +183,7 @@ def path_selector()
     "echo"
   let path = run[name].which()
   let prog = run[path]
-  strand.redirect output: $NULLITER do
+  strand.redirect output: $null do
     if is_windows
       prog /c echo ok
       run $path /c echo ok

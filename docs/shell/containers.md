@@ -1,9 +1,9 @@
 # Containers
 
-The `docker` and `podman` modules use [VFS contexts](./vfs.md) to run Do
-functions in the context of containers. Filesystem operations, external program
-launching, and other supported APIs target the container, while the interpreter
-remains on the host.
+The `docker` and `podman` modules allow managing containers and using [VFS
+contexts](./vfs.md) to run Do functions in container contexts. Filesystem
+operations, external program launching, and other supported APIs target the
+container, while the interpreter remains on the host.
 
 ## Running in a Container
 
@@ -22,8 +22,7 @@ echo $release["PRETTY_NAME"]
 strings or symbols; `nil` unsets a variable and `:INHERIT:` copies its current
 strand value into the container.
 
-`run`, `with`, and `build` also accept `pull:`: `:MISSING:` (default),
-`:ALWAYS:`, or `:NEVER:`.
+`run`, `with`, and `build` also accept a `pull:` policy.
 Starting a container waits for its VFS agent to come up with no built-in
 timeout; wrap the call in `time.timeout` if a bound is needed.
 
@@ -82,7 +81,7 @@ Build steps are applied in order:
 Top-level `mounts:` are available throughout the build. Cache mounts retain
 downloaded data between builds; bind mounts expose an explicit host path.
 
-## Images and Containers
+## Management
 
 The Docker and Podman modules also provide a small management API:
 
@@ -93,7 +92,9 @@ The Docker and Podman modules also provide a small management API:
 - `Container`s expose metadata and can be started, stopped, killed, restarted,
   or removed.
 
-Use `create` when configuration and execution need separate phases:
+Use [`docker.create`](../api/docker/index.md) or
+[`podman.create`](../api/podman/index.md) when configuration and execution need
+separate phases:
 
 ```
 import docker
@@ -101,21 +102,24 @@ import docker
 let ctr = docker.create ubuntu:24.04 -c "exit 42"
   name: example
   entrypoint: /bin/sh
-  env: {MODE: "batch"}
+  env:
+    MODE: batch
   mounts:
     - type: :BIND:
       source: ./input
       target: /input
       readonly: true
-  labels: {app: "example"}
+  labels:
+    app: example
   ports:
     - container_port: 8080
       protocol: :TCP:
   networks:
     - bridge
-  user: "1000:1000"
+  user: 1000:1000
   cd: /input
-  restart: {policy: :NO:}
+  restart:
+    policy: :NO:
 
 ctr.start()
 try
@@ -125,12 +129,6 @@ catch docker.ContainerExitError: err
 finally
   ctr.remove force: true
 ```
-
-Mount `type:` values are `:BIND:`, `:VOLUME:`, and `:TMPFS:`. Port
-`protocol:` values are `:TCP:`, `:UDP:`, and `:SCTP:`. Restart policies are
-`:NO:`, `:ON_FAILURE:`, `:ALWAYS:`, and `:UNLESS_STOPPED:`;
-`max_retries:` is valid only with `:ON_FAILURE:`. Dictionary and record keys
-remain lower-case symbols.
 
 See the [`docker`](../api/docker/index.md) and
 [`podman`](../api/podman/index.md) references for the complete interfaces.
@@ -171,39 +169,8 @@ finally
   agent.stop()
 ```
 
-Be careful to suitably restrict access to the shared directory. `dolang-vfs`
-will refuse to create a socket in a directory that is not exclusively
-accessible by its owner (mode `0700`). That directory is what keeps other users
-out; the socket inside it is bound `0666`, since the uid the container maps the
-client to is not knowable in advance, so its own mode cannot tell the intended
-client from anything else that can traverse the directory — every process in
-the container included. The module helpers therefore key the session rather
-than relying on permissions: they start the agent as
-`dolang-vfs --key-stdin --accept <socket_path>`, write the key to its standard
-input, and pass the same key to `Vfs.unix_socket`. A manual setup is weaker
-than the helpers unless it does the same; see
+Be careful to suitably restrict access to the shared directory and ensure UID
+mappings are accurate. `dolang-vfs` will refuse to create a socket in a
+directory that is not exclusively accessible by its owner (mode `0700`).
+A shared secret can be used to increase security; see
 [Connections](./vfs.md#connections).
-
-When connecting, the socket path is resolved through the current VFS context,
-so a container can be reached via an [SSH context](./ssh.md).
-
-This gives the following common lifetimes:
-
-| Form                            | Container and VFS lifetime                                |
-| ------------------------------- | --------------------------------------------------------- |
-| `docker.with` / `podman.with`   | Temporary container and session for one block             |
-| `docker.build` / `podman.build` | Temporary container spanning the build steps              |
-| `Container.with`                | Existing container and session for one block              |
-| Other `Container` methods       | Management handle                                         |
-| Manual socket connection        | Controlled by the caller and external container lifecycle |
-
-To target Docker on another host, enter that host first and then use the
-ordinary Docker module:
-
-```
-import ssh docker
-
-ssh.with builder.example.com do
-  docker.with ubuntu:24.04 do
-    run uname -a
-```
