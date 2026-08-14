@@ -25,6 +25,7 @@ dolang-vfs-winscm = { path = "../dolang-vfs-winscm", version = "0.1.1", optional
 
 [dev-dependencies]
 base64 = "0.22.1"
+dolang-rpc = { path = "../dolang-rpc", version = "0.1.1" }
 typed-path.workspace = true
 tempfile = "3"
 tokio = { version = "1.48.0", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }

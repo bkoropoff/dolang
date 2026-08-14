@@ -30,7 +30,7 @@ disconnect.
 
 ## Class Methods
 
-### `unix_socket path`
+### `unix_socket path :key?`
 
 Connects to a running `dolang-vfs` daemon on Unix.
 
@@ -41,18 +41,45 @@ non-Unix context reports that Unix VFS connections are unsupported.
 The working directory in which the `dolang-vfs` process started becomes
 the context's initial working directory.
 
+`key` is a pre-shared key that both ends prove knowledge of during the
+handshake. Supply it when the socket's permissions cannot identify the peer —
+an agent inside a container binds its socket `0666` because the uid that will
+connect is not knowable in advance, leaving it reachable by anything that can
+traverse the containing directory. The agent must have been
+started with `--key-stdin` and given the same key, and the requirement is
+mutual: a key here fails against an agent without one, and an agent expecting
+one refuses a connection without it. Keys must be at least 16 bytes, and must
+carry sufficient entropy on their own — generate one with
+[`rand.string`](../rand.md#string-len-alphabet) rather than choosing it.
+
+This authenticates the connection; it does not encrypt or integrity-protect
+the session that follows.
+
 #### Parameters
 
-| Name   | Type                    | Description      |
-| ------ | ----------------------- | ---------------- |
-| `path` | [`Path`](../fs/path.md) | Unix socket path |
+| Name   | Type                                                 | Description       |
+| ------ | ---------------------------------------------------- | ----------------- |
+| `path` | [`Path`](../fs/path.md)                              | Unix socket path  |
+| `key`  | [`str`](../std/str.md)\|[`bin`](../std/bin.md)?      | Pre-shared key    |
 
 #### Returns
 
 `Vfs`
 
+#### Errors
+
+- The agent is not listening, or the path is not a socket
+- Either end fails to prove the key, or only one end was given one
+
 ```
 let a = Vfs.unix_socket /tmp/agent/socket
+```
+
+Authenticated, with a freshly generated key:
+
+```
+let key = rand.string 32
+let a = Vfs.unix_socket /tmp/agent/socket :key
 ```
 
 ### `windows_admin :cd? :env?`

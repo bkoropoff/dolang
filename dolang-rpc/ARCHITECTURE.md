@@ -275,8 +275,9 @@ Session establishment negotiates two independent things over a single
   (String, Vec<u16>) }` (a struct — postcard serializes it identically to a
   plain tuple of its field types, so this is purely a readability choice, not
   a wire format one), where `version_blobs` is one length-prefixed handshake
-  blob per offered RPC version (reserved for future per-version handshake
-  data; not yet consulted by either endpoint) and `app_protocol` is this
+  blob per offered RPC version — for version 1, `HandshakeV1`, carrying the
+  limits this endpoint enforces and its optional authentication digest — and
+  `app_protocol` is this
   peer's application protocol name plus a sorted ascending list of supported
   `u16` versions. Application-protocol versions are `u16` rather than `u8`
   because application protocols built on top of `dolang-rpc` are expected to
@@ -298,6 +299,48 @@ local error messages (though the wire-level abort signal itself is
 undifferentiated, matching the ordinary fragment abort mechanism below), so a
 caller can tell an RPC-framing incompatibility from an application-protocol
 name or version mismatch.
+
+### Pre-Shared Key Authentication
+
+`Builder::key` makes negotiation prove, in both directions, that each peer
+knows the same secret. This exists for transports whose access control cannot
+identify the peer: a Unix-domain socket that must be world-connectable because
+the uid that will connect is not knowable in advance (a VFS agent inside a
+container, where the runtime's id mapping is not under our control).
+
+Each side derives two digests from the key with BLAKE3's key-derivation mode
+under role-specific contexts, advertises the one for its own role in
+`HandshakeV1.key`, and requires the other role's. Verification happens as soon
+as the peer's blob is decoded, before anything else it said is acted on, and
+failure takes the same best-effort `ABORT` path as a version mismatch.
+
+Two properties follow from the digests being one-way and role-separated, and
+both are the point of the design:
+
+- A peer that connects first and harvests the server's advertisement cannot
+  derive the client's, so reaching the socket ahead of the intended client
+  gains nothing.
+- A peer that binds the socket first cannot produce the server's, so
+  impersonating the agent fails too. Client-only authentication would leave
+  this open, and it is not hypothetical: anyone whose uid maps onto the socket
+  directory's owner can replace the socket.
+
+Both digests ride the existing symmetric exchange, so authentication costs no
+extra round trips — which is why it is a bearer proof rather than a
+challenge-response. The consequences are worth stating plainly: there is no
+nonce, so the exchange is not replay-resistant, and the session that follows
+has neither integrity nor privacy protection. It is meant for keys minted per
+launch and carried over a channel the peer cannot observe. The key is padded
+to a fixed width rather than salted, so it must carry sufficient entropy on
+its own; `AuthKey::new` enforces a 16-byte floor as a backstop, not as a
+substitute for generating one properly.
+
+Both ends must agree: keyed-to-unkeyed is refused from both sides
+independently, so a configuration mistake fails closed rather than silently
+dropping authentication. Neither `AuthKey` nor `HandshakeV1` derives `Debug` —
+a derived digest authenticates its side as effectively as the key it came
+from, so printing one is equivalent to printing the secret. Error messages
+carry no key material for the same reason.
 
 Each side drives its own write and its peer's read concurrently rather than
 sequentially, so a handshake payload large enough to need more than one

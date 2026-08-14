@@ -1,9 +1,9 @@
 use std::any::Any;
 use std::collections::HashMap;
-use std::{io, path::PathBuf};
+use std::{fmt, io, path::PathBuf};
 
 use dolang_rpc::{
-    Protocol,
+    AuthKey, Protocol,
     handle::OsHandle,
     session::{Cite, Gift},
 };
@@ -50,9 +50,17 @@ impl Protocol for VfsProtocol {
 pub(crate) const APP_PROTOCOL: (&str, &[u16]) = ("dolang-vfs", &[1]);
 
 /// Starts a fresh [`dolang_rpc::Builder`] preconfigured with
-/// [`APP_PROTOCOL`].
-pub(crate) fn rpc_builder() -> dolang_rpc::Builder {
-    dolang_rpc::Builder::new(APP_PROTOCOL.0, APP_PROTOCOL.1)
+/// [`APP_PROTOCOL`], optionally requiring mutual proof of a pre-shared key.
+///
+/// This is the single point at which every VFS transport acquires its RPC
+/// builder, so a key supplied here reaches whichever `client*`/`server*`
+/// method the caller goes on to use.
+pub(crate) fn rpc_builder(key: Option<AuthKey>) -> dolang_rpc::Builder {
+    let builder = dolang_rpc::Builder::new(APP_PROTOCOL.0, APP_PROTOCOL.1);
+    match key {
+        Some(key) => builder.key(key),
+        None => builder,
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -350,9 +358,24 @@ impl From<FileSeekFrom> for io::SeekFrom {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+/// `Debug` is manual so a request cannot print the key it carries.
+#[derive(Serialize, Deserialize)]
 pub(crate) struct UnixVfsRequest {
     pub(crate) path: WirePath,
+    /// Pre-shared key for the nested connection, when the peer must establish
+    /// it on our behalf. Only the non-handle-passing path uses this: when the
+    /// peer can return a connected descriptor, negotiation — and therefore
+    /// authentication — happens locally and the key never leaves this process.
+    pub(crate) key: Option<Vec<u8>>,
+}
+
+impl fmt::Debug for UnixVfsRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UnixVfsRequest")
+            .field("path", &self.path)
+            .field("key", &self.key.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]

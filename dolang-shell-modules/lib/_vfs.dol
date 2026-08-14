@@ -1,4 +1,4 @@
-import base64 shell sys std
+import base64 rand shell sys std
 import
   regex:
     - Regex
@@ -48,6 +48,26 @@ pub def bin exe = nil
       throw "VFS helper permissions do not match interpreter: $bin"
 
   bin
+
+# Generates a pre-shared key for an authenticated agent session.
+#
+# The default alphabet is ASCII, so this is 32 bytes, well over the protocol's
+# 16 byte minimum.
+pub def key()
+  rand.string 32
+
+# Frames a key the way `--key-stdin` reads it: one length byte followed by that
+# many key bytes.
+#
+# The result is an array because it is handed to a launch as `stdin:`. A `Bin`
+# item crosses that boundary verbatim, with no line ending appended, so the
+# agent sees exactly these bytes.
+pub def key_input key
+  let bytes = Bin $key
+  let buf = BinBuf()
+  buf.push $bytes.len
+  buf.extend $bytes
+  [buf.freeze()]
 
 def env_key key
   if (type key Str || type key Sym)

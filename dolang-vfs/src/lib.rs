@@ -258,7 +258,12 @@ pub trait Vfs {
     /// Creates a command builder for `program`.
     fn command(&self, program: Utf8TypedPath<'_>) -> Self::Command<'_>;
     /// Connects to a VFS agent over a Unix-domain socket.
-    async fn unix_socket(&self, path: Utf8TypedPath<'_>) -> Result<AnyVfs>;
+    ///
+    /// `key` is an optional pre-shared key that both ends must prove knowledge
+    /// of during negotiation. It is what identifies the intended agent when
+    /// the socket's permissions cannot: see
+    /// [`Client::connect_with_key`](crate::Client::connect_with_key).
+    async fn unix_socket(&self, path: Utf8TypedPath<'_>, key: Option<&[u8]>) -> Result<AnyVfs>;
     /// Starts a Windows administrative VFS session.
     async fn windows_admin(
         &self,
@@ -1207,10 +1212,14 @@ impl Vfs for AnyVfs {
         }
     }
 
-    async fn unix_socket(&self, path: Utf8TypedPath<'_>) -> crate::Result<AnyVfs> {
+    async fn unix_socket(
+        &self,
+        path: Utf8TypedPath<'_>,
+        key: Option<&[u8]>,
+    ) -> crate::Result<AnyVfs> {
         match self {
-            Self::Client(client) => client.unix_socket(path).await,
-            Self::Direct(direct) => direct.unix_socket(path).await,
+            Self::Client(client) => client.unix_socket(path, key).await,
+            Self::Direct(direct) => direct.unix_socket(path, key).await,
         }
     }
 

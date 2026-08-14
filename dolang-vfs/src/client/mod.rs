@@ -17,6 +17,8 @@ use std::os::unix::{
 #[cfg(windows)]
 use std::os::windows::io::{AsHandle, OwnedHandle};
 
+#[cfg(unix)]
+use dolang_rpc::AuthKey;
 use dolang_rpc::{
     client::Call,
     handle::{DefaultHandle, OsHandle},
@@ -959,7 +961,7 @@ impl Client {
     where
         T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let rpc = rpc_builder()
+        let rpc = rpc_builder(None)
             .client(stream)
             .await
             .map_err(rpc_error)?
@@ -975,7 +977,7 @@ impl Client {
         R: AsyncRead + Send + 'static,
         W: AsyncWrite + Send + 'static,
     {
-        let rpc = rpc_builder()
+        let rpc = rpc_builder(None)
             .client_split(reader, writer)
             .await
             .map_err(rpc_error)?
@@ -996,7 +998,24 @@ impl Client {
     /// This transport supports native file-descriptor transfer.
     #[cfg(unix)]
     pub async fn connect(path: impl AsRef<Path>) -> crate::Result<Self> {
-        Self::from_stream(UnixStream::connect(path).await?).await
+        Self::connect_with_key(path, None).await
+    }
+
+    /// Connects to an agent daemon at a Unix-domain socket path, proving
+    /// knowledge of a pre-shared key.
+    ///
+    /// A socket that must be world-connectable cannot identify its peer from
+    /// credentials alone, so `key` is what distinguishes the intended agent
+    /// from anything else listening at that path — and, in the other
+    /// direction, this client from anything else that reached the socket
+    /// first. Both ends must agree: a key here requires a keyed agent, and an
+    /// agent expecting one refuses an unkeyed client. See [`dolang_rpc::auth`].
+    #[cfg(unix)]
+    pub async fn connect_with_key(
+        path: impl AsRef<Path>,
+        key: Option<AuthKey>,
+    ) -> crate::Result<Self> {
+        Self::from_std_stream(UnixStream::connect(path).await?.into_std()?, key).await
     }
 
     /// Connects using an existing Unix-domain stream.
@@ -1004,12 +1023,12 @@ impl Client {
     /// This transport supports native file-descriptor transfer.
     #[cfg(unix)]
     pub async fn from_stream(stream: UnixStream) -> crate::Result<Self> {
-        Self::from_std_stream(stream.into_std()?).await
+        Self::from_std_stream(stream.into_std()?, None).await
     }
 
     #[cfg(unix)]
-    async fn from_std_stream(stream: StdUnixStream) -> crate::Result<Self> {
-        let rpc = rpc_builder()
+    async fn from_std_stream(stream: StdUnixStream, key: Option<AuthKey>) -> crate::Result<Self> {
+        let rpc = rpc_builder(key)
             .client_unix(stream)
             .await
             .map_err(rpc_error)?
@@ -1023,9 +1042,19 @@ impl Client {
     /// This transport supports native file-descriptor transfer.
     #[cfg(unix)]
     pub async fn from_owned_fd(value: OwnedFd) -> crate::Result<Self> {
+        Self::from_owned_fd_with_key(value, None).await
+    }
+
+    /// Starts a VFS client on an already-connected Unix-domain socket file
+    /// descriptor, proving knowledge of a pre-shared key.
+    #[cfg(unix)]
+    pub async fn from_owned_fd_with_key(
+        value: OwnedFd,
+        key: Option<AuthKey>,
+    ) -> crate::Result<Self> {
         let stream = StdUnixStream::from(value);
         stream.set_nonblocking(true)?;
-        Self::from_std_stream(stream).await
+        Self::from_std_stream(stream, key).await
     }
 
     /// Starts a VFS client on the server end of a connected Windows named pipe.
@@ -1039,7 +1068,7 @@ impl Client {
         pipe: NamedPipeServer,
         server_process: OwnedHandle,
     ) -> crate::Result<Self> {
-        let rpc = unsafe { rpc_builder().client_named_pipe_server(pipe, server_process) }
+        let rpc = unsafe { rpc_builder(None).client_named_pipe_server(pipe, server_process) }
             .await
             .map_err(rpc_error)?
             .bind();
@@ -1081,14 +1110,28 @@ impl Client {
         }
     }
 
-    async fn unix_vfs(&self, path: Utf8TypedPath<'_>) -> crate::Result<crate::AnyVfs> {
-        let request = UnixVfsRequest { path: path.into() };
+    async fn unix_vfs(
+        &self,
+        path: Utf8TypedPath<'_>,
+        key: Option<&[u8]>,
+    ) -> crate::Result<crate::AnyVfs> {
+        // The key is sent because the peer may have to establish the nested
+        // connection itself (the `Opaque` arm below), and which arm it takes
+        // is its decision, not ours. When it returns a descriptor instead, we
+        // authenticate locally and its copy goes unused.
+        let request = UnixVfsRequest {
+            path: path.into(),
+            key: key.map(<[u8]>::to_vec),
+        };
         match self.request(RequestKind::UnixVfs(request)).await? {
             ResponseKind::UnixVfs(result) => match result.map_err(crate::Error::from)? {
                 OpenVfsHandle::Native(handle) => {
                     #[cfg(unix)]
                     {
-                        Ok(Self::from_owned_fd(handle.into_inner()).await?.into())
+                        let key = key.map(AuthKey::new).transpose().map_err(rpc_error)?;
+                        Ok(Self::from_owned_fd_with_key(handle.into_inner(), key)
+                            .await?
+                            .into())
                     }
                     #[cfg(not(unix))]
                     {
@@ -2382,8 +2425,12 @@ impl Vfs for Client {
         CommandBuilder::new(self, program)
     }
 
-    async fn unix_socket(&self, path: Utf8TypedPath<'_>) -> crate::Result<crate::AnyVfs> {
-        self.unix_vfs(path).await
+    async fn unix_socket(
+        &self,
+        path: Utf8TypedPath<'_>,
+        key: Option<&[u8]>,
+    ) -> crate::Result<crate::AnyVfs> {
+        self.unix_vfs(path, key).await
     }
 
     async fn windows_admin(

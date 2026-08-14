@@ -1,4 +1,4 @@
-import progress json patch strand proc sys term time transfer _vfs
+import progress json patch rand strand proc sys term transfer _vfs
   std:
     - RuntimeError
   strand:
@@ -17,8 +17,6 @@ import progress json patch strand proc sys term time transfer _vfs
     - cache_dir
 
 let COPY_BLOCK_SIZE = 1048576
-let SOCKET_SLEEP_MIN = 0.001
-let SOCKET_SLEEP_MAX = 0.5
 
 let SAVE_FORMATS = $
   DOCKER_ARCHIVE: docker-archive
@@ -389,6 +387,12 @@ pub class Runtime
       subdir.set_metadata mode: 0o700
       let socket = (subdir / "socket")
       let input = strand.input()
+      # The socket's mode cannot identify the client: the container maps uids
+      # however it likes, so it is bound 0666 and anything that can traverse the
+      # directory -- every process in the container, and root -- can connect.
+      # The key is what distinguishes the real client: `--accept` serves one
+      # peer that proves it, and unlinks the socket once it has.
+      let key = _vfs.key()
       # The pipeline's first stage is only the agent bootstrap process, not
       # user command output, so capturing its stderr for classification
       # (rather than the pull chatter leaking to the real terminal) is safe.
@@ -399,11 +403,12 @@ pub class Runtime
             --entrypoint $ctr_agent
             -v $subdir:$ctr_subdir:rw,z$uopt
             -v $agent_bin:$ctr_agent:ro,z$uopt
-            $ctr ...(_vfs.vfs_args cd env) --listen $ctr_socket
+            $ctr ...(_vfs.vfs_args cd env) --key-stdin --accept $ctr_socket
+            stdin: (_vfs.key_input key)
             stderr: $lines
           do
             strand.next()
-            let agent = Vfs.unix_socket $socket
+            let agent = Vfs.unix_socket $socket :key
             try
               return strand.redirect input: $input do agent.with $thunk
             finally
@@ -675,7 +680,8 @@ pub class Builder
   field cd = nil
   field env = nil
   field agent = nil
-  field ctr_id = nil
+  field ctr_name = nil
+  field handle = nil
 
   def (init) self runtime subdir bin mounts cd env
     self.#runtime = runtime
@@ -689,47 +695,74 @@ pub class Builder
     self.#ctr_socket = (self.#ctr_subdir / "socket")
     self.#ctr_agent = Path "/tmp/dolang-vfs"
 
-  # Waits for the container agent's socket to appear. Retries indefinitely
-  # with exponential backoff (starting small so the common case where the
-  # socket appears almost immediately doesn't pay sleep latency); callers
-  # that need a bound should wrap in `time.timeout`.
-  def wait_socket self
-    let sleep = SOCKET_SLEEP_MIN
-    while !self.#socket.exists()
-      time.sleep $sleep
-      sleep = (sleep * 2)
-      if (sleep > SOCKET_SLEEP_MAX)
-        sleep = SOCKET_SLEEP_MAX
-
+  # Runs the container in the foreground under a background strand. The name
+  # is generated because a foreground `run` prints no container ID, and the
+  # commit steps need something to name the live container by.
   def connect self img :pull = :NEVER:
     if self.#socket.exists()
       self.#socket.remove()
     ensure_image $self.#runtime $img (str(pull).lower())
+    let name = "dolang-vfs-$(rand.string 16)"
+    # The socket's mode cannot identify the client: the container maps uids
+    # however it likes, so it is bound 0666 and anything that can traverse the
+    # directory -- every process in the container, and root -- can connect. The
+    # key is what distinguishes the real client: `--accept` serves one peer that
+    # proves it, and unlinks the socket once it has. A fresh key per container
+    # falls out of `step_commit` reconnecting through here.
+    let key = _vfs.key()
     let lines = []
-    let ctr_id = try
-      sub do self.#runtime.cli run -d --pull=never
-        ...mount_args(self.#mounts)
-        --entrypoint env
-        -v $self.#subdir:$self.#ctr_subdir:rw,z$(self.#runtime.mount_uopt())
-        -v $self.#bin:$self.#ctr_agent:ro,z$(self.#runtime.mount_uopt())
-        $img
-        $self.#ctr_agent ...(_vfs.vfs_args self.#cd self.#env) --listen $self.#ctr_socket
-        stderr: $lines
+    let handle = stream do self.#runtime.cli run -i --rm --name $name --pull=never
+      ...mount_args(self.#mounts)
+      --entrypoint env
+      -v $self.#subdir:$self.#ctr_subdir:rw,z$(self.#runtime.mount_uopt())
+      -v $self.#bin:$self.#ctr_agent:ro,z$(self.#runtime.mount_uopt())
+      $img
+      $self.#ctr_agent ...(_vfs.vfs_args self.#cd self.#env) --key-stdin --accept $self.#ctr_socket
+      stdin: (_vfs.key_input key)
+      stderr: $lines
+    # Recorded before the wait so a launch that never reports in still leaves
+    # `cleanup` a container to remove.
+    self.#ctr_name = name
+    self.#handle = handle
+    try
+      # The agent prints READY once the socket is bound and connectable, which
+      # beats polling for the path's existence. A failed `run` surfaces here:
+      # the output channel re-raises the strand's error once it is exhausted,
+      # so `default:` only covers a clean exit that said nothing.
+      let line = handle.iter().next default: nil
+      if (line == nil)
+        handle.join()
+        throw RuntimeError "container agent exited before reporting READY"
+      if (line != "READY")
+        throw RuntimeError "unexpected output from container agent: $line"
     catch proc.Error: e
       classify_image_error $img $lines
       report_unknown $lines
       throw e
-    self.#wait_socket()
-    self.#ctr_id = ctr_id
-    self.#agent = Vfs.unix_socket $self.#socket
+    self.#agent = Vfs.unix_socket $self.#socket :key
 
   def cleanup self
+    # Ending the session makes the agent exit, which exits the container, which
+    # `--rm` then removes. If no session was ever established nothing will tell
+    # the agent to exit, so force removal is the only way out.
     if self.#agent
       self.#agent.stop()
       self.#agent = nil
-    if self.#ctr_id
-      term.mute do self.#runtime.cli rm -f $self.#ctr_id
-      self.#ctr_id = nil
+    else if self.#ctr_name
+      try
+        term.mute do self.#runtime.cli rm -f $self.#ctr_name
+      catch proc.Error: _
+        nil
+    if self.#handle
+      let handle = self.#handle
+      self.#handle = nil
+      # This runs from `build`'s `finally`; a nonzero exit (which a forced
+      # removal produces) must not displace the error being unwound.
+      try
+        handle.join()
+      catch proc.Error: _
+        nil
+    self.#ctr_name = nil
 
   def step_run self thunk
       self.#agent.with $thunk
@@ -827,15 +860,13 @@ pub class Builder
       let img_id = sub do self.#runtime.cli commit
         if msg
           --message $msg
-        $self.#ctr_id
-      self.#agent.stop()
-      self.#agent = nil
-      sub do self.#runtime.cli rm $self.#ctr_id
+        $self.#ctr_name
+      self.#cleanup()
       self.#connect $img_id
 
   def finish_image self tags
     let img_id = progress.show message: "commit" do |_|
-      sub do self.#runtime.cli commit $self.#ctr_id
+      sub do self.#runtime.cli commit $self.#ctr_name
     progress.show message: tag do |_|
       for tag = tags
         term.mute do self.#runtime.cli tag $img_id $tag

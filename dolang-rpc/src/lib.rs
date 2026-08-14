@@ -46,6 +46,7 @@
 //! }
 //! ```
 
+pub mod auth;
 pub mod client;
 #[cfg(target_os = "macos")]
 mod escrow;
@@ -61,6 +62,7 @@ mod unbound;
 use std::io;
 
 use ::serde::{Serialize, de::DeserializeOwned};
+pub use auth::AuthKey;
 pub use unbound::Builder;
 
 /// Configurable size and concurrency limits for a session. Not public — set
@@ -164,6 +166,13 @@ pub enum Error {
     /// The peer sent data that violates the RPC protocol.
     #[error("protocol error: {0}")]
     Protocol(String),
+    /// A pre-shared key was rejected, missing, or unexpected.
+    ///
+    /// Covers both a locally supplied key that cannot be used (see
+    /// [`AuthKey::new`]) and a peer that failed the check during negotiation.
+    /// The message never includes key material.
+    #[error("authentication error: {0}")]
+    Auth(String),
     /// The local or peer session closed before the operation completed.
     #[error("connection closed")]
     ConnectionClosed,
@@ -187,6 +196,7 @@ impl Error {
             Self::Serialize(e) => Self::Serialize(e.clone()),
             Self::Deserialize(e) => Self::Deserialize(e.clone()),
             Self::Protocol(e) => Self::Protocol(e.clone()),
+            Self::Auth(e) => Self::Auth(e.clone()),
             Self::ConnectionClosed => Self::ConnectionClosed,
             Self::Cancelled => Self::Cancelled,
             Self::UnsupportedCapability => Self::UnsupportedCapability,

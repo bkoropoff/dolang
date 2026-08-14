@@ -5,7 +5,7 @@
 
 use std::{
     collections::{HashMap, VecDeque},
-    io,
+    fmt, io,
     sync::Arc,
     task::Poll,
 };
@@ -16,6 +16,7 @@ use ::serde::{Deserialize, Serialize};
 
 use crate::{
     Error, Limits, NEGOTIATE_FRAGMENT_SIZE, NEGOTIATE_MAX_PAYLOAD_SIZE,
+    auth::{self, Auth},
     session::Ledger,
     trailer::{RecvShared, SendAction, SendShared},
     transport::{
@@ -250,12 +251,16 @@ async fn read_payload<F: RecvFrame>(
 const PROTOCOL_VERSION: u8 = 1;
 
 /// Version 1's handshake payload: the limits this endpoint enforces on
-/// incoming traffic. `negotiate` reduces each field of the local `Limits` to
-/// the minimum of the local and peer values, so both ends converge on the
-/// same effective limits — one side raising a limit has no effect unless the
-/// peer also raises it, and either side can unilaterally cap what actually
-/// gets used on the wire.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// incoming traffic, plus an optional authentication digest. `negotiate`
+/// reduces each field of the local `Limits` to the minimum of the local and
+/// peer values, so both ends converge on the same effective limits — one side
+/// raising a limit has no effect unless the peer also raises it, and either
+/// side can unilaterally cap what actually gets used on the wire.
+///
+/// `Debug` is implemented by hand: a derived one would print `key`, and a
+/// derived digest authenticates its side as effectively as the key it came
+/// from.
+#[derive(Clone, Serialize, Deserialize)]
 struct HandshakeV1 {
     max_fragment_size: u32,
     max_payload_size: u32,
@@ -264,10 +269,28 @@ struct HandshakeV1 {
     max_handles_per_message: u32,
     max_incomplete_messages: u32,
     max_incomplete_trailers: u32,
+    /// This endpoint's role-specific authentication digest, when a key is
+    /// configured. See [`crate::auth`].
+    key: Option<[u8; 32]>,
+}
+
+impl fmt::Debug for HandshakeV1 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HandshakeV1")
+            .field("max_fragment_size", &self.max_fragment_size)
+            .field("max_payload_size", &self.max_payload_size)
+            .field("max_trailer_size", &self.max_trailer_size)
+            .field("max_handles_per_fragment", &self.max_handles_per_fragment)
+            .field("max_handles_per_message", &self.max_handles_per_message)
+            .field("max_incomplete_messages", &self.max_incomplete_messages)
+            .field("max_incomplete_trailers", &self.max_incomplete_trailers)
+            .field("key", &self.key.map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 impl HandshakeV1 {
-    fn from_limits(limits: &Limits) -> Self {
+    fn from_limits(limits: &Limits, auth: Option<Auth>) -> Self {
         let clamp = |v: usize| u32::try_from(v).unwrap_or(u32::MAX);
         #[cfg(unix)]
         let max_handles_per_fragment = limits
@@ -283,6 +306,7 @@ impl HandshakeV1 {
             max_handles_per_message: clamp(limits.max_handles_per_message),
             max_incomplete_messages: clamp(limits.max_incomplete_messages),
             max_incomplete_trailers: clamp(limits.max_incomplete_trailers),
+            key: auth.map(|auth| auth.advertise()),
         }
     }
 
@@ -386,14 +410,22 @@ struct NegotiatePayload {
 /// case to represent. The peer's name must match exactly and there must be a
 /// mutually supported version; either failure sends the `FIRST|ABORT` signal
 /// and returns a distinct error from the RPC-version-mismatch case.
+///
+/// `auth` carries an optional pre-shared-key proof. It is expressed as the
+/// digest to advertise and the digest to require, rather than as a role, which
+/// keeps this function symmetric: the caller decides which direction it is
+/// speaking in (see [`crate::auth`]). Verification happens after the peer's
+/// handshake blob is decoded and before any result is returned, so a peer that
+/// fails it never reaches a bound session.
 pub(crate) async fn negotiate(
     sender: &mut AnySender,
     receiver: &mut AnyReceiver,
     limits: &Limits,
     app_protocol: (&str, &[u16]),
+    auth: Option<Auth>,
 ) -> Result<NegotiationResult, Error> {
     let local_blob =
-        postcard::to_stdvec(&HandshakeV1::from_limits(limits)).map_err(postcard_err)?;
+        postcard::to_stdvec(&HandshakeV1::from_limits(limits, auth)).map_err(postcard_err)?;
     let (local_name, local_versions) = app_protocol;
     // Callers need not pre-sort `local_versions`: sort our own copy here so
     // the `.rev().find(..)` below can cheaply pick the highest mutually
@@ -449,6 +481,16 @@ pub(crate) async fn negotiate(
         Error::Protocol("missing handshake payload for negotiated version".into())
     })?;
     let peer_handshake: HandshakeV1 = postcard::from_bytes(blob).map_err(postcard_err)?;
+
+    // Before anything else the peer said is acted on. An unauthenticated peer
+    // must not reach a bound session, and must not learn anything from the
+    // failure beyond the fact that it failed.
+    if let Err(error) = auth::verify(auth, peer_handshake.key) {
+        // Best-effort; see the RPC-version-mismatch case above.
+        let _ = send_negotiate_abort(sender).await;
+        return Err(error);
+    }
+
     let mut effective_limits = *limits;
     peer_handshake.clamp_limits(&mut effective_limits);
 
@@ -2949,8 +2991,20 @@ mod tests {
             duplex_endpoint_pair(4096);
         let limits = Limits::default();
         let (a_result, b_result) = tokio::join!(
-            negotiate(&mut a_sender, &mut a_receiver, &limits, ("test", &[1])),
-            negotiate(&mut b_sender, &mut b_receiver, &limits, ("test", &[1])),
+            negotiate(
+                &mut a_sender,
+                &mut a_receiver,
+                &limits,
+                ("test", &[1]),
+                None
+            ),
+            negotiate(
+                &mut b_sender,
+                &mut b_receiver,
+                &limits,
+                ("test", &[1]),
+                None
+            ),
         );
         let a_result = a_result.unwrap();
         let b_result = b_result.unwrap();
@@ -2988,7 +3042,13 @@ mod tests {
 
         let limits = Limits::default();
         let (a_result, ()) = tokio::join!(
-            negotiate(&mut a_sender, &mut a_receiver, &limits, ("test", &[1])),
+            negotiate(
+                &mut a_sender,
+                &mut a_receiver,
+                &limits,
+                ("test", &[1]),
+                None
+            ),
             fake_peer,
         );
         assert!(matches!(a_result, Err(Error::Protocol(_))));
@@ -3000,8 +3060,20 @@ mod tests {
             duplex_endpoint_pair(4096);
         let limits = Limits::default();
         let (a_result, b_result) = tokio::join!(
-            negotiate(&mut a_sender, &mut a_receiver, &limits, ("vfs", &[1, 2, 3])),
-            negotiate(&mut b_sender, &mut b_receiver, &limits, ("vfs", &[2, 3, 4])),
+            negotiate(
+                &mut a_sender,
+                &mut a_receiver,
+                &limits,
+                ("vfs", &[1, 2, 3]),
+                None
+            ),
+            negotiate(
+                &mut b_sender,
+                &mut b_receiver,
+                &limits,
+                ("vfs", &[2, 3, 4]),
+                None
+            ),
         );
         let a_result = a_result.unwrap();
         let b_result = b_result.unwrap();
@@ -3015,8 +3087,14 @@ mod tests {
             duplex_endpoint_pair(4096);
         let limits = Limits::default();
         let (a_result, b_result) = tokio::join!(
-            negotiate(&mut a_sender, &mut a_receiver, &limits, ("vfs", &[1])),
-            negotiate(&mut b_sender, &mut b_receiver, &limits, ("other", &[1])),
+            negotiate(&mut a_sender, &mut a_receiver, &limits, ("vfs", &[1]), None),
+            negotiate(
+                &mut b_sender,
+                &mut b_receiver,
+                &limits,
+                ("other", &[1]),
+                None
+            ),
         );
         let a_error = a_result.unwrap_err();
         let b_error = b_result.unwrap_err();
@@ -3034,8 +3112,8 @@ mod tests {
             duplex_endpoint_pair(4096);
         let limits = Limits::default();
         let (a_result, b_result) = tokio::join!(
-            negotiate(&mut a_sender, &mut a_receiver, &limits, ("vfs", &[1])),
-            negotiate(&mut b_sender, &mut b_receiver, &limits, ("vfs", &[2])),
+            negotiate(&mut a_sender, &mut a_receiver, &limits, ("vfs", &[1]), None),
+            negotiate(&mut b_sender, &mut b_receiver, &limits, ("vfs", &[2]), None),
         );
         let a_error = a_result.unwrap_err();
         let b_error = b_result.unwrap_err();
@@ -3045,6 +3123,150 @@ mod tests {
         assert!(
             matches!(b_error, Error::Protocol(ref msg) if msg.contains("no mutually supported version of application protocol"))
         );
+    }
+
+    const TEST_KEY: &[u8] = b"a-sufficiently-long-test-key";
+
+    #[tokio::test]
+    async fn negotiate_succeeds_when_both_ends_share_a_key() {
+        let ((mut a_sender, mut a_receiver), (mut b_sender, mut b_receiver)) =
+            duplex_endpoint_pair(4096);
+        let limits = Limits::default();
+        let key = crate::AuthKey::new(TEST_KEY).unwrap();
+        let (a_result, b_result) = tokio::join!(
+            negotiate(
+                &mut a_sender,
+                &mut a_receiver,
+                &limits,
+                ("vfs", &[1]),
+                Some(key.as_client())
+            ),
+            negotiate(
+                &mut b_sender,
+                &mut b_receiver,
+                &limits,
+                ("vfs", &[1]),
+                Some(key.as_server())
+            ),
+        );
+        assert_eq!(a_result.unwrap().app_protocol, ("vfs".to_string(), 1));
+        assert_eq!(b_result.unwrap().app_protocol, ("vfs".to_string(), 1));
+    }
+
+    #[tokio::test]
+    async fn negotiate_aborts_when_the_keys_differ() {
+        let ((mut a_sender, mut a_receiver), (mut b_sender, mut b_receiver)) =
+            duplex_endpoint_pair(4096);
+        let limits = Limits::default();
+        let a_key = crate::AuthKey::new(TEST_KEY).unwrap();
+        let b_key = crate::AuthKey::new(b"an-entirely-different-key").unwrap();
+        let (a_result, b_result) = tokio::join!(
+            negotiate(
+                &mut a_sender,
+                &mut a_receiver,
+                &limits,
+                ("vfs", &[1]),
+                Some(a_key.as_client())
+            ),
+            negotiate(
+                &mut b_sender,
+                &mut b_receiver,
+                &limits,
+                ("vfs", &[1]),
+                Some(b_key.as_server())
+            ),
+        );
+        let a_error = a_result.unwrap_err();
+        let b_error = b_result.unwrap_err();
+        assert!(matches!(a_error, Error::Auth(ref msg) if msg.contains("failed authentication")));
+        assert!(matches!(b_error, Error::Auth(ref msg) if msg.contains("failed authentication")));
+        // Neither side's digest may appear in a message that reaches a log.
+        for error in [a_error, b_error] {
+            let rendered = error.to_string();
+            for digest in [a_key.as_client().advertise(), a_key.as_server().advertise()] {
+                assert!(!rendered.contains(&hex(&digest)));
+            }
+        }
+    }
+
+    /// A peer that connects first, harvests the server's advertisement, and
+    /// replays it as its own cannot authenticate: the two digests derive from
+    /// different contexts, and neither yields the other.
+    #[tokio::test]
+    async fn negotiate_rejects_a_replayed_server_advertisement() {
+        let ((mut a_sender, mut a_receiver), (mut b_sender, mut b_receiver)) =
+            duplex_endpoint_pair(4096);
+        let limits = Limits::default();
+        let key = crate::AuthKey::new(TEST_KEY).unwrap();
+        let (a_result, b_result) = tokio::join!(
+            negotiate(
+                &mut a_sender,
+                &mut a_receiver,
+                &limits,
+                ("vfs", &[1]),
+                Some(key.as_server())
+            ),
+            negotiate(
+                &mut b_sender,
+                &mut b_receiver,
+                &limits,
+                ("vfs", &[1]),
+                Some(key.as_server())
+            ),
+        );
+        assert!(matches!(a_result.unwrap_err(), Error::Auth(_)));
+        assert!(matches!(b_result.unwrap_err(), Error::Auth(_)));
+    }
+
+    #[tokio::test]
+    async fn negotiate_aborts_when_only_one_end_is_keyed() {
+        let key = crate::AuthKey::new(TEST_KEY).unwrap();
+
+        // Keyed client, unkeyed server: each side rejects independently, so a
+        // configuration mistake cannot silently drop authentication.
+        let ((mut a_sender, mut a_receiver), (mut b_sender, mut b_receiver)) =
+            duplex_endpoint_pair(4096);
+        let limits = Limits::default();
+        let (a_result, b_result) = tokio::join!(
+            negotiate(
+                &mut a_sender,
+                &mut a_receiver,
+                &limits,
+                ("vfs", &[1]),
+                Some(key.as_client())
+            ),
+            negotiate(&mut b_sender, &mut b_receiver, &limits, ("vfs", &[1]), None),
+        );
+        assert!(
+            matches!(a_result.unwrap_err(), Error::Auth(ref msg) if msg.contains("did not authenticate"))
+        );
+        assert!(
+            matches!(b_result.unwrap_err(), Error::Auth(ref msg) if msg.contains("no key is configured"))
+        );
+
+        // ...and the reverse.
+        let ((mut a_sender, mut a_receiver), (mut b_sender, mut b_receiver)) =
+            duplex_endpoint_pair(4096);
+        let (a_result, b_result) = tokio::join!(
+            negotiate(&mut a_sender, &mut a_receiver, &limits, ("vfs", &[1]), None),
+            negotiate(
+                &mut b_sender,
+                &mut b_receiver,
+                &limits,
+                ("vfs", &[1]),
+                Some(key.as_server())
+            ),
+        );
+        assert!(
+            matches!(a_result.unwrap_err(), Error::Auth(ref msg) if msg.contains("no key is configured"))
+        );
+        assert!(
+            matches!(b_result.unwrap_err(), Error::Auth(ref msg) if msg.contains("did not authenticate"))
+        );
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
 
     #[tokio::test]

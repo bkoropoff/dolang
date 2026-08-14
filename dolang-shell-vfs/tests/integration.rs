@@ -913,3 +913,163 @@ mod login_env {
         assert_eq!(imported.cwd, inherited.cwd);
     }
 }
+
+/// `--accept` serves exactly one authenticated client and then unlinks its
+/// socket. These tests drive the real binary because the interesting behavior
+/// -- the key arriving on stdin before anything binds, and the socket
+/// disappearing at the right moment -- lives in the CLI, not the library.
+#[cfg(unix)]
+mod accept_mode {
+    use std::{
+        io::{BufRead, BufReader, Write},
+        os::unix::fs::PermissionsExt,
+        path::Path,
+        process::{Command, Stdio},
+        time::Duration,
+    };
+
+    use dolang_rpc::AuthKey;
+    use dolang_vfs::client::Client;
+    use tempfile::tempdir;
+    use tokio::time::timeout;
+
+    use super::AGENT_BIN;
+
+    const TEST_KEY: &[u8] = b"a-sufficiently-long-test-key";
+
+    fn find_free_socket_path() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempdir().unwrap();
+        let mut perms = std::fs::metadata(&dir).unwrap().permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&dir, perms).unwrap();
+        let socket_path = dir.path().join("test.sock");
+        (dir, socket_path)
+    }
+
+    /// Spawns the agent in `--accept --key-stdin` mode and returns once it has
+    /// bound its socket and printed `READY`.
+    fn spawn_accept(socket_path: &Path, key: &[u8]) -> std::process::Child {
+        let mut child = Command::new(AGENT_BIN)
+            .arg("--key-stdin")
+            .arg("--accept")
+            .arg(socket_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("failed to spawn agent");
+
+        // Length-prefixed, and written before READY: the agent reads the key
+        // before it binds anything.
+        let mut stdin = child.stdin.take().expect("stdin not captured");
+        stdin
+            .write_all(&[u8::try_from(key.len()).unwrap()])
+            .unwrap();
+        stdin.write_all(key).unwrap();
+        stdin.flush().unwrap();
+        drop(stdin);
+
+        wait_for_ready(&mut child).expect("agent did not become ready");
+        child
+    }
+
+    fn wait_for_ready(child: &mut std::process::Child) -> std::io::Result<()> {
+        let stdout = child.stdout.take().expect("stdout not captured");
+        for line in BufReader::new(stdout).lines() {
+            if line.map_err(std::io::Error::other)? == "READY" {
+                return Ok(());
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "process exited before READY",
+        ))
+    }
+
+    async fn connect(socket_path: &Path, key: &[u8]) -> Result<Client, dolang_vfs::error::Error> {
+        timeout(
+            Duration::from_secs(5),
+            Client::connect_with_key(socket_path, Some(AuthKey::new(key).unwrap())),
+        )
+        .await
+        .expect("timeout connecting to agent")
+    }
+
+    #[tokio::test]
+    async fn accepts_one_authenticated_client_and_unlinks_the_socket() {
+        let (_dir, socket_path) = find_free_socket_path();
+        let mut child = spawn_accept(&socket_path, TEST_KEY);
+
+        let client = connect(&socket_path, TEST_KEY).await.expect("connect");
+
+        // The socket is unlinked as soon as the session is established, so
+        // nothing else can reach the agent for the rest of its life.
+        for _ in 0..50 {
+            if !socket_path.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            !socket_path.exists(),
+            "socket should be unlinked once a client is accepted"
+        );
+
+        client.stop().await.expect("stop");
+        let status = child.wait().expect("wait");
+        assert!(status.success(), "agent exited with {status}");
+    }
+
+    #[tokio::test]
+    async fn a_wrong_key_neither_consumes_the_slot_nor_unlinks_the_socket() {
+        let (_dir, socket_path) = find_free_socket_path();
+        let mut child = spawn_accept(&socket_path, TEST_KEY);
+
+        let result = connect(&socket_path, b"an-entirely-different-key").await;
+        assert!(result.is_err(), "a client with the wrong key was accepted");
+        assert!(
+            socket_path.exists(),
+            "a failed attempt must leave the socket in place"
+        );
+
+        // Losing the race to an impostor costs the real client an attempt, not
+        // its session.
+        let client = connect(&socket_path, TEST_KEY)
+            .await
+            .expect("the intended client should still be served");
+        client.stop().await.expect("stop");
+        let status = child.wait().expect("wait");
+        assert!(status.success(), "agent exited with {status}");
+    }
+
+    #[tokio::test]
+    async fn a_silent_connection_does_not_block_the_intended_client() {
+        let (_dir, socket_path) = find_free_socket_path();
+        let mut child = spawn_accept(&socket_path, TEST_KEY);
+
+        // Connect and then say nothing at all, which is what a peer trying to
+        // wedge the accept loop would do.
+        let _silent = std::os::unix::net::UnixStream::connect(&socket_path).unwrap();
+
+        let client = connect(&socket_path, TEST_KEY)
+            .await
+            .expect("a stalled peer must not block the accept loop");
+        client.stop().await.expect("stop");
+        let status = child.wait().expect("wait");
+        assert!(status.success(), "agent exited with {status}");
+    }
+
+    #[tokio::test]
+    async fn key_stdin_is_refused_with_stdio() {
+        let output = Command::new(AGENT_BIN)
+            .arg("--key-stdin")
+            .arg("--stdio")
+            .output()
+            .expect("failed to spawn agent");
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("--key-stdin cannot be combined with --stdio"),
+            "unexpected stderr: {stderr}"
+        );
+    }
+}

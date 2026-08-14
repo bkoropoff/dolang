@@ -923,16 +923,24 @@ impl Vfs for Direct {
         DirectCommand::new(self, program)
     }
 
-    async fn unix_socket(&self, path: Utf8TypedPath<'_>) -> crate::Result<crate::AnyVfs> {
+    async fn unix_socket(
+        &self,
+        path: Utf8TypedPath<'_>,
+        key: Option<&[u8]>,
+    ) -> crate::Result<crate::AnyVfs> {
         #[cfg(unix)]
         {
-            crate::Client::connect(native_path(path)?)
+            let key = key
+                .map(dolang_rpc::AuthKey::new)
+                .transpose()
+                .map_err(crate::client::rpc_error)?;
+            crate::Client::connect_with_key(native_path(path)?, key)
                 .await
                 .map(Into::into)
         }
         #[cfg(not(unix))]
         {
-            let _ = path;
+            let _ = (path, key);
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "Unix VFS connections are not supported by this direct backend",
