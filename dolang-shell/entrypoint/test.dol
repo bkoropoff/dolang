@@ -51,17 +51,20 @@ args.with args: $shell.args
     default: 600
     meta: SECS
     help: Max seconds for each test and module load.
+  - flag: no-capture
+    help: Print module and test output as it is produced.
   - arg: paths
     parse: $Path
     collect: true
     help: Test directories or files to run.
   do |p|
-    let :filter :jobs :module_jobs :timeout :paths ... = p
+    let :filter :jobs :module_jobs :timeout :no_capture :paths ... = p
     let rc = progress.with do
       test.run
         jobs: $jobs
         module_jobs: $module_jobs
         filter: $filter
         timeout: $timeout
+        capture: $!no_capture
         ...paths
     exit $rc
