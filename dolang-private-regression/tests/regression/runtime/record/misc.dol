@@ -147,3 +147,12 @@ let custom = MyRecord {name: "Alice", age: 30}
 assert_eq $custom.name "Alice"
 assert_eq $custom.age 30
 assert (type custom MyRecord)
+
+# A field lookup with no instance resolves to the *last* value for the key, so
+# a duplicate key overrides the ones before it: last wins, the same rule dict
+# indexing follows.
+let dup = record a: 1 b: 2 a: 3
+assert_eq $dup.a 3
+assert_eq $dup[:a:] 3
+assert_eq $dup.b 2
+assert_eq [...Record.values dup :a:] [1, 3]

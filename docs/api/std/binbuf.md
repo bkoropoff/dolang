@@ -104,7 +104,6 @@ right in place. `value` may be a single byte value, or a `Str`/`Bin` slice.
 ```
 let buf = BinBuf(b"foobar")
 buf.insert 3 b"XYZ"
-assert_eq $buf.freeze() b"fooXYZbar"
 buf.insert 0 65
 assert_eq $buf.freeze() b"AfooXYZbar"
 ```

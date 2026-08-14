@@ -58,7 +58,7 @@ let arr = [1, 2, 3]
 arr.insert 1 42
 assert_eq $arr [1, 42, 2, 3]
 arr.insert -1 99
-assert_eq $arr [1, 42, 99, 2, 3]
+assert_eq $arr [1, 42, 2, 99, 3]
 ```
 
 ### `get index :default? :else?`
@@ -139,7 +139,7 @@ Removes all elements from the array.
 
 ```
 let arr = [1, 2, 3]
-arr.clear
+arr.clear()
 assert_eq $arr.len 0
 ```
 
@@ -173,7 +173,7 @@ arr.sort key: (do |x| x.len)
 assert_eq $arr ["a", "cc", "bbb"]
 
 arr.sort reverse: true
-assert_eq $arr ["bbb", "cc", "a"]
+assert_eq $arr ["cc", "bbb", "a"]
 ```
 
 ### `contains element`
@@ -253,16 +253,15 @@ let arr = [0, 1, 2, 3]
 arr[1..3] = [9, 9]
 assert_eq $arr [0, 9, 9, 3]
 
-arr[1..1] = (tuple [4, 5])
+arr[1..1] = (tuple 4 5)
 assert_eq $arr [0, 4, 5, 9, 9, 3]
-
-arr[2..4] = Range 7 10
-assert_eq $arr [0, 4, 7, 8, 9, 3]
 ```
 
-Slice assignment accepts any sequence-spreadable value, including arrays,
-tuples, and ranges. Stepped slices are read-only; assignment with a non-unity
-step is rejected.
+The replacement must be an [`Array`](./array.md) or a
+[`Tuple`](./tuple.md) — a sequence whose length is already settled. Anything
+else, including a [`Range`](./range.md), an iterator, or a lone value, is a
+type error rather than being drained or wrapped. Stepped slices are read-only;
+assignment with a non-unity step is rejected.
 
 ### Iteration
 

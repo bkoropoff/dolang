@@ -37,12 +37,21 @@ unsafe impl Collect for str {
     }
 }
 
+/// Collects a trim pattern as a set of characters.
+///
+/// A [`Str`](str) contributes its characters, as does each element of an
+/// iterable of them. A `Bin` is not accepted: the pattern is a *set* of
+/// characters, and bytes only become characters through a decode the caller
+/// should ask for.
 async fn value_to_pattern<'v, 's>(
     strand: &mut Strand<'v, 's>,
     value: &Value<'v>,
 ) -> Result<'v, 's, Vec<char>> {
-    if let Some(str) = value.as_str_raw(strand) {
-        return Ok(str.chars().collect());
+    if let Some(str) = value.as_str(strand) {
+        return Ok(String::from(str).chars().collect());
+    }
+    if value.as_bin(strand).is_some() {
+        return Err(Error::type_error(strand, "invalid pattern: not a string"));
     }
 
     strand
@@ -50,11 +59,10 @@ async fn value_to_pattern<'v, 's>(
             let mut acc = Vec::new();
             value.iter(strand, &mut input).await?;
             while input.next(strand, &mut elem).await? {
-                acc.extend(
-                    elem.as_str_raw(strand)
-                        .ok_or_else(|| Error::type_error(strand, "invalid pattern: not a string"))?
-                        .chars(),
-                );
+                let str = elem
+                    .as_str(strand)
+                    .ok_or_else(|| Error::type_error(strand, "invalid pattern: not a string"))?;
+                acc.extend(String::from(str).chars());
                 strand.check_trap_gc()?;
             }
             Ok(acc)

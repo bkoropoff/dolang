@@ -39,12 +39,23 @@ unsafe impl Collect for u8 {
     }
 }
 
+/// Collects a trim pattern as a set of bytes.
+///
+/// A [`Bin`]([u8]) contributes its bytes, as does each element of an iterable
+/// of them. A `Str` is not accepted: the pattern is a *set*, so a multi-byte
+/// character would be split into bytes that mean nothing on their own.
 async fn value_to_pattern<'v, 's>(
     strand: &mut Strand<'v, 's>,
     value: &Value<'v>,
-) -> Result<'v, 's, Vec<char>> {
-    if let Some(slice) = value.as_str_raw(strand) {
-        return Ok(slice.chars().collect());
+) -> Result<'v, 's, Vec<u8>> {
+    if let Some(bin) = value.as_bin(strand) {
+        return Ok(bin.to_vec());
+    }
+    if value.as_str(strand).is_some() {
+        return Err(Error::type_error(
+            strand,
+            "invalid pattern: not binary data",
+        ));
     }
 
     strand
@@ -52,16 +63,31 @@ async fn value_to_pattern<'v, 's>(
             let mut acc = Vec::new();
             value.iter(strand, &mut input).await?;
             while input.next(strand, &mut elem).await? {
-                acc.extend(
-                    elem.as_str_raw(strand)
-                        .ok_or_else(|| Error::type_error(strand, "invalid pattern: binary"))?
-                        .chars(),
-                );
+                let bin = elem
+                    .as_bin(strand)
+                    .ok_or_else(|| Error::type_error(strand, "invalid pattern: not binary data"))?;
+                acc.extend_from_slice(&bin.to_vec());
                 strand.check_trap_gc()?;
             }
             Ok(acc)
         })
         .await
+}
+
+fn trim_start_bytes<'a>(me: &'a [u8], pattern: &[u8]) -> &'a [u8] {
+    let start = me
+        .iter()
+        .position(|b| !pattern.contains(b))
+        .unwrap_or(me.len());
+    &me[start..]
+}
+
+fn trim_end_bytes<'a>(me: &'a [u8], pattern: &[u8]) -> &'a [u8] {
+    let end = me
+        .iter()
+        .rposition(|b| !pattern.contains(b))
+        .map_or(0, |i| i + 1);
+    &me[..end]
 }
 
 impl<'v> Protocol<'v> for [u8] {
@@ -321,7 +347,7 @@ impl<'v> Protocol<'v> for [u8] {
                     None => me.trim(),
                     Some(chars) => {
                         let pattern = value_to_pattern(strand, &chars).await?;
-                        me.trim_with(|b| pattern.contains(&b))
+                        trim_end_bytes(trim_start_bytes(me, &pattern), &pattern)
                     }
                 };
                 Output::set(strand, out, trimmed);
@@ -334,7 +360,7 @@ impl<'v> Protocol<'v> for [u8] {
                     None => me.trim_start(),
                     Some(chars) => {
                         let pattern = value_to_pattern(strand, &chars).await?;
-                        me.trim_start_with(|b| pattern.contains(&b))
+                        trim_start_bytes(me, &pattern)
                     }
                 };
                 Output::set(strand, out, trimmed);
@@ -347,7 +373,7 @@ impl<'v> Protocol<'v> for [u8] {
                     None => me.trim_end(),
                     Some(chars) => {
                         let pattern = value_to_pattern(strand, &chars).await?;
-                        me.trim_end_with(|b| pattern.contains(&b))
+                        trim_end_bytes(me, &pattern)
                     }
                 };
                 Output::set(strand, out, trimmed);
@@ -1078,7 +1104,7 @@ mod tests {
             assert_eq!(out.to_string(strand).unwrap(), "hi");
 
             Output::set(strand, &mut slot, b"xxhixx".as_slice());
-            Output::set(strand, &mut chars, "x");
+            Output::set(strand, &mut chars, b"x".as_slice());
             method!(
                 strand,
                 &slot,
@@ -1100,6 +1126,13 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(out.to_string(strand).unwrap(), "xxhi");
+
+            // The pattern is a set of bytes, so a `Str` is not one.
+            Output::set(strand, &mut chars, "x");
+            let err = method!(strand, &slot, Sym::well_known(sym::TRIM), &mut out, &chars)
+                .await
+                .expect_err("Str pattern accepted");
+            assert_eq!(err.kind(), ErrorKind::Type);
         });
     }
 

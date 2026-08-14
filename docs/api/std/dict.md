@@ -25,7 +25,8 @@ constructing dicts from spreading or using methods with the `instance`
 parameter:
 
 - **Construction** with duplicate keys preserves all values
-- **Plain indexing** (`d[key]`) returns only the first value for a key
+- **Plain indexing** (`d[key]`) returns the last value for a key, so a
+  duplicate key overrides the values before it: last wins
 - **Plain assignment** (`d[key] = value`) replaces all values for a key
 - **`insert`** adds a new value without removing existing ones for that key
 - **`get`** and **`pop`** accept an `instance` parameter to access specific
@@ -51,7 +52,7 @@ Removes all key-value pairs.
 
 ```
 let d = {a: 1, b: 2}
-d.clear
+d.clear()
 assert_eq $d.len 0
 ```
 
@@ -115,12 +116,12 @@ remove a specific value by its position among values for that key. Negative
 
 #### Parameters
 
-| Name       | Type  | Description                                                                                               |
-| ---------- | ----- | --------------------------------------------------------------------------------------------------------- |
-| `key`      |       | the key to remove                                                                                         |
-| `instance` | `Int` | which value to remove when a key has multiple values (0-indexed; negative counts from end; default: last) |
-| `default:` |       | value to return if missing                                                                                |
-| `else:`    |       | callable to invoke if missing                                                                             |
+| Name       | Type  | Description                                                                                                |
+| ---------- | ----- | ---------------------------------------------------------------------------------------------------------- |
+| `key`      |       | the key to remove                                                                                          |
+| `instance` | `Int` | which value to remove when a key has multiple values (0-indexed; negative counts from end; default: first) |
+| `default:` |       | value to return if missing                                                                                 |
+| `else:`    |       | callable to invoke if missing                                                                              |
 
 #### Returns
 
@@ -227,9 +228,9 @@ let d = {a: 1, b: 2}
 d.insert "multi" "first"
 d.insert "multi" "second"
 
-# Key-only check
-assert (d.contains "a")
-assert (!d.contains "z")
+# Key-only check. A bareword key is a `Sym`, so `"a"` would not match it.
+assert (d.contains :a:)
+assert (!d.contains :z:)
 
 # Key + value check (multi-map aware)
 assert (d.contains "multi" "first")

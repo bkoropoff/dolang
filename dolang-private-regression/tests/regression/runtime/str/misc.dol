@@ -27,6 +27,10 @@ assert_eq ("  foobar  ".trim_end()) "  foobar"
 assert_eq ("\r\n foobar \r\n".trim "\n\r") " foobar "
 assert_eq ("\r\n foobar \r\n".trim_start "\n\r") " foobar \r\n"
 assert_eq ("\r\n foobar \r\n".trim_end "\n\r") "\r\n foobar "
+# A trim pattern is a set of characters: a `Str`, or an iterable of them.
+assert_eq ("\r\n foobar \r\n".trim ["\n", "\r"]) " foobar "
+assert_eq ("xyfoobaryx".trim ["x", "y"]) "foobar"
+assert_eq ("éfooé".trim "é") "foo"
 assert_eq [..."a,b,c".split ","] ["a", "b", "c"]
 assert_eq [..."a,b,c".split "," limit: 1] ["a", "b,c"]
 assert_eq [..."a.b.tar.gz".split "." limit: -1] ["a.b.tar", "gz"]
@@ -61,3 +65,10 @@ assert_err "numeric overflow" do "ab".repeat -1
 assert_err "index out of range or invalid" do "foobar"[-99..]
 assert_err "index out of range or invalid" do "foobar"[0..-99]
 assert_err "invalid UTF-8 substring boundaries" do "é"[0..1]
+assert_err "type error: iteration protocol not supported" do
+  "foobar".trim 1
+assert_err "type error: invalid pattern: not a string" do
+  "foobar".trim [1]
+# Bytes only become characters through a decode the caller should ask for.
+assert_err "type error: invalid pattern: not a string" do
+  "foobar".trim b"x"
