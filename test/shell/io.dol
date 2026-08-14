@@ -34,9 +34,6 @@ def handle_identity()
   assert (shell.stdout != shell.stderr)
   assert (shell.stderr != term.console)
 
-  # With no capture installed, the ambient console is the host console.
-  assert_eq (term.output()) $term.console
-
 #[test]
 def write_rejects_non_byte_values()
   assert_throws $TypeError do shell.stdout.write 42

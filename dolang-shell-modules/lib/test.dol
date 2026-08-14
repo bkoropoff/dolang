@@ -21,20 +21,31 @@ class ModuleCompileError: std.RuntimeError
     self.path = path
     self.output = output
 
+class Failure
+  pub field error backtrace path test output
+
+  def (init) self error backtrace path test = nil output = nil
+    self.error = error
+    self.backtrace = backtrace
+    self.path = path
+    self.test = test
+    self.output = output
+
 def module_name path
   let name = str $path.without_ext()
   name.replace "\\" "/"
 
 class Harness
-  field module_jobs jobs filter timeout
+  field module_jobs jobs filter timeout capture
   field errors = []
   field success total = 0
 
-  def (init) self :jobs :module_jobs :filter :timeout
+  def (init) self :jobs :module_jobs :filter :timeout :capture
     self.#module_jobs = strand.Resource $module_jobs
     self.#jobs = strand.Resource $jobs
     self.#timeout = timeout
     self.#filter = Glob $filter
+    self.#capture = capture
 
   def matches_filter self path test
      self.#filter.matches "$(module_name path)/$test"
@@ -51,16 +62,24 @@ class Harness
     else
       func()
 
-  def record_error self err bt path test = nil
-    self.#errors.push [err, bt, path, test]
+  def record_error self error backtrace path test = nil output = nil
+    self.#errors.push $Failure(error, backtrace, path, test, output)
+
+  def with_capture self output func
+    if self.#capture
+      term.capture (term.SinkConsole(output, can_style: true)) $func
+    else
+      func()
 
   def run_test self path name func
     self.#record_test()
+    let output = StrBuf()
     try
-      self.#with_timeout $func
+      self.#with_capture $output do self.#with_timeout $func
       self.#record_success()
     catch std.RuntimeError: e
-      self.#record_error $e $(strand.error_backtrace()) $path $name
+      let captured = (self.#capture && output.freeze())
+      self.#record_error $e $(strand.error_backtrace()) $path $name $captured
 
   def run_module self path tests
     progress.show message: (module_name path) icon: ▶ total: $tests.len do |w|
@@ -73,27 +92,34 @@ class Harness
               w.delta()
 
   def run_file self path
-    let source = path.read b
-    let compiled = compile.compile $path $source
-    let warnings = compiled.diagnostics.any do |d| (d.severity == :WARNING:)
-    if (!compiled.ok || warnings)
-      throw ModuleCompileError $path $compiled
+    let output = StrBuf()
+    try
+      let source = path.read b
+      let compiled = compile.compile $path $source
+      let warnings = compiled.diagnostics.any do |d| (d.severity == :WARNING:)
+      if (!compiled.ok || warnings)
+        throw ModuleCompileError $path $compiled
 
-    collect_key.value = []
-    self.#with_timeout do load.run $compiled.bytecode
-    let tests = collect_key.value
-    collect_key.value = nil
-    tests = [...tests.filter(do |test| self.#matches_filter path test[0])]
-    self.#run_module $path $tests
+      collect_key.value = []
+      self.#with_capture $output do self.#with_timeout do load.run $compiled.bytecode
+      let tests = collect_key.value
+      collect_key.value = nil
+      tests = [...tests.filter(do |test| self.#matches_filter path test[0])]
+      self.#run_module $path $tests
+    catch std.RuntimeError: e
+      collect_key.value = nil
+      let captured = (self.#capture && output.freeze())
+      self.#record_error $e $(strand.error_backtrace()) $path nil $captured
 
   def report self
     let rc = 0
     let skipped = 0
-    for e bt path test = self.#errors
-      let module = module_name $path
+    for failure = self.#errors
+      let e = failure.error
+      let module = module_name $failure.path
       if (type e Skip)
-        if test
-          print (info_style "skipped") ": " (name_style "$module/$test")
+        if failure.test
+          print (info_style "skipped") ": " (name_style "$module/$(failure.test)")
           if e.message
             print " (" (note_style e.message) ")"
           echo()
@@ -111,11 +137,13 @@ class Harness
           echo $diag.render().indent(2)
       else
         rc = 1
-        if test
-          print (err_style "failed") ": " (name_style "$module/$test") "\n"
+        if failure.test
+          print (err_style "failed") ": " (name_style "$module/$(failure.test)") ": "
         else
-          print (err_style "failed") ": " (name_style "$module") "\n"
-        echo $ term.render_error(e, backtrace: bt).indent(2)
+          print (err_style "failed") ": " (name_style "$module") ": "
+        echo $ term.render_error $e backtrace: $failure.backtrace
+        if failure.output
+          print "  ──\n" $term.preformat(failure.output).indent(2)
     print (pass_style "passed") ": $(self.#success)/$(self.#total - skipped)"
     if skipped
       print " ($skipped " (info_style "skipped") ")"
@@ -127,10 +155,7 @@ class Harness
       strand.fork
         for path = files
           do self.#module_jobs.with do
-            try
-              self.#run_file $path
-            catch std.RuntimeError: e
-              self.#record_error $e $(strand.error_backtrace()) $path
+            self.#run_file $path
             w.delta()
     self.#report()
 
@@ -279,10 +304,11 @@ pub def run
   :module_jobs = 4
   :filter = "**"
   :timeout = 600
+  :capture = true
   ...paths
 do
   let paths = [...paths.pos_only()]
-  let harness = Harness :jobs :module_jobs :filter :timeout
+  let harness = Harness :jobs :module_jobs :filter :timeout :capture
   let files = []
   for path = paths
     let path = Path $path
