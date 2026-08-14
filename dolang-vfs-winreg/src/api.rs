@@ -7,7 +7,7 @@
 //! implementation detail, same as `dolang-vfs` never exposing its own
 //! `RequestKind`/`ResponseKind`/`VfsProtocol`.
 
-use dolang_vfs::extension::{ExtOpaque, VfsExtension};
+use dolang_vfs::extension::{ExtCite, ExtGift, VfsExtension};
 use dolang_vfs::{
     AnyVfs, Vfs,
     direct::Direct,
@@ -47,7 +47,7 @@ fn unexpected(request: &str) -> Error {
 /// chain of same-machine keys: every subsequent operation on the returned
 /// `Key` (including opening its own subkeys) is dispatched through that
 /// `AnyVfs::Direct`, which is itself always `native_capable() == false`, so
-/// it always takes the ordinary in-process [`ExtOpaque`] path from then on.
+/// it always takes the ordinary in-process [`ExtGift`] path from then on.
 async fn from_response(
     vfs: &AnyVfs,
     request: &str,
@@ -90,24 +90,25 @@ pub struct Key {
 
 struct KeyState {
     vfs: AnyVfs,
-    opaque: Option<ExtOpaque<KeyMarker>>,
+    opaque: Option<ExtGift<KeyMarker>>,
 }
 
 impl KeyState {
-    fn new(vfs: AnyVfs, opaque: ExtOpaque<KeyMarker>) -> Self {
+    fn new(vfs: AnyVfs, opaque: ExtGift<KeyMarker>) -> Self {
         Self {
             vfs,
             opaque: Some(opaque),
         }
     }
 
-    fn opaque(&self) -> Result<ExtOpaque<KeyMarker>, Error> {
+    fn cite(&self) -> Result<ExtCite<KeyMarker>, Error> {
         self.opaque
-            .clone()
+            .as_ref()
+            .map(ExtGift::cite)
             .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "registry key is closed"))
     }
 
-    fn take_opaque(&mut self) -> ExtOpaque<KeyMarker> {
+    fn take_opaque(&mut self) -> ExtGift<KeyMarker> {
         self.opaque.take().expect("live key state has no opaque")
     }
 }
@@ -123,7 +124,7 @@ impl Drop for KeyState {
         let vfs = self.vfs.clone();
         runtime.spawn(async move {
             let _ = vfs
-                .call_extension::<WinRegExt>(WinRegRequest::CloseKey { key })
+                .call_extension::<WinRegExt>(WinRegRequest::CloseKey { key: key.cite() })
                 .await;
         });
     }
@@ -158,7 +159,7 @@ impl Key {
         let response = self
             .vfs
             .call_extension::<WinRegExt>(WinRegRequest::OpenKey {
-                parent: self.handle.opaque()?,
+                parent: self.handle.cite()?,
                 subpath: subpath.to_string(),
                 view,
                 access,
@@ -173,7 +174,7 @@ impl Key {
         let response = self
             .vfs
             .call_extension::<WinRegExt>(WinRegRequest::CreateKey {
-                parent: self.handle.opaque()?,
+                parent: self.handle.cite()?,
                 subpath: subpath.to_string(),
                 view,
                 access,
@@ -194,7 +195,7 @@ impl Key {
         let response = self
             .vfs
             .call_extension::<WinRegExt>(WinRegRequest::DeleteKey {
-                parent: self.handle.opaque()?,
+                parent: self.handle.cite()?,
                 subpath: subpath.to_string(),
                 view,
                 all,
@@ -221,7 +222,7 @@ impl Key {
                 "registry key has an operation in progress",
             )
         })?;
-        let key = state.take_opaque();
+        let key = state.take_opaque().cite();
         let response = self
             .vfs
             .call_extension::<WinRegExt>(WinRegRequest::CloseKey { key })
@@ -237,7 +238,7 @@ impl Key {
         let response = self
             .vfs
             .call_extension::<WinRegExt>(WinRegRequest::EnumSubkey {
-                key: self.handle.opaque()?,
+                key: self.handle.cite()?,
                 index,
             })
             .await??;
@@ -252,7 +253,7 @@ impl Key {
         let response = self
             .vfs
             .call_extension::<WinRegExt>(WinRegRequest::OpenSubkeys {
-                key: self.handle.opaque()?,
+                key: self.handle.cite()?,
             })
             .await??;
         match response {
@@ -273,7 +274,7 @@ impl Key {
         let response = self
             .vfs
             .call_extension::<WinRegExt>(WinRegRequest::EnumValue {
-                key: self.handle.opaque()?,
+                key: self.handle.cite()?,
                 index,
             })
             .await??;
@@ -288,7 +289,7 @@ impl Key {
         let response = self
             .vfs
             .call_extension::<WinRegExt>(WinRegRequest::OpenValues {
-                key: self.handle.opaque()?,
+                key: self.handle.cite()?,
             })
             .await??;
         match response {
@@ -309,7 +310,7 @@ impl Key {
         let response = self
             .vfs
             .call_extension::<WinRegExt>(WinRegRequest::GetValue {
-                key: self.handle.opaque()?,
+                key: self.handle.cite()?,
                 name: name.map(str::to_string),
             })
             .await??;
@@ -324,7 +325,7 @@ impl Key {
         let response = self
             .vfs
             .call_extension::<WinRegExt>(WinRegRequest::SetValue {
-                key: self.handle.opaque()?,
+                key: self.handle.cite()?,
                 name: name.map(str::to_string),
                 value,
             })
@@ -340,7 +341,7 @@ impl Key {
         let response = self
             .vfs
             .call_extension::<WinRegExt>(WinRegRequest::DeleteValue {
-                key: self.handle.opaque()?,
+                key: self.handle.cite()?,
                 name: name.map(str::to_string),
             })
             .await??;
@@ -363,7 +364,7 @@ impl Key {
         let response = self
             .vfs
             .call_extension::<WinRegExt>(WinRegRequest::GetSecDesc {
-                key: self.handle.opaque()?,
+                key: self.handle.cite()?,
                 mask,
             })
             .await??;
@@ -385,7 +386,7 @@ impl Key {
         let response = self
             .vfs
             .call_extension::<WinRegExt>(WinRegRequest::SetSecDesc {
-                key: self.handle.opaque()?,
+                key: self.handle.cite()?,
                 sec_desc: descriptor.clone(),
             })
             .await??;
@@ -420,7 +421,7 @@ impl SubKeys {
             .key
             .upgrade()
             .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "registry key is closed"))?;
-        key.opaque()?;
+        key.cite()?;
         if let Some(entry) = self.entries.pop_front() {
             return Ok(Some(entry));
         }
@@ -430,7 +431,7 @@ impl SubKeys {
         let response = self
             .vfs
             .call_extension::<WinRegExt>(WinRegRequest::EnumSubkeysPage {
-                key: key.opaque()?,
+                key: key.cite()?,
                 index: self.index,
                 count: PAGE_SIZE,
             })
@@ -469,7 +470,7 @@ impl Values {
             .key
             .upgrade()
             .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "registry key is closed"))?;
-        key.opaque()?;
+        key.cite()?;
         if let Some(entry) = self.entries.pop_front() {
             return Ok(Some(entry));
         }
@@ -479,7 +480,7 @@ impl Values {
         let response = self
             .vfs
             .call_extension::<WinRegExt>(WinRegRequest::EnumValuesPage {
-                key: key.opaque()?,
+                key: key.cite()?,
                 index: self.index,
                 count: PAGE_SIZE,
             })

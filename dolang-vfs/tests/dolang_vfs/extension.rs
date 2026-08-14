@@ -1,6 +1,8 @@
 #![cfg(unix)]
 
-use dolang_vfs::extension::{ExtContext, ExtOpaque, ExtResource, VfsExtension, vfs_extension};
+use dolang_vfs::extension::{
+    ExtCite, ExtContext, ExtGift, ExtResource, VfsExtension, vfs_extension,
+};
 use dolang_vfs::{AnyVfs, client::Client, direct::Direct};
 use serde::{Deserialize, Serialize};
 use tempfile::tempdir;
@@ -18,13 +20,13 @@ impl ExtResource for Counter {
 #[derive(Serialize, Deserialize)]
 enum CounterRequest {
     Open(i64),
-    Add(ExtOpaque<CounterMarker>, i64),
-    Close(ExtOpaque<CounterMarker>),
+    Add(ExtCite<CounterMarker>, i64),
+    Close(ExtCite<CounterMarker>),
 }
 
 #[derive(Serialize, Deserialize)]
 enum CounterResponse {
-    Handle(ExtOpaque<CounterMarker>),
+    Handle(ExtGift<CounterMarker>),
     Value(i64),
     Closed,
 }
@@ -65,7 +67,7 @@ impl VfsExtension for CounterExt {
 
 vfs_extension!(CounterExt);
 
-async fn open(vfs: &AnyVfs, initial: i64) -> ExtOpaque<CounterMarker> {
+async fn open(vfs: &AnyVfs, initial: i64) -> ExtGift<CounterMarker> {
     match vfs
         .call_extension::<CounterExt>(CounterRequest::Open(initial))
         .await
@@ -76,9 +78,9 @@ async fn open(vfs: &AnyVfs, initial: i64) -> ExtOpaque<CounterMarker> {
     }
 }
 
-async fn add(vfs: &AnyVfs, handle: ExtOpaque<CounterMarker>, delta: i64) -> i64 {
+async fn add(vfs: &AnyVfs, handle: &ExtGift<CounterMarker>, delta: i64) -> i64 {
     match vfs
-        .call_extension::<CounterExt>(CounterRequest::Add(handle, delta))
+        .call_extension::<CounterExt>(CounterRequest::Add(handle.cite(), delta))
         .await
         .unwrap()
     {
@@ -87,9 +89,9 @@ async fn add(vfs: &AnyVfs, handle: ExtOpaque<CounterMarker>, delta: i64) -> i64 
     }
 }
 
-async fn close(vfs: &AnyVfs, handle: ExtOpaque<CounterMarker>) {
+async fn close(vfs: &AnyVfs, handle: ExtGift<CounterMarker>) {
     match vfs
-        .call_extension::<CounterExt>(CounterRequest::Close(handle))
+        .call_extension::<CounterExt>(CounterRequest::Close(handle.cite()))
         .await
         .unwrap()
     {
@@ -100,8 +102,8 @@ async fn close(vfs: &AnyVfs, handle: ExtOpaque<CounterMarker>) {
 
 async fn exercise_counter(vfs: &AnyVfs) {
     let handle = open(vfs, 10).await;
-    assert_eq!(add(vfs, handle.clone(), 5).await, 15);
-    assert_eq!(add(vfs, handle.clone(), -3).await, 12);
+    assert_eq!(add(vfs, &handle, 5).await, 15);
+    assert_eq!(add(vfs, &handle, -3).await, 12);
     close(vfs, handle).await;
 }
 

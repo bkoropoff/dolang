@@ -20,7 +20,7 @@ use std::os::windows::io::{AsHandle, OwnedHandle};
 use dolang_rpc::{
     client::Call,
     handle::{DefaultHandle, OsHandle},
-    session::Opaque,
+    session::{Cite, Gift},
     trailer::{TrailerRecv, TrailerSend},
 };
 use dolang_winterop::security::{SecDesc, Sid};
@@ -65,7 +65,7 @@ use crate::{
 #[derive(Clone)]
 pub struct Client {
     shared: Arc<ClientShared>,
-    vfs: Option<Opaque<crate::session::VfsMarker>>,
+    vfs: Option<Gift<crate::session::VfsMarker>>,
 }
 
 struct ClientShared {
@@ -88,7 +88,7 @@ enum ClientFileInner {
 
 struct RemoteFile {
     client: Client,
-    file: Option<Opaque<crate::session::FileMarker>>,
+    file: Gift<crate::session::FileMarker>,
     pending: Option<PendingFileOperation>,
     read_body: Option<PendingTrailerRead>,
     write_body: Option<PendingTrailerWrite>,
@@ -96,7 +96,7 @@ struct RemoteFile {
 
 pub(crate) struct RemoteFileLock {
     client: Client,
-    file: Opaque<crate::session::FileMarker>,
+    file: Gift<crate::session::FileMarker>,
     lock: Option<u64>,
 }
 
@@ -108,7 +108,7 @@ impl RemoteFileLock {
         match self
             .client
             .request(RequestKind::FileUnlock {
-                file: self.file.clone(),
+                file: self.file.cite(),
                 lock,
             })
             .await?
@@ -132,7 +132,7 @@ impl Drop for RemoteFileLock {
             return;
         };
         let client = self.client.clone();
-        let file = self.file.clone();
+        let file = self.file.cite();
         runtime.spawn(async move {
             let _ = client.request(RequestKind::FileUnlock { file, lock }).await;
         });
@@ -199,10 +199,10 @@ impl ClientFile {
         )))
     }
 
-    fn from_remote(client: Client, file: Opaque<crate::session::FileMarker>) -> Self {
+    fn from_remote(client: Client, file: Gift<crate::session::FileMarker>) -> Self {
         Self(ClientFileInner::Remote(RemoteFile {
             client,
-            file: Some(file),
+            file,
             pending: None,
             read_body: None,
             write_body: None,
@@ -211,21 +211,18 @@ impl ClientFile {
 }
 
 impl RemoteFile {
-    fn opaque(&self) -> Opaque<crate::session::FileMarker> {
-        self.file
-            .as_ref()
-            .expect("live remote file has no opaque identity")
-            .clone()
+    fn cite(&self) -> Cite<crate::session::FileMarker> {
+        self.file.cite()
     }
 
     fn poll_request(
         &mut self,
         cx: &mut Context<'_>,
         kind: FileOperationKind,
-        request: impl FnOnce(Opaque<crate::session::FileMarker>) -> (RequestKind, Option<Vec<u8>>),
+        request: impl FnOnce(Cite<crate::session::FileMarker>) -> (RequestKind, Option<Vec<u8>>),
     ) -> Poll<io::Result<(ResponseKind, Option<TrailerRecv>)>> {
         if self.pending.is_none() {
-            let (request, trailer) = request(self.opaque());
+            let (request, trailer) = request(self.cite());
             self.pending = Some(PendingFileOperation {
                 kind,
                 call: {
@@ -285,22 +282,6 @@ impl RemoteFile {
             pending.call.cancel();
             let _ = pending.call.await;
         }
-    }
-}
-
-impl Drop for RemoteFile {
-    fn drop(&mut self) {
-        self.pending.take();
-        let Some(file) = self.file.take() else {
-            return;
-        };
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
-        let client = self.client.clone();
-        runtime.spawn(async move {
-            let _ = client.request(RequestKind::FileClose { file }).await;
-        });
     }
 }
 
@@ -398,9 +379,10 @@ impl AsyncWrite for ClientFile {
                 }
                 if file.write_body.is_none() {
                     file.write_body = Some(PendingTrailerWrite {
-                        send: Some(file.client.call_with_trailer(RequestKind::FileWrite {
-                            file: file.opaque(),
-                        })),
+                        send: Some(
+                            file.client
+                                .call_with_trailer(RequestKind::FileWrite { file: file.cite() }),
+                        ),
                         call: None,
                         target: buf.len(),
                         sent: 0,
@@ -520,7 +502,7 @@ impl AsyncSeek for ClientFile {
                 file.pending = Some(PendingFileOperation {
                     kind: FileOperationKind::Seek,
                     call: file.client.call(RequestKind::FileSeek {
-                        file: file.opaque(),
+                        file: file.cite(),
                         position: position.into(),
                     }),
                 });
@@ -562,9 +544,7 @@ impl FileHandle for ClientFile {
                 file.idle()?;
                 match file
                     .client
-                    .request(RequestKind::FileToStdioSend {
-                        file: file.opaque(),
-                    })
+                    .request(RequestKind::FileToStdioSend { file: file.cite() })
                     .await?
                 {
                     ResponseKind::FileToStdioSend(result) => result
@@ -590,9 +570,7 @@ impl FileHandle for ClientFile {
                 file.idle()?;
                 match file
                     .client
-                    .request(RequestKind::FileToStdioRecv {
-                        file: file.opaque(),
-                    })
+                    .request(RequestKind::FileToStdioRecv { file: file.cite() })
                     .await?
                 {
                     ResponseKind::FileToStdioRecv(result) => result
@@ -616,13 +594,11 @@ impl FileHandle for ClientFile {
             ClientFileInner::Direct(file) => file.close().await,
             ClientFileInner::Remote(mut file) => {
                 file.cancel_pending().await;
-                let opaque = file
-                    .file
-                    .take()
-                    .expect("live remote file has no opaque identity");
                 match file
                     .client
-                    .request(RequestKind::FileClose { file: opaque })
+                    .request(RequestKind::FileClose {
+                        file: file.file.cite(),
+                    })
                     .await?
                 {
                     ResponseKind::FileClose(result) => result.map_err(Into::into),
@@ -640,7 +616,7 @@ impl FileHandle for ClientFile {
                 match file
                     .client
                     .request(RequestKind::FileSetSize {
-                        file: file.opaque(),
+                        file: file.cite(),
                         size,
                     })
                     .await?
@@ -659,9 +635,7 @@ impl FileHandle for ClientFile {
                 file.idle()?;
                 match file
                     .client
-                    .request(RequestKind::FileMetadata {
-                        file: file.opaque(),
-                    })
+                    .request(RequestKind::FileMetadata { file: file.cite() })
                     .await?
                 {
                     ResponseKind::FileMetadata(result) => result.map_err(Into::into),
@@ -678,9 +652,7 @@ impl FileHandle for ClientFile {
                 file.idle()?;
                 match file
                     .client
-                    .request(RequestKind::FileFsMetadata {
-                        file: file.opaque(),
-                    })
+                    .request(RequestKind::FileFsMetadata { file: file.cite() })
                     .await?
                 {
                     ResponseKind::FileFsMetadata(result) => result.map_err(Into::into),
@@ -698,7 +670,7 @@ impl FileHandle for ClientFile {
                 match file
                     .client
                     .request(RequestKind::FileAcl {
-                        file: file.opaque(),
+                        file: file.cite(),
                         default,
                     })
                     .await?
@@ -718,7 +690,7 @@ impl FileHandle for ClientFile {
                 match file
                     .client
                     .request(RequestKind::FileSetAcl {
-                        file: file.opaque(),
+                        file: file.cite(),
                         acl: acl.cloned(),
                         default,
                     })
@@ -739,7 +711,7 @@ impl FileHandle for ClientFile {
                 match file
                     .client
                     .request(RequestKind::FileSecDesc {
-                        file: file.opaque(),
+                        file: file.cite(),
                         mask,
                     })
                     .await?
@@ -759,7 +731,7 @@ impl FileHandle for ClientFile {
                 match file
                     .client
                     .request(RequestKind::FileSetSecDesc {
-                        file: file.opaque(),
+                        file: file.cite(),
                         sec_desc: sec_desc.clone(),
                     })
                     .await?
@@ -782,7 +754,7 @@ impl FileHandle for ClientFile {
                 match file
                     .client
                     .request(RequestKind::FileXattrs {
-                        file: file.opaque(),
+                        file: file.cite(),
                         namespace: XattrNamespaceRequest::from(namespace),
                     })
                     .await?
@@ -802,7 +774,7 @@ impl FileHandle for ClientFile {
                 match file
                     .client
                     .request(RequestKind::FileXattr {
-                        file: file.opaque(),
+                        file: file.cite(),
                         name: name.to_owned(),
                         namespace: namespace.map(str::to_owned),
                     })
@@ -822,9 +794,7 @@ impl FileHandle for ClientFile {
                 file.idle()?;
                 match file
                     .client
-                    .request(RequestKind::FileStreams {
-                        file: file.opaque(),
-                    })
+                    .request(RequestKind::FileStreams { file: file.cite() })
                     .await?
                 {
                     ResponseKind::FileStreams(result) => result.map_err(Into::into),
@@ -847,7 +817,7 @@ impl FileHandle for ClientFile {
                 match file
                     .client
                     .request(RequestKind::FileSetXattr {
-                        file: file.opaque(),
+                        file: file.cite(),
                         name: name.to_owned(),
                         namespace: namespace.map(str::to_owned),
                         value: value.to_vec(),
@@ -869,7 +839,7 @@ impl FileHandle for ClientFile {
                 match file
                     .client
                     .request(RequestKind::FileRemoveXattr {
-                        file: file.opaque(),
+                        file: file.cite(),
                         name: name.to_owned(),
                         namespace: namespace.map(str::to_owned),
                     })
@@ -893,7 +863,7 @@ impl FileHandle for ClientFile {
                 match file
                     .client
                     .request(RequestKind::FileLock {
-                        file: file.opaque(),
+                        file: file.cite(),
                         request,
                     })
                     .await?
@@ -903,7 +873,7 @@ impl FileHandle for ClientFile {
                             lock.map(|lock| {
                                 crate::file::FileLock::remote(RemoteFileLock {
                                     client: file.client.clone(),
-                                    file: file.opaque(),
+                                    file: file.file.clone(),
                                     lock: Some(lock),
                                 })
                             })
@@ -953,11 +923,11 @@ impl Client {
     async fn initialize(
         rpc: dolang_rpc::client::Client<VfsProtocol>,
         mode: SessionMode,
-        vfs: Option<Opaque<crate::session::VfsMarker>>,
+        vfs: Option<Gift<crate::session::VfsMarker>>,
     ) -> crate::Result<Self> {
         let response = rpc
             .call(Request {
-                vfs: vfs.clone(),
+                vfs: vfs.as_ref().map(Gift::cite),
                 kind: RequestKind::Query,
             })
             .await
@@ -1086,14 +1056,14 @@ impl Client {
 
     fn call(&self, request: RequestKind) -> Call<VfsProtocol> {
         self.shared.rpc.call(Request {
-            vfs: self.vfs.clone(),
+            vfs: self.vfs.as_ref().map(Gift::cite),
             kind: request,
         })
     }
 
     fn call_with_trailer(&self, request: RequestKind) -> TrailerSend<Call<VfsProtocol>> {
         self.shared.rpc.call_with_trailer(Request {
-            vfs: self.vfs.clone(),
+            vfs: self.vfs.as_ref().map(Gift::cite),
             kind: request,
         })
     }
@@ -1448,7 +1418,7 @@ struct PreparedRelays {
 }
 
 enum ClientChildState {
-    Live(Opaque<crate::session::ChildMarker>),
+    Live(Gift<crate::session::ChildMarker>),
     Exited(ProcessStatus),
     Lost(crate::protocol::WireError),
 }
@@ -1459,7 +1429,7 @@ enum ClientChildState {
 /// closes the corresponding remote endpoint.
 pub struct RemoteStdioSend {
     client: Client,
-    stdio: Option<Opaque<crate::session::StdioSendMarker>>,
+    stdio: Option<Gift<crate::session::StdioSendMarker>>,
     pending: Option<(StdioSendOperation, Call<VfsProtocol>)>,
     write_body: Option<PendingTrailerWrite>,
 }
@@ -1469,7 +1439,7 @@ pub struct RemoteStdioSend {
 /// This implements [`AsyncRead`].
 pub struct RemoteStdioRecv {
     client: Client,
-    stdio: Option<Opaque<crate::session::StdioRecvMarker>>,
+    stdio: Option<Gift<crate::session::StdioRecvMarker>>,
     pending: Option<Call<VfsProtocol>>,
     read_body: Option<PendingTrailerRead>,
 }
@@ -1512,7 +1482,7 @@ impl AsyncWrite for RemoteStdioSend {
             )));
         }
         if self.write_body.is_none() {
-            let Some(stdio) = self.stdio.as_ref().cloned() else {
+            let Some(stdio) = self.stdio.as_ref().map(Gift::cite) else {
                 return Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::BrokenPipe,
                     "stdio send resource is closed",
@@ -1613,7 +1583,7 @@ impl AsyncWrite for RemoteStdioSend {
             return Poll::Ready(Ok(()));
         }
         if self.pending.is_none() {
-            let stdio = self.stdio.as_ref().unwrap().clone();
+            let stdio = self.stdio.as_ref().unwrap().cite();
             self.pending = Some((
                 StdioSendOperation::Close,
                 self.client.call(RequestKind::StdioSendClose { stdio }),
@@ -1687,7 +1657,7 @@ impl AsyncRead for RemoteStdioRecv {
                     return Poll::Ready(Ok(()));
                 };
                 self.pending = Some(self.client.call(RequestKind::StdioRecvRead {
-                    stdio: stdio.clone(),
+                    stdio: stdio.cite(),
                     len: buf.remaining(),
                 }));
             }
@@ -1724,76 +1694,9 @@ impl AsyncRead for RemoteStdioRecv {
     }
 }
 
-async fn best_effort_close_stdio_send(
-    client: Client,
-    stdio: Opaque<crate::session::StdioSendMarker>,
-) {
-    for _ in 0..4 {
-        let Ok(ResponseKind::StdioSendClose(result)) = client
-            .request(RequestKind::StdioSendClose {
-                stdio: stdio.clone(),
-            })
-            .await
-        else {
-            return;
-        };
-        match result {
-            Ok(()) => return,
-            Err(error)
-                if crate::Error::from(error.clone()).kind() == io::ErrorKind::ResourceBusy =>
-            {
-                tokio::task::yield_now().await;
-            }
-            Err(_) => return,
-        }
-    }
-}
-
-async fn best_effort_close_stdio_recv(
-    client: Client,
-    stdio: Opaque<crate::session::StdioRecvMarker>,
-) {
-    for _ in 0..4 {
-        let Ok(ResponseKind::StdioRecvClose(result)) = client
-            .request(RequestKind::StdioRecvClose {
-                stdio: stdio.clone(),
-            })
-            .await
-        else {
-            return;
-        };
-        match result {
-            Ok(()) => return,
-            Err(error)
-                if crate::Error::from(error.clone()).kind() == io::ErrorKind::ResourceBusy =>
-            {
-                tokio::task::yield_now().await;
-            }
-            Err(_) => return,
-        }
-    }
-}
-
-impl Drop for RemoteStdioSend {
-    fn drop(&mut self) {
-        let Some(stdio) = self.stdio.take() else {
-            return;
-        };
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
-        let client = self.client.clone();
-        runtime.spawn(best_effort_close_stdio_send(client, stdio));
-    }
-}
-
 impl RemoteStdioSend {
     pub(crate) fn client(&self) -> &Client {
         &self.client
-    }
-
-    pub(crate) fn disarm_cleanup(&mut self) {
-        self.stdio.take();
     }
 
     pub(crate) async fn try_clone(&self) -> io::Result<Self> {
@@ -1808,7 +1711,7 @@ impl RemoteStdioSend {
         match self
             .client
             .request(RequestKind::StdioSendClone {
-                stdio: stdio.clone(),
+                stdio: stdio.cite(),
             })
             .await
             .map_err(crate::Error::into_io_error)?
@@ -1826,26 +1729,9 @@ impl RemoteStdioSend {
     }
 }
 
-impl Drop for RemoteStdioRecv {
-    fn drop(&mut self) {
-        let Some(stdio) = self.stdio.take() else {
-            return;
-        };
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
-        let client = self.client.clone();
-        runtime.spawn(best_effort_close_stdio_recv(client, stdio));
-    }
-}
-
 impl RemoteStdioRecv {
     pub(crate) fn client(&self) -> &Client {
         &self.client
-    }
-
-    pub(crate) fn disarm_cleanup(&mut self) {
-        self.stdio.take();
     }
 
     pub(crate) async fn try_clone(&self) -> io::Result<Self> {
@@ -1863,7 +1749,7 @@ impl RemoteStdioRecv {
         match self
             .client
             .request(RequestKind::StdioRecvClone {
-                stdio: stdio.clone(),
+                stdio: stdio.cite(),
             })
             .await
             .map_err(crate::Error::into_io_error)?
@@ -1915,9 +1801,9 @@ impl<'a> CommandBuilder<'a> {
         client: &Client,
         stdio: ClientRecv,
         relays: &mut PreparedRelays,
-    ) -> crate::Result<(StdioRecvTarget, Option<StdioRecv>)> {
+    ) -> crate::Result<StdioRecvTarget> {
         match stdio {
-            ClientRecv::Null => Ok((StdioRecvTarget::Null, None)),
+            ClientRecv::Null => Ok(StdioRecvTarget::Null),
             ClientRecv::Inherit => {
                 let (send, recv) = client.pipe().await?;
                 relays.stdin = Some(send);
@@ -1933,7 +1819,7 @@ impl<'a> CommandBuilder<'a> {
                 if client.mode() == SessionMode::Remote {
                     return client.unsupported("native process stdio");
                 }
-                Ok((StdioRecvTarget::Native(OsHandle::new(handle)), None))
+                Ok(StdioRecvTarget::Native(OsHandle::new(handle)))
             }
             ClientRecv::Resource(stdio) => match stdio {
                 StdioRecv::Native(_) => {
@@ -1941,7 +1827,7 @@ impl<'a> CommandBuilder<'a> {
                         return client.unsupported("native process stdio");
                     }
                     let handle = stdio.into_blocking_handle().await?;
-                    Ok((StdioRecvTarget::Native(OsHandle::new(handle)), None))
+                    Ok(StdioRecvTarget::Native(OsHandle::new(handle)))
                 }
                 StdioRecv::Remote(remote) => Self::prepare_remote_recv(client, remote),
             },
@@ -1951,7 +1837,7 @@ impl<'a> CommandBuilder<'a> {
     fn prepare_remote_recv(
         client: &Client,
         remote: RemoteStdioRecv,
-    ) -> crate::Result<(StdioRecvTarget, Option<StdioRecv>)> {
+    ) -> crate::Result<StdioRecvTarget> {
         if !client.is_same_vfs(&remote.client) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1959,18 +1845,18 @@ impl<'a> CommandBuilder<'a> {
             )
             .into());
         }
-        let opaque = remote.stdio.as_ref().unwrap().clone();
-        let stdio = StdioRecv::Remote(remote);
-        Ok((StdioRecvTarget::Opaque(opaque), Some(stdio)))
+        Ok(StdioRecvTarget::Opaque(
+            remote.stdio.as_ref().unwrap().cite(),
+        ))
     }
 
     async fn prepare_send(
         client: &Client,
         stdio: ClientSend,
         relays: &mut PreparedRelays,
-    ) -> crate::Result<(StdioSendTarget, Option<StdioSend>)> {
+    ) -> crate::Result<StdioSendTarget> {
         match stdio {
-            ClientSend::Null => Ok((StdioSendTarget::Null, None)),
+            ClientSend::Null => Ok(StdioSendTarget::Null),
             ClientSend::Inherit(output) => {
                 let (send, recv) = client.pipe().await?;
                 relays.outputs.push((recv, output));
@@ -1986,7 +1872,7 @@ impl<'a> CommandBuilder<'a> {
                 if client.mode() == SessionMode::Remote {
                     return client.unsupported("native process stdio");
                 }
-                Ok((StdioSendTarget::Native(OsHandle::new(handle)), None))
+                Ok(StdioSendTarget::Native(OsHandle::new(handle)))
             }
             ClientSend::Resource(stdio) => match stdio {
                 StdioSend::Native(_) => {
@@ -1994,7 +1880,7 @@ impl<'a> CommandBuilder<'a> {
                         return client.unsupported("native process stdio");
                     }
                     let handle = stdio.into_blocking_handle().await?;
-                    Ok((StdioSendTarget::Native(OsHandle::new(handle)), None))
+                    Ok(StdioSendTarget::Native(OsHandle::new(handle)))
                 }
                 StdioSend::Remote(remote) => Self::prepare_remote_send(client, remote),
             },
@@ -2004,7 +1890,7 @@ impl<'a> CommandBuilder<'a> {
     fn prepare_remote_send(
         client: &Client,
         remote: RemoteStdioSend,
-    ) -> crate::Result<(StdioSendTarget, Option<StdioSend>)> {
+    ) -> crate::Result<StdioSendTarget> {
         if !client.is_same_vfs(&remote.client) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -2012,9 +1898,9 @@ impl<'a> CommandBuilder<'a> {
             )
             .into());
         }
-        let opaque = remote.stdio.as_ref().unwrap().clone();
-        let stdio = StdioSend::Remote(remote);
-        Ok((StdioSendTarget::Opaque(opaque), Some(stdio)))
+        Ok(StdioSendTarget::Opaque(
+            remote.stdio.as_ref().unwrap().cite(),
+        ))
     }
 
     async fn prepare_outputs(
@@ -2022,10 +1908,7 @@ impl<'a> CommandBuilder<'a> {
         stdout: ClientSend,
         stderr: ClientSend,
         relays: &mut PreparedRelays,
-    ) -> crate::Result<(
-        (StdioSendTarget, Option<StdioSend>),
-        (StdioSendTarget, Option<StdioSend>),
-    )> {
+    ) -> crate::Result<(StdioSendTarget, StdioSendTarget)> {
         if client.mode() == SessionMode::Remote
             && matches!(stdout, ClientSend::Inherit(HostOutput::Stdout))
             && matches!(stderr, ClientSend::Inherit(HostOutput::Stdout))
@@ -2108,18 +1991,10 @@ impl ClientChild {
 
 impl Drop for ClientChild {
     fn drop(&mut self) {
+        // Reaping the child is the opaque's own business: dropping the last
+        // handle on it releases the registration, which drops the retained
+        // child on the server. Only the relays need winding down here.
         self.relays.finish();
-        let ClientChildState::Live(child) = &self.state else {
-            return;
-        };
-        let child = child.clone();
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
-        let client = self.client.clone();
-        runtime.spawn(async move {
-            let _ = client.request(RequestKind::ChildClose { child }).await;
-        });
     }
 }
 
@@ -2134,7 +2009,7 @@ impl Child for ClientChild {
         match self
             .client
             .request(RequestKind::ChildWait {
-                child: child.clone(),
+                child: child.cite(),
             })
             .await?
         {
@@ -2158,7 +2033,7 @@ impl Child for ClientChild {
         match self
             .client
             .request(RequestKind::ChildTerminate {
-                child: child.clone(),
+                child: child.cite(),
             })
             .await?
         {
@@ -2317,9 +2192,8 @@ impl<'a> Command for CommandBuilder<'a> {
             termination_policy,
         } = self;
         let mut relays = PreparedRelays::default();
-        let (stdin, mut stdin_resource) = Self::prepare_recv(client, stdin, &mut relays).await?;
-        let ((stdout, mut stdout_resource), (stderr, mut stderr_resource)) =
-            Self::prepare_outputs(client, stdout, stderr, &mut relays).await?;
+        let stdin = Self::prepare_recv(client, stdin, &mut relays).await?;
+        let (stdout, stderr) = Self::prepare_outputs(client, stdout, stderr, &mut relays).await?;
         let req = SpawnRequest {
             program,
             args,
@@ -2332,24 +2206,13 @@ impl<'a> Command for CommandBuilder<'a> {
             termination_policy,
         };
         match client.request(RequestKind::Spawn(req)).await? {
-            ResponseKind::Spawn(result) => {
-                if let Some(stdio) = &mut stdin_resource {
-                    stdio.disarm_remote_cleanup();
-                }
-                if let Some(stdio) = &mut stdout_resource {
-                    stdio.disarm_remote_cleanup();
-                }
-                if let Some(stdio) = &mut stderr_resource {
-                    stdio.disarm_remote_cleanup();
-                }
-                result
-                    .map(|child| ClientChild {
-                        client: client.clone(),
-                        state: ClientChildState::Live(child),
-                        relays: relays.start(),
-                    })
-                    .map_err(Into::into)
-            }
+            ResponseKind::Spawn(result) => result
+                .map(|child| ClientChild {
+                    client: client.clone(),
+                    state: ClientChildState::Live(child),
+                    relays: relays.start(),
+                })
+                .map_err(Into::into),
             response => Err(unexpected(response).into()),
         }
     }
@@ -3044,14 +2907,8 @@ impl Vfs for Client {
 mod tests {
     use std::io;
 
-    use tempfile::tempdir;
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
-    use super::{Client, ClientChildState, ClientFileInner};
-    use crate::{
-        Child as _, Command as _, FileHandle as _, OpenOptions, Server, Vfs as _,
-        protocol::RequestKind,
-    };
+    use super::{Client, ClientChildState};
+    use crate::{Child as _, Command as _, Server, Vfs as _, protocol::RequestKind};
 
     #[cfg(unix)]
     fn successful_command(client: &Client) -> super::CommandBuilder<'_> {
@@ -3070,225 +2927,6 @@ mod tests {
         command
     }
 
-    async fn open_remote_file(
-        client: &Client,
-        path: crate::Utf8TypedPath<'_>,
-    ) -> super::ClientFile {
-        let mut options = client.open_options();
-        options.read(true).write(true).create(true).truncate(true);
-        crate::OpenOptions::open(&options, path).await.unwrap()
-    }
-
-    #[tokio::test]
-    async fn dropping_remote_file_unregisters_opaque_identity() {
-        let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
-        let server =
-            tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
-        let client = Client::new(client_stream).await.unwrap();
-        let temp = tempdir().unwrap();
-        let path = crate::path::typed_path(temp.path().join("file")).unwrap();
-        let file = open_remote_file(&client, path.to_path()).await;
-        let opaque = match &file.0 {
-            ClientFileInner::Remote(file) => file.opaque(),
-            ClientFileInner::Direct(_) => panic!("remote open returned a direct file"),
-        };
-
-        drop(file);
-
-        for attempt in 0..100 {
-            let response = client
-                .request(RequestKind::FileMetadata {
-                    file: opaque.clone(),
-                })
-                .await
-                .unwrap();
-            let crate::protocol::ResponseKind::FileMetadata(result) = response else {
-                panic!("file metadata returned the wrong response");
-            };
-            match result {
-                Err(error) => {
-                    assert_eq!(
-                        crate::Error::from(error).kind(),
-                        io::ErrorKind::InvalidInput
-                    );
-                    break;
-                }
-                Ok(_) if attempt < 99 => tokio::task::yield_now().await,
-                Ok(_) => panic!("dropped opaque file remained registered"),
-            }
-        }
-
-        client.stop().await.unwrap();
-        server.await.unwrap().unwrap();
-    }
-
-    #[tokio::test]
-    async fn opaque_pipe_rejects_wrong_type_and_stale_identity() {
-        let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
-        let server =
-            tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
-        let client = Client::new(client_stream).await.unwrap();
-        let (mut send, mut recv) = client.pipe().await.unwrap();
-        let send_opaque = match &send {
-            crate::StdioSend::Remote(send) => send.stdio.as_ref().unwrap().clone(),
-            crate::StdioSend::Native(_) => panic!("remote pipe returned a native send end"),
-        };
-
-        let encoded = postcard::to_allocvec(&send_opaque).unwrap();
-        let wrong: dolang_rpc::session::Opaque<crate::session::StdioRecvMarker> =
-            postcard::from_bytes(&encoded).unwrap();
-        let response = client
-            .request(RequestKind::StdioRecvClose { stdio: wrong })
-            .await
-            .unwrap();
-        let crate::protocol::ResponseKind::StdioRecvClose(result) = response else {
-            panic!("stdio receive close returned the wrong response");
-        };
-        assert_eq!(
-            crate::Error::from(result.unwrap_err()).kind(),
-            io::ErrorKind::InvalidInput
-        );
-
-        send.write_all(b"still live").await.unwrap();
-        let mut data = [0; 10];
-        recv.read_exact(&mut data).await.unwrap();
-        assert_eq!(&data, b"still live");
-        send.shutdown().await.unwrap();
-
-        let response = client
-            .request(RequestKind::StdioSendClose { stdio: send_opaque })
-            .await
-            .unwrap();
-        let crate::protocol::ResponseKind::StdioSendClose(result) = response else {
-            panic!("stdio send close returned the wrong response");
-        };
-        assert_eq!(
-            crate::Error::from(result.unwrap_err()).kind(),
-            io::ErrorKind::InvalidInput
-        );
-
-        // Stopping drains outstanding endpoints, so release this one first.
-        drop(recv);
-        client.stop().await.unwrap();
-        server.await.unwrap().unwrap();
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn resource_operations_use_the_handle_route() {
-        let temp = tempdir().unwrap();
-        let socket = temp.path().join("inner.sock");
-        let inner_server = Server::bind(&socket).await.unwrap();
-        let inner_task = tokio::spawn(inner_server.accept());
-
-        let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
-        let outer_task =
-            tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
-        let root = Client::new(client_stream).await.unwrap();
-        let path = crate::path::typed_path(socket).unwrap();
-        let selected = root
-            .unix_socket(path.to_path())
-            .await
-            .unwrap()
-            .into_client()
-            .unwrap();
-
-        let (mut send, mut recv) = root.pipe().await.unwrap();
-        send.write_all(b"root").await.unwrap();
-        send.flush().await.unwrap();
-        let mut data = [0; 4];
-        recv.read_exact(&mut data).await.unwrap();
-        assert_eq!(&data, b"root");
-
-        let send_opaque = match &send {
-            crate::StdioSend::Remote(send) => send.stdio.as_ref().unwrap().clone(),
-            crate::StdioSend::Native(_) => panic!("remote pipe returned a native send end"),
-        };
-        let response = selected
-            .request(RequestKind::StdioSendClose {
-                stdio: send_opaque.clone(),
-            })
-            .await
-            .unwrap();
-        let crate::protocol::ResponseKind::StdioSendClose(result) = response else {
-            panic!("stdio close returned the wrong response");
-        };
-        result.unwrap();
-        let mut eof = [0; 1];
-        assert_eq!(recv.read(&mut eof).await.unwrap(), 0);
-
-        let encoded = postcard::to_allocvec(&send_opaque).unwrap();
-        let wrong_vfs: dolang_rpc::session::Opaque<crate::session::VfsMarker> =
-            postcard::from_bytes(&encoded).unwrap();
-        let mut wrong_client = root.clone();
-        wrong_client.vfs = Some(wrong_vfs);
-        assert_eq!(
-            wrong_client
-                .request(RequestKind::Query)
-                .await
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::InvalidInput
-        );
-
-        selected.stop().await.unwrap();
-        assert_eq!(
-            selected
-                .request(RequestKind::Query)
-                .await
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::InvalidInput
-        );
-        inner_task.await.unwrap().unwrap();
-        // Stopping drains outstanding endpoints, so release this one first.
-        drop(recv);
-        root.stop().await.unwrap();
-        outer_task.await.unwrap().unwrap();
-    }
-
-    #[test]
-    fn dropping_remote_file_without_runtime_does_not_panic() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let (file, client, server, temp) = runtime.block_on(async {
-            let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
-            let server =
-                tokio::spawn(
-                    async move { Server::new(server_stream).await.unwrap().serve().await },
-                );
-            let client = Client::new(client_stream).await.unwrap();
-            let temp = tempdir().unwrap();
-            let path = crate::path::typed_path(temp.path().join("file")).unwrap();
-            let file = open_remote_file(&client, path.to_path()).await;
-            (file, client, server, temp)
-        });
-
-        drop(runtime);
-        drop(file);
-        drop(client);
-        drop(server);
-        drop(temp);
-    }
-
-    #[tokio::test]
-    async fn explicit_close_consumes_remote_cleanup_identity() {
-        let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
-        let server =
-            tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
-        let client = Client::new(client_stream).await.unwrap();
-        let temp = tempdir().unwrap();
-        let path = crate::path::typed_path(temp.path().join("file")).unwrap();
-        let file = open_remote_file(&client, path.to_path()).await;
-
-        file.close().await.unwrap();
-
-        client.stop().await.unwrap();
-        server.await.unwrap().unwrap();
-    }
-
     #[tokio::test]
     async fn child_wait_caches_wire_error() {
         let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
@@ -3301,7 +2939,7 @@ mod tests {
         };
         let response = client
             .request(RequestKind::ChildClose {
-                child: opaque.clone(),
+                child: opaque.cite(),
             })
             .await
             .unwrap();

@@ -7,7 +7,7 @@
 //! `dolang-vfs` never exposing its own `RequestKind`/`ResponseKind`/
 //! `VfsProtocol`.
 
-use dolang_vfs::extension::{ExtOpaque, VfsExtension};
+use dolang_vfs::extension::{ExtCite, ExtGift, VfsExtension};
 use dolang_vfs::{
     AnyVfs, Vfs,
     error::{Error, ErrorKind},
@@ -43,24 +43,25 @@ pub struct ScManager {
 
 struct ScManagerState {
     vfs: AnyVfs,
-    opaque: Option<ExtOpaque<ScManagerMarker>>,
+    opaque: Option<ExtGift<ScManagerMarker>>,
 }
 
 impl ScManagerState {
-    fn new(vfs: AnyVfs, opaque: ExtOpaque<ScManagerMarker>) -> Self {
+    fn new(vfs: AnyVfs, opaque: ExtGift<ScManagerMarker>) -> Self {
         Self {
             vfs,
             opaque: Some(opaque),
         }
     }
 
-    fn opaque(&self) -> Result<ExtOpaque<ScManagerMarker>, Error> {
+    fn cite(&self) -> Result<ExtCite<ScManagerMarker>, Error> {
         self.opaque
-            .clone()
+            .as_ref()
+            .map(ExtGift::cite)
             .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "SC manager is closed"))
     }
 
-    fn take_opaque(&mut self) -> ExtOpaque<ScManagerMarker> {
+    fn take_opaque(&mut self) -> ExtGift<ScManagerMarker> {
         self.opaque
             .take()
             .expect("live manager state has no opaque")
@@ -78,7 +79,9 @@ impl Drop for ScManagerState {
         let vfs = self.vfs.clone();
         runtime.spawn(async move {
             let _ = vfs
-                .call_extension::<WinScmExt>(WinScmRequest::CloseManager { manager })
+                .call_extension::<WinScmExt>(WinScmRequest::CloseManager {
+                    manager: manager.cite(),
+                })
                 .await;
         });
     }
@@ -114,7 +117,7 @@ impl ScManager {
         let response = self
             .vfs
             .call_extension::<WinScmExt>(WinScmRequest::OpenService {
-                manager: self.handle.opaque()?,
+                manager: self.handle.cite()?,
                 name: name.to_string(),
                 access,
             })
@@ -170,7 +173,7 @@ impl ScManager {
         let response = self
             .vfs
             .call_extension::<WinScmExt>(WinScmRequest::CreateService {
-                manager: self.handle.opaque()?,
+                manager: self.handle.cite()?,
                 name: name.to_string(),
                 display_name: display_name.map(str::to_owned),
                 service_type,
@@ -221,7 +224,7 @@ impl ScManager {
                 "SC manager has an operation in progress",
             )
         })?;
-        let manager = state.take_opaque();
+        let manager = state.take_opaque().cite();
         let response = self
             .vfs
             .call_extension::<WinScmExt>(WinScmRequest::CloseManager { manager })
@@ -251,7 +254,7 @@ impl Services {
             .manager
             .upgrade()
             .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "SC manager is closed"))?;
-        manager.opaque()?;
+        manager.cite()?;
         if let Some(entry) = self.entries.pop_front() {
             return Ok(Some(entry));
         }
@@ -261,7 +264,7 @@ impl Services {
         let response = self
             .vfs
             .call_extension::<WinScmExt>(WinScmRequest::EnumServicesPage {
-                manager: manager.opaque()?,
+                manager: manager.cite()?,
                 service_type: self.service_type,
                 state_filter: self.state_filter,
                 resume: self.resume,
@@ -285,7 +288,7 @@ impl Services {
 /// An open handle to a specific service.
 pub struct Service {
     vfs: AnyVfs,
-    handle: ExtOpaque<ServiceMarker>,
+    handle: ExtGift<ServiceMarker>,
 }
 
 impl Service {
@@ -295,7 +298,7 @@ impl Service {
         let response = self
             .vfs
             .call_extension::<WinScmExt>(WinScmRequest::DeleteService {
-                service: self.handle.clone(),
+                service: self.handle.cite(),
             })
             .await??;
         match response {
@@ -314,7 +317,7 @@ impl Service {
         let response = self
             .vfs
             .call_extension::<WinScmExt>(WinScmRequest::CloseService {
-                service: self.handle,
+                service: self.handle.cite(),
             })
             .await??;
         match response {
@@ -333,7 +336,7 @@ impl Service {
         let response = self
             .vfs
             .call_extension::<WinScmExt>(WinScmRequest::StartService {
-                service: self.handle.clone(),
+                service: self.handle.cite(),
                 args: args.to_vec(),
             })
             .await??;
@@ -349,7 +352,7 @@ impl Service {
         let response = self
             .vfs
             .call_extension::<WinScmExt>(WinScmRequest::ControlService {
-                service: self.handle.clone(),
+                service: self.handle.cite(),
                 control,
             })
             .await??;
@@ -364,7 +367,7 @@ impl Service {
         let response = self
             .vfs
             .call_extension::<WinScmExt>(WinScmRequest::QueryStatus {
-                service: self.handle.clone(),
+                service: self.handle.cite(),
             })
             .await??;
         match response {
@@ -378,7 +381,7 @@ impl Service {
         let response = self
             .vfs
             .call_extension::<WinScmExt>(WinScmRequest::QueryConfig {
-                service: self.handle.clone(),
+                service: self.handle.cite(),
             })
             .await??;
         match response {
@@ -392,7 +395,7 @@ impl Service {
         let response = self
             .vfs
             .call_extension::<WinScmExt>(WinScmRequest::ChangeConfig {
-                service: self.handle.clone(),
+                service: self.handle.cite(),
                 update,
             })
             .await??;
@@ -417,7 +420,7 @@ impl Service {
         let response = self
             .vfs
             .call_extension::<WinScmExt>(WinScmRequest::GetSecDesc {
-                service: self.handle.clone(),
+                service: self.handle.cite(),
                 mask,
             })
             .await??;
@@ -440,7 +443,7 @@ impl Service {
         let response = self
             .vfs
             .call_extension::<WinScmExt>(WinScmRequest::SetSecDesc {
-                service: self.handle.clone(),
+                service: self.handle.cite(),
                 sec_desc: descriptor.clone(),
             })
             .await??;
@@ -462,7 +465,7 @@ impl Service {
         let response = self
             .vfs
             .call_extension::<WinScmExt>(WinScmRequest::WaitForStatusChange {
-                service: self.handle.clone(),
+                service: self.handle.cite(),
                 mask,
             })
             .await??;

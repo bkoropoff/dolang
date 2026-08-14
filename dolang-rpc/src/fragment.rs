@@ -16,6 +16,7 @@ use ::serde::{Deserialize, Serialize};
 
 use crate::{
     Error, Limits, NEGOTIATE_FRAGMENT_SIZE, NEGOTIATE_MAX_PAYLOAD_SIZE,
+    session::Ledger,
     trailer::{RecvShared, SendAction, SendShared},
     transport::{
         AnyReceiver, AnySender, OutgoingHandles, ReceivedHandles, Receiver, RecvFrame, SendFrame,
@@ -42,6 +43,22 @@ pub(crate) enum Kind {
     /// Confirms receipt of the final non-trailer fragment carrying
     /// `WANT_ACK` for the message identified by `id`.
     Ack = 6,
+    /// Drops references to a session opaque. `id` names the opaque rather
+    /// than a message, and the 4-byte payload carries how many references
+    /// are being dropped at once.
+    ///
+    /// This lives at transport level, not in any [`Protocol`](crate::Protocol),
+    /// because [`Opaque`](crate::session::Opaque) is generic over the
+    /// application protocol: releasing is the RPC runtime's business, and an
+    /// application that never names an opaque still needs its peer's
+    /// references collected.
+    ///
+    /// A release for an unknown `id` is ignored rather than treated as a
+    /// protocol error. The owner may legitimately have retired the entry
+    /// already — a consuming operation races the peer's release by
+    /// construction, and the counters are commutative, so both orders
+    /// converge.
+    Release = 7,
 }
 
 impl TryFrom<u8> for Kind {
@@ -56,6 +73,7 @@ impl TryFrom<u8> for Kind {
             4 => Ok(Self::Discard),
             5 => Ok(Self::Negotiate),
             6 => Ok(Self::Ack),
+            7 => Ok(Self::Release),
             _ => Err(Error::Protocol(format!("unknown frame kind {value}"))),
         }
     }
@@ -68,8 +86,11 @@ pub(crate) struct Flags(u8);
 impl Flags {
     pub(crate) const NONE: Flags = Flags(0);
     pub(crate) const FIRST: Flags = Flags(0b0001);
+    /// Last fragment of the message, whatever phase it is in.
     pub(crate) const LAST: Flags = Flags(0b0010);
     pub(crate) const ABORT: Flags = Flags(0b0100);
+    /// The postcard payload ends with this fragment and trailer data
+    /// follows.
     pub(crate) const TRAILER: Flags = Flags(0b1000);
     pub(crate) const WANT_ACK: Flags = Flags(0b1_0000);
     const VALID: u8 =
@@ -598,19 +619,25 @@ pub(crate) enum Event {
         id: u64,
         message: Option<Message>,
     },
+    /// A trailer-data fragment. The message it belongs to was handed to the
+    /// application earlier, at its payload boundary, so this never carries
+    /// one.
     Trailer {
         id: u64,
-        message: Option<Message>,
         shared: Arc<std::sync::Mutex<RecvShared>>,
         len: usize,
         /// Set when the local consumer had already discarded this trailer
-        /// (via [`crate::trailer::TrailerRecv::discard`] or by dropping it) before
-        /// this *subsequent* fragment arrived — i.e. the peer is still
-        /// sending more than we want. Never set on the fragment that first
-        /// hands the trailer to the application. The caller should tell the
-        /// peer to stop (`Kind::Discard`) exactly once per message when
-        /// this is set.
+        /// (via [`crate::trailer::TrailerRecv::discard`] or by dropping it)
+        /// before this fragment arrived — i.e. the peer is still sending
+        /// more than we want. The caller should tell the peer to stop
+        /// (`Kind::Discard`) exactly once per message when this is set.
         notify_discard: bool,
+    },
+    /// The peer dropped `count` references to the opaque named by `id`.
+    /// Unknown ids are tolerated; see [`Kind::Release`].
+    Release {
+        id: u64,
+        count: u32,
     },
 }
 
@@ -622,7 +649,14 @@ struct Incomplete {
     trailer_len: usize,
     dispatched: bool,
     discard_notified: bool,
-    postcard_done: bool,
+    /// Set once the fragment carrying `TRAILER` — the payload's last — has
+    /// arrived. Every fragment after it is trailer data.
+    trailer_phase: bool,
+    /// Set by a `WANT_ACK` fragment, which a well-behaved peer only sends
+    /// once its payload is complete. Guards against a malformed peer
+    /// continuing the payload past the boundary it just asked us to
+    /// acknowledge, which would release its handle escrow early.
+    want_ack_boundary: bool,
 }
 
 /// Reassembles postcard data while handing trailer fragments to a live
@@ -680,7 +714,26 @@ impl Reassembler {
             }
         }
 
-        if want_ack && (trailer || abort || !matches!(kind, Kind::Request | Kind::Response)) {
+        if kind == Kind::Release {
+            #[cfg(unix)]
+            let has_handles = !fragment_handles.is_empty();
+            #[cfg(not(unix))]
+            let has_handles = false;
+            if !first || !last || abort || trailer || want_ack || payload_len != 4 || has_handles {
+                return Err(Error::Protocol("invalid Release fragment".into()));
+            }
+            let mut payload = BytesMut::with_capacity(4);
+            read_payload(frame, &mut payload, 4).await?;
+            let count = payload.get_u32_le();
+            if count == 0 {
+                return Err(Error::Protocol(
+                    "Release fragment must drop at least one reference".into(),
+                ));
+            }
+            return Ok(Event::Release { id, count });
+        }
+
+        if want_ack && (abort || !matches!(kind, Kind::Request | Kind::Response)) {
             return Err(Error::Protocol("invalid WANT_ACK fragment".into()));
         }
 
@@ -711,14 +764,24 @@ impl Reassembler {
             });
         }
 
-        if first && last && trailer {
+        if last && trailer {
             return Err(Error::Protocol(
-                "a trailer-bearing message cannot complete in its FIRST fragment".into(),
+                "TRAILER and LAST are mutually exclusive: a payload followed by a trailer has more fragments coming".into(),
             ));
         }
 
+        // `TRAILER` rides the payload's *last* fragment, so the fragment
+        // carrying it is still payload; only the ones after it are trailer
+        // data. A missing entry leaves this false and is reported as such
+        // by the non-FIRST branch below.
+        let trailer_phase = !first
+            && self
+                .incomplete
+                .get(&id)
+                .is_some_and(|entry| entry.trailer_phase);
+
         #[cfg(unix)]
-        if trailer && !fragment_handles.is_empty() {
+        if trailer_phase && !fragment_handles.is_empty() {
             return Err(Error::Protocol(
                 "trailer fragment contains file descriptor attachments".into(),
             ));
@@ -744,61 +807,39 @@ impl Reassembler {
                     "inconsistent message kind for message {id}"
                 )));
             }
-            if entry.trailer.is_some() && !trailer {
+            if entry.trailer_phase && trailer {
                 return Err(Error::Protocol(format!(
-                    "message {id} cannot return to postcard fragments once its trailer has started"
+                    "message {id} announced its payload boundary twice"
                 )));
             }
-            if entry.postcard_done && !trailer {
+            if entry.want_ack_boundary && !entry.trailer_phase {
                 return Err(Error::Protocol(format!(
                     "message {id} cannot continue after a WANT_ACK boundary"
                 )));
             }
         }
 
-        if trailer && last {
+        if trailer_phase && last {
+            // Terminal commit closing out the trailer stream. The message
+            // itself went to the application back when its payload ended,
+            // so there is nothing left to hand over here — even for a
+            // trailer that never carried a byte, whose stream was installed
+            // at that same boundary.
             if payload_len != 0 {
                 return Err(Error::Protocol(
-                    "TRAILER|LAST commit fragment must not carry a payload".into(),
+                    "trailer commit fragment must not carry a payload".into(),
                 ));
             }
-            let mut entry = self.incomplete.remove(&id).ok_or_else(|| {
-                Error::Protocol(format!(
-                    "fragment for message {id} without an active message"
-                ))
-            })?;
-            if entry.trailer.is_none() {
-                // Established and immediately finished by this same
-                // fragment (a present-but-empty trailer) — check the limit
-                // as if opening a new trailer stream, but there's nothing
-                // to decrement afterward since it never actually occupied a
-                // slot in `incomplete`.
-                if self.incomplete_trailers >= self.limits.max_incomplete_trailers {
-                    return Err(Error::Protocol("too many incomplete trailers".into()));
-                }
-            } else {
-                self.incomplete_trailers -= 1;
-            }
+            let entry = self
+                .incomplete
+                .remove(&id)
+                .expect("trailer phase implies an active message");
             let shared = entry
                 .trailer
-                .get_or_insert_with(|| {
-                    RecvShared::new(
-                        self.limits.trailer_recv_copy_threshold,
-                        self.limits.trailer_recv_demand_copy_threshold,
-                    )
-                })
-                .clone();
+                .expect("the payload boundary installs the trailer stream");
+            self.incomplete_trailers -= 1;
             RecvShared::finish(&shared);
-            if entry.dispatched {
-                return Ok(Event::None);
-            }
-            return Ok(Event::Message(Message {
-                kind,
-                id,
-                payload: entry.postcard.freeze(),
-                handles: entry.handles,
-                trailer: Some(shared),
-            }));
+            return Ok(Event::None);
         }
 
         let fragment_limit = if first && last {
@@ -867,58 +908,33 @@ impl Reassembler {
                     trailer_len: 0,
                     dispatched: false,
                     discard_notified: false,
-                    postcard_done: false,
+                    trailer_phase: false,
+                    want_ack_boundary: false,
                 },
             );
         }
         let entry = self.incomplete.get_mut(&id).unwrap();
 
-        if trailer {
+        if trailer_phase {
             if entry.trailer_len + payload_len > self.limits.max_trailer_size {
                 return Err(Error::Protocol(format!(
                     "message {id} exceeds the maximum trailer size"
                 )));
             }
-            if entry.trailer.is_none() {
-                if self.incomplete_trailers >= self.limits.max_incomplete_trailers {
-                    return Err(Error::Protocol("too many incomplete trailers".into()));
-                }
-                self.incomplete_trailers += 1;
-            }
             entry.trailer_len += payload_len;
             let shared = entry
                 .trailer
-                .get_or_insert_with(|| {
-                    RecvShared::new(
-                        self.limits.trailer_recv_copy_threshold,
-                        self.limits.trailer_recv_demand_copy_threshold,
-                    )
-                })
-                .clone();
-            let message = if entry.dispatched {
-                None
-            } else {
-                entry.dispatched = true;
-                Some(Message {
-                    kind,
-                    id,
-                    payload: entry.postcard.clone().freeze(),
-                    handles: std::mem::take(&mut entry.handles),
-                    trailer: Some(shared.clone()),
-                })
-            };
-            // Only a *subsequent* fragment (the message was already
-            // dispatched to the app on an earlier one) can trigger a
-            // notification — the very first trailer fragment hasn't given
-            // the application a chance to discard anything yet.
-            let notify_discard =
-                message.is_none() && !entry.discard_notified && RecvShared::is_discarded(&shared);
+                .clone()
+                .expect("the payload boundary installs the trailer stream");
+            // The application already has the message (it was dispatched at
+            // the payload boundary), so it has had a chance to discard the
+            // trailer by now.
+            let notify_discard = !entry.discard_notified && RecvShared::is_discarded(&shared);
             if notify_discard {
                 entry.discard_notified = true;
             }
             return Ok(Event::Trailer {
                 id,
-                message,
                 shared,
                 notify_discard,
                 len: payload_len,
@@ -954,7 +970,41 @@ impl Reassembler {
         }
 
         if want_ack {
-            entry.postcard_done = true;
+            entry.want_ack_boundary = true;
+        }
+
+        if trailer {
+            // The payload is complete and a trailer follows. Install the
+            // trailer stream and dispatch the message now, rather than
+            // waiting for the producer to emit its first fragment — a
+            // producer that stalls must not hold up a payload that has
+            // already arrived whole.
+            if self.incomplete_trailers >= self.limits.max_incomplete_trailers {
+                return Err(Error::Protocol("too many incomplete trailers".into()));
+            }
+            self.incomplete_trailers += 1;
+            let shared = RecvShared::new(
+                self.limits.trailer_recv_copy_threshold,
+                self.limits.trailer_recv_demand_copy_threshold,
+            );
+            entry.trailer = Some(shared.clone());
+            entry.trailer_phase = true;
+            entry.dispatched = true;
+            let message = Message {
+                kind,
+                id,
+                payload: entry.postcard.clone().freeze(),
+                handles: std::mem::take(&mut entry.handles),
+                trailer: Some(shared),
+            };
+            return Ok(if want_ack {
+                Event::Ack {
+                    id,
+                    message: Some(message),
+                }
+            } else {
+                Event::Message(message)
+            });
         }
 
         if last {
@@ -1024,13 +1074,22 @@ struct ActiveSend {
     /// in one fragment at admission time, or a trailer is present — a
     /// trailer-bearing message is always at least two fragments).
     multi_fragment: bool,
+    /// Session opaque references this message's payload is holding.
+    ///
+    /// Cleared — which commits it — the instant the payload's last fragment
+    /// is written, and rescinded if the send is cancelled before then. Living
+    /// on the send rather than in the endpoints is what makes that boundary
+    /// unmissable: the scheduler is the only thing that knows where the
+    /// payload actually ends.
+    ledger: Option<Ledger>,
 }
 
-/// A control-priority item: a zero-payload `Cancel`/`Error`/`Ack`, or an `ABORT`
-/// for a message whose FIRST fragment already went out.
+/// A control-priority item: a zero-payload `Cancel`/`Error`/`Ack`, an `ABORT`
+/// for a message whose FIRST fragment already went out, or a `Release`.
 enum ControlSend {
     Empty { kind: Kind, id: u64 },
     Abort { id: u64 },
+    Release { id: u64, count: u32 },
 }
 
 /// Outcome of attempting to cancel an in-flight outbound send.
@@ -1140,6 +1199,7 @@ impl Scheduler {
         payload: Bytes,
         handles: OutgoingHandles,
         trailer: Trailer,
+        ledger: Ledger,
     ) {
         #[cfg(unix)]
         let handles_fit = handles.fds.len() <= self.max_handles_per_fragment;
@@ -1160,6 +1220,7 @@ impl Scheduler {
                 trailer,
                 started: false,
                 multi_fragment: false,
+                ledger: Some(ledger),
             });
             return;
         }
@@ -1175,6 +1236,7 @@ impl Scheduler {
             trailer,
             started: false,
             multi_fragment: true,
+            ledger: Some(ledger),
         };
         if self.active_fragmented < self.max_active_fragmented {
             self.active_fragmented += 1;
@@ -1196,6 +1258,19 @@ impl Scheduler {
         self.control.push_back(ControlSend::Abort { id });
     }
 
+    /// Admits a `Release` for `count` references to the opaque `id`, ahead of
+    /// ordinary sends.
+    ///
+    /// Ordering against ordinary sends is not a correctness requirement here:
+    /// a message that *cites* an opaque holds a reference in the send escrow
+    /// until its payload is fully written, so no release for a cited opaque
+    /// can be admitted before the citing message's last payload fragment
+    /// leaves.
+    pub(crate) fn admit_release(&mut self, id: u64, count: u32) {
+        debug_assert!(count > 0, "a release must drop at least one reference");
+        self.control.push_back(ControlSend::Release { id, count });
+    }
+
     /// Attempts to cancel an in-flight or not-yet-started outbound send.
     ///
     /// If the send carries a `Trailer::Stream`, its `SendShared` is put into
@@ -1205,17 +1280,27 @@ impl Scheduler {
     /// `Arc`, are gone after this call).
     pub(crate) fn try_cancel_active(&mut self, id: u64) -> AbortOutcome {
         if let Some(pos) = self.waiting.iter().position(|s| s.id == id) {
-            let send = self.waiting.remove(pos).expect("position was just found");
+            let mut send = self.waiting.remove(pos).expect("position was just found");
             if let Trailer::Stream(shared) = &send.trailer {
                 SendShared::discard(shared);
+            }
+            // Nothing of this message ever reached the wire.
+            if let Some(ledger) = send.ledger.take() {
+                ledger.rescind();
             }
             return AbortOutcome::Discarded { started: false };
         }
         if let Some(pos) = self.active.iter().position(|s| s.id == id) {
-            let send = self.active.remove(pos).expect("position was just found");
+            let mut send = self.active.remove(pos).expect("position was just found");
             let started = send.started;
             if let Trailer::Stream(shared) = &send.trailer {
                 SendShared::discard(shared);
+            }
+            // Present only while the payload is still incomplete: the write
+            // path clears it at the payload boundary. So this rescinds
+            // exactly the sends the peer cannot have decoded, and no others.
+            if let Some(ledger) = send.ledger.take() {
+                ledger.rescind();
             }
             if send.multi_fragment {
                 self.free_fragmented_slot();
@@ -1362,8 +1447,16 @@ impl Scheduler {
             if first {
                 flags = flags | Flags::FIRST;
             }
-            if postcard_done && handles_done && send.trailer.is_none() {
-                flags = flags | Flags::LAST;
+            // The payload's final fragment always announces the boundary:
+            // `LAST` ends the message outright, `TRAILER` hands off to the
+            // trailer phase. Either way the peer can decode here.
+            if postcard_done && handles_done {
+                flags = flags
+                    | if send.trailer.is_none() {
+                        Flags::LAST
+                    } else {
+                        Flags::TRAILER
+                    };
             }
             #[cfg(target_os = "macos")]
             if postcard_done && handles_done && send.handles.escrow_tracking() {
@@ -1378,6 +1471,17 @@ impl Scheduler {
             let mut buffer = header.encode().chain(send.payload.slice(start..end));
             let atomic = frame.finish(&mut buffer).await?;
             self.record_write_atomicity(atomic);
+            if postcard_done && handles_done {
+                // The payload is irrevocably on the wire, so the peer will
+                // decode it and mirror every gift it carries even if it has
+                // already cancelled the call. Dropping the ledger commits it;
+                // a cancellation arriving from here on finds nothing left to
+                // rescind, which is the intended asymmetry — a stranded
+                // reference beats handing the peer a freed handle.
+                if let Some(ledger) = send.ledger.take() {
+                    ledger.commit();
+                }
+            }
             send.offset = end;
             #[cfg(target_os = "macos")]
             let escrow = send.handles.finish_attached(attached);
@@ -1449,9 +1553,11 @@ impl Scheduler {
 
         // Terminal commit: only reachable once both phases above are
         // exhausted, which (given `must_open_with_postcard`) implies a
-        // trailer was present.
+        // trailer was present. The peer is already in the trailer phase —
+        // the payload's last fragment carried `TRAILER` — so this only has
+        // to close the message out.
         let header = FragmentHeader {
-            flags: Flags::TRAILER | Flags::LAST,
+            flags: Flags::LAST,
             kind: send.kind,
             id: send.id,
             payload_len: 0,
@@ -1469,21 +1575,44 @@ impl Scheduler {
         transport: &mut AnySender,
         control: ControlSend,
     ) -> Result<(), Error> {
-        let header = match control {
-            ControlSend::Empty { kind, id } => FragmentHeader {
-                flags: Flags::FIRST | Flags::LAST,
-                kind,
-                id,
-                payload_len: 0,
-            },
-            ControlSend::Abort { id } => FragmentHeader {
-                flags: Flags::ABORT,
-                kind: Kind::Request,
-                id,
-                payload_len: 0,
-            },
+        let (header, count) = match control {
+            ControlSend::Empty { kind, id } => (
+                FragmentHeader {
+                    flags: Flags::FIRST | Flags::LAST,
+                    kind,
+                    id,
+                    payload_len: 0,
+                },
+                None,
+            ),
+            ControlSend::Abort { id } => (
+                FragmentHeader {
+                    flags: Flags::ABORT,
+                    kind: Kind::Request,
+                    id,
+                    payload_len: 0,
+                },
+                None,
+            ),
+            ControlSend::Release { id, count } => (
+                FragmentHeader {
+                    flags: Flags::FIRST | Flags::LAST,
+                    kind: Kind::Release,
+                    id,
+                    payload_len: 4,
+                },
+                Some(count),
+            ),
         };
-        let mut buffer = header.encode();
+        let mut buffer = match count {
+            None => header.encode(),
+            Some(count) => {
+                let mut buffer = BytesMut::with_capacity(RawFragmentHeader::LEN + 4);
+                header.encode_into(&mut buffer);
+                buffer.put_u32_le(count);
+                buffer.freeze()
+            }
+        };
         transport.send().finish(&mut buffer).await?;
         Ok(())
     }
@@ -1673,35 +1802,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn want_ack_marks_the_boundary_before_a_trailer() {
+    async fn want_ack_and_trailer_share_the_payload_boundary() {
+        // Both flags mark "the payload is complete", so a message that has
+        // attachments to escrow *and* a trailer carries them on the same
+        // fragment. That fragment acknowledges and dispatches at once.
         let mut frame = FakeRecvFrame::new(fragment_bytes(
-            Flags::FIRST | Flags::WANT_ACK,
+            Flags::FIRST | Flags::TRAILER | Flags::WANT_ACK,
             7,
             Kind::Response,
             b"done",
         ));
         let mut reassembler = Reassembler::new(Limits::default());
         let header = read_fragment_header(&mut frame).await.unwrap();
-        assert!(matches!(
-            reassembler.accept(header, &mut frame).await.unwrap(),
-            Event::Ack {
-                id: 7,
-                message: None
-            }
-        ));
-
-        let mut frame = FakeRecvFrame::new(fragment_bytes(
-            Flags::TRAILER | Flags::LAST,
-            7,
-            Kind::Response,
-            b"",
-        ));
-        let header = read_fragment_header(&mut frame).await.unwrap();
-        let Event::Message(message) = reassembler.accept(header, &mut frame).await.unwrap() else {
-            panic!("terminal trailer commit completes the message");
+        let Event::Ack {
+            id: 7,
+            message: Some(message),
+        } = reassembler.accept(header, &mut frame).await.unwrap()
+        else {
+            panic!("expected the payload boundary to ack and dispatch together");
         };
         assert_eq!(&message.payload[..], b"done");
         assert!(message.trailer.is_some());
+
+        let mut frame = FakeRecvFrame::new(fragment_bytes(Flags::LAST, 7, Kind::Response, b""));
+        let header = read_fragment_header(&mut frame).await.unwrap();
+        assert!(matches!(
+            reassembler.accept(header, &mut frame).await.unwrap(),
+            Event::None
+        ));
     }
 
     #[tokio::test]
@@ -1946,7 +2074,7 @@ mod tests {
         let header = read_fragment_header(&mut frame).await.unwrap();
         assert!(matches!(
             reassembler.accept(header, &mut frame).await.unwrap(),
-            Event::Trailer { .. }
+            Event::Message(_)
         ));
 
         let mut frame = FakeRecvFrame::new(fragment_bytes(
@@ -2024,60 +2152,45 @@ mod tests {
 
     #[tokio::test]
     async fn present_but_empty_trailer_is_distinguishable_from_absent() {
-        let mut bytes = fragment_bytes(Flags::FIRST, 1, Kind::Request, b"hello");
-        bytes.extend(fragment_bytes(
-            Flags::TRAILER | Flags::LAST,
-            1,
-            Kind::Request,
-            b"",
-        ));
+        let mut bytes = fragment_bytes(Flags::FIRST | Flags::TRAILER, 1, Kind::Request, b"hello");
+        bytes.extend(fragment_bytes(Flags::LAST, 1, Kind::Request, b""));
         let mut frame = FakeRecvFrame::new(bytes);
         let mut reassembler = Reassembler::new(Limits::default());
         let header = read_fragment_header(&mut frame).await.unwrap();
-        assert!(matches!(
-            reassembler.accept(header, &mut frame).await.unwrap(),
-            Event::None
-        ));
-        let header = read_fragment_header(&mut frame).await.unwrap();
         let Event::Message(msg) = reassembler.accept(header, &mut frame).await.unwrap() else {
-            panic!("TRAILER|LAST completes the message");
+            panic!("the payload boundary completes the message");
         };
         assert_eq!(&msg.payload[..], b"hello");
         assert!(
             msg.trailer.is_some(),
-            "a TRAILER fragment was seen, even though its content is empty"
+            "TRAILER was seen, even though no trailer data ever followed"
         );
-    }
-
-    #[tokio::test]
-    async fn single_fragment_trailer_reassembles_with_postcard_payload() {
-        let mut bytes = fragment_bytes(Flags::FIRST, 1, Kind::Request, b"hello");
-        bytes.extend(fragment_bytes(Flags::TRAILER, 1, Kind::Request, b"world"));
-        bytes.extend(fragment_bytes(
-            Flags::TRAILER | Flags::LAST,
-            1,
-            Kind::Request,
-            b"",
-        ));
-        let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = Reassembler::new(Limits::default());
-
         let header = read_fragment_header(&mut frame).await.unwrap();
         assert!(matches!(
             reassembler.accept(header, &mut frame).await.unwrap(),
             Event::None
         ));
+    }
+
+    #[tokio::test]
+    async fn single_fragment_trailer_reassembles_with_postcard_payload() {
+        let mut bytes = fragment_bytes(Flags::FIRST | Flags::TRAILER, 1, Kind::Request, b"hello");
+        bytes.extend(fragment_bytes(Flags::NONE, 1, Kind::Request, b"world"));
+        bytes.extend(fragment_bytes(Flags::LAST, 1, Kind::Request, b""));
+        let mut frame = FakeRecvFrame::new(bytes);
+        let mut reassembler = Reassembler::new(Limits::default());
 
         let header = read_fragment_header(&mut frame).await.unwrap();
-        let Event::Trailer {
-            message: Some(msg),
-            len,
-            ..
-        } = reassembler.accept(header, &mut frame).await.unwrap()
-        else {
-            panic!("expected the first TRAILER fragment to dispatch the message");
+        let Event::Message(msg) = reassembler.accept(header, &mut frame).await.unwrap() else {
+            panic!("expected the payload boundary to dispatch the message");
         };
         assert_eq!(&msg.payload[..], b"hello");
+
+        let header = read_fragment_header(&mut frame).await.unwrap();
+        let Event::Trailer { len, .. } = reassembler.accept(header, &mut frame).await.unwrap()
+        else {
+            panic!("expected a trailer-data fragment");
+        };
         assert_eq!(&drain_trailer_bytes(&mut frame, len).await[..], b"world");
 
         let header = read_fragment_header(&mut frame).await.unwrap();
@@ -2089,42 +2202,30 @@ mod tests {
 
     #[tokio::test]
     async fn multi_fragment_trailer_reassembles_with_empty_postcard_payload() {
-        let mut bytes = fragment_bytes(Flags::FIRST, 1, Kind::Request, b"");
-        bytes.extend(fragment_bytes(Flags::TRAILER, 1, Kind::Request, b"ab"));
-        bytes.extend(fragment_bytes(Flags::TRAILER, 1, Kind::Request, b"cd"));
-        bytes.extend(fragment_bytes(
-            Flags::TRAILER | Flags::LAST,
-            1,
-            Kind::Request,
-            b"",
-        ));
+        let mut bytes = fragment_bytes(Flags::FIRST | Flags::TRAILER, 1, Kind::Request, b"");
+        bytes.extend(fragment_bytes(Flags::NONE, 1, Kind::Request, b"ab"));
+        bytes.extend(fragment_bytes(Flags::NONE, 1, Kind::Request, b"cd"));
+        bytes.extend(fragment_bytes(Flags::LAST, 1, Kind::Request, b""));
         let mut frame = FakeRecvFrame::new(bytes);
         let mut reassembler = Reassembler::new(Limits::default());
 
         let header = read_fragment_header(&mut frame).await.unwrap();
-        assert!(matches!(
-            reassembler.accept(header, &mut frame).await.unwrap(),
-            Event::None
-        ));
-
-        let header = read_fragment_header(&mut frame).await.unwrap();
-        let Event::Trailer {
-            message: Some(msg),
-            len,
-            ..
-        } = reassembler.accept(header, &mut frame).await.unwrap()
-        else {
-            panic!("expected the first TRAILER fragment to dispatch the message");
+        let Event::Message(msg) = reassembler.accept(header, &mut frame).await.unwrap() else {
+            panic!("expected the payload boundary to dispatch the message");
         };
         assert_eq!(&msg.payload[..], b"");
+
+        let header = read_fragment_header(&mut frame).await.unwrap();
+        let Event::Trailer { len, .. } = reassembler.accept(header, &mut frame).await.unwrap()
+        else {
+            panic!("expected the first trailer-data fragment");
+        };
         assert_eq!(&drain_trailer_bytes(&mut frame, len).await[..], b"ab");
 
         let header = read_fragment_header(&mut frame).await.unwrap();
-        let Event::Trailer {
-            message: None, len, ..
-        } = reassembler.accept(header, &mut frame).await.unwrap()
+        let Event::Trailer { len, .. } = reassembler.accept(header, &mut frame).await.unwrap()
         else {
-            panic!("expected a subsequent TRAILER fragment to not redispatch the message");
+            panic!("expected a subsequent trailer-data fragment");
         };
         assert_eq!(&drain_trailer_bytes(&mut frame, len).await[..], b"cd");
 
@@ -2137,14 +2238,9 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_trailer_last_commit_with_nonzero_payload() {
-        let mut bytes = fragment_bytes(Flags::FIRST, 1, Kind::Request, b"");
-        bytes.extend(fragment_bytes(Flags::TRAILER, 1, Kind::Request, b"a"));
-        bytes.extend(fragment_bytes(
-            Flags::TRAILER | Flags::LAST,
-            1,
-            Kind::Request,
-            b"x",
-        ));
+        let mut bytes = fragment_bytes(Flags::FIRST | Flags::TRAILER, 1, Kind::Request, b"");
+        bytes.extend(fragment_bytes(Flags::NONE, 1, Kind::Request, b"a"));
+        bytes.extend(fragment_bytes(Flags::LAST, 1, Kind::Request, b"x"));
         let mut frame = FakeRecvFrame::new(bytes);
         let mut reassembler = Reassembler::new(Limits::default());
 
@@ -2166,27 +2262,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn first_trailer_fragment_starts_trailer_phase_immediately_with_empty_postcard() {
-        let mut bytes = fragment_bytes(Flags::FIRST | Flags::TRAILER, 1, Kind::Request, b"ab");
-        bytes.extend(fragment_bytes(
-            Flags::TRAILER | Flags::LAST,
-            1,
-            Kind::Request,
-            b"",
-        ));
+    async fn payload_boundary_dispatches_before_any_trailer_data_arrives() {
+        let mut bytes = fragment_bytes(Flags::FIRST | Flags::TRAILER, 1, Kind::Request, b"");
+        bytes.extend(fragment_bytes(Flags::NONE, 1, Kind::Request, b"ab"));
+        bytes.extend(fragment_bytes(Flags::LAST, 1, Kind::Request, b""));
         let mut frame = FakeRecvFrame::new(bytes);
         let mut reassembler = Reassembler::new(Limits::default());
 
+        // The whole point of putting TRAILER on the payload's last fragment:
+        // the message is available without waiting on the trailer producer.
         let header = read_fragment_header(&mut frame).await.unwrap();
-        let Event::Trailer {
-            message: Some(msg),
-            len,
-            ..
-        } = reassembler.accept(header, &mut frame).await.unwrap()
-        else {
+        let Event::Message(msg) = reassembler.accept(header, &mut frame).await.unwrap() else {
             panic!("expected FIRST|TRAILER to dispatch the message immediately");
         };
         assert_eq!(&msg.payload[..], b"");
+        assert!(msg.trailer.is_some());
+
+        let header = read_fragment_header(&mut frame).await.unwrap();
+        let Event::Trailer { len, .. } = reassembler.accept(header, &mut frame).await.unwrap()
+        else {
+            panic!("expected a trailer-data fragment");
+        };
         assert_eq!(&drain_trailer_bytes(&mut frame, len).await[..], b"ab");
 
         let header = read_fragment_header(&mut frame).await.unwrap();
@@ -2197,26 +2293,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_first_last_trailer_together() {
-        let mut frame = FakeRecvFrame::new(fragment_bytes(
+    async fn rejects_last_and_trailer_together() {
+        // Mutually exclusive: TRAILER promises more fragments, LAST denies it.
+        for flags in [
             Flags::FIRST | Flags::LAST | Flags::TRAILER,
-            1,
-            Kind::Request,
-            b"",
-        ));
-        let mut reassembler = Reassembler::new(Limits::default());
-        let header = read_fragment_header(&mut frame).await.unwrap();
-        assert!(matches!(
-            reassembler.accept(header, &mut frame).await,
-            Err(Error::Protocol(_))
-        ));
+            Flags::LAST | Flags::TRAILER,
+        ] {
+            let mut frame = FakeRecvFrame::new(fragment_bytes(flags, 1, Kind::Request, b""));
+            let mut reassembler = Reassembler::new(Limits::default());
+            let header = read_fragment_header(&mut frame).await.unwrap();
+            assert!(matches!(
+                reassembler.accept(header, &mut frame).await,
+                Err(Error::Protocol(_))
+            ));
+        }
     }
 
     #[tokio::test]
-    async fn rejects_fragment_returning_to_postcard_after_trailer_started() {
-        let mut bytes = fragment_bytes(Flags::FIRST, 1, Kind::Request, b"");
-        bytes.extend(fragment_bytes(Flags::TRAILER, 1, Kind::Request, b"a"));
-        bytes.extend(fragment_bytes(Flags::NONE, 1, Kind::Request, b"b"));
+    async fn rejects_a_second_payload_boundary() {
+        let mut bytes = fragment_bytes(Flags::FIRST | Flags::TRAILER, 1, Kind::Request, b"");
+        bytes.extend(fragment_bytes(Flags::NONE, 1, Kind::Request, b"a"));
+        bytes.extend(fragment_bytes(Flags::TRAILER, 1, Kind::Request, b"b"));
         let mut frame = FakeRecvFrame::new(bytes);
         let mut reassembler = Reassembler::new(Limits::default());
 
@@ -2226,7 +2323,7 @@ mod tests {
         let header = read_fragment_header(&mut frame).await.unwrap();
         let Event::Trailer { len, .. } = reassembler.accept(header, &mut frame).await.unwrap()
         else {
-            panic!("expected a TRAILER data event");
+            panic!("expected a trailer-data fragment");
         };
         drain_trailer_bytes(&mut frame, len).await;
 
@@ -2250,15 +2347,18 @@ mod tests {
             ..Limits::default()
         };
         let mut bytes = fragment_bytes(Flags::FIRST, 1, Kind::Request, b"abcd");
-        bytes.extend(fragment_bytes(Flags::TRAILER, 1, Kind::Request, b"ab"));
+        bytes.extend(fragment_bytes(Flags::TRAILER, 1, Kind::Request, b"abcd"));
+        bytes.extend(fragment_bytes(Flags::NONE, 1, Kind::Request, b"ab"));
         let mut frame = FakeRecvFrame::new(bytes);
         let mut reassembler = Reassembler::new(limits);
         let header = read_fragment_header(&mut frame).await.unwrap();
         reassembler.accept(header, &mut frame).await.unwrap();
         let header = read_fragment_header(&mut frame).await.unwrap();
+        reassembler.accept(header, &mut frame).await.unwrap();
+        let header = read_fragment_header(&mut frame).await.unwrap();
         let Event::Trailer { len, .. } = reassembler.accept(header, &mut frame).await.unwrap()
         else {
-            panic!("expected a TRAILER data event, not rejection");
+            panic!("expected a trailer-data fragment, not rejection");
         };
         drain_trailer_bytes(&mut frame, len).await;
     }
@@ -2270,8 +2370,8 @@ mod tests {
             max_trailer_size: 3,
             ..Limits::default()
         };
-        let mut bytes = fragment_bytes(Flags::FIRST, 1, Kind::Request, b"");
-        bytes.extend(fragment_bytes(Flags::TRAILER, 1, Kind::Request, b"abcd"));
+        let mut bytes = fragment_bytes(Flags::FIRST | Flags::TRAILER, 1, Kind::Request, b"");
+        bytes.extend(fragment_bytes(Flags::NONE, 1, Kind::Request, b"abcd"));
         let mut frame = FakeRecvFrame::new(bytes);
         let mut reassembler = Reassembler::new(limits);
         let header = read_fragment_header(&mut frame).await.unwrap();
@@ -2285,8 +2385,8 @@ mod tests {
 
     #[tokio::test]
     async fn abort_during_trailer_phase_discards_both_buffers() {
-        let mut bytes = fragment_bytes(Flags::FIRST, 1, Kind::Request, b"ab");
-        bytes.extend(fragment_bytes(Flags::TRAILER, 1, Kind::Request, b"cd"));
+        let mut bytes = fragment_bytes(Flags::FIRST | Flags::TRAILER, 1, Kind::Request, b"ab");
+        bytes.extend(fragment_bytes(Flags::NONE, 1, Kind::Request, b"cd"));
         bytes.extend(fragment_bytes(Flags::ABORT, 1, Kind::Request, b""));
         let mut frame = FakeRecvFrame::new(bytes);
         let mut reassembler = Reassembler::new(Limits::default());
@@ -2297,7 +2397,7 @@ mod tests {
         let header = read_fragment_header(&mut frame).await.unwrap();
         let Event::Trailer { len, .. } = reassembler.accept(header, &mut frame).await.unwrap()
         else {
-            panic!("expected a TRAILER data event");
+            panic!("expected a trailer-data fragment");
         };
         drain_trailer_bytes(&mut frame, len).await;
         assert_eq!(reassembler.incomplete_trailers, 1);
@@ -2387,6 +2487,7 @@ mod tests {
             Bytes::from_static(b"AAAAAAAA"),
             Default::default(),
             Trailer::None,
+            Default::default(),
         );
         scheduler.admit_message(
             Kind::Request,
@@ -2394,6 +2495,7 @@ mod tests {
             Bytes::from_static(b"BBBBBBBB"),
             Default::default(),
             Trailer::None,
+            Default::default(),
         );
         let (mut sender, mut reader) = sender_pair();
 
@@ -2418,6 +2520,7 @@ mod tests {
             Bytes::from_static(b"request"),
             Default::default(),
             Trailer::None,
+            Default::default(),
         );
         scheduler.admit_empty(Kind::Ack, 2);
         let (mut sender, mut reader) = sender_pair();
@@ -2445,6 +2548,7 @@ mod tests {
             Bytes::from_static(b"AAAAAAAA"),
             Default::default(),
             Trailer::None,
+            Default::default(),
         );
         // Fits in one fragment; must not be blocked by the slot above.
         scheduler.admit_message(
@@ -2453,6 +2557,7 @@ mod tests {
             Bytes::from_static(b"hi"),
             Default::default(),
             Trailer::None,
+            Default::default(),
         );
         let (mut sender, mut reader) = sender_pair();
 
@@ -2481,6 +2586,7 @@ mod tests {
             Bytes::from_static(b"AAAAAAAA"),
             Default::default(),
             Trailer::None,
+            Default::default(),
         );
         scheduler.admit_message(
             Kind::Request,
@@ -2488,6 +2594,7 @@ mod tests {
             Bytes::from_static(b"BBBBBBBB"),
             Default::default(),
             Trailer::None,
+            Default::default(),
         );
         assert_eq!(scheduler.active.len(), 1);
         assert_eq!(scheduler.waiting.len(), 1);
@@ -2507,6 +2614,7 @@ mod tests {
             Bytes::from_static(b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
             Default::default(),
             Trailer::None,
+            Default::default(),
         );
         let (mut sender, mut reader) = sender_pair();
         loop {
@@ -2533,6 +2641,7 @@ mod tests {
             Bytes::from_static(b"AAAAAAAA"),
             Default::default(),
             Trailer::None,
+            Default::default(),
         );
         scheduler.admit_message(
             Kind::Request,
@@ -2540,6 +2649,7 @@ mod tests {
             Bytes::from_static(b"BBBBBBBB"),
             Default::default(),
             Trailer::None,
+            Default::default(),
         );
         assert_eq!(scheduler.waiting.len(), 1);
         let (mut sender, mut reader) = sender_pair();
@@ -2567,6 +2677,7 @@ mod tests {
             Bytes::from_static(b"hi"),
             Default::default(),
             Trailer::None,
+            Default::default(),
         );
         scheduler.active.pop_front();
         assert!(matches!(
@@ -2584,6 +2695,7 @@ mod tests {
             Bytes::from_static(b"AAAAAAAA"),
             Default::default(),
             Trailer::None,
+            Default::default(),
         );
         match scheduler.try_cancel_active(1) {
             AbortOutcome::Discarded { started } => assert!(!started),
@@ -2604,6 +2716,7 @@ mod tests {
             Bytes::from_static(b"AAAAAAAA"),
             Default::default(),
             Trailer::None,
+            Default::default(),
         );
         if let Some(send) = scheduler.active.front_mut() {
             send.offset = 4;
@@ -2629,6 +2742,7 @@ mod tests {
             Bytes::from_static(b"AAAAAAAA"),
             Default::default(),
             Trailer::None,
+            Default::default(),
         );
         scheduler.admit_message(
             Kind::Request,
@@ -2636,6 +2750,7 @@ mod tests {
             Bytes::from_static(b"BBBBBBBB"),
             Default::default(),
             Trailer::None,
+            Default::default(),
         );
         assert_eq!(scheduler.waiting.len(), 1);
         match scheduler.try_cancel_active(2) {
@@ -2671,6 +2786,7 @@ mod tests {
                     ..limits
                 },
             )),
+            Default::default(),
         );
         assert_eq!(scheduler.active.len(), 1);
         assert_eq!(scheduler.active_fragmented, 1);
@@ -2682,69 +2798,54 @@ mod tests {
             Bytes::from_static(b"hi"),
             Default::default(),
             Trailer::None,
+            Default::default(),
         );
         assert_eq!(scheduler.active.len(), 2);
         assert_eq!(scheduler.waiting.len(), 0);
     }
 
     #[tokio::test]
-    async fn notify_discard_fires_only_on_a_subsequent_fragment_after_local_discard() {
-        let mut bytes = fragment_bytes(Flags::FIRST, 1, Kind::Request, b"");
-        bytes.extend(fragment_bytes(Flags::TRAILER, 1, Kind::Request, b"a"));
-        bytes.extend(fragment_bytes(Flags::TRAILER, 1, Kind::Request, b"b"));
-        bytes.extend(fragment_bytes(Flags::TRAILER, 1, Kind::Request, b"c"));
+    async fn notify_discard_fires_exactly_once_after_local_discard() {
+        let mut bytes = fragment_bytes(Flags::FIRST | Flags::TRAILER, 1, Kind::Request, b"");
+        bytes.extend(fragment_bytes(Flags::NONE, 1, Kind::Request, b"a"));
+        bytes.extend(fragment_bytes(Flags::NONE, 1, Kind::Request, b"b"));
         let mut frame = FakeRecvFrame::new(bytes);
         let mut reassembler = Reassembler::new(Limits::default());
 
+        // The payload boundary hands over the message and its trailer stream.
         let header = read_fragment_header(&mut frame).await.unwrap();
-        reassembler.accept(header, &mut frame).await.unwrap();
-
-        // First TRAILER fragment dispatches the message. `notify_discard`
-        // must never fire here — the application hasn't had a chance to
-        // discard anything yet.
-        let header = read_fragment_header(&mut frame).await.unwrap();
-        let Event::Trailer {
-            message: Some(_),
-            shared,
-            len,
-            notify_discard,
-            ..
-        } = reassembler.accept(header, &mut frame).await.unwrap()
-        else {
-            panic!("expected the first TRAILER fragment to dispatch the message");
+        let Event::Message(msg) = reassembler.accept(header, &mut frame).await.unwrap() else {
+            panic!("expected the payload boundary to dispatch the message");
         };
-        assert!(!notify_discard);
-        drain_trailer_bytes(&mut frame, len).await;
+        let shared = msg.trailer.expect("trailer stream");
 
-        // The application decides to stop reading.
+        // The application decides to stop reading before any trailer data
+        // has even arrived — which the payload-boundary dispatch now makes
+        // possible, so the very first trailer fragment can be the one that
+        // notifies.
         RecvShared::discard(&shared);
 
-        // Second TRAILER fragment: arrives after the discard, so this is
-        // the point where the peer should be told to stop.
         let header = read_fragment_header(&mut frame).await.unwrap();
         let Event::Trailer {
-            message: None,
             len,
             notify_discard,
             ..
         } = reassembler.accept(header, &mut frame).await.unwrap()
         else {
-            panic!("expected a subsequent TRAILER data event");
+            panic!("expected a trailer-data fragment");
         };
         assert!(notify_discard);
         drain_trailer_bytes(&mut frame, len).await;
 
-        // Third TRAILER fragment: already notified once, must not fire
-        // again for the same message.
+        // Already notified once; must not fire again for the same message.
         let header = read_fragment_header(&mut frame).await.unwrap();
         let Event::Trailer {
-            message: None,
             len,
             notify_discard,
             ..
         } = reassembler.accept(header, &mut frame).await.unwrap()
         else {
-            panic!("expected a subsequent TRAILER data event");
+            panic!("expected a trailer-data fragment");
         };
         assert!(!notify_discard);
         drain_trailer_bytes(&mut frame, len).await;
@@ -2770,14 +2871,17 @@ mod tests {
             Bytes::from_static(b"hi"),
             Default::default(),
             Trailer::Stream(shared.clone()),
+            Default::default(),
         );
         let mut trailer = crate::trailer::TrailerSend::new(shared, ());
         let (mut sender, mut reader) = sender_pair();
 
-        // Postcard phase: FIRST, no LAST (a trailer is pending).
+        // Postcard phase: FIRST plus TRAILER, since this is also the
+        // payload's last fragment and a trailer is pending.
         scheduler.advance(&mut sender).await.unwrap();
         let (flags, _, id, payload) = read_wire_fragment(&mut reader).await;
-        assert!(flags.contains(Flags::FIRST) && !flags.contains(Flags::LAST));
+        assert!(flags.contains(Flags::FIRST) && flags.contains(Flags::TRAILER));
+        assert!(!flags.contains(Flags::LAST));
         assert_eq!(id, 1);
         assert_eq!(payload, b"hi");
 
@@ -2789,7 +2893,11 @@ mod tests {
         });
         scheduler.advance(&mut sender).await.unwrap();
         let (flags, _, id, payload) = read_wire_fragment(&mut reader).await;
-        assert!(flags.contains(Flags::TRAILER) && !flags.contains(Flags::LAST));
+        assert_eq!(
+            flags,
+            Flags::NONE,
+            "trailer data carries no flags of its own"
+        );
         assert_eq!(id, 1);
         assert_eq!(payload, b"data");
         let mut trailer = writer.await.unwrap();
@@ -2802,12 +2910,11 @@ mod tests {
         let error = trailer.write_all(b"more").await.unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
 
-        // The next turn is an ordinary zero-length TRAILER | LAST terminal
-        // commit -- not an ABORT -- exactly as if the trailer had completed
-        // normally.
+        // The next turn is an ordinary zero-length LAST terminal commit --
+        // not an ABORT -- exactly as if the trailer had completed normally.
         scheduler.advance(&mut sender).await.unwrap();
         let (flags, _, id, payload) = read_wire_fragment(&mut reader).await;
-        assert!(flags.contains(Flags::TRAILER) && flags.contains(Flags::LAST));
+        assert!(flags.contains(Flags::LAST));
         assert!(!flags.contains(Flags::ABORT));
         assert_eq!(id, 1);
         assert!(payload.is_empty());

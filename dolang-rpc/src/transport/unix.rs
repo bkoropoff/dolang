@@ -16,15 +16,15 @@ use nix::{
 use tokio::io::unix::AsyncFd;
 
 use super::{AnySender, Receiver, RecvFrame, SendFrame, Sender};
-use crate::handle::{ErasedHandle, PutHandle, TakeHandle};
+use crate::handle::ErasedHandle;
 
-pub(crate) struct EncodeHandles<'handle> {
-    handles: Vec<&'handle dyn ErasedHandle>,
+pub(crate) struct EncodeHandles {
+    handles: Vec<OwnedFd>,
     max_handles: usize,
     supported: bool,
 }
 
-impl<'handle> EncodeHandles<'handle> {
+impl EncodeHandles {
     pub(crate) fn new(sender: &AnySender, max_handles: usize) -> Self {
         Self {
             handles: Vec::new(),
@@ -34,11 +34,7 @@ impl<'handle> EncodeHandles<'handle> {
     }
 
     pub(crate) fn finish(self) -> OutgoingHandles {
-        let fds: Vec<_> = self
-            .handles
-            .into_iter()
-            .map(ErasedHandle::steal_handle)
-            .collect();
+        let fds = self.handles;
         #[cfg(target_os = "macos")]
         let escrow = !fds.is_empty();
         OutgoingHandles {
@@ -58,8 +54,8 @@ impl<'handle> EncodeHandles<'handle> {
     }
 }
 
-impl<'handle> PutHandle<'handle> for EncodeHandles<'handle> {
-    fn put_handle(&mut self, handle: &'handle dyn ErasedHandle) -> io::Result<u32> {
+impl EncodeHandles {
+    pub(crate) fn put_handle(&mut self, handle: &dyn ErasedHandle) -> io::Result<u32> {
         if !self.supported {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -72,17 +68,13 @@ impl<'handle> PutHandle<'handle> for EncodeHandles<'handle> {
                 "message contains too many handle attachments",
             ));
         }
-        if self
-            .handles
-            .iter()
-            .any(|existing| std::ptr::eq(*existing, handle))
-        {
-            return Err(io::Error::new(
+        let index = u32::try_from(self.handles.len()).unwrap();
+        let handle = handle.steal_handle().ok_or_else(|| {
+            io::Error::new(
                 io::ErrorKind::InvalidData,
                 "the same handle was serialized more than once",
-            ));
-        }
-        let index = u32::try_from(self.handles.len()).unwrap();
+            )
+        })?;
         self.handles.push(handle);
         Ok(index)
     }
@@ -125,8 +117,8 @@ impl ReceivedHandles {
     }
 }
 
-impl TakeHandle for ReceivedHandles {
-    fn take_handle(&mut self, index: u32) -> io::Result<OwnedFd> {
+impl ReceivedHandles {
+    pub(crate) fn take_handle(&mut self, index: u32) -> io::Result<OwnedFd> {
         let index = usize::try_from(index).unwrap();
         self.fds
             .get_mut(index)
@@ -145,7 +137,7 @@ impl TakeHandle for ReceivedHandles {
             })
     }
 
-    fn finish(&mut self) -> io::Result<()> {
+    pub(crate) fn finish(&mut self) -> io::Result<()> {
         if self.fds.iter().any(Option::is_some) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,

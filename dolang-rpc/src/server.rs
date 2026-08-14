@@ -1,3 +1,5 @@
+#[cfg(windows)]
+use std::{any::TypeId, io, os::windows::io::OwnedHandle};
 use std::{
     collections::HashMap,
     marker::PhantomData,
@@ -14,28 +16,44 @@ use crate::{
     Error, Limits, Protocol,
     fragment::{self, Kind},
     serde::{decode_payload, encode_payload},
-    session::{self, InvalidOpaque, Opaque, OpaqueGuard, OpaqueResource},
+    session::{self, Cite, Gift, InvalidOpaque, OpaqueGuard, OpaqueResource, Session},
+    trailer::{RecvShared, SendShared, TrailerRecv, TrailerSend},
     transport::{self, EncodeHandles, Receiver, Sender},
 };
+#[cfg(windows)]
+use crate::{handle::TakeHandle, session::Inner as OpaqueInner};
 
 #[cfg(windows)]
 struct DecodeHandles<'a> {
     receiver: &'a transport::AnyReceiver,
+    session: &'a Arc<Session>,
     count: usize,
     max_handles: usize,
 }
 
 #[cfg(windows)]
-impl crate::handle::TakeHandle for DecodeHandles<'_> {
-    fn take_handle(&mut self, value: usize) -> std::io::Result<std::os::windows::io::OwnedHandle> {
+impl TakeHandle for DecodeHandles<'_> {
+    fn take_handle(&mut self, value: usize) -> io::Result<OwnedHandle> {
         if self.count == self.max_handles {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
                 "message contains too many handle attachments",
             ));
         }
         self.count += 1;
         self.receiver.duplicate_peer_handle(value)
+    }
+
+    fn take_gift(&mut self, owner: u8, id: u64) -> io::Result<OpaqueInner> {
+        self.session
+            .take_gift(owner, id)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid opaque reference"))
+    }
+
+    fn take_cite(&mut self, owner: u8, id: u64, marker: TypeId) -> io::Result<OpaqueInner> {
+        self.session
+            .take_cite(owner, id, marker)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid opaque reference"))
     }
 }
 
@@ -54,6 +72,7 @@ pub struct Server<P: Protocol> {
     outgoing: mpsc::UnboundedSender<Message<P::Response>>,
     outgoing_rx: mpsc::UnboundedReceiver<Message<P::Response>>,
     inner: Arc<Mutex<Inner>>,
+    session: Arc<Session>,
     limits: Limits,
     marker: PhantomData<fn() -> P>,
 }
@@ -85,11 +104,28 @@ enum Message<R> {
     Ack {
         id: u64,
     },
+    /// Drops `count` of this endpoint's references to the peer's opaque `id`.
+    Release {
+        id: u64,
+        count: u32,
+    },
+}
+
+/// Emits `Release` frames for opaques whose last local handle dropped. The
+/// strong senders stay exactly what they were: `serve`'s own sender and each
+/// live `CallContext`.
+impl<R: Send + 'static> session::ReleaseSink for mpsc::WeakUnboundedSender<Message<R>> {
+    fn release(&self, id: u64, count: u32) {
+        // Called from `Drop`, so a departed channel is not an error: the
+        // writer is already gone and the peer's table dies with the session.
+        if let Some(outgoing) = self.upgrade() {
+            let _ = outgoing.send(Message::Release { id, count });
+        }
+    }
 }
 
 struct Inner {
     outstanding: HashMap<u64, Cancellation>,
-    objects: session::ObjectTable,
     shutdown: Option<oneshot::Sender<()>>,
     #[cfg(target_os = "macos")]
     fd_escrow: crate::escrow::FdEscrow,
@@ -112,14 +148,15 @@ impl<P: Protocol> Server<P> {
         limits: Limits,
     ) -> Self {
         let (outgoing, outgoing_rx) = mpsc::unbounded_channel();
+        let session = Session::new(Box::new(outgoing.downgrade()));
         Self {
             sender,
             receiver,
             outgoing,
             outgoing_rx,
+            session,
             inner: Arc::new(Mutex::new(Inner {
                 outstanding: HashMap::new(),
-                objects: session::ObjectTable::default(),
                 shutdown: None,
                 #[cfg(target_os = "macos")]
                 fd_escrow: Default::default(),
@@ -146,10 +183,17 @@ impl<P: Protocol> Server<P> {
             outgoing,
             outgoing_rx,
             inner,
+            session,
             limits,
             marker: _,
         } = self;
-        let mut writer = tokio::spawn(writer::<P>(sender, outgoing_rx, inner.clone(), limits));
+        let mut writer = tokio::spawn(writer::<P>(
+            sender,
+            outgoing_rx,
+            inner.clone(),
+            session.clone(),
+            limits,
+        ));
         let (shutdown, mut shutdown_requested) = oneshot::channel();
         inner.lock().unwrap().shutdown = Some(shutdown);
         let handler = Arc::new(handler);
@@ -210,11 +254,14 @@ impl<P: Protocol> Server<P> {
                 }
                 fragment::Event::Trailer {
                     id,
-                    message,
                     shared,
                     len,
                     notify_discard,
-                } => (message, Some((id, shared, len, notify_discard))),
+                } => (None, Some((id, shared, len, notify_discard))),
+                fragment::Event::Release { id, count } => {
+                    session.release(id, count);
+                    (None, None)
+                }
             };
             if let Some(fragment::Message {
                 kind,
@@ -229,12 +276,19 @@ impl<P: Protocol> Server<P> {
                 match kind {
                     Kind::Request => {
                         #[cfg(unix)]
-                        let request = decode_payload(&payload, &mut { handles });
+                        let request = decode_payload(
+                            &payload,
+                            &mut session::SessionHandles {
+                                inner: handles,
+                                session: &session,
+                            },
+                        );
                         #[cfg(windows)]
                         let request = decode_payload(
                             &payload,
                             &mut DecodeHandles {
                                 receiver: &receiver,
+                                session: &session,
                                 count: 0,
                                 max_handles: limits.max_handles_per_message,
                             },
@@ -243,9 +297,10 @@ impl<P: Protocol> Server<P> {
                             Ok(request) => request,
                             Err(error) => break (Err(error), false, false),
                         };
-                        let trailer = trailer.map(crate::trailer::TrailerRecv::new);
+                        let trailer = trailer.map(TrailerRecv::new);
                         let handler = handler.clone();
                         let task_inner = inner.clone();
+                        let task_session = session.clone();
                         let task_outgoing = outgoing.clone();
                         let (abort, registration) = AbortHandle::new_pair();
                         tasks.push(Abortable::new(
@@ -253,6 +308,7 @@ impl<P: Protocol> Server<P> {
                                 let context = CallContext {
                                     id,
                                     inner: task_inner.clone(),
+                                    session: task_session,
                                     request_trailer: trailer,
                                     outgoing: task_outgoing,
                                     responded: false,
@@ -325,10 +381,10 @@ impl<P: Protocol> Server<P> {
                 let frame = receiver.recv();
                 // SAFETY: the lease retains the receiver borrow and clears
                 // the erased token before it ends.
-                let lease = unsafe { crate::trailer::RecvShared::grant(&shared, frame, len) };
+                let lease = unsafe { RecvShared::grant(&shared, frame, len) };
                 let result = loop {
                     tokio::select! {
-                        result = crate::trailer::RecvShared::wait_fragment(&shared) => break result,
+                        result = RecvShared::wait_fragment(&shared) => break result,
                         Some(_) = tasks.next(), if !tasks.is_empty() => continue,
                         _ = &mut shutdown_requested => break 'main (Ok(()), false, true),
                         result = &mut writer => {
@@ -390,6 +446,7 @@ async fn writer<P: Protocol>(
     mut sender: transport::AnySender,
     mut outgoing: mpsc::UnboundedReceiver<Message<P::Response>>,
     inner: Arc<Mutex<Inner>>,
+    session: Arc<Session>,
     limits: Limits,
 ) -> Result<(), Error> {
     let mut scheduler = fragment::Scheduler::new(&limits);
@@ -408,7 +465,7 @@ async fn writer<P: Protocol>(
                     closed = true;
                     continue;
                 };
-                admit::<P>(&mut sender, &mut scheduler, &inner, &limits, message).await?;
+                admit::<P>(&mut sender, &mut scheduler, &inner, &session, &limits, message).await?;
             }
             // Not raced against anything — see the matching comment in
             // client.rs's writer loop. A dropped send future could leave a
@@ -437,6 +494,7 @@ async fn admit<P: Protocol>(
     sender: &mut transport::AnySender,
     scheduler: &mut fragment::Scheduler,
     inner: &Arc<Mutex<Inner>>,
+    session: &Arc<Session>,
     limits: &Limits,
     message: Message<P::Response>,
 ) -> Result<(), Error> {
@@ -452,8 +510,23 @@ async fn admit<P: Protocol>(
             };
             #[cfg(windows)]
             let max_handles = limits.max_handles_per_message;
-            let mut put_handles = EncodeHandles::new(sender, max_handles);
-            let payload = encode_payload(&value, &mut put_handles)?;
+            let mut ledger = session::Ledger::default();
+            let mut put_handles = session::SessionFrame {
+                inner: EncodeHandles::new(sender, max_handles),
+                session,
+                ledger: &mut ledger,
+            };
+            let payload = match encode_payload(&value, &mut put_handles) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    drop(put_handles);
+                    // Nothing reached the wire, so undo the gift increments
+                    // rather than letting the ledger's drop commit them.
+                    ledger.rescind();
+                    return Err(error);
+                }
+            };
+            let put_handles = put_handles.inner;
             #[cfg(unix)]
             let handles = put_handles.finish();
             #[cfg(target_os = "macos")]
@@ -464,7 +537,7 @@ async fn admit<P: Protocol>(
             let (handles, escrow) = put_handles.finish();
             #[cfg(windows)]
             drop(escrow);
-            scheduler.admit_message(Kind::Response, id, payload, handles, trailer);
+            scheduler.admit_message(Kind::Response, id, payload, handles, trailer, ledger);
         }
         Message::Error { id } => scheduler.admit_empty(Kind::Error, id),
         Message::Cancel { id } => match scheduler.try_cancel_active(id) {
@@ -482,6 +555,7 @@ async fn admit<P: Protocol>(
         Message::DiscardTrailer { id } => scheduler.admit_empty(Kind::Discard, id),
         Message::PeerDiscarded { id } => scheduler.discard_active_trailer(id),
         Message::Ack { id } => scheduler.admit_empty(Kind::Ack, id),
+        Message::Release { id, count } => scheduler.admit_release(id, count),
     }
     Ok(())
 }
@@ -492,7 +566,8 @@ async fn admit<P: Protocol>(
 pub struct CallContext<P: Protocol> {
     id: u64,
     inner: Arc<Mutex<Inner>>,
-    request_trailer: Option<crate::trailer::TrailerRecv>,
+    session: Arc<Session>,
+    request_trailer: Option<TrailerRecv>,
     outgoing: mpsc::UnboundedSender<Message<P::Response>>,
     responded: bool,
     shutdown_on_respond: bool,
@@ -507,7 +582,7 @@ impl<P: Protocol> CallContext<P> {
     /// Dropping it or calling [`TrailerRecv::discard`](crate::trailer::TrailerRecv::discard)
     /// stops local consumption; the peer is notified only if it continues to
     /// send trailer fragments.
-    pub fn request_trailer(&mut self) -> Option<&mut crate::trailer::TrailerRecv> {
+    pub fn request_trailer(&mut self) -> Option<&mut TrailerRecv> {
         self.request_trailer.as_mut()
     }
 
@@ -532,12 +607,9 @@ impl<P: Protocol> CallContext<P> {
     /// asynchronously shut down the returned writer, to commit the trailer.
     /// Dropping it without finishing aborts the trailer. Any unread request
     /// trailer is discarded.
-    pub fn respond_with_trailer(
-        mut self,
-        response: P::Response,
-    ) -> crate::trailer::TrailerSend<()> {
+    pub fn respond_with_trailer(mut self, response: P::Response) -> TrailerSend<()> {
         drop(self.request_trailer.take());
-        let shared = crate::trailer::SendShared::new(Kind::Response, self.id, &self.limits);
+        let shared = SendShared::new(Kind::Response, self.id, &self.limits);
         self.responded = true;
         self.inner.lock().unwrap().outstanding.remove(&self.id);
         let _ = self.outgoing.send(Message::Response {
@@ -546,7 +618,7 @@ impl<P: Protocol> CallContext<P> {
             trailer: fragment::Trailer::Stream(shared.clone()),
         });
         self.finish_shutdown();
-        crate::trailer::TrailerSend::new(shared, ())
+        TrailerSend::new(shared, ())
     }
 
     /// Requests graceful shutdown after this handler sends its response.
@@ -613,33 +685,70 @@ impl<P: Protocol> CallContext<P> {
 
     /// Registers a session-scoped resource and returns its serializable handle.
     ///
-    /// The caller owns the resource's lifetime and must eventually unregister
-    /// it. Cloning, sending, or dropping the returned [`Opaque`] does not
-    /// affect the registration.
-    pub fn register<T: OpaqueResource>(&self, value: T) -> Opaque<T::Marker> {
-        self.inner.lock().unwrap().objects.register(value)
+    /// The registration lives as long as some handle naming it does — in this
+    /// process or in the peer's mirror of it. Dropping the last one releases
+    /// the resource, so a handle that is registered and then never sent
+    /// (because the call failed, or was cancelled before responding) cleans
+    /// itself up rather than stranding the entry.
+    ///
+    /// Registering yields a [`Gift`], which is what a wire position that grants
+    /// the peer a reference holds. To name an already-granted resource back to
+    /// the peer without granting another reference, send the same `Gift` again:
+    /// the peer merges the arrival into the handle it holds, and the extra
+    /// references collapse into one counted release.
+    ///
+    /// # Panics
+    ///
+    /// If a different concrete type has already been registered under
+    /// `T::Marker` on this session. A marker is the only type information the
+    /// wire carries, so it must name exactly one resource type.
+    pub fn register<T: OpaqueResource>(&self, value: T) -> Gift<T::Marker> {
+        self.session.register(value)
     }
 
     /// Acquires a typed shared guard for a registered opaque resource.
     ///
-    /// Returns [`InvalidOpaque`] if the handle belongs to another session, was
-    /// unregistered, or does not refer to a resource with concrete type `T`.
+    /// Takes a [`Cite`], because only a citation names a resource this endpoint
+    /// owns; a peer that puts a gift in a citation position is rejected during
+    /// decode instead of arriving here.
+    ///
+    /// Returns [`InvalidOpaque`] if the resource was unregistered while the peer
+    /// still held a reference to it, which an ordinary race with
+    /// [`unregister`](Self::unregister) produces.
+    ///
+    /// # Panics
+    ///
+    /// If the handle was minted by a different session. Opaque ids are
+    /// session-scoped, so redeeming one elsewhere is a local logic error that
+    /// would otherwise resolve against an unrelated resource.
     pub fn acquire<T: OpaqueResource>(
         &self,
-        value: Opaque<T::Marker>,
+        value: Cite<T::Marker>,
     ) -> Result<OpaqueGuard<T>, InvalidOpaque> {
-        self.inner.lock().unwrap().objects.acquire(value)
+        self.session.acquire(value)
     }
 
-    /// Removes a typed opaque resource from this session.
+    /// Empties a typed opaque resource, returning it when no acquired guards
+    /// still share its ownership.
     ///
-    /// Returns the resource when no acquired guards still share its ownership,
-    /// or `None` after removing it when another call retains a guard.
+    /// The registration itself outlives this call until the peer has released
+    /// its references, so a citation still in flight resolves to a revoked
+    /// handle rather than an unknown one.
+    ///
+    /// # Panics
+    ///
+    /// If the handle was minted by a different session, as with
+    /// [`acquire`](Self::acquire).
+    /// Takes a [`Cite`], as [`acquire`](Self::acquire) does: a resource is
+    /// closed because the peer named it and asked, so what arrives here is the
+    /// citation that named it. An owner closing a resource of its own accord
+    /// has no need of this — dropping its last handle retires the registration
+    /// once the peer has released its references.
     pub fn unregister<T: OpaqueResource>(
         &self,
-        value: Opaque<T::Marker>,
+        value: Cite<T::Marker>,
     ) -> Result<Option<T>, InvalidOpaque> {
-        self.inner.lock().unwrap().objects.unregister::<T>(value)
+        self.session.unregister::<T>(value)
     }
 }
 

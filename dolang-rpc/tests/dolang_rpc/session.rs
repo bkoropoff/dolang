@@ -9,7 +9,12 @@ use std::{
     time::Duration,
 };
 
-use dolang_rpc::{Builder, Error, Protocol, client::Client, server::CallContext};
+use dolang_rpc::{
+    Builder, Error, Protocol,
+    client::Client,
+    server::CallContext,
+    session::{Gift, OpaqueResource},
+};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -1063,4 +1068,194 @@ mod windows_handles {
         let mut byte = [0];
         received.read_exact(&mut byte).unwrap();
     }
+}
+
+/// A protocol whose response hands the caller an opaque, used to pin down what
+/// happens to that opaque when nobody is left to receive it.
+struct Gifts;
+impl Protocol for Gifts {
+    type Request = GiftRequest;
+    type Response = GiftResponse;
+}
+
+#[derive(Serialize, Deserialize)]
+struct GiftRequest;
+
+#[derive(Serialize, Deserialize)]
+struct GiftResponse {
+    endpoint: Gift<EndpointMarker>,
+}
+
+struct EndpointMarker;
+
+/// A registered resource that reports its own death.
+struct Endpoint(Arc<AtomicBool>);
+
+impl OpaqueResource for Endpoint {
+    type Marker = EndpointMarker;
+}
+
+impl Drop for Endpoint {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+async fn wait_for(flag: &AtomicBool) -> bool {
+    for _ in 0..200 {
+        if flag.load(Ordering::SeqCst) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    false
+}
+
+/// Serves `Gifts`, registering an [`Endpoint`] per request that flips
+/// `dropped` when it dies.
+///
+/// The handler waits to be released by `respond_now` from inside a cancel
+/// guard, so a caller can abandon the call and still be sure the response gets
+/// built and sent: an unguarded cancel would simply abort the handler, and
+/// there would be no gift to lose track of in the first place.
+fn serve_gifts<T>(
+    server_io: T,
+    dropped: Arc<AtomicBool>,
+    guarded: Arc<tokio::sync::Notify>,
+    respond_now: Arc<tokio::sync::Notify>,
+) -> tokio::task::JoinHandle<()>
+where
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let _ = builder()
+            .server(server_io)
+            .await
+            .unwrap()
+            .bind::<Gifts>()
+            .serve(async move |mut context, _request: GiftRequest| {
+                let _ = context
+                    .cancel_guard(async |_| {
+                        guarded.notify_one();
+                        respond_now.notified().await;
+                    })
+                    .await;
+                let endpoint = context.register(Endpoint(dropped.clone()));
+                context.respond(GiftResponse { endpoint });
+            })
+            .await;
+    })
+}
+
+/// The bug this whole branch exists for: a caller that walks away from a call
+/// whose response carries a gift used to strand the resource for the life of
+/// the connection.
+///
+/// Nothing in the application ever sees the response — the reader task decodes
+/// it and drops it — so releasing it is entirely the session's job. Note what
+/// this implies about the decode: skipping it for a response nobody is waiting
+/// on would look like an optimization and would silently reintroduce the leak.
+#[tokio::test]
+async fn a_cancelled_call_releases_the_gift_in_its_response() {
+    let (client_io, server_io) = tokio::io::duplex(4096);
+    let dropped = Arc::new(AtomicBool::new(false));
+    let guarded = Arc::new(tokio::sync::Notify::new());
+    let respond_now = Arc::new(tokio::sync::Notify::new());
+    let _server = serve_gifts(
+        server_io,
+        dropped.clone(),
+        guarded.clone(),
+        respond_now.clone(),
+    );
+    // Kept alive for the whole test: the release travels over this connection,
+    // so closing it early would prove nothing.
+    let client = unbound_client::<_, Gifts>(client_io).await;
+
+    let call = client.call(GiftRequest);
+    guarded.notified().await;
+    drop(call);
+    respond_now.notify_one();
+
+    assert!(
+        wait_for(&dropped).await,
+        "the endpoint in an abandoned response was never released"
+    );
+}
+
+/// The same resource, claimed normally: it must survive until the caller is
+/// actually done with it, and die once the caller drops it.
+#[tokio::test]
+async fn a_claimed_gift_lives_exactly_as_long_as_the_caller_holds_it() {
+    let (client_io, server_io) = tokio::io::duplex(4096);
+    let dropped = Arc::new(AtomicBool::new(false));
+    let guarded = Arc::new(tokio::sync::Notify::new());
+    let respond_now = Arc::new(tokio::sync::Notify::new());
+    let _server = serve_gifts(
+        server_io,
+        dropped.clone(),
+        guarded.clone(),
+        respond_now.clone(),
+    );
+    let client = unbound_client::<_, Gifts>(client_io).await;
+
+    let call = client.call(GiftRequest);
+    guarded.notified().await;
+    respond_now.notify_one();
+    let response = call.await.unwrap().into_response();
+
+    // A clone is a local handle, not a second protocol reference; the resource
+    // must outlive it and every other copy the caller makes.
+    let clone = response.endpoint.clone();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !dropped.load(Ordering::SeqCst),
+        "the endpoint died while the caller still held it"
+    );
+
+    drop(response);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !dropped.load(Ordering::SeqCst),
+        "the endpoint died while a clone of the caller's handle was still live"
+    );
+
+    drop(clone);
+    assert!(
+        wait_for(&dropped).await,
+        "the endpoint outlived the caller's last handle on it"
+    );
+}
+
+/// Releasing an opaque must not need an ambient runtime. The caller's last
+/// handle on a gift routinely falls out of scope during teardown, after the
+/// runtime that carried the session is already gone, and a release that
+/// reached for `Handle::current` there would panic in a destructor.
+#[test]
+fn dropping_a_claimed_gift_outside_a_runtime_does_not_panic() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (endpoint, client, server) = runtime.block_on(async {
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let guarded = Arc::new(tokio::sync::Notify::new());
+        let respond_now = Arc::new(tokio::sync::Notify::new());
+        let server = serve_gifts(
+            server_io,
+            Arc::new(AtomicBool::new(false)),
+            guarded.clone(),
+            respond_now.clone(),
+        );
+        let client = unbound_client::<_, Gifts>(client_io).await;
+        let call = client.call(GiftRequest);
+        guarded.notified().await;
+        respond_now.notify_one();
+        let response = call.await.unwrap().into_response();
+        (response.endpoint, client, server)
+    });
+
+    drop(runtime);
+    drop(endpoint);
+    drop(client);
+    drop(server);
 }

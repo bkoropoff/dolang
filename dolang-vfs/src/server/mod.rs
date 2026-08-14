@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use dolang_rpc::{
     handle::{DefaultHandle, OsHandle},
     server::CallContext,
-    session::{Opaque, OpaqueGuard, OpaqueResource},
+    session::{Cite, OpaqueGuard, OpaqueResource},
 };
 use dolang_winterop::security::SecDesc;
 #[cfg(unix)]
@@ -119,6 +119,20 @@ impl Drain {
     }
 }
 
+/// A reserved drain slot, returned when the endpoint holding it dies.
+///
+/// Accounting rides the endpoint's own lifetime rather than any particular
+/// message, so an endpoint reaches the drain exactly once however it ends:
+/// explicitly closed, consumed by a spawn, or released because the peer
+/// dropped the last opaque naming it.
+struct DrainSlot(Arc<Drain>);
+
+impl Drop for DrainSlot {
+    fn drop(&mut self) {
+        self.0.release(1);
+    }
+}
+
 struct RetainedVfs {
     vfs: AnyVfs,
     session: Option<crate::session::VfsSession>,
@@ -157,13 +171,21 @@ impl OpaqueResource for RetainedFile {
     type Marker = FileMarker;
 }
 
-struct RetainedStdioSend(Mutex<StdioSend>);
+struct RetainedStdioSend {
+    stdio: Mutex<StdioSend>,
+    /// Returned to the drain when the endpoint dies, however it ends.
+    _slot: DrainSlot,
+}
 
 impl OpaqueResource for RetainedStdioSend {
     type Marker = StdioSendMarker;
 }
 
-struct RetainedStdioRecv(Mutex<StdioRecv>);
+struct RetainedStdioRecv {
+    stdio: Mutex<StdioRecv>,
+    /// Returned to the drain when the endpoint dies, however it ends.
+    _slot: DrainSlot,
+}
 
 impl OpaqueResource for RetainedStdioRecv {
     type Marker = StdioRecvMarker;
@@ -429,7 +451,7 @@ impl Connection {
     fn select(
         &self,
         context: &CallContext<VfsProtocol>,
-        vfs: Option<Opaque<crate::session::VfsMarker>>,
+        vfs: Option<Cite<crate::session::VfsMarker>>,
     ) -> Result<Self, WireError> {
         let Some(vfs) = vfs else {
             return Ok(self.clone());
@@ -451,7 +473,7 @@ impl Connection {
     async fn handle_stop(
         &self,
         context: &mut CallContext<VfsProtocol>,
-        vfs: Option<Opaque<crate::session::VfsMarker>>,
+        vfs: Option<Cite<crate::session::VfsMarker>>,
         stop: &AtomicBool,
     ) -> ResponseKind {
         let Some(vfs) = vfs else {
@@ -782,17 +804,20 @@ impl Connection {
                 ))))
             }
             StdioRecvTarget::Opaque(stdio) => {
+                // Consuming the endpoint hands it to the child, which takes
+                // its drain slot along with it: once a child owns an endpoint
+                // the peer is no longer relaying through it, which is the only
+                // thing the drain protects.
                 let stdio = context
                     .unregister::<RetainedStdioRecv>(stdio)
                     .map_err(|_| Self::invalid_opaque("stdio receive"))?;
-                self.drain.release(1);
                 let Some(stdio) = stdio else {
                     return Err(wire_error(io::Error::new(
                         io::ErrorKind::ResourceBusy,
                         "opaque stdio receive is in use",
                     )));
                 };
-                Ok(Some(stdio.0.into_inner()))
+                Ok(Some(stdio.stdio.into_inner()))
             }
         }
     }
@@ -813,17 +838,20 @@ impl Connection {
                 ))))
             }
             StdioSendTarget::Opaque(stdio) => {
+                // Consuming the endpoint hands it to the child, which takes
+                // its drain slot along with it: once a child owns an endpoint
+                // the peer is no longer relaying through it, which is the only
+                // thing the drain protects.
                 let stdio = context
                     .unregister::<RetainedStdioSend>(stdio)
                     .map_err(|_| Self::invalid_opaque("stdio send"))?;
-                self.drain.release(1);
                 let Some(stdio) = stdio else {
                     return Err(wire_error(io::Error::new(
                         io::ErrorKind::ResourceBusy,
                         "opaque stdio send is in use",
                     )));
                 };
-                Ok(Some(stdio.0.into_inner()))
+                Ok(Some(stdio.stdio.into_inner()))
             }
         }
     }
@@ -862,7 +890,7 @@ impl Connection {
     fn take_child(
         &self,
         context: &CallContext<VfsProtocol>,
-        child: Opaque<crate::session::ChildMarker>,
+        child: Cite<crate::session::ChildMarker>,
     ) -> Result<RetainedChild, WireError> {
         context
             .unregister::<RetainedChild>(child)
@@ -883,7 +911,7 @@ impl Connection {
     async fn handle_child_wait(
         &self,
         context: &mut CallContext<VfsProtocol>,
-        child: Opaque<crate::session::ChildMarker>,
+        child: Cite<crate::session::ChildMarker>,
     ) -> ResponseKind {
         let result = match self.take_child(context, child) {
             Ok(child) => {
@@ -906,7 +934,7 @@ impl Connection {
     async fn handle_child_terminate(
         &self,
         context: &CallContext<VfsProtocol>,
-        child: Opaque<crate::session::ChildMarker>,
+        child: Cite<crate::session::ChildMarker>,
     ) -> ResponseKind {
         let result = match self.take_child(context, child) {
             Ok(child) => child.0.into_inner().terminate().await.map_err(wire_error),
@@ -918,7 +946,7 @@ impl Connection {
     fn handle_child_close(
         &self,
         context: &CallContext<VfsProtocol>,
-        child: Opaque<crate::session::ChildMarker>,
+        child: Cite<crate::session::ChildMarker>,
     ) -> ResponseKind {
         let result = context
             .unregister::<RetainedChild>(child)
@@ -950,9 +978,9 @@ impl Connection {
     /// available while stopping: they create no stdio endpoint of their own,
     /// and refusing a spawn could break the very in-flight pipeline stage the
     /// drain exists to protect.
-    fn reserve_stdio(&self, count: usize) -> Result<(), WireError> {
-        if self.drain.try_acquire(count) {
-            Ok(())
+    fn reserve_stdio(&self) -> Result<DrainSlot, WireError> {
+        if self.drain.try_acquire(1) {
+            Ok(DrainSlot(self.drain.clone()))
         } else {
             Err(wire_error(io::Error::new(
                 io::ErrorKind::NotConnected,
@@ -964,10 +992,17 @@ impl Connection {
     async fn handle_pipe(&self, context: &CallContext<VfsProtocol>) -> ResponseKind {
         let result = async {
             let (send, recv) = self.server.vfs.pipe().await.map_err(wire_error)?;
-            self.reserve_stdio(2)?;
+            let send_slot = self.reserve_stdio()?;
+            let recv_slot = self.reserve_stdio()?;
             Ok(PipeResponse {
-                send: context.register(RetainedStdioSend(Mutex::new(send))),
-                recv: context.register(RetainedStdioRecv(Mutex::new(recv))),
+                send: context.register(RetainedStdioSend {
+                    stdio: Mutex::new(send),
+                    _slot: send_slot,
+                }),
+                recv: context.register(RetainedStdioRecv {
+                    stdio: Mutex::new(recv),
+                    _slot: recv_slot,
+                }),
             })
         }
         .await;
@@ -977,7 +1012,7 @@ impl Connection {
     fn retained_stdio_send(
         &self,
         context: &CallContext<VfsProtocol>,
-        stdio: Opaque<StdioSendMarker>,
+        stdio: Cite<StdioSendMarker>,
     ) -> Result<OpaqueGuard<RetainedStdioSend>, WireError> {
         context
             .acquire::<RetainedStdioSend>(stdio)
@@ -987,65 +1022,48 @@ impl Connection {
     fn retained_stdio_recv(
         &self,
         context: &CallContext<VfsProtocol>,
-        stdio: Opaque<StdioRecvMarker>,
+        stdio: Cite<StdioRecvMarker>,
     ) -> Result<OpaqueGuard<RetainedStdioRecv>, WireError> {
         context
             .acquire::<RetainedStdioRecv>(stdio)
             .map_err(|_| Self::invalid_opaque("stdio receive"))
     }
 
+    /// Empties an endpoint's contents, without waiting for the peer to stop
+    /// naming it.
+    ///
+    /// A close that races the endpoint's own read or write leaves the contents
+    /// alive until that operation finishes, and the registration alive until
+    /// the peer drops its last reference. Neither is worth reporting: a peer
+    /// closing while its own I/O is in flight has no flush guarantee to lose,
+    /// and the drain slot is returned when the endpoint actually dies rather
+    /// than when this request happens to be served.
     fn close_stdio_send(
         &self,
         context: &CallContext<VfsProtocol>,
-        stdio: Opaque<StdioSendMarker>,
+        stdio: Cite<StdioSendMarker>,
     ) -> Result<(), WireError> {
-        let retained = self.retained_stdio_send(context, stdio.clone())?;
-        drop(retained);
-        let retained = context
+        context
             .unregister::<RetainedStdioSend>(stdio)
             .map_err(|_| Self::invalid_opaque("stdio send"))?;
-        // The endpoint is out of the object table either way, so it no longer
-        // holds up a drain. A racing read or write can still be holding the
-        // last reference, but a peer doing that while closing has no flush
-        // guarantee to lose.
-        self.drain.release(1);
-        match retained {
-            Some(_) => Ok(()),
-            None => Err(wire_error(io::Error::new(
-                io::ErrorKind::ResourceBusy,
-                "opaque stdio send is in use",
-            ))),
-        }
+        Ok(())
     }
 
     fn close_stdio_recv(
         &self,
         context: &CallContext<VfsProtocol>,
-        stdio: Opaque<StdioRecvMarker>,
+        stdio: Cite<StdioRecvMarker>,
     ) -> Result<(), WireError> {
-        let retained = self.retained_stdio_recv(context, stdio.clone())?;
-        drop(retained);
-        let retained = context
+        context
             .unregister::<RetainedStdioRecv>(stdio)
             .map_err(|_| Self::invalid_opaque("stdio receive"))?;
-        // The endpoint is out of the object table either way, so it no longer
-        // holds up a drain. A racing read or write can still be holding the
-        // last reference, but a peer doing that while closing has no flush
-        // guarantee to lose.
-        self.drain.release(1);
-        match retained {
-            Some(_) => Ok(()),
-            None => Err(wire_error(io::Error::new(
-                io::ErrorKind::ResourceBusy,
-                "opaque stdio receive is in use",
-            ))),
-        }
+        Ok(())
     }
 
     async fn handle_stdio_send_write(
         &self,
         context: &mut CallContext<VfsProtocol>,
-        stdio: Opaque<StdioSendMarker>,
+        stdio: Cite<StdioSendMarker>,
     ) -> ResponseKind {
         let result = async {
             let stdio = self.retained_stdio_send(context, stdio)?;
@@ -1055,7 +1073,7 @@ impl Connection {
                     "stdio write request is missing its data trailer",
                 ))
             })?;
-            let len = io::copy(trailer, &mut *stdio.0.lock().await)
+            let len = io::copy(trailer, &mut *stdio.stdio.lock().await)
                 .await
                 .map_err(wire_error)?;
             usize::try_from(len).map_err(|_| {
@@ -1072,13 +1090,22 @@ impl Connection {
     async fn handle_stdio_send_clone(
         &self,
         context: &CallContext<VfsProtocol>,
-        stdio: Opaque<StdioSendMarker>,
+        stdio: Cite<StdioSendMarker>,
     ) -> ResponseKind {
         let result = async {
             let stdio = self.retained_stdio_send(context, stdio)?;
-            let clone = stdio.0.lock().await.try_clone().await.map_err(wire_error)?;
-            self.reserve_stdio(1)?;
-            Ok(context.register(RetainedStdioSend(Mutex::new(clone))))
+            let clone = stdio
+                .stdio
+                .lock()
+                .await
+                .try_clone()
+                .await
+                .map_err(wire_error)?;
+            let slot = self.reserve_stdio()?;
+            Ok(context.register(RetainedStdioSend {
+                stdio: Mutex::new(clone),
+                _slot: slot,
+            }))
         }
         .await;
         ResponseKind::StdioSendClone(result)
@@ -1087,7 +1114,7 @@ impl Connection {
     async fn handle_stdio_recv_read(
         &self,
         context: CallContext<VfsProtocol>,
-        stdio: Opaque<StdioRecvMarker>,
+        stdio: Cite<StdioRecvMarker>,
         len: usize,
     ) {
         let stdio = match self.retained_stdio_recv(&context, stdio) {
@@ -1098,7 +1125,7 @@ impl Connection {
             }
         };
         let mut send = context.respond_with_trailer(ResponseKind::StdioRecvRead(Ok(())));
-        let mut stdio = stdio.0.lock().await;
+        let mut stdio = stdio.stdio.lock().await;
         let mut source = (&mut *stdio).take(len as u64);
         if io::copy(&mut source, &mut send).await.is_ok() {
             send.finish();
@@ -1108,13 +1135,22 @@ impl Connection {
     async fn handle_stdio_recv_clone(
         &self,
         context: &CallContext<VfsProtocol>,
-        stdio: Opaque<StdioRecvMarker>,
+        stdio: Cite<StdioRecvMarker>,
     ) -> ResponseKind {
         let result = async {
             let stdio = self.retained_stdio_recv(context, stdio)?;
-            let clone = stdio.0.lock().await.try_clone().await.map_err(wire_error)?;
-            self.reserve_stdio(1)?;
-            Ok(context.register(RetainedStdioRecv(Mutex::new(clone))))
+            let clone = stdio
+                .stdio
+                .lock()
+                .await
+                .try_clone()
+                .await
+                .map_err(wire_error)?;
+            let slot = self.reserve_stdio()?;
+            Ok(context.register(RetainedStdioRecv {
+                stdio: Mutex::new(clone),
+                _slot: slot,
+            }))
         }
         .await;
         ResponseKind::StdioRecvClone(result)
@@ -1157,7 +1193,7 @@ impl Connection {
     fn retained_file(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: Opaque<FileMarker>,
+        file: Cite<FileMarker>,
     ) -> Result<OpaqueGuard<RetainedFile>, WireError> {
         context.acquire::<RetainedFile>(file).map_err(|_| {
             wire_error(io::Error::new(
@@ -1170,7 +1206,7 @@ impl Connection {
     async fn handle_file_read(
         &self,
         context: CallContext<VfsProtocol>,
-        file: Opaque<FileMarker>,
+        file: Cite<FileMarker>,
         len: usize,
     ) {
         let file = match self.retained_file(&context, file) {
@@ -1191,7 +1227,7 @@ impl Connection {
     async fn handle_file_write(
         &self,
         context: &mut CallContext<VfsProtocol>,
-        file: Opaque<FileMarker>,
+        file: Cite<FileMarker>,
     ) -> ResponseKind {
         let result = async {
             let file = self.retained_file(context, file)?;
@@ -1218,7 +1254,7 @@ impl Connection {
     async fn handle_file_seek(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: Opaque<FileMarker>,
+        file: Cite<FileMarker>,
         position: io::SeekFrom,
     ) -> ResponseKind {
         let result = async {
@@ -1232,7 +1268,7 @@ impl Connection {
     async fn handle_file_flush(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: Opaque<FileMarker>,
+        file: Cite<FileMarker>,
     ) -> ResponseKind {
         let result = async {
             let file = self.retained_file(context, file)?;
@@ -1245,7 +1281,7 @@ impl Connection {
     async fn handle_file_set_size(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: Opaque<FileMarker>,
+        file: Cite<FileMarker>,
         size: u64,
     ) -> ResponseKind {
         let result = async {
@@ -1259,7 +1295,7 @@ impl Connection {
     async fn handle_file_to_stdio_send(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: Opaque<FileMarker>,
+        file: Cite<FileMarker>,
     ) -> ResponseKind {
         let result = async {
             let file = self.retained_file(context, file)?;
@@ -1270,8 +1306,11 @@ impl Connection {
                 .to_stdio_send()
                 .await
                 .map_err(wire_error)?;
-            self.reserve_stdio(1)?;
-            Ok(context.register(RetainedStdioSend(Mutex::new(stdio))))
+            let slot = self.reserve_stdio()?;
+            Ok(context.register(RetainedStdioSend {
+                stdio: Mutex::new(stdio),
+                _slot: slot,
+            }))
         }
         .await;
         ResponseKind::FileToStdioSend(result)
@@ -1280,7 +1319,7 @@ impl Connection {
     async fn handle_file_to_stdio_recv(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: Opaque<FileMarker>,
+        file: Cite<FileMarker>,
     ) -> ResponseKind {
         let result = async {
             let file = self.retained_file(context, file)?;
@@ -1291,8 +1330,11 @@ impl Connection {
                 .to_stdio_recv()
                 .await
                 .map_err(wire_error)?;
-            self.reserve_stdio(1)?;
-            Ok(context.register(RetainedStdioRecv(Mutex::new(stdio))))
+            let slot = self.reserve_stdio()?;
+            Ok(context.register(RetainedStdioRecv {
+                stdio: Mutex::new(stdio),
+                _slot: slot,
+            }))
         }
         .await;
         ResponseKind::FileToStdioRecv(result)
@@ -1301,7 +1343,7 @@ impl Connection {
     async fn handle_file_metadata(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: Opaque<FileMarker>,
+        file: Cite<FileMarker>,
     ) -> ResponseKind {
         let result = async {
             let file = self.retained_file(context, file)?;
@@ -1314,7 +1356,7 @@ impl Connection {
     async fn handle_file_fs_metadata(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: Opaque<FileMarker>,
+        file: Cite<FileMarker>,
     ) -> ResponseKind {
         let result = async {
             let file = self.retained_file(context, file)?;
@@ -1327,7 +1369,7 @@ impl Connection {
     async fn handle_file_sec_desc(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: Opaque<FileMarker>,
+        file: Cite<FileMarker>,
         mask: u32,
     ) -> ResponseKind {
         let result = async {
@@ -1341,7 +1383,7 @@ impl Connection {
     async fn handle_file_acl(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: Opaque<FileMarker>,
+        file: Cite<FileMarker>,
         default: bool,
     ) -> ResponseKind {
         let result = async {
@@ -1355,7 +1397,7 @@ impl Connection {
     async fn handle_file_set_acl(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: Opaque<FileMarker>,
+        file: Cite<FileMarker>,
         acl: Option<PosixAcl>,
         default: bool,
     ) -> ResponseKind {
@@ -1375,7 +1417,7 @@ impl Connection {
     async fn handle_file_set_sec_desc(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: Opaque<FileMarker>,
+        file: Cite<FileMarker>,
         sec_desc: SecDesc,
     ) -> ResponseKind {
         let result = async {
@@ -1394,7 +1436,7 @@ impl Connection {
     async fn handle_file_xattrs(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: Opaque<FileMarker>,
+        file: Cite<FileMarker>,
         namespace: XattrNamespaceRequest,
     ) -> ResponseKind {
         let result = async {
@@ -1413,7 +1455,7 @@ impl Connection {
     async fn handle_file_xattr(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: Opaque<FileMarker>,
+        file: Cite<FileMarker>,
         name: String,
         namespace: Option<String>,
     ) -> ResponseKind {
@@ -1433,7 +1475,7 @@ impl Connection {
     async fn handle_file_streams(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: Opaque<FileMarker>,
+        file: Cite<FileMarker>,
     ) -> ResponseKind {
         let result = async {
             let file = self.retained_file(context, file)?;
@@ -1446,7 +1488,7 @@ impl Connection {
     async fn handle_file_set_xattr(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: Opaque<FileMarker>,
+        file: Cite<FileMarker>,
         name: String,
         namespace: Option<String>,
         value: Vec<u8>,
@@ -1467,7 +1509,7 @@ impl Connection {
     async fn handle_file_remove_xattr(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: Opaque<FileMarker>,
+        file: Cite<FileMarker>,
         name: String,
         namespace: Option<String>,
     ) -> ResponseKind {
@@ -1487,7 +1529,7 @@ impl Connection {
     async fn handle_file_lock(
         &self,
         context: &mut CallContext<VfsProtocol>,
-        file: Opaque<FileMarker>,
+        file: Cite<FileMarker>,
         request: FileLockRequest,
     ) -> ResponseKind {
         let retained = match self.retained_file(context, file) {
@@ -1524,7 +1566,7 @@ impl Connection {
     async fn handle_file_unlock(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: Opaque<FileMarker>,
+        file: Cite<FileMarker>,
         lock: u64,
     ) -> ResponseKind {
         let retained = match self.retained_file(context, file) {
@@ -1550,7 +1592,7 @@ impl Connection {
     async fn handle_file_close(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: Opaque<FileMarker>,
+        file: Cite<FileMarker>,
     ) -> ResponseKind {
         let retained = match self.retained_file(context, file.clone()) {
             Ok(retained) => retained,
@@ -1602,7 +1644,7 @@ impl Connection {
     async fn handle_read_dir_next(
         &self,
         context: &CallContext<VfsProtocol>,
-        read_dir: Opaque<crate::session::ReadDirMarker>,
+        read_dir: Cite<crate::session::ReadDirMarker>,
     ) -> ResponseKind {
         let result: crate::Result<ReadDirPage> = async {
             let retained = context
@@ -1636,7 +1678,7 @@ impl Connection {
     fn handle_read_dir_close(
         &self,
         context: &CallContext<VfsProtocol>,
-        read_dir: Opaque<crate::session::ReadDirMarker>,
+        read_dir: Cite<crate::session::ReadDirMarker>,
     ) -> ResponseKind {
         let result = context
             .unregister::<RetainedReadDir>(read_dir)
@@ -2069,7 +2111,7 @@ mod tests {
             panic!("remote open did not return an opaque file");
         };
         let ResponseKind::FileClose(result) = client
-            .call(request(RequestKind::FileClose { file: file.clone() }))
+            .call(request(RequestKind::FileClose { file: file.cite() }))
             .await
             .unwrap()
             .into_response()
@@ -2078,7 +2120,7 @@ mod tests {
         };
         result.unwrap();
         let ResponseKind::FileClose(result) = client
-            .call(request(RequestKind::FileClose { file }))
+            .call(request(RequestKind::FileClose { file: file.cite() }))
             .await
             .unwrap()
             .into_response()
