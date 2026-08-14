@@ -1,4 +1,4 @@
-import _vfs fs
+import _vfs
   shell:
     - Vfs
   _container.common:
@@ -28,16 +28,20 @@ do
   let socket = "$(runtime_dir())/toolbox-vfs-$name"
   let agent = _vfs.bin()
   let input = strand.input()
+  # The socket sits at a predictable path in the runtime directory and its mode
+  # cannot identify the client, so the session is keyed instead: `--accept`
+  # serves one peer that proves the key, and unlinks the socket once it has.
+  let key = _vfs.key()
   pipeline
-    do run_command :cd :env $agent --listen $socket
+    do run_command :cd :env $agent --key-stdin --accept $socket
+      stdin: (_vfs.key_input key)
     do
       strand.next()
-      let agent = Vfs.unix_socket $socket
+      let agent = Vfs.unix_socket $socket :key
       try
         return strand.redirect input: $input do agent.with $thunk
       finally
         agent.stop()
-        fs.remove $socket
 
 pub def run
   cmd

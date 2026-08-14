@@ -120,14 +120,19 @@ performs Windows UAC elevation.
 
 A socket connection can be authenticated with a pre-shared key, which both
 ends prove knowledge of during the handshake. This is worth doing when the
-socket must be world-connectable because the uid that will connect is not
-knowable in advance — a container runtime may map ids however it likes, and a
-colliding uid would otherwise be enough to reach the agent, or to replace its
-socket. Start the agent with `dolang-vfs --key-stdin --accept <socket_path>`,
+socket's permissions cannot identify the peer, because the uid that will
+connect is not knowable in advance — a container runtime may map ids however it
+likes, so the socket is bound `0666` and anything able to traverse the
+containing directory can reach the agent, or replace its socket. Start the
+agent with `dolang-vfs --key-stdin --accept <socket_path>`,
 write the key to its standard input as a single length byte followed by that
 many bytes, and pass the same key to `Vfs.unix_socket`. `--accept` serves one
 authenticated client and unlinks the socket as soon as that session is
 established.
+
+The helpers that start an agent for you — `docker.with`, `podman.with`, their
+`build` counterparts, `toolbx.with`, and `sudo.with` — do this themselves,
+generating a fresh key per session.
 
 Unix-socket and Windows administrator connections are resolved through the
 active context. This makes it possible to enter an SSH host and then connect to

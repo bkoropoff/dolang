@@ -134,9 +134,19 @@ finally
 
 Be careful to suitably restrict access to the shared directory. `dolang-vfs`
 will refuse to create a socket in a directory that is not exclusively
-accessible by its owner (mode `0700`). When connecting, the socket path is
-resolved through the current VFS context, so a container can be reached via an
-[SSH context](./ssh.md).
+accessible by its owner (mode `0700`). That directory is what keeps other users
+out; the socket inside it is bound `0666`, since the uid the container maps the
+client to is not knowable in advance, so its own mode cannot tell the intended
+client from anything else that can traverse the directory — every process in
+the container included. The module helpers therefore key the session rather
+than relying on permissions: they start the agent as
+`dolang-vfs --key-stdin --accept <socket_path>`, write the key to its standard
+input, and pass the same key to `Vfs.unix_socket`. A manual setup is weaker
+than the helpers unless it does the same; see
+[Connections](./vfs.md#connections).
+
+When connecting, the socket path is resolved through the current VFS context,
+so a container can be reached via an [SSH context](./ssh.md).
 
 This gives the following common lifetimes:
 

@@ -387,6 +387,12 @@ pub class Runtime
       subdir.set_metadata mode: 0o700
       let socket = (subdir / "socket")
       let input = strand.input()
+      # The socket's mode cannot identify the client: the container maps uids
+      # however it likes, so it is bound 0666 and anything that can traverse the
+      # directory -- every process in the container, and root -- can connect.
+      # The key is what distinguishes the real client: `--accept` serves one
+      # peer that proves it, and unlinks the socket once it has.
+      let key = _vfs.key()
       # The pipeline's first stage is only the agent bootstrap process, not
       # user command output, so capturing its stderr for classification
       # (rather than the pull chatter leaking to the real terminal) is safe.
@@ -397,11 +403,12 @@ pub class Runtime
             --entrypoint $ctr_agent
             -v $subdir:$ctr_subdir:rw,z$uopt
             -v $agent_bin:$ctr_agent:ro,z$uopt
-            $ctr ...(_vfs.vfs_args cd env) --listen $ctr_socket
+            $ctr ...(_vfs.vfs_args cd env) --key-stdin --accept $ctr_socket
+            stdin: (_vfs.key_input key)
             stderr: $lines
           do
             strand.next()
-            let agent = Vfs.unix_socket $socket
+            let agent = Vfs.unix_socket $socket :key
             try
               return strand.redirect input: $input do agent.with $thunk
             finally
@@ -696,24 +703,32 @@ pub class Builder
       self.#socket.remove()
     ensure_image $self.#runtime $img (str(pull).lower())
     let name = "dolang-vfs-$(rand.string 16)"
+    # The socket's mode cannot identify the client: the container maps uids
+    # however it likes, so it is bound 0666 and anything that can traverse the
+    # directory -- every process in the container, and root -- can connect. The
+    # key is what distinguishes the real client: `--accept` serves one peer that
+    # proves it, and unlinks the socket once it has. A fresh key per container
+    # falls out of `step_commit` reconnecting through here.
+    let key = _vfs.key()
     let lines = []
-    let handle = stream do self.#runtime.cli run --rm --name $name --pull=never
+    let handle = stream do self.#runtime.cli run -i --rm --name $name --pull=never
       ...mount_args(self.#mounts)
       --entrypoint env
       -v $self.#subdir:$self.#ctr_subdir:rw,z$(self.#runtime.mount_uopt())
       -v $self.#bin:$self.#ctr_agent:ro,z$(self.#runtime.mount_uopt())
       $img
-      $self.#ctr_agent ...(_vfs.vfs_args self.#cd self.#env) --listen $self.#ctr_socket
+      $self.#ctr_agent ...(_vfs.vfs_args self.#cd self.#env) --key-stdin --accept $self.#ctr_socket
+      stdin: (_vfs.key_input key)
       stderr: $lines
     # Recorded before the wait so a launch that never reports in still leaves
     # `cleanup` a container to remove.
     self.#ctr_name = name
     self.#handle = handle
     try
-      # The agent prints READY once the socket is bound, listening, and renamed
-      # into place, which beats polling for the path's existence. A failed `run`
-      # surfaces here: the output channel re-raises the strand's error once it
-      # is exhausted, so `default:` only covers a clean exit that said nothing.
+      # The agent prints READY once the socket is bound and connectable, which
+      # beats polling for the path's existence. A failed `run` surfaces here:
+      # the output channel re-raises the strand's error once it is exhausted,
+      # so `default:` only covers a clean exit that said nothing.
       let line = handle.iter().next default: nil
       if (line == nil)
         handle.join()
@@ -724,7 +739,7 @@ pub class Builder
       classify_image_error $img $lines
       report_unknown $lines
       throw e
-    self.#agent = Vfs.unix_socket $self.#socket
+    self.#agent = Vfs.unix_socket $self.#socket :key
 
   def cleanup self
     # Ending the session makes the agent exit, which exits the container, which

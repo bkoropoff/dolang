@@ -19,14 +19,21 @@ do
     subdir.set_metadata mode: 0o700
     let socket = (subdir / "socket")
     let input = strand.input()
+    # The agent runs as another user and binds its socket 0666, since it cannot
+    # know which uid will connect. The directory keeps other users out, but not
+    # this one: any process sharing our uid could otherwise take a session that
+    # is typically root. `--accept` serves one peer that proves the key, then
+    # unlinks the socket.
+    let key = _vfs.key()
     pipeline
       do sudo -E
         if (user != nil)
           -u $user
-        $agent ...(_vfs.vfs_args cd env) --listen $socket
+        $agent ...(_vfs.vfs_args cd env) --key-stdin --accept $socket
+        stdin: (_vfs.key_input key)
       do
         strand.next()
-        let a = shell.Vfs.unix_socket $socket
+        let a = shell.Vfs.unix_socket $socket :key
         try
           return strand.redirect :input do a.with $thunk
         finally

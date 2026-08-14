@@ -43,8 +43,9 @@ the context's initial working directory.
 
 `key` is a pre-shared key that both ends prove knowledge of during the
 handshake. Supply it when the socket's permissions cannot identify the peer —
-an agent inside a container binds its socket world-connectable because the
-uid that will connect is not knowable in advance. The agent must have been
+an agent inside a container binds its socket `0666` because the uid that will
+connect is not knowable in advance, leaving it reachable by anything that can
+traverse the containing directory. The agent must have been
 started with `--key-stdin` and given the same key, and the requirement is
 mutual: a key here fails against an agent without one, and an agent expecting
 one refuses a connection without it. Keys must be at least 16 bytes, and must
