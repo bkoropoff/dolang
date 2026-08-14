@@ -11,7 +11,7 @@ def search name
         $n["name"]
 
 progress.with do docker.build
-  from: opensuse/leap:15.6
+  from: opensuse/leap:16.0
   mounts:
     - type: cache
       target: /var/cache/zypp
