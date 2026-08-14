@@ -12,3 +12,8 @@ assert_eq $foo:bar:baz "jam:bar:baz"
 assert_eq $(id foo)bar "jambar"
 assert_eq $id(foo)bar "jambar"
 assert_eq $id(foo)(bar) "jam(bar)"
+
+let address = $
+  host_ip: 127.0.0.1
+
+assert_eq $address {host_ip: "127.0.0.1"}
