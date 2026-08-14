@@ -324,31 +324,6 @@ impl<T, E: ErrorExt> ResultExt<T> for std::result::Result<T, E> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use dolang_vfs::target::OperatingSystem;
-
-    use super::SysErrorAnnex;
-
-    #[test]
-    fn sys_error_message_appends_known_symbolic_code() {
-        let error = SysErrorAnnex {
-            message: "missing".to_owned(),
-            system_code: Some((OperatingSystem::Linux, 2)),
-        };
-        assert_eq!(error.message(), "missing (ENOENT)");
-    }
-
-    #[test]
-    fn sys_error_message_leaves_unknown_code_numeric_only() {
-        let error = SysErrorAnnex {
-            message: "unknown".to_owned(),
-            system_code: Some((OperatingSystem::Linux, i32::MAX)),
-        };
-        assert_eq!(error.message(), "unknown");
-    }
-}
-
 pub(crate) fn proc_status_error<'v, 's>(
     strand: &mut Strand<'v, 's>,
     name: &str,

@@ -146,6 +146,9 @@ mod tests {
             highlight_range(source, &tokens, 0..source.len(), false),
             source
         );
-        assert!(highlight_range(source, &tokens, 0..source.len(), true).contains("\u{1b}["));
+        assert_eq!(
+            highlight_range(source, &tokens, 0..source.len(), true),
+            "\u{1b}[31mlet\u{1b}[0m answer \u{1b}[33m=\u{1b}[0m \u{1b}[35m42\u{1b}[0m"
+        );
     }
 }

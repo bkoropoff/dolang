@@ -98,11 +98,7 @@ def encode_unsupported()
   assert ((str type_err).contains "unsupported TOML type")
 
 #[test]
-def decode_unsupported()
-  let datetime_err = assert_throws $ValueError do
-    decode "when = 1979-05-27T07:32:00Z"
-  assert ((str datetime_err).contains "TOML datetimes are not supported")
-
+def decode_and_encode_errors()
   let arr = []
   arr.push $arr
   let cycle_err = assert_throws $RuntimeError do

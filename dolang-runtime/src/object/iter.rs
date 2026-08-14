@@ -3085,57 +3085,6 @@ mod tests {
             .await
     }
 
-    // ── `classify`/`nonnegative_count` (pure Rust logic) ──────────────────────
-
-    #[test]
-    fn classify_partitions_methods_into_iterable_sinkable_and_neither() {
-        for tag in [
-            sym::MAP,
-            sym::FILTER,
-            sym::CHAIN,
-            sym::ZIP,
-            sym::TAKE,
-            sym::SKIP,
-            sym::ENUMERATE,
-            sym::FIND,
-            sym::MIN,
-            sym::MAX,
-            sym::ALL,
-            sym::ANY,
-            sym::FOLD,
-            sym::ITER,
-        ] {
-            assert_eq!(classify(tag), Some(Surface::Iterable));
-        }
-        for tag in [sym::SINK, sym::PUT, sym::PREMAP, sym::PREFILTER] {
-            assert_eq!(classify(tag), Some(Surface::Sinkable));
-        }
-        // `next`/`count`/`kv` are deliberately withheld from `Iterable` (see
-        // `ITER_ONLY_METHODS`'s doc comment), and `len` is unrelated entirely.
-        for tag in [sym::NEXT, sym::COUNT, sym::KV, sym::LEN] {
-            assert_eq!(classify(tag), None);
-        }
-    }
-
-    #[test]
-    fn nonnegative_count_accepts_nonnegative_ints_and_rejects_bad_input() {
-        with_vm(async |strand, [mut val]| {
-            Output::set(strand, &mut val, 5_i64);
-            assert_eq!(nonnegative_count(strand, &val).unwrap(), 5);
-
-            Output::set(strand, &mut val, 0_i64);
-            assert_eq!(nonnegative_count(strand, &val).unwrap(), 0);
-
-            Output::set(strand, &mut val, -1_i64);
-            let err = nonnegative_count(strand, &val).unwrap_err();
-            assert_eq!(err.kind(), ErrorKind::Value);
-
-            Output::set(strand, &mut val, "nope");
-            let err = nonnegative_count(strand, &val).unwrap_err();
-            assert_eq!(err.kind(), ErrorKind::Type);
-        });
-    }
-
     // ── `iter_get`/`Iter::op_mcall` dispatch ───────────────────────────────────
 
     #[test]

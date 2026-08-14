@@ -18,7 +18,7 @@ def synthetic_module()
   import synthetic_basic: synthetic
 
   assert_eq $synthetic.answer 42
-  assert_eq (type handle) (type handle)
+  handle.unregister()
 
 #[test]
 def fallback_after_import_error()

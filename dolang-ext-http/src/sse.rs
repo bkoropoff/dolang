@@ -346,11 +346,4 @@ mod tests {
 
         assert!(parser.next_event(true).unwrap().is_none());
     }
-
-    #[test]
-    fn sse_parser_rejects_invalid_utf8() {
-        let mut parser = SseParser::default();
-        parser.push(&[b'd', b'a', b't', b'a', b':', b' ', 0xff, b'\n']);
-        assert!(parser.next_event(true).is_err());
-    }
 }

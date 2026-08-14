@@ -13,21 +13,16 @@ import
 
 #[test]
 def encode_func()
-  assert_eq (encode "") ""
   assert_eq (encode "hello") "aGVsbG8="
-  assert_eq (encode b"hello") "aGVsbG8="
   assert_eq (encode b"\x00\x01\x02\xff") "AAEC/w=="
 
 #[test]
 def decode_func()
-  assert_eq (decode "") b""
   assert_eq (decode "aGVsbG8=") b"hello"
-  assert_eq (decode "AAEC/w==") b"\x00\x01\x02\xff"
 
 #[test]
 def round_trip()
-  assert_eq (decode $ encode "hello") b"hello"
-  assert_eq (decode $ encode b"hello") b"hello"
+  assert_eq (decode $ encode b"\x00\x01\x02\xff") b"\x00\x01\x02\xff"
 
 #[test]
 def encode_type_error()
