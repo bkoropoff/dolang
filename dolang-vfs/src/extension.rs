@@ -16,7 +16,7 @@
 //! or remote requests (or both).
 //!
 //! This module is deliberately self-contained: nothing in the public API
-//! (`ExtOpaque`, `ExtGuard`, `ExtResource`, `InvalidHandle`, `ExtOsHandle`,
+//! (`ExtGift`, `ExtCite`, `ExtGuard`, `ExtResource`, `InvalidHandle`, `ExtOsHandle`,
 //! `ExtContext`) names a `dolang_rpc` type. Extension crates should never
 //! need to depend on `dolang-rpc` directly.
 
@@ -31,7 +31,7 @@ use std::{
 use dolang_rpc::{
     handle::DefaultHandle,
     server::CallContext,
-    session::{InvalidOpaque, Opaque, OpaqueGuard, OpaqueResource},
+    session::{Cite, Gift, InvalidOpaque, OpaqueGuard, OpaqueResource},
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -356,22 +356,34 @@ impl<'a> ExtContext<'a> {
     /// Registers a value in the session's opaque-object table, returning a
     /// handle that can cross the wire (when remote) and be redeemed with
     /// [`acquire`](Self::acquire)/[`unregister`](Self::unregister).
-    pub fn register<T: ExtResource>(&self, value: T) -> ExtOpaque<T::Marker> {
+    ///
+    /// The result is an [`ExtGift`], which belongs in a wire position that
+    /// hands the peer a reference. The peer names it back with
+    /// [`ExtGift::cite`], and only the resulting [`ExtCite`] can be acquired.
+    ///
+    /// # Panics
+    ///
+    /// In remote mode, if a different concrete type has already been
+    /// registered under `T::Marker` on this session: a marker must name
+    /// exactly one resource type, since it is the only type information that
+    /// crosses the wire.
+    pub fn register<T: ExtResource>(&self, value: T) -> ExtGift<T::Marker> {
         match &self.inner {
-            Inner::Direct(_) => ExtOpaque(OpaqueRepr::Direct(Arc::new(value))),
+            Inner::Direct(_) => ExtGift(GiftRepr::Direct(Arc::new(value))),
             Inner::Remote { context, .. } => {
-                ExtOpaque(OpaqueRepr::Remote(context.register(Wrap(value))))
+                ExtGift(GiftRepr::Remote(context.register(Wrap(value))))
             }
         }
     }
 
-    /// Resolves a handle previously returned by [`register`](Self::register).
+    /// Resolves a citation of a handle previously returned by
+    /// [`register`](Self::register).
     pub fn acquire<T: ExtResource>(
         &self,
-        handle: ExtOpaque<T::Marker>,
+        handle: ExtCite<T::Marker>,
     ) -> Result<ExtGuard<T>, InvalidHandle> {
         match (&self.inner, handle.0) {
-            (Inner::Direct(_), OpaqueRepr::Direct(value)) => {
+            (Inner::Direct(_), CiteRepr::Direct(value)) => {
                 if (*value).type_id() != TypeId::of::<T>() {
                     return Err(InvalidHandle);
                 }
@@ -379,8 +391,8 @@ impl<'a> ExtContext<'a> {
                     value.downcast::<T>().map_err(|_| InvalidHandle)?,
                 )))
             }
-            (Inner::Remote { context, .. }, OpaqueRepr::Remote(opaque)) => Ok(ExtGuard(
-                GuardRepr::Remote(context.acquire::<Wrap<T>>(opaque)?),
+            (Inner::Remote { context, .. }, CiteRepr::Remote(cite)) => Ok(ExtGuard(
+                GuardRepr::Remote(context.acquire::<Wrap<T>>(cite)?),
             )),
             _ => Err(InvalidHandle),
         }
@@ -390,18 +402,18 @@ impl<'a> ExtContext<'a> {
     /// returning the stored value if this was the last reference to it.
     pub fn unregister<T: ExtResource>(
         &self,
-        handle: ExtOpaque<T::Marker>,
+        handle: ExtCite<T::Marker>,
     ) -> Result<Option<T>, InvalidHandle> {
         match (&self.inner, handle.0) {
-            (Inner::Direct(_), OpaqueRepr::Direct(value)) => {
+            (Inner::Direct(_), CiteRepr::Direct(value)) => {
                 if (*value).type_id() != TypeId::of::<T>() {
                     return Err(InvalidHandle);
                 }
                 let value = value.downcast::<T>().map_err(|_| InvalidHandle)?;
                 Ok(Arc::try_unwrap(value).ok())
             }
-            (Inner::Remote { context, .. }, OpaqueRepr::Remote(opaque)) => {
-                Ok(context.unregister::<Wrap<T>>(opaque)?.map(|w| w.0))
+            (Inner::Remote { context, .. }, CiteRepr::Remote(cite)) => {
+                Ok(context.unregister::<Wrap<T>>(cite)?.map(|w| w.0))
             }
             _ => Err(InvalidHandle),
         }
@@ -416,7 +428,9 @@ impl<'a> ExtContext<'a> {
 /// would leak its `Marker`-keyed object-table design into every extension
 /// crate's own trait-impl list.
 pub trait ExtResource: Send + Sync + 'static {
-    type Marker: ?Sized + 'static;
+    /// A trivial type naming this resource on the wire. It must name only
+    /// this one — see [`ExtContext::register`].
+    type Marker: 'static;
 }
 
 /// Private adapter bridging [`ExtResource`] to `dolang_rpc::session::OpaqueResource`
@@ -427,51 +441,98 @@ impl<T: ExtResource> OpaqueResource for Wrap<T> {
     type Marker = T::Marker;
 }
 
-/// A handle to a value registered via [`ExtContext::register`].
+/// A handle to a value registered via [`ExtContext::register`], in a wire
+/// position that grants the peer a reference to it.
 ///
 /// Uses a distinct `Marker` type parameter rather than the concrete stored
 /// type so the handle a caller holds does not need to name (or even know)
 /// the private type actually retained behind it — the same design
-/// `dolang_rpc::session::Opaque` uses for its own object table.
+/// `dolang_rpc::session::Gift` uses for its own object table.
 ///
 /// Opaque by design: the direct/remote split is an implementation detail,
 /// not something extension authors match on.
-pub struct ExtOpaque<M: ?Sized + 'static>(OpaqueRepr<M>);
+pub struct ExtGift<M: 'static>(GiftRepr<M>);
 
-enum OpaqueRepr<M: ?Sized + 'static> {
+/// The same handle in a wire position that names a reference the receiver has
+/// already granted, produced by [`ExtGift::cite`].
+///
+/// Which of the two a protocol field holds is fixed by the protocol, so it is
+/// spelled in the field's type and checked when the field is decoded. See
+/// `dolang_rpc::session` for what the distinction buys.
+pub struct ExtCite<M: 'static>(CiteRepr<M>);
+
+enum GiftRepr<M: 'static> {
     Direct(Arc<dyn Any + Send + Sync>),
-    Remote(Opaque<M>),
+    Remote(Gift<M>),
 }
 
-impl<M: ?Sized> Clone for ExtOpaque<M> {
-    fn clone(&self) -> Self {
+enum CiteRepr<M: 'static> {
+    Direct(Arc<dyn Any + Send + Sync>),
+    Remote(Cite<M>),
+}
+
+impl<M> ExtGift<M> {
+    /// Names this resource back to the endpoint that owns it, for a wire
+    /// position that must not transfer a reference.
+    ///
+    /// # Panics
+    ///
+    /// In remote mode, if this endpoint is itself the owner — see
+    /// `dolang_rpc::session::Gift::cite`. Direct mode has no wire and no
+    /// owner, so it cannot fail this way; extensions should still route
+    /// through here so that the two modes agree.
+    pub fn cite(&self) -> ExtCite<M> {
         match &self.0 {
-            OpaqueRepr::Direct(value) => Self(OpaqueRepr::Direct(value.clone())),
-            OpaqueRepr::Remote(opaque) => Self(OpaqueRepr::Remote(opaque.clone())),
+            GiftRepr::Direct(value) => ExtCite(CiteRepr::Direct(value.clone())),
+            GiftRepr::Remote(gift) => ExtCite(CiteRepr::Remote(gift.cite())),
         }
     }
 }
 
-impl<M: ?Sized + 'static> Serialize for ExtOpaque<M> {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match &self.0 {
-            OpaqueRepr::Remote(opaque) => opaque.serialize(serializer),
-            OpaqueRepr::Direct(_) => Err(serde::ser::Error::custom(
-                "cannot serialize a direct-mode extension handle",
-            )),
+/// Both handles are the same value in different wire positions, so everything
+/// that does not touch the wire is identical between them.
+macro_rules! ext_handle {
+    ($name:ident, $repr:ident) => {
+        impl<M> Clone for $name<M> {
+            fn clone(&self) -> Self {
+                match &self.0 {
+                    $repr::Direct(value) => Self($repr::Direct(value.clone())),
+                    $repr::Remote(handle) => Self($repr::Remote(handle.clone())),
+                }
+            }
         }
-    }
+
+        impl<M: 'static> Serialize for $name<M> {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                match &self.0 {
+                    $repr::Remote(handle) => handle.serialize(serializer),
+                    $repr::Direct(_) => Err(serde::ser::Error::custom(
+                        "cannot serialize a direct-mode extension handle",
+                    )),
+                }
+            }
+        }
+    };
 }
 
-impl<'de, M: ?Sized + 'static> Deserialize<'de> for ExtOpaque<M> {
+ext_handle!(ExtGift, GiftRepr);
+ext_handle!(ExtCite, CiteRepr);
+
+impl<'de, M: 'static> Deserialize<'de> for ExtGift<M> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Opaque::<M>::deserialize(deserializer).map(|opaque| Self(OpaqueRepr::Remote(opaque)))
+        Gift::<M>::deserialize(deserializer).map(|gift| Self(GiftRepr::Remote(gift)))
+    }
+}
+
+impl<'de, M: 'static> Deserialize<'de> for ExtCite<M> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Cite::<M>::deserialize(deserializer).map(|cite| Self(CiteRepr::Remote(cite)))
     }
 }
 
 /// A retained, typed handle acquired via [`ExtContext::acquire`].
 ///
-/// Opaque by design, for the same reason as [`ExtOpaque`].
+/// Opaque by design, for the same reason as [`ExtGift`].
 pub struct ExtGuard<T>(GuardRepr<T>);
 
 enum GuardRepr<T> {
@@ -489,7 +550,7 @@ impl<T> std::ops::Deref for ExtGuard<T> {
     }
 }
 
-/// Error returned when an [`ExtOpaque`]/handle does not refer to a live,
+/// Error returned when an [`ExtGift`]/[`ExtCite`] does not refer to a live,
 /// correctly-typed value.
 #[derive(Clone, Copy, Debug, thiserror::Error)]
 #[error("invalid extension handle")]

@@ -8,7 +8,7 @@ use std::{
 };
 
 #[cfg(windows)]
-use std::io;
+use std::{any::TypeId, io};
 
 use tokio::sync::{mpsc, oneshot};
 
@@ -32,10 +32,7 @@ use crate::{
     transport::{self, EncodeHandles, Receiver, Sender},
 };
 #[cfg(windows)]
-use crate::{
-    handle::TakeHandle,
-    session::{Ref, Session},
-};
+use crate::{handle::TakeHandle, session::Inner as OpaqueInner};
 
 /// A negotiated client endpoint that has not yet been bound to a [`Protocol`].
 ///
@@ -90,9 +87,15 @@ impl TakeHandle for DecodeHandles<'_> {
         Ok(())
     }
 
-    fn take_opaque(&mut self, owner: u8, id: u64) -> io::Result<Ref> {
+    fn take_gift(&mut self, owner: u8, id: u64) -> io::Result<OpaqueInner> {
         self.session
-            .take(owner, id)
+            .take_gift(owner, id)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid opaque reference"))
+    }
+
+    fn take_cite(&mut self, owner: u8, id: u64, marker: TypeId) -> io::Result<OpaqueInner> {
+        self.session
+            .take_cite(owner, id, marker)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid opaque reference"))
     }
 }

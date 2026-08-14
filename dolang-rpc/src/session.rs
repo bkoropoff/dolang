@@ -1,8 +1,10 @@
 //! Session-scoped opaque resources.
 //!
-//! [`Opaque`] is a reference to a resource retained by one endpoint of a
-//! session. It can be redeemed only through that endpoint, and only while the
-//! resource remains registered.
+//! [`Gift`] and [`Cite`] are references to a resource retained by one endpoint
+//! of a session. Either can be redeemed only through that endpoint, and only
+//! while the resource remains registered. They are the same handle in different
+//! wire positions — see "Direction is load-bearing" below, which is the
+//! distinction the two types exist to make static.
 //!
 //! # Reference counting
 //!
@@ -13,8 +15,8 @@
 //!   the owner has handed the peer. The owner increments it when it serializes
 //!   a gift; the peer mirrors it when it deserializes one. Only a
 //!   [`Kind::Release`](crate::fragment::Kind::Release) moves it down.
-//! * The **local handle count** is the `Arc` inside [`Opaque`] itself: how
-//!   many live values in this process name the resource. Cloning an `Opaque`
+//! * The **local handle count** is the `Arc` inside the handle itself: how
+//!   many live values in this process name the resource. Cloning a handle
 //!   grants the peer nothing, so it must not touch the protocol count — a
 //!   shared counter would inflate the eventual release by every local clone
 //!   and make the owner decrement more than it ever granted.
@@ -35,16 +37,25 @@
 //!   is the hot path. It must have no protocol effect whatsoever. Citations
 //!   are safe unconditionally: the caller necessarily holds a reference for
 //!   the duration of the call it is citing the opaque in.
+//!
+//! Which of the two a wire position means is fixed by the protocol, never by
+//! the value that lands in it, so it is spelled in the field's type: [`Gift`]
+//! or [`Cite`]. The receiver then rejects the wrong one during decode, where
+//! the expectation is still statically known, rather than discovering at
+//! redemption that the peer sent the other kind.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 #[cfg(unix)]
 use std::os::fd::OwnedFd;
 use std::{
     any::{Any, TypeId},
-    collections::HashMap,
+    collections::{HashMap, hash_map::Entry},
     fmt, io,
     marker::PhantomData,
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 #[cfg(unix)]
@@ -71,11 +82,15 @@ const WIRE_CITATION: u8 = 1;
 
 /// A value that can be registered in a session's opaque-object table.
 ///
-/// `Marker` is the public protocol-level type carried by [`Opaque`]. The
-/// concrete resource type may remain private. A marker does not by itself
-/// authorize a downcast: [`Session::acquire`] also verifies the concrete type.
+/// `Marker` is the public protocol-level type carried by [`Gift`] and [`Cite`];
+/// it is nothing but a name, so that the concrete resource type may remain
+/// private.
+/// The mapping from marker to resource must be injective, and
+/// `Session::register` panics if an application ever registers two concrete
+/// types under one marker — otherwise a marker would not identify a type and
+/// the wire could not be typechecked at all.
 pub trait OpaqueResource: Send + Sync + 'static {
-    type Marker: ?Sized + 'static;
+    type Marker: 'static;
 }
 
 /// Emits release frames for opaques whose last local handle has dropped.
@@ -94,11 +109,14 @@ pub(crate) trait ReleaseSink: Send + Sync + 'static {
 ///
 /// The `Arc` around it is the local handle count. The resource itself lives in
 /// the session table, never in here, so that [`Session::unregister`] can empty
-/// the slot and have every outstanding `Opaque` observe the revocation. That
-/// is the whole reason [`Session::acquire`] is fallible: resolving an opaque is
+/// the slot and have every outstanding handle observe the revocation. That
+/// is the whole reason `Session::acquire` is fallible: resolving an opaque is
 /// `open()` on a descriptor number, not a pointer dereference.
 pub(crate) struct LocalRef {
     id: u64,
+    /// Which session minted this handle. An id means nothing outside the
+    /// session that issued it, so every redemption checks it.
+    serial: u64,
     session: Weak<Session>,
 }
 
@@ -110,15 +128,19 @@ pub(crate) struct LocalRef {
 /// it rather than splitting it.
 pub(crate) struct RemoteRef {
     id: u64,
+    /// See [`LocalRef::serial`].
+    serial: u64,
     session: Weak<Session>,
 }
 
-pub(crate) enum Ref {
+/// The handle behind a [`Gift`] or a [`Cite`], which differ only in the wire
+/// position they are legal in — this carries everything either of them does.
+pub(crate) enum Inner {
     Local(Arc<LocalRef>),
     Remote(Arc<RemoteRef>),
 }
 
-impl Clone for Ref {
+impl Clone for Inner {
     fn clone(&self) -> Self {
         // Purely a local handle count bump; the protocol count is untouched.
         match self {
@@ -128,7 +150,7 @@ impl Clone for Ref {
     }
 }
 
-impl Ref {
+impl Inner {
     fn id(&self) -> u64 {
         match self {
             Self::Local(local) => local.id,
@@ -200,56 +222,149 @@ impl Drop for RemoteRef {
     }
 }
 
-/// A session-scoped reference to a registered resource.
+/// Panic message shared by the two places that catch the same mistake.
+const CITE_OWNED: &str = "cannot cite a resource this endpoint owns; \
+                          gift it again to name it to the peer";
+
+/// An opaque handle in a wire position that *grants* a reference: the sender
+/// owns the resource, and the receiver comes away holding one reference more
+/// than it did.
+///
+/// This is both what `Session::register` produces and what the receiving
+/// endpoint decodes a gift into, and those are not the same thing: the owner's
+/// `Gift` names a resource it owns, while the peer's names a mirror of one it
+/// does not. The type marks the wire position, not the holder's relationship
+/// to the resource — which is why naming one back to its owner has to go
+/// through [`Gift::cite`].
 ///
 /// This is a reference, not the resource itself. It becomes invalid when its
 /// owner unregisters the resource or the session ends. Dropping the last
-/// `Opaque` naming a resource the peer owns releases the endpoint's references
+/// `Gift` naming a resource the peer owns releases the endpoint's references
 /// to it automatically — no explicit protocol close is required to avoid
 /// leaking it.
-pub struct Opaque<M: ?Sized> {
-    pub(crate) inner: Ref,
+///
+/// Gifting one resource repeatedly is well-defined and is how an owner names
+/// an already-granted resource back to the peer — for a completion report, say.
+/// The peer's `receive` merges the arrival into the handle
+/// it already holds, so the reference it gets back compares equal to the one it
+/// has, and the accumulated total collapses into a single counted release.
+pub struct Gift<M> {
+    pub(crate) inner: Inner,
     marker: PhantomData<fn() -> M>,
 }
 
-impl<M: ?Sized> Clone for Opaque<M> {
-    fn clone(&self) -> Self {
+/// An opaque handle in a wire position that *names* a reference the receiver
+/// has already granted: the receiver owns the resource and no reference
+/// changes hands.
+///
+/// Produced only by [`Gift::cite`], and redeemed with `Session::acquire` by
+/// the endpoint that owns the resource. A citation cannot legitimately race the
+/// release of the reference it names — see `Session::cite` — so one the table
+/// cannot account for fails the decode rather than failing the call.
+pub struct Cite<M> {
+    pub(crate) inner: Inner,
+    marker: PhantomData<fn() -> M>,
+}
+
+impl<M> Cite<M> {
+    pub(crate) fn new(inner: Inner) -> Self {
         Self {
+            inner,
+            marker: PhantomData,
+        }
+    }
+}
+
+impl<M> Gift<M> {
+    pub(crate) fn new(inner: Inner) -> Self {
+        Self {
+            inner,
+            marker: PhantomData,
+        }
+    }
+
+    /// Names this resource back to the endpoint that owns it.
+    ///
+    /// # Panics
+    ///
+    /// If this endpoint is itself the owner. A citation says "the reference you
+    /// granted me", which is meaningless pointed at one's own table; gift the
+    /// resource again instead.
+    pub fn cite(&self) -> Cite<M> {
+        assert!(matches!(self.inner, Inner::Remote(_)), "{CITE_OWNED}");
+        Cite {
             inner: self.inner.clone(),
             marker: PhantomData,
         }
     }
 }
 
-impl<M: ?Sized> PartialEq for Opaque<M> {
-    fn eq(&self, other: &Self) -> bool {
-        self.inner.owner() == other.inner.owner() && self.inner.id() == other.inner.id()
-    }
+/// The two handle types differ only in the wire position they are legal in, so
+/// everything that does not touch the wire is identical between them.
+macro_rules! opaque_handle {
+    ($name:ident) => {
+        impl<M> Clone for $name<M> {
+            fn clone(&self) -> Self {
+                Self {
+                    inner: self.inner.clone(),
+                    marker: PhantomData,
+                }
+            }
+        }
+
+        impl<M> PartialEq for $name<M> {
+            fn eq(&self, other: &Self) -> bool {
+                self.inner.owner() == other.inner.owner() && self.inner.id() == other.inner.id()
+            }
+        }
+
+        impl<M> Eq for $name<M> {}
+
+        impl<M> fmt::Debug for $name<M> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_struct(stringify!($name))
+                    .field("owner", &self.inner.owner())
+                    .field("id", &self.inner.id())
+                    .finish_non_exhaustive()
+            }
+        }
+    };
 }
 
-impl<M: ?Sized> Eq for Opaque<M> {}
+opaque_handle!(Gift);
+opaque_handle!(Cite);
 
-impl<M: ?Sized> fmt::Debug for Opaque<M> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Opaque")
-            .field("owner", &self.inner.owner())
-            .field("id", &self.inner.id())
-            .finish_non_exhaustive()
-    }
-}
-
-impl<M: ?Sized> Serialize for Opaque<M> {
+impl<M> Serialize for Gift<M> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        assert!(
+            matches!(self.inner, Inner::Local(_)),
+            "cannot gift a resource this endpoint does not own; \
+             use `Gift::cite` to name it back to its owner"
+        );
         crate::serde::serialize_opaque(&self.inner, serializer)
     }
 }
 
-impl<'de, M: ?Sized> Deserialize<'de> for Opaque<M> {
+impl<'de, M> Deserialize<'de> for Gift<M> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        crate::serde::deserialize_opaque(deserializer).map(|inner| Opaque {
-            inner,
-            marker: PhantomData,
-        })
+        // No marker check: the peer's table is the authority on the type of a
+        // resource the peer owns, and this side has nothing to check it against.
+        crate::serde::deserialize_gift(deserializer).map(Gift::new)
+    }
+}
+
+impl<M> Serialize for Cite<M> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        assert!(matches!(self.inner, Inner::Remote(_)), "{CITE_OWNED}");
+        crate::serde::serialize_opaque(&self.inner, serializer)
+    }
+}
+
+impl<'de, M: 'static> Deserialize<'de> for Cite<M> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // The marker travels with the request so the session can check an
+        // arriving citation against the type it registered the id under.
+        crate::serde::deserialize_cite(deserializer, TypeId::of::<M>()).map(Cite::new)
     }
 }
 
@@ -272,6 +387,9 @@ pub struct InvalidOpaque;
 
 struct LocalEntry {
     ty: TypeId,
+    /// The marker the resource was registered under, checked against the one
+    /// the wire position declares when a citation arrives.
+    marker: TypeId,
     /// `None` once [`Session::unregister`] has emptied the handle. The entry
     /// itself survives so that a citation still in flight from the peer is
     /// distinguishable from an unknown id, and so the id cannot be reused
@@ -316,19 +434,78 @@ struct Tables {
 /// that only ever receives opaques still needs `remote`, because dropping
 /// those references is what frees the peer's resources.
 pub(crate) struct Session {
+    /// Distinguishes this session from every other one in the process, so that
+    /// an [`Opaque`] redeemed against the wrong endpoint is caught rather than
+    /// silently resolving to whatever that endpoint happens to hold under the
+    /// same id.
+    serial: u64,
     tables: Mutex<Tables>,
+    /// Marker type -> the concrete resource type registered under it, with its
+    /// name for diagnostics. Kept out of `tables` so that the conflict panic
+    /// cannot poison the table lock.
+    markers: Mutex<HashMap<TypeId, (TypeId, &'static str)>>,
     sink: Box<dyn ReleaseSink>,
 }
 
 impl Session {
     pub(crate) fn new(sink: Box<dyn ReleaseSink>) -> Arc<Self> {
+        static NEXT_SERIAL: AtomicU64 = AtomicU64::new(0);
         Arc::new(Self {
+            serial: NEXT_SERIAL.fetch_add(1, Ordering::Relaxed),
             tables: Mutex::new(Tables::default()),
+            markers: Mutex::new(HashMap::new()),
             sink,
         })
     }
 
-    pub(crate) fn register<T: OpaqueResource>(self: &Arc<Self>, value: T) -> Opaque<T::Marker> {
+    /// Rejects an [`Opaque`] minted by a different session.
+    ///
+    /// A panic rather than an error: ids are session-scoped, so a foreign one
+    /// is a pure local logic error that no peer and no race can produce, and
+    /// the alternative is resolving it against an unrelated resource that
+    /// happens to share the id.
+    fn check_serial(&self, serial: u64) {
+        assert_eq!(
+            serial, self.serial,
+            "opaque reference redeemed against a different session"
+        );
+    }
+
+    /// Records the marker under which `T` is registered, panicking if the
+    /// application has already used that marker for a different resource type.
+    ///
+    /// The wire carries only `(owner, id)`; a marker is what a protocol
+    /// declares a position to hold. Two resource types behind one marker would
+    /// leave [`take`](Self::take) unable to tell a well-typed citation from a
+    /// peer naming the wrong object, so the ambiguity is refused outright.
+    fn record_marker<T: OpaqueResource>(&self) {
+        let marker = TypeId::of::<T::Marker>();
+        let previous = {
+            let mut markers = self.markers.lock().unwrap();
+            match markers.entry(marker) {
+                Entry::Occupied(entry) if entry.get().0 != TypeId::of::<T>() => Some(entry.get().1),
+                Entry::Occupied(_) => None,
+                Entry::Vacant(entry) => {
+                    entry.insert((TypeId::of::<T>(), std::any::type_name::<T>()));
+                    None
+                }
+            }
+        };
+        // Outside the lock: a panic here must not poison the map for the rest
+        // of the session.
+        if let Some(previous) = previous {
+            panic!(
+                "opaque marker `{}` is already registered for resource type `{}`; \
+                 it cannot also name `{}`",
+                std::any::type_name::<T::Marker>(),
+                previous,
+                std::any::type_name::<T>(),
+            );
+        }
+    }
+
+    pub(crate) fn register<T: OpaqueResource>(self: &Arc<Self>, value: T) -> Gift<T::Marker> {
+        self.record_marker::<T>();
         let mut tables = self.tables.lock().unwrap();
         let id = tables.next;
         tables.next = tables
@@ -337,35 +514,47 @@ impl Session {
             .expect("opaque identifiers exhausted");
         let handle = Arc::new(LocalRef {
             id,
+            serial: self.serial,
             session: Arc::downgrade(self),
         });
         tables.local.insert(
             id,
             LocalEntry {
                 ty: TypeId::of::<T>(),
+                marker: TypeId::of::<T::Marker>(),
                 resource: Some(Arc::new(value)),
                 granted: 0,
                 handle: Arc::downgrade(&handle),
             },
         );
-        Opaque {
-            inner: Ref::Local(handle),
-            marker: PhantomData,
-        }
+        Gift::new(Inner::Local(handle))
     }
 
     pub(crate) fn acquire<T: OpaqueResource>(
         &self,
-        value: Opaque<T::Marker>,
+        value: Cite<T::Marker>,
     ) -> Result<OpaqueGuard<T>, InvalidOpaque> {
-        let Ref::Local(local) = &value.inner else {
+        // Unreachable for a citation that arrived over the wire: a `Cite` is
+        // decoded only from `WIRE_CITATION`, which resolves against this
+        // endpoint's own table and so is always local. Only a locally minted
+        // one can be remote, and `Gift::cite` refuses to mint that.
+        let Inner::Local(local) = &value.inner else {
             return Err(InvalidOpaque);
         };
+        self.check_serial(local.serial);
         let tables = self.tables.lock().unwrap();
+        // Unreachable while this handle is alive: the entry is retired only
+        // once no handle points at it, and `cite` refuses an id with no entry
+        // rather than minting one.
         let entry = tables.local.get(&local.id).ok_or(InvalidOpaque)?;
+        // Likewise unreachable: `cite` rejects a citation whose marker does not
+        // match the entry, and `record_marker` makes the marker determine the
+        // type. Kept as an integer compare guarding the downcast.
         if entry.ty != TypeId::of::<T>() {
             return Err(InvalidOpaque);
         }
+        // The live case: `unregister` emptied the slot while the peer still
+        // held a reference, so a citation already in flight lands here.
         let resource = entry.resource.as_ref().ok_or(InvalidOpaque)?;
         Ok(OpaqueGuard(
             resource
@@ -387,11 +576,13 @@ impl Session {
     /// no-op; on a pipe's send end that is a missing EOF and a hung reader.
     pub(crate) fn unregister<T: OpaqueResource>(
         &self,
-        value: Opaque<T::Marker>,
+        value: Cite<T::Marker>,
     ) -> Result<Option<T>, InvalidOpaque> {
-        let Ref::Local(local) = &value.inner else {
+        // Unreachable for a decoded citation, as in `acquire`.
+        let Inner::Local(local) = &value.inner else {
             return Err(InvalidOpaque);
         };
+        self.check_serial(local.serial);
         let mut tables = self.tables.lock().unwrap();
         let entry = tables.local.get_mut(&local.id).ok_or(InvalidOpaque)?;
         if entry.ty != TypeId::of::<T>() {
@@ -427,7 +618,7 @@ impl Session {
 
     /// Mirrors an arriving gift for `id`, merging into the handle this
     /// endpoint already holds when there is one.
-    fn receive(self: &Arc<Self>, id: u64) -> Ref {
+    fn receive(self: &Arc<Self>, id: u64) -> Inner {
         let mut tables = self.tables.lock().unwrap();
         let session = Arc::downgrade(self);
         let entry = tables.remote.entry(id).or_insert_with(|| RemoteEntry {
@@ -440,48 +631,87 @@ impl Session {
         // including its own references and the one arriving now — to the fresh
         // handle installed here.
         if let Some(handle) = entry.handle.upgrade() {
-            return Ref::Remote(handle);
+            return Inner::Remote(handle);
         }
-        let handle = Arc::new(RemoteRef { id, session });
+        let handle = Arc::new(RemoteRef {
+            id,
+            serial: self.serial,
+            session,
+        });
         entry.handle = Arc::downgrade(&handle);
-        Ref::Remote(handle)
+        Inner::Remote(handle)
     }
 
     /// Resolves an arriving citation back to a handle on the resource this
     /// endpoint owns.
     ///
-    /// An unknown id yields a handle with no table entry rather than an error:
-    /// the peer may legitimately be citing something we have just retired, and
-    /// failing here would tear down the whole session over a benign race.
-    /// [`acquire`](Self::acquire) reports it as [`InvalidOpaque`] instead.
-    fn cite(self: &Arc<Self>, id: u64) -> Ref {
+    /// Both failures mean the peer has named something it cannot name, and
+    /// both are refused rather than papered over.
+    ///
+    /// An entry registered under a marker other than the one the wire position
+    /// declares is the only thing standing between a peer and a guard on the
+    /// wrong resource.
+    ///
+    /// An unknown id means the counts have diverged. It cannot arise from a
+    /// race: `granted` rises when a gift is *serialized* and falls only on a
+    /// release, the entry is retired only once it reaches zero with no live
+    /// handle, and [`Escrowed::Citation`] holds the peer's reference until the
+    /// citing payload is fully written — so the release for a cited id is
+    /// always generated after the last fragment of the message citing it. A
+    /// peer citing a retired id is therefore counting differently than we are,
+    /// and nothing it says about this table can be trusted afterwards.
+    fn cite(self: &Arc<Self>, id: u64, marker: TypeId) -> Result<Inner, InvalidOpaque> {
         let mut tables = self.tables.lock().unwrap();
-        if let Some(entry) = tables.local.get_mut(&id) {
-            if let Some(handle) = entry.handle.upgrade() {
-                return Ref::Local(handle);
-            }
-            let handle = Arc::new(LocalRef {
-                id,
-                session: Arc::downgrade(self),
-            });
-            entry.handle = Arc::downgrade(&handle);
-            return Ref::Local(handle);
+        let entry = tables.local.get_mut(&id).ok_or(InvalidOpaque)?;
+        if entry.marker != marker {
+            return Err(InvalidOpaque);
         }
-        Ref::Local(Arc::new(LocalRef {
+        if let Some(handle) = entry.handle.upgrade() {
+            return Ok(Inner::Local(handle));
+        }
+        // The owner has dropped its last handle but the peer still holds
+        // references, so the entry outlived it. Install a fresh handle.
+        let handle = Arc::new(LocalRef {
             id,
+            serial: self.serial,
             session: Arc::downgrade(self),
-        }))
+        });
+        entry.handle = Arc::downgrade(&handle);
+        Ok(Inner::Local(handle))
     }
 
-    /// Resolves an arriving `(owner, id)` pair against this endpoint.
-    pub(crate) fn take(self: &Arc<Self>, owner: u8, id: u64) -> Result<Ref, InvalidOpaque> {
-        match owner {
-            // The sender owns it: a gift, which we mirror.
-            WIRE_GIFT => Ok(self.receive(id)),
-            // We own it: a citation coming home.
-            WIRE_CITATION => Ok(self.cite(id)),
-            _ => Err(InvalidOpaque),
+    /// Resolves an arriving `(owner, id)` pair for a wire position declared to
+    /// hold a [`Gift`]: the sender owns the resource and this side mirrors it.
+    ///
+    /// Nothing is typechecked, because there is nothing here to check against —
+    /// the peer's table is the authority on the type of the peer's own
+    /// resource. The owner bit is, though: a citation in a gift position names
+    /// something this endpoint owns, which is not a reference the peer can
+    /// grant.
+    pub(crate) fn take_gift(self: &Arc<Self>, owner: u8, id: u64) -> Result<Inner, InvalidOpaque> {
+        if owner != WIRE_GIFT {
+            return Err(InvalidOpaque);
         }
+        Ok(self.receive(id))
+    }
+
+    /// Resolves an arriving `(owner, id)` pair for a wire position declared to
+    /// hold a [`Cite`] of `marker`: a citation coming home, typechecked as such.
+    ///
+    /// Both a wrong owner bit and a citation the table cannot account for fail
+    /// the decode, which ends the connection — see [`Session::cite`]. Neither
+    /// can arise from a race, so tolerating either would mean accepting that
+    /// this endpoint and its peer disagree about the table.
+    pub(crate) fn take_cite(
+        self: &Arc<Self>,
+        owner: u8,
+        id: u64,
+        marker: TypeId,
+    ) -> Result<Inner, InvalidOpaque> {
+        if owner != WIRE_CITATION {
+            return Err(InvalidOpaque);
+        }
+        self.cite(id, marker)
     }
 }
 
@@ -511,13 +741,18 @@ pub(crate) struct Ledger {
 impl Ledger {
     /// Records an opaque encountered during serialization, returning its wire
     /// `(owner, id)`.
-    pub(crate) fn put(&mut self, value: &Ref, session: &Arc<Session>) -> (u8, u64) {
+    pub(crate) fn put(&mut self, value: &Inner, session: &Arc<Session>) -> (u8, u64) {
         match value {
-            Ref::Local(local) => {
+            Inner::Local(local) => {
+                // Writing a foreign id onto this session's wire would grant the
+                // peer a reference to whatever *this* session holds under that
+                // id, so the check matters more here than at redemption.
+                session.check_serial(local.serial);
                 self.items.push(session.gift(local));
                 (WIRE_GIFT, local.id)
             }
-            Ref::Remote(remote) => {
+            Inner::Remote(remote) => {
+                session.check_serial(remote.serial);
                 self.items.push(Escrowed::Citation(remote.clone()));
                 (WIRE_CITATION, remote.id)
             }
@@ -574,7 +809,7 @@ impl PutHandle for SessionFrame<'_> {
         self.inner.put_handle(handle)
     }
 
-    fn put_opaque(&mut self, opaque: &Ref) -> io::Result<(u8, u64)> {
+    fn put_opaque(&mut self, opaque: &Inner) -> io::Result<(u8, u64)> {
         Ok(self.ledger.put(opaque, self.session))
     }
 }
@@ -595,9 +830,15 @@ impl TakeHandle for SessionHandles<'_> {
     fn finish(&mut self) -> io::Result<()> {
         self.inner.finish()
     }
-    fn take_opaque(&mut self, owner: u8, id: u64) -> io::Result<Ref> {
+    fn take_gift(&mut self, owner: u8, id: u64) -> io::Result<Inner> {
         self.session
-            .take(owner, id)
+            .take_gift(owner, id)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid opaque reference"))
+    }
+
+    fn take_cite(&mut self, owner: u8, id: u64, marker: TypeId) -> io::Result<Inner> {
+        self.session
+            .take_cite(owner, id, marker)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid opaque reference"))
     }
 }
@@ -623,6 +864,7 @@ mod tests {
 
     struct Marker;
     struct OtherMarker;
+    struct DropMarker;
     struct Value(u32);
     struct OtherValue;
     struct DropValue(Arc<AtomicBool>);
@@ -633,7 +875,7 @@ mod tests {
         type Marker = OtherMarker;
     }
     impl OpaqueResource for DropValue {
-        type Marker = Marker;
+        type Marker = DropMarker;
     }
     impl Drop for DropValue {
         fn drop(&mut self) {
@@ -641,26 +883,89 @@ mod tests {
         }
     }
 
+    /// The citation an owner gets back when the peer names one of its
+    /// resources to it, which is the only way a `Cite` legitimately reaches
+    /// `acquire`.
+    fn cited<M: 'static>(session: &Arc<Session>, gift: &Gift<M>) -> Cite<M> {
+        Cite::new(
+            session
+                .take_cite(WIRE_CITATION, gift.inner.id(), TypeId::of::<M>())
+                .unwrap(),
+        )
+    }
+
+    /// A second resource type laying claim to `Value`'s marker.
+    struct Impostor;
+    impl OpaqueResource for Impostor {
+        type Marker = Marker;
+    }
+
+    #[test]
+    #[should_panic(expected = "is already registered for resource type")]
+    fn two_resource_types_under_one_marker_panic_at_registration() {
+        let (session, _) = session();
+        let _opaque = session.register(Value(42));
+        let _conflict = session.register(Impostor);
+    }
+
+    #[test]
+    fn a_citation_naming_a_differently_typed_entry_is_rejected() {
+        let (session, _) = session();
+        let opaque = session.register(Value(42));
+        let id = opaque.inner.id();
+        assert!(
+            session
+                .take_cite(WIRE_CITATION, id, TypeId::of::<Marker>())
+                .is_ok()
+        );
+        assert!(
+            session
+                .take_cite(WIRE_CITATION, id, TypeId::of::<OtherMarker>())
+                .is_err()
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "different session")]
+    fn redeeming_an_opaque_against_another_session_panics() {
+        let (first, _) = session();
+        let (second, _) = session();
+        let opaque = first.register(Value(42));
+        let _ = second.acquire::<Value>(cited(&first, &opaque));
+    }
+
+    #[test]
+    #[should_panic(expected = "different session")]
+    fn serializing_an_opaque_into_another_session_panics() {
+        let (first, _) = session();
+        let (second, _) = session();
+        let opaque = first.register(Value(42));
+        Ledger::default().put(&opaque.inner, &second);
+    }
+
     #[test]
     fn guards_outlive_registration() {
         let (session, _) = session();
         let opaque = session.register(Value(42));
-        let guard = session.acquire::<Value>(opaque.clone()).unwrap();
+        let guard = session.acquire::<Value>(cited(&session, &opaque)).unwrap();
         assert!(
             session
-                .unregister::<Value>(opaque.clone())
+                .unregister::<Value>(cited(&session, &opaque))
                 .unwrap()
                 .is_none()
         );
         assert_eq!(guard.0.0, 42);
-        assert!(session.acquire::<Value>(opaque).is_err());
+        assert!(session.acquire::<Value>(cited(&session, &opaque)).is_err());
     }
 
     #[test]
     fn unregister_returns_exclusively_owned_value() {
         let (session, _) = session();
         let opaque = session.register(Value(42));
-        let value = session.unregister::<Value>(opaque).unwrap().unwrap();
+        let value = session
+            .unregister::<Value>(cited(&session, &opaque))
+            .unwrap()
+            .unwrap();
         assert_eq!(value.0, 42);
     }
 
@@ -668,12 +973,16 @@ mod tests {
     fn wrong_type_does_not_remove_value() {
         let (session, _) = session();
         let opaque = session.register(Value(42));
-        let wrong: Opaque<OtherMarker> = Opaque {
-            inner: opaque.inner.clone(),
-            marker: PhantomData,
-        };
+        let wrong = Cite::<OtherMarker>::new(opaque.inner.clone());
         assert!(session.unregister::<OtherValue>(wrong).is_err());
-        assert_eq!(session.acquire::<Value>(opaque.clone()).unwrap().0.0, 42);
+        assert_eq!(
+            session
+                .acquire::<Value>(cited(&session, &opaque))
+                .unwrap()
+                .0
+                .0,
+            42
+        );
     }
 
     #[test]
@@ -698,7 +1007,7 @@ mod tests {
     fn a_gifted_entry_outlives_its_local_handle_until_released() {
         let (session, _) = session();
         let opaque = session.register(Value(42));
-        let Ref::Local(handle) = &opaque.inner else {
+        let Inner::Local(handle) = &opaque.inner else {
             unreachable!()
         };
         let escrow = session.gift(handle);
@@ -745,13 +1054,12 @@ mod tests {
     #[test]
     fn citing_an_opaque_has_no_protocol_effect() {
         let (session, recorder) = session();
-        let mirrored = session.take(WIRE_GIFT, 7).unwrap();
-        let opaque: Opaque<Marker> = Opaque {
-            inner: mirrored,
-            marker: PhantomData,
-        };
+        let opaque: Gift<Marker> = Gift::new(session.take_gift(WIRE_GIFT, 7).unwrap());
         let mut ledger = Ledger::default();
-        assert_eq!(ledger.put(&opaque.inner, &session), (WIRE_CITATION, 7));
+        assert_eq!(
+            ledger.put(&opaque.cite().inner, &session),
+            (WIRE_CITATION, 7)
+        );
         ledger.commit();
         // Still exactly the one reference the gift granted.
         drop(opaque);
@@ -761,14 +1069,8 @@ mod tests {
     #[test]
     fn repeated_gifts_of_one_id_accumulate_into_a_single_release() {
         let (session, recorder) = session();
-        let first: Opaque<Marker> = Opaque {
-            inner: session.take(WIRE_GIFT, 3).unwrap(),
-            marker: PhantomData,
-        };
-        let second: Opaque<Marker> = Opaque {
-            inner: session.take(WIRE_GIFT, 3).unwrap(),
-            marker: PhantomData,
-        };
+        let first: Gift<Marker> = Gift::new(session.take_gift(WIRE_GIFT, 3).unwrap());
+        let second: Gift<Marker> = Gift::new(session.take_gift(WIRE_GIFT, 3).unwrap());
         assert_eq!(first, second);
         drop(first);
         assert!(recorder.0.lock().unwrap().is_empty());
@@ -776,14 +1078,84 @@ mod tests {
         assert_eq!(*recorder.0.lock().unwrap(), vec![(3, 2)]);
     }
 
+    /// The owner bit is the peer's to choose, so a wire position declared to
+    /// hold one kind must refuse the other where the expectation is still
+    /// known — at decode, not at redemption.
     #[test]
-    fn a_citation_for_an_unknown_id_fails_to_acquire_rather_than_erroring() {
+    fn a_gift_in_a_citation_position_is_rejected() {
         let (session, _) = session();
-        let opaque: Opaque<Marker> = Opaque {
-            inner: session.take(WIRE_CITATION, 99).unwrap(),
-            marker: PhantomData,
-        };
-        assert!(session.acquire::<Value>(opaque).is_err());
+        let opaque = session.register(Value(42));
+        let id = opaque.inner.id();
+        assert!(
+            session
+                .take_cite(WIRE_GIFT, id, TypeId::of::<Marker>())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_citation_in_a_gift_position_is_rejected() {
+        let (session, _) = session();
+        assert!(session.take_gift(WIRE_CITATION, 7).is_err());
+    }
+
+    /// A citation says "the reference you granted me", so pointing one at
+    /// one's own table is a local logic error rather than a protocol event.
+    #[test]
+    #[should_panic(expected = "cannot cite a resource this endpoint owns")]
+    fn citing_a_resource_this_endpoint_owns_panics() {
+        let (session, _) = session();
+        let _ = session.register(Value(42)).cite();
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot gift a resource this endpoint does not own")]
+    fn gifting_a_resource_the_peer_owns_panics() {
+        let (session, _) = session();
+        let mirrored: Gift<Marker> = Gift::new(session.take_gift(WIRE_GIFT, 7).unwrap());
+        let _ = postcard::to_allocvec(&mirrored);
+    }
+
+    /// The mirror image: a citation decoded on the owning side holds a local
+    /// handle, and putting it back on the wire would name it to a peer that
+    /// never granted it.
+    #[test]
+    #[should_panic(expected = "cannot cite a resource this endpoint owns")]
+    fn re_serializing_a_citation_that_came_home_panics() {
+        let (session, _) = session();
+        let opaque = session.register(Value(42));
+        let _ = postcard::to_allocvec(&cited(&session, &opaque));
+    }
+
+    #[test]
+    fn a_citation_for_an_unknown_id_is_rejected() {
+        let (session, _) = session();
+        assert!(
+            session
+                .take_cite(WIRE_CITATION, 99, TypeId::of::<Marker>())
+                .is_err()
+        );
+    }
+
+    /// The peer may still be citing a resource the owner has closed, so the
+    /// entry has to outlive the resource: emptied is a redemption failure,
+    /// absent is a protocol violation.
+    #[test]
+    fn a_citation_for_an_unregistered_but_still_granted_id_resolves() {
+        let (session, _) = session();
+        let opaque = session.register(Value(42));
+        let id = opaque.inner.id();
+        // Grant the peer a reference, as sending the opaque would.
+        Ledger::default().put(&opaque.inner, &session);
+        session
+            .unregister::<Value>(cited(&session, &opaque))
+            .unwrap();
+        let cite = Cite::<Marker>::new(
+            session
+                .take_cite(WIRE_CITATION, id, TypeId::of::<Marker>())
+                .unwrap(),
+        );
+        assert!(session.acquire::<Value>(cite).is_err());
     }
 
     #[test]
@@ -796,7 +1168,7 @@ mod tests {
             }))
             .is_err()
         );
-        assert!(std::panic::catch_unwind(|| postcard::from_bytes::<Opaque<Marker>>(&[0])).is_err());
+        assert!(std::panic::catch_unwind(|| postcard::from_bytes::<Gift<Marker>>(&[0])).is_err());
     }
 
     #[test]

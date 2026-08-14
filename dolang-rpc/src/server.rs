@@ -1,10 +1,10 @@
+#[cfg(windows)]
+use std::{any::TypeId, io, os::windows::io::OwnedHandle};
 use std::{
     collections::HashMap,
     marker::PhantomData,
     sync::{Arc, Mutex},
 };
-#[cfg(windows)]
-use std::{io, os::windows::io::OwnedHandle};
 
 use futures::{
     StreamExt,
@@ -16,15 +16,12 @@ use crate::{
     Error, Limits, Protocol,
     fragment::{self, Kind},
     serde::{decode_payload, encode_payload},
-    session::{self, InvalidOpaque, Opaque, OpaqueGuard, OpaqueResource, Session},
+    session::{self, Cite, Gift, InvalidOpaque, OpaqueGuard, OpaqueResource, Session},
     trailer::{RecvShared, SendShared, TrailerRecv, TrailerSend},
     transport::{self, EncodeHandles, Receiver, Sender},
 };
 #[cfg(windows)]
-use crate::{
-    handle::TakeHandle,
-    session::{Ref, Session},
-};
+use crate::{handle::TakeHandle, session::Inner as OpaqueInner};
 
 #[cfg(windows)]
 struct DecodeHandles<'a> {
@@ -47,9 +44,15 @@ impl TakeHandle for DecodeHandles<'_> {
         self.receiver.duplicate_peer_handle(value)
     }
 
-    fn take_opaque(&mut self, owner: u8, id: u64) -> io::Result<Ref> {
+    fn take_gift(&mut self, owner: u8, id: u64) -> io::Result<OpaqueInner> {
         self.session
-            .take(owner, id)
+            .take_gift(owner, id)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid opaque reference"))
+    }
+
+    fn take_cite(&mut self, owner: u8, id: u64, marker: TypeId) -> io::Result<OpaqueInner> {
+        self.session
+            .take_cite(owner, id, marker)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid opaque reference"))
     }
 }
@@ -682,22 +685,45 @@ impl<P: Protocol> CallContext<P> {
 
     /// Registers a session-scoped resource and returns its serializable handle.
     ///
-    /// The registration lives as long as some [`Opaque`] naming it does — in
-    /// this process or in the peer's mirror of it. Dropping the last one
-    /// releases the resource, so a handle that is registered and then never
-    /// sent (because the call failed, or was cancelled before responding)
-    /// cleans itself up rather than stranding the entry.
-    pub fn register<T: OpaqueResource>(&self, value: T) -> Opaque<T::Marker> {
+    /// The registration lives as long as some handle naming it does — in this
+    /// process or in the peer's mirror of it. Dropping the last one releases
+    /// the resource, so a handle that is registered and then never sent
+    /// (because the call failed, or was cancelled before responding) cleans
+    /// itself up rather than stranding the entry.
+    ///
+    /// Registering yields a [`Gift`], which is what a wire position that grants
+    /// the peer a reference holds. To name an already-granted resource back to
+    /// the peer without granting another reference, send the same `Gift` again:
+    /// the peer merges the arrival into the handle it holds, and the extra
+    /// references collapse into one counted release.
+    ///
+    /// # Panics
+    ///
+    /// If a different concrete type has already been registered under
+    /// `T::Marker` on this session. A marker is the only type information the
+    /// wire carries, so it must name exactly one resource type.
+    pub fn register<T: OpaqueResource>(&self, value: T) -> Gift<T::Marker> {
         self.session.register(value)
     }
 
     /// Acquires a typed shared guard for a registered opaque resource.
     ///
-    /// Returns [`InvalidOpaque`] if the handle belongs to another session, was
-    /// unregistered, or does not refer to a resource with concrete type `T`.
+    /// Takes a [`Cite`], because only a citation names a resource this endpoint
+    /// owns; a peer that puts a gift in a citation position is rejected during
+    /// decode instead of arriving here.
+    ///
+    /// Returns [`InvalidOpaque`] if the resource was unregistered while the peer
+    /// still held a reference to it, which an ordinary race with
+    /// [`unregister`](Self::unregister) produces.
+    ///
+    /// # Panics
+    ///
+    /// If the handle was minted by a different session. Opaque ids are
+    /// session-scoped, so redeeming one elsewhere is a local logic error that
+    /// would otherwise resolve against an unrelated resource.
     pub fn acquire<T: OpaqueResource>(
         &self,
-        value: Opaque<T::Marker>,
+        value: Cite<T::Marker>,
     ) -> Result<OpaqueGuard<T>, InvalidOpaque> {
         self.session.acquire(value)
     }
@@ -708,9 +734,19 @@ impl<P: Protocol> CallContext<P> {
     /// The registration itself outlives this call until the peer has released
     /// its references, so a citation still in flight resolves to a revoked
     /// handle rather than an unknown one.
+    ///
+    /// # Panics
+    ///
+    /// If the handle was minted by a different session, as with
+    /// [`acquire`](Self::acquire).
+    /// Takes a [`Cite`], as [`acquire`](Self::acquire) does: a resource is
+    /// closed because the peer named it and asked, so what arrives here is the
+    /// citation that named it. An owner closing a resource of its own accord
+    /// has no need of this — dropping its last handle retires the registration
+    /// once the peer has released its references.
     pub fn unregister<T: OpaqueResource>(
         &self,
-        value: Opaque<T::Marker>,
+        value: Cite<T::Marker>,
     ) -> Result<Option<T>, InvalidOpaque> {
         self.session.unregister::<T>(value)
     }

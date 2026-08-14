@@ -20,7 +20,7 @@ use std::os::windows::io::{AsHandle, OwnedHandle};
 use dolang_rpc::{
     client::Call,
     handle::{DefaultHandle, OsHandle},
-    session::Opaque,
+    session::{Cite, Gift},
     trailer::{TrailerRecv, TrailerSend},
 };
 use dolang_winterop::security::{SecDesc, Sid};
@@ -65,7 +65,7 @@ use crate::{
 #[derive(Clone)]
 pub struct Client {
     shared: Arc<ClientShared>,
-    vfs: Option<Opaque<crate::session::VfsMarker>>,
+    vfs: Option<Gift<crate::session::VfsMarker>>,
 }
 
 struct ClientShared {
@@ -88,7 +88,7 @@ enum ClientFileInner {
 
 struct RemoteFile {
     client: Client,
-    file: Opaque<crate::session::FileMarker>,
+    file: Gift<crate::session::FileMarker>,
     pending: Option<PendingFileOperation>,
     read_body: Option<PendingTrailerRead>,
     write_body: Option<PendingTrailerWrite>,
@@ -96,7 +96,7 @@ struct RemoteFile {
 
 pub(crate) struct RemoteFileLock {
     client: Client,
-    file: Opaque<crate::session::FileMarker>,
+    file: Gift<crate::session::FileMarker>,
     lock: Option<u64>,
 }
 
@@ -108,7 +108,7 @@ impl RemoteFileLock {
         match self
             .client
             .request(RequestKind::FileUnlock {
-                file: self.file.clone(),
+                file: self.file.cite(),
                 lock,
             })
             .await?
@@ -132,7 +132,7 @@ impl Drop for RemoteFileLock {
             return;
         };
         let client = self.client.clone();
-        let file = self.file.clone();
+        let file = self.file.cite();
         runtime.spawn(async move {
             let _ = client.request(RequestKind::FileUnlock { file, lock }).await;
         });
@@ -199,7 +199,7 @@ impl ClientFile {
         )))
     }
 
-    fn from_remote(client: Client, file: Opaque<crate::session::FileMarker>) -> Self {
+    fn from_remote(client: Client, file: Gift<crate::session::FileMarker>) -> Self {
         Self(ClientFileInner::Remote(RemoteFile {
             client,
             file,
@@ -211,18 +211,18 @@ impl ClientFile {
 }
 
 impl RemoteFile {
-    fn opaque(&self) -> Opaque<crate::session::FileMarker> {
-        self.file.clone()
+    fn cite(&self) -> Cite<crate::session::FileMarker> {
+        self.file.cite()
     }
 
     fn poll_request(
         &mut self,
         cx: &mut Context<'_>,
         kind: FileOperationKind,
-        request: impl FnOnce(Opaque<crate::session::FileMarker>) -> (RequestKind, Option<Vec<u8>>),
+        request: impl FnOnce(Cite<crate::session::FileMarker>) -> (RequestKind, Option<Vec<u8>>),
     ) -> Poll<io::Result<(ResponseKind, Option<TrailerRecv>)>> {
         if self.pending.is_none() {
-            let (request, trailer) = request(self.opaque());
+            let (request, trailer) = request(self.cite());
             self.pending = Some(PendingFileOperation {
                 kind,
                 call: {
@@ -379,9 +379,10 @@ impl AsyncWrite for ClientFile {
                 }
                 if file.write_body.is_none() {
                     file.write_body = Some(PendingTrailerWrite {
-                        send: Some(file.client.call_with_trailer(RequestKind::FileWrite {
-                            file: file.opaque(),
-                        })),
+                        send: Some(
+                            file.client
+                                .call_with_trailer(RequestKind::FileWrite { file: file.cite() }),
+                        ),
                         call: None,
                         target: buf.len(),
                         sent: 0,
@@ -501,7 +502,7 @@ impl AsyncSeek for ClientFile {
                 file.pending = Some(PendingFileOperation {
                     kind: FileOperationKind::Seek,
                     call: file.client.call(RequestKind::FileSeek {
-                        file: file.opaque(),
+                        file: file.cite(),
                         position: position.into(),
                     }),
                 });
@@ -543,9 +544,7 @@ impl FileHandle for ClientFile {
                 file.idle()?;
                 match file
                     .client
-                    .request(RequestKind::FileToStdioSend {
-                        file: file.opaque(),
-                    })
+                    .request(RequestKind::FileToStdioSend { file: file.cite() })
                     .await?
                 {
                     ResponseKind::FileToStdioSend(result) => result
@@ -571,9 +570,7 @@ impl FileHandle for ClientFile {
                 file.idle()?;
                 match file
                     .client
-                    .request(RequestKind::FileToStdioRecv {
-                        file: file.opaque(),
-                    })
+                    .request(RequestKind::FileToStdioRecv { file: file.cite() })
                     .await?
                 {
                     ResponseKind::FileToStdioRecv(result) => result
@@ -599,7 +596,9 @@ impl FileHandle for ClientFile {
                 file.cancel_pending().await;
                 match file
                     .client
-                    .request(RequestKind::FileClose { file: file.file })
+                    .request(RequestKind::FileClose {
+                        file: file.file.cite(),
+                    })
                     .await?
                 {
                     ResponseKind::FileClose(result) => result.map_err(Into::into),
@@ -617,7 +616,7 @@ impl FileHandle for ClientFile {
                 match file
                     .client
                     .request(RequestKind::FileSetSize {
-                        file: file.opaque(),
+                        file: file.cite(),
                         size,
                     })
                     .await?
@@ -636,9 +635,7 @@ impl FileHandle for ClientFile {
                 file.idle()?;
                 match file
                     .client
-                    .request(RequestKind::FileMetadata {
-                        file: file.opaque(),
-                    })
+                    .request(RequestKind::FileMetadata { file: file.cite() })
                     .await?
                 {
                     ResponseKind::FileMetadata(result) => result.map_err(Into::into),
@@ -655,9 +652,7 @@ impl FileHandle for ClientFile {
                 file.idle()?;
                 match file
                     .client
-                    .request(RequestKind::FileFsMetadata {
-                        file: file.opaque(),
-                    })
+                    .request(RequestKind::FileFsMetadata { file: file.cite() })
                     .await?
                 {
                     ResponseKind::FileFsMetadata(result) => result.map_err(Into::into),
@@ -675,7 +670,7 @@ impl FileHandle for ClientFile {
                 match file
                     .client
                     .request(RequestKind::FileAcl {
-                        file: file.opaque(),
+                        file: file.cite(),
                         default,
                     })
                     .await?
@@ -695,7 +690,7 @@ impl FileHandle for ClientFile {
                 match file
                     .client
                     .request(RequestKind::FileSetAcl {
-                        file: file.opaque(),
+                        file: file.cite(),
                         acl: acl.cloned(),
                         default,
                     })
@@ -716,7 +711,7 @@ impl FileHandle for ClientFile {
                 match file
                     .client
                     .request(RequestKind::FileSecDesc {
-                        file: file.opaque(),
+                        file: file.cite(),
                         mask,
                     })
                     .await?
@@ -736,7 +731,7 @@ impl FileHandle for ClientFile {
                 match file
                     .client
                     .request(RequestKind::FileSetSecDesc {
-                        file: file.opaque(),
+                        file: file.cite(),
                         sec_desc: sec_desc.clone(),
                     })
                     .await?
@@ -759,7 +754,7 @@ impl FileHandle for ClientFile {
                 match file
                     .client
                     .request(RequestKind::FileXattrs {
-                        file: file.opaque(),
+                        file: file.cite(),
                         namespace: XattrNamespaceRequest::from(namespace),
                     })
                     .await?
@@ -779,7 +774,7 @@ impl FileHandle for ClientFile {
                 match file
                     .client
                     .request(RequestKind::FileXattr {
-                        file: file.opaque(),
+                        file: file.cite(),
                         name: name.to_owned(),
                         namespace: namespace.map(str::to_owned),
                     })
@@ -799,9 +794,7 @@ impl FileHandle for ClientFile {
                 file.idle()?;
                 match file
                     .client
-                    .request(RequestKind::FileStreams {
-                        file: file.opaque(),
-                    })
+                    .request(RequestKind::FileStreams { file: file.cite() })
                     .await?
                 {
                     ResponseKind::FileStreams(result) => result.map_err(Into::into),
@@ -824,7 +817,7 @@ impl FileHandle for ClientFile {
                 match file
                     .client
                     .request(RequestKind::FileSetXattr {
-                        file: file.opaque(),
+                        file: file.cite(),
                         name: name.to_owned(),
                         namespace: namespace.map(str::to_owned),
                         value: value.to_vec(),
@@ -846,7 +839,7 @@ impl FileHandle for ClientFile {
                 match file
                     .client
                     .request(RequestKind::FileRemoveXattr {
-                        file: file.opaque(),
+                        file: file.cite(),
                         name: name.to_owned(),
                         namespace: namespace.map(str::to_owned),
                     })
@@ -870,7 +863,7 @@ impl FileHandle for ClientFile {
                 match file
                     .client
                     .request(RequestKind::FileLock {
-                        file: file.opaque(),
+                        file: file.cite(),
                         request,
                     })
                     .await?
@@ -880,7 +873,7 @@ impl FileHandle for ClientFile {
                             lock.map(|lock| {
                                 crate::file::FileLock::remote(RemoteFileLock {
                                     client: file.client.clone(),
-                                    file: file.opaque(),
+                                    file: file.file.clone(),
                                     lock: Some(lock),
                                 })
                             })
@@ -930,11 +923,11 @@ impl Client {
     async fn initialize(
         rpc: dolang_rpc::client::Client<VfsProtocol>,
         mode: SessionMode,
-        vfs: Option<Opaque<crate::session::VfsMarker>>,
+        vfs: Option<Gift<crate::session::VfsMarker>>,
     ) -> crate::Result<Self> {
         let response = rpc
             .call(Request {
-                vfs: vfs.clone(),
+                vfs: vfs.as_ref().map(Gift::cite),
                 kind: RequestKind::Query,
             })
             .await
@@ -1063,14 +1056,14 @@ impl Client {
 
     fn call(&self, request: RequestKind) -> Call<VfsProtocol> {
         self.shared.rpc.call(Request {
-            vfs: self.vfs.clone(),
+            vfs: self.vfs.as_ref().map(Gift::cite),
             kind: request,
         })
     }
 
     fn call_with_trailer(&self, request: RequestKind) -> TrailerSend<Call<VfsProtocol>> {
         self.shared.rpc.call_with_trailer(Request {
-            vfs: self.vfs.clone(),
+            vfs: self.vfs.as_ref().map(Gift::cite),
             kind: request,
         })
     }
@@ -1425,7 +1418,7 @@ struct PreparedRelays {
 }
 
 enum ClientChildState {
-    Live(Opaque<crate::session::ChildMarker>),
+    Live(Gift<crate::session::ChildMarker>),
     Exited(ProcessStatus),
     Lost(crate::protocol::WireError),
 }
@@ -1436,7 +1429,7 @@ enum ClientChildState {
 /// closes the corresponding remote endpoint.
 pub struct RemoteStdioSend {
     client: Client,
-    stdio: Option<Opaque<crate::session::StdioSendMarker>>,
+    stdio: Option<Gift<crate::session::StdioSendMarker>>,
     pending: Option<(StdioSendOperation, Call<VfsProtocol>)>,
     write_body: Option<PendingTrailerWrite>,
 }
@@ -1446,7 +1439,7 @@ pub struct RemoteStdioSend {
 /// This implements [`AsyncRead`].
 pub struct RemoteStdioRecv {
     client: Client,
-    stdio: Option<Opaque<crate::session::StdioRecvMarker>>,
+    stdio: Option<Gift<crate::session::StdioRecvMarker>>,
     pending: Option<Call<VfsProtocol>>,
     read_body: Option<PendingTrailerRead>,
 }
@@ -1489,7 +1482,7 @@ impl AsyncWrite for RemoteStdioSend {
             )));
         }
         if self.write_body.is_none() {
-            let Some(stdio) = self.stdio.as_ref().cloned() else {
+            let Some(stdio) = self.stdio.as_ref().map(Gift::cite) else {
                 return Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::BrokenPipe,
                     "stdio send resource is closed",
@@ -1590,7 +1583,7 @@ impl AsyncWrite for RemoteStdioSend {
             return Poll::Ready(Ok(()));
         }
         if self.pending.is_none() {
-            let stdio = self.stdio.as_ref().unwrap().clone();
+            let stdio = self.stdio.as_ref().unwrap().cite();
             self.pending = Some((
                 StdioSendOperation::Close,
                 self.client.call(RequestKind::StdioSendClose { stdio }),
@@ -1664,7 +1657,7 @@ impl AsyncRead for RemoteStdioRecv {
                     return Poll::Ready(Ok(()));
                 };
                 self.pending = Some(self.client.call(RequestKind::StdioRecvRead {
-                    stdio: stdio.clone(),
+                    stdio: stdio.cite(),
                     len: buf.remaining(),
                 }));
             }
@@ -1718,7 +1711,7 @@ impl RemoteStdioSend {
         match self
             .client
             .request(RequestKind::StdioSendClone {
-                stdio: stdio.clone(),
+                stdio: stdio.cite(),
             })
             .await
             .map_err(crate::Error::into_io_error)?
@@ -1756,7 +1749,7 @@ impl RemoteStdioRecv {
         match self
             .client
             .request(RequestKind::StdioRecvClone {
-                stdio: stdio.clone(),
+                stdio: stdio.cite(),
             })
             .await
             .map_err(crate::Error::into_io_error)?
@@ -1853,7 +1846,7 @@ impl<'a> CommandBuilder<'a> {
             .into());
         }
         Ok(StdioRecvTarget::Opaque(
-            remote.stdio.as_ref().unwrap().clone(),
+            remote.stdio.as_ref().unwrap().cite(),
         ))
     }
 
@@ -1906,7 +1899,7 @@ impl<'a> CommandBuilder<'a> {
             .into());
         }
         Ok(StdioSendTarget::Opaque(
-            remote.stdio.as_ref().unwrap().clone(),
+            remote.stdio.as_ref().unwrap().cite(),
         ))
     }
 
@@ -2016,7 +2009,7 @@ impl Child for ClientChild {
         match self
             .client
             .request(RequestKind::ChildWait {
-                child: child.clone(),
+                child: child.cite(),
             })
             .await?
         {
@@ -2040,7 +2033,7 @@ impl Child for ClientChild {
         match self
             .client
             .request(RequestKind::ChildTerminate {
-                child: child.clone(),
+                child: child.cite(),
             })
             .await?
         {
@@ -2946,7 +2939,7 @@ mod tests {
         };
         let response = client
             .request(RequestKind::ChildClose {
-                child: opaque.clone(),
+                child: opaque.cite(),
             })
             .await
             .unwrap();

@@ -1,4 +1,4 @@
-use std::{cell::RefCell, io};
+use std::{any::TypeId, cell::RefCell, io};
 
 use ::serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use ::serde::{de::Error as _, ser::Error as _};
@@ -8,7 +8,7 @@ use postcard::ser_flavors::{ExtendFlavor, Flavor};
 use crate::{
     Error as RpcError,
     handle::{ErasedHandle, PutHandle, TakeHandle},
-    session::{self, Ref},
+    session::{self, Inner},
 };
 
 struct Context<T: ?Sized + 'static> {
@@ -135,7 +135,7 @@ pub(crate) fn decode_payload<T: de::DeserializeOwned>(
 }
 
 pub(crate) fn serialize_opaque<S: Serializer>(
-    opaque: &Ref,
+    opaque: &Inner,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
     let (owner, id) = access(&PUT, |handles| handles.put_opaque(opaque), encode_error)
@@ -143,13 +143,26 @@ pub(crate) fn serialize_opaque<S: Serializer>(
     serializer.serialize_u64(session::pack_wire(owner, id))
 }
 
-pub(crate) fn deserialize_opaque<'de, D: Deserializer<'de>>(
+pub(crate) fn deserialize_gift<'de, D: Deserializer<'de>>(
     deserializer: D,
-) -> Result<Ref, D::Error> {
+) -> Result<Inner, D::Error> {
     let (owner, id) = session::unpack_wire(u64::deserialize(deserializer)?);
     access(
         &TAKE,
-        |handles| handles.take_opaque(owner, id),
+        |handles| handles.take_gift(owner, id),
+        |message, _| RpcError::Deserialize(message),
+    )
+    .map_err(D::Error::custom)
+}
+
+pub(crate) fn deserialize_cite<'de, D: Deserializer<'de>>(
+    deserializer: D,
+    marker: TypeId,
+) -> Result<Inner, D::Error> {
+    let (owner, id) = session::unpack_wire(u64::deserialize(deserializer)?);
+    access(
+        &TAKE,
+        |handles| handles.take_cite(owner, id, marker),
         |message, _| RpcError::Deserialize(message),
     )
     .map_err(D::Error::custom)
@@ -232,7 +245,7 @@ mod tests {
             self.0.put_handle(handle)
         }
 
-        fn put_opaque(&mut self, _: &Ref) -> io::Result<(u8, u64)> {
+        fn put_opaque(&mut self, _: &Inner) -> io::Result<(u8, u64)> {
             unreachable!()
         }
     }
@@ -247,7 +260,11 @@ mod tests {
                 .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid fd"))
         }
 
-        fn take_opaque(&mut self, _: u8, _: u64) -> io::Result<Ref> {
+        fn take_gift(&mut self, _: u8, _: u64) -> io::Result<Inner> {
+            unreachable!()
+        }
+
+        fn take_cite(&mut self, _: u8, _: u64, _: TypeId) -> io::Result<Inner> {
             unreachable!()
         }
     }

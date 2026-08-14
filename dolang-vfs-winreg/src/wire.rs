@@ -6,7 +6,7 @@
 //! (de)serialize through the VFS extension mechanism.
 
 use dolang_vfs::error::Error;
-use dolang_vfs::extension::{ExtContext, ExtOpaque, ExtOsHandle, VfsExtension};
+use dolang_vfs::extension::{ExtCite, ExtContext, ExtGift, ExtOsHandle, VfsExtension};
 use dolang_winterop::security::SecDesc;
 use serde::{Deserialize, Serialize};
 
@@ -25,11 +25,11 @@ pub(crate) struct KeyMarker;
 /// then operate on it directly through a local [`dolang_vfs::direct::Direct`]
 /// VFS, without any further RPC round trips. See
 /// [`WinRegRequest::AdoptNative`] for how a `Native` handle is turned back
-/// into an [`ExtOpaque`].
+/// into an [`ExtGift`].
 #[derive(Serialize, Deserialize)]
 pub(crate) enum KeyHandle {
     Native(ExtOsHandle),
-    Opaque(ExtOpaque<KeyMarker>),
+    Opaque(ExtGift<KeyMarker>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,76 +92,76 @@ pub(crate) enum WinRegRequest {
         access: Access,
     },
     OpenKey {
-        parent: ExtOpaque<KeyMarker>,
+        parent: ExtCite<KeyMarker>,
         subpath: String,
         view: View,
         access: Access,
     },
     CreateKey {
-        parent: ExtOpaque<KeyMarker>,
+        parent: ExtCite<KeyMarker>,
         subpath: String,
         view: View,
         access: Access,
     },
     CloseKey {
-        key: ExtOpaque<KeyMarker>,
+        key: ExtCite<KeyMarker>,
     },
     DeleteKey {
-        parent: ExtOpaque<KeyMarker>,
+        parent: ExtCite<KeyMarker>,
         subpath: String,
         view: View,
         all: bool,
         ignore: bool,
     },
     EnumSubkey {
-        key: ExtOpaque<KeyMarker>,
+        key: ExtCite<KeyMarker>,
         index: u32,
     },
     OpenSubkeys {
-        key: ExtOpaque<KeyMarker>,
+        key: ExtCite<KeyMarker>,
     },
     EnumSubkeysPage {
-        key: ExtOpaque<KeyMarker>,
+        key: ExtCite<KeyMarker>,
         index: u32,
         count: u32,
     },
     EnumValue {
-        key: ExtOpaque<KeyMarker>,
+        key: ExtCite<KeyMarker>,
         index: u32,
     },
     OpenValues {
-        key: ExtOpaque<KeyMarker>,
+        key: ExtCite<KeyMarker>,
     },
     EnumValuesPage {
-        key: ExtOpaque<KeyMarker>,
+        key: ExtCite<KeyMarker>,
         index: u32,
         count: u32,
     },
     GetValue {
-        key: ExtOpaque<KeyMarker>,
+        key: ExtCite<KeyMarker>,
         name: Option<String>,
     },
     SetValue {
-        key: ExtOpaque<KeyMarker>,
+        key: ExtCite<KeyMarker>,
         name: Option<String>,
         value: Value,
     },
     DeleteValue {
-        key: ExtOpaque<KeyMarker>,
+        key: ExtCite<KeyMarker>,
         name: Option<String>,
     },
     GetSecDesc {
-        key: ExtOpaque<KeyMarker>,
+        key: ExtCite<KeyMarker>,
         mask: u32,
     },
     SetSecDesc {
-        key: ExtOpaque<KeyMarker>,
+        key: ExtCite<KeyMarker>,
         sec_desc: SecDesc,
     },
     /// Adopts a native handle received out-of-band (see [`KeyHandle`]) back
-    /// into a registered [`ExtOpaque`].
+    /// into a registered [`ExtGift`].
     ///
-    /// Producing an `ExtOpaque` requires an [`ExtContext`], which only
+    /// Producing an `ExtGift` requires an [`ExtContext`], which only
     /// exists inside a `VfsExtension::handle` call — so a client that
     /// receives `KeyHandle::Native` self-dispatches this request against a
     /// local, direct [`dolang_vfs::AnyVfs::Direct`] purely to reach

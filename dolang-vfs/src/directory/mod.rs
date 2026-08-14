@@ -1,6 +1,6 @@
 use std::{collections::VecDeque, io, path::Path};
 
-use dolang_rpc::session::Opaque;
+use dolang_rpc::session::Gift;
 
 use crate::FileType;
 #[cfg(unix)]
@@ -65,7 +65,7 @@ enum ReadDirInner {
 
 struct RemoteReadDir {
     client: crate::Client,
-    handle: Option<Opaque<crate::session::ReadDirMarker>>,
+    handle: Option<Gift<crate::session::ReadDirMarker>>,
     entries: VecDeque<DirEntry>,
 }
 
@@ -106,7 +106,7 @@ impl ReadDir {
 
     pub(crate) fn from_remote(
         client: crate::Client,
-        handle: Opaque<crate::session::ReadDirMarker>,
+        handle: Gift<crate::session::ReadDirMarker>,
     ) -> Self {
         Self {
             inner: ReadDirInner::Remote(RemoteReadDir {
@@ -219,7 +219,7 @@ impl RemoteReadDir {
         if let Some(entry) = self.entries.pop_front() {
             return Ok(Some(entry));
         }
-        let Some(handle) = self.handle.clone() else {
+        let Some(handle) = self.handle.as_ref().map(Gift::cite) else {
             return Ok(None);
         };
         match self
@@ -252,7 +252,9 @@ impl Drop for RemoteReadDir {
         let client = self.client.clone();
         runtime.spawn(async move {
             let _ = client
-                .request(crate::protocol::RequestKind::ReadDirClose { read_dir })
+                .request(crate::protocol::RequestKind::ReadDirClose {
+                    read_dir: read_dir.cite(),
+                })
                 .await;
         });
     }

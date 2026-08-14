@@ -9,7 +9,7 @@
 //! route and (de)serialize through the VFS extension mechanism.
 
 use dolang_vfs::error::Error;
-use dolang_vfs::extension::{ExtContext, ExtOpaque, VfsExtension};
+use dolang_vfs::extension::{ExtCite, ExtContext, ExtGift, VfsExtension};
 use dolang_winterop::security::SecDesc;
 use serde::{Deserialize, Serialize};
 
@@ -293,15 +293,15 @@ pub(crate) enum WinScmRequest {
         access: ServiceAccess,
     },
     CloseManager {
-        manager: ExtOpaque<ScManagerMarker>,
+        manager: ExtCite<ScManagerMarker>,
     },
     OpenService {
-        manager: ExtOpaque<ScManagerMarker>,
+        manager: ExtCite<ScManagerMarker>,
         name: String,
         access: ServiceAccess,
     },
     CreateService {
-        manager: ExtOpaque<ScManagerMarker>,
+        manager: ExtCite<ScManagerMarker>,
         name: String,
         display_name: Option<String>,
         service_type: ServiceType,
@@ -312,53 +312,53 @@ pub(crate) enum WinScmRequest {
         access: ServiceAccess,
     },
     EnumServicesPage {
-        manager: ExtOpaque<ScManagerMarker>,
+        manager: ExtCite<ScManagerMarker>,
         service_type: ServiceType,
         state_filter: ServiceStateFilter,
         resume: u32,
     },
     DeleteService {
-        service: ExtOpaque<ServiceMarker>,
+        service: ExtCite<ServiceMarker>,
     },
     CloseService {
-        service: ExtOpaque<ServiceMarker>,
+        service: ExtCite<ServiceMarker>,
     },
     StartService {
-        service: ExtOpaque<ServiceMarker>,
+        service: ExtCite<ServiceMarker>,
         args: Vec<String>,
     },
     ControlService {
-        service: ExtOpaque<ServiceMarker>,
+        service: ExtCite<ServiceMarker>,
         control: ServiceControl,
     },
     QueryStatus {
-        service: ExtOpaque<ServiceMarker>,
+        service: ExtCite<ServiceMarker>,
     },
     QueryConfig {
-        service: ExtOpaque<ServiceMarker>,
+        service: ExtCite<ServiceMarker>,
     },
     ChangeConfig {
-        service: ExtOpaque<ServiceMarker>,
+        service: ExtCite<ServiceMarker>,
         update: ServiceConfigUpdate,
     },
     WaitForStatusChange {
-        service: ExtOpaque<ServiceMarker>,
+        service: ExtCite<ServiceMarker>,
         mask: NotifyMask,
     },
     GetSecDesc {
-        service: ExtOpaque<ServiceMarker>,
+        service: ExtCite<ServiceMarker>,
         mask: u32,
     },
     SetSecDesc {
-        service: ExtOpaque<ServiceMarker>,
+        service: ExtCite<ServiceMarker>,
         sec_desc: SecDesc,
     },
 }
 
 #[derive(Serialize, Deserialize)]
 pub(crate) enum WinScmResponse {
-    Manager(ExtOpaque<ScManagerMarker>),
-    Svc(ExtOpaque<ServiceMarker>),
+    Manager(ExtGift<ScManagerMarker>),
+    Svc(ExtGift<ServiceMarker>),
     Closed,
     Deleted,
     Ack,

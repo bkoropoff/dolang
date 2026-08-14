@@ -13,7 +13,7 @@ use dolang_rpc::{
     Builder, Error, Protocol,
     client::Client,
     server::CallContext,
-    session::{Opaque, OpaqueResource},
+    session::{Gift, OpaqueResource},
 };
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -1083,7 +1083,7 @@ struct GiftRequest;
 
 #[derive(Serialize, Deserialize)]
 struct GiftResponse {
-    endpoint: Opaque<EndpointMarker>,
+    endpoint: Gift<EndpointMarker>,
 }
 
 struct EndpointMarker;

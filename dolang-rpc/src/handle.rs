@@ -24,7 +24,7 @@ pub(crate) trait PutHandle {
     fn put_handle(&mut self, handle: &dyn ErasedHandle) -> io::Result<usize>;
     /// Records a session opaque encountered during serialization, returning
     /// its wire `(owner, id)`.
-    fn put_opaque(&mut self, opaque: &crate::session::Ref) -> io::Result<(u8, u64)>;
+    fn put_opaque(&mut self, opaque: &crate::session::Inner) -> io::Result<(u8, u64)>;
 }
 
 pub(crate) trait ErasedHandle {
@@ -44,8 +44,22 @@ pub(crate) trait TakeHandle {
     fn finish(&mut self) -> io::Result<()> {
         Ok(())
     }
-    /// Resolves an arriving wire `(owner, id)` against the receiving session.
-    fn take_opaque(&mut self, owner: u8, id: u64) -> io::Result<crate::session::Ref>;
+    /// Resolves an arriving wire `(owner, id)` in a position declared to hold
+    /// a [`Gift`](crate::session::Gift) against the receiving session.
+    fn take_gift(&mut self, owner: u8, id: u64) -> io::Result<crate::session::Inner>;
+
+    /// Resolves an arriving wire `(owner, id)` in a position declared to hold
+    /// a [`Cite`](crate::session::Cite) against the receiving session.
+    ///
+    /// `marker` is the [`TypeId`](std::any::TypeId) of the marker type the
+    /// wire position declares, which the session checks against its own
+    /// registration for the id.
+    fn take_cite(
+        &mut self,
+        owner: u8,
+        id: u64,
+        marker: std::any::TypeId,
+    ) -> io::Result<crate::session::Inner>;
 }
 
 /// A native operating-system resource transferred as a frame attachment.
