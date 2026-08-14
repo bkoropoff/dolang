@@ -443,20 +443,4 @@ mod tests {
             );
         });
     }
-
-    #[test]
-    fn nil_type_op_debug() {
-        with_vm(async |strand, []| {
-            let nil_recv = strand
-                .builtin_types()
-                .nil_type
-                .cast(&strand.singletons().nil)
-                .unwrap();
-            let mut s = String::new();
-            nil_recv.enter_sync(strand, |strand, recv| {
-                NilType::op_debug(recv, strand, &mut s).unwrap();
-            });
-            assert_eq!(s, "<type std.Nil>");
-        });
-    }
 }

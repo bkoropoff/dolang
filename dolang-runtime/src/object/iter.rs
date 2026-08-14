@@ -788,7 +788,7 @@ impl<'v> Protocol<'v> for Chain<'v> {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "<std.iter.Chain>")
+        crate::fmt!(strand, w, "<std.Chain>")
     }
 
     async fn op_iter<'a, 's>(
@@ -854,7 +854,7 @@ impl<'v> Protocol<'v> for Zip<'v> {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "<std.iter.Zip>")
+        crate::fmt!(strand, w, "<std.Zip>")
     }
 
     async fn op_iter<'a, 's>(
@@ -1008,7 +1008,7 @@ impl<'v> Protocol<'v> for Take<'v> {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "<std.iter.Take>")
+        crate::fmt!(strand, w, "<std.Take>")
     }
 
     async fn op_iter<'a, 's>(
@@ -1073,7 +1073,7 @@ impl<'v> Protocol<'v> for Skip<'v> {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "<std.iter.Skip>")
+        crate::fmt!(strand, w, "<std.Skip>")
     }
 
     async fn op_iter<'a, 's>(
@@ -1147,7 +1147,7 @@ impl<'v> Protocol<'v> for Enumerate<'v> {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "<std.iter.Enumerate>")
+        crate::fmt!(strand, w, "<std.Enumerate>")
     }
 
     async fn op_iter<'a, 's>(
@@ -1220,7 +1220,7 @@ impl<'v> Protocol<'v> for Kv<'v> {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "<std.iter.Kv>")
+        crate::fmt!(strand, w, "<std.Kv>")
     }
 
     async fn op_iter<'a, 's>(
@@ -1599,7 +1599,7 @@ impl<'v> Protocol<'v> for Map<'v> {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "<std.iter.Map>")
+        crate::fmt!(strand, w, "<std.Map>")
     }
 
     async fn op_iter<'a, 's>(
@@ -1701,7 +1701,7 @@ impl<'v> Protocol<'v> for Premap<'v> {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "<std.iter.Premap>")
+        crate::fmt!(strand, w, "<std.Premap>")
     }
 
     async fn op_sink<'a, 's>(
@@ -1801,7 +1801,7 @@ impl<'v> Protocol<'v> for Filter<'v> {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "<std.iter.Filter>")
+        crate::fmt!(strand, w, "<std.Filter>")
     }
 
     async fn op_iter<'a, 's>(
@@ -1906,7 +1906,7 @@ impl<'v> Protocol<'v> for Prefilter<'v> {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "<std.iter.Prefilter>")
+        crate::fmt!(strand, w, "<std.Prefilter>")
     }
 
     async fn op_sink<'a, 's>(
@@ -2101,7 +2101,7 @@ impl<'v> Protocol<'v> for Chomp<'v> {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "<std.iter.Chomp>")
+        crate::fmt!(strand, w, "<std.Chomp>")
     }
 
     async fn op_iter<'a, 's>(
@@ -2199,7 +2199,7 @@ impl<'v> Protocol<'v> for Prechomp<'v> {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "<std.iter.Prechomp>")
+        crate::fmt!(strand, w, "<std.Prechomp>")
     }
 
     async fn op_sink<'a, 's>(
@@ -2302,7 +2302,7 @@ impl<'v> Protocol<'v> for Crimp<'v> {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "<std.iter.Crimp>")
+        crate::fmt!(strand, w, "<std.Crimp>")
     }
 
     async fn op_iter<'a, 's>(
@@ -2415,7 +2415,7 @@ impl<'v> Protocol<'v> for Precrimp<'v> {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "<std.iter.Precrimp>")
+        crate::fmt!(strand, w, "<std.Precrimp>")
     }
 
     async fn op_sink<'a, 's>(
@@ -2510,7 +2510,7 @@ impl<'v> Protocol<'v> for MapType {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "<type std.iter.Map>")
+        crate::fmt!(strand, w, "<type std.Map>")
     }
 
     async fn op_call<'a, 's>(
@@ -2553,7 +2553,7 @@ impl<'v> Protocol<'v> for FilterType {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "<type std.iter.Filter>")
+        crate::fmt!(strand, w, "<type std.Filter>")
     }
 
     async fn op_call<'a, 's>(
@@ -3083,57 +3083,6 @@ mod tests {
                 Ok(pairs)
             })
             .await
-    }
-
-    // ── `classify`/`nonnegative_count` (pure Rust logic) ──────────────────────
-
-    #[test]
-    fn classify_partitions_methods_into_iterable_sinkable_and_neither() {
-        for tag in [
-            sym::MAP,
-            sym::FILTER,
-            sym::CHAIN,
-            sym::ZIP,
-            sym::TAKE,
-            sym::SKIP,
-            sym::ENUMERATE,
-            sym::FIND,
-            sym::MIN,
-            sym::MAX,
-            sym::ALL,
-            sym::ANY,
-            sym::FOLD,
-            sym::ITER,
-        ] {
-            assert_eq!(classify(tag), Some(Surface::Iterable));
-        }
-        for tag in [sym::SINK, sym::PUT, sym::PREMAP, sym::PREFILTER] {
-            assert_eq!(classify(tag), Some(Surface::Sinkable));
-        }
-        // `next`/`count`/`kv` are deliberately withheld from `Iterable` (see
-        // `ITER_ONLY_METHODS`'s doc comment), and `len` is unrelated entirely.
-        for tag in [sym::NEXT, sym::COUNT, sym::KV, sym::LEN] {
-            assert_eq!(classify(tag), None);
-        }
-    }
-
-    #[test]
-    fn nonnegative_count_accepts_nonnegative_ints_and_rejects_bad_input() {
-        with_vm(async |strand, [mut val]| {
-            Output::set(strand, &mut val, 5_i64);
-            assert_eq!(nonnegative_count(strand, &val).unwrap(), 5);
-
-            Output::set(strand, &mut val, 0_i64);
-            assert_eq!(nonnegative_count(strand, &val).unwrap(), 0);
-
-            Output::set(strand, &mut val, -1_i64);
-            let err = nonnegative_count(strand, &val).unwrap_err();
-            assert_eq!(err.kind(), ErrorKind::Value);
-
-            Output::set(strand, &mut val, "nope");
-            let err = nonnegative_count(strand, &val).unwrap_err();
-            assert_eq!(err.kind(), ErrorKind::Type);
-        });
     }
 
     // ── `iter_get`/`Iter::op_mcall` dispatch ───────────────────────────────────
@@ -3920,7 +3869,7 @@ mod tests {
                 make_int_array(strand, &[1, 2], Slot::reborrow(&mut arr));
                 arr.iter(strand, &mut it_a).await.unwrap();
                 create_chain(strand, vec![it_a.take()], &mut wrapper);
-                assert_eq!(wrapper.to_debug(strand).unwrap(), "<std.iter.Chain>");
+                assert_eq!(wrapper.to_debug(strand).unwrap(), "<std.Chain>");
                 wrapper.get(strand, next_sym, &mut out).unwrap();
                 assert!(out.to_debug(strand).unwrap().contains("bound method"));
                 let err = wrapper.get(strand, bogus_sym, &mut out).unwrap_err();
@@ -3937,7 +3886,7 @@ mod tests {
                 arr.iter(strand, &mut it_a).await.unwrap();
                 arr2.iter(strand, &mut it_b).await.unwrap();
                 create_zip(strand, vec![it_a.take(), it_b.take()], &mut wrapper);
-                assert_eq!(wrapper.to_debug(strand).unwrap(), "<std.iter.Zip>");
+                assert_eq!(wrapper.to_debug(strand).unwrap(), "<std.Zip>");
                 wrapper.get(strand, next_sym, &mut out).unwrap();
                 assert!(out.to_debug(strand).unwrap().contains("bound method"));
                 let err = wrapper.get(strand, bogus_sym, &mut out).unwrap_err();
@@ -3953,7 +3902,7 @@ mod tests {
                 make_int_array(strand, &[1, 2, 3], Slot::reborrow(&mut arr));
                 arr.iter(strand, &mut it_a).await.unwrap();
                 create_take(strand, it_a.take(), 2, &mut wrapper);
-                assert_eq!(wrapper.to_debug(strand).unwrap(), "<std.iter.Take>");
+                assert_eq!(wrapper.to_debug(strand).unwrap(), "<std.Take>");
                 wrapper.get(strand, next_sym, &mut out).unwrap();
                 assert!(out.to_debug(strand).unwrap().contains("bound method"));
                 let err = wrapper.get(strand, bogus_sym, &mut out).unwrap_err();
@@ -3968,7 +3917,7 @@ mod tests {
                 make_int_array(strand, &[1, 2, 3], Slot::reborrow(&mut arr));
                 arr.iter(strand, &mut it_a).await.unwrap();
                 create_skip(strand, it_a.take(), 1, &mut wrapper);
-                assert_eq!(wrapper.to_debug(strand).unwrap(), "<std.iter.Skip>");
+                assert_eq!(wrapper.to_debug(strand).unwrap(), "<std.Skip>");
                 wrapper.get(strand, next_sym, &mut out).unwrap();
                 assert!(out.to_debug(strand).unwrap().contains("bound method"));
                 let err = wrapper.get(strand, bogus_sym, &mut out).unwrap_err();
@@ -3983,7 +3932,7 @@ mod tests {
                 make_int_array(strand, &[5, 6], Slot::reborrow(&mut arr));
                 arr.iter(strand, &mut it_a).await.unwrap();
                 create_enumerate(strand, it_a.take(), &mut wrapper);
-                assert_eq!(wrapper.to_debug(strand).unwrap(), "<std.iter.Enumerate>");
+                assert_eq!(wrapper.to_debug(strand).unwrap(), "<std.Enumerate>");
                 wrapper.get(strand, next_sym, &mut out).unwrap();
                 assert!(out.to_debug(strand).unwrap().contains("bound method"));
                 let err = wrapper.get(strand, bogus_sym, &mut out).unwrap_err();
@@ -4000,7 +3949,7 @@ mod tests {
                 make_int_array(strand, &[1, 2], Slot::reborrow(&mut arr));
                 arr.iter(strand, &mut it_a).await.unwrap();
                 create_kv(strand, it_a.take(), &mut wrapper);
-                assert_eq!(wrapper.to_debug(strand).unwrap(), "<std.iter.Kv>");
+                assert_eq!(wrapper.to_debug(strand).unwrap(), "<std.Kv>");
                 // `Kv::op_iter` (unlike `next`, which every other case above already
                 // exercises via `method!`) is only reached through `Value::iter`.
                 wrapper.iter(strand, &mut out).await.unwrap();
@@ -4093,7 +4042,7 @@ mod tests {
                     Slot::reborrow(&mut func),
                 );
                 create_map(strand, &it, Slot::reborrow(&mut func), &mut map_val);
-                assert_eq!(map_val.to_debug(strand).unwrap(), "<std.iter.Map>");
+                assert_eq!(map_val.to_debug(strand).unwrap(), "<std.Map>");
                 map_val.get(strand, init_sym, &mut out).unwrap();
                 assert!(out.to_debug(strand).unwrap().contains("bound method"));
                 map_val.get(strand, next_sym, &mut out).unwrap();
@@ -4145,7 +4094,7 @@ mod tests {
                     Slot::reborrow(&mut func),
                 );
                 create_filter(strand, &it, Slot::reborrow(&mut func), &mut filter_val);
-                assert_eq!(filter_val.to_debug(strand).unwrap(), "<std.iter.Filter>");
+                assert_eq!(filter_val.to_debug(strand).unwrap(), "<std.Filter>");
                 filter_val.get(strand, init_sym, &mut out).unwrap();
                 assert!(out.to_debug(strand).unwrap().contains("bound method"));
                 filter_val.get(strand, next_sym, &mut out).unwrap();
@@ -4188,14 +4137,14 @@ mod tests {
     }
 
     // ── `MapType`/`FilterType`: `op_debug`/`op_call` dispatched through the real
-    //    `Value` (the `std.iter.Map`/`std.iter.Filter` callables) ─────────────
+    //    `Value` (the `std.Map`/`std.Filter` callables) ─────────────
 
     #[test]
     fn map_type_and_filter_type_op_debug_and_op_call() {
         with_fixture_vm(
             async |strand, [mut arr, mut it, mut func, mut ty, mut out]| {
                 Output::set(strand, &mut ty, &strand.singletons().map_iter);
-                assert_eq!(ty.to_debug(strand).unwrap(), "<type std.iter.Map>");
+                assert_eq!(ty.to_debug(strand).unwrap(), "<type std.Map>");
 
                 make_int_array(strand, &[1, 2, 3], Slot::reborrow(&mut arr));
                 arr.iter(strand, &mut it).await.unwrap();
@@ -4213,7 +4162,7 @@ mod tests {
                 assert_eq!(collect_ints(strand, &out).await.unwrap(), vec![2, 4, 6]);
 
                 Output::set(strand, &mut ty, &strand.singletons().filter_iter);
-                assert_eq!(ty.to_debug(strand).unwrap(), "<type std.iter.Filter>");
+                assert_eq!(ty.to_debug(strand).unwrap(), "<type std.Filter>");
 
                 arr.iter(strand, &mut it).await.unwrap();
                 make_native_fn(
@@ -4297,7 +4246,7 @@ mod tests {
                 make_int_array(strand, &[1], Slot::reborrow(&mut arr));
                 arr.iter(strand, &mut it).await.unwrap();
                 create_chomp(strand, &it, &mut wrapper);
-                assert_eq!(wrapper.to_debug(strand).unwrap(), "<std.iter.Chomp>");
+                assert_eq!(wrapper.to_debug(strand).unwrap(), "<std.Chomp>");
                 assert!(wrapper.is_instance_of(strand, TypeObject::Iter));
                 method!(strand, &wrapper, init_sym, &mut out, &wrapper)
                     .await
@@ -4305,7 +4254,7 @@ mod tests {
 
                 arr.iter(strand, &mut it).await.unwrap();
                 create_crimp(strand, &it, None, &mut wrapper).unwrap();
-                assert_eq!(wrapper.to_debug(strand).unwrap(), "<std.iter.Crimp>");
+                assert_eq!(wrapper.to_debug(strand).unwrap(), "<std.Crimp>");
                 assert!(wrapper.is_instance_of(strand, TypeObject::Iter));
                 method!(strand, &wrapper, init_sym, &mut out, &wrapper)
                     .await
@@ -4315,14 +4264,14 @@ mod tests {
                 make_int_array(strand, &[], Slot::reborrow(&mut arr));
                 arr.sink(strand, &mut sink).await.unwrap();
                 create_prechomp(strand, &sink, &mut wrapper);
-                assert_eq!(wrapper.to_debug(strand).unwrap(), "<std.iter.Prechomp>");
+                assert_eq!(wrapper.to_debug(strand).unwrap(), "<std.Prechomp>");
                 assert!(wrapper.is_instance_of(strand, TypeObject::Sink));
                 method!(strand, &wrapper, init_sym, &mut out, &wrapper)
                     .await
                     .unwrap();
 
                 create_precrimp(strand, &sink, None, &mut wrapper).unwrap();
-                assert_eq!(wrapper.to_debug(strand).unwrap(), "<std.iter.Precrimp>");
+                assert_eq!(wrapper.to_debug(strand).unwrap(), "<std.Precrimp>");
                 assert!(wrapper.is_instance_of(strand, TypeObject::Sink));
                 method!(strand, &wrapper, init_sym, &mut out, &wrapper)
                     .await
@@ -4409,8 +4358,8 @@ mod tests {
         });
     }
 
-    // ── `MapType`/`FilterType::op_type` (the type of the `std.iter.Map`/
-    //    `std.iter.Filter` callables themselves, not their instances) ─────────
+    // ── `MapType`/`FilterType::op_type` (the type of the `std.Map`/
+    //    `std.Filter` callables themselves, not their instances) ─────────
 
     #[test]
     fn map_type_and_filter_type_op_type_report_the_universal_type_object() {

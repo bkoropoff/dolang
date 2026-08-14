@@ -208,59 +208,31 @@ mod test {
     };
 
     #[test]
-    fn from_vec_exact_fit() {
-        let boxed = Box::<[u32]>::from(vec![1, 2, 3]);
-        assert_eq!(&*boxed, &[1, 2, 3]);
-    }
+    fn from_vec_preserves_contents_across_allocation_shapes() {
+        let exact = Box::<[u32]>::from(vec![1, 2, 3]);
+        assert_eq!(&*exact, &[1, 2, 3]);
 
-    #[test]
-    fn from_vec_shrinks() {
         let mut vec = Vec::with_capacity(16);
         vec.extend([1, 2, 3, 4]);
+        let excess_capacity = Box::<[u32]>::from(vec);
+        assert_eq!(&*excess_capacity, &[1, 2, 3, 4]);
 
-        let boxed = Box::<[u32]>::from(vec);
-        assert_eq!(&*boxed, &[1, 2, 3, 4]);
+        assert!(Box::<[u32]>::from(Vec::new()).is_empty());
+        assert!(Box::<[u32]>::from(Vec::with_capacity(16)).is_empty());
     }
 
     #[test]
-    fn from_empty_vec() {
-        let boxed = Box::<[u32]>::from(Vec::new());
-        assert!(boxed.is_empty());
-    }
+    fn from_string_preserves_contents_across_allocation_shapes() {
+        let exact = Box::<str>::from(String::from("hello"));
+        assert_eq!(&*exact, "hello");
 
-    #[test]
-    fn from_empty_allocated_vec() {
-        let vec = Vec::<u32>::with_capacity(16);
-        let boxed = Box::<[u32]>::from(vec);
-        assert!(boxed.is_empty());
-    }
-
-    #[test]
-    fn from_string_exact_fit() {
-        let boxed = Box::<str>::from(String::from("hello"));
-        assert_eq!(&*boxed, "hello");
-    }
-
-    #[test]
-    fn from_string_shrinks() {
         let mut string = String::with_capacity(16);
         string.push_str("hello");
+        let excess_capacity = Box::<str>::from(string);
+        assert_eq!(&*excess_capacity, "hello");
 
-        let boxed = Box::<str>::from(string);
-        assert_eq!(&*boxed, "hello");
-    }
-
-    #[test]
-    fn from_empty_string() {
-        let boxed = Box::<str>::from(String::new());
-        assert!(boxed.is_empty());
-    }
-
-    #[test]
-    fn from_empty_allocated_string() {
-        let string = String::with_capacity(16);
-        let boxed = Box::<str>::from(string);
-        assert!(boxed.is_empty());
+        assert!(Box::<str>::from(String::new()).is_empty());
+        assert!(Box::<str>::from(String::with_capacity(16)).is_empty());
     }
 
     #[test]

@@ -7,6 +7,21 @@ import compile std
   std:
     - hash
 
+def assert_span_contract left right
+  assert_type $compile.Span $left
+  assert_type $compile.Span $right
+  assert_eq $left $right
+  assert_eq (hash left) (hash right)
+  assert (left <= right)
+
+  let left_start = left.start
+  let right_start = right.start
+  assert_type $compile.Pos $left_start
+  assert_type $compile.Pos $right_start
+  assert_eq $left_start $right_start
+  assert_eq (hash left_start) (hash right_start)
+  assert (left_start <= left.end)
+
 #[test]
 def success()
   let result = compile.compile "ok.dol" |-
@@ -32,14 +47,9 @@ def warning()
   let diag = result.diagnostics[0]
   assert_type $compile.Diagnostic $diag
   assert_eq $diag.severity :WARNING:
-  assert_type $compile.Span $diag.span
-  assert_type $compile.Pos $diag.span.start
-  assert_eq $diag.span.start $diag.span.start
-  assert_eq (hash diag.span.start) (hash diag.span.start)
-  assert (diag.span.start <= diag.span.end)
-  assert_eq $diag.span $diag.span
-  assert_eq (hash diag.span) (hash diag.span)
-  assert (diag.span <= diag.span)
+  let span = diag.span
+  let equal_span = diag.span
+  assert_span_contract $span $equal_span
   assert_eq $diag.patches.len 0
   assert_eq $diag.notes.len 0
 
@@ -53,14 +63,9 @@ def error()
   let diag = result.diagnostics[0]
   assert_type $compile.Diagnostic $diag
   assert_eq $diag.severity :ERROR:
-  assert_type $compile.Span $diag.span
-  assert_type $compile.Pos $diag.span.start
-  assert_eq $diag.span.start $diag.span.start
-  assert_eq (hash diag.span.start) (hash diag.span.start)
-  assert (diag.span.start <= diag.span.end)
-  assert_eq $diag.span $diag.span
-  assert_eq (hash diag.span) (hash diag.span)
-  assert (diag.span <= diag.span)
+  let span = diag.span
+  let equal_span = diag.span
+  assert_span_contract $span $equal_span
   assert_type $Array $diag.annotations
   assert_type $Array $diag.notes
   assert_type $Array $diag.patches

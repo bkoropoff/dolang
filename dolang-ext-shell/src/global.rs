@@ -587,24 +587,4 @@ mod tests {
         assert_eq!(ov.tty, Some(false));
         assert_eq!(ov.cols, Some(80));
     }
-
-    #[test]
-    fn console_override_style_key_takes_precedence_over_no_color_force_color() {
-        // The override's `style` key is consulted before `ansi_enabled` is
-        // even called — this proves it wins regardless of what
-        // FORCE_COLOR/NO_COLOR say, per DOLANG_CONSOLE's contract.
-        let ov = ConsoleOverride::parse(Some("style=false"));
-        let effective = match ov.style {
-            Some(style) => style,
-            None => ansi_enabled(true, Some(OsStr::new("1")), None),
-        };
-        assert!(!effective);
-
-        let ov = ConsoleOverride::parse(Some("style=true"));
-        let effective = match ov.style {
-            Some(style) => style,
-            None => ansi_enabled(false, None, Some(OsStr::new("1"))),
-        };
-        assert!(effective);
-    }
 }

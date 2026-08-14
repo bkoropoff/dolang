@@ -2480,19 +2480,19 @@ pub enum TypeObject {
     Value,
     /// `std.Type`, the type of types
     Type,
-    /// `std.error.Value`
+    /// `std.Value`
     ValueError,
-    /// `std.error.Runtime`
+    /// `std.Runtime`
     RuntimeError,
     /// `std.TimedOutError`
     TimedOutError,
     /// `std.UnsupportedError`
     UnsupportedError,
-    /// `std.iter.Iter`
+    /// `std.Iter`
     Iter,
-    /// `std.iter.Iterable`
+    /// `std.Iterable`
     Iterable,
-    /// `std.iter.Sink`
+    /// `std.Sink`
     Sink,
     /// `std.Getter`
     Getter,
@@ -2566,7 +2566,7 @@ impl<'v> Input<'v> for Empty {
 /// [`Input`] which becomes a well-known singleton object
 #[non_exhaustive]
 pub enum Singleton {
-    /// `std.iter.null`
+    /// `std.null`
     IterNull,
 }
 

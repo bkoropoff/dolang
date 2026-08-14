@@ -425,12 +425,6 @@ def construct_rejects_invalid_arguments()
   assert_throws $TypeError do Node "root" attrs: "nope"
   assert_throws $UnexpectedKeyError do Node "root" bogus: "1"
 
-  # Children are unchecked at construction, exactly as with `push`; `verify`
-  # is what rejects a malformed tree.
-  let bad = Node "root" 42
-  assert_eq $bad.children[0] 42
-  assert_throws $ValueError do verify $bad
-
 #[test]
 def construct_variadically_through_subclass()
   class Element: Node

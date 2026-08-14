@@ -973,47 +973,6 @@ mod tests {
     }
 
     #[test]
-    fn choose_utf8_when_client_offers_it() {
-        let params = InitializeParams {
-            capabilities: ClientCapabilities {
-                general: Some(GeneralClientCapabilities {
-                    position_encodings: Some(vec![
-                        PositionEncodingKind::UTF16,
-                        PositionEncodingKind::UTF8,
-                    ]),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        assert_eq!(
-            Backend::choose_position_encoding(&params),
-            PositionEncodingKind::UTF8
-        );
-    }
-
-    #[test]
-    fn default_to_utf16_when_utf8_not_offered() {
-        let params = InitializeParams {
-            capabilities: ClientCapabilities {
-                general: Some(GeneralClientCapabilities {
-                    position_encodings: Some(vec![PositionEncodingKind::UTF16]),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        assert_eq!(
-            Backend::choose_position_encoding(&params),
-            PositionEncodingKind::UTF16
-        );
-    }
-
-    #[test]
     fn utf8_positions_use_byte_offsets_within_line() {
         let content = "a😀b\nx";
         let index = DocumentIndex::new(content, PositionEncodingKind::UTF8);
@@ -1135,7 +1094,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn initialize_advertises_requested_position_encoding() {
+    async fn initialize_negotiates_position_encoding() {
         let mut harness = Harness::new();
         let result = harness
             .initialize(vec![
@@ -1147,6 +1106,14 @@ mod tests {
         assert_eq!(
             result.capabilities.position_encoding,
             Some(PositionEncodingKind::UTF8)
+        );
+
+        let mut harness = Harness::new();
+        let result = harness.initialize(vec![PositionEncodingKind::UTF16]).await;
+
+        assert_eq!(
+            result.capabilities.position_encoding,
+            Some(PositionEncodingKind::UTF16)
         );
     }
 

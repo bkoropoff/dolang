@@ -503,8 +503,17 @@ impl Prim {
             };
         }
         let exponent = (exponent - 1023) as i32;
-        if exponent >= 127 {
+        if exponent > 127 {
             return Some(if f.is_sign_positive() {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            });
+        }
+        if exponent == 127 {
+            return Some(if f == Integer::MIN as f64 && i == Integer::MIN {
+                Ordering::Equal
+            } else if f.is_sign_positive() {
                 Ordering::Less
             } else {
                 Ordering::Greater
@@ -520,11 +529,6 @@ impl Prim {
                 Ordering::Greater
             })
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn compare_i64_f64(i: i64, f: f64) -> Option<Ordering> {
-        Self::compare_int_f64(i.into(), f)
     }
 
     #[inline]
@@ -655,28 +659,28 @@ mod test {
 
     #[test]
     fn nan() {
-        assert_eq!(Prim::compare_i64_f64(0, f64::NAN), None);
+        assert_eq!(Prim::compare_int_f64(0, f64::NAN), None);
     }
 
     #[test]
     fn infinities() {
         // Any integer is less than positive infinity
         assert_eq!(
-            Prim::compare_i64_f64(i64::MAX, f64::INFINITY),
+            Prim::compare_int_f64(Integer::MAX, f64::INFINITY),
             Some(Ordering::Less)
         );
         assert_eq!(
-            Prim::compare_i64_f64(i64::MIN, f64::INFINITY),
+            Prim::compare_int_f64(Integer::MIN, f64::INFINITY),
             Some(Ordering::Less)
         );
 
         // Any integer is greater than negative infinity
         assert_eq!(
-            Prim::compare_i64_f64(i64::MAX, f64::NEG_INFINITY),
+            Prim::compare_int_f64(Integer::MAX, f64::NEG_INFINITY),
             Some(Ordering::Greater)
         );
         assert_eq!(
-            Prim::compare_i64_f64(i64::MIN, f64::NEG_INFINITY),
+            Prim::compare_int_f64(Integer::MIN, f64::NEG_INFINITY),
             Some(Ordering::Greater)
         );
     }
@@ -684,64 +688,64 @@ mod test {
     #[test]
     fn zero() {
         // Positive zero
-        assert_eq!(Prim::compare_i64_f64(0, 0.0), Some(Ordering::Equal));
-        assert_eq!(Prim::compare_i64_f64(1, 0.0), Some(Ordering::Greater));
-        assert_eq!(Prim::compare_i64_f64(-1, 0.0), Some(Ordering::Less));
+        assert_eq!(Prim::compare_int_f64(0, 0.0), Some(Ordering::Equal));
+        assert_eq!(Prim::compare_int_f64(1, 0.0), Some(Ordering::Greater));
+        assert_eq!(Prim::compare_int_f64(-1, 0.0), Some(Ordering::Less));
 
         // Negative zero (should behave same as positive zero)
-        assert_eq!(Prim::compare_i64_f64(0, -0.0), Some(Ordering::Equal));
-        assert_eq!(Prim::compare_i64_f64(1, -0.0), Some(Ordering::Greater));
-        assert_eq!(Prim::compare_i64_f64(-1, -0.0), Some(Ordering::Less));
+        assert_eq!(Prim::compare_int_f64(0, -0.0), Some(Ordering::Equal));
+        assert_eq!(Prim::compare_int_f64(1, -0.0), Some(Ordering::Greater));
+        assert_eq!(Prim::compare_int_f64(-1, -0.0), Some(Ordering::Less));
     }
 
     #[test]
     fn subnormals() {
         // Smallest positive subnormal
         let min_positive = f64::from_bits(1);
-        assert_eq!(Prim::compare_i64_f64(0, min_positive), Some(Ordering::Less));
+        assert_eq!(Prim::compare_int_f64(0, min_positive), Some(Ordering::Less));
         assert_eq!(
-            Prim::compare_i64_f64(1, min_positive),
+            Prim::compare_int_f64(1, min_positive),
             Some(Ordering::Greater)
         );
         assert_eq!(
-            Prim::compare_i64_f64(-1, min_positive),
+            Prim::compare_int_f64(-1, min_positive),
             Some(Ordering::Less)
         );
 
         // Largest positive subnormal (just below f64::MIN_POSITIVE)
         let max_subnormal = f64::from_bits((1u64 << 52) - 1);
         assert_eq!(
-            Prim::compare_i64_f64(0, max_subnormal),
+            Prim::compare_int_f64(0, max_subnormal),
             Some(Ordering::Less)
         );
         assert_eq!(
-            Prim::compare_i64_f64(1, max_subnormal),
+            Prim::compare_int_f64(1, max_subnormal),
             Some(Ordering::Greater)
         );
 
         // Smallest negative subnormal (largest in magnitude)
         let min_negative = -min_positive;
         assert_eq!(
-            Prim::compare_i64_f64(0, min_negative),
+            Prim::compare_int_f64(0, min_negative),
             Some(Ordering::Greater)
         );
         assert_eq!(
-            Prim::compare_i64_f64(-1, min_negative),
+            Prim::compare_int_f64(-1, min_negative),
             Some(Ordering::Less)
         );
         assert_eq!(
-            Prim::compare_i64_f64(1, min_negative),
+            Prim::compare_int_f64(1, min_negative),
             Some(Ordering::Greater)
         );
 
         // Largest negative subnormal (smallest in magnitude)
         let max_negative_subnormal = -max_subnormal;
         assert_eq!(
-            Prim::compare_i64_f64(0, max_negative_subnormal),
+            Prim::compare_int_f64(0, max_negative_subnormal),
             Some(Ordering::Greater)
         );
         assert_eq!(
-            Prim::compare_i64_f64(-1, max_negative_subnormal),
+            Prim::compare_int_f64(-1, max_negative_subnormal),
             Some(Ordering::Less)
         );
     }
@@ -749,51 +753,51 @@ mod test {
     #[test]
     fn small_integers() {
         // Simple cases
-        assert_eq!(Prim::compare_i64_f64(5, 5.0), Some(Ordering::Equal));
-        assert_eq!(Prim::compare_i64_f64(5, 4.0), Some(Ordering::Greater));
-        assert_eq!(Prim::compare_i64_f64(5, 6.0), Some(Ordering::Less));
+        assert_eq!(Prim::compare_int_f64(5, 5.0), Some(Ordering::Equal));
+        assert_eq!(Prim::compare_int_f64(5, 4.0), Some(Ordering::Greater));
+        assert_eq!(Prim::compare_int_f64(5, 6.0), Some(Ordering::Less));
 
-        assert_eq!(Prim::compare_i64_f64(-5, -5.0), Some(Ordering::Equal));
-        assert_eq!(Prim::compare_i64_f64(-5, -6.0), Some(Ordering::Greater));
-        assert_eq!(Prim::compare_i64_f64(-5, -4.0), Some(Ordering::Less));
+        assert_eq!(Prim::compare_int_f64(-5, -5.0), Some(Ordering::Equal));
+        assert_eq!(Prim::compare_int_f64(-5, -6.0), Some(Ordering::Greater));
+        assert_eq!(Prim::compare_int_f64(-5, -4.0), Some(Ordering::Less));
     }
 
     #[test]
     fn fractional_values() {
         // Positive fractional values
-        assert_eq!(Prim::compare_i64_f64(5, 5.5), Some(Ordering::Less));
-        assert_eq!(Prim::compare_i64_f64(5, 4.5), Some(Ordering::Greater));
-        assert_eq!(Prim::compare_i64_f64(5, 5.1), Some(Ordering::Less));
-        assert_eq!(Prim::compare_i64_f64(5, 5.9), Some(Ordering::Less));
+        assert_eq!(Prim::compare_int_f64(5, 5.5), Some(Ordering::Less));
+        assert_eq!(Prim::compare_int_f64(5, 4.5), Some(Ordering::Greater));
+        assert_eq!(Prim::compare_int_f64(5, 5.1), Some(Ordering::Less));
+        assert_eq!(Prim::compare_int_f64(5, 5.9), Some(Ordering::Less));
 
         // Negative fractional values
-        assert_eq!(Prim::compare_i64_f64(-5, -5.5), Some(Ordering::Greater));
-        assert_eq!(Prim::compare_i64_f64(-5, -4.5), Some(Ordering::Less));
-        assert_eq!(Prim::compare_i64_f64(-5, -5.1), Some(Ordering::Greater));
-        assert_eq!(Prim::compare_i64_f64(-5, -5.9), Some(Ordering::Greater));
+        assert_eq!(Prim::compare_int_f64(-5, -5.5), Some(Ordering::Greater));
+        assert_eq!(Prim::compare_int_f64(-5, -4.5), Some(Ordering::Less));
+        assert_eq!(Prim::compare_int_f64(-5, -5.1), Some(Ordering::Greater));
+        assert_eq!(Prim::compare_int_f64(-5, -5.9), Some(Ordering::Greater));
     }
 
     #[test]
     fn exact_representation_boundary() {
         // 2^53 is the boundary where all integers can be exactly represented
-        let boundary = 1i64 << 53; // 9007199254740992
+        let boundary = (1 as Integer) << 53; // 9007199254740992
 
         assert_eq!(
-            Prim::compare_i64_f64(boundary, boundary as f64),
+            Prim::compare_int_f64(boundary, boundary as f64),
             Some(Ordering::Equal)
         );
         assert_eq!(
-            Prim::compare_i64_f64(boundary - 1, (boundary - 1) as f64),
+            Prim::compare_int_f64(boundary - 1, (boundary - 1) as f64),
             Some(Ordering::Equal)
         );
 
         // Negative boundary
         assert_eq!(
-            Prim::compare_i64_f64(-boundary, (-boundary) as f64),
+            Prim::compare_int_f64(-boundary, (-boundary) as f64),
             Some(Ordering::Equal)
         );
         assert_eq!(
-            Prim::compare_i64_f64(-boundary + 1, (-boundary + 1) as f64),
+            Prim::compare_int_f64(-boundary + 1, (-boundary + 1) as f64),
             Some(Ordering::Equal)
         );
     }
@@ -802,71 +806,73 @@ mod test {
     fn beyond_exact_representation() {
         // Beyond 2^53, not all consecutive integers can be represented
         // 2^54 = 18014398509481984
-        let val = 1i64 << 54;
+        let val = (1 as Integer) << 54;
 
         // At this scale, floats have a gap of 2 between consecutive representable integers
         let f = val as f64;
-        assert_eq!(Prim::compare_i64_f64(val, f), Some(Ordering::Equal));
+        assert_eq!(Prim::compare_int_f64(val, f), Some(Ordering::Equal));
 
         // val+1 should round to either val or val+2 as a float
         // Let's check the actual behavior
         let val_plus_1_as_f64 = (val + 1) as f64;
         // This will round to val
         assert_eq!(
-            Prim::compare_i64_f64(val + 1, val_plus_1_as_f64),
+            Prim::compare_int_f64(val + 1, val_plus_1_as_f64),
             Some(Ordering::Greater)
         );
     }
 
     #[test]
-    fn i64_max() {
-        // i64::MAX = 9223372036854775807 = 2^63 - 1
-        // As f64, this loses precision
-        let max_as_f64 = i64::MAX as f64;
+    fn integer_max() {
+        let max_as_f64 = Integer::MAX as f64;
 
-        // The float representation rounds to 2^63 (which is outside i64 range)
-        // So i64::MAX should compare as less than max_as_f64
+        // Integer::MAX rounds up to 2^127, just outside the Integer domain.
         assert_eq!(
-            Prim::compare_i64_f64(i64::MAX, max_as_f64),
+            Prim::compare_int_f64(Integer::MAX, max_as_f64),
             Some(Ordering::Less)
         );
     }
 
     #[test]
-    fn i64_min() {
-        let min_as_f64 = i64::MIN as f64;
+    fn integer_min() {
+        let min_as_f64 = Integer::MIN as f64;
         assert_eq!(
-            Prim::compare_i64_f64(i64::MIN, min_as_f64),
+            Prim::compare_int_f64(Integer::MIN, min_as_f64),
             Some(Ordering::Equal)
         );
     }
 
     #[test]
-    fn float_too_large_for_i64() {
-        // Floats with exponent >= 63 are outside i64 range
-        let too_large_positive = 1e63f64; // Exactly 2^63
+    fn float_near_integer_boundaries() {
+        let positive_limit = 2.0f64.powi(127);
         assert_eq!(
-            Prim::compare_i64_f64(i64::MAX, too_large_positive),
+            Prim::compare_int_f64(Integer::MAX, positive_limit),
             Some(Ordering::Less)
         );
         assert_eq!(
-            Prim::compare_i64_f64(0, too_large_positive),
-            Some(Ordering::Less)
-        );
-
-        let way_too_large = 1e100f64;
-        assert_eq!(
-            Prim::compare_i64_f64(i64::MAX, way_too_large),
+            Prim::compare_int_f64(0, positive_limit),
             Some(Ordering::Less)
         );
 
-        let too_large_negative = -1e63f64 - 1.0; // Less than -2^63
+        let above_positive_limit = f64::from_bits(positive_limit.to_bits() + 1);
         assert_eq!(
-            Prim::compare_i64_f64(i64::MIN, too_large_negative),
+            Prim::compare_int_f64(Integer::MAX, above_positive_limit),
+            Some(Ordering::Less)
+        );
+
+        let negative_limit = -positive_limit;
+        assert_eq!(
+            Prim::compare_int_f64(Integer::MIN, negative_limit),
+            Some(Ordering::Equal)
+        );
+
+        let below_negative_limit = f64::from_bits(negative_limit.to_bits() + 1);
+        assert_eq!(
+            Prim::compare_int_f64(Integer::MIN, below_negative_limit),
             Some(Ordering::Greater)
         );
         assert_eq!(
-            Prim::compare_i64_f64(0, too_large_negative),
+            Prim::compare_int_f64(0, below_negative_limit),
             Some(Ordering::Greater)
         );
     }
@@ -874,39 +880,35 @@ mod test {
     #[test]
     fn fractional_near_boundaries() {
         // Test fractional values near large integer boundaries
-        let large_int = 1i64 << 60;
+        let large_int = (1 as Integer) << 60;
         let large_f = large_int as f64;
 
         // Since large_int is a power of 2, it's exactly representable
         assert_eq!(
-            Prim::compare_i64_f64(large_int, large_f),
+            Prim::compare_int_f64(large_int, large_f),
             Some(Ordering::Equal)
         );
 
-        // Add a small epsilon (though at this scale, the float may not be able to represent it)
-        let large_f_plus = large_f + 0.5;
-        if large_f_plus != large_f {
-            // If the float can represent the difference
-            assert_eq!(
-                Prim::compare_i64_f64(large_int, large_f_plus),
-                Some(Ordering::Less)
-            );
-        }
+        let next_float = f64::from_bits(large_f.to_bits() + 1);
+        assert_eq!(
+            Prim::compare_int_f64(large_int, next_float),
+            Some(Ordering::Less)
+        );
     }
 
     #[test]
     fn powers_of_two() {
         // Powers of two should be exactly representable
-        for exp in 0..63 {
-            let val = 1i64 << exp;
+        for exp in 0..127 {
+            let val = (1 as Integer) << exp;
             assert_eq!(
-                Prim::compare_i64_f64(val, val as f64),
+                Prim::compare_int_f64(val, val as f64),
                 Some(Ordering::Equal),
                 "Failed at 2^{}",
                 exp
             );
             assert_eq!(
-                Prim::compare_i64_f64(-val, (-val) as f64),
+                Prim::compare_int_f64(-val, (-val) as f64),
                 Some(Ordering::Equal),
                 "Failed at -2^{}",
                 exp
@@ -916,9 +918,9 @@ mod test {
 
     #[test]
     fn cross_zero_comparisons() {
-        assert_eq!(Prim::compare_i64_f64(1, -1.0), Some(Ordering::Greater));
-        assert_eq!(Prim::compare_i64_f64(-1, 1.0), Some(Ordering::Less));
-        assert_eq!(Prim::compare_i64_f64(0, 1.0), Some(Ordering::Less));
-        assert_eq!(Prim::compare_i64_f64(0, -1.0), Some(Ordering::Greater));
+        assert_eq!(Prim::compare_int_f64(1, -1.0), Some(Ordering::Greater));
+        assert_eq!(Prim::compare_int_f64(-1, 1.0), Some(Ordering::Less));
+        assert_eq!(Prim::compare_int_f64(0, 1.0), Some(Ordering::Less));
+        assert_eq!(Prim::compare_int_f64(0, -1.0), Some(Ordering::Greater));
     }
 }

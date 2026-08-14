@@ -274,7 +274,7 @@ impl<'v> Protocol<'v> for VariantType {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "<type std.error.{}>", variant_name(this.get().0))
+        crate::fmt!(strand, w, "<type std.{}>", variant_name(this.get().0))
     }
 
     fn op_inspect<'a>(this: Recv<'v, 'a, Self>, _vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {

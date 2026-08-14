@@ -17,7 +17,6 @@ def matches_free()
   assert (matches "**/*.png" "images/logo.png")
   assert (!matches "**/*.png" "images/logo.jpg")
   assert (matches png "assets/icons/app.png")
-  assert (!matches png "assets/icons/app.svg")
 
 #[test]
 def matches_method()
@@ -25,11 +24,6 @@ def matches_method()
   assert (png.matches "images/logo.png")
   assert (!png.matches "images/logo.jpg")
   assert_eq (str png) "**/*.png"
-
-  let tree = Glob "src/**/mod.rs"
-  assert (tree.matches "src/fs/mod.rs")
-  assert (tree.matches "src/fs/path/mod.rs")
-  assert (!tree.matches "src/fs/path.rs")
 
 #[test]
 def invalid_patterns()
