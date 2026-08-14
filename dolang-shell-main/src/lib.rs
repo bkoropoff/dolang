@@ -17,7 +17,7 @@ use dolang::{
     },
 };
 
-use dolang_ext_shell::Exit;
+use dolang_ext_shell::{Exec, Exit};
 
 use crate::{
     batch::Action,
@@ -95,15 +95,47 @@ pub fn main(config: impl Config) -> i32 {
     std::thread::Builder::new()
         .stack_size(STACK_SIZE)
         .spawn(move || {
-            let _terminal_restore = TerminalRestoreGuard::capture_if_terminal();
-            run(config)
+            let terminal_restore = TerminalRestoreGuard::capture_if_terminal();
+            let outcome = run(config);
+            drop(terminal_restore);
+            finish(outcome)
         })
         .expect("failed to spawn main thread")
         .join()
         .expect("main thread panicked")
 }
 
-fn run(config: Arc<dyn Config>) -> i32 {
+enum Outcome {
+    Exit(i32),
+    Exec(std::process::Command),
+}
+
+fn finish(outcome: Outcome) -> i32 {
+    match outcome {
+        Outcome::Exit(code) => code,
+        Outcome::Exec(mut command) => launch(&mut command),
+    }
+}
+
+#[cfg(unix)]
+fn launch(command: &mut std::process::Command) -> i32 {
+    use std::os::unix::process::CommandExt as _;
+    eprintln!("failed to execute replacement process: {}", command.exec());
+    1
+}
+
+#[cfg(windows)]
+fn launch(command: &mut std::process::Command) -> i32 {
+    match command.status() {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(error) => {
+            eprintln!("failed to execute replacement process: {error}");
+            1
+        }
+    }
+}
+
+fn run(config: Arc<dyn Config>) -> Outcome {
     let argv: Vec<_> = std::env::args_os().collect();
     let implicit_main =
         cli::infer_implicit_entrypoint(argv.first().map(|arg| arg.as_os_str()), |name| {
@@ -113,11 +145,11 @@ fn run(config: Arc<dyn Config>) -> i32 {
         ParseOutcome::Run(cli) => cli,
         ParseOutcome::Help(help) => {
             println!("{help}");
-            return 0;
+            return Outcome::Exit(0);
         }
         ParseOutcome::Error(error) => {
             eprintln!("{error}");
-            return 2;
+            return Outcome::Exit(2);
         }
     };
     let action = get_action(&cli);
@@ -257,8 +289,14 @@ fn run(config: Arc<dyn Config>) -> i32 {
                     };
 
                     match res {
-                        Ok(()) => 0,
+                        Ok(()) => Outcome::Exit(0),
                         Err(e) => {
+                            let exec = (e.kind() == ErrorKind::Abort)
+                                .then(|| e.source()?.downcast_ref::<Exec>())
+                                .flatten();
+                            if let Some(exec) = exec {
+                                return Outcome::Exec(exec.command());
+                            }
                             let exit_code = (e.kind() == ErrorKind::Abort)
                                 .then(|| {
                                     e.source()
@@ -268,10 +306,10 @@ fn run(config: Arc<dyn Config>) -> i32 {
                                 .flatten();
 
                             if let Some(exit_code) = exit_code {
-                                exit_code
+                                Outcome::Exit(exit_code)
                             } else {
                                 let _ = dolang_ext_shell::print_error_stderr(strand, e).await;
-                                1
+                                Outcome::Exit(1)
                             }
                         }
                     }

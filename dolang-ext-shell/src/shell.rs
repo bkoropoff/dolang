@@ -1,4 +1,8 @@
-use std::fmt::{self, Debug, Display};
+use std::{
+    fmt::{self, Debug, Display},
+    path::PathBuf,
+    process::Command,
+};
 
 use tokio::io::AsyncWriteExt;
 
@@ -56,6 +60,43 @@ impl Display for Exit {
 }
 
 impl std::error::Error for Exit {}
+
+/// Process replacement requested by [`shell.exec`](https://dolang.dev/api/shell/#exec-program-args).
+///
+/// The abort source owns a snapshot of the resolved program, arguments,
+/// working directory, and environment. Embedders may recover it by
+/// downcasting [`Error::source`](std::error::Error::source).
+#[derive(Debug)]
+pub struct Exec {
+    program: PathBuf,
+    args: Vec<String>,
+    cwd: PathBuf,
+    env: Vec<(String, Option<String>)>,
+}
+
+impl Exec {
+    /// Constructs the command to execute.
+    pub fn command(&self) -> Command {
+        let mut command = Command::new(&self.program);
+        command.args(&self.args).current_dir(&self.cwd);
+        for (key, value) in &self.env {
+            if let Some(value) = value {
+                command.env(key, value);
+            } else {
+                command.env_remove(key);
+            }
+        }
+        command
+    }
+}
+
+impl Display for Exec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        <Self as Debug>::fmt(self, f)
+    }
+}
+
+impl std::error::Error for Exec {}
 
 /// The process's standard input, exported as `shell.stdin`.
 ///
@@ -722,6 +763,65 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 Err(Error::abort(strand, Exit { code }))
             },
         )
+        .function("exec", async move |strand, mut args, _| {
+            let program = match args.next() {
+                None => return Err(Error::missing_positional(strand, 0)),
+                Some(Arg::Pos(program)) => path_from_value(strand, global, &program)?,
+                Some(Arg::Key(key, _)) => return Err(Error::unexpected_key(strand, key)),
+            };
+
+            let (vfs, path, cwd, env) = {
+                let local = global.local.get(strand);
+                let vfs = local.vfs();
+                if !matches!(vfs, AnyVfs::Direct(_)) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        "shell.exec is only supported on the host VFS",
+                    )
+                    .into_sys(strand));
+                }
+                let cwd = local.cwd().clone();
+                let env = local.env();
+                let path = vfs
+                    .which(
+                        program.to_path(),
+                        env.get("PATH").as_deref(),
+                        Some(cwd.to_path()),
+                    )
+                    .await
+                    .into_sys(strand)?
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            format!("executable not found: {program}"),
+                        )
+                        .into_sys(strand)
+                    })?;
+                (vfs, path, cwd, env.flatten_delta().into_iter().collect())
+            };
+            debug_assert!(matches!(vfs, AnyVfs::Direct(_)));
+
+            let program = dolang_vfs::path::native_path(path.to_path()).into_sys(strand)?;
+            let cwd = dolang_vfs::path::native_path(cwd.to_path()).into_sys(strand)?;
+            let mut command_args = Vec::new();
+            for arg in args {
+                match arg {
+                    Arg::Pos(value) => {
+                        command_args.push(value.to_verbatim(strand)?);
+                    }
+                    Arg::Key(key, _) => return Err(Error::unexpected_key(strand, key)),
+                }
+            }
+            Err(Error::abort(
+                strand,
+                Exec {
+                    program,
+                    args: command_args,
+                    cwd,
+                    env,
+                },
+            ))
+        })
         .get("VERSION", move |strand, out| {
             let components: [i64; 3] = [
                 env!("CARGO_PKG_VERSION_MAJOR"),

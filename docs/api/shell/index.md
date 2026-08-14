@@ -87,6 +87,26 @@ Exits the current shell with the given status code.
 
 never returns; raises an interrupt error
 
+### `exec program ...args`
+
+Replaces the interpreter with an external program after shell cleanup.
+
+The program is resolved using the scoped working directory and `PATH` before
+execution unwinds. Arguments use verbatim string conversion, and the program
+inherits standard input, output, and error. This function is available only in
+the host VFS; use [`with_host`](#with_host-func-args) to select it explicitly.
+
+#### Parameters
+
+| Name      | Type                                            | Description        |
+| --------- | ----------------------------------------------- | ------------------ |
+| `program` | [`Str`](../std/str.md)\|[`Path`](../fs/path.md) | program to execute |
+| `args`    | *                                               | program arguments  |
+
+#### Returns
+
+never returns
+
 ### `cd path? func?`
 
 With no arguments, returns the current working directory. With a path, changes

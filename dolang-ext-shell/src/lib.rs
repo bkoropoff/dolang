@@ -40,7 +40,7 @@ use dolang::runtime::{Error, Output, Result, Strand, Value};
 pub use dolang_vfs::{AnyVfs, FileHandle};
 #[cfg(unix)]
 use nix::sys::termios::{LocalFlags, SetArg, tcgetattr, tcsetattr};
-pub use shell::Exit;
+pub use shell::{Exec, Exit};
 use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
 
