@@ -1,4 +1,5 @@
 #![deny(warnings)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 //! Framed, multiplexed RPC sessions over asynchronous byte streams.
 //!
 //! Define a [`Protocol`], negotiate a transport with [`Builder`], then bind
