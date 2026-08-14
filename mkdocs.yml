@@ -345,3 +345,4 @@ nav:
       - api/zip/archive.md
       - api/zip/entry.md
       - api/zip/file.md
+  - Rust API: rust-api.md

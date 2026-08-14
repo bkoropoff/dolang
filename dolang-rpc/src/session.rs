@@ -13,8 +13,8 @@
 //!
 //! * The **protocol count** is per session table entry: how many references
 //!   the owner has handed the peer. The owner increments it when it serializes
-//!   a gift; the peer mirrors it when it deserializes one. Only a
-//!   [`Kind::Release`](crate::fragment::Kind::Release) moves it down.
+//!   a gift; the peer mirrors it when it deserializes one. Only a release
+//!   frame moves it down.
 //! * The **local handle count** is the `Arc` inside the handle itself: how
 //!   many live values in this process name the resource. Cloning a handle
 //!   grants the peer nothing, so it must not touch the protocol count — a
