@@ -2264,11 +2264,17 @@ impl<'a> Parser<'a> {
                     // Parse any trailer
                     self.parse_data(scope, vec![arg])
                 } else {
-                    // Consume trailing whitespace
-                    while let Some(token!(ArgSep)) = self.peek()? {
-                        self.advance();
+                    match self.peek()? {
+                        Some(token!(ArgSep)) => {
+                            // Consume trailing whitespace
+                            while let Some(token!(ArgSep)) = self.peek()? {
+                                self.advance();
+                            }
+                            Ok(expr)
+                        }
+                        None | Some(token!(StmtSep | Indent | Dedent)) => Ok(expr),
+                        _ => self.parse_implicit_concat(scope, Some(expr), UnquotedMode::Data),
                     }
-                    Ok(expr)
                 }
             }
             Some(token!(Keyword(Keyword::Do))) => self.parse_cmd_or_expr(scope, true),
