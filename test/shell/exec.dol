@@ -1,0 +1,56 @@
+import _vfs
+import proc
+import shell:
+  - Vfs
+import fs:
+  - with_temp_dir
+import sys:
+  - NotFoundError
+  - UnsupportedError
+import test:
+  - assert_eq
+  - assert_throws
+  - test
+
+def script dir name source
+  let path = (dir / name)
+  path.write $source
+  path
+
+#[test]
+def replaces_process_with_snapshotted_context()
+  with_temp_dir do |dir|
+    let child = script $dir child.dol r|
+      import fs
+      import shell
+      let marker = shell.args[0]
+      fs.write $marker "$(shell.args[1])|$(shell.env["DOLANG_EXEC_TEST"])|$(shell.cd().canonical())"
+      shell.exit 23
+
+    let parent = script $dir parent.dol r|
+      import fs
+      import shell
+      shell.env {DOLANG_EXEC_TEST: "scoped"} do
+        shell.cd $shell.args[2] do
+          shell.exec $shell.exe $shell.args[0] $shell.args[1] argument
+      fs.write $shell.args[1] did-not-run
+
+    let marker = (dir / "marker")
+    let err = assert_throws $proc.Error do
+      run $shell.exe $parent $child $marker $dir
+    assert_eq $err.rc 23
+    assert_eq $marker.read() "argument|scoped|$(dir.canonical())"
+
+#[test]
+def resolution_errors_are_catchable()
+  assert_throws $NotFoundError do
+    shell.exec dolang-an-executable-that-does-not-exist
+
+#[test]
+def remote_vfs_is_unsupported()
+  let vfs = Vfs do run $_vfs.bin() --stdio
+  try
+    vfs.with do
+      assert_throws $UnsupportedError do shell.exec echo
+  finally
+    vfs.stop()
