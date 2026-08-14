@@ -450,6 +450,15 @@ mod tests {
         (sender, receiver)
     }
 
+    #[test]
+    fn rejects_unconsumed_file_descriptor_attachments() {
+        let (read, _write) = pipe().unwrap();
+        let mut handles = ReceivedHandles::default();
+        handles.extend(vec![read]);
+        let error = handles.finish().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
     async fn receive(receiver: &mut impl RecvFrame, expected: usize) -> BytesMut {
         let mut bytes = BytesMut::with_capacity(expected.max(64));
         while bytes.len() < expected {

@@ -98,6 +98,8 @@ pub(crate) struct Limits {
     pub trailer_send_copy_threshold: usize,
     /// Maximum number of messages with fragments in flight at once.
     pub max_incomplete_messages: usize,
+    /// Maximum number of requests awaiting a terminal response at once.
+    pub max_concurrent_calls: usize,
     /// Maximum number of those messages that may have an open trailer at
     /// once, further restricting `max_incomplete_messages`.
     pub max_incomplete_trailers: usize,
@@ -109,12 +111,13 @@ impl Default for Limits {
             max_fragment_size: 512 * 1024,
             max_payload_size: 2 * 1024 * 1024,
             max_trailer_size: 2 * 1024 * 1024,
-            max_handles_per_fragment: 64,
-            max_handles_per_message: 1024,
+            max_handles_per_fragment: 8,
+            max_handles_per_message: 8,
             trailer_recv_copy_threshold: 64 * 1024,
             trailer_recv_demand_copy_threshold: 256 * 1024,
             trailer_send_copy_threshold: 64 * 1024,
             max_incomplete_messages: 64,
+            max_concurrent_calls: 64,
             max_incomplete_trailers: 16,
         }
     }

@@ -97,7 +97,7 @@ impl Builder {
 
     /// Sets the maximum native handles carried by one wire fragment.
     ///
-    /// Defaults to 64, is capped to the transport's operating-system limit,
+    /// Defaults to 8, is capped to the transport's operating-system limit,
     /// and is negotiated down to the peer's advertised value.
     pub fn max_handles_per_fragment(mut self, value: usize) -> Self {
         self.limits.max_handles_per_fragment = value;
@@ -106,7 +106,7 @@ impl Builder {
 
     /// Sets the maximum native handles carried by one message.
     ///
-    /// Defaults to 1,024; the peer and local endpoint use the smaller
+    /// Defaults to 8; the peer and local endpoint use the smaller
     /// advertised value.
     pub fn max_handles_per_message(mut self, value: usize) -> Self {
         self.limits.max_handles_per_message = value;
@@ -149,6 +149,16 @@ impl Builder {
     /// value.
     pub fn max_incomplete_messages(mut self, value: usize) -> Self {
         self.limits.max_incomplete_messages = value;
+        self
+    }
+
+    /// Sets the maximum number of requests awaiting terminal responses.
+    ///
+    /// Defaults to 64; the peer and local endpoint use the smaller advertised
+    /// value. This is independent of [`max_incomplete_messages`](Self::max_incomplete_messages),
+    /// which limits only messages still being fragmented.
+    pub fn max_concurrent_calls(mut self, value: usize) -> Self {
+        self.limits.max_concurrent_calls = value;
         self
     }
 

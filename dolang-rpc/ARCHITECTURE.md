@@ -93,7 +93,8 @@ descriptor as two plain arguments. Chainable setters
 (`max_fragment_size`, `max_payload_size`, `max_trailer_size`,
 `trailer_recv_copy_threshold`, `trailer_recv_demand_copy_threshold`,
 `trailer_send_copy_threshold`, `max_incomplete_messages`,
-`max_incomplete_trailers`) override individual size and concurrency limits;
+`max_incomplete_trailers`, `max_concurrent_calls`) override individual size
+and concurrency limits;
 these compose the crate-private `Limits` struct, which is not itself public.
 Terminal `async` methods consume the builder and negotiate over a specific
 transport shape, one set for each endpoint role:
@@ -376,7 +377,7 @@ Internally, sends stage through a `BytesMut` buffer below
 it; receives use `trailer_recv_copy_threshold` and
 `trailer_recv_demand_copy_threshold` the same way on the read side. All three
 thresholds, plus `max_trailer_size`, `max_incomplete_messages`, and
-`max_incomplete_trailers`, are `Limits` fields configured through
+`max_incomplete_trailers` are `Limits` fields configured through
 [`Builder`](#session-establishment). Per-message and connection-wide limits
 cover both the postcard payload and the trailer.
 
@@ -411,6 +412,16 @@ subsequent atomic ones — this keeps fragment sizes adaptive to what the
 transport can actually accept in one write, and is intentionally
 future-extensible to a peer-signaled throttling hint.
 
+`max_concurrent_calls` separately bounds requests awaiting terminal responses.
+The client writer leaves excess requests unencoded in its local queue and
+continues sending control fragments. A slot starts before request serialization
+and ends on `Response`/`Error`, or after an ordered abort for a request that
+never reached dispatch. The server counts live `CallContext`s and treats an
+excess request as a protocol violation. This limit is independent of
+`max_incomplete_messages`: a call may stop being fragmented long before its
+handler responds, while a zero incomplete-message limit still permits complete
+single-fragment calls.
+
 The receiver retains incomplete assemblies by message ID, bounded by
 `max_incomplete_messages`/`max_incomplete_trailers`/`max_fragment_size`/
 `max_payload_size`/`max_trailer_size`/`max_handles_per_message`. `LAST`
@@ -434,6 +445,9 @@ The reassembler accumulates descriptors per message across interleaved
 fragments. If all postcard bytes have been sent before all descriptors, the
 scheduler emits zero-payload postcard fragments until the attachment phase is
 complete; only then may it complete the message or enter its trailer phase.
+After postcard decoding, every accumulated descriptor must have been consumed
+by an `OsHandle` field. Leftover attachments are a protocol error and are
+closed with the rejected message.
 
 `WANT_ACK` marks the final non-trailer fragment of a request or response. The
 receiver queues an empty, single-fragment `Ack` for the message ID immediately
@@ -680,6 +694,12 @@ the owner registers an object, the peer receives `Opaque<FileMarker>`, and
 subsequent read/write/close operations are ordinary RPC calls. A protocol may
 choose direct `OsHandle<T>` transfer for a local capable session and fall back
 to `Opaque<M>` for a remote one.
+
+Protocol grant totals saturate rather than wrap. An owner entry that reaches
+`u32::MAX` is immortal until the session ends; releases cannot make the
+unrepresentable total finite again. The holder normally prevents this by
+collapsing a mirrored total at `u32::MAX / 2` to one live reference and sending
+one counted `Release` for the excess.
 
 ## Transport Abstraction
 

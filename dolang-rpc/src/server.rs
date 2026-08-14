@@ -136,6 +136,20 @@ struct Cancellation {
     abort: AbortHandle,
 }
 
+fn check_call_admission(
+    outstanding: &HashMap<u64, Cancellation>,
+    max_concurrent_calls: usize,
+    id: u64,
+) -> Result<(), Error> {
+    if outstanding.contains_key(&id) {
+        return Err(Error::Protocol(format!("duplicate active request id {id}")));
+    }
+    if outstanding.len() >= max_concurrent_calls {
+        return Err(Error::Protocol("too many concurrent calls".into()));
+    }
+    Ok(())
+}
+
 impl<P: Protocol> Server<P> {
     /// Builds a `Server` from an already-negotiated transport. Only reachable
     /// via [`Unbound::bind`] — `Server` has
@@ -275,6 +289,13 @@ impl<P: Protocol> Server<P> {
                 let _ = handles;
                 match kind {
                     Kind::Request => {
+                        if let Err(error) = check_call_admission(
+                            &inner.lock().unwrap().outstanding,
+                            limits.max_concurrent_calls,
+                            id,
+                        ) {
+                            break (Err(error), false, false);
+                        }
                         #[cfg(unix)]
                         let request = decode_payload(
                             &payload,
@@ -336,7 +357,7 @@ impl<P: Protocol> Server<P> {
                             .and_then(|cancel| cancel.signal.take())
                         {
                             let _ = signal.send(());
-                        } else if let Some(cancel) = state.outstanding.remove(&id) {
+                        } else if let Some(cancel) = state.outstanding.get(&id) {
                             cancel.abort.abort();
                         } else {
                             let _ = outgoing.send(Message::Cancel { id });
@@ -542,7 +563,7 @@ async fn admit<P: Protocol>(
         Message::Error { id } => scheduler.admit_empty(Kind::Error, id),
         Message::Cancel { id } => match scheduler.try_cancel_active(id) {
             fragment::AbortOutcome::NotActive => {}
-            fragment::AbortOutcome::Discarded { started } => {
+            fragment::AbortOutcome::Discarded { started, .. } => {
                 if started {
                     scheduler.admit_abort(id);
                 }
@@ -765,3 +786,39 @@ impl<P: Protocol> Drop for CallContext<P> {
 #[derive(Clone, Copy, Debug, thiserror::Error)]
 #[error("request cancelled")]
 pub struct RequestCancelled;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cancellation() -> Cancellation {
+        let (abort, _registration) = AbortHandle::new_pair();
+        Cancellation {
+            signal: None,
+            abort,
+        }
+    }
+
+    #[test]
+    fn call_admission_rejects_excess_and_duplicate_requests() {
+        let mut outstanding = HashMap::new();
+        assert!(check_call_admission(&outstanding, 1, 7).is_ok());
+        outstanding.insert(7, cancellation());
+        assert!(matches!(
+            check_call_admission(&outstanding, 1, 8),
+            Err(Error::Protocol(message)) if message == "too many concurrent calls"
+        ));
+        assert!(matches!(
+            check_call_admission(&outstanding, 2, 7),
+            Err(Error::Protocol(message)) if message == "duplicate active request id 7"
+        ));
+    }
+
+    #[test]
+    fn zero_call_limit_rejects_the_first_request() {
+        assert!(matches!(
+            check_call_admission(&HashMap::new(), 0, 0),
+            Err(Error::Protocol(message)) if message == "too many concurrent calls"
+        ));
+    }
+}
