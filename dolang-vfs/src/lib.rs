@@ -1,5 +1,6 @@
 #![deny(warnings)]
 #![allow(async_fn_in_trait)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 //! Filesystem and process operations over either a local or remote target.
 //!
 //! [`Direct`] performs operations in the current process's environment.
@@ -261,8 +262,8 @@ pub trait Vfs {
     ///
     /// `key` is an optional pre-shared key that both ends must prove knowledge
     /// of during negotiation. It is what identifies the intended agent when
-    /// the socket's permissions cannot: see
-    /// [`Client::connect_with_key`](crate::Client::connect_with_key).
+    /// the socket's permissions cannot; the concrete client accepts the same
+    /// key when connecting.
     async fn unix_socket(&self, path: Utf8TypedPath<'_>, key: Option<&[u8]>) -> Result<AnyVfs>;
     /// Starts a Windows administrative VFS session.
     async fn windows_admin(

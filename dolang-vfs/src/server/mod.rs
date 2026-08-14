@@ -24,6 +24,8 @@ use std::os::unix::io::OwnedFd;
 use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::NamedPipeClient;
+#[cfg(all(docsrs, not(windows)))]
+struct NamedPipeClient;
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream, unix::SocketAddr};
 use tokio::sync::{Mutex, watch};
@@ -234,8 +236,8 @@ struct Negotiated {
 ///
 /// Construct a connected server with [`new`](Self::new) or
 /// [`new_split`](Self::new_split) and call [`serve`](Self::serve). On Unix,
-/// [`bind`](Self::bind) constructs a listener that accepts sessions until a
-/// client requests shutdown.
+/// `bind` constructs a listener that accepts sessions until a client requests
+/// shutdown.
 pub struct Server {
     #[cfg(unix)]
     listener: Option<UnixListener>,
@@ -337,20 +339,30 @@ impl Server {
     }
 
     /// Creates a VFS RPC server on the client end of a connected Windows named pipe.
-    #[cfg(windows)]
+    #[cfg(any(windows, docsrs))]
+    #[cfg_attr(docsrs, doc(cfg(windows)))]
+    #[cfg_attr(all(docsrs, not(windows)), allow(private_interfaces))]
     pub async fn from_named_pipe_client(pipe: NamedPipeClient) -> Result<Self, io::Error> {
-        let rpc = rpc_builder(None)
-            .server_named_pipe_client(pipe)
-            .await
-            .map_err(crate::client::rpc_error)?
-            .bind();
-        Ok(Self {
-            #[cfg(unix)]
-            listener: None,
-            rpc: Some(rpc),
-            mode: SessionMode::Native,
-            shared: Self::state().map_err(crate::Error::into_io_error)?,
-        })
+        #[cfg(windows)]
+        {
+            let rpc = rpc_builder(None)
+                .server_named_pipe_client(pipe)
+                .await
+                .map_err(crate::client::rpc_error)?
+                .bind();
+            Ok(Self {
+                #[cfg(unix)]
+                listener: None,
+                rpc: Some(rpc),
+                mode: SessionMode::Native,
+                shared: Self::state().map_err(crate::Error::into_io_error)?,
+            })
+        }
+        #[cfg(all(docsrs, not(windows)))]
+        {
+            let _ = pipe;
+            unreachable!()
+        }
     }
 
     #[cfg(unix)]

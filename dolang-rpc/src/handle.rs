@@ -64,11 +64,10 @@ pub(crate) trait TakeHandle {
 
 /// A native operating-system resource transferred as a frame attachment.
 ///
-/// Serialize this type only over an attachment-capable session transport:
-/// [`Builder::client_unix`](crate::Builder::client_unix) or
-/// [`Builder::server_unix`](crate::Builder::server_unix) on Unix, and the
-/// named-pipe constructors on Windows. Serializing it over a generic byte
-/// stream fails the call with an error; use session-scoped
+/// Serialize this type only over an attachment-capable session transport: the
+/// [`Builder`](crate::Builder) Unix-socket constructors on Unix or named-pipe
+/// constructors on Windows. Serializing it over a generic byte stream fails
+/// the call with an error; use session-scoped
 /// [`Gift`](crate::session::Gift) and [`Cite`](crate::session::Cite) handles
 /// for resources that must work over every transport.
 pub struct OsHandle<T = DefaultHandle>(Cell<Option<T>>);

@@ -1,4 +1,5 @@
 #![deny(warnings)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 //! Portable representations and small utilities for interoperating with
 //! Windows APIs and wire formats.
 //!
@@ -18,7 +19,8 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-#[cfg(windows)]
+#[cfg(any(windows, docsrs))]
+#[cfg_attr(docsrs, doc(cfg(windows)))]
 pub mod apc;
 pub mod error;
 pub mod guid;
@@ -27,6 +29,7 @@ pub mod security;
 
 /// Returns whether the current process is running under Wine.
 #[cfg(windows)]
+#[cfg_attr(docsrs, doc(auto_cfg = false))]
 pub fn is_wine() -> bool {
     use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
     use windows_sys::core::w;
@@ -39,6 +42,7 @@ pub fn is_wine() -> bool {
 
 /// Returns whether the current process is running under Wine.
 #[cfg(not(windows))]
+#[cfg_attr(docsrs, doc(auto_cfg = false))]
 pub const fn is_wine() -> bool {
     false
 }

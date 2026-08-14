@@ -959,9 +959,9 @@ impl Vfs for Direct {
         {
             let cwd = native_path(cwd)?;
             let session = if elevate {
-                crate::service::AdminSession::launch(cwd, env).await
+                crate::windows::AdminSession::launch(cwd, env).await
             } else {
-                crate::service::AdminSession::launch_unelevated(cwd, env).await
+                crate::windows::AdminSession::launch_unelevated(cwd, env).await
             }?;
             Ok(crate::session::VfsSession::from_windows(session))
         }
