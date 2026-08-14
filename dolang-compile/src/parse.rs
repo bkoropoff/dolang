@@ -114,6 +114,7 @@ macro_rules! decay_literal {
                 | self::Keyword::While)
             | TokenInfo::Op(_)
             | TokenInfo::RBar
+            | TokenInfo::DecoratorOpen
                 => TokenInfo::Literal)
     }
 }
@@ -182,7 +183,8 @@ macro_rules! decay_string {
             | TokenInfo::RawQuote
             | TokenInfo::BQuote
             | TokenInfo::RBar
-            | TokenInfo::ArgSep => TokenInfo::Literal)
+            | TokenInfo::ArgSep
+            | TokenInfo::DecoratorOpen => TokenInfo::Literal)
     }
 }
 
