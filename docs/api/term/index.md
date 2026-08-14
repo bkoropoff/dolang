@@ -82,7 +82,7 @@ it and restores the previous one.
 
 `console` may be any [`Console`](./console.md), or any
 [`Sink`](../std/sink.md) — a plain sink is wrapped in a
-[`SinkConsole`](./sink-console.md), framed per `mode:`.
+[`SinkConsole`](./sink-console.md), using the requested `mode:`.
 
 The override is inherited by all strands spawned inside the call.
 
@@ -102,7 +102,7 @@ Return value of `func`.
 **Errors:**
 
 - Raises [`ValueError`](../std/value-error.md) if `mode:` is given when
-  `console` is already a `Console`, which carries its own framing.
+  `console` is already a `Console`, which already determines its output mode.
 
 Captured lines keep their terminator, since the capture reproduces what was
 written rather than reinterpreting it:

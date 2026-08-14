@@ -558,6 +558,11 @@ async fn inherited_stdio_is_relayed_over_generic_stream() {
     let mut child = command.spawn().await.unwrap();
     assert!(child.wait().await.unwrap().success());
 
+    let mut command = command_with_args(&client, successful_command());
+    command.stdout_inherit_stderr().unwrap();
+    let mut child = command.spawn().await.unwrap();
+    assert!(child.wait().await.unwrap().success());
+
     let mut command = client.command(typed_str("nonexistent_command_12345"));
     command.stdin_inherit().unwrap();
     command.stdout_inherit().unwrap();

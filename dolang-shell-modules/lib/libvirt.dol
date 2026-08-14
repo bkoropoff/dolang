@@ -3,7 +3,7 @@ import base64 digest json proc progress rand shell shlex ssh std sys time transf
     - Path
     - with_temp_dir
   std:
-    - NULLITER
+    - null
   url:
     - Url
 
@@ -261,8 +261,8 @@ class Guest
     while true
       try
         self.#exec $command connect_timeout: 5
-          stdout: $NULLITER
-          stderr: $NULLITER
+          stdout: $null
+          stderr: $null
         return
       catch proc.Error: _
         time.sleep $READY_SLEEP
@@ -1063,14 +1063,14 @@ def remove_partial name connect_uri workdir
     let domain = Domain $name $connect_uri
     if (domain.state() != :SHUTOFF:)
       virsh $connect_uri destroy $name
-        stdout: $NULLITER
-        stderr: $NULLITER
+        stdout: $null
+        stderr: $null
   catch _
     nil
   try
     raw_undefine $name $connect_uri
-      stdout: $NULLITER
-      stderr: $NULLITER
+      stdout: $null
+      stderr: $null
   catch _
     nil
   workdir.remove all: true ignore: true

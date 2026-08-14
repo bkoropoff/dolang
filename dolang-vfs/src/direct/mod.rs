@@ -79,6 +79,7 @@ pub struct DirectCommand<'a> {
     stdin_resource: Option<StdioRecv>,
     stdout_resource: Option<StdioSend>,
     stderr_resource: Option<StdioSend>,
+    stderr_to_stdout: bool,
     process_control: crate::ProcessControl,
     termination_policy: crate::TerminationPolicy,
     error: Option<io::Error>,
@@ -456,6 +457,7 @@ impl<'a> DirectCommand<'a> {
             stdin_resource: None,
             stdout_resource: None,
             stderr_resource: None,
+            stderr_to_stdout: false,
             process_control: crate::ProcessControl::Foreground,
             termination_policy: crate::TerminationPolicy::default(),
             error: program.err(),
@@ -546,6 +548,11 @@ impl Command for DirectCommand<'_> {
         Ok(self)
     }
 
+    fn stdout_inherit_stderr(&mut self) -> io::Result<&mut Self> {
+        self.stdout_resource = None;
+        self.impl_stdout_inherit_stderr()
+    }
+
     fn stdin_null(&mut self) -> &mut Self {
         self.stdin = None;
         self.stdin_resource = None;
@@ -561,23 +568,34 @@ impl Command for DirectCommand<'_> {
     fn stderr(&mut self, stdio: StdioSend) -> io::Result<&mut Self> {
         self.stderr = None;
         self.stderr_resource = Some(stdio);
+        self.stderr_to_stdout = false;
         Ok(self)
     }
 
     fn stderr_inherit(&mut self) -> io::Result<&mut Self> {
         self.stderr_resource = None;
         self.stderr = Some(Stdio::inherit());
+        self.stderr_to_stdout = false;
+        Ok(self)
+    }
+
+    fn stderr_to_stdout(&mut self) -> io::Result<&mut Self> {
+        self.stderr = None;
+        self.stderr_resource = None;
+        self.stderr_to_stdout = true;
         Ok(self)
     }
 
     fn stderr_inherit_stdout(&mut self) -> io::Result<&mut Self> {
         self.stderr_resource = None;
+        self.stderr_to_stdout = false;
         self.impl_stderr_inherit_stdout()
     }
 
     fn stderr_null(&mut self) -> &mut Self {
         self.stderr = None;
         self.stderr_resource = None;
+        self.stderr_to_stdout = false;
         self
     }
 
@@ -609,11 +627,19 @@ impl Command for DirectCommand<'_> {
         if let Some(stdin) = self.stdin_resource.take() {
             self.stdin = Some(stdin.into_stdio().await?);
         }
+        if self.stderr_to_stdout {
+            if let Some(stdout) = self.stdout_resource.take() {
+                let stderr = stdout.try_clone().await?;
+                self.stdout = Some(stdout.into_stdio().await?);
+                self.stderr = Some(stderr.into_stdio().await?);
+            } else if self.stdout.is_some() {
+                self.impl_stderr_inherit_stdout()?;
+            }
+        } else if let Some(stderr) = self.stderr_resource.take() {
+            self.stderr = Some(stderr.into_stdio().await?);
+        }
         if let Some(stdout) = self.stdout_resource.take() {
             self.stdout = Some(stdout.into_stdio().await?);
-        }
-        if let Some(stderr) = self.stderr_resource.take() {
-            self.stderr = Some(stderr.into_stdio().await?);
         }
 
         let mut command = TokioCommand::new(&resolved);

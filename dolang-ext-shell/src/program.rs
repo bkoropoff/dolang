@@ -150,7 +150,7 @@ async fn resolve_io<'v, 's, 'a>(
 
     let stderr_temp = if let Some(stderr_key) = stderr_key {
         if let Some(sym) = stderr_key.as_sym(strand)
-            && sym == global.syms.stdout
+            && sym == global.syms.stdout_redirect
         {
             Output::set(strand, &mut stderr, &output);
             false
@@ -262,7 +262,7 @@ async fn configure_direct_input<'v, 's>(
     command: &mut impl Command<StdioRecv = StdioRecv>,
     input: &Value<'v>,
 ) -> Result<'v, 's, bool> {
-    if input.is_nil() || input.eq(strand, Singleton::IterNull) {
+    if input.is_nil() || input.eq(strand, Singleton::Null) {
         command.stdin_null();
         return Ok(true);
     }
@@ -299,7 +299,7 @@ async fn configure_direct_output<'v, 's>(
     command: &mut impl Command<StdioSend = StdioSend>,
     output: &Value<'v>,
 ) -> Result<'v, 's, bool> {
-    if output.is_nil() || output.eq(strand, Singleton::IterNull) {
+    if output.is_nil() || output.eq(strand, Singleton::Null) {
         command.stdout_null();
         return Ok(true);
     }
@@ -327,7 +327,7 @@ async fn configure_direct_stderr<'v, 's>(
     command: &mut impl Command<StdioSend = StdioSend>,
     stderr: &Value<'v>,
 ) -> Result<'v, 's, bool> {
-    if stderr.is_nil() || stderr.eq(strand, Singleton::IterNull) {
+    if stderr.is_nil() || stderr.eq(strand, Singleton::Null) {
         command.stderr_null();
         return Ok(true);
     }
@@ -708,9 +708,9 @@ async fn run<'v, 's>(
         stdout: send_guard.is_some(),
         stderr: stderr_guard.is_some(),
     };
-    // The guards must outlive the launch. `send_guard` is also read below, to
-    // duplicate the negotiated stdout pipe when stderr merges into it.
+    // The guards must outlive the launch.
     let _recv_guard = recv_guard;
+    let _send_guard = send_guard;
     let _stderr_guard = stderr_guard;
 
     if !negotiated.stdin
@@ -724,47 +724,13 @@ async fn run<'v, 's>(
     let stdout_direct = negotiated.stdout
         || (!stdout_to_console
             && configure_direct_output(strand, global, &mut command, io.value.stdout).await?);
-    if stderr_merge {
-        if negotiated.stdout {
-            command
-                .stderr(
-                    send_guard
-                        .as_ref()
-                        .unwrap()
-                        .send_pipe()
-                        .await
-                        .into_sys(strand)?,
-                )
-                .into_sys(strand)?;
-        } else if stdout_direct {
-            if io.value.stdout.is_nil() || io.value.stdout.eq(strand, Singleton::IterNull) {
-                command.stderr_null();
-            } else if is_default_stdout(global, io.value.stdout) {
-                command.stderr_inherit_stdout().into_sys(strand)?;
-            } else {
-                if let Some(file) = global.types.file.cast(io.value.stdout) {
-                    let stdio = file
-                        .enter(strand, async |strand, inst| {
-                            File::command_send(inst, strand).await
-                        })
-                        .await?
-                        .unwrap();
-                    command.stderr(stdio).into_sys(strand)?;
-                } else {
-                    unreachable!("stdout direct path should have been direct-fd capable")
-                }
-            }
-        } else {
-            let (child_stdout, parent_stdout) = vfs.pipe().await.into_sys(strand)?;
-            let child_stderr = child_stdout.try_clone().await.into_sys(strand)?;
-            command.stdout(child_stdout).into_sys(strand)?;
-            command.stderr(child_stderr).into_sys(strand)?;
-            stdout_pipe = Some(parent_stdout);
-        }
-    } else if !stdout_direct {
+    if !stdout_direct {
         let (child_stdout, parent_stdout) = vfs.pipe().await.into_sys(strand)?;
         command.stdout(child_stdout).into_sys(strand)?;
         stdout_pipe = Some(parent_stdout);
+    }
+    if stderr_merge {
+        command.stderr_to_stdout().into_sys(strand)?;
     }
 
     if !stderr_inherit

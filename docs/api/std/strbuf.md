@@ -301,8 +301,8 @@ let buf = StrBuf()
 run.uname -r stdout: $buf
 ```
 
-Framing is the caller's to choose, which is what lets a `StrBuf` stand in for
-any other sink without changing what gets written:
+Line termination is the caller's to choose, so a `StrBuf` can stand in for any
+other sink without changing what gets written:
 
 ```
 let buf = StrBuf()

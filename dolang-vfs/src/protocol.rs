@@ -296,6 +296,7 @@ pub(crate) enum StdioRecvTarget {
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) enum StdioSendTarget {
     Null,
+    Stdout,
     Native(OsHandle),
     Opaque(Cite<crate::session::StdioSendMarker>),
 }

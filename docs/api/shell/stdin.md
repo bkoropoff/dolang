@@ -29,8 +29,8 @@ let head = shell.stdin.read 64
 
 ### `lines()`
 
-Returns a `Stdin` framed into lines. This is the default framing, so it is only
-needed to undo a previous `chunks()`.
+Returns a `Stdin` that yields lines. This is the default, so it is only needed
+to undo a previous `chunks()`.
 
 #### Returns
 
@@ -38,7 +38,7 @@ needed to undo a previous `chunks()`.
 
 ### `chunks()`
 
-Returns a `Stdin` framed into arbitrary-sized [`Bin`](../std/bin.md) chunks.
+Returns a `Stdin` that yields arbitrary-sized [`Bin`](../std/bin.md) chunks.
 
 #### Returns
 
@@ -53,8 +53,8 @@ for chunk = shell.stdin.chunks()
 
 ### Iteration
 
-`Stdin` is an [iterator](../std/iter.md). Iteration yields whichever
-[framing](./index.md#stream-framing) the handle carries, defaulting to lines.
+`Stdin` is an [iterator](../std/iter.md). Iteration yields lines by default;
+`lines()` and `chunks()` select the kind of value it yields.
 A line **includes its terminator**, so [`chomp`](../std/iter.md#chomp) is how
 you ask for one without:
 

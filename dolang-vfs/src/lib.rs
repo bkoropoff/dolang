@@ -199,6 +199,9 @@ pub trait Command {
     fn stdin_inherit(&mut self) -> io::Result<&mut Self>;
     /// Inherits the host process's standard output.
     fn stdout_inherit(&mut self) -> io::Result<&mut Self>;
+    /// Connects the child's standard output to the parent process's standard
+    /// error.
+    fn stdout_inherit_stderr(&mut self) -> io::Result<&mut Self>;
     /// Connects the child's standard input to the null device.
     fn stdin_null(&mut self) -> &mut Self;
     /// Connects the child's standard output to the null device.
@@ -207,7 +210,11 @@ pub trait Command {
     fn stderr(&mut self, stdio: Self::StdioSend) -> io::Result<&mut Self>;
     /// Inherits the host process's standard error.
     fn stderr_inherit(&mut self) -> io::Result<&mut Self>;
-    /// Redirects the child's standard error to its standard output.
+    /// Connects the child's standard error to the same destination as its
+    /// configured standard output.
+    fn stderr_to_stdout(&mut self) -> io::Result<&mut Self>;
+    /// Connects the child's standard error to the parent process's standard
+    /// output.
     fn stderr_inherit_stdout(&mut self) -> io::Result<&mut Self>;
     /// Connects the child's standard error to the null device.
     fn stderr_null(&mut self) -> &mut Self;
@@ -944,6 +951,19 @@ impl<'a> Command for AnyCommand<'a> {
         Ok(self)
     }
 
+    fn stdout_inherit_stderr(&mut self) -> io::Result<&mut Self> {
+        self.stdout = None;
+        match &mut self.inner {
+            AnyCommandInner::Client(builder) => {
+                builder.stdout_inherit_stderr()?;
+            }
+            AnyCommandInner::Direct(builder) => {
+                builder.stdout_inherit_stderr()?;
+            }
+        }
+        Ok(self)
+    }
+
     fn stdin_null(&mut self) -> &mut Self {
         self.stdin = None;
         match &mut self.inner {
@@ -983,6 +1003,19 @@ impl<'a> Command for AnyCommand<'a> {
             }
             AnyCommandInner::Direct(builder) => {
                 builder.stderr_inherit()?;
+            }
+        }
+        Ok(self)
+    }
+
+    fn stderr_to_stdout(&mut self) -> io::Result<&mut Self> {
+        self.stderr = None;
+        match &mut self.inner {
+            AnyCommandInner::Client(builder) => {
+                builder.stderr_to_stdout()?;
+            }
+            AnyCommandInner::Direct(builder) => {
+                builder.stderr_to_stdout()?;
             }
         }
         Ok(self)

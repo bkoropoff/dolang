@@ -6,11 +6,11 @@ the rest of the console interface.
 [`capture`](./index.md#capture-console-func-args-mode) wraps a plain sink in one
 of these automatically.
 
-## Framing
+## Output mode
 
 The `mode:` given at construction fixes how written data is divided into
-values, for the console's lifetime. Both framings are lossless — the values
-concatenate back to exactly the bytes that were written.
+values for the console's lifetime. In either mode, the values concatenate back
+to exactly the bytes that were written.
 
 - `:LINE:` — one [`Str`](../std/str.md) per complete line, **terminator
   included**. The default.
@@ -44,7 +44,7 @@ Wraps `sink`.
 
 | Name        | Type                     | Description                        |
 | ----------- | ------------------------ | ---------------------------------- |
-| `sink`      | [`Sink`](../std/sink.md) | Where framed values are written    |
+| `sink`      | [`Sink`](../std/sink.md) | Where output values are written    |
 | `can_style` | `bool?`                  | Emit ANSI styling (default false)  |
 | `mode`      | [`sym`](../std/sym.md)?  | `:LINE:` (default) or `:CHUNK:`    |
 

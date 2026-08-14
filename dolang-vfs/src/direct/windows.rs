@@ -1810,6 +1810,13 @@ impl DirectCommand<'_> {
         ))
     }
 
+    pub(super) fn impl_stdout_inherit_stderr(&mut self) -> io::Result<&mut Self> {
+        self.stdout = Some(std::process::Stdio::from(
+            std::io::stderr().as_handle().try_clone_to_owned()?,
+        ));
+        Ok(self)
+    }
+
     pub(super) fn impl_stderr_inherit_stdout(&mut self) -> io::Result<&mut Self> {
         self.stderr = Some(std::process::Stdio::from(
             std::io::stdout().as_handle().try_clone_to_owned()?,

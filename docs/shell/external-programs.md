@@ -1,0 +1,243 @@
+# External Programs
+
+External programs are available through the [`proc.run`](../api/proc-run.md)
+module. Programs inherit the current strand's shell context, including its
+working directory, environment, and standard streams.
+
+```
+import proc.run:
+  - git
+  - sort
+
+git status --short
+sort stdin: $["c", "a", "b"].crimp()
+```
+
+## Program Lookup
+
+Access a program by field through `run`, import its name directly, or index
+`run` with a name or path. The resulting proxy object is callable:
+
+```
+run.git status
+run["/usr/local/bin/tool"] --version
+
+import proc.run:
+  - make
+
+make -j4
+```
+
+Alternatively, call `run` directly with a path or name:
+
+```
+run gcc -o main -O2 main.c
+```
+
+Calling a program resolves its executable using the current VFS and `PATH`.
+Use [`.which()`](../api/proc-run.md#which) to resolve it without running it. It
+returns the executable's path, or `nil` if the program is not found:
+
+```
+let git = run.git.which()
+if git
+  echo "using $git"
+else
+  echo "git is not installed"
+```
+
+## Working Directory and Environment
+
+Programs inherit the current strand's working directory and environment. Use
+[`cd`](../api/shell/index.md#cd-path-func) and
+[`env`](../api/shell/index.md#env) to override them for a scoped block:
+
+```
+cd build do
+  env LANG: C do
+    run make
+```
+
+## Redirecting I/O
+
+Without explicit redirects, a program's stdin/stdout is connected to the
+current strand's input `Iter` and output `Sink`, while stderr is connected to
+the current [console](../api/term/console.md). Use `stdin:`, `stdout:`, and
+`stderr:` to replace those connections for one invocation.
+
+Each redirect accepts a path or an `Iter`/`Sink`.
+[`std.null`](../api/std/null.md) provides empty input and discards output:
+
+```
+import std
+
+# Read and write files.
+run sort stdin: unsorted.txt stdout: sorted.txt
+
+# Supply values and collect output values.
+let lines = []
+run sort stdin: ["c\n", "a\n", "b\n"] stdout: $lines
+
+# Discard a stream
+run tool stdout: $std.null
+# Merge stderr into stdout.
+run tool stdout: combined.log stderr: :STDOUT:
+```
+
+An [`fs.File`](../api/fs/file.md) can be used directly as an input or output.
+
+See [I/O Redirection](../api/proc-run.md#io-redirection) for all accepted
+values and [Terminal Output](./terminal-output.md) for the distinction between
+the output stream and the console.
+
+## Capturing Output
+
+Use [`sub`](../api/proc/index.md#sub-func-chomp) when the result should be one
+string. By default, it removes one trailing line ending from the completed
+capture:
+
+```
+let revision = sub do run.git rev-parse HEAD
+let exact = sub chomp: false do run.tool
+```
+
+`sub` captures the strand output stream, not the console. A program's stderr
+still goes to the console unless it is redirected. Merge stderr into stdout to
+capture both:
+
+```
+let transcript = sub do run.tool stderr: :STDOUT:
+```
+
+Redirect stdout or stderr to a sink when the caller needs individual values,
+binary chunks, or a streaming consumer:
+
+```
+let lines = []
+run git status --short stdout: $lines
+
+let bytes = BinBuf()
+run gzip -c data.txt stdout: $bytes mode: :CHUNK:
+```
+
+In the first example, `lines` receives one `Str` per line. In the second,
+`bytes` receives `Bin` chunks and retains the exact compressed output. The
+[`mode:`](#output-mode) argument chooses between these forms.
+
+Use [`term.sub`](../api/term/index.md#sub-func-chomp-can_style-args) when the
+goal is to capture any console-bound output, including a program's unredirected
+stderr:
+
+```
+let diagnostics = term.sub do run tool
+```
+
+## Pipelines
+
+External programs integrate with
+[`strand.pipeline`](../api/strand/index.md#pipeline-stage-stages-input-output)
+
+```
+import 
+  strand:
+    - pipeline
+  proc.run:
+    - cat
+    - grep
+    - sort
+
+pipeline
+  do cat messages.log
+  do grep ERROR
+  do sort
+```
+
+When two external program stages are adjacent, the pipeline connects their
+stdio streams directly. Bytes pass from the first program's stdout to the
+second program's stdin without becoming Do values.
+
+A Do stage adjacent to an external program receives discrete values. In this
+example, `each` receives `Str` values for each line from `cat`, and `collect`
+returns an array:
+
+```
+import
+  strand:
+    - pipeline
+    - each
+    - collect
+  proc.run:
+    - cat
+
+let lines = pipeline
+  do cat messages.log
+  do each do |line| line.upper()
+  do collect()
+```
+
+The `input:` and `output:` arguments set the endpoints of the whole pipeline.
+See [Pipelines](../language/concurrency.md#pipelines) for built-in Do stages,
+custom stages, cancellation, and error handling.
+
+## Termination
+
+A nonzero exit status raises [`proc.Error`](../api/proc/error.md). Canceling a
+strand running a program terminates that program. Background programs launched
+under `strand.spawn` or `strand.stream` are terminated as a process group on
+Unix.
+
+Use
+[`proc.with_policy`](../api/proc/index.md#with_policy-func-signal-grace-force)
+to change termination defaults for a block, or `policy:` for one invocation:
+
+```
+run worker policy: {signal: :INT:, grace: 10.0, force: true}
+```
+
+Windows uses `CTRL_BREAK_EVENT`; `signal:` overrides apply only to Unix
+targets.
+
+## External I/O and Do values
+
+An external program reads and writes byte streams, while a Do pipeline stage
+reads from an [`Iter`](../api/std/iter.md) and writes to a
+[`Sink`](../api/std/sink.md). At a boundary between the two, `run` translates
+in each direction:
+
+- For stdin, `run` takes values from the input `Iter` and writes each value's
+  bytes to the program. `Bin` values are written verbatim, while other types
+  are coerced to `Str`. It adds no separator or line ending.
+- For stdout and stderr, `run` reads bytes from the program, divides them into
+  values, and puts those values into the output `Sink`.
+
+This applies both to the implicit `Iter` and `Sink` in a pipeline and to values
+given explicitly with `stdin:`, `stdout:`, or `stderr:`. Certain types pass the
+underlying stream directly when possible to avoid the round-trip through a Do
+value, such as `File` handles and the `shell.stdin` and `shell.stdout`
+singletons.
+
+### Output Mode
+
+The `mode:` argument controls how stdout or stderr bytes are divided into
+values:
+
+| Mode      | Yields                                                        |
+| --------- | ------------------------------------------------------------- |
+| `:LINE:`  | one [`Str`](../api/std/str.md) per line, line ending included |
+| `:CHUNK:` | arbitrary-sized [`Bin`](../api/std/bin.md) values             |
+
+`:LINE:` is the default. A stream whose last line has no terminator simply
+yields a final value without one. Concatenating the values from either mode
+reproduces the program's output byte for byte.
+
+Adding or removing a line ending is a separate, explicit step. Use
+[`chomp`](../api/std/iter.md#chomp) and
+[`crimp`](../api/std/iter.md#crimp-terminator) on an iterator, or
+[`prechomp`](../api/std/sink.md#prechomp) and
+[`precrimp`](../api/std/sink.md#precrimp-terminator) on a sink:
+
+```
+let sorted = []
+run sort stdin: $["c", "a", "b"].crimp() stdout: $sorted.prechomp()
+# sorted == ["a", "b", "c"]
+```

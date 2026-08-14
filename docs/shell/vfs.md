@@ -114,19 +114,17 @@ context, including its original working directory and environment.
 speaks the VFS protocol on its input and output pipe, typically by immediately
 running `dolang-vfs --stdio`.
 [`Vfs.unix_socket`](../api/shell/vfs.md#unix_socket-path-key) connects to a
-`dolang-vfs --listen <socket_path>` instance on Unix, and
+`dolang-vfs --listen SOCKET` or `--accept SOCKET` instance on Unix, and
 [`Vfs.windows_admin`](../api/shell/vfs.md#windows_admin-cd-env)
 performs Windows UAC elevation.
 
-A socket connection can be authenticated with a pre-shared key, which both
+A Unix socket connection can be authenticated with a pre-shared key, which both
 ends prove knowledge of during the handshake. This is worth doing when the
-socket's permissions cannot identify the peer, because the uid that will
-connect is not knowable in advance — a container runtime may map ids however it
-likes, so the socket is bound `0666` and anything able to traverse the
-containing directory can reach the agent, or replace its socket. Start the
-agent with `dolang-vfs --key-stdin --accept <socket_path>`,
-write the key to its standard input as a single length byte followed by that
-many bytes, and pass the same key to `Vfs.unix_socket`. `--accept` serves one
+permissions on the socket directory cannot adequately gate access to it, as in
+cross-container workflows with ambiguous or incorrect UID mapping. Start the
+agent with `dolang-vfs --key-stdin --accept SOCKET`, write the key to
+its standard input as a single length byte followed by that many bytes, and
+pass the same key to `Vfs.unix_socket`. `--accept` serves one successfully
 authenticated client and unlinks the socket as soon as that session is
 established.
 
@@ -134,7 +132,7 @@ The helpers that start an agent for you — `docker.with`, `podman.with`, their
 `build` counterparts, `toolbx.with`, and `sudo.with` — do this themselves,
 generating a fresh key per session.
 
-Unix-socket and Windows administrator connections are resolved through the
+Unix socket and Windows administrator connections are resolved through the
 active context. This makes it possible to enter an SSH host and then connect to
 a container VFS reachable from that host, or to UAC elevate from
 WSL.
@@ -163,8 +161,8 @@ stable release.
 `dolang-vfs` executes arbitrary operations with its target identity. Always
 restrict access to its client endpoint. Do not run the client endpoint on a
 system you do not trust, as a local administrator could possibly take control
-of it. The protocol is not encrypted, so always tunnel it over a secure
-channel such as SSH if traversing a network.
+of it. The protocol is not encrypted, so always tunnel it over a secure channel
+such as SSH if traversing a network.
 
 ## Limitations
 

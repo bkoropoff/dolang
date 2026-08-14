@@ -7,12 +7,13 @@ import std
     - IterStop
     - MissingPosError
     - Nil
+    - Null
     - Sink
     - SinkStop
     - TypeError
     - Value
     - ZeroDivError
-    - NULLITER
+    - null
   strand:
     - channel
 
@@ -61,7 +62,8 @@ assert_eq (type $ [].sink()) $Sink
 
 assert_eq (type {}) $Dict
 
-assert_eq (type NULLITER) $Type
+assert_eq $null $Null
+assert_eq (type null) $Type
 
 # Errors
 assert_err_type $TypeError do (5 + "hello")

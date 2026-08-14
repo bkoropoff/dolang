@@ -334,7 +334,6 @@ run gzip -c stdin: ["hello"] stdout: $buf mode: :CHUNK:
 assert (buf.starts_with b"\x1f\x8b")
 ```
 
-Combined with [chunk framing](../shell/index.md#stream-framing), this makes a
-`BinBuf` an exact byte-for-byte capture of a stream. Framing is the caller's to
-choose — use [`precrimp`](./sink.md#precrimp-terminator) to terminate written
-values.
+Combined with [`mode: :CHUNK:`](../../shell/external-programs.md#output-mode),
+this makes a `BinBuf` an exact byte-for-byte capture of a stream. Use
+[`precrimp`](./sink.md#precrimp-terminator) to terminate written values.

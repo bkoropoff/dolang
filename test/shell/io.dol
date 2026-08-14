@@ -182,6 +182,22 @@ def stdout_and_stderr_handles_do_not_cross()
     assert_eq $err.read() "on-stderr\n"
 
 #[test]
+def stderr_can_merge_into_stdout()
+  with_temp_dir do |dir|
+    let src = r|
+      import shell
+      shell.stdout.write "on-stdout\n"
+      shell.stderr.write "on-stderr\n"
+
+    let path = script $dir merge.dol $src
+    let out = (dir / "out.txt")
+    run $shell.exe --no-cache $path stdout: $out stderr: :STDOUT:
+
+    let merged = out.read()
+    assert $merged.contains("on-stdout\n")
+    assert $merged.contains("on-stderr\n")
+
+#[test]
 def console_write_is_verbatim_but_echo_sanitizes()
   # Sanitization belongs to `echo`, not to the console. Run in a child so the
   # escape lands in a captured file rather than on the test runner's terminal.
