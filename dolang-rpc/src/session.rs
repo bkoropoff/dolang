@@ -80,6 +80,11 @@ const WIRE_GIFT: u8 = 0;
 /// Wire discriminant: the resource belongs to the receiver.
 const WIRE_CITATION: u8 = 1;
 
+/// Collapse a remote grant total before it can approach the integer ceiling.
+/// One reference is retained for the live local handle; the rest are returned
+/// to the owner in one counted release.
+const GRANT_RELEASE_THRESHOLD: u32 = u32::MAX / 2;
+
 /// A value that can be registered in a session's opaque-object table.
 ///
 /// `Marker` is the public protocol-level type carried by [`Gift`] and [`Cite`];
@@ -600,7 +605,12 @@ impl Session {
         let Some(entry) = tables.local.get_mut(&id) else {
             return;
         };
-        entry.granted = entry.granted.saturating_sub(count);
+        // Saturation deliberately immortalizes the entry for this session.
+        // Decrementing it could make a wrapped or otherwise unrepresentable
+        // grant total appear finite again.
+        if entry.granted != u32::MAX {
+            entry.granted = entry.granted.saturating_sub(count);
+        }
         if entry.granted == 0 && entry.handle.upgrade().is_none() {
             tables.local.remove(&id);
         }
@@ -611,7 +621,7 @@ impl Session {
     fn gift(&self, handle: &Arc<LocalRef>) -> Escrowed {
         let mut tables = self.tables.lock().unwrap();
         if let Some(entry) = tables.local.get_mut(&handle.id) {
-            entry.granted += 1;
+            entry.granted = entry.granted.saturating_add(1);
         }
         Escrowed::Gift(handle.clone())
     }
@@ -619,26 +629,41 @@ impl Session {
     /// Mirrors an arriving gift for `id`, merging into the handle this
     /// endpoint already holds when there is one.
     fn receive(self: &Arc<Self>, id: u64) -> Inner {
-        let mut tables = self.tables.lock().unwrap();
-        let session = Arc::downgrade(self);
-        let entry = tables.remote.entry(id).or_insert_with(|| RemoteEntry {
-            granted: 0,
-            handle: Weak::new(),
-        });
-        entry.granted += 1;
-        // A failed upgrade means the previous handle is mid-`Drop`. It will
-        // find the slot no longer pointing at it and leave the running total —
-        // including its own references and the one arriving now — to the fresh
-        // handle installed here.
-        if let Some(handle) = entry.handle.upgrade() {
-            return Inner::Remote(handle);
+        let (handle, release) = {
+            let mut tables = self.tables.lock().unwrap();
+            let session = Arc::downgrade(self);
+            let entry = tables.remote.entry(id).or_insert_with(|| RemoteEntry {
+                granted: 0,
+                handle: Weak::new(),
+            });
+            entry.granted = entry.granted.saturating_add(1);
+            let release = if entry.granted >= GRANT_RELEASE_THRESHOLD {
+                let release = entry.granted - 1;
+                entry.granted = 1;
+                Some(release)
+            } else {
+                None
+            };
+            // A failed upgrade means the previous handle is mid-`Drop`. It will
+            // find the slot no longer pointing at it and leave the running total —
+            // including its own references and the one arriving now — to the fresh
+            // handle installed here.
+            let handle = if let Some(handle) = entry.handle.upgrade() {
+                handle
+            } else {
+                let handle = Arc::new(RemoteRef {
+                    id,
+                    serial: self.serial,
+                    session,
+                });
+                entry.handle = Arc::downgrade(&handle);
+                handle
+            };
+            (handle, release)
+        };
+        if let Some(count) = release {
+            self.sink.release(id, count);
         }
-        let handle = Arc::new(RemoteRef {
-            id,
-            serial: self.serial,
-            session,
-        });
-        entry.handle = Arc::downgrade(&handle);
         Inner::Remote(handle)
     }
 
@@ -782,7 +807,9 @@ impl Ledger {
                 continue;
             };
             let mut tables = session.tables.lock().unwrap();
-            if let Some(entry) = tables.local.get_mut(&handle.id) {
+            if let Some(entry) = tables.local.get_mut(&handle.id)
+                && entry.granted != u32::MAX
+            {
                 entry.granted = entry.granted.saturating_sub(1);
             }
         }
@@ -1039,6 +1066,65 @@ mod tests {
         assert_eq!(session.tables.lock().unwrap().local[&0].granted, 1);
         ledger.rescind();
         assert_eq!(session.tables.lock().unwrap().local[&0].granted, 0);
+    }
+
+    #[test]
+    fn saturated_owner_grant_count_is_immortal() {
+        let (session, _) = session();
+        let opaque = session.register(Value(42));
+        let Inner::Local(handle) = &opaque.inner else {
+            unreachable!()
+        };
+        session
+            .tables
+            .lock()
+            .unwrap()
+            .local
+            .get_mut(&0)
+            .unwrap()
+            .granted = u32::MAX - 1;
+
+        let escrow = session.gift(handle);
+        assert_eq!(session.tables.lock().unwrap().local[&0].granted, u32::MAX);
+        session.release(0, u32::MAX);
+        assert_eq!(session.tables.lock().unwrap().local[&0].granted, u32::MAX);
+
+        let ledger = Ledger {
+            items: vec![escrow],
+        };
+        ledger.rescind();
+        assert_eq!(session.tables.lock().unwrap().local[&0].granted, u32::MAX);
+        drop(opaque);
+        assert!(session.tables.lock().unwrap().local.contains_key(&0));
+    }
+
+    #[test]
+    fn remote_grants_are_collapsed_at_the_high_threshold() {
+        let (session, recorder) = session();
+        let first: Gift<Marker> = Gift::new(session.take_gift(WIRE_GIFT, 7).unwrap());
+        session
+            .tables
+            .lock()
+            .unwrap()
+            .remote
+            .get_mut(&7)
+            .unwrap()
+            .granted = GRANT_RELEASE_THRESHOLD - 1;
+
+        let second: Gift<Marker> = Gift::new(session.take_gift(WIRE_GIFT, 7).unwrap());
+        assert_eq!(first, second);
+        assert_eq!(session.tables.lock().unwrap().remote[&7].granted, 1);
+        assert_eq!(
+            *recorder.0.lock().unwrap(),
+            vec![(7, GRANT_RELEASE_THRESHOLD - 1)]
+        );
+
+        drop(first);
+        drop(second);
+        assert_eq!(
+            *recorder.0.lock().unwrap(),
+            vec![(7, GRANT_RELEASE_THRESHOLD - 1), (7, 1)]
+        );
     }
 
     #[test]

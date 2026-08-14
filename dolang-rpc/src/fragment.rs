@@ -272,6 +272,7 @@ struct HandshakeV1 {
     /// This endpoint's role-specific authentication digest, when a key is
     /// configured. See [`crate::auth`].
     key: Option<[u8; 32]>,
+    max_concurrent_calls: u32,
 }
 
 impl fmt::Debug for HandshakeV1 {
@@ -285,6 +286,7 @@ impl fmt::Debug for HandshakeV1 {
             .field("max_incomplete_messages", &self.max_incomplete_messages)
             .field("max_incomplete_trailers", &self.max_incomplete_trailers)
             .field("key", &self.key.map(|_| "<redacted>"))
+            .field("max_concurrent_calls", &self.max_concurrent_calls)
             .finish()
     }
 }
@@ -307,6 +309,7 @@ impl HandshakeV1 {
             max_incomplete_messages: clamp(limits.max_incomplete_messages),
             max_incomplete_trailers: clamp(limits.max_incomplete_trailers),
             key: auth.map(|auth| auth.advertise()),
+            max_concurrent_calls: clamp(limits.max_concurrent_calls),
         }
     }
 
@@ -339,6 +342,9 @@ impl HandshakeV1 {
         limits.max_incomplete_trailers = limits
             .max_incomplete_trailers
             .min(self.max_incomplete_trailers as usize);
+        limits.max_concurrent_calls = limits
+            .max_concurrent_calls
+            .min(self.max_concurrent_calls as usize);
     }
 }
 
@@ -1143,7 +1149,7 @@ pub(crate) enum AbortOutcome {
     /// The send was discarded before completion. `started` indicates
     /// whether any bytes (a FIRST fragment) were already sent, in which
     /// case the caller must send `ControlSend::Abort` for `id`.
-    Discarded { started: bool },
+    Discarded { started: bool, dispatched: bool },
 }
 
 pub(crate) enum AdvanceOutcome {
@@ -1330,11 +1336,15 @@ impl Scheduler {
             if let Some(ledger) = send.ledger.take() {
                 ledger.rescind();
             }
-            return AbortOutcome::Discarded { started: false };
+            return AbortOutcome::Discarded {
+                started: false,
+                dispatched: false,
+            };
         }
         if let Some(pos) = self.active.iter().position(|s| s.id == id) {
             let mut send = self.active.remove(pos).expect("position was just found");
             let started = send.started;
+            let dispatched = send.ledger.is_none();
             if let Trailer::Stream(shared) = &send.trailer {
                 SendShared::discard(shared);
             }
@@ -1347,7 +1357,10 @@ impl Scheduler {
             if send.multi_fragment {
                 self.free_fragmented_slot();
             }
-            return AbortOutcome::Discarded { started };
+            return AbortOutcome::Discarded {
+                started,
+                dispatched,
+            };
         }
         AbortOutcome::NotActive
     }
@@ -1741,6 +1754,14 @@ mod tests {
         let mut buf = BytesMut::with_capacity(len);
         read_payload(frame, &mut buf, len).await.unwrap();
         buf.freeze()
+    }
+
+    #[test]
+    fn hardened_defaults_bound_calls_and_native_handles() {
+        let limits = Limits::default();
+        assert_eq!(limits.max_concurrent_calls, 64);
+        assert_eq!(limits.max_handles_per_fragment, 8);
+        assert_eq!(limits.max_handles_per_message, 8);
     }
 
     #[test]
@@ -2740,7 +2761,7 @@ mod tests {
             Default::default(),
         );
         match scheduler.try_cancel_active(1) {
-            AbortOutcome::Discarded { started } => assert!(!started),
+            AbortOutcome::Discarded { started, .. } => assert!(!started),
             AbortOutcome::NotActive => panic!("expected Discarded"),
         }
     }
@@ -2765,7 +2786,7 @@ mod tests {
             send.started = true;
         }
         match scheduler.try_cancel_active(1) {
-            AbortOutcome::Discarded { started } => assert!(started),
+            AbortOutcome::Discarded { started, .. } => assert!(started),
             AbortOutcome::NotActive => panic!("expected Discarded"),
         }
     }
@@ -2796,7 +2817,7 @@ mod tests {
         );
         assert_eq!(scheduler.waiting.len(), 1);
         match scheduler.try_cancel_active(2) {
-            AbortOutcome::Discarded { started } => assert!(!started),
+            AbortOutcome::Discarded { started, .. } => assert!(!started),
             AbortOutcome::NotActive => panic!("expected Discarded"),
         }
         assert_eq!(scheduler.waiting.len(), 0);

@@ -3,7 +3,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     task::{Context, Poll},
     time::Duration,
@@ -53,6 +53,14 @@ where
 #[cfg(unix)]
 async fn unbound_client_unix<P: Protocol>(stream: std::os::unix::net::UnixStream) -> Client<P> {
     builder().client_unix(stream).await.unwrap().bind()
+}
+
+#[cfg(unix)]
+async fn unbound_client_unix_with_builder<P: Protocol>(
+    b: Builder,
+    stream: std::os::unix::net::UnixStream,
+) -> Client<P> {
+    b.client_unix(stream).await.unwrap().bind()
 }
 
 struct ShortWriter<W> {
@@ -132,6 +140,88 @@ async fn multiplexes_out_of_order_calls() {
     let fast = client.call(Request::Echo(7));
     assert_eq!(fast.await.unwrap().into_response(), Response(7));
     assert_eq!(slow.await.unwrap().into_response(), Response(30));
+}
+
+#[tokio::test]
+async fn concurrent_call_limit_withholds_requests_until_a_terminal_response() {
+    let (client_io, server_io) = tokio::io::duplex(4096);
+    let dispatched = Arc::new(AtomicUsize::new(0));
+    let first_started = Arc::new(tokio::sync::Notify::new());
+    let server_dispatched = dispatched.clone();
+    let server_first_started = first_started.clone();
+    tokio::spawn(async move {
+        builder()
+            .max_concurrent_calls(1)
+            .server(server_io)
+            .await
+            .unwrap()
+            .bind::<Test>()
+            .serve(async move |context, request| {
+                server_dispatched.fetch_add(1, Ordering::SeqCst);
+                let response = match request {
+                    Request::Delay(ms) => {
+                        server_first_started.notify_one();
+                        tokio::time::sleep(Duration::from_millis(ms)).await;
+                        Response(ms as u32)
+                    }
+                    Request::Echo(value) => Response(value),
+                    _ => unreachable!(),
+                };
+                context.respond(response);
+            })
+            .await
+    });
+    let client = unbound_client_with_builder::<_, Test>(
+        // The server's lower advertised value must win negotiation.
+        builder().max_concurrent_calls(2),
+        client_io,
+    )
+    .await;
+    let first = client.call(Request::Delay(30));
+    first_started.notified().await;
+    let second = client.call(Request::Echo(7));
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    assert_eq!(dispatched.load(Ordering::SeqCst), 1);
+    assert_eq!(first.await.unwrap().into_response(), Response(30));
+    assert_eq!(second.await.unwrap().into_response(), Response(7));
+    assert_eq!(dispatched.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn cancelling_a_call_waiting_for_admission_never_dispatches_it() {
+    let (client_io, server_io) = tokio::io::duplex(4096);
+    let dispatched = Arc::new(AtomicUsize::new(0));
+    let first_started = Arc::new(tokio::sync::Notify::new());
+    let server_dispatched = dispatched.clone();
+    let server_first_started = first_started.clone();
+    tokio::spawn(async move {
+        builder()
+            .max_concurrent_calls(1)
+            .server(server_io)
+            .await
+            .unwrap()
+            .bind::<Test>()
+            .serve(async move |context, request| {
+                server_dispatched.fetch_add(1, Ordering::SeqCst);
+                let Request::Delay(ms) = request else {
+                    panic!("queued request was dispatched")
+                };
+                server_first_started.notify_one();
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+                context.respond(Response(ms as u32));
+            })
+            .await
+    });
+    let client =
+        unbound_client_with_builder::<_, Test>(builder().max_concurrent_calls(1), client_io).await;
+    let first = client.call(Request::Delay(20));
+    first_started.notified().await;
+    let mut queued = client.call(Request::Echo(7));
+    queued.cancel();
+    assert!(matches!(queued.await, Err(Error::Cancelled)));
+    assert_eq!(first.await.unwrap().into_response(), Response(20));
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    assert_eq!(dispatched.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -877,6 +967,7 @@ mod unix_handles {
         let (client_stream, server_stream) = std::os::unix::net::UnixStream::pair().unwrap();
         tokio::spawn(async move {
             builder()
+                .max_handles_per_message(65)
                 .server_unix(server_stream)
                 .await
                 .unwrap()
@@ -888,7 +979,11 @@ mod unix_handles {
                 })
                 .await
         });
-        let client = unbound_client_unix::<HandlesProtocol>(client_stream).await;
+        let client = unbound_client_unix_with_builder::<HandlesProtocol>(
+            builder().max_handles_per_message(65),
+            client_stream,
+        )
+        .await;
         let mut reads = Vec::new();
         let mut writes = Vec::new();
         for _ in 0..65 {

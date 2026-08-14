@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet, VecDeque},
     future::Future,
     mem,
     pin::Pin,
@@ -13,10 +13,7 @@ use std::{any::TypeId, io};
 use tokio::sync::{mpsc, oneshot};
 
 #[cfg(windows)]
-use std::{
-    collections::HashSet,
-    os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
-};
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::GetProcessId;
@@ -136,6 +133,10 @@ enum Outgoing<Q> {
     Release {
         id: u64,
         count: u32,
+    },
+    /// A terminal response or error arrived for an active request.
+    Terminal {
+        id: u64,
     },
 }
 
@@ -546,6 +547,7 @@ impl<P: Protocol> Writer<P> {
                 scheduler.admit_release(id, count);
                 Ok(())
             }
+            Outgoing::Terminal { .. } => unreachable!("handled by the writer loop"),
         }
     }
 
@@ -606,10 +608,16 @@ impl<P: Protocol> Writer<P> {
         Ok(())
     }
 
-    fn admit_cancel(&mut self, id: u64, scheduler: &mut Scheduler) {
+    fn admit_cancel(&mut self, id: u64, scheduler: &mut Scheduler) -> bool {
         match scheduler.try_cancel_active(id) {
-            AbortOutcome::NotActive => scheduler.admit_empty(Kind::Cancel, id),
-            AbortOutcome::Discarded { started } => {
+            AbortOutcome::NotActive => {
+                scheduler.admit_empty(Kind::Cancel, id);
+                false
+            }
+            AbortOutcome::Discarded {
+                started,
+                dispatched,
+            } => {
                 if started {
                     scheduler.admit_abort(id);
                 }
@@ -617,13 +625,47 @@ impl<P: Protocol> Writer<P> {
                 if !started && let Some(inner) = self.inner.upgrade() {
                     inner.fd_escrow.lock().unwrap().discard_unsent(id);
                 }
-                self.complete_err(id, Error::Cancelled);
+                if dispatched {
+                    scheduler.admit_empty(Kind::Cancel, id);
+                    false
+                } else {
+                    self.complete_err(id, Error::Cancelled);
+                    true
+                }
             }
         }
     }
 
+    async fn promote_waiting(
+        &mut self,
+        waiting: &mut VecDeque<Outgoing<P::Request>>,
+        active_calls: &mut HashSet<u64>,
+        scheduler: &mut Scheduler,
+    ) -> Result<(), Error> {
+        while active_calls.len() < self.limits.max_concurrent_calls {
+            let Some(message) = waiting.pop_front() else {
+                break;
+            };
+            let Outgoing::Request { id, .. } = &message else {
+                unreachable!("only requests wait for call admission")
+            };
+            let id = *id;
+            let Some(inner) = self.inner.upgrade() else {
+                break;
+            };
+            if !inner.pending.lock().unwrap().contains_key(&id) {
+                continue;
+            }
+            active_calls.insert(id);
+            self.admit(message, scheduler).await?;
+        }
+        Ok(())
+    }
+
     async fn run(mut self) -> Result<(), Error> {
         let mut scheduler = Scheduler::new(&self.limits);
+        let mut waiting = VecDeque::new();
+        let mut active_calls = HashSet::new();
         // Holding a clone of `Inner::outgoing` is what represents the
         // ability to still get a message in (see its doc comment), so the
         // channel closing — every clone gone — doubles as the shutdown
@@ -637,6 +679,7 @@ impl<P: Protocol> Writer<P> {
                 message = self.outgoing.recv(), if !closed => {
                     let Some(message) = message else {
                         closed = true;
+                        waiting.clear();
                         continue;
                     };
                     // No blanket `fail_all` here: `admit` already fails just
@@ -648,7 +691,26 @@ impl<P: Protocol> Writer<P> {
                     // doomed, only that this connection is. The reader is
                     // what authoritatively decides that (see the comment
                     // after this loop).
-                    self.admit(message, &mut scheduler).await?;
+                    match message {
+                        request @ Outgoing::Request { .. } => waiting.push_back(request),
+                        Outgoing::Cancel { id } => {
+                            if let Some(pos) = waiting.iter().position(
+                                |message| matches!(message, Outgoing::Request { id: waiting_id, .. } if *waiting_id == id),
+                            ) {
+                                waiting.remove(pos);
+                                self.complete_err(id, Error::Cancelled);
+                            } else if active_calls.contains(&id)
+                                && self.admit_cancel(id, &mut scheduler)
+                            {
+                                active_calls.remove(&id);
+                            }
+                        }
+                        Outgoing::Terminal { id } => {
+                            active_calls.remove(&id);
+                        }
+                        message => self.admit(message, &mut scheduler).await?,
+                    }
+                    self.promote_waiting(&mut waiting, &mut active_calls, &mut scheduler).await?;
                 }
                 // Not raced against anything: once ready, a fragment write
                 // is committed to the scheduler and must run to completion.
@@ -665,7 +727,11 @@ impl<P: Protocol> Writer<P> {
                     match result {
                         // A streaming trailer producer was dropped mid-message.
                         Ok(fragment::AdvanceOutcome::Aborted(id)) => {
-                            self.complete_err(id, Error::Cancelled);
+                            // The postcard payload has already reached the peer
+                            // before a streaming trailer can abort. Cancel the
+                            // dispatched handler and retain its call slot until
+                            // the resulting terminal message arrives.
+                            scheduler.admit_empty(Kind::Cancel, id);
                         }
                         Ok(fragment::AdvanceOutcome::None) => {}
                         #[cfg(target_os = "macos")]
@@ -734,11 +800,13 @@ impl<P: Protocol> Reader<P> {
                 #[cfg(windows)]
                 inner.handle_escrow.lock().unwrap().remove(&id);
                 inner.complete(id, Ok(CallResult { response, trailer }));
+                inner.send(Outgoing::Terminal { id });
             }
             Kind::Error => {
                 #[cfg(windows)]
                 inner.handle_escrow.lock().unwrap().remove(&id);
                 inner.complete(id, Err(Error::Cancelled));
+                inner.send(Outgoing::Terminal { id });
             }
             #[cfg(target_os = "macos")]
             Kind::Ack => {
@@ -798,6 +866,7 @@ impl<P: Protocol> Reader<P> {
                         #[cfg(windows)]
                         inner.handle_escrow.lock().unwrap().remove(&id);
                         inner.complete(id, Err(Error::Cancelled));
+                        inner.send(Outgoing::Terminal { id });
                     }
                 }
                 Event::Message(message) => {
