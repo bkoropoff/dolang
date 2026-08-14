@@ -702,35 +702,15 @@ impl<'v> Protocol<'v> for Array<'v> {
                     .splice(start..end, source_borrow.iter().map(Value::dup));
                 return Ok(());
             }
-            return strand.with_slots_sync(|strand, [mut replacement]| {
-                strand.sync(async |strand| {
-                    call!(strand, &strand.singletons().array, &mut replacement, &value).await
-                })?;
-                let source = replacement
-                    .downcast_native(strand, strand.builtin_types().array)
-                    .expect("array() produced non-array");
-                let source = source.to_strong();
-                let source_borrow = source.borrow().ok_or_else(|| Error::concurrency(strand))?;
-                if let Some(mut target_borrow) = this.receiver.borrow_mut() {
-                    target_borrow
-                        .inner
-                        .splice(start..end, source_borrow.inner.iter().map(Value::dup));
-                    return Ok(());
-                }
-                drop(source_borrow);
-                let snapshot = {
-                    let source_borrow =
-                        source.borrow().ok_or_else(|| Error::concurrency(strand))?;
-                    tuple::tuple(strand.vm(), source_borrow.inner.iter().map(Value::dup))
-                };
-                let snapshot = snapshot
-                    .borrow()
-                    .ok_or_else(|| Error::concurrency(strand))?;
-                this.borrow_mut(strand)?
-                    .inner
-                    .splice(start..end, snapshot.iter().map(Value::dup));
-                Ok(())
-            });
+            // Only a sequence with a settled length replaces a slice. Anything
+            // else -- a range, an iterator, a lone value -- would have to be
+            // drained to know what it is replacing the slice with, and a
+            // replacement whose length is discovered mid-splice is a worse
+            // outcome than saying so up front.
+            return Err(Error::type_error(
+                strand,
+                "range assignment requires an array or tuple",
+            ));
         }
         let index = index.to_i64(strand).map_err(|_| Error::index(strand))?;
         let mut borrow = this.borrow_mut(strand)?;

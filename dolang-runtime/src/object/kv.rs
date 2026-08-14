@@ -57,6 +57,14 @@ impl<'v> EntryValue<'v> {
     pub(crate) fn at(&self, index: usize) -> &Value<'v> {
         self.get(Some(index)).unwrap()
     }
+
+    /// The value a lookup without an instance resolves to.
+    ///
+    /// The most recently inserted one, so a duplicate key overrides the values
+    /// before it: last wins.
+    pub(crate) fn latest(&self) -> &Value<'v> {
+        self.get(None).expect("entry with no values")
+    }
 }
 
 pub(crate) struct Entry<'v> {
@@ -1039,7 +1047,7 @@ impl<'v> Inner<'v> {
         let inner: &Inner<'v> = (*borrow).as_ref();
         match inner.inner.find(hv, eq(strand, index)) {
             Some(pair) => {
-                Output::set(strand, out, unsafe { pair.as_ref().value.at(0) });
+                Output::set(strand, out, unsafe { pair.as_ref().value.latest() });
                 Ok(())
             }
             None => Err(Error::index(strand)),
@@ -1305,9 +1313,12 @@ impl<'v> Inner<'v> {
                             }
                         }
                         EntryValue::Multi(items) => {
+                            // Without an explicit instance, pop the first value
+                            // for the key, so repeated pops drain a multi-value
+                            // key in insertion order.
                             let subindex = match subindex {
                                 Some(subindex) => index::element(items.len(), subindex),
-                                None => Some(items.len().saturating_sub(1)),
+                                None => Some(0),
                             };
                             if let Some(subindex) = subindex {
                                 inner.total_pairs -= 1;

@@ -442,7 +442,7 @@ impl<'v> Protocol<'v> for Record<'v> {
                 key.as_sym(strand) == Some(field)
             }) {
             Some(pair) => {
-                value::Output::set(strand, out, unsafe { pair.as_ref().value.at(0) });
+                value::Output::set(strand, out, unsafe { pair.as_ref().value.latest() });
                 Ok(())
             }
             None => Err(Error::field(strand, field)),

@@ -54,7 +54,7 @@ returns the original data.
 [`Bin`](./bin.md)
 
 ```
-assert_eq (b"hello".without_prefix b"he") b"lo"
+assert_eq (b"hello".without_prefix b"he") b"llo"
 assert_eq (b"hello".without_prefix b"xx") b"hello"
 ```
 
@@ -168,9 +168,14 @@ Removes bytes (or specified characters) from both ends.
 
 #### Parameters
 
-| Name    | Type              | Description                                  |
-| ------- | ----------------- | -------------------------------------------- |
-| `chars` | [`Bin`](./bin.md) | bytes to trim (defaults to whitespace bytes) |
+| Name    | Type                                           | Description                                  |
+| ------- | ---------------------------------------------- | -------------------------------------------- |
+| `chars` | [`Bin`](./bin.md)\|[`Iterable`](./iterable.md) | bytes to trim (defaults to whitespace bytes) |
+
+The pattern is a set of *bytes*, from a [`Bin`](./bin.md) or from each element
+of an iterable of them, so bytes that are not valid UTF-8 are a pattern like
+any other. A [`Str`](./str.md) is not accepted: in a set, a multi-byte
+character would be split into bytes that mean nothing on their own.
 
 #### Returns
 
@@ -179,6 +184,8 @@ Removes bytes (or specified characters) from both ends.
 ```
 assert_eq (b"  hello  ".trim()) b"hello"
 assert_eq (b"xxhelloxx".trim b"x") b"hello"
+assert_eq (b"xyhelloyx".trim [b"x", b"y"]) b"hello"
+assert_eq (b"\x00\xffdata\xff\x00".trim b"\x00\xff") b"data"
 ```
 
 ### `trim_start chars?`
@@ -187,9 +194,9 @@ Removes bytes (or specified characters) from the start.
 
 #### Parameters
 
-| Name    | Type              | Description   |
-| ------- | ----------------- | ------------- |
-| `chars` | [`Bin`](./bin.md) | bytes to trim |
+| Name    | Type                                           | Description                                         |
+| ------- | ---------------------------------------------- | --------------------------------------------------- |
+| `chars` | [`Bin`](./bin.md)\|[`Iterable`](./iterable.md) | bytes to trim, as a set (see [`trim`](#trim-chars)) |
 
 #### Returns
 
@@ -197,6 +204,7 @@ Removes bytes (or specified characters) from the start.
 
 ```
 assert_eq (b"  hello  ".trim_start()) b"hello  "
+assert_eq (b"xxhelloxx".trim_start b"x") b"helloxx"
 ```
 
 ### `trim_end chars?`
@@ -205,9 +213,9 @@ Removes bytes (or specified characters) from the end.
 
 #### Parameters
 
-| Name    | Type              | Description   |
-| ------- | ----------------- | ------------- |
-| `chars` | [`Bin`](./bin.md) | bytes to trim |
+| Name    | Type                                           | Description                                         |
+| ------- | ---------------------------------------------- | --------------------------------------------------- |
+| `chars` | [`Bin`](./bin.md)\|[`Iterable`](./iterable.md) | bytes to trim, as a set (see [`trim`](#trim-chars)) |
 
 #### Returns
 
@@ -215,6 +223,7 @@ Removes bytes (or specified characters) from the end.
 
 ```
 assert_eq (b"  hello  ".trim_end()) b"  hello"
+assert_eq (b"xxhelloxx".trim_end b"x") b"xxhello"
 ```
 
 ### `chomp`

@@ -173,5 +173,5 @@ assert (!r1.contains 5)
 let r2 = Range 5 0 -1
 assert (r2.contains 5)
 assert (r2.contains 1)
-assert (!r1.contains 0)
+assert (!r2.contains 0)
 ```

@@ -198,9 +198,13 @@ Removes whitespace (or specified characters) from both ends.
 
 #### Parameters
 
-| Name    | Type  | Description                                 |
-| ------- | ----- | ------------------------------------------- |
-| `chars` | `Str` | characters to trim (defaults to whitespace) |
+| Name    | Type                                           | Description                                 |
+| ------- | ---------------------------------------------- | ------------------------------------------- |
+| `chars` | [`Str`](./str.md)\|[`Iterable`](./iterable.md) | characters to trim (defaults to whitespace) |
+
+The pattern is a set of *characters*, from a [`Str`](./str.md) or from each
+element of an iterable of them. A [`Bin`](./bin.md) is not accepted: bytes only
+become characters through a decode the caller should ask for.
 
 #### Returns
 
@@ -209,6 +213,7 @@ Removes whitespace (or specified characters) from both ends.
 ```
 assert_eq ("  hello  ".trim()) "hello"
 assert_eq ("xxhelloxx".trim "x") "hello"
+assert_eq ("xyhelloyx".trim ["x", "y"]) "hello"
 ```
 
 ### `trim_start chars?`
@@ -217,9 +222,9 @@ Removes whitespace (or specified characters) from the start.
 
 #### Parameters
 
-| Name    | Type              | Description        |
-| ------- | ----------------- | ------------------ |
-| `chars` | [`Str`](./str.md) | characters to trim |
+| Name    | Type                                           | Description                                              |
+| ------- | ---------------------------------------------- | -------------------------------------------------------- |
+| `chars` | [`Str`](./str.md)\|[`Iterable`](./iterable.md) | characters to trim, as a set (see [`trim`](#trim-chars)) |
 
 #### Returns
 
@@ -227,6 +232,7 @@ Removes whitespace (or specified characters) from the start.
 
 ```
 assert_eq ("  hello  ".trim_start()) "hello  "
+assert_eq ("xxhelloxx".trim_start "x") "helloxx"
 ```
 
 ### `trim_end chars?`
@@ -235,9 +241,9 @@ Removes whitespace (or specified characters) from the end.
 
 #### Parameters
 
-| Name    | Type              | Description        |
-| ------- | ----------------- | ------------------ |
-| `chars` | [`Str`](./str.md) | characters to trim |
+| Name    | Type                                           | Description                                              |
+| ------- | ---------------------------------------------- | -------------------------------------------------------- |
+| `chars` | [`Str`](./str.md)\|[`Iterable`](./iterable.md) | characters to trim, as a set (see [`trim`](#trim-chars)) |
 
 #### Returns
 
@@ -245,6 +251,7 @@ Removes whitespace (or specified characters) from the end.
 
 ```
 assert_eq ("  hello  ".trim_end()) "  hello"
+assert_eq ("xxhelloxx".trim_end "x") "xxhello"
 ```
 
 ### `chomp`

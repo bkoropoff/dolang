@@ -90,6 +90,18 @@ assert (!(b"hello" == "hello"))
 # type is bin
 assert_eq (type b"hello") $Bin
 
+# trim: the pattern is a set of bytes, from a `Bin` or an iterable of them.
+assert_eq (b"  foobar  ".trim()) b"foobar"
+assert_eq (b"xxfoobarxx".trim b"x") b"foobar"
+assert_eq (b"xyfoobaryx".trim [b"x", b"y"]) b"foobar"
+assert_eq (b"xxfoobarxx".trim_start b"x") b"foobarxx"
+assert_eq (b"xxfoobarxx".trim_end b"x") b"xxfoobar"
+# Bytes that are not valid UTF-8 are a pattern like any other, which is why
+# the pattern is a byte set rather than a set of characters.
+assert_eq (b"\x00\xffdata\xff\x00".trim b"\x00\xff") b"data"
+assert_eq (b"\xff\xfe".trim b"\xff\xfe") b""
+assert_eq (b"foobar".trim b"") b"foobar"
+
 def assert_err msg block
   let res = try
     block()
@@ -101,3 +113,11 @@ def assert_err msg block
 
 assert_err "index out of range or invalid" do b"foobar"[-99..]
 assert_err "index out of range or invalid" do b"foobar"[0..-99]
+assert_err "type error: iteration protocol not supported" do
+  b"foobar".trim 1
+assert_err "type error: invalid pattern: not binary data" do
+  b"foobar".trim [1]
+# A `Str` pattern would have to be encoded to bytes first, and a multi-byte
+# character means nothing byte by byte, so it is rejected outright.
+assert_err "type error: invalid pattern: not binary data" do
+  b"foobar".trim "x"

@@ -277,7 +277,7 @@ class B
 
 class C: A B
 
-assert_eq $(C().who()) A
+assert_eq $(C().who()) $A
 ```
 
 Swapping the parents changes the result:
