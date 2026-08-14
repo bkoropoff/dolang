@@ -21,9 +21,15 @@ use std::os::unix::net::UnixStream;
 
 #[cfg(windows)]
 use std::os::windows::io::OwnedHandle;
+#[cfg(all(docsrs, not(windows)))]
+struct OwnedHandle;
 
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::{NamedPipeClient, NamedPipeServer};
+#[cfg(all(docsrs, not(windows)))]
+struct NamedPipeClient;
+#[cfg(all(docsrs, not(windows)))]
+struct NamedPipeServer;
 
 use crate::{
     AuthKey, Error, Limits, Protocol, auth::Auth, client::Client, fragment, server::Server,
@@ -245,7 +251,9 @@ impl Builder {
         .await
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, docsrs))]
+    #[cfg_attr(docsrs, doc(cfg(windows)))]
+    #[cfg_attr(all(docsrs, not(windows)), allow(private_interfaces))]
     /// Starts a client session on the server end of a Windows named pipe.
     ///
     /// `peer_process` is retained for the lifetime of the session and must
@@ -262,23 +270,33 @@ impl Builder {
         pipe: NamedPipeServer,
         peer_process: OwnedHandle,
     ) -> Result<crate::client::Unbound, Error> {
-        crate::client::validate_peer_process(
-            &peer_process,
-            transport::windows::server_pipe_peer_pid(&pipe)?,
-        )?;
-        let (sender, receiver) = transport::windows::server_pipe(pipe, false)?;
-        negotiate_client(
-            transport::AnySender::Windows(sender),
-            transport::AnyReceiver::Windows(receiver),
-            self.limits,
-            Some(peer_process),
-            self.app_protocol(),
-            self.client_auth(),
-        )
-        .await
+        #[cfg(windows)]
+        {
+            crate::client::validate_peer_process(
+                &peer_process,
+                transport::windows::server_pipe_peer_pid(&pipe)?,
+            )?;
+            let (sender, receiver) = transport::windows::server_pipe(pipe, false)?;
+            negotiate_client(
+                transport::AnySender::Windows(sender),
+                transport::AnyReceiver::Windows(receiver),
+                self.limits,
+                Some(peer_process),
+                self.app_protocol(),
+                self.client_auth(),
+            )
+            .await
+        }
+        #[cfg(all(docsrs, not(windows)))]
+        {
+            let _ = (self, pipe, peer_process);
+            unreachable!()
+        }
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, docsrs))]
+    #[cfg_attr(docsrs, doc(cfg(windows)))]
+    #[cfg_attr(all(docsrs, not(windows)), allow(private_interfaces))]
     /// Starts a client session on the client end of a Windows named pipe.
     ///
     /// `peer_process` is retained for the lifetime of the session and must
@@ -295,20 +313,28 @@ impl Builder {
         pipe: NamedPipeClient,
         peer_process: OwnedHandle,
     ) -> Result<crate::client::Unbound, Error> {
-        crate::client::validate_peer_process(
-            &peer_process,
-            transport::windows::client_pipe_peer_pid(&pipe)?,
-        )?;
-        let (sender, receiver) = transport::windows::client_pipe(pipe, false)?;
-        negotiate_client(
-            transport::AnySender::Windows(sender),
-            transport::AnyReceiver::Windows(receiver),
-            self.limits,
-            Some(peer_process),
-            self.app_protocol(),
-            self.client_auth(),
-        )
-        .await
+        #[cfg(windows)]
+        {
+            crate::client::validate_peer_process(
+                &peer_process,
+                transport::windows::client_pipe_peer_pid(&pipe)?,
+            )?;
+            let (sender, receiver) = transport::windows::client_pipe(pipe, false)?;
+            negotiate_client(
+                transport::AnySender::Windows(sender),
+                transport::AnyReceiver::Windows(receiver),
+                self.limits,
+                Some(peer_process),
+                self.app_protocol(),
+                self.client_auth(),
+            )
+            .await
+        }
+        #[cfg(all(docsrs, not(windows)))]
+        {
+            let _ = (self, pipe, peer_process);
+            unreachable!()
+        }
     }
 
     /// Negotiates a server session over a bidirectional byte stream.
@@ -366,38 +392,58 @@ impl Builder {
         .await
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, docsrs))]
+    #[cfg_attr(docsrs, doc(cfg(windows)))]
+    #[cfg_attr(all(docsrs, not(windows)), allow(private_interfaces))]
     /// Creates a server on the server end of a Windows named pipe.
     pub async fn server_named_pipe_server(
         self,
         pipe: NamedPipeServer,
     ) -> Result<crate::server::Unbound, Error> {
-        let (sender, receiver) = transport::windows::server_pipe(pipe, true)?;
-        negotiate_server(
-            transport::AnySender::Windows(sender),
-            transport::AnyReceiver::Windows(receiver),
-            self.limits,
-            self.app_protocol(),
-            self.server_auth(),
-        )
-        .await
+        #[cfg(windows)]
+        {
+            let (sender, receiver) = transport::windows::server_pipe(pipe, true)?;
+            negotiate_server(
+                transport::AnySender::Windows(sender),
+                transport::AnyReceiver::Windows(receiver),
+                self.limits,
+                self.app_protocol(),
+                self.server_auth(),
+            )
+            .await
+        }
+        #[cfg(all(docsrs, not(windows)))]
+        {
+            let _ = (self, pipe);
+            unreachable!()
+        }
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, docsrs))]
+    #[cfg_attr(docsrs, doc(cfg(windows)))]
+    #[cfg_attr(all(docsrs, not(windows)), allow(private_interfaces))]
     /// Creates a server on the client end of a Windows named pipe.
     pub async fn server_named_pipe_client(
         self,
         pipe: NamedPipeClient,
     ) -> Result<crate::server::Unbound, Error> {
-        let (sender, receiver) = transport::windows::client_pipe(pipe, true)?;
-        negotiate_server(
-            transport::AnySender::Windows(sender),
-            transport::AnyReceiver::Windows(receiver),
-            self.limits,
-            self.app_protocol(),
-            self.server_auth(),
-        )
-        .await
+        #[cfg(windows)]
+        {
+            let (sender, receiver) = transport::windows::client_pipe(pipe, true)?;
+            negotiate_server(
+                transport::AnySender::Windows(sender),
+                transport::AnyReceiver::Windows(receiver),
+                self.limits,
+                self.app_protocol(),
+                self.server_auth(),
+            )
+            .await
+        }
+        #[cfg(all(docsrs, not(windows)))]
+        {
+            let _ = (self, pipe);
+            unreachable!()
+        }
     }
 }
 
