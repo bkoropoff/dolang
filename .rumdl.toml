@@ -2,6 +2,10 @@
 flavor = "mkdocs"
 disable = ["MD040"]
 
+[per-file-ignores]
+# These links target rustdoc output generated alongside the MkDocs site.
+"docs/rust-api.md" = ["MD057"]
+
 [MD007]
 indent = 4 # Unordered list indentation
 

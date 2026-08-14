@@ -120,3 +120,6 @@ jobs:
 
       - name: Build docs site
         run: dodo.run mkdocs --target x86_64-linux
+
+      - name: Build Rust API docs
+        run: dodo.run rustdoc

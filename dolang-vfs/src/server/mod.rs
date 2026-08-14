@@ -428,9 +428,8 @@ impl Server {
     /// Connections that fail to negotiate (including failing authentication)
     /// are dropped and do *not* consume the single slot, so an impostor that
     /// reaches the socket first cannot deny the intended client its session;
-    /// it can only waste an attempt. Negotiation is bounded by
-    /// [`NEGOTIATE_TIMEOUT`] and the number of in-flight attempts by
-    /// [`MAX_PENDING_CONNECTIONS`], so a peer that connects and then says
+    /// it can only waste an attempt. Negotiation has a timeout and a fixed
+    /// limit on in-flight attempts, so a peer that connects and then says
     /// nothing cannot stall or crowd out the real one either.
     #[cfg(unix)]
     pub async fn accept_one<F>(mut self, established: F) -> Result<(), io::Error>

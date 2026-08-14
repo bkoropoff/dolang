@@ -1,6 +1,7 @@
 import sys admin dodo
   fs:
     - Path
+    - copy
     - create_dir
     - remove
     - with_temp_dir
@@ -151,6 +152,11 @@ def mkdocs_build_tools spec
   spec.cargo build
     for bin = MKDOCS_BINS
       --bin $bin
+
+def rustdoc_build()
+  run_cargo doc --no-deps
+    for crate = DOC_CRATES
+      -p $crate
 
 def with_mkdocs spec func
   env
@@ -343,17 +349,12 @@ return $
 
   rustdoc:
     help: build selected rustdoc packages
-    do |_|
-      run_cargo doc --no-deps
-        for crate = DOC_CRATES
-          -p $crate
+    do |_| rustdoc_build()
 
   "serve-rustdoc":
     help: build and serve rustdoc locally
     do |_|
-      run_cargo doc --no-deps
-        for crate = DOC_CRATES
-          -p $crate
+      rustdoc_build()
       dodo.show python3 -m http.server 8080 -d target/doc -b localhost
 
   "serve-mkdocs":
@@ -369,6 +370,16 @@ return $
       let spec = Spec $args profile: release
       mkdocs_build_tools $spec
       with_mkdocs $spec do dodo.show mkdocs build --strict
+
+  pages:
+    help: build the complete GitHub Pages site
+    do |args|
+      let spec = Spec $args profile: release
+      mkdocs_build_tools $spec
+      with_mkdocs $spec do dodo.show mkdocs build --strict
+      rustdoc_build()
+      copy target/doc site/rustdoc all: true
+      copy .github/rustdoc-index.html site/rustdoc/index.html
 
   fmt:
     help: format Rust

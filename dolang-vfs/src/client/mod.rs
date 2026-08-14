@@ -2263,8 +2263,9 @@ impl<'a> Command for CommandBuilder<'a> {
 
 /// Builder for opening files through a [`Client`].
 ///
-/// Configure access and creation modes, then call [`open`](Self::open). This
-/// concrete API accepts host [`Path`] values; use
+/// Configure access and creation modes, then call
+/// [`OpenOptions::open`](crate::OpenOptions::open). This concrete API accepts
+/// host [`Path`] values; use
 /// [`Vfs::open_options`] when the target's path
 /// syntax may differ from the host's.
 ///
