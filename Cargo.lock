@@ -1398,6 +1398,7 @@ dependencies = [
  "futures",
  "phf",
  "postcard",
+ "rand",
  "serde",
  "windows-sys 0.61.2",
 ]

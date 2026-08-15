@@ -291,8 +291,9 @@ mod imp {
     }
 
     pub struct Join {
-        pub(super) inner: Weak<ReactorInner>,
+        pub(super) inner: Option<Weak<ReactorInner>>,
         pub(super) exit_rx: oneshot::Receiver<()>,
+        pub(super) _pin: std::marker::PhantomPinned,
     }
 
     pub struct Context {
@@ -441,6 +442,7 @@ mod imp {
     /// Future returned by [`Control::join`].
     pub struct Join {
         _marker: ReceiverMarker,
+        _pin: std::marker::PhantomPinned,
     }
 
     /// Context handle provided to APC tasks.
@@ -511,7 +513,7 @@ const _: fn() = || {
 
     assert_send_sync_unpin::<Reactor>();
     assert_send_sync_unpin::<Control>();
-    assert_send_sync_unpin::<Join>();
+    assert_send_sync::<Join>();
     assert_send_sync_unpin::<Context>();
     // `Cell<()>` is `Send` but not `Sync`. The oneshot receiver, and therefore
     // `Task<T>`, is nevertheless `Sync` when `T: Send`.
@@ -730,8 +732,9 @@ impl Control {
             let weak_inner = Arc::downgrade(&inner);
             drop(inner);
             Join {
-                inner: weak_inner,
+                inner: Some(weak_inner),
                 exit_rx,
+                _pin: std::marker::PhantomPinned,
             }
         }
         #[cfg(all(docsrs, not(windows)))]
@@ -741,10 +744,15 @@ impl Control {
 
 impl Join {
     /// Closes the reactor while continuing to await its exit.
-    pub fn close(&self) {
+    pub fn close(self: std::pin::Pin<&mut Self>) {
         #[cfg(windows)]
-        if let Some(inner) = self.inner.upgrade() {
-            close_reactor(&inner);
+        {
+            // SAFETY: `inner` is only mutated in place and is not structurally
+            // pinned.
+            let this = unsafe { self.get_unchecked_mut() };
+            if let Some(inner) = this.inner.take().and_then(|inner| inner.upgrade()) {
+                close_reactor(&inner);
+            }
         }
         #[cfg(all(docsrs, not(windows)))]
         unreachable!()
@@ -756,7 +764,9 @@ impl Future for Join {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
+        // SAFETY: we do not move any field out of the pinned join future, and
+        // `exit_rx` is `Unpin`.
+        let this = unsafe { self.get_unchecked_mut() };
         Pin::new(&mut this.exit_rx).poll(cx).map(|_| ())
     }
 }
@@ -1177,7 +1187,7 @@ mod tests {
         let waker = futures::task::noop_waker();
         let mut cx = task::Context::from_waker(&waker);
         assert!(matches!(join.as_mut().poll(&mut cx), Poll::Pending));
-        join.close();
+        join.as_mut().close();
         block_on_with_timeout(join);
 
         assert_eq!(reactor.submit(async |_| ()).err(), Some(Closed));
