@@ -282,6 +282,22 @@ Returns the current user's home directory as a [`Path`](path.md).
 
 [`Path`](path.md)
 
+### `temp_dir()`
+
+Returns the platform-native directory for temporary files as a
+[`Path`](path.md).
+
+#### Platform behavior
+
+| Platform | Result                                                      |
+| -------- | ----------------------------------------------------------- |
+| Unix     | `$TMPDIR`, otherwise `/tmp`                                 |
+| Windows  | `%TMP%`, otherwise `%TEMP%`, otherwise the platform default |
+
+#### Returns
+
+[`Path`](path.md)
+
 ### `cache_dir :app?`
 
 Returns the platform-native user cache directory as a [`Path`](path.md).
@@ -1124,19 +1140,10 @@ removes the directory recursively upon return or error.
 
 #### Parameters
 
-| Name     | Type | Description                                     |
-| -------- | ---- | ----------------------------------------------- |
-| `func`   | func | Called with a [`Path`](path.md) to the temp dir |
-| `parent` | path | Parent directory for the temporary directory    |
-
-**Platform Notes:**
-
-The active VFS target chooses the default parent as follows:
-
-- **Windows:** Uses the directory returned by
-  [`GetTempPath2`](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-gettemppath2a)
-- **Unix:** Uses `TMPDIR` from the strand-local environment if set, otherwise
-  `/tmp`
+| Name     | Type  | Description                                             |
+| -------- | ----- | ------------------------------------------------------- |
+| `func`   | func  | Called with a [`Path`](path.md) to the temp dir         |
+| `parent` | path? | Parent directory; defaults to [`temp_dir()`](#temp_dir) |
 
 #### Example
 
@@ -1153,4 +1160,32 @@ with_temp_dir do |dir|
 # Use a custom parent directory
 with_temp_dir parent: my_temp do |dir|
   # ...
+```
+
+### `create_temp_dir :parent?`
+
+Creates a temporary directory and returns its path. Unlike
+[`with_temp_dir`](#with_temp_dir-func), it does not remove the directory --
+the caller owns its lifetime.
+
+#### Parameters
+
+| Name     | Type  | Description                                             |
+| -------- | ----- | ------------------------------------------------------- |
+| `parent` | path? | Parent directory; defaults to [`temp_dir()`](#temp_dir) |
+
+#### Returns
+
+[`Path`](path.md)
+
+#### Example
+
+```
+let dir = create_temp_dir()
+try
+  let file = (dir / "test.txt")
+  file.open w do |f|
+    f.write "Hello, World!"
+finally
+  remove_dir $dir all: true
 ```

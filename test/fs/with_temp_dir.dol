@@ -7,6 +7,7 @@ import agent
     - RuntimeError
   fs:
     - with_temp_dir
+    - create_temp_dir
     - create_dir
     - open
     - remove_dir
@@ -162,3 +163,46 @@ def with_temp_dir_parent_cleans_up_on_error()
 
   # Clean up
   remove_dir $custom_parent
+
+#[agent.test]
+def create_temp_dir_creates_directory_without_cleanup()
+  let dir = create_temp_dir()
+
+  try
+    assert $dir.exists()
+    assert $dir.is_absolute
+  finally
+    remove_dir $dir
+
+  # No automatic cleanup: still gone only because we removed it above
+  assert $!dir.exists()
+
+#[agent.test]
+def create_temp_dir_with_parent_creates_temp_in_custom_location()
+  let parent = Path "test_create_temp_dir_parent"
+  create_dir $parent all: true
+
+  let dir = create_temp_dir :parent
+  try
+    assert $dir.exists()
+    assert_eq $dir.parent.canonical() $parent.canonical()
+  finally
+    remove_dir $dir
+    parent.remove_dir()
+
+#[agent.test]
+def each_create_temp_dir_gets_unique_directory()
+  let paths = []
+
+  for _ = Range end: 5
+    let dir = create_temp_dir()
+    paths.push (str dir)
+
+  try
+    let unique = {}
+    for p = paths
+      unique[p] = nil
+    assert_eq $unique.len 5
+  finally
+    for p = paths
+      remove_dir $p
