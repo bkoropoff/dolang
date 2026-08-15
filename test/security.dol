@@ -21,16 +21,17 @@ import sys
     - assert_type
     - test
   security:
-    - token_info
-    - unix_info
     - user_name
-    - user_id
-    - group_name
-    - group_id
   security.unix:
     - Identity
     - Permission
+    - user_id
+    - group_name
+    - group_id
+    id: unix_info
+    user_name: unix_user_name
   security.windows:
+    - token_info
     - AccessMask
     - Ace
     - Acl
@@ -270,7 +271,7 @@ def reports_security_information_for_target()
     assert_type $Tuple $info.group_ids
     for group_id = info.group_ids
       assert_type $Int $group_id
-    let user = user_name $info.euid
+    let user = unix_user_name $info.euid
     let group = group_name $info.egid
     assert_type $Str $user
     assert_type $Str $group
@@ -301,7 +302,7 @@ def reports_security_information_for_target()
     assert_eq (str by_name.sid) (str info.user_sid)
     assert_eq $sid_name.kind :USER:
     assert_throws $NotFoundError do SidName.lookup dolang-account-that-does-not-exist
-    assert_throws $UnsupportedError do user_name 0
+    assert_throws $UnsupportedError do unix_user_name 0
     let groups = info.groups
     assert_type $Int $groups.len
     assert_type $TokenGroup $groups[0]

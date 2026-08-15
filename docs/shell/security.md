@@ -6,7 +6,7 @@ manipulation.
 
 ## Portable Identity Queries
 
-[`security.user_name`](../api/security/index.md#user_name-uid) returns the
+[`security.user_name`](../api/security/index.md#user_name) returns the
 current target user on both platform families:
 
 ```
@@ -15,24 +15,29 @@ import security
 echo "running as $(security.user_name())"
 ```
 
-On Unix, `user_name uid`, `user_id name`, `group_name gid`, and
-`group_id name` resolve accounts in the target's user and group databases.
-Calling these functions when the current VFS context does not target a Unix
-system raises [`sys.UnsupportedError`](../api/sys/unsupported-error.md).
+[`security.unix.user_name`](../api/security/unix/index.md#user_name-uid),
+[`security.unix.user_id`](../api/security/unix/index.md#user_id-name),
+[`security.unix.group_name`](../api/security/unix/index.md#group_name-gid),
+and [`security.unix.group_id`](../api/security/unix/index.md#group_id-name)
+resolve accounts in the target's user and group databases. Calling these
+functions when the current VFS context does not target a Unix system raises
+[`sys.UnsupportedError`](../api/sys/unsupported-error.md).
 
 ## Unix Identity
 
-[`security.unix_info()`](../api/security/index.md#unix_info) returns information
+[`security.unix.id()`](../api/security/unix/index.md#id) returns information
 about the identity under which the shell or VFS process is running:
 
 ```
-import security
+import security.unix:
+  - id
+  - group_name
 
-let identity = security.unix_info()
+let identity = id()
 echo "uid=$(identity.uid) gid=$(identity.gid)"
 echo "effective uid=$(identity.euid) gid=$(identity.egid)"
 for gid = identity.group_ids
-  echo "group $gid: $(security.group_name(gid))"
+  echo "group $gid: $(group_name(gid))"
 ```
 
 ## POSIX ACLs
@@ -48,8 +53,9 @@ import security.unix:
   - Acl
   - Ace
   - Permission
+  - id
 
-let identity = security.unix_info()
+let identity = id()
 let rw = Permission(:READ:, :WRITE:)
 let r = Permission(:READ:)
 let access = Acl $
@@ -85,8 +91,10 @@ import security.nfs4:
   - Acl
   - Ace
   - Mask
+import security.unix:
+  - id
 
-let identity = security.unix_info()
+let identity = id()
 let read = Mask(:READ_DATA:, :READ_ATTRIBUTES:, :READ_ACL:)
 let access = Acl $
   $ Ace.owner type: :ALLOW: mask: (Mask())
@@ -137,14 +145,15 @@ config.ini nil kind: :MACOS:`.
 
 ## Windows Access Tokens
 
-[`security.token_info()`](../api/security/index.md#token_info) returns a
-[`TokenInfo`](../api/security/windows/tokeninfo.md) captured for the active
-Windows target:
+[`security.windows.token_info()`](../api/security/windows/index.md#token_info)
+returns a [`TokenInfo`](../api/security/windows/tokeninfo.md) captured for the
+active Windows target:
 
 ```
-import security
+import security.windows:
+  - token_info
 
-let token = security.token_info()
+let token = token_info()
 let account = token.user_sid.lookup()
 echo "$(account.qualified_name) ($(token.user_sid))"
 echo "elevated: $(token.is_elevated)"
@@ -190,12 +199,13 @@ Windows file ownership and access control are represented by
   ACE type.
 
 Read selected components with
-[`fs.sec_desc`](../api/fs/index.md#sec_desc-path-owner-group-dacl-sacl-resolve):
+[`fs.windows.sec_desc`](../api/fs/windows/index.md#sec_desc-path-owner-group-dacl-sacl-resolve):
 
 ```
-import fs
+import fs.windows:
+  - sec_desc
 
-let desc = fs.sec_desc config.ini
+let desc = sec_desc config.ini
 echo "owner: $(desc.owner.lookup().qualified_name)"
 if desc.dacl == nil
   echo "DACL: null"
@@ -209,16 +219,18 @@ the caller has the required Windows access rights and privileges.
 
 `SecDesc.with` creates a modified descriptor while preserving other components.
 Apply a modified descriptor with
-[`fs.set_sec_desc`](../api/fs/index.md#set_sec_desc-path-desc-resolve):
+[`fs.windows.set_sec_desc`](../api/fs/windows/index.md#set_sec_desc-path-desc-resolve):
 
 ```
-import fs
+import fs.windows:
+  - sec_desc
+  - set_sec_desc
 import security.windows:
   - SidName
 
-let desc = fs.sec_desc config.ini
+let desc = sec_desc config.ini
 let owner = (SidName.lookup "BUILTIN\\Administrators").sid
-fs.set_sec_desc config.ini $ desc.with :owner
+set_sec_desc config.ini $ desc.with :owner
 ```
 
 Changing a DACL normally requires `WRITE_DAC`; changing an owner normally

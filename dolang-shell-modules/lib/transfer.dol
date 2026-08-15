@@ -1,4 +1,4 @@
-import _vfs digest fs http json proc progress security shell std sys tar zip
+import _vfs digest fs http json proc progress shell std sys tar zip
   fs:
     - Path
     - with_temp_dir
@@ -10,6 +10,7 @@ import _vfs digest fs http json proc progress security shell std sys tar zip
     - Url
 
 import fs.unix: unix_fs
+import security.unix: security_unix
 
 let DIGESTS = $
   "blake3": $digest.Blake3
@@ -412,7 +413,7 @@ def filesystem_metadata path kind options
   let user_name = options.get :user_name: else: do
     try
       if unix
-        security.user_name $metadata.uid
+        security_unix.user_name $metadata.uid
       else
         metadata.user.lookup().qualified_name
     catch sys.NotFoundError: _
@@ -420,7 +421,7 @@ def filesystem_metadata path kind options
   let group_name = options.get :group_name: else: do
     try
       if unix
-        security.group_name $metadata.gid
+        security_unix.group_name $metadata.gid
       else
         metadata.user.lookup().qualified_name
     catch sys.NotFoundError: _

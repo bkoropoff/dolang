@@ -9,9 +9,9 @@ attributes are available through [`Metadata`](./metadata.md) and
 NFSv4 ACLs use [`acl`](#acl-path-kind-posix-default-resolve) and
 [`set_acl`](#set_acl-path-acl-kind-default-resolve). Windows security
 descriptors can also be fetched and manipulated with full fidelity; see
-[`sec_desc`](#sec_desc-path-owner-group-dacl-sacl-resolve) and the
-[Security Guide](../../shell/security.md). Windows alternate data streams are
-listed with [`streams`](#streams-path-resolve).
+[`fs.windows.sec_desc`](windows/index.md#sec_desc-path-owner-group-dacl-sacl-resolve)
+and the [Security Guide](../../shell/security.md). Windows alternate data
+streams are listed with [`streams`](#streams-path-resolve).
 
 ## Types
 
@@ -417,37 +417,6 @@ echo "Capacity: $(meta.capacity)"
 echo "Available: $(meta.available)"
 echo "Readonly: $(meta.read_only)"
 ```
-
-### `sec_desc path :owner? :group? :dacl? :sacl? :resolve?`
-
-Gets selected parts of a Windows security descriptor.
-
-#### Parameters
-
-| Name      | Type                                      | Description                                                           |
-| --------- | ----------------------------------------- | --------------------------------------------------------------------- |
-| `path`    | [`Str`](../std/str.md)\|[`Path`](path.md) | Path to query                                                         |
-| `owner`   | [`Bool`](../std/bool.md)?                 | Load the owner SID (default: `true`)                                  |
-| `group`   | [`Bool`](../std/bool.md)?                 | Load the primary group SID (default: `true`)                          |
-| `dacl`    | [`Bool`](../std/bool.md)?                 | Load the discretionary ACL (default: `true`)                          |
-| `sacl`    | [`Bool`](../std/bool.md)?                 | Load the system ACL (default: `false`)                                |
-| `resolve` | `:TARGET:`\|`:LINK:`?                     | Resolution mode (default: `:TARGET:`; see [above](#resolution-modes)) |
-
-#### Returns
-
-[`security.windows.SecDesc`](../security/windows/secdesc.md)
-
-### `set_sec_desc path desc :resolve?`
-
-Applies the components selected by a Windows security descriptor's `mask`.
-
-#### Parameters
-
-| Name      | Type                                                         | Description                                      |
-| --------- | ------------------------------------------------------------ | ------------------------------------------------ |
-| `path`    | [`Str`](../std/str.md)\|[`Path`](path.md)                    | Path to update                                   |
-| `desc`    | [`security.windows.SecDesc`](../security/windows/secdesc.md) | Security descriptor to apply                     |
-| `resolve` | `:TARGET:`\|`:LINK:`                                         | Resolution mode (see [above](#resolution-modes)) |
 
 ### `acl path :kind = :POSIX: :default? :resolve?`
 

@@ -3017,109 +3017,75 @@ fn security_info<'v, 's>(
 pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Global<'v>>) {
     builder
         .module("security")
-        .function_with_slots(
-            "unix_info",
-            async move |strand, args, mut out, [mut group_ids]| {
-                let ([], []) = unpack!(strand, args, 0, 0)?;
-                let SecurityInfo::Unix(info) = security_info(strand, global)? else {
-                    return Err(Error::not_supported(strand));
-                };
-
-                Output::set(
-                    strand,
-                    &mut group_ids,
-                    AsTuple::new(info.group_ids.iter().copied()),
-                );
-
-                global
-                    .types
-                    .unix_identity
-                    .create_with_annex(strand, Identity, info, &mut out);
-                global.types.unix_identity.cast(&out).unwrap().enter_sync(
-                    strand,
-                    |strand, this| {
-                        Output::set(
-                            strand,
-                            Mut::slot_mut::<0>(&mut this.borrow_mut_unwrap()),
-                            &group_ids,
-                        );
-                    },
-                );
-                Ok(())
-            },
-        )
-        .function_with_slots(
-            "token_info",
-            async move |strand, args, mut out, [mut sid]| {
-                let ([], []) = unpack!(strand, args, 0, 0)?;
-                let SecurityInfo::Windows(info) = security_info(strand, global)? else {
-                    return Err(Error::not_supported(strand));
-                };
-
-                global.types.token_info.create_with_annex(
-                    strand,
-                    TokenInfo,
-                    info.clone(),
-                    &mut out,
-                );
-                global
-                    .types
-                    .token_info
-                    .cast(&out)
-                    .unwrap()
-                    .enter_sync(strand, |strand, this| {
-                        for (slot, value) in [
-                            (0, info.user_sid.clone()),
-                            (1, info.owner_sid.clone()),
-                            (2, info.primary_group_sid.clone()),
-                        ] {
-                            create_sid(strand, global, value, &mut sid);
-                            let mut borrow = this.borrow_mut_unwrap();
-                            match slot {
-                                0 => Output::set(strand, Mut::slot_mut::<0>(&mut borrow), &sid),
-                                1 => Output::set(strand, Mut::slot_mut::<1>(&mut borrow), &sid),
-                                2 => Output::set(strand, Mut::slot_mut::<2>(&mut borrow), &sid),
-                                _ => unreachable!(),
-                            }
-                        }
-
-                        if let Some(logon_sid) = info.logon_sid().cloned() {
-                            create_sid(strand, global, logon_sid, &mut sid);
-                            Output::set(
-                                strand,
-                                Mut::slot_mut::<3>(&mut this.borrow_mut_unwrap()),
-                                &sid,
-                            );
-                        }
-                    });
-                Ok(())
-            },
-        )
         .function("user_name", async move |strand, args, out| {
-            let ([], [uid]) = unpack!(strand, args, 0, 1)?;
+            let ([], []) = unpack!(strand, args, 0, 0)?;
             let family = global.local.get(strand).target().operating_system.family();
             let vfs = global.local.get(strand).vfs();
-            let name = match (family, uid) {
-                (OperatingSystemFamily::Unix, Some(uid)) => {
-                    let uid = uid.to_u32(strand)?;
-                    error::io_result(strand, vfs.user_name(uid).await)?
-                }
-                (OperatingSystemFamily::Unix, None) => {
+            let name = match family {
+                OperatingSystemFamily::Unix => {
                     let SecurityInfo::Unix(info) = security_info(strand, global)? else {
                         unreachable!("Unix target returned Windows security information")
                     };
                     error::io_result(strand, vfs.user_name(info.uid).await)?
                 }
-                (OperatingSystemFamily::Windows, Some(_)) => {
-                    return Err(Error::not_supported(strand));
-                }
-                (OperatingSystemFamily::Windows, None) => {
+                OperatingSystemFamily::Windows => {
                     let SecurityInfo::Windows(info) = security_info(strand, global)? else {
                         unreachable!("Windows target returned Unix security information")
                     };
                     error::io_result(strand, vfs.sid_name(&info.user_sid).await)?.name
                 }
             };
+            Output::set(strand, out, name.as_str());
+            Ok(())
+        })
+        .commit();
+
+    builder
+        .module("security.unix")
+        .value("Identity", global.types.unix_identity)
+        .value("Acl", global.types.posix_acl)
+        .value("Ace", global.types.posix_ace)
+        .value("Permission", global.types.permission)
+        .function_with_slots("id", async move |strand, args, mut out, [mut group_ids]| {
+            let ([], []) = unpack!(strand, args, 0, 0)?;
+            let SecurityInfo::Unix(info) = security_info(strand, global)? else {
+                return Err(Error::not_supported(strand));
+            };
+
+            Output::set(
+                strand,
+                &mut group_ids,
+                AsTuple::new(info.group_ids.iter().copied()),
+            );
+
+            global
+                .types
+                .unix_identity
+                .create_with_annex(strand, Identity, info, &mut out);
+            global
+                .types
+                .unix_identity
+                .cast(&out)
+                .unwrap()
+                .enter_sync(strand, |strand, this| {
+                    Output::set(
+                        strand,
+                        Mut::slot_mut::<0>(&mut this.borrow_mut_unwrap()),
+                        &group_ids,
+                    );
+                });
+            Ok(())
+        })
+        .function("user_name", async move |strand, args, out| {
+            let ([uid], []) = unpack!(strand, args, 1, 0)?;
+            if global.local.get(strand).target().operating_system.family()
+                != OperatingSystemFamily::Unix
+            {
+                return Err(Error::not_supported(strand));
+            }
+            let uid = uid.to_u32(strand)?;
+            let vfs = global.local.get(strand).vfs();
+            let name = error::io_result(strand, vfs.user_name(uid).await)?;
             Output::set(strand, out, name.as_str());
             Ok(())
         })
@@ -3171,14 +3137,6 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         .commit();
 
     builder
-        .module("security.unix")
-        .value("Identity", global.types.unix_identity)
-        .value("Acl", global.types.posix_acl)
-        .value("Ace", global.types.posix_ace)
-        .value("Permission", global.types.permission)
-        .commit();
-
-    builder
         .module("security.nfs4")
         .value("Acl", global.types.nfs4_acl)
         .value("Ace", global.types.nfs4_ace)
@@ -3207,5 +3165,52 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         .value("SidName", global.types.sid_name)
         .value("TokenGroup", global.types.token_group)
         .value("TokenInfo", global.types.token_info)
+        .function_with_slots(
+            "token_info",
+            async move |strand, args, mut out, [mut sid]| {
+                let ([], []) = unpack!(strand, args, 0, 0)?;
+                let SecurityInfo::Windows(info) = security_info(strand, global)? else {
+                    return Err(Error::not_supported(strand));
+                };
+
+                global.types.token_info.create_with_annex(
+                    strand,
+                    TokenInfo,
+                    info.clone(),
+                    &mut out,
+                );
+                global
+                    .types
+                    .token_info
+                    .cast(&out)
+                    .unwrap()
+                    .enter_sync(strand, |strand, this| {
+                        for (slot, value) in [
+                            (0, info.user_sid.clone()),
+                            (1, info.owner_sid.clone()),
+                            (2, info.primary_group_sid.clone()),
+                        ] {
+                            create_sid(strand, global, value, &mut sid);
+                            let mut borrow = this.borrow_mut_unwrap();
+                            match slot {
+                                0 => Output::set(strand, Mut::slot_mut::<0>(&mut borrow), &sid),
+                                1 => Output::set(strand, Mut::slot_mut::<1>(&mut borrow), &sid),
+                                2 => Output::set(strand, Mut::slot_mut::<2>(&mut borrow), &sid),
+                                _ => unreachable!(),
+                            }
+                        }
+
+                        if let Some(logon_sid) = info.logon_sid().cloned() {
+                            create_sid(strand, global, logon_sid, &mut sid);
+                            Output::set(
+                                strand,
+                                Mut::slot_mut::<3>(&mut this.borrow_mut_unwrap()),
+                                &sid,
+                            );
+                        }
+                    });
+                Ok(())
+            },
+        )
         .commit();
 }

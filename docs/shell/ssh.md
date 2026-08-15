@@ -174,7 +174,7 @@ the host. For example, from a Unix host:
 ```
 ssh.with windows-server.example.com do
   echo "OS: $(sys.os_info().os)"
-  let name_sid = security.token_info().user_sid.lookup()
+  let name_sid = security.windows.token_info().user_sid.lookup()
   echo "User: $(name_sid.name) ($(name_sid.sid) $(name_sid.kind))"
   echo "AppData hidden: $(fs.metadata("AppData").attrs.hidden)"
 ```

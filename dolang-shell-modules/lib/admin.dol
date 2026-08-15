@@ -1,4 +1,6 @@
-import sudo sys security shell
+import sudo sys shell
+  security.unix: security_unix
+  security.windows: security_windows
 
 # Reports whether the active target has effective administrator privileges.
 #
@@ -10,9 +12,9 @@ import sudo sys security shell
 # `Bool`
 pub def query()
   if (sys.os_info().family == :WINDOWS:)
-    security.token_info().is_elevated
+    security_windows.token_info().is_elevated
   else
-    (security.unix_info().euid == 0)
+    (security_unix.id().euid == 0)
 
 # Runs `block` with administrator privileges.
 #
@@ -40,7 +42,7 @@ pub def query()
 # ```
 pub def with block :cd = nil :env = {}
   if (sys.os_info().family == :WINDOWS:)
-    if security.token_info().is_elevated
+    if security_windows.token_info().is_elevated
       return shell.env $env do
         if (cd != nil)
           shell.cd $cd $block
@@ -54,7 +56,7 @@ pub def with block :cd = nil :env = {}
     finally
       vfs.stop()
   else
-    if (security.unix_info().euid == 0)
+    if (security_unix.id().euid == 0)
       return shell.env $env do
         if (cd != nil)
           shell.cd $cd $block

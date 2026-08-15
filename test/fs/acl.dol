@@ -7,9 +7,10 @@ import sys agent admin
     - remove
     - set_acl
   security:
-    - unix_info
     - user_name
   security.unix: unix
+  security.unix:
+    id: unix_info
   security.nfs4: nfs4
   security.macos: macos
   uuid:

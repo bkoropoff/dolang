@@ -7,6 +7,7 @@ import sys std agent
     - Path
     - open
     - remove
+  fs.windows:
     - sec_desc
     - set_sec_desc
   security.windows:
