@@ -1,7 +1,9 @@
-import base64 rand shell sys std
+import base64 rand shell sys std xdg
 import
   regex:
     - Regex
+  fs:
+    - with_temp_dir
 import fs.unix: unix_fs
 
 # Survives unquoted in both POSIX shells and cmd.exe. The base64 alphabet is a
@@ -83,6 +85,27 @@ pub def key_input key
   buf.push $bytes.len
   buf.extend $bytes
   [buf.freeze()]
+
+# Creates a temporary directory to host an authenticated agent socket, mode
+# `0700` so only the current user can traverse it, and cleans it up once
+# `thunk` returns.
+#
+# Prefers `xdg.runtime_dir()` as the parent directory. That's unset on some
+# systems (e.g. stock FreeBSD), and `with_temp_dir` would error on an
+# explicit `nil` `parent:` (it only accepts `Path`/`Str` there), so `nil`
+# is not passed through -- `with_temp_dir`'s own default (`$TMPDIR`, falling
+# back to `/tmp`) is used instead.
+pub def with_socket_dir
+  thunk
+do
+  let body = do |subdir|
+    subdir.set_metadata mode: 0o700
+    thunk $subdir
+  let runtime_dir = xdg.runtime_dir()
+  if (runtime_dir != nil)
+    with_temp_dir parent: $runtime_dir $body
+  else
+    with_temp_dir $body
 
 def env_key key
   if (type key Str || type key Sym)
