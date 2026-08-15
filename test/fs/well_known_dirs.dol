@@ -11,6 +11,7 @@ import agent fs sys
 def absolute_paths()
   assert $fs.home_dir().is_absolute
   assert $fs.cache_dir().is_absolute
+  assert $fs.temp_dir().is_absolute
 
 #[agent.test]
 def scoped_home_on_unix()
@@ -40,3 +41,17 @@ def cache_dir_on_unix_non_macos()
     skip "requires Unix outside macOS"
   env HOME: /tmp/dolang-home XDG_CACHE_HOME: /tmp/dolang-cache do
     assert_eq (fs.cache_dir()) (Path "/tmp/dolang-cache")
+
+#[agent.test]
+def temp_dir_on_unix()
+  if (sys.os_info().family != :UNIX:)
+    skip "requires Unix"
+  env TMPDIR: nil do
+    assert_eq (fs.temp_dir()) (Path "/tmp")
+
+#[agent.test]
+def temp_dir_honors_tmpdir_on_unix()
+  if (sys.os_info().family != :UNIX:)
+    skip "requires Unix"
+  env TMPDIR: /tmp/dolang-tmp do
+    assert_eq (fs.temp_dir()) (Path "/tmp/dolang-tmp")

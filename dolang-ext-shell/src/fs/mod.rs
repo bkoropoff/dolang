@@ -891,6 +891,31 @@ async fn glob<'v, 's>(
     Ok(())
 }
 
+/// Resolves the `parent:` argument shared by `with_temp_dir` and
+/// `create_temp_dir`: the given path if present, otherwise the target's
+/// well-known temp directory (the same one `fs.temp_dir()` returns).
+async fn resolve_temp_parent<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    parent: Option<Slot<'v, '_>>,
+) -> Result<'v, 's, Utf8TypedPathBuf> {
+    match parent {
+        Some(p) => {
+            let p = path_from_value(strand, global, &p)?;
+            prepend_cwd(strand, global, p.to_path())
+        }
+        None => {
+            let local = global.local.get(strand);
+            let env = local.env().flatten_delta();
+            local
+                .vfs()
+                .well_known_path(WellKnownPath::TempDir, None, &env)
+                .await
+                .into_sys(strand)
+        }
+    }
+}
+
 async fn create_temp_dir<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
@@ -1304,6 +1329,10 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             let app = app.and_then(|s| s.as_str(strand).map(|s| s.to_string()));
             well_known_path(strand, global, WellKnownPath::CacheDir, app.as_deref(), out).await
         })
+        .function("temp_dir", async move |strand, args, out| {
+            let ([], []) = unpack!(strand, args, 0, 0)?;
+            well_known_path(strand, global, WellKnownPath::TempDir, None, out).await
+        })
         .function("copy", async move |strand, args, out| {
             let ([from, to], [all]) = unpack!(strand, args, 2, 0, all = None)?;
             let from = path_from_value(strand, global, &from)?;
@@ -1459,21 +1488,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             "with_temp_dir",
             async move |strand, args, out, [mut path]| {
                 let ([callable], [parent]) = unpack!(strand, args, 1, 0, parent = None)?;
-                let parent = match parent {
-                    Some(p) => {
-                        let p = path_from_value(strand, global, &p)?;
-                        prepend_cwd(strand, global, p.to_path())?
-                    }
-                    None => {
-                        let local = global.local.get(strand);
-                        let env = local.env().flatten_delta();
-                        local
-                            .vfs()
-                            .well_known_path(WellKnownPath::TempDir, None, &env)
-                            .await
-                            .into_sys(strand)?
-                    }
-                };
+                let parent = resolve_temp_parent(strand, global, parent).await?;
                 let temp_path = create_temp_dir(strand, global, parent.to_path())
                     .await
                     .into_sys(strand)?;
@@ -1489,6 +1504,15 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 result
             },
         )
+        .function("create_temp_dir", async move |strand, args, out| {
+            let ([], [parent]) = unpack!(strand, args, 0, 0, parent = None)?;
+            let parent = resolve_temp_parent(strand, global, parent).await?;
+            let temp_path = create_temp_dir(strand, global, parent.to_path())
+                .await
+                .into_sys(strand)?;
+            create_path(strand, global, temp_path, out)?;
+            Ok(())
+        })
         .value("Metadata", global.types.metadata)
         .value("FsMetadata", global.types.fs_metadata)
         .value("XattrEntry", global.types.xattr_entry)
