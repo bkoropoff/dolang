@@ -39,6 +39,8 @@ use std::{
 
 mod lock;
 #[cfg(unix)]
+mod macos_acl;
+#[cfg(unix)]
 mod nfs4_acl;
 #[cfg(unix)]
 mod posix_acl;

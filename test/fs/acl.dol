@@ -11,6 +11,9 @@ import sys agent admin
     - user_name
   security.unix: unix
   security.nfs4: nfs4
+  security.macos: macos
+  uuid:
+    - Uuid
   std:
     - UnsupportedError
     - ValueError
@@ -38,13 +41,22 @@ def extended_nfs4_acl id
     $ nfs4.Ace.user $id type: :ALLOW: mask: $read
     $ nfs4.Ace.everyone type: :DENY: mask: $read
 
+def extended_macos_acl principal
+  let read = macos.Mask :READ_DATA: :READ_ATTRIBUTES: :READ_SECURITY:
+  macos.Acl $
+    $ macos.Ace.allow $principal mask: $read
+    $ macos.Ace.deny (Uuid.generate()) mask: $read flags: $macos.Flags()
+
 # Whether `kind` ACLs are expected to work on this platform. POSIX ACLs work
-# on Linux and FreeBSD; NFSv4 ACLs are FreeBSD-only here.
+# on Linux and FreeBSD; NFSv4 and macOS ACLs are FreeBSD-only and macOS-only,
+# respectively, here.
 def acl_kind_supported kind
   if (kind == :POSIX:)
     (sys.os_info().os == :FREEBSD: || sys.os_info().os == :LINUX:)
-  else
+  else if (kind == :NFS4:)
     (sys.os_info().os == :FREEBSD:)
+  else
+    (sys.os_info().os == :MACOS:)
 
 # On FreeBSD, POSIX and NFSv4 ACLs need to be enabled per-filesystem
 # (`tunefs`, mutually exclusive with each other on UFS) and the guest's root
@@ -117,6 +129,14 @@ def posix_fail block
 #[fixture]
 def nfs4_fail block
   unsupported_wrap :NFS4: $block
+
+#[fixture]
+def macos_supp block
+  scratch_ufs_wrap :MACOS: $block
+
+#[fixture]
+def macos_fail block
+  unsupported_wrap :MACOS: $block
 
 #[agent.test]
 #[posix_supp]
@@ -203,5 +223,46 @@ def rejects_nfs4_acl_metadata_when_unsupported()
     file.write acl
   open $path r do |file|
     assert_throws $UnsupportedError do file.acl kind: :NFS4:
+    assert_throws $UnsupportedError do file.set_acl $value
+  remove $path
+
+#[agent.test]
+#[macos_supp]
+def accesses_macos_acl_metadata()
+  let path = Path test_macos_acl.txt
+  open $path w do |file|
+    file.write acl
+
+  assert_eq (acl path kind: :MACOS:) nil
+  let principal = Uuid.generate()
+  let value = extended_macos_acl $principal
+  set_acl $path $value
+  let loaded = acl $path kind: :MACOS:
+  assert_type $macos.Acl $loaded
+  assert_eq $loaded.aces.len 2
+  assert_eq $loaded.aces[0].principal $principal
+  open $path r do |file|
+    assert_type $macos.Acl (file.acl kind: :MACOS:)
+    # Unlike an NFSv4 ACL, a macOS extended ACL is an optional overlay on
+    # top of POSIX permissions, so it can be removed back to "none".
+    file.set_acl nil kind: :MACOS:
+    assert_eq (file.acl kind: :MACOS:) nil
+
+  assert_throws $ValueError do set_acl $path $value default: true
+  assert_throws $ValueError do acl $path kind: :MACOS: default: true
+
+  remove $path
+
+#[agent.test]
+#[macos_fail]
+def rejects_macos_acl_metadata_when_unsupported()
+  let path = Path test_macos_acl.txt
+  let value = extended_macos_acl (Uuid.generate())
+  assert_throws $UnsupportedError do acl $path kind: :MACOS:
+  assert_throws $UnsupportedError do set_acl $path $value
+  open $path w do |file|
+    file.write acl
+  open $path r do |file|
+    assert_throws $UnsupportedError do file.acl kind: :MACOS:
     assert_throws $UnsupportedError do file.set_acl $value
   remove $path

@@ -123,7 +123,7 @@ fn check_acl_default<'v, 's>(
     kind: VfsAclKind,
     default: bool,
 ) -> Result<'v, 's, ()> {
-    if default && kind == VfsAclKind::Nfs4 {
+    if default && kind != VfsAclKind::Posix {
         return Err(Error::value(
             strand,
             "default: is only meaningful for kind: :POSIX:",

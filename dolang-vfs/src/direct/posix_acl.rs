@@ -1,10 +1,10 @@
-use super::{Direct, nfs4_acl};
-use crate::security::{Acl, AclKind, Nfs4Acl, PosixAcl};
+use super::{Direct, macos_acl, nfs4_acl};
+use crate::security::{Acl, AclKind, MacosAcl, Nfs4Acl, PosixAcl};
 #[cfg(any(target_os = "freebsd", target_os = "linux"))]
 use crate::security::{Permission, PosixAce, PosixAclQualifier};
-#[cfg(target_os = "freebsd")]
+#[cfg(any(target_os = "freebsd", target_os = "macos"))]
 use std::os::fd::AsRawFd;
-#[cfg(any(target_os = "freebsd", target_os = "linux"))]
+#[cfg(any(target_os = "freebsd", target_os = "linux", target_os = "macos"))]
 use std::{
     ffi::CString,
     os::{fd::AsFd, unix::ffi::OsStrExt},
@@ -514,7 +514,7 @@ mod freebsd {
 }
 
 fn check_default(kind: AclKind, default: bool) -> io::Result<()> {
-    if default && kind == AclKind::Nfs4 {
+    if default && kind != AclKind::Posix {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "default: is only meaningful for POSIX ACLs",
@@ -527,11 +527,13 @@ fn split_posix(kind: AclKind, acl: Option<&Acl>) -> io::Result<Option<&PosixAcl>
     match (kind, acl) {
         (AclKind::Posix, None) => Ok(None),
         (AclKind::Posix, Some(Acl::Posix(posix))) => Ok(Some(posix)),
-        (AclKind::Posix, Some(Acl::Nfs4(_))) => Err(io::Error::new(
+        (AclKind::Posix, Some(_)) => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "kind: POSIX but value is an NFSv4 ACL",
+            "kind: POSIX but value is not a POSIX ACL",
         )),
-        (AclKind::Nfs4, _) => unreachable!("caller must route AclKind::Nfs4 separately"),
+        (AclKind::Nfs4 | AclKind::Macos, _) => {
+            unreachable!("caller must route AclKind::Nfs4/Macos separately")
+        }
     }
 }
 
@@ -539,11 +541,27 @@ fn split_nfs4(kind: AclKind, acl: Option<&Acl>) -> io::Result<Option<&Nfs4Acl>> 
     match (kind, acl) {
         (AclKind::Nfs4, None) => Ok(None),
         (AclKind::Nfs4, Some(Acl::Nfs4(nfs4))) => Ok(Some(nfs4)),
-        (AclKind::Nfs4, Some(Acl::Posix(_))) => Err(io::Error::new(
+        (AclKind::Nfs4, Some(_)) => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "kind: NFS4 but value is a POSIX ACL",
+            "kind: NFS4 but value is not an NFSv4 ACL",
         )),
-        (AclKind::Posix, _) => unreachable!("caller must route AclKind::Posix separately"),
+        (AclKind::Posix | AclKind::Macos, _) => {
+            unreachable!("caller must route AclKind::Posix/Macos separately")
+        }
+    }
+}
+
+fn split_macos(kind: AclKind, acl: Option<&Acl>) -> io::Result<Option<&MacosAcl>> {
+    match (kind, acl) {
+        (AclKind::Macos, None) => Ok(None),
+        (AclKind::Macos, Some(Acl::Macos(macos))) => Ok(Some(macos)),
+        (AclKind::Macos, Some(_)) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "kind: MACOS but value is not a macOS ACL",
+        )),
+        (AclKind::Posix | AclKind::Nfs4, _) => {
+            unreachable!("caller must route AclKind::Posix/Nfs4 separately")
+        }
     }
 }
 
@@ -556,7 +574,7 @@ impl Direct {
         follow: bool,
     ) -> io::Result<Option<Acl>> {
         check_default(kind, default)?;
-        #[cfg(any(target_os = "freebsd", target_os = "linux"))]
+        #[cfg(any(target_os = "freebsd", target_os = "linux", target_os = "macos"))]
         let cpath = CString::new(path.as_os_str().as_bytes())
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
         match kind {
@@ -584,6 +602,17 @@ impl Direct {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
                     "NFSv4 ACLs are not supported on this platform",
+                ));
+            }
+            AclKind::Macos => {
+                #[cfg(target_os = "macos")]
+                {
+                    Ok(macos_acl::get(Some(&cpath), -1, follow)?.map(Acl::Macos))
+                }
+                #[cfg(not(target_os = "macos"))]
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "macOS ACLs are not supported on this platform",
                 ));
             }
         }
@@ -615,6 +644,21 @@ impl Direct {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
                     "NFSv4 ACLs are not supported on this platform",
+                ));
+            }
+            AclKind::Macos => {
+                #[cfg(target_os = "macos")]
+                {
+                    let macos = split_macos(kind, acl)?;
+                    let cpath = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL")
+                    })?;
+                    macos_acl::set(Some(&cpath), -1, follow, macos)
+                }
+                #[cfg(not(target_os = "macos"))]
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "macOS ACLs are not supported on this platform",
                 ));
             }
         }
@@ -685,6 +729,17 @@ impl Direct {
                     "NFSv4 ACLs are not supported on this platform",
                 ));
             }
+            AclKind::Macos => {
+                #[cfg(target_os = "macos")]
+                {
+                    Ok(macos_acl::get(None, file.as_fd().as_raw_fd(), true)?.map(Acl::Macos))
+                }
+                #[cfg(not(target_os = "macos"))]
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "macOS ACLs are not supported on this platform",
+                ));
+            }
         }
     }
 
@@ -708,6 +763,18 @@ impl Direct {
                 {
                     let _ = (file, nfs4);
                     nfs4_acl::set(None, -1, true, None)
+                }
+            }
+            AclKind::Macos => {
+                let macos = split_macos(kind, acl)?;
+                #[cfg(target_os = "macos")]
+                {
+                    macos_acl::set(None, file.as_fd().as_raw_fd(), true, macos)
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let _ = (file, macos);
+                    macos_acl::set(None, -1, true, None)
                 }
             }
         }

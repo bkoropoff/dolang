@@ -27,6 +27,7 @@ typed-path.workspace = true
 linkme = "0.3.35"
 erased-serde = "0.4"
 thiserror = "2"
+uuid = { version = "1", features = ["serde"] }
 
 [target.'cfg(windows)'.dependencies]
 dunce = "1.0"

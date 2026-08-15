@@ -103,6 +103,38 @@ object. Unlike a POSIX ACL, an NFSv4 ACL is a file's native security
 descriptor: it can be replaced with `fs.set_acl`, but FreeBSD provides no
 operation to remove it back to "none".
 
+## macOS ACLs
+
+[`security.macos.Acl`](../api/security/macos/acl.md) is an immutable
+collection of [`security.macos.Ace`](../api/security/macos/ace.md) entries.
+The object model is available on every platform. Filesystem get and set
+operations are supported on macOS only.
+
+Unlike NFSv4 or POSIX.1e ACL entries, macOS resolves every principal to a
+UUID before it reaches the file's ACL, so an `Ace`'s principal is a
+[`uuid.Uuid`](../api/uuid/uuid.md) rather than a special-cased qualifier:
+
+```
+import fs
+import security.macos:
+  - Acl
+  - Ace
+  - Mask
+
+let owner = uuid.Uuid "..."
+let read = Mask(:READ_DATA:, :READ_ATTRIBUTES:, :READ_SECURITY:)
+let access = Acl $
+  $ Ace.allow $owner mask: $read
+fs.set_acl config.ini $access
+```
+
+Pass `kind: :MACOS:` to `fs.acl` to read a macOS extended ACL instead of the
+default POSIX one; `fs.set_acl` infers the format from the value's type.
+`default: true` is not valid with a macOS ACL, the same as with an NFSv4
+one. Unlike an NFSv4 ACL, a macOS extended ACL is an optional overlay on top
+of POSIX permissions, so it can be removed back to "none" with `fs.set_acl
+config.ini nil kind: :MACOS:`.
+
 ## Windows Access Tokens
 
 [`security.token_info()`](../api/security/index.md#token_info) returns a

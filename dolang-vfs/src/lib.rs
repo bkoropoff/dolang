@@ -55,6 +55,7 @@ pub mod directory;
 pub mod error;
 pub mod extension;
 pub mod file;
+mod macos_acl;
 pub mod metadata;
 mod nfs4_acl;
 pub mod path;

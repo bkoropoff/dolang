@@ -1,0 +1,52 @@
+import security.macos: macos_security
+import uuid
+  std:
+    - ImmutableError
+    - TypeError
+    - ValueError
+  test:
+    - assert_eq
+    - assert_throws
+    - assert_type
+    - test
+
+#[test]
+def constructs_macos_acls_on_every_platform()
+  let rw = macos_security.Mask(:READ_DATA:, :WRITE_DATA:)
+  let r = macos_security.Mask(:READ_DATA:)
+  let inherit = macos_security.Flags(:FILE_INHERIT:, :DIRECTORY_INHERIT:)
+  let owner = uuid.Uuid.generate()
+  let other = uuid.Uuid.generate()
+
+  let allow = macos_security.Ace.allow $owner mask: $rw
+  let deny = macos_security.Ace.deny $other mask: $r flags: $inherit
+
+  assert_type $macos_security.Ace $allow
+  assert_type $macos_security.Ace $deny
+
+  assert_eq $allow.type :ALLOW:
+  assert_eq $allow.principal $owner
+  assert_eq $allow.mask $rw
+  assert_eq $allow.flags (macos_security.Flags())
+
+  assert_eq $deny.type :DENY:
+  assert_eq $deny.principal $other
+  assert_eq $deny.flags $inherit
+
+  let acl = macos_security.Acl [allow, deny]
+  assert_type $macos_security.Acl $acl
+  assert_eq $acl.aces.len 2
+  assert_eq $acl.aces[0].principal $owner
+  assert_eq $acl.aces[1].principal $other
+  assert_throws $ImmutableError do
+    acl.aces[0] = nil
+
+  # Like NFSv4 ACLs, macOS extended ACLs have no required entries or
+  # completeness invariant to validate: an empty ACL and a single-entry ACL
+  # both construct without error.
+  assert_eq $(macos_security.Acl []).aces.len 0
+
+  assert_throws $TypeError do macos_security.Ace.allow $owner mask: 5
+  assert_throws $TypeError do macos_security.Acl [allow, 5]
+  assert_throws $TypeError do macos_security.Ace.allow 5 mask: $r
+  assert_throws $ValueError do macos_security.Ace.allow "not-a-uuid" mask: $r

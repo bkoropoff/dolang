@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use std::io;
 
+pub use crate::macos_acl::{MacosAce, MacosAceFlags, MacosAceMask, MacosAceType, MacosAcl};
 pub use crate::metadata::{Mode, Permission};
 pub use crate::nfs4_acl::{
     Nfs4Ace, Nfs4AceFlags, Nfs4AceMask, Nfs4AceQualifier, Nfs4AceType, Nfs4Acl,
@@ -19,6 +20,8 @@ pub enum AclKind {
     Posix,
     /// NFSv4 ACL.
     Nfs4,
+    /// macOS extended ACL.
+    Macos,
 }
 
 /// A portable access-control list of any supported kind.
@@ -32,6 +35,8 @@ pub enum Acl {
     Posix(PosixAcl),
     /// NFSv4 ACL.
     Nfs4(Nfs4Acl),
+    /// macOS extended ACL.
+    Macos(MacosAcl),
 }
 
 impl Acl {
@@ -40,6 +45,7 @@ impl Acl {
         match self {
             Self::Posix(_) => AclKind::Posix,
             Self::Nfs4(_) => AclKind::Nfs4,
+            Self::Macos(_) => AclKind::Macos,
         }
     }
 }
