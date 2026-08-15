@@ -1,5 +1,6 @@
 use dolang::runtime::{
     Arg, Error, Output, Result, Slot, State, Strand, call,
+    object::FlagsTypeExt,
     strand::InterruptMask,
     unpack,
     value::{BinEmbryo, View},
@@ -7,7 +8,7 @@ use dolang::runtime::{
 };
 use dolang_vfs::{
     FileHandle, OpenOptions, Vfs,
-    metadata::{AttrFlags, AttrsPatch, FileType},
+    metadata::{AttrFlags, AttrsPatch, FileType, Mode as VfsMode},
     path::WellKnownPath,
     security::PosixAcl,
 };
@@ -297,6 +298,18 @@ pub(crate) fn resolve_sym<'v, 's>(
     }
 }
 
+fn parse_mode<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    value: Slot<'v, '_>,
+) -> Result<'v, 's, VfsMode> {
+    if let Some(mode) = global.types.mode.cast_flags(&value) {
+        Ok(mode.0)
+    } else {
+        Ok(VfsMode::from_bits_retain(value.to_u32(strand)?))
+    }
+}
+
 fn metadata_patch<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
@@ -305,7 +318,9 @@ fn metadata_patch<'v, 's>(
     resolve: Option<Slot<'v, '_>>,
     attrs: AttrsPatch,
 ) -> Result<'v, 's, dolang_vfs::metadata::MetadataPatch> {
-    let mode = mode.map(|mode| mode.to_u32(strand)).transpose()?;
+    let mode = mode
+        .map(|mode| parse_mode(strand, global, mode))
+        .transpose()?;
     let user = user
         .map(|user| parse_ownership_identity(strand, global, &user, "user"))
         .transpose()?;
@@ -1445,6 +1460,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
     builder
         .module("fs.unix")
         .value("Path", global.types.unix_path)
+        .value("Mode", global.types.mode)
         .commit();
 
     builder

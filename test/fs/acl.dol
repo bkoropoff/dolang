@@ -17,11 +17,13 @@ import sys agent
     - assert_type
 
 def extended_acl id
+  let rw = unix_security.Permission(:READ:, :WRITE:)
+  let r = unix_security.Permission(:READ:)
   unix_security.Acl [
-    unix_security.Ace.user_obj(read: true, write: true),
-    unix_security.Ace.user(id, read: true),
-    unix_security.Ace.group_obj(read: true),
-    unix_security.Ace.mask(read: true),
+    unix_security.Ace.user_obj(permissions: rw),
+    unix_security.Ace.user(id, permissions: r),
+    unix_security.Ace.group_obj(permissions: r),
+    unix_security.Ace.mask(permissions: r),
     unix_security.Ace.other(),
   ]
 

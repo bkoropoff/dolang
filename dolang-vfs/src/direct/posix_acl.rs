@@ -1,7 +1,7 @@
 use super::Direct;
 use crate::PosixAcl;
 #[cfg(any(target_os = "freebsd", target_os = "linux"))]
-use crate::security::{PosixAce, PosixAclPermissions, PosixAclQualifier};
+use crate::security::{Permission, PosixAce, PosixAclQualifier};
 #[cfg(target_os = "freebsd")]
 use std::os::fd::AsRawFd;
 #[cfg(any(target_os = "freebsd", target_os = "linux"))]
@@ -86,11 +86,7 @@ fn decode_linux(bytes: &[u8]) -> io::Result<PosixAcl> {
         };
         entries.push(PosixAce {
             qualifier,
-            permissions: PosixAclPermissions {
-                read: perm & 4 != 0,
-                write: perm & 2 != 0,
-                execute: perm & 1 != 0,
-            },
+            permissions: Permission::from_bits_truncate(perm as u8),
         });
     }
     PosixAcl::new(entries).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
@@ -109,9 +105,7 @@ fn encode_linux(acl: &PosixAcl) -> Vec<u8> {
             PosixAclQualifier::Mask => (0x10, u32::MAX),
             PosixAclQualifier::Other => (0x20, u32::MAX),
         };
-        let perm = u16::from(entry.permissions.execute)
-            | (u16::from(entry.permissions.write) << 1)
-            | (u16::from(entry.permissions.read) << 2);
+        let perm = u16::from(entry.permissions.bits());
         bytes.extend_from_slice(&tag.to_le_bytes());
         bytes.extend_from_slice(&perm.to_le_bytes());
         bytes.extend_from_slice(&id.to_le_bytes());
@@ -320,13 +314,13 @@ mod freebsd {
                     Ok(value != 0)
                 }
             };
+            let mut permissions = Permission::empty();
+            permissions.set(Permission::READ, has(ACL_READ)?);
+            permissions.set(Permission::WRITE, has(ACL_WRITE)?);
+            permissions.set(Permission::EXECUTE, has(ACL_EXECUTE)?);
             entries.push(PosixAce {
                 qualifier,
-                permissions: PosixAclPermissions {
-                    read: has(ACL_READ)?,
-                    write: has(ACL_WRITE)?,
-                    execute: has(ACL_EXECUTE)?,
-                },
+                permissions,
             });
             result = unsafe { acl_get_entry(acl.0, ACL_NEXT_ENTRY, &mut entry) };
         }
@@ -504,12 +498,12 @@ mod freebsd {
             let mut permset = ptr::null_mut();
             call(unsafe { acl_get_permset(entry, &mut permset) })?;
             call(unsafe { acl_clear_perms(permset) })?;
-            for (enabled, permission) in [
-                (ace.permissions.read, ACL_READ),
-                (ace.permissions.write, ACL_WRITE),
-                (ace.permissions.execute, ACL_EXECUTE),
+            for (bit, permission) in [
+                (Permission::READ, ACL_READ),
+                (Permission::WRITE, ACL_WRITE),
+                (Permission::EXECUTE, ACL_EXECUTE),
             ] {
-                if enabled {
+                if ace.permissions.contains(bit) {
                     call(unsafe { acl_add_perm(permset, permission) })?;
                 }
             }
@@ -627,23 +621,15 @@ mod tests {
         let acl = PosixAcl::new(vec![
             PosixAce {
                 qualifier: PosixAclQualifier::UserObj,
-                permissions: PosixAclPermissions {
-                    read: true,
-                    write: true,
-                    execute: false,
-                },
+                permissions: Permission::READ | Permission::WRITE,
             },
             PosixAce {
                 qualifier: PosixAclQualifier::GroupObj,
-                permissions: PosixAclPermissions {
-                    read: true,
-                    write: false,
-                    execute: false,
-                },
+                permissions: Permission::READ,
             },
             PosixAce {
                 qualifier: PosixAclQualifier::Other,
-                permissions: PosixAclPermissions::default(),
+                permissions: Permission::empty(),
             },
         ])
         .unwrap();

@@ -5,9 +5,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use std::io;
 
-pub use crate::posix_acl::{
-    PosixAce, PosixAcl, PosixAclError, PosixAclPermissions, PosixAclQualifier,
-};
+pub use crate::metadata::{Mode, Permission};
+pub use crate::posix_acl::{PosixAce, PosixAcl, PosixAclError, PosixAclQualifier};
 
 /// An owner or group selected by numeric ID, account name, or Windows SID.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

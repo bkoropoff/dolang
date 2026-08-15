@@ -16,6 +16,8 @@ import agent
     - symlink
   proc.run:
     - id
+  security.unix:
+    - Permission
 import std:
   - RuntimeError
 
@@ -31,7 +33,9 @@ def numeric_id()
   let after = Path(test_path).metadata()
   assert_eq $after.uid $before.uid
   assert_eq $after.gid $before.gid
-  assert_eq (after.mode & 0o777) 0o600
+  assert_eq $after.mode.owner (Permission :READ: :WRITE:)
+  assert_eq $after.mode.group (Permission())
+  assert_eq $after.mode.other (Permission())
 
   remove $test_path
 
@@ -46,8 +50,8 @@ def multiple_paths()
     f.write "second"
 
   set_metadata $first $second mode: 0o600
-  assert_eq (Path(first).metadata().mode & 0o777) 0o600
-  assert_eq (Path(second).metadata().mode & 0o777) 0o600
+  assert_eq $Path(first).metadata().mode.owner (Permission :READ: :WRITE:)
+  assert_eq $Path(second).metadata().mode.owner (Permission :READ: :WRITE:)
 
   remove $first $second
 

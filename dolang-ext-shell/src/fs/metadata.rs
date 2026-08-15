@@ -1,12 +1,120 @@
+use std::ops::{BitAnd, BitOr, BitXor, Not};
+
 use dolang::runtime::{
     Error, Object, Output, Result, State, Strand, Sym,
-    object::{Instance, TypeBuilder},
+    object::{FlagLike, FlagsInstanceExt, FlagsTypeExt, Instance, TypeBuilder},
+    unpack,
+    value::Value,
 };
-use dolang_vfs::metadata::{FileType, Metadata as VfsMetadata};
+use dolang_vfs::metadata::{FileType, Metadata as VfsMetadata, Mode as VfsMode};
 
-use crate::{fs::attrs, global::Global, time::create_datetime, util};
+use crate::{fs::attrs, global::Global, security::Permission, time::create_datetime, util};
 
 const NANOS_PER_SEC_I128: i128 = 1_000_000_000;
+
+fn mode_u32<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    value: &Value<'v>,
+    name: &'static str,
+) -> Result<'v, 's, u32> {
+    let value = value
+        .to_i64(strand)
+        .map_err(|_| Error::type_error(strand, format!("{name}: expected Int")))?;
+    u32::try_from(value).map_err(|_| Error::value(strand, format!("{name}: out of range")))
+}
+
+/// Unix mode bits (`fs.unix.Mode`), a local newtype over
+/// [`dolang_vfs::metadata::Mode`] so [`FlagLike`] can be implemented here
+/// (both the trait and the VFS type are foreign to this crate).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct Mode(pub(crate) VfsMode);
+
+impl BitOr for Mode {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
+}
+impl BitAnd for Mode {
+    type Output = Self;
+    fn bitand(self, rhs: Self) -> Self {
+        Self(self.0 & rhs.0)
+    }
+}
+impl BitXor for Mode {
+    type Output = Self;
+    fn bitxor(self, rhs: Self) -> Self {
+        Self(self.0 ^ rhs.0)
+    }
+}
+impl Not for Mode {
+    type Output = Self;
+    fn not(self) -> Self {
+        Self(!self.0)
+    }
+}
+
+impl FlagLike for Mode {
+    const ZERO: Self = Self(VfsMode::empty());
+    const MODULE: &'static str = "fs.unix";
+    const NAME: &'static str = "Mode";
+    const BITS: &'static [(&'static str, Self)] = &[
+        ("SET_UID", Self(VfsMode::SET_UID)),
+        ("SET_GID", Self(VfsMode::SET_GID)),
+        ("STICKY", Self(VfsMode::STICKY)),
+        ("OWNER_READ", Self(VfsMode::OWNER_READ)),
+        ("OWNER_WRITE", Self(VfsMode::OWNER_WRITE)),
+        ("OWNER_EXECUTE", Self(VfsMode::OWNER_EXECUTE)),
+        ("GROUP_READ", Self(VfsMode::GROUP_READ)),
+        ("GROUP_WRITE", Self(VfsMode::GROUP_WRITE)),
+        ("GROUP_EXECUTE", Self(VfsMode::GROUP_EXECUTE)),
+        ("OTHER_READ", Self(VfsMode::OTHER_READ)),
+        ("OTHER_WRITE", Self(VfsMode::OTHER_WRITE)),
+        ("OTHER_EXECUTE", Self(VfsMode::OTHER_EXECUTE)),
+        ("IFIFO", Self(VfsMode::IFIFO)),
+        ("IFCHR", Self(VfsMode::IFCHR)),
+        ("IFDIR", Self(VfsMode::IFDIR)),
+        ("IFBLK", Self(VfsMode::IFBLK)),
+        ("IFREG", Self(VfsMode::IFREG)),
+        ("IFLNK", Self(VfsMode::IFLNK)),
+        ("IFSOCK", Self(VfsMode::IFSOCK)),
+    ];
+
+    fn rank(self) -> usize {
+        self.0.bits().count_ones() as usize
+    }
+
+    fn build<'v, 'a>(
+        builder: TypeBuilder<'v, 'a, dolang::runtime::object::Flags<Self>>,
+    ) -> TypeBuilder<'v, 'a, dolang::runtime::object::Flags<Self>> {
+        builder
+            .get("owner", |this, strand, out| {
+                let permission = strand.state::<Global<'v>>().types.permission;
+                permission.create_flags(strand, Permission(this.flags().0.owner()), out);
+                Ok(())
+            })
+            .get("group", |this, strand, out| {
+                let permission = strand.state::<Global<'v>>().types.permission;
+                permission.create_flags(strand, Permission(this.flags().0.group()), out);
+                Ok(())
+            })
+            .get("other", |this, strand, out| {
+                let permission = strand.state::<Global<'v>>().types.permission;
+                permission.create_flags(strand, Permission(this.flags().0.other()), out);
+                Ok(())
+            })
+            .get("int", |this, strand, out| {
+                Output::set(strand, out, this.flags().0.bits());
+                Ok(())
+            })
+            .type_method("from_int", async move |this, strand, args, out| {
+                let ([value], []) = unpack!(strand, args, 1, 0)?;
+                let value = mode_u32(strand, &value, "value")?;
+                this.create_flags(strand, Self(VfsMode::from_bits_retain(value)), out);
+                Ok(())
+            })
+    }
+}
 
 pub(crate) struct Metadata;
 
@@ -178,12 +286,16 @@ impl<'v> Object<'v> for Metadata {
                 )
             })
             .get("mode", move |this, strand, out| {
-                util::option_field(
-                    strand,
-                    this.annex().inner.unix().map(|unix| unix.mode),
-                    mode,
-                    out,
-                )
+                let annex = this.annex();
+                let Some(unix) = annex.inner.unix() else {
+                    return Err(Error::field(strand, mode));
+                };
+                annex
+                    .global
+                    .types
+                    .mode
+                    .create_flags(strand, Mode(unix.mode), out);
+                Ok(())
             })
             .get("dev", move |this, strand, out| {
                 util::option_field(strand, this.annex().inner.unix().map(|v| v.dev), dev, out)

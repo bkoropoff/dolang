@@ -20,10 +20,9 @@ use dolang::{
 use dolang_vfs::{
     Vfs as _,
     security::{
-        PosixAce as VfsPosixAce, PosixAcl as VfsPosixAcl,
-        PosixAclPermissions as VfsPosixAclPermissions, PosixAclQualifier as VfsPosixAclQualifier,
-        SecurityInfo, SidName as VfsSidName, SidNameUse, TokenGroup as VfsTokenGroup,
-        UnixSecurityInfo, WindowsTokenInfo,
+        Permission as VfsPermission, PosixAce as VfsPosixAce, PosixAcl as VfsPosixAcl,
+        PosixAclQualifier as VfsPosixAclQualifier, SecurityInfo, SidName as VfsSidName, SidNameUse,
+        TokenGroup as VfsTokenGroup, UnixSecurityInfo, WindowsTokenInfo,
     },
     target::OperatingSystemFamily,
 };
@@ -309,6 +308,28 @@ impl FlagLike for SecDescControl {
     }
 }
 
+/// Unix read/write/execute permission bits (`security.unix.Permission`), a
+/// local newtype over [`dolang_vfs::security::Permission`] so [`FlagLike`]
+/// can be implemented here. Shared by [`Mode`]'s owner/group/other
+/// projections and by [`PosixAceObject`]'s permission set.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Permission(pub VfsPermission);
+flags_ops!(Permission);
+impl FlagLike for Permission {
+    const ZERO: Self = Self(VfsPermission::empty());
+    const MODULE: &'static str = "security.unix";
+    const NAME: &'static str = "Permission";
+    const BITS: &'static [(&'static str, Self)] = &[
+        ("READ", Self(VfsPermission::READ)),
+        ("WRITE", Self(VfsPermission::WRITE)),
+        ("EXECUTE", Self(VfsPermission::EXECUTE)),
+    ];
+
+    fn rank(self) -> usize {
+        self.0.bits().count_ones() as usize
+    }
+}
+
 pub(crate) struct Identity;
 
 impl<'v> Object<'v> for Identity {
@@ -453,27 +474,15 @@ pub(crate) fn posix_acl_from_value<'v, 's>(
 
 pub(crate) struct PosixAceObject;
 
-fn posix_permissions<'v, 's>(
+async fn posix_permissions<'v, 's>(
     strand: &mut Strand<'v, 's>,
-    read: Option<&Value<'v>>,
-    write: Option<&Value<'v>>,
-    execute: Option<&Value<'v>>,
-) -> Result<'v, 's, VfsPosixAclPermissions> {
-    let permission = |strand: &mut Strand<'v, 's>, value: Option<&Value<'v>>, name| {
-        value
-            .map(|value| {
-                value
-                    .as_bool(strand)
-                    .ok_or_else(|| Error::type_error(strand, format!("{name}: expected Bool")))
-            })
-            .transpose()
-            .map(|value| value.unwrap_or(false))
+    global: State<'v, Global<'v>>,
+    permissions: Option<&Value<'v>>,
+) -> Result<'v, 's, VfsPermission> {
+    let Some(value) = permissions else {
+        return Ok(VfsPermission::empty());
     };
-    Ok(VfsPosixAclPermissions {
-        read: permission(strand, read, "read")?,
-        write: permission(strand, write, "write")?,
-        execute: permission(strand, execute, "execute")?,
-    })
+    Ok(global.types.permission.coerce(strand, value).await?.0)
 }
 
 fn posix_id<'v, 's>(
@@ -495,9 +504,7 @@ impl<'v> Object<'v> for PosixAceObject {
     type TypeAnnex = ();
 
     fn build<'a>(mut builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
-        let read = builder.sym("read");
-        let write = builder.sym("write");
-        let execute = builder.sym("execute");
+        let permissions = builder.sym("permissions");
         let id_field = builder.sym("id");
         let user_obj = builder.sym("USER_OBJ");
         let user = builder.sym("USER");
@@ -509,21 +516,10 @@ impl<'v> Object<'v> for PosixAceObject {
         macro_rules! constructor {
             ($builder:expr, $name:literal, $qualifier:expr) => {
                 $builder.type_method($name, async move |this, strand, args, out| {
-                    let ([], [read, write, execute]) = unpack!(
-                        strand,
-                        args,
-                        0,
-                        0,
-                        read = None,
-                        write = None,
-                        execute = None
-                    )?;
-                    let permissions = posix_permissions(
-                        strand,
-                        read.as_deref(),
-                        write.as_deref(),
-                        execute.as_deref(),
-                    )?;
+                    let ([], [permissions]) = unpack!(strand, args, 0, 0, permissions = None)?;
+                    let global = strand.state::<Global<'v>>();
+                    let permissions =
+                        posix_permissions(strand, global, permissions.as_deref()).await?;
                     this.create_with_annex(
                         strand,
                         PosixAceObject,
@@ -545,21 +541,9 @@ impl<'v> Object<'v> for PosixAceObject {
 
         builder
             .type_method("user", async move |this, strand, args, out| {
-                let ([id], [read, write, execute]) = unpack!(
-                    strand,
-                    args,
-                    1,
-                    0,
-                    read = None,
-                    write = None,
-                    execute = None
-                )?;
-                let permissions = posix_permissions(
-                    strand,
-                    read.as_deref(),
-                    write.as_deref(),
-                    execute.as_deref(),
-                )?;
+                let ([id], [permissions]) = unpack!(strand, args, 1, 0, permissions = None)?;
+                let global = strand.state::<Global<'v>>();
+                let permissions = posix_permissions(strand, global, permissions.as_deref()).await?;
                 let id = posix_id(strand, &id, "uid")?;
                 this.create_with_annex(
                     strand,
@@ -573,21 +557,9 @@ impl<'v> Object<'v> for PosixAceObject {
                 Ok(())
             })
             .type_method("group", async move |this, strand, args, out| {
-                let ([id], [read, write, execute]) = unpack!(
-                    strand,
-                    args,
-                    1,
-                    0,
-                    read = None,
-                    write = None,
-                    execute = None
-                )?;
-                let permissions = posix_permissions(
-                    strand,
-                    read.as_deref(),
-                    write.as_deref(),
-                    execute.as_deref(),
-                )?;
+                let ([id], [permissions]) = unpack!(strand, args, 1, 0, permissions = None)?;
+                let global = strand.state::<Global<'v>>();
+                let permissions = posix_permissions(strand, global, permissions.as_deref()).await?;
                 let id = posix_id(strand, &id, "gid")?;
                 this.create_with_annex(
                     strand,
@@ -620,16 +592,9 @@ impl<'v> Object<'v> for PosixAceObject {
                 Output::set(strand, out, id);
                 Ok(())
             })
-            .get("read", |this, strand, out| {
-                Output::set(strand, out, this.annex().permissions.read);
-                Ok(())
-            })
-            .get("write", |this, strand, out| {
-                Output::set(strand, out, this.annex().permissions.write);
-                Ok(())
-            })
-            .get("execute", |this, strand, out| {
-                Output::set(strand, out, this.annex().permissions.execute);
+            .get("permissions", |this, strand, out| {
+                let permission = strand.state::<Global<'v>>().types.permission;
+                permission.create_flags(strand, Permission(this.annex().permissions), out);
                 Ok(())
             })
     }
@@ -2538,6 +2503,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         .value("Identity", global.types.unix_identity)
         .value("Acl", global.types.posix_acl)
         .value("Ace", global.types.posix_ace)
+        .value("Permission", global.types.permission)
         .commit();
 
     builder

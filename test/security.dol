@@ -29,6 +29,7 @@ import sys
     - group_id
   security.unix:
     - Identity
+    - Permission
   security.windows:
     - AccessMask
     - Ace
@@ -234,10 +235,10 @@ def functionally_updates_security_descriptors()
 
 #[test]
 def constructs_posix_acls_on_every_platform()
-  let owner = unix_security.Ace.user_obj read: true write: true
-  let named = unix_security.Ace.user 1234 read: true
-  let group = unix_security.Ace.group_obj read: true
-  let mask = unix_security.Ace.mask read: true
+  let owner = unix_security.Ace.user_obj permissions: (Permission :READ: :WRITE:)
+  let named = unix_security.Ace.user 1234 permissions: (Permission :READ:)
+  let group = unix_security.Ace.group_obj permissions: (Permission :READ:)
+  let mask = unix_security.Ace.mask permissions: (Permission :READ:)
   let other = unix_security.Ace.other()
   assert_type $unix_security.Ace $owner
   assert_type $unix_security.Ace $named
@@ -249,9 +250,7 @@ def constructs_posix_acls_on_every_platform()
   assert_type $unix_security.Acl $acl
   assert_eq $acl.ace_count 5
   assert_eq $acl.aces[0].type :USER_OBJ:
-  assert_eq $acl.aces[0].read true
-  assert_eq $acl.aces[0].write true
-  assert_eq $acl.aces[0].execute false
+  assert_eq $acl.aces[0].permissions (Permission :READ: :WRITE:)
   assert_throws $FieldError do acl.aces[0].id
   assert_eq $acl.aces[1].type :USER:
   assert_eq $acl.aces[1].id 1234
