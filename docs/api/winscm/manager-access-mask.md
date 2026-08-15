@@ -24,6 +24,18 @@ The generic object rights in
 [`security.windows.AccessMask`](../security/windows/access-mask.md) are also
 supported.
 
+## Fields
+
+### `int`
+
+Returns the complete native mask as an integer, including unknown bits.
+
+## Class Methods
+
+### `from_int value`
+
+Constructs a mask from a native integer while preserving every bit.
+
 ## Methods
 
 ### `contains right`

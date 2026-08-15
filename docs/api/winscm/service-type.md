@@ -20,6 +20,18 @@ Constructs a value from symbols or one iterable of symbols.
 | `:DRIVER:`              | Either kind of driver                               |
 | `:WIN32:`               | Either kind of Win32 service                        |
 
+## Fields
+
+### `int`
+
+Returns the complete native value as an integer, including unknown bits.
+
+## Class Methods
+
+### `from_int value`
+
+Constructs a value from a native integer while preserving every bit.
+
 ## Methods
 
 ### `contains service_type`

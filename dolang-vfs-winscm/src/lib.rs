@@ -1,3 +1,4 @@
+#![deny(warnings)]
 //! Windows Service Control Manager VFS extension for `dolang-vfs`.
 //!
 //! Registers a remoteable [`dolang_vfs::extension::VfsExtension`] providing

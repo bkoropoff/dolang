@@ -4,27 +4,54 @@
 
 use std::ops::{BitAnd, BitOr, BitXor, Not};
 
-use dolang::runtime::object::FlagLike;
+use dolang::runtime::object::{FlagLike, Flags, FlagsInstanceExt, FlagsTypeExt, TypeBuilder};
+use dolang::runtime::{Error, Output, unpack};
 use dolang_vfs_winscm::{
     NotifyMask as WireNotifyMask, ServiceControlsAccepted as WireServiceControlsAccepted,
     ServiceType as WireServiceType,
 };
 
+macro_rules! raw_projection {
+    ($local:ty, $wire:ty) => {
+        fn build<'v, 'a>(
+            builder: TypeBuilder<'v, 'a, Flags<Self>>,
+        ) -> TypeBuilder<'v, 'a, Flags<Self>> {
+            builder
+                .get("int", |this, strand, out| {
+                    Output::set(strand, out, this.flags().0.bits());
+                    Ok(())
+                })
+                .type_method("from_int", async move |this, strand, args, out| {
+                    let ([value], []) = unpack!(strand, args, 1, 0)?;
+                    let value = value.to_i64(strand)?;
+                    let value = u32::try_from(value)
+                        .map_err(|_| Error::value(strand, "flags integer out of range"))?;
+                    this.create_flags(
+                        strand,
+                        <$local>::from(<$wire>::from_bits_retain(value)),
+                        out,
+                    );
+                    Ok(())
+                })
+        }
+    };
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct ServiceType(pub(crate) u32);
+pub(crate) struct ServiceType(pub(crate) WireServiceType);
 
 impl ServiceType {
-    pub(crate) const KERNEL_DRIVER: ServiceType = ServiceType(WireServiceType::KERNEL_DRIVER.0);
+    pub(crate) const KERNEL_DRIVER: ServiceType = ServiceType(WireServiceType::KERNEL_DRIVER);
     pub(crate) const FILE_SYSTEM_DRIVER: ServiceType =
-        ServiceType(WireServiceType::FILE_SYSTEM_DRIVER.0);
+        ServiceType(WireServiceType::FILE_SYSTEM_DRIVER);
     pub(crate) const WIN32_OWN_PROCESS: ServiceType =
-        ServiceType(WireServiceType::WIN32_OWN_PROCESS.0);
+        ServiceType(WireServiceType::WIN32_OWN_PROCESS);
     pub(crate) const WIN32_SHARE_PROCESS: ServiceType =
-        ServiceType(WireServiceType::WIN32_SHARE_PROCESS.0);
+        ServiceType(WireServiceType::WIN32_SHARE_PROCESS);
     pub(crate) const INTERACTIVE_PROCESS: ServiceType =
-        ServiceType(WireServiceType::INTERACTIVE_PROCESS.0);
-    pub(crate) const DRIVER: ServiceType = ServiceType(WireServiceType::DRIVER.0);
-    pub(crate) const WIN32: ServiceType = ServiceType(WireServiceType::WIN32.0);
+        ServiceType(WireServiceType::INTERACTIVE_PROCESS);
+    pub(crate) const DRIVER: ServiceType = ServiceType(WireServiceType::DRIVER);
+    pub(crate) const WIN32: ServiceType = ServiceType(WireServiceType::WIN32);
 }
 
 impl BitOr for ServiceType {
@@ -56,7 +83,7 @@ impl Not for ServiceType {
 }
 
 impl FlagLike for ServiceType {
-    const ZERO: ServiceType = ServiceType(0);
+    const ZERO: ServiceType = ServiceType(WireServiceType::empty());
     const MODULE: &'static str = "winscm";
     const NAME: &'static str = "ServiceType";
     const BITS: &'static [(&'static str, ServiceType)] = &[
@@ -70,36 +97,38 @@ impl FlagLike for ServiceType {
     ];
 
     fn rank(self) -> usize {
-        self.0.count_ones() as usize
+        self.0.bits().count_ones() as usize
     }
+
+    raw_projection!(ServiceType, WireServiceType);
 }
 
 impl From<WireServiceType> for ServiceType {
     fn from(wire: WireServiceType) -> ServiceType {
-        ServiceType(wire.0)
+        ServiceType(wire)
     }
 }
 
 impl From<ServiceType> for WireServiceType {
     fn from(mask: ServiceType) -> WireServiceType {
-        WireServiceType(mask.0)
+        mask.0
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct NotifyMask(pub(crate) u32);
+pub(crate) struct NotifyMask(pub(crate) WireNotifyMask);
 
 impl NotifyMask {
-    pub(crate) const STOPPED: NotifyMask = NotifyMask(WireNotifyMask::STOPPED.0);
-    pub(crate) const START_PENDING: NotifyMask = NotifyMask(WireNotifyMask::START_PENDING.0);
-    pub(crate) const STOP_PENDING: NotifyMask = NotifyMask(WireNotifyMask::STOP_PENDING.0);
-    pub(crate) const RUNNING: NotifyMask = NotifyMask(WireNotifyMask::RUNNING.0);
-    pub(crate) const CONTINUE_PENDING: NotifyMask = NotifyMask(WireNotifyMask::CONTINUE_PENDING.0);
-    pub(crate) const PAUSE_PENDING: NotifyMask = NotifyMask(WireNotifyMask::PAUSE_PENDING.0);
-    pub(crate) const PAUSED: NotifyMask = NotifyMask(WireNotifyMask::PAUSED.0);
-    pub(crate) const CREATED: NotifyMask = NotifyMask(WireNotifyMask::CREATED.0);
-    pub(crate) const DELETED: NotifyMask = NotifyMask(WireNotifyMask::DELETED.0);
-    pub(crate) const DELETE_PENDING: NotifyMask = NotifyMask(WireNotifyMask::DELETE_PENDING.0);
+    pub(crate) const STOPPED: NotifyMask = NotifyMask(WireNotifyMask::STOPPED);
+    pub(crate) const START_PENDING: NotifyMask = NotifyMask(WireNotifyMask::START_PENDING);
+    pub(crate) const STOP_PENDING: NotifyMask = NotifyMask(WireNotifyMask::STOP_PENDING);
+    pub(crate) const RUNNING: NotifyMask = NotifyMask(WireNotifyMask::RUNNING);
+    pub(crate) const CONTINUE_PENDING: NotifyMask = NotifyMask(WireNotifyMask::CONTINUE_PENDING);
+    pub(crate) const PAUSE_PENDING: NotifyMask = NotifyMask(WireNotifyMask::PAUSE_PENDING);
+    pub(crate) const PAUSED: NotifyMask = NotifyMask(WireNotifyMask::PAUSED);
+    pub(crate) const CREATED: NotifyMask = NotifyMask(WireNotifyMask::CREATED);
+    pub(crate) const DELETED: NotifyMask = NotifyMask(WireNotifyMask::DELETED);
+    pub(crate) const DELETE_PENDING: NotifyMask = NotifyMask(WireNotifyMask::DELETE_PENDING);
 }
 
 impl BitOr for NotifyMask {
@@ -131,7 +160,7 @@ impl Not for NotifyMask {
 }
 
 impl FlagLike for NotifyMask {
-    const ZERO: NotifyMask = NotifyMask(0);
+    const ZERO: NotifyMask = NotifyMask(WireNotifyMask::empty());
     const MODULE: &'static str = "winscm";
     const NAME: &'static str = "NotifyMask";
     const BITS: &'static [(&'static str, NotifyMask)] = &[
@@ -148,42 +177,50 @@ impl FlagLike for NotifyMask {
     ];
 
     fn rank(self) -> usize {
-        self.0.count_ones() as usize
+        self.0.bits().count_ones() as usize
+    }
+
+    raw_projection!(NotifyMask, WireNotifyMask);
+}
+
+impl From<WireNotifyMask> for NotifyMask {
+    fn from(wire: WireNotifyMask) -> Self {
+        Self(wire)
     }
 }
 
 impl From<NotifyMask> for WireNotifyMask {
     fn from(mask: NotifyMask) -> WireNotifyMask {
-        WireNotifyMask(mask.0)
+        mask.0
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct ServiceControlsAccepted(pub(crate) u32);
+pub(crate) struct ServiceControlsAccepted(pub(crate) WireServiceControlsAccepted);
 
 impl ServiceControlsAccepted {
     pub(crate) const STOP: ServiceControlsAccepted =
-        ServiceControlsAccepted(WireServiceControlsAccepted::STOP.0);
+        ServiceControlsAccepted(WireServiceControlsAccepted::STOP);
     pub(crate) const PAUSE_CONTINUE: ServiceControlsAccepted =
-        ServiceControlsAccepted(WireServiceControlsAccepted::PAUSE_CONTINUE.0);
+        ServiceControlsAccepted(WireServiceControlsAccepted::PAUSE_CONTINUE);
     pub(crate) const SHUTDOWN: ServiceControlsAccepted =
-        ServiceControlsAccepted(WireServiceControlsAccepted::SHUTDOWN.0);
+        ServiceControlsAccepted(WireServiceControlsAccepted::SHUTDOWN);
     pub(crate) const PARAMCHANGE: ServiceControlsAccepted =
-        ServiceControlsAccepted(WireServiceControlsAccepted::PARAMCHANGE.0);
+        ServiceControlsAccepted(WireServiceControlsAccepted::PARAMCHANGE);
     pub(crate) const NETBINDCHANGE: ServiceControlsAccepted =
-        ServiceControlsAccepted(WireServiceControlsAccepted::NETBINDCHANGE.0);
+        ServiceControlsAccepted(WireServiceControlsAccepted::NETBINDCHANGE);
     pub(crate) const HARDWAREPROFILECHANGE: ServiceControlsAccepted =
-        ServiceControlsAccepted(WireServiceControlsAccepted::HARDWAREPROFILECHANGE.0);
+        ServiceControlsAccepted(WireServiceControlsAccepted::HARDWAREPROFILECHANGE);
     pub(crate) const POWEREVENT: ServiceControlsAccepted =
-        ServiceControlsAccepted(WireServiceControlsAccepted::POWEREVENT.0);
+        ServiceControlsAccepted(WireServiceControlsAccepted::POWEREVENT);
     pub(crate) const SESSIONCHANGE: ServiceControlsAccepted =
-        ServiceControlsAccepted(WireServiceControlsAccepted::SESSIONCHANGE.0);
+        ServiceControlsAccepted(WireServiceControlsAccepted::SESSIONCHANGE);
     pub(crate) const PRESHUTDOWN: ServiceControlsAccepted =
-        ServiceControlsAccepted(WireServiceControlsAccepted::PRESHUTDOWN.0);
+        ServiceControlsAccepted(WireServiceControlsAccepted::PRESHUTDOWN);
     pub(crate) const TIMECHANGE: ServiceControlsAccepted =
-        ServiceControlsAccepted(WireServiceControlsAccepted::TIMECHANGE.0);
+        ServiceControlsAccepted(WireServiceControlsAccepted::TIMECHANGE);
     pub(crate) const TRIGGEREVENT: ServiceControlsAccepted =
-        ServiceControlsAccepted(WireServiceControlsAccepted::TRIGGEREVENT.0);
+        ServiceControlsAccepted(WireServiceControlsAccepted::TRIGGEREVENT);
 }
 
 impl BitOr for ServiceControlsAccepted {
@@ -215,7 +252,8 @@ impl Not for ServiceControlsAccepted {
 }
 
 impl FlagLike for ServiceControlsAccepted {
-    const ZERO: ServiceControlsAccepted = ServiceControlsAccepted(0);
+    const ZERO: ServiceControlsAccepted =
+        ServiceControlsAccepted(WireServiceControlsAccepted::empty());
     const MODULE: &'static str = "winscm";
     const NAME: &'static str = "ServiceControlsAccepted";
     const BITS: &'static [(&'static str, ServiceControlsAccepted)] = &[
@@ -236,12 +274,14 @@ impl FlagLike for ServiceControlsAccepted {
     ];
 
     fn rank(self) -> usize {
-        self.0.count_ones() as usize
+        self.0.bits().count_ones() as usize
     }
+
+    raw_projection!(ServiceControlsAccepted, WireServiceControlsAccepted);
 }
 
 impl From<WireServiceControlsAccepted> for ServiceControlsAccepted {
     fn from(wire: WireServiceControlsAccepted) -> ServiceControlsAccepted {
-        ServiceControlsAccepted(wire.0)
+        ServiceControlsAccepted(wire)
     }
 }

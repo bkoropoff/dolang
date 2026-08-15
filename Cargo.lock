@@ -1385,9 +1385,11 @@ dependencies = [
 name = "dolang-vfs-winscm"
 version = "0.1.1"
 dependencies = [
+ "bitflags",
  "dolang-vfs",
  "dolang-winterop",
  "futures",
+ "postcard",
  "serde",
  "tempfile",
  "tokio",

@@ -22,6 +22,16 @@ struct SendHandle(SC_HANDLE);
 unsafe impl Send for SendHandle {}
 
 impl SendHandle {
+    /// Takes temporary ownership of a live SC manager handle.
+    ///
+    /// # Safety
+    ///
+    /// `handle` must be a live, owned SC manager handle. Ownership transfers
+    /// to the returned wrapper.
+    unsafe fn new(handle: SC_HANDLE) -> Self {
+        Self(handle)
+    }
+
     /// Consumes the wrapper, forcing a whole-value closure capture rather
     /// than a disjoint capture of the (non-`Send`) inner field.
     fn into_inner(self) -> SC_HANDLE {
@@ -49,7 +59,13 @@ impl ExtResource for ScManager {
 }
 
 impl ScManager {
-    pub(crate) fn new(handle: SC_HANDLE) -> Self {
+    /// Takes ownership of an open SC manager handle.
+    ///
+    /// # Safety
+    ///
+    /// `handle` must be a live, owned SC manager handle that may be passed to
+    /// `CloseServiceHandle` exactly once. Ownership transfers to this value.
+    pub(crate) unsafe fn new(handle: SC_HANDLE) -> Self {
         Self(Some(handle))
     }
 
@@ -69,7 +85,8 @@ impl ScManager {
         let Some(handle) = self.0.take() else {
             return Ok(());
         };
-        let handle = SendHandle(handle);
+        // SAFETY: the handle was taken from this owning resource.
+        let handle = unsafe { SendHandle::new(handle) };
         tokio::task::spawn_blocking(move || {
             // SAFETY: `handle` is a live handle owned by this `ScManager`;
             // taking it above ensures `Drop` won't also try to close it.
@@ -95,7 +112,8 @@ impl Drop for ScManager {
         // is dropped during teardown with no runtime alive), mirroring
         // `dolang_vfs::direct::lock::DirectFileLock`'s `Drop` impl.
         if tokio::runtime::Handle::try_current().is_ok() {
-            let handle = SendHandle(handle);
+            // SAFETY: the handle was taken from this owning resource.
+            let handle = unsafe { SendHandle::new(handle) };
             drop(tokio::task::spawn_blocking(move || {
                 // SAFETY: see the comment on the `SendHandle` field above.
                 unsafe {

@@ -7,9 +7,36 @@
 
 use std::ops::{BitAnd, BitOr, BitXor, Not};
 
-use dolang::runtime::object::FlagLike;
+use dolang::runtime::object::{FlagLike, Flags, FlagsInstanceExt, FlagsTypeExt, TypeBuilder};
+use dolang::runtime::{Error, Output, unpack};
 use dolang_vfs_winscm::ServiceAccess as WireServiceAccess;
 use dolang_winterop::security::AccessMask as WinAccessMask;
+
+macro_rules! raw_projection {
+    () => {
+        fn build<'v, 'a>(
+            builder: TypeBuilder<'v, 'a, Flags<Self>>,
+        ) -> TypeBuilder<'v, 'a, Flags<Self>> {
+            builder
+                .get("int", |this, strand, out| {
+                    Output::set(strand, out, this.flags().0.0.bits());
+                    Ok(())
+                })
+                .type_method("from_int", async move |this, strand, args, out| {
+                    let ([value], []) = unpack!(strand, args, 1, 0)?;
+                    let value = value.to_i64(strand)?;
+                    let value = u32::try_from(value)
+                        .map_err(|_| Error::value(strand, "flags integer out of range"))?;
+                    this.create_flags(
+                        strand,
+                        Self(WireServiceAccess(WinAccessMask::from_bits_retain(value))),
+                        out,
+                    );
+                    Ok(())
+                })
+        }
+    };
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct ManagerAccessMask(pub(crate) WireServiceAccess);
@@ -139,6 +166,8 @@ impl FlagLike for ManagerAccessMask {
     fn rank(self) -> usize {
         self.0.0.bits().count_ones() as usize
     }
+
+    raw_projection!();
 }
 
 impl From<ManagerAccessMask> for WireServiceAccess {
@@ -290,6 +319,8 @@ impl FlagLike for ServiceAccessMask {
     fn rank(self) -> usize {
         self.0.0.bits().count_ones() as usize
     }
+
+    raw_projection!();
 }
 
 impl From<ServiceAccessMask> for WireServiceAccess {

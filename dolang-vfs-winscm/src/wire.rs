@@ -93,36 +93,23 @@ impl std::ops::BitOrAssign for ServiceAccess {
     }
 }
 
-/// A service's type, passed to `CreateServiceW` and reported back in
-/// [`ServiceStatus::service_type`].
-///
-/// A bitmask, not a single discrete value: `WIN32_OWN_PROCESS` and
-/// `INTERACTIVE_PROCESS` can be combined, for example.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ServiceType(pub u32);
-
-impl ServiceType {
-    pub const KERNEL_DRIVER: ServiceType = ServiceType(0x0000_0001);
-    pub const FILE_SYSTEM_DRIVER: ServiceType = ServiceType(0x0000_0002);
-    pub const WIN32_OWN_PROCESS: ServiceType = ServiceType(0x0000_0010);
-    pub const WIN32_SHARE_PROCESS: ServiceType = ServiceType(0x0000_0020);
-    pub const INTERACTIVE_PROCESS: ServiceType = ServiceType(0x0000_0100);
-
-    /// All driver types. Only meaningful as an
-    /// [`ScManager::enumerate_services`](crate::ScManager::enumerate_services)
-    /// filter — not a combination of the individual driver-type consts
-    /// above (it also covers reserved/undocumented driver type bits).
-    pub const DRIVER: ServiceType = ServiceType(0x0000_000B);
-    /// Both Win32 process types. Only meaningful as an
-    /// [`ScManager::enumerate_services`](crate::ScManager::enumerate_services)
-    /// filter.
-    pub const WIN32: ServiceType = ServiceType(0x0000_0030);
-}
-
-impl std::ops::BitOr for ServiceType {
-    type Output = ServiceType;
-    fn bitor(self, rhs: ServiceType) -> ServiceType {
-        ServiceType(self.0 | rhs.0)
+bitflags::bitflags! {
+    /// A service's type, passed to `CreateServiceW` and reported back in
+    /// [`ServiceStatus::service_type`].
+    ///
+    /// A bitmask, not a single discrete value: `WIN32_OWN_PROCESS` and
+    /// `INTERACTIVE_PROCESS` can be combined, for example.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    pub struct ServiceType: u32 {
+        const KERNEL_DRIVER = 0x0000_0001;
+        const FILE_SYSTEM_DRIVER = 0x0000_0002;
+        const WIN32_OWN_PROCESS = 0x0000_0010;
+        const WIN32_SHARE_PROCESS = 0x0000_0020;
+        const INTERACTIVE_PROCESS = 0x0000_0100;
+        /// All driver types, including reserved driver-type bits.
+        const DRIVER = 0x0000_000B;
+        /// Both Win32 process types.
+        const WIN32 = 0x0000_0030;
     }
 }
 
@@ -160,28 +147,21 @@ impl ServiceControl {
     pub const INTERROGATE: ServiceControl = ServiceControl(4);
 }
 
-/// A bitmask of service states to be notified about, passed to
-/// `NotifyServiceStatusChangeW`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NotifyMask(pub u32);
-
-impl NotifyMask {
-    pub const STOPPED: NotifyMask = NotifyMask(0x0000_0001);
-    pub const START_PENDING: NotifyMask = NotifyMask(0x0000_0002);
-    pub const STOP_PENDING: NotifyMask = NotifyMask(0x0000_0004);
-    pub const RUNNING: NotifyMask = NotifyMask(0x0000_0008);
-    pub const CONTINUE_PENDING: NotifyMask = NotifyMask(0x0000_0010);
-    pub const PAUSE_PENDING: NotifyMask = NotifyMask(0x0000_0020);
-    pub const PAUSED: NotifyMask = NotifyMask(0x0000_0040);
-    pub const CREATED: NotifyMask = NotifyMask(0x0000_0080);
-    pub const DELETED: NotifyMask = NotifyMask(0x0000_0100);
-    pub const DELETE_PENDING: NotifyMask = NotifyMask(0x0000_0200);
-}
-
-impl std::ops::BitOr for NotifyMask {
-    type Output = NotifyMask;
-    fn bitor(self, rhs: NotifyMask) -> NotifyMask {
-        NotifyMask(self.0 | rhs.0)
+bitflags::bitflags! {
+    /// A bitmask of service states to be notified about, passed to
+    /// `NotifyServiceStatusChangeW`.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    pub struct NotifyMask: u32 {
+        const STOPPED = 0x0000_0001;
+        const START_PENDING = 0x0000_0002;
+        const STOP_PENDING = 0x0000_0004;
+        const RUNNING = 0x0000_0008;
+        const CONTINUE_PENDING = 0x0000_0010;
+        const PAUSE_PENDING = 0x0000_0020;
+        const PAUSED = 0x0000_0040;
+        const CREATED = 0x0000_0080;
+        const DELETED = 0x0000_0100;
+        const DELETE_PENDING = 0x0000_0200;
     }
 }
 
@@ -204,29 +184,22 @@ impl ServiceState {
     pub const PAUSED: ServiceState = ServiceState(7);
 }
 
-/// A bitmask of control codes a service currently accepts, as reported in
-/// [`ServiceStatus::controls_accepted`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ServiceControlsAccepted(pub u32);
-
-impl ServiceControlsAccepted {
-    pub const STOP: ServiceControlsAccepted = ServiceControlsAccepted(0x0000_0001);
-    pub const PAUSE_CONTINUE: ServiceControlsAccepted = ServiceControlsAccepted(0x0000_0002);
-    pub const SHUTDOWN: ServiceControlsAccepted = ServiceControlsAccepted(0x0000_0004);
-    pub const PARAMCHANGE: ServiceControlsAccepted = ServiceControlsAccepted(0x0000_0008);
-    pub const NETBINDCHANGE: ServiceControlsAccepted = ServiceControlsAccepted(0x0000_0010);
-    pub const HARDWAREPROFILECHANGE: ServiceControlsAccepted = ServiceControlsAccepted(0x0000_0020);
-    pub const POWEREVENT: ServiceControlsAccepted = ServiceControlsAccepted(0x0000_0040);
-    pub const SESSIONCHANGE: ServiceControlsAccepted = ServiceControlsAccepted(0x0000_0080);
-    pub const PRESHUTDOWN: ServiceControlsAccepted = ServiceControlsAccepted(0x0000_0100);
-    pub const TIMECHANGE: ServiceControlsAccepted = ServiceControlsAccepted(0x0000_0200);
-    pub const TRIGGEREVENT: ServiceControlsAccepted = ServiceControlsAccepted(0x0000_0400);
-}
-
-impl std::ops::BitOr for ServiceControlsAccepted {
-    type Output = ServiceControlsAccepted;
-    fn bitor(self, rhs: ServiceControlsAccepted) -> ServiceControlsAccepted {
-        ServiceControlsAccepted(self.0 | rhs.0)
+bitflags::bitflags! {
+    /// A bitmask of control codes a service currently accepts, as reported in
+    /// [`ServiceStatus::controls_accepted`].
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    pub struct ServiceControlsAccepted: u32 {
+        const STOP = 0x0000_0001;
+        const PAUSE_CONTINUE = 0x0000_0002;
+        const SHUTDOWN = 0x0000_0004;
+        const PARAMCHANGE = 0x0000_0008;
+        const NETBINDCHANGE = 0x0000_0010;
+        const HARDWAREPROFILECHANGE = 0x0000_0020;
+        const POWEREVENT = 0x0000_0040;
+        const SESSIONCHANGE = 0x0000_0080;
+        const PRESHUTDOWN = 0x0000_0100;
+        const TIMECHANGE = 0x0000_0200;
+        const TRIGGEREVENT = 0x0000_0400;
     }
 }
 
@@ -411,3 +384,27 @@ impl VfsExtension for WinScmExt {
 }
 
 dolang_vfs::extension::vfs_extension!(WinScmExt);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_numeric_round_trip<T>(value: T, bits: u32)
+    where
+        T: Copy + std::fmt::Debug + PartialEq + Serialize + for<'de> Deserialize<'de>,
+    {
+        let encoded = postcard::to_stdvec(&value).unwrap();
+        assert_eq!(encoded, postcard::to_stdvec(&bits).unwrap());
+        assert_eq!(postcard::from_bytes::<T>(&encoded).unwrap(), value);
+    }
+
+    #[test]
+    fn flag_sets_preserve_unknown_bits_and_numeric_encoding() {
+        assert_numeric_round_trip(ServiceType::from_bits_retain(0x8000_0010), 0x8000_0010);
+        assert_numeric_round_trip(NotifyMask::from_bits_retain(0x8000_0008), 0x8000_0008);
+        assert_numeric_round_trip(
+            ServiceControlsAccepted::from_bits_retain(0x8000_0001),
+            0x8000_0001,
+        );
+    }
+}
