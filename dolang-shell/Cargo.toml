@@ -13,10 +13,11 @@ name = "dolang"
 path = "src/main.rs"
 
 [features]
-default = ["base64", "digest", "json", "regex", "glob", "http", "http_mock", "zip", "tar", "sqlite", "xml", "yaml", "progress", "rand", "toml", "patch", "winreg", "winscm"]
+default = ["base64", "digest", "json", "regex", "glob", "http", "http_mock", "zip", "tar", "sqlite", "xml", "yaml", "progress", "rand", "toml", "patch", "winreg", "winscm", "uuid"]
 debug = ["dolang-shell-main/debug"]
 base64 = ["dep:dolang-ext-base64"]
 digest = ["dep:dolang-ext-digest"]
+uuid = ["dep:dolang-ext-uuid"]
 json = ["dep:dolang-ext-json", "dolang-ext-http?/json", "dolang-ext-http-mock?/json"]
 regex = ["dep:dolang-ext-regex"]
 glob = ["dep:dolang-ext-glob"]
@@ -63,6 +64,11 @@ optional = true
 
 [dependencies.dolang-ext-base64]
 path = "../dolang-ext-base64"
+version = "0.1.1"
+optional = true
+
+[dependencies.dolang-ext-uuid]
+path = "../dolang-ext-uuid"
 version = "0.1.1"
 optional = true
 

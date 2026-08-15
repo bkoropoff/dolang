@@ -788,10 +788,10 @@ impl AceBuf {
             );
             bytes.extend_from_slice(&object_flags.bits().to_le_bytes());
             if let Some(value) = options.object_type {
-                bytes.extend_from_slice(value.as_bytes());
+                bytes.extend_from_slice(&value.to_bytes());
             }
             if let Some(value) = options.inherited_object_type {
-                bytes.extend_from_slice(value.as_bytes());
+                bytes.extend_from_slice(&value.to_bytes());
             }
         }
         bytes.extend_from_slice(&sid.to_bytes());
@@ -2093,10 +2093,10 @@ mod tests {
             bytes.extend_from_slice(&0x90ab_cdefu32.to_le_bytes());
             bytes.extend_from_slice(&object_flags.to_le_bytes());
             if object_flags & 1 != 0 {
-                bytes.extend_from_slice(object_type.as_bytes());
+                bytes.extend_from_slice(&object_type.to_bytes());
             }
             if object_flags & 2 != 0 {
-                bytes.extend_from_slice(inherited_type.as_bytes());
+                bytes.extend_from_slice(&inherited_type.to_bytes());
             }
             bytes.extend_from_slice(&trustee.to_bytes());
             bytes.extend_from_slice(&[1, 2, 3, 4]);

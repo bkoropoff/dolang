@@ -289,7 +289,6 @@ nav:
       - api/sys/unix/errno.md
     - sys.windows:
       - api/sys/windows/index.md
-      - api/sys/windows/guid.md
       - api/sys/windows/win-error.md
     - systemd: api/systemd.md
     - tar:
@@ -318,6 +317,10 @@ nav:
     - url:
       - api/url/index.md
       - api/url/url.md
+    - uuid:
+      - api/uuid/index.md
+      - api/uuid/uuid.md
+      - api/uuid/guid.md
     - winreg:
       - api/winreg/index.md
       - api/winreg/access-mask.md

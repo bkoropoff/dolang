@@ -1,6 +1,6 @@
 import sys
   security.unix: unix_security
-  sys.windows:
+  uuid:
     - Guid
   sys:
     - NotFoundError
@@ -99,8 +99,8 @@ def guid_converts_between_windows_structural_forms()
   assert_type $Guid $guid
   assert_eq (str guid) 00112233-4455-6677-8899-aabbccddeeff
   assert_eq $guid (Guid "00112233-4455-6677-8899-AABBCCDDEEFF")
-  assert_eq (hash guid) (hash(Guid(guid.to_bin())))
-  assert_eq $guid.to_bin() b"\x33\x22\x11\x00\x55\x44\x77\x66\x88\x99\xaa\xbb\xcc\xdd\xee\xff"
+  assert_eq (hash guid) (hash(Guid(guid.bytes)))
+  assert_eq $guid.bytes b"\x33\x22\x11\x00\x55\x44\x77\x66\x88\x99\xaa\xbb\xcc\xdd\xee\xff"
 
 #[test]
 def security_descriptor_exposes_acl_and_ace_views()
