@@ -7,52 +7,81 @@
 
 use std::ops::{BitAnd, BitOr, BitXor, Not};
 
-use dolang::runtime::object::FlagLike;
+use dolang::runtime::object::{FlagLike, Flags, FlagsInstanceExt, FlagsTypeExt, TypeBuilder};
+use dolang::runtime::{Error, Output, unpack};
 use dolang_vfs_winscm::ServiceAccess as WireServiceAccess;
 use dolang_winterop::security::AccessMask as WinAccessMask;
 
+macro_rules! raw_projection {
+    () => {
+        fn build<'v, 'a>(
+            builder: TypeBuilder<'v, 'a, Flags<Self>>,
+        ) -> TypeBuilder<'v, 'a, Flags<Self>> {
+            builder
+                .get("int", |this, strand, out| {
+                    Output::set(strand, out, this.flags().0.0.bits());
+                    Ok(())
+                })
+                .type_method("from_int", async move |this, strand, args, out| {
+                    let ([value], []) = unpack!(strand, args, 1, 0)?;
+                    let value = value.to_i64(strand)?;
+                    let value = u32::try_from(value)
+                        .map_err(|_| Error::value(strand, "flags integer out of range"))?;
+                    this.create_flags(
+                        strand,
+                        Self(WireServiceAccess(WinAccessMask::from_bits_retain(value))),
+                        out,
+                    );
+                    Ok(())
+                })
+        }
+    };
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct ManagerAccessMask(pub(crate) u32);
+pub(crate) struct ManagerAccessMask(pub(crate) WireServiceAccess);
 
 impl ManagerAccessMask {
     pub(crate) const SC_MANAGER_CONNECT: ManagerAccessMask =
-        ManagerAccessMask(WireServiceAccess::SC_MANAGER_CONNECT.0);
+        ManagerAccessMask(WireServiceAccess::SC_MANAGER_CONNECT);
     pub(crate) const SC_MANAGER_CREATE_SERVICE: ManagerAccessMask =
-        ManagerAccessMask(WireServiceAccess::SC_MANAGER_CREATE_SERVICE.0);
+        ManagerAccessMask(WireServiceAccess::SC_MANAGER_CREATE_SERVICE);
     pub(crate) const SC_MANAGER_ENUMERATE_SERVICE: ManagerAccessMask =
-        ManagerAccessMask(WireServiceAccess::SC_MANAGER_ENUMERATE_SERVICE.0);
+        ManagerAccessMask(WireServiceAccess::SC_MANAGER_ENUMERATE_SERVICE);
     pub(crate) const SC_MANAGER_LOCK: ManagerAccessMask =
-        ManagerAccessMask(WireServiceAccess::SC_MANAGER_LOCK.0);
+        ManagerAccessMask(WireServiceAccess::SC_MANAGER_LOCK);
     pub(crate) const SC_MANAGER_QUERY_LOCK_STATUS: ManagerAccessMask =
-        ManagerAccessMask(WireServiceAccess::SC_MANAGER_QUERY_LOCK_STATUS.0);
+        ManagerAccessMask(WireServiceAccess::SC_MANAGER_QUERY_LOCK_STATUS);
     pub(crate) const SC_MANAGER_MODIFY_BOOT_CONFIG: ManagerAccessMask =
-        ManagerAccessMask(WireServiceAccess::SC_MANAGER_MODIFY_BOOT_CONFIG.0);
+        ManagerAccessMask(WireServiceAccess::SC_MANAGER_MODIFY_BOOT_CONFIG);
     pub(crate) const SC_MANAGER_ALL_ACCESS: ManagerAccessMask =
-        ManagerAccessMask(WireServiceAccess::SC_MANAGER_ALL_ACCESS.0);
-    pub(crate) const DELETE: ManagerAccessMask = ManagerAccessMask(WinAccessMask::DELETE.0);
+        ManagerAccessMask(WireServiceAccess::SC_MANAGER_ALL_ACCESS);
+    pub(crate) const DELETE: ManagerAccessMask =
+        ManagerAccessMask(WireServiceAccess(WinAccessMask::DELETE));
     pub(crate) const READ_CONTROL: ManagerAccessMask =
-        ManagerAccessMask(WinAccessMask::READ_CONTROL.0);
-    pub(crate) const WRITE_DAC: ManagerAccessMask = ManagerAccessMask(WinAccessMask::WRITE_DAC.0);
+        ManagerAccessMask(WireServiceAccess(WinAccessMask::READ_CONTROL));
+    pub(crate) const WRITE_DAC: ManagerAccessMask =
+        ManagerAccessMask(WireServiceAccess(WinAccessMask::WRITE_DAC));
     pub(crate) const WRITE_OWNER: ManagerAccessMask =
-        ManagerAccessMask(WinAccessMask::WRITE_OWNER.0);
+        ManagerAccessMask(WireServiceAccess(WinAccessMask::WRITE_OWNER));
     pub(crate) const SYNCHRONIZE: ManagerAccessMask =
-        ManagerAccessMask(WinAccessMask::SYNCHRONIZE.0);
+        ManagerAccessMask(WireServiceAccess(WinAccessMask::SYNCHRONIZE));
     pub(crate) const STANDARD_RIGHTS_REQUIRED: ManagerAccessMask =
-        ManagerAccessMask(WinAccessMask::STANDARD_RIGHTS_REQUIRED.0);
+        ManagerAccessMask(WireServiceAccess(WinAccessMask::STANDARD_RIGHTS_REQUIRED));
     pub(crate) const STANDARD_RIGHTS_ALL: ManagerAccessMask =
-        ManagerAccessMask(WinAccessMask::STANDARD_RIGHTS_ALL.0);
+        ManagerAccessMask(WireServiceAccess(WinAccessMask::STANDARD_RIGHTS_ALL));
     pub(crate) const ACCESS_SYSTEM_SECURITY: ManagerAccessMask =
-        ManagerAccessMask(WinAccessMask::ACCESS_SYSTEM_SECURITY.0);
+        ManagerAccessMask(WireServiceAccess(WinAccessMask::ACCESS_SYSTEM_SECURITY));
     pub(crate) const MAXIMUM_ALLOWED: ManagerAccessMask =
-        ManagerAccessMask(WinAccessMask::MAXIMUM_ALLOWED.0);
+        ManagerAccessMask(WireServiceAccess(WinAccessMask::MAXIMUM_ALLOWED));
     pub(crate) const GENERIC_READ: ManagerAccessMask =
-        ManagerAccessMask(WinAccessMask::GENERIC_READ.0);
+        ManagerAccessMask(WireServiceAccess(WinAccessMask::GENERIC_READ));
     pub(crate) const GENERIC_WRITE: ManagerAccessMask =
-        ManagerAccessMask(WinAccessMask::GENERIC_WRITE.0);
+        ManagerAccessMask(WireServiceAccess(WinAccessMask::GENERIC_WRITE));
     pub(crate) const GENERIC_EXECUTE: ManagerAccessMask =
-        ManagerAccessMask(WinAccessMask::GENERIC_EXECUTE.0);
+        ManagerAccessMask(WireServiceAccess(WinAccessMask::GENERIC_EXECUTE));
     pub(crate) const GENERIC_ALL: ManagerAccessMask =
-        ManagerAccessMask(WinAccessMask::GENERIC_ALL.0);
+        ManagerAccessMask(WireServiceAccess(WinAccessMask::GENERIC_ALL));
 }
 
 impl BitOr for ManagerAccessMask {
@@ -65,26 +94,26 @@ impl BitOr for ManagerAccessMask {
 impl BitAnd for ManagerAccessMask {
     type Output = ManagerAccessMask;
     fn bitand(self, rhs: ManagerAccessMask) -> ManagerAccessMask {
-        ManagerAccessMask(self.0 & rhs.0)
+        ManagerAccessMask(WireServiceAccess(self.0.0 & rhs.0.0))
     }
 }
 
 impl BitXor for ManagerAccessMask {
     type Output = ManagerAccessMask;
     fn bitxor(self, rhs: ManagerAccessMask) -> ManagerAccessMask {
-        ManagerAccessMask(self.0 ^ rhs.0)
+        ManagerAccessMask(WireServiceAccess(self.0.0 ^ rhs.0.0))
     }
 }
 
 impl Not for ManagerAccessMask {
     type Output = ManagerAccessMask;
     fn not(self) -> ManagerAccessMask {
-        ManagerAccessMask(!self.0)
+        ManagerAccessMask(WireServiceAccess(!self.0.0))
     }
 }
 
 impl FlagLike for ManagerAccessMask {
-    const ZERO: ManagerAccessMask = ManagerAccessMask(0);
+    const ZERO: ManagerAccessMask = ManagerAccessMask(WireServiceAccess(WinAccessMask::empty()));
     const MODULE: &'static str = "winscm";
     const NAME: &'static str = "ManagerAccessMask";
     const BITS: &'static [(&'static str, ManagerAccessMask)] = &[
@@ -135,64 +164,68 @@ impl FlagLike for ManagerAccessMask {
     ];
 
     fn rank(self) -> usize {
-        self.0.count_ones() as usize
+        self.0.0.bits().count_ones() as usize
     }
+
+    raw_projection!();
 }
 
 impl From<ManagerAccessMask> for WireServiceAccess {
     fn from(mask: ManagerAccessMask) -> WireServiceAccess {
-        WireServiceAccess(mask.0)
+        mask.0
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct ServiceAccessMask(pub(crate) u32);
+pub(crate) struct ServiceAccessMask(pub(crate) WireServiceAccess);
 
 impl ServiceAccessMask {
     pub(crate) const SERVICE_QUERY_CONFIG: ServiceAccessMask =
-        ServiceAccessMask(WireServiceAccess::SERVICE_QUERY_CONFIG.0);
+        ServiceAccessMask(WireServiceAccess::SERVICE_QUERY_CONFIG);
     pub(crate) const SERVICE_CHANGE_CONFIG: ServiceAccessMask =
-        ServiceAccessMask(WireServiceAccess::SERVICE_CHANGE_CONFIG.0);
+        ServiceAccessMask(WireServiceAccess::SERVICE_CHANGE_CONFIG);
     pub(crate) const SERVICE_QUERY_STATUS: ServiceAccessMask =
-        ServiceAccessMask(WireServiceAccess::SERVICE_QUERY_STATUS.0);
+        ServiceAccessMask(WireServiceAccess::SERVICE_QUERY_STATUS);
     pub(crate) const SERVICE_ENUMERATE_DEPENDENTS: ServiceAccessMask =
-        ServiceAccessMask(WireServiceAccess::SERVICE_ENUMERATE_DEPENDENTS.0);
+        ServiceAccessMask(WireServiceAccess::SERVICE_ENUMERATE_DEPENDENTS);
     pub(crate) const SERVICE_START: ServiceAccessMask =
-        ServiceAccessMask(WireServiceAccess::SERVICE_START.0);
+        ServiceAccessMask(WireServiceAccess::SERVICE_START);
     pub(crate) const SERVICE_STOP: ServiceAccessMask =
-        ServiceAccessMask(WireServiceAccess::SERVICE_STOP.0);
+        ServiceAccessMask(WireServiceAccess::SERVICE_STOP);
     pub(crate) const SERVICE_PAUSE_CONTINUE: ServiceAccessMask =
-        ServiceAccessMask(WireServiceAccess::SERVICE_PAUSE_CONTINUE.0);
+        ServiceAccessMask(WireServiceAccess::SERVICE_PAUSE_CONTINUE);
     pub(crate) const SERVICE_INTERROGATE: ServiceAccessMask =
-        ServiceAccessMask(WireServiceAccess::SERVICE_INTERROGATE.0);
+        ServiceAccessMask(WireServiceAccess::SERVICE_INTERROGATE);
     pub(crate) const SERVICE_USER_DEFINED_CONTROL: ServiceAccessMask =
-        ServiceAccessMask(WireServiceAccess::SERVICE_USER_DEFINED_CONTROL.0);
+        ServiceAccessMask(WireServiceAccess::SERVICE_USER_DEFINED_CONTROL);
     pub(crate) const SERVICE_ALL_ACCESS: ServiceAccessMask =
-        ServiceAccessMask(WireServiceAccess::SERVICE_ALL_ACCESS.0);
-    pub(crate) const DELETE: ServiceAccessMask = ServiceAccessMask(WinAccessMask::DELETE.0);
+        ServiceAccessMask(WireServiceAccess::SERVICE_ALL_ACCESS);
+    pub(crate) const DELETE: ServiceAccessMask =
+        ServiceAccessMask(WireServiceAccess(WinAccessMask::DELETE));
     pub(crate) const READ_CONTROL: ServiceAccessMask =
-        ServiceAccessMask(WinAccessMask::READ_CONTROL.0);
-    pub(crate) const WRITE_DAC: ServiceAccessMask = ServiceAccessMask(WinAccessMask::WRITE_DAC.0);
+        ServiceAccessMask(WireServiceAccess(WinAccessMask::READ_CONTROL));
+    pub(crate) const WRITE_DAC: ServiceAccessMask =
+        ServiceAccessMask(WireServiceAccess(WinAccessMask::WRITE_DAC));
     pub(crate) const WRITE_OWNER: ServiceAccessMask =
-        ServiceAccessMask(WinAccessMask::WRITE_OWNER.0);
+        ServiceAccessMask(WireServiceAccess(WinAccessMask::WRITE_OWNER));
     pub(crate) const SYNCHRONIZE: ServiceAccessMask =
-        ServiceAccessMask(WinAccessMask::SYNCHRONIZE.0);
+        ServiceAccessMask(WireServiceAccess(WinAccessMask::SYNCHRONIZE));
     pub(crate) const STANDARD_RIGHTS_REQUIRED: ServiceAccessMask =
-        ServiceAccessMask(WinAccessMask::STANDARD_RIGHTS_REQUIRED.0);
+        ServiceAccessMask(WireServiceAccess(WinAccessMask::STANDARD_RIGHTS_REQUIRED));
     pub(crate) const STANDARD_RIGHTS_ALL: ServiceAccessMask =
-        ServiceAccessMask(WinAccessMask::STANDARD_RIGHTS_ALL.0);
+        ServiceAccessMask(WireServiceAccess(WinAccessMask::STANDARD_RIGHTS_ALL));
     pub(crate) const ACCESS_SYSTEM_SECURITY: ServiceAccessMask =
-        ServiceAccessMask(WinAccessMask::ACCESS_SYSTEM_SECURITY.0);
+        ServiceAccessMask(WireServiceAccess(WinAccessMask::ACCESS_SYSTEM_SECURITY));
     pub(crate) const MAXIMUM_ALLOWED: ServiceAccessMask =
-        ServiceAccessMask(WinAccessMask::MAXIMUM_ALLOWED.0);
+        ServiceAccessMask(WireServiceAccess(WinAccessMask::MAXIMUM_ALLOWED));
     pub(crate) const GENERIC_READ: ServiceAccessMask =
-        ServiceAccessMask(WinAccessMask::GENERIC_READ.0);
+        ServiceAccessMask(WireServiceAccess(WinAccessMask::GENERIC_READ));
     pub(crate) const GENERIC_WRITE: ServiceAccessMask =
-        ServiceAccessMask(WinAccessMask::GENERIC_WRITE.0);
+        ServiceAccessMask(WireServiceAccess(WinAccessMask::GENERIC_WRITE));
     pub(crate) const GENERIC_EXECUTE: ServiceAccessMask =
-        ServiceAccessMask(WinAccessMask::GENERIC_EXECUTE.0);
+        ServiceAccessMask(WireServiceAccess(WinAccessMask::GENERIC_EXECUTE));
     pub(crate) const GENERIC_ALL: ServiceAccessMask =
-        ServiceAccessMask(WinAccessMask::GENERIC_ALL.0);
+        ServiceAccessMask(WireServiceAccess(WinAccessMask::GENERIC_ALL));
 }
 
 impl BitOr for ServiceAccessMask {
@@ -205,26 +238,26 @@ impl BitOr for ServiceAccessMask {
 impl BitAnd for ServiceAccessMask {
     type Output = ServiceAccessMask;
     fn bitand(self, rhs: ServiceAccessMask) -> ServiceAccessMask {
-        ServiceAccessMask(self.0 & rhs.0)
+        ServiceAccessMask(WireServiceAccess(self.0.0 & rhs.0.0))
     }
 }
 
 impl BitXor for ServiceAccessMask {
     type Output = ServiceAccessMask;
     fn bitxor(self, rhs: ServiceAccessMask) -> ServiceAccessMask {
-        ServiceAccessMask(self.0 ^ rhs.0)
+        ServiceAccessMask(WireServiceAccess(self.0.0 ^ rhs.0.0))
     }
 }
 
 impl Not for ServiceAccessMask {
     type Output = ServiceAccessMask;
     fn not(self) -> ServiceAccessMask {
-        ServiceAccessMask(!self.0)
+        ServiceAccessMask(WireServiceAccess(!self.0.0))
     }
 }
 
 impl FlagLike for ServiceAccessMask {
-    const ZERO: ServiceAccessMask = ServiceAccessMask(0);
+    const ZERO: ServiceAccessMask = ServiceAccessMask(WireServiceAccess(WinAccessMask::empty()));
     const MODULE: &'static str = "winscm";
     const NAME: &'static str = "ServiceAccessMask";
     const BITS: &'static [(&'static str, ServiceAccessMask)] = &[
@@ -284,12 +317,14 @@ impl FlagLike for ServiceAccessMask {
     ];
 
     fn rank(self) -> usize {
-        self.0.count_ones() as usize
+        self.0.0.bits().count_ones() as usize
     }
+
+    raw_projection!();
 }
 
 impl From<ServiceAccessMask> for WireServiceAccess {
     fn from(mask: ServiceAccessMask) -> WireServiceAccess {
-        WireServiceAccess(mask.0)
+        mask.0
     }
 }

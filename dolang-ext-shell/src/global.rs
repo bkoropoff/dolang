@@ -8,7 +8,7 @@ use std::{
 
 use dolang::runtime::{
     Sym, Type,
-    object::{FlagLike, Flags},
+    object::{FlagLikeExt, Flags},
     strand::{LocalKey, LocalRootKey},
     value::TypeObject,
     vm::{Builder, Stateful},
@@ -21,8 +21,8 @@ use tokio::{
 use crate::{
     console::{Console, DefaultOutput, HostConsole, SinkConsole, SubConsole},
     error::{
-        AlreadyExistsError, NotFoundError, PermissionDeniedError, ProcError, SysError,
-        SysErrorObject, TimedOutError, UnsupportedError,
+        AlreadyExistsError, InvalidInputError, NotFoundError, PermissionDeniedError, ProcError,
+        SysError, SysErrorObject, TimedOutError, UnsupportedError,
     },
     error_code::{CodeObject, Errno, ErrorCode, FreeBsdErrno, LinuxErrno, MacosErrno, WinError},
     fs::{
@@ -41,8 +41,8 @@ use crate::{
     proc::Capture,
     program::Program,
     security::{
-        AccessMask, Ace, Acl, Guid, Identity, PosixAceObject, PosixAclObject, SecDesc, Sid,
-        SidName, TokenGroup, TokenInfo,
+        AccessMask, Ace, Acl, Guid, Identity, PosixAceObject, PosixAclObject, SecDesc,
+        SecDescControl, SecInfo, Sid, SidName, TokenGroup, TokenGroupAttributes, TokenInfo,
     },
     shell::{Stderr, Stdin, Stdout, Vfs},
     shell_args::ArgsData,
@@ -99,6 +99,7 @@ pub(crate) struct Types<'v> {
     pub(crate) macos_errno: Type<'v, CodeObject<MacosErrno>>,
     pub(crate) win_error: Type<'v, CodeObject<WinError>>,
     pub(crate) sys_error: Type<'v, SysErrorObject<SysError>>,
+    pub(crate) invalid_input: Type<'v, SysErrorObject<InvalidInputError>>,
     pub(crate) not_found: Type<'v, SysErrorObject<NotFoundError>>,
     pub(crate) permission_denied: Type<'v, SysErrorObject<PermissionDeniedError>>,
     pub(crate) already_exists: Type<'v, SysErrorObject<AlreadyExistsError>>,
@@ -112,6 +113,9 @@ pub(crate) struct Types<'v> {
     pub(crate) text: Type<'v, Text>,
     pub(crate) style: Type<'v, StyleObject>,
     pub(crate) access_mask: Type<'v, Flags<AccessMask>>,
+    pub(crate) sec_desc_control: Type<'v, Flags<SecDescControl>>,
+    pub(crate) sec_info: Type<'v, Flags<SecInfo>>,
+    pub(crate) token_group_attributes: Type<'v, Flags<TokenGroupAttributes>>,
 }
 
 pub(crate) struct Syms<'v> {
@@ -441,6 +445,11 @@ impl<'v> Global<'v> {
                     .nominal_supertype(error_code)
                     .build(),
                 sys_error,
+                invalid_input: builder
+                    .build_type::<SysErrorObject<InvalidInputError>>((), ())
+                    .nominal_supertype(sys_error)
+                    .nominal_supertype(TypeObject::ValueError)
+                    .build(),
                 not_found: builder
                     .build_type::<SysErrorObject<NotFoundError>>((), ())
                     .nominal_supertype(sys_error)
@@ -471,6 +480,9 @@ impl<'v> Global<'v> {
                 text: builder.register_type(),
                 style: builder.register_type(),
                 access_mask: AccessMask::register_type(builder),
+                sec_desc_control: SecDescControl::register_type(builder),
+                sec_info: SecInfo::register_type(builder),
+                token_group_attributes: TokenGroupAttributes::register_type(builder),
             },
             syms: Syms {
                 any: builder.sym("ANY"),

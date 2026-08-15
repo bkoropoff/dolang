@@ -11,7 +11,7 @@ use serde::{
     ser::SerializeTuple,
 };
 
-use super::sid::Sid;
+use super::{access_mask::AccessMask, sid::Sid};
 use crate::guid::Guid;
 
 const REVISION: u8 = 1;
@@ -64,38 +64,143 @@ impl fmt::Display for AclKind {
     }
 }
 
-/// `SECURITY_INFORMATION` bit selecting the owner SID.
-pub const OWNER_SECURITY_INFORMATION: u32 = 0x0000_0001;
-/// `SECURITY_INFORMATION` bit selecting the primary group SID.
-pub const GROUP_SECURITY_INFORMATION: u32 = 0x0000_0002;
-/// `SECURITY_INFORMATION` bit selecting the discretionary ACL.
-pub const DACL_SECURITY_INFORMATION: u32 = 0x0000_0004;
-/// `SECURITY_INFORMATION` bit selecting the system ACL.
-pub const SACL_SECURITY_INFORMATION: u32 = 0x0000_0008;
-/// Mask selecting every supported security-descriptor component.
-pub const ALL_SECURITY_INFORMATION: u32 = OWNER_SECURITY_INFORMATION
-    | GROUP_SECURITY_INFORMATION
-    | DACL_SECURITY_INFORMATION
-    | SACL_SECURITY_INFORMATION;
+bitflags::bitflags! {
+    /// Security-descriptor components selected by a query or represented by a [`SecDesc`].
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    pub struct SecInfo: u32 {
+        /// Selects the owner SID.
+        const OWNER = 0x0000_0001;
+        /// Selects the primary group SID.
+        const GROUP = 0x0000_0002;
+        /// Selects the discretionary ACL.
+        const DACL = 0x0000_0004;
+        /// Selects the system ACL.
+        const SACL = 0x0000_0008;
+        /// Selects every supported security-descriptor component.
+        const ALL = Self::OWNER.bits() | Self::GROUP.bits() | Self::DACL.bits() | Self::SACL.bits();
+    }
+}
 
-const SE_OWNER_DEFAULTED: u16 = 0x0001;
-const SE_GROUP_DEFAULTED: u16 = 0x0002;
-const SE_DACL_PRESENT: u16 = 0x0004;
-const SE_DACL_DEFAULTED: u16 = 0x0008;
-const SE_SACL_PRESENT: u16 = 0x0010;
-const SE_SACL_DEFAULTED: u16 = 0x0020;
-const SE_DACL_AUTO_INHERIT_REQ: u16 = 0x0100;
-const SE_SACL_AUTO_INHERIT_REQ: u16 = 0x0200;
-const SE_DACL_AUTO_INHERITED: u16 = 0x0400;
-const SE_SACL_AUTO_INHERITED: u16 = 0x0800;
-const SE_DACL_PROTECTED: u16 = 0x1000;
-const SE_SACL_PROTECTED: u16 = 0x2000;
-const SE_RM_CONTROL_VALID: u16 = 0x4000;
-const SE_SELF_RELATIVE: u16 = 0x8000;
+bitflags::bitflags! {
+    /// Flags describing the state and storage of a security descriptor.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    pub struct SecDescControl: u16 {
+        const OWNER_DEFAULTED = 0x0001;
+        const GROUP_DEFAULTED = 0x0002;
+        const DACL_PRESENT = 0x0004;
+        const DACL_DEFAULTED = 0x0008;
+        const SACL_PRESENT = 0x0010;
+        const SACL_DEFAULTED = 0x0020;
+        const DACL_AUTO_INHERIT_REQUIRED = 0x0100;
+        const SACL_AUTO_INHERIT_REQUIRED = 0x0200;
+        const DACL_AUTO_INHERITED = 0x0400;
+        const SACL_AUTO_INHERITED = 0x0800;
+        const DACL_PROTECTED = 0x1000;
+        const SACL_PROTECTED = 0x2000;
+        const RM_CONTROL_VALID = 0x4000;
+        const SELF_RELATIVE = 0x8000;
+    }
+}
+
+bitflags::bitflags! {
+    /// Flags stored in an ACE header.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    pub struct AceFlags: u8 {
+        const OBJECT_INHERIT = 0x01;
+        const CONTAINER_INHERIT = 0x02;
+        const NO_PROPAGATE_INHERIT = 0x04;
+        const INHERIT_ONLY = 0x08;
+        const INHERITED = 0x10;
+        const CRITICAL = 0x20;
+        const SUCCESSFUL_ACCESS = 0x40;
+        const TRUST_PROTECTED_FILTER = 0x40;
+        const FAILED_ACCESS = 0x80;
+    }
+}
+
+bitflags::bitflags! {
+    /// Object-specific fields present in an object ACE.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    pub struct ObjectAceFlags: u32 {
+        const OBJECT_TYPE_PRESENT = 0x1;
+        const INHERITED_OBJECT_TYPE_PRESENT = 0x2;
+    }
+}
+
+/// Native ACL packet revision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AclRevision {
+    Basic,
+    DirectoryService,
+    Unknown(u8),
+}
+
+impl From<u8> for AclRevision {
+    fn from(value: u8) -> Self {
+        match value {
+            2 => Self::Basic,
+            4 => Self::DirectoryService,
+            value => Self::Unknown(value),
+        }
+    }
+}
+
+impl From<AclRevision> for u8 {
+    fn from(value: AclRevision) -> Self {
+        match value {
+            AclRevision::Basic => 2,
+            AclRevision::DirectoryService => 4,
+            AclRevision::Unknown(value) => value,
+        }
+    }
+}
+
+impl Serialize for AclRevision {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u8((*self).into())
+    }
+}
+
+impl<'de> Deserialize<'de> for AclRevision {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(u8::deserialize(deserializer)?.into())
+    }
+}
 
 const ACL_HEADER_LEN: usize = 8;
 const ACE_HEADER_LEN: usize = 4;
 const SELF_RELATIVE_HEADER_LEN: usize = 20;
+
+/// Security descriptor format revision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum SecDescRevision {
+    /// Revision 1, the format supported by current security descriptors.
+    One = 1,
+}
+
+impl Serialize for SecDescRevision {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u8(*self as u8)
+    }
+}
+
+impl<'de> Deserialize<'de> for SecDescRevision {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match u8::deserialize(deserializer)? {
+            REVISION => Ok(Self::One),
+            revision => Err(de::Error::custom(SecDescError::Revision(revision))),
+        }
+    }
+}
+
+type Revision = SecDescRevision;
 
 /// An immutable borrowed native Windows access-control list (ACL).
 #[repr(transparent)]
@@ -134,8 +239,12 @@ impl Acl {
     }
 
     /// Returns the ACL revision.
-    pub const fn revision(&self) -> u8 {
-        self.0[0]
+    pub const fn revision(&self) -> AclRevision {
+        match self.0[0] {
+            2 => AclRevision::Basic,
+            4 => AclRevision::DirectoryService,
+            value => AclRevision::Unknown(value),
+        }
     }
 
     /// Returns the declared ACL size.
@@ -219,6 +328,7 @@ impl<'a> Iterator for Aces<'a> {
 impl ExactSizeIterator for Aces<'_> {}
 
 /// A classified native ACE type.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AceType {
     /// Grants access.
@@ -269,15 +379,87 @@ pub enum AceType {
     Unknown(u8),
 }
 
+impl From<u8> for AceType {
+    fn from(code: u8) -> Self {
+        match code {
+            0 => Self::AccessAllowed,
+            1 => Self::AccessDenied,
+            2 => Self::SystemAudit,
+            3 => Self::SystemAlarm,
+            4 => Self::AccessAllowedCompound,
+            5 => Self::AccessAllowedObject,
+            6 => Self::AccessDeniedObject,
+            7 => Self::SystemAuditObject,
+            8 => Self::SystemAlarmObject,
+            9 => Self::AccessAllowedCallback,
+            10 => Self::AccessDeniedCallback,
+            11 => Self::AccessAllowedCallbackObject,
+            12 => Self::AccessDeniedCallbackObject,
+            13 => Self::SystemAuditCallback,
+            14 => Self::SystemAlarmCallback,
+            15 => Self::SystemAuditCallbackObject,
+            16 => Self::SystemAlarmCallbackObject,
+            17 => Self::SystemMandatoryLabel,
+            18 => Self::SystemResourceAttribute,
+            19 => Self::SystemScopedPolicyId,
+            20 => Self::SystemProcessTrustLabel,
+            21 => Self::SystemAccessFilter,
+            code => Self::Unknown(code),
+        }
+    }
+}
+
+impl From<AceType> for u8 {
+    fn from(value: AceType) -> Self {
+        match value {
+            AceType::AccessAllowed => 0,
+            AceType::AccessDenied => 1,
+            AceType::SystemAudit => 2,
+            AceType::SystemAlarm => 3,
+            AceType::AccessAllowedCompound => 4,
+            AceType::AccessAllowedObject => 5,
+            AceType::AccessDeniedObject => 6,
+            AceType::SystemAuditObject => 7,
+            AceType::SystemAlarmObject => 8,
+            AceType::AccessAllowedCallback => 9,
+            AceType::AccessDeniedCallback => 10,
+            AceType::AccessAllowedCallbackObject => 11,
+            AceType::AccessDeniedCallbackObject => 12,
+            AceType::SystemAuditCallback => 13,
+            AceType::SystemAlarmCallback => 14,
+            AceType::SystemAuditCallbackObject => 15,
+            AceType::SystemAlarmCallbackObject => 16,
+            AceType::SystemMandatoryLabel => 17,
+            AceType::SystemResourceAttribute => 18,
+            AceType::SystemScopedPolicyId => 19,
+            AceType::SystemProcessTrustLabel => 20,
+            AceType::SystemAccessFilter => 21,
+            AceType::Unknown(code) => code,
+        }
+    }
+}
+
+impl Serialize for AceType {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u8((*self).into())
+    }
+}
+
+impl<'de> Deserialize<'de> for AceType {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(u8::deserialize(deserializer)?.into())
+    }
+}
+
 /// An immutable borrowed native Windows access-control entry (ACE).
 #[repr(transparent)]
 pub struct Ace([u8]);
 
 #[derive(Debug)]
 struct AceBody {
-    mask: u32,
+    mask: AccessMask,
     sid: Sid,
-    object_flags: Option<u32>,
+    object_flags: Option<ObjectAceFlags>,
     object_type: Option<Guid>,
     inherited_object_type: Option<Guid>,
     application_data_at: usize,
@@ -317,37 +499,13 @@ impl Ace {
     }
 
     /// Returns the classified ACE type.
-    pub const fn ace_type(&self) -> AceType {
-        match self.type_code() {
-            0 => AceType::AccessAllowed,
-            1 => AceType::AccessDenied,
-            2 => AceType::SystemAudit,
-            3 => AceType::SystemAlarm,
-            4 => AceType::AccessAllowedCompound,
-            5 => AceType::AccessAllowedObject,
-            6 => AceType::AccessDeniedObject,
-            7 => AceType::SystemAuditObject,
-            8 => AceType::SystemAlarmObject,
-            9 => AceType::AccessAllowedCallback,
-            10 => AceType::AccessDeniedCallback,
-            11 => AceType::AccessAllowedCallbackObject,
-            12 => AceType::AccessDeniedCallbackObject,
-            13 => AceType::SystemAuditCallback,
-            14 => AceType::SystemAlarmCallback,
-            15 => AceType::SystemAuditCallbackObject,
-            16 => AceType::SystemAlarmCallbackObject,
-            17 => AceType::SystemMandatoryLabel,
-            18 => AceType::SystemResourceAttribute,
-            19 => AceType::SystemScopedPolicyId,
-            20 => AceType::SystemProcessTrustLabel,
-            21 => AceType::SystemAccessFilter,
-            code => AceType::Unknown(code),
-        }
+    pub fn ace_type(&self) -> AceType {
+        self.type_code().into()
     }
 
     /// Returns the native ACE flags byte.
-    pub const fn flags(&self) -> u8 {
-        self.0[1]
+    pub const fn flags(&self) -> AceFlags {
+        AceFlags::from_bits_retain(self.0[1])
     }
 
     /// Returns the declared ACE size.
@@ -356,7 +514,7 @@ impl Ace {
     }
 
     /// Returns the access mask for ACE layouts that contain one.
-    pub fn mask(&self) -> Option<u32> {
+    pub fn mask(&self) -> Option<AccessMask> {
         self.body().map(|body| body.mask)
     }
 
@@ -366,7 +524,7 @@ impl Ace {
     }
 
     /// Returns object-specific flags for object ACE layouts.
-    pub fn object_flags(&self) -> Option<u32> {
+    pub fn object_flags(&self) -> Option<ObjectAceFlags> {
         self.parse_object_body()
             .ok()
             .map(|body| body.object_flags.unwrap())
@@ -406,7 +564,7 @@ impl Ace {
     }
 
     fn parse_simple_body(&self) -> Result<AceBody, AceError> {
-        let mask = read_u32(&self.0, 4)?;
+        let mask = AccessMask::from_bits_retain(read_u32(&self.0, 4)?);
         let (sid, application_data_at) = parse_ace_sid(&self.0, 8)?;
         Ok(AceBody {
             mask,
@@ -419,10 +577,10 @@ impl Ace {
     }
 
     fn parse_object_body(&self) -> Result<AceBody, AceError> {
-        let mask = read_u32(&self.0, 4)?;
-        let object_flags = read_u32(&self.0, 8)?;
+        let mask = AccessMask::from_bits_retain(read_u32(&self.0, 4)?);
+        let object_flags = ObjectAceFlags::from_bits_retain(read_u32(&self.0, 8)?);
         let mut offset = 12;
-        let object_type = if object_flags & 1 != 0 {
+        let object_type = if object_flags.contains(ObjectAceFlags::OBJECT_TYPE_PRESENT) {
             let value = Guid::from_bytes(self.0.get(offset..offset + 16).ok_or(AceError::Body)?)
                 .map_err(|_| AceError::Body)?;
             offset += 16;
@@ -430,7 +588,9 @@ impl Ace {
         } else {
             None
         };
-        let inherited_object_type = if object_flags & 2 != 0 {
+        let inherited_object_type = if object_flags
+            .contains(ObjectAceFlags::INHERITED_OBJECT_TYPE_PRESENT)
+        {
             let value = Guid::from_bytes(self.0.get(offset..offset + 16).ok_or(AceError::Body)?)
                 .map_err(|_| AceError::Body)?;
             offset += 16;
@@ -482,7 +642,7 @@ impl AsRef<Ace> for Ace {
 /// fields are kept private so packet-layout choices remain explicit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AceBuildOptions {
-    flags: u8,
+    flags: AceFlags,
     object_type: Option<Guid>,
     inherited_object_type: Option<Guid>,
     callback: bool,
@@ -494,7 +654,7 @@ impl AceBuildOptions {
     #[allow(clippy::new_without_default)]
     pub const fn new() -> Self {
         Self {
-            flags: 0,
+            flags: AceFlags::empty(),
             object_type: None,
             inherited_object_type: None,
             callback: false,
@@ -503,7 +663,7 @@ impl AceBuildOptions {
     }
 
     /// Replaces the native ACE flags.
-    pub fn flags(mut self, flags: u8) -> Self {
+    pub fn flags(mut self, flags: AceFlags) -> Self {
         self.flags = flags;
         self
     }
@@ -546,19 +706,27 @@ impl AceBuf {
     }
 
     /// Builds an access-allowed ACE.
-    pub fn allow(sid: &Sid, mask: u32, options: AceBuildOptions) -> Result<Self, AceBuildError> {
+    pub fn allow(
+        sid: &Sid,
+        mask: AccessMask,
+        options: AceBuildOptions,
+    ) -> Result<Self, AceBuildError> {
         Self::build(AceFamily::Allow, sid, mask, false, false, options)
     }
 
     /// Builds an access-denied ACE.
-    pub fn deny(sid: &Sid, mask: u32, options: AceBuildOptions) -> Result<Self, AceBuildError> {
+    pub fn deny(
+        sid: &Sid,
+        mask: AccessMask,
+        options: AceBuildOptions,
+    ) -> Result<Self, AceBuildError> {
         Self::build(AceFamily::Deny, sid, mask, false, false, options)
     }
 
     /// Builds a system-audit ACE.
     pub fn audit(
         sid: &Sid,
-        mask: u32,
+        mask: AccessMask,
         successful: bool,
         failed: bool,
         options: AceBuildOptions,
@@ -566,7 +734,10 @@ impl AceBuf {
         if !successful && !failed {
             return Err(AceBuildError::AuditOutcome);
         }
-        if options.flags & 0xc0 != 0 {
+        if options
+            .flags
+            .intersects(AceFlags::SUCCESSFUL_ACCESS | AceFlags::FAILED_ACCESS)
+        {
             return Err(AceBuildError::AuditFlags);
         }
         Self::build(AceFamily::Audit, sid, mask, successful, failed, options)
@@ -575,7 +746,7 @@ impl AceBuf {
     fn build(
         family: AceFamily,
         sid: &Sid,
-        mask: u32,
+        mask: AccessMask,
         successful: bool,
         failed: bool,
         options: AceBuildOptions,
@@ -597,18 +768,25 @@ impl AceBuf {
         };
         let mut flags = options.flags;
         if successful {
-            flags |= 0x40;
+            flags |= AceFlags::SUCCESSFUL_ACCESS;
         }
         if failed {
-            flags |= 0x80;
+            flags |= AceFlags::FAILED_ACCESS;
         }
 
-        let mut bytes = vec![type_code, flags, 0, 0];
-        bytes.extend_from_slice(&mask.to_le_bytes());
+        let mut bytes = vec![type_code, flags.bits(), 0, 0];
+        bytes.extend_from_slice(&mask.bits().to_le_bytes());
         if object {
-            let object_flags = u32::from(options.object_type.is_some())
-                | (u32::from(options.inherited_object_type.is_some()) << 1);
-            bytes.extend_from_slice(&object_flags.to_le_bytes());
+            let mut object_flags = ObjectAceFlags::empty();
+            object_flags.set(
+                ObjectAceFlags::OBJECT_TYPE_PRESENT,
+                options.object_type.is_some(),
+            );
+            object_flags.set(
+                ObjectAceFlags::INHERITED_OBJECT_TYPE_PRESENT,
+                options.inherited_object_type.is_some(),
+            );
+            bytes.extend_from_slice(&object_flags.bits().to_le_bytes());
             if let Some(value) = options.object_type {
                 bytes.extend_from_slice(value.as_bytes());
             }
@@ -709,7 +887,7 @@ impl AclBuf {
     }
 
     /// Builds an ACL from already-validated ACE packets.
-    pub fn from_aces<I, A>(aces: I, revision: Option<u8>) -> Result<Self, AclBuildError>
+    pub fn from_aces<I, A>(aces: I, revision: Option<AclRevision>) -> Result<Self, AclBuildError>
     where
         I: IntoIterator<Item = A>,
         A: AsRef<Ace>,
@@ -736,16 +914,20 @@ impl AclBuf {
         }
         let count = u16::try_from(aces.len()).map_err(|_| AclBuildError::Count(aces.len()))?;
         let size16 = u16::try_from(size).map_err(|_| AclBuildError::Size(size))?;
-        let revision = revision.unwrap_or(if has_object { 4 } else { 2 });
-        if !matches!(revision, 2 | 4) {
+        let revision = revision.unwrap_or(if has_object {
+            AclRevision::DirectoryService
+        } else {
+            AclRevision::Basic
+        });
+        if let AclRevision::Unknown(revision) = revision {
             return Err(AclBuildError::Revision(revision));
         }
-        if revision == 2 && has_object {
+        if revision == AclRevision::Basic && has_object {
             return Err(AclBuildError::ObjectRevision);
         }
 
         let mut bytes = Vec::with_capacity(size);
-        bytes.extend_from_slice(&[revision, 0]);
+        bytes.extend_from_slice(&[revision.into(), 0]);
         bytes.extend_from_slice(&size16.to_le_bytes());
         bytes.extend_from_slice(&count.to_le_bytes());
         bytes.extend_from_slice(&[0, 0]);
@@ -946,10 +1128,10 @@ impl error::Error for AceError {}
 /// [`SecDescUpdate`] with [`with`](Self::with) to make a checked update.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecDesc {
-    mask: u32,
-    revision: u8,
+    mask: SecInfo,
+    revision: Revision,
     rm_control: u8,
-    control: u16,
+    control: SecDescControl,
     owner: Option<Sid>,
     group: Option<Sid>,
     dacl: Option<AclBuf>,
@@ -967,8 +1149,8 @@ pub struct SecDescUpdate {
     group: Option<Option<Sid>>,
     dacl: Option<Option<AclBuf>>,
     sacl: Option<Option<AclBuf>>,
-    set_flags: u16,
-    clear_flags: u16,
+    set_flags: SecDescControl,
+    clear_flags: SecDescControl,
     rm_control: Option<Option<u8>>,
 }
 
@@ -981,8 +1163,8 @@ impl SecDescUpdate {
             group: None,
             dacl: None,
             sacl: None,
-            set_flags: 0,
-            clear_flags: 0,
+            set_flags: SecDescControl::empty(),
+            clear_flags: SecDescControl::empty(),
             rm_control: None,
         }
     }
@@ -1009,51 +1191,51 @@ impl SecDescUpdate {
     }
     /// Sets the owner-defaulted control flag.
     pub fn owner_defaulted(self, value: bool) -> Self {
-        self.control_flag(SE_OWNER_DEFAULTED, value)
+        self.control_flag(SecDescControl::OWNER_DEFAULTED.bits(), value)
     }
     /// Sets the group-defaulted control flag.
     pub fn group_defaulted(self, value: bool) -> Self {
-        self.control_flag(SE_GROUP_DEFAULTED, value)
+        self.control_flag(SecDescControl::GROUP_DEFAULTED.bits(), value)
     }
     /// Sets whether a DACL is present.
     pub fn dacl_present(self, value: bool) -> Self {
-        self.control_flag(SE_DACL_PRESENT, value)
+        self.control_flag(SecDescControl::DACL_PRESENT.bits(), value)
     }
     /// Sets the DACL-defaulted control flag.
     pub fn dacl_defaulted(self, value: bool) -> Self {
-        self.control_flag(SE_DACL_DEFAULTED, value)
+        self.control_flag(SecDescControl::DACL_DEFAULTED.bits(), value)
     }
     /// Sets the DACL auto-inheritance-requested control flag.
     pub fn dacl_auto_inherit_required(self, value: bool) -> Self {
-        self.control_flag(SE_DACL_AUTO_INHERIT_REQ, value)
+        self.control_flag(SecDescControl::DACL_AUTO_INHERIT_REQUIRED.bits(), value)
     }
     /// Sets the DACL auto-inherited control flag.
     pub fn dacl_auto_inherited(self, value: bool) -> Self {
-        self.control_flag(SE_DACL_AUTO_INHERITED, value)
+        self.control_flag(SecDescControl::DACL_AUTO_INHERITED.bits(), value)
     }
     /// Sets the DACL-protected control flag.
     pub fn dacl_protected(self, value: bool) -> Self {
-        self.control_flag(SE_DACL_PROTECTED, value)
+        self.control_flag(SecDescControl::DACL_PROTECTED.bits(), value)
     }
     /// Sets whether a SACL is present.
     pub fn sacl_present(self, value: bool) -> Self {
-        self.control_flag(SE_SACL_PRESENT, value)
+        self.control_flag(SecDescControl::SACL_PRESENT.bits(), value)
     }
     /// Sets the SACL-defaulted control flag.
     pub fn sacl_defaulted(self, value: bool) -> Self {
-        self.control_flag(SE_SACL_DEFAULTED, value)
+        self.control_flag(SecDescControl::SACL_DEFAULTED.bits(), value)
     }
     /// Sets the SACL auto-inheritance-requested control flag.
     pub fn sacl_auto_inherit_required(self, value: bool) -> Self {
-        self.control_flag(SE_SACL_AUTO_INHERIT_REQ, value)
+        self.control_flag(SecDescControl::SACL_AUTO_INHERIT_REQUIRED.bits(), value)
     }
     /// Sets the SACL auto-inherited control flag.
     pub fn sacl_auto_inherited(self, value: bool) -> Self {
-        self.control_flag(SE_SACL_AUTO_INHERITED, value)
+        self.control_flag(SecDescControl::SACL_AUTO_INHERITED.bits(), value)
     }
     /// Sets the SACL-protected control flag.
     pub fn sacl_protected(self, value: bool) -> Self {
-        self.control_flag(SE_SACL_PROTECTED, value)
+        self.control_flag(SecDescControl::SACL_PROTECTED.bits(), value)
     }
     /// Sets the resource-manager control byte, or clears its validity with `None`.
     pub fn rm_control(mut self, rm_control: Option<u8>) -> Self {
@@ -1062,8 +1244,9 @@ impl SecDescUpdate {
     }
 
     fn control_flag(mut self, flag: u16, value: bool) -> Self {
-        self.set_flags &= !flag;
-        self.clear_flags &= !flag;
+        let flag = SecDescControl::from_bits_retain(flag);
+        self.set_flags.remove(flag);
+        self.clear_flags.remove(flag);
         if value {
             self.set_flags |= flag;
         } else {
@@ -1077,42 +1260,38 @@ impl SecDesc {
     /// Creates a security descriptor from its structural components.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        mask: u32,
-        revision: u8,
+        mask: SecInfo,
         rm_control: u8,
-        control: u16,
+        control: SecDescControl,
         owner: Option<Sid>,
         group: Option<Sid>,
         dacl: Option<AclBuf>,
         sacl: Option<AclBuf>,
     ) -> Result<Self, SecDescError> {
-        if revision != REVISION {
-            return Err(SecDescError::Revision(revision));
-        }
-        if mask & OWNER_SECURITY_INFORMATION == 0 && owner.is_some() {
+        if !mask.contains(SecInfo::OWNER) && owner.is_some() {
             return Err(SecDescError::OwnerNotLoaded);
         }
-        if mask & GROUP_SECURITY_INFORMATION == 0 && group.is_some() {
+        if !mask.contains(SecInfo::GROUP) && group.is_some() {
             return Err(SecDescError::GroupNotLoaded);
         }
         validate_acl(
             AclKind::Dacl,
-            mask & DACL_SECURITY_INFORMATION != 0,
-            control & SE_DACL_PRESENT != 0,
+            mask.contains(SecInfo::DACL),
+            control.contains(SecDescControl::DACL_PRESENT),
             dacl.as_ref(),
         )?;
         validate_acl(
             AclKind::Sacl,
-            mask & SACL_SECURITY_INFORMATION != 0,
-            control & SE_SACL_PRESENT != 0,
+            mask.contains(SecInfo::SACL),
+            control.contains(SecDescControl::SACL_PRESENT),
             sacl.as_ref(),
         )?;
 
         Ok(Self {
             mask,
-            revision,
+            revision: Revision::One,
             rm_control,
-            control: control & !SE_SELF_RELATIVE,
+            control: control - SecDescControl::SELF_RELATIVE,
             owner,
             group,
             dacl,
@@ -1122,18 +1301,21 @@ impl SecDesc {
 
     /// Parses a self-relative Windows security descriptor packet.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, SecDescError> {
-        Self::from_bytes_with_mask(bytes, ALL_SECURITY_INFORMATION)
+        Self::from_bytes_with_mask(bytes, SecInfo::ALL)
     }
 
     /// Parses the selected components of a self-relative Windows security descriptor packet.
-    pub fn from_bytes_with_mask(bytes: &[u8], mask: u32) -> Result<Self, SecDescError> {
+    pub fn from_bytes_with_mask(bytes: &[u8], mask: SecInfo) -> Result<Self, SecDescError> {
         if bytes.len() < SELF_RELATIVE_HEADER_LEN {
             return Err(SecDescError::PacketLength);
         }
-        let revision = bytes[0];
+        match bytes[0] {
+            REVISION => {}
+            revision => return Err(SecDescError::Revision(revision)),
+        }
         let rm_control = bytes[1];
         let control = u16::from_le_bytes(bytes[2..4].try_into().unwrap());
-        if control & SE_SELF_RELATIVE == 0 {
+        if control & SecDescControl::SELF_RELATIVE.bits() == 0 {
             return Err(SecDescError::NotSelfRelative);
         }
 
@@ -1141,40 +1323,54 @@ impl SecDesc {
         let group_offset = packet_offset(bytes, 8, SecDescComponent::Group)?;
         let sacl_offset = packet_offset(bytes, 12, SecDescComponent::Sacl)?;
         let dacl_offset = packet_offset(bytes, 16, SecDescComponent::Dacl)?;
-        if control & SE_SACL_PRESENT == 0 && sacl_offset != 0 {
+        if control & SecDescControl::SACL_PRESENT.bits() == 0 && sacl_offset != 0 {
             return Err(SecDescError::AclNotPresent(AclKind::Sacl));
         }
-        if control & SE_DACL_PRESENT == 0 && dacl_offset != 0 {
+        if control & SecDescControl::DACL_PRESENT.bits() == 0 && dacl_offset != 0 {
             return Err(SecDescError::AclNotPresent(AclKind::Dacl));
         }
-        let owner = (mask & OWNER_SECURITY_INFORMATION != 0)
+        let owner = mask
+            .contains(SecInfo::OWNER)
             .then(|| parse_sid(bytes, owner_offset, SecDescComponent::Owner))
             .transpose()?
             .flatten();
-        let group = (mask & GROUP_SECURITY_INFORMATION != 0)
+        let group = mask
+            .contains(SecInfo::GROUP)
             .then(|| parse_sid(bytes, group_offset, SecDescComponent::Group))
             .transpose()?
             .flatten();
-        let sacl = (mask & SACL_SECURITY_INFORMATION != 0)
+        let sacl = mask
+            .contains(SecInfo::SACL)
             .then(|| parse_acl(bytes, sacl_offset, AclKind::Sacl))
             .transpose()?
             .flatten();
-        let dacl = (mask & DACL_SECURITY_INFORMATION != 0)
+        let dacl = mask
+            .contains(SecInfo::DACL)
             .then(|| parse_acl(bytes, dacl_offset, AclKind::Dacl))
             .transpose()?
             .flatten();
 
         Self::new(
-            mask, revision, rm_control, control, owner, group, dacl, sacl,
+            mask,
+            rm_control,
+            SecDescControl::from_bits_retain(control),
+            owner,
+            group,
+            dacl,
+            sacl,
         )
     }
 
     /// Converts this descriptor to a canonical self-relative Windows packet.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = vec![0; SELF_RELATIVE_HEADER_LEN];
-        bytes[0] = self.revision;
+        bytes[0] = self.revision as u8;
         bytes[1] = self.rm_control;
-        bytes[2..4].copy_from_slice(&(self.control | SE_SELF_RELATIVE).to_le_bytes());
+        bytes[2..4].copy_from_slice(
+            &(self.control | SecDescControl::SELF_RELATIVE)
+                .bits()
+                .to_le_bytes(),
+        );
 
         let owner = self.owner.as_ref().map(Sid::to_bytes);
         let group = self.group.as_ref().map(Sid::to_bytes);
@@ -1186,17 +1382,17 @@ impl SecDesc {
     }
 
     /// Returns the native SECURITY_INFORMATION mask associated with the descriptor.
-    pub const fn mask(&self) -> u32 {
+    pub const fn mask(&self) -> SecInfo {
         self.mask
     }
 
     /// Returns the security descriptor revision.
-    pub const fn revision(&self) -> u8 {
+    pub const fn revision(&self) -> Revision {
         self.revision
     }
 
     /// Returns the security descriptor control mask.
-    pub const fn control(&self) -> u16 {
+    pub const fn control(&self) -> SecDescControl {
         self.control
     }
 
@@ -1211,12 +1407,12 @@ impl SecDesc {
 
     /// Returns whether the resource-manager control byte is valid.
     pub const fn rm_control_valid(&self) -> bool {
-        self.control & SE_RM_CONTROL_VALID != 0
+        self.control.contains(SecDescControl::RM_CONTROL_VALID)
     }
 
     /// Returns whether the owner component was loaded.
     pub const fn owner_loaded(&self) -> bool {
-        self.mask & OWNER_SECURITY_INFORMATION != 0
+        self.mask.contains(SecInfo::OWNER)
     }
 
     /// Returns the owner SID, if present.
@@ -1226,12 +1422,12 @@ impl SecDesc {
 
     /// Returns whether the owner SID was supplied by a default mechanism.
     pub const fn owner_defaulted(&self) -> bool {
-        self.control & SE_OWNER_DEFAULTED != 0
+        self.control.contains(SecDescControl::OWNER_DEFAULTED)
     }
 
     /// Returns whether the group component was loaded.
     pub const fn group_loaded(&self) -> bool {
-        self.mask & GROUP_SECURITY_INFORMATION != 0
+        self.mask.contains(SecInfo::GROUP)
     }
 
     /// Returns the primary group SID, if present.
@@ -1241,12 +1437,12 @@ impl SecDesc {
 
     /// Returns whether the group SID was supplied by a default mechanism.
     pub const fn group_defaulted(&self) -> bool {
-        self.control & SE_GROUP_DEFAULTED != 0
+        self.control.contains(SecDescControl::GROUP_DEFAULTED)
     }
 
     /// Returns whether the DACL component was loaded.
     pub const fn dacl_loaded(&self) -> bool {
-        self.mask & DACL_SECURITY_INFORMATION != 0
+        self.mask.contains(SecInfo::DACL)
     }
 
     /// Returns the DACL, if it is non-null.
@@ -1256,32 +1452,33 @@ impl SecDesc {
 
     /// Returns whether the descriptor marks the DACL as present.
     pub const fn dacl_present(&self) -> bool {
-        self.control & SE_DACL_PRESENT != 0
+        self.control.contains(SecDescControl::DACL_PRESENT)
     }
 
     /// Returns whether the DACL was supplied by a default mechanism.
     pub const fn dacl_defaulted(&self) -> bool {
-        self.control & SE_DACL_DEFAULTED != 0
+        self.control.contains(SecDescControl::DACL_DEFAULTED)
     }
 
     /// Returns whether DACL inheritance computation was requested.
     pub const fn dacl_auto_inherit_required(&self) -> bool {
-        self.control & SE_DACL_AUTO_INHERIT_REQ != 0
+        self.control
+            .contains(SecDescControl::DACL_AUTO_INHERIT_REQUIRED)
     }
 
     /// Returns whether the DACL was produced through inheritance.
     pub const fn dacl_auto_inherited(&self) -> bool {
-        self.control & SE_DACL_AUTO_INHERITED != 0
+        self.control.contains(SecDescControl::DACL_AUTO_INHERITED)
     }
 
     /// Returns whether the DACL is protected from inheritance.
     pub const fn dacl_protected(&self) -> bool {
-        self.control & SE_DACL_PROTECTED != 0
+        self.control.contains(SecDescControl::DACL_PROTECTED)
     }
 
     /// Returns whether the SACL component was loaded.
     pub const fn sacl_loaded(&self) -> bool {
-        self.mask & SACL_SECURITY_INFORMATION != 0
+        self.mask.contains(SecInfo::SACL)
     }
 
     /// Returns the SACL, if it is non-null.
@@ -1291,27 +1488,28 @@ impl SecDesc {
 
     /// Returns whether the descriptor marks the SACL as present.
     pub const fn sacl_present(&self) -> bool {
-        self.control & SE_SACL_PRESENT != 0
+        self.control.contains(SecDescControl::SACL_PRESENT)
     }
 
     /// Returns whether the SACL was supplied by a default mechanism.
     pub const fn sacl_defaulted(&self) -> bool {
-        self.control & SE_SACL_DEFAULTED != 0
+        self.control.contains(SecDescControl::SACL_DEFAULTED)
     }
 
     /// Returns whether SACL inheritance computation was requested.
     pub const fn sacl_auto_inherit_required(&self) -> bool {
-        self.control & SE_SACL_AUTO_INHERIT_REQ != 0
+        self.control
+            .contains(SecDescControl::SACL_AUTO_INHERIT_REQUIRED)
     }
 
     /// Returns whether the SACL was produced through inheritance.
     pub const fn sacl_auto_inherited(&self) -> bool {
-        self.control & SE_SACL_AUTO_INHERITED != 0
+        self.control.contains(SecDescControl::SACL_AUTO_INHERITED)
     }
 
     /// Returns whether the SACL is protected from inheritance.
     pub const fn sacl_protected(&self) -> bool {
-        self.control & SE_SACL_PROTECTED != 0
+        self.control.contains(SecDescControl::SACL_PROTECTED)
     }
 
     /// Returns a new descriptor with the supplied component and control updates.
@@ -1326,18 +1524,20 @@ impl SecDesc {
             rm_control: rm_control_update,
         } = update;
         let mut mask = self.mask;
-        let mut control = self.control;
+        let mut control = self.control.bits();
+        let set_flags = set_flags.bits();
+        let clear_flags = clear_flags.bits();
 
         let owner = match owner_update {
             Some(value) => {
-                mask |= OWNER_SECURITY_INFORMATION;
+                mask |= SecInfo::OWNER;
                 value
             }
             None => self.owner.clone(),
         };
         let group = match group_update {
             Some(value) => {
-                mask |= GROUP_SECURITY_INFORMATION;
+                mask |= SecInfo::GROUP;
                 value
             }
             None => self.group.clone(),
@@ -1345,16 +1545,16 @@ impl SecDesc {
 
         let (dacl, dacl_explicit) = match dacl_update {
             Some(value) => {
-                mask |= DACL_SECURITY_INFORMATION;
-                set_control(&mut control, SE_DACL_PRESENT, true);
+                mask |= SecInfo::DACL;
+                set_control(&mut control, SecDescControl::DACL_PRESENT.bits(), true);
                 (value, true)
             }
             None => (self.dacl.clone(), false),
         };
         let (sacl, sacl_explicit) = match sacl_update {
             Some(value) => {
-                mask |= SACL_SECURITY_INFORMATION;
-                set_control(&mut control, SE_SACL_PRESENT, true);
+                mask |= SecInfo::SACL;
+                set_control(&mut control, SecDescControl::SACL_PRESENT.bits(), true);
                 (value, true)
             }
             None => (self.sacl.clone(), false),
@@ -1364,9 +1564,9 @@ impl SecDesc {
             AclKind::Dacl,
             &mut mask,
             &mut control,
-            DACL_SECURITY_INFORMATION,
-            SE_DACL_PRESENT,
-            flag_update(set_flags, clear_flags, SE_DACL_PRESENT),
+            SecInfo::DACL,
+            SecDescControl::DACL_PRESENT.bits(),
+            flag_update(set_flags, clear_flags, SecDescControl::DACL_PRESENT.bits()),
             dacl_explicit,
             dacl,
         )?;
@@ -1374,75 +1574,115 @@ impl SecDesc {
             AclKind::Sacl,
             &mut mask,
             &mut control,
-            SACL_SECURITY_INFORMATION,
-            SE_SACL_PRESENT,
-            flag_update(set_flags, clear_flags, SE_SACL_PRESENT),
+            SecInfo::SACL,
+            SecDescControl::SACL_PRESENT.bits(),
+            flag_update(set_flags, clear_flags, SecDescControl::SACL_PRESENT.bits()),
             sacl_explicit,
             sacl,
         )?;
 
         apply_component_flag(
             SecDescComponent::Owner,
-            mask & OWNER_SECURITY_INFORMATION != 0,
+            mask.contains(SecInfo::OWNER),
             &mut control,
-            SE_OWNER_DEFAULTED,
-            flag_update(set_flags, clear_flags, SE_OWNER_DEFAULTED),
+            SecDescControl::OWNER_DEFAULTED.bits(),
+            flag_update(
+                set_flags,
+                clear_flags,
+                SecDescControl::OWNER_DEFAULTED.bits(),
+            ),
         )?;
         apply_component_flag(
             SecDescComponent::Group,
-            mask & GROUP_SECURITY_INFORMATION != 0,
+            mask.contains(SecInfo::GROUP),
             &mut control,
-            SE_GROUP_DEFAULTED,
-            flag_update(set_flags, clear_flags, SE_GROUP_DEFAULTED),
+            SecDescControl::GROUP_DEFAULTED.bits(),
+            flag_update(
+                set_flags,
+                clear_flags,
+                SecDescControl::GROUP_DEFAULTED.bits(),
+            ),
         )?;
         for (name, loaded, flag, value) in [
             (
                 SecDescComponent::Dacl,
-                mask & DACL_SECURITY_INFORMATION != 0,
-                SE_DACL_DEFAULTED,
-                flag_update(set_flags, clear_flags, SE_DACL_DEFAULTED),
+                mask.contains(SecInfo::DACL),
+                SecDescControl::DACL_DEFAULTED.bits(),
+                flag_update(
+                    set_flags,
+                    clear_flags,
+                    SecDescControl::DACL_DEFAULTED.bits(),
+                ),
             ),
             (
                 SecDescComponent::Dacl,
-                mask & DACL_SECURITY_INFORMATION != 0,
-                SE_DACL_AUTO_INHERIT_REQ,
-                flag_update(set_flags, clear_flags, SE_DACL_AUTO_INHERIT_REQ),
+                mask.contains(SecInfo::DACL),
+                SecDescControl::DACL_AUTO_INHERIT_REQUIRED.bits(),
+                flag_update(
+                    set_flags,
+                    clear_flags,
+                    SecDescControl::DACL_AUTO_INHERIT_REQUIRED.bits(),
+                ),
             ),
             (
                 SecDescComponent::Dacl,
-                mask & DACL_SECURITY_INFORMATION != 0,
-                SE_DACL_AUTO_INHERITED,
-                flag_update(set_flags, clear_flags, SE_DACL_AUTO_INHERITED),
+                mask.contains(SecInfo::DACL),
+                SecDescControl::DACL_AUTO_INHERITED.bits(),
+                flag_update(
+                    set_flags,
+                    clear_flags,
+                    SecDescControl::DACL_AUTO_INHERITED.bits(),
+                ),
             ),
             (
                 SecDescComponent::Dacl,
-                mask & DACL_SECURITY_INFORMATION != 0,
-                SE_DACL_PROTECTED,
-                flag_update(set_flags, clear_flags, SE_DACL_PROTECTED),
+                mask.contains(SecInfo::DACL),
+                SecDescControl::DACL_PROTECTED.bits(),
+                flag_update(
+                    set_flags,
+                    clear_flags,
+                    SecDescControl::DACL_PROTECTED.bits(),
+                ),
             ),
             (
                 SecDescComponent::Sacl,
-                mask & SACL_SECURITY_INFORMATION != 0,
-                SE_SACL_DEFAULTED,
-                flag_update(set_flags, clear_flags, SE_SACL_DEFAULTED),
+                mask.contains(SecInfo::SACL),
+                SecDescControl::SACL_DEFAULTED.bits(),
+                flag_update(
+                    set_flags,
+                    clear_flags,
+                    SecDescControl::SACL_DEFAULTED.bits(),
+                ),
             ),
             (
                 SecDescComponent::Sacl,
-                mask & SACL_SECURITY_INFORMATION != 0,
-                SE_SACL_AUTO_INHERIT_REQ,
-                flag_update(set_flags, clear_flags, SE_SACL_AUTO_INHERIT_REQ),
+                mask.contains(SecInfo::SACL),
+                SecDescControl::SACL_AUTO_INHERIT_REQUIRED.bits(),
+                flag_update(
+                    set_flags,
+                    clear_flags,
+                    SecDescControl::SACL_AUTO_INHERIT_REQUIRED.bits(),
+                ),
             ),
             (
                 SecDescComponent::Sacl,
-                mask & SACL_SECURITY_INFORMATION != 0,
-                SE_SACL_AUTO_INHERITED,
-                flag_update(set_flags, clear_flags, SE_SACL_AUTO_INHERITED),
+                mask.contains(SecInfo::SACL),
+                SecDescControl::SACL_AUTO_INHERITED.bits(),
+                flag_update(
+                    set_flags,
+                    clear_flags,
+                    SecDescControl::SACL_AUTO_INHERITED.bits(),
+                ),
             ),
             (
                 SecDescComponent::Sacl,
-                mask & SACL_SECURITY_INFORMATION != 0,
-                SE_SACL_PROTECTED,
-                flag_update(set_flags, clear_flags, SE_SACL_PROTECTED),
+                mask.contains(SecInfo::SACL),
+                SecDescControl::SACL_PROTECTED.bits(),
+                flag_update(
+                    set_flags,
+                    clear_flags,
+                    SecDescControl::SACL_PROTECTED.bits(),
+                ),
             ),
         ] {
             apply_component_flag(name, loaded, &mut control, flag, value)?;
@@ -1450,11 +1690,11 @@ impl SecDesc {
 
         let rm_control = match rm_control_update {
             Some(Some(value)) => {
-                set_control(&mut control, SE_RM_CONTROL_VALID, true);
+                set_control(&mut control, SecDescControl::RM_CONTROL_VALID.bits(), true);
                 value
             }
             Some(None) => {
-                set_control(&mut control, SE_RM_CONTROL_VALID, false);
+                set_control(&mut control, SecDescControl::RM_CONTROL_VALID.bits(), false);
                 0
             }
             None => self.rm_control,
@@ -1464,7 +1704,7 @@ impl SecDesc {
             mask,
             revision: self.revision,
             rm_control,
-            control,
+            control: SecDescControl::from_bits_retain(control),
             owner,
             group,
             dacl,
@@ -1510,16 +1750,16 @@ fn apply_component_flag(
 #[allow(clippy::too_many_arguments)]
 fn apply_presence(
     acl_kind: AclKind,
-    mask: &mut u32,
+    mask: &mut SecInfo,
     control: &mut u16,
-    mask_flag: u32,
+    mask_flag: SecInfo,
     present_flag: u16,
     requested: Option<bool>,
     explicit: bool,
     mut acl: Option<AclBuf>,
 ) -> Result<Option<AclBuf>, SecDescError> {
     if let Some(present) = requested {
-        let was_loaded = *mask & mask_flag != 0;
+        let was_loaded = mask.contains(mask_flag);
         if !present {
             if explicit {
                 return Err(SecDescError::AclPresenceConflict(acl_kind));
@@ -1635,10 +1875,10 @@ impl Serialize for SecDesc {
         S: Serializer,
     {
         let mut tuple = serializer.serialize_tuple(8)?;
-        tuple.serialize_element(&self.mask)?;
-        tuple.serialize_element(&self.revision)?;
+        tuple.serialize_element(&self.mask.bits())?;
+        tuple.serialize_element(&(self.revision as u8))?;
         tuple.serialize_element(&self.rm_control)?;
-        tuple.serialize_element(&self.control)?;
+        tuple.serialize_element(&self.control.bits())?;
         tuple.serialize_element(&self.owner)?;
         tuple.serialize_element(&self.group)?;
         tuple.serialize_element(&self.dacl)?;
@@ -1665,18 +1905,19 @@ impl<'de> Deserialize<'de> for SecDesc {
             where
                 A: SeqAccess<'de>,
             {
-                let mask = next(&mut seq, 0, &self)?;
-                let revision = next(&mut seq, 1, &self)?;
+                let mask = SecInfo::from_bits_retain(next(&mut seq, 0, &self)?);
+                match next(&mut seq, 1, &self)? {
+                    REVISION => {}
+                    revision => return Err(de::Error::custom(SecDescError::Revision(revision))),
+                }
                 let rm_control = next(&mut seq, 2, &self)?;
-                let control = next(&mut seq, 3, &self)?;
+                let control = SecDescControl::from_bits_retain(next(&mut seq, 3, &self)?);
                 let owner = next(&mut seq, 4, &self)?;
                 let group = next(&mut seq, 5, &self)?;
                 let dacl = next(&mut seq, 6, &self)?;
                 let sacl = next(&mut seq, 7, &self)?;
-                SecDesc::new(
-                    mask, revision, rm_control, control, owner, group, dacl, sacl,
-                )
-                .map_err(de::Error::custom)
+                SecDesc::new(mask, rm_control, control, owner, group, dacl, sacl)
+                    .map_err(de::Error::custom)
             }
         }
 
@@ -1817,7 +2058,7 @@ mod tests {
         let bytes = acl_with_aces(&[known.clone(), unknown.clone()], &[0xaa, 0xbb, 0xcc, 0xdd]);
         let acl = Acl::from_bytes(&bytes).unwrap();
 
-        assert_eq!(acl.revision(), 2);
+        assert_eq!(acl.revision(), AclRevision::Basic);
         assert_eq!(usize::from(acl.size()), bytes.len());
         assert_eq!(acl.ace_count(), 2);
         assert_eq!(acl.as_bytes(), bytes);
@@ -1825,8 +2066,8 @@ mod tests {
         let mut aces = acl.aces();
         let first = aces.next().unwrap();
         assert_eq!(first.ace_type(), AceType::AccessAllowed);
-        assert_eq!(first.flags(), 0x13);
-        assert_eq!(first.mask(), Some(0x1234_5678));
+        assert_eq!(first.flags().bits(), 0x13);
+        assert_eq!(first.mask().map(|mask| mask.bits()), Some(0x1234_5678));
         assert_eq!(first.sid(), Some(trustee));
         assert_eq!(
             first.application_data(),
@@ -1864,7 +2105,10 @@ mod tests {
 
             let ace = Ace::from_bytes(&bytes).unwrap();
             assert_eq!(ace.ace_type(), AceType::AccessAllowedCallbackObject);
-            assert_eq!(ace.object_flags(), Some(object_flags));
+            assert_eq!(
+                ace.object_flags().map(|flags| flags.bits()),
+                Some(object_flags)
+            );
             assert_eq!(
                 ace.object_type(),
                 (object_flags & 1 != 0).then_some(object_type)
@@ -1904,15 +2148,23 @@ mod tests {
 
     #[test]
     fn represents_loaded_absent_null_and_non_null_components() {
-        let unloaded = SecDesc::new(0, 1, 0, 0, None, None, None, None).unwrap();
+        let unloaded = SecDesc::new(
+            SecInfo::empty(),
+            0,
+            SecDescControl::empty(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert!(!unloaded.owner_loaded());
         assert!(!unloaded.dacl_loaded());
 
         let absent = SecDesc::new(
-            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-            1,
+            SecInfo::OWNER | SecInfo::DACL,
             0,
-            0,
+            SecDescControl::empty(),
             None,
             None,
             None,
@@ -1925,10 +2177,9 @@ mod tests {
         assert!(!absent.dacl_present());
 
         let null = SecDesc::new(
-            DACL_SECURITY_INFORMATION,
-            1,
+            SecInfo::DACL,
             0,
-            SE_DACL_PRESENT,
+            SecDescControl::DACL_PRESENT,
             None,
             None,
             None,
@@ -1940,10 +2191,9 @@ mod tests {
 
         let bytes = valid_acl(8);
         let present = SecDesc::new(
-            DACL_SECURITY_INFORMATION,
-            1,
+            SecInfo::DACL,
             0,
-            SE_DACL_PRESENT,
+            SecDescControl::DACL_PRESENT,
             None,
             None,
             Some(bytes.clone()),
@@ -1956,19 +2206,34 @@ mod tests {
     #[test]
     fn rejects_inconsistent_components() {
         assert_eq!(
-            SecDesc::new(0, 1, 0, 0, Some(sid("S-1-5-18")), None, None, None),
+            SecDesc::new(
+                SecInfo::empty(),
+                0,
+                SecDescControl::empty(),
+                Some(sid("S-1-5-18")),
+                None,
+                None,
+                None,
+            ),
             Err(SecDescError::OwnerNotLoaded)
         );
         assert_eq!(
-            SecDesc::new(0, 1, 0, 0, None, Some(sid("S-1-5-18")), None, None),
+            SecDesc::new(
+                SecInfo::empty(),
+                0,
+                SecDescControl::empty(),
+                None,
+                Some(sid("S-1-5-18")),
+                None,
+                None,
+            ),
             Err(SecDescError::GroupNotLoaded)
         );
         assert_eq!(
             SecDesc::new(
+                SecInfo::empty(),
                 0,
-                1,
-                0,
-                SE_DACL_PRESENT,
+                SecDescControl::DACL_PRESENT,
                 None,
                 None,
                 Some(valid_acl(8)),
@@ -1978,10 +2243,9 @@ mod tests {
         );
         assert_eq!(
             SecDesc::new(
-                DACL_SECURITY_INFORMATION,
-                1,
+                SecInfo::DACL,
                 0,
-                0,
+                SecDescControl::empty(),
                 None,
                 None,
                 Some(valid_acl(8)),
@@ -2009,10 +2273,9 @@ mod tests {
         opaque[8..].copy_from_slice(&[0xff; 4]);
         let opaque = unsafe { AclBuf::from_bytes_unchecked(opaque.into_boxed_slice()) };
         let descriptor = SecDesc::new(
-            DACL_SECURITY_INFORMATION,
-            1,
+            SecInfo::DACL,
             0,
-            SE_DACL_PRESENT,
+            SecDescControl::DACL_PRESENT,
             None,
             None,
             Some(opaque.clone()),
@@ -2027,19 +2290,28 @@ mod tests {
 
     #[test]
     fn projects_control_flags_and_normalizes_storage_form() {
-        let control = SE_OWNER_DEFAULTED
-            | SE_GROUP_DEFAULTED
-            | SE_DACL_DEFAULTED
-            | SE_SACL_DEFAULTED
-            | SE_DACL_AUTO_INHERIT_REQ
-            | SE_SACL_AUTO_INHERIT_REQ
-            | SE_DACL_AUTO_INHERITED
-            | SE_SACL_AUTO_INHERITED
-            | SE_DACL_PROTECTED
-            | SE_SACL_PROTECTED
-            | SE_RM_CONTROL_VALID
-            | SE_SELF_RELATIVE;
-        let descriptor = SecDesc::new(0, 1, 0x5a, control, None, None, None, None).unwrap();
+        let control = SecDescControl::OWNER_DEFAULTED.bits()
+            | SecDescControl::GROUP_DEFAULTED.bits()
+            | SecDescControl::DACL_DEFAULTED.bits()
+            | SecDescControl::SACL_DEFAULTED.bits()
+            | SecDescControl::DACL_AUTO_INHERIT_REQUIRED.bits()
+            | SecDescControl::SACL_AUTO_INHERIT_REQUIRED.bits()
+            | SecDescControl::DACL_AUTO_INHERITED.bits()
+            | SecDescControl::SACL_AUTO_INHERITED.bits()
+            | SecDescControl::DACL_PROTECTED.bits()
+            | SecDescControl::SACL_PROTECTED.bits()
+            | SecDescControl::RM_CONTROL_VALID.bits()
+            | SecDescControl::SELF_RELATIVE.bits();
+        let descriptor = SecDesc::new(
+            SecInfo::empty(),
+            0x5a,
+            SecDescControl::from_bits_retain(control),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(descriptor.rm_control(), Some(0x5a));
         assert!(descriptor.owner_defaulted());
         assert!(descriptor.group_defaulted());
@@ -2051,9 +2323,18 @@ mod tests {
         assert!(descriptor.sacl_auto_inherited());
         assert!(descriptor.dacl_protected());
         assert!(descriptor.sacl_protected());
-        assert_eq!(descriptor.control() & SE_SELF_RELATIVE, 0);
+        assert!(!descriptor.control().contains(SecDescControl::SELF_RELATIVE));
 
-        let descriptor = SecDesc::new(0, 1, 0x5a, 0, None, None, None, None).unwrap();
+        let descriptor = SecDesc::new(
+            SecInfo::empty(),
+            0x5a,
+            SecDescControl::empty(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(descriptor.rm_control(), None);
     }
 
@@ -2062,10 +2343,9 @@ mod tests {
         let owner = sid("S-1-5-18");
         let dacl = valid_acl(8);
         let descriptor = SecDesc::new(
-            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-            1,
+            SecInfo::OWNER | SecInfo::DACL,
             0x42,
-            SE_DACL_PRESENT | SE_RM_CONTROL_VALID,
+            SecDescControl::DACL_PRESENT | SecDescControl::RM_CONTROL_VALID,
             Some(owner.clone()),
             None,
             Some(dacl.clone()),
@@ -2074,10 +2354,10 @@ mod tests {
         .unwrap();
         let encoded = postcard::to_stdvec(&descriptor).unwrap();
         let expected = postcard::to_stdvec(&(
-            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            (SecInfo::OWNER | SecInfo::DACL).bits(),
             1u8,
             0x42u8,
-            SE_DACL_PRESENT | SE_RM_CONTROL_VALID,
+            SecDescControl::DACL_PRESENT.bits() | SecDescControl::RM_CONTROL_VALID.bits(),
             Some(owner),
             Option::<Sid>::None,
             Some(dacl),
@@ -2105,6 +2385,56 @@ mod tests {
     }
 
     #[test]
+    fn flag_and_revision_serde_preserve_native_values() {
+        let info = SecInfo::OWNER | SecInfo::DACL;
+        let control = SecDescControl::DACL_PRESENT | SecDescControl::DACL_PROTECTED;
+        assert_eq!(
+            postcard::to_stdvec(&info).unwrap(),
+            postcard::to_stdvec(&info.bits()).unwrap()
+        );
+        assert_eq!(
+            postcard::to_stdvec(&control).unwrap(),
+            postcard::to_stdvec(&control.bits()).unwrap()
+        );
+        assert_eq!(postcard::to_stdvec(&Revision::One).unwrap(), vec![REVISION]);
+        assert!(postcard::from_bytes::<Revision>(&[2]).is_err());
+
+        for flags in [
+            AceFlags::OBJECT_INHERIT | AceFlags::FAILED_ACCESS,
+            AceFlags::from_bits_retain(0xff),
+        ] {
+            let encoded = postcard::to_stdvec(&flags).unwrap();
+            assert_eq!(encoded, postcard::to_stdvec(&flags.bits()).unwrap());
+            assert_eq!(postcard::from_bytes::<AceFlags>(&encoded).unwrap(), flags);
+        }
+        let object_flags = ObjectAceFlags::from_bits_retain(0x8000_0001);
+        let encoded = postcard::to_stdvec(&object_flags).unwrap();
+        assert_eq!(encoded, postcard::to_stdvec(&object_flags.bits()).unwrap());
+        assert_eq!(
+            postcard::from_bytes::<ObjectAceFlags>(&encoded).unwrap(),
+            object_flags
+        );
+
+        for ace_type in [AceType::AccessAllowed, AceType::Unknown(0xfe)] {
+            let encoded = postcard::to_stdvec(&ace_type).unwrap();
+            assert_eq!(encoded, vec![u8::from(ace_type)]);
+            assert_eq!(postcard::from_bytes::<AceType>(&encoded).unwrap(), ace_type);
+        }
+        for revision in [
+            AclRevision::Basic,
+            AclRevision::DirectoryService,
+            AclRevision::Unknown(3),
+        ] {
+            let encoded = postcard::to_stdvec(&revision).unwrap();
+            assert_eq!(encoded, vec![u8::from(revision)]);
+            assert_eq!(
+                postcard::from_bytes::<AclRevision>(&encoded).unwrap(),
+                revision
+            );
+        }
+    }
+
+    #[test]
     fn self_relative_packet_round_trip() {
         let packet = [
             0x01, 0x5a, 0x15, 0xd0, 0x14, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -2113,8 +2443,8 @@ mod tests {
             0x00, 0x00, 0x20, 0x02, 0x00, 0x00, 0x02, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00,
         ];
         let descriptor = SecDesc::from_bytes(&packet).unwrap();
-        assert_eq!(descriptor.mask(), ALL_SECURITY_INFORMATION);
-        assert_eq!(descriptor.control(), 0x5015);
+        assert_eq!(descriptor.mask(), SecInfo::ALL);
+        assert_eq!(descriptor.control().bits(), 0x5015);
         assert_eq!(descriptor.rm_control(), Some(0x5a));
         assert_eq!(descriptor.owner().unwrap().to_string(), "S-1-5-18");
         assert_eq!(descriptor.group().unwrap().to_string(), "S-1-5-32-544");
@@ -2127,10 +2457,9 @@ mod tests {
     #[test]
     fn self_relative_parser_tracks_selected_components() {
         let descriptor = SecDesc::new(
-            ALL_SECURITY_INFORMATION,
-            1,
+            SecInfo::ALL,
             0,
-            SE_DACL_PRESENT | SE_DACL_PROTECTED,
+            SecDescControl::DACL_PRESENT | SecDescControl::DACL_PROTECTED,
             Some(sid("S-1-5-18")),
             Some(sid("S-1-5-32-544")),
             Some(valid_acl(8)),
@@ -2139,8 +2468,8 @@ mod tests {
         .unwrap();
         let packet = descriptor.to_bytes();
 
-        let selected = SecDesc::from_bytes_with_mask(&packet, DACL_SECURITY_INFORMATION).unwrap();
-        assert_eq!(selected.mask(), DACL_SECURITY_INFORMATION);
+        let selected = SecDesc::from_bytes_with_mask(&packet, SecInfo::DACL).unwrap();
+        assert_eq!(selected.mask(), SecInfo::DACL);
         assert!(!selected.owner_loaded());
         assert_eq!(selected.owner(), None);
         assert!(selected.dacl_loaded());
@@ -2150,9 +2479,12 @@ mod tests {
         );
         assert!(selected.dacl_protected());
 
-        let empty = SecDesc::from_bytes_with_mask(&packet, 0).unwrap();
-        assert_eq!(empty.mask(), 0);
-        assert_eq!(empty.control(), SE_DACL_PRESENT | SE_DACL_PROTECTED);
+        let empty = SecDesc::from_bytes_with_mask(&packet, SecInfo::empty()).unwrap();
+        assert_eq!(empty.mask(), SecInfo::empty());
+        assert_eq!(
+            empty.control(),
+            SecDescControl::DACL_PRESENT | SecDescControl::DACL_PROTECTED
+        );
         assert_eq!(empty.owner(), None);
         assert_eq!(empty.dacl(), None);
     }
@@ -2160,10 +2492,9 @@ mod tests {
     #[test]
     fn self_relative_packet_writer_uses_canonical_component_order() {
         let descriptor = SecDesc::new(
-            ALL_SECURITY_INFORMATION,
-            1,
+            SecInfo::ALL,
             0,
-            SE_DACL_PRESENT,
+            SecDescControl::DACL_PRESENT,
             Some(sid("S-1-5-18")),
             Some(sid("S-1-5-32-544")),
             Some(valid_acl(8)),
@@ -2192,7 +2523,7 @@ mod tests {
             Err(SecDescError::NotSelfRelative)
         );
 
-        packet[2..4].copy_from_slice(&SE_SELF_RELATIVE.to_le_bytes());
+        packet[2..4].copy_from_slice(&SecDescControl::SELF_RELATIVE.bits().to_le_bytes());
         packet[4..8].copy_from_slice(&4u32.to_le_bytes());
         assert_eq!(
             SecDesc::from_bytes(&packet),
@@ -2212,25 +2543,28 @@ mod tests {
         let object_type: Guid = "00112233-4455-6677-8899-aabbccddeeff".parse().unwrap();
         let basic = AceBuf::allow(
             &trustee,
-            0x1234,
+            AccessMask::from_bits_retain(0x1234),
             AceBuildOptions::new()
-                .flags(0x03)
+                .flags(AceFlags::from_bits_retain(0x03))
                 .application_data([1, 2, 3]),
         )
         .unwrap();
         assert_eq!(basic.ace_type(), AceType::AccessAllowed);
-        assert_eq!(basic.flags(), 0x03);
+        assert_eq!(basic.flags().bits(), 0x03);
         assert_eq!(basic.application_data(), Some(&[1, 2, 3, 0][..]));
         assert_eq!(Ace::from_bytes(basic.as_bytes()).unwrap(), &*basic);
 
         let object = AceBuf::deny(
             &trustee,
-            u32::MAX,
+            AccessMask::from_bits_retain(u32::MAX),
             AceBuildOptions::new().object_type(object_type).callback(),
         )
         .unwrap();
         assert_eq!(object.ace_type(), AceType::AccessDeniedCallbackObject);
-        assert_eq!(object.object_flags(), Some(1));
+        assert_eq!(
+            object.object_flags(),
+            Some(ObjectAceFlags::OBJECT_TYPE_PRESENT)
+        );
         assert_eq!(object.object_type(), Some(object_type));
         assert_eq!(object.inherited_object_type(), None);
     }
@@ -2239,41 +2573,65 @@ mod tests {
     fn audit_builder_enforces_outcomes_and_reserves_audit_flags() {
         let trustee = sid("S-1-5-18");
         assert_eq!(
-            AceBuf::audit(&trustee, 1, false, false, AceBuildOptions::new()),
+            AceBuf::audit(
+                &trustee,
+                AccessMask::from_specific_rights(1),
+                false,
+                false,
+                AceBuildOptions::new()
+            ),
             Err(AceBuildError::AuditOutcome)
         );
         assert_eq!(
-            AceBuf::audit(&trustee, 1, true, false, AceBuildOptions::new().flags(0x40),),
+            AceBuf::audit(
+                &trustee,
+                AccessMask::from_specific_rights(1),
+                true,
+                false,
+                AceBuildOptions::new().flags(AceFlags::SUCCESSFUL_ACCESS),
+            ),
             Err(AceBuildError::AuditFlags)
         );
-        let audit = AceBuf::audit(&trustee, 1, true, true, AceBuildOptions::new()).unwrap();
+        let audit = AceBuf::audit(
+            &trustee,
+            AccessMask::from_specific_rights(1),
+            true,
+            true,
+            AceBuildOptions::new(),
+        )
+        .unwrap();
         assert_eq!(audit.ace_type(), AceType::SystemAudit);
-        assert_eq!(audit.flags(), 0xc0);
+        assert_eq!(audit.flags().bits(), 0xc0);
     }
 
     #[test]
     fn acl_builder_preserves_packets_and_selects_revision() {
         let trustee = sid("S-1-1-0");
-        let basic = AceBuf::allow(&trustee, 1, AceBuildOptions::new()).unwrap();
+        let basic = AceBuf::allow(
+            &trustee,
+            AccessMask::from_specific_rights(1),
+            AceBuildOptions::new(),
+        )
+        .unwrap();
         let object = AceBuf::allow(
             &trustee,
-            2,
+            AccessMask::from_specific_rights(2),
             AceBuildOptions::new()
                 .object_type("00000000-0000-0000-0000-000000000000".parse().unwrap()),
         )
         .unwrap();
         let acl = AclBuf::from_aces([&*basic], None).unwrap();
-        assert_eq!(acl.revision(), 2);
+        assert_eq!(acl.revision(), AclRevision::Basic);
         assert_eq!(acl.aces().next().unwrap().as_bytes(), basic.as_bytes());
 
         let acl = AclBuf::from_aces([&*basic, &*object], None).unwrap();
-        assert_eq!(acl.revision(), 4);
+        assert_eq!(acl.revision(), AclRevision::DirectoryService);
         assert_eq!(
-            AclBuf::from_aces([&*object], Some(2)),
+            AclBuf::from_aces([&*object], Some(AclRevision::Basic)),
             Err(AclBuildError::ObjectRevision)
         );
         assert_eq!(
-            AclBuf::from_aces([&*basic], Some(3)),
+            AclBuf::from_aces([&*basic], Some(AclRevision::Unknown(3))),
             Err(AclBuildError::Revision(3))
         );
         assert_eq!(Acl::from_bytes(acl.as_bytes()).unwrap(), &*acl);
@@ -2282,7 +2640,12 @@ mod tests {
     #[test]
     fn owned_packets_validate_raw_and_serde_inputs() {
         let trustee = sid("S-1-1-0");
-        let ace = AceBuf::allow(&trustee, 1, AceBuildOptions::new()).unwrap();
+        let ace = AceBuf::allow(
+            &trustee,
+            AccessMask::from_specific_rights(1),
+            AceBuildOptions::new(),
+        )
+        .unwrap();
         let encoded = postcard::to_stdvec(&ace).unwrap();
         assert_eq!(postcard::from_bytes::<AceBuf>(&encoded).unwrap(), ace);
         assert!(AceBuf::try_from_bytes(vec![0, 0, 4, 0].into_boxed_slice()).is_err());
@@ -2297,7 +2660,16 @@ mod tests {
 
     #[test]
     fn functional_updates_cover_component_states_and_controls() {
-        let descriptor = SecDesc::new(0, 1, 0, 0, None, None, None, None).unwrap();
+        let descriptor = SecDesc::new(
+            SecInfo::empty(),
+            0,
+            SecDescControl::empty(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         let concrete = AclBuf::from_aces(std::iter::empty::<&Ace>(), None).unwrap();
         let updated = descriptor
             .with(
@@ -2331,8 +2703,16 @@ mod tests {
             descriptor.with(SecDescUpdate::new().dacl_present(true)),
             Err(SecDescError::AclPresenceRequiresValue(AclKind::Dacl))
         );
-        let unloaded_present =
-            SecDesc::new(0, 1, 0, SE_DACL_PRESENT, None, None, None, None).unwrap();
+        let unloaded_present = SecDesc::new(
+            SecInfo::empty(),
+            0,
+            SecDescControl::DACL_PRESENT,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(
             unloaded_present.with(SecDescUpdate::new().dacl_present(true)),
             Err(SecDescError::AclPresenceRequiresValue(AclKind::Dacl))

@@ -10,7 +10,7 @@ Group [`Sid`](./sid.md).
 
 ### `attributes`
 
-Raw Windows group attribute mask.
+[`TokenGroupAttributes`](./token-group-attributes.md).
 
 ### `mandatory`
 

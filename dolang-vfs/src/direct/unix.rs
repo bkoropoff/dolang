@@ -120,7 +120,7 @@ impl Direct {
 
     pub(super) fn sec_desc_from_path(
         _path: &Path,
-        _mask: u32,
+        _mask: dolang_winterop::security::SecInfo,
         _follow: bool,
     ) -> io::Result<SecDesc> {
         Err(io::Error::new(
@@ -140,7 +140,10 @@ impl Direct {
         ))
     }
 
-    pub(super) fn sec_desc_from_file(_file: &File, _mask: u32) -> io::Result<SecDesc> {
+    pub(super) fn sec_desc_from_file(
+        _file: &File,
+        _mask: dolang_winterop::security::SecInfo,
+    ) -> io::Result<SecDesc> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "security descriptors are only supported on Windows",

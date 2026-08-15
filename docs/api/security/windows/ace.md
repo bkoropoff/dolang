@@ -10,15 +10,15 @@ Constructs an access-allowed ACE.
 
 #### Parameters
 
-| Name                    | Type                                             | Description               |
-| ----------------------- | ------------------------------------------------ | ------------------------- |
-| `sid`                   | [`Sid`](./sid.md)                                | Trustee                   |
-| `mask`                  | [`Int`](../../std/int.md)                        | Access mask               |
-| `flags`                 | [`Int`](../../std/int.md)?                       | Native ACE flags          |
-| `object_type`           | [`sys.windows.Guid`](../../sys/windows/guid.md)? | Object type               |
-| `inherited_object_type` | [`sys.windows.Guid`](../../sys/windows/guid.md)? | Inherited object type     |
-| `callback`              | [`Bool`](../../std/bool.md)?                     | Build a callback ACE      |
-| `application_data`      | [`Bin`](../../std/bin.md)?                       | Trailing application data |
+| Name                    | Type                                                        | Description               |
+| ----------------------- | ----------------------------------------------------------- | ------------------------- |
+| `sid`                   | [`Sid`](./sid.md)                                           | Trustee                   |
+| `mask`                  | [`AccessMask`](./access-mask.md)\|[`Int`](../../std/int.md) | Access mask               |
+| `flags`                 | [`Int`](../../std/int.md)?                                  | Native ACE flags          |
+| `object_type`           | [`sys.windows.Guid`](../../sys/windows/guid.md)?            | Object type               |
+| `inherited_object_type` | [`sys.windows.Guid`](../../sys/windows/guid.md)?            | Inherited object type     |
+| `callback`              | [`Bool`](../../std/bool.md)?                                | Build a callback ACE      |
+| `application_data`      | [`Bin`](../../std/bin.md)?                                  | Trailing application data |
 
 #### Returns
 
@@ -41,12 +41,12 @@ Constructs a system-audit ACE.
 
 #### Parameters
 
-| Name         | Type                        | Description             |
-| ------------ | --------------------------- | ----------------------- |
-| `sid`        | [`Sid`](./sid.md)           | Trustee                 |
-| `mask`       | [`Int`](../../std/int.md)   | Access mask             |
-| `successful` | [`Bool`](../../std/bool.md) | Audit successful access |
-| `failed`     | [`Bool`](../../std/bool.md) | Audit failed access     |
+| Name         | Type                                                        | Description             |
+| ------------ | ----------------------------------------------------------- | ----------------------- |
+| `sid`        | [`Sid`](./sid.md)                                           | Trustee                 |
+| `mask`       | [`AccessMask`](./access-mask.md)\|[`Int`](../../std/int.md) | Access mask             |
+| `successful` | [`Bool`](../../std/bool.md)                                 | Audit successful access |
+| `failed`     | [`Bool`](../../std/bool.md)                                 | Audit failed access     |
 
 The remaining optional parameters match
 [`allow`](#allow-sid-mask-options).
@@ -82,7 +82,7 @@ Declared ACE packet size.
 
 ### `mask`
 
-Native access mask.
+[`AccessMask`](./access-mask.md).
 
 Raises `FieldError` for an ACE layout without a projected mask.
 

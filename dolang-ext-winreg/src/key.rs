@@ -8,16 +8,14 @@ use dolang::runtime::{
     vm::Builder,
 };
 use dolang_ext_shell::{ErrorExt, ResultExt};
-use dolang_vfs_winreg::{PredefinedRoot, View};
-use dolang_winterop::security::{
-    DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
-    SACL_SECURITY_INFORMATION,
-};
+use dolang_vfs_winreg::{PredefinedRoot, Resolve, View};
+use dolang_winterop::security::SecInfo;
 
 use crate::{
     access_mask::AccessMask,
     convert,
     global::Global,
+    link_target::LinkTarget,
     subkeys::SubKeys,
     value_entry::{ValueEntry, ValueEntryAnnex},
     values::{Values, ValuesAnnex},
@@ -75,6 +73,26 @@ fn view_from_sym<'v, 's>(
             strand,
             "view: expected :NATIVE:, :WOW32:, or :WOW64:",
         ))
+    }
+}
+
+fn resolve_from_sym<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    slot: Option<Slot<'v, '_>>,
+) -> Result<'v, 's, Resolve> {
+    let Some(slot) = slot else {
+        return Ok(Resolve::Target);
+    };
+    let sym = slot
+        .as_sym(strand.vm())
+        .ok_or_else(|| Error::type_error(strand, "resolve: expected a symbol"))?;
+    if sym == global.syms.target {
+        Ok(Resolve::Target)
+    } else if sym == global.syms.link {
+        Ok(Resolve::Link)
+    } else {
+        Err(Error::value(strand, "resolve: expected :TARGET: or :LINK:"))
     }
 }
 
@@ -161,16 +179,16 @@ fn sec_desc_mask<'v, 's>(
     }
     let mut mask = 0;
     if selected(strand, owner, true)? {
-        mask |= OWNER_SECURITY_INFORMATION;
+        mask |= SecInfo::OWNER.bits();
     }
     if selected(strand, group, true)? {
-        mask |= GROUP_SECURITY_INFORMATION;
+        mask |= SecInfo::GROUP.bits();
     }
     if selected(strand, dacl, true)? {
-        mask |= DACL_SECURITY_INFORMATION;
+        mask |= SecInfo::DACL.bits();
     }
     if selected(strand, sacl, false)? {
-        mask |= SACL_SECURITY_INFORMATION;
+        mask |= SecInfo::SACL.bits();
     }
     Ok(mask)
 }
@@ -254,22 +272,69 @@ impl<'v> Object<'v> for Key {
                 let global = strand.state::<Global<'v>>();
                 let view_sym = global.syms.view;
                 let access_sym = global.syms.access;
-                let ([subpath], [block, view, access]) =
-                    unpack!(strand, args, 1, 1, view_sym = None, access_sym = None)?;
+                let resolve_sym = global.syms.resolve;
+                let ([subpath], [block, view, access, resolve]) = unpack!(
+                    strand,
+                    args,
+                    1,
+                    1,
+                    view_sym = None,
+                    access_sym = None,
+                    resolve_sym = None
+                )?;
                 let subpath = expect_str(strand, subpath, "subpath")?;
                 let view = view_from_sym(strand, global, view)?;
                 let access = access_from_value(strand, global, access).await?;
+                let resolve = resolve_from_sym(strand, global, resolve)?;
                 let inner = {
                     let borrow = this.borrow(strand)?;
                     let key = borrow
                         .0
                         .as_ref()
                         .ok_or_else(|| Error::state_error(strand, "key is closed"))?;
-                    key.open(&subpath, view, access.into())
+                    key.open(&subpath, view, access.into(), resolve)
                         .await
                         .into_sys(strand)?
                 };
                 finish_open(strand, global, inner, block, out).await
+            })
+            .method("link", async move |this, strand, args, _out| {
+                let global = strand.state::<Global<'v>>();
+                let view_sym = global.syms.view;
+                let ([target_root, target_subpath, link_subpath], [view]) =
+                    unpack!(strand, args, 3, 0, view_sym = None)?;
+                let target_root = root_from_sym(strand, global, target_root)?;
+                let target_subpath = expect_str(strand, target_subpath, "target_subpath")?;
+                let link_subpath = expect_str(strand, link_subpath, "link_subpath")?;
+                let view = view_from_sym(strand, global, view)?;
+                let borrow = this.borrow(strand)?;
+                let key = borrow
+                    .0
+                    .as_ref()
+                    .ok_or_else(|| Error::state_error(strand, "key is closed"))?;
+                key.link(target_root, &target_subpath, &link_subpath, view)
+                    .await
+                    .into_sys(strand)
+            })
+            .method("read_link", async move |this, strand, args, out| {
+                let global = strand.state::<Global<'v>>();
+                let view_sym = global.syms.view;
+                let ([subpath], [view]) = unpack!(strand, args, 1, 0, view_sym = None)?;
+                let subpath = expect_str(strand, subpath, "subpath")?;
+                let view = view_from_sym(strand, global, view)?;
+                let target = {
+                    let borrow = this.borrow(strand)?;
+                    let key = borrow
+                        .0
+                        .as_ref()
+                        .ok_or_else(|| Error::state_error(strand, "key is closed"))?;
+                    key.read_link(&subpath, view).await.into_sys(strand)?
+                };
+                global
+                    .types
+                    .link_target
+                    .create_with_annex(strand, LinkTarget(target), global, out);
+                Ok(())
             })
             .method("create", async move |this, strand, args, out| {
                 let global = strand.state::<Global<'v>>();
@@ -490,6 +555,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         .module("winreg")
         .value("AccessMask", global.types.access_mask)
         .value("Key", global.types.key)
+        .value("LinkTarget", global.types.link_target)
         .value("Value", global.types.value_entry)
         .function("open", async move |strand, args, out| {
             open(strand, global, args, out).await

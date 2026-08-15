@@ -7,7 +7,7 @@ mod detail {
         compile::{self, Compiler, Mode},
         runtime::{
             self, Args, Bytecode, Error, Instance, Object, Output, Slot, Sym, call,
-            object::{FlagLike, FlagsTypeExt},
+            object::{FlagLike, FlagLikeExt, Flags, FlagsInstanceExt, FlagsTypeExt, TypeBuilder},
             unpack,
             vm::Builder,
         },
@@ -179,6 +179,29 @@ mod detail {
 
         fn rank(self) -> usize {
             self.0.count_ones() as usize
+        }
+
+        fn build<'v, 'a>(
+            builder: TypeBuilder<'v, 'a, Flags<Self>>,
+        ) -> TypeBuilder<'v, 'a, Flags<Self>> {
+            builder
+                .get("int", |this, strand, out| {
+                    Output::set(strand, out, this.flags().0);
+                    Ok(())
+                })
+                .method("is_exec", async move |this, strand, args, out| {
+                    let ([], []) = unpack!(strand, args, 0, 0)?;
+                    Output::set(strand, out, this.flags().0 & 4 != 0);
+                    Ok(())
+                })
+                .type_method("from_int", async move |this, strand, args, out| {
+                    let ([value], []) = unpack!(strand, args, 1, 0)?;
+                    let value = value.to_i64(strand)?;
+                    let value = u8::try_from(value)
+                        .map_err(|_| Error::value(strand, "flags integer out of range"))?;
+                    this.create_flags(strand, TestFlags(value), out);
+                    Ok(())
+                })
         }
     }
 

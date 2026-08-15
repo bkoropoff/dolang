@@ -709,7 +709,10 @@ impl FileHandle for ClientFile {
         }
     }
 
-    async fn sec_desc(&mut self, mask: u32) -> crate::Result<SecDesc> {
+    async fn sec_desc(
+        &mut self,
+        mask: dolang_winterop::security::SecInfo,
+    ) -> crate::Result<SecDesc> {
         match &mut self.0 {
             ClientFileInner::Direct(file) => file.sec_desc(mask).await,
             ClientFileInner::Remote(file) => {
@@ -2731,7 +2734,7 @@ impl Vfs for Client {
     async fn sec_desc(
         &self,
         path: Utf8TypedPath<'_>,
-        mask: u32,
+        mask: dolang_winterop::security::SecInfo,
         follow: bool,
     ) -> crate::Result<SecDesc> {
         let request = SecDescRequest {

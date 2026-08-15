@@ -25,6 +25,16 @@ struct SendHandle(SC_HANDLE);
 unsafe impl Send for SendHandle {}
 
 impl SendHandle {
+    /// Takes temporary ownership of a live service handle.
+    ///
+    /// # Safety
+    ///
+    /// `handle` must be a live, owned service handle. Ownership transfers to
+    /// the returned wrapper.
+    unsafe fn new(handle: SC_HANDLE) -> Self {
+        Self(handle)
+    }
+
     /// Consumes the wrapper, forcing a whole-value closure capture rather
     /// than a disjoint capture of the (non-`Send`) inner field.
     fn into_inner(self) -> SC_HANDLE {
@@ -74,7 +84,13 @@ impl ExtResource for Service {
 }
 
 impl Service {
-    pub(crate) fn new(handle: SC_HANDLE, reactor: Arc<Reactor>, name: String) -> Self {
+    /// Takes ownership of an open service handle.
+    ///
+    /// # Safety
+    ///
+    /// `handle` must be a live, owned service handle that may be passed to
+    /// `CloseServiceHandle` exactly once. Ownership transfers to this value.
+    pub(crate) unsafe fn new(handle: SC_HANDLE, reactor: Arc<Reactor>, name: String) -> Self {
         Self {
             handle: Some(handle),
             reactor,
@@ -98,7 +114,8 @@ impl Service {
         let Some(handle) = self.handle.take() else {
             return Ok(());
         };
-        let handle = SendHandle(handle);
+        // SAFETY: the handle was taken from this owning resource.
+        let handle = unsafe { SendHandle::new(handle) };
         tokio::task::spawn_blocking(move || {
             // SAFETY: `handle` is a live handle owned by this `Service`;
             // taking it above ensures `Drop` won't also try to close it.
@@ -124,7 +141,8 @@ impl Drop for Service {
         // is dropped during teardown with no runtime alive), mirroring
         // `dolang_vfs::direct::lock::DirectFileLock`'s `Drop` impl.
         if tokio::runtime::Handle::try_current().is_ok() {
-            let handle = SendHandle(handle);
+            // SAFETY: the handle was taken from this owning resource.
+            let handle = unsafe { SendHandle::new(handle) };
             drop(tokio::task::spawn_blocking(move || {
                 // SAFETY: see the comment on the `SendHandle` field above.
                 unsafe {

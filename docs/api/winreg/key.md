@@ -6,7 +6,7 @@ An open registry key, returned by
 
 ## Methods
 
-### `open subpath :view? :access? func?`
+### `open subpath :view? :access? :resolve? func?`
 
 Opens a subkey relative to this key.
 
@@ -17,6 +17,7 @@ Opens a subkey relative to this key.
 | `subpath` | [`Str`](../std/str.md)                           | Path to the subkey, relative to this key                               |
 | `view`    | sym?                                             | [Registry view](./index.md#registry-view-values) (default: `:NATIVE:`) |
 | `access`  | [`AccessMask`](./access-mask.md)\|sym\|iterable? | Access rights (default: `:READ:`)                                      |
+| `resolve` | sym?                                             | `:TARGET:` follows links; `:LINK:` opens the link key                  |
 | `func`    | func?                                            | Function to run with the key; auto-closes when done                    |
 
 #### Returns
@@ -38,13 +39,58 @@ winreg.open :CURRENT_USER: do |root|
     echo (env.get "TEMP")
 ```
 
+### `link target_root target_subpath link_subpath :view?`
+
+Creates a registry link. The target may not exist. Arguments follow `ln -s`
+ordering: target first, link destination last.
+
+**Parameters:**
+
+| Name             | Type                   | Description                                        |
+| ---------------- | ---------------------- | -------------------------------------------------- |
+| `target_root`    | sym                    | [Predefined root](./index.md#registry-root-values) |
+| `target_subpath` | [`Str`](../std/str.md) | Target path relative to `target_root`              |
+| `link_subpath`   | [`Str`](../std/str.md) | New link path relative to this key                 |
+| `view`           | sym?                   | View used for target mapping and destination       |
+
+**Errors:**
+
+- [`sys.AlreadyExistsError`](../sys/already-exists-error.md) — the destination
+  already exists and was not modified
+- `sys.InvalidInputError` — a path contains NUL
+
+```
+root.link :CURRENT_USER: r"Software\MyApp" "MyAppLink"
+```
+
+### `read_link subpath :view?`
+
+Reads a registry link without following it.
+
+**Parameters:**
+
+| Name      | Type                   | Description                         |
+| --------- | ---------------------- | ----------------------------------- |
+| `subpath` | [`Str`](../std/str.md) | Link path relative to this key      |
+| `view`    | sym?                   | Registry view (default: `:NATIVE:`) |
+
+**Returns:** [`LinkTarget`](./link-target.md)
+
+**Errors:**
+
+- `sys.InvalidInputError` — the key is not a link
+- `sys.InvalidDataError` — the link value is malformed
+
+Aliases such as `:CLASSES_ROOT:` and `:CURRENT_CONFIG:` may project to their
+physical `:LOCAL_MACHINE:` or `:USERS:` backing path.
+
 ### `create subpath :view? :access? func?`
 
 Creates a subkey relative to this key, or opens it if it already exists.
 
 #### Parameters
 
-Same as [`open`](#open-subpath-view-access-func).
+Same as [`open`](#open-subpath-view-access-resolve-func).
 
 #### Returns
 
@@ -63,7 +109,8 @@ winreg.open :CURRENT_USER: access: :READ_WRITE: do |root|
 
 Deletes a subkey. By default, the subkey must have no children. With `all:
 true`, its values and descendants are deleted recursively. With `ignore: true`,
-a missing subkey is ignored.
+a missing subkey is ignored. Recursive deletion removes a registry link itself
+without traversing or modifying its target.
 
 #### Parameters
 

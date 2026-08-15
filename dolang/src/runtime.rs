@@ -38,7 +38,7 @@ pub mod object {
     pub use dolang_runtime::object::{
         array_view::{ArrayLike, ArrayView},
         dict_view::{DictLike, DictView, DictViewSink},
-        flags::{FlagLike, Flags, FlagsTypeExt},
+        flags::{FlagLike, FlagLikeExt, Flags, FlagsInstanceExt, FlagsTypeExt},
     };
     pub use dolang_runtime::{fmt, value::Format};
 }

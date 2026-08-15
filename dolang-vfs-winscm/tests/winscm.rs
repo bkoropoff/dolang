@@ -80,7 +80,7 @@ mod live {
         CreateServiceOptions, ErrorControl, NotifyMask, Service, ServiceAccess,
         ServiceConfigUpdate, ServiceState, ServiceStateFilter, ServiceType, StartType,
     };
-    use dolang_winterop::security::{DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION};
+    use dolang_winterop::security::SecInfo;
     use tokio::{
         net::windows::named_pipe::{ClientOptions, ServerOptions},
         task::JoinHandle,
@@ -324,11 +324,11 @@ mod live {
         // `supports_async_notification`'s. The round trip itself (get, then
         // set back without error) still proves the wire plumbing works, so
         // only the owner-presence assertion is skipped there.
-        let descriptor = service.sec_desc(OWNER_SECURITY_INFORMATION).await.unwrap();
+        let descriptor = service.sec_desc(SecInfo::OWNER.bits()).await.unwrap();
         if !dolang_winterop::is_wine() {
             assert!(descriptor.owner().is_some(), "expected an owner SID");
         }
-        let descriptor = service.sec_desc(DACL_SECURITY_INFORMATION).await.unwrap();
+        let descriptor = service.sec_desc(SecInfo::DACL.bits()).await.unwrap();
         service.set_sec_desc(&descriptor).await.unwrap();
 
         // Start the service and observe a status-change notification

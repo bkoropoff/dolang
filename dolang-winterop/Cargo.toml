@@ -14,7 +14,9 @@ test = true
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(docsrs)"] }
 
 [dependencies]
+bitflags = { version = "2.9.4", features = ["serde"] }
 phf = { version = "0.14.0", features = ["macros"] }
+rand = "0.10"
 serde = { version = "1.0", features = ["derive"] }
 
 [target.'cfg(windows)'.dependencies]

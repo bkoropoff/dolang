@@ -10,10 +10,10 @@ Constructs an ACL from an iterable of [`Ace`](./ace.md) values.
 
 #### Parameters
 
-| Name       | Type                       | Description             |
-| ---------- | -------------------------- | ----------------------- |
-| `aces`     | iterable                   | Entries in packet order |
-| `revision` | [`Int`](../../std/int.md)? | Native revision 2 or 4  |
+| Name       | Type                                                  | Description                               |
+| ---------- | ----------------------------------------------------- | ----------------------------------------- |
+| `aces`     | iterable                                              | Entries in packet order                   |
+| `revision` | [`Sym`](../../std/sym.md)\|[`Int`](../../std/int.md)? | `:BASIC:`, `:DIRECTORY_SERVICE:`, 2, or 4 |
 
 Revision 4 is selected when an object ACE is present; otherwise revision 2 is
 selected. Supplying revision 2 with an object ACE raises `ValueError`.
@@ -22,7 +22,8 @@ selected. Supplying revision 2 with an object ACE raises `ValueError`.
 
 ### `revision`
 
-Native ACL revision.
+`:BASIC:` or `:DIRECTORY_SERVICE:` for supported revisions, or the native
+integer for an unknown parsed revision.
 
 ### `size`
 

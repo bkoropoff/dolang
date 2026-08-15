@@ -6,7 +6,7 @@ use serde::{
     ser::SerializeSeq,
 };
 
-const REVISION: u8 = 1;
+const REVISION: u8 = SidRevision::One as u8;
 const MIN_SUB_AUTHORITIES: usize = 1;
 const MAX_SUB_AUTHORITIES: usize = 15;
 const IDENTIFIER_AUTHORITY_MAX: u64 = (1 << 48) - 1;
@@ -17,8 +17,8 @@ const IDENTIFIER_AUTHORITY_MAX: u64 = (1 << 48) - 1;
 /// the native Windows packet layout.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Sid {
-    identifier_authority: u64,
-    sub_authorities: Vec<u32>,
+    identifier_authority: SidIdentifierAuthority,
+    sub_authorities: Box<[u32]>,
 }
 
 impl Sid {
@@ -26,10 +26,16 @@ impl Sid {
     ///
     /// The authority must fit in 48 bits and a SID must have one through 15
     /// sub-authorities.
-    pub fn new(identifier_authority: u64, sub_authorities: Vec<u32>) -> Result<Self, SidError> {
-        if identifier_authority > IDENTIFIER_AUTHORITY_MAX {
+    pub fn new(
+        identifier_authority: impl Into<SidIdentifierAuthority>,
+        sub_authorities: impl IntoIterator<Item = u32>,
+    ) -> Result<Self, SidError> {
+        let identifier_authority = identifier_authority.into();
+        let identifier_authority_value = u64::from(identifier_authority);
+        if identifier_authority_value > IDENTIFIER_AUTHORITY_MAX {
             return Err(SidError::IdentifierAuthority);
         }
+        let sub_authorities = sub_authorities.into_iter().collect::<Box<[_]>>();
         if !(MIN_SUB_AUTHORITIES..=MAX_SUB_AUTHORITIES).contains(&sub_authorities.len()) {
             return Err(SidError::SubAuthorityCount(sub_authorities.len()));
         }
@@ -40,12 +46,12 @@ impl Sid {
     }
 
     /// Returns the SID revision.
-    pub const fn revision(&self) -> u8 {
-        REVISION
+    pub const fn revision(&self) -> SidRevision {
+        SidRevision::One
     }
 
-    /// Returns the 48-bit identifier authority as an integer.
-    pub const fn identifier_authority(&self) -> u64 {
+    /// Returns the identifier authority
+    pub const fn identifier_authority(&self) -> SidIdentifierAuthority {
         self.identifier_authority
     }
 
@@ -76,8 +82,7 @@ impl Sid {
         let identifier_authority = u64::from_be_bytes(identifier_authority_bytes);
         let sub_authorities = bytes[8..]
             .chunks_exact(4)
-            .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
-            .collect();
+            .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()));
         Self::new(identifier_authority, sub_authorities)
     }
 
@@ -86,7 +91,7 @@ impl Sid {
         let mut bytes = Vec::with_capacity(8 + self.sub_authorities.len() * 4);
         bytes.push(REVISION);
         bytes.push(u8::try_from(self.sub_authorities.len()).unwrap());
-        bytes.extend_from_slice(&self.identifier_authority.to_be_bytes()[2..]);
+        bytes.extend_from_slice(&u64::from(self.identifier_authority).to_be_bytes()[2..]);
         for sub_authority in &self.sub_authorities {
             bytes.extend_from_slice(&sub_authority.to_le_bytes());
         }
@@ -94,7 +99,7 @@ impl Sid {
     }
 
     fn identifier_authority_bytes(&self) -> [u8; 6] {
-        self.identifier_authority.to_be_bytes()[2..]
+        u64::from(self.identifier_authority).to_be_bytes()[2..]
             .try_into()
             .unwrap()
     }
@@ -111,15 +116,135 @@ impl TryFrom<&[u8]> for Sid {
 impl fmt::Display for Sid {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "S-{REVISION}-")?;
-        if self.identifier_authority < (1 << 32) {
-            write!(f, "{}", self.identifier_authority)?;
+        let identifier_authority = u64::from(self.identifier_authority);
+        if identifier_authority < (1 << 32) {
+            write!(f, "{identifier_authority}")?;
         } else {
-            write!(f, "0x{:012X}", self.identifier_authority)?;
+            write!(f, "0x{identifier_authority:012X}")?;
         }
         for sub_authority in &self.sub_authorities {
             write!(f, "-{sub_authority}")?;
         }
         Ok(())
+    }
+}
+
+/// SID packet format revision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum SidRevision {
+    /// Revision 1, the only SID format revision.
+    One = 1,
+}
+
+impl Serialize for SidRevision {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u8(*self as u8)
+    }
+}
+
+impl<'de> Deserialize<'de> for SidRevision {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match u8::deserialize(deserializer)? {
+            REVISION => Ok(Self::One),
+            revision => Err(de::Error::custom(SidError::Revision(revision))),
+        }
+    }
+}
+
+/// Authority responsible for issuing a SID.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum SidIdentifierAuthority {
+    /// Null authority.
+    Null,
+    /// World authority.
+    World,
+    /// Local authority.
+    Local,
+    /// Creator authority.
+    Creator,
+    /// Non-unique authority.
+    NonUnique,
+    /// NT authority.
+    Nt,
+    /// Resource manager authority.
+    ResourceManager,
+    /// Application package authority.
+    AppPackage,
+    /// Mandatory label authority.
+    MandatoryLabel,
+    /// Scoped policy identifier authority.
+    ScopedPolicy,
+    /// Authentication authority.
+    Authentication,
+    /// Process trust authority.
+    ProcessTrust,
+    /// An authority not known by this version of the crate.
+    Unknown(u64),
+}
+
+impl From<u64> for SidIdentifierAuthority {
+    fn from(value: u64) -> Self {
+        match value {
+            0 => Self::Null,
+            1 => Self::World,
+            2 => Self::Local,
+            3 => Self::Creator,
+            4 => Self::NonUnique,
+            5 => Self::Nt,
+            9 => Self::ResourceManager,
+            15 => Self::AppPackage,
+            16 => Self::MandatoryLabel,
+            17 => Self::ScopedPolicy,
+            18 => Self::Authentication,
+            19 => Self::ProcessTrust,
+            value => Self::Unknown(value),
+        }
+    }
+}
+
+impl From<SidIdentifierAuthority> for u64 {
+    fn from(authority: SidIdentifierAuthority) -> Self {
+        match authority {
+            SidIdentifierAuthority::Null => 0,
+            SidIdentifierAuthority::World => 1,
+            SidIdentifierAuthority::Local => 2,
+            SidIdentifierAuthority::Creator => 3,
+            SidIdentifierAuthority::NonUnique => 4,
+            SidIdentifierAuthority::Nt => 5,
+            SidIdentifierAuthority::ResourceManager => 9,
+            SidIdentifierAuthority::AppPackage => 15,
+            SidIdentifierAuthority::MandatoryLabel => 16,
+            SidIdentifierAuthority::ScopedPolicy => 17,
+            SidIdentifierAuthority::Authentication => 18,
+            SidIdentifierAuthority::ProcessTrust => 19,
+            SidIdentifierAuthority::Unknown(value) => value,
+        }
+    }
+}
+
+impl Serialize for SidIdentifierAuthority {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u64((*self).into())
+    }
+}
+
+impl<'de> Deserialize<'de> for SidIdentifierAuthority {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(u64::deserialize(deserializer)?.into())
     }
 }
 
@@ -290,12 +415,16 @@ mod tests {
         assert_eq!(sid.to_bytes(), bytes);
         assert_eq!(Sid::from_bytes(&bytes).unwrap(), sid);
         assert_eq!(sid.to_string(), "S-1-5-21-287454020-2864434397");
+        assert_eq!(Sid::new(5, [32, 544]).unwrap().to_string(), "S-1-5-32-544");
     }
 
     #[test]
     fn high_identifier_authority_uses_hexadecimal() {
         let sid: Sid = "S-1-0x010203040506-7".parse().unwrap();
-        assert_eq!(sid.identifier_authority(), 0x0102_0304_0506);
+        assert_eq!(
+            sid.identifier_authority(),
+            SidIdentifierAuthority::Unknown(0x0102_0304_0506)
+        );
         assert_eq!(sid.to_string(), "S-1-0x010203040506-7");
         assert_eq!(&sid.to_bytes()[2..8], &[1, 2, 3, 4, 5, 6]);
     }
@@ -318,5 +447,26 @@ mod tests {
             postcard::to_stdvec(&(1u8, 2u8, [0u8, 0, 0, 0, 0, 5], 32u32, 544u32)).unwrap();
         assert_eq!(encoded, [vec![5], expected].concat());
         assert_eq!(postcard::from_bytes::<Sid>(&encoded).unwrap(), sid);
+    }
+
+    #[test]
+    fn revisions_and_authorities_use_native_values() {
+        assert_eq!(
+            Sid::new(SidIdentifierAuthority::Nt, [32])
+                .unwrap()
+                .revision(),
+            SidRevision::One
+        );
+        assert_eq!(SidIdentifierAuthority::from(5), SidIdentifierAuthority::Nt);
+        assert_eq!(
+            SidIdentifierAuthority::from(42),
+            SidIdentifierAuthority::Unknown(42)
+        );
+        assert_eq!(postcard::to_stdvec(&SidRevision::One).unwrap(), vec![1]);
+        assert!(postcard::from_bytes::<SidRevision>(&[2]).is_err());
+        assert_eq!(
+            postcard::to_stdvec(&SidIdentifierAuthority::Nt).unwrap(),
+            postcard::to_stdvec(&5u64).unwrap()
+        );
     }
 }

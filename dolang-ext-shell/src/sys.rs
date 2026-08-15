@@ -129,6 +129,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         .value("CpuInfo", global.types.cpu_info)
         .value("ErrorCode", global.types.error_code)
         .value("Error", global.types.sys_error)
+        .value("InvalidInputError", global.types.invalid_input)
         .value("NotFoundError", global.types.not_found)
         .value("PermissionDeniedError", global.types.permission_denied)
         .value("AlreadyExistsError", global.types.already_exists)

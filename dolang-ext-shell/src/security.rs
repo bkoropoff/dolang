@@ -9,7 +9,9 @@ use dolang::{
     compile::Compiler,
     runtime::{
         Args, Error, Instance, Object, Output, Result, Slot, State, Strand, Type, Value,
-        object::{ArrayLike, ArrayView, FlagLike, Mut, Ref, TypeBuilder},
+        object::{
+            ArrayLike, ArrayView, FlagLike, FlagsInstanceExt, FlagsTypeExt, Mut, Ref, TypeBuilder,
+        },
         unpack,
         value::{AsTuple, Nil},
         vm::Builder,
@@ -25,53 +27,126 @@ use dolang_vfs::{
     },
     target::OperatingSystemFamily,
 };
-use dolang_winterop::security::AccessMask as WinAccessMask;
+use dolang_winterop::security::{
+    AccessMask as WinAccessMask, SecDescControl as WinSecDescControl, SecInfo as WinSecInfo,
+    TokenGroupAttributes as WinTokenGroupAttributes,
+};
 use dolang_winterop::{
     guid::Guid as VfsGuid,
     security::{
-        Ace as VfsAce, AceBuf as VfsAceBuf, AceBuildOptions, AceType as VfsAceType, Acl as VfsAcl,
-        AclBuf as VfsAclBuf, SecDesc as VfsSecDesc, SecDescUpdate as VfsSecDescUpdate,
-        Sid as VfsSid,
+        Ace as VfsAce, AceBuf as VfsAceBuf, AceBuildOptions, AceFlags, AceType as VfsAceType,
+        Acl as VfsAcl, AclBuf as VfsAclBuf, AclRevision, SecDesc as VfsSecDesc,
+        SecDescUpdate as VfsSecDescUpdate, Sid as VfsSid, SidIdentifierAuthority,
     },
 };
 
 use crate::{error, global::Global, util};
 
-const SE_GROUP_MANDATORY: u32 = 0x0000_0001;
-const SE_GROUP_ENABLED_BY_DEFAULT: u32 = 0x0000_0002;
-const SE_GROUP_ENABLED: u32 = 0x0000_0004;
-const SE_GROUP_OWNER: u32 = 0x0000_0008;
-const SE_GROUP_USE_FOR_DENY_ONLY: u32 = 0x0000_0010;
-const SE_GROUP_INTEGRITY: u32 = 0x0000_0020;
-const SE_GROUP_INTEGRITY_ENABLED: u32 = 0x0000_0040;
-const SE_GROUP_RESOURCE: u32 = 0x2000_0000;
-const SE_GROUP_LOGON_ID: u32 = 0xC000_0000;
-
 pub(crate) fn configure_compiler<'a>(_compiler: &mut Compiler<'a>) {}
+
+macro_rules! flags_ops {
+    ($name:ident) => {
+        impl BitOr for $name {
+            type Output = Self;
+            fn bitor(self, rhs: Self) -> Self {
+                Self(self.0 | rhs.0)
+            }
+        }
+        impl BitAnd for $name {
+            type Output = Self;
+            fn bitand(self, rhs: Self) -> Self {
+                Self(self.0 & rhs.0)
+            }
+        }
+        impl BitXor for $name {
+            type Output = Self;
+            fn bitxor(self, rhs: Self) -> Self {
+                Self(self.0 ^ rhs.0)
+            }
+        }
+        impl Not for $name {
+            type Output = Self;
+            fn not(self) -> Self {
+                Self(!self.0)
+            }
+        }
+    };
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SecInfo(pub WinSecInfo);
+flags_ops!(SecInfo);
+impl FlagLike for SecInfo {
+    const ZERO: Self = Self(WinSecInfo::empty());
+    const MODULE: &'static str = "security.windows";
+    const NAME: &'static str = "SecInfo";
+    const BITS: &'static [(&'static str, Self)] = &[
+        ("OWNER", Self(WinSecInfo::OWNER)),
+        ("GROUP", Self(WinSecInfo::GROUP)),
+        ("DACL", Self(WinSecInfo::DACL)),
+        ("SACL", Self(WinSecInfo::SACL)),
+        ("ALL", Self(WinSecInfo::ALL)),
+    ];
+    fn rank(self) -> usize {
+        self.0.bits().count_ones() as usize
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TokenGroupAttributes(pub WinTokenGroupAttributes);
+flags_ops!(TokenGroupAttributes);
+impl FlagLike for TokenGroupAttributes {
+    const ZERO: Self = Self(WinTokenGroupAttributes::empty());
+    const MODULE: &'static str = "security.windows";
+    const NAME: &'static str = "TokenGroupAttributes";
+    const BITS: &'static [(&'static str, Self)] = &[
+        ("MANDATORY", Self(WinTokenGroupAttributes::MANDATORY)),
+        (
+            "ENABLED_BY_DEFAULT",
+            Self(WinTokenGroupAttributes::ENABLED_BY_DEFAULT),
+        ),
+        ("ENABLED", Self(WinTokenGroupAttributes::ENABLED)),
+        ("OWNER", Self(WinTokenGroupAttributes::OWNER)),
+        (
+            "USE_FOR_DENY_ONLY",
+            Self(WinTokenGroupAttributes::USE_FOR_DENY_ONLY),
+        ),
+        ("INTEGRITY", Self(WinTokenGroupAttributes::INTEGRITY)),
+        (
+            "INTEGRITY_ENABLED",
+            Self(WinTokenGroupAttributes::INTEGRITY_ENABLED),
+        ),
+        ("RESOURCE", Self(WinTokenGroupAttributes::RESOURCE)),
+        ("LOGON_ID", Self(WinTokenGroupAttributes::LOGON_ID)),
+    ];
+    fn rank(self) -> usize {
+        self.0.bits().count_ones() as usize
+    }
+}
 
 /// Generic Windows `ACCESS_MASK` bits (`security.windows.AccessMask`), a
 /// local newtype over [`dolang_winterop::security::AccessMask`]'s bit values so
 /// [`FlagLike`] can be implemented here (both the trait and
 /// `dolang_winterop::security::AccessMask` are foreign to this crate).
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct AccessMask(pub u32);
+pub struct AccessMask(pub WinAccessMask);
 
 impl AccessMask {
-    pub const DELETE: AccessMask = AccessMask(WinAccessMask::DELETE.0);
-    pub const READ_CONTROL: AccessMask = AccessMask(WinAccessMask::READ_CONTROL.0);
-    pub const WRITE_DAC: AccessMask = AccessMask(WinAccessMask::WRITE_DAC.0);
-    pub const WRITE_OWNER: AccessMask = AccessMask(WinAccessMask::WRITE_OWNER.0);
-    pub const SYNCHRONIZE: AccessMask = AccessMask(WinAccessMask::SYNCHRONIZE.0);
+    pub const DELETE: AccessMask = AccessMask(WinAccessMask::DELETE);
+    pub const READ_CONTROL: AccessMask = AccessMask(WinAccessMask::READ_CONTROL);
+    pub const WRITE_DAC: AccessMask = AccessMask(WinAccessMask::WRITE_DAC);
+    pub const WRITE_OWNER: AccessMask = AccessMask(WinAccessMask::WRITE_OWNER);
+    pub const SYNCHRONIZE: AccessMask = AccessMask(WinAccessMask::SYNCHRONIZE);
     pub const STANDARD_RIGHTS_REQUIRED: AccessMask =
-        AccessMask(WinAccessMask::STANDARD_RIGHTS_REQUIRED.0);
-    pub const STANDARD_RIGHTS_ALL: AccessMask = AccessMask(WinAccessMask::STANDARD_RIGHTS_ALL.0);
+        AccessMask(WinAccessMask::STANDARD_RIGHTS_REQUIRED);
+    pub const STANDARD_RIGHTS_ALL: AccessMask = AccessMask(WinAccessMask::STANDARD_RIGHTS_ALL);
     pub const ACCESS_SYSTEM_SECURITY: AccessMask =
-        AccessMask(WinAccessMask::ACCESS_SYSTEM_SECURITY.0);
-    pub const MAXIMUM_ALLOWED: AccessMask = AccessMask(WinAccessMask::MAXIMUM_ALLOWED.0);
-    pub const GENERIC_ALL: AccessMask = AccessMask(WinAccessMask::GENERIC_ALL.0);
-    pub const GENERIC_EXECUTE: AccessMask = AccessMask(WinAccessMask::GENERIC_EXECUTE.0);
-    pub const GENERIC_WRITE: AccessMask = AccessMask(WinAccessMask::GENERIC_WRITE.0);
-    pub const GENERIC_READ: AccessMask = AccessMask(WinAccessMask::GENERIC_READ.0);
+        AccessMask(WinAccessMask::ACCESS_SYSTEM_SECURITY);
+    pub const MAXIMUM_ALLOWED: AccessMask = AccessMask(WinAccessMask::MAXIMUM_ALLOWED);
+    pub const GENERIC_ALL: AccessMask = AccessMask(WinAccessMask::GENERIC_ALL);
+    pub const GENERIC_EXECUTE: AccessMask = AccessMask(WinAccessMask::GENERIC_EXECUTE);
+    pub const GENERIC_WRITE: AccessMask = AccessMask(WinAccessMask::GENERIC_WRITE);
+    pub const GENERIC_READ: AccessMask = AccessMask(WinAccessMask::GENERIC_READ);
 }
 
 impl BitOr for AccessMask {
@@ -103,7 +178,7 @@ impl Not for AccessMask {
 }
 
 impl FlagLike for AccessMask {
-    const ZERO: AccessMask = AccessMask(0);
+    const ZERO: AccessMask = AccessMask(WinAccessMask::empty());
     const MODULE: &'static str = "security.windows";
     const NAME: &'static str = "AccessMask";
     const BITS: &'static [(&'static str, AccessMask)] = &[
@@ -126,7 +201,114 @@ impl FlagLike for AccessMask {
     ];
 
     fn rank(self) -> usize {
-        self.0.count_ones() as usize
+        self.0.bits().count_ones() as usize
+    }
+
+    fn build<'v, 'a>(
+        builder: TypeBuilder<'v, 'a, dolang::runtime::object::Flags<Self>>,
+    ) -> TypeBuilder<'v, 'a, dolang::runtime::object::Flags<Self>> {
+        builder
+            .get("specific_rights", |this, strand, out| {
+                Output::set(strand, out, this.flags().0.specific_rights());
+                Ok(())
+            })
+            .get("standard_rights", |this, strand, out| {
+                let ty = this.ty(strand.vm());
+                ty.create_flags(strand, Self(this.flags().0.standard_rights()), out);
+                Ok(())
+            })
+            .get("generic_rights", |this, strand, out| {
+                let ty = this.ty(strand.vm());
+                ty.create_flags(strand, Self(this.flags().0.generic_rights()), out);
+                Ok(())
+            })
+            .get("int", |this, strand, out| {
+                Output::set(strand, out, this.flags().0.bits());
+                Ok(())
+            })
+            .type_method("from_int", async move |this, strand, args, out| {
+                let ([value], []) = unpack!(strand, args, 1, 0)?;
+                let value = ace_u32(strand, &value, "value")?;
+                this.create_flags(strand, Self(WinAccessMask::from_bits_retain(value)), out);
+                Ok(())
+            })
+    }
+}
+
+/// Security descriptor control flags (`security.windows.SecDescControl`).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SecDescControl(WinSecDescControl);
+
+impl BitOr for SecDescControl {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl BitAnd for SecDescControl {
+    type Output = Self;
+
+    fn bitand(self, rhs: Self) -> Self {
+        Self(self.0 & rhs.0)
+    }
+}
+
+impl BitXor for SecDescControl {
+    type Output = Self;
+
+    fn bitxor(self, rhs: Self) -> Self {
+        Self(self.0 ^ rhs.0)
+    }
+}
+
+impl Not for SecDescControl {
+    type Output = Self;
+
+    fn not(self) -> Self {
+        Self(!self.0)
+    }
+}
+
+impl FlagLike for SecDescControl {
+    const ZERO: Self = Self(WinSecDescControl::empty());
+    const MODULE: &'static str = "security.windows";
+    const NAME: &'static str = "SecDescControl";
+    const BITS: &'static [(&'static str, Self)] = &[
+        ("OWNER_DEFAULTED", Self(WinSecDescControl::OWNER_DEFAULTED)),
+        ("GROUP_DEFAULTED", Self(WinSecDescControl::GROUP_DEFAULTED)),
+        ("DACL_PRESENT", Self(WinSecDescControl::DACL_PRESENT)),
+        ("DACL_DEFAULTED", Self(WinSecDescControl::DACL_DEFAULTED)),
+        ("SACL_PRESENT", Self(WinSecDescControl::SACL_PRESENT)),
+        ("SACL_DEFAULTED", Self(WinSecDescControl::SACL_DEFAULTED)),
+        (
+            "DACL_AUTO_INHERIT_REQUIRED",
+            Self(WinSecDescControl::DACL_AUTO_INHERIT_REQUIRED),
+        ),
+        (
+            "SACL_AUTO_INHERIT_REQUIRED",
+            Self(WinSecDescControl::SACL_AUTO_INHERIT_REQUIRED),
+        ),
+        (
+            "DACL_AUTO_INHERITED",
+            Self(WinSecDescControl::DACL_AUTO_INHERITED),
+        ),
+        (
+            "SACL_AUTO_INHERITED",
+            Self(WinSecDescControl::SACL_AUTO_INHERITED),
+        ),
+        ("DACL_PROTECTED", Self(WinSecDescControl::DACL_PROTECTED)),
+        ("SACL_PROTECTED", Self(WinSecDescControl::SACL_PROTECTED)),
+        (
+            "RM_CONTROL_VALID",
+            Self(WinSecDescControl::RM_CONTROL_VALID),
+        ),
+        ("SELF_RELATIVE", Self(WinSecDescControl::SELF_RELATIVE)),
+    ];
+
+    fn rank(self) -> usize {
+        self.0.bits().count_ones() as usize
     }
 }
 
@@ -529,18 +711,52 @@ impl<'v> Object<'v> for Sid {
         Ok(())
     }
 
-    fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
+    fn build<'a>(mut builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
+        let null = builder.sym("NULL");
+        let world = builder.sym("WORLD");
+        let local = builder.sym("LOCAL");
+        let creator = builder.sym("CREATOR");
+        let non_unique = builder.sym("NON_UNIQUE");
+        let nt = builder.sym("NT");
+        let resource_manager = builder.sym("RESOURCE_MANAGER");
+        let app_package = builder.sym("APP_PACKAGE");
+        let mandatory_label = builder.sym("MANDATORY_LABEL");
+        let scoped_policy = builder.sym("SCOPED_POLICY");
+        let authentication = builder.sym("AUTHENTICATION");
+        let process_trust = builder.sym("PROCESS_TRUST");
+
         builder
             .get("revision", |this, strand, out| {
-                Output::set(strand, out, this.annex().revision());
+                Output::set(strand, out, this.annex().revision() as u8);
                 Ok(())
             })
             .get("sub_authority_count", |this, strand, out| {
                 Output::set(strand, out, this.annex().sub_authorities().len());
                 Ok(())
             })
-            .get("identifier_authority", |this, strand, out| {
-                Output::set(strand, out, this.annex().identifier_authority());
+            .get("identifier_authority", move |this, strand, out| {
+                match this.annex().identifier_authority() {
+                    SidIdentifierAuthority::Null => Output::set(strand, out, null),
+                    SidIdentifierAuthority::World => Output::set(strand, out, world),
+                    SidIdentifierAuthority::Local => Output::set(strand, out, local),
+                    SidIdentifierAuthority::Creator => Output::set(strand, out, creator),
+                    SidIdentifierAuthority::NonUnique => Output::set(strand, out, non_unique),
+                    SidIdentifierAuthority::Nt => Output::set(strand, out, nt),
+                    SidIdentifierAuthority::ResourceManager => {
+                        Output::set(strand, out, resource_manager)
+                    }
+                    SidIdentifierAuthority::AppPackage => Output::set(strand, out, app_package),
+                    SidIdentifierAuthority::MandatoryLabel => {
+                        Output::set(strand, out, mandatory_label)
+                    }
+                    SidIdentifierAuthority::ScopedPolicy => Output::set(strand, out, scoped_policy),
+                    SidIdentifierAuthority::Authentication => {
+                        Output::set(strand, out, authentication)
+                    }
+                    SidIdentifierAuthority::ProcessTrust => Output::set(strand, out, process_trust),
+                    SidIdentifierAuthority::Unknown(value) => Output::set(strand, out, value),
+                    authority => Output::set(strand, out, u64::from(authority)),
+                }
                 Ok(())
             })
             .get("sub_authorities", |this, strand, out| {
@@ -800,11 +1016,19 @@ impl<'v> Object<'v> for Acl {
         let revision_sym = strand.state::<Global<'v>>().syms.revision;
         let ([mut iterable], [revision]) = unpack!(strand, args, 1, 0, revision_sym = None)?;
         let revision = revision
-            .map(|value| value.to_i64(strand))
-            .transpose()
-            .map_err(|_| Error::type_error(strand, "revision: expected Int"))?
             .map(|value| {
-                u8::try_from(value).map_err(|_| Error::value(strand, "revision: expected 2 or 4"))
+                if let Some(sym) = value.as_sym(strand.vm()) {
+                    return match sym.as_str(strand.vm()) {
+                        "BASIC" => Ok(AclRevision::Basic),
+                        "DIRECTORY_SERVICE" => Ok(AclRevision::DirectoryService),
+                        _ => Err(Error::value(
+                            strand,
+                            "revision: expected BASIC or DIRECTORY_SERVICE",
+                        )),
+                    };
+                }
+                let value = ace_u8(strand, &value, "revision")?;
+                Ok(AclRevision::from(value))
             })
             .transpose()?;
 
@@ -826,11 +1050,17 @@ impl<'v> Object<'v> for Acl {
         Ok(())
     }
 
-    fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
+    fn build<'a>(mut builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
+        let basic = builder.sym("BASIC");
+        let directory_service = builder.sym("DIRECTORY_SERVICE");
         builder
-            .get("revision", |this, strand, out| {
+            .get("revision", move |this, strand, out| {
                 let revision = with_acl(this, strand, |acl| acl.revision())?;
-                Output::set(strand, out, revision);
+                match revision {
+                    AclRevision::Basic => Output::set(strand, out, basic),
+                    AclRevision::DirectoryService => Output::set(strand, out, directory_service),
+                    AclRevision::Unknown(value) => Output::set(strand, out, value),
+                }
                 Ok(())
             })
             .get("size", |this, strand, out| {
@@ -883,6 +1113,20 @@ fn ace_u8<'v, 's>(
     u8::try_from(value).map_err(|_| Error::value(strand, format!("{name}: out of range")))
 }
 
+fn ace_mask<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    value: &Value<'v>,
+) -> Result<'v, 's, WinAccessMask> {
+    if let Some(mask) = global.types.access_mask.cast_flags(value) {
+        Ok(mask.0)
+    } else {
+        Ok(WinAccessMask::from_bits_retain(ace_u32(
+            strand, value, "mask",
+        )?))
+    }
+}
+
 fn ace_bool<'v, 's>(
     strand: &mut Strand<'v, 's>,
     value: &Value<'v>,
@@ -912,7 +1156,7 @@ fn ace_options<'v, 's>(
     };
     let mut options = AceBuildOptions::new();
     if let Some(value) = flags {
-        options = options.flags(ace_u8(strand, value, "flags")?);
+        options = options.flags(AceFlags::from_bits_retain(ace_u8(strand, value, "flags")?));
     }
     if let Some(value) = object_type {
         options = options.object_type(guid(strand, value, "object_type")?);
@@ -1043,7 +1287,7 @@ impl<'v> Object<'v> for Ace {
                 let sid = global.types.sid.cast(&sid).ok_or_else(|| {
                     Error::type_error(strand, "sid: expected security.windows.Sid")
                 })?;
-                let mask = ace_u32(strand, &mask, "mask")?;
+                let mask = ace_mask(strand, global, &mask)?;
                 let options = ace_options(
                     strand,
                     global,
@@ -1085,7 +1329,7 @@ impl<'v> Object<'v> for Ace {
                 let sid = global.types.sid.cast(&sid).ok_or_else(|| {
                     Error::type_error(strand, "sid: expected security.windows.Sid")
                 })?;
-                let mask = ace_u32(strand, &mask, "mask")?;
+                let mask = ace_mask(strand, global, &mask)?;
                 let options = ace_options(
                     strand,
                     global,
@@ -1129,7 +1373,7 @@ impl<'v> Object<'v> for Ace {
                 let sid = global.types.sid.cast(&sid).ok_or_else(|| {
                     Error::type_error(strand, "sid: expected security.windows.Sid")
                 })?;
-                let mask = ace_u32(strand, &mask, "mask")?;
+                let mask = ace_mask(strand, global, &mask)?;
                 let successful = ace_bool(strand, &successful_value, "successful")?;
                 let failed = ace_bool(strand, &failed_value, "failed")?;
                 let options = ace_options(
@@ -1174,6 +1418,7 @@ impl<'v> Object<'v> for Ace {
                     VfsAceType::SystemProcessTrustLabel => system_process_trust_label,
                     VfsAceType::SystemAccessFilter => system_access_filter,
                     VfsAceType::Unknown(_) => unknown,
+                    _ => unknown,
                 };
                 Output::set(strand, out, value);
                 Ok(())
@@ -1185,7 +1430,7 @@ impl<'v> Object<'v> for Ace {
             })
             .get("flags", |this, strand, out| {
                 let value = with_ace(this, strand, |ace| ace.flags())?;
-                Output::set(strand, out, value);
+                Output::set(strand, out, value.bits());
                 Ok(())
             })
             .get("size", |this, strand, out| {
@@ -1197,7 +1442,11 @@ impl<'v> Object<'v> for Ace {
                 let Some(value) = with_ace(this, strand, |ace| ace.mask())? else {
                     return Err(Error::field(strand, mask_field));
                 };
-                Output::set(strand, out, value);
+                let global = strand.state::<Global<'v>>();
+                global
+                    .types
+                    .access_mask
+                    .create_flags(strand, AccessMask(value), out);
                 Ok(())
             })
             .get("sid", move |this, strand, mut out| {
@@ -1212,7 +1461,7 @@ impl<'v> Object<'v> for Ace {
                 let Some(value) = with_ace(this, strand, |ace| ace.object_flags())? else {
                     return Err(Error::field(strand, object_flags_field));
                 };
-                Output::set(strand, out, value);
+                Output::set(strand, out, value.bits());
                 Ok(())
             })
             .get("object_type", move |this, strand, mut out| {
@@ -1277,7 +1526,7 @@ impl<'v> Object<'v> for Ace {
                 if !ace_is_audit(kind) {
                     return Err(Error::field(strand, successful_access_field));
                 }
-                Output::set(strand, out, flags & 0x40 != 0);
+                Output::set(strand, out, flags.contains(AceFlags::SUCCESSFUL_ACCESS));
                 Ok(())
             })
             .get("failed_access", move |this, strand, out| {
@@ -1285,7 +1534,7 @@ impl<'v> Object<'v> for Ace {
                 if !ace_is_audit(kind) {
                     return Err(Error::field(strand, failed_access_field));
                 }
-                Output::set(strand, out, flags & 0x80 != 0);
+                Output::set(strand, out, flags.contains(AceFlags::FAILED_ACCESS));
                 Ok(())
             })
             .get("trust_protected_filter", move |this, strand, out| {
@@ -1293,7 +1542,11 @@ impl<'v> Object<'v> for Ace {
                 if kind != VfsAceType::SystemAccessFilter {
                     return Err(Error::field(strand, trust_protected_filter_field));
                 }
-                Output::set(strand, out, flags & 0x40 != 0);
+                Output::set(
+                    strand,
+                    out,
+                    flags.contains(AceFlags::TRUST_PROTECTED_FILTER),
+                );
                 Ok(())
             })
             .method("to_bin", async move |this, strand, args, out| {
@@ -1312,7 +1565,11 @@ fn ace_flag<'v, 's>(
     flag: u8,
 ) -> Result<'v, 's, ()> {
     let flags = with_ace(this, strand, |ace| ace.flags())?;
-    Output::set(strand, out, flags & flag != 0);
+    Output::set(
+        strand,
+        out,
+        flags.contains(AceFlags::from_bits_retain(flag)),
+    );
     Ok(())
 }
 
@@ -1598,8 +1855,16 @@ impl<'v> Object<'v> for SecDesc {
             VfsSecDesc::from_bytes(&value.to_vec())
                 .map_err(|error| Error::value(strand, error.to_string()))?
         } else {
-            let descriptor = VfsSecDesc::new(0, 1, 0, 0, None, None, None, None)
-                .expect("empty security descriptor is valid");
+            let descriptor = VfsSecDesc::new(
+                dolang_winterop::security::SecInfo::empty(),
+                0,
+                dolang_winterop::security::SecDescControl::empty(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("empty security descriptor is valid");
             descriptor
                 .with(sec_desc_update(strand, global, values)?)
                 .map_err(|error| Error::value(strand, error.to_string()))?
@@ -1644,15 +1909,24 @@ impl<'v> Object<'v> for SecDesc {
 
         builder
             .get("revision", |this, strand, out| {
-                Output::set(strand, out, this.annex().revision());
+                Output::set(strand, out, this.annex().revision() as u8);
                 Ok(())
             })
             .get("control", |this, strand, out| {
-                Output::set(strand, out, this.annex().control());
+                let global = strand.state::<Global<'v>>();
+                global.types.sec_desc_control.create_flags(
+                    strand,
+                    SecDescControl(this.annex().control()),
+                    out,
+                );
                 Ok(())
             })
             .get("mask", |this, strand, out| {
-                Output::set(strand, out, this.annex().mask());
+                let global = strand.state::<Global<'v>>();
+                global
+                    .types
+                    .sec_info
+                    .create_flags(strand, SecInfo(this.annex().mask()), out);
                 Ok(())
             })
             .get("rm_control_valid", |this, strand, out| {
@@ -2029,9 +2303,9 @@ impl<'v> Object<'v> for TokenGroup {
             this: Instance<'v, '_, TokenGroup>,
             strand: &mut Strand<'v, 's>,
             out: impl Output<'v>,
-            mask: u32,
+            mask: WinTokenGroupAttributes,
         ) -> Result<'v, 's, ()> {
-            Output::set(strand, out, this.annex().attributes & mask != 0);
+            Output::set(strand, out, this.annex().attributes.contains(mask));
             Ok(())
         }
 
@@ -2042,38 +2316,60 @@ impl<'v> Object<'v> for TokenGroup {
                 Ok(())
             })
             .get("attributes", |this, strand, out| {
-                Output::set(strand, out, this.annex().attributes);
+                let global = strand.state::<Global<'v>>();
+                global.types.token_group_attributes.create_flags(
+                    strand,
+                    TokenGroupAttributes(this.annex().attributes),
+                    out,
+                );
                 Ok(())
             })
             .get("mandatory", |this, strand, out| {
-                flag(this, strand, out, SE_GROUP_MANDATORY)
+                flag(this, strand, out, WinTokenGroupAttributes::MANDATORY)
             })
             .get("enabled_by_default", |this, strand, out| {
-                flag(this, strand, out, SE_GROUP_ENABLED_BY_DEFAULT)
+                flag(
+                    this,
+                    strand,
+                    out,
+                    WinTokenGroupAttributes::ENABLED_BY_DEFAULT,
+                )
             })
             .get("enabled", |this, strand, out| {
-                flag(this, strand, out, SE_GROUP_ENABLED)
+                flag(this, strand, out, WinTokenGroupAttributes::ENABLED)
             })
             .get("owner", |this, strand, out| {
-                flag(this, strand, out, SE_GROUP_OWNER)
+                flag(this, strand, out, WinTokenGroupAttributes::OWNER)
             })
             .get("use_for_deny_only", |this, strand, out| {
-                flag(this, strand, out, SE_GROUP_USE_FOR_DENY_ONLY)
+                flag(
+                    this,
+                    strand,
+                    out,
+                    WinTokenGroupAttributes::USE_FOR_DENY_ONLY,
+                )
             })
             .get("integrity", |this, strand, out| {
-                flag(this, strand, out, SE_GROUP_INTEGRITY)
+                flag(this, strand, out, WinTokenGroupAttributes::INTEGRITY)
             })
             .get("integrity_enabled", |this, strand, out| {
-                flag(this, strand, out, SE_GROUP_INTEGRITY_ENABLED)
+                flag(
+                    this,
+                    strand,
+                    out,
+                    WinTokenGroupAttributes::INTEGRITY_ENABLED,
+                )
             })
             .get("resource", |this, strand, out| {
-                flag(this, strand, out, SE_GROUP_RESOURCE)
+                flag(this, strand, out, WinTokenGroupAttributes::RESOURCE)
             })
             .get("logon_id", |this, strand, out| {
                 Output::set(
                     strand,
                     out,
-                    this.annex().attributes & SE_GROUP_LOGON_ID == SE_GROUP_LOGON_ID,
+                    this.annex()
+                        .attributes
+                        .contains(WinTokenGroupAttributes::LOGON_ID),
                 );
                 Ok(())
             })
@@ -2350,6 +2646,9 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
     builder
         .module("security.windows")
         .value("AccessMask", global.types.access_mask)
+        .value("SecDescControl", global.types.sec_desc_control)
+        .value("SecInfo", global.types.sec_info)
+        .value("TokenGroupAttributes", global.types.token_group_attributes)
         .value("Acl", global.types.acl)
         .value("Ace", global.types.ace)
         .value("SecDesc", global.types.sec_desc)

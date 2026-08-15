@@ -5,10 +5,7 @@ use crate::{
     OwnershipIdentity, SidName, StreamEntry, Utf8TypedPath, Utf8WindowsPath, XattrEntry,
     XattrNamespace, security::SidNameUse,
 };
-use dolang_winterop::security::{
-    ALL_SECURITY_INFORMATION, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION,
-    OWNER_SECURITY_INFORMATION, SACL_SECURITY_INFORMATION, SecDesc, Sid,
-};
+use dolang_winterop::security::{SecDesc, SecDescControl, SecInfo, Sid};
 use std::{
     collections::HashMap,
     ffi::OsString,
@@ -277,10 +274,13 @@ impl Direct {
         }
     }
 
-    fn sec_desc_from_handle(handle: BorrowedHandle<'_>, mask: u32) -> io::Result<SecDesc> {
+    fn sec_desc_from_handle(
+        handle: BorrowedHandle<'_>,
+        mask: dolang_winterop::security::SecInfo,
+    ) -> io::Result<SecDesc> {
         let mut descriptor = ptr::null_mut();
-        let query_mask = if mask == 0 {
-            OWNER_SECURITY_INFORMATION
+        let query_mask = if mask.is_empty() {
+            SecInfo::OWNER
         } else {
             mask
         };
@@ -288,7 +288,7 @@ impl Direct {
             GetSecurityInfo(
                 handle.as_raw_handle(),
                 SE_FILE_OBJECT,
-                query_mask,
+                query_mask.bits(),
                 ptr::null_mut(),
                 ptr::null_mut(),
                 ptr::null_mut(),
@@ -315,12 +315,8 @@ impl Direct {
     }
 
     fn set_sec_desc_on_handle(handle: BorrowedHandle<'_>, descriptor: &SecDesc) -> io::Result<()> {
-        let mask = descriptor.mask()
-            & (OWNER_SECURITY_INFORMATION
-                | GROUP_SECURITY_INFORMATION
-                | DACL_SECURITY_INFORMATION
-                | SACL_SECURITY_INFORMATION);
-        if mask == 0 {
+        let mask = descriptor.mask() & SecInfo::ALL;
+        if mask.is_empty() {
             return Ok(());
         }
 
@@ -340,26 +336,36 @@ impl Direct {
         let dacl = component(16).map_or(ptr::null(), |value| value.cast::<ACL>());
 
         let mut update_mask = mask;
-        if mask & DACL_SECURITY_INFORMATION != 0 {
-            update_mask |= if descriptor.dacl_protected() {
-                PROTECTED_DACL_SECURITY_INFORMATION
-            } else {
-                UNPROTECTED_DACL_SECURITY_INFORMATION
-            };
+        if mask.contains(SecInfo::DACL) {
+            update_mask |= SecInfo::from_bits_retain(
+                if descriptor
+                    .control()
+                    .contains(SecDescControl::DACL_PROTECTED)
+                {
+                    PROTECTED_DACL_SECURITY_INFORMATION
+                } else {
+                    UNPROTECTED_DACL_SECURITY_INFORMATION
+                },
+            );
         }
-        if mask & SACL_SECURITY_INFORMATION != 0 {
-            update_mask |= if descriptor.sacl_protected() {
-                PROTECTED_SACL_SECURITY_INFORMATION
-            } else {
-                UNPROTECTED_SACL_SECURITY_INFORMATION
-            };
+        if mask.contains(SecInfo::SACL) {
+            update_mask |= SecInfo::from_bits_retain(
+                if descriptor
+                    .control()
+                    .contains(SecDescControl::SACL_PROTECTED)
+                {
+                    PROTECTED_SACL_SECURITY_INFORMATION
+                } else {
+                    UNPROTECTED_SACL_SECURITY_INFORMATION
+                },
+            );
         }
         let set = || {
             let error = unsafe {
                 SetSecurityInfo(
                     handle.as_raw_handle(),
                     SE_FILE_OBJECT,
-                    update_mask,
+                    update_mask.bits(),
                     owner,
                     group,
                     dacl,
@@ -372,20 +378,24 @@ impl Direct {
                 Err(io::Error::from_raw_os_error(error as i32))
             }
         };
-        if mask & SACL_SECURITY_INFORMATION != 0 {
+        if mask.contains(SecInfo::SACL) {
             dolang_winterop::security::with_security_privilege(set)
         } else {
             set()
         }
     }
 
-    pub(super) fn sec_desc_from_path(path: &Path, mask: u32, follow: bool) -> io::Result<SecDesc> {
-        let mask = mask & ALL_SECURITY_INFORMATION;
-        let access = if mask == 0 || mask & !SACL_SECURITY_INFORMATION != 0 {
+    pub(super) fn sec_desc_from_path(
+        path: &Path,
+        mask: dolang_winterop::security::SecInfo,
+        follow: bool,
+    ) -> io::Result<SecDesc> {
+        let mask = mask & SecInfo::ALL;
+        let access = if mask.is_empty() || mask.intersects(SecInfo::ALL - SecInfo::SACL) {
             READ_CONTROL
         } else {
             0
-        } | if mask & SACL_SECURITY_INFORMATION != 0 {
+        } | if mask.contains(SecInfo::SACL) {
             ACCESS_SYSTEM_SECURITY
         } else {
             0
@@ -401,21 +411,24 @@ impl Direct {
     ) -> io::Result<()> {
         let mask = descriptor.mask();
         let mut access = 0;
-        if mask & (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION) != 0 {
+        if mask.intersects(SecInfo::OWNER | SecInfo::GROUP) {
             access |= WRITE_OWNER;
         }
-        if mask & DACL_SECURITY_INFORMATION != 0 {
+        if mask.contains(SecInfo::DACL) {
             access |= WRITE_DAC;
         }
-        if mask & SACL_SECURITY_INFORMATION != 0 {
+        if mask.contains(SecInfo::SACL) {
             access |= ACCESS_SYSTEM_SECURITY;
         }
         let handle = Self::security_handle(path, access, follow)?;
         Self::set_sec_desc_on_handle(handle.as_handle(), descriptor)
     }
 
-    pub(super) fn sec_desc_from_file(file: &File, mask: u32) -> io::Result<SecDesc> {
-        let mask = mask & ALL_SECURITY_INFORMATION;
+    pub(super) fn sec_desc_from_file(
+        file: &File,
+        mask: dolang_winterop::security::SecInfo,
+    ) -> io::Result<SecDesc> {
+        let mask = mask & SecInfo::ALL;
         Self::sec_desc_from_handle(file.as_handle(), mask)
     }
 
@@ -699,10 +712,7 @@ impl Direct {
         metadata: std::fs::Metadata,
         file: &File,
     ) -> io::Result<Metadata> {
-        let descriptor = Self::sec_desc_from_file(
-            file,
-            OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION,
-        )?;
+        let descriptor = Self::sec_desc_from_file(file, SecInfo::OWNER | SecInfo::GROUP)?;
         Ok(metadata_with_sids(
             metadata_from_std(metadata),
             descriptor.owner().cloned(),
@@ -716,11 +726,7 @@ impl Direct {
         } else {
             std::fs::symlink_metadata(path)?
         };
-        let descriptor = Self::sec_desc_from_path(
-            path,
-            OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION,
-            follow,
-        )?;
+        let descriptor = Self::sec_desc_from_path(path, SecInfo::OWNER | SecInfo::GROUP, follow)?;
         Ok(metadata_with_sids(
             metadata_from_std(metadata),
             descriptor.owner().cloned(),
@@ -1620,19 +1626,19 @@ impl Direct {
             let user = patch.user.map(&mut resolve).transpose()?;
             let group = patch.group.map(&mut resolve).transpose()?;
             let mask = if user.is_some() {
-                OWNER_SECURITY_INFORMATION
+                SecInfo::OWNER
             } else {
-                0
+                SecInfo::empty()
             } | if group.is_some() {
-                GROUP_SECURITY_INFORMATION
+                SecInfo::GROUP
             } else {
-                0
+                SecInfo::empty()
             };
-            let descriptor = if mask == 0 {
+            let descriptor = if mask.is_empty() {
                 None
             } else {
                 Some(
-                    SecDesc::new(mask, 1, 0, 0, user, group, None, None)
+                    SecDesc::new(mask, 0, SecDescControl::empty(), user, group, None, None)
                         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
                 )
             };

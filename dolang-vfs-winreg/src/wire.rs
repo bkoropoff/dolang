@@ -7,7 +7,7 @@
 
 use dolang_vfs::error::Error;
 use dolang_vfs::extension::{ExtCite, ExtContext, ExtGift, ExtOsHandle, VfsExtension};
-use dolang_winterop::security::SecDesc;
+use dolang_winterop::security::{AccessMask, SecDesc, SecInfo};
 use serde::{Deserialize, Serialize};
 
 #[cfg(windows)]
@@ -48,6 +48,20 @@ pub enum View {
     Wow64,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Resolve {
+    #[default]
+    Target,
+    Link,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkTarget {
+    pub native: String,
+    pub root: Option<PredefinedRoot>,
+    pub subpath: Option<String>,
+}
+
 /// A Windows access-rights bitmask for opening a key.
 ///
 /// Built by OR-ing named constants together (`Access::READ | Access::WRITE_DAC`),
@@ -58,17 +72,25 @@ pub enum View {
 /// values are the stable, documented Win32 SAM desired-access bits, hence
 /// no `windows-sys` dependency here — this type stays portable so it still
 /// compiles on non-Windows hosts running only the stub backend.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Access(pub u32);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Access(pub AccessMask);
 
 impl Access {
-    pub const READ: Access = Access(0x0002_0019); // KEY_READ
-    pub const WRITE: Access = Access(0x0002_0006); // KEY_WRITE
-    pub const READ_WRITE: Access = Access(Self::READ.0 | Self::WRITE.0);
-    pub const READ_CONTROL: Access = Access(0x0002_0000);
-    pub const WRITE_DAC: Access = Access(0x0004_0000);
-    pub const WRITE_OWNER: Access = Access(0x0008_0000);
-    pub const ACCESS_SYSTEM_SECURITY: Access = Access(0x0100_0000);
+    pub const QUERY_VALUE: Access = Access(AccessMask::from_bits_retain(0x0001));
+    pub const SET_VALUE: Access = Access(AccessMask::from_bits_retain(0x0002));
+    pub const CREATE_SUB_KEY: Access = Access(AccessMask::from_bits_retain(0x0004));
+    pub const ENUMERATE_SUB_KEYS: Access = Access(AccessMask::from_bits_retain(0x0008));
+    pub const NOTIFY: Access = Access(AccessMask::from_bits_retain(0x0010));
+    pub const CREATE_LINK: Access = Access(AccessMask::from_bits_retain(0x0020));
+    pub const WOW64_64KEY: Access = Access(AccessMask::from_bits_retain(0x0100));
+    pub const WOW64_32KEY: Access = Access(AccessMask::from_bits_retain(0x0200));
+    pub const READ: Access = Access(AccessMask::from_bits_retain(0x0002_0019));
+    pub const WRITE: Access = Access(AccessMask::from_bits_retain(0x0002_0006));
+    pub const READ_WRITE: Access = Access(Self::READ.0.union(Self::WRITE.0));
+    pub const READ_CONTROL: Access = Access(AccessMask::READ_CONTROL);
+    pub const WRITE_DAC: Access = Access(AccessMask::WRITE_DAC);
+    pub const WRITE_OWNER: Access = Access(AccessMask::WRITE_OWNER);
+    pub const ACCESS_SYSTEM_SECURITY: Access = Access(AccessMask::ACCESS_SYSTEM_SECURITY);
 }
 
 impl std::ops::BitOr for Access {
@@ -152,7 +174,7 @@ pub(crate) enum WinRegRequest {
     },
     GetSecDesc {
         key: ExtCite<KeyMarker>,
-        mask: u32,
+        mask: SecInfo,
     },
     SetSecDesc {
         key: ExtCite<KeyMarker>,
@@ -170,6 +192,24 @@ pub(crate) enum WinRegRequest {
     AdoptNative {
         handle: ExtOsHandle,
     },
+    OpenLink {
+        parent: ExtCite<KeyMarker>,
+        subpath: String,
+        view: View,
+        access: Access,
+    },
+    CreateLink {
+        parent: ExtCite<KeyMarker>,
+        target_root: PredefinedRoot,
+        target_subpath: String,
+        link_subpath: String,
+        view: View,
+    },
+    ReadLink {
+        parent: ExtCite<KeyMarker>,
+        subpath: String,
+        view: View,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -184,6 +224,7 @@ pub(crate) enum WinRegResponse {
     ValuesPage(Vec<(String, Value)>),
     SecDesc(SecDesc),
     Ack,
+    LinkTarget(LinkTarget),
 }
 
 pub(crate) struct WinRegExt;

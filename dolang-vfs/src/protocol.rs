@@ -18,7 +18,7 @@ pub(crate) use crate::{
     DirEntry, FsMetadata, Metadata, MetadataPatch, PosixAcl, SecurityInfo, SidName, StreamEntry,
     TargetInfo, XattrEntry, XattrNamespace, path::WellKnownPath,
 };
-pub(crate) use dolang_winterop::security::{SecDesc, Sid};
+pub(crate) use dolang_winterop::security::{SecDesc, SecInfo, Sid};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(transparent)]
@@ -441,7 +441,7 @@ pub(crate) struct SetAclRequest {
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct SecDescRequest {
     pub(crate) path: WirePath,
-    pub(crate) mask: u32,
+    pub(crate) mask: SecInfo,
     pub(crate) follow: bool,
 }
 
@@ -830,7 +830,7 @@ pub(crate) enum RequestKind {
     },
     FileSecDesc {
         file: Cite<crate::session::FileMarker>,
-        mask: u32,
+        mask: SecInfo,
     },
     FileSetSecDesc {
         file: Cite<crate::session::FileMarker>,

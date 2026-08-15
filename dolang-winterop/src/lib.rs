@@ -10,10 +10,14 @@
 //! facilities, such as the APC reactor, are conditionally exported.
 //!
 //! ```
-//! use dolang_winterop::security::{AceBuf, AceBuildOptions, AclBuf, Sid};
+//! use dolang_winterop::security::{AccessMask, AceBuf, AceBuildOptions, AclBuf, Sid};
 //!
 //! let sid: Sid = "S-1-5-32-544".parse()?;
-//! let ace = AceBuf::allow(&sid, 0x0012_0000, AceBuildOptions::new())?;
+//! let ace = AceBuf::allow(
+//!     &sid,
+//!     AccessMask::from_bits_retain(0x0012_0000),
+//!     AceBuildOptions::new(),
+//! )?;
 //! let acl = AclBuf::from_aces([ace], None)?;
 //! assert_eq!(acl.ace_count(), 1);
 //! # Ok::<(), Box<dyn std::error::Error>>(())

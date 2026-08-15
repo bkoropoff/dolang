@@ -15,11 +15,8 @@ use dolang_vfs::{
     target::OperatingSystem,
 };
 use dolang_winterop::{
-    apc::{ApcCancelled, ApcContext, Reactor},
-    security::{
-        ALL_SECURITY_INFORMATION, DACL_SECURITY_INFORMATION, SACL_SECURITY_INFORMATION,
-        SecDesc as VfsSecDesc, with_security_privilege,
-    },
+    apc::{Canceled, Context, Reactor},
+    security::{SecDesc as VfsSecDesc, SecDescControl, SecInfo, with_security_privilege},
 };
 use futures::channel::oneshot;
 use windows_sys::Win32::{
@@ -34,11 +31,10 @@ use windows_sys::Win32::{
     System::Services::{
         ChangeServiceConfigW, CloseServiceHandle, ControlService, CreateServiceW, DeleteService,
         ENUM_SERVICE_STATUS_PROCESSW, EnumServicesStatusExW, NotifyServiceStatusChangeW,
-        OpenSCManagerW, OpenServiceW, PFN_SC_NOTIFY_CALLBACK, QUERY_SERVICE_CONFIGW,
-        QueryServiceConfigW, QueryServiceObjectSecurity, QueryServiceStatusEx,
-        SC_ENUM_PROCESS_INFO, SC_HANDLE, SC_STATUS_PROCESS_INFO, SERVICE_NO_CHANGE,
-        SERVICE_NOTIFY_2W, SERVICE_NOTIFY_STATUS_CHANGE, SERVICE_STATUS, SERVICE_STATUS_PROCESS,
-        SetServiceObjectSecurity, StartServiceW,
+        OpenSCManagerW, OpenServiceW, QUERY_SERVICE_CONFIGW, QueryServiceConfigW,
+        QueryServiceObjectSecurity, QueryServiceStatusEx, SC_ENUM_PROCESS_INFO, SC_HANDLE,
+        SC_STATUS_PROCESS_INFO, SERVICE_NO_CHANGE, SERVICE_NOTIFY_2W, SERVICE_NOTIFY_STATUS_CHANGE,
+        SERVICE_STATUS, SERVICE_STATUS_PROCESS, SetServiceObjectSecurity, StartServiceW,
     },
 };
 
@@ -151,9 +147,9 @@ fn last_error(operation: &str) -> Error {
 
 fn status_from_raw(status: &SERVICE_STATUS_PROCESS) -> ServiceStatus {
     ServiceStatus {
-        service_type: ServiceType(status.dwServiceType),
+        service_type: ServiceType::from_bits_retain(status.dwServiceType),
         current_state: ServiceState(status.dwCurrentState),
-        controls_accepted: ServiceControlsAccepted(status.dwControlsAccepted),
+        controls_accepted: ServiceControlsAccepted::from_bits_retain(status.dwControlsAccepted),
         win32_exit_code: status.dwWin32ExitCode,
         service_specific_exit_code: status.dwServiceSpecificExitCode,
         check_point: status.dwCheckPoint,
@@ -170,7 +166,7 @@ fn status_from_raw(status: &SERVICE_STATUS_PROCESS) -> ServiceStatus {
 /// (see [`crate::service::Service`]) so the reactor's background thread
 /// stays alive for exactly as long as at least one `Service` handle
 /// referencing it is open, and no longer: this cache never calls
-/// `ReactorControl::cancel()`/`join()` itself. Once every `Arc<Reactor>`
+/// `Control::cancel()`/`join()` itself. Once every `Arc<Reactor>`
 /// clone handed out here is dropped, the reactor's own internal refcount
 /// reaches zero on its own and the background thread exits via the natural-
 /// quiescence path `dolang_winterop::apc` already implements and tests
@@ -197,13 +193,13 @@ fn open_manager(access: ServiceAccess) -> Result<SC_HANDLE, Error> {
     let open = || {
         // SAFETY: both name pointers are null (local machine, default
         // database), which is documented as valid.
-        let handle = unsafe { OpenSCManagerW(ptr::null(), ptr::null(), access.0) };
+        let handle = unsafe { OpenSCManagerW(ptr::null(), ptr::null(), access.0.bits()) };
         if handle.is_null() {
             return Err(io::Error::last_os_error());
         }
         Ok(handle)
     };
-    let result = if access.0 & ServiceAccess::ACCESS_SYSTEM_SECURITY.0 != 0 {
+    let result = if access.0.intersects(ServiceAccess::ACCESS_SYSTEM_SECURITY.0) {
         with_security_privilege(open)
     } else {
         open()
@@ -211,17 +207,21 @@ fn open_manager(access: ServiceAccess) -> Result<SC_HANDLE, Error> {
     result.map_err(|error| from_io("open SC manager", error))
 }
 
-fn open_service(manager: SC_HANDLE, name: &str, access: ServiceAccess) -> Result<SC_HANDLE, Error> {
+unsafe fn open_service(
+    manager: SC_HANDLE,
+    name: &str,
+    access: ServiceAccess,
+) -> Result<SC_HANDLE, Error> {
     let name = wide(name);
     let open = || {
         // SAFETY: `name` is NUL-terminated; `manager` is a live SC manager handle.
-        let handle = unsafe { OpenServiceW(manager, name.as_ptr(), access.0) };
+        let handle = unsafe { OpenServiceW(manager, name.as_ptr(), access.0.bits()) };
         if handle.is_null() {
             return Err(io::Error::last_os_error());
         }
         Ok(handle)
     };
-    let result = if access.0 & ServiceAccess::ACCESS_SYSTEM_SECURITY.0 != 0 {
+    let result = if access.0.intersects(ServiceAccess::ACCESS_SYSTEM_SECURITY.0) {
         with_security_privilege(open)
     } else {
         open()
@@ -239,7 +239,7 @@ fn open_service(manager: SC_HANDLE, name: &str, access: ServiceAccess) -> Result
 /// right-sized buffer for each chunk by first probing with a zero-length
 /// buffer — `needed` on that probe is the exact size required for the next
 /// chunk starting from the current resume position.
-fn enum_services_page(
+unsafe fn enum_services_page(
     manager: SC_HANDLE,
     service_type: u32,
     state_filter: u32,
@@ -311,7 +311,8 @@ fn enum_services_page(
 /// doc comment for why this can't just reuse the `Service`'s own handle.
 fn open_notify_handle(name: &str) -> Result<SC_HANDLE, Error> {
     let manager = open_manager(ServiceAccess::SC_MANAGER_CONNECT)?;
-    let result = open_service(manager, name, ServiceAccess::SERVICE_QUERY_STATUS);
+    // SAFETY: `manager` was returned by `open_manager` above.
+    let result = unsafe { open_service(manager, name, ServiceAccess::SERVICE_QUERY_STATUS) };
     // SAFETY: `manager` is a live handle from `open_manager` above, no
     // longer needed once `open_service` has (or hasn't) used it.
     unsafe {
@@ -330,6 +331,17 @@ fn open_notify_handle(name: &str) -> Result<SC_HANDLE, Error> {
 /// the close for free without repeating it.
 struct AutoCloseHandle(SC_HANDLE);
 
+impl AutoCloseHandle {
+    /// Takes ownership of a live service handle.
+    ///
+    /// # Safety
+    ///
+    /// `handle` must be live and owned. Ownership transfers to this value.
+    unsafe fn new(handle: SC_HANDLE) -> Self {
+        Self(handle)
+    }
+}
+
 impl Drop for AutoCloseHandle {
     fn drop(&mut self) {
         // SAFETY: `self.0` is a live handle owned by this value; nothing
@@ -341,7 +353,7 @@ impl Drop for AutoCloseHandle {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn create_service(
+unsafe fn create_service(
     manager: SC_HANDLE,
     name: &str,
     display_name: Option<&str>,
@@ -368,7 +380,7 @@ fn create_service(
                 manager,
                 name.as_ptr(),
                 optional_ptr(display_name.as_ref()),
-                access.0,
+                access.0.bits(),
                 service_type,
                 start_type,
                 error_control,
@@ -385,7 +397,7 @@ fn create_service(
         }
         Ok(handle)
     };
-    let result = if access.0 & ServiceAccess::ACCESS_SYSTEM_SECURITY.0 != 0 {
+    let result = if access.0.intersects(ServiceAccess::ACCESS_SYSTEM_SECURITY.0) {
         with_security_privilege(create)
     } else {
         create()
@@ -393,7 +405,7 @@ fn create_service(
     result.map_err(|error| from_io("create service", error))
 }
 
-fn delete_service(handle: SC_HANDLE) -> Result<(), Error> {
+unsafe fn delete_service(handle: SC_HANDLE) -> Result<(), Error> {
     // SAFETY: `handle` is a live service handle.
     if unsafe { DeleteService(handle) } == 0 {
         return Err(last_error("delete service"));
@@ -401,7 +413,7 @@ fn delete_service(handle: SC_HANDLE) -> Result<(), Error> {
     Ok(())
 }
 
-fn start_service(handle: SC_HANDLE, args: &[String]) -> Result<(), Error> {
+unsafe fn start_service(handle: SC_HANDLE, args: &[String]) -> Result<(), Error> {
     let wide_args: Vec<Vec<u16>> = args.iter().map(|arg| wide(arg)).collect();
     let arg_ptrs: Vec<*const u16> = wide_args.iter().map(|arg| arg.as_ptr()).collect();
     let args_ptr = if arg_ptrs.is_empty() {
@@ -416,7 +428,7 @@ fn start_service(handle: SC_HANDLE, args: &[String]) -> Result<(), Error> {
     Ok(())
 }
 
-fn query_config(handle: SC_HANDLE) -> Result<ServiceConfig, Error> {
+unsafe fn query_config(handle: SC_HANDLE) -> Result<ServiceConfig, Error> {
     let mut needed = 0u32;
     // SAFETY: a null, zero-length buffer is the documented sizing call.
     let ok = unsafe { QueryServiceConfigW(handle, ptr::null_mut(), 0, &mut needed) };
@@ -450,7 +462,7 @@ fn query_config(handle: SC_HANDLE) -> Result<ServiceConfig, Error> {
     let service_start_name = unsafe { from_wide(config.lpServiceStartName) };
     let display_name = unsafe { from_wide(config.lpDisplayName) };
     Ok(ServiceConfig {
-        service_type: ServiceType(config.dwServiceType),
+        service_type: ServiceType::from_bits_retain(config.dwServiceType),
         start_type: crate::wire::StartType(config.dwStartType),
         error_control: crate::wire::ErrorControl(config.dwErrorControl),
         binary_path,
@@ -462,7 +474,7 @@ fn query_config(handle: SC_HANDLE) -> Result<ServiceConfig, Error> {
     })
 }
 
-fn change_config(handle: SC_HANDLE, update: &ServiceConfigUpdate) -> Result<(), Error> {
+unsafe fn change_config(handle: SC_HANDLE, update: &ServiceConfigUpdate) -> Result<(), Error> {
     let binary_path = optional_wide(update.binary_path.as_deref());
     let load_order_group = optional_wide(update.load_order_group.as_deref());
     let dependencies = update
@@ -480,7 +492,7 @@ fn change_config(handle: SC_HANDLE, update: &ServiceConfigUpdate) -> Result<(), 
             handle,
             update
                 .service_type
-                .map_or(SERVICE_NO_CHANGE, |value| value.0),
+                .map_or(SERVICE_NO_CHANGE, |value| value.bits()),
             update.start_type.map_or(SERVICE_NO_CHANGE, |value| value.0),
             update
                 .error_control
@@ -500,16 +512,16 @@ fn change_config(handle: SC_HANDLE, update: &ServiceConfigUpdate) -> Result<(), 
     Ok(())
 }
 
-fn control_service(handle: SC_HANDLE, control: u32) -> Result<ServiceStatus, Error> {
+unsafe fn control_service(handle: SC_HANDLE, control: u32) -> Result<ServiceStatus, Error> {
     let mut status: SERVICE_STATUS = unsafe { std::mem::zeroed() };
     // SAFETY: `handle` is a live service handle; `status` is a valid out pointer.
     if unsafe { ControlService(handle, control, &mut status) } == 0 {
         return Err(last_error("control service"));
     }
     Ok(ServiceStatus {
-        service_type: ServiceType(status.dwServiceType),
+        service_type: ServiceType::from_bits_retain(status.dwServiceType),
         current_state: ServiceState(status.dwCurrentState),
-        controls_accepted: ServiceControlsAccepted(status.dwControlsAccepted),
+        controls_accepted: ServiceControlsAccepted::from_bits_retain(status.dwControlsAccepted),
         win32_exit_code: status.dwWin32ExitCode,
         service_specific_exit_code: status.dwServiceSpecificExitCode,
         check_point: status.dwCheckPoint,
@@ -518,7 +530,7 @@ fn control_service(handle: SC_HANDLE, control: u32) -> Result<ServiceStatus, Err
     })
 }
 
-fn query_status(handle: SC_HANDLE) -> Result<ServiceStatus, Error> {
+unsafe fn query_status(handle: SC_HANDLE) -> Result<ServiceStatus, Error> {
     let mut status: SERVICE_STATUS_PROCESS = unsafe { std::mem::zeroed() };
     let mut needed = 0u32;
     // SAFETY: `status`/`needed` describe a live, correctly-sized buffer for
@@ -553,10 +565,10 @@ fn from_io(operation: &str, err: io::Error) -> Error {
 /// which (like `RegGetKeySecurity` in `dolang-vfs-winreg`) returns the same
 /// native self-relative byte blob `SecDesc::from_bytes_with_mask` already
 /// parses.
-fn sec_desc(handle: SC_HANDLE, mask: u32) -> Result<VfsSecDesc, Error> {
-    let mask = mask & ALL_SECURITY_INFORMATION;
-    let query_mask = if mask == 0 {
-        dolang_winterop::security::OWNER_SECURITY_INFORMATION
+unsafe fn sec_desc(handle: SC_HANDLE, mask: SecInfo) -> Result<VfsSecDesc, Error> {
+    let mask = mask & SecInfo::ALL;
+    let query_mask = if mask.is_empty() {
+        SecInfo::OWNER
     } else {
         mask
     };
@@ -567,7 +579,7 @@ fn sec_desc(handle: SC_HANDLE, mask: u32) -> Result<VfsSecDesc, Error> {
         let ok = unsafe {
             QueryServiceObjectSecurity(
                 handle,
-                query_mask,
+                query_mask.bits(),
                 bytes.as_mut_ptr().cast(),
                 bytes.len() as u32,
                 &mut needed,
@@ -591,20 +603,26 @@ fn sec_desc(handle: SC_HANDLE, mask: u32) -> Result<VfsSecDesc, Error> {
 /// Sets `handle`'s security descriptor via `SetServiceObjectSecurity`,
 /// passing the native self-relative byte blob `SecDesc::to_bytes` produces
 /// straight through — same shape as `dolang-vfs-winreg`'s `set_sec_desc`.
-fn set_sec_desc(handle: SC_HANDLE, descriptor: &VfsSecDesc) -> Result<(), Error> {
-    let mut mask = descriptor.mask() & ALL_SECURITY_INFORMATION;
+unsafe fn set_sec_desc(handle: SC_HANDLE, descriptor: &VfsSecDesc) -> Result<(), Error> {
+    let mut mask = (descriptor.mask() & SecInfo::ALL).bits();
     if mask == 0 {
         return Ok(());
     }
-    if mask & DACL_SECURITY_INFORMATION != 0 {
-        mask |= if descriptor.dacl_protected() {
+    if mask & SecInfo::DACL.bits() != 0 {
+        mask |= if descriptor
+            .control()
+            .contains(SecDescControl::DACL_PROTECTED)
+        {
             PROTECTED_DACL_SECURITY_INFORMATION
         } else {
             UNPROTECTED_DACL_SECURITY_INFORMATION
         };
     }
-    if mask & SACL_SECURITY_INFORMATION != 0 {
-        mask |= if descriptor.sacl_protected() {
+    if mask & SecInfo::SACL.bits() != 0 {
+        mask |= if descriptor
+            .control()
+            .contains(SecDescControl::SACL_PROTECTED)
+        {
             PROTECTED_SACL_SECURITY_INFORMATION
         } else {
             UNPROTECTED_SACL_SECURITY_INFORMATION
@@ -622,7 +640,7 @@ fn set_sec_desc(handle: SC_HANDLE, descriptor: &VfsSecDesc) -> Result<(), Error>
             Err(io::Error::last_os_error())
         }
     };
-    let result = if mask & SACL_SECURITY_INFORMATION != 0 {
+    let result = if mask & SecInfo::SACL.bits() != 0 {
         with_security_privilege(set)
     } else {
         set()
@@ -675,11 +693,12 @@ unsafe extern "system" fn notify_trampoline(pparameter: *const std::ffi::c_void)
 /// taking one from the caller — see [`crate::service::Service`]'s doc
 /// comment for why.
 async fn wait_for_status_change(
-    apc_ctx: &mut ApcContext,
+    apc_ctx: &mut Context,
     name: String,
     mask: u32,
 ) -> Result<ServiceStatus, Error> {
-    let handle = AutoCloseHandle(open_notify_handle(&name)?);
+    // SAFETY: `open_notify_handle` returns a new owned service handle.
+    let handle = unsafe { AutoCloseHandle::new(open_notify_handle(&name)?) };
 
     let (tx, rx) = oneshot::channel();
     let mut cell = Box::new(NotifyCell {
@@ -687,7 +706,7 @@ async fn wait_for_status_change(
         tx: Some(tx),
     });
     cell.buf.dwVersion = SERVICE_NOTIFY_STATUS_CHANGE;
-    cell.buf.pfnNotifyCallback = notify_trampoline_ptr();
+    cell.buf.pfnNotifyCallback = Some(notify_trampoline);
     cell.buf.pContext = &mut *cell as *mut NotifyCell as *mut _;
 
     // SAFETY: `handle.0` is a live service handle; `cell.buf` stays alive
@@ -704,7 +723,7 @@ async fn wait_for_status_change(
             ErrorKind::Other,
             "status notification sender dropped unexpectedly",
         )),
-        Err(ApcCancelled) => {
+        Err(Canceled) => {
             // Close the dedicated handle now: SCM has no "unregister
             // notification" API, so closing the handle a request was
             // registered on is the only documented way to cancel it. This
@@ -723,65 +742,37 @@ async fn wait_for_status_change(
             // just-about-to-fire notify callback — has been fully
             // delivered and processed by the time our own callback runs.
             // Only then is it safe to drop `cell`.
-            let (drained_tx, drained_rx) = oneshot::channel();
             apc_ctx
-                .post_raw(move || {
-                    let _ = drained_tx.send(());
-                })
+                .submit(async |_| ())
+                .await
                 .map_err(|error| Error::new(ErrorKind::Other, error.to_string()))?;
-            let _ = drained_rx.await;
             Err(Error::new(ErrorKind::Other, "status change wait cancelled"))
         }
     }
-}
-
-fn notify_trampoline_ptr() -> PFN_SC_NOTIFY_CALLBACK {
-    Some(notify_trampoline)
 }
 
 fn invalid_handle(_: InvalidHandle) -> Error {
     Error::new(ErrorKind::InvalidInput, "invalid SCM handle")
 }
 
-/// Wraps a value so it can cross a [`tokio::task::spawn_blocking`] boundary
-/// even when it isn't `Send` — Win32 handles (`SC_HANDLE` and friends) are
-/// opaque pointer types Rust doesn't know are safe to move between threads,
-/// even though Microsoft documents them as such.
-struct SendValue<T>(T);
-// SAFETY: only used to ferry Win32 handle values (and results built from
-// them) across a `spawn_blocking` call; those are documented as usable from
-// any thread.
-unsafe impl<T> Send for SendValue<T> {}
-
-/// Runs `f` on the blocking thread pool, since every SCM API this backend
-/// calls is a synchronous Win32 call with no async equivalent — running it
-/// inline on the async task would block the executor thread. This also
-/// covers closing a handle: unlike a registry `HKEY` close, closing an SC
-/// handle can involve an RPC to the services.exe SCM process, not just
-/// local object-manager bookkeeping.
-async fn blocking<T: 'static>(
-    f: impl FnOnce() -> Result<T, Error> + Send + 'static,
-) -> Result<T, Error> {
-    match tokio::task::spawn_blocking(move || SendValue(f())).await {
-        Ok(SendValue(result)) => result,
-        Err(_) => Err(Error::new(ErrorKind::Other, "SCM operation task panicked")),
-    }
-}
-
 /// Runs `f` on the blocking thread pool with the SC manager handle.
-async fn with_manager<T: 'static>(
+async fn with_manager<T: Send + 'static>(
     manager: ExtGuard<ScManager>,
     f: impl FnOnce(SC_HANDLE) -> Result<T, Error> + Send + 'static,
 ) -> Result<T, Error> {
-    blocking(move || f(manager.handle())).await
+    tokio::task::spawn_blocking(move || f(manager.handle()))
+        .await
+        .map_err(|_| Error::new(ErrorKind::Other, "SCM operation task panicked"))?
 }
 
 /// Runs `f` on the blocking thread pool with the service handle.
-async fn with_service<T: 'static>(
+async fn with_service<T: Send + 'static>(
     service: ExtGuard<Service>,
     f: impl FnOnce(SC_HANDLE) -> Result<T, Error> + Send + 'static,
 ) -> Result<T, Error> {
-    blocking(move || f(service.handle())).await
+    tokio::task::spawn_blocking(move || f(service.handle()))
+        .await
+        .map_err(|_| Error::new(ErrorKind::Other, "SCM operation task panicked"))?
 }
 
 pub(crate) async fn handle(
@@ -790,10 +781,14 @@ pub(crate) async fn handle(
 ) -> Result<WinScmResponse, Error> {
     match request {
         WinScmRequest::OpenManager { access } => {
-            let handle = blocking(move || open_manager(access)).await?;
-            Ok(WinScmResponse::Manager(
-                ctx.register(ScManager::new(handle)),
-            ))
+            let manager = tokio::task::spawn_blocking(move || {
+                let handle = open_manager(access)?;
+                // SAFETY: `open_manager` returned a new owned manager handle.
+                Ok::<_, Error>(unsafe { ScManager::new(handle) })
+            })
+            .await
+            .map_err(|_| Error::new(ErrorKind::Other, "SCM operation task panicked"))??;
+            Ok(WinScmResponse::Manager(ctx.register(manager)))
         }
         WinScmRequest::CloseManager { manager } => {
             if let Some(manager) = ctx
@@ -814,17 +809,17 @@ pub(crate) async fn handle(
             access,
         } => {
             let guard = ctx.acquire::<ScManager>(manager).map_err(invalid_handle)?;
-            let name2 = name.clone();
-            let (handle, reactor) = with_manager(guard, move |m| {
-                let handle = open_service(m, &name2, access)?;
+            let service = with_manager(guard, move |m| {
                 let reactor =
                     reactor().map_err(|error| Error::new(ErrorKind::Other, error.to_string()))?;
-                Ok((handle, reactor))
+                // SAFETY: `m` comes from the live manager guard held by
+                // `with_manager` for the duration of this closure.
+                let handle = unsafe { open_service(m, &name, access) }?;
+                // SAFETY: `open_service` returned a new owned service handle.
+                Ok(unsafe { Service::new(handle, reactor, name) })
             })
             .await?;
-            Ok(WinScmResponse::Svc(
-                ctx.register(Service::new(handle, reactor, name)),
-            ))
+            Ok(WinScmResponse::Svc(ctx.register(service)))
         }
         WinScmRequest::CreateService {
             manager,
@@ -838,27 +833,29 @@ pub(crate) async fn handle(
             access,
         } => {
             let guard = ctx.acquire::<ScManager>(manager).map_err(invalid_handle)?;
-            let name2 = name.clone();
-            let (handle, reactor) = with_manager(guard, move |m| {
-                let handle = create_service(
-                    m,
-                    &name2,
-                    display_name.as_deref(),
-                    service_type.0,
-                    start_type.0,
-                    error_control.0,
-                    binary_path.as_deref(),
-                    &options,
-                    access,
-                )?;
+            let service = with_manager(guard, move |m| {
                 let reactor =
                     reactor().map_err(|error| Error::new(ErrorKind::Other, error.to_string()))?;
-                Ok((handle, reactor))
+                // SAFETY: `m` comes from the live manager guard held by
+                // `with_manager` for the duration of this closure.
+                let handle = unsafe {
+                    create_service(
+                        m,
+                        &name,
+                        display_name.as_deref(),
+                        service_type.bits(),
+                        start_type.0,
+                        error_control.0,
+                        binary_path.as_deref(),
+                        &options,
+                        access,
+                    )
+                }?;
+                // SAFETY: `create_service` returned a new owned service handle.
+                Ok(unsafe { Service::new(handle, reactor, name) })
             })
             .await?;
-            Ok(WinScmResponse::Svc(
-                ctx.register(Service::new(handle, reactor, name)),
-            ))
+            Ok(WinScmResponse::Svc(ctx.register(service)))
         }
         WinScmRequest::EnumServicesPage {
             manager,
@@ -868,7 +865,9 @@ pub(crate) async fn handle(
         } => {
             let guard = ctx.acquire::<ScManager>(manager).map_err(invalid_handle)?;
             let (services, resume, done) = with_manager(guard, move |m| {
-                enum_services_page(m, service_type.0, state_filter.0, resume)
+                // SAFETY: `m` comes from the live manager guard held by
+                // `with_manager` for the duration of this closure.
+                unsafe { enum_services_page(m, service_type.bits(), state_filter.0, resume) }
             })
             .await?;
             Ok(WinScmResponse::ServicesPage {
@@ -879,7 +878,11 @@ pub(crate) async fn handle(
         }
         WinScmRequest::DeleteService { service } => {
             let guard = ctx.acquire::<Service>(service).map_err(invalid_handle)?;
-            with_service(guard, delete_service).await?;
+            with_service(guard, |h| {
+                // SAFETY: `h` comes from the live service guard.
+                unsafe { delete_service(h) }
+            })
+            .await?;
             Ok(WinScmResponse::Deleted)
         }
         WinScmRequest::CloseService { service } => {
@@ -894,33 +897,57 @@ pub(crate) async fn handle(
         }
         WinScmRequest::StartService { service, args } => {
             let guard = ctx.acquire::<Service>(service).map_err(invalid_handle)?;
-            with_service(guard, move |h| start_service(h, &args)).await?;
+            with_service(guard, move |h| {
+                // SAFETY: `h` comes from the live service guard.
+                unsafe { start_service(h, &args) }
+            })
+            .await?;
             Ok(WinScmResponse::Ack)
         }
         WinScmRequest::ControlService { service, control } => {
             let guard = ctx.acquire::<Service>(service).map_err(invalid_handle)?;
-            let status = with_service(guard, move |h| control_service(h, control.0)).await?;
+            let status = with_service(guard, move |h| {
+                // SAFETY: `h` comes from the live service guard.
+                unsafe { control_service(h, control.0) }
+            })
+            .await?;
             Ok(WinScmResponse::Status(status))
         }
         WinScmRequest::QueryStatus { service } => {
             let guard = ctx.acquire::<Service>(service).map_err(invalid_handle)?;
-            let status = with_service(guard, query_status).await?;
+            let status = with_service(guard, |h| {
+                // SAFETY: `h` comes from the live service guard.
+                unsafe { query_status(h) }
+            })
+            .await?;
             Ok(WinScmResponse::Status(status))
         }
         WinScmRequest::QueryConfig { service } => {
             let guard = ctx.acquire::<Service>(service).map_err(invalid_handle)?;
             Ok(WinScmResponse::Config(
-                with_service(guard, query_config).await?,
+                with_service(guard, |h| {
+                    // SAFETY: `h` comes from the live service guard.
+                    unsafe { query_config(h) }
+                })
+                .await?,
             ))
         }
         WinScmRequest::ChangeConfig { service, update } => {
             let guard = ctx.acquire::<Service>(service).map_err(invalid_handle)?;
-            with_service(guard, move |h| change_config(h, &update)).await?;
+            with_service(guard, move |h| {
+                // SAFETY: `h` comes from the live service guard.
+                unsafe { change_config(h, &update) }
+            })
+            .await?;
             Ok(WinScmResponse::Ack)
         }
         WinScmRequest::GetSecDesc { service, mask } => {
             let guard = ctx.acquire::<Service>(service).map_err(invalid_handle)?;
-            let descriptor = with_service(guard, move |h| sec_desc(h, mask)).await?;
+            let descriptor = with_service(guard, move |h| {
+                // SAFETY: `h` comes from the live service guard.
+                unsafe { sec_desc(h, mask) }
+            })
+            .await?;
             Ok(WinScmResponse::SecDesc(descriptor))
         }
         WinScmRequest::SetSecDesc {
@@ -928,7 +955,11 @@ pub(crate) async fn handle(
             sec_desc: descriptor,
         } => {
             let guard = ctx.acquire::<Service>(service).map_err(invalid_handle)?;
-            with_service(guard, move |h| set_sec_desc(h, &descriptor)).await?;
+            with_service(guard, move |h| {
+                // SAFETY: `h` comes from the live service guard.
+                unsafe { set_sec_desc(h, &descriptor) }
+            })
+            .await?;
             Ok(WinScmResponse::Ack)
         }
         WinScmRequest::WaitForStatusChange { service, mask } => {
@@ -937,7 +968,9 @@ pub(crate) async fn handle(
             let reactor = guard.reactor.clone();
             drop(guard);
             let task = reactor
-                .submit(async move |apc_ctx| wait_for_status_change(apc_ctx, name, mask.0).await)
+                .submit(async move |apc_ctx| {
+                    wait_for_status_change(apc_ctx, name, mask.bits()).await
+                })
                 .map_err(|_closed| Error::new(ErrorKind::Other, "SCM reactor unavailable"))?;
             let status = task.await.map_err(|_cancelled| {
                 Error::new(ErrorKind::Other, "status change wait cancelled")

@@ -5,6 +5,8 @@ use dolang_vfs::{
     direct::Direct,
     error::{Error, ErrorKind},
 };
+#[cfg(windows)]
+use dolang_vfs_winreg::Resolve;
 use dolang_vfs_winreg::{Access, Key, PredefinedRoot, View};
 
 /// `Result::unwrap_err` requires `T: Debug`, which `Key` intentionally
@@ -176,7 +178,11 @@ mod live {
             .unwrap();
         let name = format!("run-{}-{id}", std::process::id());
         let scratch = parent
-            .create(&name, View::Native, Access::READ_WRITE)
+            .create(
+                &name,
+                View::Native,
+                Access::READ_WRITE | Access::CREATE_LINK,
+            )
             .await
             .unwrap();
         (parent, name, scratch)
@@ -201,7 +207,7 @@ mod live {
         );
         assert_eq!(scratch.enum_subkey(1).await.unwrap(), None);
         scratch
-            .open("child", View::Native, Access::READ)
+            .open("child", View::Native, Access::READ, Resolve::Target)
             .await
             .unwrap();
         scratch
@@ -230,7 +236,11 @@ mod live {
             .delete("tree", View::Native, true, false)
             .await
             .unwrap();
-        let error = expect_err(scratch.open("tree", View::Native, Access::READ).await);
+        let error = expect_err(
+            scratch
+                .open("tree", View::Native, Access::READ, Resolve::Target)
+                .await,
+        );
         assert_eq!(error.kind(), ErrorKind::NotFound);
 
         scratch
@@ -305,7 +315,12 @@ mod live {
         // Not-found path for a subkey open.
         let error = expect_err(
             scratch
-                .open("does-not-exist", View::Native, Access::READ)
+                .open(
+                    "does-not-exist",
+                    View::Native,
+                    Access::READ,
+                    Resolve::Target,
+                )
                 .await,
         );
         assert_eq!(error.kind(), ErrorKind::NotFound);
@@ -325,6 +340,119 @@ mod live {
         // accepted and don't break ordinary key/value operations, not that
         // isolation actually occurs.
         if !dolang_winterop::is_wine() {
+            let target = scratch
+                .create("link-target", View::Native, Access::READ_WRITE)
+                .await
+                .unwrap();
+            target
+                .set_value(Some("marker"), Value::Dword(7))
+                .await
+                .unwrap();
+            let target_path =
+                format!(r"Software\dolang-vfs-winreg-tests\{scratch_name}\link-target");
+            scratch
+                .link(
+                    PredefinedRoot::CurrentUser,
+                    &target_path,
+                    "link",
+                    View::Native,
+                )
+                .await
+                .unwrap();
+            let link_target = scratch.read_link("link", View::Native).await.unwrap();
+            let user_prefix = r"\Registry\User\";
+            assert!(
+                link_target
+                    .native
+                    .get(..user_prefix.len())
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(user_prefix))
+            );
+            assert_eq!(link_target.root, Some(PredefinedRoot::CurrentUser));
+            assert!(
+                link_target
+                    .subpath
+                    .as_deref()
+                    .is_some_and(|subpath| subpath.eq_ignore_ascii_case(&target_path))
+            );
+            let followed = scratch
+                .open("link", View::Native, Access::READ, Resolve::Target)
+                .await
+                .unwrap();
+            assert_eq!(
+                followed.get_value(Some("marker")).await.unwrap(),
+                Some(Value::Dword(7))
+            );
+            let raw_link = scratch
+                .open("link", View::Native, Access::QUERY_VALUE, Resolve::Link)
+                .await
+                .unwrap();
+            assert!(matches!(
+                raw_link.get_value(Some("SymbolicLinkValue")).await.unwrap(),
+                Some(Value::Other { .. })
+            ));
+            assert_eq!(
+                expect_err(scratch.read_link("link-target", View::Native).await).kind(),
+                ErrorKind::InvalidInput
+            );
+            assert_eq!(
+                expect_err(
+                    scratch
+                        .link(
+                            PredefinedRoot::CurrentUser,
+                            &target_path,
+                            "link",
+                            View::Native
+                        )
+                        .await
+                )
+                .kind(),
+                ErrorKind::AlreadyExists
+            );
+            raw_link.close().await.unwrap();
+            followed.close().await.unwrap();
+            scratch
+                .delete("link", View::Native, true, false)
+                .await
+                .unwrap();
+            assert_eq!(
+                target.get_value(Some("marker")).await.unwrap(),
+                Some(Value::Dword(7))
+            );
+
+            // Recursive deletion must not follow a link nested below the key
+            // being removed.
+            let link_tree = scratch
+                .create(
+                    "link-tree",
+                    View::Native,
+                    Access::READ_WRITE | Access::CREATE_LINK,
+                )
+                .await
+                .unwrap();
+            link_tree
+                .link(
+                    PredefinedRoot::CurrentUser,
+                    &target_path,
+                    "nested-link",
+                    View::Native,
+                )
+                .await
+                .unwrap();
+            link_tree.close().await.unwrap();
+            scratch
+                .delete("link-tree", View::Native, true, false)
+                .await
+                .unwrap();
+            assert_eq!(
+                target.get_value(Some("marker")).await.unwrap(),
+                Some(Value::Dword(7))
+            );
+            target.close().await.unwrap();
+            scratch
+                .delete("link-target", View::Native, true, false)
+                .await
+                .unwrap();
+
             let wow32 = parent
                 .create("view-probe", View::Wow32, Access::READ_WRITE)
                 .await
@@ -334,7 +462,7 @@ mod live {
                 .await
                 .unwrap();
             let wow64 = parent
-                .open("view-probe", View::Wow64, Access::READ)
+                .open("view-probe", View::Wow64, Access::READ, Resolve::Target)
                 .await
                 .unwrap();
             assert_eq!(

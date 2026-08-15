@@ -14,7 +14,7 @@ use dolang_vfs::{
     target::TargetInfo,
 };
 #[cfg(windows)]
-use dolang_winterop::security::{DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION};
+use dolang_winterop::security::SecInfo;
 use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use typed_path::{Utf8TypedPath, Utf8UnixPath, Utf8WindowsPath};
@@ -1057,17 +1057,13 @@ async fn security_descriptor_round_trip_over_generic_stream() {
     std::fs::write(path.to_path().as_str(), "hello").unwrap();
 
     let descriptor = client
-        .sec_desc(
-            path.to_path(),
-            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-            true,
-        )
+        .sec_desc(path.to_path(), SecInfo::OWNER | SecInfo::DACL, true)
         .await
         .unwrap();
     assert!(descriptor.owner().is_some());
     assert!(descriptor.dacl_loaded());
     let dacl = client
-        .sec_desc(path.to_path(), DACL_SECURITY_INFORMATION, true)
+        .sec_desc(path.to_path(), SecInfo::DACL, true)
         .await
         .unwrap();
     if let Err(error) = client.set_sec_desc(path.to_path(), &dacl, true).await {
@@ -1078,7 +1074,7 @@ async fn security_descriptor_round_trip_over_generic_stream() {
     options.read(true);
     let mut file = OpenOptions::open(&options, path.to_path()).await.unwrap();
     assert!(
-        file.sec_desc(OWNER_SECURITY_INFORMATION)
+        file.sec_desc(SecInfo::OWNER)
             .await
             .unwrap()
             .owner()

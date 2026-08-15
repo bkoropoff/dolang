@@ -20,7 +20,7 @@ use crate::wire::KeyMarker;
 /// concurrent operations on the same key is simplest; this mirrors
 /// `dolang-vfs`'s own "cursor-affecting operations on each retained
 /// file are serialized by the server" precedent for retained files.
-pub(crate) struct Key(pub(crate) Mutex<HKEY>);
+pub(crate) struct Key(Mutex<HKEY>);
 
 // SAFETY: Win32 registry handles are valid to use from any thread; they just
 // require external synchronization for cursor-affecting operations, which
@@ -47,7 +47,18 @@ impl Drop for Key {
 }
 
 impl Key {
-    pub(crate) fn new(handle: HKEY) -> Self {
+    /// # Safety
+    ///
+    /// `handle` must be a live registry-key handle that may be passed to
+    /// `RegCloseKey` exactly once. That close responsibility transfers to the
+    /// returned resource.
+    pub(crate) unsafe fn new(handle: HKEY) -> Self {
         Self(Mutex::new(handle))
+    }
+
+    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, HKEY> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }

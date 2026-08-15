@@ -139,7 +139,7 @@ pub trait FileHandle: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Sized {
     /// Sets or removes the POSIX ACL, optionally its default ACL.
     async fn set_acl(&mut self, acl: Option<&PosixAcl>, default: bool) -> Result<()>;
     /// Returns the Windows security descriptor selected by `mask`.
-    async fn sec_desc(&mut self, mask: u32) -> Result<SecDesc>;
+    async fn sec_desc(&mut self, mask: dolang_winterop::security::SecInfo) -> Result<SecDesc>;
     /// Replaces the Windows security descriptor.
     async fn set_sec_desc(&mut self, sec_desc: &SecDesc) -> Result<()>;
     /// Lists extended attributes in `namespace`.
@@ -377,7 +377,12 @@ pub trait Vfs {
         follow: bool,
     ) -> Result<()>;
     /// Returns the Windows security descriptor for a path.
-    async fn sec_desc(&self, path: Utf8TypedPath<'_>, mask: u32, follow: bool) -> Result<SecDesc>;
+    async fn sec_desc(
+        &self,
+        path: Utf8TypedPath<'_>,
+        mask: dolang_winterop::security::SecInfo,
+        follow: bool,
+    ) -> Result<SecDesc>;
     /// Replaces the Windows security descriptor for a path.
     async fn set_sec_desc(
         &self,
@@ -538,7 +543,10 @@ impl FileHandle for AnyFile {
         match_file!(self, file => file.set_acl(acl, default).await)
     }
 
-    async fn sec_desc(&mut self, mask: u32) -> crate::Result<SecDesc> {
+    async fn sec_desc(
+        &mut self,
+        mask: dolang_winterop::security::SecInfo,
+    ) -> crate::Result<SecDesc> {
         match_file!(self, file => file.sec_desc(mask).await)
     }
 
@@ -1479,7 +1487,7 @@ impl Vfs for AnyVfs {
     async fn sec_desc(
         &self,
         path: Utf8TypedPath<'_>,
-        mask: u32,
+        mask: dolang_winterop::security::SecInfo,
         follow: bool,
     ) -> crate::Result<SecDesc> {
         match self {

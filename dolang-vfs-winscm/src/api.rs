@@ -421,7 +421,7 @@ impl Service {
             .vfs
             .call_extension::<WinScmExt>(WinScmRequest::GetSecDesc {
                 service: self.handle.cite(),
-                mask,
+                mask: dolang_winterop::security::SecInfo::from_bits_retain(mask),
             })
             .await??;
         match response {

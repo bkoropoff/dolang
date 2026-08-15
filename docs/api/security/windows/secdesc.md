@@ -58,7 +58,7 @@ Security descriptor revision.
 
 ### `mask`
 
-Native `SECURITY_INFORMATION` mask recording which fields are present.
+[`SecInfo`](./sec-info.md) flags recording which fields are present.
 
 Descriptors parsed from a self-relative packet have owner, group, DACL, and
 SACL marked as loaded because the native packet does not carry a separate
@@ -67,7 +67,8 @@ information depending on what was queried.
 
 ### `control`
 
-Native control flags, excluding the self-relative storage flag.
+[`SecDescControl`](./secdesc-control.md) flags, excluding the self-relative
+storage flag.
 
 ### `rm_control_valid`
 
