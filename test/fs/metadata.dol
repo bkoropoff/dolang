@@ -16,6 +16,8 @@ import sys agent
     - open
     - remove
     - set_metadata
+  fs.unix:
+    - Mode
   security.windows:
     - Sid
   time:
@@ -84,7 +86,7 @@ def unix_fields()
   open $test_path r do |f|
     let meta = f.metadata()
     assert_type $Metadata $meta
-    assert (meta.mode > 0)
+    assert (meta.mode != Mode())
     assert (meta.dev >= 0)
     assert (meta.ino >= 0)
     assert (meta.nlink >= 1)

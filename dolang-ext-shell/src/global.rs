@@ -29,7 +29,7 @@ use crate::{
         file::File,
         file_lock::FileLock,
         fs_metadata::FsMetadata,
-        metadata::Metadata,
+        metadata::{Metadata, Mode},
         path::{Path, UnixPath, WindowsPath},
         readdir::{DirEntry, DirEntryIter},
         stream::{StreamEntry, StreamIter},
@@ -41,8 +41,8 @@ use crate::{
     proc::Capture,
     program::Program,
     security::{
-        AccessMask, Ace, Acl, Identity, PosixAceObject, PosixAclObject, SecDesc, SecDescControl,
-        SecInfo, Sid, SidName, TokenGroup, TokenGroupAttributes, TokenInfo,
+        AccessMask, Ace, Acl, Identity, Permission, PosixAceObject, PosixAclObject, SecDesc,
+        SecDescControl, SecInfo, Sid, SidName, TokenGroup, TokenGroupAttributes, TokenInfo,
     },
     shell::{Stderr, Stdin, Stdout, Vfs},
     shell_args::ArgsData,
@@ -115,6 +115,8 @@ pub(crate) struct Types<'v> {
     pub(crate) sec_desc_control: Type<'v, Flags<SecDescControl>>,
     pub(crate) sec_info: Type<'v, Flags<SecInfo>>,
     pub(crate) token_group_attributes: Type<'v, Flags<TokenGroupAttributes>>,
+    pub(crate) mode: Type<'v, Flags<Mode>>,
+    pub(crate) permission: Type<'v, Flags<Permission>>,
 }
 
 pub(crate) struct Syms<'v> {
@@ -481,6 +483,8 @@ impl<'v> Global<'v> {
                 sec_desc_control: SecDescControl::register_type(builder),
                 sec_info: SecInfo::register_type(builder),
                 token_group_attributes: TokenGroupAttributes::register_type(builder),
+                mode: Mode::register_type(builder),
+                permission: Permission::register_type(builder),
             },
             syms: Syms {
                 any: builder.sym("ANY"),

@@ -1,16 +1,7 @@
 use serde::{Deserialize, Deserializer, Serialize, de};
 use std::{collections::HashSet, error, fmt};
 
-/// POSIX.1e ACL permissions.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PosixAclPermissions {
-    /// Permission to read.
-    pub read: bool,
-    /// Permission to write.
-    pub write: bool,
-    /// Permission to execute or search.
-    pub execute: bool,
-}
+use crate::metadata::Permission;
 
 /// The principal or class selected by a POSIX.1e ACL entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -35,7 +26,7 @@ pub struct PosixAce {
     /// Principal or class controlled by this entry.
     pub qualifier: PosixAclQualifier,
     /// Permissions granted by this entry.
-    pub permissions: PosixAclPermissions,
+    pub permissions: Permission,
 }
 
 /// A validated, portable POSIX.1e access-control list.
@@ -147,7 +138,7 @@ mod tests {
     fn ace(qualifier: PosixAclQualifier) -> PosixAce {
         PosixAce {
             qualifier,
-            permissions: PosixAclPermissions::default(),
+            permissions: Permission::empty(),
         }
     }
 

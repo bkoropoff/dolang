@@ -1,5 +1,5 @@
 use super::{Direct, DirectChild, DirectCommand};
-use crate::metadata::{FsMetadataFamily, Permissions, UnixFsMetadata, UnixFsMetadataPlatform};
+use crate::metadata::{FsMetadataFamily, Mode, UnixFsMetadata, UnixFsMetadataPlatform};
 #[cfg(target_os = "linux")]
 use crate::metadata::{MetadataFamily, UnixMetadata, UnixMetadataPlatform};
 #[cfg(any(target_os = "freebsd", target_os = "linux", target_os = "macos"))]
@@ -1718,8 +1718,7 @@ impl Direct {
                     .await?;
             }
             if let Some(mode) = patch.mode {
-                self.impl_set_permissions(path, Permissions::from_mode(mode))
-                    .await?;
+                self.impl_set_permissions(path, mode).await?;
             }
             if !patch.attrs.is_empty() {
                 self.impl_set_attrs(path, patch.attrs).await?;
@@ -1745,11 +1744,11 @@ impl Direct {
     pub(super) async fn impl_set_permissions(
         &self,
         path: &Path,
-        perm: Permissions,
+        mode: Mode,
     ) -> Result<(), io::Error> {
         use std::os::unix::fs::PermissionsExt;
 
-        fs::set_permissions(path, std::fs::Permissions::from_mode(perm.mode())).await
+        fs::set_permissions(path, std::fs::Permissions::from_mode(mode.bits())).await
     }
 
     async fn impl_set_file_times(

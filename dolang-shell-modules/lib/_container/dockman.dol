@@ -1010,12 +1010,13 @@ pub class Builder
         target
 
   def copy_to_target self target chmod copy_data
+    let mode = _vfs.parse_mode $chmod
     self.#agent.with do
       target.parent.create_dir all: true
       target.open wb do |dest|
         copy_data $dest
-      if (chmod != nil)
-        target.set_metadata mode: $chmod
+      if (mode != nil)
+        target.set_metadata mode: $mode
 
   def add_file self path target chmod
     path.open rb do |src|

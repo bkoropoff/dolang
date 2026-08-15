@@ -129,7 +129,7 @@ pub def with image func :cd = nil :env = {} :pull = :MISSING:
 # - `content: <Str | bin>`: content to write directly to `target`
 # - `target: <path | Str>`: target path; if a directory, source file
 #    name will be appended for `source`, but not for `content`
-# - `chmod: mode`: permissions
+# - `chmod: <Int | fs.unix.Mode>`: permissions
 #
 # ### `commit: msg`
 # 

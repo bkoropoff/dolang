@@ -1,4 +1,4 @@
-import digest fs http json proc progress security shell std sys tar zip
+import _vfs digest fs http json proc progress security shell std sys tar zip
   fs:
     - Path
     - with_temp_dir
@@ -426,7 +426,7 @@ def filesystem_metadata path kind options
     catch sys.NotFoundError: _
       nil
   return $
-    mode: (options.get(mode_key) || (unix && (metadata.mode & 0o7777)) || default_mode)
+    mode: (_vfs.parse_mode(options.get(mode_key)) || (unix && (metadata.mode.int & 0o7777)) || default_mode)
     uid: (options.get(:uid:) || (unix && metadata.uid) || 0)
     gid: (options.get(:gid:) || (unix && metadata.gid) || 0)
     mtime: (options.get(:mtime:) || metadata.modified || DateTime.from_unix(0))

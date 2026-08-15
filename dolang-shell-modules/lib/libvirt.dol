@@ -1,4 +1,4 @@
-import base64 digest json proc progress rand shell shlex ssh std sys time transfer xdg xml yaml
+import _vfs base64 digest json proc progress rand shell shlex ssh std sys time transfer xdg xml yaml
   fs:
     - Path
     - with_temp_dir
@@ -791,15 +791,14 @@ def resolved_add_content spec app
   let resolved = resolve_source $source $app nil
   resolved.open rb do |file| file.read()
 
-# `chmod:` is always an `Int` mode, whichever `add:` it appears in.
+# `chmod:` accepts an `Int` mode or a `fs.unix.Mode`, normalized to a
+# plain `Int` here, whichever `add:` it appears in.
 #
 # cloud-init's `write_files` wants `permissions` as an octal string, but that is
 # its serialization detail, not a second calling convention: `parse_add_spec`
 # renders the int with `Int.octal()` instead.
 def require_chmod chmod
-  if (chmod != nil && !(type chmod Int))
-    throw std.TypeError "add chmod: expected Int"
-  chmod
+  _vfs.parse_mode $chmod
 
 # Validates a top-level `add:` entry (`target`, `source:`|`content:`,
 # `chmod:`, mirroring `dockman`'s own `add:` build step). No VFS access —
@@ -832,7 +831,7 @@ def validate_add_spec spec
 # the guest's VFS to write the destination.
 def perform_add domain spec app
   let target = spec.get :target:
-  let chmod = spec.get :chmod:
+  let chmod = require_chmod (spec.get :chmod:)
   let source = spec.get :source:
   if (source != nil)
     let resolved = resolve_source $source $app nil

@@ -5,7 +5,7 @@ use dolang_vfs::{
     client::Client,
     direct::Direct,
     file::AccessFlags,
-    metadata::{FileType, MetadataPatch},
+    metadata::{FileType, MetadataPatch, Mode},
     security::{OwnershipIdentity, SecurityInfo},
     target::TargetInfo,
 };
@@ -566,7 +566,7 @@ async fn file_metadata() {
     assert_eq!(metadata.len, 11);
     assert_eq!(metadata.file_type, FileType::File);
     let unix = metadata.unix().unwrap();
-    assert!(unix.mode != 0);
+    assert!(!unix.mode.is_empty());
     assert!(unix.ino != 0);
     assert!(unix.nlink > 0);
 
@@ -589,8 +589,7 @@ async fn dir_metadata() {
 
     assert_eq!(metadata.file_type, FileType::Dir);
     let unix = metadata.unix().unwrap();
-    assert!(unix.mode != 0);
-    assert!(unix.mode != 0);
+    assert!(!unix.mode.is_empty());
 
     server_task.abort();
     let _ = server_task.await;
@@ -671,7 +670,7 @@ async fn set_metadata_by_numeric_id() {
         .set_metadata(
             &[typed(&test_file).to_path_buf()],
             MetadataPatch {
-                mode: Some(0o600),
+                mode: Some(Mode::from_bits_retain(0o600)),
                 user: Some(OwnershipIdentity::Id(getuid().as_raw())),
                 group: Some(OwnershipIdentity::Id(getgid().as_raw())),
                 ..MetadataPatch::default()
@@ -684,7 +683,7 @@ async fn set_metadata_by_numeric_id() {
     let unix = metadata.unix().unwrap();
     assert_eq!(unix.uid, getuid().as_raw());
     assert_eq!(unix.gid, getgid().as_raw());
-    assert_eq!(unix.mode & 0o777, 0o600);
+    assert_eq!(unix.mode.bits() & 0o777, 0o600);
 
     server_task.abort();
     let _ = server_task.await;

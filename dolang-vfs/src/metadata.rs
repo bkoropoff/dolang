@@ -26,36 +26,61 @@ pub enum FileType {
     Unknown,
 }
 
-/// Portable Unix-style permission bits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Permissions {
-    mode: u32,
+bitflags::bitflags! {
+    /// Unix read/write/execute permission bits, as granted by one class of a
+    /// [`Mode`] or one entry of a POSIX ACL.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    pub struct Permission: u8 {
+        const READ = 0o4;
+        const WRITE = 0o2;
+        const EXECUTE = 0o1;
+    }
 }
 
-impl Permissions {
-    /// Creates permissions from Unix-style mode bits.
-    pub fn from_mode(mode: u32) -> Self {
-        Self { mode }
+bitflags::bitflags! {
+    /// Portable Unix-style mode bits: permissions, the setuid/setgid/sticky
+    /// bits, and the `S_IFMT` file-type nibble.
+    ///
+    /// The file-type bits are retained for inspection/round-tripping but are
+    /// not decoded structurally here -- [`FileType`] is the source of truth
+    /// for a filesystem object's kind, since the type nibble is fragile and
+    /// platform-dependent.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    pub struct Mode: u32 {
+        const SET_UID = 0o4000;
+        const SET_GID = 0o2000;
+        const STICKY = 0o1000;
+        const OWNER_READ = 0o400;
+        const OWNER_WRITE = 0o200;
+        const OWNER_EXECUTE = 0o100;
+        const GROUP_READ = 0o40;
+        const GROUP_WRITE = 0o20;
+        const GROUP_EXECUTE = 0o10;
+        const OTHER_READ = 0o4;
+        const OTHER_WRITE = 0o2;
+        const OTHER_EXECUTE = 0o1;
+        const IFIFO = 0o010000;
+        const IFCHR = 0o020000;
+        const IFDIR = 0o040000;
+        const IFBLK = 0o060000;
+        const IFREG = 0o100000;
+        const IFLNK = 0o120000;
+        const IFSOCK = 0o140000;
     }
-    /// Returns the Unix-style mode bits.
-    pub fn mode(&self) -> u32 {
-        self.mode
+}
+
+impl Mode {
+    /// Projects the owning user's read/write/execute bits.
+    pub fn owner(self) -> Permission {
+        Permission::from_bits_truncate((self.bits() >> 6) as u8 & 0o7)
     }
-    /// Replaces the Unix-style mode bits.
-    pub fn set_mode(&mut self, mode: u32) {
-        self.mode = mode;
+    /// Projects the owning group's read/write/execute bits.
+    pub fn group(self) -> Permission {
+        Permission::from_bits_truncate((self.bits() >> 3) as u8 & 0o7)
     }
-    /// Returns whether no write permission bit is set.
-    pub fn readonly(&self) -> bool {
-        self.mode & 0o222 == 0
-    }
-    /// Sets or clears the read-only state.
-    pub fn set_readonly(&mut self, readonly: bool) {
-        if readonly {
-            self.mode &= !0o222;
-        } else {
-            self.mode |= 0o200;
-        }
+    /// Projects other users' read/write/execute bits.
+    pub fn other(self) -> Permission {
+        Permission::from_bits_truncate(self.bits() as u8 & 0o7)
     }
 }
 
@@ -95,7 +120,7 @@ pub enum MetadataFamily {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnixMetadata {
     /// File mode bits.
-    pub mode: u32,
+    pub mode: Mode,
     /// Device ID containing the file.
     pub dev: u64,
     /// File inode number.
@@ -124,7 +149,6 @@ pub enum UnixMetadataPlatform {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowsMetadata {
-    pub mode: u32,
     pub attrs: u32,
     pub user: Option<Sid>,
     pub group: Option<Sid>,
@@ -144,12 +168,6 @@ impl Metadata {
         } else {
             None
         }
-    }
-    pub fn permissions(&self) -> Permissions {
-        Permissions::from_mode(match &self.family {
-            MetadataFamily::Unix(metadata) => metadata.mode,
-            MetadataFamily::Windows(metadata) => metadata.mode,
-        })
     }
     pub const fn linux_attrs(&self) -> Option<u32> {
         match &self.family {
@@ -377,7 +395,7 @@ impl AttrsPatch {
 /// Requested changes to a filesystem object's metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataPatch {
-    pub mode: Option<u32>,
+    pub mode: Option<Mode>,
     pub user: Option<OwnershipIdentity>,
     pub group: Option<OwnershipIdentity>,
     pub accessed: Option<i128>,
@@ -442,7 +460,7 @@ pub(crate) fn metadata_from_std(metadata: std::fs::Metadata) -> Metadata {
             ctime: metadata.ctime(),
             ctime_nsec: metadata.ctime_nsec(),
             family: MetadataFamily::Unix(UnixMetadata {
-                mode,
+                mode: Mode::from_bits_retain(mode),
                 dev: metadata.dev(),
                 ino: metadata.ino(),
                 nlink: metadata.nlink(),
@@ -486,11 +504,6 @@ pub(crate) fn metadata_from_std(metadata: std::fs::Metadata) -> Metadata {
             ctime: system_time_to_parts(metadata.created().ok()).0,
             ctime_nsec: i64::from(system_time_to_parts(metadata.created().ok()).1),
             family: MetadataFamily::Windows(WindowsMetadata {
-                mode: if metadata.permissions().readonly() {
-                    0o444
-                } else {
-                    0o666
-                },
                 attrs: metadata.file_attributes(),
                 user: None,
                 group: None,
