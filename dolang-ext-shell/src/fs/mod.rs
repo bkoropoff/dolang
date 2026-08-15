@@ -11,10 +11,7 @@ use dolang_vfs::{
     path::WellKnownPath,
     security::PosixAcl,
 };
-use dolang_winterop::security::{
-    DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
-    SACL_SECURITY_INFORMATION, SecDesc,
-};
+use dolang_winterop::security::{SecDesc, SecInfo};
 use std::{
     future::poll_fn,
     io::{self, ErrorKind},
@@ -59,7 +56,7 @@ fn sec_desc_mask<'v, 's>(
     group: Option<Slot<'v, '_>>,
     dacl: Option<Slot<'v, '_>>,
     sacl: Option<Slot<'v, '_>>,
-) -> Result<'v, 's, u32> {
+) -> Result<'v, 's, SecInfo> {
     fn selected<'v, 's>(
         strand: &mut Strand<'v, 's>,
         value: Option<Slot<'v, '_>>,
@@ -70,18 +67,18 @@ fn sec_desc_mask<'v, 's>(
             .transpose()
             .map(|value| value.unwrap_or(default))
     }
-    let mut mask = 0;
+    let mut mask = SecInfo::empty();
     if selected(strand, owner, true)? {
-        mask |= OWNER_SECURITY_INFORMATION;
+        mask |= SecInfo::OWNER;
     }
     if selected(strand, group, true)? {
-        mask |= GROUP_SECURITY_INFORMATION;
+        mask |= SecInfo::GROUP;
     }
     if selected(strand, dacl, true)? {
-        mask |= DACL_SECURITY_INFORMATION;
+        mask |= SecInfo::DACL;
     }
     if selected(strand, sacl, false)? {
-        mask |= SACL_SECURITY_INFORMATION;
+        mask |= SecInfo::SACL;
     }
     Ok(mask)
 }
@@ -90,7 +87,7 @@ async fn sec_desc<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
     path: Utf8TypedPath<'_>,
-    mask: u32,
+    mask: SecInfo,
     follow: bool,
     mut out: Slot<'v, '_>,
 ) -> Result<'v, 's, ()> {

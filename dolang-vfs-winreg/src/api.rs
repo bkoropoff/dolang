@@ -365,7 +365,7 @@ impl Key {
             .vfs
             .call_extension::<WinRegExt>(WinRegRequest::GetSecDesc {
                 key: self.handle.cite()?,
-                mask,
+                mask: dolang_winterop::security::SecInfo::from_bits_retain(mask),
             })
             .await??;
         match response {

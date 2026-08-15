@@ -10,7 +10,8 @@
 
 use dolang_vfs::error::Error;
 use dolang_vfs::extension::{ExtCite, ExtContext, ExtGift, VfsExtension};
-use dolang_winterop::security::SecDesc;
+use dolang_winterop::security::AccessMask;
+use dolang_winterop::security::{SecDesc, SecInfo};
 use serde::{Deserialize, Serialize};
 
 #[cfg(windows)]
@@ -29,44 +30,60 @@ pub(crate) struct ServiceMarker;
 /// desired-access bits, so no `windows-sys` dependency is needed here — this
 /// type stays portable so it still compiles on non-Windows hosts running
 /// only the stub backend.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ServiceAccess(pub u32);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ServiceAccess(pub AccessMask);
 
 impl ServiceAccess {
     // SC manager rights
-    pub const SC_MANAGER_CONNECT: ServiceAccess = ServiceAccess(0x0001);
-    pub const SC_MANAGER_CREATE_SERVICE: ServiceAccess = ServiceAccess(0x0002);
-    pub const SC_MANAGER_ENUMERATE_SERVICE: ServiceAccess = ServiceAccess(0x0004);
-    pub const SC_MANAGER_LOCK: ServiceAccess = ServiceAccess(0x0008);
-    pub const SC_MANAGER_QUERY_LOCK_STATUS: ServiceAccess = ServiceAccess(0x0010);
-    pub const SC_MANAGER_MODIFY_BOOT_CONFIG: ServiceAccess = ServiceAccess(0x0020);
-    pub const SC_MANAGER_ALL_ACCESS: ServiceAccess = ServiceAccess(0x000F_003F);
+    pub const SC_MANAGER_CONNECT: ServiceAccess =
+        ServiceAccess(AccessMask::from_bits_retain(0x0001));
+    pub const SC_MANAGER_CREATE_SERVICE: ServiceAccess =
+        ServiceAccess(AccessMask::from_bits_retain(0x0002));
+    pub const SC_MANAGER_ENUMERATE_SERVICE: ServiceAccess =
+        ServiceAccess(AccessMask::from_bits_retain(0x0004));
+    pub const SC_MANAGER_LOCK: ServiceAccess = ServiceAccess(AccessMask::from_bits_retain(0x0008));
+    pub const SC_MANAGER_QUERY_LOCK_STATUS: ServiceAccess =
+        ServiceAccess(AccessMask::from_bits_retain(0x0010));
+    pub const SC_MANAGER_MODIFY_BOOT_CONFIG: ServiceAccess =
+        ServiceAccess(AccessMask::from_bits_retain(0x0020));
+    pub const SC_MANAGER_ALL_ACCESS: ServiceAccess =
+        ServiceAccess(AccessMask::from_bits_retain(0x000F_003F));
 
     // Service rights
-    pub const SERVICE_QUERY_CONFIG: ServiceAccess = ServiceAccess(0x0001);
-    pub const SERVICE_CHANGE_CONFIG: ServiceAccess = ServiceAccess(0x0002);
-    pub const SERVICE_QUERY_STATUS: ServiceAccess = ServiceAccess(0x0004);
-    pub const SERVICE_ENUMERATE_DEPENDENTS: ServiceAccess = ServiceAccess(0x0008);
-    pub const SERVICE_START: ServiceAccess = ServiceAccess(0x0010);
-    pub const SERVICE_STOP: ServiceAccess = ServiceAccess(0x0020);
-    pub const SERVICE_PAUSE_CONTINUE: ServiceAccess = ServiceAccess(0x0040);
-    pub const SERVICE_INTERROGATE: ServiceAccess = ServiceAccess(0x0080);
-    pub const SERVICE_USER_DEFINED_CONTROL: ServiceAccess = ServiceAccess(0x0100);
-    pub const SERVICE_ALL_ACCESS: ServiceAccess = ServiceAccess(0x000F_01FF);
+    pub const SERVICE_QUERY_CONFIG: ServiceAccess =
+        ServiceAccess(AccessMask::from_bits_retain(0x0001));
+    pub const SERVICE_CHANGE_CONFIG: ServiceAccess =
+        ServiceAccess(AccessMask::from_bits_retain(0x0002));
+    pub const SERVICE_QUERY_STATUS: ServiceAccess =
+        ServiceAccess(AccessMask::from_bits_retain(0x0004));
+    pub const SERVICE_ENUMERATE_DEPENDENTS: ServiceAccess =
+        ServiceAccess(AccessMask::from_bits_retain(0x0008));
+    pub const SERVICE_START: ServiceAccess = ServiceAccess(AccessMask::from_bits_retain(0x0010));
+    pub const SERVICE_STOP: ServiceAccess = ServiceAccess(AccessMask::from_bits_retain(0x0020));
+    pub const SERVICE_PAUSE_CONTINUE: ServiceAccess =
+        ServiceAccess(AccessMask::from_bits_retain(0x0040));
+    pub const SERVICE_INTERROGATE: ServiceAccess =
+        ServiceAccess(AccessMask::from_bits_retain(0x0080));
+    pub const SERVICE_USER_DEFINED_CONTROL: ServiceAccess =
+        ServiceAccess(AccessMask::from_bits_retain(0x0100));
+    pub const SERVICE_ALL_ACCESS: ServiceAccess =
+        ServiceAccess(AccessMask::from_bits_retain(0x000F_01FF));
 
     // Generic object rights, shared by both SC manager and service handles
     // (needed for `sec_desc`/`set_sec_desc`, same as
     // `dolang-vfs-winreg::Access`'s equivalents).
-    pub const READ_CONTROL: ServiceAccess = ServiceAccess(0x0002_0000);
-    pub const WRITE_DAC: ServiceAccess = ServiceAccess(0x0004_0000);
-    pub const WRITE_OWNER: ServiceAccess = ServiceAccess(0x0008_0000);
-    pub const ACCESS_SYSTEM_SECURITY: ServiceAccess = ServiceAccess(0x0100_0000);
+    pub const READ_CONTROL: ServiceAccess =
+        ServiceAccess(AccessMask::from_bits_retain(0x0002_0000));
+    pub const WRITE_DAC: ServiceAccess = ServiceAccess(AccessMask::from_bits_retain(0x0004_0000));
+    pub const WRITE_OWNER: ServiceAccess = ServiceAccess(AccessMask::from_bits_retain(0x0008_0000));
+    pub const ACCESS_SYSTEM_SECURITY: ServiceAccess =
+        ServiceAccess(AccessMask::from_bits_retain(0x0100_0000));
 }
 
 impl std::ops::BitOr for ServiceAccess {
     type Output = ServiceAccess;
     fn bitor(self, rhs: ServiceAccess) -> ServiceAccess {
-        ServiceAccess(self.0 | rhs.0)
+        ServiceAccess(self.0.union(rhs.0))
     }
 }
 
@@ -347,7 +364,7 @@ pub(crate) enum WinScmRequest {
     },
     GetSecDesc {
         service: ExtCite<ServiceMarker>,
-        mask: u32,
+        mask: SecInfo,
     },
     SetSecDesc {
         service: ExtCite<ServiceMarker>,

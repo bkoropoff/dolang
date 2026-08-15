@@ -26,6 +26,30 @@ Constructs a mask from symbols or one iterable of symbols.
 | `:GENERIC_EXECUTE:`          | Request object-specific execute access           |
 | `:GENERIC_ALL:`              | Request all object-specific access               |
 
+## Class Methods
+
+### `from_int value`
+
+Constructs a mask from a native integer while preserving unknown bits.
+
+## Fields
+
+### `int`
+
+Returns the native integer mask.
+
+### `specific_rights`
+
+Returns the object-specific low 16 bits.
+
+### `standard_rights`
+
+Returns the standard-rights portion as an `AccessMask`.
+
+### `generic_rights`
+
+Returns the generic-rights portion as an `AccessMask`.
+
 ## Methods
 
 ### `contains right`

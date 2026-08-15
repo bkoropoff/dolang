@@ -9,10 +9,7 @@ use dolang::runtime::{
 };
 use dolang_ext_shell::{ErrorExt, ResultExt};
 use dolang_vfs_winreg::{PredefinedRoot, View};
-use dolang_winterop::security::{
-    DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
-    SACL_SECURITY_INFORMATION,
-};
+use dolang_winterop::security::SecInfo;
 
 use crate::{
     access_mask::AccessMask,
@@ -161,16 +158,16 @@ fn sec_desc_mask<'v, 's>(
     }
     let mut mask = 0;
     if selected(strand, owner, true)? {
-        mask |= OWNER_SECURITY_INFORMATION;
+        mask |= SecInfo::OWNER.bits();
     }
     if selected(strand, group, true)? {
-        mask |= GROUP_SECURITY_INFORMATION;
+        mask |= SecInfo::GROUP.bits();
     }
     if selected(strand, dacl, true)? {
-        mask |= DACL_SECURITY_INFORMATION;
+        mask |= SecInfo::DACL.bits();
     }
     if selected(strand, sacl, false)? {
-        mask |= SACL_SECURITY_INFORMATION;
+        mask |= SecInfo::SACL.bits();
     }
     Ok(mask)
 }

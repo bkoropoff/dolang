@@ -8,7 +8,7 @@ use std::{
 
 use dolang::runtime::{
     Sym, Type,
-    object::{FlagLike, Flags},
+    object::{FlagLikeExt, Flags},
     strand::{LocalKey, LocalRootKey},
     value::TypeObject,
     vm::{Builder, Stateful},
@@ -41,8 +41,8 @@ use crate::{
     proc::Capture,
     program::Program,
     security::{
-        AccessMask, Ace, Acl, Guid, Identity, PosixAceObject, PosixAclObject, SecDesc, Sid,
-        SidName, TokenGroup, TokenInfo,
+        AccessMask, Ace, Acl, Guid, Identity, PosixAceObject, PosixAclObject, SecDesc,
+        SecDescControl, SecInfo, Sid, SidName, TokenGroup, TokenGroupAttributes, TokenInfo,
     },
     shell::{Stderr, Stdin, Stdout, Vfs},
     shell_args::ArgsData,
@@ -113,6 +113,9 @@ pub(crate) struct Types<'v> {
     pub(crate) text: Type<'v, Text>,
     pub(crate) style: Type<'v, StyleObject>,
     pub(crate) access_mask: Type<'v, Flags<AccessMask>>,
+    pub(crate) sec_desc_control: Type<'v, Flags<SecDescControl>>,
+    pub(crate) sec_info: Type<'v, Flags<SecInfo>>,
+    pub(crate) token_group_attributes: Type<'v, Flags<TokenGroupAttributes>>,
 }
 
 pub(crate) struct Syms<'v> {
@@ -477,6 +480,9 @@ impl<'v> Global<'v> {
                 text: builder.register_type(),
                 style: builder.register_type(),
                 access_mask: AccessMask::register_type(builder),
+                sec_desc_control: SecDescControl::register_type(builder),
+                sec_info: SecInfo::register_type(builder),
+                token_group_attributes: TokenGroupAttributes::register_type(builder),
             },
             syms: Syms {
                 any: builder.sym("ANY"),

@@ -13,9 +13,7 @@ use dolang_vfs::{
     metadata::{FileType, MetadataPatch},
 };
 #[cfg(windows)]
-use dolang_winterop::security::{
-    DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
-};
+use dolang_winterop::security::SecInfo;
 use tempfile::tempdir;
 use typed_path::{Utf8TypedPath, Utf8UnixPath, Utf8WindowsPath};
 
@@ -764,7 +762,7 @@ async fn direct_security_descriptor_path_and_file() {
     let path = dir.path().join("security.txt");
     tokio::fs::write(&path, "hello").await.unwrap();
 
-    let mask = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+    let mask = SecInfo::OWNER | SecInfo::GROUP | SecInfo::DACL;
     let descriptor = direct.sec_desc(typed(&path), mask, true).await.unwrap();
     assert_eq!(descriptor.mask(), mask);
     assert!(descriptor.owner_loaded());
@@ -773,13 +771,13 @@ async fn direct_security_descriptor_path_and_file() {
     assert!(descriptor.dacl_loaded());
 
     let dacl = direct
-        .sec_desc(typed(&path), DACL_SECURITY_INFORMATION, true)
+        .sec_desc(typed(&path), SecInfo::DACL, true)
         .await
         .unwrap();
     match direct.set_sec_desc(typed(&path), &dacl, true).await {
         Ok(()) => {
             let round_trip = direct
-                .sec_desc(typed(&path), DACL_SECURITY_INFORMATION, true)
+                .sec_desc(typed(&path), SecInfo::DACL, true)
                 .await
                 .unwrap();
             assert_eq!(round_trip.dacl(), dacl.dacl());
@@ -793,7 +791,7 @@ async fn direct_security_descriptor_path_and_file() {
         .open(typed(&path))
         .await
         .unwrap();
-    let file_descriptor = file.sec_desc(OWNER_SECURITY_INFORMATION).await.unwrap();
+    let file_descriptor = file.sec_desc(SecInfo::OWNER).await.unwrap();
     assert!(file_descriptor.owner().is_some());
 }
 
@@ -805,7 +803,14 @@ async fn direct_security_descriptors_are_unsupported() {
     let path = dir.path().join("security.txt");
     tokio::fs::write(&path, "hello").await.unwrap();
 
-    let error = direct.sec_desc(typed(&path), 0, true).await.unwrap_err();
+    let error = direct
+        .sec_desc(
+            typed(&path),
+            dolang_winterop::security::SecInfo::empty(),
+            true,
+        )
+        .await
+        .unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
 }
 

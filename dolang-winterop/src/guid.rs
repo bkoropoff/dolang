@@ -1,4 +1,4 @@
-//! Windows globally unique identifiers (GUIDs).
+//! Globally unique identifiers (GUIDs).
 
 use std::{error, fmt, str::FromStr};
 
@@ -64,7 +64,7 @@ impl Guid {
     }
 
     /// Returns the native 16-byte Windows GUID representation.
-    pub const fn to_bytes(self) -> [u8; 16] {
+    pub const fn into_bytes(self) -> [u8; 16] {
         self.0
     }
 }
@@ -189,7 +189,7 @@ mod tests {
             guid
         );
         assert_eq!(
-            guid.to_bytes(),
+            guid.into_bytes(),
             [
                 0x33, 0x22, 0x11, 0x00, 0x55, 0x44, 0x77, 0x66, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
                 0xee, 0xff,

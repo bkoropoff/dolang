@@ -11,6 +11,7 @@ import sys std agent
     - set_sec_desc
   security.windows:
     - SecDesc
+    - SecInfo
 
 #[agent.test]
 def query_security_descriptors()
@@ -21,9 +22,9 @@ def query_security_descriptors()
   if (sys.os_info().family == :WINDOWS:)
     let descriptor = path.sec_desc()
     assert_type $SecDesc $descriptor
-    assert_eq $descriptor.mask 7
+    assert_eq $descriptor.mask (SecInfo :OWNER: :GROUP: :DACL:)
     let shallow = path.sec_desc owner: false group: false dacl: false
-    assert_eq $shallow.mask 0
+    assert_eq $shallow.mask (SecInfo())
     assert_type $SecDesc (sec_desc "test_sec_desc.txt")
     set_sec_desc test_sec_desc.txt $shallow
     open $path r do |file|

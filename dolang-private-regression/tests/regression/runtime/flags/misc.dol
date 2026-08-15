@@ -31,6 +31,10 @@ let rw_seq = TestFlags([:READ:, :WRITE:])
 assert_eq $rw $rw_seq
 
 let exec = TestFlags(:EXEC:)
+assert_eq $exec.int 4
+assert $exec.is_exec()
+assert (!(r.is_exec()))
+assert_eq (TestFlags.from_int 4) $exec
 let all = (rw | exec)
 assert_eq [...all] [:READ:, :WRITE:, :EXEC:]
 

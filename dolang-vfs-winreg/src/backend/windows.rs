@@ -15,10 +15,7 @@ use dolang_vfs::{
     error::{Error, ErrorKind},
     target::OperatingSystem,
 };
-use dolang_winterop::security::{
-    ALL_SECURITY_INFORMATION, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
-    SACL_SECURITY_INFORMATION, SecDesc as VfsSecDesc,
-};
+use dolang_winterop::security::{AccessMask, SecDesc as VfsSecDesc, SecDescControl, SecInfo};
 use windows_sys::Win32::{
     Foundation::{
         ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER,
@@ -90,7 +87,7 @@ fn sam(view: View, access: Access) -> u32 {
         View::Wow32 => KEY_WOW64_32KEY,
         View::Wow64 => KEY_WOW64_64KEY,
     };
-    access.0 | view
+    access.0.bits() | view
 }
 
 fn view_sam(view: View) -> u32 {
@@ -123,7 +120,7 @@ fn open_key(parent: HKEY, subpath: &str, view: View, access: Access) -> Result<H
         }
         Ok(out)
     };
-    let result = if access.0 & ACCESS_SYSTEM_SECURITY != 0 {
+    let result = if access.0.bits() & ACCESS_SYSTEM_SECURITY != 0 {
         dolang_winterop::security::with_security_privilege(open)
     } else {
         open()
@@ -155,7 +152,7 @@ fn create_key(parent: HKEY, subpath: &str, view: View, access: Access) -> Result
         }
         Ok(out)
     };
-    let result = if access.0 & ACCESS_SYSTEM_SECURITY != 0 {
+    let result = if access.0.bits() & ACCESS_SYSTEM_SECURITY != 0 {
         dolang_winterop::security::with_security_privilege(create)
     } else {
         create()
@@ -176,7 +173,9 @@ fn delete_key(parent: HKEY, subpath: &str, view: View, all: bool) -> Result<(), 
             parent,
             subpath,
             view,
-            Access(DELETE_ACCESS | KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_ENUMERATE_SUB_KEYS),
+            Access(AccessMask::from_bits_retain(
+                DELETE_ACCESS | KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_ENUMERATE_SUB_KEYS,
+            )),
         )?;
         // SAFETY: `target` is a live key handle and a null subkey asks
         // RegDeleteTreeW to clear its values and descendants without deleting
@@ -438,10 +437,10 @@ fn from_io(operation: &str, err: io::Error) -> Error {
 /// directly on the `HKEY` and returns the same native self-relative byte
 /// blob `SecDesc::from_bytes_with_mask` already parses — no owner/group/
 /// dacl/sacl pointer decomposition needed.
-fn sec_desc(handle: HKEY, mask: u32) -> Result<VfsSecDesc, Error> {
-    let mask = mask & ALL_SECURITY_INFORMATION;
-    let query_mask = if mask == 0 {
-        OWNER_SECURITY_INFORMATION
+fn sec_desc(handle: HKEY, mask: SecInfo) -> Result<VfsSecDesc, Error> {
+    let mask = mask & SecInfo::ALL;
+    let query_mask = if mask.is_empty() {
+        SecInfo::OWNER
     } else {
         mask
     };
@@ -449,8 +448,14 @@ fn sec_desc(handle: HKEY, mask: u32) -> Result<VfsSecDesc, Error> {
     loop {
         let mut len = bytes.len() as u32;
         // SAFETY: `bytes`/`len` describe a live, correctly-sized buffer.
-        let status =
-            unsafe { RegGetKeySecurity(handle, query_mask, bytes.as_mut_ptr().cast(), &mut len) };
+        let status = unsafe {
+            RegGetKeySecurity(
+                handle,
+                query_mask.bits(),
+                bytes.as_mut_ptr().cast(),
+                &mut len,
+            )
+        };
         match status {
             ERROR_SUCCESS => {
                 bytes.truncate(len as usize);
@@ -470,19 +475,25 @@ fn sec_desc(handle: HKEY, mask: u32) -> Result<VfsSecDesc, Error> {
 /// native self-relative byte blob `SecDesc::to_bytes` produces straight
 /// through.
 fn set_sec_desc(handle: HKEY, descriptor: &VfsSecDesc) -> Result<(), Error> {
-    let mut mask = descriptor.mask() & ALL_SECURITY_INFORMATION;
+    let mut mask = (descriptor.mask() & SecInfo::ALL).bits();
     if mask == 0 {
         return Ok(());
     }
-    if mask & DACL_SECURITY_INFORMATION != 0 {
-        mask |= if descriptor.dacl_protected() {
+    if mask & SecInfo::DACL.bits() != 0 {
+        mask |= if descriptor
+            .control()
+            .contains(SecDescControl::DACL_PROTECTED)
+        {
             PROTECTED_DACL_SECURITY_INFORMATION
         } else {
             UNPROTECTED_DACL_SECURITY_INFORMATION
         };
     }
-    if mask & SACL_SECURITY_INFORMATION != 0 {
-        mask |= if descriptor.sacl_protected() {
+    if mask & SecInfo::SACL.bits() != 0 {
+        mask |= if descriptor
+            .control()
+            .contains(SecDescControl::SACL_PROTECTED)
+        {
             PROTECTED_SACL_SECURITY_INFORMATION
         } else {
             UNPROTECTED_SACL_SECURITY_INFORMATION
@@ -499,7 +510,7 @@ fn set_sec_desc(handle: HKEY, descriptor: &VfsSecDesc) -> Result<(), Error> {
             Err(io::Error::from_raw_os_error(status as i32))
         }
     };
-    let result = if mask & SACL_SECURITY_INFORMATION != 0 {
+    let result = if mask & SecInfo::SACL.bits() != 0 {
         dolang_winterop::security::with_security_privilege(set)
     } else {
         set()
@@ -605,7 +616,7 @@ pub(crate) async fn handle(
             // was requested so a later SACL update remains on this backend,
             // whose token was used to open the handle and can enable the
             // privilege again for the update.
-            if handle == predefined || access.0 & ACCESS_SYSTEM_SECURITY != 0 {
+            if handle == predefined || access.0.bits() & ACCESS_SYSTEM_SECURITY != 0 {
                 Ok(WinRegResponse::Key(KeyHandle::Opaque(
                     ctx.register(Key::new(handle)),
                 )))
@@ -625,7 +636,7 @@ pub(crate) async fn handle(
             // was requested so a later SACL update remains on this backend,
             // whose token was used to open the handle and can enable the
             // privilege again for the update.
-            if access.0 & ACCESS_SYSTEM_SECURITY != 0 {
+            if access.0.bits() & ACCESS_SYSTEM_SECURITY != 0 {
                 Ok(WinRegResponse::Key(KeyHandle::Opaque(
                     ctx.register(Key::new(handle)),
                 )))
@@ -641,7 +652,7 @@ pub(crate) async fn handle(
         } => {
             let guard = ctx.acquire::<Key>(parent).map_err(invalid_handle)?;
             let handle = with_handle(guard, move |h| create_key(h, &subpath, view, access)).await?;
-            if access.0 & ACCESS_SYSTEM_SECURITY != 0 {
+            if access.0.bits() & ACCESS_SYSTEM_SECURITY != 0 {
                 Ok(WinRegResponse::Key(KeyHandle::Opaque(
                     ctx.register(Key::new(handle)),
                 )))

@@ -22,7 +22,23 @@ SID revision number.
 
 ### `identifier_authority`
 
-The 48-bit identifier authority as an integer.
+The identifier authority as a symbol when it is well known, or its 48-bit
+integer value otherwise.
+
+| Symbol               | Authority           |
+| -------------------- | ------------------- |
+| `:NULL:`             | Null                |
+| `:WORLD:`            | World               |
+| `:LOCAL:`            | Local               |
+| `:CREATOR:`          | Creator             |
+| `:NON_UNIQUE:`       | Non-unique          |
+| `:NT:`               | NT                  |
+| `:RESOURCE_MANAGER:` | Resource manager    |
+| `:APP_PACKAGE:`      | Application package |
+| `:MANDATORY_LABEL:`  | Mandatory label     |
+| `:SCOPED_POLICY:`    | Scoped policy ID    |
+| `:AUTHENTICATION:`   | Authentication      |
+| `:PROCESS_TRUST:`    | Process trust       |
 
 ### `sub_authority_count`
 

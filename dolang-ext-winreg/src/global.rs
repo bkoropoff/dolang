@@ -1,6 +1,6 @@
 use dolang::runtime::{
     Sym, Type,
-    object::{FlagLike, Flags},
+    object::{FlagLikeExt, Flags},
     vm::{Builder, Stateful},
 };
 

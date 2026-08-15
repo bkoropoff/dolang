@@ -1,6 +1,6 @@
 //! Ownership identities and POSIX access-control lists.
 
-use dolang_winterop::security::Sid;
+use dolang_winterop::security::{Sid, TokenGroupAttributes};
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use std::io;
@@ -65,7 +65,7 @@ pub struct TokenGroup {
     /// Group security identifier.
     pub sid: Sid,
     /// Native group attributes bitmask.
-    pub attributes: u32,
+    pub attributes: TokenGroupAttributes,
 }
 
 /// Classification returned by Windows account-name lookup.
@@ -194,10 +194,9 @@ fn current_group_ids(euid: nix::unistd::Uid, egid: nix::unistd::Gid) -> crate::R
 impl WindowsTokenInfo {
     /// Returns the logon SID identified by the token group attributes.
     pub fn logon_sid(&self) -> Option<&Sid> {
-        const SE_GROUP_LOGON_ID: u32 = 0xC000_0000;
         self.groups
             .iter()
-            .find(|group| group.attributes & SE_GROUP_LOGON_ID == SE_GROUP_LOGON_ID)
+            .find(|group| group.attributes.contains(TokenGroupAttributes::LOGON_ID))
             .map(|group| &group.sid)
     }
 }
@@ -292,7 +291,7 @@ impl WindowsTokenInfo {
             .map(|group| {
                 Ok(TokenGroup {
                     sid: unsafe { copy_sid(group.Sid) }?,
-                    attributes: group.Attributes,
+                    attributes: TokenGroupAttributes::from_bits_retain(group.Attributes),
                 })
             })
             .collect::<io::Result<Vec<_>>>()?;

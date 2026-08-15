@@ -30,20 +30,25 @@ import sys
   security.unix:
     - Identity
   security.windows:
+    - AccessMask
     - Ace
     - Acl
     - SecDesc
+    - SecDescControl
+    - SecInfo
     - Sid
     - SidName
     - TokenGroup
+    - TokenGroupAttributes
     - TokenInfo
 
 #[test]
 def sid_converts_between_structural_forms()
+  assert_eq [...TokenGroupAttributes()] []
   let sid = Sid S-1-5-32-544
   assert_type $Sid $sid
   assert_eq $sid.revision 1
-  assert_eq $sid.identifier_authority 5
+  assert_eq $sid.identifier_authority :NT:
   assert_eq $sid.sub_authority_count 2
   assert_type $Tuple $sid.sub_authorities
   assert_eq $sid.sub_authorities[0] 32
@@ -52,6 +57,8 @@ def sid_converts_between_structural_forms()
   let bytes = sid.to_bin()
   assert_type $Bin $bytes
   assert_eq (str(Sid(bytes))) S-1-5-32-544
+  let unknown = Sid S-1-0x010203040506-7
+  assert_eq $unknown.identifier_authority 1108152157446
 
 #[test]
 def security_descriptor_converts_self_relative_packets()
@@ -59,8 +66,10 @@ def security_descriptor_converts_self_relative_packets()
   let descriptor = SecDesc $packet
   assert_type $SecDesc $descriptor
   assert_eq $descriptor.revision 1
-  assert_eq $descriptor.mask 15
-  assert_eq $descriptor.control 20501
+  assert_type $SecInfo $descriptor.mask
+  assert_eq $descriptor.mask (SecInfo :ALL:)
+  assert_type $SecDescControl $descriptor.control
+  assert_eq $descriptor.control (SecDescControl :OWNER_DEFAULTED: :DACL_PRESENT: :SACL_PRESENT: :DACL_PROTECTED: :RM_CONTROL_VALID:)
   assert_eq $descriptor.rm_control_valid true
   assert_eq $descriptor.rm_control 90
   assert_eq (str descriptor.owner) S-1-5-18
@@ -99,7 +108,7 @@ def security_descriptor_exposes_acl_and_ace_views()
   let descriptor = SecDesc $packet
   let acl = descriptor.dacl
   assert_type $Acl $acl
-  assert_eq $acl.revision 2
+  assert_eq $acl.revision :BASIC:
   assert_eq $acl.size 88
   assert_eq $acl.ace_count 3
   assert_eq $acl.to_bin() $packet[20..]
@@ -113,7 +122,8 @@ def security_descriptor_exposes_acl_and_ace_views()
   assert_eq $allowed.type_code 0
   assert_eq $allowed.flags 19
   assert_eq $allowed.size 28
-  assert_eq $allowed.mask 305419896
+  assert_type $AccessMask $allowed.mask
+  assert_eq $allowed.mask.int 305419896
   assert_eq (str allowed.sid) S-1-5-32-544
   assert_eq $allowed.object_inherit true
   assert_eq $allowed.container_inherit true
@@ -124,7 +134,7 @@ def security_descriptor_exposes_acl_and_ace_views()
 
   let object = acl.aces[1]
   assert_eq $object.type :ACCESS_ALLOWED_CALLBACK_OBJECT:
-  assert_eq $object.mask 2427178479
+  assert_eq $object.mask.int 2427178479
   assert_eq $object.object_flags 1
   assert_type $Guid $object.object_type
   assert_eq (str object.object_type) 00112233-4455-6677-8899-aabbccddeeff
@@ -150,11 +160,15 @@ def security_descriptor_exposes_acl_and_ace_views()
 def constructs_aces_and_acls()
   let sid = Sid S-1-1-0
   let guid = Guid 00112233-4455-6677-8899-aabbccddeeff
-  let allowed = Ace.allow(sid, 305419896, flags: 3, application_data: b"\x01\x02\x03")
+  let raw_mask = AccessMask.from_int 305419896
+  assert_eq $raw_mask.specific_rights 22136
+  assert_type $AccessMask $raw_mask.standard_rights
+  assert_type $AccessMask $raw_mask.generic_rights
+  let allowed = Ace.allow(sid, raw_mask, flags: 3, application_data: b"\x01\x02\x03")
   assert_type $Ace $allowed
   assert_eq $allowed.type :ACCESS_ALLOWED:
   assert_eq $allowed.flags 3
-  assert_eq $allowed.mask 305419896
+  assert_eq $allowed.mask $raw_mask
   assert_eq $allowed.application_data b"\x01\x02\x03\x00"
 
   let denied = Ace.deny(sid, 1, object_type: guid, callback: true)
@@ -173,12 +187,12 @@ def constructs_aces_and_acls()
 
   let acl = Acl [allowed, denied, audited]
   assert_type $Acl $acl
-  assert_eq $acl.revision 4
+  assert_eq $acl.revision :DIRECTORY_SERVICE:
   assert_eq $acl.ace_count 3
   assert_eq $acl.aces[0].to_bin() $allowed.to_bin()
   assert_eq $acl.aces[1].to_bin() $denied.to_bin()
   assert_eq $acl.aces[2].to_bin() $audited.to_bin()
-  assert_throws $ValueError do Acl [denied] revision: 2
+  assert_throws $ValueError do Acl [denied] revision: :BASIC:
 
 #[test]
 def functionally_updates_security_descriptors()
@@ -303,7 +317,7 @@ def reports_security_information_for_target()
     for group = groups
       assert_type $TokenGroup $group
       assert_type $Sid $group.sid
-      assert_type $Int $group.attributes
+      assert_type $TokenGroupAttributes $group.attributes
       assert_type $Bool $group.mandatory
       assert_type $Bool $group.enabled_by_default
       assert_type $Bool $group.enabled

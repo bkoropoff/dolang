@@ -16,10 +16,7 @@ use dolang_vfs::{
 };
 use dolang_winterop::{
     apc::{Canceled, Context, Reactor},
-    security::{
-        ALL_SECURITY_INFORMATION, DACL_SECURITY_INFORMATION, SACL_SECURITY_INFORMATION,
-        SecDesc as VfsSecDesc, with_security_privilege,
-    },
+    security::{SecDesc as VfsSecDesc, SecDescControl, SecInfo, with_security_privilege},
 };
 use futures::channel::oneshot;
 use windows_sys::Win32::{
@@ -196,13 +193,13 @@ fn open_manager(access: ServiceAccess) -> Result<SC_HANDLE, Error> {
     let open = || {
         // SAFETY: both name pointers are null (local machine, default
         // database), which is documented as valid.
-        let handle = unsafe { OpenSCManagerW(ptr::null(), ptr::null(), access.0) };
+        let handle = unsafe { OpenSCManagerW(ptr::null(), ptr::null(), access.0.bits()) };
         if handle.is_null() {
             return Err(io::Error::last_os_error());
         }
         Ok(handle)
     };
-    let result = if access.0 & ServiceAccess::ACCESS_SYSTEM_SECURITY.0 != 0 {
+    let result = if access.0.intersects(ServiceAccess::ACCESS_SYSTEM_SECURITY.0) {
         with_security_privilege(open)
     } else {
         open()
@@ -214,13 +211,13 @@ fn open_service(manager: SC_HANDLE, name: &str, access: ServiceAccess) -> Result
     let name = wide(name);
     let open = || {
         // SAFETY: `name` is NUL-terminated; `manager` is a live SC manager handle.
-        let handle = unsafe { OpenServiceW(manager, name.as_ptr(), access.0) };
+        let handle = unsafe { OpenServiceW(manager, name.as_ptr(), access.0.bits()) };
         if handle.is_null() {
             return Err(io::Error::last_os_error());
         }
         Ok(handle)
     };
-    let result = if access.0 & ServiceAccess::ACCESS_SYSTEM_SECURITY.0 != 0 {
+    let result = if access.0.intersects(ServiceAccess::ACCESS_SYSTEM_SECURITY.0) {
         with_security_privilege(open)
     } else {
         open()
@@ -367,7 +364,7 @@ fn create_service(
                 manager,
                 name.as_ptr(),
                 optional_ptr(display_name.as_ref()),
-                access.0,
+                access.0.bits(),
                 service_type,
                 start_type,
                 error_control,
@@ -384,7 +381,7 @@ fn create_service(
         }
         Ok(handle)
     };
-    let result = if access.0 & ServiceAccess::ACCESS_SYSTEM_SECURITY.0 != 0 {
+    let result = if access.0.intersects(ServiceAccess::ACCESS_SYSTEM_SECURITY.0) {
         with_security_privilege(create)
     } else {
         create()
@@ -552,10 +549,10 @@ fn from_io(operation: &str, err: io::Error) -> Error {
 /// which (like `RegGetKeySecurity` in `dolang-vfs-winreg`) returns the same
 /// native self-relative byte blob `SecDesc::from_bytes_with_mask` already
 /// parses.
-fn sec_desc(handle: SC_HANDLE, mask: u32) -> Result<VfsSecDesc, Error> {
-    let mask = mask & ALL_SECURITY_INFORMATION;
-    let query_mask = if mask == 0 {
-        dolang_winterop::security::OWNER_SECURITY_INFORMATION
+fn sec_desc(handle: SC_HANDLE, mask: SecInfo) -> Result<VfsSecDesc, Error> {
+    let mask = mask & SecInfo::ALL;
+    let query_mask = if mask.is_empty() {
+        SecInfo::OWNER
     } else {
         mask
     };
@@ -566,7 +563,7 @@ fn sec_desc(handle: SC_HANDLE, mask: u32) -> Result<VfsSecDesc, Error> {
         let ok = unsafe {
             QueryServiceObjectSecurity(
                 handle,
-                query_mask,
+                query_mask.bits(),
                 bytes.as_mut_ptr().cast(),
                 bytes.len() as u32,
                 &mut needed,
@@ -591,19 +588,25 @@ fn sec_desc(handle: SC_HANDLE, mask: u32) -> Result<VfsSecDesc, Error> {
 /// passing the native self-relative byte blob `SecDesc::to_bytes` produces
 /// straight through — same shape as `dolang-vfs-winreg`'s `set_sec_desc`.
 fn set_sec_desc(handle: SC_HANDLE, descriptor: &VfsSecDesc) -> Result<(), Error> {
-    let mut mask = descriptor.mask() & ALL_SECURITY_INFORMATION;
+    let mut mask = (descriptor.mask() & SecInfo::ALL).bits();
     if mask == 0 {
         return Ok(());
     }
-    if mask & DACL_SECURITY_INFORMATION != 0 {
-        mask |= if descriptor.dacl_protected() {
+    if mask & SecInfo::DACL.bits() != 0 {
+        mask |= if descriptor
+            .control()
+            .contains(SecDescControl::DACL_PROTECTED)
+        {
             PROTECTED_DACL_SECURITY_INFORMATION
         } else {
             UNPROTECTED_DACL_SECURITY_INFORMATION
         };
     }
-    if mask & SACL_SECURITY_INFORMATION != 0 {
-        mask |= if descriptor.sacl_protected() {
+    if mask & SecInfo::SACL.bits() != 0 {
+        mask |= if descriptor
+            .control()
+            .contains(SecDescControl::SACL_PROTECTED)
+        {
             PROTECTED_SACL_SECURITY_INFORMATION
         } else {
             UNPROTECTED_SACL_SECURITY_INFORMATION
@@ -621,7 +624,7 @@ fn set_sec_desc(handle: SC_HANDLE, descriptor: &VfsSecDesc) -> Result<(), Error>
             Err(io::Error::last_os_error())
         }
     };
-    let result = if mask & SACL_SECURITY_INFORMATION != 0 {
+    let result = if mask & SecInfo::SACL.bits() != 0 {
         with_security_privilege(set)
     } else {
         set()

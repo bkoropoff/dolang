@@ -1543,7 +1543,7 @@ impl Connection {
         &self,
         context: &CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
-        mask: u32,
+        mask: dolang_winterop::security::SecInfo,
     ) -> ResponseKind {
         let result = async {
             let file = self.retained_file(context, file)?;

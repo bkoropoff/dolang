@@ -1,4 +1,4 @@
-//! Windows process command-line argument encoding and parsing.
+//! Process command-line argument encoding and parsing.
 //!
 //! Windows process creation receives one command-line string, not an argv
 //! array. [`join_arguments`] encodes an argv-like input using the convention

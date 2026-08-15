@@ -4,16 +4,19 @@ The `security.windows` module exposes Windows security types.
 
 ## Types
 
-| Type                                | Description                       |
-| ----------------------------------- | --------------------------------- |
-| [`AccessMask`](./access-mask.md)    | Generic Windows object rights     |
-| [`Acl`](./acl.md)                   | Windows access-control list       |
-| [`Ace`](./ace.md)                   | Windows access-control entry      |
-| [`SecDesc`](./secdesc.md)           | Windows security descriptor       |
-| [`Sid`](./sid.md)                   | Windows security identifier       |
-| [`SidName`](./sidname.md)           | Resolved Windows account identity |
-| [`TokenGroup`](./tokengroup.md)     | Windows token group membership    |
-| [`TokenInfo`](./tokeninfo.md)       | Windows access token information  |
+| Type                                                  | Description                       |
+| ----------------------------------------------------- | --------------------------------- |
+| [`AccessMask`](./access-mask.md)                      | Generic Windows object rights     |
+| [`SecDescControl`](./secdesc-control.md)              | Security descriptor control flags |
+| [`SecInfo`](./sec-info.md)                            | Loaded descriptor components      |
+| [`TokenGroupAttributes`](./token-group-attributes.md) | Token group attributes            |
+| [`Acl`](./acl.md)                                     | Windows access-control list       |
+| [`Ace`](./ace.md)                                     | Windows access-control entry      |
+| [`SecDesc`](./secdesc.md)                             | Windows security descriptor       |
+| [`Sid`](./sid.md)                                     | Windows security identifier       |
+| [`SidName`](./sidname.md)                             | Resolved Windows account identity |
+| [`TokenGroup`](./tokengroup.md)                       | Windows token group membership    |
+| [`TokenInfo`](./tokeninfo.md)                         | Windows access token information  |
 
 ## Enumeration values
 

@@ -288,7 +288,10 @@ impl FileHandle for DirectFile {
             .map_err(Into::into)
     }
 
-    async fn sec_desc(&mut self, mask: u32) -> crate::Result<SecDesc> {
+    async fn sec_desc(
+        &mut self,
+        mask: dolang_winterop::security::SecInfo,
+    ) -> crate::Result<SecDesc> {
         let file = self.inner.try_clone().await?;
         tokio::task::spawn_blocking(move || Direct::sec_desc_from_file(&file, mask))
             .await
@@ -1254,7 +1257,7 @@ impl Vfs for Direct {
     async fn sec_desc(
         &self,
         path: Utf8TypedPath<'_>,
-        mask: u32,
+        mask: dolang_winterop::security::SecInfo,
         follow: bool,
     ) -> crate::Result<SecDesc> {
         let path = native_path(path)?;
