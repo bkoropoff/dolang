@@ -4,7 +4,7 @@
 //! lazy projections sharing one generic `Type` per helper, a flags value is a
 //! real, independently nameable, constructible, downcastable type — one per
 //! extension-defined flag domain. An extension implements [`FlagLike`] for
-//! its Rust-side bitset representation and calls [`FlagLike::register_type`] to
+//! its Rust-side bitset representation and calls [`FlagLikeExt::register_type`] to
 //! get a Do-visible type with construction from symbols, set-algebra
 //! operators (`|`, `&`, `^`, `~`), membership testing, iteration, and debug
 //! output — all implemented once, generically, in [`Flags`].
@@ -37,7 +37,7 @@ use crate::{
 ///
 /// Implement this for a plain bitflags-style type (e.g. a newtype over an
 /// integer with hand-written or `bitflags!`-generated bitwise operators), then
-/// call [`FlagLike::register_type`] once at VM setup to get a real, nameable,
+/// call [`FlagLikeExt::register_type`] once at VM setup to get a real, nameable,
 /// constructible Do type back.
 pub trait FlagLike:
     Copy
@@ -68,11 +68,19 @@ pub trait FlagLike:
     /// For ordinary integer bitflags, return the population count.
     fn rank(self) -> usize;
 
-    /// Registers `Flags<Self>` as a Do-visible native type.
-    fn build_type<'v, 'a>(builder: &'a mut Builder<'v>) -> TypeBuilder<'v, 'a, Flags<Self>>
+    /// Adds representation-specific methods, getters, or supertypes.
+    fn build<'v, 'a>(builder: TypeBuilder<'v, 'a, Flags<Self>>) -> TypeBuilder<'v, 'a, Flags<Self>>
     where
         Self: Sized,
     {
+        builder
+    }
+}
+
+/// Non-customizable registration helpers for [`FlagLike`] representations.
+pub trait FlagLikeExt: FlagLike {
+    /// Starts building `Flags<Self>` as a Do-visible native type.
+    fn build_type<'v, 'a>(builder: &'a mut Builder<'v>) -> TypeBuilder<'v, 'a, Flags<Self>> {
         let mut entries = Vec::with_capacity(Self::BITS.len());
         let mut all = Self::ZERO;
         for &(name, bits) in Self::BITS {
@@ -110,16 +118,15 @@ pub trait FlagLike:
     }
 
     /// Registers `Flags<Self>` as a Do-visible native type.
-    fn register_type<'v>(builder: &mut Builder<'v>) -> Type<'v, Flags<Self>>
-    where
-        Self: Sized,
-    {
+    fn register_type<'v>(builder: &mut Builder<'v>) -> Type<'v, Flags<Self>> {
         Self::build_type(builder).build()
     }
 }
 
+impl<F: FlagLike> FlagLikeExt for F {}
+
 /// Native object for a set of symbols backed by `F`. Register with
-/// [`FlagLike::register_type`]; construct/read values via [`FlagsTypeExt`].
+/// [`FlagLikeExt::register_type`]; construct/read values via [`FlagsTypeExt`].
 pub struct Flags<F>(PhantomData<F>);
 
 /// `TypeAnnex` for [`Flags`]: interned `Sym`s for every [`FlagLike::BITS`]
@@ -456,7 +463,7 @@ impl<'v, F: FlagLike> Object<'v> for Flags<F> {
     }
 
     fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
-        builder.method("contains", async move |this, strand, args, mut out| {
+        let builder = builder.method("contains", async move |this, strand, args, mut out| {
             let ([sym], []) = unpack!(strand, args, 1, 0)?;
             let sym = sym
                 .as_sym(strand.vm())
@@ -466,7 +473,19 @@ impl<'v, F: FlagLike> Object<'v> for Flags<F> {
             let bit = resolve_sym(strand, table, sym)?;
             Output::set(strand, &mut out, (*this.annex() & bit) == bit);
             Ok(())
-        })
+        });
+        F::build(builder)
+    }
+}
+
+/// Copies the representation stored by a [`Flags`] instance.
+pub trait FlagsInstanceExt<F: FlagLike> {
+    fn flags(&self) -> F;
+}
+
+impl<F: FlagLike> FlagsInstanceExt<F> for Instance<'_, '_, Flags<F>> {
+    fn flags(&self) -> F {
+        *self.annex()
     }
 }
 
