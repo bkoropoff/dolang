@@ -4,11 +4,11 @@ Immutable POSIX.1e access-control entry.
 
 ## Class Methods
 
-### `user_obj :read? :write? :execute?`
+### `user_obj permissions?`
 
 Constructs the file-owner entry.
 
-### `user id :read? :write? :execute?`
+### `user id permissions?`
 
 Constructs a named-user entry.
 
@@ -18,11 +18,11 @@ Constructs a named-user entry.
 | ---- | ------------------------- | ----------- |
 | `id` | [`Int`](../../std/int.md) | User ID     |
 
-### `group_obj :read? :write? :execute?`
+### `group_obj permissions?`
 
 Constructs the file-group entry.
 
-### `group id :read? :write? :execute?`
+### `group id permissions?`
 
 Constructs a named-group entry.
 
@@ -32,15 +32,16 @@ Constructs a named-group entry.
 | ---- | ------------------------- | ----------- |
 | `id` | [`Int`](../../std/int.md) | Group ID    |
 
-### `mask :read? :write? :execute?`
+### `mask permissions?`
 
 Constructs the effective-rights mask entry.
 
-### `other :read? :write? :execute?`
+### `other permissions?`
 
 Constructs the entry for all other users.
 
-The permission options accepted by every constructor default to `false`.
+Every constructor takes an optional trailing
+[`Permission`](./permission.md) argument, defaulting to empty.
 
 ## Fields
 
@@ -55,14 +56,6 @@ Numeric user or group ID.
 
 Raises `FieldError` unless `type` is `:USER:` or `:GROUP:`.
 
-### `read`
+### `permissions`
 
-Whether the entry grants read permission.
-
-### `write`
-
-Whether the entry grants write permission.
-
-### `execute`
-
-Whether the entry grants execute permission.
+The entry's permissions, as a [`Permission`](./permission.md).

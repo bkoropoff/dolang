@@ -2,7 +2,8 @@
 
 The `security` module reports the security identity of the active VFS target.
 
-Platform-specific types are exposed by [`security.unix`](./unix/index.md) and
+Platform-specific types are exposed by [`security.unix`](./unix/index.md),
+[`security.nfs4`](./nfs4/index.md), and
 [`security.windows`](./windows/index.md).
 
 ## Functions

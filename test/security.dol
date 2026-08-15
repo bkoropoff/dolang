@@ -111,7 +111,6 @@ def security_descriptor_exposes_acl_and_ace_views()
   assert_type $Acl $acl
   assert_eq $acl.revision :BASIC:
   assert_eq $acl.size 88
-  assert_eq $acl.ace_count 3
   assert_eq $acl.to_bin() $packet[20..]
   assert_eq $acl.aces.len 3
   assert_throws $ImmutableError do
@@ -189,7 +188,7 @@ def constructs_aces_and_acls()
   let acl = Acl [allowed, denied, audited]
   assert_type $Acl $acl
   assert_eq $acl.revision :DIRECTORY_SERVICE:
-  assert_eq $acl.ace_count 3
+  assert_eq $acl.aces.len 3
   assert_eq $acl.aces[0].to_bin() $allowed.to_bin()
   assert_eq $acl.aces[1].to_bin() $denied.to_bin()
   assert_eq $acl.aces[2].to_bin() $audited.to_bin()
@@ -235,10 +234,10 @@ def functionally_updates_security_descriptors()
 
 #[test]
 def constructs_posix_acls_on_every_platform()
-  let owner = unix_security.Ace.user_obj permissions: (Permission :READ: :WRITE:)
-  let named = unix_security.Ace.user 1234 permissions: (Permission :READ:)
-  let group = unix_security.Ace.group_obj permissions: (Permission :READ:)
-  let mask = unix_security.Ace.mask permissions: (Permission :READ:)
+  let owner = unix_security.Ace.user_obj (Permission :READ: :WRITE:)
+  let named = unix_security.Ace.user 1234 (Permission :READ:)
+  let group = unix_security.Ace.group_obj (Permission :READ:)
+  let mask = unix_security.Ace.mask (Permission :READ:)
   let other = unix_security.Ace.other()
   assert_type $unix_security.Ace $owner
   assert_type $unix_security.Ace $named
@@ -248,7 +247,7 @@ def constructs_posix_acls_on_every_platform()
   let acl = unix_security.Acl [owner, named, group, mask, other]
 
   assert_type $unix_security.Acl $acl
-  assert_eq $acl.ace_count 5
+  assert_eq $acl.aces.len 5
   assert_eq $acl.aces[0].type :USER_OBJ:
   assert_eq $acl.aces[0].permissions (Permission :READ: :WRITE:)
   assert_throws $FieldError do acl.aces[0].id

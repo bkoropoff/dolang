@@ -26,10 +26,7 @@ The constructor preserves the supplied mask. It does not calculate one.
 
 ## Fields
 
-### `ace_count`
-
-Number of access-control entries.
-
 ### `aces`
 
-Immutable array-like view of [`Ace`](./ace.md) values.
+Immutable array-like view of [`Ace`](./ace.md) values. Use `.len` for the
+entry count.

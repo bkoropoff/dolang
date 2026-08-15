@@ -5,10 +5,10 @@ The `fs` module provides functions and types for filesystem operations.
 Ordinary metadata such as size, timestamps, ownership, permissions, and file
 attributes are available through [`Metadata`](./metadata.md) and
 [`set_metadata`](#set_metadata-resolve-paths). Extended attributes use
-[`xattrs`](#xattrs-path-namespace-resolve) and related functions. POSIX ACLs
-use [`acl`](#acl-path-default-resolve) and
-[`set_acl`](#set_acl-path-acl-default-resolve). Windows security descriptors
-can also be fetched and manipulated with full fidelity; see
+[`xattrs`](#xattrs-path-namespace-resolve) and related functions. POSIX and
+NFSv4 ACLs use [`acl`](#acl-path-kind-posix-default-resolve) and
+[`set_acl`](#set_acl-path-acl-kind-default-resolve). Windows security
+descriptors can also be fetched and manipulated with full fidelity; see
 [`sec_desc`](#sec_desc-path-owner-group-dacl-sacl-resolve) and the
 [Security Guide](../../shell/security.md). Windows alternate data streams are
 listed with [`streams`](#streams-path-resolve).
@@ -449,40 +449,61 @@ Applies the components selected by a Windows security descriptor's `mask`.
 | `desc`    | [`security.windows.SecDesc`](../security/windows/secdesc.md) | Security descriptor to apply                     |
 | `resolve` | `:TARGET:`\|`:LINK:`                                         | Resolution mode (see [above](#resolution-modes)) |
 
-### `acl path :default? :resolve?`
+### `acl path :kind = :POSIX: :default? :resolve?`
 
-Gets the POSIX.1e ACL stored on a path.
+Gets the ACL stored on a path.
 
 #### Parameters
 
 | Name      | Type                                      | Description                                      |
 | --------- | ----------------------------------------- | ------------------------------------------------ |
 | `path`    | [`Str`](../std/str.md)\|[`Path`](path.md) | Path to query                                    |
+| `kind`    | `:POSIX:`\|`:NFS4:`                       | ACL format to query                              |
 | `default` | [`Bool`](../std/bool.md)                  | Query the directory's inheritable default ACL    |
 | `resolve` | `:TARGET:`\|`:LINK:`                      | Resolution mode (see [above](#resolution-modes)) |
 
 #### Returns
 
-[`security.unix.Acl`](../security/unix/acl.md), or `nil` when no ACL metadata
-is stored.
+[`security.unix.Acl`](../security/unix/acl.md) or
+[`security.nfs4.Acl`](../security/nfs4/acl.md), depending on `kind`, or `nil`
+when no ACL metadata is stored.
 
-Linux and FreeBSD support this operation. Other targets raise
-`sys.UnsupportedError`.
+**Errors:**
 
-### `set_acl path acl :default? :resolve?`
+- Raises `ValueError` when `kind: :NFS4:` is combined with `default: true` —
+  NFSv4 ACLs have no separate default-ACL object; inheritance is expressed
+  through [`Ace`](../security/nfs4/ace.md) flags instead.
 
-Sets or removes a POSIX.1e ACL.
+POSIX ACLs (`kind: :POSIX:`, the default) are supported on Linux and
+FreeBSD. NFSv4 ACLs (`kind: :NFS4:`) are supported on FreeBSD only. Other
+combinations of target and `kind` raise `sys.UnsupportedError`.
+
+### `set_acl path acl :kind? :default? :resolve?`
+
+Sets or removes an ACL. The format is inferred from `acl`'s type when
+setting a value; `kind` selects the format to remove when `acl` is `nil`.
 
 #### Parameters
 
-| Name      | Type                                                                   | Description                                      |
-| --------- | ---------------------------------------------------------------------- | ------------------------------------------------ |
-| `path`    | [`Str`](../std/str.md)\|[`Path`](path.md)                              | Path to update                                   |
-| `acl`     | [`security.unix.Acl`](../security/unix/acl.md)\|[`nil`](../std/nil.md) | ACL to set, or `nil` to remove it                |
-| `default` | [`Bool`](../std/bool.md)                                               | Update the directory's inheritable default ACL   |
-| `resolve` | `:TARGET:`\|`:LINK:`                                                   | Resolution mode (see [above](#resolution-modes)) |
+| Name      | Type                                                                                                                   | Description                                      |
+| --------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| `path`    | [`Str`](../std/str.md)\|[`Path`](path.md)                                                                              | Path to update                                   |
+| `acl`     | [`security.unix.Acl`](../security/unix/acl.md)\|[`security.nfs4.Acl`](../security/nfs4/acl.md)\|[`nil`](../std/nil.md) | ACL to set, or `nil` to remove it                |
+| `kind`    | `:POSIX:`\|`:NFS4:`?                                                                                                   | ACL format to remove, when `acl` is `nil`        |
+| `default` | [`Bool`](../std/bool.md)                                                                                               | Update the directory's inheritable default ACL   |
+| `resolve` | `:TARGET:`\|`:LINK:`                                                                                                   | Resolution mode (see [above](#resolution-modes)) |
 
-Linux and FreeBSD support this operation. Other targets raise
+**Errors:**
+
+- Raises `ValueError` when an NFSv4 `acl` or `kind: :NFS4:` is combined with
+  `default: true`.
+- Raises `sys.UnsupportedError` when removing an NFSv4 ACL (`kind: :NFS4:`
+  with `acl: nil`): unlike a POSIX ACL, an NFSv4 ACL is a file's native
+  security descriptor, not an optional extended attribute, and FreeBSD has no
+  operation that clears it back to "none" — only ways to replace it.
+
+POSIX ACLs are supported on Linux and FreeBSD. NFSv4 ACLs are supported on
+FreeBSD only. Other combinations of target and format raise
 `sys.UnsupportedError`.
 
 ### `xattrs path :namespace? :resolve?`

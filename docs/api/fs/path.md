@@ -168,13 +168,13 @@ Equivalent to [`fs.xattrs`](index.md).
 
 Equivalent to [`fs.xattr`](index.md).
 
-### `acl :default? :resolve = :TARGET:`
+### `acl :kind = :POSIX: :default? :resolve = :TARGET:`
 
-Equivalent to [`fs.acl`](index.md#acl-path-default-resolve).
+Equivalent to [`fs.acl`](index.md#acl-path-kind-posix-default-resolve).
 
-### `set_acl acl :default? :resolve = :TARGET:`
+### `set_acl acl :kind? :default? :resolve = :TARGET:`
 
-Equivalent to [`fs.set_acl`](index.md#set_acl-path-acl-default-resolve).
+Equivalent to [`fs.set_acl`](index.md#set_acl-path-acl-kind-default-resolve).
 
 ### `set_xattr name value :namespace? :resolve = :TARGET:`
 

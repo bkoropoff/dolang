@@ -1,5 +1,5 @@
-use super::Direct;
-use crate::PosixAcl;
+use super::{Direct, nfs4_acl};
+use crate::security::{Acl, AclKind, Nfs4Acl, PosixAcl};
 #[cfg(any(target_os = "freebsd", target_os = "linux"))]
 use crate::security::{Permission, PosixAce, PosixAclQualifier};
 #[cfg(target_os = "freebsd")]
@@ -513,35 +513,114 @@ mod freebsd {
     }
 }
 
+fn check_default(kind: AclKind, default: bool) -> io::Result<()> {
+    if default && kind == AclKind::Nfs4 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "default: is only meaningful for POSIX ACLs",
+        ));
+    }
+    Ok(())
+}
+
+fn split_posix(kind: AclKind, acl: Option<&Acl>) -> io::Result<Option<&PosixAcl>> {
+    match (kind, acl) {
+        (AclKind::Posix, None) => Ok(None),
+        (AclKind::Posix, Some(Acl::Posix(posix))) => Ok(Some(posix)),
+        (AclKind::Posix, Some(Acl::Nfs4(_))) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "kind: POSIX but value is an NFSv4 ACL",
+        )),
+        (AclKind::Nfs4, _) => unreachable!("caller must route AclKind::Nfs4 separately"),
+    }
+}
+
+fn split_nfs4(kind: AclKind, acl: Option<&Acl>) -> io::Result<Option<&Nfs4Acl>> {
+    match (kind, acl) {
+        (AclKind::Nfs4, None) => Ok(None),
+        (AclKind::Nfs4, Some(Acl::Nfs4(nfs4))) => Ok(Some(nfs4)),
+        (AclKind::Nfs4, Some(Acl::Posix(_))) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "kind: NFS4 but value is a POSIX ACL",
+        )),
+        (AclKind::Posix, _) => unreachable!("caller must route AclKind::Posix separately"),
+    }
+}
+
 impl Direct {
+    #[allow(unused_variables)]
     pub(super) fn acl_from_path(
         path: &Path,
+        kind: AclKind,
         default: bool,
         follow: bool,
-    ) -> io::Result<Option<PosixAcl>> {
-        #[cfg(target_os = "linux")]
-        {
-            let path = CString::new(path.as_os_str().as_bytes())
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
-            linux_get(UnixXattrTarget::Path(&path, follow), default)
-        }
-        #[cfg(target_os = "freebsd")]
-        {
-            let path = CString::new(path.as_os_str().as_bytes())
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
-            freebsd::get(Some(&path), -1, default, follow)
-        }
-        #[cfg(not(any(target_os = "freebsd", target_os = "linux")))]
-        {
-            let _ = (path, default, follow);
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "POSIX ACLs are not supported on this platform",
-            ))
+    ) -> io::Result<Option<Acl>> {
+        check_default(kind, default)?;
+        #[cfg(any(target_os = "freebsd", target_os = "linux"))]
+        let cpath = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
+        match kind {
+            AclKind::Posix => {
+                #[cfg(target_os = "linux")]
+                {
+                    Ok(linux_get(UnixXattrTarget::Path(&cpath, follow), default)?.map(Acl::Posix))
+                }
+                #[cfg(target_os = "freebsd")]
+                {
+                    Ok(freebsd::get(Some(&cpath), -1, default, follow)?.map(Acl::Posix))
+                }
+                #[cfg(not(any(target_os = "freebsd", target_os = "linux")))]
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "POSIX ACLs are not supported on this platform",
+                ));
+            }
+            AclKind::Nfs4 => {
+                #[cfg(target_os = "freebsd")]
+                {
+                    Ok(nfs4_acl::get(Some(&cpath), -1, follow)?.map(Acl::Nfs4))
+                }
+                #[cfg(not(target_os = "freebsd"))]
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "NFSv4 ACLs are not supported on this platform",
+                ));
+            }
         }
     }
 
+    #[allow(unused_variables)]
     pub(super) fn set_acl_path(
+        path: &Path,
+        kind: AclKind,
+        acl: Option<&Acl>,
+        default: bool,
+        follow: bool,
+    ) -> io::Result<()> {
+        check_default(kind, default)?;
+        match kind {
+            AclKind::Posix => {
+                Self::set_posix_acl_path(path, split_posix(kind, acl)?, default, follow)
+            }
+            AclKind::Nfs4 => {
+                #[cfg(target_os = "freebsd")]
+                {
+                    let nfs4 = split_nfs4(kind, acl)?;
+                    let cpath = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL")
+                    })?;
+                    nfs4_acl::set(Some(&cpath), -1, follow, nfs4)
+                }
+                #[cfg(not(target_os = "freebsd"))]
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "NFSv4 ACLs are not supported on this platform",
+                ));
+            }
+        }
+    }
+
+    fn set_posix_acl_path(
         path: &Path,
         acl: Option<&PosixAcl>,
         default: bool,
@@ -569,30 +648,72 @@ impl Direct {
         }
     }
 
-    pub(super) fn acl_from_file(file: &File, default: bool) -> io::Result<Option<PosixAcl>> {
-        #[cfg(target_os = "linux")]
-        {
-            linux_get(UnixXattrTarget::Fd(file.as_fd()), default)
-        }
-        #[cfg(target_os = "freebsd")]
-        {
-            freebsd::get(None, file.as_fd().as_raw_fd(), default, true)
-        }
-        #[cfg(not(any(target_os = "freebsd", target_os = "linux")))]
-        {
-            let _ = (file, default);
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "POSIX ACLs are not supported on this platform",
-            ))
+    #[allow(unused_variables)]
+    pub(super) fn acl_from_file(
+        file: &File,
+        kind: AclKind,
+        default: bool,
+    ) -> io::Result<Option<Acl>> {
+        check_default(kind, default)?;
+        match kind {
+            AclKind::Posix => {
+                #[cfg(target_os = "linux")]
+                {
+                    Ok(linux_get(UnixXattrTarget::Fd(file.as_fd()), default)?.map(Acl::Posix))
+                }
+                #[cfg(target_os = "freebsd")]
+                {
+                    Ok(
+                        freebsd::get(None, file.as_fd().as_raw_fd(), default, true)?
+                            .map(Acl::Posix),
+                    )
+                }
+                #[cfg(not(any(target_os = "freebsd", target_os = "linux")))]
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "POSIX ACLs are not supported on this platform",
+                ));
+            }
+            AclKind::Nfs4 => {
+                #[cfg(target_os = "freebsd")]
+                {
+                    Ok(nfs4_acl::get(None, file.as_fd().as_raw_fd(), true)?.map(Acl::Nfs4))
+                }
+                #[cfg(not(target_os = "freebsd"))]
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "NFSv4 ACLs are not supported on this platform",
+                ));
+            }
         }
     }
 
+    #[allow(unused_variables)]
     pub(super) fn set_acl_file(
         file: &File,
-        acl: Option<&PosixAcl>,
+        kind: AclKind,
+        acl: Option<&Acl>,
         default: bool,
     ) -> io::Result<()> {
+        check_default(kind, default)?;
+        match kind {
+            AclKind::Posix => Self::set_posix_acl_file(file, split_posix(kind, acl)?, default),
+            AclKind::Nfs4 => {
+                let nfs4 = split_nfs4(kind, acl)?;
+                #[cfg(target_os = "freebsd")]
+                {
+                    nfs4_acl::set(None, file.as_fd().as_raw_fd(), true, nfs4)
+                }
+                #[cfg(not(target_os = "freebsd"))]
+                {
+                    let _ = (file, nfs4);
+                    nfs4_acl::set(None, -1, true, None)
+                }
+            }
+        }
+    }
+
+    fn set_posix_acl_file(file: &File, acl: Option<&PosixAcl>, default: bool) -> io::Result<()> {
         #[cfg(target_os = "linux")]
         {
             linux_set(UnixXattrTarget::Fd(file.as_fd()), acl, default)

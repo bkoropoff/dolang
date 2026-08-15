@@ -56,6 +56,7 @@ pub mod error;
 pub mod extension;
 pub mod file;
 pub mod metadata;
+mod nfs4_acl;
 pub mod path;
 mod posix_acl;
 mod probe;
@@ -80,7 +81,7 @@ use file::{FileLock, FileLockRequest};
 use metadata::{AttrFlags, AttrsPatch, FileType, FsMetadata, Metadata, MetadataPatch};
 use path::WellKnownPath;
 use process::{ProcessControl, ProcessStatus, TerminationPolicy};
-use security::{OwnershipIdentity, PosixAcl, SecurityInfo, SidName};
+use security::{Acl, AclKind, OwnershipIdentity, SecurityInfo, SidName};
 use session::{ExtensionSet, VfsSession};
 use stream::StreamEntry;
 use target::TargetInfo;
@@ -134,10 +135,14 @@ pub trait FileHandle: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Sized {
     async fn metadata(&mut self) -> Result<Metadata>;
     /// Returns metadata for the filesystem containing the open file.
     async fn fs_metadata(&mut self) -> Result<FsMetadata>;
-    /// Returns the POSIX ACL, optionally its default ACL when this is a directory.
-    async fn acl(&mut self, default: bool) -> Result<Option<PosixAcl>>;
-    /// Sets or removes the POSIX ACL, optionally its default ACL.
-    async fn set_acl(&mut self, acl: Option<&PosixAcl>, default: bool) -> Result<()>;
+    /// Returns the ACL of the requested `kind`. For a POSIX ACL, `default`
+    /// selects the directory's default ACL rather than its access ACL; it
+    /// must be `false` for `AclKind::Nfs4`.
+    async fn acl(&mut self, kind: AclKind, default: bool) -> Result<Option<Acl>>;
+    /// Sets or removes the ACL of `kind`. `acl`, if present, must match
+    /// `kind`. `default` selects the POSIX default ACL, as in
+    /// [`acl`](Self::acl); it must be `false` for `AclKind::Nfs4`.
+    async fn set_acl(&mut self, kind: AclKind, acl: Option<&Acl>, default: bool) -> Result<()>;
     /// Returns the Windows security descriptor selected by `mask`.
     async fn sec_desc(&mut self, mask: dolang_winterop::security::SecInfo) -> Result<SecDesc>;
     /// Replaces the Windows security descriptor.
@@ -361,18 +366,22 @@ pub trait Vfs {
     async fn metadata(&self, path: Utf8TypedPath<'_>) -> Result<Metadata>;
     /// Returns filesystem metadata for a path.
     async fn fs_metadata(&self, path: Utf8TypedPath<'_>, follow: bool) -> Result<FsMetadata>;
-    /// Returns the POSIX ACL for a path.
+    /// Returns the ACL of the requested `kind` for a path. See
+    /// [`FileHandle::acl`] for `default`'s meaning.
     async fn acl(
         &self,
         path: Utf8TypedPath<'_>,
+        kind: AclKind,
         default: bool,
         follow: bool,
-    ) -> Result<Option<PosixAcl>>;
-    /// Sets or removes the POSIX ACL for a path.
+    ) -> Result<Option<Acl>>;
+    /// Sets or removes the ACL for a path. See [`FileHandle::set_acl`] for
+    /// `default`'s meaning.
     async fn set_acl(
         &self,
         path: Utf8TypedPath<'_>,
-        acl: Option<&PosixAcl>,
+        kind: AclKind,
+        acl: Option<&Acl>,
         default: bool,
         follow: bool,
     ) -> Result<()>;
@@ -535,12 +544,17 @@ impl FileHandle for AnyFile {
         match_file!(self, file => file.fs_metadata().await)
     }
 
-    async fn acl(&mut self, default: bool) -> crate::Result<Option<PosixAcl>> {
-        match_file!(self, file => file.acl(default).await)
+    async fn acl(&mut self, kind: AclKind, default: bool) -> crate::Result<Option<Acl>> {
+        match_file!(self, file => file.acl(kind, default).await)
     }
 
-    async fn set_acl(&mut self, acl: Option<&PosixAcl>, default: bool) -> crate::Result<()> {
-        match_file!(self, file => file.set_acl(acl, default).await)
+    async fn set_acl(
+        &mut self,
+        kind: AclKind,
+        acl: Option<&Acl>,
+        default: bool,
+    ) -> crate::Result<()> {
+        match_file!(self, file => file.set_acl(kind, acl, default).await)
     }
 
     async fn sec_desc(
@@ -1462,25 +1476,27 @@ impl Vfs for AnyVfs {
     async fn acl(
         &self,
         path: Utf8TypedPath<'_>,
+        kind: AclKind,
         default: bool,
         follow: bool,
-    ) -> crate::Result<Option<PosixAcl>> {
+    ) -> crate::Result<Option<Acl>> {
         match self {
-            Self::Client(client) => client.acl(path, default, follow).await,
-            Self::Direct(direct) => direct.acl(path, default, follow).await,
+            Self::Client(client) => client.acl(path, kind, default, follow).await,
+            Self::Direct(direct) => direct.acl(path, kind, default, follow).await,
         }
     }
 
     async fn set_acl(
         &self,
         path: Utf8TypedPath<'_>,
-        acl: Option<&PosixAcl>,
+        kind: AclKind,
+        acl: Option<&Acl>,
         default: bool,
         follow: bool,
     ) -> crate::Result<()> {
         match self {
-            Self::Client(client) => client.set_acl(path, acl, default, follow).await,
-            Self::Direct(direct) => direct.set_acl(path, acl, default, follow).await,
+            Self::Client(client) => client.set_acl(path, kind, acl, default, follow).await,
+            Self::Direct(direct) => direct.set_acl(path, kind, acl, default, follow).await,
         }
     }
 
