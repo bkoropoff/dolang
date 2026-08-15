@@ -14,6 +14,7 @@ use dolang::runtime::{
 use crate::{error_code, global::Global};
 
 pub(crate) struct SysError;
+pub(crate) struct InvalidInputError;
 pub(crate) struct NotFoundError;
 pub(crate) struct PermissionDeniedError;
 pub(crate) struct AlreadyExistsError;
@@ -118,6 +119,10 @@ impl<'v> SysErrorType<'v> for SysError {
     const NAME: &'v str = "Error";
 }
 
+impl<'v> SysErrorType<'v> for InvalidInputError {
+    const NAME: &'v str = "InvalidInputError";
+}
+
 impl<'v> SysErrorType<'v> for NotFoundError {
     const NAME: &'v str = "NotFoundError";
 }
@@ -141,6 +146,7 @@ impl<'v> SysErrorType<'v> for UnsupportedError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SysErrorClass {
     Error,
+    InvalidInputError,
     NotFoundError,
     PermissionDeniedError,
     AlreadyExistsError,
@@ -150,6 +156,7 @@ enum SysErrorClass {
 
 fn classify_error_kind(kind: ErrorKind) -> SysErrorClass {
     match kind {
+        ErrorKind::InvalidInput => SysErrorClass::InvalidInputError,
         ErrorKind::NotFound => SysErrorClass::NotFoundError,
         ErrorKind::PermissionDenied => SysErrorClass::PermissionDeniedError,
         ErrorKind::AlreadyExists => SysErrorClass::AlreadyExistsError,
@@ -264,6 +271,12 @@ fn sys_error<'v, 's>(strand: &mut Strand<'v, 's>, error: VfsError) -> Error<'v, 
         SysErrorClass::Error => {
             create_sys_error::<SysError>(strand, global.types.sys_error, message, system_code)
         }
+        SysErrorClass::InvalidInputError => create_sys_error::<InvalidInputError>(
+            strand,
+            global.types.invalid_input,
+            message,
+            system_code,
+        ),
         SysErrorClass::NotFoundError => {
             create_sys_error::<NotFoundError>(strand, global.types.not_found, message, system_code)
         }
@@ -372,7 +385,7 @@ mod test {
         );
         assert_eq!(
             classify_error_kind(ErrorKind::InvalidInput),
-            SysErrorClass::Error
+            SysErrorClass::InvalidInputError
         );
     }
 }

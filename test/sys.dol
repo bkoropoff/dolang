@@ -13,6 +13,7 @@ import sys sys.freebsd sys.linux sys.macos sys.unix sys.windows
     - CpuInfo
     - Error
     - ErrorCode
+    - InvalidInputError
     - NotFoundError
     - OsInfo
 
@@ -74,6 +75,11 @@ def system_errors_are_constructible_and_subclassable()
   assert_type $Error $missing
   assert_eq $missing.code.value $sys.linux.Errno.ENOENT.value
   assert_eq (str missing) "library lookup failed (ENOENT)"
+
+  let invalid = InvalidInputError "invalid argument"
+  assert_type $InvalidInputError $invalid
+  assert_type $Error $invalid
+  assert_type $ValueError $invalid
 
   class LibraryError: Error
     def (init) self message code

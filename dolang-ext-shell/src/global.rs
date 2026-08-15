@@ -21,8 +21,8 @@ use tokio::{
 use crate::{
     console::{Console, DefaultOutput, HostConsole, SinkConsole, SubConsole},
     error::{
-        AlreadyExistsError, NotFoundError, PermissionDeniedError, ProcError, SysError,
-        SysErrorObject, TimedOutError, UnsupportedError,
+        AlreadyExistsError, InvalidInputError, NotFoundError, PermissionDeniedError, ProcError,
+        SysError, SysErrorObject, TimedOutError, UnsupportedError,
     },
     error_code::{CodeObject, Errno, ErrorCode, FreeBsdErrno, LinuxErrno, MacosErrno, WinError},
     fs::{
@@ -99,6 +99,7 @@ pub(crate) struct Types<'v> {
     pub(crate) macos_errno: Type<'v, CodeObject<MacosErrno>>,
     pub(crate) win_error: Type<'v, CodeObject<WinError>>,
     pub(crate) sys_error: Type<'v, SysErrorObject<SysError>>,
+    pub(crate) invalid_input: Type<'v, SysErrorObject<InvalidInputError>>,
     pub(crate) not_found: Type<'v, SysErrorObject<NotFoundError>>,
     pub(crate) permission_denied: Type<'v, SysErrorObject<PermissionDeniedError>>,
     pub(crate) already_exists: Type<'v, SysErrorObject<AlreadyExistsError>>,
@@ -441,6 +442,11 @@ impl<'v> Global<'v> {
                     .nominal_supertype(error_code)
                     .build(),
                 sys_error,
+                invalid_input: builder
+                    .build_type::<SysErrorObject<InvalidInputError>>((), ())
+                    .nominal_supertype(sys_error)
+                    .nominal_supertype(TypeObject::ValueError)
+                    .build(),
                 not_found: builder
                     .build_type::<SysErrorObject<NotFoundError>>((), ())
                     .nominal_supertype(sys_error)

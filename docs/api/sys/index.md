@@ -14,6 +14,7 @@ and platforms supported by Do.
 | [`NotFoundError`](./not-found-error.md)                 | Subtype for missing files, paths, or programs |
 | [`PermissionDeniedError`](./permission-denied-error.md) | Subtype for permission failures               |
 | [`AlreadyExistsError`](./already-exists-error.md)       | Subtype for existing-path conflicts           |
+| [`InvalidInputError`](./invalid-input-error.md)         | Subtype for invalid operation inputs          |
 | [`TimedOutError`](./timed-out-error.md)                 | Subtype for timed-out system operations       |
 | [`UnsupportedError`](./unsupported-error.md)            | Subtype for unsupported system operations     |
 
