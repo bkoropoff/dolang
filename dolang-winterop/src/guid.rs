@@ -2,9 +2,12 @@
 
 use std::{error, fmt, str::FromStr};
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use serde::{Deserialize, Serialize};
 
 /// A Windows globally unique identifier (GUID).
+///
+/// Mirrors the fields of the native `GUID` struct (`Data1`/`Data2`/`Data3`/
+/// `Data4`) rather than an opaque byte packet.
 ///
 /// Parse and format it using the canonical hyphenated form:
 ///
@@ -15,57 +18,55 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 /// assert_eq!(guid.to_string(), "00112233-4455-6677-8899-aabbccddeeff");
 /// # Ok::<(), dolang_winterop::guid::Error>(())
 /// ```
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Guid([u8; 16]);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Guid {
+    pub data1: u32,
+    pub data2: u16,
+    pub data3: u16,
+    pub data4: [u8; 8],
+}
 
 impl Guid {
-    /// Constructs a GUID from the fields of the Windows `GUID` structure.
-    pub const fn from_components(data1: u32, data2: u16, data3: u16, data4: [u8; 8]) -> Self {
-        let data1 = data1.to_le_bytes();
-        let data2 = data2.to_le_bytes();
-        let data3 = data3.to_le_bytes();
-        Self([
-            data1[0], data1[1], data1[2], data1[3], data2[0], data2[1], data3[0], data3[1],
-            data4[0], data4[1], data4[2], data4[3], data4[4], data4[5], data4[6], data4[7],
-        ])
-    }
-
     /// Generates a random version 4 GUID.
     pub fn new_v4() -> Self {
-        let mut bytes = [0; 16];
+        let mut bytes = [0u8; 16];
         rand::fill(&mut bytes);
         bytes[7] = (bytes[7] & 0x0f) | 0x40;
         bytes[8] = (bytes[8] & 0x3f) | 0x80;
-        Self(bytes)
+        Self::from_bytes(&bytes).unwrap()
     }
 
     /// Parses the 16-byte in-memory layout used by Windows APIs.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
-        let bytes = bytes.try_into().map_err(|_| Error::PacketLength)?;
-        Ok(Self(bytes))
-    }
-
-    /// Returns the fields of the Windows `GUID` structure.
-    pub const fn components(self) -> (u32, u16, u16, [u8; 8]) {
-        (
-            u32::from_le_bytes([self.0[0], self.0[1], self.0[2], self.0[3]]),
-            u16::from_le_bytes([self.0[4], self.0[5]]),
-            u16::from_le_bytes([self.0[6], self.0[7]]),
-            [
-                self.0[8], self.0[9], self.0[10], self.0[11], self.0[12], self.0[13], self.0[14],
-                self.0[15],
-            ],
-        )
+        let bytes: [u8; 16] = bytes.try_into().map_err(|_| Error::PacketLength)?;
+        Ok(Self {
+            data1: u32::from_le_bytes(bytes[0..4].try_into().unwrap()),
+            data2: u16::from_le_bytes(bytes[4..6].try_into().unwrap()),
+            data3: u16::from_le_bytes(bytes[6..8].try_into().unwrap()),
+            data4: bytes[8..16].try_into().unwrap(),
+        })
     }
 
     /// Returns the native 16-byte Windows GUID representation.
-    pub const fn as_bytes(&self) -> &[u8; 16] {
-        &self.0
-    }
-
-    /// Returns the native 16-byte Windows GUID representation.
-    pub const fn into_bytes(self) -> [u8; 16] {
-        self.0
+    pub const fn to_bytes(&self) -> [u8; 16] {
+        let mut bytes = [0u8; 16];
+        let d1 = self.data1.to_le_bytes();
+        let d2 = self.data2.to_le_bytes();
+        let d3 = self.data3.to_le_bytes();
+        bytes[0] = d1[0];
+        bytes[1] = d1[1];
+        bytes[2] = d1[2];
+        bytes[3] = d1[3];
+        bytes[4] = d2[0];
+        bytes[5] = d2[1];
+        bytes[6] = d3[0];
+        bytes[7] = d3[1];
+        let mut i = 0;
+        while i < 8 {
+            bytes[8 + i] = self.data4[i];
+            i += 1;
+        }
+        bytes
     }
 }
 
@@ -79,15 +80,12 @@ impl TryFrom<&[u8]> for Guid {
 
 impl fmt::Display for Guid {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let data1 = u32::from_le_bytes(self.0[0..4].try_into().unwrap());
-        let data2 = u16::from_le_bytes(self.0[4..6].try_into().unwrap());
-        let data3 = u16::from_le_bytes(self.0[6..8].try_into().unwrap());
         write!(
             f,
-            "{data1:08x}-{data2:04x}-{data3:04x}-{:02x}{:02x}-",
-            self.0[8], self.0[9]
+            "{:08x}-{:04x}-{:04x}-{:02x}{:02x}-",
+            self.data1, self.data2, self.data3, self.data4[0], self.data4[1]
         )?;
-        for byte in &self.0[10..] {
+        for byte in &self.data4[2..] {
             write!(f, "{byte:02x}")?;
         }
         Ok(())
@@ -114,32 +112,15 @@ impl FromStr for Guid {
         let data3 = u16::try_from(parse(14, 18)?).unwrap();
         let data4a = u16::try_from(parse(19, 23)?).unwrap();
         let data4b = parse(24, 36)?;
-        let mut bytes = [0; 16];
-        bytes[0..4].copy_from_slice(&data1.to_le_bytes());
-        bytes[4..6].copy_from_slice(&data2.to_le_bytes());
-        bytes[6..8].copy_from_slice(&data3.to_le_bytes());
-        bytes[8..10].copy_from_slice(&data4a.to_be_bytes());
-        bytes[10..16].copy_from_slice(&data4b.to_be_bytes()[2..]);
-        Ok(Self(bytes))
-    }
-}
-
-impl Serialize for Guid {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        self.0.serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for Guid {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let bytes = <[u8; 16]>::deserialize(deserializer)?;
-        Guid::from_bytes(&bytes).map_err(de::Error::custom)
+        let mut data4 = [0u8; 8];
+        data4[0..2].copy_from_slice(&data4a.to_be_bytes());
+        data4[2..8].copy_from_slice(&data4b.to_be_bytes()[2..]);
+        Ok(Self {
+            data1,
+            data2,
+            data3,
+            data4,
+        })
     }
 }
 
@@ -171,25 +152,7 @@ mod tests {
     fn string_and_native_packet_round_trip() {
         let guid: Guid = "00112233-4455-6677-8899-aabbccddeeff".parse().unwrap();
         assert_eq!(
-            guid.components(),
-            (
-                0x0011_2233,
-                0x4455,
-                0x6677,
-                [0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]
-            )
-        );
-        assert_eq!(
-            Guid::from_components(
-                0x0011_2233,
-                0x4455,
-                0x6677,
-                [0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]
-            ),
-            guid
-        );
-        assert_eq!(
-            guid.into_bytes(),
+            guid.to_bytes(),
             [
                 0x33, 0x22, 0x11, 0x00, 0x55, 0x44, 0x77, 0x66, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
                 0xee, 0xff,
@@ -202,7 +165,7 @@ mod tests {
                 .unwrap(),
             guid
         );
-        assert_eq!(Guid::from_bytes(guid.as_bytes()).unwrap(), guid);
+        assert_eq!(Guid::from_bytes(&guid.to_bytes()).unwrap(), guid);
     }
 
     #[test]
@@ -226,8 +189,7 @@ mod tests {
     #[test]
     fn generated_guid_is_version_4_with_rfc_variant() {
         let guid = Guid::new_v4();
-        let (_, _, data3, data4) = guid.components();
-        assert_eq!(data3 >> 12, 4);
-        assert_eq!(data4[0] >> 6, 2);
+        assert_eq!(guid.data3 >> 12, 4);
+        assert_eq!(guid.data4[0] >> 6, 2);
     }
 }

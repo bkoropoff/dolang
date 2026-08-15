@@ -1,5 +1,5 @@
 use std::{
-    hash::{Hash, Hasher},
+    hash::Hash,
     ops::{BitAnd, BitOr, BitXor, Not},
 };
 
@@ -31,13 +31,10 @@ use dolang_winterop::security::{
     AccessMask as WinAccessMask, SecDescControl as WinSecDescControl, SecInfo as WinSecInfo,
     TokenGroupAttributes as WinTokenGroupAttributes,
 };
-use dolang_winterop::{
-    guid::Guid as VfsGuid,
-    security::{
-        Ace as VfsAce, AceBuf as VfsAceBuf, AceBuildOptions, AceFlags, AceType as VfsAceType,
-        Acl as VfsAcl, AclBuf as VfsAclBuf, AclRevision, SecDesc as VfsSecDesc,
-        SecDescUpdate as VfsSecDescUpdate, Sid as VfsSid, SidIdentifierAuthority,
-    },
+use dolang_winterop::security::{
+    Ace as VfsAce, AceBuf as VfsAceBuf, AceBuildOptions, AceFlags, AceType as VfsAceType,
+    Acl as VfsAcl, AclBuf as VfsAclBuf, AclRevision, SecDesc as VfsSecDesc,
+    SecDescUpdate as VfsSecDescUpdate, Sid as VfsSid, SidIdentifierAuthority,
 };
 
 use crate::{error, global::Global, util};
@@ -808,92 +805,6 @@ impl<'v> Object<'v> for Sid {
     }
 }
 
-pub(crate) struct Guid;
-
-fn create_guid<'v>(
-    strand: &mut Strand<'v, '_>,
-    global: State<'v, Global<'v>>,
-    guid: VfsGuid,
-    out: &mut Slot<'v, '_>,
-) {
-    global.types.guid.create_with_annex(strand, Guid, guid, out);
-}
-
-impl<'v> Object<'v> for Guid {
-    const NAME: &'v str = "Guid";
-    const MODULE: &'v str = "sys.windows";
-    type Annex = VfsGuid;
-    type Type = ();
-    type TypeAnnex = ();
-
-    async fn new<'a, 's>(
-        this: Type<'v, Self>,
-        strand: &'a mut Strand<'v, 's>,
-        args: Args<'v, 'a>,
-        out: Slot<'v, 'a>,
-    ) -> Result<'v, 's, ()> {
-        let ([value], []) = unpack!(strand, args, 1, 0)?;
-        let guid = if let Some(value) = value.as_str(strand) {
-            value
-                .to_string()
-                .parse::<VfsGuid>()
-                .map_err(|error| Error::value(strand, error.to_string()))?
-        } else if let Some(value) = value.as_bin(strand) {
-            VfsGuid::from_bytes(&value.to_vec())
-                .map_err(|error| Error::value(strand, error.to_string()))?
-        } else {
-            return Err(Error::type_error(strand, "Guid: expected Str or Bin"));
-        };
-        this.create_with_annex(strand, Guid, guid, out);
-        Ok(())
-    }
-
-    fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
-        builder.method("to_bin", async move |this, strand, args, out| {
-            let ([], []) = unpack!(strand, args, 0, 0)?;
-            Output::set(strand, out, this.annex().as_bytes().as_slice());
-            Ok(())
-        })
-    }
-
-    fn display<'a, 's>(
-        this: Instance<'v, 'a, Self>,
-        strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
-    ) -> Result<'v, 's, ()> {
-        fmt!(strand, w, "{}", &*this.annex())
-    }
-
-    fn debug<'a, 's>(
-        this: Instance<'v, 'a, Self>,
-        strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
-    ) -> Result<'v, 's, ()> {
-        fmt!(strand, w, "<sys.windows.Guid {}>", &*this.annex())
-    }
-
-    fn eq<'a, 's>(
-        this: Instance<'v, 'a, Self>,
-        strand: &'a mut Strand<'v, 's>,
-        other: &Value<'v>,
-    ) -> Result<'v, 's, bool> {
-        let global = strand.state::<Global<'v>>();
-        let Some(other) = global.types.guid.cast(other) else {
-            return Err(Error::not_supported(strand));
-        };
-        Ok(other.enter_sync(strand, |_strand, other| *this.annex() == *other.annex()))
-    }
-
-    fn hash<'a, 's>(
-        this: Instance<'v, 'a, Self>,
-        _strand: &'a mut Strand<'v, 's>,
-        hasher: &mut impl Hasher,
-    ) -> Result<'v, 's, ()> {
-        (*this.annex()).hash(hasher);
-        Ok(())
-    }
-}
-
 pub(crate) enum AclComponent {
     Dacl,
     Sacl,
@@ -1139,30 +1050,21 @@ fn ace_bool<'v, 's>(
 
 fn ace_options<'v, 's>(
     strand: &mut Strand<'v, 's>,
-    global: State<'v, Global<'v>>,
     flags: Option<&Value<'v>>,
     object_type: Option<&Value<'v>>,
     inherited_object_type: Option<&Value<'v>>,
     callback: Option<&Value<'v>>,
     application_data: Option<&Value<'v>>,
 ) -> Result<'v, 's, AceBuildOptions> {
-    let guid = |strand: &mut Strand<'v, 's>, value: &Value<'v>, name| {
-        global
-            .types
-            .guid
-            .cast(value)
-            .map(|value| value.enter_sync(strand, |_strand, value| *value.annex()))
-            .ok_or_else(|| Error::type_error(strand, format!("{name}: expected sys.windows.Guid")))
-    };
     let mut options = AceBuildOptions::new();
     if let Some(value) = flags {
         options = options.flags(AceFlags::from_bits_retain(ace_u8(strand, value, "flags")?));
     }
     if let Some(value) = object_type {
-        options = options.object_type(guid(strand, value, "object_type")?);
+        options = options.object_type(dolang_ext_uuid::value_to_guid(strand, value)?);
     }
     if let Some(value) = inherited_object_type {
-        options = options.inherited_object_type(guid(strand, value, "inherited_object_type")?);
+        options = options.inherited_object_type(dolang_ext_uuid::value_to_guid(strand, value)?);
     }
     if callback
         .map(|value| ace_bool(strand, value, "callback"))
@@ -1290,7 +1192,6 @@ impl<'v> Object<'v> for Ace {
                 let mask = ace_mask(strand, global, &mask)?;
                 let options = ace_options(
                     strand,
-                    global,
                     flags_value.as_deref(),
                     object_type_value.as_deref(),
                     inherited_value.as_deref(),
@@ -1332,7 +1233,6 @@ impl<'v> Object<'v> for Ace {
                 let mask = ace_mask(strand, global, &mask)?;
                 let options = ace_options(
                     strand,
-                    global,
                     flags_value.as_deref(),
                     object_type_value.as_deref(),
                     inherited_value.as_deref(),
@@ -1378,7 +1278,6 @@ impl<'v> Object<'v> for Ace {
                 let failed = ace_bool(strand, &failed_value, "failed")?;
                 let options = ace_options(
                     strand,
-                    global,
                     flags_value.as_deref(),
                     object_type_value.as_deref(),
                     inherited_value.as_deref(),
@@ -1464,21 +1363,20 @@ impl<'v> Object<'v> for Ace {
                 Output::set(strand, out, value.bits());
                 Ok(())
             })
-            .get("object_type", move |this, strand, mut out| {
+            .get("object_type", move |this, strand, out| {
                 let (flags, value) =
                     with_ace(this, strand, |ace| (ace.object_flags(), ace.object_type()))?;
                 if flags.is_none() {
                     return Err(Error::field(strand, object_type_field));
                 }
                 if let Some(value) = value {
-                    let global = strand.state::<Global<'v>>();
-                    create_guid(strand, global, value, &mut out);
+                    dolang_ext_uuid::create_guid(strand, value, out);
                 } else {
                     Output::set(strand, out, Nil);
                 }
                 Ok(())
             })
-            .get("inherited_object_type", move |this, strand, mut out| {
+            .get("inherited_object_type", move |this, strand, out| {
                 let (flags, value) = with_ace(this, strand, |ace| {
                     (ace.object_flags(), ace.inherited_object_type())
                 })?;
@@ -1486,8 +1384,7 @@ impl<'v> Object<'v> for Ace {
                     return Err(Error::field(strand, inherited_object_type_field));
                 }
                 if let Some(value) = value {
-                    let global = strand.state::<Global<'v>>();
-                    create_guid(strand, global, value, &mut out);
+                    dolang_ext_uuid::create_guid(strand, value, out);
                 } else {
                     Output::set(strand, out, Nil);
                 }

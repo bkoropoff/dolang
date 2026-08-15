@@ -26,6 +26,5 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
     builder
         .module("sys.windows")
         .value("WinError", global.types.win_error)
-        .value("Guid", global.types.guid)
         .commit();
 }

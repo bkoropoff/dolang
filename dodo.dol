@@ -56,6 +56,7 @@ let PUBLISH_CRATES = $
   - dolang-ext-glob
   - dolang-ext-digest
   - dolang-ext-base64
+  - dolang-ext-uuid
   - dolang-ext-load
   - dolang-private-test
   - dolang-ext-compile

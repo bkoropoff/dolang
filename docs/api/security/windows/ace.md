@@ -15,8 +15,8 @@ Constructs an access-allowed ACE.
 | `sid`                   | [`Sid`](./sid.md)                                           | Trustee                   |
 | `mask`                  | [`AccessMask`](./access-mask.md)\|[`Int`](../../std/int.md) | Access mask               |
 | `flags`                 | [`Int`](../../std/int.md)?                                  | Native ACE flags          |
-| `object_type`           | [`sys.windows.Guid`](../../sys/windows/guid.md)?            | Object type               |
-| `inherited_object_type` | [`sys.windows.Guid`](../../sys/windows/guid.md)?            | Inherited object type     |
+| `object_type`           | [`uuid.Guid`](../../uuid/guid.md)?                          | Object type               |
+| `inherited_object_type` | [`uuid.Guid`](../../uuid/guid.md)?                          | Inherited object type     |
 | `callback`              | [`Bool`](../../std/bool.md)?                                | Build a callback ACE      |
 | `application_data`      | [`Bin`](../../std/bin.md)?                                  | Trailing application data |
 
@@ -100,14 +100,14 @@ Raises `FieldError` for a non-object ACE.
 
 ### `object_type`
 
-Object-type [`sys.windows.Guid`](../../sys/windows/guid.md), or `nil` when the
+Object-type [`uuid.Guid`](../../uuid/guid.md), or `nil` when the
 object flag is clear.
 
 Raises `FieldError` for a non-object ACE.
 
 ### `inherited_object_type`
 
-Inherited-object-type [`sys.windows.Guid`](../../sys/windows/guid.md), or `nil`
+Inherited-object-type [`uuid.Guid`](../../uuid/guid.md), or `nil`
 when the object flag is clear.
 
 Raises `FieldError` for a non-object ACE.
