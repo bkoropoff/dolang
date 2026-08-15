@@ -15,7 +15,7 @@ use dolang_vfs::{
     target::OperatingSystem,
 };
 use dolang_winterop::{
-    apc::{ApcCancelled, ApcContext, Reactor},
+    apc::{Canceled, Context, Reactor},
     security::{
         ALL_SECURITY_INFORMATION, DACL_SECURITY_INFORMATION, SACL_SECURITY_INFORMATION,
         SecDesc as VfsSecDesc, with_security_privilege,
@@ -34,11 +34,10 @@ use windows_sys::Win32::{
     System::Services::{
         ChangeServiceConfigW, CloseServiceHandle, ControlService, CreateServiceW, DeleteService,
         ENUM_SERVICE_STATUS_PROCESSW, EnumServicesStatusExW, NotifyServiceStatusChangeW,
-        OpenSCManagerW, OpenServiceW, PFN_SC_NOTIFY_CALLBACK, QUERY_SERVICE_CONFIGW,
-        QueryServiceConfigW, QueryServiceObjectSecurity, QueryServiceStatusEx,
-        SC_ENUM_PROCESS_INFO, SC_HANDLE, SC_STATUS_PROCESS_INFO, SERVICE_NO_CHANGE,
-        SERVICE_NOTIFY_2W, SERVICE_NOTIFY_STATUS_CHANGE, SERVICE_STATUS, SERVICE_STATUS_PROCESS,
-        SetServiceObjectSecurity, StartServiceW,
+        OpenSCManagerW, OpenServiceW, QUERY_SERVICE_CONFIGW, QueryServiceConfigW,
+        QueryServiceObjectSecurity, QueryServiceStatusEx, SC_ENUM_PROCESS_INFO, SC_HANDLE,
+        SC_STATUS_PROCESS_INFO, SERVICE_NO_CHANGE, SERVICE_NOTIFY_2W, SERVICE_NOTIFY_STATUS_CHANGE,
+        SERVICE_STATUS, SERVICE_STATUS_PROCESS, SetServiceObjectSecurity, StartServiceW,
     },
 };
 
@@ -170,7 +169,7 @@ fn status_from_raw(status: &SERVICE_STATUS_PROCESS) -> ServiceStatus {
 /// (see [`crate::service::Service`]) so the reactor's background thread
 /// stays alive for exactly as long as at least one `Service` handle
 /// referencing it is open, and no longer: this cache never calls
-/// `ReactorControl::cancel()`/`join()` itself. Once every `Arc<Reactor>`
+/// `Control::cancel()`/`join()` itself. Once every `Arc<Reactor>`
 /// clone handed out here is dropped, the reactor's own internal refcount
 /// reaches zero on its own and the background thread exits via the natural-
 /// quiescence path `dolang_winterop::apc` already implements and tests
@@ -675,7 +674,7 @@ unsafe extern "system" fn notify_trampoline(pparameter: *const std::ffi::c_void)
 /// taking one from the caller — see [`crate::service::Service`]'s doc
 /// comment for why.
 async fn wait_for_status_change(
-    apc_ctx: &mut ApcContext,
+    apc_ctx: &mut Context,
     name: String,
     mask: u32,
 ) -> Result<ServiceStatus, Error> {
@@ -687,7 +686,7 @@ async fn wait_for_status_change(
         tx: Some(tx),
     });
     cell.buf.dwVersion = SERVICE_NOTIFY_STATUS_CHANGE;
-    cell.buf.pfnNotifyCallback = notify_trampoline_ptr();
+    cell.buf.pfnNotifyCallback = Some(notify_trampoline);
     cell.buf.pContext = &mut *cell as *mut NotifyCell as *mut _;
 
     // SAFETY: `handle.0` is a live service handle; `cell.buf` stays alive
@@ -704,7 +703,7 @@ async fn wait_for_status_change(
             ErrorKind::Other,
             "status notification sender dropped unexpectedly",
         )),
-        Err(ApcCancelled) => {
+        Err(Canceled) => {
             // Close the dedicated handle now: SCM has no "unregister
             // notification" API, so closing the handle a request was
             // registered on is the only documented way to cancel it. This
@@ -723,20 +722,13 @@ async fn wait_for_status_change(
             // just-about-to-fire notify callback — has been fully
             // delivered and processed by the time our own callback runs.
             // Only then is it safe to drop `cell`.
-            let (drained_tx, drained_rx) = oneshot::channel();
             apc_ctx
-                .post_raw(move || {
-                    let _ = drained_tx.send(());
-                })
+                .submit(async |_| ())
+                .await
                 .map_err(|error| Error::new(ErrorKind::Other, error.to_string()))?;
-            let _ = drained_rx.await;
             Err(Error::new(ErrorKind::Other, "status change wait cancelled"))
         }
     }
-}
-
-fn notify_trampoline_ptr() -> PFN_SC_NOTIFY_CALLBACK {
-    Some(notify_trampoline)
 }
 
 fn invalid_handle(_: InvalidHandle) -> Error {
