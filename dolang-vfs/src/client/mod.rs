@@ -44,9 +44,9 @@ use crate::extension::VfsExtension;
 use crate::protocol::AccessRequest;
 use crate::session::Query;
 use crate::{
-    Acl, AclKind, Child, Command, FileHandle, FsMetadata, Metadata, MetadataPatch, ProcessStatus,
-    ReadDir, SessionMode, SidName, StdioRecv, StdioSend, StreamEntry, Utf8TypedPath,
-    Utf8TypedPathBuf, Vfs, XattrEntry,
+    Acl, AclKind, Child, Command, FileHandle, FsMetadata, Metadata, MetadataPatch, PrincipalId,
+    PrincipalIdKind, ProcessStatus, ReadDir, SessionMode, SidName, StdioRecv, StdioSend,
+    StreamEntry, Utf8TypedPath, Utf8TypedPathBuf, Vfs, XattrEntry,
     direct::DirectFile,
     path::WellKnownPath,
     protocol::{
@@ -1314,6 +1314,22 @@ impl Client {
         }
     }
 
+    /// Converts a principal ID from one representation to another on the
+    /// target.
+    pub async fn resolve_principal_id(
+        &self,
+        input: PrincipalId,
+        want: PrincipalIdKind,
+    ) -> crate::Result<PrincipalId> {
+        match self
+            .request(RequestKind::ResolvePrincipalId { input, want })
+            .await?
+        {
+            ResponseKind::ResolvePrincipalId(result) => result.map_err(Into::into),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
     /// Resolve a program path using the daemon's PATH resolution.
     pub async fn which(
         &self,
@@ -2520,6 +2536,14 @@ impl Vfs for Client {
 
     async fn account_name(&self, name: &str) -> crate::Result<SidName> {
         Client::account_name(self, name).await
+    }
+
+    async fn resolve_principal_id(
+        &self,
+        input: PrincipalId,
+        want: PrincipalIdKind,
+    ) -> crate::Result<PrincipalId> {
+        Client::resolve_principal_id(self, input, want).await
     }
 
     async fn read_dir(&self, path: Utf8TypedPath<'_>) -> crate::Result<ReadDir> {

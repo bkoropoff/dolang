@@ -50,6 +50,31 @@ impl Acl {
     }
 }
 
+/// A principal identifier of a specific kind, used with
+/// [`Vfs::resolve_principal_id`](crate::Vfs::resolve_principal_id) to
+/// convert between them (e.g. a Unix uid/gid and a macOS `guid_t`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PrincipalId {
+    /// A Unix user ID.
+    Uid(u32),
+    /// A Unix group ID.
+    Gid(u32),
+    /// A macOS principal UUID (`guid_t`).
+    Uuid(uuid::Uuid),
+}
+
+/// Selects which [`PrincipalId`] variant a `resolve_principal_id`-style
+/// operation should produce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PrincipalIdKind {
+    /// Resolve to a Unix user ID.
+    Uid,
+    /// Resolve to a Unix group ID.
+    Gid,
+    /// Resolve to a macOS principal UUID (`guid_t`).
+    Uuid,
+}
+
 /// An owner or group selected by numeric ID, account name, or Windows SID.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OwnershipIdentity {

@@ -26,11 +26,12 @@ use dolang_vfs::{
         Nfs4AceFlags as VfsNfs4AceFlags, Nfs4AceMask as VfsNfs4AceMask,
         Nfs4AceQualifier as VfsNfs4AceQualifier, Nfs4AceType as VfsNfs4AceType,
         Nfs4Acl as VfsNfs4Acl, Permission as VfsPermission, PosixAce as VfsPosixAce,
-        PosixAcl as VfsPosixAcl, PosixAclQualifier as VfsPosixAclQualifier, SecurityInfo,
+        PosixAcl as VfsPosixAcl, PosixAclQualifier as VfsPosixAclQualifier,
+        PrincipalId as VfsPrincipalId, PrincipalIdKind as VfsPrincipalIdKind, SecurityInfo,
         SidName as VfsSidName, SidNameUse, TokenGroup as VfsTokenGroup, UnixSecurityInfo,
         WindowsTokenInfo,
     },
-    target::OperatingSystemFamily,
+    target::{OperatingSystem, OperatingSystemFamily},
 };
 use dolang_winterop::security::{
     AccessMask as WinAccessMask, SecDescControl as WinSecDescControl, SecInfo as WinSecInfo,
@@ -3014,6 +3015,35 @@ fn security_info<'v, 's>(
     Ok(global.local.get(strand).security())
 }
 
+/// Resolves a `security.unix.user_name`/`group_name` argument that may be a
+/// `uuid.Uuid` (macOS only) as well as the usual numeric uid/gid.
+async fn resolve_uid_or_gid_arg<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    value: &Value<'v>,
+    want: VfsPrincipalIdKind,
+) -> Result<'v, 's, u32> {
+    let Some(uuid) = dolang_ext_uuid::cast_uuid(strand, value) else {
+        return value.to_u32(strand);
+    };
+    if global.local.get(strand).target().operating_system != OperatingSystem::Macos {
+        return Err(Error::not_supported(strand));
+    }
+    let vfs = global.local.get(strand).vfs();
+    let id = error::io_result(
+        strand,
+        vfs.resolve_principal_id(VfsPrincipalId::Uuid(uuid), want)
+            .await,
+    )?;
+    Ok(match id {
+        VfsPrincipalId::Uid(uid) => uid,
+        VfsPrincipalId::Gid(gid) => gid,
+        VfsPrincipalId::Uuid(_) => {
+            unreachable!("resolve_principal_id(Uuid, Uid|Gid) returned a Uuid")
+        }
+    })
+}
+
 pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Global<'v>>) {
     builder
         .module("security")
@@ -3083,8 +3113,8 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             {
                 return Err(Error::not_supported(strand));
             }
-            let uid = uid.to_u32(strand)?;
             let vfs = global.local.get(strand).vfs();
+            let uid = resolve_uid_or_gid_arg(strand, global, &uid, VfsPrincipalIdKind::Uid).await?;
             let name = error::io_result(strand, vfs.user_name(uid).await)?;
             Output::set(strand, out, name.as_str());
             Ok(())
@@ -3112,8 +3142,8 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             {
                 return Err(Error::not_supported(strand));
             }
-            let gid = gid.to_u32(strand)?;
             let vfs = global.local.get(strand).vfs();
+            let gid = resolve_uid_or_gid_arg(strand, global, &gid, VfsPrincipalIdKind::Gid).await?;
             let name = error::io_result(strand, vfs.group_name(gid).await)?;
             Output::set(strand, out, name.as_str());
             Ok(())
@@ -3144,12 +3174,72 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         .value("Flags", global.types.nfs4_ace_flags)
         .commit();
 
+    let macos_uid_sym = builder.sym("UID");
+    let macos_gid_sym = builder.sym("GID");
     builder
         .module("security.macos")
         .value("Acl", global.types.macos_acl)
         .value("Ace", global.types.macos_ace)
         .value("Mask", global.types.macos_ace_mask)
         .value("Flags", global.types.macos_ace_flags)
+        .function("uuid_for_uid", async move |strand, args, out| {
+            let ([uid], []) = unpack!(strand, args, 1, 0)?;
+            if global.local.get(strand).target().operating_system != OperatingSystem::Macos {
+                return Err(Error::not_supported(strand));
+            }
+            let uid = uid.to_u32(strand)?;
+            let vfs = global.local.get(strand).vfs();
+            let id = error::io_result(
+                strand,
+                vfs.resolve_principal_id(VfsPrincipalId::Uid(uid), VfsPrincipalIdKind::Uuid)
+                    .await,
+            )?;
+            let VfsPrincipalId::Uuid(uuid) = id else {
+                unreachable!("resolve_principal_id(_, Uuid) returned a non-Uuid PrincipalId")
+            };
+            dolang_ext_uuid::create_uuid(strand, uuid, out);
+            Ok(())
+        })
+        .function("uuid_for_gid", async move |strand, args, out| {
+            let ([gid], []) = unpack!(strand, args, 1, 0)?;
+            if global.local.get(strand).target().operating_system != OperatingSystem::Macos {
+                return Err(Error::not_supported(strand));
+            }
+            let gid = gid.to_u32(strand)?;
+            let vfs = global.local.get(strand).vfs();
+            let id = error::io_result(
+                strand,
+                vfs.resolve_principal_id(VfsPrincipalId::Gid(gid), VfsPrincipalIdKind::Uuid)
+                    .await,
+            )?;
+            let VfsPrincipalId::Uuid(uuid) = id else {
+                unreachable!("resolve_principal_id(_, Uuid) returned a non-Uuid PrincipalId")
+            };
+            dolang_ext_uuid::create_uuid(strand, uuid, out);
+            Ok(())
+        })
+        .function("id_for_uuid", async move |strand, args, out| {
+            let ([uuid], []) = unpack!(strand, args, 1, 0)?;
+            if global.local.get(strand).target().operating_system != OperatingSystem::Macos {
+                return Err(Error::not_supported(strand));
+            }
+            let uuid = dolang_ext_uuid::value_to_uuid(strand, &uuid)?;
+            let vfs = global.local.get(strand).vfs();
+            let id = error::io_result(
+                strand,
+                vfs.resolve_principal_id(VfsPrincipalId::Uuid(uuid), VfsPrincipalIdKind::Uid)
+                    .await,
+            )?;
+            let (kind, id) = match id {
+                VfsPrincipalId::Uid(uid) => (macos_uid_sym, uid),
+                VfsPrincipalId::Gid(gid) => (macos_gid_sym, gid),
+                VfsPrincipalId::Uuid(_) => {
+                    unreachable!("resolve_principal_id(_, Uid|Gid) returned a Uuid")
+                }
+            };
+            Output::set(strand, out, (kind, id));
+            Ok(())
+        })
         .commit();
 
     builder

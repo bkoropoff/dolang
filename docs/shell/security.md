@@ -143,6 +143,34 @@ one. Unlike an NFSv4 ACL, a macOS extended ACL is an optional overlay on top
 of POSIX permissions, so it can be removed back to "none" with `fs.set_acl
 config.ini nil kind: :MACOS:`.
 
+Since ACL principals are UUIDs, building or inspecting a macOS ACE usually
+means converting between a Unix uid/gid and its UUID.
+[`security.macos.uuid_for_uid`](../api/security/macos/index.md#uuid_for_uid-uid)
+and
+[`uuid_for_gid`](../api/security/macos/index.md#uuid_for_gid-gid) go from
+id to UUID;
+[`id_for_uuid`](../api/security/macos/index.md#id_for_uuid-uuid) goes the
+other way, returning which kind (`:UID:` or `:GID:`) the UUID resolved to
+alongside the id itself, since a bare UUID doesn't say which it is:
+
+```
+import security.macos
+import security.unix: id
+
+let owner = security.macos.uuid_for_uid id().euid
+let access = Acl $
+  $ Ace.allow $owner mask: $read
+fs.set_acl config.ini $access
+
+let kind id = security.macos.id_for_uuid owner
+echo "$kind $id"  # UID 501
+```
+
+[`security.unix.user_name`](../api/security/unix/index.md#user_name-uid) and
+[`group_name`](../api/security/unix/index.md#group_name-gid) also accept a
+UUID directly on macOS, resolving it internally, so an ACE principal can be
+turned into a name without a separate `id_for_uuid` call.
+
 ## Windows Access Tokens
 
 [`security.windows.token_info()`](../api/security/windows/index.md#token_info)

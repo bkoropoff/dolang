@@ -1,13 +1,33 @@
-use std::io;
+use std::{
+    ffi::CStr,
+    io,
+    os::fd::{AsFd, AsRawFd},
+    path::Path,
+    ptr,
+};
 
-use crate::security::MacosAcl;
+use tokio::fs::File;
+use uuid::Uuid;
 
-#[cfg(target_os = "macos")]
-mod macos {
+use crate::security::{
+    Acl, AclKind, MacosAce, MacosAceFlags, MacosAceMask, MacosAceType, MacosAcl,
+};
+
+use super::{cpath, unsupported_kind};
+
+fn call(result: libc::c_int) -> io::Result<()> {
+    if result < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+// --- macOS extended ACLs (ACL_TYPE_EXTENDED) ---
+
+mod acl {
     use super::*;
-    use crate::security::{MacosAce, MacosAceFlags, MacosAceMask, MacosAceType};
-    use std::{ffi::c_void, os::unix::ffi::OsStrExt, ptr};
-    use uuid::Uuid;
+    use std::{ffi::c_void, os::unix::ffi::OsStrExt};
 
     type Acl = *mut c_void;
     type Entry = *mut c_void;
@@ -113,14 +133,6 @@ mod macos {
         }
     }
 
-    fn call(result: libc::c_int) -> io::Result<()> {
-        if result < 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
-    }
-
     // Unlike FreeBSD's NFSv4 ACL API (EINVAL for "not applicable at all"),
     // Darwin's acl_get_{file,link_np,fd_np} report a target with no
     // extended ACL by returning NULL with errno set to ENOENT -- the same
@@ -128,7 +140,7 @@ mod macos {
     // whether the target actually exists before treating ENOENT as "no
     // ACL"; an fd is already open, so ENOENT on that path can only mean
     // "no ACL".
-    fn target_exists(path: Option<&std::ffi::CStr>, fd: libc::c_int, follow: bool) -> bool {
+    fn target_exists(path: Option<&CStr>, fd: libc::c_int, follow: bool) -> bool {
         if fd >= 0 {
             return true;
         }
@@ -141,7 +153,7 @@ mod macos {
         }
     }
 
-    unsafe fn get_native(path: Option<&std::ffi::CStr>, fd: libc::c_int, follow: bool) -> Acl {
+    unsafe fn get_native(path: Option<&CStr>, fd: libc::c_int, follow: bool) -> Acl {
         if fd >= 0 {
             unsafe { acl_get_fd_np(fd, ACL_TYPE_EXTENDED) }
         } else if follow {
@@ -152,7 +164,7 @@ mod macos {
     }
 
     unsafe fn set_native(
-        path: Option<&std::ffi::CStr>,
+        path: Option<&CStr>,
         fd: libc::c_int,
         follow: bool,
         acl: Acl,
@@ -167,7 +179,7 @@ mod macos {
     }
 
     pub(super) fn get(
-        path: Option<&std::ffi::CStr>,
+        path: Option<&CStr>,
         fd: libc::c_int,
         follow: bool,
     ) -> io::Result<Option<MacosAcl>> {
@@ -269,7 +281,7 @@ mod macos {
     }
 
     pub(super) fn set(
-        path: Option<&std::ffi::CStr>,
+        path: Option<&CStr>,
         fd: libc::c_int,
         follow: bool,
         acl: Option<&MacosAcl>,
@@ -323,34 +335,130 @@ mod macos {
     }
 }
 
-#[cfg(target_os = "macos")]
-pub(super) fn get(
-    path: Option<&std::ffi::CStr>,
-    fd: libc::c_int,
-    follow: bool,
-) -> io::Result<Option<MacosAcl>> {
-    macos::get(path, fd, follow)
+pub(super) fn get(path: &Path, kind: AclKind, follow: bool) -> io::Result<Option<Acl>> {
+    match kind {
+        AclKind::Macos => {
+            let cpath = cpath(path)?;
+            Ok(acl::get(Some(&cpath), -1, follow)?.map(Acl::Macos))
+        }
+        AclKind::Posix | AclKind::Nfs4 => Err(unsupported_kind(kind)),
+    }
 }
 
-#[cfg(target_os = "macos")]
-pub(super) fn set(
-    path: Option<&std::ffi::CStr>,
-    fd: libc::c_int,
-    follow: bool,
-    acl: Option<&MacosAcl>,
-) -> io::Result<()> {
-    macos::set(path, fd, follow, acl)
+pub(super) fn set(path: &Path, kind: AclKind, acl: Option<&Acl>, follow: bool) -> io::Result<()> {
+    match kind {
+        AclKind::Macos => {
+            let cpath = cpath(path)?;
+            acl::set(Some(&cpath), -1, follow, super::split_macos(kind, acl)?)
+        }
+        AclKind::Posix | AclKind::Nfs4 => Err(unsupported_kind(kind)),
+    }
 }
 
-#[cfg(not(target_os = "macos"))]
-pub(super) fn set(
-    _path: Option<&std::ffi::CStr>,
-    _fd: libc::c_int,
-    _follow: bool,
-    _acl: Option<&MacosAcl>,
-) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "macOS ACLs are not supported on this platform",
-    ))
+pub(super) fn get_fd(file: &File, kind: AclKind) -> io::Result<Option<Acl>> {
+    match kind {
+        AclKind::Macos => Ok(acl::get(None, file.as_fd().as_raw_fd(), true)?.map(Acl::Macos)),
+        AclKind::Posix | AclKind::Nfs4 => Err(unsupported_kind(kind)),
+    }
+}
+
+pub(super) fn set_fd(file: &File, kind: AclKind, acl: Option<&Acl>) -> io::Result<()> {
+    match kind {
+        AclKind::Macos => acl::set(
+            None,
+            file.as_fd().as_raw_fd(),
+            true,
+            super::split_macos(kind, acl)?,
+        ),
+        AclKind::Posix | AclKind::Nfs4 => Err(unsupported_kind(kind)),
+    }
+}
+
+// --- Principal ID resolution (Membership framework: uid/gid <-> guid_t) ---
+//
+// Signatures below are transcribed from Apple's public `membership.h` and
+// have not been compiled/verified on this (Linux) machine -- confirm
+// against a real macOS SDK/CI build before relying on them.
+
+mod mbr {
+    use super::*;
+
+    const ID_TYPE_UID: libc::c_int = 0;
+    const ID_TYPE_GID: libc::c_int = 1;
+
+    unsafe extern "C" {
+        fn mbr_uid_to_uuid(uid: libc::uid_t, uu: *mut u8) -> libc::c_int;
+        fn mbr_gid_to_uuid(gid: libc::gid_t, uu: *mut u8) -> libc::c_int;
+        fn mbr_uuid_to_id(uu: *const u8, id: *mut u32, id_type: *mut libc::c_int) -> libc::c_int;
+    }
+
+    fn call(result: libc::c_int) -> io::Result<()> {
+        // mbr_*() functions return an error number directly on failure,
+        // rather than -1 with errno set.
+        if result != 0 {
+            Err(io::Error::from_raw_os_error(result))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(super) fn uid_to_uuid(uid: u32) -> io::Result<Uuid> {
+        let mut uu = [0u8; 16];
+        call(unsafe { mbr_uid_to_uuid(uid, uu.as_mut_ptr()) })?;
+        Ok(Uuid::from_bytes(uu))
+    }
+
+    pub(super) fn gid_to_uuid(gid: u32) -> io::Result<Uuid> {
+        let mut uu = [0u8; 16];
+        call(unsafe { mbr_gid_to_uuid(gid, uu.as_mut_ptr()) })?;
+        Ok(Uuid::from_bytes(uu))
+    }
+
+    pub(super) enum ResolvedId {
+        Uid(u32),
+        Gid(u32),
+    }
+
+    pub(super) fn uuid_to_id(uuid: Uuid) -> io::Result<ResolvedId> {
+        let mut id = 0u32;
+        let mut id_type = 0;
+        call(unsafe { mbr_uuid_to_id(uuid.as_bytes().as_ptr(), &mut id, &mut id_type) })?;
+        match id_type {
+            ID_TYPE_UID => Ok(ResolvedId::Uid(id)),
+            ID_TYPE_GID => Ok(ResolvedId::Gid(id)),
+            _ => Err(io::Error::other(
+                "mbr_uuid_to_id returned an unrecognized id type",
+            )),
+        }
+    }
+}
+
+fn invalid_combo() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "unsupported principal ID conversion",
+    )
+}
+
+pub(super) fn resolve_principal_id(
+    input: crate::security::PrincipalId,
+    want: crate::security::PrincipalIdKind,
+) -> io::Result<crate::security::PrincipalId> {
+    use crate::security::{PrincipalId, PrincipalIdKind};
+
+    match (input, want) {
+        (PrincipalId::Uid(uid), PrincipalIdKind::Uuid) => {
+            mbr::uid_to_uuid(uid).map(PrincipalId::Uuid)
+        }
+        (PrincipalId::Gid(gid), PrincipalIdKind::Uuid) => {
+            mbr::gid_to_uuid(gid).map(PrincipalId::Uuid)
+        }
+        (PrincipalId::Uuid(uuid), PrincipalIdKind::Uid | PrincipalIdKind::Gid) => {
+            match mbr::uuid_to_id(uuid)? {
+                mbr::ResolvedId::Uid(uid) => Ok(PrincipalId::Uid(uid)),
+                mbr::ResolvedId::Gid(gid) => Ok(PrincipalId::Gid(gid)),
+            }
+        }
+        _ => Err(invalid_combo()),
+    }
 }

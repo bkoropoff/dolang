@@ -1,13 +1,19 @@
-import security.macos: macos_security
-import uuid
+import sys
+  security.macos: macos_security
+  security.unix: unix_security
+  security.unix:
+    id: unix_info
+  uuid
   std:
     - ImmutableError
     - TypeError
+    - UnsupportedError
     - ValueError
   test:
     - assert_eq
     - assert_throws
     - assert_type
+    - skip
     - test
 
 #[test]
@@ -50,3 +56,36 @@ def constructs_macos_acls_on_every_platform()
   assert_throws $TypeError do macos_security.Acl [allow, 5]
   assert_throws $TypeError do macos_security.Ace.allow 5 mask: $r
   assert_throws $ValueError do macos_security.Ace.allow "not-a-uuid" mask: $r
+
+#[test]
+def resolves_macos_principal_ids()
+  if (sys.os_info().os != :MACOS:)
+    skip "macOS principal ID resolution is not supported on this platform"
+
+  let info = unix_info()
+  let uid_uuid = macos_security.uuid_for_uid $info.euid
+  let gid_uuid = macos_security.uuid_for_gid $info.egid
+  assert_type $uuid.Uuid $uid_uuid
+  assert_type $uuid.Uuid $gid_uuid
+
+  let kind id = macos_security.id_for_uuid $uid_uuid
+  assert_eq $kind :UID:
+  assert_eq $id $info.euid
+
+  let kind id = macos_security.id_for_uuid $gid_uuid
+  assert_eq $kind :GID:
+  assert_eq $id $info.egid
+
+  assert_eq (unix_security.user_name uid_uuid) (unix_security.user_name info.euid)
+  assert_eq (unix_security.group_name gid_uuid) (unix_security.group_name info.egid)
+
+#[test]
+def rejects_macos_principal_id_resolution_when_unsupported()
+  if (sys.os_info().os == :MACOS:)
+    skip "macOS principal ID resolution is supported on this platform"
+
+  assert_throws $UnsupportedError do macos_security.uuid_for_uid 0
+  assert_throws $UnsupportedError do macos_security.uuid_for_gid 0
+  assert_throws $UnsupportedError do macos_security.id_for_uuid (uuid.Uuid.generate())
+  assert_throws $UnsupportedError do unix_security.user_name (uuid.Uuid.generate())
+  assert_throws $UnsupportedError do unix_security.group_name (uuid.Uuid.generate())
