@@ -5,7 +5,8 @@ use dolang::runtime::{
 };
 
 use crate::{
-    access_mask::AccessMask, key::Key, subkeys::SubKeys, value_entry::ValueEntry, values::Values,
+    access_mask::AccessMask, key::Key, link_target::LinkTarget, subkeys::SubKeys,
+    value_entry::ValueEntry, values::Values,
 };
 
 pub(crate) struct Types<'v> {
@@ -14,6 +15,7 @@ pub(crate) struct Types<'v> {
     pub(crate) values: Type<'v, Values>,
     pub(crate) subkeys: Type<'v, SubKeys>,
     pub(crate) access_mask: Type<'v, Flags<AccessMask>>,
+    pub(crate) link_target: Type<'v, LinkTarget>,
 }
 
 /// Symbols for the `:UPPER_CASE:` constants this extension accepts in place
@@ -39,11 +41,14 @@ pub(crate) struct Syms<'v> {
     pub(crate) qword: Sym<'v, 'v>,
     pub(crate) binary: Sym<'v, 'v>,
     pub(crate) none: Sym<'v, 'v>,
+    pub(crate) target: Sym<'v, 'v>,
+    pub(crate) link: Sym<'v, 'v>,
     // Method/keyword names
     pub(crate) close: Sym<'v, 'v>,
     pub(crate) view: Sym<'v, 'v>,
     pub(crate) access: Sym<'v, 'v>,
     pub(crate) kind: Sym<'v, 'v>,
+    pub(crate) resolve: Sym<'v, 'v>,
 }
 
 pub(crate) struct Global<'v> {
@@ -64,6 +69,7 @@ impl<'v> Global<'v> {
         let values = builder.register_type::<Values>();
         let subkeys = builder.register_type::<SubKeys>();
         let access_mask = AccessMask::register_type(builder);
+        let link_target = builder.register_type::<LinkTarget>();
 
         Self {
             types: Types {
@@ -72,6 +78,7 @@ impl<'v> Global<'v> {
                 values,
                 subkeys,
                 access_mask,
+                link_target,
             },
             syms: Syms {
                 classes_root: builder.sym("CLASSES_ROOT"),
@@ -90,10 +97,13 @@ impl<'v> Global<'v> {
                 qword: builder.sym("QWORD"),
                 binary: builder.sym("BINARY"),
                 none: builder.sym("NONE"),
+                target: builder.sym("TARGET"),
+                link: builder.sym("LINK"),
                 close: builder.sym("close"),
                 view: builder.sym("view"),
                 access: builder.sym("access"),
                 kind: builder.sym("kind"),
+                resolve: builder.sym("resolve"),
             },
         }
     }

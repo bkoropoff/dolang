@@ -1,3 +1,4 @@
+#![deny(warnings)]
 //! Windows registry VFS extension for `dolang-vfs`.
 //!
 //! Registers a remoteable [`dolang_vfs::extension::VfsExtension`] providing
@@ -17,4 +18,4 @@ mod wire;
 
 pub use api::{Key, SubKeys, Values};
 pub use value::Value;
-pub use wire::{Access, PredefinedRoot, View};
+pub use wire::{Access, LinkTarget, PredefinedRoot, Resolve, View};

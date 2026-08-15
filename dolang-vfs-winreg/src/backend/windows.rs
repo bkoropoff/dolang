@@ -27,10 +27,10 @@ use windows_sys::Win32::{
     },
     System::Registry::{
         HKEY, HKEY_CLASSES_ROOT, HKEY_CURRENT_CONFIG, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE,
-        HKEY_USERS, KEY_WOW64_32KEY, KEY_WOW64_64KEY, REG_OPTION_NON_VOLATILE, RegCreateKeyExW,
-        RegDeleteKeyExW, RegDeleteTreeW, RegDeleteValueW, RegEnumKeyExW, RegEnumValueW,
-        RegGetKeySecurity, RegOpenKeyExW, RegQueryInfoKeyW, RegQueryValueExW, RegSetKeySecurity,
-        RegSetValueExW,
+        HKEY_USERS, KEY_WOW64_32KEY, KEY_WOW64_64KEY, REG_LINK, REG_OPTION_CREATE_LINK,
+        REG_OPTION_NON_VOLATILE, REG_OPTION_OPEN_LINK, RegCreateKeyExW, RegDeleteKeyExW,
+        RegDeleteValueW, RegEnumKeyExW, RegEnumValueW, RegGetKeySecurity, RegOpenCurrentUser,
+        RegOpenKeyExW, RegQueryInfoKeyW, RegQueryValueExW, RegSetKeySecurity, RegSetValueExW,
     },
     System::SystemServices::ACCESS_SYSTEM_SECURITY,
 };
@@ -38,7 +38,7 @@ use windows_sys::Win32::{
 use crate::{
     key::Key,
     value::Value,
-    wire::{Access, KeyHandle, PredefinedRoot, View, WinRegRequest, WinRegResponse},
+    wire::{Access, KeyHandle, LinkTarget, PredefinedRoot, View, WinRegRequest, WinRegResponse},
 };
 
 /// Converts a non-predefined `HKEY` into an `OwnedHandle` that closes it via
@@ -47,7 +47,7 @@ use crate::{
 /// `windows-sys`'s `HKEY` is `*mut core::ffi::c_void`, the same
 /// representation as `RawHandle`, so this is a pointer reinterpretation, not
 /// a numeric cast.
-fn hkey_to_owned(hkey: HKEY) -> OwnedHandle {
+unsafe fn hkey_to_owned(hkey: HKEY) -> OwnedHandle {
     // SAFETY: `hkey` came from RegOpenKeyExW/RegCreateKeyExW, never a
     // predefined pseudo-handle; Microsoft documents such handles as usable
     // with generic kernel-handle APIs including DuplicateHandle/CloseHandle,
@@ -64,6 +64,17 @@ fn wide(value: &str) -> Vec<u16> {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect()
+}
+
+fn checked_wide(value: &str, what: &str) -> Result<Vec<u16>, Error> {
+    if value.contains('\0') {
+        Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!("{what} contains NUL"),
+        ))
+    } else {
+        Ok(wide(value))
+    }
 }
 
 fn from_win32(operation: &str, code: u32) -> Error {
@@ -108,13 +119,30 @@ fn predefined_hkey(root: PredefinedRoot) -> HKEY {
     }
 }
 
-fn open_key(parent: HKEY, subpath: &str, view: View, access: Access) -> Result<HKEY, Error> {
-    let subpath = wide(subpath);
+unsafe fn open_key(parent: HKEY, subpath: &str, view: View, access: Access) -> Result<HKEY, Error> {
+    unsafe { open_key_options(parent, subpath, view, access, 0) }
+}
+
+unsafe fn open_key_options(
+    parent: HKEY,
+    subpath: &str,
+    view: View,
+    access: Access,
+    options: u32,
+) -> Result<HKEY, Error> {
+    let subpath = checked_wide(subpath, "registry subpath")?;
     let open = || {
         let mut out: HKEY = ptr::null_mut();
         // SAFETY: `subpath` is NUL-terminated; `out` is a valid out pointer.
-        let status =
-            unsafe { RegOpenKeyExW(parent, subpath.as_ptr(), 0, sam(view, access), &mut out) };
+        let status = unsafe {
+            RegOpenKeyExW(
+                parent,
+                subpath.as_ptr(),
+                options,
+                sam(view, access),
+                &mut out,
+            )
+        };
         if status != ERROR_SUCCESS {
             return Err(io::Error::from_raw_os_error(status as i32));
         }
@@ -128,8 +156,22 @@ fn open_key(parent: HKEY, subpath: &str, view: View, access: Access) -> Result<H
     result.map_err(|error| from_io("open key", error))
 }
 
-fn create_key(parent: HKEY, subpath: &str, view: View, access: Access) -> Result<HKEY, Error> {
-    let subpath = wide(subpath);
+unsafe fn open_link(
+    parent: HKEY,
+    subpath: &str,
+    view: View,
+    access: Access,
+) -> Result<HKEY, Error> {
+    unsafe { open_key_options(parent, subpath, view, access, REG_OPTION_OPEN_LINK) }
+}
+
+unsafe fn create_key(
+    parent: HKEY,
+    subpath: &str,
+    view: View,
+    access: Access,
+) -> Result<HKEY, Error> {
+    let subpath = checked_wide(subpath, "registry subpath")?;
     let create = || {
         let mut out: HKEY = ptr::null_mut();
         // SAFETY: `subpath` is NUL-terminated; `out` is a valid out pointer; no
@@ -160,37 +202,404 @@ fn create_key(parent: HKEY, subpath: &str, view: View, access: Access) -> Result
     result.map_err(|error| from_io("create key", error))
 }
 
-fn delete_key(parent: HKEY, subpath: &str, view: View, all: bool) -> Result<(), Error> {
-    if all {
-        // RegDeleteTreeW has no WOW64-view parameter. Open the target in the
-        // requested view, clear its contents through that handle, then delete
-        // the now-empty target with RegDeleteKeyExW below.
-        const DELETE_ACCESS: u32 = 0x0001_0000;
-        const KEY_QUERY_VALUE: u32 = 0x0001;
-        const KEY_SET_VALUE: u32 = 0x0002;
-        const KEY_ENUMERATE_SUB_KEYS: u32 = 0x0008;
-        let target = open_key(
+#[link(name = "ntdll")]
+unsafe extern "system" {
+    fn NtQueryKey(
+        key_handle: *mut core::ffi::c_void,
+        key_information_class: i32,
+        key_information: *mut core::ffi::c_void,
+        length: u32,
+        result_length: *mut u32,
+    ) -> i32;
+
+    fn NtDeleteKey(key_handle: *mut core::ffi::c_void) -> i32;
+}
+
+/// Returns the object-manager name of a registry key.
+///
+/// # Safety
+///
+/// `handle` must be a live registry-key handle for the duration of the call.
+unsafe fn native_key_name(handle: HKEY) -> Result<String, Error> {
+    const KEY_NAME_INFORMATION: i32 = 3;
+    const STATUS_BUFFER_OVERFLOW: i32 = 0x8000_0005u32 as i32;
+    const STATUS_BUFFER_TOO_SMALL: i32 = 0xc000_0023u32 as i32;
+    let mut bytes = vec![0u8; 256];
+    loop {
+        let mut needed = 0;
+        // SAFETY: the handle is live and the output buffer and length pointer are valid.
+        let status = unsafe {
+            NtQueryKey(
+                handle.cast(),
+                KEY_NAME_INFORMATION,
+                bytes.as_mut_ptr().cast(),
+                bytes.len() as u32,
+                &mut needed,
+            )
+        };
+        if status == STATUS_BUFFER_OVERFLOW || status == STATUS_BUFFER_TOO_SMALL {
+            bytes.resize(needed as usize, 0);
+            continue;
+        }
+        if status < 0 {
+            return Err(Error::new(
+                ErrorKind::Other,
+                format!(
+                    "query native registry name: NTSTATUS 0x{:08x}",
+                    status as u32
+                ),
+            ));
+        }
+        if needed < 4 {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "malformed native registry name",
+            ));
+        }
+        let name_len = u32::from_ne_bytes(bytes[..4].try_into().unwrap()) as usize;
+        let data = bytes
+            .get(4..4 + name_len)
+            .ok_or_else(|| Error::new(ErrorKind::InvalidData, "malformed native registry name"))?;
+        if data.len() % 2 != 0 {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "malformed native registry name",
+            ));
+        }
+        let units: Vec<u16> = data
+            .chunks_exact(2)
+            .map(|p| u16::from_le_bytes([p[0], p[1]]))
+            .collect();
+        return String::from_utf16(&units).map_err(|_| {
+            Error::new(
+                ErrorKind::InvalidData,
+                "native registry name is not valid UTF-16",
+            )
+        });
+    }
+}
+
+/// # Safety
+///
+/// `handle` must be a live, owned registry-key handle.
+unsafe fn close_key(handle: HKEY) {
+    unsafe { windows_sys::Win32::System::Registry::RegCloseKey(handle) };
+}
+
+fn resolve_native_target(root: PredefinedRoot, subpath: &str, view: View) -> Result<String, Error> {
+    if subpath.contains('\0') {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "target subpath contains NUL",
+        ));
+    }
+    let parts: Vec<&str> = subpath
+        .split('\\')
+        .filter(|part| !part.is_empty())
+        .collect();
+    for count in (1..=parts.len()).rev() {
+        let prefix = parts[..count].join("\\");
+        // Opening with REG_OPTION_OPEN_LINK is necessary for a link object,
+        // but real Windows returns ERROR_FILE_NOT_FOUND for an ordinary key.
+        // Fall back to a normal open so either kind can be the existing
+        // ancestor. Both calls use a nonempty subpath, so a successful result
+        // is a real key handle rather than a predefined pseudo-handle.
+        // SAFETY: `predefined_hkey` returns a valid predefined registry handle.
+        let opened = unsafe { open_link(predefined_hkey(root), &prefix, view, Access::READ) };
+        let opened = match opened {
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                // SAFETY: same parent-handle argument as above.
+                unsafe { open_key(predefined_hkey(root), &prefix, view, Access::READ) }
+            }
+            result => result,
+        };
+        match opened {
+            Ok(handle) => {
+                // SAFETY: `handle` was just returned by `open_link` and is
+                // kept live until it is closed immediately below.
+                let native = unsafe { native_key_name(handle) };
+                // SAFETY: ownership of the freshly-opened handle is local.
+                unsafe { close_key(handle) };
+                let mut native = native?;
+                if count < parts.len() {
+                    native.push('\\');
+                    native.push_str(&parts[count..].join("\\"));
+                }
+                return Ok(native);
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let mut native = match root {
+        PredefinedRoot::LocalMachine => r"\Registry\Machine".to_string(),
+        PredefinedRoot::Users => r"\Registry\User".to_string(),
+        PredefinedRoot::CurrentUser => {
+            let mut handle = ptr::null_mut();
+            // Unlike RegOpenKeyExW(HKEY_CURRENT_USER, ""), this returns a
+            // closable real handle suitable for NtQueryKey.
+            // SAFETY: `handle` is a valid out pointer.
+            let status = unsafe { RegOpenCurrentUser(sam(view, Access::READ), &mut handle) };
+            if status != ERROR_SUCCESS {
+                return Err(from_win32("open current user", status));
+            }
+            // SAFETY: `handle` was returned by RegOpenCurrentUser and remains
+            // live until the close immediately below.
+            let native = unsafe { native_key_name(handle) };
+            // SAFETY: ownership of the freshly-opened handle is local.
+            unsafe { close_key(handle) };
+            native?
+        }
+        PredefinedRoot::CurrentConfig => resolve_native_target(
+            PredefinedRoot::LocalMachine,
+            r"System\CurrentControlSet\Hardware Profiles\Current",
+            view,
+        )?,
+        PredefinedRoot::ClassesRoot => {
+            resolve_native_target(PredefinedRoot::LocalMachine, r"Software\Classes", view)?
+        }
+    };
+    if !parts.is_empty() {
+        native.push('\\');
+        native.push_str(&parts.join("\\"));
+    }
+    Ok(native)
+}
+
+unsafe fn create_link(
+    parent: HKEY,
+    target_root: PredefinedRoot,
+    target_subpath: &str,
+    link_subpath: &str,
+    view: View,
+) -> Result<(), Error> {
+    const KEY_SET_VALUE: u32 = 0x0002;
+    let native = resolve_native_target(target_root, target_subpath, view)?;
+    let link_path = checked_wide(link_subpath, "link subpath")?;
+    let mut handle = ptr::null_mut();
+    let mut disposition = 0;
+    // SAFETY: all pointers reference live values and link_path is NUL terminated.
+    let status = unsafe {
+        RegCreateKeyExW(
+            parent,
+            link_path.as_ptr(),
+            0,
+            ptr::null_mut(),
+            REG_OPTION_CREATE_LINK,
+            view_sam(view) | KEY_SET_VALUE,
+            ptr::null(),
+            &mut handle,
+            &mut disposition,
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return Err(from_win32("create registry link", status));
+    }
+    if disposition != 1 {
+        // SAFETY: ownership of the freshly-created handle is local.
+        unsafe { close_key(handle) };
+        return Err(Error::new(
+            ErrorKind::AlreadyExists,
+            "registry link destination already exists",
+        ));
+    }
+    let name = wide("SymbolicLinkValue");
+    let units: Vec<u16> = native.encode_utf16().collect();
+    let bytes: Vec<u8> = units.iter().flat_map(|unit| unit.to_le_bytes()).collect();
+    // SAFETY: handle is live and both buffers remain live for the call.
+    let set = unsafe {
+        RegSetValueExW(
+            handle,
+            name.as_ptr(),
+            0,
+            REG_LINK,
+            bytes.as_ptr(),
+            bytes.len() as u32,
+        )
+    };
+    // SAFETY: ownership of the freshly-created handle is local.
+    unsafe { close_key(handle) };
+    if set != ERROR_SUCCESS {
+        // Best-effort rollback of the newly-created, still-empty link.
+        unsafe { RegDeleteKeyExW(parent, link_path.as_ptr(), view_sam(view), 0) };
+        return Err(from_win32("set registry link target", set));
+    }
+    Ok(())
+}
+
+fn native_projection(native: String, view: View) -> Result<LinkTarget, Error> {
+    fn suffix(native: &str, prefix: &str) -> Option<String> {
+        if native.eq_ignore_ascii_case(prefix) {
+            return Some(String::new());
+        }
+        native
+            .get(prefix.len()..)
+            .filter(|rest| {
+                rest.starts_with('\\') && native[..prefix.len()].eq_ignore_ascii_case(prefix)
+            })
+            .map(|rest| rest[1..].to_string())
+    }
+    for root in [
+        PredefinedRoot::CurrentUser,
+        PredefinedRoot::Users,
+        PredefinedRoot::LocalMachine,
+    ] {
+        let prefix = resolve_native_target(root, "", view)?;
+        if let Some(subpath) = suffix(&native, &prefix) {
+            return Ok(LinkTarget {
+                native,
+                root: Some(root),
+                subpath: Some(subpath),
+            });
+        }
+    }
+    Ok(LinkTarget {
+        native,
+        root: None,
+        subpath: None,
+    })
+}
+
+unsafe fn read_link(parent: HKEY, subpath: &str, view: View) -> Result<LinkTarget, Error> {
+    let handle = unsafe { open_link(parent, subpath, view, Access::QUERY_VALUE)? };
+    let result = unsafe { get_value(handle, Some("SymbolicLinkValue")) };
+    // SAFETY: ownership of the freshly-opened handle is local.
+    unsafe { close_key(handle) };
+    let (_, value) =
+        result?.ok_or_else(|| Error::new(ErrorKind::InvalidInput, "registry key is not a link"))?;
+    let Value::Other { kind, data } = value else {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "registry key is not a link",
+        ));
+    };
+    if kind != REG_LINK {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "registry key is not a link",
+        ));
+    }
+    if data.len() % 2 != 0 {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "registry link target has an odd byte length",
+        ));
+    }
+    let units: Vec<u16> = data
+        .chunks_exact(2)
+        .map(|p| u16::from_le_bytes([p[0], p[1]]))
+        .collect();
+    let native = String::from_utf16(&units).map_err(|_| {
+        Error::new(
+            ErrorKind::InvalidData,
+            "registry link target is not valid UTF-16",
+        )
+    })?;
+    if native.contains('\0') {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "registry link target contains NUL",
+        ));
+    }
+    native_projection(native, view)
+}
+
+unsafe fn delete_link_if_link(parent: HKEY, subpath: &str, view: View) -> Result<bool, Error> {
+    const DELETE_ACCESS: u32 = 0x0001_0000;
+    let handle = unsafe {
+        open_link(
             parent,
             subpath,
             view,
             Access(AccessMask::from_bits_retain(
-                DELETE_ACCESS | KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_ENUMERATE_SUB_KEYS,
+                Access::QUERY_VALUE.0.bits() | DELETE_ACCESS,
             )),
-        )?;
-        // SAFETY: `target` is a live key handle and a null subkey asks
-        // RegDeleteTreeW to clear its values and descendants without deleting
-        // the target key itself.
-        let status = unsafe { RegDeleteTreeW(target, ptr::null()) };
+        )
+    };
+    let handle = match handle {
+        Ok(handle) => handle,
+        // Real Windows reports an ordinary key as not found when it is
+        // opened with REG_OPTION_OPEN_LINK. The normal deletion path below
+        // distinguishes an ordinary key from a genuinely missing path.
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let result = unsafe { get_value(handle, Some("SymbolicLinkValue")) };
+    let deleted = match result {
+        Ok(Some((_, Value::Other { kind: REG_LINK, .. }))) => {
+            // RegDeleteKeyExW resolves the pathname on some Windows versions
+            // and can consequently delete the target. NtDeleteKey acts on
+            // this REG_OPTION_OPEN_LINK handle, so it unambiguously deletes
+            // the link object itself.
+            // SAFETY: `handle` is live and was opened with DELETE access.
+            let status = unsafe { NtDeleteKey(handle.cast()) };
+            if status < 0 {
+                Err(Error::new(
+                    ErrorKind::Other,
+                    format!("delete registry link: NTSTATUS 0x{:08x}", status as u32),
+                ))
+            } else {
+                Ok(true)
+            }
+        }
+        Ok(_) => Ok(false),
+        Err(error) => Err(error),
+    };
+    // SAFETY: ownership of the freshly-opened handle is local.
+    unsafe { close_key(handle) };
+    deleted
+}
+
+/// Clears a key without ever following a registry symbolic link.
+///
+/// # Safety
+///
+/// `handle` must be a live registry-key handle with enumerate, query, set,
+/// and delete access for the duration of the call.
+unsafe fn clear_key(handle: HKEY) -> Result<(), Error> {
+    // Always remove index zero: deleting it shifts the next child into the
+    // same position. `delete_key` opens every child with REG_OPTION_OPEN_LINK
+    // first and deletes link objects by handle.
+    while let Some(name) = unsafe { enum_subkey(handle, 0)? } {
+        unsafe { delete_key(handle, &name, View::Native, true)? };
+    }
+    while let Some(name) = unsafe { enum_value(handle, 0)? } {
+        unsafe { delete_value(handle, Some(&name))? };
+    }
+    Ok(())
+}
+
+unsafe fn delete_key(parent: HKEY, subpath: &str, view: View, all: bool) -> Result<(), Error> {
+    // Check this for every removal, not only recursive removal: pathname-based
+    // deletion must never be given a link source.
+    if unsafe { delete_link_if_link(parent, subpath, view)? } {
+        return Ok(());
+    }
+    if all {
+        // Open the ordinary key in the requested view, clear it one child at
+        // a time without following links, then delete the empty key below.
+        const DELETE_ACCESS: u32 = 0x0001_0000;
+        const KEY_QUERY_VALUE: u32 = 0x0001;
+        const KEY_SET_VALUE: u32 = 0x0002;
+        const KEY_ENUMERATE_SUB_KEYS: u32 = 0x0008;
+        let target = unsafe {
+            open_key(
+                parent,
+                subpath,
+                view,
+                Access(AccessMask::from_bits_retain(
+                    DELETE_ACCESS | KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_ENUMERATE_SUB_KEYS,
+                )),
+            )?
+        };
+        // SAFETY: `target` is live with all access required by `clear_key`.
+        let result = unsafe { clear_key(target) };
         // SAFETY: `target` was returned by RegOpenKeyExW and has not otherwise
         // been closed.
-        unsafe {
-            windows_sys::Win32::System::Registry::RegCloseKey(target);
-        }
-        if status != ERROR_SUCCESS {
-            return Err(from_win32("delete registry tree", status));
-        }
+        unsafe { close_key(target) };
+        result?;
     }
-    let subpath = wide(subpath);
+    let subpath = checked_wide(subpath, "registry subpath")?;
     // SAFETY: `subpath` is NUL-terminated.
     let status = unsafe { RegDeleteKeyExW(parent, subpath.as_ptr(), view_sam(view), 0) };
     if status != ERROR_SUCCESS {
@@ -199,7 +608,7 @@ fn delete_key(parent: HKEY, subpath: &str, view: View, all: bool) -> Result<(), 
     Ok(())
 }
 
-fn enum_subkey(handle: HKEY, index: u32) -> Result<Option<String>, Error> {
+unsafe fn enum_subkey(handle: HKEY, index: u32) -> Result<Option<String>, Error> {
     let mut name = vec![0u16; 256]; // MAX_PATH-class limit for key names
     loop {
         let mut name_len = name.len() as u32;
@@ -236,10 +645,14 @@ fn enum_subkey(handle: HKEY, index: u32) -> Result<Option<String>, Error> {
 
 /// Fetches every subkey name under `handle` in one pass, unlike calling
 /// [`enum_subkey`] for every index.
-fn enum_subkeys_page(handle: HKEY, mut index: u32, count: u32) -> Result<Vec<String>, Error> {
+unsafe fn enum_subkeys_page(
+    handle: HKEY,
+    mut index: u32,
+    count: u32,
+) -> Result<Vec<String>, Error> {
     let mut names = Vec::new();
     while names.len() < count as usize {
-        let Some(name) = enum_subkey(handle, index)? else {
+        let Some(name) = (unsafe { enum_subkey(handle, index)? }) else {
             break;
         };
         names.push(name);
@@ -248,7 +661,7 @@ fn enum_subkeys_page(handle: HKEY, mut index: u32, count: u32) -> Result<Vec<Str
     Ok(names)
 }
 
-fn enum_value(handle: HKEY, index: u32) -> Result<Option<String>, Error> {
+unsafe fn enum_value(handle: HKEY, index: u32) -> Result<Option<String>, Error> {
     let mut name = vec![0u16; 16_384]; // registry value names are limited to 16,383 characters
     loop {
         let mut name_len = name.len() as u32;
@@ -288,7 +701,7 @@ fn enum_value(handle: HKEY, index: u32) -> Result<Option<String>, Error> {
 /// Fetches every value under `handle` (name, kind, and data) in one pass,
 /// using `RegEnumValueW`'s own data-return parameters instead of a separate
 /// `RegQueryValueExW` per value.
-fn enum_values_page(
+unsafe fn enum_values_page(
     handle: HKEY,
     mut index: u32,
     count: u32,
@@ -339,7 +752,7 @@ fn enum_values_page(
     }
 }
 
-fn query_counts(handle: HKEY) -> Result<(u32, u32), Error> {
+unsafe fn query_counts(handle: HKEY) -> Result<(u32, u32), Error> {
     let mut subkeys = 0;
     let mut values = 0;
     // SAFETY: `handle` is live; all unused output pointers may be null.
@@ -366,7 +779,7 @@ fn query_counts(handle: HKEY) -> Result<(u32, u32), Error> {
     }
 }
 
-fn get_value(handle: HKEY, name: Option<&str>) -> Result<Option<(String, Value)>, Error> {
+unsafe fn get_value(handle: HKEY, name: Option<&str>) -> Result<Option<(String, Value)>, Error> {
     let wide_name = wide(name.unwrap_or(""));
     let mut kind = 0u32;
     let mut data = vec![0u8; 256];
@@ -400,7 +813,7 @@ fn get_value(handle: HKEY, name: Option<&str>) -> Result<Option<(String, Value)>
     }
 }
 
-fn set_value(handle: HKEY, name: Option<&str>, value: &Value) -> Result<(), Error> {
+unsafe fn set_value(handle: HKEY, name: Option<&str>, value: &Value) -> Result<(), Error> {
     let wide_name = wide(name.unwrap_or(""));
     let (kind, data) = value.to_raw();
     // SAFETY: `wide_name` is NUL-terminated; `data` describes a live buffer
@@ -437,7 +850,7 @@ fn from_io(operation: &str, err: io::Error) -> Error {
 /// directly on the `HKEY` and returns the same native self-relative byte
 /// blob `SecDesc::from_bytes_with_mask` already parses — no owner/group/
 /// dacl/sacl pointer decomposition needed.
-fn sec_desc(handle: HKEY, mask: SecInfo) -> Result<VfsSecDesc, Error> {
+unsafe fn sec_desc(handle: HKEY, mask: SecInfo) -> Result<VfsSecDesc, Error> {
     let mask = mask & SecInfo::ALL;
     let query_mask = if mask.is_empty() {
         SecInfo::OWNER
@@ -474,7 +887,7 @@ fn sec_desc(handle: HKEY, mask: SecInfo) -> Result<VfsSecDesc, Error> {
 /// Sets `handle`'s security descriptor via `RegSetKeySecurity`, passing the
 /// native self-relative byte blob `SecDesc::to_bytes` produces straight
 /// through.
-fn set_sec_desc(handle: HKEY, descriptor: &VfsSecDesc) -> Result<(), Error> {
+unsafe fn set_sec_desc(handle: HKEY, descriptor: &VfsSecDesc) -> Result<(), Error> {
     let mut mask = (descriptor.mask() & SecInfo::ALL).bits();
     if mask == 0 {
         return Ok(());
@@ -518,7 +931,7 @@ fn set_sec_desc(handle: HKEY, descriptor: &VfsSecDesc) -> Result<(), Error> {
     result.map_err(|error| from_io("set key security", error))
 }
 
-fn delete_value(handle: HKEY, name: Option<&str>) -> Result<(), Error> {
+unsafe fn delete_value(handle: HKEY, name: Option<&str>) -> Result<(), Error> {
     let wide_name = wide(name.unwrap_or(""));
     // SAFETY: `wide_name` is NUL-terminated.
     let status = unsafe { RegDeleteValueW(handle, wide_name.as_ptr()) };
@@ -570,10 +983,7 @@ async fn with_handle<T: 'static>(
     f: impl FnOnce(HKEY) -> Result<T, Error> + Send + 'static,
 ) -> Result<T, Error> {
     blocking(move || {
-        let guard = key
-            .0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let guard = key.lock();
         f(*guard)
     })
     .await
@@ -583,11 +993,13 @@ async fn with_handle<T: 'static>(
 /// native out-of-band handle when the peer's transport supports it (no
 /// registration — ownership transfers fully to the peer), otherwise a
 /// registered [`dolang_vfs::extension::ExtOpaque`].
-fn key_response(ctx: &ExtContext<'_>, handle: HKEY) -> WinRegResponse {
+unsafe fn key_response(ctx: &ExtContext<'_>, handle: HKEY) -> WinRegResponse {
     if ctx.native_capable() {
-        WinRegResponse::Key(KeyHandle::Native(ExtOsHandle::new(hkey_to_owned(handle))))
+        WinRegResponse::Key(KeyHandle::Native(ExtOsHandle::new(unsafe {
+            hkey_to_owned(handle)
+        })))
     } else {
-        WinRegResponse::Key(KeyHandle::Opaque(ctx.register(Key::new(handle))))
+        WinRegResponse::Key(KeyHandle::Opaque(ctx.register(unsafe { Key::new(handle) })))
     }
 }
 
@@ -603,7 +1015,11 @@ pub(crate) async fn handle(
             // afterward instead — `predefined_hkey` is a pure lookup.
             let handle = {
                 let predefined = SendValue(predefined_hkey(root));
-                blocking(move || open_key(predefined.into_inner(), "", view, access)).await?
+                blocking(move || {
+                    // SAFETY: `predefined` contains a predefined registry handle.
+                    unsafe { open_key(predefined.into_inner(), "", view, access) }
+                })
+                .await?
             };
             let predefined = predefined_hkey(root);
             // `RegOpenKeyExW` on a predefined root with an empty subkey
@@ -618,10 +1034,11 @@ pub(crate) async fn handle(
             // privilege again for the update.
             if handle == predefined || access.0.bits() & ACCESS_SYSTEM_SECURITY != 0 {
                 Ok(WinRegResponse::Key(KeyHandle::Opaque(
-                    ctx.register(Key::new(handle)),
+                    ctx.register(unsafe { Key::new(handle) }),
                 )))
             } else {
-                Ok(key_response(ctx, handle))
+                // SAFETY: ownership of the freshly-opened handle transfers to the response.
+                Ok(unsafe { key_response(ctx, handle) })
             }
         }
         WinRegRequest::OpenKey {
@@ -631,18 +1048,38 @@ pub(crate) async fn handle(
             access,
         } => {
             let guard = ctx.acquire::<Key>(parent).map_err(invalid_handle)?;
-            let handle = with_handle(guard, move |h| open_key(h, &subpath, view, access)).await?;
+            let handle = with_handle(guard, move |h| {
+                // SAFETY: `with_handle` keeps the acquired key live and locked.
+                unsafe { open_key(h, &subpath, view, access) }
+            })
+            .await?;
             // Also always use an opaque handle if `ACCESS_SYSTEM_SECURITY`
             // was requested so a later SACL update remains on this backend,
             // whose token was used to open the handle and can enable the
             // privilege again for the update.
             if access.0.bits() & ACCESS_SYSTEM_SECURITY != 0 {
                 Ok(WinRegResponse::Key(KeyHandle::Opaque(
-                    ctx.register(Key::new(handle)),
+                    ctx.register(unsafe { Key::new(handle) }),
                 )))
             } else {
-                Ok(key_response(ctx, handle))
+                // SAFETY: ownership of the freshly-opened handle transfers to the response.
+                Ok(unsafe { key_response(ctx, handle) })
             }
+        }
+        WinRegRequest::OpenLink {
+            parent,
+            subpath,
+            view,
+            access,
+        } => {
+            let guard = ctx.acquire::<Key>(parent).map_err(invalid_handle)?;
+            let handle = with_handle(guard, move |h| {
+                // SAFETY: `with_handle` keeps the acquired key live and locked.
+                unsafe { open_link(h, &subpath, view, access) }
+            })
+            .await?;
+            // SAFETY: ownership of the freshly-opened handle transfers to the response.
+            Ok(unsafe { key_response(ctx, handle) })
         }
         WinRegRequest::CreateKey {
             parent,
@@ -651,19 +1088,54 @@ pub(crate) async fn handle(
             access,
         } => {
             let guard = ctx.acquire::<Key>(parent).map_err(invalid_handle)?;
-            let handle = with_handle(guard, move |h| create_key(h, &subpath, view, access)).await?;
+            let handle = with_handle(guard, move |h| {
+                // SAFETY: `with_handle` keeps the acquired key live and locked.
+                unsafe { create_key(h, &subpath, view, access) }
+            })
+            .await?;
             if access.0.bits() & ACCESS_SYSTEM_SECURITY != 0 {
                 Ok(WinRegResponse::Key(KeyHandle::Opaque(
-                    ctx.register(Key::new(handle)),
+                    ctx.register(unsafe { Key::new(handle) }),
                 )))
             } else {
-                Ok(key_response(ctx, handle))
+                // SAFETY: ownership of the freshly-created handle transfers to the response.
+                Ok(unsafe { key_response(ctx, handle) })
             }
+        }
+        WinRegRequest::CreateLink {
+            parent,
+            target_root,
+            target_subpath,
+            link_subpath,
+            view,
+        } => {
+            let guard = ctx.acquire::<Key>(parent).map_err(invalid_handle)?;
+            with_handle(guard, move |h| {
+                // SAFETY: `with_handle` keeps the acquired key live and locked.
+                unsafe { create_link(h, target_root, &target_subpath, &link_subpath, view) }
+            })
+            .await?;
+            Ok(WinRegResponse::Ack)
+        }
+        WinRegRequest::ReadLink {
+            parent,
+            subpath,
+            view,
+        } => {
+            let guard = ctx.acquire::<Key>(parent).map_err(invalid_handle)?;
+            Ok(WinRegResponse::LinkTarget(
+                with_handle(guard, move |h| {
+                    // SAFETY: `with_handle` keeps the acquired key live and locked.
+                    unsafe { read_link(h, &subpath, view) }
+                })
+                .await?,
+            ))
         }
         WinRegRequest::AdoptNative { handle } => {
             let hkey = owned_to_hkey(handle.into_inner());
             Ok(WinRegResponse::Key(KeyHandle::Opaque(
-                ctx.register(Key::new(hkey)),
+                // SAFETY: `hkey` retains the ownership carried by `OwnedHandle`.
+                ctx.register(unsafe { Key::new(hkey) }),
             )))
         }
         WinRegRequest::CloseKey { key } => {
@@ -681,7 +1153,11 @@ pub(crate) async fn handle(
             ignore,
         } => {
             let guard = ctx.acquire::<Key>(parent).map_err(invalid_handle)?;
-            let result = with_handle(guard, move |h| delete_key(h, &subpath, view, all)).await;
+            let result = with_handle(guard, move |h| {
+                // SAFETY: `with_handle` keeps the acquired key live and locked.
+                unsafe { delete_key(h, &subpath, view, all) }
+            })
+            .await;
             match result {
                 Err(error) if ignore && error.kind() == ErrorKind::NotFound => {}
                 result => result?,
@@ -691,59 +1167,65 @@ pub(crate) async fn handle(
         WinRegRequest::EnumSubkey { key, index } => {
             let guard = ctx.acquire::<Key>(key).map_err(invalid_handle)?;
             Ok(WinRegResponse::Name(
-                with_handle(guard, move |h| enum_subkey(h, index)).await?,
+                with_handle(guard, move |h| unsafe { enum_subkey(h, index) }).await?,
             ))
         }
         WinRegRequest::OpenSubkeys { key } => {
             let guard = ctx.acquire::<Key>(key).map_err(invalid_handle)?;
             Ok(WinRegResponse::EnumerationLen(
-                with_handle(guard, |h| Ok(query_counts(h)?.0)).await?,
+                with_handle(guard, |h| Ok(unsafe { query_counts(h)? }.0)).await?,
             ))
         }
         WinRegRequest::EnumSubkeysPage { key, index, count } => {
             let guard = ctx.acquire::<Key>(key).map_err(invalid_handle)?;
             Ok(WinRegResponse::SubkeysPage(
-                with_handle(guard, move |h| enum_subkeys_page(h, index, count)).await?,
+                with_handle(guard, move |h| unsafe {
+                    enum_subkeys_page(h, index, count)
+                })
+                .await?,
             ))
         }
         WinRegRequest::EnumValue { key, index } => {
             let guard = ctx.acquire::<Key>(key).map_err(invalid_handle)?;
             Ok(WinRegResponse::Name(
-                with_handle(guard, move |h| enum_value(h, index)).await?,
+                with_handle(guard, move |h| unsafe { enum_value(h, index) }).await?,
             ))
         }
         WinRegRequest::OpenValues { key } => {
             let guard = ctx.acquire::<Key>(key).map_err(invalid_handle)?;
             Ok(WinRegResponse::EnumerationLen(
-                with_handle(guard, |h| Ok(query_counts(h)?.1)).await?,
+                with_handle(guard, |h| Ok(unsafe { query_counts(h)? }.1)).await?,
             ))
         }
         WinRegRequest::EnumValuesPage { key, index, count } => {
             let guard = ctx.acquire::<Key>(key).map_err(invalid_handle)?;
             Ok(WinRegResponse::ValuesPage(
-                with_handle(guard, move |h| enum_values_page(h, index, count)).await?,
+                with_handle(guard, move |h| unsafe { enum_values_page(h, index, count) }).await?,
             ))
         }
         WinRegRequest::GetValue { key, name } => {
             let guard = ctx.acquire::<Key>(key).map_err(invalid_handle)?;
             Ok(WinRegResponse::Value(
-                with_handle(guard, move |h| get_value(h, name.as_deref())).await?,
+                with_handle(guard, move |h| unsafe { get_value(h, name.as_deref()) }).await?,
             ))
         }
         WinRegRequest::SetValue { key, name, value } => {
             let guard = ctx.acquire::<Key>(key).map_err(invalid_handle)?;
-            with_handle(guard, move |h| set_value(h, name.as_deref(), &value)).await?;
+            with_handle(guard, move |h| unsafe {
+                set_value(h, name.as_deref(), &value)
+            })
+            .await?;
             Ok(WinRegResponse::Ack)
         }
         WinRegRequest::DeleteValue { key, name } => {
             let guard = ctx.acquire::<Key>(key).map_err(invalid_handle)?;
-            with_handle(guard, move |h| delete_value(h, name.as_deref())).await?;
+            with_handle(guard, move |h| unsafe { delete_value(h, name.as_deref()) }).await?;
             Ok(WinRegResponse::Ack)
         }
         WinRegRequest::GetSecDesc { key, mask } => {
             let guard = ctx.acquire::<Key>(key).map_err(invalid_handle)?;
             Ok(WinRegResponse::SecDesc(
-                with_handle(guard, move |h| sec_desc(h, mask)).await?,
+                with_handle(guard, move |h| unsafe { sec_desc(h, mask) }).await?,
             ))
         }
         WinRegRequest::SetSecDesc {
@@ -751,7 +1233,7 @@ pub(crate) async fn handle(
             sec_desc: descriptor,
         } => {
             let guard = ctx.acquire::<Key>(key).map_err(invalid_handle)?;
-            with_handle(guard, move |h| set_sec_desc(h, &descriptor)).await?;
+            with_handle(guard, move |h| unsafe { set_sec_desc(h, &descriptor) }).await?;
             Ok(WinRegResponse::Ack)
         }
     }

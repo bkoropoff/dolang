@@ -19,8 +19,8 @@ use std::sync::{Arc, Weak};
 use crate::{
     value::Value,
     wire::{
-        Access, KeyHandle, KeyMarker, PredefinedRoot, View, WinRegExt, WinRegRequest,
-        WinRegResponse,
+        Access, KeyHandle, KeyMarker, LinkTarget, PredefinedRoot, Resolve, View, WinRegExt,
+        WinRegRequest, WinRegResponse,
     },
 };
 
@@ -155,17 +155,67 @@ impl Key {
     }
 
     /// Opens an existing subkey of this key.
-    pub async fn open(&self, subpath: &str, view: View, access: Access) -> Result<Key, Error> {
-        let response = self
-            .vfs
-            .call_extension::<WinRegExt>(WinRegRequest::OpenKey {
+    pub async fn open(
+        &self,
+        subpath: &str,
+        view: View,
+        access: Access,
+        resolve: Resolve,
+    ) -> Result<Key, Error> {
+        let request = match resolve {
+            Resolve::Target => WinRegRequest::OpenKey {
                 parent: self.handle.cite()?,
                 subpath: subpath.to_string(),
                 view,
                 access,
+            },
+            Resolve::Link => WinRegRequest::OpenLink {
+                parent: self.handle.cite()?,
+                subpath: subpath.to_string(),
+                view,
+                access,
+            },
+        };
+        let response = self.vfs.call_extension::<WinRegExt>(request).await??;
+        from_response(&self.vfs, "OpenKey", response).await
+    }
+
+    pub async fn link(
+        &self,
+        target_root: PredefinedRoot,
+        target_subpath: &str,
+        link_subpath: &str,
+        view: View,
+    ) -> Result<(), Error> {
+        let response = self
+            .vfs
+            .call_extension::<WinRegExt>(WinRegRequest::CreateLink {
+                parent: self.handle.cite()?,
+                target_root,
+                target_subpath: target_subpath.to_string(),
+                link_subpath: link_subpath.to_string(),
+                view,
             })
             .await??;
-        from_response(&self.vfs, "OpenKey", response).await
+        match response {
+            WinRegResponse::Ack => Ok(()),
+            _ => Err(unexpected("CreateLink")),
+        }
+    }
+
+    pub async fn read_link(&self, subpath: &str, view: View) -> Result<LinkTarget, Error> {
+        let response = self
+            .vfs
+            .call_extension::<WinRegExt>(WinRegRequest::ReadLink {
+                parent: self.handle.cite()?,
+                subpath: subpath.to_string(),
+                view,
+            })
+            .await??;
+        match response {
+            WinRegResponse::LinkTarget(target) => Ok(target),
+            _ => Err(unexpected("ReadLink")),
+        }
     }
 
     /// Opens a subkey of this key, creating it (and any missing

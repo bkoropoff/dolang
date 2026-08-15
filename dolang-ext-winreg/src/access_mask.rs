@@ -4,7 +4,8 @@
 
 use std::ops::{BitAnd, BitOr, BitXor, Not};
 
-use dolang::runtime::object::FlagLike;
+use dolang::runtime::object::{FlagLike, Flags, FlagsInstanceExt, FlagsTypeExt, TypeBuilder};
+use dolang::runtime::{Error, Output, unpack};
 use dolang_vfs_winreg::Access as WireAccess;
 use dolang_winterop::security::AccessMask as WinAccessMask;
 
@@ -12,6 +13,14 @@ use dolang_winterop::security::AccessMask as WinAccessMask;
 pub(crate) struct AccessMask(pub(crate) WireAccess);
 
 impl AccessMask {
+    pub(crate) const QUERY_VALUE: AccessMask = AccessMask(WireAccess::QUERY_VALUE);
+    pub(crate) const SET_VALUE: AccessMask = AccessMask(WireAccess::SET_VALUE);
+    pub(crate) const CREATE_SUB_KEY: AccessMask = AccessMask(WireAccess::CREATE_SUB_KEY);
+    pub(crate) const ENUMERATE_SUB_KEYS: AccessMask = AccessMask(WireAccess::ENUMERATE_SUB_KEYS);
+    pub(crate) const NOTIFY: AccessMask = AccessMask(WireAccess::NOTIFY);
+    pub(crate) const CREATE_LINK: AccessMask = AccessMask(WireAccess::CREATE_LINK);
+    pub(crate) const WOW64_64KEY: AccessMask = AccessMask(WireAccess::WOW64_64KEY);
+    pub(crate) const WOW64_32KEY: AccessMask = AccessMask(WireAccess::WOW64_32KEY);
     pub(crate) const READ: AccessMask = AccessMask(WireAccess::READ);
     pub(crate) const WRITE: AccessMask = AccessMask(WireAccess::WRITE);
     pub(crate) const READ_WRITE: AccessMask = AccessMask(WireAccess::READ_WRITE);
@@ -69,6 +78,14 @@ impl FlagLike for AccessMask {
     const MODULE: &'static str = "winreg";
     const NAME: &'static str = "AccessMask";
     const BITS: &'static [(&'static str, AccessMask)] = &[
+        ("QUERY_VALUE", AccessMask::QUERY_VALUE),
+        ("SET_VALUE", AccessMask::SET_VALUE),
+        ("CREATE_SUB_KEY", AccessMask::CREATE_SUB_KEY),
+        ("ENUMERATE_SUB_KEYS", AccessMask::ENUMERATE_SUB_KEYS),
+        ("NOTIFY", AccessMask::NOTIFY),
+        ("CREATE_LINK", AccessMask::CREATE_LINK),
+        ("WOW64_64KEY", AccessMask::WOW64_64KEY),
+        ("WOW64_32KEY", AccessMask::WOW64_32KEY),
         ("READ", AccessMask::READ),
         ("WRITE", AccessMask::WRITE),
         ("READ_WRITE", AccessMask::READ_WRITE),
@@ -92,6 +109,28 @@ impl FlagLike for AccessMask {
 
     fn rank(self) -> usize {
         self.0.0.bits().count_ones() as usize
+    }
+
+    fn build<'v, 'a>(
+        builder: TypeBuilder<'v, 'a, Flags<Self>>,
+    ) -> TypeBuilder<'v, 'a, Flags<Self>> {
+        builder
+            .get("int", |this, strand, out| {
+                Output::set(strand, out, this.flags().0.0.bits());
+                Ok(())
+            })
+            .type_method("from_int", async move |this, strand, args, out| {
+                let ([value], []) = unpack!(strand, args, 1, 0)?;
+                let value = value.to_i64(strand)?;
+                let value = u32::try_from(value)
+                    .map_err(|_| Error::value(strand, "flags integer out of range"))?;
+                this.create_flags(
+                    strand,
+                    Self(WireAccess(WinAccessMask::from_bits_retain(value))),
+                    out,
+                );
+                Ok(())
+            })
     }
 }
 

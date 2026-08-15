@@ -10,11 +10,12 @@ every operation throws [`sys.UnsupportedError`](../sys/unsupported-error.md).
 
 ## Types
 
-| Type                                  | Description                                        |
-| ------------------------------------- | -------------------------------------------------- |
-| [`AccessMask`](./access-mask.md)      | Registry key access rights                         |
-| [`Key`](./key.md)                     | An open registry key                               |
-| [`Value`](./value.md)                 | One named value read from a key (name, kind, data) |
+| Type                             | Description                                        |
+| -------------------------------- | -------------------------------------------------- |
+| [`AccessMask`](./access-mask.md) | Registry key access rights                         |
+| [`Key`](./key.md)                | An open registry key                               |
+| [`LinkTarget`](./link-target.md) | A registry link's native and canonical target      |
+| [`Value`](./value.md)            | One named value read from a key (name, kind, data) |
 
 ## Enumeration values
 
@@ -35,6 +36,13 @@ every operation throws [`sys.UnsupportedError`](../sys/unsupported-error.md).
 | `:NATIVE:`  | The target process's native registry view |
 | `:WOW32:`   | The 32-bit registry view                  |
 | `:WOW64:`   | The 64-bit registry view                  |
+
+### Link resolution values
+
+| Value      | Meaning                              |
+| ---------- | ------------------------------------ |
+| `:TARGET:` | Follow a registry link (the default) |
+| `:LINK:`   | Open the link key itself             |
 
 ### Registry value kind values
 

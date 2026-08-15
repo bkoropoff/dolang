@@ -11,6 +11,19 @@ import winreg rand sys
     - UnsupportedError
   security.windows:
     - SecDesc
+    - SecInfo
+
+#[test]
+def access_masks_are_precise_and_lossless()
+  let access = winreg.AccessMask :QUERY_VALUE: :CREATE_SUB_KEY:
+  assert $access.contains(:QUERY_VALUE:)
+  assert $access.contains(:CREATE_SUB_KEY:)
+  assert_eq $access.int 5
+
+  let unknown = winreg.AccessMask.from_int 2147483649
+  assert_eq $unknown.int 2147483649
+  assert $unknown.contains(:GENERIC_READ:)
+  assert $unknown.contains(:QUERY_VALUE:)
 
 #[test]
 def unsupported_without_windows_backend()
@@ -30,7 +43,7 @@ def registry_crud_round_trips()
   let root = winreg.open :CURRENT_USER: access: :READ_WRITE:
   let parent = root.create r"Software\dolang-vfs-winreg-tests" access: :READ_WRITE:
   let name = "run-$(rand.string 8)"
-  let scratch = parent.create $name access: [:READ_WRITE:, :READ_CONTROL:, :WRITE_DAC:, :WRITE_OWNER:]
+  let scratch = parent.create $name access: [:READ_WRITE:, :CREATE_LINK:, :READ_CONTROL:, :WRITE_DAC:, :WRITE_OWNER:]
 
   # Enumerate on an empty key.
   assert_eq $scratch.subkeys().len 0
@@ -124,6 +137,31 @@ def registry_crud_round_trips()
   assert_throws $NotFoundError do
     scratch.open "does-not-exist"
 
+  if !sys.os_info().is_wine
+    let target = scratch.create link-target access: :READ_WRITE:
+    target.set marker 7
+    let target_path = "Software\\dolang-vfs-winreg-tests\\$name\\link-target"
+    scratch.link :CURRENT_USER: $target_path link
+    let link_target = scratch.read_link link
+    assert_type $winreg.LinkTarget $link_target
+    assert_eq $link_target.root :CURRENT_USER:
+    assert_eq $link_target.subpath.lower() $target_path.lower()
+    assert $link_target.native.lower().starts_with(r"\registry\user\")
+    let followed = scratch.open link resolve: :TARGET:
+    assert_eq $followed.get("marker") 7
+    followed.close()
+    let raw_link = scratch.open link resolve: :LINK:
+    assert_eq $raw_link.get_value("SymbolicLinkValue").kind 6
+    raw_link.close()
+    assert_throws $sys.InvalidInputError do
+      scratch.read_link link-target
+    assert_throws $sys.AlreadyExistsError do
+      scratch.link :CURRENT_USER: $target_path link
+    scratch.delete link all: true
+    assert_eq $target.get("marker") 7
+    target.close()
+    scratch.delete link-target all: true
+
   # Security descriptor: fetch (default mask: owner/group/dacl), and
   # round-trip it back unmodified. The scratch key was opened with the
   # extra access rights (READ_CONTROL/WRITE_DAC/WRITE_OWNER) this requires
@@ -136,7 +174,7 @@ def registry_crud_round_trips()
 
   # A narrower mask fetches fewer components.
   let owner_only = scratch.sec_desc group: false dacl: false
-  assert_eq $owner_only.mask 1
+  assert_eq $owner_only.mask (SecInfo :OWNER:)
 
   scratch.close()
   parent.delete $name
