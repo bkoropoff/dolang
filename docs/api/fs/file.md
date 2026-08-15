@@ -265,30 +265,35 @@ The operation raises a permission error if the file was opened without the
 necessary Windows access rights. Windows may normalize the resulting
 descriptor. Other platforms raise `UnsupportedError`.
 
-### `acl :default?`
+### `acl :kind = :POSIX: :default?`
 
-Gets the POSIX.1e ACL stored on the open file.
+Gets the ACL stored on the open file.
 
 #### Parameters
 
 | Name      | Type                      | Description                                   |
 | --------- | ------------------------- | --------------------------------------------- |
+| `kind`    | `:POSIX:`\|`:NFS4:`       | ACL format to query                           |
 | `default` | [`Bool`](../std/bool.md)? | Query the directory's inheritable default ACL |
 
 #### Returns
 
-[`security.unix.Acl`](../security/unix/acl.md), or `nil`
+[`security.unix.Acl`](../security/unix/acl.md) or
+[`security.nfs4.Acl`](../security/nfs4/acl.md), depending on `kind`, or `nil`
 
-### `set_acl acl :default?`
+### `set_acl acl :kind? :default?`
 
-Sets or removes a POSIX.1e ACL on the open file.
+Sets or removes an ACL on the open file. The format is inferred from `acl`'s
+type when setting a value; `kind` selects the format to remove when `acl` is
+`nil`.
 
 #### Parameters
 
-| Name      | Type                                                                   | Description                                    |
-| --------- | ---------------------------------------------------------------------- | ---------------------------------------------- |
-| `acl`     | [`security.unix.Acl`](../security/unix/acl.md)\|[`nil`](../std/nil.md) | ACL to set, or `nil` to remove it              |
-| `default` | [`Bool`](../std/bool.md)?                                              | Update the directory's inheritable default ACL |
+| Name      | Type                                                                                                                   | Description                                    |
+| --------- | ---------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| `acl`     | [`security.unix.Acl`](../security/unix/acl.md)\|[`security.nfs4.Acl`](../security/nfs4/acl.md)\|[`nil`](../std/nil.md) | ACL to set, or `nil` to remove it              |
+| `kind`    | `:POSIX:`\|`:NFS4:`?                                                                                                   | ACL format to remove, when `acl` is `nil`      |
+| `default` | [`Bool`](../std/bool.md)?                                                                                              | Update the directory's inheritable default ACL |
 
 ### `xattrs :namespace?`
 

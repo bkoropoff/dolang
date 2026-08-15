@@ -37,8 +37,9 @@ use tokio::{sync::mpsc, time::timeout};
 use crate::direct::Direct;
 use crate::extension::ExtContext;
 use crate::file::{FileLock, FileLockRequest};
+use crate::security::{Acl, AclKind};
 use crate::{
-    AnyFile, AnyVfs, Child as _, Command as _, Error, FileHandle as _, OpenOptions as _, PosixAcl,
+    AnyFile, AnyVfs, Child as _, Command as _, Error, FileHandle as _, OpenOptions as _,
     SessionMode, StdioRecv, StdioSend, Utf8TypedPath, Vfs,
     protocol::{
         AccessRequest, AclRequest, CanonicalizeRequest, CopyRequest, CreateDirRequest,
@@ -782,11 +783,19 @@ impl Connection {
             RequestKind::FileFsMetadata { file } => {
                 self.handle_file_fs_metadata(context, file).await
             }
-            RequestKind::FileAcl { file, default } => {
-                self.handle_file_acl(context, file, default).await
-            }
-            RequestKind::FileSetAcl { file, acl, default } => {
-                self.handle_file_set_acl(context, file, acl, default).await
+            RequestKind::FileAcl {
+                file,
+                kind,
+                default,
+            } => self.handle_file_acl(context, file, kind, default).await,
+            RequestKind::FileSetAcl {
+                file,
+                kind,
+                acl,
+                default,
+            } => {
+                self.handle_file_set_acl(context, file, kind, acl, default)
+                    .await
             }
             RequestKind::FileSecDesc { file, mask } => {
                 self.handle_file_sec_desc(context, file, mask).await
@@ -1557,11 +1566,17 @@ impl Connection {
         &self,
         context: &CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
+        kind: AclKind,
         default: bool,
     ) -> ResponseKind {
         let result = async {
             let file = self.retained_file(context, file)?;
-            file.0.lock().await.acl(default).await.map_err(wire_error)
+            file.0
+                .lock()
+                .await
+                .acl(kind, default)
+                .await
+                .map_err(wire_error)
         }
         .await;
         ResponseKind::FileAcl(result)
@@ -1571,7 +1586,8 @@ impl Connection {
         &self,
         context: &CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
-        acl: Option<PosixAcl>,
+        kind: AclKind,
+        acl: Option<Acl>,
         default: bool,
     ) -> ResponseKind {
         let result = async {
@@ -1579,7 +1595,7 @@ impl Connection {
             file.0
                 .lock()
                 .await
-                .set_acl(acl.as_ref(), default)
+                .set_acl(kind, acl.as_ref(), default)
                 .await
                 .map_err(wire_error)
         }
@@ -1942,7 +1958,7 @@ impl Connection {
         ResponseKind::Acl(Self::wire_result(
             self.server
                 .vfs
-                .acl(request_path(&req.path), req.default, req.follow)
+                .acl(request_path(&req.path), req.kind, req.default, req.follow)
                 .await,
         ))
     }
@@ -1953,6 +1969,7 @@ impl Connection {
                 .vfs
                 .set_acl(
                     request_path(&req.path),
+                    req.kind,
                     req.acl.as_ref(),
                     req.default,
                     req.follow,

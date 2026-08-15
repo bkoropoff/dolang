@@ -173,7 +173,14 @@ nav:
       - api/security/unix/index.md
       - api/security/unix/ace.md
       - api/security/unix/acl.md
+      - api/security/unix/permission.md
       - api/security/unix/identity.md
+    - security.nfs4:
+      - api/security/nfs4/index.md
+      - api/security/nfs4/ace.md
+      - api/security/nfs4/acl.md
+      - api/security/nfs4/mask.md
+      - api/security/nfs4/flags.md
     - security.windows:
       - api/security/windows/index.md
       - api/security/windows/access-mask.md

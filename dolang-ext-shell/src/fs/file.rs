@@ -585,6 +585,7 @@ impl<'v> Object<'v> for File<'v> {
         let dacl = builder.sym("dacl");
         let sacl = builder.sym("sacl");
         let default_acl = builder.sym("default");
+        let kind_acl = builder.sym("kind");
         let shared = builder.sym("shared");
         builder
             .supertype(TypeObject::Iter)
@@ -786,31 +787,42 @@ impl<'v> Object<'v> for File<'v> {
                 Ok(())
             })
             .method("acl", async move |this, strand, args, mut out| {
-                let ([], [default]) = unpack!(strand, args, 0, 0, default_acl = None)?;
-                let default = super::acl_default(strand, default.as_deref())?;
+                let ([], [kind, default]) =
+                    unpack!(strand, args, 0, 0, kind_acl = None, default_acl = None)?;
                 let global = this.annex().global;
+                let kind = crate::security::acl_kind_sym(strand, global, kind)?;
+                let default = super::acl_default(strand, default.as_deref())?;
+                super::check_acl_default(strand, kind, default)?;
                 let acl = {
                     let mut borrow = this.borrow_mut(strand)?;
                     let file = borrow
                         .file
                         .as_mut()
                         .ok_or_else(|| Error::state_error(strand, "file is closed"))?;
-                    file.acl(default).await.into_sys(strand)?
+                    file.acl(kind, default).await.into_sys(strand)?
                 };
-                crate::security::create_posix_acl(strand, global, acl, &mut out);
+                crate::security::create_any_acl(strand, global, acl, &mut out);
                 Ok(())
             })
             .method("set_acl", async move |this, strand, args, _out| {
-                let ([acl_value], [default]) = unpack!(strand, args, 1, 0, default_acl = None)?;
+                let ([acl_value], [kind, default]) =
+                    unpack!(strand, args, 1, 0, kind_acl = None, default_acl = None)?;
                 let global = this.annex().global;
-                let acl = crate::security::posix_acl_from_value(strand, global, &acl_value)?;
+                let acl = crate::security::acl_from_value(strand, global, &acl_value)?;
+                let kind = match (&acl, kind) {
+                    (Some(acl), _) => acl.kind(),
+                    (None, kind) => crate::security::acl_kind_sym(strand, global, kind)?,
+                };
                 let default = super::acl_default(strand, default.as_deref())?;
+                super::check_acl_default(strand, kind, default)?;
                 let mut borrow = this.borrow_mut(strand)?;
                 let file = borrow
                     .file
                     .as_mut()
                     .ok_or_else(|| Error::state_error(strand, "file is closed"))?;
-                file.set_acl(acl.as_ref(), default).await.into_sys(strand)
+                file.set_acl(kind, acl.as_ref(), default)
+                    .await
+                    .into_sys(strand)
             })
             .method("set_sec_desc", async move |this, strand, args, _out| {
                 let ([descriptor], []) = unpack!(strand, args, 1, 0)?;

@@ -14,9 +14,10 @@ use serde::{
 };
 
 use crate::extension::ErasedVfsExtension;
+pub(crate) use crate::security::{Acl, AclKind};
 pub(crate) use crate::{
-    DirEntry, FsMetadata, Metadata, MetadataPatch, PosixAcl, SecurityInfo, SidName, StreamEntry,
-    TargetInfo, XattrEntry, XattrNamespace, path::WellKnownPath,
+    DirEntry, FsMetadata, Metadata, MetadataPatch, SecurityInfo, SidName, StreamEntry, TargetInfo,
+    XattrEntry, XattrNamespace, path::WellKnownPath,
 };
 pub(crate) use dolang_winterop::security::{SecDesc, SecInfo, Sid};
 
@@ -426,6 +427,7 @@ pub(crate) struct FsMetadataRequest {
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct AclRequest {
     pub(crate) path: WirePath,
+    pub(crate) kind: AclKind,
     pub(crate) default: bool,
     pub(crate) follow: bool,
 }
@@ -433,7 +435,8 @@ pub(crate) struct AclRequest {
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct SetAclRequest {
     pub(crate) path: WirePath,
-    pub(crate) acl: Option<PosixAcl>,
+    pub(crate) kind: AclKind,
+    pub(crate) acl: Option<Acl>,
     pub(crate) default: bool,
     pub(crate) follow: bool,
 }
@@ -821,11 +824,13 @@ pub(crate) enum RequestKind {
     },
     FileAcl {
         file: Cite<crate::session::FileMarker>,
+        kind: AclKind,
         default: bool,
     },
     FileSetAcl {
         file: Cite<crate::session::FileMarker>,
-        acl: Option<PosixAcl>,
+        kind: AclKind,
+        acl: Option<Acl>,
         default: bool,
     },
     FileSecDesc {
@@ -938,7 +943,7 @@ pub(crate) enum ResponseKind {
     StdioRecvClone(Result<Gift<crate::session::StdioRecvMarker>, WireError>),
     FileMetadata(Result<Metadata, WireError>),
     FileFsMetadata(Result<FsMetadata, WireError>),
-    FileAcl(Result<Option<PosixAcl>, WireError>),
+    FileAcl(Result<Option<Acl>, WireError>),
     FileSetAcl(Result<(), WireError>),
     FileSecDesc(Result<SecDesc, WireError>),
     FileSetSecDesc(Result<(), WireError>),
@@ -956,7 +961,7 @@ pub(crate) enum ResponseKind {
     Remove(Result<(), WireError>),
     Metadata(Result<Metadata, WireError>),
     FsMetadata(Result<FsMetadata, WireError>),
-    Acl(Result<Option<PosixAcl>, WireError>),
+    Acl(Result<Option<Acl>, WireError>),
     SetAcl(Result<(), WireError>),
     SecDesc(Result<SecDesc, WireError>),
     SetSecDesc(Result<(), WireError>),

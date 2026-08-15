@@ -1,4 +1,4 @@
-import sys agent
+import sys agent admin
   fs:
     - Path
     - acl
@@ -8,26 +8,118 @@ import sys agent
     - set_acl
   security:
     - unix_info
-  security.unix: unix_security
+    - user_name
+  security.unix: unix
+  security.nfs4: nfs4
   std:
     - UnsupportedError
+    - ValueError
   test:
     - assert_eq
     - assert_throws
     - assert_type
+    - fixture
+    - skip
 
-def extended_acl id
-  let rw = unix_security.Permission(:READ:, :WRITE:)
-  let r = unix_security.Permission(:READ:)
-  unix_security.Acl [
-    unix_security.Ace.user_obj(permissions: rw),
-    unix_security.Ace.user(id, permissions: r),
-    unix_security.Ace.group_obj(permissions: r),
-    unix_security.Ace.mask(permissions: r),
-    unix_security.Ace.other(),
-  ]
+def extended_posix_acl id
+  let rw = unix.Permission :READ: :WRITE:
+  let r = unix.Permission :READ:
+  unix.Acl $
+    $ unix.Ace.user_obj $rw
+    $ unix.Ace.user $id $r
+    $ unix.Ace.group_obj $r
+    $ unix.Ace.mask $r
+    $ unix.Ace.other()
+
+def extended_nfs4_acl id
+  let read = nfs4.Mask :READ_DATA: :READ_ATTRIBUTES: :READ_ACL:
+  nfs4.Acl $
+    $ nfs4.Ace.owner type: :ALLOW: mask: $nfs4.Mask() flags: $nfs4.Flags()
+    $ nfs4.Ace.user $id type: :ALLOW: mask: $read
+    $ nfs4.Ace.everyone type: :DENY: mask: $read
+
+# Whether `kind` ACLs are expected to work on this platform. POSIX ACLs work
+# on Linux and FreeBSD; NFSv4 ACLs are FreeBSD-only here.
+def acl_kind_supported kind
+  if (kind == :POSIX:)
+    (sys.os_info().os == :FREEBSD: || sys.os_info().os == :LINUX:)
+  else
+    (sys.os_info().os == :FREEBSD:)
+
+# On FreeBSD, POSIX and NFSv4 ACLs need to be enabled per-filesystem
+# (`tunefs`, mutually exclusive with each other on UFS) and the guest's root
+# filesystem carries neither by default. Rather than mutating the guest's
+# root filesystem, provision an isolated scratch `md(4)`-backed UFS
+# filesystem with the requested ACL type enabled, `cd` into it for the
+# duration of `block`, and tear the filesystem down afterward.
+#
+# On a platform where `kind` isn't supported at all, skips the decorated
+# test outright — the corresponding `*_fail` decorator covers that case
+# instead. On a supported platform that doesn't need the scratch filesystem
+# (Linux, for POSIX ACLs), setup/teardown are skipped and `block` just runs
+# directly in the harness's own temp dir.
+#
+# `mdconfig` is left to auto-assign the unit (captured via `sub`) rather than
+# requesting a fixed one: `#[agent.test]` runs this same code concurrently
+# for its `/local`, `/remote`, and `/direct` variants, and a fixed unit
+# collides across them.
+def scratch_ufs_wrap kind block
+  if !(acl_kind_supported kind)
+    skip "$kind ACLs are not supported on this platform"
+  if (sys.os_info().os != :FREEBSD:)
+    return block()
+
+  # Resolved before elevating: inside `admin.with`, the current-user context
+  # is root's, not the unprivileged account the mountpoint needs to end up
+  # owned by.
+  let owner = user_name()
+  let device mnt = admin.with do
+    let device = sub do run mdconfig -a -t swap -s 64m
+    let dev = "/dev/$device"
+    run newfs -U $dev
+    if (kind == :POSIX:)
+      run tunefs -a enable $dev
+    else
+      run tunefs -N enable $dev
+    let mnt = Path "/mnt/dolang-acl-test-$device"
+    mnt.create_dir all: true
+    run mount $dev $mnt
+    run chown $owner $mnt
+    [device, mnt]
+  try
+    cd $mnt $block
+  finally
+    admin.with do
+      run umount $mnt
+      run mdconfig -d -u $device
+
+# Counterpart to `scratch_ufs_wrap` for tests exercising the
+# not-supported-here path: runs `block` unmodified (no scratch filesystem
+# needed to observe an `UnsupportedError`), but skips the test on a platform
+# where `kind` ACLs actually are supported.
+def unsupported_wrap kind block
+  if (acl_kind_supported kind)
+    skip "$kind ACLs are supported on this platform"
+  block()
+
+#[fixture]
+def posix_supp block
+  scratch_ufs_wrap :POSIX: $block
+
+#[fixture]
+def nfs4_supp block
+  scratch_ufs_wrap :NFS4: $block
+
+#[fixture]
+def posix_fail block
+  unsupported_wrap :POSIX: $block
+
+#[fixture]
+def nfs4_fail block
+  unsupported_wrap :NFS4: $block
 
 #[agent.test]
+#[posix_supp]
 def accesses_posix_acl_metadata()
   let path = Path test_posix_acl.txt
   let dir = Path test_posix_acl_dir
@@ -35,32 +127,81 @@ def accesses_posix_acl_metadata()
     file.write acl
   create_dir $dir
 
-  let supported = (sys.os_info().os == :LINUX: || sys.os_info().os == :FREEBSD:)
-  if supported
-    assert_eq (acl path) nil
-    let id = unix_info().euid
-    let value = extended_acl $id
-    set_acl $path $value
-    let loaded = acl $path
-    assert_type $unix_security.Acl $loaded
-    assert_eq $loaded.ace_count 5
-    assert_eq $loaded.aces[1].id $id
-    open $path r do |file|
-      assert_type $unix_security.Acl $file.acl()
-      file.set_acl nil
-      assert_eq $file.acl() nil
+  assert_eq (acl path) nil
+  let id = unix_info().euid
+  let value = extended_posix_acl $id
+  set_acl $path $value
+  let loaded = acl $path
+  assert_type $unix.Acl $loaded
+  assert_eq $loaded.aces.len 5
+  assert_eq $loaded.aces[1].id $id
+  open $path r do |file|
+    assert_type $unix.Acl $file.acl()
+    file.set_acl nil
+    assert_eq $file.acl() nil
 
-    set_acl $dir $value default: true
-    assert_type $unix_security.Acl (acl dir default: true)
-    set_acl $dir nil default: true
-    assert_eq (acl dir default: true) nil
-  else
-    let value = extended_acl 12345
-    assert_throws $UnsupportedError do acl $path
-    assert_throws $UnsupportedError do set_acl $path $value
-    open $path r do |file|
-      assert_throws $UnsupportedError do file.acl()
-      assert_throws $UnsupportedError do file.set_acl $value
+  set_acl $dir $value default: true
+  assert_type $unix.Acl (acl dir default: true)
+  set_acl $dir nil default: true
+  assert_eq (acl dir default: true) nil
 
   remove $path
   remove $dir all: true
+
+#[agent.test]
+#[nfs4_supp]
+def accesses_nfs4_acl_metadata()
+  let path = Path test_nfs4_acl.txt
+  open $path w do |file|
+    file.write acl
+
+  assert_eq (acl path kind: :NFS4:) nil
+  let id = unix_info().euid
+  let value = extended_nfs4_acl $id
+  set_acl $path $value
+  let loaded = acl $path kind: :NFS4:
+  assert_type $nfs4.Acl $loaded
+  assert_eq $loaded.aces.len 3
+  assert_eq $loaded.aces[1].id $id
+  assert_eq $loaded.aces[1].principal :USER:
+  open $path r do |file|
+    assert_type $nfs4.Acl (file.acl kind: :NFS4:)
+    # Unlike a POSIX ACL, an NFSv4 ACL is a file's native security
+    # descriptor rather than an optional extended attribute: it can be
+    # replaced, but there is no operation that removes it back to "none".
+    assert_throws $UnsupportedError do file.set_acl nil kind: :NFS4:
+
+  assert_throws $UnsupportedError do set_acl $path nil kind: :NFS4:
+
+  assert_throws $ValueError do set_acl $path $value default: true
+  assert_throws $ValueError do acl $path kind: :NFS4: default: true
+
+  remove $path
+
+#[agent.test]
+#[posix_fail]
+def rejects_posix_acl_metadata_when_unsupported()
+  let path = Path test_posix_acl.txt
+  let value = extended_posix_acl 12345
+  assert_throws $UnsupportedError do acl $path
+  assert_throws $UnsupportedError do set_acl $path $value
+  open $path w do |file|
+    file.write acl
+  open $path r do |file|
+    assert_throws $UnsupportedError do file.acl()
+    assert_throws $UnsupportedError do file.set_acl $value
+  remove $path
+
+#[agent.test]
+#[nfs4_fail]
+def rejects_nfs4_acl_metadata_when_unsupported()
+  let path = Path test_nfs4_acl.txt
+  let value = extended_nfs4_acl 12345
+  assert_throws $UnsupportedError do acl $path kind: :NFS4:
+  assert_throws $UnsupportedError do set_acl $path $value
+  open $path w do |file|
+    file.write acl
+  open $path r do |file|
+    assert_throws $UnsupportedError do file.acl kind: :NFS4:
+    assert_throws $UnsupportedError do file.set_acl $value
+  remove $path

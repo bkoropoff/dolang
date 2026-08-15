@@ -202,45 +202,49 @@ impl Direct {
 
     pub(super) fn acl_from_path(
         _path: &Path,
+        _kind: crate::security::AclKind,
         _default: bool,
         _follow: bool,
-    ) -> io::Result<Option<crate::PosixAcl>> {
+    ) -> io::Result<Option<crate::security::Acl>> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "POSIX ACLs are not supported on Windows",
+            "ACLs are not supported on Windows",
         ))
     }
 
     pub(super) fn set_acl_path(
         _path: &Path,
-        _acl: Option<&crate::PosixAcl>,
+        _kind: crate::security::AclKind,
+        _acl: Option<&crate::security::Acl>,
         _default: bool,
         _follow: bool,
     ) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "POSIX ACLs are not supported on Windows",
+            "ACLs are not supported on Windows",
         ))
     }
 
     pub(super) fn acl_from_file(
         _file: &File,
+        _kind: crate::security::AclKind,
         _default: bool,
-    ) -> io::Result<Option<crate::PosixAcl>> {
+    ) -> io::Result<Option<crate::security::Acl>> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "POSIX ACLs are not supported on Windows",
+            "ACLs are not supported on Windows",
         ))
     }
 
     pub(super) fn set_acl_file(
         _file: &File,
-        _acl: Option<&crate::PosixAcl>,
+        _kind: crate::security::AclKind,
+        _acl: Option<&crate::security::Acl>,
         _default: bool,
     ) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "POSIX ACLs are not supported on Windows",
+            "ACLs are not supported on Windows",
         ))
     }
 

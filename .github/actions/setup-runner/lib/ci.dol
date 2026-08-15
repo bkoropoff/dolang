@@ -145,13 +145,22 @@ def create_vm()
       - pkgconf
       - curl
       - llvm19
+      - sudo
     init:
       add:
         target: /etc/rc.conf.d/firstboot_pkg_upgrade
         content: |
           firstboot_pkg_upgrade_enable="NO"
-      run: sed -i "" s/rw,noatime/rw,noatime,acls/ /etc/fstab
-      run: sh -c 'if [ ! -e /etc/.rebooted ]; then touch /etc/.rebooted; reboot; fi'
+      # Grants the `ci` user passwordless sudo, so shell tests can provision
+      # and tear down scratch `md(4)` filesystems (for ACL coverage that
+      # needs a POSIX- or NFSv4-ACL-enabled mount) via the `sudo`/`admin`
+      # bundled modules instead of mutating the guest's root filesystem.
+      add:
+        target: /usr/local/etc/sudoers.d/ci
+        content: |
+          ci ALL=(ALL) NOPASSWD: ALL
+        chmod: 0o440
+        owner: "root:wheel"
     # A top-level `add:` rather than an `init:` one: this runs once SSH is up,
     # so the user exists and the file is written through the guest's VFS with
     # the right ownership

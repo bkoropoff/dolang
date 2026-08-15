@@ -44,7 +44,7 @@ use crate::extension::VfsExtension;
 use crate::protocol::AccessRequest;
 use crate::session::Query;
 use crate::{
-    Child, Command, FileHandle, FsMetadata, Metadata, MetadataPatch, PosixAcl, ProcessStatus,
+    Acl, AclKind, Child, Command, FileHandle, FsMetadata, Metadata, MetadataPatch, ProcessStatus,
     ReadDir, SessionMode, SidName, StdioRecv, StdioSend, StreamEntry, Utf8TypedPath,
     Utf8TypedPathBuf, Vfs, XattrEntry,
     direct::DirectFile,
@@ -668,15 +668,16 @@ impl FileHandle for ClientFile {
         }
     }
 
-    async fn acl(&mut self, default: bool) -> crate::Result<Option<PosixAcl>> {
+    async fn acl(&mut self, kind: AclKind, default: bool) -> crate::Result<Option<Acl>> {
         match &mut self.0 {
-            ClientFileInner::Direct(file) => file.acl(default).await,
+            ClientFileInner::Direct(file) => file.acl(kind, default).await,
             ClientFileInner::Remote(file) => {
                 file.idle()?;
                 match file
                     .client
                     .request(RequestKind::FileAcl {
                         file: file.cite(),
+                        kind,
                         default,
                     })
                     .await?
@@ -688,15 +689,21 @@ impl FileHandle for ClientFile {
         }
     }
 
-    async fn set_acl(&mut self, acl: Option<&PosixAcl>, default: bool) -> crate::Result<()> {
+    async fn set_acl(
+        &mut self,
+        kind: AclKind,
+        acl: Option<&Acl>,
+        default: bool,
+    ) -> crate::Result<()> {
         match &mut self.0 {
-            ClientFileInner::Direct(file) => file.set_acl(acl, default).await,
+            ClientFileInner::Direct(file) => file.set_acl(kind, acl, default).await,
             ClientFileInner::Remote(file) => {
                 file.idle()?;
                 match file
                     .client
                     .request(RequestKind::FileSetAcl {
                         file: file.cite(),
+                        kind,
                         acl: acl.cloned(),
                         default,
                     })
@@ -2698,11 +2705,13 @@ impl Vfs for Client {
     async fn acl(
         &self,
         path: Utf8TypedPath<'_>,
+        kind: AclKind,
         default: bool,
         follow: bool,
-    ) -> crate::Result<Option<PosixAcl>> {
+    ) -> crate::Result<Option<Acl>> {
         let request = AclRequest {
             path: path.into(),
+            kind,
             default,
             follow,
         };
@@ -2715,12 +2724,14 @@ impl Vfs for Client {
     async fn set_acl(
         &self,
         path: Utf8TypedPath<'_>,
-        acl: Option<&PosixAcl>,
+        kind: AclKind,
+        acl: Option<&Acl>,
         default: bool,
         follow: bool,
     ) -> crate::Result<()> {
         let request = SetAclRequest {
             path: path.into(),
+            kind,
             acl: acl.cloned(),
             default,
             follow,

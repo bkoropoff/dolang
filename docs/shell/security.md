@@ -47,27 +47,61 @@ import fs
 import security.unix:
   - Acl
   - Ace
+  - Permission
 
 let identity = security.unix_info()
+let rw = Permission(:READ:, :WRITE:)
+let r = Permission(:READ:)
 let access = Acl $
-  $ Ace.user_obj read: true write: true
-  $ Ace.user $identity.euid read: true
-  $ Ace.group_obj read: true
-  $ Ace.mask read: true
+  $ Ace.user_obj $rw
+  $ Ace.user $identity.euid $r
+  $ Ace.group_obj $r
+  $ Ace.mask $r
   $ Ace.other()
 fs.set_acl config.ini $access
 ```
 
-Use [`fs.acl`](../api/fs/index.md#acl-path-default-resolve) to read stored ACL
-metadata. It returns `nil` when no ACL is stored; it does not construct an ACL
-from file mode bits. Pass `nil` to
-[`fs.set_acl`](../api/fs/index.md#set_acl-path-acl-default-resolve) to remove
-the ACL. Set `default: true` to operate on a directory's inheritable default
-ACL.
+Use [`fs.acl`](../api/fs/index.md#acl-path-kind-posix-default-resolve) to read
+stored ACL metadata. It returns `nil` when no ACL is stored; it does not
+construct an ACL from file mode bits. Pass `nil` to
+[`fs.set_acl`](../api/fs/index.md#set_acl-path-acl-kind-default-resolve) to
+remove the ACL. Set `default: true` to operate on a directory's inheritable
+default ACL.
 
 `Acl` validates the required base entries and requires a mask when named user
 or group entries are present. It preserves the supplied mask without
 recalculating it.
+
+## NFSv4 ACLs
+
+[`security.nfs4.Acl`](../api/security/nfs4/acl.md) is an immutable collection
+of [`security.nfs4.Ace`](../api/security/nfs4/ace.md) entries. The object
+model is available on every platform. Filesystem get and set operations are
+supported on FreeBSD only.
+
+```
+import fs
+import security.nfs4:
+  - Acl
+  - Ace
+  - Mask
+
+let identity = security.unix_info()
+let read = Mask(:READ_DATA:, :READ_ATTRIBUTES:, :READ_ACL:)
+let access = Acl $
+  $ Ace.owner type: :ALLOW: mask: (Mask())
+  $ Ace.user $identity.euid type: :ALLOW: mask: $read
+  $ Ace.everyone type: :DENY: mask: $read
+fs.set_acl config.ini $access
+```
+
+Pass `kind: :NFS4:` to `fs.acl` to read an NFSv4 ACL instead of the default
+POSIX one; `fs.set_acl` infers the format from the value's type. `default:
+true` is not valid with an NFSv4 ACL — inheritance is expressed through
+[`Ace`](../api/security/nfs4/ace.md) flags instead of a separate default-ACL
+object. Unlike a POSIX ACL, an NFSv4 ACL is a file's native security
+descriptor: it can be replaced with `fs.set_acl`, but FreeBSD provides no
+operation to remove it back to "none".
 
 ## Windows Access Tokens
 

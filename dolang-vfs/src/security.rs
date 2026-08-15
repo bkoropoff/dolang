@@ -6,7 +6,43 @@ use serde::{Deserialize, Serialize};
 use std::io;
 
 pub use crate::metadata::{Mode, Permission};
+pub use crate::nfs4_acl::{
+    Nfs4Ace, Nfs4AceFlags, Nfs4AceMask, Nfs4AceQualifier, Nfs4AceType, Nfs4Acl,
+};
 pub use crate::posix_acl::{PosixAce, PosixAcl, PosixAclError, PosixAclQualifier};
+
+/// Selects which kind of access-control list a `get_acl`-style operation
+/// should read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AclKind {
+    /// POSIX.1e ACL.
+    Posix,
+    /// NFSv4 ACL.
+    Nfs4,
+}
+
+/// A portable access-control list of any supported kind.
+///
+/// Returned by `get_acl`-style operations and accepted by `set_acl`-style
+/// ones, which infer the kind from the variant rather than taking a separate
+/// selector.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Acl {
+    /// POSIX.1e ACL.
+    Posix(PosixAcl),
+    /// NFSv4 ACL.
+    Nfs4(Nfs4Acl),
+}
+
+impl Acl {
+    /// Returns the [`AclKind`] of this ACL.
+    pub fn kind(&self) -> AclKind {
+        match self {
+            Self::Posix(_) => AclKind::Posix,
+            Self::Nfs4(_) => AclKind::Nfs4,
+        }
+    }
+}
 
 /// An owner or group selected by numeric ID, account name, or Windows SID.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

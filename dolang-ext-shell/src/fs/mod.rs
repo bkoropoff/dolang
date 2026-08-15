@@ -10,7 +10,7 @@ use dolang_vfs::{
     FileHandle, OpenOptions, Vfs,
     metadata::{AttrFlags, AttrsPatch, FileType, Mode as VfsMode},
     path::WellKnownPath,
-    security::PosixAcl,
+    security::{Acl as VfsAnyAcl, AclKind as VfsAclKind},
 };
 use dolang_winterop::security::{SecDesc, SecInfo};
 use std::{
@@ -118,23 +118,39 @@ fn acl_default<'v, 's>(
         .map(|value| value.unwrap_or(false))
 }
 
+fn check_acl_default<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    kind: VfsAclKind,
+    default: bool,
+) -> Result<'v, 's, ()> {
+    if default && kind == VfsAclKind::Nfs4 {
+        return Err(Error::value(
+            strand,
+            "default: is only meaningful for kind: :POSIX:",
+        ));
+    }
+    Ok(())
+}
+
 async fn acl<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
     path: Utf8TypedPath<'_>,
+    kind: VfsAclKind,
     default: bool,
     follow: bool,
     mut out: Slot<'v, '_>,
 ) -> Result<'v, 's, ()> {
+    check_acl_default(strand, kind, default)?;
     let path = prepend_cwd(strand, global, path)?;
     let acl = global
         .local
         .get(strand)
         .vfs()
-        .acl(path.to_path(), default, follow)
+        .acl(path.to_path(), kind, default, follow)
         .await
         .into_sys(strand)?;
-    security::create_posix_acl(strand, global, acl, &mut out);
+    security::create_any_acl(strand, global, acl, &mut out);
     Ok(())
 }
 
@@ -142,16 +158,18 @@ async fn set_acl<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
     path: Utf8TypedPath<'_>,
-    acl: Option<&PosixAcl>,
+    kind: VfsAclKind,
+    acl: Option<&VfsAnyAcl>,
     default: bool,
     follow: bool,
 ) -> Result<'v, 's, ()> {
+    check_acl_default(strand, kind, default)?;
     let path = prepend_cwd(strand, global, path)?;
     global
         .local
         .get(strand)
         .vfs()
-        .set_acl(path.to_path(), acl, default, follow)
+        .set_acl(path.to_path(), kind, acl, default, follow)
         .await
         .into_sys(strand)
 }
@@ -913,6 +931,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
     let dacl = builder.sym("dacl");
     let sacl = builder.sym("sacl");
     let default_acl = builder.sym("default");
+    let kind_acl = builder.sym("kind");
     let namespace = builder.sym("namespace");
     let modified = builder.sym("modified");
     let accessed = builder.sym("accessed");
@@ -1008,24 +1027,44 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             sec_desc(strand, global, path.to_path(), mask, follow, out).await
         })
         .function("acl", async move |strand, args, out| {
-            let ([path], [default, resolve]) =
-                unpack!(strand, args, 1, 0, default_acl = None, resolve = None)?;
+            let ([path], [kind, default, resolve]) = unpack!(
+                strand,
+                args,
+                1,
+                0,
+                kind_acl = None,
+                default_acl = None,
+                resolve = None
+            )?;
             let path = path_from_value(strand, global, &path)?;
+            let kind = security::acl_kind_sym(strand, global, kind)?;
             let default = acl_default(strand, default.as_deref())?;
             let follow = resolve_sym(strand, global, resolve, true)?;
-            acl(strand, global, path.to_path(), default, follow, out).await
+            acl(strand, global, path.to_path(), kind, default, follow, out).await
         })
         .function("set_acl", async move |strand, args, _out| {
-            let ([path, acl_value], [default, resolve]) =
-                unpack!(strand, args, 2, 0, default_acl = None, resolve = None)?;
+            let ([path, acl_value], [kind, default, resolve]) = unpack!(
+                strand,
+                args,
+                2,
+                0,
+                kind_acl = None,
+                default_acl = None,
+                resolve = None
+            )?;
             let path = path_from_value(strand, global, &path)?;
-            let acl = security::posix_acl_from_value(strand, global, &acl_value)?;
+            let acl = security::acl_from_value(strand, global, &acl_value)?;
+            let kind = match (&acl, kind) {
+                (Some(acl), _) => acl.kind(),
+                (None, kind) => security::acl_kind_sym(strand, global, kind)?,
+            };
             let default = acl_default(strand, default.as_deref())?;
             let follow = resolve_sym(strand, global, resolve, true)?;
             set_acl(
                 strand,
                 global,
                 path.to_path(),
+                kind,
                 acl.as_ref(),
                 default,
                 follow,
