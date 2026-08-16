@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use std::io;
 
+pub use crate::macos_acl::{MacosAce, MacosAceFlags, MacosAceMask, MacosAceType, MacosAcl};
 pub use crate::metadata::{Mode, Permission};
 pub use crate::nfs4_acl::{
     Nfs4Ace, Nfs4AceFlags, Nfs4AceMask, Nfs4AceQualifier, Nfs4AceType, Nfs4Acl,
@@ -19,6 +20,8 @@ pub enum AclKind {
     Posix,
     /// NFSv4 ACL.
     Nfs4,
+    /// macOS extended ACL.
+    Macos,
 }
 
 /// A portable access-control list of any supported kind.
@@ -32,6 +35,8 @@ pub enum Acl {
     Posix(PosixAcl),
     /// NFSv4 ACL.
     Nfs4(Nfs4Acl),
+    /// macOS extended ACL.
+    Macos(MacosAcl),
 }
 
 impl Acl {
@@ -40,8 +45,34 @@ impl Acl {
         match self {
             Self::Posix(_) => AclKind::Posix,
             Self::Nfs4(_) => AclKind::Nfs4,
+            Self::Macos(_) => AclKind::Macos,
         }
     }
+}
+
+/// A principal identifier of a specific kind, used with
+/// [`Vfs::resolve_principal_id`](crate::Vfs::resolve_principal_id) to
+/// convert between them (e.g. a Unix uid/gid and a macOS `guid_t`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PrincipalId {
+    /// A Unix user ID.
+    Uid(u32),
+    /// A Unix group ID.
+    Gid(u32),
+    /// A macOS principal UUID (`guid_t`).
+    Uuid(uuid::Uuid),
+}
+
+/// Selects which [`PrincipalId`] variant a `resolve_principal_id`-style
+/// operation should produce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PrincipalIdKind {
+    /// Resolve to a Unix user ID.
+    Uid,
+    /// Resolve to a Unix group ID.
+    Gid,
+    /// Resolve to a macOS principal UUID (`guid_t`).
+    Uuid,
 }
 
 /// An owner or group selected by numeric ID, account name, or Windows SID.

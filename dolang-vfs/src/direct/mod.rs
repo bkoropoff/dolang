@@ -39,9 +39,7 @@ use std::{
 
 mod lock;
 #[cfg(unix)]
-mod nfs4_acl;
-#[cfg(unix)]
-mod posix_acl;
+mod security;
 #[cfg(unix)]
 mod unix;
 #[cfg(windows)]
@@ -1081,6 +1079,24 @@ impl Vfs for Direct {
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "Windows accounts are not supported",
+            )
+            .into())
+        }
+    }
+
+    async fn resolve_principal_id(
+        &self,
+        input: crate::security::PrincipalId,
+        want: crate::security::PrincipalIdKind,
+    ) -> crate::Result<crate::security::PrincipalId> {
+        #[cfg(unix)]
+        return Self::resolve_principal_id(input, want).map_err(Into::into);
+        #[cfg(windows)]
+        {
+            let _ = (input, want);
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "principal ID resolution is not supported on this platform",
             )
             .into())
         }

@@ -14,7 +14,7 @@ use serde::{
 };
 
 use crate::extension::ErasedVfsExtension;
-pub(crate) use crate::security::{Acl, AclKind};
+pub(crate) use crate::security::{Acl, AclKind, PrincipalId, PrincipalIdKind};
 pub(crate) use crate::{
     DirEntry, FsMetadata, Metadata, MetadataPatch, SecurityInfo, SidName, StreamEntry, TargetInfo,
     XattrEntry, XattrNamespace, path::WellKnownPath,
@@ -755,6 +755,10 @@ pub(crate) enum RequestKind {
     AccountName {
         name: String,
     },
+    ResolvePrincipalId {
+        input: PrincipalId,
+        want: PrincipalIdKind,
+    },
     Which {
         program: WirePath,
         path: Option<String>,
@@ -920,6 +924,7 @@ pub(crate) enum ResponseKind {
     GroupId(Result<u32, WireError>),
     SidName(Result<SidName, WireError>),
     AccountName(Result<SidName, WireError>),
+    ResolvePrincipalId(Result<PrincipalId, WireError>),
     Which(Result<Option<WirePath>, WireError>),
     WellKnownPath(Result<WirePath, WireError>),
     Stop,

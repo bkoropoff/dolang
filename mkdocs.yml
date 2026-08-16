@@ -181,6 +181,12 @@ nav:
       - api/security/nfs4/acl.md
       - api/security/nfs4/mask.md
       - api/security/nfs4/flags.md
+    - security.macos:
+      - api/security/macos/index.md
+      - api/security/macos/ace.md
+      - api/security/macos/acl.md
+      - api/security/macos/mask.md
+      - api/security/macos/flags.md
     - security.windows:
       - api/security/windows/index.md
       - api/security/windows/access-mask.md

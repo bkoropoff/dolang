@@ -1,0 +1,91 @@
+import sys
+  security.macos: macos_security
+  security.unix: unix_security
+  security.unix:
+    id: unix_info
+  uuid
+  std:
+    - ImmutableError
+    - TypeError
+    - UnsupportedError
+    - ValueError
+  test:
+    - assert_eq
+    - assert_throws
+    - assert_type
+    - skip
+    - test
+
+#[test]
+def constructs_macos_acls_on_every_platform()
+  let rw = macos_security.Mask(:READ_DATA:, :WRITE_DATA:)
+  let r = macos_security.Mask(:READ_DATA:)
+  let inherit = macos_security.Flags(:FILE_INHERIT:, :DIRECTORY_INHERIT:)
+  let owner = uuid.Uuid.generate()
+  let other = uuid.Uuid.generate()
+
+  let allow = macos_security.Ace.allow $owner mask: $rw
+  let deny = macos_security.Ace.deny $other mask: $r flags: $inherit
+
+  assert_type $macos_security.Ace $allow
+  assert_type $macos_security.Ace $deny
+
+  assert_eq $allow.type :ALLOW:
+  assert_eq $allow.principal $owner
+  assert_eq $allow.mask $rw
+  assert_eq $allow.flags (macos_security.Flags())
+
+  assert_eq $deny.type :DENY:
+  assert_eq $deny.principal $other
+  assert_eq $deny.flags $inherit
+
+  let acl = macos_security.Acl [allow, deny]
+  assert_type $macos_security.Acl $acl
+  assert_eq $acl.aces.len 2
+  assert_eq $acl.aces[0].principal $owner
+  assert_eq $acl.aces[1].principal $other
+  assert_throws $ImmutableError do
+    acl.aces[0] = nil
+
+  # Like NFSv4 ACLs, macOS extended ACLs have no required entries or
+  # completeness invariant to validate: an empty ACL and a single-entry ACL
+  # both construct without error.
+  assert_eq $(macos_security.Acl []).aces.len 0
+
+  assert_throws $TypeError do macos_security.Ace.allow $owner mask: 5
+  assert_throws $TypeError do macos_security.Acl [allow, 5]
+  assert_throws $TypeError do macos_security.Ace.allow 5 mask: $r
+  assert_throws $ValueError do macos_security.Ace.allow "not-a-uuid" mask: $r
+
+#[test]
+def resolves_macos_principal_ids()
+  if (sys.os_info().os != :MACOS:)
+    skip "macOS principal ID resolution is not supported on this platform"
+
+  let info = unix_info()
+  let uid_uuid = macos_security.uuid_for_uid $info.euid
+  let gid_uuid = macos_security.uuid_for_gid $info.egid
+  assert_type $uuid.Uuid $uid_uuid
+  assert_type $uuid.Uuid $gid_uuid
+
+  let kind id = macos_security.id_for_uuid $uid_uuid
+  assert_eq $kind :UID:
+  assert_eq $id $info.euid
+
+  let kind id = macos_security.id_for_uuid $gid_uuid
+  assert_eq $kind :GID:
+  assert_eq $id $info.egid
+
+  assert_eq (unix_security.user_name uid_uuid) (unix_security.user_name info.euid)
+  assert_eq (unix_security.group_name gid_uuid) (unix_security.group_name info.egid)
+
+#[test]
+def rejects_macos_principal_id_resolution_when_unsupported()
+  if (sys.os_info().os == :MACOS:)
+    skip "macOS principal ID resolution is supported on this platform"
+
+  assert_throws $UnsupportedError do macos_security.uuid_for_uid 0
+  assert_throws $UnsupportedError do macos_security.uuid_for_gid 0
+  assert_throws $UnsupportedError do macos_security.id_for_uuid (uuid.Uuid.generate())
+  assert_throws $UnsupportedError do unix_security.user_name (uuid.Uuid.generate())
+  assert_throws $UnsupportedError do unix_security.group_name (uuid.Uuid.generate())

@@ -62,3 +62,22 @@ The `security.windows` module exposes Windows security types.
 | 19   | `:SYSTEM_SCOPED_POLICY_ID:`        |
 | 20   | `:SYSTEM_PROCESS_TRUST_LABEL:`     |
 | 21   | `:SYSTEM_ACCESS_FILTER:`           |
+
+## Functions
+
+### `token_info()`
+
+Returns Windows token information captured for the active VFS context.
+
+#### Returns
+
+[`TokenInfo`](./tokeninfo.md)
+
+**Errors:**
+
+- Raises `UnsupportedError` when the active VFS target is Unix.
+
+```
+if token_info().is_elevated
+  echo elevated
+```

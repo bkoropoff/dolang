@@ -32,6 +32,15 @@ pub fn create_uuid<'v, 'a>(strand: &mut Strand<'v, '_>, id: uuid::Uuid, out: Slo
     create_uuid_with_global(global, strand, id, out);
 }
 
+/// Returns the wrapped `uuid::Uuid` if `value` is a Do `uuid.Uuid` object, or
+/// `None` otherwise. Unlike [`value_to_uuid`], does not accept `Str`/`Bin`
+/// forms.
+pub fn cast_uuid<'v>(strand: &mut Strand<'v, '_>, value: &Value<'v>) -> Option<uuid::Uuid> {
+    let global = strand.state::<Global<'v>>();
+    let inst = global.types.uuid.cast(value)?;
+    Some(inst.enter_sync(strand, |_strand, inst| inst.annex().inner))
+}
+
 /// Converts a Do `uuid.Uuid`, `Str`, or `Bin` value into an owned `uuid::Uuid`.
 ///
 /// Text is parsed via `uuid::Uuid::parse_str`, which accepts the hyphenated,

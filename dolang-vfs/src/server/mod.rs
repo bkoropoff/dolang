@@ -728,6 +728,9 @@ impl Connection {
             RequestKind::AccountName { name } => ResponseKind::AccountName(Self::wire_result(
                 self.server.vfs.account_name(&name).await,
             )),
+            RequestKind::ResolvePrincipalId { input, want } => ResponseKind::ResolvePrincipalId(
+                Self::wire_result(self.server.vfs.resolve_principal_id(input, want).await),
+            ),
             RequestKind::Which { program, path, cwd } => {
                 self.handle_which(program, path, cwd).await
             }

@@ -123,7 +123,7 @@ fn check_acl_default<'v, 's>(
     kind: VfsAclKind,
     default: bool,
 ) -> Result<'v, 's, ()> {
-    if default && kind == VfsAclKind::Nfs4 {
+    if default && kind != VfsAclKind::Posix {
         return Err(Error::value(
             strand,
             "default: is only meaningful for kind: :POSIX:",
@@ -1034,23 +1034,6 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             let follow = resolve_sym(strand, global, resolve, true)?;
             fs_metadata(strand, global, path.to_path(), follow, out).await
         })
-        .function("sec_desc", async move |strand, args, out| {
-            let ([path], [owner, group, dacl, sacl, resolve]) = unpack!(
-                strand,
-                args,
-                1,
-                0,
-                owner = None,
-                group = None,
-                dacl = None,
-                sacl = None,
-                resolve = None
-            )?;
-            let path = path_from_value(strand, global, &path)?;
-            let mask = sec_desc_mask(strand, owner, group, dacl, sacl)?;
-            let follow = resolve_sym(strand, global, resolve, true)?;
-            sec_desc(strand, global, path.to_path(), mask, follow, out).await
-        })
         .function("acl", async move |strand, args, out| {
             let ([path], [kind, default, resolve]) = unpack!(
                 strand,
@@ -1095,13 +1078,6 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 follow,
             )
             .await
-        })
-        .function("set_sec_desc", async move |strand, args, _out| {
-            let ([path, descriptor], [resolve]) = unpack!(strand, args, 2, 0, resolve = None)?;
-            let path = path_from_value(strand, global, &path)?;
-            let descriptor = security::sec_desc_from_value(strand, global, &descriptor)?;
-            let follow = resolve_sym(strand, global, resolve, true)?;
-            set_sec_desc(strand, global, path.to_path(), &descriptor, follow).await
         })
         .function("xattrs", async move |strand, args, out| {
             let ([path], [namespace, resolve]) =
@@ -1530,5 +1506,29 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         .module("fs.windows")
         .value("Path", global.types.windows_path)
         .value("StreamEntry", global.types.stream_entry)
+        .function("sec_desc", async move |strand, args, out| {
+            let ([path], [owner, group, dacl, sacl, resolve]) = unpack!(
+                strand,
+                args,
+                1,
+                0,
+                owner = None,
+                group = None,
+                dacl = None,
+                sacl = None,
+                resolve = None
+            )?;
+            let path = path_from_value(strand, global, &path)?;
+            let mask = sec_desc_mask(strand, owner, group, dacl, sacl)?;
+            let follow = resolve_sym(strand, global, resolve, true)?;
+            sec_desc(strand, global, path.to_path(), mask, follow, out).await
+        })
+        .function("set_sec_desc", async move |strand, args, _out| {
+            let ([path, descriptor], [resolve]) = unpack!(strand, args, 2, 0, resolve = None)?;
+            let path = path_from_value(strand, global, &path)?;
+            let descriptor = security::sec_desc_from_value(strand, global, &descriptor)?;
+            let follow = resolve_sym(strand, global, resolve, true)?;
+            set_sec_desc(strand, global, path.to_path(), &descriptor, follow).await
+        })
         .commit();
 }

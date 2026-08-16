@@ -55,6 +55,7 @@ pub mod directory;
 pub mod error;
 pub mod extension;
 pub mod file;
+mod macos_acl;
 pub mod metadata;
 mod nfs4_acl;
 pub mod path;
@@ -81,7 +82,9 @@ use file::{FileLock, FileLockRequest};
 use metadata::{AttrFlags, AttrsPatch, FileType, FsMetadata, Metadata, MetadataPatch};
 use path::WellKnownPath;
 use process::{ProcessControl, ProcessStatus, TerminationPolicy};
-use security::{Acl, AclKind, OwnershipIdentity, SecurityInfo, SidName};
+use security::{
+    Acl, AclKind, OwnershipIdentity, PrincipalId, PrincipalIdKind, SecurityInfo, SidName,
+};
 use session::{ExtensionSet, VfsSession};
 use stream::StreamEntry;
 use target::TargetInfo;
@@ -307,6 +310,13 @@ pub trait Vfs {
     async fn sid_name(&self, sid: &Sid) -> Result<SidName>;
     /// Resolves a Windows account name to its SID.
     async fn account_name(&self, name: &str) -> Result<SidName>;
+    /// Converts a principal ID from one representation to another (e.g. a
+    /// Unix uid/gid to/from a macOS principal UUID).
+    async fn resolve_principal_id(
+        &self,
+        input: PrincipalId,
+        want: PrincipalIdKind,
+    ) -> Result<PrincipalId>;
     /// Opens a directory iterator.
     async fn read_dir(&self, path: Utf8TypedPath<'_>) -> Result<ReadDir>;
     /// Finds an executable using a target search path.
@@ -1344,6 +1354,17 @@ impl Vfs for AnyVfs {
         match self {
             Self::Client(client) => client.account_name(name).await,
             Self::Direct(direct) => direct.account_name(name).await,
+        }
+    }
+
+    async fn resolve_principal_id(
+        &self,
+        input: PrincipalId,
+        want: PrincipalIdKind,
+    ) -> crate::Result<PrincipalId> {
+        match self {
+            Self::Client(client) => client.resolve_principal_id(input, want).await,
+            Self::Direct(direct) => direct.resolve_principal_id(input, want).await,
         }
     }
 
