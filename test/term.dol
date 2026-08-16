@@ -303,6 +303,25 @@ def child_stderr_is_captured()
     assert_eq $out ["child-out\n"]
 
 #[test]
+def child_stdout_is_captured()
+  # An undirected child stdout is console-bound too, so a capture takes it —
+  # regardless of whether the real stdout backing the process is a terminal.
+  # `dodo shell-test` itself runs with stdout redirected to a file, so this
+  # also stands as a regression test for that non-tty case.
+  with_temp_dir do |dir|
+    let src = r|
+      import shell
+      shell.stdout.write "child-out\n"
+      shell.stderr.write "child-err\n"
+
+    let path = script $dir noisy.dol $src
+    let err = []
+    let human = term.sub do run $shell.exe --no-cache $path stderr: $err
+
+    assert_eq $human child-out
+    assert_eq $err ["child-err\n"]
+
+#[test]
 def mute_silences_echo_and_child_stderr()
   # Same mechanism as `capture`, just wired to a sink that throws writes away
   # — so it composes with an enclosing capture rather than fighting it, and
