@@ -51,7 +51,7 @@ import podman
 let image = podman.build
   from: ubuntu:24.04
   mounts:
-    - type: cache
+    - type: :CACHE:
       target: /var/cache/apt
   run: do
     run apt-get update
