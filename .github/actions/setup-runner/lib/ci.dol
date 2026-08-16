@@ -269,14 +269,10 @@ do
           icon: 🦀
           do if !cache.has_rust(vm)
             install_rust $vm
-      if (rust && target == "x86_64-linux")
-        - name: "install llvm"
+      if (rust && target.ends_with "-linux")
+        - name: "install musl"
           icon: 📦
-          do
-            sudo.with do
-              run apt update
-              run apt install llvm libclang-dev
-        # `dodo install` links dolang-vfs against musl
+          do run sudo apt install musl-dev musl-tools
         - name: "add musl target"
           icon: 🦀
-          do run rustup target add x86_64-unknown-linux-musl
+          do run rustup target add $(target.split("-").next())-unknown-linux-musl
