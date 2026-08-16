@@ -673,13 +673,13 @@ async fn run<'v, 's>(
     // that has taken the terminal over. Naming `shell.stdout`/`shell.stderr`
     // explicitly pins the channel to the real stream and opts out.
     let console_owned = global.terminal.redirected.get();
-    let stdout_to_console = !io.explicit.stdout
-        && console_owned
-        && global.terminal.stdout_is_terminal
-        && is_default_stdout(global, io.value.stdout);
-    // A capture routes regardless of whether stderr is a terminal: gating it on
-    // a tty would make capture work interactively and silently not in CI.
+    // A capture routes regardless of whether stdout/stderr is a terminal:
+    // gating it on a tty would make capture work interactively and silently
+    // not in CI.
     let captured = !global.capture.slot(strand).is_nil();
+    let stdout_to_console = !io.explicit.stdout
+        && is_default_stdout(global, io.value.stdout)
+        && (captured || (console_owned && global.terminal.stdout_is_terminal));
     let stderr_to_console =
         !io.explicit.stderr && (captured || (console_owned && global.terminal.stderr_is_terminal));
 
