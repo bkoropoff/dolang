@@ -2,7 +2,7 @@
 
 ## Example
 
-[`example/download.dol`](https://github.com/bkoropoff/dolang/blob/master/example/download.dol)
+[`example/download.dol`](https://github.com/dolang-org/dolang/blob/master/example/download.dol)
 downloads files concurrently with progress reporting:
 
 ```

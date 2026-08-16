@@ -5,7 +5,7 @@ resolver = "3"
 
 [workspace.package]
 license = "Apache-2.0 OR MIT"
-repository = "https://github.com/bkoropoff/dolang"
+repository = "https://github.com/dolang-org/dolang"
 rust-version = "1.93"
 
 [workspace.dependencies]

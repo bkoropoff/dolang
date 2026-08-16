@@ -125,7 +125,7 @@ cargo build --release --bin dolang --bin dolang-lsp --bin dolang-vfs
 ./target/release/dolang example/cow.dol
 ```
 
-See the [Language Guide](https://dolang-org.github.io/dolang/language/overview/)
+See the [Language Guide](https://dolang-org.github.io/dolang/language/)
 or follow the
 [command-line tool example](https://dolang-org.github.io/dolang/shell/cli-tools/).
 

@@ -53,7 +53,7 @@ Tool resolution order is:
 3. Downloaded GitHub release bundle
 
 If the tools are not available locally, the extension downloads one platform
-`tar.gz` bundle from the latest GitHub release for `bkoropoff/dolang` and
+`tar.gz` bundle from the latest GitHub release for `dolang-org/dolang` and
 extracts it into extension global storage.
 
 ## Building

@@ -6,7 +6,7 @@
     "license": "Apache-2.0 OR MIT",
     "repository": {
         "type": "git",
-        "url": "https://github.com/bkoropoff/dolang.git"
+        "url": "https://github.com/dolang-org/dolang.git"
     },
     "engines": {
         "vscode": "^1.75.0"
