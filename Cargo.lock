@@ -1297,7 +1297,6 @@ dependencies = [
  "dolang-ext-tar",
  "dolang-ext-toml",
  "dolang-ext-url",
- "dolang-ext-uuid",
  "dolang-ext-winreg",
  "dolang-ext-winscm",
  "dolang-ext-xml",
