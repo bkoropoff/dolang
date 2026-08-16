@@ -1,4 +1,4 @@
-use std::{ffi::CStr, os::raw::c_char};
+use std::ffi::CStr;
 
 use dolang::runtime::{
     Error, Instance, Object, Output, Result, Slot, State, Strand, Value,
@@ -718,9 +718,9 @@ unsafe fn get<'v, 's>(
                     }
                     SQLITE_FLOAT => Output::set(strand, out, sqlite3_column_double(raw, idx)),
                     SQLITE_TEXT => {
-                        let ptr = sqlite3_column_text(raw, idx) as *const c_char;
+                        let ptr = sqlite3_column_text(raw, idx);
                         let len = sqlite3_column_bytes(raw, idx);
-                        let bytes = std::slice::from_raw_parts(ptr as *const u8, len as usize);
+                        let bytes = std::slice::from_raw_parts(ptr, len as usize);
                         Output::set(strand, out, String::from_utf8_lossy(bytes).as_ref())
                     }
                     SQLITE_BLOB => {
@@ -776,9 +776,9 @@ unsafe fn column_to_value(raw: *mut sqlite3_stmt, idx: i32, bool_columns: &[bool
             }
             SQLITE_FLOAT => SqliteValue::Real(sqlite3_column_double(raw, idx)),
             SQLITE_TEXT => {
-                let ptr = sqlite3_column_text(raw, idx) as *const c_char;
+                let ptr = sqlite3_column_text(raw, idx);
                 let len = sqlite3_column_bytes(raw, idx);
-                let bytes = std::slice::from_raw_parts(ptr as *const u8, len as usize);
+                let bytes = std::slice::from_raw_parts(ptr, len as usize);
                 SqliteValue::Text(String::from_utf8_lossy(bytes).into_owned())
             }
             SQLITE_BLOB => {

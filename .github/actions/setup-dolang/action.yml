@@ -28,8 +28,16 @@ runs:
             artifact=dolang-x86_64-linux.tar.gz
             executable=dolang
             ;;
+          Linux-ARM64)
+            artifact=dolang-aarch64-linux.tar.gz
+            executable=dolang
+            ;;
           Windows-X64)
             artifact=dolang-x86_64-windows.tar.gz
+            executable=dolang.exe
+            ;;
+          Windows-ARM64)
+            artifact=dolang-aarch64-windows.tar.gz
             executable=dolang.exe
             ;;
           macOS-ARM64)
