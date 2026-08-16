@@ -110,11 +110,11 @@ pub def with image func :cd = nil :env = {} :pull = :MISSING:
 # Each element is a `Dict` of the form:
 #
 # - `type`:
-#     - `cache`: Mount a persistent cache at `target`
-#     - `bind`: Bind mount `source` at `target`
+#     - `:CACHE:`: Mount a persistent cache at `target`
+#     - `:BIND:`: Bind mount `source` at `target`
 # - `target: <path | Str>`: target mount path
-# - `source: <path | Str>`: mount source (omit for `cache` mounts)
-# - `id` (optional): identifier for `cache` mounts; `target` used if omitted
+# - `source: <path | Str>`: mount source (omit for `:CACHE:` mounts)
+# - `id` (optional): identifier for `:CACHE:` mounts; `target` used if omitted
 #
 # # Build steps
 #

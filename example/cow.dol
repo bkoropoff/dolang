@@ -13,7 +13,7 @@ def search name
 progress.with do docker.build
   from: opensuse/leap:16.0
   mounts:
-    - type: cache
+    - type: :CACHE:
       target: /var/cache/zypp
   run: do progress.show message: "updating repos" do |_|
     zypper -n modifyrepo --all --keep-packages

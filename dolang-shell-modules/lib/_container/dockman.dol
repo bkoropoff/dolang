@@ -49,7 +49,13 @@ let PORT_PROTOCOLS = $
   "udp": :UDP:
   "sctp": :SCTP:
 
-let CONTAINER_MOUNT_TYPES = $
+let CONTAINER_MOUNT_TYPES = Set $
+  - :BIND:
+  - :VOLUME:
+  - :TMPFS:
+
+let BUILD_MOUNT_TYPES = $
+  CACHE: cache
   BIND: bind
   VOLUME: volume
   TMPFS: tmpfs
@@ -790,6 +796,8 @@ pub def mount_args mounts
       :size = nil
       :chown = nil
       :selinux = nil
+    type = BUILD_MOUNT_TYPES.get $type else: do
+      throw ValueError "unsupported mount type: $type"
     if (type == "cache")
       # Emulate cache mount with bind mount for Docker
       source = str $ cache_dir (id || target)
@@ -836,9 +844,9 @@ def container_mount_args mounts
       :type :target
       :source = nil
       :readonly = false
-    let type = CONTAINER_MOUNT_TYPES.get $type else: do
+    if !(CONTAINER_MOUNT_TYPES.contains type)
       throw ValueError "unsupported container mount type: $type"
-    if (type == "bind" && source == nil)
+    if (type == :BIND: && source == nil)
       throw ValueError "bind mount requires source"
     normalized.push $ record :type :target :source :readonly
   mount_args $normalized

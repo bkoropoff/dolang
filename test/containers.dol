@@ -128,6 +128,9 @@ def image_build_inspect_remove()
     from: ubuntu:24.04
     cd: /tmp
     env: $overrides
+    mounts:
+      - type: :CACHE:
+        target: /var/cache/apt
     run: $build_step
     tag: $image_tag
 
