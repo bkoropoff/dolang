@@ -7,21 +7,10 @@ ordinary functions, structured concurrency, and remote-capable system APIs.
 [Documentation](https://dolang-org.github.io/dolang/) ·
 [Source](https://github.com/dolang-org/dolang)
 
-- Run the same automation on Linux, macOS, Windows, and FreeBSD.
-- Use structured concurrency, cancellation, channels, pipelines, and scoped
-  resources.
-- Redirect filesystem, process, environment, system, and security operations
-  with block-scoped VFS contexts.
-- Enter containers, SSH hosts, WSL, `sudo`, or Windows UAC elevation without
-  rewriting the function that performs the work.
-- Work with Windows paths, access tokens, SIDs, ACLs, security descriptors,
-  and native error codes alongside Unix identities and error codes.
-- Styled terminal output and progress displays.
-- Editor support: LSP server, VS Code extension, Vim syntax definition
-
-> **⚠️ Experimental:** Do is still in rapid development. The language syntax,
-> standard library, and API are subject to change. Not recommended for
-> production use.
+> **⚠️ Experimental:** Do is early and still taking shape — syntax, the
+> standard library, and APIs are all subject to change, and it's not ready
+> for production workloads. If the ideas below interest you, this is a good
+> time to poke around, try things out, and weigh in.
 
 ## What Makes Do Different?
 
@@ -29,7 +18,8 @@ The interpreter stays local while a VFS context selects where system work
 happens. The same function can operate on the local system, a container, an SSH
 host, across WSL, or with administrator privileges. Filesystem access, external
 programs, environment variables, system information, and security queries
-follow the selected target.
+follow the selected target — you don't write a different version of the
+function for "local" versus "remote."
 
 ```
 import fs sys
@@ -47,6 +37,20 @@ ssh.with build.example.com do inspect_target()
 VFS contexts compose, so the same model supports paths such as local → SSH host
 → container. APIs that are not VFS-forwarded continue to run in the interpreter
 process.
+
+## Also Included
+
+- Structured concurrency: cancellation, channels, pipelines, and scoped
+  resources.
+- Enter containers, SSH hosts, WSL, `sudo`, or Windows UAC elevation without
+  rewriting the function that performs the work.
+- Work with Windows paths, access tokens, SIDs, ACLs, security descriptors,
+  and native error codes alongside Unix identities and error codes.
+- Styled terminal output and progress displays.
+- Editor support: LSP server, Vim syntax definition, and a VS Code extension
+  (build from source in [`dolang-code/`](./dolang-code); not yet on the
+  Marketplace).
+- Runs on Linux, macOS, Windows, and FreeBSD.
 
 ## Quick Look
 
@@ -103,10 +107,10 @@ progress.with do podman.build
 - **Tooling:** compiler APIs, dynamic loading, the REPL, LSP, and VS Code
   extension.
 
-Do also implements this repository's cross-platform GitHub Actions build and
-release workflows, including the Do-based task runner used by those workflows.
+## Try It
 
-## Getting Started
+There are no packaged releases yet — building from source is the only way to
+try Do right now.
 
 ### Prerequisites
 
