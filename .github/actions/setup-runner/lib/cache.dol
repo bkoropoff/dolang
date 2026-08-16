@@ -27,8 +27,6 @@
 # switch `save`/`restore` below back to `fetch`/`send`.
 
 import fs proc progress sys toml
-import std:
-  - NULLITER
 # `pipeline` puts the pipe ends on the VFS and spawns both processes onto them,
 # so `tar | zstd` stays entirely inside the guest rather than routing gigabytes
 # back through the host
@@ -230,7 +228,7 @@ pub def restore vm
 pub def has_rust vm
   try
     vm.with do
-      run cargo --version stdout: $NULLITER stderr: $NULLITER
+      run cargo --version stdout: $std.null stderr: $std.null
     true
   catch sys.NotFoundError: _
     # The cold-guest case: no `cargo` on the guest's search path at all, which

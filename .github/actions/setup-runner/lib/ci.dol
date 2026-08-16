@@ -6,8 +6,6 @@
 # indicators render as plain step lines.
 
 import cache fs http libvirt proc progress sudo sys
-import std:
-  - NULLITER
 
 # Libvirt domain name for the CI VM.
 pub let VM_NAME = "dolang-ci"
@@ -119,7 +117,7 @@ def unconfine()
       # turned off. The catch is for that false failure, not for a real one:
       # `aa-teardown` going missing must stay fatal, because passt segfaults if
       # AppArmor is still enforcing.
-      run aa-teardown stderr: $NULLITER
+      run aa-teardown stderr: $std.null
     catch proc.Error: _
       nil
 
