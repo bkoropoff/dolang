@@ -268,7 +268,7 @@ return $
       help: "arguments to `cargo bench`"
       collect: true
     do |args|
-      let spec = Spec $args
+      let spec = Spec $args profile: dist
       spec.cargo bench ...args.args
 
   "gen-system-error-codes":
