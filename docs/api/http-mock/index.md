@@ -1,4 +1,4 @@
-# HTTP Mock Extension
+# http.mock
 
 Mock HTTP server for testing code that makes requests through the
 [HTTP extension](../http/index.md).
