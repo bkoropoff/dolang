@@ -20,7 +20,7 @@ export interface ToolResolverOptions {
 }
 
 const DOWNLOADS_ENABLED = true;
-const REPOSITORY_OWNER = "bkoropoff";
+const REPOSITORY_OWNER = "dolang-org";
 const REPOSITORY_NAME = "dolang";
 const BUNDLE_DIRECTORY = "bundle";
 

@@ -5,9 +5,10 @@ combines shell-like commands and indentation-oriented data declartion with
 ordinary functions, structured concurrency, and remote-capable system APIs.
 
 !!! warning "Experimental Language"
-    Do is still in rapid development.
-    The language syntax, standard library, and API are subject to change. Not
-    recommended for production use.
+    Do is early and still taking shape — syntax, the standard library, and
+    APIs are all subject to change, and it's not ready for production
+    workloads. If the ideas below interest you, this is a good time to poke
+    around, try things out, and weigh in.
 
 ## What Makes Do Different?
 
@@ -140,11 +141,11 @@ Supported platforms are Linux, macOS, Windows, and FreeBSD.
 Platform-specific features follow the VFS context, not the host platform, so
 a Linux host can remotely modify security descriptors on Windows, etc.
 
-## Get Started
+## Explore
 
 **New to Do?** Start with the [Language Guide](./language/index.md).
 
-**Building a script?** Follow the
+**Want to see it in action?** Follow the
 [command-line tool worked example](./shell/cli-tools.md).
 
-**Targeting another system?** Read the [VFS Guide](./shell/vfs.md).
+**Curious about the VFS model?** Read the [VFS Guide](./shell/vfs.md).
