@@ -1,4 +1,4 @@
-# HTTP Extension
+# http
 
 HTTP client for making web requests.
 

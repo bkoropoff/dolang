@@ -193,9 +193,12 @@ nav:
       - api/security/windows/ace.md
       - api/security/windows/acl.md
       - api/security/windows/secdesc.md
+      - api/security/windows/secdesc-control.md
+      - api/security/windows/sec-info.md
       - api/security/windows/sid.md
       - api/security/windows/sidname.md
       - api/security/windows/tokengroup.md
+      - api/security/windows/token-group-attributes.md
       - api/security/windows/tokeninfo.md
     - shell:
       - api/shell/index.md
@@ -283,6 +286,7 @@ nav:
       - api/sys/cpuinfo.md
       - api/sys/error.md
       - api/sys/error-code.md
+      - api/sys/invalid-input-error.md
       - api/sys/not-found-error.md
       - api/sys/osinfo.md
       - api/sys/permission-denied-error.md
@@ -338,6 +342,7 @@ nav:
       - api/winreg/index.md
       - api/winreg/access-mask.md
       - api/winreg/key.md
+      - api/winreg/link-target.md
       - api/winreg/value.md
     - winscm:
       - api/winscm/index.md

@@ -670,7 +670,7 @@ leaf modules like `base64.md`):
     Don't list internal/return-only types here — only types the module
     exports as values. Types that are only returned by functions (e.g.
     `Result` from `compile`) are mentioned in the relevant function's
-    **Returns:** line and linked to their own page from there.
+    `#### Returns` section and linked to their own page from there.
 4. `## Functions` — each function as `### \`name args\`` (see below)
 
 **Type pages** (one `.md` file per type):
@@ -695,9 +695,10 @@ apply):
 
 1. `### \`name param1 param2 :kw1? :kw2?\`` — signature as heading
 2. One-line or short paragraph description
-3. `**Parameters:**` — table with Name, Type, Description columns
-4. `**Returns:**` — type and brief note
-5. `**Errors:**` — bullet list of error conditions (only if non-obvious)
+3. `#### Parameters` — table with Name, Type, Description columns
+4. `#### Returns` — type and brief note
+5. `#### Errors` — table (or bullet list) of error conditions (only if
+   non-obvious)
 6. Code example (fenced, no label)
 
 ### Voice and Brevity
