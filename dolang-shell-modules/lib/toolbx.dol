@@ -33,7 +33,7 @@ do
   # serves one peer that proves the key, and unlinks the socket once it has.
   let key = _vfs.key()
   pipeline
-    do run_command :cd :env $agent --key-stdin --accept $socket
+    do run_command :cd :env :name $agent --key-stdin --accept $socket
       stdin: (_vfs.key_input key)
     do
       strand.next()
