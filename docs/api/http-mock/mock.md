@@ -15,6 +15,8 @@ received.
 
 Array of [`Request`](./request.md).
 
+#### Example
+
 ```
 server.mock
   - method: POST

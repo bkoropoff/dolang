@@ -31,7 +31,7 @@ The `std` module provides core language facilities.
 | [`Iter`](./iter.md)                               | Abstract iterator type                     |
 | [`Iterable`](./iterable.md)                       | Abstract iterable type                     |
 | [`IterStop`](./iter-stop.md)                      | Error raised when an iterator is exhausted |
-| [`MissingKeyError`](./missing-key-error.md)       | Required keyword argument not provided     |
+| [`MissingKeyError`](./missing-key-error.md)       | Required key argument not provided         |
 | [`MissingPosError`](./missing-pos-error.md)       | Required positional argument not provided  |
 | [`Nil`](./nil.md)                                 | Type object for `nil`                      |
 | [`Null`](./null.md)                               | Empty iterator and discarding sink         |
@@ -51,7 +51,7 @@ The `std` module provides core language facilities.
 | [`Tuple`](./tuple.md)                             | Immutable ordered sequence                 |
 | [`Type`](./type.md)                               | Type of types                              |
 | [`TypeError`](./type-error.md)                    | Wrong type for an operation                |
-| [`UnexpectedKeyError`](./unexpected-key-error.md) | Unexpected keyword argument                |
+| [`UnexpectedKeyError`](./unexpected-key-error.md) | Unexpected key argument                    |
 | [`UnexpectedPosError`](./unexpected-pos-error.md) | Unexpected positional argument             |
 | [`UnsupportedError`](./unsupported-error.md)      | Unsupported operation                      |
 | [`ValueError`](./value-error.md)                  | Invalid value for an operation             |
@@ -98,6 +98,8 @@ Builds a getter object from a callable.
 
 [`Getter`](./getter.md)
 
+#### Example
+
 ```
 class Config
   field port = 8080
@@ -121,6 +123,8 @@ Builds a setter object from a callable.
 
 [`Setter`](./setter.md)
 
+#### Example
+
 ```
 class Config
   #[setter]
@@ -134,10 +138,10 @@ Creates an array from positional arguments.
 
 ### `dict ...`
 
-Creates a dictionary from positional and keyword arguments.
+Creates a dictionary from positional and key arguments.
 
 Positional arguments receive incrementing integer keys starting at `0`.
-Keyword arguments become symbol keys. The function-call syntax cannot specify
+Key arguments become symbol keys. The function-call syntax cannot specify
 other key types; use a [horizontal dictionary
 literal](../../language/data-structures.md#literals) or [vertical
 data](../../language/vertical-layout.md#vertical-data) instead.
@@ -148,21 +152,23 @@ Creates a tuple from positional arguments.
 
 ### `record ...`
 
-Creates a record from positional and keyword arguments.
+Creates a record from positional and key arguments.
 
 Positional arguments receive incrementing integer keys starting at `0`.
-Keyword arguments become symbol fields.
+Key arguments become symbol fields.
 
 #### Parameters
 
 | Name                 | Type | Description                       |
 | -------------------- | ---- | --------------------------------- |
 | positional arguments | *    | Receive incrementing integer keys |
-| keyword arguments    |      | Become symbol fields              |
+| key arguments        |      | Become symbol fields              |
 
 #### Returns
 
 [`Record`](./record.md)
+
+#### Example
 
 ```
 let r = record name: Alice age: 30

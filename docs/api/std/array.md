@@ -19,6 +19,8 @@ Returns the number of elements.
 
 [`Int`](./index.md)
 
+#### Example
+
 ```
 assert_eq $[1, 2, 3].len 3
 ```
@@ -34,6 +36,8 @@ Appends one or more values to the end of the array.
 | Name        | Type | Description      |
 | ----------- | ---- | ---------------- |
 | `...values` |      | values to append |
+
+#### Example
 
 ```
 let arr = [1, 2]
@@ -52,6 +56,8 @@ Negative indexes count from the end; `-1` inserts before the last element.
 | ----------- | ------------------- | ------------------------- |
 | `index`     | [`Int`](./index.md) | the position to insert at |
 | `...values` |                     | values to insert          |
+
+#### Example
 
 ```
 let arr = [1, 2, 3]
@@ -77,6 +83,8 @@ alternative is provided. Negative indexes count from the end.
 #### Returns
 
 The value, or the default/else result.
+
+#### Example
 
 ```
 let arr = [10, 20, 30]
@@ -104,6 +112,8 @@ provided. Negative indexes count from the end.
 
 The removed value, or the default/else result.
 
+#### Example
+
 ```
 let arr = [1, 2, 3]
 assert_eq $arr.pop() 3
@@ -124,6 +134,8 @@ Out-of-bounds indexes are ignored.
 #### Returns
 
 [`Bool`](./index.md) indicating whether an element was removed
+
+#### Example
 
 ```
 let arr = [10, 20, 30]
@@ -167,6 +179,8 @@ Sorts the array in place.
 
 The `key:` callable is evaluated once per element.
 
+#### Example
+
 ```
 let arr = ["bbb", "a", "cc"]
 arr.sort key: (do |x| x.len)
@@ -190,6 +204,8 @@ Tests whether the array contains the given element (by equality).
 
 [`Bool`](./index.md)
 
+#### Example
+
 ```
 let arr = [1, 2, 3, "hello"]
 assert (arr.contains 2)
@@ -205,6 +221,8 @@ Returns an iterator yielding `[index, value]` pairs.
 #### Returns
 
 iterator of `[int, value]` pairs
+
+#### Example
 
 ```
 for i v = [10, 20, 30].pairs()

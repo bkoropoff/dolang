@@ -11,7 +11,7 @@ Keys can be any hashable type.
 
 Builds a dictionary from one spreadable source of key-value pairs. The
 lowercase `dict` factory instead assigns integer keys to positional arguments
-and symbol keys to keyword arguments.
+and symbol keys to key arguments.
 
 ## Ordering
 
@@ -100,6 +100,8 @@ alternative is provided. Negative `instance` indexes count from the end.
 
 The value, or the default/else result.
 
+#### Example
+
 ```
 let d = {name: "Alice"}
 assert_eq (d.get :name:) "Alice"
@@ -127,6 +129,8 @@ remove a specific value by its position among values for that key. Negative
 
 The removed value, or the default/else result.
 
+#### Example
+
 ```
 let d = {a: 1, b: 2}
 d.insert "multi" "first"
@@ -152,6 +156,8 @@ Removes all values for the key.
 #### Returns
 
 [`Bool`](./index.md) indicating whether any values were removed
+
+#### Example
 
 ```
 let d = {a: 1, b: 2}
@@ -222,6 +228,8 @@ tests whether any value associated with that key matches the given value
 #### Returns
 
 [`Bool`](./index.md)
+
+#### Example
 
 ```
 let d = {a: 1, b: 2}

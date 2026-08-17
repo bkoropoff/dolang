@@ -29,6 +29,8 @@ terminal newline does not gain a trailing indentation prefix.
 
 `Text`
 
+#### Example
+
 ```
 let diagnostic = result.diagnostics[0].render()
 echo $diagnostic.indent(4)

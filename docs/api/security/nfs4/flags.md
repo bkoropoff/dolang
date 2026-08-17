@@ -20,6 +20,8 @@ Constructs a flag set from symbols or one iterable of symbols.
 | `:FAILED_ACCESS:`        | Generate an audit/alarm event on failed access (`:AUDIT:`/`:ALARM:` entries)     |
 | `:INHERITED:`            | This entry was inherited from a parent directory                                 |
 
+#### Example
+
 ```
 let inherit = nfs4.Flags(:FILE_INHERIT:, :DIRECTORY_INHERIT:)
 ```

@@ -15,10 +15,12 @@ Suspends the current strand.
 | ---------- | ----------------------------------------------------------------------------------- | ---------------------------------------------------------- |
 | `duration` | [`Duration`](./duration.md) \| [`Int`](../std/int.md) \| [`Float`](../std/float.md) | Sleep duration. Numeric values are interpreted as seconds. |
 
-**Notes:**
+##### Notes
 
 - Duration must be non-negative.
 - Floating-point values must be finite.
+
+#### Example
 
 ```
 sleep 0.25
@@ -45,6 +47,8 @@ block result
 | Exception                                    | Condition                                                                                |
 | -------------------------------------------- | ---------------------------------------------------------------------------------------- |
 | [`TimedOutError`](../std/timed-out-error.md) | The timeout is observed at a suspend or interrupt-check point before the block completes |
+
+#### Example
 
 ```
 timeout 1 do

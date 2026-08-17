@@ -25,6 +25,8 @@ The result of executing the bytecode.
 | `TypeError` | `bytecode` is not `Bin`                  |
 | Various     | Bytecode verification or execution fails |
 
+#### Example
+
 ```
 import compile
 import load
@@ -52,6 +54,8 @@ To decline a module name, raise
 #### Returns
 
 [`ImportHandler`](./importhandler.md)
+
+#### Example
 
 ```
 let handle = load.import_handler do |name|

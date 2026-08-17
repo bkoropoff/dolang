@@ -34,6 +34,8 @@ Parses a patch stream.
 | ------------------------------- | -------------------------------------- |
 | [`ParseError`](./parseerror.md) | Iteration reaches malformed patch data |
 
+#### Example
+
 ```
 let patches = [...patch.decode diff_text]
 ```
@@ -65,6 +67,8 @@ Builds a text patch from two versions of the same content.
 | `TypeError` | `before` and `after` are not both text or both binary                           |
 | `TypeError` | `source` or `target` is not a [`Path`](../fs/path.md) or [`Str`](../std/str.md) |
 
+#### Example
+
 ```
 let p = patch.diff "alpha\n" "beta\n" source: old.txt target: new.txt
 echo (patch.encode p)
@@ -92,6 +96,8 @@ When every encoded byte is valid UTF-8, this returns a
 | Exception   | Condition                                |
 | ----------- | ---------------------------------------- |
 | `TypeError` | An iterable contains a non-`Patch` value |
+
+#### Example
 
 ```
 let patches = [...patch.decode diff_text]

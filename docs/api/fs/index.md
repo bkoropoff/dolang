@@ -58,7 +58,7 @@ Opens a file and returns a File object.
 | `mode` | `Str`                  | File access mode (default: `"r"`)                    |
 | `func` | func                   | Callable to run with the file; auto-closes when done |
 
-**File modes:**
+##### File modes
 
 | Mode   | Description                              |
 | ------ | ---------------------------------------- |
@@ -271,7 +271,7 @@ if !is_absolute "./config.txt"
 
 Returns the current user's home directory as a [`Path`](path.md).
 
-**Platform behavior:**
+#### Platform behavior
 
 | Platform | Result                                                         |
 | -------- | -------------------------------------------------------------- |
@@ -354,14 +354,16 @@ Gets file metadata for the given path.
 
 [`Metadata`](metadata.md)
 
-**Fields:**
+##### Fields
 
 | Field  | Type                   | Description                                                                                                        |
 | ------ | ---------------------- | ------------------------------------------------------------------------------------------------------------------ |
 | `len`  | [`Int`](../std/int.md) | File size in bytes                                                                                                 |
 | `type` | [`Sym`](../std/sym.md) | File type: `:FILE:`, `:DIR:`, `:SYMLINK:`, `:FIFO:`, `:CHAR_DEVICE:`, `:BLOCK_DEVICE:`, `:SOCKET:`, or `:UNKNOWN:` |
 
-**Optional timestamps** (platform-dependent):
+###### Optional timestamps
+
+ (platform-dependent):
 
 | Field      | Type                              | Description            |
 | ---------- | --------------------------------- | ---------------------- |
@@ -369,7 +371,9 @@ Gets file metadata for the given path.
 | `accessed` | [`DateTime`](../time/datetime.md) | Last access time       |
 | `created`  | [`DateTime`](../time/datetime.md) | Creation/change time   |
 
-**Unix-only** (these fields do not exist on Windows):
+###### Unix-only
+
+ (these fields do not exist on Windows):
 
 | Field     | Type                   | Description                           |
 | --------- | ---------------------- | ------------------------------------- |
@@ -383,7 +387,9 @@ Gets file metadata for the given path.
 | `blksize` | [`Int`](../std/int.md) | Preferred block size for I/O          |
 | `blocks`  | [`Int`](../std/int.md) | Number of 512-byte blocks allocated   |
 
-**Windows-only** (these fields do not exist on Unix):
+###### Windows-only
+
+ (these fields do not exist on Unix):
 
 | Field       | Type                   | Description                             |
 | ----------- | ---------------------- | --------------------------------------- |
@@ -427,6 +433,8 @@ Gets filesystem metadata for the filesystem containing the given path.
 | ---------------------- | ----------------------------------- |
 | `sys.UnsupportedError` | On Linux, `resolve: :LINK:` is used |
 
+#### Example
+
 ```
 let meta = fs_metadata "data.txt"
 echo "Capacity: $(meta.capacity)"
@@ -453,15 +461,15 @@ Gets the ACL stored on a path.
 [`security.nfs4.Acl`](../security/nfs4/acl.md), depending on `kind`, or `nil`
 when no ACL metadata is stored.
 
-**Errors:**
+#### Errors
 
-- Raises `ValueError` when `kind: :NFS4:` is combined with `default: true` —
-  NFSv4 ACLs have no separate default-ACL object; inheritance is expressed
-  through [`Ace`](../security/nfs4/ace.md) flags instead.
+| Exception              | Condition                                                                                        |
+| ---------------------- | ------------------------------------------------------------------------------------------------ |
+| `ValueError`           | `kind: :NFS4:` is combined with `default: true`; NFSv4 ACLs express inheritance with `Ace` flags |
+| `sys.UnsupportedError` | The target and ACL format combination is unsupported                                             |
 
-POSIX ACLs (`kind: :POSIX:`, the default) are supported on Linux and
-FreeBSD. NFSv4 ACLs (`kind: :NFS4:`) are supported on FreeBSD only. Other
-combinations of target and `kind` raise `sys.UnsupportedError`.
+POSIX ACLs (`kind: :POSIX:`, the default) are supported on Linux and FreeBSD.
+NFSv4 ACLs (`kind: :NFS4:`) are supported on FreeBSD only.
 
 ### `set_acl path acl :kind? :default? :resolve?`
 
@@ -478,14 +486,12 @@ setting a value; `kind` selects the format to remove when `acl` is `nil`.
 | `default` | [`Bool`](../std/bool.md)                                                                                               | Update the directory's inheritable default ACL   |
 | `resolve` | `:TARGET:`\|`:LINK:`                                                                                                   | Resolution mode (see [above](#resolution-modes)) |
 
-**Errors:**
+#### Errors
 
-- Raises `ValueError` when an NFSv4 `acl` or `kind: :NFS4:` is combined with
-  `default: true`.
-- Raises `sys.UnsupportedError` when removing an NFSv4 ACL (`kind: :NFS4:`
-  with `acl: nil`): unlike a POSIX ACL, an NFSv4 ACL is a file's native
-  security descriptor, not an optional extended attribute, and FreeBSD has no
-  operation that clears it back to "none" — only ways to replace it.
+| Exception              | Condition                                                                                                        |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `ValueError`           | An NFSv4 `acl` or `kind: :NFS4:` is combined with `default: true`                                                |
+| `sys.UnsupportedError` | An NFSv4 ACL is removed with `kind: :NFS4:` and `acl: nil`; NFSv4 ACLs can be replaced but not cleared to "none" |
 
 POSIX ACLs are supported on Linux and FreeBSD. NFSv4 ACLs are supported on
 FreeBSD only. Other combinations of target and format raise
@@ -510,6 +516,8 @@ case from the requested name.
 
 iterator of [`XattrEntry`](xattr-entry.md)
 
+#### Example
+
 ```
 for attr = xattrs "data.txt"
   echo $attr.name
@@ -531,6 +539,8 @@ This is only supported on Windows.
 #### Returns
 
 `Iter` of [`fs.windows.StreamEntry`](windows/stream-entry.md)
+
+#### Example
 
 ```
 let path = Path data.txt
@@ -557,6 +567,8 @@ Gets an extended attribute value.
 
 [`Bin`](../std/bin.md)
 
+#### Example
+
 ```
 let value = xattr "data.txt" "comment"
 ```
@@ -578,6 +590,8 @@ storing an empty value.
 | `namespace` | [`Str`](../std/str.md)\|[`Sym`](../std/sym.md)?        | Namespace to update                              |
 | `resolve`   | `:TARGET:`\|`:LINK:`                                   | Resolution mode (see [above](#resolution-modes)) |
 
+#### Example
+
 ```
 set_xattr "data.txt" "comment" "ready"
 set_xattr "data.txt" "raw" b"\x00\x01"
@@ -595,6 +609,8 @@ Removes an extended attribute.
 | `name`      | [`Str`](../std/str.md)\|[`XattrEntry`](xattr-entry.md) | Attribute name or entry from `xattrs`            |
 | `namespace` | [`Str`](../std/str.md)\|[`Sym`](../std/sym.md)?        | Namespace to update                              |
 | `resolve`   | `:TARGET:`\|`:LINK:`                                   | Resolution mode (see [above](#resolution-modes)) |
+
+#### Example
 
 ```
 remove_xattr "data.txt" "comment"
@@ -680,7 +696,7 @@ move "project" "archive/project" all: true
 
 Creates a symbolic link at `dst` pointing to `src`.
 
-**Platform Notes:**
+#### Platform Notes
 
 - **Unix:** Creates a standard symbolic link
 - **Windows:** Attempts to determine if the target is a file or directory by
@@ -710,7 +726,7 @@ symlink "/path/to/target" "link_name"
 
 Creates a directory symbolic link at `dst` pointing to `src`.
 
-**Platform Notes:**
+#### Platform Notes
 
 - **Unix:** Equivalent to `symlink`
 - **Windows:** Creates a directory symlink (requires appropriate permissions on
@@ -733,7 +749,7 @@ symlink_dir "/path/to/dir" "dir_link"
 
 Creates a file symbolic link at `dst` pointing to `src`.
 
-**Platform Notes:**
+#### Platform Notes
 
 - **Unix:** Equivalent to `symlink`
 - **Windows:** Creates a file symlink (may require appropriate permissions on
@@ -863,17 +879,17 @@ Returns an iterator over paths matching a glob pattern.
 | `max_depth` | [`Int`](../std/int.md) | Maximum directory depth to traverse (default: unlimited)             |
 | `resolve`   | `:TARGET:`\|`:LINK:`   | Resolution mode (see [above](#resolution-modes)) (default: `:LINK:`) |
 
-#### Returns
-
-`Iter` of [`Path`](path.md) objects
-
-**Glob pattern syntax:**
+##### Glob pattern syntax
 
 - `*` - Match any sequence of characters except path separator
 - `?` - Match a single character
 - `**` - Match any sequence of characters including path separators (recursive)
 - `[abc]` - Match any character in the set
 - `{a,b,c}` - Match any of the comma-separated patterns
+
+#### Returns
+
+`Iter` of [`Path`](path.md) objects
 
 #### Example
 
@@ -1038,6 +1054,8 @@ are unspecified.
 | Exception              | Condition                                        |
 | ---------------------- | ------------------------------------------------ |
 | `sys.UnsupportedError` | The operation is used on an unsupported platform |
+
+#### Example
 
 ```
 set_metadata "script.sh" mode: 0o755 user: "deploy" group: "deploy"

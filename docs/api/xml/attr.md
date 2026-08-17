@@ -17,6 +17,8 @@ Creates an attribute.
 | `namespace` | `str?` | Namespace URI                |
 | `prefix`    | `str?` | Preferred namespace prefix   |
 
+#### Example
+
 ```
 let attr = Attr "id" "123" namespace: "urn:inventory" prefix: "inv"
 ```

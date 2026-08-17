@@ -699,7 +699,24 @@ apply):
 4. `#### Returns` — type and brief note
 5. `#### Errors` — table (or bullet list) of error conditions (only if
    non-obvious)
-6. Code example (fenced, no label)
+6. `#### Example` — code example
+
+A short code fence may appear without an `Example` heading only when it follows
+the function, method, field, or operator heading directly. Once an entry uses a
+subsection such as `Parameters`, `Returns`, `Errors`, or `Type`, a later code
+fence must be placed under its own `Example` subsection rather than inheriting
+the preceding subsection.
+
+Detailed semantics for a parameter belong beneath `Parameters`, using nested
+headings when useful (for example, `##### Compilation Modes`). Do not place
+parameter details after `Returns` or `Errors`, and do not use bold text as a
+substitute for subsection headings.
+
+When more than one exception is worth documenting, use a table with
+`Exception` and `Condition` columns so each exception's meaning is explicit.
+Single exceptions may use concise prose. Do not document incidental exceptions
+such as cancellation or interruption unless they are part of the API's
+specific contract.
 
 ### Voice and Brevity
 

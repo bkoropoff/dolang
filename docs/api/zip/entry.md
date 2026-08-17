@@ -63,9 +63,11 @@ Opens the entry for reading.
 [`File`](./file.md) when no block is provided, otherwise the
 result of calling `block`.
 
-**Errors:**
+#### Errors
 
 - Raises a concurrency error if another file is already open in the archive.
+
+#### Example
 
 ```
 for entry = archive.entries

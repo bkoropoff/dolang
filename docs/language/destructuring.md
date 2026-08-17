@@ -27,7 +27,7 @@ Specify nothing after `...` to simply ignore surplus items:
 let first ... = [1, 2, 3, 4]
 ```
 
-Destructure dictionaries and similar key/value structures with keyword
+Destructure dictionaries and similar key/value structures with key
 patterns:
 
 ```
@@ -83,7 +83,7 @@ assert_eq $a false
 assert_eq $b 2
 ```
 
-Keyword defaults:
+Key defaults:
 
 ```
 bind {}

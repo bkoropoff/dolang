@@ -17,6 +17,8 @@ Creates a system error.
 | message | [`str`](../std/str.md)          | Error message            |
 | code    | [`ErrorCode`](./error-code.md)? | Underlying platform code |
 
+#### Example
+
 ```
 let error = Error "operation failed" code: $sys.linux.Errno.EIO
 ```

@@ -1,6 +1,6 @@
 # MissingKeyError
 
-Raised when a required keyword argument is not provided.
+Raised when a required key argument is not provided.
 
 ## Inherits
 

@@ -21,7 +21,7 @@ Creates an element, optionally with attributes and children.
 | `prefix`    | `str?`  | Preferred namespace prefix                                                 |
 | `attrs`     | `Dict?` | Unnamespaced attributes; keys may be `Sym` or `Str`, values must be `Str`  |
 
-**Errors:**
+#### Errors
 
 - `TypeError` if `attrs` is not a `Dict`, or one of its values is not a `Str`.
 
@@ -29,8 +29,10 @@ Children are not type-checked here, matching `children.push`; a tree
 containing anything other than `Node` and `Str` children is rejected by
 [`verify`](./index.md#verify-node) and by serialization.
 
-`attrs` is applied before any positional `Attr`, regardless of where the
-keyword appears in the call.
+`attrs` is applied before any positional `Attr`, regardless of where the key
+argument appears in the call.
+
+#### Example
 
 ```
 let item = Node "item" namespace: "urn:inventory" prefix: "inv"
@@ -110,6 +112,8 @@ Gets the first attribute matching an expanded name.
 | `namespace` | `str?` | Namespace URI                     |
 | `default`   |        | Value returned when absent        |
 | `else`      |        | Callable evaluated when absent    |
+
+#### Example
 
 ```
 let id = node.attr "id" namespace: "urn:inventory"

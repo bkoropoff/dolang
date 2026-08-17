@@ -41,6 +41,8 @@ way *into* the sink. A value that is both [`Iterable`](./iterable.md) and
 | ------ | ---- | -------------------------------------- |
 | `func` |      | applied to each value before it is put |
 
+#### Example
+
 ```
 let acc = []
 let out = acc.premap (do |x| x * 2)
@@ -60,6 +62,8 @@ sees a value first — the reverse of an iterator chain.
 | Name   | Type | Description                            |
 | ------ | ---- | -------------------------------------- |
 | `pred` |      | decides whether a value is written     |
+
+#### Example
 
 ```
 let acc = []
@@ -105,6 +109,8 @@ a second.
 Raises [`TypeError`](./type-error.md) for a value, or a terminator, that is
 neither a `Str` nor a `Bin`, or if a `Bin` terminator would leave a `Str` value
 invalid UTF-8.
+
+#### Example
 
 ```
 let out = shell.stdout.precrimp()

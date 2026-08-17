@@ -25,6 +25,8 @@ The HTTP status code of the response.
 
 [`Int`](../std/int.md)
 
+#### Example
+
 ```
 
 let response = get https://api.example.com/users
@@ -41,6 +43,8 @@ HTTP-date, it is returned as a [`DateTime`](../time/datetime.md) instead.
 #### Type
 
 [`Dict`](../std/dict.md)-like
+
+#### Example
 
 ```
 
@@ -80,6 +84,8 @@ in a "closed" state.
 | `RuntimeError`        | The response has already been closed   |
 | [`Error`](./error.md) | A transport or protocol failure occurs |
 
+#### Example
+
 ```
 
 let response = get https://api.example.com/users
@@ -94,6 +100,8 @@ leaves it in a "closed" state.
 #### Returns
 
 [`Bin`](../std/bin.md) -- The response body as bytes
+
+#### Example
 
 ```
 
@@ -123,6 +131,8 @@ appropriate.
 | [`Error`](./error.md) | An error occurs while reading the response |
 | `ValueError`          | The JSON is invalid                        |
 
+#### Example
+
 ```
 
 let response = get https://api.example.com/users
@@ -139,6 +149,8 @@ body into memory.
 #### Returns
 
 An iterator of [`Bin`](../std/bin.md) values
+
+#### Example
 
 ```
 
@@ -157,6 +169,8 @@ Returns an iterator that yields the response body as lines (split on `\n` or
 #### Returns
 
 An iterator of [`Str`](../std/str.md) values
+
+#### Example
 
 ```
 
@@ -190,6 +204,8 @@ An iterator of [`Event`](./event.md) values
 | `RuntimeError`        | The response has already been closed    |
 | [`Error`](./error.md) | The underlying body read fails          |
 | `ValueError`          | The event stream contains invalid UTF-8 |
+
+#### Example
 
 ```
 

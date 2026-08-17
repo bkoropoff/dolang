@@ -25,6 +25,8 @@ Samples a uniformly distributed integer from the half-open range `[0, end)`.
 | `TypeError`  | `end` is not an integer |
 | `ValueError` | `end <= 0`              |
 
+#### Example
+
 ```
 assert_eq (int 1) 0
 let n = int 10
@@ -52,6 +54,8 @@ Samples a uniformly distributed integer from the half-open range `[start, end)`.
 | ------------ | ---------------------------------- |
 | `TypeError`  | `start` or `end` is not an integer |
 | `ValueError` | `end <= start`                     |
+
+#### Example
 
 ```
 assert_eq (int 0 1) 0
@@ -88,6 +92,8 @@ Generates a random string by sampling characters from `alphabet`.
 If `alphabet:` is omitted, it defaults to the URL-safe NanoID alphabet:
 `_-0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ`.
 
+#### Example
+
 ```
 let token = string 12
 assert_eq $token.len 12
@@ -117,6 +123,8 @@ One element from `collection`
 | `TypeError`  | `collection` is not an array |
 | `ValueError` | `collection` is empty        |
 
+#### Example
+
 ```
 let item = pick [1, 2, 3]
 assert ([1, 2, 3].contains $item)
@@ -137,6 +145,8 @@ Shuffles an array in place using a uniform Fisher-Yates pass.
 | Exception   | Condition               |
 | ----------- | ----------------------- |
 | `TypeError` | `array` is not an array |
+
+#### Example
 
 ```
 let items = [1, 2, 3, 4]

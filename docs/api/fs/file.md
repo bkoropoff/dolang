@@ -93,6 +93,8 @@ with positive-length ranges that start before and end after their offset. They
 do not conflict with another zero-length range or a range starting at the same
 offset. The zero-length range `0..0` is invalid.
 
+#### Example
+
 ```
 file.lock (0..128) do |lock|
   update_header()
@@ -116,6 +118,8 @@ the block's result
 
 The block always runs. `lock.held` is false when another handle holds a
 conflicting lock. Other acquisition failures raise errors.
+
+#### Example
 
 ```
 file.try_lock (..) do |lock|
@@ -160,14 +164,16 @@ Gets file metadata.
 
 [`Metadata`](metadata.md)
 
-**Fields:**
+##### Fields
 
 | Field  | Type                     | Description                                                                                                        |
 | ------ | ------------------------ | ------------------------------------------------------------------------------------------------------------------ |
 | `len`  | [`Int`](../std/index.md) | File size in bytes                                                                                                 |
 | `type` | [`Sym`](../std/sym.md)   | File type: `:FILE:`, `:DIR:`, `:SYMLINK:`, `:FIFO:`, `:CHAR_DEVICE:`, `:BLOCK_DEVICE:`, `:SOCKET:`, or `:UNKNOWN:` |
 
-**Optional timestamps** (platform-dependent):
+###### Optional timestamps
+
+ (platform-dependent):
 
 | Field      | Type                              | Description            |
 | ---------- | --------------------------------- | ---------------------- |
@@ -175,7 +181,9 @@ Gets file metadata.
 | `accessed` | [`DateTime`](../time/datetime.md) | Last access time       |
 | `created`  | [`DateTime`](../time/datetime.md) | Creation/change time   |
 
-**Unix-only** (these fields do not exist on Windows):
+###### Unix-only
+
+ (these fields do not exist on Windows):
 
 | Field     | Type                     | Description                           |
 | --------- | ------------------------ | ------------------------------------- |
@@ -189,7 +197,9 @@ Gets file metadata.
 | `blksize` | [`Int`](../std/index.md) | Preferred block size for I/O          |
 | `blocks`  | [`Int`](../std/index.md) | Number of 512-byte blocks allocated   |
 
-**Windows-only** (these fields do not exist on Unix):
+###### Windows-only
+
+ (these fields do not exist on Unix):
 
 | Field       | Type                     | Description                           |
 | ----------- | ------------------------ | ------------------------------------- |
@@ -312,6 +322,8 @@ case from the requested name.
 
 iterator of [`XattrEntry`](xattr-entry.md)
 
+#### Example
+
 ```
 open data.txt r do |file|
   for attr = file.xattrs()
@@ -327,6 +339,8 @@ This is only supported on Windows.
 #### Returns
 
 iterator of [`fs.windows.StreamEntry`](windows/stream-entry.md)
+
+#### Example
 
 ```
 let path = Path data.txt
@@ -351,6 +365,8 @@ Gets an extended attribute value.
 
 [`Bin`](../std/bin.md)
 
+#### Example
+
 ```
 open data.txt r do |file|
   let value = file.xattr "comment"
@@ -371,6 +387,8 @@ storing an empty value.
 | `value`     | [`Str`](../std/str.md)\|[`Bin`](../std/bin.md)         | Attribute bytes; strings use UTF-8    |
 | `namespace` | [`Str`](../std/str.md)\|[`Sym`](../std/sym.md)?        | Namespace to update                   |
 
+#### Example
+
 ```
 open data.txt r+ do |file|
   file.set_xattr "comment" "ready"
@@ -386,6 +404,8 @@ Removes an extended attribute.
 | ----------- | ------------------------------------------------------ | ------------------------------------- |
 | `name`      | [`Str`](../std/str.md)\|[`XattrEntry`](xattr-entry.md) | Attribute name or entry from `xattrs` |
 | `namespace` | [`Str`](../std/str.md)\|[`Sym`](../std/sym.md)?        | Namespace to update                   |
+
+#### Example
 
 ```
 open data.txt r+ do |file|
@@ -517,7 +537,9 @@ back to exactly the file's bytes.
 
 Fetches the next item from the file.
 
-**Text mode:** Reads the next line as a [`Str`](../std/str.md), **including its
+#### Text mode
+
+ Reads the next line as a [`Str`](../std/str.md), **including its
 terminator**, so a `\r\n` file stays `\r\n` and a final line without one yields
 a value without one. Use [`chomp`](../std/iter.md#chomp) to strip them:
 
@@ -526,7 +548,9 @@ for line = file.chomp()
   echo $line
 ```
 
-**Binary mode:** Reads a chunk of data of arbitrary length.
+#### Binary mode
+
+ Reads a chunk of data of arbitrary length.
 
 ### `put`
 

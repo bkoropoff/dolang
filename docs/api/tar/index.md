@@ -29,6 +29,8 @@ Compression is detected from gzip or zstd magic bytes.
 
 the result of `func`.
 
+#### Example
+
 ```
 read "archive.tar.gz" do |archive|
   for entry = archive
@@ -54,6 +56,8 @@ matching is case-insensitive. An explicit `compression` overrides the path.
 #### Returns
 
 the result of `func`.
+
+#### Example
 
 ```
 write "archive.tar.zst" do |archive|

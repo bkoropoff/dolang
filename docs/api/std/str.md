@@ -24,6 +24,8 @@ Returns the byte length of the string.
 
 [`Int`](./index.md)
 
+#### Example
+
 ```
 assert_eq $"hello".len 5
 assert_eq $"".len 0
@@ -45,6 +47,8 @@ Tests whether the string starts with the given prefix.
 
 [`Bool`](./index.md)
 
+#### Example
+
 ```
 assert ("foobar".starts_with "foo")
 assert (!("foobar".starts_with "bar"))
@@ -65,6 +69,8 @@ the original string.
 
 [`Str`](./str.md)
 
+#### Example
+
 ```
 assert_eq ("foobar".without_prefix "foo") "bar"
 assert_eq ("foobar".without_prefix "baz") "foobar"
@@ -84,6 +90,8 @@ Tests whether the string ends with the given suffix.
 
 [`Bool`](./index.md)
 
+#### Example
+
 ```
 assert ("foobar".ends_with "bar")
 ```
@@ -102,6 +110,8 @@ the original string.
 #### Returns
 
 [`Str`](./str.md)
+
+#### Example
 
 ```
 assert_eq ("foobar".without_suffix "bar") "foo"
@@ -131,6 +141,8 @@ The optional `limit` controls how many splits are performed and from which end:
 #### Returns
 
 iterator of [`Str`](./str.md)
+
+#### Example
 
 ```
 assert_eq [..."a,b,c".split ","] ["a", "b", "c"]
@@ -166,6 +178,8 @@ The optional `limit` controls how many splits are performed and from which end:
 
 iterator of [`Str`](./str.md)
 
+#### Example
+
 ```
 assert_eq [..."a,b,c".rsplit ","] ["c", "b", "a"]
 assert_eq [..."a,b,c".rsplit "," limit: 1] ["c", "a,b"]
@@ -187,6 +201,8 @@ Joins values from an input source using this string as a separator.
 #### Returns
 
 [`Str`](./str.md)
+
+#### Example
 
 ```
 assert_eq (",".join ["a", "b", "c"]) "a,b,c"
@@ -210,6 +226,8 @@ become characters through a decode the caller should ask for.
 
 [`Str`](./str.md)
 
+#### Example
+
 ```
 assert_eq ("  hello  ".trim()) "hello"
 assert_eq ("xxhelloxx".trim "x") "hello"
@@ -230,6 +248,8 @@ Removes whitespace (or specified characters) from the start.
 
 [`Str`](./str.md)
 
+#### Example
+
 ```
 assert_eq ("  hello  ".trim_start()) "hello  "
 assert_eq ("xxhelloxx".trim_start "x") "helloxx"
@@ -249,6 +269,8 @@ Removes whitespace (or specified characters) from the end.
 
 [`Str`](./str.md)
 
+#### Example
+
 ```
 assert_eq ("  hello  ".trim_end()) "  hello"
 assert_eq ("xxhelloxx".trim_end "x") "xxhello"
@@ -264,6 +286,8 @@ A string without one is returned unchanged.
 #### Returns
 
 [`Str`](./str.md)
+
+#### Example
 
 ```
 assert_eq ("line\n".chomp()) "line"
@@ -296,6 +320,8 @@ Tests whether the string contains the given substring.
 
 [`Bool`](./index.md)
 
+#### Example
+
 ```
 assert ("foobar".contains "foo")
 assert ("foobar".contains "bar")
@@ -319,6 +345,8 @@ with `to`.
 
 [`Str`](./str.md)
 
+#### Example
+
 ```
 assert_eq ("foo bar foo".replace "foo" "baz") "baz bar baz"
 assert_eq ("banana".replace "na" "") "ba"
@@ -333,6 +361,8 @@ Returns the string converted to uppercase.
 
 [`Str`](./str.md)
 
+#### Example
+
 ```
 assert_eq ("hello".upper()) "HELLO"
 assert_eq ("Hello World".upper()) "HELLO WORLD"
@@ -345,6 +375,8 @@ Returns the string converted to lowercase.
 #### Returns
 
 [`Str`](./str.md)
+
+#### Example
 
 ```
 assert_eq ("HELLO".lower()) "hello"
@@ -364,6 +396,8 @@ Returns the string repeated `count` times.
 #### Returns
 
 [`Str`](./str.md)
+
+#### Example
 
 ```
 assert_eq ("ab".repeat 3) "ababab"

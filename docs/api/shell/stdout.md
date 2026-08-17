@@ -20,10 +20,12 @@ Writes bytes verbatim and reports how many were written.
 [`Int`](../std/int.md) — bytes written. For a `Str`, this is the
 UTF-8 byte count, not the character count.
 
-**Errors:**
+#### Errors
 
 - Raises [`TypeError`](../std/type-error.md) for anything other than a `Str` or
   `Bin`.
+
+#### Example
 
 ```
 shell.stdout.write "no newline"

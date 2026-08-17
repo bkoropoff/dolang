@@ -47,6 +47,8 @@ Capture groups can be retrieved by integer index or by name.
 | ------------------------------------- | ----------------------------------------------------------------------------- |
 | [`IndexError`](../std/index-error.md) | The group index is out of range or the group did not participate in the match |
 
+#### Example
+
 ```
 let date = Regex r"(\d{4})-(\d{2})-(\d{2})"
 let caps = date.match "2024-03-15"
@@ -71,6 +73,8 @@ Named groups (defined with `(?<name>...)`) can be accessed by their name.
 | Exception                             | Condition                                                                    |
 | ------------------------------------- | ---------------------------------------------------------------------------- |
 | [`IndexError`](../std/index-error.md) | No group with that name exists or the group did not participate in the match |
+
+#### Example
 
 ```
 let date = Regex r"(?<year>\d{4})-(?<month>\d{2})-(?<day>\d{2})"

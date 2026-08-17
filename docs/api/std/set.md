@@ -33,6 +33,8 @@ Adds `value` if it is not already present.
 | ------- | ---- | ------------------- |
 | `value` |      | the value to insert |
 
+#### Example
+
 ```
 let s = Set [1, 2]
 s.add 3

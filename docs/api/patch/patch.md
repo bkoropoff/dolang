@@ -68,6 +68,8 @@ be valid UTF-8.
 | [`ApplyError`](./applyerror.md) | A text result is not valid UTF-8                               |
 | `TypeError`                     | `base` is not [`Str`](../std/str.md) or [`Bin`](../std/bin.md) |
 
+#### Example
+
 ```
 let p = patch.diff "alpha\n" "beta\n"
 assert_eq (p.apply "alpha\n") "beta\n"

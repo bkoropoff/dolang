@@ -17,6 +17,8 @@ Returns the type object representing the value's type.
 
 type object
 
+#### Example
+
 ```
 assert_eq (type 42) $Int
 assert_eq (type "hello") $Str
@@ -39,6 +41,8 @@ inheritance.
 #### Returns
 
 `Bool`
+
+#### Example
 
 ```
 assert (type 42 Int)

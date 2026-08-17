@@ -23,6 +23,8 @@ The byte offset of the end of the match within the haystack.
 
 [`Int`](../std/int.md)
 
+#### Example
+
 ```
 let date = Regex r"(?<year>\d{4})-(?<month>\d{2})-(?<day>\d{2})"
 let caps = date.match "prefix 2024-03-15 suffix"

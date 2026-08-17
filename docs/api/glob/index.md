@@ -31,6 +31,8 @@ Tests whether `value` matches a glob pattern.
 
 [`Bool`](../std/index.md) indicating whether the value matches.
 
+#### Example
+
 ```
 let png = glob.Glob "**/*.png"
 

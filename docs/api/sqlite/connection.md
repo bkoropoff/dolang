@@ -15,10 +15,10 @@ need to be reused.
 
 #### Parameters
 
-| Name  | Type                   | Description                             |
-| ----- | ---------------------- | --------------------------------------- |
-| `sql` | [`Str`](../std/str.md) | SQL statement to execute                |
-| `...` | any                    | Keyword arguments for parameter binding |
+| Name  | Type                   | Description                         |
+| ----- | ---------------------- | ----------------------------------- |
+| `sql` | [`Str`](../std/str.md) | SQL statement to execute            |
+| `...` | any                    | Key arguments for parameter binding |
 
 #### Returns
 

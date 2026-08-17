@@ -18,6 +18,8 @@ Encodes a string or binary value using standard RFC 4648 base64 with padding.
 
 [`Str`](./std/str.md) - Base64 text
 
+#### Example
+
 ```
 assert_eq (encode "") ""
 assert_eq (encode "hello") "aGVsbG8="
@@ -45,6 +47,8 @@ Decodes standard RFC 4648 base64 text with padding and returns the raw bytes.
 | ------------ | ----------------------------- |
 | `TypeError`  | `text` is not a string        |
 | `ValueError` | The input is not valid base64 |
+
+#### Example
 
 ```
 assert_eq (decode "aGVsbG8=") b"hello"

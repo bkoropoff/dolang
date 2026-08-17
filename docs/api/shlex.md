@@ -18,6 +18,8 @@ Quote a string for shell safety.
 
 [`Str`](../api/std/str.md) - The quoted string.
 
+#### Example
+
 ```
 echo (quote "hello world")
 # prints: 'hello world'
@@ -36,6 +38,8 @@ Split a shell-quoted string into tokens, returning an iterator.
 #### Returns
 
 `Iter` yielding each argument.
+
+#### Example
 
 ```
 for arg = split "echo 'hello world'"
@@ -59,6 +63,8 @@ Join an iterable of arguments into a shell-quoted string.
 #### Returns
 
 [`Str`](../api/std/str.md) - Joined string with proper quoting.
+
+#### Example
 
 ```
 echo $ join ["echo", "hello world"]

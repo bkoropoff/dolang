@@ -33,6 +33,8 @@ Activates a progress context for the duration of `func`. Terminal output (echo,
 print, child process stderr/stdout) is routed through the progress display so it
 does not interfere with active indicators.
 
+#### Parameters
+
 | Name       | Type   | Description                                  |
 | ---------- | ------ | -------------------------------------------- |
 | `func`     | func   | Callback (no arguments)                      |
@@ -42,13 +44,13 @@ does not interfere with active indicators.
 `interval` only affects the plain-text (non-terminal) rendering — it has no
 effect when connected to a real terminal.
 
-**Style dict:**
+##### Style dict
 
 The optional `style` parameter accepts a dict whose top-level keys name the
 visual elements of the progress display. Each element accepts a sub-dict of
 properties.
 
-**Elements with width and color:**
+###### Elements with width and color
 
 | Element   | Default width | Default fg | Default attrs |
 | --------- | ------------- | ---------- | ------------- |
@@ -56,7 +58,7 @@ properties.
 | `message` | 30            |            | `bold`        |
 | `icon`    | 2             |            | `bold`        |
 
-**Color-only elements:**
+###### Color-only elements
 
 | Element    | Default fg | Default attrs |
 | ---------- | ---------- | ------------- |
@@ -65,7 +67,9 @@ properties.
 | `position` |            |               |
 | `total`    |            |               |
 
-**Properties** (all optional):
+###### Properties
+
+All properties are optional.
 
 | Property | Type                                           | Description                                   |
 | -------- | ---------------------------------------------- | --------------------------------------------- |
@@ -78,19 +82,25 @@ properties.
 The `alt` sub-dict accepts the same `fg`, `bg`, and `attrs` properties. The
 default alt style for `bar` is `fg: :BLUE:`.
 
-**Color names:** `:BLACK:`, `:RED:`, `:GREEN:`, `:YELLOW:`, `:BLUE:`,
+###### Color names
+
+`:BLACK:`, `:RED:`, `:GREEN:`, `:YELLOW:`, `:BLUE:`,
 `:MAGENTA:`, `:CYAN:`, and `:WHITE:`. Prefix the name with `BRIGHT_` for bright
 variants, such as `:BRIGHT_CYAN:`. Use `:BRIGHT:` alone to brighten the default
 color.
 
-**Attributes:** `bold`, `dim`, `italic`, `underlined`, `blink`, `reverse`,
-`hidden`, `strikethrough`
+###### Attributes
+
+`bold`, `dim`, `italic`, `underlined`, `blink`, `reverse`, `hidden`, and
+`strikethrough`.
 
 All keys are optional; omitted values use defaults.
 
 #### Returns
 
 The return value of `func`
+
+#### Example
 
 ```
 progress.with do
@@ -131,6 +141,8 @@ by setting `total` on the indicator.
 Outside a `progress.with` scope, the callback is invoked with a dummy indicator
 whose methods are silent no-ops.
 
+#### Parameters
+
 | Name      | Type                                            | Description                                         |
 | --------- | ----------------------------------------------- | --------------------------------------------------- |
 | `func`    | func                                            | Callback receiving an [`Indicator`](./indicator.md) |
@@ -140,7 +152,7 @@ whose methods are silent no-ops.
 | `units`   | [`Sym`](../std/sym.md)\|[`Str`](../std/str.md)? | Unit format                                         |
 | `tick`    | [`Float`](../std/float.md)?                     | Tick interval in seconds (default 0.08)             |
 
-**Units:**
+##### Units
 
 | Value     | Description                     |
 | --------- | ------------------------------- |
@@ -154,6 +166,8 @@ time.
 #### Returns
 
 The return value of `func`
+
+#### Example
 
 ```
 progress.with do

@@ -21,7 +21,7 @@ Open-ended forms keep the missing endpoint as `nil` internally.
 
 ## Creating Ranges
 
-Call the `Range` type object with positional or keyword arguments:
+Call the `Range` type object with positional or key arguments:
 
 ### Positional Arguments
 
@@ -42,7 +42,7 @@ let r = Range 1 nil
 let r = Range nil nil
 ```
 
-### Keyword Arguments
+### Key Arguments
 
 ```
 # Just a end value (start defaults to 0, step to 1)
@@ -57,13 +57,13 @@ let r = Range start: 0 end: 20 step: 2
 
 ### Mixed Arguments
 
-Positional and keyword arguments can be mixed:
+Positional and key arguments can be mixed:
 
 ```
-# Positional end with keyword step
+# Positional end with key step
 let r = Range 10 step: 2
 
-# Positional start with keyword end and step
+# Positional start with key end and step
 let r = Range 0 end: 20 step: 5
 ```
 
@@ -161,6 +161,8 @@ ranges (start > end), checks if value is in (end, start].
 #### Returns
 
 `Bool`
+
+#### Example
 
 ```
 # Increasing Range [0, 5)

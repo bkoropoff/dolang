@@ -25,6 +25,8 @@ the source tuple as a single positional argument. Subclasses that inherit
 `copy()` should accept that argument and usually forward it with
 `Tuple.(init) $self $source`.
 
+#### Example
+
 ```
 let tup = Tuple([1, 2, 3])
 assert_eq $tup[1] 2

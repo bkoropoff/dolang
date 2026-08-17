@@ -50,6 +50,8 @@ Generates a random (version 4) UUID.
 
 `Uuid`
 
+#### Example
+
 ```
 let id = Uuid.generate()
 assert_eq $id.version 4

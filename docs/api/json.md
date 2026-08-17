@@ -31,6 +31,8 @@ Type mapping:
 | `array` | array                |
 | `dict`  | object               |
 
+#### Example
+
 ```
 assert_eq (encode 42) "42"
 assert_eq (encode "hello") "\"hello\""
@@ -68,6 +70,8 @@ Type mapping:
 | string    | `Str`   |
 | array     | `array` |
 | object    | `dict`  |
+
+#### Example
 
 ```
 assert_eq (decode "null") nil

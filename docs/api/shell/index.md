@@ -28,6 +28,8 @@ on Windows, `"\n"` elsewhere.
 Values are never terminated implicitly, so a script that wants native endings
 asks for them by name:
 
+#### Example
+
 ```
 run cmd stdout: (lines.precrimp(shell.line_ending()))
 ```
@@ -121,11 +123,12 @@ current value, so nested calls can override only one part of the invocation
 identity. The previous values are restored when `func` returns or raises an
 error.
 
-**Errors:**
+#### Errors
 
-- Raises [`TypeError`](../std/type-error.md) if `args` is not iterable.
-- Raises [`TypeError`](../std/type-error.md) if `program` is not a string or
-  path.
+| Exception                               | Condition                         |
+| --------------------------------------- | --------------------------------- |
+| [`TypeError`](../std/type-error.md)     | `args` is not iterable            |
+| [`TypeError`](../std/type-error.md)     | `program` is not a string or path |
 
 ### `vfs_exe()`
 

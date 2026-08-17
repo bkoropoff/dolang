@@ -15,7 +15,7 @@ let r = Record {name: Alice, age: 30}
 
 The lowercase `record` factory constructs a record verbatim from all
 arguments, with positional arguments receiving incrementing integer keys and
-keyword arguments becoming fields. Order and key multiplicity are preserved.
+key arguments becoming fields. Order and key multiplicity are preserved.
 
 ```
 let r = record first second name: Alice
@@ -145,6 +145,8 @@ tests whether any value associated with that key matches.
 #### Returns
 
 `Bool`
+
+#### Example
 
 ```
 let r = record 1 2 3 a: "first"

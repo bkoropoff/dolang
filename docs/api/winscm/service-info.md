@@ -2,7 +2,7 @@
 
 One entry in a service enumeration.
 
-Supports keyword unpack.
+Supports key unpack.
 
 ## Fields
 

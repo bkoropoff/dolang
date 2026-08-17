@@ -26,6 +26,8 @@ Also accepts the [`term` style options](./index.md#style-options).
 [`Text`](./text.md) when positional arguments are provided;
 otherwise a derived `Style`
 
+#### Example
+
 ```
 let warning = term.style fg: :YELLOW: bold: true
 let urgent = warning fg: :RED: underline: true

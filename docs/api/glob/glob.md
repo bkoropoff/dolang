@@ -20,6 +20,8 @@ Compiles a glob pattern.
 | ------------ | ---------------------- |
 | `ValueError` | The pattern is invalid |
 
+#### Example
+
 ```
 let png = Glob "**/*.png"
 let tree = Glob "src/**/mod.rs"
@@ -40,6 +42,8 @@ Tests whether `value` matches this glob.
 #### Returns
 
 [`Bool`](../std/index.md) indicating whether the value matches.
+
+#### Example
 
 ```
 let png = Glob "**/*.png"

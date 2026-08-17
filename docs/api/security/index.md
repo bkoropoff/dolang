@@ -18,6 +18,8 @@ user ID's name on Unix, or the access token's user SID's name on Windows.
 
 [`Str`](../std/str.md)
 
+#### Example
+
 ```
 echo "running as $(user_name())"
 ```

@@ -17,7 +17,7 @@ Opens a ZIP archive and returns an Archive object.
 | `mode` | `Str`                  | Access mode (default: `"r"`)                            |
 | `func` | func                   | Callable to run with the archive; auto-closes when done |
 
-**Archive modes:**
+##### Archive modes
 
 | Mode   | Description                                           |
 | ------ | ----------------------------------------------------- |

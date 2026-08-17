@@ -50,6 +50,8 @@ Writes bytes verbatim and reports how many were written.
 
 [`Int`](../std/int.md) byte count
 
+#### Example
+
 ```
 term.console.write b"\x1b[2K"
 ```
@@ -69,6 +71,8 @@ The console's dimensions, or `nil` if it is just a stream.
 #### Returns
 
 [`Geometry`](./geometry.md) or `nil`
+
+#### Example
 
 ```
 let g = term.console.geometry()
