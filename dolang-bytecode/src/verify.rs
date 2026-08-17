@@ -542,8 +542,30 @@ impl<'a, C: Context> FuncVerifier<'a, C> {
                 NlBranch(_, _) => {
                     need_bb = true;
                 }
+                // Both an unpack and a branch: the unpack index must be in bounds and
+                // the branch target must be in bounds, as for the separate instructions
+                UnpackBranch(index, target) => {
+                    self.ctx.unpack_arity(index).ok_or(FuncError::inst(
+                        bytecode,
+                        before,
+                        InstError::UnpackIndexOutOfBounds,
+                    ))?;
+                    after
+                        .checked_add_signed(target)
+                        .and_then(|abs| if abs >= bytecode_len { None } else { Some(()) })
+                        .ok_or(FuncError::inst(
+                            bytecode,
+                            before,
+                            InstError::BranchTargetOutOfBounds,
+                        ))?;
+                    // Note that next instruction should start a basic block
+                    need_bb = true;
+                }
             }
         }
+        // Note that `UnpackBranch` is deliberately absent: its fall-through edge is the
+        // success path, which always has somewhere to go, so it is never legitimately
+        // the final instruction of a function.
         match last.inst {
             Ret | Branch(_) | NlBranch(_, _) => (),
             _ => return Err(FuncError::UnexpectedEnd),
@@ -565,7 +587,10 @@ impl<'a, C: Context> FuncVerifier<'a, C> {
             } = item;
             match inst {
                 // Branch targets must be the start of an instruction
-                Branch(target) | BranchTrue(target) | BranchFalse(target) => {
+                Branch(target)
+                | BranchTrue(target)
+                | BranchFalse(target)
+                | UnpackBranch(_, target) => {
                     let offset = after.strict_add_signed(target);
                     match self.offsets.binary_search_by_key(
                         &offset,
@@ -813,9 +838,41 @@ impl<'a, C: Context> FuncVerifier<'a, C> {
                     return Err(InstError::UpvarDepthOutOfBounds);
                 }
             }
+            // Only the branch-independent effect is modeled here: the scrutinee is
+            // popped on both edges.  The values pushed by a successful unpack are
+            // applied per-edge in `dataflow`, since the two successors diverge in
+            // operand depth.  See `edge_state`.
+            UnpackBranch(_, _) => {
+                block.pop()?;
+            }
         }
 
         Ok(())
+    }
+
+    // Stack effect of `inst` that applies only along one outgoing edge.
+    //
+    // `step` models the effect common to every successor; anything that differs
+    // between the taken and not-taken edges of a branching instruction belongs
+    // here.  `taken` selects the branch-target edge over the fall-through edge.
+    //
+    // This is what lets an instruction leave the operand stack at different depths
+    // depending on which way it went.  Both edges must still agree wherever control
+    // flow rejoins, which `BlockState::merge` enforces.
+    fn edge_state(&self, inst: &Inst, taken: bool, state: &BlockState) -> BlockState {
+        let mut state = state.clone();
+        if let Inst::UnpackBranch(index, _) = inst
+            && !taken
+        {
+            // Fall-through means the unpack matched, pushing one value per element
+            // of the signature.  The taken edge means it did not match, and pushes
+            // nothing at all.
+            let arity = self.ctx.unpack_arity(*index).unwrap();
+            for _ in 0..arity {
+                state.push();
+            }
+        }
+        state
     }
 
     // Pass 2: dataflow analysis
@@ -899,23 +956,43 @@ impl<'a, C: Context> FuncVerifier<'a, C> {
 
             // Branch target successor block, if applicable
             let branch = match last.inst {
-                Branch(index) | BranchTrue(index) | BranchFalse(index) => Some(
-                    self.blocks
-                        .binary_search_by_key(
-                            &last.after.strict_add_signed(index),
-                            |Block {
-                                 offset,
-                                 mark: _,
-                                 state: _,
-                             }| { *offset },
-                        )
-                        .unwrap(),
-                ),
+                Branch(index) | BranchTrue(index) | BranchFalse(index) | UnpackBranch(_, index) => {
+                    Some(
+                        self.blocks
+                            .binary_search_by_key(
+                                &last.after.strict_add_signed(index),
+                                |Block {
+                                     offset,
+                                     mark: _,
+                                     state: _,
+                                 }| { *offset },
+                            )
+                            .unwrap(),
+                    )
+                }
                 _ => None,
             };
 
+            // Pair each successor with the state that reaches it.  For most
+            // instructions both edges see the same state, but a branching instruction
+            // may leave the operand stack at different depths on each edge, so the
+            // state is computed per edge rather than broadcast.
+            let succs = [
+                next.map(|sid| (sid, self.edge_state(&last.inst, false, &block))),
+                branch.map(|sid| (sid, self.edge_state(&last.inst, true, &block))),
+            ];
+
+            // Account for per-edge pushes in the frame size.  The in-loop check above
+            // only sees `step`'s branch-independent result, so without this an edge
+            // that pushes values would be invisible and the frame would be too small.
+            for (_, state) in succs.iter().flatten() {
+                if state.operands > self.max_operand_depth {
+                    self.max_operand_depth = state.operands
+                }
+            }
+
             // Merge state into each sucessor block,
-            for sid in next.into_iter().chain(branch) {
+            for (sid, edge) in succs.into_iter().flatten() {
                 let succ = &mut self.blocks[sid];
                 if cert.is_some() {
                     // Certificate check case
@@ -928,8 +1005,7 @@ impl<'a, C: Context> FuncVerifier<'a, C> {
                     // Check that claimed successor state is unchanged by merge
                     // (and that merge doesn't otherwise catch an invariant violation)
                     let mut claimed = succ.state.clone();
-                    block
-                        .merge(&mut claimed)
+                    edge.merge(&mut claimed)
                         .map_err(|e| FuncError::inst(bytecode, succ.offset, e))?;
                     if claimed != succ.state {
                         return Err(FuncError::inst(
@@ -942,15 +1018,13 @@ impl<'a, C: Context> FuncVerifier<'a, C> {
                     // Certificate generation case, block is already marked for visit
                     // Just merge predecessor state into it
                     debug_eprintln!("    merge #{}", sid);
-                    block
-                        .merge(&mut succ.state)
+                    edge.merge(&mut succ.state)
                         .map_err(|e| FuncError::inst(bytecode, succ.offset, e))?
                 } else {
                     // Certificate generation case, block is not marked for visit
                     // Merge state into it, check for change
                     let prev = succ.state.clone();
-                    block
-                        .merge(&mut succ.state)
+                    edge.merge(&mut succ.state)
                         .map_err(|e| FuncError::inst(bytecode, succ.offset, e))?;
                     // If the state did change, mark and queue block for visit
                     if succ.state != prev {
@@ -1182,6 +1256,14 @@ mod test {
                             }
                             _ => unreachable!(),
                         }
+                    }
+                    // Carries an unpack index alongside the target, so it cannot join
+                    // the or-pattern above
+                    Inst::UnpackBranch(id, t) => {
+                        let offset = offsets[*t as usize] as isize - offsets[i + 1] as isize;
+                        Inst::UnpackBranch(*id, offset)
+                            .encode(&mut bytecode)
+                            .unwrap()
                     }
                     _ => inst.encode(&mut bytecode).unwrap(),
                 }
@@ -1609,6 +1691,144 @@ mod test {
             )],
         );
         run(&ctx).unwrap();
+    }
+
+    // Mock with a second unpack signature of arity 2, for the conditional unpack tests
+    fn unpack_branch_mock() -> Mock {
+        Mock {
+            packs: vec![],
+            unpack_arities: vec![0, 2],
+            symbols: 0,
+            constants: 1,
+        }
+    }
+
+    #[test]
+    fn valid_unpack_branch_compute_and_check() {
+        use Inst::*;
+
+        // The two edges leave the operand stack at different depths -- the match
+        // pushes two values, the mismatch pushes none -- and each path then brings
+        // itself back to a single operand before they rejoin at the `Ret`.
+        let ctx = link(
+            unpack_branch_mock(),
+            vec![func(
+                0,
+                vec![],
+                vec![
+                    LoadConst(0),       // 0: scrutinee                        -> 1
+                    UnpackBranch(1, 4), // 1: match falls through -> 2, else jumps to 4 -> 0
+                    Pop,                // 2: drop one of the two              -> 1
+                    Branch(5),          // 3: rejoin
+                    LoadConst(0),       // 4: mismatch path                    -> 1
+                    Ret,                // 5: both paths arrive with 1
+                ],
+            )],
+        );
+        run(&ctx).unwrap();
+    }
+
+    #[test]
+    fn unpack_branch_accounts_for_success_edge_depth() {
+        use Inst::*;
+
+        // The deepest the operand stack ever gets is on the fall-through edge of the
+        // conditional unpack, which `step` alone does not model.  If the per-edge
+        // pushes were not counted, the frame would be sized too small for them.
+        let ctx = link(
+            unpack_branch_mock(),
+            vec![func(
+                0,
+                vec![],
+                vec![
+                    LoadConst(0),
+                    UnpackBranch(1, 4),
+                    Pop,
+                    Branch(5),
+                    LoadConst(0),
+                    Ret,
+                ],
+            )],
+        );
+        let certs = run(&ctx).unwrap();
+        assert_eq!(certs[0].max_operand_depth, 2);
+    }
+
+    #[test]
+    fn unpack_branch_operand_depth_conflict() {
+        use Inst::*;
+
+        // Both edges reach the `Ret` without reconciling their depths: the match path
+        // arrives with two operands, the mismatch path with none.
+        let ctx = link(
+            unpack_branch_mock(),
+            vec![func(
+                0,
+                vec![],
+                vec![
+                    LoadConst(0),       // 0                   -> 1
+                    UnpackBranch(1, 3), // 1: match -> 2, mismatch -> 0 (at inst 3)
+                    Branch(3),          // 2: arrives at 3 with 2
+                    LoadConst(0),       // 3: merges 2 and 0
+                    Ret,
+                ],
+            )],
+        );
+        inst_error(ctx, InstError::OperandDepthConflict { from: 2, into: 0 });
+    }
+
+    #[test]
+    fn unpack_branch_index_out_of_bounds() {
+        use Inst::*;
+
+        let inputs = vec![func(0, vec![], vec![LoadConst(0), UnpackBranch(5, 2), Ret])];
+
+        inst_error(
+            link(default_mock(), inputs),
+            InstError::UnpackIndexOutOfBounds,
+        );
+    }
+
+    #[test]
+    fn unpack_branch_target_out_of_bounds() {
+        use Inst::*;
+
+        let ctx = link(
+            unpack_branch_mock(),
+            vec![raw_func(0, vec![], vec![UnpackBranch(1, 99)])],
+        );
+        inst_error(ctx, InstError::BranchTargetOutOfBounds);
+    }
+
+    #[test]
+    fn unpack_branch_target_invalid() {
+        use Inst::*;
+
+        // Lands in the middle of the preceding instruction rather than on a boundary
+        let ctx = link(
+            unpack_branch_mock(),
+            vec![raw_func(
+                0,
+                vec![],
+                vec![LoadConst(0), UnpackBranch(1, -4), Ret],
+            )],
+        );
+        inst_error(ctx, InstError::BranchTargetInvalid);
+    }
+
+    #[test]
+    fn unpack_branch_must_not_end_function() {
+        use Inst::*;
+
+        // A conditional unpack ends a basic block, but its fall-through edge is the
+        // success path, so it may not be the final instruction of a function.  The
+        // target here is in bounds and lands on an instruction boundary, so this
+        // reaches the fall-off-the-end check rather than a branch target error.
+        let ctx = link(
+            unpack_branch_mock(),
+            vec![raw_func(0, vec![], vec![LoadConst(0), UnpackBranch(1, -5)])],
+        );
+        func_error(ctx, FuncError::UnexpectedEnd);
     }
 
     #[test]

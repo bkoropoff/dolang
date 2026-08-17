@@ -371,6 +371,7 @@ pub enum Opcode {
     NlBranch, // depth: uvar, indicator: uvar
     Shl,
     Shr,
+    UnpackBranch, // unpack: uvar, offset: ivar
 }
 
 // Decoded instruction
@@ -423,6 +424,7 @@ pub enum Inst {
     NlBranch(usize, usize),
     Shl,
     Shr,
+    UnpackBranch(usize, isize),
 }
 
 #[cfg(feature = "debug")]
@@ -482,6 +484,7 @@ impl Display for Inst {
             Unpack(id) => write!(f, "unpk #{id}"),
             NlGuard(id) => write!(f, "nlgd #{id}"),
             NlBranch(depth, indicator) => write!(f, "nlbr {depth},{indicator}"),
+            UnpackBranch(id, ofs) => write!(f, "upbr #{id} {ofs}"),
         }
     }
 }
@@ -548,8 +551,8 @@ impl Decode for Opcode {
                 Some(NlBranch),
                 Some(Shl),
                 Some(Shr),
+                Some(UnpackBranch),
                 // This is worse than anything
-                None,
                 None,
                 None,
                 None,
@@ -890,6 +893,11 @@ impl Inst {
             }
             Shl => w.opcode(Opcode::Shl),
             Shr => w.opcode(Opcode::Shr),
+            UnpackBranch(id, target) => {
+                w.opcode(Opcode::UnpackBranch)?;
+                w.usize(*id)?;
+                w.isize(*target)
+            }
         }
     }
 }
@@ -1061,6 +1069,7 @@ impl<R: io::Read + io::Seek> Iterator for InstDecoder<R> {
                 NlBranch => Inst::NlBranch(self.usize()?, self.usize()?),
                 Shl => Inst::Shl,
                 Shr => Inst::Shr,
+                UnpackBranch => Inst::UnpackBranch(self.usize()?, self.isize()?),
             })
         })())
     }
