@@ -1,0 +1,89 @@
+# Conditional pattern binds in vertical layout, where the branch bodies are
+# element lists rather than blocks
+
+# Array literal
+let pair = [1, 2]
+let arr = $
+  - 0
+  if let a b = pair
+    - $a
+    - $b
+  else
+    - none
+assert_eq $arr [0, 1, 2]
+
+# The failure edge, and bindings scoped to the matching branch only
+let short = $
+  if let a b = [1]
+    - $a
+    - $b
+  else
+    - nope
+assert_eq $short ["nope"]
+
+# Dict literal, with `if bind` and a default
+let d = $
+  base: 1
+  if bind {status: 200}
+    :status
+    :body = "empty"
+  do
+    code: $status
+    text: $body
+  else
+    code: 0
+assert_eq $d {base: 1, code: 200, text: "empty"}
+
+# Command arguments
+def three a b c
+  [a, b, c]
+let got = three
+  - x
+  if let p q = [7, 8]
+    - $p
+    - $q
+assert_eq $got ["x", 7, 8]
+
+# `else if` chains, mixing both forms
+let chain = $
+  if let a b c = [1, 2]
+    - $a
+    - $b
+    - $c
+  else if bind {n: 5}
+    :n
+  do
+    - $n
+  else
+    - fell-through
+assert_eq $chain [5]
+
+# A bare identifier binds the scrutinee and tests its truthiness
+let truthy = $
+  if let v = "yes"
+    - $v
+  else
+    - "no"
+assert_eq $truthy ["yes"]
+
+let falsy = $
+  if let v = nil
+    - $v
+  else
+    - "no"
+assert_eq $falsy ["no"]
+
+# Nested `for` inside a bound branch sees the bindings
+let nested = $
+  if let a rest = [1, [2, 3]]
+    - $a
+    for x = rest
+      - (x * 10)
+assert_eq $nested [1, 20, 30]
+
+# No `else` at all: a failed match contributes nothing
+let empty = $
+  if let a b = [1]
+    - $a
+    - $b
+assert_eq $empty []

@@ -1,0 +1,113 @@
+# Matching unpack binds the pattern in the branch body
+if let a b = [1, 2]
+  assert_eq $a 1
+  assert_eq $b 2
+else
+  assert false msg: "should have matched"
+
+# Arity mismatch takes the failure edge rather than raising
+if let a b c = [1, 2]
+  assert false msg: "should not have matched: $a $b $c"
+else
+  echo too-few
+
+if let a b = [1, 2, 3]
+  assert false msg: "should not have matched: $a $b"
+else
+  echo too-many
+
+# A missing or extra key is a shape error too
+if let :name :age = {name: "Alice"}
+  assert false msg: "should not have matched: $name $age"
+else
+  echo missing-key
+
+if let :name = {name: "Alice", age: 30}
+  assert false msg: "should not have matched: $name"
+else
+  echo extra-key
+
+# Keyword and rest patterns bind as usual
+if let first ...rest = [1, 2, 3]
+  assert_eq $first 1
+  let sum = 0
+  for x = rest
+    sum = (sum + x)
+  assert_eq $sum 5
+else
+  assert false msg: "should have matched"
+
+# Horizontal patterns take no defaults -- `=` ends the pattern -- so a default
+# is only available in the vertical `if bind` form; see if_bind.dol
+
+# A bare identifier binds the scrutinee and tests its truthiness
+if let x = 42
+  assert_eq $x 42
+else
+  assert false msg: "should have matched"
+
+if let x = nil
+  assert false msg: "should not have matched: $x"
+else
+  echo falsy
+
+# No `else` at all
+if let a b = [1, 2]
+  assert_eq (a + b) 3
+
+if let a b = [1]
+  assert false msg: "should not have matched: $a $b"
+
+# `else if let` chains
+if let a b c = [1, 2]
+  assert false msg: "should not have matched: $a $b $c"
+else if let a b = [3, 4]
+  assert_eq $a 3
+  assert_eq $b 4
+else
+  assert false msg: "should have matched the elif"
+
+# Failure of the whole chain
+if let a b = [1]
+  assert false msg: "should not have matched: $a $b"
+else if let c d = []
+  assert false msg: "should not have matched: $c $d"
+else
+  echo no-branch
+
+# Only shape errors branch; anything else propagates
+class Boom
+  pub def (unpack) _self
+    throw std.RuntimeError boom
+
+let caught = try
+  if let a b = Boom()
+    assert false msg: "should not have matched: $a $b"
+  else
+    assert false msg: "should not have taken the failure edge"
+  "no-throw"
+catch err
+  str $err
+
+assert_eq $caught boom
+
+# `Unsupported` is a hard error, not a silent no-match
+let caught = try
+  if let a b = 42
+    assert false msg: "should not have matched: $a $b"
+  else
+    assert false msg: "should not have taken the failure edge"
+  "no-throw"
+catch _
+  "unsupported"
+
+assert_eq $caught unsupported
+
+# output: END
+# too-few
+# too-many
+# missing-key
+# extra-key
+# falsy
+# no-branch
+# END

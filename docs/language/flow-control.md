@@ -34,6 +34,38 @@ else
   echo F
 ```
 
+### `if let` / `if bind`
+
+A `let` or `bind` pattern after `if` makes the destructuring itself the
+condition. The bindings are in scope for the branch body, and the `else` branch
+runs when the pattern does not match:
+
+```
+if let a b = pair
+  echo "matched $a $b"
+else
+  echo "no match"
+```
+
+`if bind` puts the pattern in vertical layout after the scrutinee, with `do`
+introducing the body, and so also accepts default values:
+
+```
+if bind response
+  :status
+  :body = ""
+do
+  echo "$status $body"
+```
+
+Both forms are also available where `if` appears in
+[vertical layout](./vertical-layout.md).
+
+Only a shape mismatch — wrong arity, or a missing or unexpected key — takes the
+failure branch; other errors propagate. See
+[Conditional Destructuring](./destructuring.md#conditional-destructuring) for
+the details.
+
 ### `if` in `let` and Assignments
 
 `if` statements can be the right-hand side of `let` bindings and assignments:
@@ -67,6 +99,18 @@ let count = 0
 while (count < 5)
   echo $count
   count = (count + 1)
+```
+
+### `while let` / `while bind`
+
+`while` accepts the same pattern forms as `if`. The loop ends the first time the
+pattern fails to match:
+
+```
+let i = 0
+while let a b = pairs.get(i)
+  echo "$a $b"
+  i = (i + 1)
 ```
 
 ### `for`

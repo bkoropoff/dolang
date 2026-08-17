@@ -833,6 +833,30 @@ impl<'v, 's> Error<'v, 's> {
         !matches!(self.inner, Variant::NonLocalJump(..)) && !matches!(self.kind(), ErrorKind::Abort)
     }
 
+    /// Does error indicate that a value simply did not have the shape a destructuring
+    /// pattern called for?
+    ///
+    /// This is the set of failures that a conditional unpack treats as "no match" and
+    /// turns into a branch rather than propagating.  It is deliberately narrow: only
+    /// arity and key mismatches qualify.  In particular [`ErrorKind::Unsupported`] does
+    /// *not*, so destructuring a value that has no unpack implementation at all remains
+    /// a hard error rather than silently failing to match.
+    ///
+    /// Note that this classifies by kind alone.  An error of one of these kinds raised
+    /// from inside a user-defined `(unpack)` method -- including one from a destructuring
+    /// it performs itself -- is indistinguishable from one raised by the unpack of the
+    /// receiver, and is likewise treated as a failed match.
+    pub fn is_unpack_mismatch(&self) -> bool {
+        !matches!(self.inner, Variant::NonLocalJump(..))
+            && matches!(
+                self.kind(),
+                ErrorKind::MissingPos
+                    | ErrorKind::MissingKey
+                    | ErrorKind::UnexpectedPos
+                    | ErrorKind::UnexpectedKey
+            )
+    }
+
     /// Iterate over backtrace associated with error, deepest entries first.
     ///
     /// Note that the backtrace for a propagating error will cease at the deepest live frame.

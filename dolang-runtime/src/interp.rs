@@ -1268,6 +1268,45 @@ impl<'v> Vm<'v> {
                     })
                     .await?;
                 }
+                // Conditional unpack: on success the unpacked values are left on the
+                // operand stack exactly as `Unpack` leaves them; on a shape mismatch
+                // they are discarded and control branches instead.  Errors that are not
+                // shape mismatches propagate, so a genuine fault inside a user-defined
+                // `(unpack)` method is never mistaken for a failed match.
+                UnpackBranch => {
+                    // Set current PC in frame header in case a backtrace is needed
+                    frame.pc = reader.offset();
+                    let index = reader.usize();
+                    let offset = reader.isize();
+                    // Hold the scrutinee in a scratch slot rather than a bare local so
+                    // it stays rooted across the GC trap check and the unpack itself,
+                    // as `Next` does with its receiver
+                    let mut value = frame.scratch1();
+                    value.store(frame.pop());
+                    let sig = frame.program.unpacktab.get_unchecked(index);
+                    let depth = frame.sp.get();
+                    let slice = frame.slots.get_unchecked(depth..depth + sig.len());
+                    frame.sp.update(|s| s + sig.len());
+                    if offset < 0 {
+                        Strand::for_frame(inner, frame, |strand| self.check_trap_gc(strand))?
+                    }
+                    let matched = match Strand::async_for_frame(inner, frame, async |strand| {
+                        value.op_unpack(strand, sig, Slots::new(slice)).await
+                    })
+                    .await
+                    {
+                        Ok(()) => true,
+                        Err(e) if e.is_unpack_mismatch() => false,
+                        Err(e) => return Err(e),
+                    };
+                    value.store(Value::NIL);
+                    if !matched {
+                        // Release the slots reserved above, clearing them so the
+                        // collector does not see partially written values
+                        frame.discard(sig.len());
+                        reader.seek(offset)
+                    }
+                }
                 // Non-local branch: jump to a target frame outside the current call stack.
                 // Used to implement break/continue/return across closure boundaries.
                 //

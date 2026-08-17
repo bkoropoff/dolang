@@ -10,10 +10,10 @@ use dolang_util::{arena::ArenaVec, intern::BinTable};
 use crate::{
     Compiler, Mode, PreludeImport,
     ast::{
-        self, Arg, ArrayElem, Assign, Bind, Block, Class, Def, DictElem, Expand, Expr, For,
-        Function, GetVariant, Ident, If, Import, ImportElement, ImportItem, Key, LValue, Let,
-        Method, NlGuard, NlInfo, Pair, Param, Pattern, PrimStmt, Res, Return, SideEffect, Single,
-        Stmt, Try, Unit, Var, While, visit::Node,
+        self, Arg, ArrayElem, Assign, Bind, Block, Class, Def, DictElem, Expand, Expr, ExprBody,
+        For, Function, GetVariant, Ident, If, Import, ImportElement, ImportItem, Key, LValue, Let,
+        Method, NlGuard, NlInfo, Pair, Param, Pattern, PatternBind, PrimStmt, Res, Return,
+        SideEffect, Single, Stmt, Try, Unit, Var, While, visit::Node,
     },
     diag::{AnnotationKind, Severity},
     origin::{self, Origin},
@@ -1184,33 +1184,7 @@ impl<'a> Elaborater<'a> {
             ArrayElem::Single(Single { expr, .. }) | ArrayElem::Expand(Expand { expr, .. }) => {
                 self.visit_expr(scope, expr, is_arg)
             }
-            ArrayElem::If(node) => {
-                // Visit first if branch
-                self.visit_expr(scope, &mut node.tbranch.cond, is_arg)?;
-                for elem in node.tbranch.body.iter_mut() {
-                    let mut scope = scope.nested();
-                    self.visit_array_elem(&mut scope, elem, is_arg)?;
-                }
-
-                // Visit elif branches
-                for (elif_branch, _) in &mut node.elif_branches {
-                    self.visit_expr(scope, &mut elif_branch.cond, is_arg)?;
-                    for elem in elif_branch.body.iter_mut() {
-                        let mut scope = scope.nested();
-                        self.visit_array_elem(&mut scope, elem, is_arg)?;
-                    }
-                }
-
-                // Visit final else branch if present
-                if let Some((else_elems, _)) = &mut node.else_branch {
-                    for elem in else_elems.iter_mut() {
-                        let mut scope = scope.nested();
-                        self.visit_array_elem(&mut scope, elem, is_arg)?;
-                    }
-                }
-
-                Ok(())
-            }
+            ArrayElem::If(node) => self.visit_elem_if(scope, node, is_arg, Self::visit_array_elem),
             ArrayElem::For(For {
                 bind,
                 expr,
@@ -1276,35 +1250,7 @@ impl<'a> Elaborater<'a> {
                 self.visit_expr(scope, value, is_arg)
             }
             DictElem::Expand(Expand { expr, .. }) => self.visit_expr(scope, expr, is_arg),
-            DictElem::If(node) => {
-                // Visit first if branch
-                self.visit_expr(scope, &mut node.tbranch.cond, false)?;
-                {
-                    let mut nested_scope = scope.nested();
-                    for elem in node.tbranch.body.iter_mut() {
-                        self.visit_dict_elem(&mut nested_scope, elem, is_arg)?;
-                    }
-                }
-
-                // Visit elif branches
-                for (elif_branch, _) in &mut node.elif_branches {
-                    self.visit_expr(scope, &mut elif_branch.cond, false)?;
-                    let mut nested_scope = scope.nested();
-                    for elem in elif_branch.body.iter_mut() {
-                        self.visit_dict_elem(&mut nested_scope, elem, is_arg)?;
-                    }
-                }
-
-                // Visit final else branch if present
-                if let Some((else_elems, _)) = &mut node.else_branch {
-                    let mut nested_scope = scope.nested();
-                    for elem in else_elems.iter_mut() {
-                        self.visit_dict_elem(&mut nested_scope, elem, is_arg)?;
-                    }
-                }
-
-                Ok(())
-            }
+            DictElem::If(node) => self.visit_elem_if(scope, node, is_arg, Self::visit_dict_elem),
             DictElem::For(For {
                 bind,
                 expr,
@@ -1561,35 +1507,9 @@ impl<'a> Elaborater<'a> {
                 self.visit_expr(scope, value, true)
             }
             Arg::Expand(Expand { expr, .. }) => self.visit_expr(scope, expr, true),
-            Arg::If(node) => {
-                // Visit first if branch
-                self.visit_expr(scope, &mut node.tbranch.cond, false)?;
-                {
-                    let mut nested_scope = scope.nested();
-                    for elem in node.tbranch.body.iter_mut() {
-                        self.visit_cmd_arg(&mut nested_scope, elem)?;
-                    }
-                }
-
-                // Visit elif branches
-                for (elif_branch, _) in &mut node.elif_branches {
-                    self.visit_expr(scope, &mut elif_branch.cond, false)?;
-                    let mut nested_scope = scope.nested();
-                    for elem in elif_branch.body.iter_mut() {
-                        self.visit_cmd_arg(&mut nested_scope, elem)?;
-                    }
-                }
-
-                // Visit final else branch if present
-                if let Some((else_elems, _)) = &mut node.else_branch {
-                    let mut nested_scope = scope.nested();
-                    for elem in else_elems.iter_mut() {
-                        self.visit_cmd_arg(&mut nested_scope, elem)?;
-                    }
-                }
-
-                Ok(())
-            }
+            Arg::If(node) => self.visit_elem_if(scope, node, false, |this, scope, elem, _| {
+                this.visit_cmd_arg(scope, elem)
+            }),
             Arg::For(For {
                 bind,
                 expr,
@@ -1766,23 +1686,141 @@ impl<'a> Elaborater<'a> {
         self.visit_prim_stmt(scope, &mut node.rhs, true)
     }
 
-    fn visit_while(&mut self, scope: &mut Scope<'_>, node: &mut While) -> Result<()> {
-        self.visit_expr(scope, &mut node.cond, false)?;
-        let mut inner = scope.nested_loop();
-        self.visit_block_inner(&mut inner, &mut node.body)?;
-        inner.finish(self, &mut node.body.vars);
+    /// Inject the bindings of a destructuring pattern into `scope`.
+    ///
+    /// The bindings land at the front of the scope, which lowering relies on to
+    /// resolve them positionally.
+    fn bind_pattern(&mut self, scope: &mut Scope<'_>, pattern: &mut Pattern) -> Result<()> {
+        match pattern {
+            Pattern::Ident(ident) => self.bind_ident(scope, ident, false)?,
+            Pattern::Unpack(params) => {
+                for param in params.iter_mut() {
+                    self.visit_param_non_const_default(scope, param)?;
+                    match param {
+                        Param::Pos { ident, .. }
+                        | Param::Key { ident, .. }
+                        | Param::ConstKey { ident, .. } => self.bind_ident(scope, ident, false)?,
+                        Param::Rest { ident, .. } => {
+                            if let Some(ident) = ident {
+                                self.bind_ident(scope, ident, false)?
+                            }
+                        }
+                    }
+                }
+            }
+        }
         Ok(())
+    }
+
+    /// Visit the body of an `if` or `while` branch, injecting the bindings of its
+    /// conditional pattern, if any, before the body's own statements.
+    ///
+    /// The condition itself belongs to the enclosing scope and must already have
+    /// been visited there: only the branch body can see the bindings.
+    fn visit_branch_body(
+        &mut self,
+        scope: &mut Scope<'_>,
+        bind: Option<&mut PatternBind>,
+        body: &mut Block,
+        is_loop: bool,
+    ) -> Result<()> {
+        let mut inner = if is_loop {
+            scope.nested_loop()
+        } else {
+            scope.nested()
+        };
+        if let Some(bind) = bind {
+            self.bind_pattern(&mut inner, &mut bind.pattern)?;
+        }
+        self.visit_block_inner(&mut inner, body)?;
+        inner.finish(self, &mut body.vars);
+        Ok(())
+    }
+
+    /// Elaborate an `if` in vertical-element layout, where each branch body is a
+    /// list of arguments, array elements, or dict elements rather than a block.
+    ///
+    /// Structurally identical to [`Self::visit_if`]: each branch body gets a scope
+    /// of its own so that a conditional pattern has somewhere to bind.  `visit_elem`
+    /// is the caller's per-element visitor, and `is_arg` is threaded through to it.
+    fn visit_elem_if<T>(
+        &mut self,
+        scope: &mut Scope<'_>,
+        node: &mut If<ExprBody<T>>,
+        is_arg: bool,
+        visit_elem: fn(&mut Self, &mut Scope<'_>, &mut T, bool) -> Result<()>,
+    ) -> Result<()> {
+        self.visit_expr(scope, &mut node.tbranch.expr, false)?;
+        self.visit_elem_branch_body(
+            scope,
+            node.tbranch.bind.as_mut(),
+            &mut node.tbranch.body,
+            is_arg,
+            visit_elem,
+        )?;
+
+        for (elif_branch, _) in &mut node.elif_branches {
+            self.visit_expr(scope, &mut elif_branch.expr, false)?;
+            self.visit_elem_branch_body(
+                scope,
+                elif_branch.bind.as_mut(),
+                &mut elif_branch.body,
+                is_arg,
+                visit_elem,
+            )?;
+        }
+
+        if let Some((else_body, _)) = &mut node.else_branch {
+            self.visit_elem_branch_body(scope, None, else_body, is_arg, visit_elem)?;
+        }
+
+        Ok(())
+    }
+
+    /// The vertical-element counterpart of [`Self::visit_branch_body`].
+    fn visit_elem_branch_body<T>(
+        &mut self,
+        scope: &mut Scope<'_>,
+        bind: Option<&mut PatternBind>,
+        body: &mut ExprBody<T>,
+        is_arg: bool,
+        visit_elem: fn(&mut Self, &mut Scope<'_>, &mut T, bool) -> Result<()>,
+    ) -> Result<()> {
+        let mut inner = scope.nested();
+        if let Some(bind) = bind {
+            self.bind_pattern(&mut inner, &mut bind.pattern)?;
+        }
+        for elem in body.elems.iter_mut() {
+            visit_elem(self, &mut inner, elem, is_arg)?;
+        }
+        inner.finish(self, &mut body.vars);
+        Ok(())
+    }
+
+    fn visit_while(&mut self, scope: &mut Scope<'_>, node: &mut While) -> Result<()> {
+        self.visit_expr(scope, &mut node.expr, false)?;
+        self.visit_branch_body(scope, node.bind.as_mut(), &mut node.body, true)
     }
 
     fn visit_if(&mut self, scope: &mut Scope<'_>, node: &mut If<Block>) -> Result<()> {
         // Visit first if branch
-        self.visit_expr(scope, &mut node.tbranch.cond, false)?;
-        self.visit_block(scope, &mut node.tbranch.body)?;
+        self.visit_expr(scope, &mut node.tbranch.expr, false)?;
+        self.visit_branch_body(
+            scope,
+            node.tbranch.bind.as_mut(),
+            &mut node.tbranch.body,
+            false,
+        )?;
 
         // Visit elif branches
         for (elif_branch, _) in &mut node.elif_branches {
-            self.visit_expr(scope, &mut elif_branch.cond, false)?;
-            self.visit_block(scope, &mut elif_branch.body)?;
+            self.visit_expr(scope, &mut elif_branch.expr, false)?;
+            self.visit_branch_body(
+                scope,
+                elif_branch.bind.as_mut(),
+                &mut elif_branch.body,
+                false,
+            )?;
         }
 
         // Visit final else branch if present
@@ -1905,26 +1943,7 @@ impl<'a> Elaborater<'a> {
         {
             let mut scope = scope.nested_loop();
             // Inject loop binds into inner scope
-            match &mut node.bind {
-                Pattern::Ident(ident) => self.bind_ident(&mut scope, ident, false)?,
-                Pattern::Unpack(params) => {
-                    for param in params.iter_mut() {
-                        self.visit_param_non_const_default(&mut scope, param)?;
-                        match param {
-                            Param::Pos { ident, .. }
-                            | Param::Key { ident, .. }
-                            | Param::ConstKey { ident, .. } => {
-                                self.bind_ident(&mut scope, ident, false)?
-                            }
-                            Param::Rest { ident, .. } => {
-                                if let Some(ident) = ident {
-                                    self.bind_ident(&mut scope, ident, false)?
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            self.bind_pattern(&mut scope, &mut node.bind)?;
             self.visit_block_inner(&mut scope, &mut node.body)?;
             scope.finish(self, &mut node.body.vars);
         }

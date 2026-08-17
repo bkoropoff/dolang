@@ -176,6 +176,22 @@ let bar = $
 assert_eq $bar []
 ```
 
+`if let` and `if bind` work here too, and their bindings are in scope for the
+items of the matching branch:
+
+```
+let pair = [1, 2]
+let items = $
+  if let a b = pair
+    - $a
+    - $b
+  else
+    - "no pair"
+assert_eq $items [1, 2]
+```
+
+See [Conditional Destructuring](./destructuring.md#conditional-destructuring).
+
 ## Spreading
 
 Use `...` to spread in vertical layout. It must not be preceded by `-`.

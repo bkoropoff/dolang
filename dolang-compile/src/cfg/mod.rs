@@ -93,6 +93,12 @@ pub(crate) enum TermInfo {
     Ret,
     Branch(BlockId),
     If(BlockId, BlockId),
+    /// Unpack the top of the operand stack against a signature, branching to the
+    /// second successor if it does not match.
+    ///
+    /// The scrutinee is popped either way.  The success edge additionally receives
+    /// one value per element of the signature; the failure edge receives nothing.
+    UnpackIf(sig::UnpackId, BlockId, BlockId),
     NlBranch(usize, u8),
 }
 

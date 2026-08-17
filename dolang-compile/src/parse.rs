@@ -11,8 +11,9 @@ use crate::{
         Arg, ArrayElem, Assign, Bind, Block, CatchHandler, Class, ClassBody, ClassMember,
         ClassSuper, Const, Decorator, Def, DictElem, Expand, Expr, ExprBody, FieldDecl, FieldInit,
         FieldName, For, Function, GetVariant, GroupDelim, Ident, If, IfBranch, Import,
-        ImportElement, ImportItem, Key, Let, Method, Pair, Param, ParamDefault, Pattern, PrimStmt,
-        Return, Single, SpecialMethod, Stmt, Throw, Try, Unit, While, visit::Node,
+        ImportElement, ImportItem, Key, Let, Method, Pair, Param, ParamDefault, Pattern,
+        PatternBind, PatternBindKind, PrimStmt, Return, Single, SpecialMethod, Stmt, Throw, Try,
+        Unit, While, visit::Node,
     },
     diag::{AnnotationKind, NoteKind, Severity},
     lex::{self, Keyword, Lexer, Mode, Op, Token, TokenInfo},
@@ -2340,7 +2341,30 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_cmd_vert_if(&mut self, scope: &mut Scope) -> Result<If<Vec<Arg>>> {
+    /// Parse an indented run of vertical arguments through its closing `Dedent`.
+    ///
+    /// The opening `Indent` has already been consumed by the caller.
+    fn parse_cmd_vert_body(&mut self, scope: &mut Scope) -> Result<ExprBody<Arg>> {
+        use TokenInfo::*;
+
+        let mut elems = Vec::new();
+        loop {
+            match self.peek()? {
+                None | Some(token!(Dedent)) => break,
+                Some(token!(StmtSep)) => {
+                    self.advance();
+                }
+                _ => self.parse_cmd_vert_arg(scope, &mut elems)?,
+            }
+        }
+        self.expect(scope, &[ExpectKind::Dedent])?;
+        Ok(ExprBody {
+            elems,
+            vars: Vec::new(),
+        })
+    }
+
+    fn parse_cmd_vert_if(&mut self, scope: &mut Scope) -> Result<If<ExprBody<Arg>>> {
         use self::If;
         use self::IfBranch;
         use self::Keyword;
@@ -2348,19 +2372,8 @@ impl<'a> Parser<'a> {
 
         let if_span = self.expect(scope, &[ExpectKind::Keyword(Keyword::If)])?;
         self.expect(scope, &[ExpectKind::ArgSep])?;
-        let cond = self.parse_cmd_or_expr(scope, false)?;
-        self.expect(scope, &[ExpectKind::Indent])?;
-        let mut tbranch = Vec::new();
-        loop {
-            match self.peek()? {
-                None | Some(token!(Dedent)) => break,
-                Some(token!(StmtSep)) => {
-                    self.advance();
-                }
-                _ => self.parse_cmd_vert_arg(scope, &mut tbranch)?,
-            }
-        }
-        self.expect(scope, &[ExpectKind::Dedent])?;
+        let (cond, bind) = self.parse_cond(scope)?;
+        let tbranch = self.parse_cmd_vert_body(scope)?;
 
         let mut elif_branches = Vec::new();
         let mut else_branch = None;
@@ -2373,24 +2386,14 @@ impl<'a> Parser<'a> {
                 self.advance();
                 let elif_if_span = self.expect(scope, &[ExpectKind::Keyword(Keyword::If)])?;
                 self.expect(scope, &[ExpectKind::ArgSep])?;
-                let elif_cond = self.parse_cmd_or_expr(scope, false)?;
-                self.expect(scope, &[ExpectKind::Indent])?;
-                let mut elif_body = Vec::new();
-                loop {
-                    match self.peek()? {
-                        None | Some(token!(Dedent)) => break,
-                        Some(token!(StmtSep)) => {
-                            self.advance();
-                        }
-                        _ => self.parse_cmd_vert_arg(scope, &mut elif_body)?,
-                    }
-                }
-                self.expect(scope, &[ExpectKind::Dedent])?;
+                let (elif_cond, elif_bind) = self.parse_cond(scope)?;
+                let elif_body = self.parse_cmd_vert_body(scope)?;
 
                 elif_branches.push((
                     IfBranch {
                         span: elif_if_span,
-                        cond: elif_cond,
+                        expr: elif_cond,
+                        bind: elif_bind,
                         body: elif_body,
                     },
                     else_span,
@@ -2398,19 +2401,7 @@ impl<'a> Parser<'a> {
             } else {
                 // This is final "else"
                 self.expect(scope, &[ExpectKind::Indent])?;
-                let mut else_body = Vec::new();
-                loop {
-                    match self.peek()? {
-                        None | Some(token!(Dedent)) => break,
-                        Some(token!(StmtSep)) => {
-                            self.advance();
-                        }
-                        _ => self.parse_cmd_vert_arg(scope, &mut else_body)?,
-                    }
-                }
-                self.expect(scope, &[ExpectKind::Dedent])?;
-
-                else_branch = Some((else_body, else_span));
+                else_branch = Some((self.parse_cmd_vert_body(scope)?, else_span));
                 break;
             }
         }
@@ -2418,7 +2409,8 @@ impl<'a> Parser<'a> {
         Ok(If {
             tbranch: IfBranch {
                 span: if_span,
-                cond,
+                expr: cond,
+                bind,
                 body: tbranch,
             },
             elif_branches,
@@ -2808,20 +2800,20 @@ impl<'a> Parser<'a> {
                 }
                 Arg::If(node) => {
                     // Check first if branch
-                    if self.args_have_key(&node.tbranch.body) {
+                    if self.args_have_key(&node.tbranch.body.elems) {
                         return true;
                     }
 
                     // Check elif branches
                     for (elif_branch, _) in &node.elif_branches {
-                        if self.args_have_key(&elif_branch.body) {
+                        if self.args_have_key(&elif_branch.body.elems) {
                             return true;
                         }
                     }
 
                     // Check final else branch
                     if let Some((else_body, _)) = &node.else_branch
-                        && self.args_have_key(else_body)
+                        && self.args_have_key(&else_body.elems)
                     {
                         return true;
                     }
@@ -2835,19 +2827,12 @@ impl<'a> Parser<'a> {
         match arg {
             Arg::Pos(single) => ArrayElem::Single(single),
             Arg::Expand(expand) => ArrayElem::Expand(expand),
-            Arg::If(node) => ArrayElem::If(
-                node.map(&mut |args| args.into_iter().map(Self::arg_to_array_elem).collect()),
-            ),
-            Arg::For(node) => ArrayElem::For(node.map(&mut |body| {
-                ExprBody {
-                    elems: body
-                        .elems
-                        .into_iter()
-                        .map(Self::arg_to_array_elem)
-                        .collect(),
-                    vars: body.vars,
-                }
-            })),
+            Arg::If(node) => {
+                ArrayElem::If(node.map(&mut |body| body.map(&mut Self::arg_to_array_elem)))
+            }
+            Arg::For(node) => {
+                ArrayElem::For(node.map(&mut |body| body.map(&mut Self::arg_to_array_elem)))
+            }
             _ => unreachable!("Unexpected arg type in array conversion"),
         }
     }
@@ -2858,13 +2843,12 @@ impl<'a> Parser<'a> {
             Arg::Key(node) => DictElem::Key(node),
             Arg::DynamicKey(node) => DictElem::Pair(node),
             Arg::Expand(node) => DictElem::Expand(node),
-            Arg::If(node) => DictElem::If(
-                node.map(&mut |args| args.into_iter().map(Self::arg_to_dict_elem).collect()),
-            ),
-            Arg::For(node) => DictElem::For(node.map(&mut |body| ExprBody {
-                elems: body.elems.into_iter().map(Self::arg_to_dict_elem).collect(),
-                vars: body.vars,
-            })),
+            Arg::If(node) => {
+                DictElem::If(node.map(&mut |body| body.map(&mut Self::arg_to_dict_elem)))
+            }
+            Arg::For(node) => {
+                DictElem::For(node.map(&mut |body| body.map(&mut Self::arg_to_dict_elem)))
+            }
         }
     }
 
@@ -2930,6 +2914,55 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// Parse the condition of an `if` or `while`, along with the conditional
+    /// pattern bind introduced by `let` or `bind` if there is one, consuming the
+    /// `Indent` that opens the branch body.
+    ///
+    /// The three forms differ only in layout: `let` puts the pattern before the
+    /// scrutinee and separates them with `=`, `bind` puts it after in an indented
+    /// block terminated by `do`, and the plain form has no pattern at all.
+    fn parse_cond(&mut self, scope: &mut Scope) -> Result<(Expr, Option<PatternBind>)> {
+        use self::Keyword;
+        use TokenInfo::*;
+
+        let (keyword_span, is_let) = match self.peek()? {
+            Some(token!(Keyword(Keyword::Let))) => (self.advance(), true),
+            Some(token!(Keyword(Keyword::Bind))) => (self.advance(), false),
+            _ => {
+                let expr = self.parse_cmd_or_expr(scope, false)?;
+                self.expect(scope, &[ExpectKind::Indent])?;
+                return Ok((expr, None));
+            }
+        };
+        self.expect(scope, &[ExpectKind::ArgSep])?;
+
+        let (expr, pattern, kind) = if is_let {
+            let pattern = self.parse_pattern(scope, false)?;
+            let equal_span = self.expect(scope, &[ExpectKind::Equal])?;
+            self.expect(scope, &[ExpectKind::ArgSep])?;
+            let expr = self.parse_cmd_or_expr(scope, false)?;
+            self.expect(scope, &[ExpectKind::Indent])?;
+            (expr, pattern, PatternBindKind::Let { equal_span })
+        } else {
+            let expr = self.parse_cmd_or_expr(scope, false)?;
+            // The vertical pattern consumes its own indented block through the
+            // closing `Dedent`, leaving `do` as the next token
+            let pattern = self.parse_pattern(scope, true)?;
+            let do_span = self.expect(scope, &[ExpectKind::Keyword(Keyword::Do)])?;
+            self.expect(scope, &[ExpectKind::Indent])?;
+            (expr, pattern, PatternBindKind::Bind { do_span })
+        };
+
+        Ok((
+            expr,
+            Some(PatternBind {
+                keyword_span,
+                kind,
+                pattern,
+            }),
+        ))
+    }
+
     fn parse_if(&mut self, scope: &mut Scope) -> Result<If<Block>> {
         use self::{If, IfBranch, Keyword};
         use Keyword::*;
@@ -2937,8 +2970,7 @@ impl<'a> Parser<'a> {
 
         let if_span = self.expect(scope, &[ExpectKind::Keyword(If)])?;
         self.expect(scope, &[ExpectKind::ArgSep])?;
-        let cond = self.parse_cmd_or_expr(scope, false)?;
-        self.expect(scope, &[ExpectKind::Indent])?;
+        let (cond, bind) = self.parse_cond(scope)?;
         let tbranch = self.parse_block(scope)?;
         self.expect(scope, &[ExpectKind::Dedent])?;
 
@@ -2953,15 +2985,15 @@ impl<'a> Parser<'a> {
                 self.advance();
                 let elif_if_span = self.expect(scope, &[ExpectKind::Keyword(If)])?;
                 self.expect(scope, &[ExpectKind::ArgSep])?;
-                let elif_cond = self.parse_cmd_or_expr(scope, false)?;
-                self.expect(scope, &[ExpectKind::Indent])?;
+                let (elif_cond, elif_bind) = self.parse_cond(scope)?;
                 let elif_body = self.parse_block(scope)?;
                 self.expect(scope, &[ExpectKind::Dedent])?;
 
                 elif_branches.push((
                     IfBranch {
                         span: elif_if_span,
-                        cond: elif_cond,
+                        expr: elif_cond,
+                        bind: elif_bind,
                         body: elif_body,
                     },
                     else_span,
@@ -2980,7 +3012,8 @@ impl<'a> Parser<'a> {
         Ok(If {
             tbranch: IfBranch {
                 span: if_span,
-                cond,
+                expr: cond,
+                bind,
                 body: tbranch,
             },
             elif_branches,
@@ -3101,12 +3134,12 @@ impl<'a> Parser<'a> {
     fn parse_while(&mut self, scope: &mut Scope) -> Result<Stmt> {
         let while_span = self.advance();
         self.expect(scope, &[ExpectKind::ArgSep])?;
-        let cond = self.parse_cmd_or_expr(scope, false)?;
-        self.expect(scope, &[ExpectKind::Indent])?;
+        let (cond, bind) = self.parse_cond(scope)?;
         let body = self.parse_block(scope)?;
         self.expect(scope, &[ExpectKind::Dedent])?;
         Ok(Stmt::While(While {
-            cond,
+            expr: cond,
+            bind,
             body,
             while_span,
         }))

@@ -170,13 +170,17 @@ impl Inst {
 
 #[cfg(feature = "debug")]
 impl Term {
-    fn dump(&self, _compiler: &Compiler, w: &mut impl fmt::Write) -> fmt::Result {
+    fn dump(&self, compiler: &Compiler, w: &mut impl fmt::Write) -> fmt::Result {
         use TermInfo::*;
 
         match &self.0 {
             Ret => write!(w, "ret"),
             Branch(id) => write!(w, "br #{}", id.0),
             If(tid, fid) => write!(w, "if #{}, #{}", tid.0, fid.0),
+            UnpackIf(id, tid, fid) => {
+                write!(w, "upif #{}, #{} ", tid.0, fid.0)?;
+                compiler.unpacktab[*id].dump(compiler, w)
+            }
             NlBranch(depth, indicator) => write!(w, "nlbr {}:{}", depth, indicator),
         }
     }
@@ -260,7 +264,7 @@ impl Block {
                     .set("tailport", "s", true)
                     .set("headport", "n", true);
             }
-            If(then_target, else_target) => {
+            If(then_target, else_target) | UnpackIf(_, then_target, else_target) => {
                 let then_node = format!("block_{}", then_target.0);
                 let else_node = format!("block_{}", else_target.0);
 
