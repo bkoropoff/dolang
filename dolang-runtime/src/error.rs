@@ -575,7 +575,7 @@ impl<'v, 's> Error<'v, 's> {
             View::Str(str) => strand.access(|access| format!("{:?}", str.as_str(access))),
             _ => {
                 if let Case::Prim(prim) = value.case() {
-                    format!("{:?}", prim)
+                    format!("{prim}")
                 } else {
                     "<unknown>".to_string()
                 }
@@ -597,7 +597,7 @@ impl<'v, 's> Error<'v, 's> {
             View::Str(str) => strand.access(|access| format!("{:?}", str.as_str(access))),
             _ => {
                 if let Case::Prim(prim) = value.case() {
-                    format!("{:?}", prim)
+                    format!("{prim}")
                 } else {
                     "<unknown>".to_string()
                 }

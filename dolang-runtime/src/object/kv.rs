@@ -136,6 +136,38 @@ impl<'v> Inner<'v> {
             }))
     }
 
+    /// Finds the key of the first pair, in insertion order, that an unpack
+    /// left behind.
+    ///
+    /// A pair is accounted for if it is one of the integer keys below
+    /// `int_limit` consumed positionally, or if `skip` already covers that
+    /// many instances of its key. `skip` is copied rather than advanced,
+    /// since the caller still needs it as it stands (to commit, or to hand to
+    /// a capture).
+    pub(crate) fn leftover_key<'s>(
+        &self,
+        strand: &mut Strand<'v, 's>,
+        int_limit: i64,
+        skip: &Skip<'v>,
+    ) -> Result<'v, 's, Option<Value<'v>>> {
+        let mut skip = skip.clone();
+        for (bucket, subindex) in self.index.iter().flatten() {
+            let bucket = unsafe { bucket.as_ref() };
+            let key = &bucket.key;
+            if *subindex == 0
+                && let Some(int) = key.as_int(strand)
+                && (0..i128::from(int_limit)).contains(&int)
+            {
+                continue;
+            }
+            if skip.add(strand, key, bucket.hash) >= bucket.value.len() {
+                continue;
+            }
+            return Ok(Some(key.dup()));
+        }
+        Ok(None)
+    }
+
     pub(crate) fn next_index<'a>(
         index: &'a mut Vec<Option<(Bucket<Entry<'v>>, usize)>>,
         capacity: usize,
@@ -1100,7 +1132,6 @@ impl<'v> Inner<'v> {
             return Err(Error::unexpected_positional(strand, sig.required));
         }
         let mut skip = Skip::new();
-        let mut found_keys = 0;
         for (i, key) in sig.keys.iter().enumerate() {
             let key_value = match &key.kind {
                 UnpackKeyKind::Sym(sym) => Value::from_object(strand.sym_obj(*sym)),
@@ -1121,13 +1152,12 @@ impl<'v> Inner<'v> {
                     UnpackKeyKind::Const(val) => Error::missing_key(strand, val),
                 });
             }
-            found_keys += 1;
         }
-        if sig.variadic == Variadic::None && found_keys + pos_count < inner.inner.len() {
-            return Err(Error::unexpected_key(
-                strand,
-                Sym::well_known(sym::ITEM_ERROR),
-            ));
+        let int_limit = i64::try_from(pos_count).map_err(|_| Error::overflow(strand))?;
+        if sig.variadic == Variadic::None
+            && let Some(key) = inner.leftover_key(strand, int_limit, &skip)?
+        {
+            return Err(Error::unexpected_key(strand, &key));
         }
         match sig.variadic {
             Variadic::None | Variadic::Discard => {}
@@ -1623,8 +1653,6 @@ impl<'v, T: Protocol<'v> + AsRef<Inner<'v>> + AsMut<Inner<'v>>> UnpackInner<'v, 
             // Error during validation - temp_skip discarded, original untouched
             return Err(Error::unexpected_positional(strand, sig.required));
         }
-        let skipped = temp_skip.count;
-        let mut found_keys = 0;
         for (i, key) in sig.keys.iter().enumerate() {
             // Convert key to value based on kind
             let key_value = match &key.kind {
@@ -1648,17 +1676,16 @@ impl<'v, T: Protocol<'v> + AsRef<Inner<'v>> + AsMut<Inner<'v>>> UnpackInner<'v, 
                     UnpackKeyKind::Const(val) => Error::missing_key(strand, val),
                 });
             }
-            found_keys += 1;
         }
-        // Final validation
+        // Final validation. Integer keys the iterator has already delivered
+        // (everything below `int`) are consumed too, as are the ones this
+        // unpack just took.
+        let int_limit = int.saturating_add_unsigned(pos_count as u64);
         if sig.variadic == Variadic::None
-            && found_keys + pos_count + int as usize + skipped < inner.inner.len()
+            && let Some(key) = inner.leftover_key(strand, int_limit, &temp_skip)?
         {
             // Error during validation - temp_skip discarded, original untouched
-            return Err(Error::unexpected_key(
-                strand,
-                Sym::well_known(sym::ITEM_ERROR),
-            ));
+            return Err(Error::unexpected_key(strand, &key));
         }
 
         // Phase 2: All validation passed, commit Skip changes

@@ -87,7 +87,6 @@ well_known_symbols! {
     (Insert, "insert", INSERT),
     (InitMethod, "(init)", INIT_METHOD),
     (Int, "int", INT),
-    (ItemError, "ItemError", ITEM_ERROR),
     (Join, "join", JOIN),
     (Key, "key", KEY),
     (Keys, "keys", KEYS),

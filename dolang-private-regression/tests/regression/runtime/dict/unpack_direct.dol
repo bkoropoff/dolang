@@ -60,18 +60,31 @@ let d e = rest4
 assert_eq $d zero
 assert_eq $e one
 
-let a: _a ...rest5 = {a: 1, b: 2, c: 3}
+let a: _a ...rest5 = {a: 1, b: 2}
 bind rest5
   :b
   :missing = "fallback"
 assert_eq $b 2
 assert_eq $missing fallback
 
+# a key satisfied by a default does not excuse a pair nobody claimed
+assert_err "unexpected key item: c" do
+  let a: _a ...rest5b = {a: 1, b: 2, c: 3}
+  bind rest5b
+    b: _b
+    missing: _missing = "fallback"
+
+# the leftover key is named when unpacking a dict directly, too
+assert_err "unexpected key item: c" do
+  let b: _b = {b: 2, c: 3}
+assert_err "unexpected key item: 5" do
+  let b: _b = {5: "five", b: 2}
+
 assert_err "missing key item: zzz" do
   let a: _a ...rest6 = {a: 1, b: 2, c: 3}
   let zzz: _zzz = rest6
 
-assert_err "unexpected key item: ItemError" do
+assert_err "unexpected key item: c" do
   let a: _a ...rest7 = {a: 1, b: 2, c: 3}
   let b: _b = rest7
 
