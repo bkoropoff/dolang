@@ -35,7 +35,9 @@ use windows_sys::Win32::{
 /// setting a SACL, but not while querying a SACL through a handle that already
 /// has `ACCESS_SYSTEM_SECURITY` access.
 #[cfg_attr(docsrs, doc(cfg(windows)))]
-pub fn with_security_privilege<T>(f: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+pub fn with_security_privilege<T, E: From<io::Error>>(
+    f: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
     #[cfg(windows)]
     {
         struct RevertGuard;
@@ -56,7 +58,7 @@ pub fn with_security_privilege<T>(f: impl FnOnce() -> io::Result<T>) -> io::Resu
             )
         } == 0
         {
-            return Err(io::Error::last_os_error());
+            return Err(io::Error::last_os_error().into());
         }
         let process_token = unsafe { OwnedHandle::from_raw_handle(process_token) };
 
@@ -72,13 +74,13 @@ pub fn with_security_privilege<T>(f: impl FnOnce() -> io::Result<T>) -> io::Resu
             )
         } == 0
         {
-            return Err(io::Error::last_os_error());
+            return Err(io::Error::last_os_error().into());
         }
         let token = unsafe { OwnedHandle::from_raw_handle(token) };
 
         let mut luid = Default::default();
         if unsafe { LookupPrivilegeValueW(ptr::null(), SE_SECURITY_NAME, &mut luid) } == 0 {
-            return Err(io::Error::last_os_error());
+            return Err(io::Error::last_os_error().into());
         }
         let privileges = TOKEN_PRIVILEGES {
             PrivilegeCount: 1,
@@ -99,16 +101,17 @@ pub fn with_security_privilege<T>(f: impl FnOnce() -> io::Result<T>) -> io::Resu
             )
         } == 0
         {
-            return Err(io::Error::last_os_error());
+            return Err(io::Error::last_os_error().into());
         }
         if unsafe { GetLastError() } == ERROR_NOT_ALL_ASSIGNED {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "SeSecurityPrivilege is not available",
-            ));
+            )
+            .into());
         }
         if unsafe { SetThreadToken(ptr::null(), token.as_raw_handle()) } == 0 {
-            return Err(io::Error::last_os_error());
+            return Err(io::Error::last_os_error().into());
         }
         let _guard = RevertGuard;
         f()
