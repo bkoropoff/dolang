@@ -43,6 +43,8 @@ Closes the sender, signaling EOF to receivers. After closing:
 | `error`     |                                    | Optional error value to propagate   |
 | `backtrace` | [`strand.Backtrace`](./index.md)?  | Optional backtrace for that error   |
 
+#### Example
+
 ```
 send.close()
 send.close "boom"

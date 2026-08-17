@@ -10,13 +10,17 @@ they do not parse `cmd.exe` or PowerShell syntax.
 
 Encodes one argument for a Windows process command line.
 
-**Parameters:**
+#### Parameters
 
 | Name  | Type | Description                                                          |
 | ----- | ---- | -------------------------------------------------------------------- |
 | `arg` |      | Value converted with [`std.verbatim`](./std/index.md#verbatim-value) |
 
-**Returns:** [`str`](./std/str.md)
+#### Returns
+
+[`str`](./std/str.md)
+
+#### Example
 
 ```
 assert_eq (quote "two words") r#""two words""#
@@ -26,13 +30,17 @@ assert_eq (quote "two words") r#""two words""#
 
 Encodes an iterable of arguments as one Windows process command line.
 
-**Parameters:**
+#### Parameters
 
 | Name       | Type | Description                                                           |
 | ---------- | ---- | --------------------------------------------------------------------- |
 | `iterable` |      | Values converted with [`std.verbatim`](./std/index.md#verbatim-value) |
 
-**Returns:** [`str`](./std/str.md)
+#### Returns
+
+[`str`](./std/str.md)
+
+#### Example
 
 ```
 assert_eq (join ["program", "two words"]) r#"program "two words""#
@@ -42,13 +50,17 @@ assert_eq (join ["program", "two words"]) r#"program "two words""#
 
 Decodes a Windows process command line into an iterator of arguments.
 
-**Parameters:**
+#### Parameters
 
 | Name           | Type                  | Description            |
 | -------------- | --------------------- | ---------------------- |
 | `command_line` | [`str`](./std/str.md) | Command line to decode |
 
-**Returns:** `Iter` yielding [`str`](./std/str.md) arguments.
+#### Returns
+
+`Iter` yielding [`str`](./std/str.md) arguments.
+
+#### Example
 
 ```
 assert_eq [...(split r#"program "two words""#)] ["program", "two words"]

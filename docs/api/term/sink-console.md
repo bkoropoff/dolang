@@ -48,6 +48,8 @@ Wraps `sink`.
 | `can_style` | `bool?`                  | Emit ANSI styling (default false)  |
 | `mode`      | [`sym`](../std/sym.md)?  | `:LINE:` (default) or `:CHUNK:`    |
 
+#### Example
+
 ```
 # Style is off by default
 let plain = []

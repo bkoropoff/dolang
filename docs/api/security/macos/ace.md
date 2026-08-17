@@ -19,13 +19,15 @@ Constructs an entry that denies the permissions in `mask`.
 | `principal` | [`uuid.Uuid`](../../uuid/uuid.md) | The entry's principal |
 
 Every constructor takes `mask:` (a [`Mask`](./mask.md)) as a required
-keyword argument, and `flags:` (a [`Flags`](./flags.md)) as an optional
+key argument, and `flags:` (a [`Flags`](./flags.md)) as an optional
 one, defaulting to empty.
 
 Unlike NFSv4 or POSIX.1e ACL entries, macOS resolves every principal (owning
 user, owning group, well-known accounts, or an arbitrary user/group) to a
 UUID before it reaches the file's ACL, so there is no separate qualifier
 enum: `principal` is always a [`uuid.Uuid`](../../uuid/uuid.md).
+
+#### Example
 
 ```
 let read = macos.Mask(:READ_DATA:, :READ_ATTRIBUTES:)

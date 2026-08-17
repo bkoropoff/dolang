@@ -20,9 +20,10 @@ Resolves an account name or [`Sid`](./sid.md) in the active VFS target.
 
 #### Errors
 
-- Raises [`sys.NotFoundError`](../../sys/not-found-error.md) when the identity
-  is unmapped.
-- Raises `UnsupportedError` for Unix targets.
+| Exception                                            | Condition                     |
+| ---------------------------------------------------- | ----------------------------- |
+| [`sys.NotFoundError`](../../sys/not-found-error.md)  | The identity is unmapped      |
+| [`UnsupportedError`](../../std/unsupported-error.md) | The active VFS target is Unix |
 
 ## Fields
 

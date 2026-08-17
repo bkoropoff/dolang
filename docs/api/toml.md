@@ -41,6 +41,8 @@ Type mapping:
 Top-level `dict` and `record` values serialize as TOML documents. Other values
 serialize as TOML values.
 
+#### Example
+
 ```
 assert_eq (encode 42) "42"
 assert_eq (decode $ encode [1, 2, 3]) [1, 2, 3]
@@ -83,6 +85,8 @@ Type mapping:
 
 `decode` accepts both full TOML documents and bare TOML values such as
 numbers, arrays, and inline tables.
+
+#### Example
 
 ```
 assert_eq (decode "42") 42

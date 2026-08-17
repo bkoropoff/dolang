@@ -34,6 +34,8 @@ last), matching [`dict.get`](../std/dict.md#get-key-instance-default-else).
 
 [`Dict`](../std/dict.md)-like
 
+#### Example
+
 ```
 server.mock
   - match: do |req|

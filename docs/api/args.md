@@ -4,7 +4,7 @@ Declarative command-line argument parsing.
 
 ## Spec declarations
 
-Both `args.parse` and `args.with` accept `help:` and `usage:` as keyword
+Both `args.parse` and `args.with` accept `help:` and `usage:` as key
 arguments, plus any number of positional spec items using `-` list syntax.
 Each spec item is a dict whose first key is both the item type and its name:
 

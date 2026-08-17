@@ -27,6 +27,8 @@ without the other. The host console (`term.console`) always returns a
 `Geometry`, never `nil` itself — see
 [`Console.geometry()`](./console.md#geometry).
 
+#### Example
+
 ```
 let g = term.console.geometry()
 if g.cols

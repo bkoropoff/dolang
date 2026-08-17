@@ -58,9 +58,9 @@ def add a b
   (a + b)
 ```
 
-### Keyword Parameters
+### Key Parameters
 
-Keyword parameters use `key: param` syntax in the definition:
+Key parameters use `key: param` syntax in the definition:
 
 ```
 def create_user name age: user_age

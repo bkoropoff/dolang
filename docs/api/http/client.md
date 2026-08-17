@@ -29,6 +29,8 @@ HTTP client for making web requests.
 `Client` when no `func` is provided, otherwise the result of
 calling `func`
 
+#### Example
+
 ```
 
 let client = Client()
@@ -39,6 +41,8 @@ let client = Client()
 By default, the client respects system proxy environment variables
 (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`). Pass `proxy:` to set an explicit
 proxy or `proxy: nil` to disable proxy detection entirely.
+
+##### Example
 
 ```
 # Explicit proxy
@@ -54,6 +58,8 @@ Pass `cookies: true` to enable automatic storage and replay of cookies on that
 client instance. Cookie state is isolated per client and is not shared with the
 top-level `http.get` / `http.post` helpers.
 
+##### Example
+
 ```
 let client = Client cookies: true
 
@@ -67,6 +73,8 @@ client.get https://example.com/dashboard do |resp|
 Use `ca_cert:` to trust an additional CA certificate (PEM format), and
 `identity:` with `password:` for client certificate authentication (PKCS#12/PFX
 format).
+
+##### Example
 
 ```
 # Custom CA certificate
@@ -82,6 +90,8 @@ let client = Client
 
 Pass `invalid_certs: :DANGER_ACCEPT:` to disable TLS certificate validation.
 This is dangerous and should only be used for testing.
+
+##### Example
 
 ```
 let client = Client invalid_certs: :DANGER_ACCEPT:
@@ -130,6 +140,8 @@ Makes an HTTP request using the specified verb.
 | ----------------------- | ----------------------------------------------------- |
 | [`Status`](./status.md) | The response is non-2xx and `status:` is not provided |
 | [`Error`](./error.md)   | A transport or protocol failure occurs                |
+
+#### Example
 
 ```
 

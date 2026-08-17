@@ -37,6 +37,8 @@ The reconnection delay hint from the stream, if present.
 
 [`Int`](../std/int.md) or `nil`
 
+#### Example
+
 ```
 
 get https://api.example.com/stream do |response|

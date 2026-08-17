@@ -16,6 +16,8 @@ Constructs a permission set from symbols or one iterable of symbols.
 | `:WRITE:`   | Write permission   |
 | `:EXECUTE:` | Execute permission |
 
+#### Example
+
 ```
 let rw = unix.Permission(:READ:, :WRITE:)
 ```

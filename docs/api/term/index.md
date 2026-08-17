@@ -14,7 +14,7 @@ The `term` module interfaces with terminals and consoles.
 
 ## Style options
 
-The terminal styling functions accept these keyword options:
+The terminal styling functions accept these key options:
 
 | Name            | Type                                                                                                    | Description                        |
 | --------------- | ------------------------------------------------------------------------------------------------------- | ---------------------------------- |
@@ -37,7 +37,7 @@ bright color, such as `:BRIGHT_RED:`. An integer selects a 256-color palette
 index. A three-integer array or tuple specifies an RGB color. Numeric values
 must be between 0 and 255. Color options also accept `:INHERIT:`.
 
-**Errors:**
+### Errors
 
 - An attribute option is present with a value other than `true` or `:INHERIT:`.
 - A color name is unknown, a numeric value is out of range, or an RGB value
@@ -99,13 +99,15 @@ The override is inherited by all strands spawned inside the call.
 
 Return value of `func`.
 
-**Errors:**
+#### Errors
 
 - Raises [`ValueError`](../std/value-error.md) if `mode:` is given when
   `console` is already a `Console`, which already determines its output mode.
 
 Captured lines keep their terminator, since the capture reproduces what was
 written rather than reinterpreting it:
+
+#### Example
 
 ```
 let lines = []
@@ -154,6 +156,8 @@ Verbatim output is captured, which must be valid UTF-8. One final line ending
 
 [`Str`](../std/str.md)
 
+#### Example
+
 ```
 let greeting = term.sub do greet Alice
 assert_eq $greeting "Hello, Alice!"
@@ -175,6 +179,8 @@ unredirected program `stderr`, etc.
 
 Return value of `func`.
 
+#### Example
+
 ```
 # Nothing from this reaches the terminal.
 mute do run printf "this will not be printed"
@@ -190,6 +196,8 @@ are sanitized; direct [`Text`](./text.md) arguments retain their styling.
 | Name      | Type | Description                                         |
 | --------- | ---- | --------------------------------------------------- |
 | `...args` | *    | Values converted with `verbatim` and written safely |
+
+#### Example
 
 ```
 echo status: ready count: 3
@@ -208,6 +216,8 @@ is omitted when stderr is not a terminal.
 
 Also accepts the module's [style options](#style-options). `:INHERIT:` is a
 no-op for `print`.
+
+#### Example
 
 ```
 print "status: " ready fg: :GREEN: bold: true
@@ -233,6 +243,8 @@ a saved setting when deriving a [`Style`](./style.md).
 [`Text`](./text.md) when positional arguments are provided;
 otherwise [`Style`](./style.md)
 
+#### Example
+
 ```
 let warning = style Warning fg: :YELLOW: bold: true
 echo $warning
@@ -252,6 +264,8 @@ terminal controls, including hyperlinks, are removed.
 #### Returns
 
 [`Text`](./text.md)
+
+#### Example
 
 ```
 let formatted = preformat input
@@ -274,10 +288,14 @@ The returned text does not include a final newline.
 
 [`Text`](./text.md)
 
-**Errors:**
+#### Errors
 
-- `backtrace` is present and is not a `strand.Backtrace`.
-- `backtrace` is omitted outside an active exception handler.
+| Exception    | Condition                                                  |
+| ------------ | ---------------------------------------------------------- |
+| `TypeError`  | `backtrace` is present but is not a `strand.Backtrace`     |
+| `StateError` | `backtrace` is omitted outside an active exception handler |
+
+#### Example
 
 ```
 try

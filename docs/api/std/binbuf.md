@@ -14,6 +14,8 @@ Builds a buffer, optionally seeded with the contents of existing binary data.
 | --------- | ------------------ | ---------------- |
 | `initial` | [`Bin`](./bin.md)? | initial contents |
 
+#### Example
+
 ```
 let buf = BinBuf(b"hello")
 assert_eq $buf.len 5
@@ -28,6 +30,8 @@ Returns the byte length of the buffer's current contents.
 #### Type
 
 [`Int`](./index.md)
+
+#### Example
 
 ```
 assert_eq (BinBuf(b"hello").len) 5
@@ -48,6 +52,8 @@ into the buffer.
 | ------- | ---- | --------------- |
 | `value` |      | value to append |
 
+#### Example
+
 ```
 let buf = BinBuf()
 buf.append b"foo"
@@ -66,6 +72,8 @@ Appends one or more raw byte values to the buffer.
 | ---------- | --------------------------- | --------------------- |
 | `...bytes` | [`Int`](./index.md) (0-255) | byte values to append |
 
+#### Example
+
 ```
 let buf = BinBuf()
 buf.push 104 105
@@ -82,6 +90,8 @@ Appends the raw bytes of `value`, which must be a [`Str`](./str.md) or
 | Name    | Type                                 | Description     |
 | ------- | ------------------------------------ | --------------- |
 | `value` | [`Bin`](./bin.md)\|[`Str`](./str.md) | bytes to append |
+
+#### Example
 
 ```
 let buf = BinBuf(b"foo")
@@ -100,6 +110,8 @@ right in place. `value` may be a single byte value, or a `Str`/`Bin` slice.
 | ------- | ----------------------------------------------------------------- | ----------------------- |
 | `index` | [`Int`](./index.md)                                               | insertion point         |
 | `value` | [`Int`](./index.md) (0-255)\|[`Bin`](./bin.md)\|[`Str`](./str.md) | byte or bytes to insert |
+
+#### Example
 
 ```
 let buf = BinBuf(b"foobar")
@@ -125,6 +137,8 @@ of the removed bytes.
 
 [`Int`](./index.md) or [`Bin`](./bin.md), matching the argument's kind
 
+#### Example
+
 ```
 let buf = BinBuf(b"foobar")
 assert_eq (buf.remove 0) 102
@@ -144,6 +158,8 @@ Shrinks the buffer to `len` bytes, discarding anything past that point.
 | Name  | Type                | Description |
 | ----- | ------------------- | ----------- |
 | `len` | [`Int`](./index.md) | new length  |
+
+#### Example
 
 ```
 let buf = BinBuf(b"foobar")
@@ -173,6 +189,8 @@ afterward, and the returned value is unaffected by later mutation.
 
 [`Bin`](./bin.md)
 
+#### Example
+
 ```
 let buf = BinBuf(b"abc")
 let frozen = buf.freeze()
@@ -196,6 +214,8 @@ from the front of the buffer as it's consumed.
 #### Returns
 
 iterator of [`Bin`](./bin.md)
+
+#### Example
 
 ```
 let buf = BinBuf(b"hello world")
@@ -226,6 +246,8 @@ Tests whether the buffer's contents start with the given prefix.
 
 [`Bool`](./index.md)
 
+#### Example
+
 ```
 assert (BinBuf(b"foobar").starts_with b"foo")
 ```
@@ -244,6 +266,8 @@ Tests whether the buffer's contents end with the given suffix.
 
 [`Bool`](./index.md)
 
+#### Example
+
 ```
 assert (BinBuf(b"foobar").ends_with b"bar")
 ```
@@ -261,6 +285,8 @@ Tests whether the buffer's contents contain the given bytes.
 #### Returns
 
 [`Bool`](./index.md)
+
+#### Example
 
 ```
 assert (BinBuf(b"foobar").contains b"oob")
@@ -282,6 +308,8 @@ the buffer if omitted), without modifying the buffer.
 
 [`Bin`](./bin.md)
 
+#### Example
+
 ```
 let buf = BinBuf(b"foobar")
 assert_eq (buf.sub 2) b"obar"
@@ -296,6 +324,8 @@ modifying the buffer.
 #### Returns
 
 [`Str`](./str.md)
+
+#### Example
 
 ```
 assert_eq (BinBuf(b"ABC").hex()) "414243"

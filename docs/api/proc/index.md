@@ -33,6 +33,8 @@ The signal setting is retained when the strand later targets a Unix VFS.
 Windows launches always use `CTRL_BREAK_EVENT`. With `force: false`, a process
 that outlives the grace period is orphaned.
 
+#### Example
+
 ```
 with_policy signal: :INT: grace: 2.5 do
   run worker
@@ -59,6 +61,8 @@ line ending, from the end of the finished string.
 #### Returns
 
 [`Str`](../std/str.md)
+
+#### Example
 
 ```
 let output = sub do run echo hello

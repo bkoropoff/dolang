@@ -27,6 +27,8 @@ Constructs a mask from symbols or one iterable of symbols.
 | `:WRITE_OWNER:`       | Change owner and owning group                          |
 | `:SYNCHRONIZE:`       | Use synchronous I/O                                    |
 
+#### Example
+
 ```
 let rw = nfs4.Mask(:READ_DATA:, :WRITE_DATA:)
 ```

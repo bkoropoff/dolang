@@ -29,6 +29,8 @@ Computes the BLAKE3 digest.
 
 [`Bin`](../std/bin.md) - 32-byte digest
 
+#### Example
+
 ```
 let digest = blake3 "abc"
 assert_eq $digest.len 32
@@ -50,6 +52,8 @@ Computes the MD5 digest.
 
 [`Bin`](../std/bin.md) - 16-byte digest
 
+#### Example
+
 ```
 assert_eq $md5("abc").hex()
   900150983cd24fb0d6963f7d28e17f72
@@ -68,6 +72,8 @@ Computes the SHA-1 digest.
 #### Returns
 
 [`Bin`](../std/bin.md) - 20-byte digest
+
+#### Example
 
 ```
 assert_eq $sha1("abc").hex()
@@ -88,6 +94,8 @@ Computes the SHA-256 digest.
 
 [`Bin`](../std/bin.md) - 32-byte digest
 
+#### Example
+
 ```
 assert_eq $sha256("abc").hex()
   ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
@@ -106,6 +114,8 @@ Computes the SHA-512 digest.
 #### Returns
 
 [`Bin`](../std/bin.md) - 64-byte digest
+
+#### Example
 
 ```
 assert_eq $sha512("abc").hex()[..10]

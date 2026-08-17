@@ -73,9 +73,11 @@ Returns Windows token information captured for the active VFS context.
 
 [`TokenInfo`](./tokeninfo.md)
 
-**Errors:**
+#### Errors
 
 - Raises `UnsupportedError` when the active VFS target is Unix.
+
+#### Example
 
 ```
 if token_info().is_elevated

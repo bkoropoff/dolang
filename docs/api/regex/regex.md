@@ -88,13 +88,17 @@ echo $matches.len  # => 3
 Replaces matches of this pattern in `haystack`. The `replacement` is either a
 string template or a callback function.
 
-**String replacement** supports backreferences:
+#### String replacement
+
+ supports backreferences:
 
 - `$1`, `$2`, … — numbered capture groups
 - `${name}` — named capture groups
 - `$$` — literal `$`
 
-**Callback replacement** receives a [`Captures`](./captures.md) object for each
+#### Callback replacement
+
+ receives a [`Captures`](./captures.md) object for each
 match and must return a `Str`.
 
 The optional `limit` controls how many replacements are performed:

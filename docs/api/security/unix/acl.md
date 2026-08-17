@@ -14,13 +14,13 @@ Constructs an ACL from an iterable of [`Ace`](./ace.md) values.
 | ------ | -------- | ---------------------- |
 | `aces` | iterable | Access-control entries |
 
-**Errors:**
+#### Errors
 
-- Raises `ValueError` when required owner-user, owner-group, or other entries
-  are missing.
-- Raises `ValueError` for duplicate entry qualifiers.
-- Raises `ValueError` when named user or group entries are present without a
-  mask entry.
+| Exception    | Condition                                                     |
+| ------------ | ------------------------------------------------------------- |
+| `ValueError` | A required owner-user, owner-group, or other entry is missing |
+| `ValueError` | Entry qualifiers are duplicated                               |
+| `ValueError` | Named user or group entries are present without a mask entry  |
 
 The constructor preserves the supplied mask. It does not calculate one.
 

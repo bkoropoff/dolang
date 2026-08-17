@@ -16,6 +16,8 @@ A running mock HTTP server, bound to a random local port.
 
 `Server` when no `func` is provided, otherwise the result of calling `func`
 
+#### Example
+
 ```
 let server = http.mock.Server()
 ```
@@ -43,6 +45,8 @@ when needed; use `/` to build request paths.
 #### Type
 
 [`url.Url`](../url/url.md)
+
+#### Example
 
 ```
 http.mock.Server do |server|
@@ -94,6 +98,8 @@ callback that returns one — built dynamically from the matched request
 | `body`    | [`Str`](../std/str.md)\|[`Bin`](../std/bin.md) | Raw response body                   |
 | `json`    | any                                            | Response body, JSON-serialized      |
 
+#### Example
+
 ```
 server.mock
   - method: POST
@@ -115,11 +121,14 @@ passed to the `do` block if one is given, otherwise returned directly.
 
 #### Errors
 
-- Raises if no items are given, if an item is missing `respond`, or if
-  `path_regex` isn't a valid regular expression.
-- If an item's `expect:` is unsatisfied by the time it's unmounted (block
-  exit, or explicit `.unmount()`), raises with that item's `name:` (or a
-  generic label) and the expected vs. actual request count.
+| Exception         | Condition                                              |
+| ----------------- | ------------------------------------------------------ |
+| `RuntimeError`    | No items are given                                     |
+| `MissingKeyError` | An item is missing `respond`                           |
+| `ValueError`      | An item's `path_regex` is invalid                      |
+| `RuntimeError`    | An item's `expect` is unsatisfied when it is unmounted |
+
+#### Scoped Example
 
 ```
 http.mock.Server do |server|

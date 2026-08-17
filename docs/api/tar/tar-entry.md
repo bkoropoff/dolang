@@ -72,6 +72,8 @@ Reads up to `size` bytes from the current content position.
 
 [`Bin`](../std/bin.md).
 
+#### Example
+
 ```
 let prefix = entry.read 512
 ```

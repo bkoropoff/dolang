@@ -244,6 +244,8 @@ Returns a new path with the final extension removed.
 
 [Path](path.md)
 
+#### Example
+
 ```
 let path = Path "archive.tar.gz"
 echo path.without_ext()  # archive.tar
@@ -265,6 +267,8 @@ Returns a new path with the final extension replaced.
 #### Returns
 
 [Path](path.md)
+
+#### Example
 
 ```
 let path = Path "archive.tar.gz"
@@ -288,6 +292,8 @@ Returns a new path with the final component replaced.
 
 [Path](path.md)
 
+#### Example
+
 ```
 let path = Path "src/main.rs"
 echo path.with_name "lib.rs"  # src/lib.rs
@@ -307,6 +313,8 @@ extension when present.
 #### Returns
 
 [Path](path.md)
+
+#### Example
 
 ```
 let path = Path "archive.tar.gz"

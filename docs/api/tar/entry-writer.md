@@ -14,6 +14,8 @@ Writes raw string or binary bytes.
 | ------ | ---------------------------------------------- | -------------- |
 | `data` | [`Str`](../std/str.md)\|[`Bin`](../std/bin.md) | Bytes to write |
 
+#### Example
+
 ```
 entry.write header
 entry.write b"\x00\x01"

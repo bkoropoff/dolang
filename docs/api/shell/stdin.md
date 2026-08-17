@@ -22,6 +22,8 @@ Reads raw bytes.
 With a `size`, this is a single read and may return fewer bytes than requested,
 as [`fs.File.read`](../fs/file.md) does. Without one, it reads to end of stream.
 
+#### Example
+
 ```
 let rest = shell.stdin.read()
 let head = shell.stdin.read 64
@@ -43,6 +45,8 @@ Returns a `Stdin` that yields arbitrary-sized [`Bin`](../std/bin.md) chunks.
 #### Returns
 
 `Stdin`.
+
+#### Example
 
 ```
 for chunk = shell.stdin.chunks()

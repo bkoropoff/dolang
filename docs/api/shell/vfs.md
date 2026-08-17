@@ -18,6 +18,8 @@ The `Vfs` retains the background stream for its lifetime.
 | ------ | -------- | --------------------------- |
 | `func` | callable | VFS server launcher         |
 
+#### Example
+
 ```
 let remote = Vfs do run ssh host dolang-vfs --stdio
 ```
@@ -68,8 +70,13 @@ the session that follows.
 
 #### Errors
 
-- The agent is not listening, or the path is not a socket
-- Either end fails to prove the key, or only one end was given one
+| Exception           | Condition                                                           |
+| ------------------- | ------------------------------------------------------------------- |
+| `sys.NotFoundError` | The socket path does not exist                                      |
+| `sys.Error`         | The agent is not listening or the path is not a usable Unix socket  |
+| `sys.Error`         | Authentication fails or only one endpoint was configured with a key |
+
+#### Example
 
 ```
 let a = Vfs.unix_socket /tmp/agent/socket
@@ -115,6 +122,8 @@ handles and works across the elevated VFS boundary.
 #### Returns
 
 `Vfs`
+
+#### Example
 
 ```
 let admin = Vfs.windows_admin()

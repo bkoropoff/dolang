@@ -39,11 +39,14 @@ handle.
 
 the result of `func`.
 
-**Errors:**
+#### Errors
 
-- Creating another entry while an entry scope is active raises a concurrency
-    error.
-- Writing fewer or more bytes than `size` fails and prevents further entries.
+| Exception          | Condition                                                    |
+| ------------------ | ------------------------------------------------------------ |
+| `ConcurrencyError` | Another entry is created while an entry scope is active      |
+| `ValueError`       | The number of bytes written differs from the declared `size` |
+
+#### Example
 
 ```
 archive.entry data.bin size: 4 mode: 0o600 do |entry|
@@ -65,6 +68,8 @@ Creates a directory entry.
 | `mtime`      | [`DateTime`](../time/datetime.md)?                           | Modification time; default Unix epoch |
 | `user_name`  | [`Str`](../std/str.md)?                                      | Owner name                            |
 | `group_name` | [`Str`](../std/str.md)?                                      | Group name                            |
+
+#### Example
 
 ```
 archive.create_dir "subdir" mode: 0o755
@@ -88,6 +93,8 @@ Creates a symbolic link entry pointing to `target`. Argument order matches
 | `user_name`  | [`Str`](../std/str.md)?                                      | Owner name                            |
 | `group_name` | [`Str`](../std/str.md)?                                      | Group name                            |
 
+#### Example
+
 ```
 archive.symlink "target.txt" "link.txt"
 ```
@@ -109,6 +116,8 @@ Creates a hard-link entry pointing to `target`. Argument order matches
 | `mtime`      | [`DateTime`](../time/datetime.md)?                           | Modification time; default Unix epoch |
 | `user_name`  | [`Str`](../std/str.md)?                                      | Owner name                            |
 | `group_name` | [`Str`](../std/str.md)?                                      | Group name                            |
+
+#### Example
 
 ```
 archive.hard_link "file.txt" "link.txt"

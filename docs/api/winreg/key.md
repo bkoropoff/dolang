@@ -27,9 +27,10 @@ of calling `func`
 
 #### Errors
 
-- [`sys.NotFoundError`](../sys/not-found-error.md) — the subkey does not exist
-- [`sys.PermissionDeniedError`](../sys/permission-denied-error.md) — access
-    was denied
+| Exception                                                        | Condition                 |
+| ---------------------------------------------------------------- | ------------------------- |
+| [`sys.NotFoundError`](../sys/not-found-error.md)                 | The subkey does not exist |
+| [`sys.PermissionDeniedError`](../sys/permission-denied-error.md) | Access was denied         |
 
 #### Example
 
@@ -44,7 +45,7 @@ winreg.open :CURRENT_USER: do |root|
 Creates a registry link. The target may not exist. Arguments follow `ln -s`
 ordering: target first, link destination last.
 
-**Parameters:**
+#### Parameters
 
 | Name             | Type                   | Description                                        |
 | ---------------- | ---------------------- | -------------------------------------------------- |
@@ -53,11 +54,14 @@ ordering: target first, link destination last.
 | `link_subpath`   | [`Str`](../std/str.md) | New link path relative to this key                 |
 | `view`           | sym?                   | View used for target mapping and destination       |
 
-**Errors:**
+#### Errors
 
-- [`sys.AlreadyExistsError`](../sys/already-exists-error.md) — the destination
-  already exists and was not modified
-- `sys.InvalidInputError` — a path contains NUL
+| Exception                | Condition                                           |
+| ------------------------ | --------------------------------------------------- |
+| `sys.AlreadyExistsError` | The destination already exists and was not modified |
+| `sys.InvalidInputError`  | A path contains NUL                                 |
+
+#### Example
 
 ```
 root.link :CURRENT_USER: r"Software\MyApp" "MyAppLink"
@@ -67,19 +71,23 @@ root.link :CURRENT_USER: r"Software\MyApp" "MyAppLink"
 
 Reads a registry link without following it.
 
-**Parameters:**
+#### Parameters
 
 | Name      | Type                   | Description                         |
 | --------- | ---------------------- | ----------------------------------- |
 | `subpath` | [`Str`](../std/str.md) | Link path relative to this key      |
 | `view`    | sym?                   | Registry view (default: `:NATIVE:`) |
 
-**Returns:** [`LinkTarget`](./link-target.md)
+#### Returns
 
-**Errors:**
+ [`LinkTarget`](./link-target.md)
 
-- `sys.InvalidInputError` — the key is not a link
-- `sys.InvalidDataError` — the link value is malformed
+#### Errors
+
+| Exception               | Condition                   |
+| ----------------------- | --------------------------- |
+| `sys.InvalidInputError` | The key is not a link       |
+| `sys.InvalidDataError`  | The link value is malformed |
 
 Aliases such as `:CLASSES_ROOT:` and `:CURRENT_CONFIG:` may project to their
 physical `:LOCAL_MACHINE:` or `:USERS:` backing path.
@@ -123,8 +131,10 @@ without traversing or modifying its target.
 
 #### Errors
 
-- [`sys.NotFoundError`](../sys/not-found-error.md) — the subkey does not exist
-- Without `all: true`, deleting a subkey that still has children raises
+| Exception                                        | Condition                                              |
+| ------------------------------------------------ | ------------------------------------------------------ |
+| [`sys.NotFoundError`](../sys/not-found-error.md) | The subkey does not exist                              |
+| `sys.Error`                                      | The subkey has children and `all: true` was not passed |
 
 #### Example
 

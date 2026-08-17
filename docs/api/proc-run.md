@@ -20,7 +20,7 @@ run git status
 Resolves and runs the program. Positional arguments are converted with
 [`std.verbatim`](./std/index.md#verbatim-value).
 
-**Parameters:**
+#### Parameters
 
 | Name     | Type                                       | Description                            |
 | -------- | ------------------------------------------ | -------------------------------------- |
@@ -31,7 +31,7 @@ Resolves and runs the program. Positional arguments are converted with
 | `policy` | [`dict`](./std/dict.md)?                   | Termination policy overrides           |
 | `mode`   | [`sym`](./std/sym.md)?                     | `:LINE:` (default) or `:CHUNK:` output |
 
-**Returns:**
+#### Returns
 
 `nil` after the program exits successfully.
 
@@ -83,9 +83,11 @@ Windows target.
 
 Resolves the program without running it.
 
-**Returns:**
+#### Returns
 
 [`fs.Path`](./fs/path.md), or `nil` when the program is not found.
+
+#### Example
 
 ```
 let git = run.git.which()

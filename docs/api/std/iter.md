@@ -81,8 +81,10 @@ Returns an iterator that yields at most `n` values.
 
 #### Errors
 
-Raises [`TypeError`](./type-error.md) if `n` is not an `Int`.
-Raises [`ValueError`](./value-error.md) if `n` is negative.
+| Exception                        | Condition           |
+| -------------------------------- | ------------------- |
+| [`TypeError`](./type-error.md)   | `n` is not an `Int` |
+| [`ValueError`](./value-error.md) | `n` is negative     |
 
 ### `skip n`
 
@@ -96,8 +98,10 @@ Returns an iterator that discards the first `n` values, then yields the rest.
 
 #### Errors
 
-Raises [`TypeError`](./type-error.md) if `n` is not an `Int`.
-Raises [`ValueError`](./value-error.md) if `n` is negative.
+| Exception                        | Condition           |
+| -------------------------------- | ------------------- |
+| [`TypeError`](./type-error.md)   | `n` is not an `Int` |
+| [`ValueError`](./value-error.md) | `n` is negative     |
 
 ### `enumerate`
 

@@ -29,9 +29,11 @@ Resolves a Unix user ID to its macOS principal UUID.
 
 [`uuid.Uuid`](../../uuid/uuid.md)
 
-**Errors:**
+#### Errors
 
 - Raises `UnsupportedError` when the active VFS target is not macOS.
+
+#### Example
 
 ```
 let owner = security.macos.uuid_for_uid 501
@@ -51,7 +53,7 @@ Resolves a Unix group ID to its macOS principal UUID.
 
 [`uuid.Uuid`](../../uuid/uuid.md)
 
-**Errors:**
+#### Errors
 
 - Raises `UnsupportedError` when the active VFS target is not macOS.
 
@@ -72,9 +74,11 @@ result carries both the id and whether it's a user or group.
 A two-element [`Tuple`](../../std/tuple.md) of `(kind, id)`, where `kind` is
 `:UID:` or `:GID:` and `id` is an `Int`.
 
-**Errors:**
+#### Errors
 
 - Raises `UnsupportedError` when the active VFS target is not macOS.
+
+#### Example
 
 ```
 let kind id = security.macos.id_for_uuid owner

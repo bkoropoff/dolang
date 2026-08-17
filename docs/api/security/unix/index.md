@@ -22,9 +22,11 @@ Returns Unix security information captured for the active VFS context.
 
 [`Identity`](./identity.md)
 
-**Errors:**
+#### Errors
 
 - Raises `UnsupportedError` when the active VFS target is not Unix.
+
+#### Example
 
 ```
 let info = id()
@@ -47,12 +49,13 @@ be a [`uuid.Uuid`](../../uuid/uuid.md) principal, resolved to a uid first via
 
 [`Str`](../../std/str.md)
 
-**Errors:**
+#### Errors
 
-- Raises [`sys.NotFoundError`](../../sys/not-found-error.md) when the ID is
-  unknown.
-- Raises `UnsupportedError` when the active VFS target is not Unix, or when
-  a `uuid.Uuid` is passed and the target is not macOS.
+| Exception                                            | Condition                                                      |
+| ---------------------------------------------------- | -------------------------------------------------------------- |
+| [`sys.NotFoundError`](../../sys/not-found-error.md)  | The ID is unknown                                              |
+| [`UnsupportedError`](../../std/unsupported-error.md) | The active VFS target is not Unix                              |
+| [`UnsupportedError`](../../std/unsupported-error.md) | A `uuid.Uuid` is passed and the active VFS target is not macOS |
 
 ### `user_id name`
 
@@ -62,11 +65,12 @@ Resolves a Unix user name in the active VFS target.
 
 [`Int`](../../std/int.md)
 
-**Errors:**
+#### Errors
 
-- Raises [`sys.NotFoundError`](../../sys/not-found-error.md) when the name is
-  unknown.
-- Raises `UnsupportedError` when the active VFS target is not Unix.
+| Exception                                            | Condition                         |
+| ---------------------------------------------------- | --------------------------------- |
+| [`sys.NotFoundError`](../../sys/not-found-error.md)  | The name is unknown               |
+| [`UnsupportedError`](../../std/unsupported-error.md) | The active VFS target is not Unix |
 
 ### `group_name gid`
 
@@ -84,12 +88,13 @@ be a [`uuid.Uuid`](../../uuid/uuid.md) principal, resolved to a gid first via
 
 [`Str`](../../std/str.md)
 
-**Errors:**
+#### Errors
 
-- Raises [`sys.NotFoundError`](../../sys/not-found-error.md) when the ID is
-  unknown.
-- Raises `UnsupportedError` when the active VFS target is not Unix, or when
-  a `uuid.Uuid` is passed and the target is not macOS.
+| Exception                                            | Condition                                                      |
+| ---------------------------------------------------- | -------------------------------------------------------------- |
+| [`sys.NotFoundError`](../../sys/not-found-error.md)  | The ID is unknown                                              |
+| [`UnsupportedError`](../../std/unsupported-error.md) | The active VFS target is not Unix                              |
+| [`UnsupportedError`](../../std/unsupported-error.md) | A `uuid.Uuid` is passed and the active VFS target is not macOS |
 
 ### `group_id name`
 
@@ -99,8 +104,9 @@ Resolves a Unix group name in the active VFS target.
 
 [`Int`](../../std/int.md)
 
-**Errors:**
+#### Errors
 
-- Raises [`sys.NotFoundError`](../../sys/not-found-error.md) when the name is
-  unknown.
-- Raises `UnsupportedError` when the active VFS target is not Unix.
+| Exception                                            | Condition                         |
+| ---------------------------------------------------- | --------------------------------- |
+| [`sys.NotFoundError`](../../sys/not-found-error.md)  | The name is unknown               |
+| [`UnsupportedError`](../../std/unsupported-error.md) | The active VFS target is not Unix |

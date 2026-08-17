@@ -1,6 +1,6 @@
 # UnexpectedKeyError
 
-Raised when an unexpected keyword argument is passed.
+Raised when an unexpected key argument is passed.
 
 ## Inherits
 

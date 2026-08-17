@@ -27,6 +27,8 @@ Executes multiple blocks concurrently and returns their results as an array.
 
 `array` -- results in the same order as the blocks
 
+#### Example
+
 ```
 let results = fork
   - do 42
@@ -55,6 +57,8 @@ Applies `func` concurrently to values pulled lazily from an iterator.
 
 Results are sent as workers complete. The function returns `nil` after the
 input is exhausted and every worker has finished.
+
+#### Example
 
 ```
 let results = []
@@ -86,6 +90,8 @@ Executes `func` over an iterator with a fixed number of scoped worker strands.
 Block results are discarded. The function returns `nil` after the input is
 exhausted and every worker has finished.
 
+#### Example
+
 ```
 pool 4 $urls do |url|
   download $url
@@ -109,7 +115,7 @@ Pipeline stages are callables that read from their implicit input and write to
 their implicit output. The `from`, `where`, `each`, and `collect` functions are
 designed to work as pipeline stages.
 
-**Examples:**
+#### Example
 
 ```
 let result = pipeline
@@ -160,6 +166,8 @@ Runs `func` concurrently in a background strand, returning a
 
 [Strand](strand.md) -- a handle to the background strand
 
+#### Example
+
 ```
 let worker = spawn do
   echo "Background task running"
@@ -192,6 +200,8 @@ can be used to communicate with it.
 #### Returns
 
 [Stream](./stream.md)
+
+#### Example
 
 ```
 let s = stream do each do |x| (x * 2)

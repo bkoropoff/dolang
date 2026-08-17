@@ -14,9 +14,11 @@ Creates a resource with `count` concurrent reservations.
 | ------- | ---------------------- | ----------------------------- |
 | `count` | [`Int`](../std/int.md) | maximum concurrent admissions |
 
-**Errors:**
+#### Errors
 
 - Raises `ValueError` if `count` is zero.
+
+#### Example
 
 ```
 let network = Resource 8
@@ -47,6 +49,8 @@ invariants.
 #### Returns
 
 the block result
+
+#### Example
 
 ```
 network.with do

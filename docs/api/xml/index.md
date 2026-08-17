@@ -25,13 +25,15 @@ Parses an XML document into a parentless element tree.
 
 [`Node`](./node.md), the root element.
 
-**Errors:**
+#### Errors
 
 - `ValueError` if the document is invalid, has no root element, or uses an
   unsupported entity.
 
 Predefined entities and numeric character references are expanded into text
 and attribute values. Custom DTD entities are not resolved.
+
+#### Example
 
 ```
 let doc = decode "<root><child>text</child></root>"
@@ -56,9 +58,11 @@ but element and attribute namespace semantics are preserved.
 
 `Str`, the serialized XML.
 
-**Errors:**
+#### Errors
 
 - `ValueError` if the tree is invalid or cyclic.
+
+#### Example
 
 ```
 let n = Node "greeting"
@@ -80,9 +84,11 @@ contain invalid data while it is being edited.
 | ------ | ----------------------- | ------------ |
 | `node` | [`Node`](./node.md)     | Root element |
 
-**Errors:**
+#### Errors
 
 - `ValueError` if the tree is invalid or cyclic.
+
+#### Example
 
 ```
 let doc = Node "root"

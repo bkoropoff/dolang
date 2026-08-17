@@ -12,7 +12,9 @@ Unix mode is available on [`Entry`](./entry.md) rather than `File`.
 
 Reads data from the file.
 
-**Availability:** Read mode only
+#### Availability
+
+Read mode only.
 
 #### Parameters
 
@@ -37,13 +39,17 @@ open "archive.zip" do |archive|
     echo text
 ```
 
-**Error:** Raises a runtime error if called on a file opened in write mode.
+#### Errors
+
+Raises a runtime error if called on a file opened in write mode.
 
 ### `write data`
 
 Writes data to the file.
 
-**Availability:** Write mode only
+#### Availability
+
+Write mode only.
 
 #### Parameters
 
@@ -60,7 +66,9 @@ open "output.zip" "w" do |archive|
     file.write b"\x00\x01\x02\x03"
 ```
 
-**Error:** Raises a runtime error if called on a file opened in read mode.
+#### Errors
+
+Raises a runtime error if called on a file opened in read mode.
 
 ### `close()`
 

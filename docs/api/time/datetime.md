@@ -23,6 +23,8 @@ Creates a `DateTime` from a Unix timestamp.
 | `seconds` | [`Int`](../std/int.md)\|[`Float`](../std/float.md)? | Optional seconds since Unix epoch                      |
 | `nanos`   | [`Int`](../std/int.md)?                             | Optional nanoseconds since Unix epoch or offset to add |
 
+#### Example
+
 ```
 echo $ DateTime.from_unix 1700000000
 echo $ DateTime.from_unix 1.25
@@ -50,6 +52,8 @@ Parses an RFC3339 timestamp.
 | ------------ | ------------------------------------------ |
 | `ValueError` | The input is not a valid RFC3339 timestamp |
 
+#### Example
+
 ```
 let dt = DateTime.parse_rfc3339("2024-01-02T03:04:05Z")
 echo $dt.rfc3339()
@@ -75,6 +79,8 @@ Returns the RFC3339 representation.
 #### Returns
 
 [`Str`](../std/str.md)
+
+#### Example
 
 ```
 let dt = DateTime.from_unix(1700000000)

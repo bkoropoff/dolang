@@ -37,9 +37,11 @@ Constructs a named-group entry.
 | `id` | [`Int`](../../std/int.md) | Group ID    |
 
 Every constructor takes `type:` (`:ALLOW:`, `:DENY:`, `:AUDIT:`, or
-`:ALARM:`) and `mask:` (a [`Mask`](./mask.md)) as required keyword
+`:ALARM:`) and `mask:` (a [`Mask`](./mask.md)) as required key
 arguments, and `flags:` (a [`Flags`](./flags.md)) as an optional one,
 defaulting to empty.
+
+#### Example
 
 ```
 let read = nfs4.Mask(:READ_DATA:, :READ_ATTRIBUTES:)

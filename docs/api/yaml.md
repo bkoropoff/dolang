@@ -37,6 +37,8 @@ Type mapping:
 | `array` | sequence   |
 | `dict`  | mapping    |
 
+#### Example
+
 ```
 assert_eq (encode nil) "~"
 assert_eq (encode [1, 2, 3]) "- 1\n- 2\n- 3"
@@ -76,6 +78,8 @@ Type mapping:
 | string     | `Str`   |
 | sequence   | `array` |
 | mapping    | `dict`  |
+
+#### Example
 
 ```
 let doc = decode |

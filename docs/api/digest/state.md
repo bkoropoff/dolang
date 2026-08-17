@@ -21,6 +21,8 @@ Updates the digest state with the bytes of `data`.
 
 The same handle, for chaining.
 
+#### Example
+
 ```
 let state = Blake3()
 state.update "ab"
@@ -41,6 +43,8 @@ Returns the current digest bytes without consuming the handle.
 #### Returns
 
 [`Bin`](../std/bin.md) - Digest snapshot
+
+#### Example
 
 ```
 let state = Blake3()

@@ -15,7 +15,7 @@ Executes the statement and returns a Rows iterator for reading results.
 
 | Name  | Type | Description                                           |
 | ----- | ---- | ----------------------------------------------------- |
-| `...` | any  | Keyword arguments for parameter binding               |
+| `...` | any  | Key arguments for parameter binding                   |
 
 #### Returns
 
@@ -43,7 +43,7 @@ Executes the statement and returns the number of rows affected.
 
 | Name  | Type | Description                                           |
 | ----- | ---- | ----------------------------------------------------- |
-| `...` | any  | Keyword arguments for parameter binding               |
+| `...` | any  | Key arguments for parameter binding                   |
 
 #### Returns
 
@@ -67,9 +67,9 @@ Closes the statement and releases resources.
 ### Parameter Binding
 
 Statements support named parameters using the `:name` syntax in SQL. Parameters
-are bound by passing keyword arguments to `query()` or `execute()`.
+are bound by passing key arguments to `query()` or `execute()`.
 
-**Supported parameter types:**
+#### Supported parameter types
 
 | Type    | SQLite Type  | Example                                  |
 | ------- | ------------ | ---------------------------------------- |

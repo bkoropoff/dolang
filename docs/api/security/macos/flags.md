@@ -18,6 +18,8 @@ Constructs a flag set from symbols or one iterable of symbols.
 | `:ONLY_INHERIT:`      | This entry is inherited but does not apply to the directory itself |
 | `:INHERITED:`         | This entry was inherited from a parent directory                   |
 
+#### Example
+
 ```
 let inherit = macos.Flags(:FILE_INHERIT:, :DIRECTORY_INHERIT:)
 ```

@@ -14,6 +14,8 @@ Builds a buffer, optionally seeded with the contents of an existing string.
 | --------- | ------------------ | ---------------- |
 | `initial` | [`Str`](./str.md)? | initial contents |
 
+#### Example
+
 ```
 let buf = StrBuf("hello")
 assert_eq $buf.len 5
@@ -28,6 +30,8 @@ Returns the byte length of the buffer's current contents.
 #### Type
 
 [`Int`](./index.md)
+
+#### Example
 
 ```
 assert_eq (StrBuf("hello").len) 5
@@ -47,6 +51,8 @@ it, written directly into the buffer.
 | ------- | ---- | --------------- |
 | `value` |      | value to append |
 
+#### Example
+
 ```
 let buf = StrBuf()
 buf.append "foo"
@@ -63,6 +69,8 @@ Appends the raw bytes of `value`, which must be a [`Str`](./str.md).
 | Name    | Type              | Description      |
 | ------- | ----------------- | ---------------- |
 | `value` | [`Str`](./str.md) | string to append |
+
+#### Example
 
 ```
 let buf = StrBuf("foo")
@@ -81,6 +89,8 @@ right in place.
 | ------- | ------------------- | ---------------------------------------------- |
 | `index` | [`Int`](./index.md) | insertion point; must fall on a UTF-8 boundary |
 | `value` | [`Str`](./str.md)   | string to insert                               |
+
+#### Example
 
 ```
 let buf = StrBuf("foobar")
@@ -103,6 +113,8 @@ the buffer left in place.
 
 [`Str`](./str.md)
 
+#### Example
+
 ```
 let buf = StrBuf("foobar")
 assert_eq (buf.remove (1..3)) "oo"
@@ -121,6 +133,8 @@ Shrinks the buffer to `len` bytes, discarding anything past that point.
 | Name  | Type                | Description                               |
 | ----- | ------------------- | ----------------------------------------- |
 | `len` | [`Int`](./index.md) | new length; must fall on a UTF-8 boundary |
+
+#### Example
 
 ```
 let buf = StrBuf("foobar")
@@ -149,6 +163,8 @@ afterward, and the returned string is unaffected by later mutation.
 #### Returns
 
 [`Str`](./str.md)
+
+#### Example
 
 ```
 let buf = StrBuf("abc")
@@ -179,6 +195,8 @@ chunk yielded is non-empty.
 
 iterator of [`Str`](./str.md)
 
+#### Example
+
 ```
 let buf = StrBuf("hello world")
 assert_eq [...buf.drain(4)] ["hell", "o wo", "rld"]
@@ -208,6 +226,8 @@ Tests whether the buffer's contents start with the given prefix.
 
 [`Bool`](./index.md)
 
+#### Example
+
 ```
 assert (StrBuf("foobar").starts_with "foo")
 ```
@@ -226,6 +246,8 @@ Tests whether the buffer's contents end with the given suffix.
 
 [`Bool`](./index.md)
 
+#### Example
+
 ```
 assert (StrBuf("foobar").ends_with "bar")
 ```
@@ -243,6 +265,8 @@ Tests whether the buffer's contents contain the given substring.
 #### Returns
 
 [`Bool`](./index.md)
+
+#### Example
 
 ```
 assert (StrBuf("foobar").contains "oob")
@@ -263,6 +287,8 @@ buffer if omitted), without modifying the buffer.
 #### Returns
 
 [`Str`](./str.md)
+
+#### Example
 
 ```
 let buf = StrBuf("foobar")

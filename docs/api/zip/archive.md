@@ -10,7 +10,9 @@ and provide methods for working with ZIP archives.
 Immutable array-like view of [`Entry`](./entry.md) objects for every entry in
 the archive.
 
-**Availability:** Read mode only
+#### Availability
+
+Read mode only.
 
 #### Example
 
@@ -24,8 +26,10 @@ open "archive.zip" do |archive|
   echo "Total files: $(entries.len)"
 ```
 
-**Error:** Raises a runtime error if accessed on an archive opened in write
-mode. A view obtained before the archive is closed reports an empty length
+#### Errors
+
+Raises a runtime error if accessed on an archive opened in write mode. A view
+obtained before the archive is closed reports an empty length
 afterward rather than erroring, since `len` cannot itself raise an error.
 
 ## Methods
@@ -45,7 +49,7 @@ which carry no content and so have no use for a write handle.
 | `mode` | [`Int`](../std/int.md)? | Unix permission bits in write mode (default: `0`)    |
 | `func` | func                    | Callable to run with the file; auto-closes when done |
 
-**Mode-specific behavior:**
+##### Mode-specific behavior
 
 - **Read mode:** Opens an existing file for reading
 - **Write mode:** Creates a new file entry for writing
@@ -112,7 +116,7 @@ open "output.zip" "w" do |archive|
 
 Closes the archive and releases resources.
 
-**Mode-specific behavior:**
+#### Mode-specific behavior
 
 - **Read mode:** Simply closes the archive
 - **Write mode:** Finalizes the archive (writes central directory) before
