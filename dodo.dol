@@ -302,7 +302,7 @@ return $
   "gen-bytecode-fuzz-seeds":
     help: generate bytecode fuzz seeds
     do |_|
-      run_cargo run --bin gen-bytecode-seeds
+      run_cargo run -p dolang-fuzz --bin gen-bytecode-seeds
 
   "fuzz-bytecode":
     help: run the bytecode fuzzer
@@ -310,8 +310,8 @@ return $
       help: "arguments to `cargo +nightly fuzz run`"
       collect: true
     do |args|
-      run_cargo run --bin gen-bytecode-seeds
-      run_cargo cargo +nightly fuzz run bytecode_deserialize
+      run_cargo run -p dolang-fuzz --bin gen-bytecode-seeds
+      run_cargo +nightly fuzz run bytecode_deserialize
         target/fuzz-corpus/bytecode_deserialize
         -- ...args.args
 
