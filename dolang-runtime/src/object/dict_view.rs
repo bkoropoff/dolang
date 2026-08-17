@@ -2,6 +2,7 @@
 
 use std::ops::ControlFlow;
 
+use bitvec::{bitbox, boxed::BitBox};
 use dolang_bytecode::Variadic;
 
 use crate::{
@@ -19,7 +20,9 @@ use crate::{
     sym,
     sym::Sym,
     unpack,
-    value::{Empty, Input, InputBy, Output, Slot, Slots, TypeObject, Value, private::Sealed},
+    value::{
+        AsTuple, Empty, Input, InputBy, Output, Slot, Slots, TypeObject, Value, private::Sealed,
+    },
     vm::Vm,
 };
 
@@ -188,7 +191,7 @@ impl<'v, 'a, I: DictLike<'v>> DictView<'v, 'a, I> {
         sink: &mut dyn Spread<'v, 's>,
     ) -> Result<'v, 's, ()> {
         let pairs = flatten(view, owner, strand)?;
-        spread_pairs(strand, pairs, context, sink)
+        spread_pairs(strand, &pairs, context, sink)
     }
 
     /// Implements [`Object::unpack`] directly without constructing a view object.
@@ -432,19 +435,31 @@ fn snapshot_dict<'v, 's>(
 
 fn spread_pairs<'v, 's>(
     strand: &mut Strand<'v, 's>,
-    pairs: Vec<(Value<'v>, Value<'v>)>,
+    pairs: &[(Value<'v>, Value<'v>)],
     context: SpreadContext,
     sink: &mut dyn Spread<'v, 's>,
 ) -> Result<'v, 's, ()> {
-    for (mut key, mut value) in pairs {
-        if context == SpreadContext::Pairs {
-            sink.keyed(strand, Slot::new(&mut key), Slot::new(&mut value))?;
-        } else {
-            let mut pair = Value::from_object(super::tuple::tuple(strand, [key, value]));
-            sink.positional(strand, Slot::new(&mut pair))?;
+    // The pairs stay borrowed from wherever they're rooted, so each one is
+    // copied into scratch slots (never bare stack `Value`s) for the duration
+    // of the sink call.
+    strand.with_slots_sync(|strand, [mut first, mut second]| {
+        for (key, value) in pairs {
+            if context == SpreadContext::Pairs {
+                Output::set(strand, &mut first, key);
+                Output::set(strand, &mut second, value);
+                sink.keyed(
+                    strand,
+                    Slot::reborrow(&mut first),
+                    Slot::reborrow(&mut second),
+                )?;
+            } else {
+                // The pair tuple only needs one slot; `second` goes unused.
+                Output::set(strand, &mut first, AsTuple::new([key, value]));
+                sink.positional(strand, Slot::reborrow(&mut first))?;
+            }
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 fn unpack_pairs<'v, 's>(
@@ -452,7 +467,7 @@ fn unpack_pairs<'v, 's>(
     pairs: Vec<(Value<'v>, Value<'v>)>,
     mut unpack: Unpack<'v, '_>,
 ) -> Result<'v, 's, ()> {
-    let mut consumed = vec![false; pairs.len()];
+    let mut consumed = bitbox![0; pairs.len()];
     let mut position = 0i64;
     for item in unpack.iter() {
         let (key, slot, default) = match item {
@@ -470,8 +485,8 @@ fn unpack_pairs<'v, 's>(
             UnpackItem::Rest { slot } => {
                 let pairs = pairs
                     .iter()
-                    .zip(&consumed)
-                    .filter(|(_, consumed)| !**consumed)
+                    .zip(consumed.iter().by_vals())
+                    .filter(|(_, consumed)| !*consumed)
                     .map(|((key, value), _)| (key.dup(), value.dup()))
                     .collect();
                 strand.builtin_types().dict_view_iter.create(
@@ -494,7 +509,7 @@ fn unpack_pairs<'v, 's>(
                 }
             });
         if let Some((index, value)) = found {
-            consumed[index] = true;
+            consumed.set(index, true);
             Output::set(strand, slot, value);
         } else if let Some(default) = default {
             Output::set(strand, slot, default);
@@ -506,22 +521,28 @@ fn unpack_pairs<'v, 's>(
             return Err(Error::missing_key(strand, &key));
         }
     }
-    if unpack.exhaustive() && consumed.iter().any(|consumed| !consumed) {
-        return Err(Error::unexpected_key(
-            strand,
-            Sym::well_known(sym::ITEM_ERROR),
-        ));
+    if unpack.exhaustive()
+        && let Some(index) = consumed.first_zero()
+    {
+        return Err(Error::unexpected_key(strand, &pairs[index].0));
     }
     Ok(())
 }
 
+/// Matches `pairs` against `sig`, filling in the positional and key slots of
+/// `out`.
+///
+/// Returns the mask of pairs that were consumed; the caller owns producing
+/// the [`Variadic::Capture`] tail from it, since how the leftovers are best
+/// represented depends on where the pairs came from (a fresh snapshot can be
+/// moved into a new iterator, an existing iterator can just drop them).
 fn unpack_sig_pairs<'v, 's>(
     strand: &mut Strand<'v, 's>,
-    pairs: Vec<(Value<'v>, Value<'v>)>,
+    pairs: &[(Value<'v>, Value<'v>)],
     sig: &sig::Unpack<'v, '_>,
-    mut out: Slots<'v, '_>,
-) -> Result<'v, 's, ()> {
-    let mut consumed = vec![false; pairs.len()];
+    out: &mut Slots<'v, '_>,
+) -> Result<'v, 's, BitBox> {
+    let mut consumed = bitbox![0; pairs.len()];
     let pos_count = sig.required + sig.optional.len();
     for index in 0..pos_count {
         let index_value = i64::try_from(index).map_err(|_| Error::overflow(strand))?;
@@ -531,7 +552,7 @@ fn unpack_sig_pairs<'v, 's>(
             .enumerate()
             .find(|(found, pair)| !consumed[*found] && pair.0.op_eq(strand, &key).to_bool(strand))
         {
-            consumed[found] = true;
+            consumed.set(found, true);
             out.at(index).store(value.dup());
         } else if let Some(default) = sig.optional.get(index.saturating_sub(sig.required)) {
             out.at(index).store(default.dup());
@@ -549,7 +570,7 @@ fn unpack_sig_pairs<'v, 's>(
             .enumerate()
             .find(|(found, pair)| !consumed[*found] && pair.0.op_eq(strand, &key).to_bool(strand))
         {
-            consumed[found] = true;
+            consumed.set(found, true);
             out.at(pos_count + offset).store(value.dup());
         } else if let Some(default) = &spec.default {
             out.at(pos_count + offset).store(default.dup());
@@ -560,25 +581,12 @@ fn unpack_sig_pairs<'v, 's>(
             });
         }
     }
-    if sig.variadic == Variadic::None && consumed.iter().any(|consumed| !consumed) {
-        return Err(Error::unexpected_key(
-            strand,
-            Sym::well_known(sym::ITEM_ERROR),
-        ));
+    if sig.variadic == Variadic::None
+        && let Some(index) = consumed.first_zero()
+    {
+        return Err(Error::unexpected_key(strand, &pairs[index].0));
     }
-    if sig.variadic == Variadic::Capture {
-        let pairs = pairs
-            .into_iter()
-            .zip(consumed)
-            .filter_map(|(pair, consumed)| (!consumed).then_some(pair))
-            .collect();
-        strand.builtin_types().dict_view_iter.create(
-            strand,
-            Iter { pairs, index: 0 },
-            out.at(pos_count + sig.keys.len()),
-        );
-    }
-    Ok(())
+    Ok(consumed)
 }
 
 fn debug<'v, 's>(
@@ -760,16 +768,30 @@ impl<'v> Protocol<'v> for View<'v> {
         sink: &'a mut dyn Spread<'v, 's>,
     ) -> Result<'v, 's, ()> {
         let pairs = flatten_glue(this.get(), strand)?;
-        spread_pairs(strand, pairs, context, sink)
+        spread_pairs(strand, &pairs, context, sink)
     }
     async fn op_unpack<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         sig: &'a sig::Unpack<'v, 'a>,
-        out: Slots<'v, 'a>,
+        mut out: Slots<'v, 'a>,
     ) -> Result<'v, 's, ()> {
         let pairs = flatten_glue(this.get(), strand)?;
-        unpack_sig_pairs(strand, pairs, sig, out)
+        let consumed = unpack_sig_pairs(strand, &pairs, sig, &mut out)?;
+        if sig.variadic == Variadic::Capture {
+            // The snapshot is ours, so the tail moves into the iterator.
+            let pairs = pairs
+                .into_iter()
+                .zip(consumed.iter().by_vals())
+                .filter_map(|(pair, consumed)| (!consumed).then_some(pair))
+                .collect();
+            strand.builtin_types().dict_view_iter.create(
+                strand,
+                Iter { pairs, index: 0 },
+                out.at(sig.len() - 1),
+            );
+        }
+        Ok(())
     }
     fn op_type<'a, 's>(
         _this: Recv<'v, 'a, Self>,
@@ -816,18 +838,41 @@ impl<'v> Protocol<'v> for Iter<'v> {
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         sig: &'a sig::Unpack<'v, 'a>,
-        out: Slots<'v, 'a>,
+        mut out: Slots<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        let pairs = {
-            let mut iter = this.borrow_mut(strand)?;
-            let pairs = iter.pairs[iter.index..]
-                .iter()
-                .map(|(key, value)| (key.dup(), value.dup()))
-                .collect();
-            iter.index = iter.pairs.len();
-            pairs
+        // Unpack against the remaining pairs in place: no copy of the tail,
+        // and the iterator is only advanced once the unpack has succeeded, so
+        // a failure leaves it exactly where it was. The shared borrow is held
+        // across the unpack, so re-entering this iterator from a key
+        // comparison is reported as a concurrency error rather than seeing a
+        // half-consumed iterator.
+        let consumed = {
+            let iter = this.borrow(strand)?;
+            unpack_sig_pairs(strand, &iter.pairs[iter.index..], sig, &mut out)?
         };
-        unpack_sig_pairs(strand, pairs, sig, out)
+        {
+            let mut iter = this.borrow_mut(strand)?;
+            if sig.variadic == Variadic::Capture {
+                // The capture is this same iterator, rewound over whatever the
+                // unpack left behind: drop the pairs it took (along with
+                // everything consumed by earlier operations) and keep the rest
+                // in place.
+                let start = iter.index;
+                let mut index = 0;
+                iter.pairs.retain(|_| {
+                    let keep = index >= start && !consumed[index - start];
+                    index += 1;
+                    keep
+                });
+                iter.index = 0;
+            } else {
+                iter.index = iter.pairs.len();
+            }
+        }
+        if sig.variadic == Variadic::Capture {
+            Output::set(strand, out.at(sig.len() - 1), &this);
+        }
+        Ok(())
     }
     async fn op_spread<'a, 's>(
         this: Recv<'v, 'a, Self>,
@@ -835,13 +880,16 @@ impl<'v> Protocol<'v> for Iter<'v> {
         context: SpreadContext,
         sink: &'a mut dyn Spread<'v, 's>,
     ) -> Result<'v, 's, ()> {
-        let mut iter = this.borrow_mut(strand)?;
-        let pairs = iter.pairs[iter.index..]
-            .iter()
-            .map(|(k, v)| (k.dup(), v.dup()))
-            .collect();
-        iter.index = iter.pairs.len();
-        spread_pairs(strand, pairs, context, sink)
+        // As in `op_unpack`: spread the remaining pairs in place rather than
+        // copying the tail out, and only mark them consumed once the whole
+        // spread has succeeded.
+        let end = {
+            let iter = this.borrow(strand)?;
+            spread_pairs(strand, &iter.pairs[iter.index..], context, sink)?;
+            iter.pairs.len()
+        };
+        this.borrow_mut(strand)?.index = end;
+        Ok(())
     }
     fn op_get<'a, 's>(
         this: Recv<'v, 'a, Self>,
