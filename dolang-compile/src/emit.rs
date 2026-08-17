@@ -88,6 +88,9 @@ impl<'a, 'b> FuncEmitter<'a, 'b> {
         let mut seen = HashSet::new();
         let enter = func.enter;
         out.push(enter);
+        // Nothing branches to the entry block today, but leaving it out of `seen` would
+        // let a back edge to it push a second copy
+        seen.insert(enter);
         Self::topological_sort_rec(emitter, emitter.graph.block(enter), &mut seen, &mut out);
         out.into()
     }
