@@ -545,7 +545,7 @@ impl<'a, C: Context> FuncVerifier<'a, C> {
             }
         }
         match last.inst {
-            Ret | Branch(_) | BranchTrue(_) | BranchFalse(_) | NlBranch(_, _) => (),
+            Ret | Branch(_) | NlBranch(_, _) => (),
             _ => return Err(FuncError::UnexpectedEnd),
         }
         Ok(())
@@ -1609,6 +1609,19 @@ mod test {
             )],
         );
         run(&ctx).unwrap();
+    }
+
+    #[test]
+    fn conditional_branch_must_not_end_function() {
+        use Inst::*;
+
+        for inst in [BranchTrue(-4), BranchFalse(-4)] {
+            let ctx = link(
+                default_mock(),
+                vec![raw_func(0, vec![], vec![LoadConst(0), inst])],
+            );
+            func_error(ctx, FuncError::UnexpectedEnd);
+        }
     }
 
     #[test]
