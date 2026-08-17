@@ -62,6 +62,14 @@ def registry_crud_round_trips()
   scratch.delete "child"
   assert_eq $scratch.subkeys().len 0
 
+  let nonempty = scratch.create "nonempty" access: :READ_WRITE:
+  let grandchild = nonempty.create "child" access: :READ_WRITE:
+  grandchild.close()
+  nonempty.close()
+  assert_throws $sys.DirectoryNotEmptyError do
+    scratch.delete "nonempty"
+  scratch.delete "nonempty" all: true
+
   # Recursive deletion removes values and nested subkeys. Missing keys are
   # ignored only when requested.
   let tree = scratch.create "tree" access: :READ_WRITE:

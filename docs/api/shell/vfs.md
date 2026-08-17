@@ -70,11 +70,12 @@ the session that follows.
 
 #### Errors
 
-| Exception           | Condition                                                           |
-| ------------------- | ------------------------------------------------------------------- |
-| `sys.NotFoundError` | The socket path does not exist                                      |
-| `sys.Error`         | The agent is not listening or the path is not a usable Unix socket  |
-| `sys.Error`         | Authentication fails or only one endpoint was configured with a key |
+| Exception                    | Condition                                                           |
+| ---------------------------- | ------------------------------------------------------------------- |
+| `sys.NotFoundError`          | The socket path does not exist                                      |
+| `sys.ConnectionRefusedError` | The endpoint is unavailable                                         |
+| `sys.PermissionDeniedError`  | Authentication fails or only one endpoint was configured with a key |
+| `sys.InvalidInputError`      | The key is shorter than 16 bytes                                    |
 
 #### Example
 

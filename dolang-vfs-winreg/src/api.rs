@@ -33,7 +33,7 @@ const PAGE_SIZE: u32 = 64;
 /// wire input rather than a locally provable invariant.
 fn unexpected(request: &str) -> Error {
     Error::new(
-        ErrorKind::Other,
+        ErrorKind::InvalidData,
         format!("unexpected response for {request}"),
     )
 }
@@ -557,7 +557,7 @@ mod tests {
             Err(error) => error,
         };
 
-        assert_eq!(error.kind(), ErrorKind::Other);
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
         assert_eq!(error.to_string(), "unexpected response for OpenRoot");
     }
 }

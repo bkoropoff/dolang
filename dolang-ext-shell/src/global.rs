@@ -21,8 +21,16 @@ use tokio::{
 use crate::{
     console::{Console, DefaultOutput, HostConsole, SinkConsole, SubConsole},
     error::{
-        AlreadyExistsError, InvalidInputError, NotFoundError, PermissionDeniedError, ProcError,
-        SysError, SysErrorObject, TimedOutError, UnsupportedError,
+        AddrInUseError, AddrNotAvailableError, AlreadyExistsError, ArgumentListTooLongError,
+        BrokenPipeError, ConnectionAbortedError, ConnectionRefusedError, ConnectionResetError,
+        CrossesDevicesError, DeadlockError, DirectoryNotEmptyError, ExecutableFileBusyError,
+        FileTooLargeError, HostUnreachableError, InterruptedError, InvalidDataError,
+        InvalidFilenameError, InvalidInputError, IsADirectoryError, NetworkDownError,
+        NetworkUnreachableError, NotADirectoryError, NotConnectedError, NotFoundError,
+        NotSeekableError, OutOfMemoryError, PermissionDeniedError, ProcError, QuotaExceededError,
+        ReadOnlyFilesystemError, ResourceBusyError, StaleNetworkFileHandleError, StorageFullError,
+        SysError, SysErrorObject, TimedOutError, TooManyLinksError, UnexpectedEofError,
+        UnsupportedError, WouldBlockError, WriteZeroError,
     },
     error_code::{CodeObject, Errno, ErrorCode, FreeBsdErrno, LinuxErrno, MacosErrno, WinError},
     fs::{
@@ -114,6 +122,38 @@ pub(crate) struct Types<'v> {
     pub(crate) already_exists: Type<'v, SysErrorObject<AlreadyExistsError>>,
     pub(crate) timed_out: Type<'v, SysErrorObject<TimedOutError>>,
     pub(crate) unsupported: Type<'v, SysErrorObject<UnsupportedError>>,
+    pub(crate) connection_refused: Type<'v, SysErrorObject<ConnectionRefusedError>>,
+    pub(crate) connection_reset: Type<'v, SysErrorObject<ConnectionResetError>>,
+    pub(crate) host_unreachable: Type<'v, SysErrorObject<HostUnreachableError>>,
+    pub(crate) network_unreachable: Type<'v, SysErrorObject<NetworkUnreachableError>>,
+    pub(crate) connection_aborted: Type<'v, SysErrorObject<ConnectionAbortedError>>,
+    pub(crate) not_connected: Type<'v, SysErrorObject<NotConnectedError>>,
+    pub(crate) addr_in_use: Type<'v, SysErrorObject<AddrInUseError>>,
+    pub(crate) addr_not_available: Type<'v, SysErrorObject<AddrNotAvailableError>>,
+    pub(crate) network_down: Type<'v, SysErrorObject<NetworkDownError>>,
+    pub(crate) broken_pipe: Type<'v, SysErrorObject<BrokenPipeError>>,
+    pub(crate) would_block: Type<'v, SysErrorObject<WouldBlockError>>,
+    pub(crate) not_adirectory: Type<'v, SysErrorObject<NotADirectoryError>>,
+    pub(crate) is_adirectory: Type<'v, SysErrorObject<IsADirectoryError>>,
+    pub(crate) directory_not_empty: Type<'v, SysErrorObject<DirectoryNotEmptyError>>,
+    pub(crate) read_only_filesystem: Type<'v, SysErrorObject<ReadOnlyFilesystemError>>,
+    pub(crate) stale_network_file_handle: Type<'v, SysErrorObject<StaleNetworkFileHandleError>>,
+    pub(crate) write_zero: Type<'v, SysErrorObject<WriteZeroError>>,
+    pub(crate) storage_full: Type<'v, SysErrorObject<StorageFullError>>,
+    pub(crate) not_seekable: Type<'v, SysErrorObject<NotSeekableError>>,
+    pub(crate) quota_exceeded: Type<'v, SysErrorObject<QuotaExceededError>>,
+    pub(crate) file_too_large: Type<'v, SysErrorObject<FileTooLargeError>>,
+    pub(crate) resource_busy: Type<'v, SysErrorObject<ResourceBusyError>>,
+    pub(crate) executable_file_busy: Type<'v, SysErrorObject<ExecutableFileBusyError>>,
+    pub(crate) deadlock: Type<'v, SysErrorObject<DeadlockError>>,
+    pub(crate) crosses_devices: Type<'v, SysErrorObject<CrossesDevicesError>>,
+    pub(crate) too_many_links: Type<'v, SysErrorObject<TooManyLinksError>>,
+    pub(crate) invalid_filename: Type<'v, SysErrorObject<InvalidFilenameError>>,
+    pub(crate) argument_list_too_long: Type<'v, SysErrorObject<ArgumentListTooLongError>>,
+    pub(crate) invalid_data: Type<'v, SysErrorObject<InvalidDataError>>,
+    pub(crate) interrupted: Type<'v, SysErrorObject<InterruptedError>>,
+    pub(crate) unexpected_eof: Type<'v, SysErrorObject<UnexpectedEofError>>,
+    pub(crate) out_of_memory: Type<'v, SysErrorObject<OutOfMemoryError>>,
     pub(crate) proc_error: Type<'v, ProcError>,
     pub(crate) capture: Type<'v, Capture>,
     pub(crate) pipe_receiver: Type<'v, PipeReceiver>,
@@ -492,6 +532,134 @@ impl<'v> Global<'v> {
                     .build_type::<SysErrorObject<UnsupportedError>>((), ())
                     .nominal_supertype(sys_error)
                     .nominal_supertype(TypeObject::UnsupportedError)
+                    .build(),
+                connection_refused: builder
+                    .build_type::<SysErrorObject<ConnectionRefusedError>>((), ())
+                    .nominal_supertype(sys_error)
+                    .build(),
+                connection_reset: builder
+                    .build_type::<SysErrorObject<ConnectionResetError>>((), ())
+                    .nominal_supertype(sys_error)
+                    .build(),
+                host_unreachable: builder
+                    .build_type::<SysErrorObject<HostUnreachableError>>((), ())
+                    .nominal_supertype(sys_error)
+                    .build(),
+                network_unreachable: builder
+                    .build_type::<SysErrorObject<NetworkUnreachableError>>((), ())
+                    .nominal_supertype(sys_error)
+                    .build(),
+                connection_aborted: builder
+                    .build_type::<SysErrorObject<ConnectionAbortedError>>((), ())
+                    .nominal_supertype(sys_error)
+                    .build(),
+                not_connected: builder
+                    .build_type::<SysErrorObject<NotConnectedError>>((), ())
+                    .nominal_supertype(sys_error)
+                    .build(),
+                addr_in_use: builder
+                    .build_type::<SysErrorObject<AddrInUseError>>((), ())
+                    .nominal_supertype(sys_error)
+                    .build(),
+                addr_not_available: builder
+                    .build_type::<SysErrorObject<AddrNotAvailableError>>((), ())
+                    .nominal_supertype(sys_error)
+                    .build(),
+                network_down: builder
+                    .build_type::<SysErrorObject<NetworkDownError>>((), ())
+                    .nominal_supertype(sys_error)
+                    .build(),
+                broken_pipe: builder
+                    .build_type::<SysErrorObject<BrokenPipeError>>((), ())
+                    .nominal_supertype(sys_error)
+                    .build(),
+                would_block: builder
+                    .build_type::<SysErrorObject<WouldBlockError>>((), ())
+                    .nominal_supertype(sys_error)
+                    .build(),
+                not_adirectory: builder
+                    .build_type::<SysErrorObject<NotADirectoryError>>((), ())
+                    .nominal_supertype(sys_error)
+                    .build(),
+                is_adirectory: builder
+                    .build_type::<SysErrorObject<IsADirectoryError>>((), ())
+                    .nominal_supertype(sys_error)
+                    .build(),
+                directory_not_empty: builder
+                    .build_type::<SysErrorObject<DirectoryNotEmptyError>>((), ())
+                    .nominal_supertype(sys_error)
+                    .build(),
+                read_only_filesystem: builder
+                    .build_type::<SysErrorObject<ReadOnlyFilesystemError>>((), ())
+                    .nominal_supertype(sys_error)
+                    .build(),
+                stale_network_file_handle: builder
+                    .build_type::<SysErrorObject<StaleNetworkFileHandleError>>((), ())
+                    .nominal_supertype(sys_error)
+                    .build(),
+                write_zero: builder
+                    .build_type::<SysErrorObject<WriteZeroError>>((), ())
+                    .nominal_supertype(sys_error)
+                    .build(),
+                storage_full: builder
+                    .build_type::<SysErrorObject<StorageFullError>>((), ())
+                    .nominal_supertype(sys_error)
+                    .build(),
+                not_seekable: builder
+                    .build_type::<SysErrorObject<NotSeekableError>>((), ())
+                    .nominal_supertype(sys_error)
+                    .build(),
+                quota_exceeded: builder
+                    .build_type::<SysErrorObject<QuotaExceededError>>((), ())
+                    .nominal_supertype(sys_error)
+                    .build(),
+                file_too_large: builder
+                    .build_type::<SysErrorObject<FileTooLargeError>>((), ())
+                    .nominal_supertype(sys_error)
+                    .build(),
+                resource_busy: builder
+                    .build_type::<SysErrorObject<ResourceBusyError>>((), ())
+                    .nominal_supertype(sys_error)
+                    .build(),
+                executable_file_busy: builder
+                    .build_type::<SysErrorObject<ExecutableFileBusyError>>((), ())
+                    .nominal_supertype(sys_error)
+                    .build(),
+                deadlock: builder
+                    .build_type::<SysErrorObject<DeadlockError>>((), ())
+                    .nominal_supertype(sys_error)
+                    .build(),
+                crosses_devices: builder
+                    .build_type::<SysErrorObject<CrossesDevicesError>>((), ())
+                    .nominal_supertype(sys_error)
+                    .build(),
+                too_many_links: builder
+                    .build_type::<SysErrorObject<TooManyLinksError>>((), ())
+                    .nominal_supertype(sys_error)
+                    .build(),
+                invalid_filename: builder
+                    .build_type::<SysErrorObject<InvalidFilenameError>>((), ())
+                    .nominal_supertype(sys_error)
+                    .build(),
+                argument_list_too_long: builder
+                    .build_type::<SysErrorObject<ArgumentListTooLongError>>((), ())
+                    .nominal_supertype(sys_error)
+                    .build(),
+                invalid_data: builder
+                    .build_type::<SysErrorObject<InvalidDataError>>((), ())
+                    .nominal_supertype(sys_error)
+                    .build(),
+                interrupted: builder
+                    .build_type::<SysErrorObject<InterruptedError>>((), ())
+                    .nominal_supertype(sys_error)
+                    .build(),
+                unexpected_eof: builder
+                    .build_type::<SysErrorObject<UnexpectedEofError>>((), ())
+                    .nominal_supertype(sys_error)
+                    .build(),
+                out_of_memory: builder
+                    .build_type::<SysErrorObject<OutOfMemoryError>>((), ())
+                    .nominal_supertype(sys_error)
                     .build(),
                 proc_error: builder.register_type(),
                 capture: builder.register_type(),

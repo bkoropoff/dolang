@@ -3,6 +3,12 @@
 System and I/O failures raise [`sys.Error`](../api/sys/error.md) or one of its
 categorized subclasses.
 
+Every stable portable I/O category has a corresponding subclass. This makes
+common network, filesystem, resource, data, and control-flow failures catchable
+without inspecting platform-specific codes. [`sys.Error`](../api/sys/error.md)
+remains their catch-all superclass and represents failures without a portable
+classification.
+
 ## Catching Categorized Failures
 
 ```

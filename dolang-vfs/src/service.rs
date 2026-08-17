@@ -467,7 +467,8 @@ fn read_key_from_stdin() -> io::Result<dolang_rpc::AuthKey> {
     stdin
         .read_exact(&mut key)
         .map_err(|error| io::Error::other(format!("--key-stdin: reading key: {error}")))?;
-    dolang_rpc::AuthKey::new(&key).map_err(io::Error::other)
+    dolang_rpc::AuthKey::new(&key)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
 }
 
 /// Checks the containing directory's permissions and binds `socket_path`.

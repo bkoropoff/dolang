@@ -10,16 +10,13 @@ use std::{
     ptr,
 };
 
+use dolang_vfs::error::{Error, ErrorKind};
 use dolang_vfs::extension::{ExtContext, ExtGuard, ExtOsHandle, InvalidHandle};
-use dolang_vfs::{
-    error::{Error, ErrorKind},
-    target::OperatingSystem,
-};
 use dolang_winterop::security::{AccessMask, SecDesc as VfsSecDesc, SecDescControl, SecInfo};
 use windows_sys::Win32::{
     Foundation::{
-        ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER,
-        ERROR_MORE_DATA, ERROR_NO_MORE_ITEMS, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS,
+        ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA,
+        ERROR_NO_MORE_ITEMS, ERROR_SUCCESS,
     },
     Security::{
         PROTECTED_DACL_SECURITY_INFORMATION, PROTECTED_SACL_SECURITY_INFORMATION,
@@ -78,17 +75,9 @@ fn checked_wide(value: &str, what: &str) -> Result<Vec<u16>, Error> {
 }
 
 fn from_win32(operation: &str, code: u32) -> Error {
-    let kind = match code {
-        ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND => ErrorKind::NotFound,
-        ERROR_ACCESS_DENIED => ErrorKind::PermissionDenied,
-        ERROR_ALREADY_EXISTS => ErrorKind::AlreadyExists,
-        _ => ErrorKind::Other,
-    };
-    Error::from_system_code(
-        kind,
-        format!("{operation}: registry error {code}"),
-        OperatingSystem::Windows,
+    Error::from_raw_os_error_with_message(
         code as i32,
+        format!("{operation}: registry error {code}"),
     )
 }
 
@@ -130,7 +119,8 @@ unsafe fn open_key_options(
     access: Access,
     options: u32,
 ) -> Result<HKEY, Error> {
-    let subpath = checked_wide(subpath, "registry subpath")?;
+    let subpath_str = subpath;
+    let subpath = checked_wide(subpath_str, "registry subpath")?;
     let open = || {
         let mut out: HKEY = ptr::null_mut();
         // SAFETY: `subpath` is NUL-terminated; `out` is a valid out pointer.
@@ -599,10 +589,32 @@ unsafe fn delete_key(parent: HKEY, subpath: &str, view: View, all: bool) -> Resu
         unsafe { close_key(target) };
         result?;
     }
-    let subpath = checked_wide(subpath, "registry subpath")?;
+    let subpath_wide = checked_wide(subpath, "registry subpath")?;
     // SAFETY: `subpath` is NUL-terminated.
-    let status = unsafe { RegDeleteKeyExW(parent, subpath.as_ptr(), view_sam(view), 0) };
+    let status = unsafe { RegDeleteKeyExW(parent, subpath_wide.as_ptr(), view_sam(view), 0) };
     if status != ERROR_SUCCESS {
+        if !all && status == ERROR_ACCESS_DENIED {
+            const KEY_ENUMERATE_SUB_KEYS: u32 = 0x0008;
+            let target = unsafe {
+                open_key(
+                    parent,
+                    subpath,
+                    view,
+                    Access(AccessMask::from_bits_retain(KEY_ENUMERATE_SUB_KEYS)),
+                )
+            };
+            if let Ok(target) = target {
+                let has_children =
+                    unsafe { enum_subkey(target, 0) }.is_ok_and(|name| name.is_some());
+                unsafe { close_key(target) };
+                if has_children {
+                    return Err(Error::new(
+                        ErrorKind::DirectoryNotEmpty,
+                        "delete key: registry key has subkeys",
+                    ));
+                }
+            }
+        }
         return Err(from_win32("delete key", status));
     }
     Ok(())
@@ -841,7 +853,7 @@ unsafe fn set_value(handle: HKEY, name: Option<&str>, value: &Value) -> Result<(
 fn from_io(operation: &str, err: io::Error) -> Error {
     match err.raw_os_error() {
         Some(code) => from_win32(operation, code as u32),
-        None => Error::new(ErrorKind::Other, format!("{operation}: {err}")),
+        None => Error::new(err.kind().into(), format!("{operation}: {err}")),
     }
 }
 

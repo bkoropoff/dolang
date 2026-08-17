@@ -292,6 +292,38 @@ nav:
       - api/sys/permission-denied-error.md
       - api/sys/timed-out-error.md
       - api/sys/unsupported-error.md
+      - api/sys/connection-refused-error.md
+      - api/sys/connection-reset-error.md
+      - api/sys/host-unreachable-error.md
+      - api/sys/network-unreachable-error.md
+      - api/sys/connection-aborted-error.md
+      - api/sys/not-connected-error.md
+      - api/sys/addr-in-use-error.md
+      - api/sys/addr-not-available-error.md
+      - api/sys/network-down-error.md
+      - api/sys/broken-pipe-error.md
+      - api/sys/would-block-error.md
+      - api/sys/not-a-directory-error.md
+      - api/sys/is-a-directory-error.md
+      - api/sys/directory-not-empty-error.md
+      - api/sys/read-only-filesystem-error.md
+      - api/sys/stale-network-file-handle-error.md
+      - api/sys/write-zero-error.md
+      - api/sys/storage-full-error.md
+      - api/sys/not-seekable-error.md
+      - api/sys/quota-exceeded-error.md
+      - api/sys/file-too-large-error.md
+      - api/sys/resource-busy-error.md
+      - api/sys/executable-file-busy-error.md
+      - api/sys/deadlock-error.md
+      - api/sys/crosses-devices-error.md
+      - api/sys/too-many-links-error.md
+      - api/sys/invalid-filename-error.md
+      - api/sys/argument-list-too-long-error.md
+      - api/sys/invalid-data-error.md
+      - api/sys/interrupted-error.md
+      - api/sys/unexpected-eof-error.md
+      - api/sys/out-of-memory-error.md
     - sys.linux:
       - api/sys/linux/index.md
       - api/sys/linux/errno.md

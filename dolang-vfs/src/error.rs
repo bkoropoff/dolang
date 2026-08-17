@@ -218,7 +218,22 @@ impl Error {
 
     /// Converts a native error number from the current host.
     pub fn from_raw_os_error(raw: i32) -> Self {
-        io::Error::from_raw_os_error(raw).into()
+        let error = io::Error::from_raw_os_error(raw);
+        Self::from_raw_os_error_with_message(raw, error.to_string())
+    }
+
+    /// Converts a native error number from the current host while preserving
+    /// a caller-supplied message.
+    pub fn from_raw_os_error_with_message(raw: i32, message: impl Into<String>) -> Self {
+        let kind = io::Error::from_raw_os_error(raw).kind().into();
+        Self::from_system_code(kind, message, OperatingSystem::current(), raw)
+    }
+
+    /// Converts a native error number from the current host while preserving
+    /// a caller-supplied kind.
+    pub fn from_raw_os_error_with_kind(raw: i32, kind: ErrorKind) -> Self {
+        let error = io::Error::from_raw_os_error(raw);
+        Self::from_system_code(kind, error.to_string(), OperatingSystem::current(), raw)
     }
 
     /// Returns this error's portable classification.
@@ -307,5 +322,20 @@ mod tests {
             error.system_code().unwrap().operating_system(),
             OperatingSystem::Windows
         );
+    }
+
+    #[test]
+    fn raw_os_error_with_message_derives_kind_and_preserves_details() {
+        #[cfg(unix)]
+        let raw = libc::ENOENT;
+        #[cfg(windows)]
+        let raw = windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND as i32;
+
+        let error = Error::from_raw_os_error_with_message(raw, "custom message");
+        assert_eq!(error.kind(), ErrorKind::NotFound);
+        assert_eq!(error.message(), "custom message");
+        let code = error.system_code().unwrap();
+        assert_eq!(code.operating_system(), OperatingSystem::current());
+        assert_eq!(code.raw(), raw);
     }
 }
