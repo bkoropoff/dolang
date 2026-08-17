@@ -786,6 +786,12 @@ impl Reassembler {
         }
 
         if abort {
+            if kind == Kind::Negotiate {
+                return Err(Error::Auth(
+                    "authentication not provided or not accepted".into(),
+                ));
+            }
+
             #[cfg(unix)]
             if !fragment_handles.is_empty() {
                 return Err(Error::Protocol(
