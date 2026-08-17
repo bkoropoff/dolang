@@ -1,0 +1,51 @@
+# The loop runs until the pattern stops matching
+let pairs = [[1, 2], [3, 4], [5]]
+let i = 0
+let sum = 0
+while let a b = pairs.get(i)
+  sum = (sum + a + b)
+  i = (i + 1)
+assert_eq $i 2
+assert_eq $sum 10
+
+# A pattern that never matches runs the body zero times
+while let a b = [1]
+  assert false msg: "should not have matched: $a $b"
+
+# The bindings are fresh on each iteration and not visible afterwards
+# The trailing single-element entry stops the loop by failing the shape test
+let items = [[:a:, 1], [:b:, 2], [:c:]]
+let j = 0
+let keys = []
+while let k v = items.get(j)
+  keys.push $k
+  assert_eq $v (j + 1)
+  j = (j + 1)
+assert_eq $keys [:a:, :b:]
+
+# A bare identifier binds the scrutinee and tests its truthiness
+let countdown = 3
+while let n = countdown
+  echo $n
+  countdown = if (n == 1)
+    nil
+  else
+    (n - 1)
+
+# `break` and `continue` work in a pattern-bound body
+let total = 0
+let k = 0
+while let a b = pairs.get(k)
+  k = (k + 1)
+  if (a == 3)
+    continue
+  if (a == 5)
+    break
+  total = (total + a + b)
+assert_eq $total 3
+
+# output: END
+# 3
+# 2
+# 1
+# END

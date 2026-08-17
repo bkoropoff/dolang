@@ -1,0 +1,7 @@
+while let = [1, 2]
+  echo yes
+# error: expected at least one item in pattern
+#   --> cond_bind_empty_pattern.dol:LL:LL
+#    |
+# LL | while let = [1, 2]
+#    |           ^

@@ -1,0 +1,99 @@
+# The pattern is laid out vertically after the scrutinee, and `do` introduces
+# the branch body
+let resp = {status: 200, body: "ok"}
+if bind resp
+  :status
+  :body
+do
+  assert_eq $status 200
+  assert_eq $body ok
+else
+  assert false msg: "should have matched"
+
+# Dash items work the same as bare ones
+if bind [1, 2]
+  - a
+  - b
+do
+  assert_eq $a 1
+  assert_eq $b 2
+else
+  assert false msg: "should have matched"
+
+# A shape mismatch takes the failure edge
+if bind {status: 200}
+  :status
+  :body
+do
+  assert false msg: "should not have matched: $status $body"
+else
+  echo missing-key
+
+# Unlike the horizontal `if let` form, the vertical pattern supports defaults
+if bind {status: 200}
+  :status
+  :body = "fallback"
+do
+  assert_eq $status 200
+  assert_eq $body fallback
+else
+  assert false msg: "should have matched"
+
+# Non-constant defaults are evaluated in the branch body
+def make_default()
+  "computed"
+
+if bind {status: 200}
+  :status
+  :body = make_default()
+do
+  assert_eq $status 200
+  assert_eq $body computed
+else
+  assert false msg: "should have matched"
+
+# Rest patterns
+if bind [1, 2, 3]
+  - a
+  ...rest
+do
+  assert_eq $a 1
+  let sum = 0
+  for x = rest
+    sum = (sum + x)
+  assert_eq $sum 5
+else
+  assert false msg: "should have matched"
+
+# `else if bind` chains, and mixing with `else if let`
+if bind {status: 200}
+  :missing
+do
+  assert false msg: "should not have matched: $missing"
+else if let a b = [7, 8]
+  assert_eq $a 7
+  assert_eq $b 8
+else
+  assert false msg: "should have matched the elif"
+
+# No `else` at all
+if bind {status: 404}
+  :status
+do
+  assert_eq $status 404
+
+# `while bind` takes the same shape
+let queue = [{n: 1}, {n: 2}, {}]
+let i = 0
+let sum = 0
+while bind queue.get(i)
+  :n
+do
+  sum = (sum + n)
+  i = (i + 1)
+assert_eq $i 2
+assert_eq $sum 3
+
+# output: END
+# missing-key
+# END

@@ -95,6 +95,99 @@ bind {foo: nil}
 assert_eq $foo nil  # nil is a present value, not missing
 ```
 
+## Conditional Destructuring
+
+`let` and `bind` after `if` or `while` make the destructuring itself the
+condition: the bindings are in scope for the branch body when the pattern
+matches, and the failure branch runs when it does not.
+
+```
+if let a b = [1, 2]
+  echo "matched $a $b"
+else
+  echo "no match"
+```
+
+`bind` takes the same vertical layout as its statement form, with `do`
+introducing the branch body. Because the pattern is vertical, it also supports
+default values:
+
+```
+if bind response
+  :status
+  :body = ""
+do
+  echo "$status $body"
+else
+  echo "unexpected shape"
+```
+
+Both forms work with `while`, in which case the loop ends the first time the
+pattern fails to match:
+
+```
+let i = 0
+while let a b = pairs.get(i)
+  echo "$a $b"
+  i = (i + 1)
+```
+
+The bindings are scoped to the branch body, so they are not visible after the
+`if`, in an `else` branch, or after the loop.
+
+Both forms also work where `if` appears in
+[vertical layout](./vertical-layout.md), building arrays, dictionaries, or
+argument lists:
+
+```
+let parts = $
+  - always
+  if let a b = pair
+    - $a
+    - $b
+  else
+    - "no pair"
+```
+
+### What Counts as a Match
+
+Only a *shape* mismatch takes the failure branch: too few or too many
+positional elements, or a missing or unexpected key. Any other error raised
+while destructuring propagates as usual. In particular, destructuring a value
+that does not support it at all is an error rather than a silent non-match:
+
+```
+# Branches: [1, 2] unpacks fine, but not into three elements
+if let a b c = [1, 2]
+  echo unreachable
+else
+  echo "wrong arity"
+
+# Raises: an int cannot be destructured at all
+if let a b = 42
+  echo unreachable
+else
+  echo also-unreachable
+```
+
+A default supplies a missing element, so it turns what would otherwise be a
+mismatch into a match.
+
+### Binding a Single Name
+
+A pattern that is a bare identifier binds the scrutinee itself and branches on
+its truthiness rather than destructuring it:
+
+```
+if let value = lookup key
+  echo "found $value"
+else
+  echo "not found"
+```
+
+Since `if let` uses horizontal pattern layout, `=` ends the pattern, so this
+form takes no default value. Use `if bind` when a default is needed.
+
 ## Destructuring in `for`
 
 Destructure elements during iteration:

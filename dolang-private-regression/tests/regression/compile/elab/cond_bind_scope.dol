@@ -1,0 +1,8 @@
+if let a b = [1, 2]
+  echo $a $b
+echo $a
+# error: unbound identifier
+#   --> cond_bind_scope.dol:LL:LL
+#    |
+# LL | echo $a
+#    |       ^

@@ -70,7 +70,7 @@ impl<'a, 'b> FuncEmitter<'a, 'b> {
                     Self::topological_sort_rec(emitter, emitter.graph.block(bid), seen, out);
                 }
             }
-            TermInfo::If(tid, fid) => {
+            TermInfo::If(tid, fid) | TermInfo::UnpackIf(_, tid, fid) => {
                 if seen.insert(tid) {
                     out.push(tid);
                     Self::topological_sort_rec(emitter, emitter.graph.block(tid), seen, out);
@@ -233,6 +233,20 @@ impl<'a, 'b> FuncEmitter<'a, 'b> {
                 } else {
                     panic!("neither successor is next in block order");
                 }
+            }
+            UnpackIf(sig, tid, fid) => {
+                // `UnpackBranch` branches only on failure, so unlike `If` its polarity
+                // cannot be flipped to suit the block order: the success block has to be
+                // next.  The topological sort guarantees it, since it visits the success
+                // successor first and a branch body has no other predecessor.
+                assert_eq!(Some(*tid), next, "success block is not next in block order");
+                let i = self.map[fid];
+                let dest = self.blocks[i].offset.get();
+                let mut src = output.offset.get().checked_add(len).unwrap();
+                if initial {
+                    src = src.checked_add(1).unwrap();
+                }
+                BcInst::UnpackBranch(sig.index(), checked_signed_diff(dest, src).unwrap())
             }
             NlBranch(depth, indicator) => BcInst::NlBranch(*depth, *indicator as usize),
         };

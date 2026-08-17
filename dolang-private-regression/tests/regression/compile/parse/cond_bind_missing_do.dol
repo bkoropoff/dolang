@@ -1,0 +1,9 @@
+if bind [1, 2]
+  - a
+  - b
+  echo $a $b
+# error: invalid pattern
+#   --> cond_bind_missing_do.dol:LL:LL
+#    |
+# LL |   echo $a $b
+#    |        ^

@@ -103,6 +103,15 @@ pub(crate) struct ExprBody<T> {
     pub(crate) vars: Vec<Var>,
 }
 
+impl<T> ExprBody<T> {
+    pub(crate) fn map<R>(self, f: &mut impl FnMut(T) -> R) -> ExprBody<R> {
+        ExprBody {
+            elems: self.elems.into_iter().map(f).collect(),
+            vars: self.vars,
+        }
+    }
+}
+
 impl<T: Node> Node for ExprBody<T> {
     fn accept<'a, V: Visit>(&'a self, visit: &'a mut V) -> ControlFlow<V::Break> {
         self.elems.accept(visit)
@@ -153,9 +162,58 @@ impl<T: Node> Node for For<T> {
     }
 }
 
+/// Which surface form introduced a conditional pattern bind.
+///
+/// The two forms bind identically; they differ only in where the pattern sits
+/// relative to the scrutinee, which matters for traversal order.
+pub(crate) enum PatternBindKind {
+    /// `if let PATTERN = SCRUTINEE`
+    Let { equal_span: Span },
+    /// `if bind SCRUTINEE`, with the pattern laid out vertically and the body
+    /// introduced by `do`
+    Bind { do_span: Span },
+}
+
+/// A pattern matched against the condition of an `if` or `while`, binding its
+/// parts in the branch body on success and taking the failure edge otherwise.
+pub(crate) struct PatternBind {
+    /// Span of the `let` or `bind` keyword
+    pub(crate) keyword_span: Span,
+    pub(crate) kind: PatternBindKind,
+    pub(crate) pattern: Pattern,
+}
+
+/// Visit the condition of an `if` or `while` together with its pattern bind, if
+/// any, in source order.  The two bind forms put the pattern on opposite sides of
+/// the scrutinee, so the order cannot be fixed by the caller.
+fn accept_cond<'a, V: Visit>(
+    bind: Option<&'a PatternBind>,
+    cond: &'a Expr,
+    visit: &'a mut V,
+) -> ControlFlow<V::Break> {
+    let Some(bind) = bind else {
+        return visit.node(cond);
+    };
+    visit.token(Token::Keyword, bind.keyword_span, None)?;
+    match bind.kind {
+        PatternBindKind::Let { equal_span } => {
+            visit.node(&bind.pattern)?;
+            visit.token(Token::Operator, equal_span, None)?;
+            visit.node(cond)
+        }
+        PatternBindKind::Bind { do_span } => {
+            visit.node(cond)?;
+            visit.node(&bind.pattern)?;
+            visit.token(Token::Keyword, do_span, None)
+        }
+    }
+}
+
 pub(crate) struct IfBranch<T> {
     pub(crate) span: Span,
-    pub(crate) cond: Expr,
+    pub(crate) expr: Expr,
+    /// Conditional pattern bind, for `if let` / `if bind`
+    pub(crate) bind: Option<PatternBind>,
     pub(crate) body: T,
 }
 
@@ -164,7 +222,8 @@ impl<T> IfBranch<T> {
         IfBranch {
             body: f(self.body),
             span: self.span,
-            cond: self.cond,
+            expr: self.expr,
+            bind: self.bind,
         }
     }
 }
@@ -192,7 +251,7 @@ impl<T> If<T> {
 impl<T: Node> Node for IfBranch<T> {
     fn accept<'a, V: Visit>(&'a self, visit: &'a mut V) -> ControlFlow<V::Break> {
         visit.token(Token::Keyword, self.span, None)?;
-        visit.node(&self.cond)?;
+        accept_cond(self.bind.as_ref(), &self.expr, visit)?;
         self.body.trans(visit)
     }
 
@@ -270,7 +329,7 @@ pub(crate) enum ArrayElem {
     Single(Single),
     Expand(Expand),
     For(For<ExprBody<Self>>),
-    If(If<Vec<Self>>),
+    If(If<ExprBody<Self>>),
 }
 
 impl Node for ArrayElem {
@@ -324,7 +383,7 @@ pub(crate) enum DictElem {
     Pair(Pair),
     Expand(Expand),
     For(For<ExprBody<Self>>),
-    If(If<Vec<Self>>),
+    If(If<ExprBody<Self>>),
 }
 
 impl Node for DictElem {
@@ -702,11 +761,12 @@ impl Expr {
                 }
                 ArrayElem::If(i) => {
                     // Cond VarRef upgrades to Unlikely (overloadable bool conversion)
-                    let cond = i.tbranch.cond.side_effect().unlikely();
+                    let cond = i.tbranch.expr.side_effect().unlikely();
                     // Branches are accumulated, use combine_iter
                     let branch_effect = Self::combine_iter(
                         i.tbranch
                             .body
+                            .elems
                             .iter()
                             .map(|e| match e {
                                 ArrayElem::Single(s) => s.expr.side_effect(),
@@ -714,7 +774,7 @@ impl Expr {
                                 _ => SideEffect::Likely,
                             })
                             .chain(i.else_branch.iter().flat_map(|(body, _)| {
-                                body.iter().map(|e| match e {
+                                body.elems.iter().map(|e| match e {
                                     ArrayElem::Single(s) => s.expr.side_effect(),
                                     ArrayElem::Expand(e) => e.expr.side_effect().unlikely(),
                                     _ => SideEffect::Likely,
@@ -746,11 +806,12 @@ impl Expr {
                 }
                 DictElem::If(i) => {
                     // Cond VarRef upgrades to Unlikely (overloadable bool conversion)
-                    let cond = i.tbranch.cond.side_effect().unlikely();
+                    let cond = i.tbranch.expr.side_effect().unlikely();
                     // Branches are accumulated, use combine_iter
                     let branch_effect = Self::combine_iter(
                         i.tbranch
                             .body
+                            .elems
                             .iter()
                             .map(|e| match e {
                                 DictElem::Single(s) => s.expr.side_effect(),
@@ -762,7 +823,7 @@ impl Expr {
                                 _ => SideEffect::Likely,
                             })
                             .chain(i.else_branch.iter().flat_map(|(body, _)| {
-                                body.iter().map(|e| match e {
+                                body.elems.iter().map(|e| match e {
                                     DictElem::Single(s) => s.expr.side_effect(),
                                     DictElem::Key(k) => k.expr.side_effect(),
                                     DictElem::Pair(p) => Self::combine_iter(
@@ -1118,7 +1179,7 @@ pub(crate) enum Arg {
     DynamicKey(Pair),
     Expand(Expand),
     For(For<ExprBody<Arg>>),
-    If(If<Vec<Arg>>),
+    If(If<ExprBody<Arg>>),
 }
 
 impl Node for Arg {
@@ -1356,7 +1417,9 @@ impl Node for Assign {
 }
 
 pub(crate) struct While {
-    pub(crate) cond: Expr,
+    pub(crate) expr: Expr,
+    /// Conditional pattern bind, for `while let` / `while bind`
+    pub(crate) bind: Option<PatternBind>,
     pub(crate) body: Block,
     pub(crate) while_span: Span,
 }
@@ -1364,7 +1427,7 @@ pub(crate) struct While {
 impl Node for While {
     fn accept<'a, V: Visit>(&'a self, visit: &'a mut V) -> ControlFlow<V::Break> {
         visit.token(Token::Keyword, self.while_span, None)?;
-        visit.node(&self.cond)?;
+        accept_cond(self.bind.as_ref(), &self.expr, visit)?;
         visit.node(&self.body)
     }
 

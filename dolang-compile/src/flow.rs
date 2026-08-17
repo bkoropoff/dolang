@@ -128,7 +128,7 @@ impl<'a, A: Analysis + 'a> Flow<'a, A> {
                         queue.push(bid)
                     }
                 }
-                Term(TermInfo::If(tid, fid), _) => {
+                Term(TermInfo::If(tid, fid) | TermInfo::UnpackIf(_, tid, fid), _) => {
                     let tblock = self.graph.block(tid);
                     let fblock = self.graph.block(fid);
                     let dsts = [

@@ -8,9 +8,9 @@ use crate::{
     Mode, PreludeImport,
     ast::{
         Arg, ArrayElem, Assign, Bind, Block, Class, ClassMember, ClassSuper, Const, Decorator, Def,
-        DictElem, Expand, Expr, FieldInit, For, Function, GetVariant, Ident, If, Import,
+        DictElem, Expand, Expr, ExprBody, FieldInit, For, Function, GetVariant, Ident, If, Import,
         ImportElement, ImportItem, Key, LValue, Let, Method, NlGuard, Pair, Param, ParamDefault,
-        Pattern, PrimStmt, Res, Return, Single, Stmt, Try, Unit, While, visit::Node,
+        Pattern, PatternBind, PrimStmt, Res, Return, Single, Stmt, Try, Unit, While, visit::Node,
     },
     cfg::{self, BlockRefMut, Inst, InstInfo, Term, TermInfo},
     constant::{self, ConstantExt},
@@ -49,6 +49,11 @@ enum Var {
     Local(usize),
     Upvar(usize, usize),
 }
+
+/// The prologue bindings a branch body needs: the store order for the values the
+/// terminator left on the operand stack, and, for an unpack pattern, the parameter
+/// list carrying any non-constant defaults.
+type Binds<'a> = (Option<Vec<Var>>, Option<&'a [Param]>);
 
 struct Params<'a> {
     bind: Option<Vec<Var>>,
@@ -662,125 +667,7 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
                 )
             }
             DictElem::If(node) => {
-                let empty = {
-                    let call = sig::Pack::new([].into_iter());
-                    self.packtab.id(&call)
-                };
-                self.block.insts.push(Inst(
-                    InstInfo::Builtin(builtin::ARGS, empty),
-                    node.tbranch.span,
-                ));
-
-                let next = self.graph.alloc_block(self.block.func, self.block.scope);
-
-                let start = self.bb;
-
-                // Build control flow from inside out
-                let mut fallback = next;
-
-                // Handle final else branch if present
-                if let Some((else_body, _)) = &node.else_branch {
-                    let fscope = self.graph.alloc_scope(
-                        false,
-                        false,
-                        self.block.func,
-                        Some(self.block.scope),
-                        &[],
-                        self.origintab,
-                    );
-                    fallback = self.graph.alloc_block(self.block.func, fscope);
-                    self.queue(Work {
-                        bb: fallback,
-                        ast: WorkAst::DictElems(else_body),
-                        params: Params {
-                            bind: None,
-                            bind_params: None,
-                            unpack: None,
-                            mode: self.params.mode.clone(),
-                            is_top_level: false,
-                            next_id: Some(next),
-                            break_id: self.params.break_id,
-                            break_result: self.params.break_result,
-                            continue_id: self.params.continue_id,
-                            exit_id: self.params.exit_id,
-                        },
-                    });
-                }
-
-                // Process elif branches in reverse order
-                for (elif_branch, _) in node.elif_branches.iter().rev() {
-                    let current_fallback = fallback;
-                    fallback = self.graph.alloc_block(self.block.func, self.block.scope);
-
-                    let tscope = self.graph.alloc_scope(
-                        false,
-                        false,
-                        self.block.func,
-                        Some(self.block.scope),
-                        &[],
-                        self.origintab,
-                    );
-                    let tid = self.graph.alloc_block(self.block.func, tscope);
-                    self.queue(Work {
-                        bb: tid,
-                        ast: WorkAst::DictElems(&elif_branch.body),
-                        params: Params {
-                            bind: None,
-                            bind_params: None,
-                            unpack: None,
-                            mode: self.params.mode.clone(),
-                            is_top_level: false,
-                            next_id: Some(next),
-                            break_id: self.params.break_id,
-                            break_result: self.params.break_result,
-                            continue_id: self.params.continue_id,
-                            exit_id: self.params.exit_id,
-                        },
-                    });
-
-                    self.switch(fallback);
-                    self.lower_expr(&elif_branch.cond)?;
-                    self.block.term = Term(TermInfo::If(tid, current_fallback), elif_branch.span);
-                    self.link(tid);
-                    self.link(current_fallback);
-                }
-
-                self.switch(start);
-
-                // Finally, process initial if branch
-                let current_fallback = fallback;
-                self.lower_expr(&node.tbranch.cond)?;
-                let tscope = self.graph.alloc_scope(
-                    false,
-                    false,
-                    self.block.func,
-                    Some(self.block.scope),
-                    &[],
-                    self.origintab,
-                );
-                let tid = self.graph.alloc_block(self.block.func, tscope);
-                self.queue(Work {
-                    bb: tid,
-                    ast: WorkAst::DictElems(&node.tbranch.body),
-                    params: Params {
-                        bind: None,
-                        bind_params: None,
-                        unpack: None,
-                        mode: self.params.mode.clone(),
-                        is_top_level: false,
-                        next_id: Some(next),
-                        break_id: self.params.break_id,
-                        break_result: self.params.break_result,
-                        continue_id: self.params.continue_id,
-                        exit_id: self.params.exit_id,
-                    },
-                });
-
-                self.block.term = Term(TermInfo::If(tid, current_fallback), node.tbranch.span);
-                self.link(tid);
-                self.link(current_fallback);
-                self.switch(next);
-
+                self.lower_elem_if(node, WorkAst::DictElems)?;
                 (sig::Arg::Pack, None)
             }
             DictElem::For(For {
@@ -886,124 +773,7 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
                 sig::Arg::Key(*iter_sym.get_or_init(|| self.symtab.id(&self.bintab.id_str("iter"))))
             }
             ArrayElem::If(node) => {
-                let empty = {
-                    let call = sig::Pack::new([].into_iter());
-                    self.packtab.id(&call)
-                };
-                self.block.insts.push(Inst(
-                    InstInfo::Builtin(builtin::ARGS, empty),
-                    node.tbranch.span,
-                ));
-
-                let next = self.graph.alloc_block(self.block.func, self.block.scope);
-
-                let start = self.bb;
-
-                // Build control flow from inside out
-                let mut fallback = next;
-
-                // Handle final else branch if present
-                if let Some((else_body, _)) = &node.else_branch {
-                    let fscope = self.graph.alloc_scope(
-                        false,
-                        false,
-                        self.block.func,
-                        Some(self.block.scope),
-                        &[],
-                        self.origintab,
-                    );
-                    fallback = self.graph.alloc_block(self.block.func, fscope);
-                    self.queue(Work {
-                        bb: fallback,
-                        ast: WorkAst::ArrayElems(else_body),
-                        params: Params {
-                            bind: None,
-                            bind_params: None,
-                            unpack: None,
-                            mode: self.params.mode.clone(),
-                            is_top_level: false,
-                            next_id: Some(next),
-                            break_id: self.params.break_id,
-                            break_result: self.params.break_result,
-                            continue_id: self.params.continue_id,
-                            exit_id: self.params.exit_id,
-                        },
-                    });
-                }
-
-                // Process elif branches in reverse order
-                for (elif_branch, _) in node.elif_branches.iter().rev() {
-                    let current_fallback = fallback;
-                    fallback = self.graph.alloc_block(self.block.func, self.block.scope);
-
-                    let tscope = self.graph.alloc_scope(
-                        false,
-                        false,
-                        self.block.func,
-                        Some(self.block.scope),
-                        &[],
-                        self.origintab,
-                    );
-                    let tid = self.graph.alloc_block(self.block.func, tscope);
-                    self.queue(Work {
-                        bb: tid,
-                        ast: WorkAst::ArrayElems(&elif_branch.body),
-                        params: Params {
-                            bind: None,
-                            bind_params: None,
-                            unpack: None,
-                            mode: self.params.mode.clone(),
-                            is_top_level: false,
-                            next_id: Some(next),
-                            break_id: self.params.break_id,
-                            break_result: self.params.break_result,
-                            continue_id: self.params.continue_id,
-                            exit_id: self.params.exit_id,
-                        },
-                    });
-
-                    self.switch(fallback);
-                    self.lower_expr(&elif_branch.cond)?;
-                    self.block.term = Term(TermInfo::If(tid, current_fallback), elif_branch.span);
-                    self.link(tid);
-                    self.link(current_fallback);
-                }
-
-                self.switch(start);
-
-                let current_fallback = fallback;
-                self.lower_expr(&node.tbranch.cond)?;
-                let tscope = self.graph.alloc_scope(
-                    false,
-                    false,
-                    self.block.func,
-                    Some(self.block.scope),
-                    &[],
-                    self.origintab,
-                );
-                let tid = self.graph.alloc_block(self.block.func, tscope);
-                self.queue(Work {
-                    bb: tid,
-                    ast: WorkAst::ArrayElems(&node.tbranch.body),
-                    params: Params {
-                        bind: None,
-                        bind_params: None,
-                        unpack: None,
-                        mode: self.params.mode.clone(),
-                        is_top_level: false,
-                        next_id: Some(next),
-                        break_id: self.params.break_id,
-                        break_result: self.params.break_result,
-                        continue_id: self.params.continue_id,
-                        exit_id: self.params.exit_id,
-                    },
-                });
-
-                self.block.term = Term(TermInfo::If(tid, current_fallback), node.tbranch.span);
-                self.link(tid);
-                self.link(current_fallback);
-                self.switch(next);
-
+                self.lower_elem_if(node, WorkAst::ArrayElems)?;
                 sig::Arg::Pack
             }
             ArrayElem::For(For {
@@ -1203,125 +973,7 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
                 sig::Arg::Pack
             }
             Arg::If(node) => {
-                let empty = {
-                    let call = sig::Pack::new([].into_iter());
-                    self.packtab.id(&call)
-                };
-                self.block.insts.push(Inst(
-                    InstInfo::Builtin(builtin::ARGS, empty),
-                    node.tbranch.span,
-                ));
-
-                let start = self.bb;
-
-                let next = self.graph.alloc_block(self.block.func, self.block.scope);
-
-                // Build control flow from inside out
-                let mut fallback = next;
-
-                // Handle final else branch if present
-                if let Some((else_body, _)) = &node.else_branch {
-                    let fscope = self.graph.alloc_scope(
-                        false,
-                        false,
-                        self.block.func,
-                        Some(self.block.scope),
-                        &[],
-                        self.origintab,
-                    );
-                    fallback = self.graph.alloc_block(self.block.func, fscope);
-                    self.queue(Work {
-                        bb: fallback,
-                        ast: WorkAst::Args(else_body),
-                        params: Params {
-                            bind: None,
-                            bind_params: None,
-                            unpack: None,
-                            mode: self.params.mode.clone(),
-                            is_top_level: false,
-                            next_id: Some(next),
-                            break_id: self.params.break_id,
-                            break_result: self.params.break_result,
-                            continue_id: self.params.continue_id,
-                            exit_id: self.params.exit_id,
-                        },
-                    });
-                }
-
-                // Process elif branches in reverse order
-                for (elif_branch, _) in node.elif_branches.iter().rev() {
-                    let current_fallback = fallback;
-                    fallback = self.graph.alloc_block(self.block.func, self.block.scope);
-
-                    let tscope = self.graph.alloc_scope(
-                        false,
-                        false,
-                        self.block.func,
-                        Some(self.block.scope),
-                        &[],
-                        self.origintab,
-                    );
-                    let tid = self.graph.alloc_block(self.block.func, tscope);
-                    self.queue(Work {
-                        bb: tid,
-                        ast: WorkAst::Args(&elif_branch.body),
-                        params: Params {
-                            bind: None,
-                            bind_params: None,
-                            unpack: None,
-                            mode: self.params.mode.clone(),
-                            is_top_level: false,
-                            next_id: Some(next),
-                            break_id: self.params.break_id,
-                            break_result: self.params.break_result,
-                            continue_id: self.params.continue_id,
-                            exit_id: self.params.exit_id,
-                        },
-                    });
-
-                    self.switch(fallback);
-                    self.lower_expr(&elif_branch.cond)?;
-                    self.block.term = Term(TermInfo::If(tid, current_fallback), elif_branch.span);
-                    self.link(tid);
-                    self.link(current_fallback);
-                }
-
-                self.switch(start);
-
-                // Finally, process initial if branch
-                let current_fallback = fallback;
-                self.lower_expr(&node.tbranch.cond)?;
-                let tscope = self.graph.alloc_scope(
-                    false,
-                    false,
-                    self.block.func,
-                    Some(self.block.scope),
-                    &[],
-                    self.origintab,
-                );
-                let tid = self.graph.alloc_block(self.block.func, tscope);
-                self.queue(Work {
-                    bb: tid,
-                    ast: WorkAst::Args(&node.tbranch.body),
-                    params: Params {
-                        bind: None,
-                        bind_params: None,
-                        unpack: None,
-                        mode: self.params.mode.clone(),
-                        is_top_level: false,
-                        next_id: Some(next),
-                        break_id: self.params.break_id,
-                        break_result: self.params.break_result,
-                        continue_id: self.params.continue_id,
-                        exit_id: self.params.exit_id,
-                    },
-                });
-
-                self.block.term = Term(TermInfo::If(tid, current_fallback), node.tbranch.span);
-                self.link(tid);
-                self.link(current_fallback);
-                self.switch(next);
-
+                self.lower_elem_if(node, WorkAst::Args)?;
                 sig::Arg::Pack
             }
             Arg::DynamicKey { .. } => unreachable!(),
@@ -1438,6 +1090,204 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
         }
     }
 
+    /// Lower the test of a conditional branch and set the current block's terminator.
+    ///
+    /// `bscope` is the scope allocated for the branch body, `tid` the block the body
+    /// starts in, and `fid` the block reached when the test fails.  Returns the `bind`
+    /// and `bind_params` the body's prologue needs; `unpack` is always `None`, since
+    /// the terminator performs the unpack itself.
+    fn lower_cond(
+        &mut self,
+        cond: &'a Expr,
+        bind: Option<&'a PatternBind>,
+        bscope: cfg::ScopeId,
+        tid: cfg::BlockId,
+        fid: cfg::BlockId,
+        span: Span,
+    ) -> Result<Binds<'a>> {
+        self.lower_expr(cond)?;
+        let Some(bind) = bind else {
+            self.block.term = Term(TermInfo::If(tid, fid), span);
+            self.link(tid);
+            self.link(fid);
+            return Ok((None, None));
+        };
+        match &bind.pattern {
+            Pattern::Ident(_) => {
+                // A bare identifier binds the scrutinee itself and branches on its
+                // truthiness, so the value has to survive the test.  That leaves the
+                // duplicate on the failure edge, which needs a block of its own to drop
+                // it: the real failure target is shared with predecessors that have no
+                // such value to clean up.
+                let cleanup = self.graph.alloc_block(self.block.func, self.block.scope);
+                self.block.insts.push(Inst(InstInfo::Dup, span));
+                self.block.term = Term(TermInfo::If(tid, cleanup), span);
+                self.link(tid);
+                self.link(cleanup);
+                let test = self.bb;
+                self.switch(cleanup);
+                self.block.insts.push(Inst(InstInfo::Pop, span));
+                self.block.term = Term(TermInfo::Branch(fid), span);
+                self.link(fid);
+                self.switch(test);
+                let var = self.resolve_var_in_scope(self.graph.scope(bscope), 0, 0);
+                Ok((Some(vec![var]), None))
+            }
+            Pattern::Unpack(params) => {
+                // The terminator pops the scrutinee and pushes one value per element of
+                // the signature on the success edge, nothing on the failure edge, so
+                // neither edge is left holding anything the other does not
+                let unpack = self.lower_params(params)?;
+                let sig = self.unpacktab.id(&unpack);
+                let binds = self.unpack_order_in_scope(self.graph.scope(bscope), params, sig);
+                self.block.term = Term(TermInfo::UnpackIf(sig, tid, fid), span);
+                self.link(tid);
+                self.link(fid);
+                Ok((Some(binds), Some(params.as_slice())))
+            }
+        }
+    }
+
+    /// Lower an `if` in vertical-element layout, where each branch body is a list
+    /// of arguments, array elements, or dict elements rather than a block.
+    ///
+    /// Mirrors [`Self::lower_if`], differing only in what the branches contribute
+    /// to: an empty `ARGS` builtin opens the pack each body pushes into, and
+    /// `work_ast` wraps the body for the queue.  There is no result value, so no
+    /// `want_result` and no `complete` distinction.
+    fn lower_elem_if<T>(
+        &mut self,
+        node: &'a If<ExprBody<T>>,
+        work_ast: fn(&'a [T]) -> WorkAst<'a>,
+    ) -> Result<()> {
+        let empty = {
+            let call = sig::Pack::new([].into_iter());
+            self.packtab.id(&call)
+        };
+        self.block.insts.push(Inst(
+            InstInfo::Builtin(builtin::ARGS, empty),
+            node.tbranch.span,
+        ));
+
+        let next = self.graph.alloc_block(self.block.func, self.block.scope);
+
+        let start = self.bb;
+
+        // Build the control flow structure from the inside out
+        let mut fallback = next;
+
+        // Handle final else branch if present
+        if let Some((else_body, _)) = &node.else_branch {
+            let fscope = self.graph.alloc_scope(
+                false,
+                false,
+                self.block.func,
+                Some(self.block.scope),
+                &else_body.vars,
+                self.origintab,
+            );
+            fallback = self.graph.alloc_block(self.block.func, fscope);
+            self.queue(Work {
+                bb: fallback,
+                ast: work_ast(&else_body.elems),
+                params: Params {
+                    bind: None,
+                    bind_params: None,
+                    unpack: None,
+                    mode: self.params.mode.clone(),
+                    is_top_level: false,
+                    next_id: Some(next),
+                    break_id: self.params.break_id,
+                    break_result: self.params.break_result,
+                    continue_id: self.params.continue_id,
+                    exit_id: self.params.exit_id,
+                },
+            });
+        }
+
+        // Process elif branches in reverse order (last to first)
+        for (elif_branch, _) in node.elif_branches.iter().rev() {
+            let current_fallback = fallback;
+            fallback = self.graph.alloc_block(self.block.func, self.block.scope);
+
+            let tscope = self.graph.alloc_scope(
+                false,
+                false,
+                self.block.func,
+                Some(self.block.scope),
+                &elif_branch.body.vars,
+                self.origintab,
+            );
+            let tid = self.graph.alloc_block(self.block.func, tscope);
+
+            self.switch(fallback);
+            let (bind, bind_params) = self.lower_cond(
+                &elif_branch.expr,
+                elif_branch.bind.as_ref(),
+                tscope,
+                tid,
+                current_fallback,
+                elif_branch.span,
+            )?;
+            self.queue(Work {
+                bb: tid,
+                ast: work_ast(&elif_branch.body.elems),
+                params: Params {
+                    bind,
+                    bind_params,
+                    unpack: None,
+                    mode: self.params.mode.clone(),
+                    is_top_level: false,
+                    next_id: Some(next),
+                    break_id: self.params.break_id,
+                    break_result: self.params.break_result,
+                    continue_id: self.params.continue_id,
+                    exit_id: self.params.exit_id,
+                },
+            });
+        }
+
+        // Finally, process the initial if branch
+        self.switch(start);
+        let current_fallback = fallback;
+        let tscope = self.graph.alloc_scope(
+            false,
+            false,
+            self.block.func,
+            Some(self.block.scope),
+            &node.tbranch.body.vars,
+            self.origintab,
+        );
+        let tid = self.graph.alloc_block(self.block.func, tscope);
+        let (bind, bind_params) = self.lower_cond(
+            &node.tbranch.expr,
+            node.tbranch.bind.as_ref(),
+            tscope,
+            tid,
+            current_fallback,
+            node.tbranch.span,
+        )?;
+        self.queue(Work {
+            bb: tid,
+            ast: work_ast(&node.tbranch.body.elems),
+            params: Params {
+                bind,
+                bind_params,
+                unpack: None,
+                mode: self.params.mode.clone(),
+                is_top_level: false,
+                next_id: Some(next),
+                break_id: self.params.break_id,
+                break_result: self.params.break_result,
+                continue_id: self.params.continue_id,
+                exit_id: self.params.exit_id,
+            },
+        });
+
+        self.switch(next);
+        Ok(())
+    }
+
     fn lower_if(&mut self, node: &'a If<Block>, want_result: bool) -> Result<()> {
         let complete = node.else_branch.is_some();
         let next = self.graph.alloc_block(self.block.func, self.block.scope);
@@ -1490,12 +1340,22 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
                 self.origintab,
             );
             let tid = self.graph.alloc_block(self.block.func, tscope);
+
+            self.switch(fallback);
+            let (bind, bind_params) = self.lower_cond(
+                &elif_branch.expr,
+                elif_branch.bind.as_ref(),
+                tscope,
+                tid,
+                current_fallback,
+                elif_branch.span,
+            )?;
             self.queue(Work {
                 bb: tid,
                 ast: WorkAst::Block(&elif_branch.body, want_result && complete),
                 params: Params {
-                    bind: None,
-                    bind_params: None,
+                    bind,
+                    bind_params,
                     unpack: None,
                     mode: self.params.mode.clone(),
                     is_top_level: false,
@@ -1506,18 +1366,11 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
                     exit_id: self.params.exit_id,
                 },
             });
-
-            self.switch(fallback);
-            self.lower_expr(&elif_branch.cond)?;
-            self.block.term = Term(TermInfo::If(tid, current_fallback), elif_branch.span);
-            self.link(tid);
-            self.link(current_fallback);
         }
 
         // Finally, process the initial if branch
         self.switch(start);
         let current_fallback = fallback;
-        self.lower_expr(&node.tbranch.cond)?;
         let tscope = self.graph.alloc_scope(
             false,
             false,
@@ -1527,12 +1380,20 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
             self.origintab,
         );
         let tid = self.graph.alloc_block(self.block.func, tscope);
+        let (bind, bind_params) = self.lower_cond(
+            &node.tbranch.expr,
+            node.tbranch.bind.as_ref(),
+            tscope,
+            tid,
+            current_fallback,
+            node.tbranch.span,
+        )?;
         self.queue(Work {
             bb: tid,
             ast: WorkAst::Block(&node.tbranch.body, want_result && complete),
             params: Params {
-                bind: None,
-                bind_params: None,
+                bind,
+                bind_params,
                 unpack: None,
                 mode: self.params.mode.clone(),
                 is_top_level: false,
@@ -1544,9 +1405,6 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
             },
         });
 
-        self.block.term = Term(TermInfo::If(tid, current_fallback), node.tbranch.span);
-        self.link(tid);
-        self.link(current_fallback);
         self.switch(next);
 
         if want_result && !complete {
@@ -1650,12 +1508,17 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
         );
         let bodyid = self.graph.alloc_block(self.block.func, bscope);
         let span = node.while_span;
+        self.block.term = Term(TermInfo::Branch(test), span);
+        self.link(test);
+        self.switch(test);
+        let (bind, bind_params) =
+            self.lower_cond(&node.expr, node.bind.as_ref(), bscope, bodyid, next, span)?;
         self.queue(Work {
             bb: bodyid,
             ast: WorkAst::Block(&node.body, false),
             params: Params {
-                bind: None,
-                bind_params: None,
+                bind,
+                bind_params,
                 unpack: None,
                 mode: self.params.mode.clone(),
                 is_top_level: false,
@@ -1666,13 +1529,6 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
                 exit_id: self.params.exit_id,
             },
         });
-        self.block.term = Term(TermInfo::Branch(test), span);
-        self.link(test);
-        self.switch(test);
-        self.lower_expr(&node.cond)?;
-        self.block.term = Term(TermInfo::If(bodyid, next), span);
-        self.link(bodyid);
-        self.link(next);
         self.switch(next);
         if want_result {
             self.lower_load_nil(span)
