@@ -16,6 +16,38 @@ import sys sys.freebsd sys.linux sys.macos sys.unix sys.windows
     - InvalidInputError
     - NotFoundError
     - OsInfo
+    - ConnectionRefusedError
+    - ConnectionResetError
+    - HostUnreachableError
+    - NetworkUnreachableError
+    - ConnectionAbortedError
+    - NotConnectedError
+    - AddrInUseError
+    - AddrNotAvailableError
+    - NetworkDownError
+    - BrokenPipeError
+    - WouldBlockError
+    - NotADirectoryError
+    - IsADirectoryError
+    - DirectoryNotEmptyError
+    - ReadOnlyFilesystemError
+    - StaleNetworkFileHandleError
+    - WriteZeroError
+    - StorageFullError
+    - NotSeekableError
+    - QuotaExceededError
+    - FileTooLargeError
+    - ResourceBusyError
+    - ExecutableFileBusyError
+    - DeadlockError
+    - CrossesDevicesError
+    - TooManyLinksError
+    - InvalidFilenameError
+    - ArgumentListTooLongError
+    - InvalidDataError
+    - InterruptedError
+    - UnexpectedEofError
+    - OutOfMemoryError
 
 #[test]
 def sys_reports_basic_information()
@@ -80,6 +112,44 @@ def system_errors_are_constructible_and_subclassable()
   assert_type $InvalidInputError $invalid
   assert_type $Error $invalid
   assert_type $ValueError $invalid
+
+  let portable_types = $
+    - $ConnectionRefusedError
+    - $ConnectionResetError
+    - $HostUnreachableError
+    - $NetworkUnreachableError
+    - $ConnectionAbortedError
+    - $NotConnectedError
+    - $AddrInUseError
+    - $AddrNotAvailableError
+    - $NetworkDownError
+    - $BrokenPipeError
+    - $WouldBlockError
+    - $NotADirectoryError
+    - $IsADirectoryError
+    - $DirectoryNotEmptyError
+    - $ReadOnlyFilesystemError
+    - $StaleNetworkFileHandleError
+    - $WriteZeroError
+    - $StorageFullError
+    - $NotSeekableError
+    - $QuotaExceededError
+    - $FileTooLargeError
+    - $ResourceBusyError
+    - $ExecutableFileBusyError
+    - $DeadlockError
+    - $CrossesDevicesError
+    - $TooManyLinksError
+    - $InvalidFilenameError
+    - $ArgumentListTooLongError
+    - $InvalidDataError
+    - $InterruptedError
+    - $UnexpectedEofError
+    - $OutOfMemoryError
+  for error_type = portable_types
+    let error = error_type "synthetic portable error"
+    assert_type $error_type $error
+    assert_type $Error $error
 
   class LibraryError: Error
     def (init) self message code

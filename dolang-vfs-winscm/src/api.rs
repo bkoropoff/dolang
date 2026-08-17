@@ -30,7 +30,7 @@ use crate::wire::{
 /// a panic.
 fn unexpected(request: &str) -> Error {
     Error::new(
-        ErrorKind::Other,
+        ErrorKind::InvalidData,
         format!("unexpected response for {request}"),
     )
 }

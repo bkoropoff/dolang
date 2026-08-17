@@ -21,6 +21,51 @@ pub(crate) struct AlreadyExistsError;
 pub(crate) struct TimedOutError;
 pub(crate) struct UnsupportedError;
 
+macro_rules! sys_error_types {
+    ($($type:ident),+ $(,)?) => {
+        $(pub(crate) struct $type;)+
+
+        $(impl<'v> SysErrorType<'v> for $type {
+            const NAME: &'v str = stringify!($type);
+        })+
+    };
+}
+
+sys_error_types!(
+    ConnectionRefusedError,
+    ConnectionResetError,
+    HostUnreachableError,
+    NetworkUnreachableError,
+    ConnectionAbortedError,
+    NotConnectedError,
+    AddrInUseError,
+    AddrNotAvailableError,
+    NetworkDownError,
+    BrokenPipeError,
+    WouldBlockError,
+    NotADirectoryError,
+    IsADirectoryError,
+    DirectoryNotEmptyError,
+    ReadOnlyFilesystemError,
+    StaleNetworkFileHandleError,
+    WriteZeroError,
+    StorageFullError,
+    NotSeekableError,
+    QuotaExceededError,
+    FileTooLargeError,
+    ResourceBusyError,
+    ExecutableFileBusyError,
+    DeadlockError,
+    CrossesDevicesError,
+    TooManyLinksError,
+    InvalidFilenameError,
+    ArgumentListTooLongError,
+    InvalidDataError,
+    InterruptedError,
+    UnexpectedEofError,
+    OutOfMemoryError,
+);
+
 pub(crate) struct SysErrorObject<T>(PhantomData<T>);
 
 impl<T> Default for SysErrorObject<T> {
@@ -143,29 +188,6 @@ impl<'v> SysErrorType<'v> for UnsupportedError {
     const NAME: &'v str = "UnsupportedError";
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SysErrorClass {
-    Error,
-    InvalidInputError,
-    NotFoundError,
-    PermissionDeniedError,
-    AlreadyExistsError,
-    TimedOutError,
-    UnsupportedError,
-}
-
-fn classify_error_kind(kind: ErrorKind) -> SysErrorClass {
-    match kind {
-        ErrorKind::InvalidInput => SysErrorClass::InvalidInputError,
-        ErrorKind::NotFound => SysErrorClass::NotFoundError,
-        ErrorKind::PermissionDenied => SysErrorClass::PermissionDeniedError,
-        ErrorKind::AlreadyExists => SysErrorClass::AlreadyExistsError,
-        ErrorKind::TimedOut => SysErrorClass::TimedOutError,
-        ErrorKind::Unsupported => SysErrorClass::UnsupportedError,
-        _ => SysErrorClass::Error,
-    }
-}
-
 fn create_sys_error<'v, 's, T: SysErrorType<'v>>(
     strand: &mut Strand<'v, 's>,
     ty: Type<'v, SysErrorObject<T>>,
@@ -267,40 +289,149 @@ fn sys_error<'v, 's>(strand: &mut Strand<'v, 's>, error: VfsError) -> Error<'v, 
     let system_code = error
         .system_code()
         .map(|code| (code.operating_system(), code.raw()));
-    match classify_error_kind(error.kind()) {
-        SysErrorClass::Error => {
-            create_sys_error::<SysError>(strand, global.types.sys_error, message, system_code)
+    match error.kind() {
+        ErrorKind::Other => create_sys_error(strand, global.types.sys_error, message, system_code),
+        ErrorKind::InvalidInput => {
+            create_sys_error(strand, global.types.invalid_input, message, system_code)
         }
-        SysErrorClass::InvalidInputError => create_sys_error::<InvalidInputError>(
-            strand,
-            global.types.invalid_input,
-            message,
-            system_code,
-        ),
-        SysErrorClass::NotFoundError => {
-            create_sys_error::<NotFoundError>(strand, global.types.not_found, message, system_code)
+        ErrorKind::NotFound => {
+            create_sys_error(strand, global.types.not_found, message, system_code)
         }
-        SysErrorClass::PermissionDeniedError => create_sys_error::<PermissionDeniedError>(
-            strand,
-            global.types.permission_denied,
-            message,
-            system_code,
-        ),
-        SysErrorClass::AlreadyExistsError => create_sys_error::<AlreadyExistsError>(
-            strand,
-            global.types.already_exists,
-            message,
-            system_code,
-        ),
-        SysErrorClass::TimedOutError => {
-            create_sys_error::<TimedOutError>(strand, global.types.timed_out, message, system_code)
+        ErrorKind::PermissionDenied => {
+            create_sys_error(strand, global.types.permission_denied, message, system_code)
         }
-        SysErrorClass::UnsupportedError => create_sys_error::<UnsupportedError>(
+        ErrorKind::AlreadyExists => {
+            create_sys_error(strand, global.types.already_exists, message, system_code)
+        }
+        ErrorKind::TimedOut => {
+            create_sys_error(strand, global.types.timed_out, message, system_code)
+        }
+        ErrorKind::Unsupported => {
+            create_sys_error(strand, global.types.unsupported, message, system_code)
+        }
+        ErrorKind::ConnectionRefused => create_sys_error(
             strand,
-            global.types.unsupported,
+            global.types.connection_refused,
             message,
             system_code,
         ),
+        ErrorKind::ConnectionReset => {
+            create_sys_error(strand, global.types.connection_reset, message, system_code)
+        }
+        ErrorKind::HostUnreachable => {
+            create_sys_error(strand, global.types.host_unreachable, message, system_code)
+        }
+        ErrorKind::NetworkUnreachable => create_sys_error(
+            strand,
+            global.types.network_unreachable,
+            message,
+            system_code,
+        ),
+        ErrorKind::ConnectionAborted => create_sys_error(
+            strand,
+            global.types.connection_aborted,
+            message,
+            system_code,
+        ),
+        ErrorKind::NotConnected => {
+            create_sys_error(strand, global.types.not_connected, message, system_code)
+        }
+        ErrorKind::AddrInUse => {
+            create_sys_error(strand, global.types.addr_in_use, message, system_code)
+        }
+        ErrorKind::AddrNotAvailable => create_sys_error(
+            strand,
+            global.types.addr_not_available,
+            message,
+            system_code,
+        ),
+        ErrorKind::NetworkDown => {
+            create_sys_error(strand, global.types.network_down, message, system_code)
+        }
+        ErrorKind::BrokenPipe => {
+            create_sys_error(strand, global.types.broken_pipe, message, system_code)
+        }
+        ErrorKind::WouldBlock => {
+            create_sys_error(strand, global.types.would_block, message, system_code)
+        }
+        ErrorKind::NotADirectory => {
+            create_sys_error(strand, global.types.not_adirectory, message, system_code)
+        }
+        ErrorKind::IsADirectory => {
+            create_sys_error(strand, global.types.is_adirectory, message, system_code)
+        }
+        ErrorKind::DirectoryNotEmpty => create_sys_error(
+            strand,
+            global.types.directory_not_empty,
+            message,
+            system_code,
+        ),
+        ErrorKind::ReadOnlyFilesystem => create_sys_error(
+            strand,
+            global.types.read_only_filesystem,
+            message,
+            system_code,
+        ),
+        ErrorKind::StaleNetworkFileHandle => create_sys_error(
+            strand,
+            global.types.stale_network_file_handle,
+            message,
+            system_code,
+        ),
+        ErrorKind::WriteZero => {
+            create_sys_error(strand, global.types.write_zero, message, system_code)
+        }
+        ErrorKind::StorageFull => {
+            create_sys_error(strand, global.types.storage_full, message, system_code)
+        }
+        ErrorKind::NotSeekable => {
+            create_sys_error(strand, global.types.not_seekable, message, system_code)
+        }
+        ErrorKind::QuotaExceeded => {
+            create_sys_error(strand, global.types.quota_exceeded, message, system_code)
+        }
+        ErrorKind::FileTooLarge => {
+            create_sys_error(strand, global.types.file_too_large, message, system_code)
+        }
+        ErrorKind::ResourceBusy => {
+            create_sys_error(strand, global.types.resource_busy, message, system_code)
+        }
+        ErrorKind::ExecutableFileBusy => create_sys_error(
+            strand,
+            global.types.executable_file_busy,
+            message,
+            system_code,
+        ),
+        ErrorKind::Deadlock => {
+            create_sys_error(strand, global.types.deadlock, message, system_code)
+        }
+        ErrorKind::CrossesDevices => {
+            create_sys_error(strand, global.types.crosses_devices, message, system_code)
+        }
+        ErrorKind::TooManyLinks => {
+            create_sys_error(strand, global.types.too_many_links, message, system_code)
+        }
+        ErrorKind::InvalidFilename => {
+            create_sys_error(strand, global.types.invalid_filename, message, system_code)
+        }
+        ErrorKind::ArgumentListTooLong => create_sys_error(
+            strand,
+            global.types.argument_list_too_long,
+            message,
+            system_code,
+        ),
+        ErrorKind::InvalidData => {
+            create_sys_error(strand, global.types.invalid_data, message, system_code)
+        }
+        ErrorKind::Interrupted => {
+            create_sys_error(strand, global.types.interrupted, message, system_code)
+        }
+        ErrorKind::UnexpectedEof => {
+            create_sys_error(strand, global.types.unexpected_eof, message, system_code)
+        }
+        ErrorKind::OutOfMemory => {
+            create_sys_error(strand, global.types.out_of_memory, message, system_code)
+        }
     }
 }
 
@@ -354,38 +485,4 @@ pub(crate) fn proc_status_error<'v, 's>(
             operating_system,
         },
     )
-}
-
-#[cfg(test)]
-mod test {
-    use super::{SysErrorClass, classify_error_kind};
-    use dolang_vfs::error::ErrorKind;
-
-    #[test]
-    fn classify_common_io_kinds() {
-        assert_eq!(
-            classify_error_kind(ErrorKind::NotFound),
-            SysErrorClass::NotFoundError
-        );
-        assert_eq!(
-            classify_error_kind(ErrorKind::PermissionDenied),
-            SysErrorClass::PermissionDeniedError
-        );
-        assert_eq!(
-            classify_error_kind(ErrorKind::AlreadyExists),
-            SysErrorClass::AlreadyExistsError
-        );
-        assert_eq!(
-            classify_error_kind(ErrorKind::TimedOut),
-            SysErrorClass::TimedOutError
-        );
-        assert_eq!(
-            classify_error_kind(ErrorKind::Unsupported),
-            SysErrorClass::UnsupportedError
-        );
-        assert_eq!(
-            classify_error_kind(ErrorKind::InvalidInput),
-            SysErrorClass::InvalidInputError
-        );
-    }
 }

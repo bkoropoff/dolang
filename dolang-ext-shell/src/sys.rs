@@ -135,5 +135,43 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         .value("AlreadyExistsError", global.types.already_exists)
         .value("TimedOutError", global.types.timed_out)
         .value("UnsupportedError", global.types.unsupported)
+        .value("ConnectionRefusedError", global.types.connection_refused)
+        .value("ConnectionResetError", global.types.connection_reset)
+        .value("HostUnreachableError", global.types.host_unreachable)
+        .value("NetworkUnreachableError", global.types.network_unreachable)
+        .value("ConnectionAbortedError", global.types.connection_aborted)
+        .value("NotConnectedError", global.types.not_connected)
+        .value("AddrInUseError", global.types.addr_in_use)
+        .value("AddrNotAvailableError", global.types.addr_not_available)
+        .value("NetworkDownError", global.types.network_down)
+        .value("BrokenPipeError", global.types.broken_pipe)
+        .value("WouldBlockError", global.types.would_block)
+        .value("NotADirectoryError", global.types.not_adirectory)
+        .value("IsADirectoryError", global.types.is_adirectory)
+        .value("DirectoryNotEmptyError", global.types.directory_not_empty)
+        .value("ReadOnlyFilesystemError", global.types.read_only_filesystem)
+        .value(
+            "StaleNetworkFileHandleError",
+            global.types.stale_network_file_handle,
+        )
+        .value("WriteZeroError", global.types.write_zero)
+        .value("StorageFullError", global.types.storage_full)
+        .value("NotSeekableError", global.types.not_seekable)
+        .value("QuotaExceededError", global.types.quota_exceeded)
+        .value("FileTooLargeError", global.types.file_too_large)
+        .value("ResourceBusyError", global.types.resource_busy)
+        .value("ExecutableFileBusyError", global.types.executable_file_busy)
+        .value("DeadlockError", global.types.deadlock)
+        .value("CrossesDevicesError", global.types.crosses_devices)
+        .value("TooManyLinksError", global.types.too_many_links)
+        .value("InvalidFilenameError", global.types.invalid_filename)
+        .value(
+            "ArgumentListTooLongError",
+            global.types.argument_list_too_long,
+        )
+        .value("InvalidDataError", global.types.invalid_data)
+        .value("InterruptedError", global.types.interrupted)
+        .value("UnexpectedEofError", global.types.unexpected_eof)
+        .value("OutOfMemoryError", global.types.out_of_memory)
         .commit();
 }

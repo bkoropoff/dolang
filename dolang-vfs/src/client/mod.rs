@@ -1152,7 +1152,10 @@ impl Client {
                 OpenVfsHandle::Native(handle) => {
                     #[cfg(unix)]
                     {
-                        let key = key.map(AuthKey::new).transpose().map_err(rpc_error)?;
+                        let key = key
+                            .map(AuthKey::new)
+                            .transpose()
+                            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
                         Ok(Self::from_owned_fd_with_key(handle.into_inner(), key)
                             .await?
                             .into())
@@ -1391,18 +1394,31 @@ impl Client {
 pub(crate) fn rpc_error(error: dolang_rpc::Error) -> io::Error {
     match error {
         dolang_rpc::Error::Io(error) => error,
+        dolang_rpc::Error::Serialize(_)
+        | dolang_rpc::Error::Deserialize(_)
+        | dolang_rpc::Error::Protocol(_) => {
+            io::Error::new(io::ErrorKind::InvalidData, error.to_string())
+        }
+        dolang_rpc::Error::Auth(_) => {
+            io::Error::new(io::ErrorKind::PermissionDenied, error.to_string())
+        }
         dolang_rpc::Error::ConnectionClosed => {
             io::Error::new(io::ErrorKind::ConnectionReset, error.to_string())
         }
         dolang_rpc::Error::Cancelled => {
             io::Error::new(io::ErrorKind::Interrupted, error.to_string())
         }
-        error => io::Error::other(error),
+        dolang_rpc::Error::UnsupportedCapability => {
+            io::Error::new(io::ErrorKind::Unsupported, error.to_string())
+        }
     }
 }
 
 fn unexpected(response: ResponseKind) -> io::Error {
-    io::Error::other(format!("unexpected RPC response: {response:?}"))
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("unexpected RPC response: {response:?}"),
+    )
 }
 
 fn clone_stdin_handle() -> io::Result<DefaultHandle> {
@@ -3011,8 +3027,48 @@ impl Vfs for Client {
 mod tests {
     use std::io;
 
-    use super::{Client, ClientChildState};
+    use super::{Client, ClientChildState, rpc_error};
     use crate::{Child as _, Command as _, Server, Vfs as _, protocol::RequestKind};
+
+    #[test]
+    fn rpc_errors_have_portable_io_kinds() {
+        let cases = [
+            (
+                dolang_rpc::Error::Serialize("x".into()),
+                io::ErrorKind::InvalidData,
+            ),
+            (
+                dolang_rpc::Error::Deserialize("x".into()),
+                io::ErrorKind::InvalidData,
+            ),
+            (
+                dolang_rpc::Error::Protocol("x".into()),
+                io::ErrorKind::InvalidData,
+            ),
+            (
+                dolang_rpc::Error::Auth("x".into()),
+                io::ErrorKind::PermissionDenied,
+            ),
+            (
+                dolang_rpc::Error::ConnectionClosed,
+                io::ErrorKind::ConnectionReset,
+            ),
+            (dolang_rpc::Error::Cancelled, io::ErrorKind::Interrupted),
+            (
+                dolang_rpc::Error::UnsupportedCapability,
+                io::ErrorKind::Unsupported,
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(rpc_error(error).kind(), expected);
+        }
+
+        let io_error = io::Error::new(io::ErrorKind::WouldBlock, "wait");
+        assert_eq!(
+            rpc_error(dolang_rpc::Error::Io(io_error)).kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
 
     #[cfg(unix)]
     fn successful_command(client: &Client) -> super::CommandBuilder<'_> {

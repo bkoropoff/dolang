@@ -134,7 +134,7 @@ without traversing or modifying its target.
 | Exception                                        | Condition                                              |
 | ------------------------------------------------ | ------------------------------------------------------ |
 | [`sys.NotFoundError`](../sys/not-found-error.md) | The subkey does not exist                              |
-| `sys.Error`                                      | The subkey has children and `all: true` was not passed |
+| `sys.DirectoryNotEmptyError`                     | The subkey has children and `all: true` was not passed |
 
 #### Example
 

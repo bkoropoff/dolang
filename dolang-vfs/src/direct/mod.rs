@@ -969,7 +969,7 @@ impl Vfs for Direct {
             let key = key
                 .map(dolang_rpc::AuthKey::new)
                 .transpose()
-                .map_err(crate::client::rpc_error)?;
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
             crate::Client::connect_with_key(native_path(path)?, key)
                 .await
                 .map(Into::into)

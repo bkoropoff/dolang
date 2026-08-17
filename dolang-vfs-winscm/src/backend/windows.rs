@@ -9,11 +9,8 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 
+use dolang_vfs::error::{Error, ErrorKind};
 use dolang_vfs::extension::{ExtContext, ExtGuard, InvalidHandle};
-use dolang_vfs::{
-    error::{Error, ErrorKind},
-    target::OperatingSystem,
-};
 use dolang_winterop::{
     apc::{Canceled, Context, Reactor},
     security::{SecDesc as VfsSecDesc, SecDescControl, SecInfo, with_security_privilege},
@@ -21,8 +18,8 @@ use dolang_winterop::{
 use futures::channel::oneshot;
 use windows_sys::Win32::{
     Foundation::{
-        ERROR_ACCESS_DENIED, ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA,
-        ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_EXISTS, ERROR_SUCCESS, GetLastError,
+        ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA, ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SUCCESS,
+        GetLastError,
     },
     Security::{
         PROTECTED_DACL_SECURITY_INFORMATION, PROTECTED_SACL_SECURITY_INFORMATION,
@@ -126,18 +123,7 @@ fn optional_ptr(value: Option<&Vec<u16>>) -> *const u16 {
 }
 
 fn from_win32(operation: &str, code: u32) -> Error {
-    let kind = match code {
-        ERROR_ACCESS_DENIED => ErrorKind::PermissionDenied,
-        ERROR_SERVICE_DOES_NOT_EXIST => ErrorKind::NotFound,
-        ERROR_SERVICE_EXISTS => ErrorKind::AlreadyExists,
-        _ => ErrorKind::Other,
-    };
-    Error::from_system_code(
-        kind,
-        format!("{operation}: SCM error {code}"),
-        OperatingSystem::Windows,
-        code as i32,
-    )
+    Error::from_raw_os_error_with_message(code as i32, format!("{operation}: SCM error {code}"))
 }
 
 fn last_error(operation: &str) -> Error {
@@ -217,16 +203,21 @@ unsafe fn open_service(
         // SAFETY: `name` is NUL-terminated; `manager` is a live SC manager handle.
         let handle = unsafe { OpenServiceW(manager, name.as_ptr(), access.0.bits()) };
         if handle.is_null() {
-            return Err(io::Error::last_os_error());
+            let code = unsafe { GetLastError() };
+            return Err(match code {
+                ERROR_SERVICE_DOES_NOT_EXIST => {
+                    Error::from_raw_os_error_with_kind(code as i32, ErrorKind::NotFound)
+                }
+                _ => Error::from_raw_os_error(code as i32),
+            });
         }
         Ok(handle)
     };
-    let result = if access.0.intersects(ServiceAccess::ACCESS_SYSTEM_SECURITY.0) {
+    if access.0.intersects(ServiceAccess::ACCESS_SYSTEM_SECURITY.0) {
         with_security_privilege(open)
     } else {
         open()
-    };
-    result.map_err(|error| from_io("open service", error))
+    }
 }
 
 /// Enumerates services in `manager` matching `service_type`/`state_filter`,
@@ -557,7 +548,7 @@ unsafe fn query_status(handle: SC_HANDLE) -> Result<ServiceStatus, Error> {
 fn from_io(operation: &str, err: io::Error) -> Error {
     match err.raw_os_error() {
         Some(code) => from_win32(operation, code as u32),
-        None => Error::new(ErrorKind::Other, format!("{operation}: {err}")),
+        None => Error::new(err.kind().into(), format!("{operation}: {err}")),
     }
 }
 
