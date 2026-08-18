@@ -17,7 +17,7 @@ use crate::{
     fragment::{self, Kind},
     serde::{decode_payload, encode_payload},
     session::{self, Cite, Gift, InvalidOpaque, OpaqueGuard, OpaqueResource, Session},
-    trailer::{RecvShared, SendShared, TrailerRecv, TrailerSend},
+    trailer::{RecvShared, SendShared, SessionWindow, TrailerRecv, TrailerSend},
     transport::{self, EncodeHandles, Receiver, Sender},
 };
 #[cfg(windows)]
@@ -104,6 +104,12 @@ enum Message<R> {
     Ack {
         id: u64,
     },
+    /// We retired `count` bytes of the request trailer on `id` and are
+    /// returning that much credit. Always results in a wire `Kind::Credit`.
+    Credit {
+        id: u64,
+        count: u32,
+    },
     /// Drops `count` of this endpoint's references to the peer's opaque `id`.
     Release {
         id: u64,
@@ -120,6 +126,22 @@ impl<R: Send + 'static> session::ReleaseSink for mpsc::WeakUnboundedSender<Messa
         // writer is already gone and the peer's table dies with the session.
         if let Some(outgoing) = self.upgrade() {
             let _ = outgoing.send(Message::Release { id, count });
+        }
+    }
+}
+
+impl<R: Send + 'static> crate::trailer::TrailerSink for mpsc::WeakUnboundedSender<Message<R>> {
+    fn credit(&self, id: u64, count: u32) {
+        if let Some(outgoing) = self.upgrade() {
+            let _ = outgoing.send(Message::Credit { id, count });
+        }
+    }
+
+    fn discard(&self, id: u64) {
+        // Reached from `TrailerRecv::drop`, so a departed channel just means
+        // the connection is already gone and the peer has nothing to stop.
+        if let Some(outgoing) = self.upgrade() {
+            let _ = outgoing.send(Message::DiscardTrailer { id });
         }
     }
 }
@@ -201,17 +223,19 @@ impl<P: Protocol> Server<P> {
             limits,
             marker: _,
         } = self;
+        let trailer_session = Arc::new(SessionWindow::new(limits.trailer_session_window));
         let mut writer = tokio::spawn(writer::<P>(
             sender,
             outgoing_rx,
             inner.clone(),
             session.clone(),
+            trailer_session.clone(),
             limits,
         ));
         let (shutdown, mut shutdown_requested) = oneshot::channel();
         inner.lock().unwrap().shutdown = Some(shutdown);
         let handler = Arc::new(handler);
-        let mut reassembler = fragment::Reassembler::new(limits);
+        let mut reassembler = fragment::Reassembler::new(limits, Arc::new(outgoing.downgrade()));
         let mut tasks = futures::stream::FuturesUnordered::new();
         let (mut result, mut writer_finished, mut graceful) = 'main: loop {
             let mut frame = receiver.recv();
@@ -266,14 +290,15 @@ impl<P: Protocol> Server<P> {
                     let _ = outgoing.send(Message::Ack { id });
                     (message, None)
                 }
-                fragment::Event::Trailer {
-                    id,
-                    shared,
-                    len,
-                    notify_discard,
-                } => (None, Some((id, shared, len, notify_discard))),
+                fragment::Event::Trailer { shared, len, .. } => (None, Some((shared, len))),
                 fragment::Event::Release { id, count } => {
                     session.release(id, count);
+                    (None, None)
+                }
+                fragment::Event::Credit { id, count } => {
+                    // Applied here rather than routed through the writer;
+                    // see the client's matching arm.
+                    trailer_session.refund(id, count as usize);
                     (None, None)
                 }
             };
@@ -323,6 +348,7 @@ impl<P: Protocol> Server<P> {
                         let task_inner = inner.clone();
                         let task_session = session.clone();
                         let task_outgoing = outgoing.clone();
+                        let task_trailer_session = trailer_session.clone();
                         let (abort, registration) = AbortHandle::new_pair();
                         tasks.push(Abortable::new(
                             async move {
@@ -335,6 +361,7 @@ impl<P: Protocol> Server<P> {
                                     responded: false,
                                     shutdown_on_respond: false,
                                     limits,
+                                    trailer_session: task_trailer_session,
                                     marker: PhantomData,
                                 };
                                 handler(context, request).await;
@@ -395,10 +422,7 @@ impl<P: Protocol> Server<P> {
                     }
                 }
             }
-            if let Some((id, shared, len, notify_discard)) = live_trailer {
-                if notify_discard {
-                    let _ = outgoing.send(Message::DiscardTrailer { id });
-                }
+            if let Some((shared, len)) = live_trailer {
                 let frame = receiver.recv();
                 // SAFETY: the lease retains the receiver borrow and clears
                 // the erased token before it ends.
@@ -468,6 +492,7 @@ async fn writer<P: Protocol>(
     mut outgoing: mpsc::UnboundedReceiver<Message<P::Response>>,
     inner: Arc<Mutex<Inner>>,
     session: Arc<Session>,
+    trailer_session: Arc<SessionWindow>,
     limits: Limits,
 ) -> Result<(), Error> {
     let mut scheduler = fragment::Scheduler::new(&limits);
@@ -486,7 +511,16 @@ async fn writer<P: Protocol>(
                     closed = true;
                     continue;
                 };
-                admit::<P>(&mut sender, &mut scheduler, &inner, &session, &limits, message).await?;
+                admit::<P>(
+                    &mut sender,
+                    &mut scheduler,
+                    &inner,
+                    &session,
+                    &trailer_session,
+                    &limits,
+                    message,
+                )
+                .await?;
             }
             // Not raced against anything — see the matching comment in
             // client.rs's writer loop. A dropped send future could leave a
@@ -516,6 +550,7 @@ async fn admit<P: Protocol>(
     scheduler: &mut fragment::Scheduler,
     inner: &Arc<Mutex<Inner>>,
     session: &Arc<Session>,
+    trailer_session: &Arc<SessionWindow>,
     limits: &Limits,
     message: Message<P::Response>,
 ) -> Result<(), Error> {
@@ -574,9 +609,15 @@ async fn admit<P: Protocol>(
             }
         },
         Message::DiscardTrailer { id } => scheduler.admit_empty(Kind::Discard, id),
-        Message::PeerDiscarded { id } => scheduler.discard_active_trailer(id),
+        Message::PeerDiscarded { id } => {
+            // The peer will never credit what it just threw away; see the
+            // client's matching arm.
+            trailer_session.settle(id);
+            scheduler.discard_active_trailer(id);
+        }
         Message::Ack { id } => scheduler.admit_empty(Kind::Ack, id),
         Message::Release { id, count } => scheduler.admit_release(id, count),
+        Message::Credit { id, count } => scheduler.admit_credit(id, count),
     }
     Ok(())
 }
@@ -593,23 +634,58 @@ pub struct CallContext<P: Protocol> {
     responded: bool,
     shutdown_on_respond: bool,
     limits: Limits,
+    /// Send-side trailer credit shared by every outgoing response trailer on
+    /// this connection.
+    trailer_session: Arc<SessionWindow>,
     marker: PhantomData<fn() -> P>,
 }
 
 impl<P: Protocol> CallContext<P> {
-    /// Returns this request's raw-byte trailer, if present.
+    /// Takes this request's raw-byte trailer, if present.
     ///
     /// The returned value implements [`AsyncRead`](tokio::io::AsyncRead).
-    /// Dropping it or calling [`TrailerRecv::discard`](crate::trailer::TrailerRecv::discard)
-    /// stops local consumption; the peer is notified only if it continues to
-    /// send trailer fragments.
-    pub fn request_trailer(&mut self) -> Option<&mut TrailerRecv> {
-        self.request_trailer.as_mut()
+    /// Dropping it or calling
+    /// [`TrailerRecv::discard`](crate::trailer::TrailerRecv::discard) stops
+    /// local consumption and immediately tells the peer to stop sending, as
+    /// does responding while the context still holds it.
+    ///
+    /// Taken rather than borrowed, so a handler may keep reading after it
+    /// has responded. Paired with
+    /// [`respond_with_trailer`](Self::respond_with_trailer) that gives a
+    /// duplex byte pipe over one call: each direction is an independent
+    /// stream that ends when its own end says so, and the call itself is
+    /// complete as soon as the response head goes out. Neither direction
+    /// holds a call slot after that, so the pipes are bounded by trailer
+    /// credit rather than by `max_concurrent_calls` — and, as with a socket,
+    /// nothing ties the two halves together: closing one does not close the
+    /// other, and a peer that vanishes is noticed through the transport.
+    pub fn trailer(&mut self) -> Option<TrailerRecv> {
+        self.request_trailer.take()
+    }
+
+    /// Returns this request's raw-byte trailer in manual-credit mode.
+    ///
+    /// The consumer then owes the peer an explicit
+    /// [`TrailerRecv::release`](crate::trailer::TrailerRecv::release) for
+    /// every chunk it finishes with, instead of credit being returned on
+    /// read. Use this when the bytes are being handed somewhere slower than
+    /// this process, so that the peer's send rate follows the real drain
+    /// rate; read [`release`](crate::trailer::TrailerRecv::release) first,
+    /// since manual mode moves a deadlock rule into calling code.
+    ///
+    /// The mode is fixed here rather than switchable afterwards, so a
+    /// trailer cannot be half auto-credited and half not. Taken rather than
+    /// borrowed, exactly as in [`trailer`](Self::trailer).
+    pub fn trailer_manual_credit(&mut self) -> Option<TrailerRecv> {
+        let mut trailer = self.request_trailer.take()?;
+        trailer.set_manual_credit();
+        Some(trailer)
     }
 
     /// Sends a response without a trailer and consumes this call context.
     ///
-    /// Any unread request trailer is discarded.
+    /// A request trailer this context still holds is discarded; one already
+    /// taken by [`trailer`](Self::trailer) is untouched and stays readable.
     pub fn respond(mut self, response: P::Response) {
         drop(self.request_trailer.take());
         self.responded = true;
@@ -626,11 +702,18 @@ impl<P: Protocol> CallContext<P> {
     ///
     /// Call [`TrailerSend::finish`](crate::trailer::TrailerSend::finish), or
     /// asynchronously shut down the returned writer, to commit the trailer.
-    /// Dropping it without finishing aborts the trailer. Any unread request
-    /// trailer is discarded.
+    /// Dropping it without finishing aborts the trailer. A request trailer
+    /// this context still holds is discarded; one already taken by
+    /// [`trailer`](Self::trailer) is untouched, which is what makes the two
+    /// directions a duplex pipe.
     pub fn respond_with_trailer(mut self, response: P::Response) -> TrailerSend<()> {
         drop(self.request_trailer.take());
-        let shared = SendShared::new(Kind::Response, self.id, &self.limits);
+        let shared = SendShared::new(
+            Kind::Response,
+            self.id,
+            &self.limits,
+            self.trailer_session.clone(),
+        );
         self.responded = true;
         self.inner.lock().unwrap().outstanding.remove(&self.id);
         let _ = self.outgoing.send(Message::Response {

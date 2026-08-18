@@ -1,6 +1,7 @@
 //! Streaming RPC trailer bodies and their lifetime-erased transport leases.
 
 use std::{
+    collections::HashMap,
     io::{self, IoSlice},
     marker::PhantomData,
     pin::Pin,
@@ -36,6 +37,153 @@ fn register_waker(slot: &mut Option<Waker>, waker: &Waker) {
 fn wake(waker: Option<Waker>) {
     if let Some(waker) = waker {
         waker.wake();
+    }
+}
+
+/// The session-wide trailer credit pool, shared by every trailer on one
+/// connection.
+///
+/// Each endpoint holds two of these, for opposite directions. The send-side
+/// pool tracks credit this endpoint may still spend across all its outgoing
+/// trailers; the receive-side pool tracks unretired bytes owed by the peer,
+/// so the reassembler can catch a peer that overruns what it was granted.
+///
+/// There is no negotiated per-trailer
+/// window. A sender that lets one trailer consume the whole pool starves only
+/// its own other trailers, never the peer's, so per-trailer fairness is a
+/// local scheduling concern rather than something the protocol has to
+/// enforce — including a sender that imposes a private budget per trailer,
+/// which this end cannot see. The receiver never has to: it flushes coalesced
+/// credit whenever withholding it could be what keeps a sender parked, both
+/// when the pool is provably drained ([`SessionWindow::is_exhausted`]) and
+/// when a consumer is waiting on bytes that have not come
+/// ([`RecvShared::is_stalled`]).
+///
+/// Outstanding bytes are tracked per message id rather than per
+/// `SendShared`/`RecvShared`, because settlement outlives those. A trailer's
+/// last `Credit` fragments routinely arrive after its send has finished and
+/// left the scheduler; if the debt lived on the send, those refunds would be
+/// dropped and the pool would shrink a little on every completed transfer
+/// until nothing could be sent at all. Keying by id also makes settlement
+/// idempotent, so an abort that returns the whole debt at once cannot be
+/// double-counted by a `Credit` that crossed it on the wire.
+pub(crate) struct SessionWindow {
+    state: Mutex<SessionWindowState>,
+}
+
+struct SessionWindowState {
+    /// Send side: bytes still spendable. Receive side: bytes of headroom
+    /// before the peer has overrun its grant.
+    available: usize,
+    /// Bytes outstanding per message id. Entries are removed as they reach
+    /// zero, so this is bounded by the number of live trailers.
+    debt: HashMap<u64, usize>,
+    /// Writers parked because the *pool* was empty, as opposed to their own
+    /// window. Woken all together on a refund; the parked set is bounded by
+    /// the number of open trailers, and no fairness is attempted beyond
+    /// that — a starved pool is a misconfiguration, not a steady state.
+    wakers: Vec<Waker>,
+}
+
+impl SessionWindow {
+    pub(crate) fn new(available: usize) -> Self {
+        Self {
+            state: Mutex::new(SessionWindowState {
+                available,
+                debt: HashMap::new(),
+                wakers: Vec::new(),
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    fn available(&self) -> usize {
+        lock(&self.state).available
+    }
+
+    /// Receive side: true once the peer has spent every byte it was granted,
+    /// so it is certainly parked waiting for credit. Forces a coalesced
+    /// `Credit` out rather than stranding it below the threshold.
+    fn is_exhausted(&self) -> bool {
+        lock(&self.state).available == 0
+    }
+
+    /// Send side: spends up to `n` bytes on behalf of message `id`, returning
+    /// how many were actually granted. Zero means the pool is empty.
+    ///
+    /// Clamping and accounting happen under one lock. They have to, now that
+    /// the pool is the sole limiter: writers on different trailers hold
+    /// different `SendShared` mutexes, so a separate read-then-debit would
+    /// let two of them spend the same bytes.
+    fn debit_up_to(&self, id: u64, n: usize) -> usize {
+        let mut state = lock(&self.state);
+        let granted = n.min(state.available);
+        state.available -= granted;
+        if granted > 0 {
+            *state.debt.entry(id).or_default() += granted;
+        }
+        granted
+    }
+
+    /// Returns up to `n` of message `id`'s outstanding bytes and wakes every
+    /// writer parked on the pool.
+    ///
+    /// Clamping to the recorded debt is what makes this safe to call for an
+    /// id that has already been settled, or twice for the same bytes.
+    pub(crate) fn refund(&self, id: u64, n: usize) {
+        let mut state = lock(&self.state);
+        let Some(debt) = state.debt.get_mut(&id) else {
+            return;
+        };
+        let refund = n.min(*debt);
+        *debt -= refund;
+        if *debt == 0 {
+            state.debt.remove(&id);
+        }
+        state.available += refund;
+        let wakers = std::mem::take(&mut state.wakers);
+        drop(state);
+        for waker in wakers {
+            waker.wake();
+        }
+    }
+
+    /// Returns everything message `id` still owes, for a trailer that ended
+    /// without the rest of its bytes ever being retired (an abort, or a
+    /// discard on the receive side). Idempotent.
+    pub(crate) fn settle(&self, id: u64) {
+        let mut state = lock(&self.state);
+        let Some(debt) = state.debt.remove(&id) else {
+            return;
+        };
+        state.available += debt;
+        let wakers = std::mem::take(&mut state.wakers);
+        drop(state);
+        for waker in wakers {
+            waker.wake();
+        }
+    }
+
+    fn park(&self, waker: &Waker) {
+        let mut state = lock(&self.state);
+        if !state.wakers.iter().any(|parked| parked.will_wake(waker)) {
+            state.wakers.push(waker.clone());
+        }
+    }
+
+    /// Receive side: accounts `n` bytes arriving from the peer under message
+    /// `id`, returning `false` if that overruns the credit this endpoint
+    /// actually granted.
+    fn accept_bytes(&self, id: u64, n: usize) -> bool {
+        let mut state = lock(&self.state);
+        match state.available.checked_sub(n) {
+            Some(remaining) => {
+                state.available = remaining;
+                *state.debt.entry(id).or_default() += n;
+                true
+            }
+            None => false,
+        }
     }
 }
 
@@ -91,14 +239,21 @@ pub(crate) struct SendShared {
     id: u64,
     max_fragment_size: usize,
     copy_threshold: usize,
-    /// Configured cap on the total bytes this trailer may carry (see
-    /// `crate::Limits::max_trailer_size`). Fixed for the lifetime of this
-    /// `SendShared` — unlike `max_fragment_size`, it isn't reset per grant.
-    max_trailer_size: usize,
     /// Total bytes committed to fragments so far (staged or written
     /// zero-copy), regardless of whether they've actually reached the wire
-    /// yet. Checked against `max_trailer_size` on every `poll_write`.
+    /// yet.
     written: usize,
+    /// Pool credit held for the fragment currently being formed but not yet
+    /// committed. Nonzero only while a large write is waiting for its
+    /// transport grant: the reservation is taken in `Idle` and carried across
+    /// `Demand` so that reaching `Granted`/`Staging` always has credit in
+    /// hand, and those states never have to park while holding a lease.
+    reserved: usize,
+    /// The connection-wide credit pool, and the only thing bounding what this
+    /// trailer may have outstanding — there is no per-trailer window, see
+    /// [`SessionWindow`]. Outstanding bytes are tracked there by message id,
+    /// not here, so they can still be settled once this `SendShared` is gone.
+    session: Arc<SessionWindow>,
     /// Unsent suffix of a committed fragment. While `poll_write` holds the
     /// mutex, this temporarily contains the header before it is committed.
     buffer: BytesMut,
@@ -113,15 +268,21 @@ pub(crate) struct SendShared {
 }
 
 impl SendShared {
-    pub(crate) fn new(kind: Kind, id: u64, limits: &Limits) -> Arc<Mutex<Self>> {
+    pub(crate) fn new(
+        kind: Kind,
+        id: u64,
+        limits: &Limits,
+        session: Arc<SessionWindow>,
+    ) -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self {
             token: None,
             kind,
             id,
             max_fragment_size: limits.max_fragment_size,
             copy_threshold: limits.trailer_send_copy_threshold,
-            max_trailer_size: limits.max_trailer_size,
             written: 0,
+            reserved: 0,
+            session,
             buffer: BytesMut::new(),
             state: SendState::Idle,
             error: None,
@@ -340,37 +501,62 @@ impl SendShared {
         }
         let driver = inner.driver_waker.take();
         let writer = inner.writer_waker.take();
+        let session = inner.session.clone();
+        let id = inner.id;
         drop(inner);
+        // No more credit will ever arrive for this trailer, so its share of
+        // the pool has to come back here or it is lost until the connection
+        // ends. `settle` is idempotent, so a `Credit` that crossed this on
+        // the wire cannot double-refund.
+        session.settle(id);
         wake(driver);
         wake(writer);
     }
+
+    /// Reserves up to `want` bytes of pool credit, returning what was
+    /// granted. Zero means the pool is empty and the caller must park.
+    ///
+    /// Peer-returned credit is applied to the pool directly by the endpoint,
+    /// keyed by message id, rather than routed back through this trailer: a
+    /// `Credit` may well arrive after this `SendShared` is gone — see
+    /// [`SessionWindow`].
+    fn reserve(&mut self, want: usize) -> usize {
+        let granted = self.session.debit_up_to(self.id, want);
+        self.written += granted;
+        granted
+    }
+
+    /// Returns a reservation whose fragment was never committed.
+    fn unreserve(&mut self, len: usize) {
+        if len == 0 {
+            return;
+        }
+        self.written -= len;
+        self.session.refund(self.id, len);
+    }
 }
 
-/// If the producer has already written `max_trailer_size` bytes, aborts the
-/// send (same as a peer discard or cancellation — the driver observes an
-/// ordinary wire `ABORT`, not a connection-fatal error) and returns the
-/// error the caller should hand back from `poll_write`.
+/// Why `Granted`/`Staging` may assert they already hold a reservation: the
+/// scheduler only grants after `poll_action` reports `Fragment`, which
+/// `Idle` never does, so a fresh grant (the only kind that sets `Granted`,
+/// since `grant` leaves a non-empty `buffer`'s state alone) is always
+/// answering a `Demand` — and `Demand` is only entered from `Idle` with a
+/// reservation in hand.
+const RESERVED_HELD: &str = "Granted/Staging is only reached from Demand, which reserves";
+
+/// Parks the writer because the session pool is empty, registering it there
+/// so the matching refund wakes it.
 ///
-/// A well-behaved producer that respects this never causes the receiver's
-/// own (connection-fatal) `max_trailer_size` check to trip — that check
-/// only exists as a backstop for an asymmetrically configured or
-/// misbehaving peer.
-fn reject_if_trailer_size_exceeded(shared: &mut SendShared) -> Option<io::Error> {
-    if shared.written < shared.max_trailer_size {
-        return None;
-    }
-    let error = io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!(
-            "trailer exceeds the maximum size of {} bytes",
-            shared.max_trailer_size
-        ),
-    );
-    shared.state = SendState::Abort;
-    shared.error = Some((error.kind(), error.to_string()));
-    let driver = shared.driver_waker.take();
-    wake(driver);
-    Some(error)
+/// This is only ever reached from `SendState::Idle`, so a starved
+/// trailer simply reports `Pending` from `poll_action` and the scheduler
+/// skips it. Parking in `Granted`/`Staging` instead would hold a live
+/// `SendLease` while the driver waited forever, wedging the connection's
+/// single writer.
+fn park_for_credit(shared: &mut SendShared, cx: &mut Context<'_>) {
+    // `writer_waker` covers abort and failure; the pool's own list covers the
+    // credit this park is actually waiting for.
+    register_waker(&mut shared.writer_waker, cx.waker());
+    shared.session.park(cx.waker());
 }
 
 fn poll_flush_buffer(shared: &mut SendShared, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -507,13 +693,20 @@ impl<T: Unpin> AsyncWrite for TrailerSend<T> {
                 Poll::Pending
             }
             SendState::Idle => {
-                if let Some(error) = reject_if_trailer_size_exceeded(&mut inner) {
-                    return Poll::Ready(Err(error));
+                // The only place credit is ever waited for. Doing it here,
+                // before demanding a token, is what keeps a starved trailer
+                // from holding a transport grant hostage — see
+                // `park_for_credit`. The reservation taken here is *held*
+                // across `Demand`, so `Granted`/`Staging` always have credit
+                // in hand and never have to park while holding a lease. That
+                // matters now that the pool is the sole limiter: another
+                // trailer could otherwise drain it in between.
+                let want = buf.len().min(inner.max_fragment_size.max(1));
+                let len = inner.reserve(want);
+                if len == 0 {
+                    park_for_credit(&mut inner, cx);
+                    return Poll::Pending;
                 }
-                let len = buf
-                    .len()
-                    .min(inner.max_fragment_size.max(1))
-                    .min(inner.max_trailer_size - inner.written);
                 if len <= inner.copy_threshold {
                     FragmentHeader {
                         flags: Flags::NONE,
@@ -523,14 +716,15 @@ impl<T: Unpin> AsyncWrite for TrailerSend<T> {
                     }
                     .encode_into(&mut inner.buffer);
                     inner.buffer.extend_from_slice(&buf[..len]);
-                    inner.written += len;
                     inner.state = SendState::Fragment;
                     let driver = inner.driver_waker.take();
                     drop(inner);
                     wake(driver);
                     return Poll::Ready(Ok(len));
                 }
-                // A large write asks to be granted a token for direct I/O.
+                // A large write asks to be granted a token for direct I/O,
+                // carrying its reservation along.
+                inner.reserved = len;
                 inner.state = SendState::Demand;
                 register_waker(&mut inner.writer_waker, cx.waker());
                 let driver = inner.driver_waker.take();
@@ -543,16 +737,17 @@ impl<T: Unpin> AsyncWrite for TrailerSend<T> {
                 Poll::Pending
             }
             SendState::Staging => {
-                if let Some(error) = reject_if_trailer_size_exceeded(&mut inner) {
-                    return Poll::Ready(Err(error));
-                }
                 // The grace period for zero-copy already expired for this
                 // grant: stage directly and wake the driver, which is
                 // already waiting for exactly this.
+                debug_assert!(inner.reserved > 0, "{RESERVED_HELD}");
                 let len = buf
                     .len()
                     .min(inner.max_fragment_size.max(1))
-                    .min(inner.max_trailer_size - inner.written);
+                    .min(inner.reserved);
+                let unused = inner.reserved - len;
+                inner.unreserve(unused);
+                inner.reserved = 0;
                 FragmentHeader {
                     flags: Flags::NONE,
                     kind: inner.kind,
@@ -561,7 +756,6 @@ impl<T: Unpin> AsyncWrite for TrailerSend<T> {
                 }
                 .encode_into(&mut inner.buffer);
                 inner.buffer.extend_from_slice(&buf[..len]);
-                inner.written += len;
                 inner.state = SendState::Fragment;
                 let driver = inner.driver_waker.take();
                 drop(inner);
@@ -569,15 +763,20 @@ impl<T: Unpin> AsyncWrite for TrailerSend<T> {
                 Poll::Ready(Ok(len))
             }
             SendState::Granted => {
-                if let Some(error) = reject_if_trailer_size_exceeded(&mut inner) {
-                    return Poll::Ready(Err(error));
-                }
                 // Zero-copy fast path: a token is granted and waiting on
                 // us, so try writing directly instead of staging.
+                debug_assert!(inner.reserved > 0, "{RESERVED_HELD}");
                 let len = buf
                     .len()
                     .min(inner.max_fragment_size.max(1))
-                    .min(inner.max_trailer_size - inner.written);
+                    .min(inner.reserved);
+                // Release the part of the reservation this fragment won't
+                // use, but keep `len` held: a `Pending` below retries against
+                // it rather than re-reserving against a pool that may have
+                // been drained meanwhile.
+                let unused = inner.reserved - len;
+                inner.unreserve(unused);
+                inner.reserved = len;
                 FragmentHeader {
                     flags: Flags::NONE,
                     kind: inner.kind,
@@ -600,6 +799,8 @@ impl<T: Unpin> AsyncWrite for TrailerSend<T> {
                     Poll::Ready(Ok(0)) => {
                         let error = io::Error::from(io::ErrorKind::WriteZero);
                         inner.buffer.clear();
+                        inner.unreserve(len);
+                        inner.reserved = 0;
                         inner.state = SendState::Failed;
                         inner.error = Some((error.kind(), error.to_string()));
                         let driver = inner.driver_waker.take();
@@ -616,7 +817,7 @@ impl<T: Unpin> AsyncWrite for TrailerSend<T> {
                             inner.buffer.clear();
                             inner.buffer.extend_from_slice(&buf[n - header_len..len]);
                         }
-                        inner.written += len;
+                        inner.reserved = 0;
                         inner.state = SendState::Fragment;
                         let driver = inner.driver_waker.take();
                         drop(inner);
@@ -625,6 +826,8 @@ impl<T: Unpin> AsyncWrite for TrailerSend<T> {
                     }
                     Poll::Ready(Err(error)) => {
                         inner.buffer.clear();
+                        inner.unreserve(len);
+                        inner.reserved = 0;
                         inner.state = SendState::Failed;
                         inner.error = Some((error.kind(), error.to_string()));
                         let driver = inner.driver_waker.take();
@@ -635,7 +838,8 @@ impl<T: Unpin> AsyncWrite for TrailerSend<T> {
                     Poll::Pending => {
                         // No header bytes were committed, so this write
                         // remains entirely the caller's and can be retried
-                        // with a new buffer.
+                        // with a new buffer. The reservation stays held for
+                        // that retry.
                         inner.buffer.clear();
                         Poll::Pending
                     }
@@ -713,10 +917,53 @@ pub(crate) struct RecvShared {
     error: Option<(io::ErrorKind, String)>,
     reader_waker: Option<Waker>,
     driver_waker: Option<Waker>,
+    /// How much retired credit accumulates before a `Credit` goes out.
+    /// Purely local coalescing granularity — what actually bounds the peer is
+    /// the session pool, not this.
+    credit_interval: usize,
+    /// Cumulative trailer bytes accepted from the wire, and cumulative bytes
+    /// retired (already credited, plus `pending`). Kept only to catch a
+    /// manual consumer releasing more than it was given.
+    received: usize,
+    retired: usize,
+    /// Retired but not yet sent as a `Credit`. See `retire`.
+    pending: usize,
+    /// When false, the consumer releases credit explicitly via
+    /// [`TrailerRecv::release`] instead of implicitly on read.
+    auto_release: bool,
+    /// The route back to the peer, for the `Credit`/`Discard` fragments this
+    /// trailer sends on its own behalf.
+    sink: Arc<dyn TrailerSink>,
+    /// The message id those fragments name.
+    id: u64,
+    /// The receive-side session pool, so `accept_bytes` can check the
+    /// aggregate bound and retirement can give back to it.
+    session: Arc<SessionWindow>,
+}
+
+/// The route from a `TrailerRecv` back to its connection's outgoing queue.
+///
+/// Trailer state lives behind an `Arc<Mutex<..>>` that knows nothing about
+/// the application protocol, so this mirrors `session::ReleaseSink`: the
+/// endpoint implements it over its own outgoing channel and hands it in.
+/// Both operations are fire-and-forget — a dead channel means the connection
+/// is gone, which the reader will observe through its own error path.
+pub(crate) trait TrailerSink: Send + Sync + 'static {
+    /// Returns `count` retired bytes for message `id`.
+    fn credit(&self, id: u64, count: u32);
+    /// Tells the peer to stop sending message `id`'s trailer.
+    fn discard(&self, id: u64);
 }
 
 impl RecvShared {
-    pub(crate) fn new(copy_threshold: usize, demand_copy_threshold: usize) -> Arc<Mutex<Self>> {
+    pub(crate) fn new(
+        copy_threshold: usize,
+        demand_copy_threshold: usize,
+        credit_interval: usize,
+        session: Arc<SessionWindow>,
+        id: u64,
+        sink: Arc<dyn TrailerSink>,
+    ) -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self {
             token: None,
             remaining: 0,
@@ -727,7 +974,113 @@ impl RecvShared {
             error: None,
             reader_waker: None,
             driver_waker: None,
+            credit_interval,
+            received: 0,
+            retired: 0,
+            pending: 0,
+            auto_release: true,
+            sink,
+            id,
+            session,
         }))
+    }
+
+    /// Accounts `len` bytes arriving from the wire against the session pool,
+    /// returning a reason if the peer overran the credit it was granted.
+    ///
+    /// This is the backstop that makes the memory bound hold against a peer
+    /// that ignores the credit it agreed to; a well-behaved one never trips
+    /// it. The pool is the only bound — there is no per-trailer window to
+    /// check, because a sender over-committing one of its own trailers can
+    /// only starve its other trailers, never this end.
+    pub(crate) fn accept_bytes(shared: &Mutex<Self>, len: usize) -> Option<&'static str> {
+        let mut inner = lock(shared);
+        // A discarded trailer's bytes are sunk as they arrive and never
+        // held, so the bound does not apply — there is nothing to bound, and
+        // the peer is racing a `Discard` it has not seen yet.
+        if inner.state == RecvState::Discard {
+            return None;
+        }
+        if !inner.session.accept_bytes(inner.id, len) {
+            return Some("exceeded the session trailer credit window");
+        }
+        inner.received += len;
+        None
+    }
+
+    /// Records `len` bytes as retired and emits a `Credit` if that crosses
+    /// the coalescing threshold.
+    ///
+    /// Emission happens at half a `credit_interval`, *or* whenever holding
+    /// credit back could be what keeps the peer parked: the trailer has
+    /// ended, the pool is exhausted, or this trailer's own consumer is
+    /// blocked waiting for bytes that are not coming. None of those are
+    /// optimisations — without them a consumer that retires less than the
+    /// interval and then waits for more data deadlocks against a sender that
+    /// is waiting for exactly the credit sitting in `pending`.
+    fn retire(inner: &mut Self, len: usize) -> Option<(Arc<dyn TrailerSink>, u64, u32)> {
+        // `discard` already returned this trailer's whole outstanding debt
+        // to the pool in one go. Bytes retired after that point — `poll_read`
+        // still serves whatever was left in `stage`, and `discard` does not
+        // consume the handle — must not be refunded a second time.
+        if inner.state == RecvState::Discard {
+            return None;
+        }
+        inner.pending += len;
+        inner.retired += len;
+        if inner.pending * 2 < inner.credit_interval && !Self::must_flush(inner) {
+            return None;
+        }
+        Self::flush(inner)
+    }
+
+    /// Whether coalescing must give way, because credit held back here could
+    /// be the only thing the peer is missing.
+    ///
+    /// The first two clauses are session-scoped: a finished trailer would
+    /// otherwise strand its pool debt for the life of the connection, and a
+    /// drained pool means the peer is provably parked. The third is
+    /// trailer-scoped and is what lets a sender divide the pool among its own
+    /// trailers however it likes: a private per-trailer budget is invisible
+    /// from here, but a sender parked on one produces the same symptom as any
+    /// other stall — this consumer asking for bytes that never arrive. Since
+    /// `credit_interval` is a purely local knob neither end advertises, this
+    /// is the only way a sender's subdivision can be safe without the two
+    /// ends agreeing on a number.
+    fn must_flush(inner: &Self) -> bool {
+        inner.state == RecvState::Eof || inner.session.is_exhausted() || Self::is_stalled(inner)
+    }
+
+    /// Whether the consumer is parked with nothing left to read: it has
+    /// demanded a fragment that has not arrived, and `stage` is empty.
+    fn is_stalled(inner: &Self) -> bool {
+        matches!(inner.state, RecvState::Demand | RecvState::FragmentDemand)
+            && inner.stage.is_empty()
+    }
+
+    /// Emits whatever credit has accumulated, whatever the threshold says.
+    fn flush(inner: &mut Self) -> Option<(Arc<dyn TrailerSink>, u64, u32)> {
+        if inner.state == RecvState::Discard || inner.pending == 0 {
+            return None;
+        }
+        let count = u32::try_from(inner.pending).unwrap_or(u32::MAX) as usize;
+        inner.pending -= count;
+        inner.session.refund(inner.id, count);
+        Some((inner.sink.clone(), inner.id, count as u32))
+    }
+
+    /// `retire` plus the send, for callers that hold the guard and can drop
+    /// it first. The sink is never called under the mutex.
+    fn retire_and_emit(shared: &Mutex<Self>, len: usize) {
+        let mut inner = lock(shared);
+        if !inner.auto_release {
+            return;
+        }
+        let emit = Self::retire(&mut inner, len);
+        drop(inner);
+        if let Some((sink, id, count)) = emit {
+            sink.credit(id, count);
+        }
     }
 
     /// Installs a fresh fragment and selects copying or rendezvous according
@@ -891,12 +1244,28 @@ impl RecvShared {
         .await
     }
 
+    /// Marks the trailer complete, flushing any credit coalescing was still
+    /// holding back.
+    ///
+    /// That flush is not an optimisation. A trailer smaller than the
+    /// coalescing threshold retires every one of its bytes below it, so
+    /// nothing has been credited when it ends — and once it has ended
+    /// nothing more can trigger a flush: no further bytes arrive, and a
+    /// completed trailer sends no `Discard` for the peer to settle against.
+    /// The peer's matching pool debt would then be stranded for the life of
+    /// the connection, and a stream of small trailers would exhaust its
+    /// session window and park it forever.
     pub(crate) fn finish(shared: &Mutex<Self>) {
         let mut inner = lock(shared);
         inner.state = RecvState::Eof;
+        // Retiring nothing, purely to take the `Eof` flush path.
+        let emit = Self::retire(&mut inner, 0);
         let reader = inner.reader_waker.take();
         drop(inner);
         wake(reader);
+        if let Some((sink, id, count)) = emit {
+            sink.credit(id, count);
+        }
     }
 
     pub(crate) fn fail(shared: &Mutex<Self>, error: io::Error) {
@@ -908,32 +1277,49 @@ impl RecvShared {
         wake(reader);
     }
 
+    /// Stops wanting this trailer, and tells the peer so immediately.
+    ///
+    /// The notice has to be eager. A sender parked on exhausted credit emits
+    /// no further fragments, so the old trigger — noticing that another
+    /// `TRAILER` fragment arrived unwanted — can never fire, and an
+    /// abandoned trailer would leave its sender parked forever instead of
+    /// aborting it. With manual release the ambiguity is worse still: "the
+    /// consumer is holding bytes it has not released" and "the consumer is
+    /// gone" look identical from the sender's side, and this is the only
+    /// thing that distinguishes them.
+    ///
+    /// Idempotent, and safe after the trailer has already finished — a
+    /// `Discard` for a completed trailer is a defined no-op on the peer.
     pub(crate) fn discard(shared: &Mutex<Self>) {
         let mut inner = lock(shared);
-        // A trailer that has already ended stays ended. `Eof` and `Failed`
-        // are terminal facts about what arrived, not statements about what
-        // the consumer still wants, and overwriting one loses it for good:
-        // a consumer that discards and then reads — to observe the end
-        // rather than merely stop waiting for it — would be left waiting on
-        // an EOF that had already been recorded, and a discarded error
-        // would surface as a stall instead of a failure.
-        if matches!(inner.state, RecvState::Eof | RecvState::Failed) {
+        // Entering `Discard` is what makes this idempotent: a consumer that
+        // calls `discard()` and then drops the handle must not send two
+        // notices, nor refund the pool twice.
+        if inner.state == RecvState::Discard {
             return;
         }
-        inner.state = RecvState::Discard;
+        // A trailer that already ended has nothing to stop, so dropping its
+        // handle — the overwhelmingly common case — stays silent. The pool
+        // settlement below still runs.
+        let ended = inner.state == RecvState::Eof;
+        if !matches!(inner.state, RecvState::Eof | RecvState::Failed) {
+            inner.state = RecvState::Discard;
+        }
         let driver = inner.driver_waker.take();
+        let notify = (!ended).then(|| (inner.sink.clone(), inner.id));
+        // Whatever this trailer still owes the pool will never be retired
+        // now, so hand it back in one go rather than stranding it for the
+        // life of the connection.
+        inner.pending = 0;
+        inner.retired = inner.received;
+        let session = inner.session.clone();
+        let id = inner.id;
         drop(inner);
+        session.settle(id);
         wake(driver);
-    }
-
-    /// Peeks whether the local consumer has already stopped wanting this
-    /// trailer's bytes, without changing anything. Used to decide, when a
-    /// *subsequent* `TRAILER` fragment arrives, whether it's worth telling
-    /// the peer to stop — never on the fragment that first hands the
-    /// trailer to the application, since nothing has had a chance to
-    /// discard it yet at that point.
-    pub(crate) fn is_discarded(shared: &Mutex<Self>) -> bool {
-        lock(shared).state == RecvState::Discard
+        if let Some((sink, id)) = notify {
+            sink.discard(id);
+        }
     }
 }
 
@@ -988,14 +1374,28 @@ impl Drop for RecvLease<'_> {
 /// means the peer finished the trailer.
 ///
 /// Dropping or [`discard`](TrailerRecv::discard)ing a `TrailerRecv` before
-/// reading it to completion never itself sends anything to the peer: it
-/// only stops the local reader from waiting on further fragments. If the
-/// peer is still (or later starts) streaming more `TRAILER` data for this
-/// message, the read loop that notices it arriving unwanted is what tells
-/// the peer to stop — see `notify_discard` on `StreamEvent::Trailer`. This
-/// keeps the overwhelmingly common case (a consumer reads exactly what it
-/// expects, then drops the handle right as the trailer naturally ends)
-/// silent, since nothing more is ever going to arrive for it anyway.
+/// reading it to completion tells the peer to stop immediately, so a sender
+/// blocked waiting for credit fails promptly instead of waiting on a
+/// consumer that will never return any.
+///
+/// # Flow control
+///
+/// Trailers share one session-wide credit pool: across every trailer on the
+/// connection, the peer may have at most `trailer_session_window` bytes
+/// outstanding that this end has not yet *retired*. By default every byte
+/// read is retired automatically, which is what every ordinary consumer —
+/// [`read_to_end`], [`io::copy`], and friends — wants, and needs no
+/// participation at all.
+///
+/// A consumer that hands the bytes somewhere slow (a file, another socket)
+/// can do better by obtaining the trailer in manual-credit mode and calling
+/// [`release`](Self::release) once each chunk has actually landed. Credit
+/// then bounds this end's real memory rather than just its receive buffer,
+/// and the peer's send rate becomes governed by the destination's drain rate
+/// instead of by this end's willingness to buffer.
+///
+/// [`read_to_end`]: tokio::io::AsyncReadExt::read_to_end
+/// [`io::copy`]: tokio::io::copy
 pub struct TrailerRecv {
     pub(crate) shared: Arc<Mutex<RecvShared>>,
 }
@@ -1010,6 +1410,77 @@ impl TrailerRecv {
     /// either outcome stands, and a subsequent read still observes it.
     pub fn discard(&mut self) {
         RecvShared::discard(&self.shared);
+    }
+
+    /// Switches this trailer to manual credit release, before it is handed
+    /// to the application.
+    ///
+    /// Not public: the mode is chosen where the trailer is obtained, so
+    /// there is no way to switch one mid-stream and no half-credited state
+    /// to reason about. See [`release`](Self::release) for the rules manual
+    /// mode imposes on the consumer.
+    pub(crate) fn set_manual_credit(&mut self) {
+        let mut inner = lock(&self.shared);
+        debug_assert!(
+            inner.retired == 0,
+            "manual credit must be selected before the first read"
+        );
+        inner.auto_release = false;
+    }
+
+    /// Returns `n` bytes of credit to the peer, after this end is done with
+    /// them.
+    ///
+    /// Only meaningful on a trailer obtained in manual-credit mode — via
+    /// [`CallContext::trailer_manual_credit`] or
+    /// [`CallResult::into_response_trailer_manual_credit`]. Credit is
+    /// coalesced, so this is cheap to call per chunk; it does not put a
+    /// fragment on the wire every time.
+    ///
+    /// # Deadlocks
+    ///
+    /// Manual release moves one standard credit-scheme hazard into calling
+    /// code: **never wait to accumulate more credit than the pool holds
+    /// before releasing.** A consumer that tries to read
+    /// `trailer_session_window + 1` bytes before releasing any deadlocks
+    /// against itself, because the peer is parked with no credit left to
+    /// send the byte the consumer is waiting for. Release each chunk as it
+    /// is retired, rather than batching.
+    ///
+    /// Because the pool is session-wide and the protocol imposes no
+    /// per-trailer subdivision, a consumer that stalls indefinitely holds
+    /// whatever share of it the peer chose to spend here — up to all of it —
+    /// and can stall the peer's other trailers as well as this one. That is
+    /// a deliberate trade: dividing the pool per trailer is left to the
+    /// sending end as a local scheduling choice, and any division it picks
+    /// is safe, because credit is flushed whenever this end's consumer is
+    /// found waiting rather than only at the coalescing threshold.
+    ///
+    /// # Panics
+    ///
+    /// In debug builds, if called on an automatic trailer, or if the running
+    /// total exceeds the bytes actually delivered.
+    ///
+    /// [`CallContext::trailer_manual_credit`]: crate::server::CallContext::trailer_manual_credit
+    /// [`CallResult::into_response_trailer_manual_credit`]: crate::client::CallResult::into_response_trailer_manual_credit
+    pub fn release(&mut self, n: usize) {
+        let mut inner = lock(&self.shared);
+        debug_assert!(
+            !inner.auto_release,
+            "release requires a manual-credit trailer; credit is returned on read otherwise"
+        );
+        debug_assert!(
+            inner.retired + n <= inner.received,
+            "released more trailer credit than was delivered"
+        );
+        if n == 0 {
+            return;
+        }
+        let emit = RecvShared::retire(&mut inner, n);
+        drop(inner);
+        if let Some((sink, id, count)) = emit {
+            sink.credit(id, count);
+        }
     }
 }
 
@@ -1043,6 +1514,12 @@ impl AsyncRead for TrailerRecv {
             let n = buf.remaining().min(inner.stage.len());
             buf.put_slice(&inner.stage[..n]);
             let _ = inner.stage.split_to(n);
+            // One of the two points where bytes actually reach the
+            // application, and so one of the two places auto-release retires
+            // them. Drop the guard first: the sink is never called under the
+            // mutex.
+            drop(inner);
+            RecvShared::retire_and_emit(&this.shared, n);
             return Poll::Ready(Ok(()));
         }
         match inner.state {
@@ -1051,14 +1528,26 @@ impl AsyncRead for TrailerRecv {
                 Poll::Ready(Err(io::Error::new(kind, message)))
             }
             RecvState::Eof => Poll::Ready(Ok(())),
-            RecvState::Idle => {
-                inner.state = RecvState::Demand;
+            RecvState::Idle | RecvState::Fragment => {
+                inner.state = if inner.state == RecvState::Idle {
+                    RecvState::Demand
+                } else {
+                    RecvState::FragmentDemand
+                };
                 register_waker(&mut inner.reader_waker, cx.waker());
-                Poll::Pending
-            }
-            RecvState::Fragment => {
-                inner.state = RecvState::FragmentDemand;
-                register_waker(&mut inner.reader_waker, cx.waker());
+                // The consumer has just gone from reading to waiting, with
+                // nothing staged behind it. Coalescing has nothing left to
+                // gain here and could cost everything: if the peer is parked
+                // — on the pool, or on a per-trailer budget of its own that
+                // this end cannot see — the credit sitting in `pending` is
+                // exactly what would release it. `retire` covers credit
+                // retired *while* stalled; this covers credit already
+                // accumulated when the stall begins.
+                let emit = RecvShared::flush(&mut inner);
+                drop(inner);
+                if let Some((sink, id, count)) = emit {
+                    sink.credit(id, count);
+                }
                 Poll::Pending
             }
             RecvState::Demand | RecvState::FragmentDemand => {
@@ -1114,6 +1603,8 @@ impl AsyncRead for TrailerRecv {
                         let driver = inner.driver_waker.take();
                         drop(inner);
                         wake(driver);
+                        // The other delivery point; see the `stage` branch.
+                        RecvShared::retire_and_emit(&this.shared, n);
                         debug_assert_eq!(buf.filled().len() - before, n);
                         Poll::Ready(Ok(()))
                     }
@@ -1164,6 +1655,78 @@ unsafe impl BufMut for ReadBufMut<'_, '_> {
 mod tests {
     use super::*;
     use crate::transport::{AnyReceiver, AnySender, Receiver, Sender, generic};
+
+    /// Limits whose credit pool never binds, for tests about anything other
+    /// than flow control.
+    fn unbounded_limits() -> Limits {
+        Limits {
+            trailer_session_window: usize::MAX,
+            ..zero_copy_limits()
+        }
+    }
+
+    /// Limits under which every write is large enough to demand a token
+    /// instead of staging, so a test can drive the zero-copy path with
+    /// conveniently small buffers.
+    fn zero_copy_limits() -> Limits {
+        Limits {
+            trailer_send_copy_threshold: 0,
+            ..Limits::default()
+        }
+    }
+
+    /// Drives a writer to the only state the scheduler ever grants from: a
+    /// `Demand`, which is where the write's credit reservation is taken.
+    /// Granting straight out of `Idle` would hand back a token the writer
+    /// never asked for and skip the reservation with it.
+    fn demand<T: Unpin>(trailer: &mut TrailerSend<T>, buf: &[u8]) {
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(
+            Pin::new(trailer).poll_write(&mut cx, buf).is_pending(),
+            "a write past the copy threshold must demand a token"
+        );
+    }
+
+    fn send_shared(limits: Limits) -> Arc<Mutex<SendShared>> {
+        send_shared_id(1, limits)
+    }
+
+    fn send_shared_id(id: u64, limits: Limits) -> Arc<Mutex<SendShared>> {
+        let session = Arc::new(SessionWindow::new(limits.trailer_session_window));
+        SendShared::new(Kind::Request, id, &limits, session)
+    }
+
+    /// A `RecvShared` with a sink that records what it would have sent, so
+    /// credit and discard decisions can be asserted directly.
+    #[derive(Default)]
+    struct RecordingSink {
+        credits: Mutex<Vec<(u64, u32)>>,
+        discards: Mutex<Vec<u64>>,
+    }
+
+    impl TrailerSink for Arc<RecordingSink> {
+        fn credit(&self, id: u64, count: u32) {
+            lock(&self.credits).push((id, count));
+        }
+
+        fn discard(&self, id: u64) {
+            lock(&self.discards).push(id);
+        }
+    }
+
+    fn recv_shared(limits: Limits) -> (Arc<Mutex<RecvShared>>, Arc<RecordingSink>) {
+        let session = Arc::new(SessionWindow::new(limits.trailer_session_window));
+        let sink = Arc::new(RecordingSink::default());
+        let shared = RecvShared::new(
+            limits.trailer_recv_copy_threshold,
+            limits.trailer_recv_demand_copy_threshold,
+            limits.trailer_credit_interval,
+            session,
+            7,
+            Arc::new(sink.clone()),
+        );
+        (shared, sink)
+    }
 
     fn poll_read_once(trailer: &mut TrailerRecv, output: &mut [u8]) -> Poll<io::Result<usize>> {
         let mut read = ReadBuf::new(output);
@@ -1228,7 +1791,7 @@ mod tests {
             ..Limits::default()
         };
 
-        let small_shared = SendShared::new(Kind::Request, 1, &limits);
+        let small_shared = send_shared(limits);
         let mut small = TrailerSend::new(small_shared.clone(), ());
         let mut cx = Context::from_waker(Waker::noop());
         assert!(matches!(
@@ -1248,7 +1811,7 @@ mod tests {
         );
         assert_eq!(small_shared.lock().unwrap().state, SendState::Fragment);
 
-        let large_shared = SendShared::new(Kind::Request, 2, &limits);
+        let large_shared = send_shared(limits);
         let mut large = TrailerSend::new(large_shared.clone(), ());
         assert!(
             Pin::new(&mut large)
@@ -1261,14 +1824,24 @@ mod tests {
 
     #[test]
     fn receive_copy_threshold_depends_on_demand_for_this_fragment() {
-        let undemanded = RecvShared::new(1, 4);
+        let undemanded = recv_shared(Limits {
+            trailer_recv_copy_threshold: 1,
+            trailer_recv_demand_copy_threshold: 4,
+            ..unbounded_limits()
+        })
+        .0;
         let (_, receiver) = generic(tokio::io::empty(), tokio::io::sink());
         let mut receiver = AnyReceiver::Generic(receiver);
         let lease = unsafe { RecvShared::grant(&undemanded, receiver.recv(), 4) };
         assert_eq!(undemanded.lock().unwrap().state, RecvState::Unclaimed);
         drop(lease);
 
-        let demanded = RecvShared::new(1, 4);
+        let demanded = recv_shared(Limits {
+            trailer_recv_copy_threshold: 1,
+            trailer_recv_demand_copy_threshold: 4,
+            ..unbounded_limits()
+        })
+        .0;
         let mut trailer = TrailerRecv::new(demanded.clone());
         let mut output = [0; 4];
         assert!(poll_read_once(&mut trailer, &mut output).is_pending());
@@ -1282,7 +1855,12 @@ mod tests {
 
     #[test]
     fn demand_at_a_completed_fragment_boundary_applies_to_the_next_fragment() {
-        let shared = RecvShared::new(0, 0);
+        let shared = recv_shared(Limits {
+            trailer_recv_copy_threshold: 0,
+            trailer_recv_demand_copy_threshold: 0,
+            ..unbounded_limits()
+        })
+        .0;
         let mut trailer = TrailerRecv::new(shared.clone());
         let (_, receiver) = generic(tokio::io::empty(), tokio::io::sink());
         let mut receiver = AnyReceiver::Generic(receiver);
@@ -1300,7 +1878,12 @@ mod tests {
     async fn unclaimed_large_receive_falls_back_to_driver_draining() {
         use tokio::io::AsyncWriteExt;
 
-        let shared = RecvShared::new(0, 0);
+        let shared = recv_shared(Limits {
+            trailer_recv_copy_threshold: 0,
+            trailer_recv_demand_copy_threshold: 0,
+            ..unbounded_limits()
+        })
+        .0;
         let (mut writer, reader) = tokio::io::duplex(16);
         writer.write_all(b"data").await.unwrap();
         let (_, receiver) = generic(reader, tokio::io::sink());
@@ -1318,7 +1901,12 @@ mod tests {
     async fn demanded_large_receive_can_claim_the_grant_directly() {
         use tokio::io::AsyncWriteExt;
 
-        let shared = RecvShared::new(0, 0);
+        let shared = recv_shared(Limits {
+            trailer_recv_copy_threshold: 0,
+            trailer_recv_demand_copy_threshold: 0,
+            ..unbounded_limits()
+        })
+        .0;
         let mut trailer = TrailerRecv::new(shared.clone());
         let mut output = [0; 4];
         assert!(poll_read_once(&mut trailer, &mut output).is_pending());
@@ -1350,17 +1938,11 @@ mod tests {
             },
         );
         let mut sender = AnySender::Generic(sender);
-        let shared = SendShared::new(
-            Kind::Request,
-            1,
-            &Limits {
-                max_trailer_size: usize::MAX,
-                ..Limits::default()
-            },
-        );
-        let lease = unsafe { SendShared::grant(&shared, sender.send(), 1024) };
+        let shared = send_shared(unbounded_limits());
         let data = (0..100).map(|value| value as u8).collect::<Vec<_>>();
         let mut trailer = TrailerSend::new(shared.clone(), ());
+        demand(&mut trailer, &data);
+        let lease = unsafe { SendShared::grant(&shared, sender.send(), 1024) };
 
         let written = std::future::poll_fn(|cx| Pin::new(&mut trailer).poll_write(cx, &data))
             .await
@@ -1407,17 +1989,11 @@ mod tests {
             },
         );
         let mut sender = AnySender::Generic(sender);
-        let shared = SendShared::new(
-            Kind::Request,
-            7,
-            &Limits {
-                max_trailer_size: usize::MAX,
-                ..Limits::default()
-            },
-        );
-        let lease = unsafe { SendShared::grant(&shared, sender.send(), 1024) };
+        let shared = send_shared_id(7, unbounded_limits());
         let data = (0..32).map(|value| value as u8).collect::<Vec<_>>();
         let mut trailer = TrailerSend::new(shared.clone(), ());
+        demand(&mut trailer, &data);
+        let lease = unsafe { SendShared::grant(&shared, sender.send(), 1024) };
 
         let written = std::future::poll_fn(|cx| Pin::new(&mut trailer).poll_write(cx, &data))
             .await
@@ -1447,14 +2023,7 @@ mod tests {
     async fn finish_releases_an_unused_live_grant() {
         let (sender, _) = generic(tokio::io::empty(), tokio::io::sink());
         let mut sender = AnySender::Generic(sender);
-        let shared = SendShared::new(
-            Kind::Request,
-            9,
-            &Limits {
-                max_trailer_size: usize::MAX,
-                ..Limits::default()
-            },
-        );
+        let shared = send_shared(unbounded_limits());
         let lease = unsafe { SendShared::grant(&shared, sender.send(), 1024) };
 
         TrailerSend::new(shared.clone(), ()).finish();
@@ -1465,22 +2034,20 @@ mod tests {
         lease.complete();
     }
 
+    /// Exhausting the pool parks the writer instead of failing it. This is
+    /// the whole behavioural change from the old `max_trailer_size` abort: a
+    /// slow consumer throttles the sender, it does not break it.
     #[tokio::test]
-    async fn write_past_max_trailer_size_aborts_instead_of_silently_truncating() {
+    async fn exhausted_credit_parks_the_writer_until_credit_arrives() {
         let (sender, _) = generic(tokio::io::empty(), tokio::io::sink());
         let mut sender = AnySender::Generic(sender);
-        let shared = SendShared::new(
-            Kind::Request,
-            1,
-            &Limits {
-                max_trailer_size: 4,
-                ..Limits::default()
-            },
-        );
-        let lease = unsafe { SendShared::grant(&shared, sender.send(), 1024) };
+        let session = Arc::new(SessionWindow::new(4));
+        let shared = SendShared::new(Kind::Request, 1, &zero_copy_limits(), session.clone());
         let mut trailer = TrailerSend::new(shared.clone(), ());
 
-        // Exhaust the 4-byte budget in a single write.
+        // Spend the whole 4-byte pool.
+        demand(&mut trailer, b"abcd");
+        let lease = unsafe { SendShared::grant(&shared, sender.send(), 1024) };
         let written = std::future::poll_fn(|cx| Pin::new(&mut trailer).poll_write(cx, b"abcd"))
             .await
             .unwrap();
@@ -1489,22 +2056,407 @@ mod tests {
         assert_eq!(action, SendAction::Fragment);
         lease.complete();
 
-        // A fresh grant still has nothing staged, so `poll_write` goes
-        // through the zero-copy `Granted` path — which must reject
-        // immediately rather than trying to write anything, since the
-        // budget is already spent.
-        let lease = unsafe { SendShared::grant(&shared, sender.send(), 1024) };
-        let error = std::future::poll_fn(|cx| Pin::new(&mut trailer).poll_write(cx, b"e"))
-            .await
-            .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        // With nothing left, the next write parks rather than erroring, and
+        // stays in `Idle` so it holds no transport grant while parked.
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            Pin::new(&mut trailer).poll_write(&mut cx, b"e"),
+            Poll::Pending
+        ));
+        assert_eq!(lock(&shared).state, SendState::Idle);
+        assert!(matches!(
+            SendShared::poll_action(&shared, &mut cx),
+            Poll::Pending
+        ));
 
-        // The peer must observe a real `ABORT`, not a clean completion that
-        // would look like the trailer just ended early (a plain EOF).
-        assert_eq!(
-            SendShared::wait_fragment(&shared).await.unwrap().0,
-            SendAction::Abort
-        );
+        // Credit from the peer unblocks exactly that much more.
+        session.refund(1, 2);
+        demand(&mut trailer, b"ef");
+        let lease = unsafe { SendShared::grant(&shared, sender.send(), 1024) };
+        let written = std::future::poll_fn(|cx| Pin::new(&mut trailer).poll_write(cx, b"ef"))
+            .await
+            .unwrap();
+        assert_eq!(written, 2);
         lease.complete();
+    }
+
+    /// A credit pool smaller than a fragment is legal: it just produces
+    /// short fragments. Only a zero pool would deadlock, and negotiation
+    /// floors it at 1.
+    #[tokio::test]
+    async fn pool_below_fragment_size_still_makes_progress() {
+        let (sender, _) = generic(tokio::io::empty(), tokio::io::sink());
+        let mut sender = AnySender::Generic(sender);
+        let session = Arc::new(SessionWindow::new(3));
+        let limits = Limits {
+            max_fragment_size: 1024,
+            ..zero_copy_limits()
+        };
+        let shared = SendShared::new(Kind::Request, 1, &limits, session.clone());
+        let mut trailer = TrailerSend::new(shared.clone(), ());
+        let mut total = 0;
+        for _ in 0..4 {
+            demand(&mut trailer, b"abcdefghij");
+            let lease = unsafe { SendShared::grant(&shared, sender.send(), 1024) };
+            let n = std::future::poll_fn(|cx| Pin::new(&mut trailer).poll_write(cx, b"abcdefghij"))
+                .await
+                .unwrap();
+            assert_eq!(n, 3, "each write is clamped to the pool, not dropped");
+            total += n;
+            SendShared::wait_fragment(&shared).await.unwrap();
+            lease.complete();
+            session.refund(1, 3);
+        }
+        assert_eq!(total, 12);
+    }
+
+    /// The pool is the only limiter, so one trailer can exhaust it and park
+    /// another. The parked writer holds no transport grant while it waits,
+    /// and it is the *other* trailer's consumer retiring bytes that releases
+    /// it — the cross-trailer coupling that comes with a single pool.
+    #[tokio::test]
+    async fn one_trailer_exhausting_the_pool_parks_another() {
+        let (sender, _) = generic(tokio::io::empty(), tokio::io::sink());
+        let mut sender = AnySender::Generic(sender);
+        let session = Arc::new(SessionWindow::new(4));
+        let limits = zero_copy_limits();
+        let first = SendShared::new(Kind::Request, 1, &limits, session.clone());
+        let second = SendShared::new(Kind::Request, 2, &limits, session.clone());
+
+        let mut trailer = TrailerSend::new(first.clone(), ());
+        demand(&mut trailer, b"abcdefgh");
+        let lease = unsafe { SendShared::grant(&first, sender.send(), 1024) };
+        let written = std::future::poll_fn(|cx| Pin::new(&mut trailer).poll_write(cx, b"abcdefgh"))
+            .await
+            .unwrap();
+        assert_eq!(written, 4, "clamped by the pool");
+        SendShared::wait_fragment(&first).await.unwrap();
+        lease.complete();
+
+        let mut other = TrailerSend::new(second.clone(), ());
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            Pin::new(&mut other).poll_write(&mut cx, b"i"),
+            Poll::Pending
+        ));
+        assert_eq!(
+            lock(&second).state,
+            SendState::Idle,
+            "a parked writer must hold no transport grant"
+        );
+        assert!(matches!(
+            SendShared::poll_action(&second, &mut cx),
+            Poll::Pending
+        ));
+
+        session.refund(1, 2);
+        demand(&mut other, b"ij");
+        let lease = unsafe { SendShared::grant(&second, sender.send(), 1024) };
+        let written = std::future::poll_fn(|cx| Pin::new(&mut other).poll_write(cx, b"ij"))
+            .await
+            .unwrap();
+        assert_eq!(written, 2);
+        lease.complete();
+    }
+
+    /// Aborting a trailer must return its share of the pool, or a discarded
+    /// transfer would shrink the connection's capacity permanently.
+    #[tokio::test]
+    async fn aborting_a_trailer_returns_its_session_debt() {
+        let (sender, _) = generic(tokio::io::empty(), tokio::io::sink());
+        let mut sender = AnySender::Generic(sender);
+        let session = Arc::new(SessionWindow::new(64));
+        let shared = SendShared::new(Kind::Request, 1, &zero_copy_limits(), session.clone());
+        let mut trailer = TrailerSend::new(shared.clone(), ());
+        demand(&mut trailer, b"abcdefgh");
+        let lease = unsafe { SendShared::grant(&shared, sender.send(), 1024) };
+        std::future::poll_fn(|cx| Pin::new(&mut trailer).poll_write(cx, b"abcdefgh"))
+            .await
+            .unwrap();
+        SendShared::wait_fragment(&shared).await.unwrap();
+        lease.complete();
+        assert_eq!(session.available(), 56);
+
+        SendShared::discard(&shared);
+        assert_eq!(session.available(), 64, "the pool is made whole again");
+    }
+
+    /// Auto-release is the default and needs no participation: bytes are
+    /// retired as they reach the application.
+    #[test]
+    fn auto_release_credits_on_delivery() {
+        let (shared, sink) = recv_shared(Limits {
+            trailer_credit_interval: 8,
+            ..Limits::default()
+        });
+        RecvShared::accept_bytes(&shared, 8);
+        lock(&shared).stage.extend_from_slice(b"abcdefgh");
+        let mut trailer = TrailerRecv::new(shared.clone());
+
+        let mut out = [0u8; 8];
+        assert!(matches!(
+            poll_read_once(&mut trailer, &mut out),
+            Poll::Ready(Ok(8))
+        ));
+        assert_eq!(&*lock(&sink.credits), &[(7, 8)]);
+    }
+
+    /// In manual mode reading retires nothing; only `release` does.
+    #[test]
+    fn manual_release_does_not_credit_on_read() {
+        let (shared, sink) = recv_shared(Limits {
+            trailer_credit_interval: 8,
+            ..Limits::default()
+        });
+        RecvShared::accept_bytes(&shared, 8);
+        lock(&shared).stage.extend_from_slice(b"abcdefgh");
+        let mut trailer = TrailerRecv::new(shared.clone());
+        trailer.set_manual_credit();
+
+        let mut out = [0u8; 8];
+        assert!(matches!(
+            poll_read_once(&mut trailer, &mut out),
+            Poll::Ready(Ok(8))
+        ));
+        assert!(lock(&sink.credits).is_empty(), "reading must not credit");
+
+        trailer.release(8);
+        assert_eq!(&*lock(&sink.credits), &[(7, 8)]);
+    }
+
+    /// Credit is coalesced at half an interval, so a chunk below that does
+    /// not put a fragment on the wire by itself.
+    #[test]
+    fn credit_is_coalesced_below_half_an_interval() {
+        let (shared, sink) = recv_shared(Limits {
+            trailer_credit_interval: 64,
+            trailer_session_window: 1024,
+            ..Limits::default()
+        });
+        RecvShared::accept_bytes(&shared, 32);
+        let mut trailer = TrailerRecv::new(shared.clone());
+        trailer.set_manual_credit();
+
+        trailer.release(8);
+        assert!(lock(&sink.credits).is_empty());
+        trailer.release(8);
+        assert!(lock(&sink.credits).is_empty());
+        // Crossing half the interval (32) flushes the accumulated total as
+        // one fragment rather than three.
+        trailer.release(16);
+        assert_eq!(&*lock(&sink.credits), &[(7, 32)]);
+    }
+
+    /// The anti-deadlock half of the coalescing rule: when the peer has
+    /// provably run out of credit, even a sub-threshold release must go out,
+    /// or both ends wait on each other forever.
+    #[test]
+    fn credit_is_flushed_when_the_peer_is_starved() {
+        let (shared, sink) = recv_shared(Limits {
+            trailer_credit_interval: 64,
+            trailer_session_window: 64,
+            ..Limits::default()
+        });
+        // The peer has spent the entire pool and is certainly parked.
+        assert_eq!(RecvShared::accept_bytes(&shared, 64), None);
+        let mut trailer = TrailerRecv::new(shared.clone());
+        trailer.set_manual_credit();
+
+        trailer.release(1);
+        assert_eq!(
+            &*lock(&sink.credits),
+            &[(7, 1)],
+            "a starved peer must be credited immediately, however little"
+        );
+    }
+
+    /// A sub-threshold chunk that accumulated while the consumer was reading
+    /// must go out the moment the consumer starts waiting, or a sender parked
+    /// on a per-trailer budget of its own — which this end cannot see — never
+    /// learns it may continue.
+    #[test]
+    fn credit_is_flushed_when_the_consumer_starts_waiting() {
+        let (shared, sink) = recv_shared(Limits {
+            trailer_credit_interval: 64,
+            trailer_session_window: 1024,
+            ..Limits::default()
+        });
+        RecvShared::accept_bytes(&shared, 8);
+        lock(&shared).stage.extend_from_slice(b"abcdefgh");
+        let mut trailer = TrailerRecv::new(shared.clone());
+
+        let mut out = [0u8; 8];
+        assert!(matches!(
+            poll_read_once(&mut trailer, &mut out),
+            Poll::Ready(Ok(8))
+        ));
+        assert!(
+            lock(&sink.credits).is_empty(),
+            "8 bytes is below half the interval, so it coalesces while reading"
+        );
+
+        // Nothing staged and nothing granted: the consumer is now blocked on
+        // the peer, and coalescing has nothing left to gain.
+        assert!(poll_read_once(&mut trailer, &mut out).is_pending());
+        assert_eq!(&*lock(&sink.credits), &[(7, 8)]);
+    }
+
+    /// The other edge of the same rule: credit retired *while* the consumer
+    /// is already waiting — where a manual consumer's `release` lands, since
+    /// it runs on its own timeline — must not be held back either.
+    #[test]
+    fn credit_released_while_waiting_is_flushed_immediately() {
+        let (shared, sink) = recv_shared(Limits {
+            trailer_credit_interval: 64,
+            trailer_session_window: 1024,
+            ..Limits::default()
+        });
+        RecvShared::accept_bytes(&shared, 8);
+        lock(&shared).stage.extend_from_slice(b"abcdefgh");
+        let mut trailer = TrailerRecv::new(shared.clone());
+        trailer.set_manual_credit();
+
+        let mut out = [0u8; 8];
+        assert!(matches!(
+            poll_read_once(&mut trailer, &mut out),
+            Poll::Ready(Ok(8))
+        ));
+        assert!(poll_read_once(&mut trailer, &mut out).is_pending());
+        assert!(
+            lock(&sink.credits).is_empty(),
+            "manual mode retires nothing on read, so the stall flushes nothing"
+        );
+
+        trailer.release(8);
+        assert_eq!(
+            &*lock(&sink.credits),
+            &[(7, 8)],
+            "a waiting consumer's release goes out below the threshold"
+        );
+    }
+
+    /// The starvation flush is session-scoped, and that is what replaces the
+    /// per-trailer starvation check a two-window scheme would have had: a
+    /// trailer retiring a sub-threshold chunk must still credit it when the
+    /// pool was drained by some *other* trailer, or the parked sender never
+    /// learns there is room.
+    #[test]
+    fn credit_is_flushed_when_another_trailer_drained_the_pool() {
+        let limits = Limits {
+            trailer_credit_interval: 1024,
+            trailer_session_window: 64,
+            ..Limits::default()
+        };
+        let session = Arc::new(SessionWindow::new(limits.trailer_session_window));
+        let make = |id| {
+            let sink = Arc::new(RecordingSink::default());
+            let shared = RecvShared::new(
+                limits.trailer_recv_copy_threshold,
+                limits.trailer_recv_demand_copy_threshold,
+                limits.trailer_credit_interval,
+                session.clone(),
+                id,
+                Arc::new(sink.clone()),
+            );
+            (shared, sink)
+        };
+        let (first, first_sink) = make(1);
+        let (second, _second_sink) = make(2);
+
+        // The other trailer takes all but one byte of the pool, leaving this
+        // one holding far less than its coalescing interval.
+        assert_eq!(RecvShared::accept_bytes(&first, 1), None);
+        assert_eq!(RecvShared::accept_bytes(&second, 63), None);
+
+        let mut trailer = TrailerRecv::new(first.clone());
+        trailer.set_manual_credit();
+        trailer.release(1);
+        assert_eq!(
+            &*lock(&first_sink.credits),
+            &[(1, 1)],
+            "a drained pool must flush even a single byte, whoever drained it"
+        );
+    }
+
+    /// The pool ledger must survive the objects it accounts for: settlement
+    /// is idempotent and refunds are clamped, so an abort and a `Credit` that
+    /// crossed it on the wire cannot both pay off the same bytes.
+    #[test]
+    fn session_ledger_settles_each_byte_exactly_once() {
+        let session = SessionWindow::new(100);
+        assert_eq!(session.debit_up_to(1, 40), 40);
+        assert_eq!(session.debit_up_to(2, 30), 30);
+        assert_eq!(session.available(), 30);
+
+        // A refund larger than what the id owes is clamped, not overpaid.
+        session.refund(1, 1000);
+        assert_eq!(session.available(), 70);
+        // ... and repeating it adds nothing.
+        session.refund(1, 1000);
+        assert_eq!(session.available(), 70);
+
+        // Settling returns the remainder once, and only once.
+        session.settle(2);
+        assert_eq!(session.available(), 100);
+        session.settle(2);
+        session.refund(2, 30);
+        assert_eq!(session.available(), 100);
+
+        // An id the pool never knew about is a no-op, which is what makes a
+        // credit for an already-finished trailer safe to apply blindly.
+        session.refund(99, 10);
+        session.settle(99);
+        assert_eq!(session.available(), 100);
+    }
+
+    /// `discard` returns the trailer's whole outstanding debt to the pool in
+    /// one go, so bytes still sitting in `stage` and read afterwards must not
+    /// be refunded a second time.
+    #[test]
+    fn reading_staged_bytes_after_a_discard_does_not_double_refund() {
+        let limits = Limits {
+            trailer_credit_interval: 8,
+            trailer_session_window: 64,
+            ..Limits::default()
+        };
+        let session = Arc::new(SessionWindow::new(limits.trailer_session_window));
+        let sink = Arc::new(RecordingSink::default());
+        let shared = RecvShared::new(
+            limits.trailer_recv_copy_threshold,
+            limits.trailer_recv_demand_copy_threshold,
+            limits.trailer_credit_interval,
+            session.clone(),
+            7,
+            Arc::new(sink.clone()),
+        );
+
+        assert!(RecvShared::accept_bytes(&shared, 8).is_none());
+        assert_eq!(session.available(), 56);
+        lock(&shared).stage.extend_from_slice(b"abcdefgh");
+
+        let mut trailer = TrailerRecv::new(shared.clone());
+        trailer.discard();
+        assert_eq!(session.available(), 64, "the debt is returned in full");
+
+        // The staged tail is still readable, and must cost the pool nothing.
+        let mut out = [0u8; 8];
+        assert!(matches!(
+            poll_read_once(&mut trailer, &mut out),
+            Poll::Ready(Ok(8))
+        ));
+        assert_eq!(session.available(), 64);
+        assert!(lock(&sink.credits).is_empty());
+    }
+
+    /// Dropping the handle tells the peer at once, rather than waiting for
+    /// another unwanted fragment that a parked sender will never send.
+    #[test]
+    fn dropping_a_trailer_discards_eagerly_exactly_once() {
+        let (shared, sink) = recv_shared(unbounded_limits());
+        let mut trailer = TrailerRecv::new(shared.clone());
+        trailer.discard();
+        assert_eq!(&*lock(&sink.discards), &[7]);
+        drop(trailer);
+        assert_eq!(&*lock(&sink.discards), &[7], "idempotent");
     }
 }

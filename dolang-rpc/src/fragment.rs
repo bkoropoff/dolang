@@ -60,6 +60,26 @@ pub(crate) enum Kind {
     /// construction, and the counters are commutative, so both orders
     /// converge.
     Release = 7,
+    /// Returns trailer flow-control credit. `id` names the *message* whose
+    /// trailer is being credited, and the 4-byte payload carries how many
+    /// bytes the consumer has retired since the last `Credit` for that id.
+    ///
+    /// Credit is session-scoped: the count returns to the connection-wide
+    /// pool, which is the only credit limit. The `id` is still required,
+    /// because the sender keeps its pool debt keyed by message id so that a
+    /// `Discard` can refund a trailer's whole remainder implicitly, and
+    /// because per-trailer retirement is the signal a sender needs to tell a
+    /// draining trailer from a stalled one.
+    ///
+    /// "Retired" means the consuming application released the credit, which
+    /// is deliberately later than having read the bytes. Reading only moves
+    /// data from `stage` into the consumer's buffer; it does not free it.
+    ///
+    /// Like [`Kind::Release`], credit for an unknown `id` is ignored rather
+    /// than treated as a protocol error: the sender may legitimately have
+    /// finished or aborted the trailer already, and the two race by
+    /// construction.
+    Credit = 8,
 }
 
 impl TryFrom<u8> for Kind {
@@ -75,6 +95,7 @@ impl TryFrom<u8> for Kind {
             5 => Ok(Self::Negotiate),
             6 => Ok(Self::Ack),
             7 => Ok(Self::Release),
+            8 => Ok(Self::Credit),
             _ => Err(Error::Protocol(format!("unknown frame kind {value}"))),
         }
     }
@@ -264,15 +285,13 @@ const PROTOCOL_VERSION: u8 = 1;
 struct HandshakeV1 {
     max_fragment_size: u32,
     max_payload_size: u32,
-    max_trailer_size: u32,
     max_handles_per_fragment: u32,
     max_handles_per_message: u32,
-    max_incomplete_messages: u32,
-    max_incomplete_trailers: u32,
     /// This endpoint's role-specific authentication digest, when a key is
     /// configured. See [`crate::auth`].
     key: Option<[u8; 32]>,
     max_concurrent_calls: u32,
+    trailer_session_window: u32,
 }
 
 impl fmt::Debug for HandshakeV1 {
@@ -280,13 +299,11 @@ impl fmt::Debug for HandshakeV1 {
         f.debug_struct("HandshakeV1")
             .field("max_fragment_size", &self.max_fragment_size)
             .field("max_payload_size", &self.max_payload_size)
-            .field("max_trailer_size", &self.max_trailer_size)
             .field("max_handles_per_fragment", &self.max_handles_per_fragment)
             .field("max_handles_per_message", &self.max_handles_per_message)
-            .field("max_incomplete_messages", &self.max_incomplete_messages)
-            .field("max_incomplete_trailers", &self.max_incomplete_trailers)
             .field("key", &self.key.map(|_| "<redacted>"))
             .field("max_concurrent_calls", &self.max_concurrent_calls)
+            .field("trailer_session_window", &self.trailer_session_window)
             .finish()
     }
 }
@@ -303,13 +320,11 @@ impl HandshakeV1 {
         Self {
             max_fragment_size: clamp(limits.max_fragment_size),
             max_payload_size: clamp(limits.max_payload_size),
-            max_trailer_size: clamp(limits.max_trailer_size),
             max_handles_per_fragment: clamp(max_handles_per_fragment),
             max_handles_per_message: clamp(limits.max_handles_per_message),
-            max_incomplete_messages: clamp(limits.max_incomplete_messages),
-            max_incomplete_trailers: clamp(limits.max_incomplete_trailers),
             key: auth.map(|auth| auth.advertise()),
             max_concurrent_calls: clamp(limits.max_concurrent_calls),
+            trailer_session_window: clamp(limits.trailer_session_window),
         }
     }
 
@@ -318,12 +333,20 @@ impl HandshakeV1 {
     /// The buffering-threshold fields (`trailer_*_copy_threshold`) aren't
     /// part of the handshake at all — they only affect local behavior and
     /// don't need agreement.
+    ///
+    /// `trailer_credit_interval` is absent: it is local coalescing
+    /// granularity, not a bound the peer relies on, so it needs no agreement.
+    ///
+    /// The session credit pool is floored at 1 afterwards. Only zero
+    /// deadlocks: the sender would park before its first byte, and no credit
+    /// could ever arrive because retirement requires bytes that were never
+    /// sent. A pool below `max_fragment_size` is legal and merely produces
+    /// short fragments.
     fn clamp_limits(&self, limits: &mut Limits) {
         limits.max_fragment_size = limits
             .max_fragment_size
             .min(self.max_fragment_size as usize);
         limits.max_payload_size = limits.max_payload_size.min(self.max_payload_size as usize);
-        limits.max_trailer_size = limits.max_trailer_size.min(self.max_trailer_size as usize);
         limits.max_handles_per_fragment = limits
             .max_handles_per_fragment
             .min(self.max_handles_per_fragment as usize);
@@ -336,15 +359,13 @@ impl HandshakeV1 {
         limits.max_handles_per_message = limits
             .max_handles_per_message
             .min(self.max_handles_per_message as usize);
-        limits.max_incomplete_messages = limits
-            .max_incomplete_messages
-            .min(self.max_incomplete_messages as usize);
-        limits.max_incomplete_trailers = limits
-            .max_incomplete_trailers
-            .min(self.max_incomplete_trailers as usize);
         limits.max_concurrent_calls = limits
             .max_concurrent_calls
             .min(self.max_concurrent_calls as usize);
+        limits.trailer_session_window = limits
+            .trailer_session_window
+            .min(self.trailer_session_window as usize)
+            .max(1);
     }
 }
 
@@ -671,19 +692,19 @@ pub(crate) enum Event {
     /// application earlier, at its payload boundary, so this never carries
     /// one.
     Trailer {
-        id: u64,
         shared: Arc<std::sync::Mutex<RecvShared>>,
         len: usize,
-        /// Set when the local consumer had already discarded this trailer
-        /// (via [`crate::trailer::TrailerRecv::discard`] or by dropping it)
-        /// before this fragment arrived — i.e. the peer is still sending
-        /// more than we want. The caller should tell the peer to stop
-        /// (`Kind::Discard`) exactly once per message when this is set.
-        notify_discard: bool,
     },
     /// The peer dropped `count` references to the opaque named by `id`.
     /// Unknown ids are tolerated; see [`Kind::Release`].
     Release {
+        id: u64,
+        count: u32,
+    },
+    /// The peer retired `count` bytes of the trailer on message `id`,
+    /// refunding that much of the session pool. Unknown ids are tolerated;
+    /// see [`Kind::Credit`].
+    Credit {
         id: u64,
         count: u32,
     },
@@ -694,9 +715,7 @@ struct Incomplete {
     postcard: BytesMut,
     handles: ReceivedHandles,
     trailer: Option<Arc<std::sync::Mutex<RecvShared>>>,
-    trailer_len: usize,
     dispatched: bool,
-    discard_notified: bool,
     /// Set once the fragment carrying `TRAILER` — the payload's last — has
     /// arrived. Every fragment after it is trailer data.
     trailer_phase: bool,
@@ -712,18 +731,31 @@ struct Incomplete {
 pub(crate) struct Reassembler {
     limits: Limits,
     incomplete: HashMap<u64, Incomplete>,
-    /// Number of `incomplete` entries whose `trailer` is (or was, at some
-    /// point while incomplete) `Some`. Enforces `max_incomplete_trailers`
-    /// independent of `max_incomplete_messages`.
-    incomplete_trailers: usize,
+    /// Number of `incomplete` entries still assembling their postcard
+    /// payload, i.e. not yet in their trailer phase. This — not
+    /// `incomplete.len()` — is what `max_concurrent_calls` bounds.
+    payload_phase: usize,
+    /// Unretired trailer bytes across every open trailer, bounded by
+    /// `Limits::trailer_session_window`. Shared with each trailer's
+    /// `RecvShared` so credit emission and this check see one number.
+    session_credit: Arc<crate::trailer::SessionWindow>,
+    /// The route back to the peer handed to every trailer this reassembler
+    /// opens, so a trailer can credit or discard itself. Connection-scoped
+    /// like `session_credit`, and erased to a trait object here because the
+    /// reassembler is generic over no application protocol.
+    trailer_sink: Arc<dyn crate::trailer::TrailerSink>,
 }
 
 impl Reassembler {
-    pub(crate) fn new(limits: Limits) -> Self {
+    pub(crate) fn new(limits: Limits, trailer_sink: Arc<dyn crate::trailer::TrailerSink>) -> Self {
         Self {
             limits,
             incomplete: HashMap::new(),
-            incomplete_trailers: 0,
+            payload_phase: 0,
+            session_credit: Arc::new(crate::trailer::SessionWindow::new(
+                limits.trailer_session_window,
+            )),
+            trailer_sink,
         }
     }
 
@@ -781,6 +813,25 @@ impl Reassembler {
             return Ok(Event::Release { id, count });
         }
 
+        if kind == Kind::Credit {
+            #[cfg(unix)]
+            let has_handles = !fragment_handles.is_empty();
+            #[cfg(not(unix))]
+            let has_handles = false;
+            if !first || !last || abort || trailer || want_ack || payload_len != 4 || has_handles {
+                return Err(Error::Protocol("invalid Credit fragment".into()));
+            }
+            let mut payload = BytesMut::with_capacity(4);
+            read_payload(frame, &mut payload, 4).await?;
+            let count = payload.get_u32_le();
+            if count == 0 {
+                return Err(Error::Protocol(
+                    "Credit fragment must release at least one byte".into(),
+                ));
+            }
+            return Ok(Event::Credit { id, count });
+        }
+
         if want_ack && (abort || !matches!(kind, Kind::Request | Kind::Response)) {
             return Err(Error::Protocol("invalid WANT_ACK fragment".into()));
         }
@@ -804,8 +855,10 @@ impl Reassembler {
             let entry = self.incomplete.remove(&id).ok_or_else(|| {
                 Error::Protocol(format!("ABORT for message {id} with no active fragments"))
             })?;
+            if !entry.trailer_phase {
+                self.payload_phase -= 1;
+            }
             if let Some(shared) = entry.trailer {
-                self.incomplete_trailers -= 1;
                 RecvShared::fail(
                     &shared,
                     io::Error::new(io::ErrorKind::Interrupted, "trailer was aborted"),
@@ -847,7 +900,11 @@ impl Reassembler {
                     "duplicate FIRST fragment for message {id}"
                 )));
             }
-            if !last && self.incomplete.len() >= self.limits.max_incomplete_messages {
+            // Counts only payload-phase entries: a message in its trailer
+            // phase has finished the postcard reassembly this bounds, and
+            // may legitimately stay resident for the life of a long-lived
+            // trailer. See `Reassembler::payload_phase`.
+            if !last && self.payload_phase >= self.limits.max_concurrent_calls {
                 return Err(Error::Protocol("too many incomplete messages".into()));
             }
         } else {
@@ -891,7 +948,6 @@ impl Reassembler {
             let shared = entry
                 .trailer
                 .expect("the payload boundary installs the trailer stream");
-            self.incomplete_trailers -= 1;
             RecvShared::finish(&shared);
             return Ok(Event::None);
         }
@@ -959,38 +1015,31 @@ impl Reassembler {
                     postcard: BytesMut::new(),
                     handles: Default::default(),
                     trailer: None,
-                    trailer_len: 0,
                     dispatched: false,
-                    discard_notified: false,
                     trailer_phase: false,
                     want_ack_boundary: false,
                 },
             );
+            self.payload_phase += 1;
         }
         let entry = self.incomplete.get_mut(&id).unwrap();
 
         if trailer_phase {
-            if entry.trailer_len + payload_len > self.limits.max_trailer_size {
-                return Err(Error::Protocol(format!(
-                    "message {id} exceeds the maximum trailer size"
-                )));
-            }
-            entry.trailer_len += payload_len;
             let shared = entry
                 .trailer
                 .clone()
                 .expect("the payload boundary installs the trailer stream");
-            // The application already has the message (it was dispatched at
-            // the payload boundary), so it has had a chance to discard the
-            // trailer by now.
-            let notify_discard = !entry.discard_notified && RecvShared::is_discarded(&shared);
-            if notify_discard {
-                entry.discard_notified = true;
+            // There is no cap on a trailer's total size. What bounds memory
+            // is the credit the consumer has issued, so the only thing to
+            // enforce here is that the peer stayed within it — both for this
+            // trailer and for the session as a whole. Overrunning either is
+            // connection-fatal, as a backstop against a peer that ignores
+            // the windows it agreed to.
+            if let Some(reason) = RecvShared::accept_bytes(&shared, payload_len) {
+                return Err(Error::Protocol(format!("message {id} {reason}")));
             }
             return Ok(Event::Trailer {
-                id,
                 shared,
-                notify_discard,
                 len: payload_len,
             });
         }
@@ -1033,17 +1082,20 @@ impl Reassembler {
             // waiting for the producer to emit its first fragment — a
             // producer that stalls must not hold up a payload that has
             // already arrived whole.
-            if self.incomplete_trailers >= self.limits.max_incomplete_trailers {
-                return Err(Error::Protocol("too many incomplete trailers".into()));
-            }
-            self.incomplete_trailers += 1;
             let shared = RecvShared::new(
                 self.limits.trailer_recv_copy_threshold,
                 self.limits.trailer_recv_demand_copy_threshold,
+                self.limits.trailer_credit_interval,
+                self.session_credit.clone(),
+                id,
+                self.trailer_sink.clone(),
             );
             entry.trailer = Some(shared.clone());
             entry.trailer_phase = true;
             entry.dispatched = true;
+            // Leaving payload phase: from here the entry is bounded by the
+            // credit windows, not by `max_concurrent_calls`.
+            self.payload_phase -= 1;
             let message = Message {
                 kind,
                 id,
@@ -1063,6 +1115,7 @@ impl Reassembler {
 
         if last {
             let entry = self.incomplete.remove(&id).unwrap();
+            self.payload_phase -= 1;
             let message = Message {
                 kind,
                 id,
@@ -1144,6 +1197,7 @@ enum ControlSend {
     Empty { kind: Kind, id: u64 },
     Abort { id: u64 },
     Release { id: u64, count: u32 },
+    Credit { id: u64, count: u32 },
 }
 
 /// Outcome of attempting to cancel an in-flight outbound send.
@@ -1213,7 +1267,7 @@ impl Scheduler {
             waiting: VecDeque::new(),
             control: VecDeque::new(),
             active_fragmented: 0,
-            max_active_fragmented: limits.max_incomplete_messages.max(1),
+            max_active_fragmented: limits.max_concurrent_calls.max(1),
             max_fragment_size: limits
                 .max_fragment_size
                 .saturating_sub(RawFragmentHeader::LEN)
@@ -1323,6 +1377,17 @@ impl Scheduler {
     pub(crate) fn admit_release(&mut self, id: u64, count: u32) {
         debug_assert!(count > 0, "a release must drop at least one reference");
         self.control.push_back(ControlSend::Release { id, count });
+    }
+
+    /// Admits a `Credit` returning `count` retired trailer bytes for message
+    /// `id`, ahead of ordinary sends.
+    ///
+    /// The priority matters here in a way it does not for `Release`: the peer
+    /// may be parked with no credit at all, and every ordinary fragment
+    /// queued ahead of this one is time it stays parked.
+    pub(crate) fn admit_credit(&mut self, id: u64, count: u32) {
+        debug_assert!(count > 0, "a credit must release at least one byte");
+        self.control.push_back(ControlSend::Credit { id, count });
     }
 
     /// Attempts to cancel an in-flight or not-yet-started outbound send.
@@ -1664,6 +1729,15 @@ impl Scheduler {
                 },
                 Some(count),
             ),
+            ControlSend::Credit { id, count } => (
+                FragmentHeader {
+                    flags: Flags::FIRST | Flags::LAST,
+                    kind: Kind::Credit,
+                    id,
+                    payload_len: 4,
+                },
+                Some(count),
+            ),
         };
         let mut buffer = match count {
             None => header.encode(),
@@ -1681,6 +1755,18 @@ impl Scheduler {
 
 #[cfg(test)]
 mod tests {
+
+    /// A reassembler whose trailers have nowhere to send credit. Every test
+    /// here drives the wire format rather than the credit loop, which has
+    /// its own tests in `trailer`.
+    fn new_reassembler(limits: Limits) -> Reassembler {
+        struct NullSink;
+        impl crate::trailer::TrailerSink for NullSink {
+            fn credit(&self, _id: u64, _count: u32) {}
+            fn discard(&self, _id: u64) {}
+        }
+        Reassembler::new(limits, Arc::new(NullSink))
+    }
     use std::io;
     #[cfg(unix)]
     use std::os::fd::OwnedFd;
@@ -1765,7 +1851,7 @@ mod tests {
     #[test]
     fn hardened_defaults_bound_calls_and_native_handles() {
         let limits = Limits::default();
-        assert_eq!(limits.max_concurrent_calls, 64);
+        assert_eq!(limits.max_concurrent_calls, 128);
         assert_eq!(limits.max_handles_per_fragment, 8);
         assert_eq!(limits.max_handles_per_message, 8);
     }
@@ -1798,7 +1884,7 @@ mod tests {
 
     #[tokio::test]
     async fn ack_is_a_single_empty_message() {
-        let mut reassembler = Reassembler::new(Limits::default());
+        let mut reassembler = new_reassembler(Limits::default());
         let mut frame = FakeRecvFrame::new(Bytes::new());
         let event = reassembler
             .accept(
@@ -1830,7 +1916,7 @@ mod tests {
             (Flags::FIRST | Flags::LAST, 1),
             (Flags::FIRST | Flags::LAST | Flags::WANT_ACK, 0),
         ] {
-            let mut reassembler = Reassembler::new(Limits::default());
+            let mut reassembler = new_reassembler(Limits::default());
             let mut frame = FakeRecvFrame::new(Bytes::new());
             assert!(matches!(
                 reassembler
@@ -1857,7 +1943,7 @@ mod tests {
             Kind::Response,
             b"done",
         ));
-        let mut reassembler = Reassembler::new(Limits::default());
+        let mut reassembler = new_reassembler(Limits::default());
         let header = read_fragment_header(&mut frame).await.unwrap();
         let Event::Ack {
             id,
@@ -1881,7 +1967,7 @@ mod tests {
             Kind::Response,
             b"done",
         ));
-        let mut reassembler = Reassembler::new(Limits::default());
+        let mut reassembler = new_reassembler(Limits::default());
         let header = read_fragment_header(&mut frame).await.unwrap();
         let Event::Ack {
             id: 7,
@@ -1909,7 +1995,7 @@ mod tests {
             Kind::Request,
             b"done",
         ));
-        let mut reassembler = Reassembler::new(Limits::default());
+        let mut reassembler = new_reassembler(Limits::default());
         let header = read_fragment_header(&mut frame).await.unwrap();
         reassembler.accept(header, &mut frame).await.unwrap();
 
@@ -1924,7 +2010,7 @@ mod tests {
     #[tokio::test]
     async fn first_last_fragment_is_the_fast_path_and_bypasses_incomplete_bookkeeping() {
         let mut frame = FakeRecvFrame::new(fast_path_bytes(1, Kind::Request, b"hello"));
-        let mut reassembler = Reassembler::new(Limits::default());
+        let mut reassembler = new_reassembler(Limits::default());
         let header = read_fragment_header(&mut frame).await.unwrap();
         let Event::Message(msg) = reassembler.accept(header, &mut frame).await.unwrap() else {
             panic!("fast path completes immediately");
@@ -1941,7 +2027,7 @@ mod tests {
         bytes.extend(fragment_bytes(Flags::NONE, 1, Kind::Request, b"world"));
         bytes.extend(fragment_bytes(Flags::LAST, 1, Kind::Request, b"!"));
         let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = Reassembler::new(Limits::default());
+        let mut reassembler = new_reassembler(Limits::default());
 
         for _ in 0..2 {
             let header = read_fragment_header(&mut frame).await.unwrap();
@@ -1970,7 +2056,7 @@ mod tests {
         // observe bytes belonging to the second fragment while reading the
         // first, if the read weren't correctly bounded.
         let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = Reassembler::new(Limits::default());
+        let mut reassembler = new_reassembler(Limits::default());
 
         let header = read_fragment_header(&mut frame).await.unwrap();
         let Event::Message(msg) = reassembler.accept(header, &mut frame).await.unwrap() else {
@@ -1993,7 +2079,7 @@ mod tests {
         // `recv()` calls across both the header and payload reads.
         let pieces = bytes.into_iter().map(|b| vec![b]).collect();
         let mut frame = FakeRecvFrame::chunked(pieces);
-        let mut reassembler = Reassembler::new(Limits::default());
+        let mut reassembler = new_reassembler(Limits::default());
         let header = read_fragment_header(&mut frame).await.unwrap();
         let Event::Message(msg) = reassembler.accept(header, &mut frame).await.unwrap() else {
             panic!("expected a completed message");
@@ -2004,7 +2090,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_duplicate_first_fragment() {
         let mut frame = FakeRecvFrame::new(fragment_bytes(Flags::FIRST, 1, Kind::Request, b"a"));
-        let mut reassembler = Reassembler::new(Limits::default());
+        let mut reassembler = new_reassembler(Limits::default());
         let header = read_fragment_header(&mut frame).await.unwrap();
         reassembler.accept(header, &mut frame).await.unwrap();
 
@@ -2019,7 +2105,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_continuation_without_active_message() {
         let mut frame = FakeRecvFrame::new(fragment_bytes(Flags::NONE, 1, Kind::Request, b"a"));
-        let mut reassembler = Reassembler::new(Limits::default());
+        let mut reassembler = new_reassembler(Limits::default());
         let header = read_fragment_header(&mut frame).await.unwrap();
         assert!(matches!(
             reassembler.accept(header, &mut frame).await,
@@ -2032,7 +2118,7 @@ mod tests {
         let mut bytes = fragment_bytes(Flags::FIRST | Flags::LAST, 1, Kind::Request, b"a");
         bytes.extend(fragment_bytes(Flags::NONE, 1, Kind::Request, b"b"));
         let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = Reassembler::new(Limits::default());
+        let mut reassembler = new_reassembler(Limits::default());
         let header = read_fragment_header(&mut frame).await.unwrap();
         reassembler.accept(header, &mut frame).await.unwrap();
         let header = read_fragment_header(&mut frame).await.unwrap();
@@ -2047,7 +2133,7 @@ mod tests {
         let mut bytes = fragment_bytes(Flags::FIRST, 1, Kind::Request, b"a");
         bytes.extend(fragment_bytes(Flags::LAST, 1, Kind::Response, b"b"));
         let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = Reassembler::new(Limits::default());
+        let mut reassembler = new_reassembler(Limits::default());
         let header = read_fragment_header(&mut frame).await.unwrap();
         reassembler.accept(header, &mut frame).await.unwrap();
         let header = read_fragment_header(&mut frame).await.unwrap();
@@ -2065,7 +2151,7 @@ mod tests {
         };
         let mut frame =
             FakeRecvFrame::new(fragment_bytes(Flags::FIRST, 1, Kind::Request, b"hello"));
-        let mut reassembler = Reassembler::new(limits);
+        let mut reassembler = new_reassembler(limits);
         let header = read_fragment_header(&mut frame).await.unwrap();
         assert!(matches!(
             reassembler.accept(header, &mut frame).await,
@@ -2080,7 +2166,7 @@ mod tests {
             ..Limits::default()
         };
         let mut frame = FakeRecvFrame::new(fast_path_bytes(1, Kind::Request, b"hello"));
-        let mut reassembler = Reassembler::new(limits);
+        let mut reassembler = new_reassembler(limits);
         let header = read_fragment_header(&mut frame).await.unwrap();
         assert!(matches!(
             reassembler.accept(header, &mut frame).await,
@@ -2098,7 +2184,7 @@ mod tests {
         let mut bytes = fragment_bytes(Flags::FIRST, 1, Kind::Request, b"abcd");
         bytes.extend(fragment_bytes(Flags::LAST, 1, Kind::Request, b"abcd"));
         let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = Reassembler::new(limits);
+        let mut reassembler = new_reassembler(limits);
         let header = read_fragment_header(&mut frame).await.unwrap();
         reassembler.accept(header, &mut frame).await.unwrap();
         let header = read_fragment_header(&mut frame).await.unwrap();
@@ -2111,10 +2197,10 @@ mod tests {
     #[tokio::test]
     async fn rejects_too_many_incomplete_messages() {
         let limits = Limits {
-            max_incomplete_messages: 1,
+            max_concurrent_calls: 1,
             ..Limits::default()
         };
-        let mut reassembler = Reassembler::new(limits);
+        let mut reassembler = new_reassembler(limits);
         let mut frame = FakeRecvFrame::new(fragment_bytes(Flags::FIRST, 1, Kind::Request, b"a"));
         let header = read_fragment_header(&mut frame).await.unwrap();
         reassembler.accept(header, &mut frame).await.unwrap();
@@ -2127,36 +2213,40 @@ mod tests {
         ));
     }
 
+    /// A message that has entered its trailer phase is done with postcard
+    /// reassembly and may stay resident for as long as its trailer streams,
+    /// so it must not hold a concurrency slot. If it did, a handful of
+    /// long-lived trailers would make every later message a fatal protocol
+    /// error. Trailer memory is bounded by the credit windows instead.
     #[tokio::test]
-    async fn rejects_too_many_incomplete_trailers() {
+    async fn trailer_phase_messages_do_not_hold_concurrency_slots() {
         let limits = Limits {
-            max_incomplete_trailers: 1,
+            max_concurrent_calls: 1,
             ..Limits::default()
         };
-        let mut reassembler = Reassembler::new(limits);
-        let mut frame = FakeRecvFrame::new(fragment_bytes(
-            Flags::FIRST | Flags::TRAILER,
-            1,
-            Kind::Request,
-            b"a",
-        ));
-        let header = read_fragment_header(&mut frame).await.unwrap();
-        assert!(matches!(
-            reassembler.accept(header, &mut frame).await.unwrap(),
-            Event::Message(_)
-        ));
+        let mut reassembler = new_reassembler(limits);
+        for id in 1..=3 {
+            let mut frame = FakeRecvFrame::new(fragment_bytes(
+                Flags::FIRST | Flags::TRAILER,
+                id,
+                Kind::Request,
+                b"a",
+            ));
+            let header = read_fragment_header(&mut frame).await.unwrap();
+            assert!(matches!(
+                reassembler.accept(header, &mut frame).await.unwrap(),
+                Event::Message(_)
+            ));
+        }
+        assert_eq!(reassembler.payload_phase, 0);
+        assert_eq!(reassembler.incomplete.len(), 3);
 
-        let mut frame = FakeRecvFrame::new(fragment_bytes(
-            Flags::FIRST | Flags::TRAILER,
-            2,
-            Kind::Request,
-            b"a",
-        ));
+        // The budget is still fully available to an ordinary payload-phase
+        // message even with three trailers open.
+        let mut frame = FakeRecvFrame::new(fragment_bytes(Flags::FIRST, 4, Kind::Request, b"a"));
         let header = read_fragment_header(&mut frame).await.unwrap();
-        assert!(matches!(
-            reassembler.accept(header, &mut frame).await,
-            Err(Error::Protocol(_))
-        ));
+        reassembler.accept(header, &mut frame).await.unwrap();
+        assert_eq!(reassembler.payload_phase, 1);
     }
 
     #[tokio::test]
@@ -2164,7 +2254,7 @@ mod tests {
         let mut bytes = fragment_bytes(Flags::FIRST, 1, Kind::Request, b"a");
         bytes.extend(fragment_bytes(Flags::ABORT, 1, Kind::Request, b"x"));
         let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = Reassembler::new(Limits::default());
+        let mut reassembler = new_reassembler(Limits::default());
         let header = read_fragment_header(&mut frame).await.unwrap();
         reassembler.accept(header, &mut frame).await.unwrap();
         let header = read_fragment_header(&mut frame).await.unwrap();
@@ -2179,7 +2269,7 @@ mod tests {
         let mut bytes = fragment_bytes(Flags::FIRST, 1, Kind::Request, b"abcd");
         bytes.extend(fragment_bytes(Flags::ABORT, 1, Kind::Request, b""));
         let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = Reassembler::new(Limits::default());
+        let mut reassembler = new_reassembler(Limits::default());
         let header = read_fragment_header(&mut frame).await.unwrap();
         reassembler.accept(header, &mut frame).await.unwrap();
         let header = read_fragment_header(&mut frame).await.unwrap();
@@ -2197,7 +2287,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_abort_for_unknown_message() {
         let mut frame = FakeRecvFrame::new(fragment_bytes(Flags::ABORT, 1, Kind::Request, b""));
-        let mut reassembler = Reassembler::new(Limits::default());
+        let mut reassembler = new_reassembler(Limits::default());
         let header = read_fragment_header(&mut frame).await.unwrap();
         assert!(matches!(
             reassembler.accept(header, &mut frame).await,
@@ -2210,7 +2300,7 @@ mod tests {
     #[tokio::test]
     async fn message_without_any_trailer_fragment_has_no_trailer() {
         let mut frame = FakeRecvFrame::new(fast_path_bytes(1, Kind::Request, b"hello"));
-        let mut reassembler = Reassembler::new(Limits::default());
+        let mut reassembler = new_reassembler(Limits::default());
         let header = read_fragment_header(&mut frame).await.unwrap();
         let Event::Message(msg) = reassembler.accept(header, &mut frame).await.unwrap() else {
             panic!("expected a completed message");
@@ -2224,7 +2314,7 @@ mod tests {
         let mut bytes = fragment_bytes(Flags::FIRST | Flags::TRAILER, 1, Kind::Request, b"hello");
         bytes.extend(fragment_bytes(Flags::LAST, 1, Kind::Request, b""));
         let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = Reassembler::new(Limits::default());
+        let mut reassembler = new_reassembler(Limits::default());
         let header = read_fragment_header(&mut frame).await.unwrap();
         let Event::Message(msg) = reassembler.accept(header, &mut frame).await.unwrap() else {
             panic!("the payload boundary completes the message");
@@ -2247,7 +2337,7 @@ mod tests {
         bytes.extend(fragment_bytes(Flags::NONE, 1, Kind::Request, b"world"));
         bytes.extend(fragment_bytes(Flags::LAST, 1, Kind::Request, b""));
         let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = Reassembler::new(Limits::default());
+        let mut reassembler = new_reassembler(Limits::default());
 
         let header = read_fragment_header(&mut frame).await.unwrap();
         let Event::Message(msg) = reassembler.accept(header, &mut frame).await.unwrap() else {
@@ -2276,7 +2366,7 @@ mod tests {
         bytes.extend(fragment_bytes(Flags::NONE, 1, Kind::Request, b"cd"));
         bytes.extend(fragment_bytes(Flags::LAST, 1, Kind::Request, b""));
         let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = Reassembler::new(Limits::default());
+        let mut reassembler = new_reassembler(Limits::default());
 
         let header = read_fragment_header(&mut frame).await.unwrap();
         let Event::Message(msg) = reassembler.accept(header, &mut frame).await.unwrap() else {
@@ -2311,7 +2401,7 @@ mod tests {
         bytes.extend(fragment_bytes(Flags::NONE, 1, Kind::Request, b"a"));
         bytes.extend(fragment_bytes(Flags::LAST, 1, Kind::Request, b"x"));
         let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = Reassembler::new(Limits::default());
+        let mut reassembler = new_reassembler(Limits::default());
 
         let header = read_fragment_header(&mut frame).await.unwrap();
         reassembler.accept(header, &mut frame).await.unwrap();
@@ -2336,7 +2426,7 @@ mod tests {
         bytes.extend(fragment_bytes(Flags::NONE, 1, Kind::Request, b"ab"));
         bytes.extend(fragment_bytes(Flags::LAST, 1, Kind::Request, b""));
         let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = Reassembler::new(Limits::default());
+        let mut reassembler = new_reassembler(Limits::default());
 
         // The whole point of putting TRAILER on the payload's last fragment:
         // the message is available without waiting on the trailer producer.
@@ -2369,7 +2459,7 @@ mod tests {
             Flags::LAST | Flags::TRAILER,
         ] {
             let mut frame = FakeRecvFrame::new(fragment_bytes(flags, 1, Kind::Request, b""));
-            let mut reassembler = Reassembler::new(Limits::default());
+            let mut reassembler = new_reassembler(Limits::default());
             let header = read_fragment_header(&mut frame).await.unwrap();
             assert!(matches!(
                 reassembler.accept(header, &mut frame).await,
@@ -2384,7 +2474,7 @@ mod tests {
         bytes.extend(fragment_bytes(Flags::NONE, 1, Kind::Request, b"a"));
         bytes.extend(fragment_bytes(Flags::TRAILER, 1, Kind::Request, b"b"));
         let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = Reassembler::new(Limits::default());
+        let mut reassembler = new_reassembler(Limits::default());
 
         let header = read_fragment_header(&mut frame).await.unwrap();
         reassembler.accept(header, &mut frame).await.unwrap();
@@ -2403,23 +2493,22 @@ mod tests {
         ));
     }
 
+    /// The postcard payload and the trailer draw on separate budgets: a
+    /// payload larger than the whole credit pool is fine, because the pool
+    /// bounds only unretired trailer bytes.
     #[tokio::test]
-    async fn postcard_and_trailer_size_are_independent_budgets() {
-        // A postcard payload that would itself exceed `max_trailer_size`
-        // (but fits `max_payload_size`) doesn't count against the trailer
-        // that follows it — the two limits are enforced independently, not
-        // combined the way `max_message_size` used to combine them.
+    async fn postcard_and_trailer_credit_are_independent_budgets() {
         let limits = Limits {
             max_fragment_size: 4,
             max_payload_size: 8,
-            max_trailer_size: 3,
+            trailer_session_window: 3,
             ..Limits::default()
         };
         let mut bytes = fragment_bytes(Flags::FIRST, 1, Kind::Request, b"abcd");
         bytes.extend(fragment_bytes(Flags::TRAILER, 1, Kind::Request, b"abcd"));
         bytes.extend(fragment_bytes(Flags::NONE, 1, Kind::Request, b"ab"));
         let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = Reassembler::new(limits);
+        let mut reassembler = new_reassembler(limits);
         let header = read_fragment_header(&mut frame).await.unwrap();
         reassembler.accept(header, &mut frame).await.unwrap();
         let header = read_fragment_header(&mut frame).await.unwrap();
@@ -2432,24 +2521,49 @@ mod tests {
         drain_trailer_bytes(&mut frame, len).await;
     }
 
+    /// The backstop against a peer that ignores the credit it was granted.
+    /// A well-behaved sender parks instead of overrunning, so this is
+    /// connection-fatal rather than a per-message failure. Two trailers are
+    /// used because the pool is a session-wide bound: what makes the memory
+    /// bound hold is that it is independent of how many trailers are open.
     #[tokio::test]
-    async fn rejects_trailer_exceeding_max_trailer_size() {
+    async fn rejects_trailers_exceeding_session_window() {
         let limits = Limits {
-            max_fragment_size: 4,
-            max_trailer_size: 3,
+            max_fragment_size: 8,
+            trailer_session_window: 6,
             ..Limits::default()
         };
         let mut bytes = fragment_bytes(Flags::FIRST | Flags::TRAILER, 1, Kind::Request, b"");
-        bytes.extend(fragment_bytes(Flags::NONE, 1, Kind::Request, b"abcd"));
-        let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = Reassembler::new(limits);
-        let header = read_fragment_header(&mut frame).await.unwrap();
-        reassembler.accept(header, &mut frame).await.unwrap();
-        let header = read_fragment_header(&mut frame).await.unwrap();
-        assert!(matches!(
-            reassembler.accept(header, &mut frame).await,
-            Err(Error::Protocol(_))
+        bytes.extend(fragment_bytes(
+            Flags::FIRST | Flags::TRAILER,
+            2,
+            Kind::Request,
+            b"",
         ));
+        bytes.extend(fragment_bytes(Flags::NONE, 1, Kind::Request, b"abcd"));
+        bytes.extend(fragment_bytes(Flags::NONE, 2, Kind::Request, b"abcd"));
+        let mut frame = FakeRecvFrame::new(bytes);
+        let mut reassembler = new_reassembler(limits);
+        for _ in 0..2 {
+            let header = read_fragment_header(&mut frame).await.unwrap();
+            reassembler.accept(header, &mut frame).await.unwrap();
+        }
+        // Trailer 1 fits within the pool.
+        let header = read_fragment_header(&mut frame).await.unwrap();
+        let Event::Trailer { len, .. } = reassembler.accept(header, &mut frame).await.unwrap()
+        else {
+            panic!("expected a trailer-data fragment");
+        };
+        drain_trailer_bytes(&mut frame, len).await;
+        // Trailer 2 does not fit what is left of the pool.
+        let header = read_fragment_header(&mut frame).await.unwrap();
+        let Err(error) = reassembler.accept(header, &mut frame).await else {
+            panic!("expected the overrun to be rejected");
+        };
+        assert!(
+            format!("{error}").contains("session trailer credit window"),
+            "unexpected error: {error}"
+        );
     }
 
     #[tokio::test]
@@ -2458,7 +2572,7 @@ mod tests {
         bytes.extend(fragment_bytes(Flags::NONE, 1, Kind::Request, b"cd"));
         bytes.extend(fragment_bytes(Flags::ABORT, 1, Kind::Request, b""));
         let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = Reassembler::new(Limits::default());
+        let mut reassembler = new_reassembler(Limits::default());
 
         let header = read_fragment_header(&mut frame).await.unwrap();
         reassembler.accept(header, &mut frame).await.unwrap();
@@ -2469,7 +2583,7 @@ mod tests {
             panic!("expected a trailer-data fragment");
         };
         drain_trailer_bytes(&mut frame, len).await;
-        assert_eq!(reassembler.incomplete_trailers, 1);
+        assert_eq!(reassembler.incomplete.len(), 1);
 
         let header = read_fragment_header(&mut frame).await.unwrap();
         let event = reassembler.accept(header, &mut frame).await.unwrap();
@@ -2481,7 +2595,6 @@ mod tests {
             }
         ));
         assert_eq!(reassembler.incomplete.len(), 0);
-        assert_eq!(reassembler.incomplete_trailers, 0);
     }
 
     // --- Scheduler tests ---
@@ -2606,7 +2719,7 @@ mod tests {
     async fn scheduler_single_fragment_message_bypasses_concurrency_gate() {
         let limits = Limits {
             max_fragment_size: 4 + RawFragmentHeader::LEN,
-            max_incomplete_messages: 1,
+            max_concurrent_calls: 1,
             ..Limits::default()
         };
         let mut scheduler = Scheduler::new(&limits);
@@ -2645,7 +2758,7 @@ mod tests {
     fn scheduler_defers_multi_fragment_message_when_active_fragmented_is_full() {
         let limits = Limits {
             max_fragment_size: 4 + RawFragmentHeader::LEN,
-            max_incomplete_messages: 1,
+            max_concurrent_calls: 1,
             ..Limits::default()
         };
         let mut scheduler = Scheduler::new(&limits);
@@ -2700,7 +2813,7 @@ mod tests {
     async fn scheduler_promotes_waiting_message_when_a_slot_frees() {
         let limits = Limits {
             max_fragment_size: 4 + RawFragmentHeader::LEN,
-            max_incomplete_messages: 1,
+            max_concurrent_calls: 1,
             ..Limits::default()
         };
         let mut scheduler = Scheduler::new(&limits);
@@ -2801,7 +2914,7 @@ mod tests {
     fn scheduler_try_cancel_active_discards_waiting_message_without_abort() {
         let limits = Limits {
             max_fragment_size: 4 + RawFragmentHeader::LEN,
-            max_incomplete_messages: 1,
+            max_concurrent_calls: 1,
             ..Limits::default()
         };
         let mut scheduler = Scheduler::new(&limits);
@@ -2836,7 +2949,7 @@ mod tests {
     fn scheduler_trailer_forces_multi_fragment_even_with_small_payload() {
         let limits = Limits {
             max_fragment_size: 1024 + RawFragmentHeader::LEN,
-            max_incomplete_messages: 1,
+            max_concurrent_calls: 1,
             ..Limits::default()
         };
         let mut scheduler = Scheduler::new(&limits);
@@ -2850,10 +2963,8 @@ mod tests {
             Trailer::Stream(SendShared::new(
                 Kind::Request,
                 1,
-                &Limits {
-                    max_trailer_size: usize::MAX,
-                    ..limits
-                },
+                &Limits { ..limits },
+                Arc::new(crate::trailer::SessionWindow::new(usize::MAX)),
             )),
             Default::default(),
         );
@@ -2873,51 +2984,37 @@ mod tests {
         assert_eq!(scheduler.waiting.len(), 0);
     }
 
+    /// Trailer fragments that arrive after a local discard are sunk without
+    /// costing either credit window: they were already in flight when the
+    /// `Discard` went out, and they are never held in memory.
     #[tokio::test]
-    async fn notify_discard_fires_exactly_once_after_local_discard() {
+    async fn fragments_arriving_after_a_discard_cost_no_credit() {
+        let limits = Limits {
+            trailer_session_window: 1,
+            ..Limits::default()
+        };
         let mut bytes = fragment_bytes(Flags::FIRST | Flags::TRAILER, 1, Kind::Request, b"");
         bytes.extend(fragment_bytes(Flags::NONE, 1, Kind::Request, b"a"));
         bytes.extend(fragment_bytes(Flags::NONE, 1, Kind::Request, b"b"));
         let mut frame = FakeRecvFrame::new(bytes);
-        let mut reassembler = Reassembler::new(Limits::default());
+        let mut reassembler = new_reassembler(limits);
 
-        // The payload boundary hands over the message and its trailer stream.
         let header = read_fragment_header(&mut frame).await.unwrap();
         let Event::Message(msg) = reassembler.accept(header, &mut frame).await.unwrap() else {
             panic!("expected the payload boundary to dispatch the message");
         };
         let shared = msg.trailer.expect("trailer stream");
-
-        // The application decides to stop reading before any trailer data
-        // has even arrived — which the payload-boundary dispatch now makes
-        // possible, so the very first trailer fragment can be the one that
-        // notifies.
         RecvShared::discard(&shared);
 
-        let header = read_fragment_header(&mut frame).await.unwrap();
-        let Event::Trailer {
-            len,
-            notify_discard,
-            ..
-        } = reassembler.accept(header, &mut frame).await.unwrap()
-        else {
-            panic!("expected a trailer-data fragment");
-        };
-        assert!(notify_discard);
-        drain_trailer_bytes(&mut frame, len).await;
-
-        // Already notified once; must not fire again for the same message.
-        let header = read_fragment_header(&mut frame).await.unwrap();
-        let Event::Trailer {
-            len,
-            notify_discard,
-            ..
-        } = reassembler.accept(header, &mut frame).await.unwrap()
-        else {
-            panic!("expected a trailer-data fragment");
-        };
-        assert!(!notify_discard);
-        drain_trailer_bytes(&mut frame, len).await;
+        // Both fragments would exceed a one-byte window if they counted.
+        for _ in 0..2 {
+            let header = read_fragment_header(&mut frame).await.unwrap();
+            let Event::Trailer { len, .. } = reassembler.accept(header, &mut frame).await.unwrap()
+            else {
+                panic!("expected a trailer-data fragment, not a credit violation");
+            };
+            drain_trailer_bytes(&mut frame, len).await;
+        }
     }
 
     #[tokio::test]
@@ -2929,10 +3026,8 @@ mod tests {
         let shared = SendShared::new(
             Kind::Request,
             1,
-            &Limits {
-                max_trailer_size: usize::MAX,
-                ..limits
-            },
+            &Limits { ..limits },
+            Arc::new(crate::trailer::SessionWindow::new(usize::MAX)),
         );
         scheduler.admit_message(
             Kind::Request,

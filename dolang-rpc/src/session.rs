@@ -3,7 +3,7 @@
 //! [`Gift`] and [`Cite`] are references to a resource retained by one endpoint
 //! of a session. Either can be redeemed only through that endpoint, and only
 //! while the resource remains registered. They are the same handle in different
-//! wire positions — see "Direction is load-bearing" below, which is the
+//! wire positions — see "Direction matters", which is the
 //! distinction the two types exist to make static.
 //!
 //! # Reference counting
@@ -26,7 +26,7 @@
 //! while the peer goes 1 -> 0 -> 1, and both arrive at the same total whatever
 //! the interleaving.
 //!
-//! # Direction is load-bearing
+//! # Direction matters
 //!
 //! Serializing an opaque means one of two entirely different things depending
 //! on which side owns the resource:
@@ -37,12 +37,6 @@
 //!   is the hot path. It must have no protocol effect whatsoever. Citations
 //!   are safe unconditionally: the caller necessarily holds a reference for
 //!   the duration of the call it is citing the opaque in.
-//!
-//! Which of the two a wire position means is fixed by the protocol, never by
-//! the value that lands in it, so it is spelled in the field's type: [`Gift`]
-//! or [`Cite`]. The receiver then rejects the wrong one during decode, where
-//! the expectation is still statically known, rather than discovering at
-//! redemption that the peer sent the other kind.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 #[cfg(unix)]

@@ -1261,7 +1261,7 @@ impl Connection {
         stdio: Cite<StdioSendMarker>,
     ) -> Result<usize, WireError> {
         let stdio = self.retained_stdio_send(context, stdio)?;
-        let trailer = context.request_trailer().ok_or_else(|| {
+        let trailer = context.trailer().ok_or_else(|| {
             wire_error(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "stdio write request is missing its data trailer",
@@ -1436,7 +1436,7 @@ impl Connection {
         file: Cite<FileMarker>,
     ) -> Result<usize, WireError> {
         let file = self.retained_file(context, file)?;
-        let trailer = context.request_trailer().ok_or_else(|| {
+        let trailer = context.trailer().ok_or_else(|| {
             wire_error(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "file write request is missing its data trailer",
