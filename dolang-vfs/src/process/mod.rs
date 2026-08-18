@@ -10,10 +10,10 @@ use dolang_rpc::handle::DefaultHandle;
 use serde::{Deserialize, Serialize};
 use tokio::{
     fs::File,
-    io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf},
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf},
 };
 
-use crate::target::OperatingSystem;
+use crate::{STREAM_CHUNK_SIZE, target::OperatingSystem};
 
 /// Terminal status of a spawned process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -218,12 +218,13 @@ pub enum NativeStdioRecv {
 }
 
 /// Pumps bytes from `src` to `dst` until EOF or error, then shuts `dst` down.
-pub(crate) async fn relay<R, W>(mut src: R, mut dst: W)
+pub(crate) async fn relay<R, W>(src: R, mut dst: W)
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let _ = tokio::io::copy(&mut src, &mut dst).await;
+    let mut src = BufReader::with_capacity(STREAM_CHUNK_SIZE, src);
+    let _ = tokio::io::copy_buf(&mut src, &mut dst).await;
     let _ = dst.shutdown().await;
 }
 

@@ -38,6 +38,7 @@ windows-sys = { version = "0.61", features = ["Wdk_Storage_FileSystem", "Win32_F
 [dev-dependencies]
 tempfile = "3"
 postcard = { version = "1.1.3", features = ["use-std"] }
+criterion = { version = "0.5", features = ["async_tokio"] }
 
 [target.'cfg(unix)'.dependencies]
 tokio = { version = "1.48.0", features = ["process", "time", "signal"] }
@@ -46,3 +47,7 @@ nix = { version = "0.31", features = ["dir", "fs", "ioctl", "user", "socket"] }
 
 [target.'cfg(unix)'.dev-dependencies]
 futures = "0.3"
+
+[[bench]]
+name = "remote_file"
+harness = false
