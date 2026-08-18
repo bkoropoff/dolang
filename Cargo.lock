@@ -1360,6 +1360,7 @@ dependencies = [
  "base64",
  "bitflags",
  "bytes",
+ "criterion",
  "dolang-rpc",
  "dolang-winterop",
  "dunce",
