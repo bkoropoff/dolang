@@ -40,7 +40,7 @@ use crate::file::{FileLock, FileLockRequest};
 use crate::security::{Acl, AclKind};
 use crate::{
     AnyFile, AnyVfs, Child as _, Command as _, Error, FileHandle as _, OpenOptions as _,
-    SessionMode, StdioRecv, StdioSend, Utf8TypedPath, Vfs,
+    STREAM_CHUNK_SIZE, SessionMode, StdioRecv, StdioSend, Utf8TypedPath, Vfs,
     protocol::{
         AccessRequest, AclRequest, CanonicalizeRequest, CopyRequest, CreateDirRequest,
         ExtensionRequest, ExtensionResponse, FsMetadataRequest, GlobRequest, HardLinkRequest,
@@ -1258,7 +1258,8 @@ impl Connection {
                     "stdio write request is missing its data trailer",
                 ))
             })?;
-            let len = io::copy(trailer, &mut *stdio.stdio.lock().await)
+            let mut trailer = io::BufReader::with_capacity(STREAM_CHUNK_SIZE, trailer);
+            let len = io::copy_buf(&mut trailer, &mut *stdio.stdio.lock().await)
                 .await
                 .map_err(wire_error)?;
             usize::try_from(len).map_err(|_| {
@@ -1311,8 +1312,11 @@ impl Connection {
         };
         let mut send = context.respond_with_trailer(ResponseKind::StdioRecvRead(Ok(())));
         let mut stdio = stdio.stdio.lock().await;
-        let mut source = (&mut *stdio).take(len as u64);
-        if io::copy(&mut source, &mut send).await.is_ok() {
+        let mut source = io::BufReader::with_capacity(
+            len.clamp(1, STREAM_CHUNK_SIZE),
+            (&mut *stdio).take(len as u64),
+        );
+        if io::copy_buf(&mut source, &mut send).await.is_ok() {
             send.finish();
         }
     }
@@ -1403,8 +1407,11 @@ impl Connection {
         };
         let mut send = context.respond_with_trailer(ResponseKind::FileRead(Ok(())));
         let mut file = file.0.lock().await;
-        let mut source = (&mut *file).take(len as u64);
-        if io::copy(&mut source, &mut send).await.is_ok() {
+        let mut source = io::BufReader::with_capacity(
+            len.clamp(1, STREAM_CHUNK_SIZE),
+            (&mut *file).take(len as u64),
+        );
+        if io::copy_buf(&mut source, &mut send).await.is_ok() {
             send.finish();
         }
     }
@@ -1422,7 +1429,8 @@ impl Connection {
                     "file write request is missing its data trailer",
                 ))
             })?;
-            let len = io::copy(trailer, &mut *file.0.lock().await)
+            let mut trailer = io::BufReader::with_capacity(STREAM_CHUNK_SIZE, trailer);
+            let len = io::copy_buf(&mut trailer, &mut *file.0.lock().await)
                 .await
                 .map_err(wire_error)?;
             usize::try_from(len).map_err(|_| {

@@ -35,7 +35,7 @@ use tokio::net::windows::named_pipe::NamedPipeServer;
 #[cfg(all(docsrs, not(windows)))]
 struct NamedPipeServer;
 use tokio::{
-    io::{AsyncRead, AsyncSeek, AsyncWrite, AsyncWriteExt, ReadBuf},
+    io::{AsyncRead, AsyncSeek, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf},
     task::JoinHandle,
 };
 
@@ -45,8 +45,8 @@ use crate::protocol::AccessRequest;
 use crate::session::Query;
 use crate::{
     Acl, AclKind, Child, Command, FileHandle, FsMetadata, Metadata, MetadataPatch, PrincipalId,
-    PrincipalIdKind, ProcessStatus, ReadDir, SessionMode, SidName, StdioRecv, StdioSend,
-    StreamEntry, Utf8TypedPath, Utf8TypedPathBuf, Vfs, XattrEntry,
+    PrincipalIdKind, ProcessStatus, ReadDir, STREAM_CHUNK_SIZE, SessionMode, SidName, StdioRecv,
+    StdioSend, StreamEntry, Utf8TypedPath, Utf8TypedPathBuf, Vfs, XattrEntry,
     direct::DirectFile,
     path::WellKnownPath,
     protocol::{
@@ -2017,16 +2017,17 @@ impl<'a> CommandBuilder<'a> {
 }
 
 async fn relay_stdin(mut send: StdioSend) {
-    let mut stdin = tokio::io::stdin();
-    let _ = tokio::io::copy(&mut stdin, &mut send).await;
+    let mut stdin = BufReader::with_capacity(STREAM_CHUNK_SIZE, tokio::io::stdin());
+    let _ = tokio::io::copy_buf(&mut stdin, &mut send).await;
     let _ = send.shutdown().await;
 }
 
-async fn relay_output<W>(mut recv: StdioRecv, mut output: W)
+async fn relay_output<W>(recv: StdioRecv, mut output: W)
 where
     W: AsyncWrite + Unpin,
 {
-    let _ = tokio::io::copy(&mut recv, &mut output).await;
+    let mut recv = BufReader::with_capacity(STREAM_CHUNK_SIZE, recv);
+    let _ = tokio::io::copy_buf(&mut recv, &mut output).await;
     let _ = output.flush().await;
 }
 
