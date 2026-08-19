@@ -200,7 +200,7 @@ def copy_chunks input output indicator
   strand.pipeline
     do while let chunk = input.read(1024 * 1024)
       strand.put $chunk
-    do for chunk = input
+    do for chunk
       output.write $chunk
       indicator.delta $chunk.len
 
