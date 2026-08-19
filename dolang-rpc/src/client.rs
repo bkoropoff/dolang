@@ -22,7 +22,10 @@ use windows_sys::Win32::System::Threading::GetProcessId;
 use crate::session::SessionHandles;
 use crate::{
     Error, Limits, Protocol,
-    fragment::{self, AbortOutcome, Event, Kind, Message, Reassembler, Scheduler, Trailer},
+    fragment::{
+        self, AbortOutcome, Event, Flags, FragmentHeader, Kind, Message, Reassembler, Scheduler,
+        Trailer,
+    },
     serde::{decode_payload, encode_payload},
     session::{Ledger, Session, SessionFrame},
     trailer::{RecvShared, SendShared, SessionWindow, TrailerRecv, TrailerSend, TrailerSink},
@@ -38,6 +41,38 @@ use crate::{handle::TakeHandle, session::Inner as OpaqueInner};
 pub use crate::unbound::UnboundClient as Unbound;
 
 type Pending<R> = HashMap<u64, oneshot::Sender<Result<CallResult<R>, Error>>>;
+
+/// State the reader and writer tasks share.
+///
+/// Both hold this strongly, which is safe precisely because nothing in it can
+/// keep an API handle alive: everything a [`Client`] handle owns — pending
+/// calls, the id counter, the task handles, and the only strong sender into
+/// the writer — stays in [`Inner`], so dropping the last handle still closes
+/// the writer's channel and still shuts the connection down.
+struct Shared {
+    session: Arc<Session>,
+    /// Send-side trailer credit shared by every outgoing trailer on this
+    /// connection. Bounds what the peer must buffer for us in aggregate.
+    trailer_session: Arc<SessionWindow>,
+    /// Calls whose request reached the scheduler and whose terminal message
+    /// has not yet arrived.
+    ///
+    /// Each task asks it a different question: the writer bounds admissions
+    /// by its size, and the reader treats it as the set of ids the peer is
+    /// entitled to respond to. Membership starts in `Writer::admit_request`
+    /// and ends wherever the terminal message is observed, which for
+    /// everything but a locally cancelled request is the reader.
+    active_calls: Mutex<HashSet<u64>>,
+    /// The route trailers use to credit and discard themselves. Weak, since
+    /// a `TrailerRecv` can outlive the session and must not keep the writer
+    /// alive just to say it is going away.
+    trailer_sink: Arc<dyn TrailerSink>,
+    #[cfg(windows)]
+    handle_escrow: Mutex<HashMap<u64, Vec<OwnedHandle>>>,
+    #[cfg(target_os = "macos")]
+    fd_escrow: Mutex<crate::escrow::FdEscrow>,
+    limits: Limits,
+}
 
 #[cfg(windows)]
 struct DecodeHandles<'a> {
@@ -140,10 +175,11 @@ enum Outgoing<Q> {
         id: u64,
         count: u32,
     },
-    /// A terminal response or error arrived for an active request.
-    Terminal {
-        id: u64,
-    },
+    /// A call ended, freeing a slot. The reader has already dropped the id
+    /// from [`ActiveCalls`] itself — it has to, so that a second `Response`
+    /// for the same id is rejected — so this carries nothing and exists only
+    /// to wake the writer to promote whatever was waiting on that slot.
+    Terminal,
 }
 
 impl<Q: Send + 'static> crate::session::ReleaseSink for mpsc::WeakUnboundedSender<Outgoing<Q>> {
@@ -183,15 +219,7 @@ struct Inner<P: Protocol> {
     pending: Mutex<Pending<P::Response>>,
     next_id: Mutex<u64>,
     tasks: Mutex<Option<Tasks>>,
-    #[cfg(windows)]
-    handle_escrow: Mutex<HashMap<u64, Vec<OwnedHandle>>>,
-    #[cfg(target_os = "macos")]
-    fd_escrow: Mutex<crate::escrow::FdEscrow>,
-    session: Arc<Session>,
-    /// Send-side trailer credit shared by every outgoing trailer on this
-    /// connection. Bounds what the peer must buffer for us in aggregate.
-    trailer_session: Arc<SessionWindow>,
-    limits: Limits,
+    shared: Arc<Shared>,
     #[cfg(windows)]
     _peer_process: Option<OwnedHandle>,
 }
@@ -199,28 +227,21 @@ struct Inner<P: Protocol> {
 struct Writer<P: Protocol> {
     transport: transport::AnySender,
     outgoing: mpsc::UnboundedReceiver<Outgoing<P::Request>>,
+    /// Weak: the API handles decide when the session ends, and a writer that
+    /// held them alive would wait forever on a channel it kept open itself.
     inner: Weak<Inner<P>>,
-    limits: Limits,
+    shared: Arc<Shared>,
     scheduler: Scheduler,
-    /// Calls admitted to the scheduler and not yet terminated, which is what
-    /// `max_concurrent_calls` bounds on this end. An entry is added where the
-    /// request actually reaches the scheduler (`admit_request`) and removed
-    /// on the reader's `Outgoing::Terminal`, or on a cancel that got there
-    /// before the request did.
-    active_calls: HashSet<u64>,
-    /// Requests held back because `active_calls` is at the limit, promoted in
-    /// arrival order as slots free up.
+    /// Requests held back because `Shared::active_calls` is at the limit,
+    /// promoted in arrival order as slots free up.
     waiting: VecDeque<Outgoing<P::Request>>,
 }
 
 struct Reader<P: Protocol> {
     transport: transport::AnyReceiver,
+    /// Weak, as on the writer.
     inner: Weak<Inner<P>>,
-    /// The route trailers use to credit and discard themselves. Weak, since
-    /// a `TrailerRecv` can outlive the session and must not keep the writer
-    /// alive just to say it is going away.
-    trailer_sink: Arc<dyn TrailerSink>,
-    limits: Limits,
+    shared: Arc<Shared>,
 }
 
 struct Tasks {
@@ -309,19 +330,23 @@ impl<P: Protocol> Client<P> {
     ) -> Self {
         let (outgoing, outgoing_rx) = mpsc::unbounded_channel();
         let session = Session::new(Box::new(outgoing.downgrade()));
-        let trailer_sink = outgoing.downgrade();
+        let shared = Arc::new(Shared {
+            session,
+            trailer_session: Arc::new(SessionWindow::new(limits.trailer_session_window)),
+            active_calls: Default::default(),
+            trailer_sink: Arc::new(outgoing.downgrade()),
+            #[cfg(windows)]
+            handle_escrow: Mutex::new(HashMap::new()),
+            #[cfg(target_os = "macos")]
+            fd_escrow: Mutex::new(Default::default()),
+            limits,
+        });
         let inner = Arc::new(Inner {
             outgoing: Mutex::new(Some(outgoing)),
             pending: Mutex::new(HashMap::new()),
             next_id: Mutex::new(0),
             tasks: Mutex::new(None),
-            #[cfg(windows)]
-            handle_escrow: Mutex::new(HashMap::new()),
-            #[cfg(target_os = "macos")]
-            fd_escrow: Mutex::new(Default::default()),
-            session,
-            trailer_session: Arc::new(SessionWindow::new(limits.trailer_session_window)),
-            limits,
+            shared: shared.clone(),
             #[cfg(windows)]
             _peer_process: peer_process,
         });
@@ -331,9 +356,8 @@ impl<P: Protocol> Client<P> {
                 transport: sender,
                 outgoing: outgoing_rx,
                 inner: Arc::downgrade(&inner),
-                limits,
+                shared: shared.clone(),
                 scheduler: Scheduler::new(&limits),
-                active_calls: HashSet::new(),
                 waiting: VecDeque::new(),
             }
             .run(),
@@ -342,8 +366,7 @@ impl<P: Protocol> Client<P> {
             Reader {
                 transport: receiver,
                 inner: Arc::downgrade(&inner),
-                trailer_sink: Arc::new(trailer_sink),
-                limits,
+                shared,
             }
             .run(reader_stop),
         );
@@ -404,8 +427,8 @@ impl<P: Protocol> Client<P> {
             let shared = SendShared::new(
                 Kind::Request,
                 id,
-                &self.inner.limits,
-                self.inner.trailer_session.clone(),
+                &self.inner.shared.limits,
+                self.inner.shared.trailer_session.clone(),
             );
             (
                 Outgoing::Request {
@@ -580,9 +603,11 @@ impl<P: Protocol> Writer<P> {
     /// the session is already gone. Also drops any handles escrowed until
     /// the peer has had an opportunity to duplicate them.
     fn complete_err(&self, id: u64, error: Error) {
+        // The escrow lives in `Shared`, which outlives the handles, so it is
+        // cleaned up whether or not anyone is still waiting for the result.
+        #[cfg(windows)]
+        self.shared.handle_escrow.lock().unwrap().remove(&id);
         if let Some(inner) = self.inner.upgrade() {
-            #[cfg(windows)]
-            inner.handle_escrow.lock().unwrap().remove(&id);
             inner.complete(id, Err(error));
         }
     }
@@ -607,9 +632,7 @@ impl<P: Protocol> Writer<P> {
                 // The peer will never credit what it just threw away, so
                 // settle by id rather than through the send, which may
                 // already have finished and left the scheduler.
-                if let Some(inner) = self.inner.upgrade() {
-                    inner.trailer_session.settle(id);
-                }
+                self.shared.trailer_session.settle(id);
                 self.scheduler.discard_active_trailer(id);
                 Ok(())
             }
@@ -625,7 +648,7 @@ impl<P: Protocol> Writer<P> {
                 self.scheduler.admit_credit(id, count);
                 Ok(())
             }
-            Outgoing::Terminal { .. } => unreachable!("handled by the writer loop"),
+            Outgoing::Terminal => unreachable!("handled by the writer loop"),
         }
     }
 
@@ -636,20 +659,22 @@ impl<P: Protocol> Writer<P> {
         trailer: Trailer,
     ) -> Result<(), Error> {
         #[cfg(unix)]
-        let max_handles = if self.limits.max_handles_per_fragment == 0 {
+        let max_handles = if self.shared.limits.max_handles_per_fragment == 0 {
             0
         } else {
-            self.limits.max_handles_per_message
+            self.shared.limits.max_handles_per_message
         };
         #[cfg(windows)]
-        let max_handles = self.limits.max_handles_per_message;
-        let Some(inner) = self.inner.upgrade() else {
+        let max_handles = self.shared.limits.max_handles_per_message;
+        // Every handle is gone, so nothing is waiting on this call's result
+        // and its pending entry went with them: drop it rather than encode it.
+        if self.inner.upgrade().is_none() {
             return Ok(());
-        };
+        }
         let mut ledger = Ledger::default();
         let mut put_handles = SessionFrame {
             inner: EncodeHandles::new(&self.transport, max_handles),
-            session: &inner.session,
+            session: &self.shared.session,
             ledger: &mut ledger,
         };
         let payload = match encode_payload(&value, &mut put_handles) {
@@ -668,18 +693,14 @@ impl<P: Protocol> Writer<P> {
         #[cfg(unix)]
         let handles = put_handles.finish();
         #[cfg(target_os = "macos")]
-        if handles.needs_ack()
-            && let Some(inner) = self.inner.upgrade()
-        {
-            inner.fd_escrow.lock().unwrap().register(id);
+        if handles.needs_ack() {
+            self.shared.fd_escrow.lock().unwrap().register(id);
         }
         #[cfg(windows)]
         let (handles, escrow) = put_handles.finish();
         #[cfg(windows)]
-        if !escrow.is_empty()
-            && let Some(inner) = self.inner.upgrade()
-        {
-            inner.handle_escrow.lock().unwrap().insert(id, escrow);
+        if !escrow.is_empty() {
+            self.shared.handle_escrow.lock().unwrap().insert(id, escrow);
         }
         self.scheduler
             .admit_message(Kind::Request, id, payload, handles, trailer, ledger);
@@ -687,7 +708,7 @@ impl<P: Protocol> Writer<P> {
         // the scheduler — never on the way in. A request that fails to encode
         // is completed locally above and never goes out, so no response and
         // no `Terminal` will ever come back to release a slot taken earlier.
-        self.active_calls.insert(id);
+        self.shared.active_calls.lock().unwrap().insert(id);
         Ok(())
     }
 
@@ -705,8 +726,8 @@ impl<P: Protocol> Writer<P> {
                     self.scheduler.admit_abort(id);
                 }
                 #[cfg(target_os = "macos")]
-                if !started && let Some(inner) = self.inner.upgrade() {
-                    inner.fd_escrow.lock().unwrap().discard_unsent(id);
+                if !started {
+                    self.shared.fd_escrow.lock().unwrap().discard_unsent(id);
                 }
                 if dispatched {
                     self.scheduler.admit_empty(Kind::Cancel, id);
@@ -720,7 +741,9 @@ impl<P: Protocol> Writer<P> {
     }
 
     async fn promote_waiting(&mut self) -> Result<(), Error> {
-        while self.active_calls.len() < self.limits.max_concurrent_calls {
+        while self.shared.active_calls.lock().unwrap().len()
+            < self.shared.limits.max_concurrent_calls
+        {
             let Some(message) = self.waiting.pop_front() else {
                 break;
             };
@@ -773,13 +796,18 @@ impl<P: Protocol> Writer<P> {
                             ) {
                                 self.waiting.remove(pos);
                                 self.complete_err(id, Error::Cancelled);
-                            } else if self.active_calls.contains(&id) && self.admit_cancel(id) {
-                                self.active_calls.remove(&id);
+                            } else if self.shared.active_calls.lock().unwrap().contains(&id)
+                                && self.admit_cancel(id)
+                            {
+                                // Cancelled before its request ever reached
+                                // the wire, so no terminal message is coming
+                                // and the reader will never free this slot.
+                                self.shared.active_calls.lock().unwrap().remove(&id);
                             }
                         }
-                        Outgoing::Terminal { id } => {
-                            self.active_calls.remove(&id);
-                        }
+                        // The slot is already free; this only prompts the
+                        // promotion below.
+                        Outgoing::Terminal => {}
                         message => self.admit(message).await?,
                     }
                     self.promote_waiting().await?;
@@ -808,9 +836,7 @@ impl<P: Protocol> Writer<P> {
                         Ok(fragment::AdvanceOutcome::None) => {}
                         #[cfg(target_os = "macos")]
                         Ok(fragment::AdvanceOutcome::Escrow { id, fds, handles_done }) => {
-                            if let Some(inner) = self.inner.upgrade() {
-                                inner.fd_escrow.lock().unwrap().sent(id, fds, handles_done);
-                            }
+                            self.shared.fd_escrow.lock().unwrap().sent(id, fds, handles_done);
                         }
                         // No blanket `fail_all`: a write failure here means
                         // this connection is broken, not that every pending
@@ -830,10 +856,13 @@ impl<P: Protocol> Writer<P> {
 }
 
 impl<P: Protocol> Reader<P> {
+    /// Applies a reassembled message.
+    ///
+    /// Everything that belongs to `Shared` — the call slot, the handle
+    /// escrows — is settled unconditionally; only handing the result to a
+    /// waiting caller needs the handle side to still be alive, so the
+    /// upgrade is taken per arm rather than up front.
     fn dispatch(&self, message: Message) -> Result<(), Error> {
-        let Some(inner) = self.inner.upgrade() else {
-            return Ok(());
-        };
         let Message {
             kind,
             id,
@@ -858,42 +887,86 @@ impl<P: Protocol> Reader<P> {
                     &payload,
                     &mut SessionHandles {
                         inner: handles,
-                        session: &inner.session,
+                        session: &self.shared.session,
                     },
                 )?;
                 #[cfg(windows)]
                 let response = decode_payload(
                     &payload,
-                    &mut DecodeHandles::new(self.limits.max_handles_per_message, &inner.session),
+                    &mut DecodeHandles::new(
+                        self.shared.limits.max_handles_per_message,
+                        &self.shared.session,
+                    ),
                 )?;
                 let trailer = trailer.map(TrailerRecv::new);
                 #[cfg(windows)]
-                inner.handle_escrow.lock().unwrap().remove(&id);
-                inner.complete(id, Ok(CallResult { response, trailer }));
-                inner.send(Outgoing::Terminal { id });
+                self.shared.handle_escrow.lock().unwrap().remove(&id);
+                self.shared.active_calls.lock().unwrap().remove(&id);
+                if let Some(inner) = self.inner.upgrade() {
+                    inner.complete(id, Ok(CallResult { response, trailer }));
+                    inner.send(Outgoing::Terminal);
+                }
             }
             Kind::Error => {
                 #[cfg(windows)]
-                inner.handle_escrow.lock().unwrap().remove(&id);
-                inner.complete(id, Err(Error::Cancelled));
-                inner.send(Outgoing::Terminal { id });
+                self.shared.handle_escrow.lock().unwrap().remove(&id);
+                self.shared.active_calls.lock().unwrap().remove(&id);
+                if let Some(inner) = self.inner.upgrade() {
+                    inner.complete(id, Err(Error::Cancelled));
+                    inner.send(Outgoing::Terminal);
+                }
             }
             #[cfg(target_os = "macos")]
             Kind::Ack => {
-                if !inner.fd_escrow.lock().unwrap().release(id) {
+                if !self.shared.fd_escrow.lock().unwrap().release(id) {
                     return Err(Error::Protocol(format!(
                         "Ack for request {id} with no active escrow"
                     )));
                 }
             }
-            Kind::Discard => inner.send(Outgoing::PeerDiscarded { id }),
+            Kind::Discard => {
+                if let Some(inner) = self.inner.upgrade() {
+                    inner.send(Outgoing::PeerDiscarded { id });
+                }
+            }
             kind => return Err(Error::Protocol(format!("unexpected {kind:?} frame"))),
         }
         Ok(())
     }
 
+    /// Refuses a fragment the peer had no business sending, before the
+    /// reassembler can allocate anything for it.
+    ///
+    /// Only the first fragment of a message is checked: a later one names a
+    /// message this end already accepted, and the reassembler rejects an id it
+    /// has no entry for.
+    fn check_header(
+        active_calls: &Mutex<HashSet<u64>>,
+        header: &FragmentHeader,
+    ) -> Result<(), Error> {
+        match header.kind {
+            // A server cannot originate a call, so this is never admissible in
+            // this direction, whatever id it names.
+            Kind::Request => Err(Error::Protocol("client received a Request fragment".into())),
+            // Ids are minted by this end, so an id that names no live call is
+            // fabricated. Tolerating it would let a peer open unbounded
+            // reassembly buffers for calls that were never made.
+            Kind::Response
+                if header.flags.contains(Flags::FIRST)
+                    && !active_calls.lock().unwrap().contains(&header.id) =>
+            {
+                Err(Error::Protocol(format!(
+                    "Response for message {} with no call outstanding",
+                    header.id
+                )))
+            }
+            _ => Ok(()),
+        }
+    }
+
     async fn run(mut self, mut shutdown: oneshot::Receiver<()>) {
-        let mut reassembler = Reassembler::new(self.limits, self.trailer_sink.clone());
+        let mut reassembler =
+            Reassembler::new(self.shared.limits, self.shared.trailer_sink.clone());
         loop {
             let mut frame = self.transport.recv();
             let header = tokio::select! {
@@ -907,6 +980,10 @@ impl<P: Protocol> Reader<P> {
                     return;
                 }
             };
+            if let Err(error) = Self::check_header(&self.shared.active_calls, &header) {
+                fail(&self.inner, error);
+                return;
+            }
             let accepted = tokio::select! {
                 accepted = reassembler.accept(header, &mut frame) => accepted,
                 _ = &mut shutdown => return,
@@ -925,18 +1002,18 @@ impl<P: Protocol> Reader<P> {
                     id,
                     dispatched,
                 } => {
-                    if kind != Kind::Response {
-                        fail(
-                            &self.inner,
-                            Error::Protocol(format!("unexpected aborted {kind:?} message")),
-                        );
-                        return;
-                    }
-                    if !dispatched && let Some(inner) = self.inner.upgrade() {
+                    // The header gate already refused every kind a client
+                    // may not receive, and the reassembler only ever aborts a
+                    // message it opened.
+                    debug_assert_eq!(kind, Kind::Response, "aborted a non-response message");
+                    if !dispatched {
                         #[cfg(windows)]
-                        inner.handle_escrow.lock().unwrap().remove(&id);
-                        inner.complete(id, Err(Error::Cancelled));
-                        inner.send(Outgoing::Terminal { id });
+                        self.shared.handle_escrow.lock().unwrap().remove(&id);
+                        self.shared.active_calls.lock().unwrap().remove(&id);
+                        if let Some(inner) = self.inner.upgrade() {
+                            inner.complete(id, Err(Error::Cancelled));
+                            inner.send(Outgoing::Terminal);
+                        }
                     }
                 }
                 Event::Message(message) => {
@@ -967,22 +1044,16 @@ impl<P: Protocol> Reader<P> {
                     }
                     lease.complete();
                 }
-                Event::Release { id, count } => {
-                    if let Some(inner) = self.inner.upgrade() {
-                        inner.session.release(id, count);
-                    }
-                }
+                Event::Release { id, count } => self.shared.session.release(id, count),
                 Event::Credit { id, count } => {
                     // Applied here rather than routed through the writer:
-                    // the pool is shared state on `Inner`, and the refund
+                    // the pool is shared state on `Shared`, and the refund
                     // needs nothing the writer owns. It is keyed by id and
                     // lands whether or not the send still exists, since a
                     // trailer's last credits routinely arrive after it has
                     // finished and left the scheduler, and dropping those
                     // would shrink the pool on every transfer.
-                    if let Some(inner) = self.inner.upgrade() {
-                        inner.trailer_session.refund(id, count as usize);
-                    }
+                    self.shared.trailer_session.refund(id, count as usize);
                 }
             }
         }
@@ -1010,6 +1081,53 @@ mod tests {
         type Response = u8;
     }
 
+    fn header(kind: Kind, flags: Flags, id: u64) -> FragmentHeader {
+        FragmentHeader {
+            flags,
+            kind,
+            id,
+            payload_len: 0,
+        }
+    }
+
+    /// The gate in front of the reassembler: a client answers calls it made
+    /// and nothing else.
+    #[test]
+    fn header_gate_refuses_requests_and_responses_to_calls_never_made() {
+        let active = Mutex::new(HashSet::from([7u64]));
+        let check = |header| Reader::<Test>::check_header(&active, &header);
+
+        assert!(matches!(
+            check(header(Kind::Request, Flags::FIRST | Flags::LAST, 7)),
+            Err(Error::Protocol(_)),
+        ));
+        assert!(matches!(
+            check(header(Kind::Response, Flags::FIRST, 9)),
+            Err(Error::Protocol(_)),
+        ));
+        assert!(check(header(Kind::Response, Flags::FIRST, 7)).is_ok());
+        // A continuation names a message this end already accepted, so the
+        // reassembler owns rejecting an id it has no entry for.
+        assert!(check(header(Kind::Response, Flags::LAST, 9)).is_ok());
+        // Trailer credit and opaque releases outlive the call they name, so
+        // control frames are not gated on it.
+        assert!(check(header(Kind::Credit, Flags::FIRST | Flags::LAST, 9)).is_ok());
+    }
+
+    fn test_shared(outgoing: &mpsc::UnboundedSender<Outgoing<u8>>) -> Arc<Shared> {
+        Arc::new(Shared {
+            session: Session::new(Box::new(outgoing.downgrade())),
+            trailer_session: Arc::new(SessionWindow::new(Limits::default().trailer_session_window)),
+            active_calls: Default::default(),
+            trailer_sink: Arc::new(outgoing.downgrade()),
+            #[cfg(windows)]
+            handle_escrow: Mutex::new(HashMap::new()),
+            #[cfg(target_os = "macos")]
+            fd_escrow: Mutex::new(Default::default()),
+            limits: Limits::default(),
+        })
+    }
+
     fn pending_call() -> (Call<Test>, mpsc::UnboundedReceiver<Outgoing<u8>>) {
         let (outgoing, outgoing_rx) = mpsc::unbounded_channel();
         let inner = Arc::new(Inner {
@@ -1017,13 +1135,7 @@ mod tests {
             pending: Mutex::new(HashMap::new()),
             next_id: Mutex::new(1),
             tasks: Mutex::new(None),
-            #[cfg(windows)]
-            handle_escrow: Mutex::new(HashMap::new()),
-            #[cfg(target_os = "macos")]
-            fd_escrow: Mutex::new(Default::default()),
-            session: Session::new(Box::new(outgoing.downgrade())),
-            trailer_session: Arc::new(SessionWindow::new(Limits::default().trailer_session_window)),
-            limits: Limits::default(),
+            shared: test_shared(&outgoing),
             #[cfg(windows)]
             _peer_process: None,
         });
@@ -1073,23 +1185,19 @@ mod tests {
     #[tokio::test]
     async fn complete_err_clears_handle_escrow() {
         let (outgoing, _outgoing_rx) = mpsc::unbounded_channel();
+        let shared = test_shared(&outgoing);
         let inner = Arc::new(Inner {
             outgoing: Mutex::new(Some(outgoing.clone())),
             pending: Mutex::new(HashMap::new()),
             next_id: Mutex::new(1),
             tasks: Mutex::new(None),
-            handle_escrow: Mutex::new(HashMap::new()),
-            #[cfg(target_os = "macos")]
-            fd_escrow: Mutex::new(Default::default()),
-            session: Session::new(Box::new(outgoing.downgrade())),
-            trailer_session: Arc::new(SessionWindow::new(Limits::default().trailer_session_window)),
-            limits: Limits::default(),
-            #[cfg(windows)]
+            shared: shared.clone(),
             _peer_process: None,
         });
         let (tx, _rx) = oneshot::channel();
         inner.pending.lock().unwrap().insert(0, tx);
-        inner.handle_escrow.lock().unwrap().insert(0, Vec::new());
+        shared.handle_escrow.lock().unwrap().insert(0, Vec::new());
+        shared.handle_escrow.lock().unwrap().insert(1, Vec::new());
 
         let (dummy_write, _unused) = tokio::io::duplex(64);
         let (sender, _unused) = transport::generic_duplex(dummy_write);
@@ -1098,12 +1206,19 @@ mod tests {
             transport: transport::AnySender::Generic(sender),
             outgoing: outgoing_rx,
             inner: Arc::downgrade(&inner),
-            limits: Limits::default(),
+            shared: shared.clone(),
+            scheduler: Scheduler::new(&Limits::default()),
+            waiting: VecDeque::new(),
         };
 
         writer.complete_err(0, Error::Cancelled);
+        assert!(!shared.handle_escrow.lock().unwrap().contains_key(&0));
 
-        assert!(inner.handle_escrow.lock().unwrap().is_empty());
+        // The escrow outlives the handle side, so it is still cleaned up
+        // once nothing is left to deliver the error to.
+        drop(inner);
+        writer.complete_err(1, Error::Cancelled);
+        assert!(shared.handle_escrow.lock().unwrap().is_empty());
     }
 }
 
