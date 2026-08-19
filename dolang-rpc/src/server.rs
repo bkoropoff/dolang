@@ -9,12 +9,13 @@ use std::{
 use futures::{
     StreamExt,
     future::{AbortHandle, Abortable},
+    stream::FuturesUnordered,
 };
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     Error, Limits, Protocol,
-    fragment::{self, Kind},
+    fragment::{self, Event, Kind, Message},
     serde::{decode_payload, encode_payload},
     session::{self, Cite, Gift, InvalidOpaque, OpaqueGuard, OpaqueResource, Session},
     trailer::{RecvShared, SendShared, SessionWindow, TrailerRecv, TrailerSend},
@@ -69,13 +70,16 @@ pub use crate::unbound::UnboundServer as Unbound;
 pub struct Server<P: Protocol> {
     sender: transport::AnySender,
     receiver: transport::AnyReceiver,
-    outgoing: mpsc::UnboundedSender<Message<P::Response>>,
-    outgoing_rx: mpsc::UnboundedReceiver<Message<P::Response>>,
+    outgoing: mpsc::UnboundedSender<Outgoing<P::Response>>,
+    outgoing_rx: mpsc::UnboundedReceiver<Outgoing<P::Response>>,
+    /// The other end of `Inner::shutdown`, held until `serve` hands it to
+    /// the receive driver.
+    shutdown_rx: oneshot::Receiver<()>,
     shared: Arc<Shared>,
     marker: PhantomData<fn() -> P>,
 }
 
-enum Message<R> {
+enum Outgoing<R> {
     Response {
         id: u64,
         value: R,
@@ -118,20 +122,20 @@ enum Message<R> {
 /// Emits `Release` frames for opaques whose last local handle dropped. The
 /// strong senders stay exactly what they were: `serve`'s own sender and each
 /// live `CallContext`.
-impl<R: Send + 'static> session::ReleaseSink for mpsc::WeakUnboundedSender<Message<R>> {
+impl<R: Send + 'static> session::ReleaseSink for mpsc::WeakUnboundedSender<Outgoing<R>> {
     fn release(&self, id: u64, count: u32) {
         // Called from `Drop`, so a departed channel is not an error: the
         // writer is already gone and the peer's table dies with the session.
         if let Some(outgoing) = self.upgrade() {
-            let _ = outgoing.send(Message::Release { id, count });
+            let _ = outgoing.send(Outgoing::Release { id, count });
         }
     }
 }
 
-impl<R: Send + 'static> crate::trailer::TrailerSink for mpsc::WeakUnboundedSender<Message<R>> {
+impl<R: Send + 'static> crate::trailer::TrailerSink for mpsc::WeakUnboundedSender<Outgoing<R>> {
     fn credit(&self, id: u64, count: u32) {
         if let Some(outgoing) = self.upgrade() {
-            let _ = outgoing.send(Message::Credit { id, count });
+            let _ = outgoing.send(Outgoing::Credit { id, count });
         }
     }
 
@@ -139,12 +143,12 @@ impl<R: Send + 'static> crate::trailer::TrailerSink for mpsc::WeakUnboundedSende
         // Reached from `TrailerRecv::drop`, so a departed channel just means
         // the connection is already gone and the peer has nothing to stop.
         if let Some(outgoing) = self.upgrade() {
-            let _ = outgoing.send(Message::DiscardTrailer { id });
+            let _ = outgoing.send(Outgoing::DiscardTrailer { id });
         }
     }
 }
 
-/// State the reader loop, the writer task, and every live handler share.
+/// State both connection drivers and every live handler share.
 ///
 /// One `Arc` rather than a bundle of them, and held strongly by all three:
 /// nothing in here can keep the session alive on its own, because the ability
@@ -268,6 +272,8 @@ impl Shared {
 
 struct Inner {
     outstanding: HashMap<u64, Cancellation>,
+    /// Signals the receive driver to stop accepting new work. Taken by the
+    /// first handler to ask for shutdown, so later ones are no-ops.
     shutdown: Option<oneshot::Sender<()>>,
     #[cfg(target_os = "macos")]
     fd_escrow: crate::escrow::FdEscrow,
@@ -292,35 +298,6 @@ fn check_header(header: &fragment::FragmentHeader) -> Result<(), Error> {
     Ok(())
 }
 
-/// Applies `max_concurrent_calls` to a call that is arriving or starting to
-/// arrive.
-///
-/// A concurrent call is one this end has begun receiving and has not yet
-/// answered, and it passes through two custodians on the way: the reassembler
-/// holds it while its payload is still fragmented, and `outstanding` holds it
-/// from dispatch until the response head. The limit is on the *sum* — the two
-/// counts are disjoint, since a message leaves payload phase in the same
-/// `accept` call that dispatches it — so neither custodian can enforce it
-/// alone, and checking them separately would admit twice the limit.
-///
-/// `incomplete` is the reassembler's count *including* the call being
-/// admitted, so callers add one for a call that has already left payload
-/// phase.
-fn check_call_admission(
-    outstanding: &HashMap<u64, Cancellation>,
-    incomplete: usize,
-    max_concurrent_calls: usize,
-    id: u64,
-) -> Result<(), Error> {
-    if outstanding.contains_key(&id) {
-        return Err(Error::Protocol(format!("duplicate active request id {id}")));
-    }
-    if outstanding.len() + incomplete > max_concurrent_calls {
-        return Err(Error::Protocol("too many concurrent calls".into()));
-    }
-    Ok(())
-}
-
 impl<P: Protocol> Server<P> {
     /// Builds a `Server` from an already-negotiated transport. Only reachable
     /// via [`Unbound::bind`] — `Server` has
@@ -333,13 +310,14 @@ impl<P: Protocol> Server<P> {
         limits: Limits,
     ) -> Self {
         let (outgoing, outgoing_rx) = mpsc::unbounded_channel();
+        let (shutdown, shutdown_rx) = oneshot::channel();
         Self {
             sender,
             receiver,
             shared: Arc::new(Shared {
                 inner: Mutex::new(Inner {
                     outstanding: HashMap::new(),
-                    shutdown: None,
+                    shutdown: Some(shutdown),
                     #[cfg(target_os = "macos")]
                     fd_escrow: Default::default(),
                 }),
@@ -349,6 +327,7 @@ impl<P: Protocol> Server<P> {
             }),
             outgoing,
             outgoing_rx,
+            shutdown_rx,
             marker: PhantomData,
         }
     }
@@ -364,23 +343,111 @@ impl<P: Protocol> Server<P> {
     where
         H: AsyncFn(CallContext<P>, P::Request) + Send + Sync + 'static,
     {
-        let Server {
-            sender,
-            mut receiver,
-            outgoing,
-            outgoing_rx,
+        let send = SendDriver::<P>::new(self.sender, self.outgoing_rx, self.shared.clone()).run();
+        tokio::pin!(send);
+        let recv = RecvDriver::new(
+            self.receiver,
+            self.outgoing,
+            self.shutdown_rx,
+            self.shared,
+            handler,
+        )
+        .run();
+        let result = tokio::select! {
+            result = recv => result,
+            // The send driver cannot finish on its own while the receive
+            // driver holds a sender into it, so reaching here means it
+            // failed — which ends the session, and nothing else would
+            // notice. Dropping the receive future is what stops it; it is
+            // never resumed, so a half-read fragment costs nothing.
+            result = &mut send => return result,
+        };
+        // The receive half has dropped its sender, so the send driver stops
+        // once it has flushed whatever is still queued. Only then is the
+        // session over — but a receive-side failure is what ended it, so
+        // that is the error worth reporting.
+        result.and(send.await)
+    }
+}
+
+/// Drives the receive half of the connection: reassembles inbound fragments,
+/// dispatches requests to the handler, and owns the tear-down that follows
+/// whatever ends the session.
+///
+/// This is the half that runs on the caller's own future rather than a task
+/// of its own, because it is what [`Server::serve`] returns the result of.
+struct RecvDriver<P: Protocol, H> {
+    transport: transport::AnyReceiver,
+    reassembler: fragment::Reassembler,
+    shared: Arc<Shared>,
+    /// Kept alive for the whole run: dropping this and every handler task's
+    /// clone is what closes the send driver's channel and shuts it down.
+    outgoing: mpsc::UnboundedSender<Outgoing<P::Response>>,
+    handler: Arc<H>,
+    /// Fires when a handler has asked to shut down gracefully.
+    shutdown: oneshot::Receiver<()>,
+}
+
+impl<P: Protocol, H> RecvDriver<P, H>
+where
+    H: AsyncFn(CallContext<P>, P::Request) + Send + Sync + 'static,
+{
+    fn new(
+        transport: transport::AnyReceiver,
+        outgoing: mpsc::UnboundedSender<Outgoing<P::Response>>,
+        shutdown: oneshot::Receiver<()>,
+        shared: Arc<Shared>,
+        handler: H,
+    ) -> Self {
+        let reassembler = fragment::Reassembler::new(shared.limits, Arc::new(outgoing.downgrade()));
+        Self {
+            transport,
+            reassembler,
             shared,
-            marker: _,
-        } = self;
-        let limits = shared.limits;
-        let mut writer = tokio::spawn(writer::<P>(sender, outgoing_rx, shared.clone()));
-        let (shutdown, mut shutdown_requested) = oneshot::channel();
-        shared.inner.lock().unwrap().shutdown = Some(shutdown);
-        let handler = Arc::new(handler);
-        let mut reassembler = fragment::Reassembler::new(limits, Arc::new(outgoing.downgrade()));
-        let mut tasks = futures::stream::FuturesUnordered::new();
-        let (mut result, mut writer_finished, mut graceful) = 'main: loop {
-            let mut frame = receiver.recv();
+            outgoing,
+            handler: Arc::new(handler),
+            shutdown,
+        }
+    }
+
+    /// Applies `max_concurrent_calls` to a call that is arriving or starting
+    /// to arrive.
+    ///
+    /// A concurrent call is one this end has begun receiving and has not yet
+    /// answered, and it passes through two custodians on the way: the
+    /// reassembler holds it while its payload is still fragmented, and
+    /// `outstanding` holds it from dispatch until the response head. The
+    /// limit is on the *sum* — the two counts are disjoint, since a message
+    /// leaves payload phase in the same `accept` call that dispatches it — so
+    /// neither custodian can enforce it alone, and checking them separately
+    /// would admit twice the limit.
+    ///
+    /// `incomplete` is the reassembler's count *including* the call being
+    /// admitted, so callers add one for a call that has already left payload
+    /// phase.
+    fn check_call_admission(&self, id: u64, incomplete: usize) -> Result<(), Error> {
+        let inner = self.shared.inner.lock().unwrap();
+        let duplicate = inner.outstanding.contains_key(&id);
+        let outstanding = inner.outstanding.len();
+        if duplicate {
+            return Err(Error::Protocol(format!("duplicate active request id {id}")));
+        }
+        if outstanding + incomplete > self.shared.limits.max_concurrent_calls {
+            return Err(Error::Protocol("too many concurrent calls".into()));
+        }
+        Ok(())
+    }
+
+    /// Runs until the peer disconnects, the session fails, or a handler
+    /// requests shutdown.
+    ///
+    /// Knows nothing of the send driver beyond holding a sender into it:
+    /// whether that half is still alive is [`Server::serve`]'s concern, and
+    /// it ends this one by dropping the future.
+    async fn run(mut self) -> Result<(), Error> {
+        let mut tasks = FuturesUnordered::new();
+        let (result, graceful) = 'main: loop {
+            let mut frame = self.transport.recv();
             // The header/payload reads must not be dropped and restarted
             // once they've begun: any bytes already consumed from the
             // transport into their local buffers would otherwise be lost,
@@ -391,79 +458,68 @@ impl<P: Protocol> Server<P> {
                 let step = async {
                     let header = fragment::read_fragment_header(&mut frame).await?;
                     check_header(&header)?;
-                    reassembler.accept(header, &mut frame).await
+                    self.reassembler.accept(header, &mut frame).await
                 };
                 tokio::pin!(step);
                 loop {
                     tokio::select! {
                         result = &mut step => break result,
                         Some(_) = tasks.next(), if !tasks.is_empty() => continue,
-                        _ = &mut shutdown_requested => break 'main (Ok(()), false, true),
-                        result = &mut writer => {
-                            let result = match result {
-                                Ok(result) => result,
-                                Err(error) => Err(Error::Protocol(format!("server writer task failed: {error}"))),
-                            };
-                            break 'main (result, true, false);
-                        }
+                        _ = &mut self.shutdown => break 'main (Ok(()), true),
                     }
                 }
             };
             let complete = match complete {
                 Ok(complete) => complete,
-                Err(error) => break 'main (Err(error), false, false),
+                Err(error) => break 'main (Err(error), false),
             };
             let (message, live_trailer) = match complete {
-                fragment::Event::None => (None, None),
+                Event::None => (None, None),
                 // A request has started arriving. It occupies the same
                 // budget as one already dispatched, so it is admitted on the
                 // same rule, at the earliest point this end knows about it.
-                fragment::Event::PayloadIncomplete { id } => {
-                    if let Err(error) = check_call_admission(
-                        &shared.inner.lock().unwrap().outstanding,
-                        reassembler.payload_incomplete(),
-                        limits.max_concurrent_calls,
-                        id,
-                    ) {
-                        break 'main (Err(error), false, false);
+                Event::PayloadIncomplete { id } => {
+                    if let Err(error) =
+                        self.check_call_admission(id, self.reassembler.payload_incomplete())
+                    {
+                        break 'main (Err(error), false);
                     }
                     (None, None)
                 }
-                fragment::Event::Aborted {
+                Event::Aborted {
                     kind: Kind::Request,
                     ..
                 } => (None, None),
-                fragment::Event::Aborted { kind, .. } => {
+                Event::Aborted { kind, .. } => {
                     break 'main (
                         Err(Error::Protocol(format!(
                             "unexpected aborted {kind:?} message"
                         ))),
                         false,
-                        false,
                     );
                 }
-                fragment::Event::Message(message) => (Some(message), None),
-                fragment::Event::Ack { id, message } => {
-                    let _ = outgoing.send(Message::Ack { id });
+                Event::Message(message) => (Some(message), None),
+                Event::Ack { id, message } => {
+                    let _ = self.outgoing.send(Outgoing::Ack { id });
                     (message, None)
                 }
-                fragment::Event::Trailer {
+                Event::Trailer {
                     shared: trailer,
                     len,
                     ..
                 } => (None, Some((trailer, len))),
-                fragment::Event::Release { id, count } => {
-                    shared.session.release(id, count);
+                Event::Release { id, count } => {
+                    self.shared.session.release(id, count);
                     (None, None)
                 }
-                fragment::Event::Credit { id, count } => {
+                Event::Credit { id, count } => {
                     // Applied here rather than routed through the writer;
                     // see the client's matching arm.
-                    shared.trailer_session.refund(id, count as usize);
+                    self.shared.trailer_session.refund(id, count as usize);
                     (None, None)
                 }
             };
-            if let Some(fragment::Message {
+            if let Some(Message {
                 kind,
                 id,
                 payload,
@@ -473,25 +529,22 @@ impl<P: Protocol> Server<P> {
             {
                 match kind {
                     Kind::Request => {
-                        if let Err(error) = check_call_admission(
-                            &shared.inner.lock().unwrap().outstanding,
-                            // This message has already left payload phase, so
-                            // it is no longer in the reassembler's count and
-                            // has to be added back.
-                            reassembler.payload_incomplete() + 1,
-                            limits.max_concurrent_calls,
-                            id,
-                        ) {
-                            break (Err(error), false, false);
+                        // This message has already left payload phase, so it
+                        // is no longer in the reassembler's count and has to
+                        // be added back.
+                        if let Err(error) =
+                            self.check_call_admission(id, self.reassembler.payload_incomplete() + 1)
+                        {
+                            break (Err(error), false);
                         }
-                        let request = match shared.decode(&payload, handles, &receiver) {
+                        let request = match self.shared.decode(&payload, handles, &self.transport) {
                             Ok(request) => request,
-                            Err(error) => break (Err(error), false, false),
+                            Err(error) => break (Err(error), false),
                         };
                         let trailer = trailer.map(TrailerRecv::new);
-                        let handler = handler.clone();
-                        let task_shared = shared.clone();
-                        let task_outgoing = outgoing.clone();
+                        let handler = self.handler.clone();
+                        let task_shared = self.shared.clone();
+                        let task_outgoing = self.outgoing.clone();
                         let (abort, registration) = AbortHandle::new_pair();
                         tasks.push(Abortable::new(
                             async move {
@@ -508,7 +561,7 @@ impl<P: Protocol> Server<P> {
                             },
                             registration,
                         ));
-                        shared.inner.lock().unwrap().outstanding.insert(
+                        self.shared.inner.lock().unwrap().outstanding.insert(
                             id,
                             Cancellation {
                                 signal: None,
@@ -517,7 +570,7 @@ impl<P: Protocol> Server<P> {
                         );
                     }
                     Kind::Cancel => {
-                        let mut state = shared.inner.lock().unwrap();
+                        let mut state = self.shared.inner.lock().unwrap();
                         if let Some(signal) = state
                             .outstanding
                             .get_mut(&id)
@@ -527,19 +580,18 @@ impl<P: Protocol> Server<P> {
                         } else if let Some(cancel) = state.outstanding.get(&id) {
                             cancel.abort.abort();
                         } else {
-                            let _ = outgoing.send(Message::Cancel { id });
+                            let _ = self.outgoing.send(Outgoing::Cancel { id });
                         }
                     }
                     Kind::Discard => {
-                        let _ = outgoing.send(Message::PeerDiscarded { id });
+                        let _ = self.outgoing.send(Outgoing::PeerDiscarded { id });
                     }
                     Kind::Ack => {
-                        if !shared.release_escrow(id) {
+                        if !self.shared.release_escrow(id) {
                             break (
                                 Err(Error::Protocol(format!(
                                     "Ack for response {id} with no active escrow"
                                 ))),
-                                false,
                                 false,
                             );
                         }
@@ -548,13 +600,12 @@ impl<P: Protocol> Server<P> {
                         break (
                             Err(Error::Protocol(format!("unexpected {kind:?} frame"))),
                             false,
-                            false,
                         );
                     }
                 }
             }
             if let Some((trailer, len)) = live_trailer {
-                let frame = receiver.recv();
+                let frame = self.transport.recv();
                 // SAFETY: the lease retains the receiver borrow and clears
                 // the erased token before it ends.
                 let lease = unsafe { RecvShared::grant(&trailer, frame, len) };
@@ -562,160 +613,144 @@ impl<P: Protocol> Server<P> {
                     tokio::select! {
                         result = RecvShared::wait_fragment(&trailer) => break result,
                         Some(_) = tasks.next(), if !tasks.is_empty() => continue,
-                        _ = &mut shutdown_requested => break 'main (Ok(()), false, true),
-                        result = &mut writer => {
-                            let result = match result {
-                                Ok(result) => result,
-                                Err(error) => Err(Error::Protocol(format!("server writer task failed: {error}"))),
-                            };
-                            break 'main (result, true, false);
-                        }
+                        _ = &mut self.shutdown => break 'main (Ok(()), true),
                     }
                 };
                 if let Err(error) = result {
-                    break 'main (Err(error.into()), false, false);
+                    break 'main (Err(error.into()), false);
                 }
                 lease.complete();
             }
         };
-        drop(receiver);
+        drop(self.transport);
         if graceful {
-            while !tasks.is_empty() {
-                tokio::select! {
-                    Some(_) = tasks.next() => {}
-                    writer_result = &mut writer => {
-                        result = match writer_result {
-                            Ok(result) => result,
-                            Err(error) => Err(Error::Protocol(format!("server writer task failed: {error}"))),
-                        };
-                        writer_finished = true;
-                        graceful = false;
-                    }
-                }
-                if !graceful {
-                    break;
-                }
-            }
-        }
-        // Dropping `outgoing` and every task's clone of it (via `tasks`)
-        // closes the writer's channel — see the comment on `writer` below —
-        // which is what tells it to stop and, once drained, exit.
-        drop(outgoing);
-        drop(tasks);
-        if !writer_finished {
-            if graceful {
-                result = match writer.await {
-                    Ok(writer_result) => writer_result,
-                    Err(error) => Err(Error::Protocol(format!(
-                        "server writer task failed: {error}"
-                    ))),
-                };
-            } else {
-                let _ = writer.await;
-            }
+            // A handler asked to shut down rather than the session breaking,
+            // so every call already dispatched still gets to answer. Their
+            // responses queue up behind the send driver's channel, which the
+            // caller drains after this returns.
+            while tasks.next().await.is_some() {}
         }
         result
     }
 }
 
-async fn writer<P: Protocol>(
-    mut sender: transport::AnySender,
-    mut outgoing: mpsc::UnboundedReceiver<Message<P::Response>>,
+/// Drives the send half of the connection: admits queued messages into the
+/// fragment scheduler and advances the scheduler onto the transport.
+///
+/// Runs on [`Server::serve`]'s own future, alongside the receive driver and
+/// the handlers — a response is queued rather than written by the handler
+/// that produced it, so nothing here blocks on anything there.
+struct SendDriver<P: Protocol> {
+    transport: transport::AnySender,
+    outgoing: mpsc::UnboundedReceiver<Outgoing<P::Response>>,
     shared: Arc<Shared>,
-) -> Result<(), Error> {
-    let limits = shared.limits;
-    let mut scheduler = fragment::Scheduler::new(&limits);
-    // Holding a clone of `outgoing`'s sender half (the local `outgoing` in
-    // `serve`, or a `CallContext`'s) is what represents the ability to
-    // still get a message in, so the channel closing — every clone gone —
-    // doubles as this task's shutdown signal: once `recv()` reports no more
-    // messages will ever arrive, admission of new work stops, and the loop
-    // keeps advancing the scheduler until it's fully drained before
-    // exiting, never abandoning a write already committed to it.
-    let mut closed = false;
-    while !closed || scheduler.has_work() {
-        tokio::select! {
-            message = outgoing.recv(), if !closed => {
-                let Some(message) = message else {
-                    closed = true;
-                    continue;
-                };
-                admit::<P>(&mut sender, &mut scheduler, &shared, message).await?;
-            }
-            // Not raced against anything — see the matching comment in
-            // client.rs's writer loop. A dropped send future could leave a
-            // committed partial fragment on the transport, or — on
-            // transports whose writes are dispatched to a detached
-            // background task — let an abandoned write complete arbitrarily
-            // later, after the peer has already torn down its end.
-            _ = scheduler.ready(), if scheduler.has_work() => {
-                match scheduler.advance(&mut sender).await? {
-                    fragment::AdvanceOutcome::None | fragment::AdvanceOutcome::Aborted(_) => {}
-                    #[cfg(target_os = "macos")]
-                    fragment::AdvanceOutcome::Escrow { id, fds, handles_done } => {
-                        shared.escrow_sent(id, fds, handles_done);
-                    }
-                }
-                // Flush anything sent by the scheduler
-                let _ = sender.flush().await;
-            }
-        }
-    }
-    Ok(())
+    scheduler: fragment::Scheduler,
 }
 
-/// Admits one outgoing item to the fragment scheduler.
-async fn admit<P: Protocol>(
-    sender: &mut transport::AnySender,
-    scheduler: &mut fragment::Scheduler,
-    shared: &Arc<Shared>,
-    message: Message<P::Response>,
-) -> Result<(), Error> {
-    match message {
-        Message::Response { id, value, trailer } => {
-            let mut ledger = session::Ledger::default();
-            let mut put_handles = session::SessionFrame {
-                inner: EncodeHandles::new(sender, shared.max_handles()),
-                session: &shared.session,
-                ledger: &mut ledger,
-            };
-            let payload = match encode_payload(&value, &mut put_handles) {
-                Ok(payload) => payload,
-                Err(error) => {
-                    drop(put_handles);
-                    // Nothing reached the wire, so undo the gift increments
-                    // rather than letting the ledger's drop commit them.
-                    ledger.rescind();
-                    return Err(error);
-                }
-            };
-            let handles = shared.finish_handles(id, put_handles.inner);
-            scheduler.admit_message(Kind::Response, id, payload, handles, trailer, ledger);
+impl<P: Protocol> SendDriver<P> {
+    fn new(
+        transport: transport::AnySender,
+        outgoing: mpsc::UnboundedReceiver<Outgoing<P::Response>>,
+        shared: Arc<Shared>,
+    ) -> Self {
+        let scheduler = fragment::Scheduler::new(&shared.limits);
+        Self {
+            transport,
+            outgoing,
+            shared,
+            scheduler,
         }
-        Message::Error { id } => scheduler.admit_empty(Kind::Error, id),
-        Message::Cancel { id } => match scheduler.try_cancel_active(id) {
-            fragment::AbortOutcome::NotActive => {}
-            fragment::AbortOutcome::Discarded { started, .. } => {
-                if started {
-                    scheduler.admit_abort(id);
+    }
+
+    async fn run(mut self) -> Result<(), Error> {
+        // Holding a clone of `outgoing`'s sender half (the local `outgoing` in
+        // `serve`, or a `CallContext`'s) is what represents the ability to
+        // still get a message in, so the channel closing — every clone gone —
+        // doubles as this task's shutdown signal: once `recv()` reports no more
+        // messages will ever arrive, admission of new work stops, and the loop
+        // keeps advancing the scheduler until it's fully drained before
+        // exiting, never abandoning a write already committed to it.
+        let mut closed = false;
+        while !closed || self.scheduler.has_work() {
+            tokio::select! {
+                message = self.outgoing.recv(), if !closed => {
+                    let Some(message) = message else {
+                        closed = true;
+                        continue;
+                    };
+                    self.admit(message).await?;
                 }
-                if !started {
-                    shared.discard_unsent_escrow(id);
+                // Not raced against anything — see the matching comment in
+                // client.rs's writer loop. A dropped send future could leave a
+                // committed partial fragment on the transport, or — on
+                // transports whose writes are dispatched to a detached
+                // background task — let an abandoned write complete arbitrarily
+                // later, after the peer has already torn down its end.
+                _ = self.scheduler.ready(), if self.scheduler.has_work() => {
+                    match self.scheduler.advance(&mut self.transport).await? {
+                        fragment::AdvanceOutcome::None | fragment::AdvanceOutcome::Aborted(_) => {}
+                        #[cfg(target_os = "macos")]
+                        fragment::AdvanceOutcome::Escrow { id, fds, handles_done } => {
+                            self.shared.escrow_sent(id, fds, handles_done);
+                        }
+                    }
+                    // Flush anything sent by the scheduler
+                    let _ = self.transport.flush().await;
                 }
             }
-        },
-        Message::DiscardTrailer { id } => scheduler.admit_empty(Kind::Discard, id),
-        Message::PeerDiscarded { id } => {
-            // The peer will never credit what it just threw away; see the
-            // client's matching arm.
-            shared.trailer_session.settle(id);
-            scheduler.discard_active_trailer(id);
         }
-        Message::Ack { id } => scheduler.admit_empty(Kind::Ack, id),
-        Message::Release { id, count } => scheduler.admit_release(id, count),
-        Message::Credit { id, count } => scheduler.admit_credit(id, count),
+        Ok(())
     }
-    Ok(())
+
+    /// Admits one outgoing item to the fragment scheduler.
+    async fn admit(&mut self, message: Outgoing<P::Response>) -> Result<(), Error> {
+        match message {
+            Outgoing::Response { id, value, trailer } => {
+                let mut ledger = session::Ledger::default();
+                let mut put_handles = session::SessionFrame {
+                    inner: EncodeHandles::new(&self.transport, self.shared.max_handles()),
+                    session: &self.shared.session,
+                    ledger: &mut ledger,
+                };
+                let payload = match encode_payload(&value, &mut put_handles) {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        drop(put_handles);
+                        // Nothing reached the wire, so undo the gift increments
+                        // rather than letting the ledger's drop commit them.
+                        ledger.rescind();
+                        return Err(error);
+                    }
+                };
+                let handles = self.shared.finish_handles(id, put_handles.inner);
+                self.scheduler
+                    .admit_message(Kind::Response, id, payload, handles, trailer, ledger);
+            }
+            Outgoing::Error { id } => self.scheduler.admit_empty(Kind::Error, id),
+            Outgoing::Cancel { id } => match self.scheduler.try_cancel_active(id) {
+                fragment::AbortOutcome::NotActive => {}
+                fragment::AbortOutcome::Discarded { started, .. } => {
+                    if started {
+                        self.scheduler.admit_abort(id);
+                    }
+                    if !started {
+                        self.shared.discard_unsent_escrow(id);
+                    }
+                }
+            },
+            Outgoing::DiscardTrailer { id } => self.scheduler.admit_empty(Kind::Discard, id),
+            Outgoing::PeerDiscarded { id } => {
+                // The peer will never credit what it just threw away; see the
+                // client's matching arm.
+                self.shared.trailer_session.settle(id);
+                self.scheduler.discard_active_trailer(id);
+            }
+            Outgoing::Ack { id } => self.scheduler.admit_empty(Kind::Ack, id),
+            Outgoing::Release { id, count } => self.scheduler.admit_release(id, count),
+            Outgoing::Credit { id, count } => self.scheduler.admit_credit(id, count),
+        }
+        Ok(())
+    }
 }
 
 /// Request-scoped services supplied to a server handler.
@@ -727,7 +762,7 @@ pub struct CallContext<P: Protocol> {
     request_trailer: Option<TrailerRecv>,
     /// A strong sender, so a live handler keeps the writer's channel — and
     /// with it the connection — open until it has answered.
-    outgoing: mpsc::UnboundedSender<Message<P::Response>>,
+    outgoing: mpsc::UnboundedSender<Outgoing<P::Response>>,
     responded: bool,
     shutdown_on_respond: bool,
     marker: PhantomData<fn() -> P>,
@@ -788,7 +823,7 @@ impl<P: Protocol> CallContext<P> {
             .unwrap()
             .outstanding
             .remove(&self.id);
-        let _ = self.outgoing.send(Message::Response {
+        let _ = self.outgoing.send(Outgoing::Response {
             id: self.id,
             value: response,
             trailer: fragment::Trailer::None,
@@ -819,7 +854,7 @@ impl<P: Protocol> CallContext<P> {
             .unwrap()
             .outstanding
             .remove(&self.id);
-        let _ = self.outgoing.send(Message::Response {
+        let _ = self.outgoing.send(Outgoing::Response {
             id: self.id,
             value: response,
             trailer: fragment::Trailer::Stream(shared.clone()),
@@ -975,7 +1010,7 @@ impl<P: Protocol> Drop for CallContext<P> {
                 .unwrap()
                 .outstanding
                 .remove(&self.id);
-            let _ = self.outgoing.send(Message::Error { id: self.id });
+            let _ = self.outgoing.send(Outgoing::Error { id: self.id });
         }
     }
 }
@@ -987,70 +1022,262 @@ pub struct RequestCancelled;
 
 #[cfg(test)]
 mod tests {
+    use std::{future, time::Duration};
+
+    use bytes::Bytes;
+    use tokio::task::JoinHandle;
+
     use super::*;
 
-    fn cancellation() -> Cancellation {
-        let (abort, _registration) = AbortHandle::new_pair();
-        Cancellation {
-            signal: None,
-            abort,
+    const APP_PROTOCOL: (&str, &[u16]) = ("test", &[1]);
+    const FRAGMENT_SIZE: usize = 512;
+
+    struct Test;
+
+    impl Protocol for Test {
+        type Request = u32;
+        type Response = u32;
+    }
+
+    /// A peer that speaks the wire format directly, so a test can send what
+    /// a real client's own accounting would never let it send.
+    struct Peer {
+        transport: transport::AnySender,
+        scheduler: fragment::Scheduler,
+        /// Unread: nothing these tests do makes the server say anything back.
+        _receiver: transport::AnyReceiver,
+    }
+
+    impl Peer {
+        /// Queues a whole request, small enough to arrive in one fragment
+        /// and be dispatched the moment it lands.
+        fn request(&mut self, id: u64, value: u32) {
+            self.admit(Kind::Request, id, postcard::to_stdvec(&value).unwrap());
         }
+
+        /// Queues a request far too large for one fragment, so it stays in
+        /// the server's reassembler for as long as the test declines to send
+        /// the rest of it. Its bytes are never decoded, so they need not be
+        /// a valid request.
+        fn partial_request(&mut self, id: u64) {
+            self.admit(Kind::Request, id, vec![0; 64 * FRAGMENT_SIZE]);
+        }
+
+        /// Queues a fragment of a kind only a server may send.
+        fn response(&mut self, id: u64) {
+            self.admit(Kind::Response, id, postcard::to_stdvec(&0u32).unwrap());
+        }
+
+        fn admit(&mut self, kind: Kind, id: u64, payload: Vec<u8>) {
+            self.scheduler.admit_message(
+                kind,
+                id,
+                Bytes::from(payload),
+                Default::default(),
+                fragment::Trailer::None,
+                session::Ledger::default(),
+            );
+        }
+
+        /// Writes `count` fragments. The scheduler round-robins, so a count
+        /// equal to the number of queued messages puts one fragment of each
+        /// on the wire.
+        async fn send(&mut self, count: usize) {
+            for _ in 0..count {
+                self.scheduler.advance(&mut self.transport).await.unwrap();
+            }
+        }
+    }
+
+    fn endpoint_pair() -> (
+        (transport::AnySender, transport::AnyReceiver),
+        (transport::AnySender, transport::AnyReceiver),
+    ) {
+        let (a_write, a_read) = tokio::io::duplex(4096);
+        let (b_write, b_read) = tokio::io::duplex(4096);
+        let (a_sender, _unused) = transport::generic_duplex(a_write);
+        let (_unused, a_receiver) = transport::generic_duplex(b_read);
+        let (b_sender, _unused) = transport::generic_duplex(b_write);
+        let (_unused, b_receiver) = transport::generic_duplex(a_read);
+        (
+            (
+                transport::AnySender::Generic(a_sender),
+                transport::AnyReceiver::Generic(a_receiver),
+            ),
+            (
+                transport::AnySender::Generic(b_sender),
+                transport::AnyReceiver::Generic(b_receiver),
+            ),
+        )
+    }
+
+    /// Negotiates a real session, serves one end of it, and hands back the
+    /// wire-level peer on the other.
+    ///
+    /// The handler never responds, so every call it is given stays
+    /// outstanding until the session ends under it — which is what lets a
+    /// test hold calls in one custodian while it fills the other.
+    async fn hostile_session(
+        max_concurrent_calls: usize,
+    ) -> (
+        Peer,
+        JoinHandle<Result<(), Error>>,
+        mpsc::UnboundedReceiver<()>,
+    ) {
+        let ((mut peer_sender, mut peer_receiver), (mut server_sender, mut server_receiver)) =
+            endpoint_pair();
+        let limits = Limits {
+            max_concurrent_calls,
+            max_fragment_size: FRAGMENT_SIZE,
+            ..Limits::default()
+        };
+        let (peer, server) = tokio::join!(
+            fragment::negotiate(
+                &mut peer_sender,
+                &mut peer_receiver,
+                &limits,
+                APP_PROTOCOL,
+                None
+            ),
+            fragment::negotiate(
+                &mut server_sender,
+                &mut server_receiver,
+                &limits,
+                APP_PROTOCOL,
+                None
+            ),
+        );
+        let peer_limits = peer.unwrap().limits;
+        let server =
+            Server::<Test>::from_transport(server_sender, server_receiver, server.unwrap().limits);
+        let (dispatched_tx, dispatched) = mpsc::unbounded_channel();
+        let serve = tokio::spawn(server.serve(async move |_: CallContext<Test>, _: u32| {
+            let _ = dispatched_tx.send(());
+            future::pending::<()>().await
+        }));
+        (
+            Peer {
+                transport: peer_sender,
+                scheduler: fragment::Scheduler::new(&peer_limits),
+                _receiver: peer_receiver,
+            },
+            serve,
+            dispatched,
+        )
+    }
+
+    /// A server that fails to notice a violation wedges rather than fails,
+    /// and which await it wedges on depends on the violation, so the bound
+    /// goes around the whole test.
+    async fn bounded<F: Future>(test: F) -> F::Output {
+        tokio::time::timeout(Duration::from_secs(5), test)
+            .await
+            .expect("the server should have refused the peer by now")
+    }
+
+    /// A call that has only started arriving is charged to the same budget
+    /// as one already dispatched. The reassembler counting it separately
+    /// would let a peer hold twice the limit — and twice the reassembly
+    /// memory the limit exists to bound.
+    ///
+    /// Filling the budget exactly, and seeing the second call dispatched
+    /// anyway, is also what pins the comparison at `>` rather than `>=`.
+    #[tokio::test]
+    async fn a_call_still_arriving_counts_against_dispatched_ones() {
+        bounded(async {
+            let (mut peer, serve, mut dispatched) = hostile_session(2).await;
+            peer.request(1, 7);
+            peer.send(1).await;
+            dispatched.recv().await.unwrap();
+            peer.request(2, 8);
+            peer.send(1).await;
+            dispatched.recv().await.unwrap();
+
+            // Two of two are dispatched and unanswered, so a third is over
+            // the limit from its very first fragment.
+            peer.partial_request(3);
+            peer.send(1).await;
+
+            assert!(matches!(
+                serve.await.unwrap(),
+                Err(Error::Protocol(message)) if message == "too many concurrent calls"
+            ));
+        })
+        .await;
+    }
+
+    /// The mirror image: a dispatched call is charged to the same budget as
+    /// one still arriving, so the check at dispatch has to add the
+    /// reassembler's count to its own.
+    #[tokio::test]
+    async fn a_dispatched_call_counts_against_ones_still_arriving() {
+        bounded(async {
+            let (mut peer, serve, mut dispatched) = hostile_session(2).await;
+            peer.request(1, 7);
+            peer.send(1).await;
+            dispatched.recv().await.unwrap();
+
+            // Two of two: one dispatched and unanswered, one still arriving.
+            peer.partial_request(2);
+            peer.send(1).await;
+
+            peer.request(3, 9);
+            peer.send(2).await;
+
+            assert!(matches!(
+                serve.await.unwrap(),
+                Err(Error::Protocol(message)) if message == "too many concurrent calls"
+            ));
+        })
+        .await;
+    }
+
+    /// The arriving call is already in the count, so a limit of zero admits
+    /// nothing at all.
+    #[tokio::test]
+    async fn a_zero_call_limit_refuses_the_first_request() {
+        bounded(async {
+            let (mut peer, serve, _dispatched) = hostile_session(0).await;
+            peer.request(1, 7);
+            peer.send(1).await;
+            assert!(matches!(
+                serve.await.unwrap(),
+                Err(Error::Protocol(message)) if message == "too many concurrent calls"
+            ));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_request_reusing_a_live_call_id_is_refused() {
+        bounded(async {
+            let (mut peer, serve, mut dispatched) = hostile_session(4).await;
+            peer.request(1, 7);
+            peer.send(1).await;
+            dispatched.recv().await.unwrap();
+            peer.request(1, 8);
+            peer.send(1).await;
+            assert!(matches!(
+                serve.await.unwrap(),
+                Err(Error::Protocol(message)) if message == "duplicate active request id 1"
+            ));
+        })
+        .await;
     }
 
     /// The gate in front of the reassembler: nobody calls a client, so a
     /// response arriving here answers nothing.
-    #[test]
-    fn header_gate_refuses_responses() {
-        let header = |kind| fragment::FragmentHeader {
-            flags: fragment::Flags::FIRST | fragment::Flags::LAST,
-            kind,
-            id: 7,
-            payload_len: 0,
-        };
-        assert!(matches!(
-            check_header(&header(Kind::Response)),
-            Err(Error::Protocol(_))
-        ));
-        assert!(check_header(&header(Kind::Request)).is_ok());
-        assert!(check_header(&header(Kind::Cancel)).is_ok());
-    }
-
-    #[test]
-    fn call_admission_rejects_excess_and_duplicate_requests() {
-        let mut outstanding = HashMap::new();
-        assert!(check_call_admission(&outstanding, 1, 1, 7).is_ok());
-        outstanding.insert(7, cancellation());
-        assert!(matches!(
-            check_call_admission(&outstanding, 1, 1, 8),
-            Err(Error::Protocol(message)) if message == "too many concurrent calls"
-        ));
-        assert!(matches!(
-            check_call_admission(&outstanding, 1, 2, 7),
-            Err(Error::Protocol(message)) if message == "duplicate active request id 7"
-        ));
-    }
-
-    /// The two halves share one budget: a call still arriving counts against
-    /// the same limit as one already dispatched, so neither half may be
-    /// admitted on its own count.
-    #[test]
-    fn call_admission_counts_arriving_and_dispatched_calls_together() {
-        let mut outstanding = HashMap::new();
-        outstanding.insert(7, cancellation());
-        // One dispatched, one arriving, limit of two: exactly full, and the
-        // arriving one is what the count already includes.
-        assert!(check_call_admission(&outstanding, 1, 2, 8).is_ok());
-        assert!(matches!(
-            check_call_admission(&outstanding, 2, 2, 8),
-            Err(Error::Protocol(message)) if message == "too many concurrent calls"
-        ));
-    }
-
-    #[test]
-    fn zero_call_limit_rejects_the_first_request() {
-        assert!(matches!(
-            check_call_admission(&HashMap::new(), 1, 0, 0),
-            Err(Error::Protocol(message)) if message == "too many concurrent calls"
-        ));
+    #[tokio::test]
+    async fn a_response_from_the_peer_is_refused() {
+        bounded(async {
+            let (mut peer, serve, _dispatched) = hostile_session(4).await;
+            peer.response(1);
+            peer.send(1).await;
+            assert!(matches!(
+                serve.await.unwrap(),
+                Err(Error::Protocol(message)) if message == "server received a Response fragment"
+            ));
+        })
+        .await;
     }
 }
