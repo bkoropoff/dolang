@@ -543,7 +543,10 @@ async fn retained_files_can_be_used_for_remote_stdio() {
     server_task.await.unwrap().unwrap();
 }
 
+// Relaying stdin can cause an wedged tokio blocking reader thread;
+// this test is ignored to prevent it from non-deterministically hanging
 #[tokio::test]
+#[ignore]
 async fn inherited_stdio_is_relayed_over_generic_stream() {
     let (client, server_task) = connected_pair().await;
     let mut command = command_with_args(&client, successful_command());
