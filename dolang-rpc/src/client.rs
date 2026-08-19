@@ -59,7 +59,7 @@ struct Shared {
     ///
     /// Each task asks it a different question: the writer bounds admissions
     /// by its size, and the reader treats it as the set of ids the peer is
-    /// entitled to respond to. Membership starts in `Writer::admit_request`
+    /// entitled to respond to. Membership starts in `SendDriver::admit_request`
     /// and ends wherever the terminal message is observed, which for
     /// everything but a locally cancelled request is the reader.
     active_calls: Mutex<HashSet<u64>>,
@@ -328,7 +328,7 @@ impl<Q: Send + 'static> TrailerSink for mpsc::WeakUnboundedSender<Outgoing<Q>> {
 struct Inner<P: Protocol> {
     // Holding a clone of this sender represents the ability to still get a
     // message into the writer, so closing the channel — clearing this to
-    // `None` — is itself the writer's shutdown signal (see `Writer::run`):
+    // `None` — is itself the writer's shutdown signal (see `SendDriver::run`):
     // no separate oneshot needed. This is the only strong sender; the
     // session's release sink holds a weak one so that it cannot keep the
     // channel open past this point.
@@ -341,7 +341,9 @@ struct Inner<P: Protocol> {
     _peer_process: Option<OwnedHandle>,
 }
 
-struct Writer<P: Protocol> {
+/// Drives the send half of the connection: admits queued items into the
+/// fragment scheduler and advances the scheduler onto the transport.
+struct SendDriver<P: Protocol> {
     transport: transport::AnySender,
     outgoing: mpsc::UnboundedReceiver<Outgoing<P::Request>>,
     /// Weak: the API handles decide when the session ends, and a writer that
@@ -354,7 +356,9 @@ struct Writer<P: Protocol> {
     waiting: VecDeque<Outgoing<P::Request>>,
 }
 
-struct Reader<P: Protocol> {
+/// Drives the receive half of the connection: reassembles inbound fragments
+/// and settles the calls they answer.
+struct RecvDriver<P: Protocol> {
     transport: transport::AnyReceiver,
     /// Weak, as on the writer.
     inner: Weak<Inner<P>>,
@@ -469,7 +473,7 @@ impl<P: Protocol> Client<P> {
         });
         let (reader_shutdown, reader_stop) = oneshot::channel();
         let writer = tokio::spawn(
-            Writer {
+            SendDriver {
                 transport: sender,
                 outgoing: outgoing_rx,
                 inner: Arc::downgrade(&inner),
@@ -480,7 +484,7 @@ impl<P: Protocol> Client<P> {
             .run(),
         );
         let reader = tokio::spawn(
-            Reader {
+            RecvDriver {
                 transport: receiver,
                 inner: Arc::downgrade(&inner),
                 shared,
@@ -715,7 +719,7 @@ impl<P: Protocol> Drop for Call<P> {
     }
 }
 
-impl<P: Protocol> Writer<P> {
+impl<P: Protocol> SendDriver<P> {
     /// Best-effort completion of a pending call with an error; a no-op if
     /// the session is already gone. Also drops any handles escrowed until
     /// the peer has had an opportunity to duplicate them.
@@ -950,7 +954,7 @@ impl<P: Protocol> Writer<P> {
     }
 }
 
-impl<P: Protocol> Reader<P> {
+impl<P: Protocol> RecvDriver<P> {
     /// Applies a reassembled message.
     ///
     /// Everything that belongs to `Shared` — the call slot, the handle
@@ -1138,7 +1142,7 @@ impl<P: Protocol> Reader<P> {
 }
 
 /// Fails every pending call. Takes `inner` by reference (rather than a
-/// `Reader` method borrowing `&self`) so it can be called while another
+/// `RecvDriver` method borrowing `&self`) so it can be called while another
 /// field (e.g. a `RecvFrame` token borrowing `self.transport`) is still
 /// mutably borrowed.
 fn fail<P: Protocol>(inner: &Weak<Inner<P>>, error: Error) {
@@ -1172,7 +1176,7 @@ mod tests {
     #[test]
     fn header_gate_refuses_requests_and_responses_to_calls_never_made() {
         let active = Mutex::new(HashSet::from([7u64]));
-        let check = |header| Reader::<Test>::check_header(&active, &header);
+        let check = |header| RecvDriver::<Test>::check_header(&active, &header);
 
         assert!(matches!(
             check(header(Kind::Request, Flags::FIRST | Flags::LAST, 7)),
@@ -1279,7 +1283,7 @@ mod tests {
         let (dummy_write, _unused) = tokio::io::duplex(64);
         let (sender, _unused) = transport::generic_duplex(dummy_write);
         let (_unused_tx, outgoing_rx) = mpsc::unbounded_channel();
-        let writer = Writer::<Test> {
+        let writer = SendDriver::<Test> {
             transport: transport::AnySender::Generic(sender),
             outgoing: outgoing_rx,
             inner: Arc::downgrade(&inner),
