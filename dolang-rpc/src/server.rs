@@ -15,6 +15,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     Error, Limits, Protocol,
+    driver::{Drain, DrainSignal, DrainWatch, drain_signal},
     fragment::{self, Event, Kind, Message},
     serde::{decode_payload, encode_payload},
     session::{self, Cite, Gift, InvalidOpaque, OpaqueGuard, OpaqueResource, Session},
@@ -76,6 +77,8 @@ pub struct Server<P: Protocol> {
     /// The other end of `Inner::shutdown`, held until `serve` hands it to
     /// the receive driver.
     shutdown_rx: oneshot::Receiver<()>,
+    /// Held until `serve` hands the two ends to the two drivers.
+    drain: (DrainSignal, DrainWatch),
     shared: Arc<Shared>,
     marker: PhantomData<fn() -> P>,
 }
@@ -351,6 +354,7 @@ impl<P: Protocol> Server<P> {
             outgoing,
             outgoing_rx,
             shutdown_rx,
+            drain: drain_signal(),
             marker: PhantomData,
         }
     }
@@ -366,7 +370,14 @@ impl<P: Protocol> Server<P> {
     where
         H: AsyncFn(CallContext<P>, P::Request) + Send + Sync + 'static,
     {
-        let send = SendDriver::<P>::new(self.sender, self.outgoing_rx, self.shared.clone()).run();
+        let (drain_signal, drain_watch) = self.drain;
+        let send = SendDriver::<P>::new(
+            self.sender,
+            self.outgoing_rx,
+            self.shared.clone(),
+            drain_watch,
+        )
+        .run();
         tokio::pin!(send);
         let recv = RecvDriver::new(
             self.receiver,
@@ -374,21 +385,30 @@ impl<P: Protocol> Server<P> {
             self.shutdown_rx,
             self.shared,
             handler,
+            drain_signal,
         )
         .run();
         let result = tokio::select! {
             result = recv => result,
-            // The send driver cannot finish on its own while the receive
-            // driver holds a sender into it, so reaching here means it
-            // failed — which ends the session, and nothing else would
-            // notice. Dropping the receive future is what stops it; it is
-            // never resumed, so a half-read fragment costs nothing.
+            // Two ways to arrive here. A graceful drain completed: the
+            // receive driver published `Drain::Graceful` once its last
+            // handler answered, and the send driver has since emptied its
+            // scheduler — quota-blocked sends included, which is the whole
+            // reason the receive half was kept alive to reach this point.
+            // Or the send driver failed, which ends the session and which
+            // nothing else would notice.
+            //
+            // Either way the receive future is dropped rather than resumed.
+            // A half-read fragment costs nothing now: no further inbound
+            // work can matter once the send half is done.
             result = &mut send => return result,
         };
-        // The receive half has dropped its sender, so the send driver stops
-        // once it has flushed whatever is still queued. Only then is the
-        // session over — but a receive-side failure is what ended it, so
-        // that is the error worth reporting.
+        // The receive half ended first, so the session is failing or the peer
+        // is gone. It published `Drain::Abrupt` on the way out; the send
+        // driver flushes what it had already committed to the wire and
+        // abandons anything still waiting on credit that can no longer
+        // arrive. Dropping `recv` above also dropped its sender, so nothing
+        // new can be queued behind it either.
         result.and(send.await)
     }
 }
@@ -409,6 +429,8 @@ struct RecvDriver<P: Protocol, H> {
     handler: Arc<H>,
     /// Fires when a handler has asked to shut down gracefully.
     shutdown: oneshot::Receiver<()>,
+    /// Tells the send driver how much it still owes; see [`crate::driver`].
+    drain: DrainSignal,
 }
 
 impl<P: Protocol, H> RecvDriver<P, H>
@@ -421,6 +443,7 @@ where
         shutdown: oneshot::Receiver<()>,
         shared: Arc<Shared>,
         handler: H,
+        drain: DrainSignal,
     ) -> Self {
         let reassembler = fragment::Reassembler::new(shared.limits, Arc::new(outgoing.downgrade()));
         Self {
@@ -430,6 +453,7 @@ where
             outgoing,
             handler: Arc::new(handler),
             shutdown,
+            drain,
         }
     }
 
@@ -461,15 +485,25 @@ where
         Ok(())
     }
 
-    /// Runs until the peer disconnects, the session fails, or a handler
-    /// requests shutdown.
+    /// Runs until the peer disconnects or the session fails.
     ///
-    /// Knows nothing of the send driver beyond holding a sender into it:
-    /// whether that half is still alive is [`Server::serve`]'s concern, and
-    /// it ends this one by dropping the future.
+    /// A handler asking to shut down does *not* end this — it starts a
+    /// drain. New requests are refused from that point, but the transport
+    /// keeps being read, because the calls already dispatched still have to
+    /// answer and the flow-control credit their responses may be waiting on
+    /// arrives through this half. Once those handlers have finished, this
+    /// driver publishes [`Drain::Graceful`] and keeps reading until the send
+    /// driver has emptied its scheduler; [`Server::serve`] ends this future
+    /// by dropping it at that point.
+    ///
+    /// Beyond publishing that signal it knows nothing of the send driver.
     async fn run(mut self) -> Result<(), Error> {
         let mut tasks = FuturesUnordered::new();
-        let (result, graceful) = 'main: loop {
+        // Set when a handler has asked to shut down. From then on the
+        // `shutdown` branch is disarmed (a consumed `oneshot` resolves
+        // immediately and would spin the loop) and new requests are refused.
+        let mut draining = false;
+        let result = 'main: loop {
             let mut frame = self.transport.recv();
             // The header/payload reads must not be dropped and restarted
             // once they've begun: any bytes already consumed from the
@@ -487,14 +521,27 @@ where
                 loop {
                     tokio::select! {
                         result = &mut step => break result,
-                        Some(_) = tasks.next(), if !tasks.is_empty() => continue,
-                        _ = &mut self.shutdown => break 'main (Ok(()), true),
+                        // Handler tasks must keep being polled here: a
+                        // handler reading a request trailer is unblocked by
+                        // the very fragment this read is fetching. Their
+                        // completions are also the trigger for sealing the
+                        // drain, since a drain ends when the last dispatched
+                        // call has answered.
+                        Some(_) = tasks.next(), if !tasks.is_empty() => {
+                            self.drain.seal_if_idle(draining, tasks.is_empty());
+                            continue;
+                        }
+                        _ = &mut self.shutdown, if !draining => {
+                            draining = true;
+                            self.drain.seal_if_idle(draining, tasks.is_empty());
+                            continue;
+                        }
                     }
                 }
             };
             let complete = match complete {
                 Ok(complete) => complete,
-                Err(error) => break 'main (Err(error), false),
+                Err(error) => break 'main Err(error),
             };
             let (message, live_trailer) = match complete {
                 Event::None => (None, None),
@@ -505,7 +552,7 @@ where
                     if let Err(error) =
                         self.check_call_admission(id, self.reassembler.payload_incomplete())
                     {
-                        break 'main (Err(error), false);
+                        break 'main Err(error);
                     }
                     (None, None)
                 }
@@ -514,12 +561,9 @@ where
                     ..
                 } => (None, None),
                 Event::Aborted { kind, .. } => {
-                    break 'main (
-                        Err(Error::Protocol(format!(
-                            "unexpected aborted {kind:?} message"
-                        ))),
-                        false,
-                    );
+                    break 'main Err(Error::Protocol(format!(
+                        "unexpected aborted {kind:?} message"
+                    )));
                 }
                 Event::Message(message) => (Some(message), None),
                 Event::Ack { id, message } => {
@@ -556,6 +600,24 @@ where
             }) = message
             {
                 match kind {
+                    Kind::Request if draining => {
+                        // A drain finishes the calls already dispatched; it
+                        // does not take on new ones. Refusing here rather
+                        // than letting the reassembler reject it keeps the
+                        // decision in one place, and dropping `charge`
+                        // returns the request's payload quota to the peer —
+                        // this end is still reading, so that credit is still
+                        // worth sending.
+                        //
+                        // The trailer is wrapped before being dropped rather
+                        // than dropped as it arrived: `TrailerRecv`'s `Drop`
+                        // is what tells the peer to stop sending, and a
+                        // refused request that left its trailer streaming
+                        // would go on consuming the drain it is not part of.
+                        let _ = self.outgoing.send(Outgoing::Error { id });
+                        drop(trailer.map(TrailerRecv::new));
+                        drop(charge);
+                    }
                     Kind::Request => {
                         // This message has already left payload phase, so it
                         // is no longer in the reassembler's count and has to
@@ -563,11 +625,11 @@ where
                         if let Err(error) =
                             self.check_call_admission(id, self.reassembler.payload_incomplete() + 1)
                         {
-                            break (Err(error), false);
+                            break Err(error);
                         }
                         let request = match self.shared.decode(&payload, handles, &self.transport) {
                             Ok(request) => request,
-                            Err(error) => break (Err(error), false),
+                            Err(error) => break Err(error),
                         };
                         let trailer = trailer.map(TrailerRecv::new);
                         let handler = self.handler.clone();
@@ -617,19 +679,13 @@ where
                     }
                     Kind::Ack => {
                         if !self.shared.release_escrow(id) {
-                            break (
-                                Err(Error::Protocol(format!(
-                                    "Ack for response {id} with no active escrow"
-                                ))),
-                                false,
-                            );
+                            break Err(Error::Protocol(format!(
+                                "Ack for response {id} with no active escrow"
+                            )));
                         }
                     }
                     _ => {
-                        break (
-                            Err(Error::Protocol(format!("unexpected {kind:?} frame"))),
-                            false,
-                        );
+                        break Err(Error::Protocol(format!("unexpected {kind:?} frame")));
                     }
                 }
             }
@@ -641,24 +697,37 @@ where
                 let result = loop {
                     tokio::select! {
                         result = RecvShared::wait_fragment(&trailer) => break result,
-                        Some(_) = tasks.next(), if !tasks.is_empty() => continue,
-                        _ = &mut self.shutdown => break 'main (Ok(()), true),
+                        Some(_) = tasks.next(), if !tasks.is_empty() => {
+                            self.drain.seal_if_idle(draining, tasks.is_empty());
+                            continue;
+                        }
+                        _ = &mut self.shutdown, if !draining => {
+                            draining = true;
+                            self.drain.seal_if_idle(draining, tasks.is_empty());
+                            continue;
+                        }
                     }
                 };
                 if let Err(error) = result {
-                    break 'main (Err(error.into()), false);
+                    break 'main Err(error.into());
                 }
                 lease.complete();
             }
         };
         drop(self.transport);
-        if graceful {
-            // A handler asked to shut down rather than the session breaking,
-            // so every call already dispatched still gets to answer. Their
-            // responses queue up behind the send driver's channel, which the
-            // caller drains after this returns.
+        if draining {
+            // A drain was already under way when the transport failed, so the
+            // calls already dispatched still get to finish — their responses
+            // queue up behind the send driver's channel even though most will
+            // no longer reach the peer.
             while tasks.next().await.is_some() {}
         }
+        // Reaching here at all means this half is over, so the send driver
+        // must not be left waiting on credit that can now never arrive. This
+        // is deliberately unconditional and deliberately last: it overrides
+        // any `Graceful` already published, including one this very drain
+        // set a moment ago before the transport gave out.
+        self.drain.set(Drain::Abrupt);
         result
     }
 }
@@ -674,6 +743,9 @@ struct SendDriver<P: Protocol> {
     outgoing: mpsc::UnboundedReceiver<Outgoing<P::Response>>,
     shared: Arc<Shared>,
     scheduler: fragment::Scheduler,
+    /// How much this driver still owes before it may stop; see
+    /// [`crate::driver`].
+    drain: DrainWatch,
 }
 
 impl<P: Protocol> SendDriver<P> {
@@ -681,6 +753,7 @@ impl<P: Protocol> SendDriver<P> {
         transport: transport::AnySender,
         outgoing: mpsc::UnboundedReceiver<Outgoing<P::Response>>,
         shared: Arc<Shared>,
+        drain: DrainWatch,
     ) -> Self {
         let scheduler = fragment::Scheduler::new(&shared.limits, shared.payload_budget.clone());
         Self {
@@ -688,19 +761,51 @@ impl<P: Protocol> SendDriver<P> {
             outgoing,
             shared,
             scheduler,
+            drain,
         }
     }
 
+    /// Runs until the drain signal says this driver owes nothing more.
+    ///
+    /// Three ways that happens, and they differ only in how much counts as
+    /// owed:
+    ///
+    /// * [`Drain::Running`] — the channel closed. Every handle that could
+    ///   queue work is gone, including the receive driver's, so no credit can
+    ///   arrive either; finish what is already started.
+    /// * [`Drain::Graceful`] — shutdown was requested and everything that
+    ///   was going to be queued has been. The receive half is still running,
+    ///   so finish *everything*, quota-blocked sends included.
+    /// * [`Drain::Abrupt`] — the receive half is gone. Finish what is
+    ///   already started and abandon the rest.
+    ///
+    /// A committed write is never abandoned in any of them: the scheduler is
+    /// advanced to a fragment boundary before the loop can exit.
     async fn run(mut self) -> Result<(), Error> {
-        // Holding a clone of `outgoing`'s sender half (the local `outgoing` in
-        // `serve`, or a `CallContext`'s) is what represents the ability to
-        // still get a message in, so the channel closing — every clone gone —
-        // doubles as this task's shutdown signal: once `recv()` reports no more
-        // messages will ever arrive, admission of new work stops, and the loop
-        // keeps advancing the scheduler until it's fully drained before
-        // exiting, never abandoning a write already committed to it.
+        // Holding a clone of `outgoing`'s sender half (the receive driver's,
+        // or a `CallContext`'s) is what represents the ability to still get a
+        // message in, so the channel closing — every clone gone — is one of
+        // the terminal conditions in its own right. It is no longer the only
+        // one: under a graceful drain the receive driver keeps its clone
+        // precisely so it can keep servicing credit, and the drain signal is
+        // what says nothing more will be admitted.
         let mut closed = false;
-        while !closed || self.scheduler.has_work() {
+        loop {
+            let mode = self.drain.mode();
+            let done = match mode {
+                Drain::Running => closed && !self.scheduler.has_work(),
+                // Also requires the channel to be drained. A handler queues
+                // its response and *then* completes, and completing is what
+                // seals the drain — so at the instant the signal arrives the
+                // last response may still be sitting in the channel, not yet
+                // admitted to the scheduler, which would leave `has_pending`
+                // reporting nothing to do.
+                Drain::Graceful => !self.scheduler.has_pending() && self.outgoing.is_empty(),
+                Drain::Abrupt => !self.scheduler.has_work(),
+            };
+            if done {
+                return Ok(());
+            }
             tokio::select! {
                 message = self.outgoing.recv(), if !closed => {
                     let Some(message) = message else {
@@ -709,6 +814,10 @@ impl<P: Protocol> SendDriver<P> {
                     };
                     self.admit(message).await?;
                 }
+                // Cancel-safe (a `watch` registration), and re-evaluating the
+                // terminal condition is the whole of the arm — the loop head
+                // above does the work.
+                _ = self.drain.changed() => {}
                 // Not raced against anything — see the matching comment in
                 // client.rs's writer loop. A dropped send future could leave a
                 // committed partial fragment on the transport, or — on
@@ -728,7 +837,6 @@ impl<P: Protocol> SendDriver<P> {
                 }
             }
         }
-        Ok(())
     }
 
     /// Admits one outgoing item to the fragment scheduler.

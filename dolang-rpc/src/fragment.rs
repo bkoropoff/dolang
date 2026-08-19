@@ -1752,24 +1752,28 @@ impl Scheduler {
         self.promote_waiting();
     }
 
-    /// Whether the scheduler holds work it can still finish on its own.
+    /// Whether the scheduler holds work it has already committed to the
+    /// wire and must finish.
     ///
-    /// This is the *drain* condition, and it deliberately excludes `waiting`.
-    /// A send held back for quota can only start when the peer returns
-    /// credit, and credit arrives through the receive half — so once a writer
-    /// loop is draining, its reader is already gone and no waiting send can
-    /// ever proceed. Counting them would turn a graceful shutdown into a hang.
+    /// Deliberately excludes `waiting`: a send held back for quota can only
+    /// start when the peer returns credit, and credit arrives through the
+    /// receive half. This is therefore the drain condition for
+    /// [`Drain::Abrupt`](crate::driver::Drain::Abrupt) — the receive half is
+    /// gone, no credit can arrive, and counting a waiting send would turn
+    /// shutdown into a hang.
     pub(crate) fn has_work(&self) -> bool {
         !self.control.is_empty() || !self.active.is_empty()
     }
 
-    /// Whether it is worth polling [`Scheduler::ready`] at all.
+    /// Whether the scheduler holds anything at all.
     ///
-    /// Unlike `has_work` this counts `waiting`, because `ready` is where a
-    /// quota-blocked send registers on the pool. Gate the poll on `has_work`
-    /// instead and a session with nothing active would never arm that
-    /// registration, so the credit that would have started the send would
-    /// arrive with nobody listening.
+    /// Counts `waiting`, so it is both the gate on polling
+    /// [`Scheduler::ready`] — where a quota-blocked send registers on the
+    /// pool, and which would never be armed by `has_work` alone in a session
+    /// with nothing active — and the drain condition for
+    /// [`Drain::Graceful`](crate::driver::Drain::Graceful), where the receive
+    /// half is still running and the credit that releases a waiting send can
+    /// still arrive.
     pub(crate) fn has_pending(&self) -> bool {
         self.has_work() || !self.waiting.is_empty()
     }

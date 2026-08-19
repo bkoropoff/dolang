@@ -49,6 +49,7 @@
 
 pub mod auth;
 pub mod client;
+mod driver;
 #[cfg(target_os = "macos")]
 mod escrow;
 mod fragment;

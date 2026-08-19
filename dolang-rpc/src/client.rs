@@ -939,6 +939,18 @@ impl<P: Protocol> SendDriver<P> {
         // admission of new work stops, and the loop keeps advancing the
         // scheduler until it's fully drained before exiting, never
         // abandoning a write already committed to it.
+        //
+        // "Fully drained" here means `has_work`, not `has_pending`: this is
+        // the client's equivalent of the server's `Drain::Abrupt` (see
+        // `crate::driver`), and deliberately so. Both ways the channel can
+        // close — `Client::close` and dropping the last handle — also stop
+        // the reader and fail every pending call with `ConnectionClosed`, so
+        // no credit can arrive to release a quota-blocked send and no promise
+        // is broken by abandoning one. The client has no graceful close to
+        // drain for; if it ever gains one, it needs the server's treatment —
+        // a drain signal, and a reader kept alive past the writer — rather
+        // than a widening of this condition, which would only convert the
+        // abandonment into a hang.
         let mut closed = false;
         while !closed || self.scheduler.has_work() {
             tokio::select! {

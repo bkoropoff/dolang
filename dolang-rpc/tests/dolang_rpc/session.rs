@@ -2136,3 +2136,166 @@ async fn many_small_calls_are_admitted_concurrently() {
         assert_eq!(response, Response(value as u32));
     }
 }
+
+/// A protocol whose *responses* are the large payloads, which is what makes a
+/// send blocked on payload quota reachable from the server side. `Test`'s
+/// `Response(u32)` costs a handful of bytes and could never fill a pool.
+#[derive(Serialize, Deserialize)]
+enum DrainRequest {
+    Big,
+    Shutdown,
+    /// Parks the handler until the test releases it, holding the drain open.
+    Hold,
+}
+
+#[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
+struct DrainResponse(Vec<u8>);
+
+struct DrainProtocol;
+impl Protocol for DrainProtocol {
+    type Request = DrainRequest;
+    type Response = DrainResponse;
+}
+
+/// How many oversized responses to have in flight. Any two of them exceed
+/// `QUOTA`, so at least two are still parked in the scheduler's waiting queue
+/// when the drain begins.
+const DRAIN_CALLS: usize = 3;
+
+async fn drain_client(io: tokio::io::DuplexStream) -> Client<DrainProtocol> {
+    quota_builder().client(io).await.unwrap().bind()
+}
+
+/// Spawns a server whose `Big` handler answers with a payload too large for
+/// two to share the session's payload quota, and whose `Shutdown` handler
+/// requests a graceful drain.
+fn drain_server(io: tokio::io::DuplexStream) -> tokio::task::JoinHandle<Result<(), Error>> {
+    drain_server_holding(io, Arc::new(tokio::sync::Notify::new()))
+}
+
+/// As [`drain_server`], but `Hold` parks until `hold` is notified — which is
+/// how a test keeps a call outstanding, and therefore the drain unsealed, for
+/// as long as it needs.
+fn drain_server_holding(
+    io: tokio::io::DuplexStream,
+    hold: Arc<tokio::sync::Notify>,
+) -> tokio::task::JoinHandle<Result<(), Error>> {
+    tokio::spawn(async move {
+        quota_builder()
+            .server(io)
+            .await
+            .unwrap()
+            .bind::<DrainProtocol>()
+            .serve(async move |mut context, request| match request {
+                DrainRequest::Big => context.respond(DrainResponse(vec![b'x'; BIG])),
+                DrainRequest::Shutdown => {
+                    context.shutdown();
+                    context.respond(DrainResponse(Vec::new()));
+                }
+                DrainRequest::Hold => {
+                    // Cloned into the handler's own future so the wait does
+                    // not hold a borrow of the captured `Arc` across an
+                    // await, which the `'static` handler bound rejects.
+                    let hold = hold.clone();
+                    hold.notified().await;
+                    context.respond(DrainResponse(Vec::new()));
+                }
+            })
+            .await
+    })
+}
+
+#[tokio::test]
+async fn graceful_shutdown_delivers_responses_blocked_on_payload_quota() {
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    let server = drain_server(server_io);
+    let client = drain_client(client_io).await;
+
+    // Queued before the shutdown request, so all of them are dispatched — and
+    // their responses queued — before the drain starts. Only one fits the
+    // quota at a time; the rest can move only as the client reads a response
+    // and returns that credit, which requires the server's *receive* half to
+    // still be running well after shutdown was asked for.
+    let calls: Vec<_> = (0..DRAIN_CALLS)
+        .map(|_| client.call(DrainRequest::Big))
+        .collect();
+    let shutdown = client.call(DrainRequest::Shutdown);
+
+    // Awaited before the shutdown call, and in order, because payload quota
+    // is held for the whole call lifecycle: a response's charge is released
+    // when its `CallResult` is dropped, so leaving these unread would starve
+    // the very credit the server is waiting on. Consuming each one is what
+    // lets the next be admitted.
+    //
+    // Before the drain signal existed, the writer's drain condition ignored
+    // quota-blocked sends and the receive half was torn down the moment
+    // shutdown was requested, so every response after the first failed here
+    // with `ConnectionClosed`.
+    for call in calls {
+        assert_eq!(call.await.unwrap().into_response().0.len(), BIG);
+    }
+    assert_eq!(
+        shutdown.await.unwrap().into_response(),
+        DrainResponse(Vec::new())
+    );
+    assert!(server.await.unwrap().is_ok());
+    client.close().await;
+}
+
+#[tokio::test]
+async fn a_lost_peer_does_not_hang_a_send_blocked_on_payload_quota() {
+    // The mirror of the test above: with the receive half gone there is no
+    // credit left to wait for, so the writer must abandon what it cannot
+    // start rather than draining it. A regression here is a hang, not a
+    // wrong answer, so the bound goes around the whole session.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let (client_io, server_io) = tokio::io::duplex(8192);
+        let server = drain_server(server_io);
+        let client = drain_client(client_io).await;
+        let calls: Vec<_> = (0..DRAIN_CALLS)
+            .map(|_| client.call(DrainRequest::Big))
+            .collect();
+        // Drops the transport with responses still parked on quota.
+        client.close().await;
+        for call in calls {
+            assert!(call.await.is_err());
+        }
+        // Returns rather than waiting forever for credit that can no longer
+        // arrive.
+        let _ = server.await.unwrap();
+    })
+    .await
+    .expect("server hung draining a send that could never be credited");
+}
+
+#[tokio::test]
+async fn a_drain_refuses_new_calls_but_finishes_the_ones_it_has() {
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    let hold = Arc::new(tokio::sync::Notify::new());
+    let server = drain_server_holding(server_io, hold.clone());
+    let client = drain_client(client_io).await;
+
+    let held = client.call(DrainRequest::Hold);
+    let shutdown = client.call(DrainRequest::Shutdown);
+    // `shutdown` is requested inside `respond`, before the response reaches
+    // the wire, so observing the response means the server is already
+    // draining — no sleep needed to make the next call land in the window.
+    assert_eq!(
+        shutdown.await.unwrap().into_response(),
+        DrainResponse(Vec::new())
+    );
+
+    // Refused rather than dispatched: a drain finishes what it has, it does
+    // not take on more. Were it dispatched it would answer with `BIG` bytes.
+    assert!(client.call(DrainRequest::Big).await.is_err());
+
+    // The call that was already in flight still answers, and only once it
+    // does can the drain seal and the server return.
+    hold.notify_one();
+    assert_eq!(
+        held.await.unwrap().into_response(),
+        DrainResponse(Vec::new())
+    );
+    assert!(server.await.unwrap().is_ok());
+    client.close().await;
+}

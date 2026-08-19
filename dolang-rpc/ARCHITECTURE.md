@@ -797,13 +797,12 @@ a genuine park when nothing can be admitted. Exhausted quota is a park rather
 than a reorder, which splits one question the scheduler used to answer once.
 `ready` must be polled while a send waits on quota, since that poll is where
 it registers on the pool — gate it on "is there work" and the credit that
-would start the send arrives with nobody listening. The *drain* condition must
-not count it, because credit arrives through the receive half: by the time a
-writer is draining, its reader is gone and no waiting send can ever proceed,
-so waiting for one would turn shutdown into a hang. A send still blocked on
-quota when the connection drains is therefore dropped, and its caller sees the
-connection close rather than waiting forever for a response that could never
-have been sent.
+would start the send arrives with nobody listening. That splits the scheduler's
+old single "is there anything to do" question into two: `has_work`, which
+counts only what has already been committed to the wire, and `has_pending`,
+which also counts sends parked on quota. Which one is the *drain* condition
+depends on whether the receive half is still there to deliver credit, and that
+is what [Shutdown And Draining](#shutdown-and-draining) is about.
 
 Control fragments and trailer-phase sends are never gated by the quota: a
 handler blocked on an inbound trailer cannot complete, and therefore cannot
@@ -824,6 +823,82 @@ not unthinkable. This is documented as a caveat with an escape hatch rather
 than designed around: **release explicitly if you are going to pend for a long
 time, or don't mix large payloads with slow responses.** Violating it degrades
 throughput. It does not hang anything.
+
+## Shutdown And Draining
+
+Each endpoint runs two long-lived futures, a receive driver and a send driver,
+raced against each other. They stay at arm's length on purpose. Neither is
+cancel-safe — the receiver holds bytes already consumed from the transport in
+a partially read fragment, the sender holds a fragment partially committed to
+it — so each has to be polled as a whole rather than stepped, and folding them
+into one loop would mean a stalled write blocks reading, which deadlocks
+against a peer that is itself blocked writing. Keeping them independently
+pollable is what makes read progress and write progress independent.
+
+That independence leaves exactly one thing neither can decide alone: when the
+send driver is allowed to stop. Its own state says whether it still holds work;
+only the receive half knows whether more work can still arrive, and whether the
+peer is still there to return the credit a parked send is waiting on. So one
+bit crosses between them — the drain mode, published by the receive driver over
+a `watch` and observed by the send driver.
+
+### Why It Cannot Just Drop The Send
+
+Payload quota made the scheduler able to hold a message back indefinitely. A
+send that does not fit the session budget waits for credit, and that credit
+arrives through the *receive* half. A writer draining after its reader is gone
+can therefore be holding a send that will never proceed.
+
+Dropping it is not an option. A graceful shutdown promises that work already
+accepted still finishes, and silently discarding a queued response breaks that
+— the peer's call fails with a connection error for a response the server
+had already produced. So the ordering has to be inverted relative to the
+obvious one: the receive driver stays alive until the send driver has drained,
+rather than the send driver being torn down once the receive driver ends.
+
+### The Three Modes
+
+`Running` is the live session. The send driver stops only if its channel
+closes, which means every handle that could still queue work is gone.
+
+`Graceful` is published by the receive driver once shutdown has been requested
+*and* every dispatched call has answered. The send driver then finishes
+everything it holds, `has_pending` rather than `has_work`, parked sends
+included — the receive half is still running, so the credit that releases them
+can still arrive. The condition also requires the outgoing channel to be
+drained: a handler queues its response and *then* completes, and completing is
+what seals the drain, so at the instant the signal lands the last response may
+still be in the channel rather than in the scheduler.
+
+`Abrupt` is published unconditionally on the receive driver's way out, and it
+sticks — it cannot be downgraded. No further credit can arrive, so the send
+driver flushes only `has_work`, what it had already committed to the wire, and
+abandons the rest. This is what keeps a lost peer from turning into a hang, and
+it is why the two predicates exist.
+
+Between the request to shut down and the seal, the receive driver keeps reading
+but stops taking on new calls: an arriving request is refused with an error
+rather than dispatched, and dropping its charge returns its payload quota to
+the peer — this end is still reading, so that credit is still worth sending.
+
+### Termination Is The Caller's To Bound
+
+`Graceful` is unbounded by construction: it waits for credit a peer may never
+send, and a peer that stops reading at its own shutdown will hold this end open
+indefinitely. The bound belongs to the caller, who can wrap the endpoint's
+driving future in a timeout — dropping it aborts both halves at once. This
+crate does not depend on a timer, so it does not impose a policy of its own.
+
+### The Client
+
+The client's writer drains on `has_work`, which is `Abrupt` by another name,
+and deliberately. Both ways its channel can close — `Client::close` and
+dropping the last handle — also stop the reader and fail every pending call, so
+no credit can arrive and no promise is broken by abandoning a parked send. The
+client has no graceful close to drain for. If it gains one it needs the
+server's treatment, a drain signal and a reader kept alive past the writer;
+widening the condition on its own would only convert the abandonment into a
+hang.
 
 ## Cancellation
 
