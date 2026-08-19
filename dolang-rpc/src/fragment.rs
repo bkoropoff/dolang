@@ -5,7 +5,7 @@
 
 use std::{
     collections::{HashMap, VecDeque},
-    fmt, io,
+    fmt, io, mem,
     sync::Arc,
     task::Poll,
 };
@@ -161,7 +161,7 @@ impl RawFragmentHeader {
         // SAFETY: RawFragmentHeader is packed, contains no padding, and
         // consists only of byte arrays, so a bitwise copy of its bytes is
         // always valid.
-        unsafe { std::mem::transmute_copy(self) }
+        unsafe { mem::transmute_copy(self) }
     }
 
     fn decode(bytes: &[u8; Self::LEN]) -> Result<(Flags, Kind, u64, usize), Error> {
@@ -1047,8 +1047,8 @@ impl Reassembler {
             let message = Message {
                 kind,
                 id,
-                payload: entry.postcard.clone().freeze(),
-                handles: std::mem::take(&mut entry.handles),
+                payload: mem::take(&mut entry.postcard).freeze(),
+                handles: mem::take(&mut entry.handles),
                 trailer: Some(shared),
             };
             return Ok(if want_ack {
