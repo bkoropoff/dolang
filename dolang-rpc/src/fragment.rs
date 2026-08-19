@@ -732,8 +732,19 @@ pub(crate) struct Reassembler {
     limits: Limits,
     incomplete: HashMap<u64, Incomplete>,
     /// Number of `incomplete` entries still assembling their postcard
-    /// payload, i.e. not yet in their trailer phase. This — not
-    /// `incomplete.len()` — is what `max_concurrent_calls` bounds.
+    /// payload, i.e. not yet in their trailer phase.
+    ///
+    /// This, not `incomplete.len()`, is the counter `max_concurrent_calls` is
+    /// enforced against here: a trailer-phase entry holds no payload buffer
+    /// and may outlive its call, so counting it would cap long-lived trailers
+    /// at the call limit.
+    ///
+    /// It is not the only enforcement of that limit. This check is skipped for
+    /// a message that arrives whole in one fragment, which the server bounds
+    /// instead in `check_call_admission` — that one counts live calls, from
+    /// dispatch to response head. The client applies the same number to its
+    /// own outgoing calls (`active_calls`), as flow control rather than as a
+    /// protocol error.
     payload_phase: usize,
     /// Unretired trailer bytes across every open trailer, bounded by
     /// `Limits::trailer_session_window`. Shared with each trailer's
