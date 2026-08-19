@@ -159,6 +159,113 @@ struct Shared {
     limits: Limits,
 }
 
+impl Shared {
+    /// Maximum handle attachments one message may carry.
+    fn max_handles(&self) -> usize {
+        // A transport configured to attach no handles to a fragment can
+        // carry none at all.
+        #[cfg(unix)]
+        if self.limits.max_handles_per_fragment == 0 {
+            return 0;
+        }
+        self.limits.max_handles_per_message
+    }
+
+    /// Finishes handle encoding for message `id`, taking custody of whatever
+    /// this platform must keep alive once the message is on the wire.
+    ///
+    /// On macOS that is the file descriptors themselves, escrowed until the
+    /// peer acknowledges receipt. Every other unix passes them with the
+    /// fragment and is done with them.
+    #[cfg(unix)]
+    fn finish_handles(&self, id: u64, handles: EncodeHandles) -> transport::OutgoingHandles {
+        let handles = handles.finish();
+        #[cfg(target_os = "macos")]
+        if handles.needs_ack() {
+            self.inner.lock().unwrap().fd_escrow.register(id);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = id;
+        handles
+    }
+
+    /// Finishes handle encoding for message `_id`. Windows duplicates each
+    /// handle into the peer as it is encoded, so the originals are this
+    /// end's to close and nothing is escrowed.
+    #[cfg(windows)]
+    fn finish_handles(&self, _id: u64, handles: EncodeHandles) -> transport::OutgoingHandles {
+        let (handles, escrow) = handles.finish();
+        drop(escrow);
+        handles
+    }
+
+    /// Decodes a message payload, taking custody of every handle and opaque
+    /// reference it carries.
+    #[cfg(unix)]
+    fn decode<T: ::serde::de::DeserializeOwned>(
+        &self,
+        payload: &[u8],
+        handles: transport::ReceivedHandles,
+        _receiver: &transport::AnyReceiver,
+    ) -> Result<T, Error> {
+        decode_payload(
+            payload,
+            &mut session::SessionHandles {
+                inner: handles,
+                session: &self.session,
+            },
+        )
+    }
+
+    /// Decodes a message payload, taking custody of every handle and opaque
+    /// reference it carries. Windows handles are named by value in the
+    /// payload and duplicated out of the peer as they are decoded, rather
+    /// than arriving attached to the fragment, so `handles` is empty.
+    #[cfg(windows)]
+    fn decode<T: ::serde::de::DeserializeOwned>(
+        &self,
+        payload: &[u8],
+        _handles: transport::ReceivedHandles,
+        receiver: &transport::AnyReceiver,
+    ) -> Result<T, Error> {
+        decode_payload(
+            payload,
+            &mut DecodeHandles {
+                receiver,
+                session: &self.session,
+                count: 0,
+                max_handles: self.max_handles(),
+            },
+        )
+    }
+
+    /// Records the file descriptors for `id` that just reached the wire.
+    #[cfg(target_os = "macos")]
+    fn escrow_sent(&self, id: u64, fds: Vec<std::os::fd::OwnedFd>, done: bool) {
+        self.inner.lock().unwrap().fd_escrow.sent(id, fds, done);
+    }
+
+    /// Forgets the escrow for a message that will never reach the wire.
+    fn discard_unsent_escrow(&self, id: u64) {
+        #[cfg(target_os = "macos")]
+        self.inner.lock().unwrap().fd_escrow.discard_unsent(id);
+        #[cfg(not(target_os = "macos"))]
+        let _ = id;
+    }
+
+    /// Releases the escrow an `Ack` names, returning false when there is
+    /// none — which is every `Ack` on a platform that escrows nothing.
+    fn release_escrow(&self, id: u64) -> bool {
+        #[cfg(target_os = "macos")]
+        return self.inner.lock().unwrap().fd_escrow.release(id);
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = id;
+            false
+        }
+    }
+}
+
 struct Inner {
     outstanding: HashMap<u64, Cancellation>,
     shutdown: Option<oneshot::Sender<()>>,
@@ -364,8 +471,6 @@ impl<P: Protocol> Server<P> {
                 trailer,
             }) = message
             {
-                #[cfg(windows)]
-                let _ = handles;
                 match kind {
                     Kind::Request => {
                         if let Err(error) = check_call_admission(
@@ -379,25 +484,7 @@ impl<P: Protocol> Server<P> {
                         ) {
                             break (Err(error), false, false);
                         }
-                        #[cfg(unix)]
-                        let request = decode_payload(
-                            &payload,
-                            &mut session::SessionHandles {
-                                inner: handles,
-                                session: &shared.session,
-                            },
-                        );
-                        #[cfg(windows)]
-                        let request = decode_payload(
-                            &payload,
-                            &mut DecodeHandles {
-                                receiver: &receiver,
-                                session: &shared.session,
-                                count: 0,
-                                max_handles: limits.max_handles_per_message,
-                            },
-                        );
-                        let request = match request {
+                        let request = match shared.decode(&payload, handles, &receiver) {
                             Ok(request) => request,
                             Err(error) => break (Err(error), false, false),
                         };
@@ -447,24 +534,15 @@ impl<P: Protocol> Server<P> {
                         let _ = outgoing.send(Message::PeerDiscarded { id });
                     }
                     Kind::Ack => {
-                        #[cfg(target_os = "macos")]
-                        if !shared.inner.lock().unwrap().fd_escrow.release(id) {
+                        if !shared.release_escrow(id) {
                             break (
                                 Err(Error::Protocol(format!(
-                                    "Ack for response {id} with no active file descriptor escrow"
+                                    "Ack for response {id} with no active escrow"
                                 ))),
                                 false,
                                 false,
                             );
                         }
-                        #[cfg(not(target_os = "macos"))]
-                        break (
-                            Err(Error::Protocol(format!(
-                                "Ack for response {id} with no active escrow"
-                            ))),
-                            false,
-                            false,
-                        );
                     }
                     _ => {
                         break (
@@ -575,7 +653,7 @@ async fn writer<P: Protocol>(
                     fragment::AdvanceOutcome::None | fragment::AdvanceOutcome::Aborted(_) => {}
                     #[cfg(target_os = "macos")]
                     fragment::AdvanceOutcome::Escrow { id, fds, handles_done } => {
-                        shared.inner.lock().unwrap().fd_escrow.sent(id, fds, handles_done);
+                        shared.escrow_sent(id, fds, handles_done);
                     }
                 }
                 // Flush anything sent by the scheduler
@@ -593,20 +671,11 @@ async fn admit<P: Protocol>(
     shared: &Arc<Shared>,
     message: Message<P::Response>,
 ) -> Result<(), Error> {
-    let limits = &shared.limits;
     match message {
         Message::Response { id, value, trailer } => {
-            #[cfg(unix)]
-            let max_handles = if limits.max_handles_per_fragment == 0 {
-                0
-            } else {
-                limits.max_handles_per_message
-            };
-            #[cfg(windows)]
-            let max_handles = limits.max_handles_per_message;
             let mut ledger = session::Ledger::default();
             let mut put_handles = session::SessionFrame {
-                inner: EncodeHandles::new(sender, max_handles),
+                inner: EncodeHandles::new(sender, shared.max_handles()),
                 session: &shared.session,
                 ledger: &mut ledger,
             };
@@ -620,17 +689,7 @@ async fn admit<P: Protocol>(
                     return Err(error);
                 }
             };
-            let put_handles = put_handles.inner;
-            #[cfg(unix)]
-            let handles = put_handles.finish();
-            #[cfg(target_os = "macos")]
-            if handles.needs_ack() {
-                shared.inner.lock().unwrap().fd_escrow.register(id);
-            }
-            #[cfg(windows)]
-            let (handles, escrow) = put_handles.finish();
-            #[cfg(windows)]
-            drop(escrow);
+            let handles = shared.finish_handles(id, put_handles.inner);
             scheduler.admit_message(Kind::Response, id, payload, handles, trailer, ledger);
         }
         Message::Error { id } => scheduler.admit_empty(Kind::Error, id),
@@ -640,9 +699,8 @@ async fn admit<P: Protocol>(
                 if started {
                     scheduler.admit_abort(id);
                 }
-                #[cfg(target_os = "macos")]
                 if !started {
-                    shared.inner.lock().unwrap().fd_escrow.discard_unsent(id);
+                    shared.discard_unsent_escrow(id);
                 }
             }
         },

@@ -27,7 +27,7 @@ use crate::{
         Trailer,
     },
     serde::{decode_payload, encode_payload},
-    session::{Ledger, Session, SessionFrame},
+    session::{Ledger, ReleaseSink, Session, SessionFrame},
     trailer::{RecvShared, SendShared, SessionWindow, TrailerRecv, TrailerSend, TrailerSink},
     transport::{self, EncodeHandles, Receiver, Sender},
 };
@@ -72,6 +72,123 @@ struct Shared {
     #[cfg(target_os = "macos")]
     fd_escrow: Mutex<crate::escrow::FdEscrow>,
     limits: Limits,
+}
+
+impl Shared {
+    /// Maximum handle attachments one message may carry.
+    fn max_handles(&self) -> usize {
+        // A transport configured to attach no handles to a fragment can
+        // carry none at all.
+        #[cfg(unix)]
+        if self.limits.max_handles_per_fragment == 0 {
+            return 0;
+        }
+        self.limits.max_handles_per_message
+    }
+
+    /// Finishes handle encoding for message `id`, taking custody of whatever
+    /// this platform must keep alive once the message is on the wire.
+    ///
+    /// On macOS that is the file descriptors themselves, escrowed until the
+    /// peer acknowledges receipt. Every other unix passes them with the
+    /// fragment and is done with them.
+    #[cfg(unix)]
+    fn finish_handles(&self, id: u64, handles: EncodeHandles) -> transport::OutgoingHandles {
+        let handles = handles.finish();
+        #[cfg(target_os = "macos")]
+        if handles.needs_ack() {
+            self.fd_escrow.lock().unwrap().register(id);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = id;
+        handles
+    }
+
+    /// Finishes handle encoding for message `id`, escrowing the originals of
+    /// the handles duplicated into the peer until the call is settled.
+    #[cfg(windows)]
+    fn finish_handles(&self, id: u64, handles: EncodeHandles) -> transport::OutgoingHandles {
+        let (handles, escrow) = handles.finish();
+        if !escrow.is_empty() {
+            self.handle_escrow.lock().unwrap().insert(id, escrow);
+        }
+        handles
+    }
+
+    /// Records the file descriptors for `id` that just reached the wire.
+    #[cfg(target_os = "macos")]
+    fn escrow_sent(&self, id: u64, fds: Vec<std::os::fd::OwnedFd>, done: bool) {
+        self.fd_escrow.lock().unwrap().sent(id, fds, done);
+    }
+
+    /// Forgets the escrow for a request that will never reach the wire.
+    fn discard_unsent_escrow(&self, id: u64) {
+        #[cfg(target_os = "macos")]
+        self.fd_escrow.lock().unwrap().discard_unsent(id);
+        #[cfg(not(target_os = "macos"))]
+        let _ = id;
+    }
+
+    /// Releases the escrow an `Ack` names, returning false when there is
+    /// none — which is every `Ack` on a platform that escrows nothing.
+    fn release_escrow(&self, id: u64) -> bool {
+        #[cfg(target_os = "macos")]
+        return self.fd_escrow.lock().unwrap().release(id);
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = id;
+            false
+        }
+    }
+
+    /// Drops the handles escrowed for `id`. A no-op where the platform keeps
+    /// nothing back for the peer to duplicate.
+    fn drop_escrowed_handles(&self, id: u64) {
+        #[cfg(windows)]
+        self.handle_escrow.lock().unwrap().remove(&id);
+        #[cfg(not(windows))]
+        let _ = id;
+    }
+
+    /// Decodes a message payload, taking custody of every handle and opaque
+    /// reference it carries.
+    #[cfg(unix)]
+    fn decode<T: ::serde::de::DeserializeOwned>(
+        &self,
+        payload: &[u8],
+        handles: transport::ReceivedHandles,
+    ) -> Result<T, Error> {
+        decode_payload(
+            payload,
+            &mut SessionHandles {
+                inner: handles,
+                session: &self.session,
+            },
+        )
+    }
+
+    /// Decodes a message payload, taking custody of every handle and opaque
+    /// reference it carries. Windows handles arrive already duplicated into
+    /// this process, named by value in the payload rather than attached to
+    /// the fragment, so `handles` is empty.
+    #[cfg(windows)]
+    fn decode<T: ::serde::de::DeserializeOwned>(
+        &self,
+        payload: &[u8],
+        _handles: transport::ReceivedHandles,
+    ) -> Result<T, Error> {
+        decode_payload(
+            payload,
+            &mut DecodeHandles::new(self.max_handles(), &self.session),
+        )
+    }
+
+    /// Retires call `id` now that its terminal message has settled it: the
+    /// call slot goes back, and so does anything escrowed for its request.
+    fn finish_call(&self, id: u64) {
+        self.drop_escrowed_handles(id);
+        self.active_calls.lock().unwrap().remove(&id);
+    }
 }
 
 #[cfg(windows)]
@@ -182,7 +299,7 @@ enum Outgoing<Q> {
     Terminal,
 }
 
-impl<Q: Send + 'static> crate::session::ReleaseSink for mpsc::WeakUnboundedSender<Outgoing<Q>> {
+impl<Q: Send + 'static> ReleaseSink for mpsc::WeakUnboundedSender<Outgoing<Q>> {
     fn release(&self, id: u64, count: u32) {
         // Called from `Drop`, so a departed channel is not an error: the
         // writer is already gone and the peer's table dies with the session.
@@ -192,7 +309,7 @@ impl<Q: Send + 'static> crate::session::ReleaseSink for mpsc::WeakUnboundedSende
     }
 }
 
-impl<Q: Send + 'static> crate::trailer::TrailerSink for mpsc::WeakUnboundedSender<Outgoing<Q>> {
+impl<Q: Send + 'static> TrailerSink for mpsc::WeakUnboundedSender<Outgoing<Q>> {
     fn credit(&self, id: u64, count: u32) {
         if let Some(outgoing) = self.upgrade() {
             let _ = outgoing.send(Outgoing::Credit { id, count });
@@ -605,8 +722,7 @@ impl<P: Protocol> Writer<P> {
     fn complete_err(&self, id: u64, error: Error) {
         // The escrow lives in `Shared`, which outlives the handles, so it is
         // cleaned up whether or not anyone is still waiting for the result.
-        #[cfg(windows)]
-        self.shared.handle_escrow.lock().unwrap().remove(&id);
+        self.shared.drop_escrowed_handles(id);
         if let Some(inner) = self.inner.upgrade() {
             inner.complete(id, Err(error));
         }
@@ -658,14 +774,6 @@ impl<P: Protocol> Writer<P> {
         value: P::Request,
         trailer: Trailer,
     ) -> Result<(), Error> {
-        #[cfg(unix)]
-        let max_handles = if self.shared.limits.max_handles_per_fragment == 0 {
-            0
-        } else {
-            self.shared.limits.max_handles_per_message
-        };
-        #[cfg(windows)]
-        let max_handles = self.shared.limits.max_handles_per_message;
         // Every handle is gone, so nothing is waiting on this call's result
         // and its pending entry went with them: drop it rather than encode it.
         if self.inner.upgrade().is_none() {
@@ -673,7 +781,7 @@ impl<P: Protocol> Writer<P> {
         }
         let mut ledger = Ledger::default();
         let mut put_handles = SessionFrame {
-            inner: EncodeHandles::new(&self.transport, max_handles),
+            inner: EncodeHandles::new(&self.transport, self.shared.max_handles()),
             session: &self.shared.session,
             ledger: &mut ledger,
         };
@@ -689,19 +797,7 @@ impl<P: Protocol> Writer<P> {
                 return Ok(());
             }
         };
-        let put_handles = put_handles.inner;
-        #[cfg(unix)]
-        let handles = put_handles.finish();
-        #[cfg(target_os = "macos")]
-        if handles.needs_ack() {
-            self.shared.fd_escrow.lock().unwrap().register(id);
-        }
-        #[cfg(windows)]
-        let (handles, escrow) = put_handles.finish();
-        #[cfg(windows)]
-        if !escrow.is_empty() {
-            self.shared.handle_escrow.lock().unwrap().insert(id, escrow);
-        }
+        let handles = self.shared.finish_handles(id, put_handles.inner);
         self.scheduler
             .admit_message(Kind::Request, id, payload, handles, trailer, ledger);
         // The call takes its slot here, where its request actually reaches
@@ -725,9 +821,8 @@ impl<P: Protocol> Writer<P> {
                 if started {
                     self.scheduler.admit_abort(id);
                 }
-                #[cfg(target_os = "macos")]
                 if !started {
-                    self.shared.fd_escrow.lock().unwrap().discard_unsent(id);
+                    self.shared.discard_unsent_escrow(id);
                 }
                 if dispatched {
                     self.scheduler.admit_empty(Kind::Cancel, id);
@@ -836,7 +931,7 @@ impl<P: Protocol> Writer<P> {
                         Ok(fragment::AdvanceOutcome::None) => {}
                         #[cfg(target_os = "macos")]
                         Ok(fragment::AdvanceOutcome::Escrow { id, fds, handles_done }) => {
-                            self.shared.fd_escrow.lock().unwrap().sent(id, fds, handles_done);
+                            self.shared.escrow_sent(id, fds, handles_done);
                         }
                         // No blanket `fail_all`: a write failure here means
                         // this connection is broken, not that every pending
@@ -870,8 +965,6 @@ impl<P: Protocol> Reader<P> {
             handles,
             trailer,
         } = message;
-        #[cfg(windows)]
-        let _ = handles;
         match kind {
             Kind::Response => {
                 // Decoding happens here, in the reader task, *before*
@@ -882,43 +975,23 @@ impl<P: Protocol> Reader<P> {
                 // references back to the peer. Skipping the decode for a
                 // response nobody is waiting on would look like an
                 // optimization and would silently leak every handle in it.
-                #[cfg(unix)]
-                let response = decode_payload(
-                    &payload,
-                    &mut SessionHandles {
-                        inner: handles,
-                        session: &self.shared.session,
-                    },
-                )?;
-                #[cfg(windows)]
-                let response = decode_payload(
-                    &payload,
-                    &mut DecodeHandles::new(
-                        self.shared.limits.max_handles_per_message,
-                        &self.shared.session,
-                    ),
-                )?;
+                let response = self.shared.decode(&payload, handles)?;
                 let trailer = trailer.map(TrailerRecv::new);
-                #[cfg(windows)]
-                self.shared.handle_escrow.lock().unwrap().remove(&id);
-                self.shared.active_calls.lock().unwrap().remove(&id);
+                self.shared.finish_call(id);
                 if let Some(inner) = self.inner.upgrade() {
                     inner.complete(id, Ok(CallResult { response, trailer }));
                     inner.send(Outgoing::Terminal);
                 }
             }
             Kind::Error => {
-                #[cfg(windows)]
-                self.shared.handle_escrow.lock().unwrap().remove(&id);
-                self.shared.active_calls.lock().unwrap().remove(&id);
+                self.shared.finish_call(id);
                 if let Some(inner) = self.inner.upgrade() {
                     inner.complete(id, Err(Error::Cancelled));
                     inner.send(Outgoing::Terminal);
                 }
             }
-            #[cfg(target_os = "macos")]
             Kind::Ack => {
-                if !self.shared.fd_escrow.lock().unwrap().release(id) {
+                if !self.shared.release_escrow(id) {
                     return Err(Error::Protocol(format!(
                         "Ack for request {id} with no active escrow"
                     )));
@@ -1013,9 +1086,7 @@ impl<P: Protocol> Reader<P> {
                     // message it opened.
                     debug_assert_eq!(kind, Kind::Response, "aborted a non-response message");
                     if !dispatched {
-                        #[cfg(windows)]
-                        self.shared.handle_escrow.lock().unwrap().remove(&id);
-                        self.shared.active_calls.lock().unwrap().remove(&id);
+                        self.shared.finish_call(id);
                         if let Some(inner) = self.inner.upgrade() {
                             inner.complete(id, Err(Error::Cancelled));
                             inner.send(Outgoing::Terminal);
