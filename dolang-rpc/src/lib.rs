@@ -59,6 +59,7 @@ pub mod session;
 pub mod trailer;
 mod transport;
 mod unbound;
+mod window;
 
 use std::io;
 
@@ -103,7 +104,38 @@ pub(crate) struct Limits {
     /// payload and entered their trailer phase are *not* counted: those are
     /// bounded by the credit window below rather than by a count, because a
     /// trailer may legitimately outlive its call.
+    ///
+    /// This is a count, not a memory bound. What bounds the memory those
+    /// calls hold is `max_outstanding_payload` below, which is why this can
+    /// be generous: a peer may keep a great many *small* calls in flight
+    /// without thereby being allowed to keep that many large ones.
     pub max_concurrent_calls: usize,
+    /// Total charged postcard bytes across all calls that have not yet
+    /// released, in aggregate.
+    ///
+    /// `max_payload_size` bounds one message and cannot bound the sum:
+    /// multiplied by `max_concurrent_calls` it is the whole reassembly
+    /// footprint a peer can demand, reachable by opening that many messages
+    /// and sending one fragment of each. This bounds the sum directly, and
+    /// spans the *whole call lifecycle* rather than just reassembly — a
+    /// payload's memory does not end at dispatch, it ends when the
+    /// application is done with the call. That makes it a byte-denominated
+    /// concurrency bound, which is the point.
+    ///
+    /// Unlike a trailer, a postcard payload cannot be paced incrementally: it
+    /// has to be reassembled whole before it can be deserialized. So the two
+    /// rules invert — trailers have no size cap because they are streamable,
+    /// and payloads keep one because they are not.
+    ///
+    /// The pool measures **wire** bytes. The deserialized form is
+    /// `O(serialized size)`, so wire bytes are an adequate proxy, but a
+    /// struct-heavy payload can land at 4–8× its postcard size once padding
+    /// and per-node overhead are counted. Size the limit knowing that.
+    ///
+    /// Trailer bytes are not counted here; see `trailer_session_window`.
+    /// Negotiation keeps this at least `max_payload_size`, since otherwise a
+    /// legal single message could never be sent.
+    pub max_outstanding_payload: usize,
     /// How much retired trailer credit this end accumulates before returning
     /// it to the peer.
     ///
@@ -123,9 +155,12 @@ pub(crate) struct Limits {
     /// staged bytes plus whatever the application still holds. A sender parks
     /// once the pool is empty and resumes on the next `Kind::Credit`.
     ///
-    /// This is the *only* credit limit, and the whole bound on receiver memory
-    /// attributable to trailers, however many are open. There is deliberately
-    /// no per-trailer window: a sender that lets one trailer consume the pool
+    /// This is the only credit limit trailers have, and the whole bound on
+    /// receiver memory attributable to them, however many are open. Payload
+    /// quota is a separate pool (`max_outstanding_payload`); sharing one
+    /// between the two deadlocks a handler that must consume a trailer before
+    /// it can release its payload. There is deliberately no per-trailer
+    /// window: a sender that lets one trailer consume the pool
     /// starves only its own other trailers, so how the pool is divided is a
     /// local scheduling choice rather than a protocol rule. Only zero is a
     /// deadlock, and negotiation floors it at 1.
@@ -142,7 +177,8 @@ impl Default for Limits {
             trailer_recv_copy_threshold: 64 * 1024,
             trailer_recv_demand_copy_threshold: 256 * 1024,
             trailer_send_copy_threshold: 64 * 1024,
-            max_concurrent_calls: 128,
+            max_concurrent_calls: 1024,
+            max_outstanding_payload: 16 * 1024 * 1024,
             trailer_credit_interval: 256 * 1024,
             trailer_session_window: 16 * 1024 * 1024,
         }

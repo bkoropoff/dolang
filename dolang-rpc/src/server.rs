@@ -18,8 +18,9 @@ use crate::{
     fragment::{self, Event, Kind, Message},
     serde::{decode_payload, encode_payload},
     session::{self, Cite, Gift, InvalidOpaque, OpaqueGuard, OpaqueResource, Session},
-    trailer::{RecvShared, SendShared, SessionWindow, TrailerRecv, TrailerSend},
+    trailer::{RecvShared, SendShared, TrailerRecv, TrailerSend},
     transport::{self, EncodeHandles, Receiver, Sender},
+    window::{ControlSink, PayloadBudget, PayloadCharge, SessionWindow},
 };
 #[cfg(windows)]
 use crate::{handle::TakeHandle, session::Inner as OpaqueInner};
@@ -112,6 +113,12 @@ enum Outgoing<R> {
         id: u64,
         count: u32,
     },
+    /// A call released its request payload and is returning `count` bytes of
+    /// quota. Always results in a wire `Kind::PayloadCredit`, which names no
+    /// message: several of these coalesce into one fragment.
+    PayloadCredit {
+        count: u32,
+    },
     /// Drops `count` of this endpoint's references to the peer's opaque `id`.
     Release {
         id: u64,
@@ -132,10 +139,19 @@ impl<R: Send + 'static> session::ReleaseSink for mpsc::WeakUnboundedSender<Outgo
     }
 }
 
-impl<R: Send + 'static> crate::trailer::TrailerSink for mpsc::WeakUnboundedSender<Outgoing<R>> {
+impl<R: Send + 'static> ControlSink for mpsc::WeakUnboundedSender<Outgoing<R>> {
     fn credit(&self, id: u64, count: u32) {
         if let Some(outgoing) = self.upgrade() {
             let _ = outgoing.send(Outgoing::Credit { id, count });
+        }
+    }
+
+    fn payload_credit(&self, count: u32) {
+        // Reached from `PayloadCharge::drop`, which runs on every path a call
+        // can end on — including ones where the session is already tearing
+        // down, where there is no one left to credit.
+        if let Some(outgoing) = self.upgrade() {
+            let _ = outgoing.send(Outgoing::PayloadCredit { count });
         }
     }
 
@@ -160,6 +176,12 @@ struct Shared {
     /// Send-side trailer credit shared by every outgoing response trailer on
     /// this connection. Bounds what the peer must buffer for us in aggregate.
     trailer_session: Arc<SessionWindow>,
+    /// Send-side payload quota shared by every outgoing response. Bounds the
+    /// postcard bytes the peer must hold for us across all live calls, and is
+    /// charged in full when a response is admitted to the scheduler.
+    ///
+    /// Kept apart from `trailer_session` on purpose; see [`crate::window`].
+    payload_budget: Arc<PayloadBudget>,
     limits: Limits,
 }
 
@@ -323,6 +345,7 @@ impl<P: Protocol> Server<P> {
                 }),
                 session: Session::new(Box::new(outgoing.downgrade())),
                 trailer_session: Arc::new(SessionWindow::new(limits.trailer_session_window)),
+                payload_budget: Arc::new(PayloadBudget::new(limits.max_outstanding_payload)),
                 limits,
             }),
             outgoing,
@@ -518,6 +541,10 @@ where
                     self.shared.trailer_session.refund(id, count as usize);
                     (None, None)
                 }
+                Event::PayloadCredit { count } => {
+                    self.shared.payload_budget.credit(count as usize);
+                    (None, None)
+                }
             };
             if let Some(Message {
                 kind,
@@ -525,6 +552,7 @@ where
                 payload,
                 handles,
                 trailer,
+                charge,
             }) = message
             {
                 match kind {
@@ -555,6 +583,7 @@ where
                                     outgoing: task_outgoing,
                                     responded: false,
                                     shutdown_on_respond: false,
+                                    charge: Some(charge),
                                     marker: PhantomData,
                                 };
                                 handler(context, request).await;
@@ -653,7 +682,7 @@ impl<P: Protocol> SendDriver<P> {
         outgoing: mpsc::UnboundedReceiver<Outgoing<P::Response>>,
         shared: Arc<Shared>,
     ) -> Self {
-        let scheduler = fragment::Scheduler::new(&shared.limits);
+        let scheduler = fragment::Scheduler::new(&shared.limits, shared.payload_budget.clone());
         Self {
             transport,
             outgoing,
@@ -686,7 +715,7 @@ impl<P: Protocol> SendDriver<P> {
                 // transports whose writes are dispatched to a detached
                 // background task — let an abandoned write complete arbitrarily
                 // later, after the peer has already torn down its end.
-                _ = self.scheduler.ready(), if self.scheduler.has_work() => {
+                _ = self.scheduler.ready(), if self.scheduler.has_pending() => {
                     match self.scheduler.advance(&mut self.transport).await? {
                         fragment::AdvanceOutcome::None | fragment::AdvanceOutcome::Aborted(_) => {}
                         #[cfg(target_os = "macos")]
@@ -748,6 +777,7 @@ impl<P: Protocol> SendDriver<P> {
             Outgoing::Ack { id } => self.scheduler.admit_empty(Kind::Ack, id),
             Outgoing::Release { id, count } => self.scheduler.admit_release(id, count),
             Outgoing::Credit { id, count } => self.scheduler.admit_credit(id, count),
+            Outgoing::PayloadCredit { count } => self.scheduler.admit_payload_credit(count),
         }
         Ok(())
     }
@@ -765,6 +795,11 @@ pub struct CallContext<P: Protocol> {
     outgoing: mpsc::UnboundedSender<Outgoing<P::Response>>,
     responded: bool,
     shutdown_on_respond: bool,
+    /// This request's share of the payload quota, returned to the peer when
+    /// this context is dropped — which is every path a call can end on,
+    /// including a handler that never responds, one aborted by a peer
+    /// cancellation, and one that panics.
+    charge: Option<PayloadCharge>,
     marker: PhantomData<fn() -> P>,
 }
 
@@ -861,6 +896,23 @@ impl<P: Protocol> CallContext<P> {
         });
         self.finish_shutdown();
         TrailerSend::new(shared, ())
+    }
+
+    /// Returns this request's payload quota to the peer now, rather than when
+    /// this context is dropped.
+    ///
+    /// The quota is charged for the whole call, so a handler that pends for a
+    /// long time throttles the connection for as long as it pends — which is
+    /// fine for the small payloads a long-poll usually carries, and is not
+    /// for a large one. This is the escape hatch: finish with the request,
+    /// drop whatever you decoded from it, then release. Nothing checks that
+    /// you did the first two, and releasing while still holding the request's
+    /// data merely makes the peer's accounting optimistic.
+    ///
+    /// Idempotent, and never required — dropping the context releases just
+    /// the same.
+    pub fn release_payload(&mut self) {
+        self.charge = None;
     }
 
     /// Requests graceful shutdown after this handler sends its response.
@@ -1124,13 +1176,23 @@ mod tests {
         JoinHandle<Result<(), Error>>,
         mpsc::UnboundedReceiver<()>,
     ) {
-        let ((mut peer_sender, mut peer_receiver), (mut server_sender, mut server_receiver)) =
-            endpoint_pair();
-        let limits = Limits {
+        hostile_session_with(Limits {
             max_concurrent_calls,
             max_fragment_size: FRAGMENT_SIZE,
             ..Limits::default()
-        };
+        })
+        .await
+    }
+
+    async fn hostile_session_with(
+        limits: Limits,
+    ) -> (
+        Peer,
+        JoinHandle<Result<(), Error>>,
+        mpsc::UnboundedReceiver<()>,
+    ) {
+        let ((mut peer_sender, mut peer_receiver), (mut server_sender, mut server_receiver)) =
+            endpoint_pair();
         let (peer, server) = tokio::join!(
             fragment::negotiate(
                 &mut peer_sender,
@@ -1158,7 +1220,15 @@ mod tests {
         (
             Peer {
                 transport: peer_sender,
-                scheduler: fragment::Scheduler::new(&peer_limits),
+                // An unbounded budget, so the peer can send what its
+                // negotiated quota would have stopped it sending. That is
+                // the whole point of this harness: the server's checks are
+                // backstops against a peer that ignores what it agreed to,
+                // and a peer that honoured it could never reach them.
+                scheduler: fragment::Scheduler::new(
+                    &peer_limits,
+                    Arc::new(PayloadBudget::new(usize::MAX)),
+                ),
                 _receiver: peer_receiver,
             },
             serve,
@@ -1277,6 +1347,45 @@ mod tests {
                 serve.await.unwrap(),
                 Err(Error::Protocol(message)) if message == "server received a Response fragment"
             ));
+        })
+        .await;
+    }
+
+    /// The attack `max_outstanding_payload` exists to close: open many
+    /// messages and send one fragment of each, and `max_concurrent_calls`
+    /// alone admits every one of them — `max_payload_size` bounds each
+    /// message, and nothing bounds the sum. Here the call count is deliberately
+    /// generous, so the only thing that can refuse this is the byte quota.
+    #[tokio::test]
+    async fn a_peer_that_ignores_its_payload_quota_is_refused() {
+        bounded(async {
+            let (mut peer, serve, _dispatched) = hostile_session_with(Limits {
+                max_concurrent_calls: 64,
+                max_fragment_size: FRAGMENT_SIZE,
+                // Both, because negotiation raises the quota to at least the
+                // per-message cap: a pool that could not carry one legal
+                // message would be a configuration with no legal traffic.
+                max_payload_size: 4 * FRAGMENT_SIZE,
+                max_outstanding_payload: 4 * FRAGMENT_SIZE,
+                ..Limits::default()
+            })
+            .await;
+
+            for id in 1..=16 {
+                peer.partial_request(id);
+            }
+            // One fragment of each, round-robin, until the sum of the
+            // reassembly buffers passes the quota. Driven from its own task
+            // because the server stops reading the moment it objects, and a
+            // peer writing into a full pipe would otherwise block forever
+            // instead of letting the assertion below run.
+            let sending = tokio::spawn(async move { peer.send(16).await });
+
+            assert!(matches!(
+                serve.await.unwrap(),
+                Err(Error::Protocol(message)) if message.contains("session payload quota")
+            ));
+            sending.abort();
         })
         .await;
     }

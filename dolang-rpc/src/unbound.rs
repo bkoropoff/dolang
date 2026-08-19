@@ -86,9 +86,48 @@ impl Builder {
     /// Sets the maximum reassembled postcard payload, excluding a trailer.
     ///
     /// Defaults to 2 MiB; the peer and local endpoint use the smaller
-    /// advertised value.
+    /// advertised value, and it is lowered further to the negotiated
+    /// [`max_outstanding_payload`](Self::max_outstanding_payload) if that
+    /// ends up smaller — a per-message cap above the aggregate pool would
+    /// describe a message that could never be sent.
     pub fn max_payload_size(mut self, value: usize) -> Self {
         self.limits.max_payload_size = value;
+        self
+    }
+
+    /// Sets the session-wide postcard payload quota, in bytes.
+    ///
+    /// This bounds the total charged payload bytes of every call that has not
+    /// yet released, across the whole connection. Unlike
+    /// [`max_payload_size`](Self::max_payload_size), which bounds one message,
+    /// this bounds the sum — and it is charged for the *entire call
+    /// lifecycle*, from the sender admitting the message to the receiving
+    /// application being done with it, not merely while the payload is being
+    /// reassembled. A payload's memory does not end at dispatch.
+    ///
+    /// The consequence is a contract worth knowing: a long-pending call with a
+    /// large payload holds its share of the pool for as long as it pends, and
+    /// throttles the connection accordingly. Indefinitely pending calls are
+    /// legitimate — an event poll is the usual shape — and a large payload on
+    /// one is unusual but not unthinkable. If you want both, release
+    /// explicitly (see
+    /// [`CallContext::release_payload`](crate::server::CallContext::release_payload)
+    /// and [`CallResult::take_payload_credit`](crate::client::CallResult::take_payload_credit))
+    /// once you no longer need the request. Violating it degrades throughput;
+    /// it does not hang anything.
+    ///
+    /// Trailer bytes are counted against
+    /// [`trailer_session_window`](Self::trailer_session_window) instead, and
+    /// the two pools are deliberately separate: a handler that must consume a
+    /// trailer before it can release its payload would deadlock against a
+    /// shared one.
+    ///
+    /// The pool measures wire bytes, and a struct-heavy payload can occupy
+    /// several times that once deserialized. Defaults to 16 MiB; the peer and
+    /// local endpoint use the smaller advertised value, raised to at least
+    /// this endpoint's own `max_payload_size` before it is advertised.
+    pub fn max_outstanding_payload(mut self, value: usize) -> Self {
+        self.limits.max_outstanding_payload = value;
         self
     }
 
@@ -192,8 +231,13 @@ impl Builder {
     /// trailer may outlive its call, and is bounded by
     /// [`trailer_session_window`](Self::trailer_session_window) instead.
     ///
-    /// Defaults to 128; the peer and local endpoint use the smaller advertised
-    /// value.
+    /// This is a count and not a memory bound; what bounds the memory those
+    /// calls hold is
+    /// [`max_outstanding_payload`](Self::max_outstanding_payload), which is
+    /// why the default is generous.
+    ///
+    /// Defaults to 1024; the peer and local endpoint use the smaller
+    /// advertised value.
     pub fn max_concurrent_calls(mut self, value: usize) -> Self {
         self.limits.max_concurrent_calls = value;
         self

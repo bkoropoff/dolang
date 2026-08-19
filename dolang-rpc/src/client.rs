@@ -28,8 +28,9 @@ use crate::{
     },
     serde::{decode_payload, encode_payload},
     session::{Ledger, ReleaseSink, Session, SessionFrame},
-    trailer::{RecvShared, SendShared, SessionWindow, TrailerRecv, TrailerSend, TrailerSink},
+    trailer::{RecvShared, SendShared, TrailerRecv, TrailerSend},
     transport::{self, EncodeHandles, Receiver, Sender},
+    window::{ControlSink, PayloadBudget, PayloadCharge, SessionWindow},
 };
 #[cfg(windows)]
 use crate::{handle::TakeHandle, session::Inner as OpaqueInner};
@@ -54,6 +55,12 @@ struct Shared {
     /// Send-side trailer credit shared by every outgoing trailer on this
     /// connection. Bounds what the peer must buffer for us in aggregate.
     trailer_session: Arc<SessionWindow>,
+    /// Send-side payload quota shared by every outgoing request. Bounds the
+    /// postcard bytes the peer must hold for us across all live calls, and is
+    /// charged in full when a request is admitted to the scheduler.
+    ///
+    /// Kept apart from `trailer_session` on purpose; see [`crate::window`].
+    payload_budget: Arc<PayloadBudget>,
     /// Calls whose request reached the scheduler and whose terminal message
     /// has not yet arrived.
     ///
@@ -63,10 +70,11 @@ struct Shared {
     /// and ends wherever the terminal message is observed, which for
     /// everything but a locally cancelled request is the reader.
     active_calls: Mutex<HashSet<u64>>,
-    /// The route trailers use to credit and discard themselves. Weak, since
-    /// a `TrailerRecv` can outlive the session and must not keep the writer
-    /// alive just to say it is going away.
-    trailer_sink: Arc<dyn TrailerSink>,
+    /// The route trailers and payload charges use to credit and discard
+    /// themselves. Weak, since a `TrailerRecv` or a held payload credit can
+    /// outlive the session and must not keep the writer alive just to say it
+    /// is going away.
+    sink: Arc<dyn ControlSink>,
     #[cfg(windows)]
     handle_escrow: Mutex<HashMap<u64, Vec<OwnedHandle>>>,
     #[cfg(target_os = "macos")]
@@ -292,6 +300,12 @@ enum Outgoing<Q> {
         id: u64,
         count: u32,
     },
+    /// A call released its request payload and is returning `count` bytes of
+    /// quota. Always results in a wire `Kind::PayloadCredit`, which names no
+    /// message: several of these coalesce into one fragment.
+    PayloadCredit {
+        count: u32,
+    },
     /// A call ended, freeing a slot. The reader has already dropped the id
     /// from [`ActiveCalls`] itself — it has to, so that a second `Response`
     /// for the same id is rejected — so this carries nothing and exists only
@@ -309,10 +323,19 @@ impl<Q: Send + 'static> ReleaseSink for mpsc::WeakUnboundedSender<Outgoing<Q>> {
     }
 }
 
-impl<Q: Send + 'static> TrailerSink for mpsc::WeakUnboundedSender<Outgoing<Q>> {
+impl<Q: Send + 'static> ControlSink for mpsc::WeakUnboundedSender<Outgoing<Q>> {
     fn credit(&self, id: u64, count: u32) {
         if let Some(outgoing) = self.upgrade() {
             let _ = outgoing.send(Outgoing::Credit { id, count });
+        }
+    }
+
+    fn payload_credit(&self, count: u32) {
+        // Reached from `PayloadCharge::drop`, which runs on every path a call
+        // can end on — including ones where the session is already tearing
+        // down, where there is no one left to credit.
+        if let Some(outgoing) = self.upgrade() {
+            let _ = outgoing.send(Outgoing::PayloadCredit { count });
         }
     }
 
@@ -454,8 +477,9 @@ impl<P: Protocol> Client<P> {
         let shared = Arc::new(Shared {
             session,
             trailer_session: Arc::new(SessionWindow::new(limits.trailer_session_window)),
+            payload_budget: Arc::new(PayloadBudget::new(limits.max_outstanding_payload)),
             active_calls: Default::default(),
-            trailer_sink: Arc::new(outgoing.downgrade()),
+            sink: Arc::new(outgoing.downgrade()),
             #[cfg(windows)]
             handle_escrow: Mutex::new(HashMap::new()),
             #[cfg(target_os = "macos")]
@@ -478,7 +502,7 @@ impl<P: Protocol> Client<P> {
                 outgoing: outgoing_rx,
                 inner: Arc::downgrade(&inner),
                 shared: shared.clone(),
-                scheduler: Scheduler::new(&limits),
+                scheduler: Scheduler::new(&limits, shared.payload_budget.clone()),
                 waiting: VecDeque::new(),
             }
             .run(),
@@ -632,9 +656,51 @@ pub(crate) fn validate_peer_process(
 pub struct CallResult<R> {
     response: R,
     trailer: Option<TrailerRecv>,
+    /// This response's share of the payload quota, released when this value
+    /// is decomposed or dropped — unless the caller took it out with
+    /// [`take_payload_credit`](Self::take_payload_credit) first.
+    charge: Option<PayloadCharge>,
+}
+
+/// A held share of the session payload quota, returned to the peer when
+/// dropped.
+///
+/// Obtained from [`CallResult::take_payload_credit`] by a caller that wants
+/// the quota released later than the `CallResult` it came from — typically
+/// because the deserialized response is being kept around after the
+/// `CallResult` has been decomposed. Holding one throttles the peer exactly
+/// as an unreleased call does, so drop it as soon as the response's memory
+/// is actually gone.
+///
+/// Holding it forever is not a hang; it is a permanent subtraction from the
+/// pool, which degrades throughput on the whole connection with no error
+/// anywhere. There is no way for either end to reclaim it short of closing
+/// the session.
+pub struct PayloadCredit(Option<PayloadCharge>);
+
+impl PayloadCredit {
+    /// Returns the quota now. Identical to dropping this value, and offered
+    /// only so the intent can be stated where it happens.
+    pub fn release(self) {
+        drop(self.0);
+    }
 }
 
 impl<R> CallResult<R> {
+    /// Takes charge of returning this call's payload quota.
+    ///
+    /// By default the quota goes back when this `CallResult` is decomposed or
+    /// dropped, which is right when the response is consumed there and then.
+    /// Take it out instead when the response's memory outlives that — the
+    /// returned token releases on *its* drop, so the peer's view of what this
+    /// end is holding matches reality.
+    ///
+    /// Calling this more than once yields a token that releases nothing; the
+    /// quota is released exactly once however the pieces are dropped.
+    pub fn take_payload_credit(&mut self) -> PayloadCredit {
+        PayloadCredit(self.charge.take())
+    }
+
     /// Discards any response trailer and returns just the response.
     pub fn into_response(self) -> R {
         self.response
@@ -766,6 +832,10 @@ impl<P: Protocol> SendDriver<P> {
             }
             Outgoing::Credit { id, count } => {
                 self.scheduler.admit_credit(id, count);
+                Ok(())
+            }
+            Outgoing::PayloadCredit { count } => {
+                self.scheduler.admit_payload_credit(count);
                 Ok(())
             }
             Outgoing::Terminal => unreachable!("handled by the writer loop"),
@@ -919,7 +989,7 @@ impl<P: Protocol> SendDriver<P> {
                 // (e.g. the blocking-pool-backed Windows pipe transport) —
                 // let an abandoned write complete arbitrarily later,
                 // potentially after the peer has already torn down its end.
-                _ = self.scheduler.ready(), if self.scheduler.has_work() => {
+                _ = self.scheduler.ready(), if self.scheduler.has_pending() => {
                     let result = self.scheduler.advance(&mut self.transport).await;
                     // Flush anything sent by the scheduler
                     let _ = self.transport.flush().await;
@@ -968,6 +1038,7 @@ impl<P: Protocol> RecvDriver<P> {
             payload,
             handles,
             trailer,
+            charge,
         } = message;
         match kind {
             Kind::Response => {
@@ -983,7 +1054,14 @@ impl<P: Protocol> RecvDriver<P> {
                 let trailer = trailer.map(TrailerRecv::new);
                 self.shared.finish_call(id);
                 if let Some(inner) = self.inner.upgrade() {
-                    inner.complete(id, Ok(CallResult { response, trailer }));
+                    inner.complete(
+                        id,
+                        Ok(CallResult {
+                            response,
+                            trailer,
+                            charge: Some(charge),
+                        }),
+                    );
                     inner.send(Outgoing::Terminal);
                 }
             }
@@ -1042,8 +1120,7 @@ impl<P: Protocol> RecvDriver<P> {
     }
 
     async fn run(mut self, mut shutdown: oneshot::Receiver<()>) {
-        let mut reassembler =
-            Reassembler::new(self.shared.limits, self.shared.trailer_sink.clone());
+        let mut reassembler = Reassembler::new(self.shared.limits, self.shared.sink.clone());
         loop {
             let mut frame = self.transport.recv();
             let header = tokio::select! {
@@ -1136,6 +1213,14 @@ impl<P: Protocol> RecvDriver<P> {
                     // would shrink the pool on every transfer.
                     self.shared.trailer_session.refund(id, count as usize);
                 }
+                Event::PayloadCredit { count } => {
+                    // Applied here for the same reason as trailer credit, and
+                    // with the same indifference to whether the send it pays
+                    // for still exists: the pool lives on `Shared`, and
+                    // crediting it wakes the writer parked on it. Nothing is
+                    // keyed by id, so nothing has to still be around.
+                    self.shared.payload_budget.credit(count as usize);
+                }
             }
         }
     }
@@ -1191,16 +1276,21 @@ mod tests {
         // reassembler owns rejecting an id it has no entry for.
         assert!(check(header(Kind::Response, Flags::LAST, 9)).is_ok());
         // Trailer credit and opaque releases outlive the call they name, so
-        // control frames are not gated on it.
+        // control frames are not gated on it — and payload credit names no
+        // call at all.
         assert!(check(header(Kind::Credit, Flags::FIRST | Flags::LAST, 9)).is_ok());
+        assert!(check(header(Kind::PayloadCredit, Flags::FIRST | Flags::LAST, 0)).is_ok());
     }
 
     fn test_shared(outgoing: &mpsc::UnboundedSender<Outgoing<u8>>) -> Arc<Shared> {
         Arc::new(Shared {
             session: Session::new(Box::new(outgoing.downgrade())),
             trailer_session: Arc::new(SessionWindow::new(Limits::default().trailer_session_window)),
+            payload_budget: Arc::new(PayloadBudget::new(
+                Limits::default().max_outstanding_payload,
+            )),
             active_calls: Default::default(),
-            trailer_sink: Arc::new(outgoing.downgrade()),
+            sink: Arc::new(outgoing.downgrade()),
             #[cfg(windows)]
             handle_escrow: Mutex::new(HashMap::new()),
             #[cfg(target_os = "macos")]
@@ -1242,6 +1332,7 @@ mod tests {
             Ok(CallResult {
                 response: 7,
                 trailer: None,
+                charge: None,
             }),
         );
         assert_eq!(call.await.unwrap().into_response(), 7);
@@ -1288,7 +1379,12 @@ mod tests {
             outgoing: outgoing_rx,
             inner: Arc::downgrade(&inner),
             shared: shared.clone(),
-            scheduler: Scheduler::new(&Limits::default()),
+            scheduler: Scheduler::new(
+                &Limits::default(),
+                Arc::new(PayloadBudget::new(
+                    Limits::default().max_outstanding_payload,
+                )),
+            ),
             waiting: VecDeque::new(),
         };
 

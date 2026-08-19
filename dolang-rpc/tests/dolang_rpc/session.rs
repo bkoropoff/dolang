@@ -771,12 +771,20 @@ async fn trailer_call_cancelled_mid_transmission_completes_without_hanging() {
             .await
             .unwrap()
             .bind::<Test>()
-            .serve(async |context, request| {
+            .serve(async |mut context: CallContext<Test>, request| {
                 let response = match request {
                     Request::TrailerRoundTrip(value) => Response(value),
                     Request::Echo(value) => Response(value),
                     _ => unreachable!(),
                 };
+                // Read the trailer rather than letting `respond` discard it,
+                // so the abort under test is the producer's own and not a
+                // race against the peer telling it to stop. The read fails
+                // when the producer is dropped, which is the point.
+                if let Some(mut trailer) = context.trailer() {
+                    let mut received = Vec::new();
+                    let _ = trailer.read_to_end(&mut received).await;
+                }
                 context.respond(response);
             })
             .await
@@ -1835,4 +1843,296 @@ async fn a_detached_request_trailer_keeps_streaming_after_the_response() {
         .expect("the duplex exchange stalled");
     assert_eq!(response, Response(7));
     assert_eq!(echoed, data);
+}
+
+/// Big enough that a leak of one request's payload shows up within a couple of
+/// rounds, small enough to keep the tests quick.
+const QUOTA: usize = 16 * 1024;
+
+/// Over half the pool, so no two of these can be outstanding at once, and
+/// comfortably under the per-message cap once postcard's framing is added.
+const BIG: usize = QUOTA / 2 + 1024;
+
+fn quota_builder() -> Builder {
+    builder()
+        .max_payload_size(QUOTA)
+        .max_outstanding_payload(QUOTA)
+        .max_fragment_size(4096)
+}
+
+/// A pool so small that even the few bytes of a `Response(u32)` accumulate
+/// into a stall, which is what makes a *response*-side leak visible: the
+/// request direction of these tests costs almost nothing.
+fn tiny_quota_builder() -> Builder {
+    builder()
+        .max_payload_size(TINY_QUOTA)
+        .max_outstanding_payload(TINY_QUOTA)
+}
+
+const TINY_QUOTA: usize = 512;
+
+/// Echoed rather than a small number so postcard spends its full five varint
+/// bytes on it. `Response(1)` would cost one byte, and the round counts below
+/// would then not add up to a stall even if every response leaked — the test
+/// would pass without testing anything.
+const WIDE: u32 = u32::MAX;
+
+/// Enough rounds that a leaked response overruns `TINY_QUOTA` several times
+/// over.
+const TINY_ROUNDS: usize = 400;
+
+/// Drives `rounds` calls through a session whose payload quota holds only a few
+/// of them at once, running each to completion before the next.
+///
+/// Unreleased quota stays subtracted forever, so any leak — one path that
+/// answers a call without dropping its charge — stops the connection dead
+/// within a few rounds rather than degrading gracefully. That is what makes
+/// this shape the right test for release: there is nothing to assert beyond
+/// "it kept going".
+async fn quota_rounds<F>(make: fn() -> Builder, rounds: usize, round_trip: F)
+where
+    F: AsyncFn(&Client<Test>),
+{
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    tokio::spawn(async move {
+        make()
+            .server(server_io)
+            .await
+            .unwrap()
+            .bind::<Test>()
+            .serve(
+                async move |context: CallContext<Test>, request| match request {
+                    Request::Bulk(_) => context.respond(Response(0)),
+                    Request::Echo(value) => context.respond(Response(value)),
+                    // Answers nothing and drops the context, which must still
+                    // release the request's quota.
+                    Request::Delay(_) => drop(context),
+                    _ => unreachable!(),
+                },
+            )
+            .await
+    });
+    let client = unbound_client_with_builder::<_, Test>(make(), client_io).await;
+
+    for round in 0..rounds {
+        tokio::time::timeout(Duration::from_secs(10), round_trip(&client))
+            .await
+            .unwrap_or_else(|_| panic!("round {round} stalled; payload quota leaked"));
+    }
+}
+
+/// The ordinary path, on the request side: a large call answered and its result
+/// consumed. Each request is over half the pool, so a single leaked charge
+/// stalls the very next round.
+#[tokio::test]
+async fn completed_calls_do_not_leak_payload_quota() {
+    quota_rounds(quota_builder, 12, async |client: &Client<Test>| {
+        let response = client
+            .call(Request::Bulk(vec![b'x'; BIG]))
+            .await
+            .unwrap()
+            .into_response();
+        assert_eq!(response, Response(0));
+    })
+    .await;
+}
+
+/// A handler that drops its context without responding fails the call, and must
+/// release just the same. A charge lost on an error path is the same permanent
+/// subtraction as one lost on a success path, and rather more likely to go
+/// unnoticed.
+#[tokio::test]
+async fn calls_the_handler_never_answers_do_not_leak_payload_quota() {
+    quota_rounds(quota_builder, 12, async |client: &Client<Test>| {
+        assert!(matches!(
+            client.call(Request::Delay(0)).await,
+            Err(Error::Cancelled)
+        ));
+    })
+    .await;
+}
+
+/// The response side. A `CallResult` nobody decomposes still has to release, or
+/// a caller who simply ignores a response strangles the connection — the
+/// server's send budget is what runs out, so the symptom is a call that never
+/// completes rather than an error anywhere.
+#[tokio::test]
+async fn dropped_call_results_do_not_leak_payload_quota() {
+    quota_rounds(
+        tiny_quota_builder,
+        TINY_ROUNDS,
+        async |client: &Client<Test>| {
+            let result = client.call(Request::Echo(WIDE)).await.unwrap();
+            drop(result);
+        },
+    )
+    .await;
+}
+
+/// Also the response side, through the token. Extracting the credit moves the
+/// release off the `CallResult` and onto the token's own drop, so the release
+/// genuinely outlives the value it came from — the whole reason the API exists
+/// and the easiest place for it to go missing.
+#[tokio::test]
+async fn extracted_payload_credit_releases_when_it_is_dropped() {
+    quota_rounds(
+        tiny_quota_builder,
+        TINY_ROUNDS,
+        async |client: &Client<Test>| {
+            let mut result = client.call(Request::Echo(WIDE)).await.unwrap();
+            let credit = result.take_payload_credit();
+            assert_eq!(result.into_response(), Response(WIDE));
+            // Deliberately after the `CallResult` is gone: nothing was released
+            // until this line.
+            drop(credit);
+        },
+    )
+    .await;
+}
+
+/// A handler that releases early stops holding the connection hostage while it
+/// pends, which is the documented escape hatch for a long-lived call with a
+/// large request. Every one of these pends until the test drops the client, so
+/// without the early release the second call could never be admitted.
+#[tokio::test]
+async fn releasing_early_lets_a_pending_call_stop_holding_its_quota() {
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    let (pending_tx, mut pending) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        quota_builder()
+            .server(server_io)
+            .await
+            .unwrap()
+            .bind::<Test>()
+            .serve(async move |mut context: CallContext<Test>, _| {
+                context.release_payload();
+                let _ = pending_tx.send(());
+                std::future::pending::<()>().await
+            })
+            .await
+    });
+    let client = unbound_client_with_builder::<_, Test>(quota_builder(), client_io).await;
+
+    // Each request is over half the pool, so two of them cannot be
+    // outstanding at once unless the first one's quota came back.
+    let big = || Request::Bulk(vec![b'x'; BIG]);
+    let _first = client.call(big());
+    let _second = client.call(big());
+    for _ in 0..2 {
+        tokio::time::timeout(Duration::from_secs(10), pending.recv())
+            .await
+            .expect("the second call never reached the handler")
+            .unwrap();
+    }
+}
+
+/// The reason payload quota and trailer credit are separate pools rather than
+/// one.
+///
+/// This is the ordinary streaming-upload shape: a descriptor payload, a large
+/// trailer, and a handler that reads the trailer to completion before it
+/// responds. Each call holds its payload charge until the handler completes,
+/// and the handler cannot complete until the trailer has flowed. The payloads
+/// here are sized so that a few of them fill the payload pool outright — which
+/// is harmless with two pools (the rest simply wait their turn) and fatal with
+/// one, since the calls that got in would hold every byte of credit their own
+/// trailers need to finish.
+#[tokio::test]
+async fn concurrent_uploads_do_not_deadlock_payload_quota_against_trailer_credit() {
+    const PAYLOAD: usize = 4 * 1024;
+    const TRAILER: usize = 32 * 1024;
+    const POOL: usize = 16 * 1024;
+
+    let make = || {
+        builder()
+            .max_payload_size(2 * PAYLOAD)
+            .max_outstanding_payload(POOL)
+            .trailer_session_window(POOL)
+            .max_fragment_size(4096)
+    };
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    tokio::spawn(async move {
+        make()
+            .server(server_io)
+            .await
+            .unwrap()
+            .bind::<Test>()
+            .serve(async move |mut context: CallContext<Test>, request| {
+                let Request::Bulk(payload) = request else {
+                    unreachable!()
+                };
+                // Consume the whole trailer *before* responding, which is what
+                // makes the payload charge outlive the trailer's need for
+                // credit and closes the cycle a shared pool would have.
+                let mut received = Vec::new();
+                context
+                    .trailer()
+                    .unwrap()
+                    .read_to_end(&mut received)
+                    .await
+                    .unwrap();
+                assert_eq!(received.len(), TRAILER);
+                context.respond(Response(payload.len() as u32));
+            })
+            .await
+    });
+    let client = Arc::new(unbound_client_with_builder::<_, Test>(make(), client_io).await);
+
+    // Enough calls that their payloads together are twice the pool.
+    let calls: Vec<_> = (0..8u32)
+        .map(|_| {
+            let client = client.clone();
+            tokio::spawn(async move {
+                let mut send = client.call_with_trailer(Request::Bulk(vec![b'd'; PAYLOAD]));
+                send.write_all(&vec![b'u'; TRAILER]).await.unwrap();
+                let response = send.finish().await.unwrap().into_response();
+                assert_eq!(response, Response(PAYLOAD as u32));
+            })
+        })
+        .collect();
+    for call in calls {
+        tokio::time::timeout(Duration::from_secs(30), call)
+            .await
+            .expect("an upload wedged; the two credit pools are entangled")
+            .unwrap();
+    }
+}
+
+/// The count is generous precisely because the bytes are bounded separately,
+/// so many small calls must actually be admitted concurrently rather than
+/// queued a few at a time.
+#[tokio::test]
+async fn many_small_calls_are_admitted_concurrently() {
+    let (client_io, server_io) = tokio::io::duplex(65536);
+    tokio::spawn(async move {
+        builder()
+            .server(server_io)
+            .await
+            .unwrap()
+            .bind::<Test>()
+            .serve(
+                async move |context: CallContext<Test>, request| match request {
+                    Request::Echo(value) => context.respond(Response(value)),
+                    _ => unreachable!(),
+                },
+            )
+            .await
+    });
+    let client = Arc::new(unbound_client::<_, Test>(client_io).await);
+
+    let calls: Vec<_> = (0..512u32)
+        .map(|value| {
+            let client = client.clone();
+            tokio::spawn(async move { client.call(Request::Echo(value)).await })
+        })
+        .collect();
+    for (value, call) in calls.into_iter().enumerate() {
+        let response = tokio::time::timeout(Duration::from_secs(30), call)
+            .await
+            .expect("a call stalled")
+            .unwrap()
+            .unwrap()
+            .into_response();
+        assert_eq!(response, Response(value as u32));
+    }
 }
