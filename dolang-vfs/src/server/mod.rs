@@ -16,7 +16,7 @@ use dolang_rpc::AuthKey;
 use dolang_rpc::{
     handle::{DefaultHandle, OsHandle},
     server::CallContext,
-    session::{Cite, OpaqueGuard, OpaqueResource},
+    session::{Cite, Gift, OpaqueGuard, OpaqueResource},
 };
 use dolang_winterop::security::SecDesc;
 #[cfg(unix)]
@@ -39,8 +39,9 @@ use crate::extension::ExtContext;
 use crate::file::{FileLock, FileLockRequest};
 use crate::security::{Acl, AclKind};
 use crate::{
-    AnyFile, AnyVfs, Child as _, Command as _, Error, FileHandle as _, OpenOptions as _,
-    STREAM_CHUNK_SIZE, SessionMode, StdioRecv, StdioSend, Utf8TypedPath, Vfs,
+    AnyFile, AnyVfs, Child as _, Command as _, Error, FileHandle as _, FsMetadata, Metadata,
+    OpenOptions as _, STREAM_CHUNK_SIZE, SessionMode, StdioRecv, StdioSend, StreamEntry,
+    Utf8TypedPath, Vfs, XattrEntry,
     protocol::{
         AccessRequest, AclRequest, CanonicalizeRequest, CopyRequest, CreateDirRequest,
         ExtensionRequest, ExtensionResponse, FsMetadataRequest, GlobRequest, HardLinkRequest,
@@ -743,16 +744,20 @@ impl Connection {
             RequestKind::ClearCache => {
                 ResponseKind::ClearCache(Self::wire_result(self.server.vfs.clear_cache().await))
             }
-            RequestKind::Pipe => self.handle_pipe(context).await,
+            RequestKind::Pipe => ResponseKind::Pipe(self.handle_pipe(context).await),
             RequestKind::Open(request) => self.handle_open(context, request).await,
             RequestKind::FileRead { .. } => unreachable!(),
-            RequestKind::FileWrite { file } => self.handle_file_write(context, file).await,
-            RequestKind::FileSeek { file, position } => {
-                self.handle_file_seek(context, file, position.into()).await
+            RequestKind::FileWrite { file } => {
+                ResponseKind::FileWrite(self.handle_file_write(context, file).await)
             }
-            RequestKind::FileFlush { file } => self.handle_file_flush(context, file).await,
+            RequestKind::FileSeek { file, position } => {
+                ResponseKind::FileSeek(self.handle_file_seek(context, file, position.into()).await)
+            }
+            RequestKind::FileFlush { file } => {
+                ResponseKind::FileFlush(self.handle_file_flush(context, file).await)
+            }
             RequestKind::FileSetSize { file, size } => {
-                self.handle_file_set_size(context, file, size).await
+                ResponseKind::FileSetSize(self.handle_file_set_size(context, file, size).await)
             }
             RequestKind::FileLock { file, request } => {
                 self.handle_file_lock(context, file, request).await
@@ -761,77 +766,83 @@ impl Connection {
                 self.handle_file_unlock(context, file, lock).await
             }
             RequestKind::FileToStdioSend { file } => {
-                self.handle_file_to_stdio_send(context, file).await
+                ResponseKind::FileToStdioSend(self.handle_file_to_stdio_send(context, file).await)
             }
             RequestKind::FileToStdioRecv { file } => {
-                self.handle_file_to_stdio_recv(context, file).await
+                ResponseKind::FileToStdioRecv(self.handle_file_to_stdio_recv(context, file).await)
             }
             RequestKind::StdioSendClose { stdio } => {
                 ResponseKind::StdioSendClose(self.close_stdio_send(context, stdio))
             }
             RequestKind::StdioSendWrite { stdio } => {
-                self.handle_stdio_send_write(context, stdio).await
+                ResponseKind::StdioSendWrite(self.handle_stdio_send_write(context, stdio).await)
             }
             RequestKind::StdioSendClone { stdio } => {
-                self.handle_stdio_send_clone(context, stdio).await
+                ResponseKind::StdioSendClone(self.handle_stdio_send_clone(context, stdio).await)
             }
             RequestKind::StdioRecvClose { stdio } => {
                 ResponseKind::StdioRecvClose(self.close_stdio_recv(context, stdio))
             }
             RequestKind::StdioRecvRead { .. } => unreachable!(),
             RequestKind::StdioRecvClone { stdio } => {
-                self.handle_stdio_recv_clone(context, stdio).await
+                ResponseKind::StdioRecvClone(self.handle_stdio_recv_clone(context, stdio).await)
             }
-            RequestKind::FileMetadata { file } => self.handle_file_metadata(context, file).await,
+            RequestKind::FileMetadata { file } => {
+                ResponseKind::FileMetadata(self.handle_file_metadata(context, file).await)
+            }
             RequestKind::FileFsMetadata { file } => {
-                self.handle_file_fs_metadata(context, file).await
+                ResponseKind::FileFsMetadata(self.handle_file_fs_metadata(context, file).await)
             }
             RequestKind::FileAcl {
                 file,
                 kind,
                 default,
-            } => self.handle_file_acl(context, file, kind, default).await,
+            } => ResponseKind::FileAcl(self.handle_file_acl(context, file, kind, default).await),
             RequestKind::FileSetAcl {
                 file,
                 kind,
                 acl,
                 default,
-            } => {
+            } => ResponseKind::FileSetAcl(
                 self.handle_file_set_acl(context, file, kind, acl, default)
-                    .await
-            }
+                    .await,
+            ),
             RequestKind::FileSecDesc { file, mask } => {
-                self.handle_file_sec_desc(context, file, mask).await
+                ResponseKind::FileSecDesc(self.handle_file_sec_desc(context, file, mask).await)
             }
-            RequestKind::FileSetSecDesc { file, sec_desc } => {
-                self.handle_file_set_sec_desc(context, file, sec_desc).await
-            }
+            RequestKind::FileSetSecDesc { file, sec_desc } => ResponseKind::FileSetSecDesc(
+                self.handle_file_set_sec_desc(context, file, sec_desc).await,
+            ),
             RequestKind::FileXattrs { file, namespace } => {
-                self.handle_file_xattrs(context, file, namespace).await
+                ResponseKind::FileXattrs(self.handle_file_xattrs(context, file, namespace).await)
             }
             RequestKind::FileXattr {
                 file,
                 name,
                 namespace,
-            } => self.handle_file_xattr(context, file, name, namespace).await,
-            RequestKind::FileStreams { file } => self.handle_file_streams(context, file).await,
+            } => ResponseKind::FileXattr(
+                self.handle_file_xattr(context, file, name, namespace).await,
+            ),
+            RequestKind::FileStreams { file } => {
+                ResponseKind::FileStreams(self.handle_file_streams(context, file).await)
+            }
             RequestKind::FileSetXattr {
                 file,
                 name,
                 namespace,
                 value,
-            } => {
+            } => ResponseKind::FileSetXattr(
                 self.handle_file_set_xattr(context, file, name, namespace, value)
-                    .await
-            }
+                    .await,
+            ),
             RequestKind::FileRemoveXattr {
                 file,
                 name,
                 namespace,
-            } => {
+            } => ResponseKind::FileRemoveXattr(
                 self.handle_file_remove_xattr(context, file, name, namespace)
-                    .await
-            }
+                    .await,
+            ),
             RequestKind::FileClose { file } => self.handle_file_close(context, file).await,
             RequestKind::UnixVfs(request) => self.handle_unix_vfs(context, request).await,
             RequestKind::WindowsAdmin(request) => self.handle_windows_admin(context, request).await,
@@ -1174,24 +1185,23 @@ impl Connection {
         }
     }
 
-    async fn handle_pipe(&self, context: &CallContext<VfsProtocol>) -> ResponseKind {
-        let result = async {
-            let (send, recv) = self.server.vfs.pipe().await.map_err(wire_error)?;
-            let send_slot = self.reserve_stdio()?;
-            let recv_slot = self.reserve_stdio()?;
-            Ok(PipeResponse {
-                send: context.register(RetainedStdioSend {
-                    stdio: Mutex::new(send),
-                    _slot: send_slot,
-                }),
-                recv: context.register(RetainedStdioRecv {
-                    stdio: Mutex::new(recv),
-                    _slot: recv_slot,
-                }),
-            })
-        }
-        .await;
-        ResponseKind::Pipe(result)
+    async fn handle_pipe(
+        &self,
+        context: &CallContext<VfsProtocol>,
+    ) -> Result<PipeResponse, WireError> {
+        let (send, recv) = self.server.vfs.pipe().await.map_err(wire_error)?;
+        let send_slot = self.reserve_stdio()?;
+        let recv_slot = self.reserve_stdio()?;
+        Ok(PipeResponse {
+            send: context.register(RetainedStdioSend {
+                stdio: Mutex::new(send),
+                _slot: send_slot,
+            }),
+            recv: context.register(RetainedStdioRecv {
+                stdio: Mutex::new(recv),
+                _slot: recv_slot,
+            }),
+        })
     }
 
     fn retained_stdio_send(
@@ -1249,52 +1259,44 @@ impl Connection {
         &self,
         context: &mut CallContext<VfsProtocol>,
         stdio: Cite<StdioSendMarker>,
-    ) -> ResponseKind {
-        let result = async {
-            let stdio = self.retained_stdio_send(context, stdio)?;
-            let trailer = context.request_trailer().ok_or_else(|| {
-                wire_error(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "stdio write request is missing its data trailer",
-                ))
-            })?;
-            let mut trailer = io::BufReader::with_capacity(STREAM_CHUNK_SIZE, trailer);
-            let len = io::copy_buf(&mut trailer, &mut *stdio.stdio.lock().await)
-                .await
-                .map_err(wire_error)?;
-            usize::try_from(len).map_err(|_| {
-                wire_error(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "stdio trailer length does not fit in usize",
-                ))
-            })
-        }
-        .await;
-        ResponseKind::StdioSendWrite(result)
+    ) -> Result<usize, WireError> {
+        let stdio = self.retained_stdio_send(context, stdio)?;
+        let trailer = context.request_trailer().ok_or_else(|| {
+            wire_error(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "stdio write request is missing its data trailer",
+            ))
+        })?;
+        let mut trailer = io::BufReader::with_capacity(STREAM_CHUNK_SIZE, trailer);
+        let len = io::copy_buf(&mut trailer, &mut *stdio.stdio.lock().await)
+            .await
+            .map_err(wire_error)?;
+        usize::try_from(len).map_err(|_| {
+            wire_error(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "stdio trailer length does not fit in usize",
+            ))
+        })
     }
 
     async fn handle_stdio_send_clone(
         &self,
         context: &CallContext<VfsProtocol>,
         stdio: Cite<StdioSendMarker>,
-    ) -> ResponseKind {
-        let result = async {
-            let stdio = self.retained_stdio_send(context, stdio)?;
-            let clone = stdio
-                .stdio
-                .lock()
-                .await
-                .try_clone()
-                .await
-                .map_err(wire_error)?;
-            let slot = self.reserve_stdio()?;
-            Ok(context.register(RetainedStdioSend {
-                stdio: Mutex::new(clone),
-                _slot: slot,
-            }))
-        }
-        .await;
-        ResponseKind::StdioSendClone(result)
+    ) -> Result<Gift<crate::session::StdioSendMarker>, WireError> {
+        let stdio = self.retained_stdio_send(context, stdio)?;
+        let clone = stdio
+            .stdio
+            .lock()
+            .await
+            .try_clone()
+            .await
+            .map_err(wire_error)?;
+        let slot = self.reserve_stdio()?;
+        Ok(context.register(RetainedStdioSend {
+            stdio: Mutex::new(clone),
+            _slot: slot,
+        }))
     }
 
     async fn handle_stdio_recv_read(
@@ -1311,12 +1313,19 @@ impl Connection {
             }
         };
         let mut send = context.respond_with_trailer(ResponseKind::StdioRecvRead(Ok(())));
-        let mut stdio = stdio.stdio.lock().await;
-        let mut source = io::BufReader::with_capacity(
-            len.clamp(1, STREAM_CHUNK_SIZE),
-            (&mut *stdio).take(len as u64),
-        );
-        if io::copy_buf(&mut source, &mut send).await.is_ok() {
+        let copied = {
+            let mut guard = stdio.stdio.lock().await;
+            let mut source = io::BufReader::with_capacity(
+                len.clamp(1, STREAM_CHUNK_SIZE),
+                (&mut *guard).take(len as u64),
+            );
+            io::copy_buf(&mut source, &mut send).await.is_ok()
+        };
+        // Released before the terminal fragment, as in `handle_file_read`:
+        // the peer may hand the endpoint to a child or close it as soon as
+        // the trailer ends, and both consume the endpoint.
+        drop(stdio);
+        if copied {
             send.finish();
         }
     }
@@ -1325,24 +1334,20 @@ impl Connection {
         &self,
         context: &CallContext<VfsProtocol>,
         stdio: Cite<StdioRecvMarker>,
-    ) -> ResponseKind {
-        let result = async {
-            let stdio = self.retained_stdio_recv(context, stdio)?;
-            let clone = stdio
-                .stdio
-                .lock()
-                .await
-                .try_clone()
-                .await
-                .map_err(wire_error)?;
-            let slot = self.reserve_stdio()?;
-            Ok(context.register(RetainedStdioRecv {
-                stdio: Mutex::new(clone),
-                _slot: slot,
-            }))
-        }
-        .await;
-        ResponseKind::StdioRecvClone(result)
+    ) -> Result<Gift<crate::session::StdioRecvMarker>, WireError> {
+        let stdio = self.retained_stdio_recv(context, stdio)?;
+        let clone = stdio
+            .stdio
+            .lock()
+            .await
+            .try_clone()
+            .await
+            .map_err(wire_error)?;
+        let slot = self.reserve_stdio()?;
+        Ok(context.register(RetainedStdioRecv {
+            stdio: Mutex::new(clone),
+            _slot: slot,
+        }))
     }
 
     async fn handle_open(
@@ -1406,12 +1411,21 @@ impl Connection {
             }
         };
         let mut send = context.respond_with_trailer(ResponseKind::FileRead(Ok(())));
-        let mut file = file.0.lock().await;
-        let mut source = io::BufReader::with_capacity(
-            len.clamp(1, STREAM_CHUNK_SIZE),
-            (&mut *file).take(len as u64),
-        );
-        if io::copy_buf(&mut source, &mut send).await.is_ok() {
+        let copied = {
+            let mut guard = file.0.lock().await;
+            let mut source = io::BufReader::with_capacity(
+                len.clamp(1, STREAM_CHUNK_SIZE),
+                (&mut *guard).take(len as u64),
+            );
+            io::copy_buf(&mut source, &mut send).await.is_ok()
+        };
+        // Release the file before the trailer's terminal fragment goes out.
+        // Finishing the trailer is what tells the peer this read is over, and
+        // the peer is entitled to close the file the moment it sees that; if
+        // we were still holding a reference at that point, its `FileClose`
+        // would find the file in use and fail.
+        drop(file);
+        if copied {
             send.finish();
         }
     }
@@ -1420,28 +1434,24 @@ impl Connection {
         &self,
         context: &mut CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
-    ) -> ResponseKind {
-        let result = async {
-            let file = self.retained_file(context, file)?;
-            let trailer = context.request_trailer().ok_or_else(|| {
-                wire_error(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "file write request is missing its data trailer",
-                ))
-            })?;
-            let mut trailer = io::BufReader::with_capacity(STREAM_CHUNK_SIZE, trailer);
-            let len = io::copy_buf(&mut trailer, &mut *file.0.lock().await)
-                .await
-                .map_err(wire_error)?;
-            usize::try_from(len).map_err(|_| {
-                wire_error(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "file trailer length does not fit in usize",
-                ))
-            })
-        }
-        .await;
-        ResponseKind::FileWrite(result)
+    ) -> Result<usize, WireError> {
+        let file = self.retained_file(context, file)?;
+        let trailer = context.request_trailer().ok_or_else(|| {
+            wire_error(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "file write request is missing its data trailer",
+            ))
+        })?;
+        let mut trailer = io::BufReader::with_capacity(STREAM_CHUNK_SIZE, trailer);
+        let len = io::copy_buf(&mut trailer, &mut *file.0.lock().await)
+            .await
+            .map_err(wire_error)?;
+        usize::try_from(len).map_err(|_| {
+            wire_error(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "file trailer length does not fit in usize",
+            ))
+        })
     }
 
     async fn handle_file_seek(
@@ -1449,26 +1459,18 @@ impl Connection {
         context: &CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
         position: io::SeekFrom,
-    ) -> ResponseKind {
-        let result = async {
-            let file = self.retained_file(context, file)?;
-            file.0.lock().await.seek(position).await.map_err(wire_error)
-        }
-        .await;
-        ResponseKind::FileSeek(result)
+    ) -> Result<u64, WireError> {
+        let file = self.retained_file(context, file)?;
+        file.0.lock().await.seek(position).await.map_err(wire_error)
     }
 
     async fn handle_file_flush(
         &self,
         context: &CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
-    ) -> ResponseKind {
-        let result = async {
-            let file = self.retained_file(context, file)?;
-            file.0.lock().await.flush().await.map_err(wire_error)
-        }
-        .await;
-        ResponseKind::FileFlush(result)
+    ) -> Result<(), WireError> {
+        let file = self.retained_file(context, file)?;
+        file.0.lock().await.flush().await.map_err(wire_error)
     }
 
     async fn handle_file_set_size(
@@ -1476,87 +1478,67 @@ impl Connection {
         context: &CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
         size: u64,
-    ) -> ResponseKind {
-        let result = async {
-            let file = self.retained_file(context, file)?;
-            file.0.lock().await.set_size(size).await.map_err(wire_error)
-        }
-        .await;
-        ResponseKind::FileSetSize(result)
+    ) -> Result<(), WireError> {
+        let file = self.retained_file(context, file)?;
+        file.0.lock().await.set_size(size).await.map_err(wire_error)
     }
 
     async fn handle_file_to_stdio_send(
         &self,
         context: &CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
-    ) -> ResponseKind {
-        let result = async {
-            let file = self.retained_file(context, file)?;
-            let stdio = file
-                .0
-                .lock()
-                .await
-                .to_stdio_send()
-                .await
-                .map_err(wire_error)?;
-            let slot = self.reserve_stdio()?;
-            Ok(context.register(RetainedStdioSend {
-                stdio: Mutex::new(stdio),
-                _slot: slot,
-            }))
-        }
-        .await;
-        ResponseKind::FileToStdioSend(result)
+    ) -> Result<Gift<crate::session::StdioSendMarker>, WireError> {
+        let file = self.retained_file(context, file)?;
+        let stdio = file
+            .0
+            .lock()
+            .await
+            .to_stdio_send()
+            .await
+            .map_err(wire_error)?;
+        let slot = self.reserve_stdio()?;
+        Ok(context.register(RetainedStdioSend {
+            stdio: Mutex::new(stdio),
+            _slot: slot,
+        }))
     }
 
     async fn handle_file_to_stdio_recv(
         &self,
         context: &CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
-    ) -> ResponseKind {
-        let result = async {
-            let file = self.retained_file(context, file)?;
-            let stdio = file
-                .0
-                .lock()
-                .await
-                .to_stdio_recv()
-                .await
-                .map_err(wire_error)?;
-            let slot = self.reserve_stdio()?;
-            Ok(context.register(RetainedStdioRecv {
-                stdio: Mutex::new(stdio),
-                _slot: slot,
-            }))
-        }
-        .await;
-        ResponseKind::FileToStdioRecv(result)
+    ) -> Result<Gift<crate::session::StdioRecvMarker>, WireError> {
+        let file = self.retained_file(context, file)?;
+        let stdio = file
+            .0
+            .lock()
+            .await
+            .to_stdio_recv()
+            .await
+            .map_err(wire_error)?;
+        let slot = self.reserve_stdio()?;
+        Ok(context.register(RetainedStdioRecv {
+            stdio: Mutex::new(stdio),
+            _slot: slot,
+        }))
     }
 
     async fn handle_file_metadata(
         &self,
         context: &CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
-    ) -> ResponseKind {
-        let result = async {
-            let file = self.retained_file(context, file)?;
-            file.0.lock().await.metadata().await.map_err(wire_error)
-        }
-        .await;
-        ResponseKind::FileMetadata(result)
+    ) -> Result<Metadata, WireError> {
+        let file = self.retained_file(context, file)?;
+        file.0.lock().await.metadata().await.map_err(wire_error)
     }
 
     async fn handle_file_fs_metadata(
         &self,
         context: &CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
-    ) -> ResponseKind {
-        let result = async {
-            let file = self.retained_file(context, file)?;
-            file.0.lock().await.fs_metadata().await.map_err(wire_error)
-        }
-        .await;
-        ResponseKind::FileFsMetadata(result)
+    ) -> Result<FsMetadata, WireError> {
+        let file = self.retained_file(context, file)?;
+        file.0.lock().await.fs_metadata().await.map_err(wire_error)
     }
 
     async fn handle_file_sec_desc(
@@ -1564,13 +1546,9 @@ impl Connection {
         context: &CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
         mask: dolang_winterop::security::SecInfo,
-    ) -> ResponseKind {
-        let result = async {
-            let file = self.retained_file(context, file)?;
-            file.0.lock().await.sec_desc(mask).await.map_err(wire_error)
-        }
-        .await;
-        ResponseKind::FileSecDesc(result)
+    ) -> Result<SecDesc, WireError> {
+        let file = self.retained_file(context, file)?;
+        file.0.lock().await.sec_desc(mask).await.map_err(wire_error)
     }
 
     async fn handle_file_acl(
@@ -1579,18 +1557,14 @@ impl Connection {
         file: Cite<FileMarker>,
         kind: AclKind,
         default: bool,
-    ) -> ResponseKind {
-        let result = async {
-            let file = self.retained_file(context, file)?;
-            file.0
-                .lock()
-                .await
-                .acl(kind, default)
-                .await
-                .map_err(wire_error)
-        }
-        .await;
-        ResponseKind::FileAcl(result)
+    ) -> Result<Option<Acl>, WireError> {
+        let file = self.retained_file(context, file)?;
+        file.0
+            .lock()
+            .await
+            .acl(kind, default)
+            .await
+            .map_err(wire_error)
     }
 
     async fn handle_file_set_acl(
@@ -1600,18 +1574,14 @@ impl Connection {
         kind: AclKind,
         acl: Option<Acl>,
         default: bool,
-    ) -> ResponseKind {
-        let result = async {
-            let file = self.retained_file(context, file)?;
-            file.0
-                .lock()
-                .await
-                .set_acl(kind, acl.as_ref(), default)
-                .await
-                .map_err(wire_error)
-        }
-        .await;
-        ResponseKind::FileSetAcl(result)
+    ) -> Result<(), WireError> {
+        let file = self.retained_file(context, file)?;
+        file.0
+            .lock()
+            .await
+            .set_acl(kind, acl.as_ref(), default)
+            .await
+            .map_err(wire_error)
     }
 
     async fn handle_file_set_sec_desc(
@@ -1619,18 +1589,14 @@ impl Connection {
         context: &CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
         sec_desc: SecDesc,
-    ) -> ResponseKind {
-        let result = async {
-            let file = self.retained_file(context, file)?;
-            file.0
-                .lock()
-                .await
-                .set_sec_desc(&sec_desc)
-                .await
-                .map_err(wire_error)
-        }
-        .await;
-        ResponseKind::FileSetSecDesc(result)
+    ) -> Result<(), WireError> {
+        let file = self.retained_file(context, file)?;
+        file.0
+            .lock()
+            .await
+            .set_sec_desc(&sec_desc)
+            .await
+            .map_err(wire_error)
     }
 
     async fn handle_file_xattrs(
@@ -1638,18 +1604,14 @@ impl Connection {
         context: &CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
         namespace: XattrNamespaceRequest,
-    ) -> ResponseKind {
-        let result = async {
-            let file = self.retained_file(context, file)?;
-            file.0
-                .lock()
-                .await
-                .xattrs(namespace.as_borrowed())
-                .await
-                .map_err(wire_error)
-        }
-        .await;
-        ResponseKind::FileXattrs(result)
+    ) -> Result<Vec<XattrEntry>, WireError> {
+        let file = self.retained_file(context, file)?;
+        file.0
+            .lock()
+            .await
+            .xattrs(namespace.as_borrowed())
+            .await
+            .map_err(wire_error)
     }
 
     async fn handle_file_xattr(
@@ -1658,31 +1620,23 @@ impl Connection {
         file: Cite<FileMarker>,
         name: String,
         namespace: Option<String>,
-    ) -> ResponseKind {
-        let result = async {
-            let file = self.retained_file(context, file)?;
-            file.0
-                .lock()
-                .await
-                .xattr(&name, namespace.as_deref())
-                .await
-                .map_err(wire_error)
-        }
-        .await;
-        ResponseKind::FileXattr(result)
+    ) -> Result<Vec<u8>, WireError> {
+        let file = self.retained_file(context, file)?;
+        file.0
+            .lock()
+            .await
+            .xattr(&name, namespace.as_deref())
+            .await
+            .map_err(wire_error)
     }
 
     async fn handle_file_streams(
         &self,
         context: &CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
-    ) -> ResponseKind {
-        let result = async {
-            let file = self.retained_file(context, file)?;
-            file.0.lock().await.streams().await.map_err(wire_error)
-        }
-        .await;
-        ResponseKind::FileStreams(result)
+    ) -> Result<Vec<StreamEntry>, WireError> {
+        let file = self.retained_file(context, file)?;
+        file.0.lock().await.streams().await.map_err(wire_error)
     }
 
     async fn handle_file_set_xattr(
@@ -1692,18 +1646,14 @@ impl Connection {
         name: String,
         namespace: Option<String>,
         value: Vec<u8>,
-    ) -> ResponseKind {
-        let result = async {
-            let file = self.retained_file(context, file)?;
-            file.0
-                .lock()
-                .await
-                .set_xattr(&name, namespace.as_deref(), &value)
-                .await
-                .map_err(wire_error)
-        }
-        .await;
-        ResponseKind::FileSetXattr(result)
+    ) -> Result<(), WireError> {
+        let file = self.retained_file(context, file)?;
+        file.0
+            .lock()
+            .await
+            .set_xattr(&name, namespace.as_deref(), &value)
+            .await
+            .map_err(wire_error)
     }
 
     async fn handle_file_remove_xattr(
@@ -1712,18 +1662,14 @@ impl Connection {
         file: Cite<FileMarker>,
         name: String,
         namespace: Option<String>,
-    ) -> ResponseKind {
-        let result = async {
-            let file = self.retained_file(context, file)?;
-            file.0
-                .lock()
-                .await
-                .remove_xattr(&name, namespace.as_deref())
-                .await
-                .map_err(wire_error)
-        }
-        .await;
-        ResponseKind::FileRemoveXattr(result)
+    ) -> Result<(), WireError> {
+        let file = self.retained_file(context, file)?;
+        file.0
+            .lock()
+            .await
+            .remove_xattr(&name, namespace.as_deref())
+            .await
+            .map_err(wire_error)
     }
 
     async fn handle_file_lock(

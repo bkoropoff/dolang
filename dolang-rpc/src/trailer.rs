@@ -910,6 +910,16 @@ impl RecvShared {
 
     pub(crate) fn discard(shared: &Mutex<Self>) {
         let mut inner = lock(shared);
+        // A trailer that has already ended stays ended. `Eof` and `Failed`
+        // are terminal facts about what arrived, not statements about what
+        // the consumer still wants, and overwriting one loses it for good:
+        // a consumer that discards and then reads — to observe the end
+        // rather than merely stop waiting for it — would be left waiting on
+        // an EOF that had already been recorded, and a discarded error
+        // would surface as a stall instead of a failure.
+        if matches!(inner.state, RecvState::Eof | RecvState::Failed) {
+            return;
+        }
         inner.state = RecvState::Discard;
         let driver = inner.driver_waker.take();
         drop(inner);
@@ -996,7 +1006,8 @@ impl TrailerRecv {
     }
 
     /// Stops waiting for any more of this trailer's bytes. Idempotent, and
-    /// safe to call even if the trailer has already finished.
+    /// safe to call even if the trailer has already finished or failed:
+    /// either outcome stands, and a subsequent read still observes it.
     pub fn discard(&mut self) {
         RecvShared::discard(&self.shared);
     }

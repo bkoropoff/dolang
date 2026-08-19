@@ -35,7 +35,7 @@ use tokio::net::windows::named_pipe::NamedPipeServer;
 #[cfg(all(docsrs, not(windows)))]
 struct NamedPipeServer;
 use tokio::{
-    io::{AsyncRead, AsyncSeek, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf},
+    io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf},
     task::JoinHandle,
 };
 
@@ -277,7 +277,19 @@ impl RemoteFile {
     }
 
     async fn cancel_pending(&mut self) {
-        self.read_body.take();
+        if let Some(mut body) = self.read_body.take() {
+            // Getting every byte we asked for isn't the end of the read: the
+            // peer holds the file until it commits the trailer's terminal
+            // fragment, so anything sent before we observe EOF here races an
+            // operation the peer still counts as in flight. What is left is
+            // bounded by the length this read asked for, so draining it is
+            // cheap; discarding instead would only trade those bytes for a
+            // round trip to tell the peer to stop sending them.
+            let mut sink = Vec::with_capacity(STREAM_CHUNK_SIZE);
+            while matches!(body.recv.read_buf(&mut sink).await, Ok(1..)) {
+                sink.clear();
+            }
+        }
         if let Some(mut pending) = self.write_body.take()
             && let Some(mut call) = pending.call.take()
         {
