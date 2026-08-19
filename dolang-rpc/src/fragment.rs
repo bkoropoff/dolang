@@ -676,6 +676,14 @@ pub(crate) struct Message {
 
 pub(crate) enum Event {
     None,
+    /// A message opened a payload that will span further fragments, so this
+    /// end is now holding a buffer for it. Reported so an endpoint can apply
+    /// its own admission policy before more arrives — see
+    /// [`Reassembler::payload_incomplete`], which this event announces a
+    /// change to.
+    PayloadIncomplete {
+        id: u64,
+    },
     Aborted {
         kind: Kind,
         id: u64,
@@ -732,8 +740,20 @@ pub(crate) struct Reassembler {
     limits: Limits,
     incomplete: HashMap<u64, Incomplete>,
     /// Number of `incomplete` entries still assembling their postcard
-    /// payload, i.e. not yet in their trailer phase. This — not
-    /// `incomplete.len()` — is what `max_concurrent_calls` bounds.
+    /// payload, i.e. not yet in their trailer phase. Read by endpoints
+    /// through [`Reassembler::payload_incomplete`].
+    ///
+    /// This, not `incomplete.len()`, is the counter `max_concurrent_calls` is
+    /// enforced against here: a trailer-phase entry holds no payload buffer
+    /// and may outlive its call, so counting it would cap long-lived trailers
+    /// at the call limit.
+    ///
+    /// It is not the only enforcement of that limit. This check is skipped for
+    /// a message that arrives whole in one fragment, which the server bounds
+    /// instead in `check_call_admission` — that one counts live calls, from
+    /// dispatch to response head. The client applies the same number to its
+    /// own outgoing calls (`active_calls`), as flow control rather than as a
+    /// protocol error.
     payload_phase: usize,
     /// Unretired trailer bytes across every open trailer, bounded by
     /// `Limits::trailer_session_window`. Shared with each trailer's
@@ -747,6 +767,17 @@ pub(crate) struct Reassembler {
 }
 
 impl Reassembler {
+    /// Messages whose postcard payload is still arriving.
+    ///
+    /// Half of the concurrency an endpoint is responsible for bounding: a
+    /// call is counted here until its payload completes and by the endpoint
+    /// itself from then until its response. The check below bounds this
+    /// count alone, which is all a reassembler can do on its own; an endpoint
+    /// that knows the other half enforces the sum.
+    pub(crate) fn payload_incomplete(&self) -> usize {
+        self.payload_phase
+    }
+
     pub(crate) fn new(limits: Limits, trailer_sink: Arc<dyn crate::trailer::TrailerSink>) -> Self {
         Self {
             limits,
@@ -1135,7 +1166,14 @@ impl Reassembler {
         if want_ack {
             return Ok(Event::Ack { id, message: None });
         }
-        Ok(Event::None)
+        // A payload that will span more fragments. Only its first fragment
+        // announces this: a later one adds to a buffer the endpoint already
+        // admitted.
+        Ok(if first {
+            Event::PayloadIncomplete { id }
+        } else {
+            Event::None
+        })
     }
 }
 
@@ -2029,18 +2067,30 @@ mod tests {
         let mut frame = FakeRecvFrame::new(bytes);
         let mut reassembler = new_reassembler(Limits::default());
 
-        for _ in 0..2 {
-            let header = read_fragment_header(&mut frame).await.unwrap();
-            assert!(matches!(
-                reassembler.accept(header, &mut frame).await.unwrap(),
-                Event::None
-            ));
-        }
+        // Only the opening fragment announces the message; the one after it
+        // adds to a buffer already accounted for.
+        let header = read_fragment_header(&mut frame).await.unwrap();
+        assert!(matches!(
+            reassembler.accept(header, &mut frame).await.unwrap(),
+            Event::PayloadIncomplete { id: 1 }
+        ));
+        assert_eq!(reassembler.payload_incomplete(), 1);
+        let header = read_fragment_header(&mut frame).await.unwrap();
+        assert!(matches!(
+            reassembler.accept(header, &mut frame).await.unwrap(),
+            Event::None
+        ));
+        assert_eq!(reassembler.payload_incomplete(), 1);
         let header = read_fragment_header(&mut frame).await.unwrap();
         let Event::Message(msg) = reassembler.accept(header, &mut frame).await.unwrap() else {
             panic!("LAST completes the message");
         };
         assert_eq!(&msg.payload[..], b"hello, world!");
+        assert_eq!(
+            reassembler.payload_incomplete(),
+            0,
+            "the completed message hands its accounting to the endpoint"
+        );
     }
 
     #[tokio::test]

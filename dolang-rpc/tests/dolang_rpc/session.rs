@@ -187,6 +187,73 @@ async fn concurrent_call_limit_withholds_requests_until_a_terminal_response() {
     assert_eq!(dispatched.load(Ordering::SeqCst), 2);
 }
 
+/// A request whose payload cannot be encoded is failed locally and never
+/// reaches the wire, so no response — and therefore no terminal event — ever
+/// comes back for it. Its call slot has to be reclaimed where the failure
+/// happens, or a client wedges permanently after `max_concurrent_calls` of
+/// them.
+#[tokio::test]
+async fn a_request_that_fails_to_encode_does_not_hold_its_call_slot() {
+    #[derive(Debug, Eq, PartialEq)]
+    struct Fallible(bool);
+
+    impl Serialize for Fallible {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            if self.0 {
+                return Err(serde::ser::Error::custom("this request cannot be encoded"));
+            }
+            serializer.serialize_bool(self.0)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for Fallible {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            Ok(Self(bool::deserialize(deserializer)?))
+        }
+    }
+
+    struct Fallible1;
+    impl Protocol for Fallible1 {
+        type Request = Fallible;
+        type Response = Fallible;
+    }
+
+    // A leaked slot leaves a later call queued for admission forever, and
+    // which call that is depends on the limit, so the bound goes around the
+    // whole test rather than around any one call.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            builder()
+                .server(server_io)
+                .await
+                .unwrap()
+                .bind::<Fallible1>()
+                .serve(async |context: CallContext<Fallible1>, _request| {
+                    context.respond(Fallible(false));
+                })
+                .await
+        });
+        let client = unbound_client_with_builder::<_, Fallible1>(
+            builder().max_concurrent_calls(1),
+            client_io,
+        )
+        .await;
+
+        for _ in 0..4 {
+            assert!(matches!(
+                client.call(Fallible(true)).await,
+                Err(Error::Serialize(_))
+            ));
+        }
+
+        let response = client.call(Fallible(false)).await.unwrap().into_response();
+        assert_eq!(response, Fallible(false));
+    })
+    .await
+    .expect("the failed requests must not have consumed the call limit");
+}
+
 #[tokio::test]
 async fn cancelling_a_call_waiting_for_admission_never_dispatches_it() {
     let (client_io, server_io) = tokio::io::duplex(4096);

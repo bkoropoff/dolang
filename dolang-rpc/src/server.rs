@@ -71,9 +71,7 @@ pub struct Server<P: Protocol> {
     receiver: transport::AnyReceiver,
     outgoing: mpsc::UnboundedSender<Message<P::Response>>,
     outgoing_rx: mpsc::UnboundedReceiver<Message<P::Response>>,
-    inner: Arc<Mutex<Inner>>,
-    session: Arc<Session>,
-    limits: Limits,
+    shared: Arc<Shared>,
     marker: PhantomData<fn() -> P>,
 }
 
@@ -146,6 +144,128 @@ impl<R: Send + 'static> crate::trailer::TrailerSink for mpsc::WeakUnboundedSende
     }
 }
 
+/// State the reader loop, the writer task, and every live handler share.
+///
+/// One `Arc` rather than a bundle of them, and held strongly by all three:
+/// nothing in here can keep the session alive on its own, because the ability
+/// to still get a message out is the `outgoing` sender, which stays outside
+/// it. Closing that channel is still what shuts the writer down.
+struct Shared {
+    inner: Mutex<Inner>,
+    session: Arc<Session>,
+    /// Send-side trailer credit shared by every outgoing response trailer on
+    /// this connection. Bounds what the peer must buffer for us in aggregate.
+    trailer_session: Arc<SessionWindow>,
+    limits: Limits,
+}
+
+impl Shared {
+    /// Maximum handle attachments one message may carry.
+    fn max_handles(&self) -> usize {
+        // A transport configured to attach no handles to a fragment can
+        // carry none at all.
+        #[cfg(unix)]
+        if self.limits.max_handles_per_fragment == 0 {
+            return 0;
+        }
+        self.limits.max_handles_per_message
+    }
+
+    /// Finishes handle encoding for message `id`, taking custody of whatever
+    /// this platform must keep alive once the message is on the wire.
+    ///
+    /// On macOS that is the file descriptors themselves, escrowed until the
+    /// peer acknowledges receipt. Every other unix passes them with the
+    /// fragment and is done with them.
+    #[cfg(unix)]
+    fn finish_handles(&self, id: u64, handles: EncodeHandles) -> transport::OutgoingHandles {
+        let handles = handles.finish();
+        #[cfg(target_os = "macos")]
+        if handles.needs_ack() {
+            self.inner.lock().unwrap().fd_escrow.register(id);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = id;
+        handles
+    }
+
+    /// Finishes handle encoding for message `_id`. Windows duplicates each
+    /// handle into the peer as it is encoded, so the originals are this
+    /// end's to close and nothing is escrowed.
+    #[cfg(windows)]
+    fn finish_handles(&self, _id: u64, handles: EncodeHandles) -> transport::OutgoingHandles {
+        let (handles, escrow) = handles.finish();
+        drop(escrow);
+        handles
+    }
+
+    /// Decodes a message payload, taking custody of every handle and opaque
+    /// reference it carries.
+    #[cfg(unix)]
+    fn decode<T: ::serde::de::DeserializeOwned>(
+        &self,
+        payload: &[u8],
+        handles: transport::ReceivedHandles,
+        _receiver: &transport::AnyReceiver,
+    ) -> Result<T, Error> {
+        decode_payload(
+            payload,
+            &mut session::SessionHandles {
+                inner: handles,
+                session: &self.session,
+            },
+        )
+    }
+
+    /// Decodes a message payload, taking custody of every handle and opaque
+    /// reference it carries. Windows handles are named by value in the
+    /// payload and duplicated out of the peer as they are decoded, rather
+    /// than arriving attached to the fragment, so `handles` is empty.
+    #[cfg(windows)]
+    fn decode<T: ::serde::de::DeserializeOwned>(
+        &self,
+        payload: &[u8],
+        _handles: transport::ReceivedHandles,
+        receiver: &transport::AnyReceiver,
+    ) -> Result<T, Error> {
+        decode_payload(
+            payload,
+            &mut DecodeHandles {
+                receiver,
+                session: &self.session,
+                count: 0,
+                max_handles: self.max_handles(),
+            },
+        )
+    }
+
+    /// Records the file descriptors for `id` that just reached the wire.
+    #[cfg(target_os = "macos")]
+    fn escrow_sent(&self, id: u64, fds: Vec<std::os::fd::OwnedFd>, done: bool) {
+        self.inner.lock().unwrap().fd_escrow.sent(id, fds, done);
+    }
+
+    /// Forgets the escrow for a message that will never reach the wire.
+    fn discard_unsent_escrow(&self, id: u64) {
+        #[cfg(target_os = "macos")]
+        self.inner.lock().unwrap().fd_escrow.discard_unsent(id);
+        #[cfg(not(target_os = "macos"))]
+        let _ = id;
+    }
+
+    /// Releases the escrow an `Ack` names, returning false when there is
+    /// none — which is every `Ack` on a platform that escrows nothing.
+    fn release_escrow(&self, id: u64) -> bool {
+        #[cfg(target_os = "macos")]
+        return self.inner.lock().unwrap().fd_escrow.release(id);
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = id;
+            false
+        }
+    }
+}
+
 struct Inner {
     outstanding: HashMap<u64, Cancellation>,
     shutdown: Option<oneshot::Sender<()>>,
@@ -158,15 +278,44 @@ struct Cancellation {
     abort: AbortHandle,
 }
 
+/// Refuses a fragment the peer had no business sending, before the
+/// reassembler can allocate anything for it.
+///
+/// Unlike the client's gate, this needs no id: a client never asks this end
+/// for anything, so a response in this direction names nothing at all.
+fn check_header(header: &fragment::FragmentHeader) -> Result<(), Error> {
+    if header.kind == Kind::Response {
+        return Err(Error::Protocol(
+            "server received a Response fragment".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Applies `max_concurrent_calls` to a call that is arriving or starting to
+/// arrive.
+///
+/// A concurrent call is one this end has begun receiving and has not yet
+/// answered, and it passes through two custodians on the way: the reassembler
+/// holds it while its payload is still fragmented, and `outstanding` holds it
+/// from dispatch until the response head. The limit is on the *sum* — the two
+/// counts are disjoint, since a message leaves payload phase in the same
+/// `accept` call that dispatches it — so neither custodian can enforce it
+/// alone, and checking them separately would admit twice the limit.
+///
+/// `incomplete` is the reassembler's count *including* the call being
+/// admitted, so callers add one for a call that has already left payload
+/// phase.
 fn check_call_admission(
     outstanding: &HashMap<u64, Cancellation>,
+    incomplete: usize,
     max_concurrent_calls: usize,
     id: u64,
 ) -> Result<(), Error> {
     if outstanding.contains_key(&id) {
         return Err(Error::Protocol(format!("duplicate active request id {id}")));
     }
-    if outstanding.len() >= max_concurrent_calls {
+    if outstanding.len() + incomplete > max_concurrent_calls {
         return Err(Error::Protocol("too many concurrent calls".into()));
     }
     Ok(())
@@ -184,20 +333,22 @@ impl<P: Protocol> Server<P> {
         limits: Limits,
     ) -> Self {
         let (outgoing, outgoing_rx) = mpsc::unbounded_channel();
-        let session = Session::new(Box::new(outgoing.downgrade()));
         Self {
             sender,
             receiver,
+            shared: Arc::new(Shared {
+                inner: Mutex::new(Inner {
+                    outstanding: HashMap::new(),
+                    shutdown: None,
+                    #[cfg(target_os = "macos")]
+                    fd_escrow: Default::default(),
+                }),
+                session: Session::new(Box::new(outgoing.downgrade())),
+                trailer_session: Arc::new(SessionWindow::new(limits.trailer_session_window)),
+                limits,
+            }),
             outgoing,
             outgoing_rx,
-            session,
-            inner: Arc::new(Mutex::new(Inner {
-                outstanding: HashMap::new(),
-                shutdown: None,
-                #[cfg(target_os = "macos")]
-                fd_escrow: Default::default(),
-            })),
-            limits,
             marker: PhantomData,
         }
     }
@@ -218,22 +369,13 @@ impl<P: Protocol> Server<P> {
             mut receiver,
             outgoing,
             outgoing_rx,
-            inner,
-            session,
-            limits,
+            shared,
             marker: _,
         } = self;
-        let trailer_session = Arc::new(SessionWindow::new(limits.trailer_session_window));
-        let mut writer = tokio::spawn(writer::<P>(
-            sender,
-            outgoing_rx,
-            inner.clone(),
-            session.clone(),
-            trailer_session.clone(),
-            limits,
-        ));
+        let limits = shared.limits;
+        let mut writer = tokio::spawn(writer::<P>(sender, outgoing_rx, shared.clone()));
         let (shutdown, mut shutdown_requested) = oneshot::channel();
-        inner.lock().unwrap().shutdown = Some(shutdown);
+        shared.inner.lock().unwrap().shutdown = Some(shutdown);
         let handler = Arc::new(handler);
         let mut reassembler = fragment::Reassembler::new(limits, Arc::new(outgoing.downgrade()));
         let mut tasks = futures::stream::FuturesUnordered::new();
@@ -248,6 +390,7 @@ impl<P: Protocol> Server<P> {
             let complete = {
                 let step = async {
                     let header = fragment::read_fragment_header(&mut frame).await?;
+                    check_header(&header)?;
                     reassembler.accept(header, &mut frame).await
                 };
                 tokio::pin!(step);
@@ -272,6 +415,20 @@ impl<P: Protocol> Server<P> {
             };
             let (message, live_trailer) = match complete {
                 fragment::Event::None => (None, None),
+                // A request has started arriving. It occupies the same
+                // budget as one already dispatched, so it is admitted on the
+                // same rule, at the earliest point this end knows about it.
+                fragment::Event::PayloadIncomplete { id } => {
+                    if let Err(error) = check_call_admission(
+                        &shared.inner.lock().unwrap().outstanding,
+                        reassembler.payload_incomplete(),
+                        limits.max_concurrent_calls,
+                        id,
+                    ) {
+                        break 'main (Err(error), false, false);
+                    }
+                    (None, None)
+                }
                 fragment::Event::Aborted {
                     kind: Kind::Request,
                     ..
@@ -290,15 +447,19 @@ impl<P: Protocol> Server<P> {
                     let _ = outgoing.send(Message::Ack { id });
                     (message, None)
                 }
-                fragment::Event::Trailer { shared, len, .. } => (None, Some((shared, len))),
+                fragment::Event::Trailer {
+                    shared: trailer,
+                    len,
+                    ..
+                } => (None, Some((trailer, len))),
                 fragment::Event::Release { id, count } => {
-                    session.release(id, count);
+                    shared.session.release(id, count);
                     (None, None)
                 }
                 fragment::Event::Credit { id, count } => {
                     // Applied here rather than routed through the writer;
                     // see the client's matching arm.
-                    trailer_session.refund(id, count as usize);
+                    shared.trailer_session.refund(id, count as usize);
                     (None, None)
                 }
             };
@@ -310,65 +471,44 @@ impl<P: Protocol> Server<P> {
                 trailer,
             }) = message
             {
-                #[cfg(windows)]
-                let _ = handles;
                 match kind {
                     Kind::Request => {
                         if let Err(error) = check_call_admission(
-                            &inner.lock().unwrap().outstanding,
+                            &shared.inner.lock().unwrap().outstanding,
+                            // This message has already left payload phase, so
+                            // it is no longer in the reassembler's count and
+                            // has to be added back.
+                            reassembler.payload_incomplete() + 1,
                             limits.max_concurrent_calls,
                             id,
                         ) {
                             break (Err(error), false, false);
                         }
-                        #[cfg(unix)]
-                        let request = decode_payload(
-                            &payload,
-                            &mut session::SessionHandles {
-                                inner: handles,
-                                session: &session,
-                            },
-                        );
-                        #[cfg(windows)]
-                        let request = decode_payload(
-                            &payload,
-                            &mut DecodeHandles {
-                                receiver: &receiver,
-                                session: &session,
-                                count: 0,
-                                max_handles: limits.max_handles_per_message,
-                            },
-                        );
-                        let request = match request {
+                        let request = match shared.decode(&payload, handles, &receiver) {
                             Ok(request) => request,
                             Err(error) => break (Err(error), false, false),
                         };
                         let trailer = trailer.map(TrailerRecv::new);
                         let handler = handler.clone();
-                        let task_inner = inner.clone();
-                        let task_session = session.clone();
+                        let task_shared = shared.clone();
                         let task_outgoing = outgoing.clone();
-                        let task_trailer_session = trailer_session.clone();
                         let (abort, registration) = AbortHandle::new_pair();
                         tasks.push(Abortable::new(
                             async move {
                                 let context = CallContext {
                                     id,
-                                    inner: task_inner.clone(),
-                                    session: task_session,
+                                    shared: task_shared,
                                     request_trailer: trailer,
                                     outgoing: task_outgoing,
                                     responded: false,
                                     shutdown_on_respond: false,
-                                    limits,
-                                    trailer_session: task_trailer_session,
                                     marker: PhantomData,
                                 };
                                 handler(context, request).await;
                             },
                             registration,
                         ));
-                        inner.lock().unwrap().outstanding.insert(
+                        shared.inner.lock().unwrap().outstanding.insert(
                             id,
                             Cancellation {
                                 signal: None,
@@ -377,7 +517,7 @@ impl<P: Protocol> Server<P> {
                         );
                     }
                     Kind::Cancel => {
-                        let mut state = inner.lock().unwrap();
+                        let mut state = shared.inner.lock().unwrap();
                         if let Some(signal) = state
                             .outstanding
                             .get_mut(&id)
@@ -394,24 +534,15 @@ impl<P: Protocol> Server<P> {
                         let _ = outgoing.send(Message::PeerDiscarded { id });
                     }
                     Kind::Ack => {
-                        #[cfg(target_os = "macos")]
-                        if !inner.lock().unwrap().fd_escrow.release(id) {
+                        if !shared.release_escrow(id) {
                             break (
                                 Err(Error::Protocol(format!(
-                                    "Ack for response {id} with no active file descriptor escrow"
+                                    "Ack for response {id} with no active escrow"
                                 ))),
                                 false,
                                 false,
                             );
                         }
-                        #[cfg(not(target_os = "macos"))]
-                        break (
-                            Err(Error::Protocol(format!(
-                                "Ack for response {id} with no active escrow"
-                            ))),
-                            false,
-                            false,
-                        );
                     }
                     _ => {
                         break (
@@ -422,14 +553,14 @@ impl<P: Protocol> Server<P> {
                     }
                 }
             }
-            if let Some((shared, len)) = live_trailer {
+            if let Some((trailer, len)) = live_trailer {
                 let frame = receiver.recv();
                 // SAFETY: the lease retains the receiver borrow and clears
                 // the erased token before it ends.
-                let lease = unsafe { RecvShared::grant(&shared, frame, len) };
+                let lease = unsafe { RecvShared::grant(&trailer, frame, len) };
                 let result = loop {
                     tokio::select! {
-                        result = RecvShared::wait_fragment(&shared) => break result,
+                        result = RecvShared::wait_fragment(&trailer) => break result,
                         Some(_) = tasks.next(), if !tasks.is_empty() => continue,
                         _ = &mut shutdown_requested => break 'main (Ok(()), false, true),
                         result = &mut writer => {
@@ -490,11 +621,9 @@ impl<P: Protocol> Server<P> {
 async fn writer<P: Protocol>(
     mut sender: transport::AnySender,
     mut outgoing: mpsc::UnboundedReceiver<Message<P::Response>>,
-    inner: Arc<Mutex<Inner>>,
-    session: Arc<Session>,
-    trailer_session: Arc<SessionWindow>,
-    limits: Limits,
+    shared: Arc<Shared>,
 ) -> Result<(), Error> {
+    let limits = shared.limits;
     let mut scheduler = fragment::Scheduler::new(&limits);
     // Holding a clone of `outgoing`'s sender half (the local `outgoing` in
     // `serve`, or a `CallContext`'s) is what represents the ability to
@@ -511,16 +640,7 @@ async fn writer<P: Protocol>(
                     closed = true;
                     continue;
                 };
-                admit::<P>(
-                    &mut sender,
-                    &mut scheduler,
-                    &inner,
-                    &session,
-                    &trailer_session,
-                    &limits,
-                    message,
-                )
-                .await?;
+                admit::<P>(&mut sender, &mut scheduler, &shared, message).await?;
             }
             // Not raced against anything — see the matching comment in
             // client.rs's writer loop. A dropped send future could leave a
@@ -533,7 +653,7 @@ async fn writer<P: Protocol>(
                     fragment::AdvanceOutcome::None | fragment::AdvanceOutcome::Aborted(_) => {}
                     #[cfg(target_os = "macos")]
                     fragment::AdvanceOutcome::Escrow { id, fds, handles_done } => {
-                        inner.lock().unwrap().fd_escrow.sent(id, fds, handles_done);
+                        shared.escrow_sent(id, fds, handles_done);
                     }
                 }
                 // Flush anything sent by the scheduler
@@ -548,28 +668,15 @@ async fn writer<P: Protocol>(
 async fn admit<P: Protocol>(
     sender: &mut transport::AnySender,
     scheduler: &mut fragment::Scheduler,
-    inner: &Arc<Mutex<Inner>>,
-    session: &Arc<Session>,
-    trailer_session: &Arc<SessionWindow>,
-    limits: &Limits,
+    shared: &Arc<Shared>,
     message: Message<P::Response>,
 ) -> Result<(), Error> {
-    #[cfg(not(target_os = "macos"))]
-    let _ = inner;
     match message {
         Message::Response { id, value, trailer } => {
-            #[cfg(unix)]
-            let max_handles = if limits.max_handles_per_fragment == 0 {
-                0
-            } else {
-                limits.max_handles_per_message
-            };
-            #[cfg(windows)]
-            let max_handles = limits.max_handles_per_message;
             let mut ledger = session::Ledger::default();
             let mut put_handles = session::SessionFrame {
-                inner: EncodeHandles::new(sender, max_handles),
-                session,
+                inner: EncodeHandles::new(sender, shared.max_handles()),
+                session: &shared.session,
                 ledger: &mut ledger,
             };
             let payload = match encode_payload(&value, &mut put_handles) {
@@ -582,17 +689,7 @@ async fn admit<P: Protocol>(
                     return Err(error);
                 }
             };
-            let put_handles = put_handles.inner;
-            #[cfg(unix)]
-            let handles = put_handles.finish();
-            #[cfg(target_os = "macos")]
-            if handles.needs_ack() {
-                inner.lock().unwrap().fd_escrow.register(id);
-            }
-            #[cfg(windows)]
-            let (handles, escrow) = put_handles.finish();
-            #[cfg(windows)]
-            drop(escrow);
+            let handles = shared.finish_handles(id, put_handles.inner);
             scheduler.admit_message(Kind::Response, id, payload, handles, trailer, ledger);
         }
         Message::Error { id } => scheduler.admit_empty(Kind::Error, id),
@@ -602,9 +699,8 @@ async fn admit<P: Protocol>(
                 if started {
                     scheduler.admit_abort(id);
                 }
-                #[cfg(target_os = "macos")]
                 if !started {
-                    inner.lock().unwrap().fd_escrow.discard_unsent(id);
+                    shared.discard_unsent_escrow(id);
                 }
             }
         },
@@ -612,7 +708,7 @@ async fn admit<P: Protocol>(
         Message::PeerDiscarded { id } => {
             // The peer will never credit what it just threw away; see the
             // client's matching arm.
-            trailer_session.settle(id);
+            shared.trailer_session.settle(id);
             scheduler.discard_active_trailer(id);
         }
         Message::Ack { id } => scheduler.admit_empty(Kind::Ack, id),
@@ -627,16 +723,13 @@ async fn admit<P: Protocol>(
 /// A context is not cloneable and must be consumed to send a response.
 pub struct CallContext<P: Protocol> {
     id: u64,
-    inner: Arc<Mutex<Inner>>,
-    session: Arc<Session>,
+    shared: Arc<Shared>,
     request_trailer: Option<TrailerRecv>,
+    /// A strong sender, so a live handler keeps the writer's channel — and
+    /// with it the connection — open until it has answered.
     outgoing: mpsc::UnboundedSender<Message<P::Response>>,
     responded: bool,
     shutdown_on_respond: bool,
-    limits: Limits,
-    /// Send-side trailer credit shared by every outgoing response trailer on
-    /// this connection.
-    trailer_session: Arc<SessionWindow>,
     marker: PhantomData<fn() -> P>,
 }
 
@@ -689,7 +782,12 @@ impl<P: Protocol> CallContext<P> {
     pub fn respond(mut self, response: P::Response) {
         drop(self.request_trailer.take());
         self.responded = true;
-        self.inner.lock().unwrap().outstanding.remove(&self.id);
+        self.shared
+            .inner
+            .lock()
+            .unwrap()
+            .outstanding
+            .remove(&self.id);
         let _ = self.outgoing.send(Message::Response {
             id: self.id,
             value: response,
@@ -711,11 +809,16 @@ impl<P: Protocol> CallContext<P> {
         let shared = SendShared::new(
             Kind::Response,
             self.id,
-            &self.limits,
-            self.trailer_session.clone(),
+            &self.shared.limits,
+            self.shared.trailer_session.clone(),
         );
         self.responded = true;
-        self.inner.lock().unwrap().outstanding.remove(&self.id);
+        self.shared
+            .inner
+            .lock()
+            .unwrap()
+            .outstanding
+            .remove(&self.id);
         let _ = self.outgoing.send(Message::Response {
             id: self.id,
             value: response,
@@ -736,7 +839,7 @@ impl<P: Protocol> CallContext<P> {
 
     fn finish_shutdown(&self) {
         if self.shutdown_on_respond
-            && let Some(shutdown) = self.inner.lock().unwrap().shutdown.take()
+            && let Some(shutdown) = self.shared.inner.lock().unwrap().shutdown.take()
         {
             let _ = shutdown.send(());
         }
@@ -756,18 +859,25 @@ impl<P: Protocol> CallContext<P> {
     {
         struct Reset {
             id: u64,
-            inner: Arc<Mutex<Inner>>,
+            shared: Arc<Shared>,
         }
         impl Drop for Reset {
             fn drop(&mut self) {
-                if let Some(cancel) = self.inner.lock().unwrap().outstanding.get_mut(&self.id) {
+                if let Some(cancel) = self
+                    .shared
+                    .inner
+                    .lock()
+                    .unwrap()
+                    .outstanding
+                    .get_mut(&self.id)
+                {
                     cancel.signal = None;
                 }
             }
         }
         let (signal, cancelled) = oneshot::channel();
         {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.shared.inner.lock().unwrap();
             let cancel = inner
                 .outstanding
                 .get_mut(&self.id)
@@ -777,7 +887,7 @@ impl<P: Protocol> CallContext<P> {
         }
         let _reset = Reset {
             id: self.id,
-            inner: self.inner.clone(),
+            shared: self.shared.clone(),
         };
         let future = operation(&mut *self);
         tokio::pin!(future);
@@ -807,7 +917,7 @@ impl<P: Protocol> CallContext<P> {
     /// `T::Marker` on this session. A marker is the only type information the
     /// wire carries, so it must name exactly one resource type.
     pub fn register<T: OpaqueResource>(&self, value: T) -> Gift<T::Marker> {
-        self.session.register(value)
+        self.shared.session.register(value)
     }
 
     /// Acquires a typed shared guard for a registered opaque resource.
@@ -829,7 +939,7 @@ impl<P: Protocol> CallContext<P> {
         &self,
         value: Cite<T::Marker>,
     ) -> Result<OpaqueGuard<T>, InvalidOpaque> {
-        self.session.acquire(value)
+        self.shared.session.acquire(value)
     }
 
     /// Empties a typed opaque resource, returning it when no acquired guards
@@ -852,14 +962,19 @@ impl<P: Protocol> CallContext<P> {
         &self,
         value: Cite<T::Marker>,
     ) -> Result<Option<T>, InvalidOpaque> {
-        self.session.unregister::<T>(value)
+        self.shared.session.unregister::<T>(value)
     }
 }
 
 impl<P: Protocol> Drop for CallContext<P> {
     fn drop(&mut self) {
         if !self.responded {
-            self.inner.lock().unwrap().outstanding.remove(&self.id);
+            self.shared
+                .inner
+                .lock()
+                .unwrap()
+                .outstanding
+                .remove(&self.id);
             let _ = self.outgoing.send(Message::Error { id: self.id });
         }
     }
@@ -882,25 +997,59 @@ mod tests {
         }
     }
 
+    /// The gate in front of the reassembler: nobody calls a client, so a
+    /// response arriving here answers nothing.
+    #[test]
+    fn header_gate_refuses_responses() {
+        let header = |kind| fragment::FragmentHeader {
+            flags: fragment::Flags::FIRST | fragment::Flags::LAST,
+            kind,
+            id: 7,
+            payload_len: 0,
+        };
+        assert!(matches!(
+            check_header(&header(Kind::Response)),
+            Err(Error::Protocol(_))
+        ));
+        assert!(check_header(&header(Kind::Request)).is_ok());
+        assert!(check_header(&header(Kind::Cancel)).is_ok());
+    }
+
     #[test]
     fn call_admission_rejects_excess_and_duplicate_requests() {
         let mut outstanding = HashMap::new();
-        assert!(check_call_admission(&outstanding, 1, 7).is_ok());
+        assert!(check_call_admission(&outstanding, 1, 1, 7).is_ok());
         outstanding.insert(7, cancellation());
         assert!(matches!(
-            check_call_admission(&outstanding, 1, 8),
+            check_call_admission(&outstanding, 1, 1, 8),
             Err(Error::Protocol(message)) if message == "too many concurrent calls"
         ));
         assert!(matches!(
-            check_call_admission(&outstanding, 2, 7),
+            check_call_admission(&outstanding, 1, 2, 7),
             Err(Error::Protocol(message)) if message == "duplicate active request id 7"
+        ));
+    }
+
+    /// The two halves share one budget: a call still arriving counts against
+    /// the same limit as one already dispatched, so neither half may be
+    /// admitted on its own count.
+    #[test]
+    fn call_admission_counts_arriving_and_dispatched_calls_together() {
+        let mut outstanding = HashMap::new();
+        outstanding.insert(7, cancellation());
+        // One dispatched, one arriving, limit of two: exactly full, and the
+        // arriving one is what the count already includes.
+        assert!(check_call_admission(&outstanding, 1, 2, 8).is_ok());
+        assert!(matches!(
+            check_call_admission(&outstanding, 2, 2, 8),
+            Err(Error::Protocol(message)) if message == "too many concurrent calls"
         ));
     }
 
     #[test]
     fn zero_call_limit_rejects_the_first_request() {
         assert!(matches!(
-            check_call_admission(&HashMap::new(), 0, 0),
+            check_call_admission(&HashMap::new(), 1, 0, 0),
             Err(Error::Protocol(message)) if message == "too many concurrent calls"
         ));
     }

@@ -422,21 +422,42 @@ subsequent atomic ones — this keeps fragment sizes adaptive to what the
 transport can actually accept in one write, and is intentionally
 future-extensible to a peer-signaled throttling hint.
 
-`max_concurrent_calls` bounds requests awaiting terminal responses. The client
-writer leaves excess requests unencoded in its local queue and continues
-sending control fragments. A slot starts before request serialization and ends
-on `Response`/`Error`, or after an ordered abort for a request that never
-reached dispatch. The server counts live `CallContext`s and treats an excess
-request as a protocol violation.
+`max_concurrent_calls` bounds calls in flight, counted from a request's first
+fragment to its response. The client writer leaves excess requests unencoded
+in its local queue and continues sending control fragments. A slot is taken
+where the request reaches the scheduler and released on `Response`/`Error`, or
+on an ordered abort for a request that never reached dispatch — never before
+the request goes out, so a request that fails to encode cannot strand one.
 
-The same number bounds how many messages may be mid-reassembly, which is a
-policy statement as much as a limit: a message is incomplete only while its
-postcard payload is being fragmented, and that always happens within a call in
-both directions, so it would be strange to admit more messages than can ever
-become calls. It is not redundant with the dispatch-time check, though —
-`check_call_admission` counts live `CallContext`s, so a request that never
-sends its `LAST` fragment is counted nowhere by it, and the reassembler's
-check is what actually bounds that.
+On the server the same span has two custodians. The reassembler holds a call
+while its payload is still arriving (`Reassembler::payload_incomplete`); the
+server holds it from dispatch to the response head (`outstanding`). The two
+are disjoint — a message leaves payload phase in the same `accept` call that
+dispatches it — so the limit is on their **sum**, and neither count can
+enforce it alone: separate budgets would admit twice the limit, and twice the
+worst-case reassembly memory that sizes the default.
+
+`check_call_admission` therefore takes both numbers, and runs at the two
+points where the sum can grow: `Event::PayloadIncomplete`, which the
+reassembler emits when a message opens a payload that will span more
+fragments, and dispatch. A call moving from one custodian to the other leaves
+the sum unchanged, so the transition never trips it. Single-fragment requests
+never enter payload phase at all and are admitted at dispatch alone.
+
+The client needs none of this. It answers no calls, and its header gate
+(below) refuses any fragment that does not belong to a call it made, so its
+reassembler holds at most one entry per live call — already bounded where
+calls are issued.
+
+### Header Gates
+
+Each reader validates a fragment header against its own direction before
+handing the frame to the reassembler, so an inadmissible fragment costs no
+buffer at all. A client refuses any `Request`, and any first `Response`
+fragment naming an id with no call outstanding — ids are minted locally, so
+one that names no live call is fabricated. A server refuses any `Response`.
+Later fragments are not gated: they name a message this end already accepted,
+and the reassembler rejects an id it has no entry for.
 
 Messages that have finished their payload and entered their **trailer phase**
 are excluded from that count, on both the receiving `Reassembler` and the

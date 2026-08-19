@@ -183,13 +183,13 @@ impl Builder {
         self
     }
 
-    /// Sets the maximum number of requests awaiting terminal responses.
+    /// Sets the maximum number of concurrent calls, counted from a request's
+    /// first fragment to its response.
     ///
-    /// This doubles as the bound on messages still being reassembled, since a
-    /// message is only incomplete while its postcard payload is being
-    /// fragmented and that always happens within a call. Messages that have
-    /// entered their trailer phase are excluded — a trailer may outlive its
-    /// call, and is bounded by
+    /// Requests still being reassembled count against it alongside those
+    /// already dispatched, so the two together can never exceed this.
+    /// Messages that have entered their trailer phase are excluded — a
+    /// trailer may outlive its call, and is bounded by
     /// [`trailer_session_window`](Self::trailer_session_window) instead.
     ///
     /// Defaults to 128; the peer and local endpoint use the smaller advertised
