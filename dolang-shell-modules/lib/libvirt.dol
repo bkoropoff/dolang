@@ -197,9 +197,12 @@ def raw_undefine name connect_uri ...options
     virsh $connect_uri undefine $name ...options
 
 def copy_chunks input output indicator
-  for chunk = input
-    output.write $chunk
-    indicator.delta $chunk.len
+  strand.pipeline
+    do while let chunk = input.read(1024 * 1024)
+      strand.put $chunk
+    do for chunk = input
+      output.write $chunk
+      indicator.delta $chunk.len
 
 def payload_directory user
   "/home/$(user)/.dolang-libvirt-guest"
