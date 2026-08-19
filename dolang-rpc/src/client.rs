@@ -25,7 +25,7 @@ use crate::{
     fragment::{self, AbortOutcome, Event, Kind, Message, Reassembler, Scheduler, Trailer},
     serde::{decode_payload, encode_payload},
     session::{Ledger, Session, SessionFrame},
-    trailer::{RecvShared, SendShared, TrailerRecv, TrailerSend},
+    trailer::{RecvShared, SendShared, SessionWindow, TrailerRecv, TrailerSend, TrailerSink},
     transport::{self, EncodeHandles, Receiver, Sender},
 };
 #[cfg(windows)]
@@ -134,6 +134,12 @@ enum Outgoing<Q> {
         id: u64,
         count: u32,
     },
+    /// We retired `count` bytes of the response trailer on `id` and are
+    /// returning that much credit. Always results in a wire `Kind::Credit`.
+    Credit {
+        id: u64,
+        count: u32,
+    },
     /// A terminal response or error arrived for an active request.
     Terminal {
         id: u64,
@@ -146,6 +152,22 @@ impl<Q: Send + 'static> crate::session::ReleaseSink for mpsc::WeakUnboundedSende
         // writer is already gone and the peer's table dies with the session.
         if let Some(outgoing) = self.upgrade() {
             let _ = outgoing.send(Outgoing::Release { id, count });
+        }
+    }
+}
+
+impl<Q: Send + 'static> crate::trailer::TrailerSink for mpsc::WeakUnboundedSender<Outgoing<Q>> {
+    fn credit(&self, id: u64, count: u32) {
+        if let Some(outgoing) = self.upgrade() {
+            let _ = outgoing.send(Outgoing::Credit { id, count });
+        }
+    }
+
+    fn discard(&self, id: u64) {
+        // Reached from `TrailerRecv::drop`, so a departed channel just means
+        // the connection is already gone and the peer has nothing to stop.
+        if let Some(outgoing) = self.upgrade() {
+            let _ = outgoing.send(Outgoing::DiscardTrailer { id });
         }
     }
 }
@@ -166,6 +188,9 @@ struct Inner<P: Protocol> {
     #[cfg(target_os = "macos")]
     fd_escrow: Mutex<crate::escrow::FdEscrow>,
     session: Arc<Session>,
+    /// Send-side trailer credit shared by every outgoing trailer on this
+    /// connection. Bounds what the peer must buffer for us in aggregate.
+    trailer_session: Arc<SessionWindow>,
     limits: Limits,
     #[cfg(windows)]
     _peer_process: Option<OwnedHandle>,
@@ -181,6 +206,10 @@ struct Writer<P: Protocol> {
 struct Reader<P: Protocol> {
     transport: transport::AnyReceiver,
     inner: Weak<Inner<P>>,
+    /// The route trailers use to credit and discard themselves. Weak, since
+    /// a `TrailerRecv` can outlive the session and must not keep the writer
+    /// alive just to say it is going away.
+    trailer_sink: Arc<dyn TrailerSink>,
     limits: Limits,
 }
 
@@ -270,6 +299,7 @@ impl<P: Protocol> Client<P> {
     ) -> Self {
         let (outgoing, outgoing_rx) = mpsc::unbounded_channel();
         let session = Session::new(Box::new(outgoing.downgrade()));
+        let trailer_sink = outgoing.downgrade();
         let inner = Arc::new(Inner {
             outgoing: Mutex::new(Some(outgoing)),
             pending: Mutex::new(HashMap::new()),
@@ -280,6 +310,7 @@ impl<P: Protocol> Client<P> {
             #[cfg(target_os = "macos")]
             fd_escrow: Mutex::new(Default::default()),
             session,
+            trailer_session: Arc::new(SessionWindow::new(limits.trailer_session_window)),
             limits,
             #[cfg(windows)]
             _peer_process: peer_process,
@@ -298,6 +329,7 @@ impl<P: Protocol> Client<P> {
             Reader {
                 transport: receiver,
                 inner: Arc::downgrade(&inner),
+                trailer_sink: Arc::new(trailer_sink),
                 limits,
             }
             .run(reader_stop),
@@ -356,7 +388,12 @@ impl<P: Protocol> Client<P> {
     /// cancels the partially sent request.
     pub fn call_with_trailer(&self, request: P::Request) -> TrailerSend<Call<P>> {
         let ((id, rx, cancel_sent), shared) = self.begin(|id| {
-            let shared = SendShared::new(Kind::Request, id, &self.inner.limits);
+            let shared = SendShared::new(
+                Kind::Request,
+                id,
+                &self.inner.limits,
+                self.inner.trailer_session.clone(),
+            );
             (
                 Outgoing::Request {
                     id,
@@ -432,7 +469,9 @@ pub(crate) fn validate_peer_process(
 /// A completed call's response and its optional raw-byte trailer.
 ///
 /// Use [`into_response`](Self::into_response) when the trailer is not needed,
-/// or [`into_response_trailer`](Self::into_response_trailer) to retain it.
+/// or [`into_response_trailer`](Self::into_response_trailer) to retain it —
+/// or [`into_response_trailer_manual_credit`](Self::into_response_trailer_manual_credit)
+/// to retain it and take charge of returning its credit.
 pub struct CallResult<R> {
     response: R,
     trailer: Option<TrailerRecv>,
@@ -447,6 +486,26 @@ impl<R> CallResult<R> {
     /// Decomposes into the response and its readable trailer, if present.
     pub fn into_response_trailer(self) -> (R, Option<TrailerRecv>) {
         (self.response, self.trailer)
+    }
+
+    /// Decomposes into the response and its trailer in manual-credit mode.
+    ///
+    /// The consumer then owes the peer an explicit
+    /// [`TrailerRecv::release`](crate::trailer::TrailerRecv::release) for
+    /// every chunk it finishes with, instead of credit being returned on
+    /// read — worth it when the bytes are handed somewhere slower than this
+    /// process, so the peer's send rate follows the real drain rate. Read
+    /// [`release`](crate::trailer::TrailerRecv::release) first: manual mode
+    /// moves a deadlock rule into calling code.
+    ///
+    /// The mode is fixed here rather than switchable afterwards, so a
+    /// trailer cannot be half auto-credited and half not.
+    pub fn into_response_trailer_manual_credit(self) -> (R, Option<TrailerRecv>) {
+        let mut trailer = self.trailer;
+        if let Some(trailer) = trailer.as_mut() {
+            trailer.set_manual_credit();
+        }
+        (self.response, trailer)
     }
 }
 
@@ -536,6 +595,12 @@ impl<P: Protocol> Writer<P> {
                 Ok(())
             }
             Outgoing::PeerDiscarded { id } => {
+                // The peer will never credit what it just threw away, so
+                // settle by id rather than through the send, which may
+                // already have finished and left the scheduler.
+                if let Some(inner) = self.inner.upgrade() {
+                    inner.trailer_session.settle(id);
+                }
                 scheduler.discard_active_trailer(id);
                 Ok(())
             }
@@ -545,6 +610,10 @@ impl<P: Protocol> Writer<P> {
             }
             Outgoing::Release { id, count } => {
                 scheduler.admit_release(id, count);
+                Ok(())
+            }
+            Outgoing::Credit { id, count } => {
+                scheduler.admit_credit(id, count);
                 Ok(())
             }
             Outgoing::Terminal { .. } => unreachable!("handled by the writer loop"),
@@ -775,14 +844,12 @@ impl<P: Protocol> Reader<P> {
             Kind::Response => {
                 // Decoding happens here, in the reader task, *before*
                 // `complete` discovers whether anyone still wants this
-                // response — and that ordering is load-bearing, not
-                // incidental. Decoding is what mirrors any opaque the payload
+                // response. Decoding is what mirrors any opaque the payload
                 // carries; the resulting `CallResult` is then dropped
                 // normally when the call was cancelled, which releases those
                 // references back to the peer. Skipping the decode for a
                 // response nobody is waiting on would look like an
-                // optimization and would silently leak every handle in it —
-                // on a VFS pipe, a leak that hangs shutdown forever.
+                // optimization and would silently leak every handle in it.
                 #[cfg(unix)]
                 let response = decode_payload(
                     &payload,
@@ -823,7 +890,7 @@ impl<P: Protocol> Reader<P> {
     }
 
     async fn run(mut self, mut shutdown: oneshot::Receiver<()>) {
-        let mut reassembler = Reassembler::new(self.limits);
+        let mut reassembler = Reassembler::new(self.limits, self.trailer_sink.clone());
         loop {
             let mut frame = self.transport.recv();
             let header = tokio::select! {
@@ -886,15 +953,7 @@ impl<P: Protocol> Reader<P> {
                         return;
                     }
                 }
-                Event::Trailer {
-                    id,
-                    shared,
-                    len,
-                    notify_discard,
-                } => {
-                    if notify_discard && let Some(inner) = self.inner.upgrade() {
-                        inner.send(Outgoing::DiscardTrailer { id });
-                    }
+                Event::Trailer { shared, len, .. } => {
                     let frame = self.transport.recv();
                     // SAFETY: the lease retains the receiver borrow and
                     // clears the erased token before it ends.
@@ -908,6 +967,18 @@ impl<P: Protocol> Reader<P> {
                 Event::Release { id, count } => {
                     if let Some(inner) = self.inner.upgrade() {
                         inner.session.release(id, count);
+                    }
+                }
+                Event::Credit { id, count } => {
+                    // Applied here rather than routed through the writer:
+                    // the pool is shared state on `Inner`, and the refund
+                    // needs nothing the writer owns. It is keyed by id and
+                    // lands whether or not the send still exists, since a
+                    // trailer's last credits routinely arrive after it has
+                    // finished and left the scheduler, and dropping those
+                    // would shrink the pool on every transfer.
+                    if let Some(inner) = self.inner.upgrade() {
+                        inner.trailer_session.refund(id, count as usize);
                     }
                 }
             }
@@ -948,6 +1019,7 @@ mod tests {
             #[cfg(target_os = "macos")]
             fd_escrow: Mutex::new(Default::default()),
             session: Session::new(Box::new(outgoing.downgrade())),
+            trailer_session: Arc::new(SessionWindow::new(Limits::default().trailer_session_window)),
             limits: Limits::default(),
             #[cfg(windows)]
             _peer_process: None,
@@ -1007,6 +1079,7 @@ mod tests {
             #[cfg(target_os = "macos")]
             fd_escrow: Mutex::new(Default::default()),
             session: Session::new(Box::new(outgoing.downgrade())),
+            trailer_session: Arc::new(SessionWindow::new(Limits::default().trailer_session_window)),
             limits: Limits::default(),
             #[cfg(windows)]
             _peer_process: None,

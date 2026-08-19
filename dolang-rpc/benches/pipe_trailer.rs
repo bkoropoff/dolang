@@ -56,7 +56,7 @@ async fn build_client(
 
     let server_task = tokio::spawn(async move {
         Builder::new(APP_PROTOCOL.0, APP_PROTOCOL.1)
-            .max_trailer_size(trailer_len)
+            .trailer_credit_interval(trailer_len.max(1))
             .max_fragment_size(FRAGMENT_SIZE)
             .server_split(server_recv, server_send)
             .await
@@ -79,7 +79,7 @@ async fn build_client(
     });
 
     let client = Builder::new(APP_PROTOCOL.0, APP_PROTOCOL.1)
-        .max_trailer_size(trailer_len)
+        .trailer_credit_interval(trailer_len.max(1))
         .max_fragment_size(FRAGMENT_SIZE)
         .client_split(client_recv, client_send)
         .await

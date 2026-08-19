@@ -442,7 +442,7 @@ async fn interleaves_large_and_small_messages_round_robin() {
 
 #[tokio::test]
 async fn bounded_concurrency_limits_simultaneous_large_transfers() {
-    let make = || builder().max_fragment_size(256).max_incomplete_messages(2);
+    let make = || builder().max_fragment_size(256).max_concurrent_calls(2);
     let (client_io, server_io) = tokio::io::duplex(8192);
     tokio::spawn(async move {
         make()
@@ -463,7 +463,7 @@ async fn bounded_concurrency_limits_simultaneous_large_transfers() {
             .await
     });
     let client = unbound_client_with_builder::<_, Test>(make(), client_io).await;
-    // More concurrent large transfers than `max_incomplete_messages`, so at
+    // More concurrent large transfers than `max_concurrent_calls`, so at
     // least one must sit in the scheduler's `waiting` queue.
     let bulk_a = client.call(Request::Bulk(vec![b'a'; 16 * 1024]));
     let bulk_b = client.call(Request::Bulk(vec![b'b'; 16 * 1024]));
@@ -539,7 +539,7 @@ async fn trailer_echo_handler(mut context: CallContext<Test>, request: Request) 
     match request {
         Request::TrailerRoundTrip(value) => {
             let mut data = None;
-            if let Some(trailer) = context.request_trailer() {
+            if let Some(mut trailer) = context.trailer() {
                 let mut bytes = Vec::new();
                 trailer.read_to_end(&mut bytes).await.unwrap();
                 data = Some(bytes);
@@ -738,7 +738,7 @@ async fn trailer_call_cancelled_after_full_transmission_falls_back_to_ordinary_c
             .serve(async move |mut context, _request| {
                 let mut body = Vec::new();
                 context
-                    .request_trailer()
+                    .trailer()
                     .unwrap()
                     .read_to_end(&mut body)
                     .await
@@ -758,9 +758,14 @@ async fn trailer_call_cancelled_after_full_transmission_falls_back_to_ordinary_c
     assert!(matches!(call.await, Err(Error::Cancelled)));
 }
 
+/// A handler that answers without reading the request trailer leaves the
+/// client's writer parked on exhausted credit. Only the eager `Discard` sent
+/// when the unread `TrailerRecv` is dropped gets it moving again — the old
+/// lazy notice could never fire here, because a parked sender emits no
+/// further fragments to notice.
 #[tokio::test]
-async fn trailer_resource_limits_enforced_end_to_end() {
-    let make = || builder().max_trailer_size(16);
+async fn unread_request_trailer_stops_a_credit_parked_sender_promptly() {
+    let make = || builder().trailer_session_window(16).max_fragment_size(64);
     let (client_io, server_io) = tokio::io::duplex(4096);
     tokio::spawn(async move {
         make()
@@ -773,6 +778,7 @@ async fn trailer_resource_limits_enforced_end_to_end() {
                     Request::TrailerRoundTrip(value) => Response(value),
                     _ => unreachable!(),
                 };
+                // Never touches `trailer`; responding drops it.
                 context.respond(response);
             })
             .await
@@ -780,13 +786,16 @@ async fn trailer_resource_limits_enforced_end_to_end() {
     let client = unbound_client_with_builder::<_, Test>(make(), client_io).await;
     let data = vec![b'x'; 1024];
     let mut send = client.call_with_trailer(Request::TrailerRoundTrip(1));
-    let result = send.write_all(&data).await;
-    if result.is_ok() {
-        assert!(matches!(
-            send.finish().await,
-            Err(Error::Protocol(_)) | Err(Error::ConnectionClosed) | Err(Error::Io(_))
-        ));
-    }
+    let result = tokio::time::timeout(Duration::from_secs(10), send.write_all(&data))
+        .await
+        .expect("the sender must be released, not left parked forever");
+    assert_eq!(
+        result.unwrap_err().kind(),
+        io::ErrorKind::BrokenPipe,
+        "an abandoned trailer aborts its sender"
+    );
+    // The discard is advisory: the call itself still completes normally.
+    assert_eq!(send.finish().await.unwrap().into_response(), Response(1));
 }
 
 #[tokio::test]
@@ -804,18 +813,14 @@ async fn server_discarding_a_request_trailer_errors_the_writer_but_response_stil
                     Request::TrailerRoundTrip(value) => value,
                     _ => unreachable!(),
                 };
+                let mut trailer = context.trailer().unwrap();
                 let mut prefix = [0u8; 4];
-                context
-                    .request_trailer()
-                    .unwrap()
-                    .read_exact(&mut prefix)
-                    .await
-                    .unwrap();
+                trailer.read_exact(&mut prefix).await.unwrap();
                 // Simulate hitting an error partway through consuming the
                 // request trailer (e.g. a failed file write): stop wanting
                 // more of it, but still answer normally through the ordinary
                 // response.
-                context.request_trailer().unwrap().discard();
+                trailer.discard();
                 context.respond(Response(value));
             })
             .await
@@ -1353,4 +1358,414 @@ fn dropping_a_claimed_gift_outside_a_runtime_does_not_panic() {
     drop(endpoint);
     drop(client);
     drop(server);
+}
+
+/// The auto-release default must be completely transparent: an ordinary
+/// `read_to_end` consumer moves megabytes through a credit pool a fraction of
+/// that size without knowing flow control exists.
+#[tokio::test]
+async fn large_trailer_streams_through_a_small_pool_with_an_ordinary_consumer() {
+    let make = || {
+        builder()
+            .trailer_session_window(4096)
+            .trailer_credit_interval(1024)
+            .max_fragment_size(1024)
+    };
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    tokio::spawn(async move {
+        make()
+            .server(server_io)
+            .await
+            .unwrap()
+            .bind::<Test>()
+            .serve(trailer_echo_handler)
+            .await
+    });
+    let client = unbound_client_with_builder::<_, Test>(make(), client_io).await;
+
+    // Two orders of magnitude past the window, in both directions.
+    let data = vec![b'z'; 512 * 1024];
+    let mut send = client.call_with_trailer(Request::TrailerRoundTrip(1));
+    send.write_all(&data).await.unwrap();
+    let (response, mut trailer) = send.finish().await.unwrap().into_response_trailer();
+    assert_eq!(response, Response(1));
+    let mut received = Vec::new();
+    trailer
+        .as_mut()
+        .unwrap()
+        .read_to_end(&mut received)
+        .await
+        .unwrap();
+    assert_eq!(received, data);
+}
+
+/// Manual release is what the sender's pacing actually follows: with the
+/// credit pool exhausted and nothing released, the sender must be stuck, and
+/// must resume the moment credit is returned.
+#[tokio::test]
+async fn manual_release_gates_the_sender() {
+    let make = || {
+        builder()
+            .trailer_session_window(1024)
+            .trailer_credit_interval(1024)
+            .max_fragment_size(256)
+    };
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    // Set once the handler has read a window's worth without releasing.
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let server_gate = gate.clone();
+    tokio::spawn(async move {
+        make()
+            .server(server_io)
+            .await
+            .unwrap()
+            .bind::<Test>()
+            .serve(move |mut context: CallContext<Test>, request| {
+                let gate = server_gate.clone();
+                async move {
+                    let value = match request {
+                        Request::TrailerRoundTrip(value) => value,
+                        _ => unreachable!(),
+                    };
+                    let mut trailer = context.trailer_manual_credit().unwrap();
+                    let mut buf = vec![0u8; 1024];
+                    let mut held = 0;
+                    // Consume the whole pool and release nothing, which
+                    // must leave the peer with no credit at all.
+                    while held < 1024 {
+                        let n = trailer.read(&mut buf[..1024 - held]).await.unwrap();
+                        held += n;
+                    }
+                    gate.notified().await;
+                    // Now drain normally, releasing as we go.
+                    trailer.release(held);
+                    loop {
+                        let n = trailer.read(&mut buf).await.unwrap();
+                        if n == 0 {
+                            break;
+                        }
+                        trailer.release(n);
+                    }
+                    context.respond(Response(value));
+                }
+            })
+            .await
+    });
+    let client = unbound_client_with_builder::<_, Test>(make(), client_io).await;
+    let data = vec![b'q'; 64 * 1024];
+    let mut send = client.call_with_trailer(Request::TrailerRoundTrip(5));
+
+    // Far more than the window, so this cannot finish until credit flows.
+    let mut write = Box::pin(send.write_all(&data));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut write)
+            .await
+            .is_err(),
+        "the sender must park once the pool is spent and nothing is released"
+    );
+
+    gate.notify_one();
+    tokio::time::timeout(Duration::from_secs(30), write)
+        .await
+        .expect("releasing credit must unpark the sender")
+        .unwrap();
+    let response = tokio::time::timeout(Duration::from_secs(30), send.finish())
+        .await
+        .expect("the call must complete once the trailer drains")
+        .unwrap()
+        .into_response();
+    assert_eq!(response, Response(5));
+}
+
+/// One consumer sitting on its bytes must not stop an unrelated trailer on
+/// the same connection, *provided the pool has headroom beyond what the
+/// stalled consumer holds*. That proviso is the whole shape of the design:
+/// there is no per-trailer window, so isolation comes from the sender not
+/// having spent the pool on the stalled trailer rather than from anything the
+/// protocol enforces.
+#[tokio::test]
+async fn a_stalled_trailer_does_not_block_an_unrelated_one_given_pool_headroom() {
+    let make = || {
+        builder()
+            .trailer_credit_interval(1024)
+            .trailer_session_window(1024 * 1024)
+            .max_fragment_size(256)
+    };
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    tokio::spawn(async move {
+        make()
+            .server(server_io)
+            .await
+            .unwrap()
+            .bind::<Test>()
+            .serve(async |mut context, request| {
+                let value = match request {
+                    Request::TrailerRoundTrip(value) => value,
+                    _ => unreachable!(),
+                };
+                if value == 1 {
+                    // The stalled consumer: take a chunk and hold it for
+                    // the rest of the test.
+                    let mut trailer = context.trailer_manual_credit().unwrap();
+                    let mut buf = vec![0u8; 1024];
+                    let _ = trailer.read(&mut buf).await.unwrap();
+                    std::future::pending::<()>().await;
+                } else {
+                    let mut sink = Vec::new();
+                    context
+                        .trailer()
+                        .unwrap()
+                        .read_to_end(&mut sink)
+                        .await
+                        .unwrap();
+                }
+                context.respond(Response(value));
+            })
+            .await
+    });
+    let client = unbound_client_with_builder::<_, Test>(make(), client_io).await;
+
+    let mut stalled = client.call_with_trailer(Request::TrailerRoundTrip(1));
+    let big = vec![b'a'; 64 * 1024];
+    tokio::spawn(async move {
+        let _ = stalled.write_all(&big).await;
+        std::future::pending::<()>().await;
+    });
+
+    let mut healthy = client.call_with_trailer(Request::TrailerRoundTrip(2));
+    let payload = vec![b'b'; 32 * 1024];
+    tokio::time::timeout(Duration::from_secs(30), async {
+        healthy.write_all(&payload).await.unwrap();
+        healthy.finish().await
+    })
+    .await
+    .expect("a stalled trailer must not block an unrelated one")
+    .unwrap();
+}
+
+/// Long-lived trailers must not consume a per-message concurrency slot: more
+/// of them can be open at once than the old `max_incomplete_trailers` (16)
+/// ever allowed, and an ordinary call still goes through alongside them.
+#[tokio::test]
+async fn many_concurrent_long_lived_trailers_all_progress() {
+    const TRAILERS: u32 = 40;
+    let make = || {
+        builder()
+            .trailer_credit_interval(4096)
+            .max_fragment_size(512)
+    };
+    let (client_io, server_io) = tokio::io::duplex(16384);
+    tokio::spawn(async move {
+        make()
+            .server(server_io)
+            .await
+            .unwrap()
+            .bind::<Test>()
+            .serve(async |mut context, request| match request {
+                Request::TrailerRoundTrip(value) => {
+                    let mut sink = Vec::new();
+                    context
+                        .trailer()
+                        .unwrap()
+                        .read_to_end(&mut sink)
+                        .await
+                        .unwrap();
+                    context.respond(Response(value + sink.len() as u32));
+                }
+                Request::Echo(value) => context.respond(Response(value)),
+                _ => unreachable!(),
+            })
+            .await
+    });
+    let client = Arc::new(unbound_client_with_builder::<_, Test>(make(), client_io).await);
+
+    let mut calls = Vec::new();
+    for id in 0..TRAILERS {
+        let client = client.clone();
+        calls.push(tokio::spawn(async move {
+            let mut send = client.call_with_trailer(Request::TrailerRoundTrip(id));
+            send.write_all(&vec![b'x'; 8192]).await.unwrap();
+            send.finish().await.unwrap().into_response()
+        }));
+    }
+    // An ordinary call must still get through with all of those open.
+    let echo = tokio::time::timeout(Duration::from_secs(30), client.call(Request::Echo(99)))
+        .await
+        .expect("trailer-phase messages must not consume concurrency slots")
+        .unwrap()
+        .into_response();
+    assert_eq!(echo, Response(99));
+
+    for (id, call) in calls.into_iter().enumerate() {
+        let response = tokio::time::timeout(Duration::from_secs(30), call)
+            .await
+            .expect("every trailer must complete")
+            .unwrap();
+        assert_eq!(response, Response(id as u32 + 8192));
+    }
+}
+
+/// Drains a request trailer and answers without one, the shape a bulk write
+/// takes: data flows one way and the response is a bare acknowledgement.
+async fn trailer_sink_handler(mut context: CallContext<Test>, request: Request) {
+    match request {
+        Request::TrailerRoundTrip(value) => {
+            if let Some(mut trailer) = context.trailer() {
+                let mut sink = tokio::io::sink();
+                tokio::io::copy(&mut trailer, &mut sink).await.unwrap();
+            }
+            context.respond(Response(value));
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// A one-way trailer that ends below the coalescing threshold has never
+/// credited a byte, and nothing after it can trigger a flush: no more data
+/// arrives, no response trailer travels the other way, and a completed
+/// trailer sends no `Discard` to settle against. Its completion is the only
+/// chance to return the peer's pool debt, and without it a stream of small
+/// writes — which is what remote file and stdio I/O are made of — parks the
+/// sender for good once the pool runs dry.
+#[tokio::test]
+async fn one_way_trailers_below_the_coalescing_threshold_do_not_leak_session_credit() {
+    // Default-shaped windows, with a pool a small multiple of the transfer
+    // so a per-transfer leak shows up in a few rounds rather than hundreds.
+    let make = || {
+        builder()
+            .trailer_session_window(64 * 1024)
+            .trailer_credit_interval(32 * 1024)
+    };
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    tokio::spawn(async move {
+        make()
+            .server(server_io)
+            .await
+            .unwrap()
+            .bind::<Test>()
+            .serve(trailer_sink_handler)
+            .await
+    });
+    let client = unbound_client_with_builder::<_, Test>(make(), client_io).await;
+
+    // Enough rounds to drain the pool several times over. A leak is not
+    // strictly one transfer per round — a trailer the peer happens to drop
+    // before observing its end sends a `Discard`, which settles that round's
+    // debt — so a handful of rounds proves nothing.
+    let data = vec![b'q'; 4096];
+    for round in 0..120 {
+        let mut send = client.call_with_trailer(Request::TrailerRoundTrip(round));
+        let round_trip = async {
+            send.write_all(&data).await.unwrap();
+            send.finish().await.unwrap().into_response()
+        };
+        let response = tokio::time::timeout(Duration::from_secs(10), round_trip)
+            .await
+            .unwrap_or_else(|_| panic!("round {round} stalled; session credit leaked"));
+        assert_eq!(response, Response(round));
+    }
+}
+
+/// Every completed trailer must return its share of the session pool. If any
+/// of it leaked — a final coalesced credit never flushed, or a late `Credit`
+/// dropped because its send had already left the scheduler — the pool would
+/// shrink on each transfer and this loop would stall well before the end.
+#[tokio::test]
+async fn sequential_trailers_do_not_leak_session_credit() {
+    // A pool only twice the size of one transfer, so even a small per-
+    // transfer leak exhausts it within a few iterations.
+    let make = || {
+        builder()
+            .trailer_session_window(64 * 1024)
+            .trailer_credit_interval(16 * 1024)
+            .max_fragment_size(4096)
+    };
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    tokio::spawn(async move {
+        make()
+            .server(server_io)
+            .await
+            .unwrap()
+            .bind::<Test>()
+            .serve(trailer_echo_handler)
+            .await
+    });
+    let client = unbound_client_with_builder::<_, Test>(make(), client_io).await;
+
+    let data = vec![b'p'; 32 * 1024];
+    for round in 0..20 {
+        let mut send = client.call_with_trailer(Request::TrailerRoundTrip(round));
+        let round_trip = async {
+            send.write_all(&data).await.unwrap();
+            let (response, mut trailer) = send.finish().await.unwrap().into_response_trailer();
+            let mut received = Vec::new();
+            trailer
+                .as_mut()
+                .unwrap()
+                .read_to_end(&mut received)
+                .await
+                .unwrap();
+            (response, received)
+        };
+        let (response, received) = tokio::time::timeout(Duration::from_secs(30), round_trip)
+            .await
+            .unwrap_or_else(|_| panic!("round {round} stalled; session credit leaked"));
+        assert_eq!(response, Response(round));
+        assert_eq!(received.len(), data.len());
+    }
+}
+
+/// A detached request trailer outlives the response, which is what makes one
+/// call a duplex pipe: the server answers immediately, then keeps reading
+/// what the client is still writing while streaming back a response trailer
+/// of its own. Both directions are open at once and each ends on its own.
+#[tokio::test]
+async fn a_detached_request_trailer_keeps_streaming_after_the_response() {
+    let make = || builder().max_fragment_size(8);
+    let (client_io, server_io) = tokio::io::duplex(64);
+    tokio::spawn(async move {
+        make()
+            .server(server_io)
+            .await
+            .unwrap()
+            .bind::<Test>()
+            .serve(async move |mut context, request| {
+                let value = match request {
+                    Request::TrailerRoundTrip(value) => value,
+                    _ => unreachable!(),
+                };
+                // Detach the request half, then answer. The call is over on
+                // the wire from here, but the trailer is not.
+                let mut incoming = context.trailer().unwrap();
+                let mut outgoing = context.respond_with_trailer(Response(value));
+                let mut received = Vec::new();
+                incoming.read_to_end(&mut received).await.unwrap();
+                // Echoing back what arrived only after responding proves the
+                // read really happened past the end of the call.
+                outgoing.write_all(&received).await.unwrap();
+                outgoing.finish();
+            })
+            .await
+    });
+    let client = unbound_client_with_builder::<_, Test>(make(), client_io).await;
+
+    let mut send = client.call_with_trailer(Request::TrailerRoundTrip(7));
+    let data = vec![b'd'; 4096];
+    let exchange = async {
+        send.write_all(&data).await.unwrap();
+        let (response, mut trailer) = send.finish().await.unwrap().into_response_trailer();
+        let mut echoed = Vec::new();
+        trailer
+            .as_mut()
+            .unwrap()
+            .read_to_end(&mut echoed)
+            .await
+            .unwrap();
+        (response, echoed)
+    };
+    let (response, echoed) = tokio::time::timeout(Duration::from_secs(30), exchange)
+        .await
+        .expect("the duplex exchange stalled");
+    assert_eq!(response, Response(7));
+    assert_eq!(echoed, data);
 }

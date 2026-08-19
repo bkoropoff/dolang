@@ -77,10 +77,6 @@ pub(crate) struct Limits {
     /// Maximum size of one complete (reassembled) message's postcard
     /// payload, excluding any trailer.
     pub max_payload_size: usize,
-    /// Maximum size of one message's trailer. Trailers stream a known,
-    /// bounded suffix in chunks rather than acting as an open-ended
-    /// channel, so this should be reasonably bounded.
-    pub max_trailer_size: usize,
     /// Maximum number of native handles attached to one wire fragment.
     pub max_handles_per_fragment: usize,
     /// Maximum number of native handles carried by one message.
@@ -97,13 +93,41 @@ pub(crate) struct Limits {
     /// `TrailerSend::poll_write` without first waiting for a transport grant.
     /// Set to zero to disable copying nonempty fragments on this path.
     pub trailer_send_copy_threshold: usize,
-    /// Maximum number of messages with fragments in flight at once.
-    pub max_incomplete_messages: usize,
     /// Maximum number of requests awaiting a terminal response at once.
+    ///
+    /// This also bounds how many messages may be mid-reassembly: a message is
+    /// only incomplete while its postcard payload is being fragmented, which
+    /// happens strictly within a call in both directions. Messages that have
+    /// finished their payload and entered their trailer phase are *not*
+    /// counted — those are bounded by the credit windows below, not by a
+    /// count, because a trailer may legitimately outlive its call.
     pub max_concurrent_calls: usize,
-    /// Maximum number of those messages that may have an open trailer at
-    /// once, further restricting `max_incomplete_messages`.
-    pub max_incomplete_trailers: usize,
+    /// How much retired trailer credit this end accumulates before returning
+    /// it to the peer.
+    ///
+    /// Purely a local coalescing knob — it is not negotiated and bounds
+    /// nothing. Larger values mean fewer `Kind::Credit` fragments and a
+    /// coarser feedback signal; a few fragments' worth is the useful range.
+    /// Credit is always flushed regardless once the trailer ends, the pool is
+    /// exhausted, or a consumer is left waiting for bytes, so no value can
+    /// stall a sender — including a sender that budgets the pool across its
+    /// own trailers, which this end never learns about.
+    pub trailer_credit_interval: usize,
+    /// Bytes of unretired trailer data all trailers on the session may have
+    /// outstanding, in aggregate.
+    ///
+    /// "Unretired" means the consuming application has not yet released the
+    /// credit for it — deliberately later than having read it, so this bounds
+    /// staged bytes plus whatever the application still holds. A sender parks
+    /// once the pool is empty and resumes on the next `Kind::Credit`.
+    ///
+    /// This is the *only* credit limit, and the whole bound on receiver memory
+    /// attributable to trailers, however many are open. There is deliberately
+    /// no per-trailer window: a sender that lets one trailer consume the pool
+    /// starves only its own other trailers, so how the pool is divided is a
+    /// local scheduling choice rather than a protocol rule. Only zero is a
+    /// deadlock, and negotiation floors it at 1.
+    pub trailer_session_window: usize,
 }
 
 impl Default for Limits {
@@ -111,15 +135,14 @@ impl Default for Limits {
         Self {
             max_fragment_size: 512 * 1024,
             max_payload_size: 2 * 1024 * 1024,
-            max_trailer_size: 2 * 1024 * 1024,
             max_handles_per_fragment: 8,
             max_handles_per_message: 8,
             trailer_recv_copy_threshold: 64 * 1024,
             trailer_recv_demand_copy_threshold: 256 * 1024,
             trailer_send_copy_threshold: 64 * 1024,
-            max_incomplete_messages: 64,
-            max_concurrent_calls: 64,
-            max_incomplete_trailers: 16,
+            max_concurrent_calls: 128,
+            trailer_credit_interval: 256 * 1024,
+            trailer_session_window: 16 * 1024 * 1024,
         }
     }
 }

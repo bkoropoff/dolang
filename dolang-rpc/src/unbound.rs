@@ -92,12 +92,46 @@ impl Builder {
         self
     }
 
-    /// Sets the maximum total raw-byte trailer size for one message.
+    /// Sets how much retired trailer credit accumulates before it is
+    /// returned to the peer, in bytes.
     ///
-    /// Defaults to 2 MiB; the peer and local endpoint use the smaller
-    /// advertised value.
-    pub fn max_trailer_size(mut self, value: usize) -> Self {
-        self.limits.max_trailer_size = value;
+    /// Purely a local coalescing knob: it is not negotiated, the two ends
+    /// need not agree on it, and it bounds nothing — what bounds the peer is
+    /// [`trailer_session_window`](Self::trailer_session_window). Larger
+    /// values mean fewer credit fragments and a coarser feedback signal.
+    /// Credit is flushed regardless once the pool is exhausted or a trailer
+    /// ends, so no value can stall a sender.
+    ///
+    /// Defaults to 256 KiB.
+    pub fn trailer_credit_interval(mut self, value: usize) -> Self {
+        self.limits.trailer_credit_interval = value;
+        self
+    }
+
+    /// Sets the session-wide trailer credit pool, in bytes.
+    ///
+    /// This bounds trailer data the peer has sent but this end has not yet
+    /// retired — released by the consuming application, which is later than
+    /// merely reading it — across *all* trailers at once. It is the only
+    /// credit limit and the whole bound on receiver memory attributable to
+    /// trailers, however many are open. There is no separate cap on a
+    /// trailer's total size, so a trailer may stream indefinitely.
+    ///
+    /// There is deliberately no per-trailer subdivision: a sender that lets
+    /// one trailer consume the pool starves only its own other trailers, so
+    /// dividing it up is the sending end's local scheduling choice rather
+    /// than a protocol rule — and any division it chooses is safe, since
+    /// credit is flushed whenever a consumer is left waiting and not merely
+    /// at the coalescing threshold. The corollary is that a consumer which
+    /// stalls indefinitely can hold as much of the pool as the peer chose to
+    /// spend on it.
+    ///
+    /// Defaults to 16 MiB; the peer and local endpoint use the smaller
+    /// advertised value, floored at 1. A value below
+    /// [`max_fragment_size`](Self::max_fragment_size) is legal but merely
+    /// produces short fragments.
+    pub fn trailer_session_window(mut self, value: usize) -> Self {
+        self.limits.trailer_session_window = value;
         self
     }
 
@@ -149,32 +183,19 @@ impl Builder {
         self
     }
 
-    /// Sets the maximum number of messages with fragments in flight at once.
-    ///
-    /// Defaults to 64; the peer and local endpoint use the smaller advertised
-    /// value.
-    pub fn max_incomplete_messages(mut self, value: usize) -> Self {
-        self.limits.max_incomplete_messages = value;
-        self
-    }
-
     /// Sets the maximum number of requests awaiting terminal responses.
     ///
-    /// Defaults to 64; the peer and local endpoint use the smaller advertised
-    /// value. This is independent of [`max_incomplete_messages`](Self::max_incomplete_messages),
-    /// which limits only messages still being fragmented.
+    /// This doubles as the bound on messages still being reassembled, since a
+    /// message is only incomplete while its postcard payload is being
+    /// fragmented and that always happens within a call. Messages that have
+    /// entered their trailer phase are excluded — a trailer may outlive its
+    /// call, and is bounded by
+    /// [`trailer_session_window`](Self::trailer_session_window) instead.
+    ///
+    /// Defaults to 128; the peer and local endpoint use the smaller advertised
+    /// value.
     pub fn max_concurrent_calls(mut self, value: usize) -> Self {
         self.limits.max_concurrent_calls = value;
-        self
-    }
-
-    /// Sets the maximum in-flight messages that may have an open trailer.
-    ///
-    /// This further restricts [`max_incomplete_messages`](Self::max_incomplete_messages).
-    /// Defaults to 16; the peer and local endpoint use the smaller advertised
-    /// value.
-    pub fn max_incomplete_trailers(mut self, value: usize) -> Self {
-        self.limits.max_incomplete_trailers = value;
         self
     }
 

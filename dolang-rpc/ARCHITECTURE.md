@@ -90,10 +90,10 @@ let client: Client<Vfs> = unbound.bind();
 
 `Builder::new(name, versions)` takes the mandatory application-protocol
 descriptor as two plain arguments. Chainable setters
-(`max_fragment_size`, `max_payload_size`, `max_trailer_size`,
-`trailer_recv_copy_threshold`, `trailer_recv_demand_copy_threshold`,
-`trailer_send_copy_threshold`, `max_incomplete_messages`,
-`max_incomplete_trailers`, `max_concurrent_calls`) override individual size
+(`max_fragment_size`, `max_payload_size`, `trailer_session_window`,
+`trailer_credit_interval`, `trailer_recv_copy_threshold`,
+`trailer_recv_demand_copy_threshold`, `trailer_send_copy_threshold`,
+`max_concurrent_calls`) override individual size
 and concurrency limits;
 these compose the crate-private `Limits` struct, which is not itself public.
 Terminal `async` methods consume the builder and negotiate over a specific
@@ -161,7 +161,8 @@ appropriate to request processing:
 
 ```rust
 impl<P: Protocol> CallContext<P> {
-    fn request_trailer(&mut self) -> Option<&mut TrailerRecv>;
+    fn trailer(&mut self) -> Option<&mut TrailerRecv>;
+    fn trailer_manual_credit(&mut self) -> Option<&mut TrailerRecv>;
     fn respond(self, response: P::Response);
     fn respond_with_trailer(self, response: P::Response) -> TrailerSend<()>;
     fn shutdown(&self);
@@ -220,20 +221,27 @@ Frame kinds are:
 Request   { id, payload }
 Response  { id, payload }
 Error     { id, kind }
-Notify    { id, payload }
 Cancel    { id }
 Discard   { id }
 Negotiate { id, payload }
+Ack       { id }
+Release   { id, count }
+Credit    { id, count }
 ```
 
-`Request` and `Response` provide ordinary RPC correlation. `Notify` is for
-one-way protocol messages. `Error` is a terminal session-level failure for the
-correlated request, initially including cancellation. `Cancel` controls a
-request already in flight. `Discard` is an advisory, non-fatal signal that the
-receiver no longer wants a request's or response's trailer; see
+`Request` and `Response` provide ordinary RPC correlation. `Error` is a
+terminal session-level failure for the correlated request, initially including
+cancellation. `Cancel` controls a request already in flight. `Discard` is an
+advisory, non-fatal signal that the receiver no longer wants a request's or
+response's trailer; see
 [Payload Trailers](#payload-trailers-and-fragmentation). `Negotiate` is the
 handshake message described below, and must run to completion before any
-other kind is valid on a connection.
+other kind is valid on a connection. `Ack` confirms the boundary marked by
+`WANT_ACK`. `Release` drops references to a session
+[opaque](#opaque-objects); `Credit` returns
+[trailer flow-control credit](#trailer-flow-control). Both carry a 4-byte
+count and tolerate an unknown `id`, because in both cases the sender may
+legitimately have retired the thing named while the message was in flight.
 
 The exact binary envelope is an implementation detail, but it must preserve
 frame boundaries and associate native-handle attachment serialization state
@@ -361,9 +369,11 @@ impl<P: Protocol> Client<P> {
 }
 impl<R> CallResult<R> {
     fn into_response_trailer(self) -> (R, Option<TrailerRecv>);
+    fn into_response_trailer_manual_credit(self) -> (R, Option<TrailerRecv>);
 }
 impl<P: Protocol> CallContext<P> {
-    fn request_trailer(&mut self) -> Option<&mut TrailerRecv>;
+    fn trailer(&mut self) -> Option<&mut TrailerRecv>;
+    fn trailer_manual_credit(&mut self) -> Option<&mut TrailerRecv>;
     fn respond_with_trailer(self, response: P::Response) -> TrailerSend<()>;
 }
 ```
@@ -376,8 +386,8 @@ Internally, sends stage through a `BytesMut` buffer below
 `trailer_send_copy_threshold` and switch to zero-copy vectored writes above
 it; receives use `trailer_recv_copy_threshold` and
 `trailer_recv_demand_copy_threshold` the same way on the read side. All three
-thresholds, plus `max_trailer_size`, `max_incomplete_messages`, and
-`max_incomplete_trailers` are `Limits` fields configured through
+thresholds, plus `trailer_session_window`, `trailer_credit_interval`, and
+`max_concurrent_calls`, are `Limits` fields configured through
 [`Builder`](#session-establishment). Per-message and connection-wide limits
 cover both the postcard payload and the trailer.
 
@@ -412,30 +422,51 @@ subsequent atomic ones — this keeps fragment sizes adaptive to what the
 transport can actually accept in one write, and is intentionally
 future-extensible to a peer-signaled throttling hint.
 
-`max_concurrent_calls` separately bounds requests awaiting terminal responses.
-The client writer leaves excess requests unencoded in its local queue and
-continues sending control fragments. A slot starts before request serialization
-and ends on `Response`/`Error`, or after an ordered abort for a request that
-never reached dispatch. The server counts live `CallContext`s and treats an
-excess request as a protocol violation. This limit is independent of
-`max_incomplete_messages`: a call may stop being fragmented long before its
-handler responds, while a zero incomplete-message limit still permits complete
-single-fragment calls.
+`max_concurrent_calls` bounds requests awaiting terminal responses. The client
+writer leaves excess requests unencoded in its local queue and continues
+sending control fragments. A slot starts before request serialization and ends
+on `Response`/`Error`, or after an ordered abort for a request that never
+reached dispatch. The server counts live `CallContext`s and treats an excess
+request as a protocol violation.
+
+The same number bounds how many messages may be mid-reassembly, which is a
+policy statement as much as a limit: a message is incomplete only while its
+postcard payload is being fragmented, and that always happens within a call in
+both directions, so it would be strange to admit more messages than can ever
+become calls. It is not redundant with the dispatch-time check, though —
+`check_call_admission` counts live `CallContext`s, so a request that never
+sends its `LAST` fragment is counted nowhere by it, and the reassembler's
+check is what actually bounds that.
+
+Messages that have finished their payload and entered their **trailer phase**
+are excluded from that count, on both the receiving `Reassembler` and the
+sending `Scheduler`. A trailer may outlive its call and stream for as long as an
+application keeps writing, so counting it would let a handful of streaming
+transfers exhaust the limit — fatally on the receiver, and as indefinite
+head-of-line blocking on the sender, which simply declines to promote further
+sends. Trailer memory is bounded by
+[credit](#trailer-flow-control) instead, which bounds bytes rather than a
+count and so does not care how many trailers are open.
 
 The receiver retains incomplete assemblies by message ID, bounded by
-`max_incomplete_messages`/`max_incomplete_trailers`/`max_fragment_size`/
-`max_payload_size`/`max_trailer_size`/`max_handles_per_message`. `LAST`
-dispatches a request or completes a response; `ABORT` discards an incomplete
-request or completes an incomplete response with an error. Unknown, duplicate,
-and terminally-completed fragment sequences are protocol errors or defined
-late-message no-ops as appropriate.
+`max_concurrent_calls`/`max_fragment_size`/`max_payload_size`/
+`max_handles_per_message`. `LAST` dispatches a request or completes a
+response; `ABORT` discards an incomplete request or completes an incomplete
+response with an error. Unknown, duplicate, and terminally-completed fragment
+sequences are protocol errors or defined late-message no-ops as appropriate.
 
-A receiver that no longer wants an in-progress trailer (e.g. the application
-dropped it) does not need to send anything immediately — it becomes an issue
-only if the peer keeps sending `TRAILER` fragments for that ID, at which point
-the receiver sends a `Discard { id }` notice once. `Discard` is advisory: it
-never changes the outcome of the request or response it names, it only tells
-the sender it can stop spending bandwidth on a trailer nobody will read.
+A receiver that no longer wants an in-progress trailer — because the
+application dropped or discarded its `TrailerRecv` — sends a `Discard { id }`
+notice immediately, exactly once. `Discard` is advisory: it never changes the
+outcome of the request or response it names, it only tells the sender to stop
+spending bandwidth on a trailer nobody will read.
+
+The notice must be eager, because a sender parked on exhausted credit emits no
+further fragments: waiting to notice an unwanted `TRAILER` fragment arriving
+would mean never noticing, and an abandoned trailer would leave its sender
+parked forever instead of aborting. Under manual release this is also the only
+thing distinguishing "the consumer is holding bytes it has not released yet"
+from "the consumer is gone" — from the sender's side the two look identical.
 
 Unix `SCM_RIGHTS` descriptors are attached to postcard fragments in serialized
 index order. Each fragment carries at most the negotiated
@@ -462,6 +493,126 @@ every successfully transmitted `OwnedFd` into message-ID escrow instead of
 dropping it, without testing its descriptor type. Receipt of `Ack` releases the
 escrow. Other platforms honor `WANT_ACK`; Windows does not yet use it for its
 own outgoing handle escrow.
+
+### Trailer Flow Control
+
+Trailers share one session-wide credit pool. Across every trailer on the
+connection, the peer may have at most `trailer_session_window` bytes
+outstanding that this end has not **retired**, and a `Credit { id, count }`
+fragment returns retired bytes to it. A sender that exhausts the pool parks
+and resumes when credit arrives; there is no cap on a trailer's total size, so
+a trailer may stream indefinitely.
+
+Retiring is deliberately later than reading. Bytes that have crossed into the
+consumer's buffer still occupy memory until the consumer has flushed them
+wherever they are going, so a consumer that reads a chunk and then blocks
+writing it to a slow disk has moved the bytes without freeing them. Crediting
+on retirement makes the pool bound end-to-end receiver memory — the receive
+buffer plus whatever the application still holds — and makes the sender's rate
+track the destination's real drain rate rather than the receiver's willingness
+to buffer. The transfer becomes self-pacing.
+
+By default every byte is retired as it is read, which is what an ordinary
+consumer (`read_to_end`, `io::copy`) wants and requires no participation.
+Obtaining the trailer through `CallContext::trailer_manual_credit` or
+`CallResult::into_response_trailer_manual_credit` opts into explicit
+`release(n)` instead, for consumers that care about that pacing. The mode is
+fixed where the trailer is obtained rather than switchable afterwards, so no
+trailer is half auto-credited. Manual release moves one hazard into calling
+code, and it is loud in the API docs: never wait to accumulate more credit
+than the pool holds before releasing, or the consumer deadlocks against
+itself.
+
+A request trailer is *taken* from its `CallContext`, not borrowed, so a
+handler may go on reading after it has responded: the reassembler entry, the
+credit route and the peer's send all outlive the handler already. `respond`
+discards only a trailer the context still holds.
+
+Taken together with `respond_with_trailer`, that makes one call a duplex byte
+pipe. Each direction is an independent stream, and the call is complete once
+the response head is out — the server drops its `outstanding` entry in
+`respond_with_trailer`, and the client drops its call slot on the `Terminal`
+that follows the response. So a pipe holds no call slot in either direction,
+and its cost is trailer credit rather than `max_concurrent_calls`. Nothing
+couples the two halves: closing one leaves the other open, there is no
+call-level cancellation left to send, and a peer that disappears is noticed
+through the transport or through a credit stall. That is the same contract a
+socket offers, and code layered on top should own the pairing itself.
+
+#### One Pool, No Per-Trailer Window
+
+The pool is the *only* credit limit. A sender that lets one trailer consume the
+whole pool starves only its own other trailers. Since `Credit` indicates which
+message ID is responsible for returned quota, the sender can always attribute
+quota consumption to its individual streams and apply per-stream limiting as
+local policy.
+
+That stays safe only because the receiver never assumes the pool is the sole
+reason a sender might be parked. A private per-stream budget is invisible on
+the wire — nothing announces it, and `trailer_credit_interval` is not
+advertised either, so the sender could not size one against the peer's
+coalescing granularity even if it wanted to. So the receiver treats its own
+consumer waiting on bytes that have not arrived as sufficient reason to flush,
+whatever the threshold says: see the third clause below.
+
+#### Coalescing
+
+Credit is emitted once half a `trailer_credit_interval` has accumulated, *or*
+when the trailer ends, *or* whenever the peer might be parked waiting for it:
+the pool is exhausted, or this trailer's own consumer is blocked with nothing
+staged. Only the first is an optimization. Without the end-of-trailer flush a
+transfer that finishes below the threshold would strand its pool debt for the
+life of the connection. Without the exhaustion clause a consumer that retires
+less than the interval and then waits for more data would deadlock against a
+sender parked on an empty pool. Without the stalled-consumer clause the same
+deadlock returns for a sender parked on a per-stream budget of its own, which
+the receiver has no way to observe directly — the stall is the only symptom it
+shares with every other reason a sender stops sending.
+
+The stall clause fires at both edges: when a consumer goes from reading to
+waiting (flushing whatever had accumulated), and when credit is retired while
+it is already waiting (which is where a manual consumer's `release` lands).
+
+`trailer_credit_interval` is purely local coalescing granularity — it is not
+negotiated and bounds nothing, so the two ends need not agree on it and no
+value can stall a sender.
+
+#### Backstops And Ledger
+
+The pool is enforced connection-fatally on the receiver as a backstop against
+a peer that ignores what it agreed to; a well-behaved sender parks rather than
+overrunning. Negotiation floors it at 1. Only zero deadlocks — the sender
+would park before its first byte, and no credit could ever arrive for bytes
+that were never sent. A pool below `max_fragment_size` is legal and merely
+produces short fragments.
+
+On the send side, credit is *reserved* under the pool's own lock rather than
+read and then spent, because the pool is shared across trailers holding
+different `SendShared` mutexes and a separate read-then-debit would let two
+writers spend the same bytes. A reservation taken before requesting a
+transport grant is carried across the wait, so a granted trailer always has
+credit in hand and never has to park while holding a lease — parking with a
+live lease would wedge the connection's single writer.
+
+Outstanding pool bytes are tracked per message id in a small ledger rather
+than on the `SendShared`/`RecvShared` that spends them, because settlement
+outlives those objects. A trailer's last `Credit` fragments routinely arrive
+after its send has finished and left the scheduler; charging the debt to the
+send would drop those refunds and shrink the pool a little on every completed
+transfer, until eventually nothing could be sent at all. Keying by id also
+makes settlement idempotent, so an abort that returns a whole debt at once
+cannot be double-counted by a `Credit` that crossed it on the wire.
+
+That ledger is what lets `Discard` refund implicitly. When a consumer
+abandons a trailer it sends `Discard { id }` and stops charging for that id,
+including for fragments already in flight behind the notice; the sender
+receives it, returns the id's whole remaining debt, and drops the entry.
+Both ends reach zero without either counting the bytes on the wire, because
+`Credit` and `Discard` travel the same direction on one ordered stream, so a
+`Discard` can never overtake a credit the sender has not yet applied. The
+alternative — crediting the racing fragments explicitly — would require the
+sender to keep a dead trailer's ledger entry alive until every byte it ever
+sent had been credited, with no crisp point at which it could be dropped.
 
 ## Cancellation
 
