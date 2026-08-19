@@ -1022,125 +1022,262 @@ pub struct RequestCancelled;
 
 #[cfg(test)]
 mod tests {
+    use std::{future, time::Duration};
+
+    use bytes::Bytes;
+    use tokio::task::JoinHandle;
+
     use super::*;
 
-    fn cancellation() -> Cancellation {
-        let (abort, _registration) = AbortHandle::new_pair();
-        Cancellation {
-            signal: None,
-            abort,
-        }
-    }
-
-    /// The gate in front of the reassembler: nobody calls a client, so a
-    /// response arriving here answers nothing.
-    #[test]
-    fn header_gate_refuses_responses() {
-        let header = |kind| fragment::FragmentHeader {
-            flags: fragment::Flags::FIRST | fragment::Flags::LAST,
-            kind,
-            id: 7,
-            payload_len: 0,
-        };
-        assert!(matches!(
-            check_header(&header(Kind::Response)),
-            Err(Error::Protocol(_))
-        ));
-        assert!(check_header(&header(Kind::Request)).is_ok());
-        assert!(check_header(&header(Kind::Cancel)).is_ok());
-    }
+    const APP_PROTOCOL: (&str, &[u16]) = ("test", &[1]);
+    const FRAGMENT_SIZE: usize = 512;
 
     struct Test;
 
     impl Protocol for Test {
-        type Request = u8;
-        type Response = u8;
+        type Request = u32;
+        type Response = u32;
     }
 
-    /// A receive driver over a transport nothing ever reads or writes:
-    /// enough to exercise the checks that only consult `Shared`.
-    fn test_driver(
-        max_concurrent_calls: usize,
-    ) -> RecvDriver<Test, impl AsyncFn(CallContext<Test>, u8) + Send + Sync + 'static> {
-        let (stream, _peer) = tokio::io::duplex(64);
-        let (_sender, receiver) = transport::generic_duplex(stream);
-        let (outgoing, _outgoing_rx) = mpsc::unbounded_channel();
-        let (shutdown, shutdown_requested) = oneshot::channel();
-        let limits = Limits {
-            max_concurrent_calls,
-            ..Limits::default()
-        };
-        let shared = Arc::new(Shared {
-            inner: Mutex::new(Inner {
-                outstanding: HashMap::new(),
-                shutdown: Some(shutdown),
-                #[cfg(target_os = "macos")]
-                fd_escrow: Default::default(),
-            }),
-            session: Session::new(Box::new(outgoing.downgrade())),
-            trailer_session: Arc::new(SessionWindow::new(limits.trailer_session_window)),
-            limits,
-        });
-        RecvDriver::new(
-            transport::AnyReceiver::Generic(receiver),
-            outgoing,
-            shutdown_requested,
-            shared,
-            async |_: CallContext<Test>, _: u8| {},
+    /// A peer that speaks the wire format directly, so a test can send what
+    /// a real client's own accounting would never let it send.
+    struct Peer {
+        transport: transport::AnySender,
+        scheduler: fragment::Scheduler,
+        /// Unread: nothing these tests do makes the server say anything back.
+        _receiver: transport::AnyReceiver,
+    }
+
+    impl Peer {
+        /// Queues a whole request, small enough to arrive in one fragment
+        /// and be dispatched the moment it lands.
+        fn request(&mut self, id: u64, value: u32) {
+            self.admit(Kind::Request, id, postcard::to_stdvec(&value).unwrap());
+        }
+
+        /// Queues a request far too large for one fragment, so it stays in
+        /// the server's reassembler for as long as the test declines to send
+        /// the rest of it. Its bytes are never decoded, so they need not be
+        /// a valid request.
+        fn partial_request(&mut self, id: u64) {
+            self.admit(Kind::Request, id, vec![0; 64 * FRAGMENT_SIZE]);
+        }
+
+        /// Queues a fragment of a kind only a server may send.
+        fn response(&mut self, id: u64) {
+            self.admit(Kind::Response, id, postcard::to_stdvec(&0u32).unwrap());
+        }
+
+        fn admit(&mut self, kind: Kind, id: u64, payload: Vec<u8>) {
+            self.scheduler.admit_message(
+                kind,
+                id,
+                Bytes::from(payload),
+                Default::default(),
+                fragment::Trailer::None,
+                session::Ledger::default(),
+            );
+        }
+
+        /// Writes `count` fragments. The scheduler round-robins, so a count
+        /// equal to the number of queued messages puts one fragment of each
+        /// on the wire.
+        async fn send(&mut self, count: usize) {
+            for _ in 0..count {
+                self.scheduler.advance(&mut self.transport).await.unwrap();
+            }
+        }
+    }
+
+    fn endpoint_pair() -> (
+        (transport::AnySender, transport::AnyReceiver),
+        (transport::AnySender, transport::AnyReceiver),
+    ) {
+        let (a_write, a_read) = tokio::io::duplex(4096);
+        let (b_write, b_read) = tokio::io::duplex(4096);
+        let (a_sender, _unused) = transport::generic_duplex(a_write);
+        let (_unused, a_receiver) = transport::generic_duplex(b_read);
+        let (b_sender, _unused) = transport::generic_duplex(b_write);
+        let (_unused, b_receiver) = transport::generic_duplex(a_read);
+        (
+            (
+                transport::AnySender::Generic(a_sender),
+                transport::AnyReceiver::Generic(a_receiver),
+            ),
+            (
+                transport::AnySender::Generic(b_sender),
+                transport::AnyReceiver::Generic(b_receiver),
+            ),
         )
     }
 
-    fn dispatch<P: Protocol, H>(driver: &RecvDriver<P, H>, id: u64) {
-        driver
-            .shared
-            .inner
-            .lock()
-            .unwrap()
-            .outstanding
-            .insert(id, cancellation());
+    /// Negotiates a real session, serves one end of it, and hands back the
+    /// wire-level peer on the other.
+    ///
+    /// The handler never responds, so every call it is given stays
+    /// outstanding until the session ends under it — which is what lets a
+    /// test hold calls in one custodian while it fills the other.
+    async fn hostile_session(
+        max_concurrent_calls: usize,
+    ) -> (
+        Peer,
+        JoinHandle<Result<(), Error>>,
+        mpsc::UnboundedReceiver<()>,
+    ) {
+        let ((mut peer_sender, mut peer_receiver), (mut server_sender, mut server_receiver)) =
+            endpoint_pair();
+        let limits = Limits {
+            max_concurrent_calls,
+            max_fragment_size: FRAGMENT_SIZE,
+            ..Limits::default()
+        };
+        let (peer, server) = tokio::join!(
+            fragment::negotiate(
+                &mut peer_sender,
+                &mut peer_receiver,
+                &limits,
+                APP_PROTOCOL,
+                None
+            ),
+            fragment::negotiate(
+                &mut server_sender,
+                &mut server_receiver,
+                &limits,
+                APP_PROTOCOL,
+                None
+            ),
+        );
+        let peer_limits = peer.unwrap().limits;
+        let server =
+            Server::<Test>::from_transport(server_sender, server_receiver, server.unwrap().limits);
+        let (dispatched_tx, dispatched) = mpsc::unbounded_channel();
+        let serve = tokio::spawn(server.serve(async move |_: CallContext<Test>, _: u32| {
+            let _ = dispatched_tx.send(());
+            future::pending::<()>().await
+        }));
+        (
+            Peer {
+                transport: peer_sender,
+                scheduler: fragment::Scheduler::new(&peer_limits),
+                _receiver: peer_receiver,
+            },
+            serve,
+            dispatched,
+        )
+    }
+
+    /// A server that fails to notice a violation wedges rather than fails,
+    /// and which await it wedges on depends on the violation, so the bound
+    /// goes around the whole test.
+    async fn bounded<F: Future>(test: F) -> F::Output {
+        tokio::time::timeout(Duration::from_secs(5), test)
+            .await
+            .expect("the server should have refused the peer by now")
+    }
+
+    /// A call that has only started arriving is charged to the same budget
+    /// as one already dispatched. The reassembler counting it separately
+    /// would let a peer hold twice the limit — and twice the reassembly
+    /// memory the limit exists to bound.
+    ///
+    /// Filling the budget exactly, and seeing the second call dispatched
+    /// anyway, is also what pins the comparison at `>` rather than `>=`.
+    #[tokio::test]
+    async fn a_call_still_arriving_counts_against_dispatched_ones() {
+        bounded(async {
+            let (mut peer, serve, mut dispatched) = hostile_session(2).await;
+            peer.request(1, 7);
+            peer.send(1).await;
+            dispatched.recv().await.unwrap();
+            peer.request(2, 8);
+            peer.send(1).await;
+            dispatched.recv().await.unwrap();
+
+            // Two of two are dispatched and unanswered, so a third is over
+            // the limit from its very first fragment.
+            peer.partial_request(3);
+            peer.send(1).await;
+
+            assert!(matches!(
+                serve.await.unwrap(),
+                Err(Error::Protocol(message)) if message == "too many concurrent calls"
+            ));
+        })
+        .await;
+    }
+
+    /// The mirror image: a dispatched call is charged to the same budget as
+    /// one still arriving, so the check at dispatch has to add the
+    /// reassembler's count to its own.
+    #[tokio::test]
+    async fn a_dispatched_call_counts_against_ones_still_arriving() {
+        bounded(async {
+            let (mut peer, serve, mut dispatched) = hostile_session(2).await;
+            peer.request(1, 7);
+            peer.send(1).await;
+            dispatched.recv().await.unwrap();
+
+            // Two of two: one dispatched and unanswered, one still arriving.
+            peer.partial_request(2);
+            peer.send(1).await;
+
+            peer.request(3, 9);
+            peer.send(2).await;
+
+            assert!(matches!(
+                serve.await.unwrap(),
+                Err(Error::Protocol(message)) if message == "too many concurrent calls"
+            ));
+        })
+        .await;
+    }
+
+    /// The arriving call is already in the count, so a limit of zero admits
+    /// nothing at all.
+    #[tokio::test]
+    async fn a_zero_call_limit_refuses_the_first_request() {
+        bounded(async {
+            let (mut peer, serve, _dispatched) = hostile_session(0).await;
+            peer.request(1, 7);
+            peer.send(1).await;
+            assert!(matches!(
+                serve.await.unwrap(),
+                Err(Error::Protocol(message)) if message == "too many concurrent calls"
+            ));
+        })
+        .await;
     }
 
     #[tokio::test]
-    async fn call_admission_rejects_excess_and_duplicate_requests() {
-        let driver = test_driver(1);
-        assert!(driver.check_call_admission(7, 1).is_ok());
-        dispatch(&driver, 7);
-        assert!(matches!(
-            driver.check_call_admission(8, 1),
-            Err(Error::Protocol(message)) if message == "too many concurrent calls"
-        ));
-
-        // A duplicate is refused on its own account, not because the limit
-        // happens to be full.
-        let roomy = test_driver(8);
-        dispatch(&roomy, 7);
-        assert!(matches!(
-            roomy.check_call_admission(7, 1),
-            Err(Error::Protocol(message)) if message == "duplicate active request id 7"
-        ));
+    async fn a_request_reusing_a_live_call_id_is_refused() {
+        bounded(async {
+            let (mut peer, serve, mut dispatched) = hostile_session(4).await;
+            peer.request(1, 7);
+            peer.send(1).await;
+            dispatched.recv().await.unwrap();
+            peer.request(1, 8);
+            peer.send(1).await;
+            assert!(matches!(
+                serve.await.unwrap(),
+                Err(Error::Protocol(message)) if message == "duplicate active request id 1"
+            ));
+        })
+        .await;
     }
 
-    /// The two halves share one budget: a call still arriving counts against
-    /// the same limit as one already dispatched, so neither half may be
-    /// admitted on its own count.
+    /// The gate in front of the reassembler: nobody calls a client, so a
+    /// response arriving here answers nothing.
     #[tokio::test]
-    async fn call_admission_counts_arriving_and_dispatched_calls_together() {
-        let driver = test_driver(2);
-        dispatch(&driver, 7);
-        // One dispatched, one arriving, limit of two: exactly full, and the
-        // arriving one is what the count already includes.
-        assert!(driver.check_call_admission(8, 1).is_ok());
-        assert!(matches!(
-            driver.check_call_admission(8, 2),
-            Err(Error::Protocol(message)) if message == "too many concurrent calls"
-        ));
-    }
-
-    #[tokio::test]
-    async fn zero_call_limit_rejects_the_first_request() {
-        assert!(matches!(
-            test_driver(0).check_call_admission(0, 1),
-            Err(Error::Protocol(message)) if message == "too many concurrent calls"
-        ));
+    async fn a_response_from_the_peer_is_refused() {
+        bounded(async {
+            let (mut peer, serve, _dispatched) = hostile_session(4).await;
+            peer.response(1);
+            peer.send(1).await;
+            assert!(matches!(
+                serve.await.unwrap(),
+                Err(Error::Protocol(message)) if message == "server received a Response fragment"
+            ));
+        })
+        .await;
     }
 }
