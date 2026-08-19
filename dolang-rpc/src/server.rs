@@ -185,15 +185,30 @@ fn check_header(header: &fragment::FragmentHeader) -> Result<(), Error> {
     Ok(())
 }
 
+/// Applies `max_concurrent_calls` to a call that is arriving or starting to
+/// arrive.
+///
+/// A concurrent call is one this end has begun receiving and has not yet
+/// answered, and it passes through two custodians on the way: the reassembler
+/// holds it while its payload is still fragmented, and `outstanding` holds it
+/// from dispatch until the response head. The limit is on the *sum* — the two
+/// counts are disjoint, since a message leaves payload phase in the same
+/// `accept` call that dispatches it — so neither custodian can enforce it
+/// alone, and checking them separately would admit twice the limit.
+///
+/// `incomplete` is the reassembler's count *including* the call being
+/// admitted, so callers add one for a call that has already left payload
+/// phase.
 fn check_call_admission(
     outstanding: &HashMap<u64, Cancellation>,
+    incomplete: usize,
     max_concurrent_calls: usize,
     id: u64,
 ) -> Result<(), Error> {
     if outstanding.contains_key(&id) {
         return Err(Error::Protocol(format!("duplicate active request id {id}")));
     }
-    if outstanding.len() >= max_concurrent_calls {
+    if outstanding.len() + incomplete > max_concurrent_calls {
         return Err(Error::Protocol("too many concurrent calls".into()));
     }
     Ok(())
@@ -293,6 +308,20 @@ impl<P: Protocol> Server<P> {
             };
             let (message, live_trailer) = match complete {
                 fragment::Event::None => (None, None),
+                // A request has started arriving. It occupies the same
+                // budget as one already dispatched, so it is admitted on the
+                // same rule, at the earliest point this end knows about it.
+                fragment::Event::PayloadIncomplete { id } => {
+                    if let Err(error) = check_call_admission(
+                        &shared.inner.lock().unwrap().outstanding,
+                        reassembler.payload_incomplete(),
+                        limits.max_concurrent_calls,
+                        id,
+                    ) {
+                        break 'main (Err(error), false, false);
+                    }
+                    (None, None)
+                }
                 fragment::Event::Aborted {
                     kind: Kind::Request,
                     ..
@@ -341,6 +370,10 @@ impl<P: Protocol> Server<P> {
                     Kind::Request => {
                         if let Err(error) = check_call_admission(
                             &shared.inner.lock().unwrap().outstanding,
+                            // This message has already left payload phase, so
+                            // it is no longer in the reassembler's count and
+                            // has to be added back.
+                            reassembler.payload_incomplete() + 1,
                             limits.max_concurrent_calls,
                             id,
                         ) {
@@ -927,22 +960,38 @@ mod tests {
     #[test]
     fn call_admission_rejects_excess_and_duplicate_requests() {
         let mut outstanding = HashMap::new();
-        assert!(check_call_admission(&outstanding, 1, 7).is_ok());
+        assert!(check_call_admission(&outstanding, 1, 1, 7).is_ok());
         outstanding.insert(7, cancellation());
         assert!(matches!(
-            check_call_admission(&outstanding, 1, 8),
+            check_call_admission(&outstanding, 1, 1, 8),
             Err(Error::Protocol(message)) if message == "too many concurrent calls"
         ));
         assert!(matches!(
-            check_call_admission(&outstanding, 2, 7),
+            check_call_admission(&outstanding, 1, 2, 7),
             Err(Error::Protocol(message)) if message == "duplicate active request id 7"
+        ));
+    }
+
+    /// The two halves share one budget: a call still arriving counts against
+    /// the same limit as one already dispatched, so neither half may be
+    /// admitted on its own count.
+    #[test]
+    fn call_admission_counts_arriving_and_dispatched_calls_together() {
+        let mut outstanding = HashMap::new();
+        outstanding.insert(7, cancellation());
+        // One dispatched, one arriving, limit of two: exactly full, and the
+        // arriving one is what the count already includes.
+        assert!(check_call_admission(&outstanding, 1, 2, 8).is_ok());
+        assert!(matches!(
+            check_call_admission(&outstanding, 2, 2, 8),
+            Err(Error::Protocol(message)) if message == "too many concurrent calls"
         ));
     }
 
     #[test]
     fn zero_call_limit_rejects_the_first_request() {
         assert!(matches!(
-            check_call_admission(&HashMap::new(), 0, 0),
+            check_call_admission(&HashMap::new(), 1, 0, 0),
             Err(Error::Protocol(message)) if message == "too many concurrent calls"
         ));
     }

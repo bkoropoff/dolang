@@ -997,6 +997,12 @@ impl<P: Protocol> Reader<P> {
             };
             match complete {
                 Event::None => {}
+                // Nothing to admit: a client answers no calls, and the header
+                // gate already refused every fragment that does not belong to
+                // one this end made. So the reassembler holds at most one
+                // entry per live call, and `max_concurrent_calls` bounds
+                // those where they are issued.
+                Event::PayloadIncomplete { .. } => {}
                 Event::Aborted {
                     kind,
                     id,

@@ -93,14 +93,16 @@ pub(crate) struct Limits {
     /// `TrailerSend::poll_write` without first waiting for a transport grant.
     /// Set to zero to disable copying nonempty fragments on this path.
     pub trailer_send_copy_threshold: usize,
-    /// Maximum number of requests awaiting a terminal response at once.
+    /// Maximum number of concurrent calls, counted from the first fragment
+    /// of a request to its response.
     ///
-    /// This also bounds how many messages may be mid-reassembly: a message is
-    /// only incomplete while its postcard payload is being fragmented, which
-    /// happens strictly within a call in both directions. Messages that have
-    /// finished their payload and entered their trailer phase are *not*
-    /// counted — those are bounded by the credit windows below, not by a
-    /// count, because a trailer may legitimately outlive its call.
+    /// A call spends that span in two custodians — the reassembler while its
+    /// payload is still arriving, then the endpoint until it answers — and
+    /// the limit is on the sum, so a peer cannot get twice the budget by
+    /// keeping half its calls in each. Messages that have finished their
+    /// payload and entered their trailer phase are *not* counted: those are
+    /// bounded by the credit window below rather than by a count, because a
+    /// trailer may legitimately outlive its call.
     pub max_concurrent_calls: usize,
     /// How much retired trailer credit this end accumulates before returning
     /// it to the peer.
