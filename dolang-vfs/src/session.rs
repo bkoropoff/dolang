@@ -134,6 +134,9 @@ mod tests {
 /// Marker for a regular file retained by a VFS RPC session.
 #[derive(Debug)]
 pub(crate) struct FileMarker;
+/// Marker for a held file lock retained by a VFS RPC session.
+#[derive(Debug)]
+pub(crate) struct FileLockMarker;
 /// Marker for a directory enumeration retained by a VFS RPC session.
 #[derive(Debug)]
 pub(crate) struct ReadDirMarker;

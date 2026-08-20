@@ -1,6 +1,6 @@
 use std::any::Any;
 use std::collections::HashMap;
-use std::{fmt, io, path::PathBuf};
+use std::{fmt, path::PathBuf};
 
 use dolang_rpc::{
     AuthKey, Protocol,
@@ -331,33 +331,6 @@ pub(crate) enum OpenHandlePreference {
 pub(crate) enum OpenHandle {
     Native(OsHandle),
     Opaque(Gift<crate::session::FileMarker>),
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
-pub(crate) enum FileSeekFrom {
-    Start(u64),
-    End(i64),
-    Current(i64),
-}
-
-impl From<io::SeekFrom> for FileSeekFrom {
-    fn from(value: io::SeekFrom) -> Self {
-        match value {
-            io::SeekFrom::Start(offset) => Self::Start(offset),
-            io::SeekFrom::End(offset) => Self::End(offset),
-            io::SeekFrom::Current(offset) => Self::Current(offset),
-        }
-    }
-}
-
-impl From<FileSeekFrom> for io::SeekFrom {
-    fn from(value: FileSeekFrom) -> Self {
-        match value {
-            FileSeekFrom::Start(offset) => Self::Start(offset),
-            FileSeekFrom::End(offset) => Self::End(offset),
-            FileSeekFrom::Current(offset) => Self::Current(offset),
-        }
-    }
 }
 
 /// `Debug` is manual so a request cannot print the key it carries.
@@ -771,14 +744,18 @@ pub(crate) enum RequestKind {
     Open(OpenRequest),
     FileRead {
         file: Cite<crate::session::FileMarker>,
+        offset: u64,
         len: usize,
     },
     FileWrite {
         file: Cite<crate::session::FileMarker>,
+        offset: u64,
     },
-    FileSeek {
+    FileAppend {
         file: Cite<crate::session::FileMarker>,
-        position: FileSeekFrom,
+    },
+    FileSize {
+        file: Cite<crate::session::FileMarker>,
     },
     FileFlush {
         file: Cite<crate::session::FileMarker>,
@@ -792,14 +769,15 @@ pub(crate) enum RequestKind {
         request: crate::file::FileLockRequest,
     },
     FileUnlock {
-        file: Cite<crate::session::FileMarker>,
-        lock: u64,
+        lock: Cite<crate::session::FileLockMarker>,
     },
     FileToStdioSend {
         file: Cite<crate::session::FileMarker>,
+        offset: u64,
     },
     FileToStdioRecv {
         file: Cite<crate::session::FileMarker>,
+        offset: u64,
     },
     StdioSendClose {
         stdio: Cite<crate::session::StdioSendMarker>,
@@ -933,10 +911,11 @@ pub(crate) enum ResponseKind {
     Open(Result<OpenHandle, WireError>),
     FileRead(Result<(), WireError>),
     FileWrite(Result<usize, WireError>),
-    FileSeek(Result<u64, WireError>),
+    FileAppend(Result<(usize, u64), WireError>),
+    FileSize(Result<u64, WireError>),
     FileFlush(Result<(), WireError>),
     FileSetSize(Result<(), WireError>),
-    FileLock(Result<Option<u64>, WireError>),
+    FileLock(Result<Option<Gift<crate::session::FileLockMarker>>, WireError>),
     FileUnlock(Result<(), WireError>),
     FileToStdioSend(Result<Gift<crate::session::StdioSendMarker>, WireError>),
     FileToStdioRecv(Result<Gift<crate::session::StdioRecvMarker>, WireError>),

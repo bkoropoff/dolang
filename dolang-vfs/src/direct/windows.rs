@@ -1,4 +1,4 @@
-use super::{Direct, DirectChild, DirectCommand, DirectOpenOptions};
+use super::{Direct, DirectChild, DirectCommand, DirectFile, DirectOpenOptions};
 use crate::metadata::{FsMetadataFamily, WindowsFsMetadata, metadata_from_std, metadata_with_sids};
 use crate::{
     AttrFlags, AttrsPatch, FsMetadata, Metadata, MetadataPatch, OpenOptions as _,
@@ -18,10 +18,11 @@ use std::{
     },
     path::{Component, Path, PathBuf, Prefix},
     ptr, slice,
+    sync::Arc,
     time::SystemTime,
 };
 use tokio::{
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     time::{Duration, timeout},
 };
 use windows_sys::{
@@ -87,6 +88,22 @@ use windows_sys::{
     },
     core::GUID,
 };
+
+impl DirectFile {
+    /// Reads at an absolute offset.
+    ///
+    /// Windows has no true positional read: `seek_read` moves the handle's
+    /// file pointer as a side effect. That is harmless because shared code
+    /// never consumes that pointer and materializes the cursor before handing
+    /// the descriptor to another process.
+    pub(super) fn pread(file: &std::fs::File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+        std::os::windows::fs::FileExt::seek_read(file, buf, offset)
+    }
+
+    pub(super) fn pwrite(file: &std::fs::File, buf: &[u8], offset: u64) -> io::Result<usize> {
+        std::os::windows::fs::FileExt::seek_write(file, buf, offset)
+    }
+}
 
 fn typed_windows_path(path: &Path) -> io::Result<Utf8TypedPath<'_>> {
     let path = path
@@ -226,7 +243,7 @@ impl Direct {
     }
 
     pub(super) fn acl_from_file(
-        _file: &File,
+        _file: &std::fs::File,
         _kind: crate::security::AclKind,
         _default: bool,
     ) -> io::Result<Option<crate::security::Acl>> {
@@ -237,7 +254,7 @@ impl Direct {
     }
 
     pub(super) fn set_acl_file(
-        _file: &File,
+        _file: &std::fs::File,
         _kind: crate::security::AclKind,
         _acl: Option<&crate::security::Acl>,
         _default: bool,
@@ -429,14 +446,14 @@ impl Direct {
     }
 
     pub(super) fn sec_desc_from_file(
-        file: &File,
+        file: &std::fs::File,
         mask: dolang_winterop::security::SecInfo,
     ) -> io::Result<SecDesc> {
         let mask = mask & SecInfo::ALL;
         Self::sec_desc_from_handle(file.as_handle(), mask)
     }
 
-    pub(super) fn set_sec_desc_file(file: &File, descriptor: &SecDesc) -> io::Result<()> {
+    pub(super) fn set_sec_desc_file(file: &std::fs::File, descriptor: &SecDesc) -> io::Result<()> {
         Self::set_sec_desc_on_handle(file.as_handle(), descriptor)
     }
 
@@ -708,13 +725,13 @@ impl Direct {
         })
     }
 
-    pub(super) fn fs_metadata_from_file(file: &File) -> io::Result<FsMetadata> {
+    pub(super) fn fs_metadata_from_file(file: &std::fs::File) -> io::Result<FsMetadata> {
         Self::fs_metadata_from_handle(file.as_handle())
     }
 
     pub(super) fn metadata_with_security(
         metadata: std::fs::Metadata,
-        file: &File,
+        file: &std::fs::File,
     ) -> io::Result<Metadata> {
         let descriptor = Self::sec_desc_from_file(file, SecInfo::OWNER | SecInfo::GROUP)?;
         Ok(metadata_with_sids(
@@ -806,9 +823,9 @@ impl Direct {
         }
     }
 
-    pub(super) fn open_for_metadata(path: &Path, follow: bool) -> io::Result<File> {
+    pub(super) fn open_for_metadata(path: &Path, follow: bool) -> io::Result<Arc<StdFile>> {
         let handle = Self::security_handle(path, 0, follow)?;
-        Ok(File::from_std(StdFile::from(handle)))
+        Ok(Arc::new(StdFile::from(handle)))
     }
 
     fn validate_attrs_patch(patch: AttrsPatch) -> io::Result<()> {
@@ -1448,7 +1465,7 @@ impl Direct {
             .open(typed_windows_path(path)?)
             .await
             .map_err(crate::Error::into_io_error)?;
-        Self::impl_file_xattrs(&file.inner, namespace).await
+        Self::impl_file_xattrs(&file.file, namespace).await
     }
 
     pub(super) async fn impl_streams(
@@ -1474,7 +1491,7 @@ impl Direct {
             .open(typed_windows_path(path)?)
             .await
             .map_err(crate::Error::into_io_error)?;
-        Self::impl_file_xattr(&file.inner, name, namespace).await
+        Self::impl_file_xattr(&file.file, name, namespace).await
     }
 
     pub(super) async fn impl_set_xattr(
@@ -1492,7 +1509,7 @@ impl Direct {
             .open(typed_windows_path(path)?)
             .await
             .map_err(crate::Error::into_io_error)?;
-        Self::impl_file_set_xattr(&file.inner, name, namespace, value).await
+        Self::impl_file_set_xattr(&file.file, name, namespace, value).await
     }
 
     pub(super) async fn impl_remove_xattr(
@@ -1510,11 +1527,11 @@ impl Direct {
             .open(typed_windows_path(path)?)
             .await
             .map_err(crate::Error::into_io_error)?;
-        Self::impl_file_remove_xattr(&file.inner, name, namespace).await
+        Self::impl_file_remove_xattr(&file.file, name, namespace).await
     }
 
     pub(super) async fn impl_file_xattrs(
-        file: &File,
+        file: &Arc<std::fs::File>,
         namespace: XattrNamespace<'_>,
     ) -> Result<Vec<XattrEntry>, io::Error> {
         if let XattrNamespace::Named(_) = namespace {
@@ -1523,19 +1540,19 @@ impl Direct {
                 "xattr namespaces are not supported on this platform",
             ));
         }
-        let file = file.try_clone().await?;
+        let file = Arc::clone(file);
         tokio::task::spawn_blocking(move || unsafe { Self::windows_list_xattrs(file.as_handle()) })
             .await
             .unwrap_or_else(|e| Err(io::Error::other(e)))
     }
 
     pub(super) async fn impl_file_xattr(
-        file: &File,
+        file: &Arc<std::fs::File>,
         name: &str,
         namespace: Option<&str>,
     ) -> Result<Vec<u8>, io::Error> {
         let name = Self::windows_xattr_name(name, namespace)?;
-        let file = file.try_clone().await?;
+        let file = Arc::clone(file);
         tokio::task::spawn_blocking(move || unsafe {
             Self::windows_get_xattr(file.as_handle(), &name)
         })
@@ -1543,15 +1560,17 @@ impl Direct {
         .unwrap_or_else(|e| Err(io::Error::other(e)))
     }
 
-    pub(super) async fn impl_file_streams(file: &File) -> Result<Vec<StreamEntry>, io::Error> {
-        let file = file.try_clone().await?;
+    pub(super) async fn impl_file_streams(
+        file: &Arc<std::fs::File>,
+    ) -> Result<Vec<StreamEntry>, io::Error> {
+        let file = Arc::clone(file);
         tokio::task::spawn_blocking(move || unsafe { Self::windows_list_streams(file.as_handle()) })
             .await
             .unwrap_or_else(|e| Err(io::Error::other(e)))
     }
 
     pub(super) async fn impl_file_set_xattr(
-        file: &File,
+        file: &Arc<std::fs::File>,
         name: &str,
         namespace: Option<&str>,
         value: &[u8],
@@ -1564,7 +1583,7 @@ impl Direct {
         }
         let name = Self::windows_xattr_name(name, namespace)?;
         let value = value.to_vec();
-        let file = file.try_clone().await?;
+        let file = Arc::clone(file);
         tokio::task::spawn_blocking(move || unsafe {
             Self::windows_set_xattr(file.as_handle(), &name, &value)
         })
@@ -1573,12 +1592,12 @@ impl Direct {
     }
 
     pub(super) async fn impl_file_remove_xattr(
-        file: &File,
+        file: &Arc<std::fs::File>,
         name: &str,
         namespace: Option<&str>,
     ) -> Result<(), io::Error> {
         let name = Self::windows_xattr_name(name, namespace)?;
-        let file = file.try_clone().await?;
+        let file = Arc::clone(file);
         tokio::task::spawn_blocking(move || unsafe {
             Self::windows_set_xattr(file.as_handle(), &name, &[])
         })

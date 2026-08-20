@@ -31,12 +31,15 @@
 //! }
 //! ```
 
+use bytes::{Bytes, BytesMut};
 use direct::{Direct, DirectFile, DirectOpenOptions};
 use dolang_winterop::security::{SecDesc, Sid};
 use extension::VfsExtension;
 use std::{
     collections::HashMap,
+    future::Future,
     io,
+    mem::MaybeUninit,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -77,7 +80,7 @@ mod windows;
 pub mod xattr;
 
 use directory::DirEntry;
-pub(crate) use error::{Error, ErrorKind, Result};
+pub(crate) use error::{Error, ErrorKind, HandoffError, Result};
 use file::{FileLock, FileLockRequest};
 use metadata::{AttrFlags, AttrsPatch, FileType, FsMetadata, Metadata, MetadataPatch};
 use path::WellKnownPath;
@@ -101,6 +104,21 @@ use xattr::{XattrEntry, XattrNamespace};
 /// `BYTE_STREAM_CHUNK_SIZE`, so a full buffer maps onto a single wire
 /// fragment, and it also amortizes syscalls on purely local transfers.
 pub const STREAM_CHUNK_SIZE: usize = 512 * 1024;
+
+/// Largest range one `FileRead` request may ask for.
+///
+/// The server reads the whole requested range into memory *before* it responds,
+/// so that a filesystem error becomes a structured failure in the response
+/// rather than an aborted trailer with the `ErrorKind` lost. That makes the
+/// requested length an allocation the peer controls, so it has to be bounded.
+/// One chunk keeps a full reply inside a single wire fragment, matching what
+/// the trailer pool already budgets per transfer.
+///
+/// Reads larger than this are not an error: both the request length and the
+/// reply are clamped, and the caller sees an ordinary short read. Callers that
+/// must have every byte loop, exactly as they already must around a short read
+/// at any other layer.
+pub const MAX_FILE_READ: usize = STREAM_CHUNK_SIZE;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SessionMode {
@@ -138,40 +156,164 @@ pub trait OpenOptions {
 ///
 /// File handles implement Tokio's asynchronous read, write, and seek traits.
 pub trait FileHandle: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Sized {
-    /// Converts this handle into a standard-output or standard-error endpoint.
-    async fn to_stdio_send(&self) -> Result<StdioSend>;
-    /// Converts this handle into a standard-input endpoint.
-    async fn to_stdio_recv(&self) -> Result<StdioRecv>;
+    /// Consumes this handle, converting it into a standard-output or
+    /// standard-error endpoint positioned at `offset`.
+    ///
+    /// The endpoint carries a position of its own and the cursor is kept on
+    /// this side rather than in the kernel, so the position has to be stated
+    /// explicitly: this handle's own is only the right answer when the caller
+    /// is the one holding it, which is not the case for anything relaying on
+    /// someone else's behalf.
+    ///
+    /// The handle is consumed because two live handles onto one description
+    /// would each believe a cursor the other moves. Callers that want to keep
+    /// reading or writing should open the file again instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HandoffError`], which carries the handle back. Nothing has
+    /// been surrendered when it does — most importantly on the busy path,
+    /// where operations are still in flight against the descriptor and the
+    /// caller may simply retry once they finish.
+    async fn into_stdio_send(
+        self,
+        offset: u64,
+    ) -> std::result::Result<StdioSend, HandoffError<Self>>;
+    /// Consumes this handle, converting it into a standard-input endpoint
+    /// positioned at `offset`. See [`into_stdio_send`](Self::into_stdio_send).
+    async fn into_stdio_recv(
+        self,
+        offset: u64,
+    ) -> std::result::Result<StdioRecv, HandoffError<Self>>;
+    /// Commits anything this handle is holding back from the target.
+    ///
+    /// The `&self` counterpart of [`AsyncWriteExt::flush`], which the
+    /// positional operations need because they never take the handle
+    /// exclusively. It is deliberately *not* called `flush`: a `&self` method
+    /// of that name would win method resolution over `AsyncWriteExt`'s
+    /// `&mut self` one at every existing call site, silently changing what
+    /// `file.flush()` means. This does not settle work started through the
+    /// poll surface; `poll_flush` owns that.
+    ///
+    /// [`AsyncWriteExt::flush`]: tokio::io::AsyncWriteExt::flush
+    async fn commit(&self) -> Result<()>;
     /// Closes this handle.
     async fn close(self) -> Result<()>;
     /// Changes the file length to `size` bytes.
-    async fn set_size(&mut self, size: u64) -> Result<()>;
+    async fn set_size(&self, size: u64) -> Result<()>;
     /// Returns metadata for the open file.
-    async fn metadata(&mut self) -> Result<Metadata>;
+    async fn metadata(&self) -> Result<Metadata>;
     /// Returns metadata for the filesystem containing the open file.
-    async fn fs_metadata(&mut self) -> Result<FsMetadata>;
+    async fn fs_metadata(&self) -> Result<FsMetadata>;
     /// Returns the ACL of the requested `kind`. For a POSIX ACL, `default`
     /// selects the directory's default ACL rather than its access ACL; it
     /// must be `false` for `AclKind::Nfs4`.
-    async fn acl(&mut self, kind: AclKind, default: bool) -> Result<Option<Acl>>;
+    async fn acl(&self, kind: AclKind, default: bool) -> Result<Option<Acl>>;
     /// Sets or removes the ACL of `kind`. `acl`, if present, must match
     /// `kind`. `default` selects the POSIX default ACL, as in
     /// [`acl`](Self::acl); it must be `false` for `AclKind::Nfs4`.
-    async fn set_acl(&mut self, kind: AclKind, acl: Option<&Acl>, default: bool) -> Result<()>;
+    async fn set_acl(&self, kind: AclKind, acl: Option<&Acl>, default: bool) -> Result<()>;
     /// Returns the Windows security descriptor selected by `mask`.
-    async fn sec_desc(&mut self, mask: dolang_winterop::security::SecInfo) -> Result<SecDesc>;
+    async fn sec_desc(&self, mask: dolang_winterop::security::SecInfo) -> Result<SecDesc>;
     /// Replaces the Windows security descriptor.
-    async fn set_sec_desc(&mut self, sec_desc: &SecDesc) -> Result<()>;
+    async fn set_sec_desc(&self, sec_desc: &SecDesc) -> Result<()>;
     /// Lists extended attributes in `namespace`.
-    async fn xattrs(&mut self, namespace: XattrNamespace<'_>) -> Result<Vec<XattrEntry>>;
+    async fn xattrs(&self, namespace: XattrNamespace<'_>) -> Result<Vec<XattrEntry>>;
     /// Reads one extended attribute.
-    async fn xattr(&mut self, name: &str, namespace: Option<&str>) -> Result<Vec<u8>>;
+    async fn xattr(&self, name: &str, namespace: Option<&str>) -> Result<Vec<u8>>;
     /// Lists alternate data streams.
-    async fn streams(&mut self) -> Result<Vec<StreamEntry>>;
+    async fn streams(&self) -> Result<Vec<StreamEntry>>;
     /// Creates or replaces an extended attribute.
-    async fn set_xattr(&mut self, name: &str, namespace: Option<&str>, value: &[u8]) -> Result<()>;
+    async fn set_xattr(&self, name: &str, namespace: Option<&str>, value: &[u8]) -> Result<()>;
     /// Removes an extended attribute.
-    async fn remove_xattr(&mut self, name: &str, namespace: Option<&str>) -> Result<()>;
+    async fn remove_xattr(&self, name: &str, namespace: Option<&str>) -> Result<()>;
+    /// Reads into `buf`'s spare capacity starting at `offset`, returning the
+    /// transfer count.
+    ///
+    /// Cancelling the read may leave `buf` empty.
+    ///
+    /// Bytes are *appended* into the spare capacity rather than replacing the
+    /// contents, so buffers recycle; pass a cleared buffer to read from the
+    /// start.
+    ///
+    /// The transfer is capped by the spare capacity available, and may be
+    /// shorter than that for reasons other than end of file — a partial page
+    /// cache hit, a signal, a chunk boundary on the wire. A remote file caps
+    /// every read at [`MAX_FILE_READ`], because the peer must hold the whole
+    /// reply before it can report a failure structurally. Zero means end of
+    /// file; callers that need a specific count must loop.
+    ///
+    /// The returned future borrows the buffer but not the handle, so it may
+    /// outlive the handle it came from and any number may be in flight on one
+    /// handle at once.
+    fn read_at<'b>(
+        &self,
+        buf: &'b mut BytesMut,
+        offset: u64,
+    ) -> impl Future<Output = io::Result<usize>> + Send + use<'b, Self>;
+
+    /// Writes `data` at `offset`, returning the byte count.
+    ///
+    /// May write less than all of `data`; callers that need it all must loop.
+    /// Rejected on an append-mode handle, where the offset would be ignored
+    /// and the data appended regardless; use [`append`](Self::append) there.
+    fn write_at(
+        &self,
+        data: Bytes,
+        offset: u64,
+    ) -> impl Future<Output = io::Result<usize>> + Send + use<Self>;
+
+    /// Appends `data`, returning the byte count and the position just past
+    /// what was written.
+    ///
+    /// The resulting position is reported because the caller cannot compute
+    /// it: an append lands wherever the end happened to be when it ran.
+    fn append(
+        &self,
+        data: Bytes,
+    ) -> impl Future<Output = io::Result<(usize, u64)>> + Send + use<Self>;
+
+    /// Reads into the uninitialized `buf` starting at `offset`, returning how
+    /// many bytes at its front were filled.
+    ///
+    /// The destination-borrowing counterpart of [`read_at`](Self::read_at),
+    /// for callers whose buffer is not a [`BytesMut`].
+    ///
+    /// Only the returned count is initialized, and only on success. An error
+    /// says nothing about how much of `buf` was written, but writing into
+    /// uninitialized memory harms nothing: the caller has no count to act on,
+    /// so the bytes are unreachable either way.
+    ///
+    /// Short transfers are contractual for the same reasons as `read_at`'s,
+    /// with the copying route bounded additionally by the size of temporary it
+    /// is willing to allocate. Zero means end of file.
+    fn read_at_into<'b>(
+        &self,
+        buf: &'b mut [MaybeUninit<u8>],
+        offset: u64,
+    ) -> impl Future<Output = io::Result<usize>> + Send + use<'b, Self>;
+
+    /// Writes `data` at `offset` from borrowed storage, returning the byte
+    /// count.
+    ///
+    /// The source-borrowing counterpart of [`write_at`](Self::write_at), for
+    /// callers holding bytes they cannot cheaply turn into a [`Bytes`] —
+    /// memory belonging to a garbage collector, say. A backend that can send
+    /// from borrowed storage does; the default copies, which is exactly what
+    /// such a caller would have done itself.
+    ///
+    /// Same short-write and append-mode rules as `write_at`.
+    fn write_at_from<'b>(
+        &self,
+        data: &'b [u8],
+        offset: u64,
+    ) -> impl Future<Output = io::Result<usize>> + Send + use<'b, Self> {
+        // Eagerly, outside any async block: the copy is what this default
+        // exists to perform, and `write_at`'s future does not borrow the
+        // handle, which is the property the signature promises onward.
+        self.write_at(Bytes::copy_from_slice(data), offset)
+    }
+
     /// Acquires a byte-range lock according to `request`.
     async fn lock(&self, request: FileLockRequest) -> Result<Option<FileLock>>;
     /// Converts this handle into a local standard-library file when possible.
@@ -476,6 +618,34 @@ pub enum AnyFile {
     Direct(DirectFile),
 }
 
+/// One of two futures, chosen at dispatch time.
+///
+/// The positional operations return `impl Future`, so a backend that dispatches
+/// between two implementations has two distinct future types to reconcile and
+/// cannot simply `match` inside an `async` block: the returned future captures
+/// no lifetimes, so it cannot borrow the handle it came from. Boxing would
+/// work; this avoids the allocation on what is meant to be the hot path.
+pub(crate) enum EitherFuture<L, R> {
+    Left(L),
+    Right(R),
+}
+
+impl<T, L: Future<Output = T>, R: Future<Output = T>> Future for EitherFuture<L, R> {
+    type Output = T;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {
+        // SAFETY: the projection is structural and neither variant is ever
+        // moved out of, so the pinning guarantee carries through to whichever
+        // future is inside.
+        unsafe {
+            match self.get_unchecked_mut() {
+                Self::Left(future) => Pin::new_unchecked(future).poll(cx),
+                Self::Right(future) => Pin::new_unchecked(future).poll(cx),
+            }
+        }
+    }
+}
+
 macro_rules! dispatch_file_mut {
     ($self:expr, $method:ident($($arg:expr),* $(,)?)) => {{
         match $self {
@@ -532,19 +702,48 @@ impl AsyncSeek for AnyFile {
     }
 }
 
+/// Puts a handle recovered from a failed handoff back in the wrapper it was
+/// dispatched out of.
+pub(crate) fn rewrap<I, O>(error: HandoffError<I>, wrap: impl FnOnce(I) -> O) -> HandoffError<O> {
+    let (handle, error) = error.into_parts();
+    HandoffError::new(wrap(handle), error)
+}
+
 impl FileHandle for AnyFile {
-    async fn to_stdio_send(&self) -> crate::Result<StdioSend> {
+    async fn into_stdio_send(
+        self,
+        offset: u64,
+    ) -> std::result::Result<StdioSend, HandoffError<Self>> {
         match self {
-            Self::Client(file) => file.to_stdio_send().await,
-            Self::Direct(file) => file.to_stdio_send().await,
+            Self::Client(file) => file
+                .into_stdio_send(offset)
+                .await
+                .map_err(|error| rewrap(error, Self::Client)),
+            Self::Direct(file) => file
+                .into_stdio_send(offset)
+                .await
+                .map_err(|error| rewrap(error, Self::Direct)),
         }
     }
 
-    async fn to_stdio_recv(&self) -> crate::Result<StdioRecv> {
+    async fn into_stdio_recv(
+        self,
+        offset: u64,
+    ) -> std::result::Result<StdioRecv, HandoffError<Self>> {
         match self {
-            Self::Client(file) => file.to_stdio_recv().await,
-            Self::Direct(file) => file.to_stdio_recv().await,
+            Self::Client(file) => file
+                .into_stdio_recv(offset)
+                .await
+                .map_err(|error| rewrap(error, Self::Client)),
+            Self::Direct(file) => file
+                .into_stdio_recv(offset)
+                .await
+                .map_err(|error| rewrap(error, Self::Direct)),
         }
+    }
+
+    async fn commit(&self) -> crate::Result<()> {
+        match_file!(self, file => file.commit().await)
     }
 
     async fn close(self) -> crate::Result<()> {
@@ -554,56 +753,102 @@ impl FileHandle for AnyFile {
         }
     }
 
-    async fn set_size(&mut self, size: u64) -> crate::Result<()> {
+    fn read_at<'b>(
+        &self,
+        buf: &'b mut BytesMut,
+        offset: u64,
+    ) -> impl Future<Output = io::Result<usize>> + Send + use<'b> {
+        match self {
+            Self::Client(file) => EitherFuture::Left(file.read_at(buf, offset)),
+            Self::Direct(file) => EitherFuture::Right(file.read_at(buf, offset)),
+        }
+    }
+
+    fn write_at(
+        &self,
+        data: Bytes,
+        offset: u64,
+    ) -> impl Future<Output = io::Result<usize>> + Send + use<> {
+        match self {
+            Self::Client(file) => EitherFuture::Left(file.write_at(data, offset)),
+            Self::Direct(file) => EitherFuture::Right(file.write_at(data, offset)),
+        }
+    }
+
+    fn append(&self, data: Bytes) -> impl Future<Output = io::Result<(usize, u64)>> + Send + use<> {
+        match self {
+            Self::Client(file) => EitherFuture::Left(file.append(data)),
+            Self::Direct(file) => EitherFuture::Right(file.append(data)),
+        }
+    }
+
+    // Forwarded explicitly rather than left to the trait's copying default,
+    // which at a dispatch point would copy before reaching the backend that
+    // wanted the borrow.
+    fn read_at_into<'b>(
+        &self,
+        buf: &'b mut [MaybeUninit<u8>],
+        offset: u64,
+    ) -> impl Future<Output = io::Result<usize>> + Send + use<'b> {
+        match self {
+            Self::Client(file) => EitherFuture::Left(file.read_at_into(buf, offset)),
+            Self::Direct(file) => EitherFuture::Right(file.read_at_into(buf, offset)),
+        }
+    }
+
+    fn write_at_from<'b>(
+        &self,
+        data: &'b [u8],
+        offset: u64,
+    ) -> impl Future<Output = io::Result<usize>> + Send + use<'b> {
+        match self {
+            Self::Client(file) => EitherFuture::Left(file.write_at_from(data, offset)),
+            Self::Direct(file) => EitherFuture::Right(file.write_at_from(data, offset)),
+        }
+    }
+
+    async fn set_size(&self, size: u64) -> crate::Result<()> {
         match_file!(self, file => file.set_size(size).await)
     }
 
-    async fn metadata(&mut self) -> crate::Result<Metadata> {
+    async fn metadata(&self) -> crate::Result<Metadata> {
         match_file!(self, file => file.metadata().await)
     }
 
-    async fn fs_metadata(&mut self) -> crate::Result<FsMetadata> {
+    async fn fs_metadata(&self) -> crate::Result<FsMetadata> {
         match_file!(self, file => file.fs_metadata().await)
     }
 
-    async fn acl(&mut self, kind: AclKind, default: bool) -> crate::Result<Option<Acl>> {
+    async fn acl(&self, kind: AclKind, default: bool) -> crate::Result<Option<Acl>> {
         match_file!(self, file => file.acl(kind, default).await)
     }
 
-    async fn set_acl(
-        &mut self,
-        kind: AclKind,
-        acl: Option<&Acl>,
-        default: bool,
-    ) -> crate::Result<()> {
+    async fn set_acl(&self, kind: AclKind, acl: Option<&Acl>, default: bool) -> crate::Result<()> {
         match_file!(self, file => file.set_acl(kind, acl, default).await)
     }
 
-    async fn sec_desc(
-        &mut self,
-        mask: dolang_winterop::security::SecInfo,
-    ) -> crate::Result<SecDesc> {
+    async fn sec_desc(&self, mask: dolang_winterop::security::SecInfo) -> crate::Result<SecDesc> {
         match_file!(self, file => file.sec_desc(mask).await)
     }
 
-    async fn set_sec_desc(&mut self, sec_desc: &SecDesc) -> crate::Result<()> {
+    async fn set_sec_desc(&self, sec_desc: &SecDesc) -> crate::Result<()> {
         match_file!(self, file => file.set_sec_desc(sec_desc).await)
     }
 
-    async fn xattrs(&mut self, namespace: XattrNamespace<'_>) -> crate::Result<Vec<XattrEntry>> {
+    async fn xattrs(&self, namespace: XattrNamespace<'_>) -> crate::Result<Vec<XattrEntry>> {
         match_file!(self, file => file.xattrs(namespace).await)
     }
 
-    async fn xattr(&mut self, name: &str, namespace: Option<&str>) -> crate::Result<Vec<u8>> {
+    async fn xattr(&self, name: &str, namespace: Option<&str>) -> crate::Result<Vec<u8>> {
         match_file!(self, file => file.xattr(name, namespace).await)
     }
 
-    async fn streams(&mut self) -> crate::Result<Vec<StreamEntry>> {
+    async fn streams(&self) -> crate::Result<Vec<StreamEntry>> {
         match_file!(self, file => file.streams().await)
     }
 
     async fn set_xattr(
-        &mut self,
+        &self,
         name: &str,
         namespace: Option<&str>,
         value: &[u8],
@@ -611,7 +856,7 @@ impl FileHandle for AnyFile {
         match_file!(self, file => file.set_xattr(name, namespace, value).await)
     }
 
-    async fn remove_xattr(&mut self, name: &str, namespace: Option<&str>) -> crate::Result<()> {
+    async fn remove_xattr(&self, name: &str, namespace: Option<&str>) -> crate::Result<()> {
         match_file!(self, file => file.remove_xattr(name, namespace).await)
     }
 

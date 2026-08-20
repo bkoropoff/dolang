@@ -1,6 +1,6 @@
 use std::{ffi::CString, io, os::unix::ffi::OsStrExt, path::Path};
 
-use tokio::fs::File;
+use std::fs::File;
 
 use super::Direct;
 #[cfg(target_os = "macos")]

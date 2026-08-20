@@ -350,7 +350,7 @@ async fn fd_passing() {
     let mut command = client.command(typed_str("echo"));
     command
         .arg("hello_world")
-        .stdout(output.to_stdio_send().await.unwrap())
+        .stdout(crate::support::stdio_send(output).await)
         .unwrap();
     let mut child = command.spawn().await.unwrap();
     let status = child.wait().await.unwrap();

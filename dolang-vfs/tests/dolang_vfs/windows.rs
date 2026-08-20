@@ -169,7 +169,7 @@ async fn windows_metadata_and_ownership_round_trip_over_rpc() {
 
     let mut options = client.open_options();
     options.read(true);
-    let mut file = OpenOptions::open(&options, typed(&path)).await.unwrap();
+    let file = OpenOptions::open(&options, typed(&path)).await.unwrap();
     let file_metadata = file.metadata().await.unwrap();
     let file_windows = file_metadata.windows().unwrap();
     assert_eq!(file_windows.user.as_ref(), Some(&user));
@@ -297,11 +297,10 @@ async fn file_stdio_is_reopened_without_overlapped() {
         .arg("/s")
         .arg("/c")
         .arg("echo first")
-        .stdout(output.to_stdio_send().await.unwrap())
+        .stdout(crate::support::stdio_send(output).await)
         .unwrap();
     let mut child = command.spawn().await.unwrap();
     assert!(child.wait().await.unwrap().success());
-    drop(output);
 
     let mut options = client.open_options();
     options.append(true);
@@ -312,11 +311,10 @@ async fn file_stdio_is_reopened_without_overlapped() {
         .arg("/s")
         .arg("/c")
         .arg("echo second")
-        .stdout(output.to_stdio_send().await.unwrap())
+        .stdout(crate::support::stdio_send(output).await)
         .unwrap();
     let mut child = command.spawn().await.unwrap();
     assert!(child.wait().await.unwrap().success());
-    drop(output);
 
     let contents = std::fs::read_to_string(&path).unwrap();
     assert!(contents.contains("first"), "contents were {contents:?}");
