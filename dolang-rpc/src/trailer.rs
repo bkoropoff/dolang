@@ -1,7 +1,6 @@
 //! Streaming RPC trailer bodies and their lifetime-erased transport leases.
 
 use std::{
-    collections::HashMap,
     io::{self, IoSlice},
     marker::PhantomData,
     pin::Pin,
@@ -17,6 +16,7 @@ use crate::{
     fragment::Kind,
     fragment::{Flags, FragmentHeader},
     transport::{AnyRecv, AnySend, RecvFrame, SendFrame},
+    window::{ControlSink, SessionWindow},
 };
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -37,153 +37,6 @@ fn register_waker(slot: &mut Option<Waker>, waker: &Waker) {
 fn wake(waker: Option<Waker>) {
     if let Some(waker) = waker {
         waker.wake();
-    }
-}
-
-/// The session-wide trailer credit pool, shared by every trailer on one
-/// connection.
-///
-/// Each endpoint holds two of these, for opposite directions. The send-side
-/// pool tracks credit this endpoint may still spend across all its outgoing
-/// trailers; the receive-side pool tracks unretired bytes owed by the peer,
-/// so the reassembler can catch a peer that overruns what it was granted.
-///
-/// There is no negotiated per-trailer
-/// window. A sender that lets one trailer consume the whole pool starves only
-/// its own other trailers, never the peer's, so per-trailer fairness is a
-/// local scheduling concern rather than something the protocol has to
-/// enforce — including a sender that imposes a private budget per trailer,
-/// which this end cannot see. The receiver never has to: it flushes coalesced
-/// credit whenever withholding it could be what keeps a sender parked, both
-/// when the pool is provably drained ([`SessionWindow::is_exhausted`]) and
-/// when a consumer is waiting on bytes that have not come
-/// ([`RecvShared::is_stalled`]).
-///
-/// Outstanding bytes are tracked per message id rather than per
-/// `SendShared`/`RecvShared`, because settlement outlives those. A trailer's
-/// last `Credit` fragments routinely arrive after its send has finished and
-/// left the scheduler; if the debt lived on the send, those refunds would be
-/// dropped and the pool would shrink a little on every completed transfer
-/// until nothing could be sent at all. Keying by id also makes settlement
-/// idempotent, so an abort that returns the whole debt at once cannot be
-/// double-counted by a `Credit` that crossed it on the wire.
-pub(crate) struct SessionWindow {
-    state: Mutex<SessionWindowState>,
-}
-
-struct SessionWindowState {
-    /// Send side: bytes still spendable. Receive side: bytes of headroom
-    /// before the peer has overrun its grant.
-    available: usize,
-    /// Bytes outstanding per message id. Entries are removed as they reach
-    /// zero, so this is bounded by the number of live trailers.
-    debt: HashMap<u64, usize>,
-    /// Writers parked because the *pool* was empty, as opposed to their own
-    /// window. Woken all together on a refund; the parked set is bounded by
-    /// the number of open trailers, and no fairness is attempted beyond
-    /// that — a starved pool is a misconfiguration, not a steady state.
-    wakers: Vec<Waker>,
-}
-
-impl SessionWindow {
-    pub(crate) fn new(available: usize) -> Self {
-        Self {
-            state: Mutex::new(SessionWindowState {
-                available,
-                debt: HashMap::new(),
-                wakers: Vec::new(),
-            }),
-        }
-    }
-
-    #[cfg(test)]
-    fn available(&self) -> usize {
-        lock(&self.state).available
-    }
-
-    /// Receive side: true once the peer has spent every byte it was granted,
-    /// so it is certainly parked waiting for credit. Forces a coalesced
-    /// `Credit` out rather than stranding it below the threshold.
-    fn is_exhausted(&self) -> bool {
-        lock(&self.state).available == 0
-    }
-
-    /// Send side: spends up to `n` bytes on behalf of message `id`, returning
-    /// how many were actually granted. Zero means the pool is empty.
-    ///
-    /// Clamping and accounting happen under one lock. They have to, now that
-    /// the pool is the sole limiter: writers on different trailers hold
-    /// different `SendShared` mutexes, so a separate read-then-debit would
-    /// let two of them spend the same bytes.
-    fn debit_up_to(&self, id: u64, n: usize) -> usize {
-        let mut state = lock(&self.state);
-        let granted = n.min(state.available);
-        state.available -= granted;
-        if granted > 0 {
-            *state.debt.entry(id).or_default() += granted;
-        }
-        granted
-    }
-
-    /// Returns up to `n` of message `id`'s outstanding bytes and wakes every
-    /// writer parked on the pool.
-    ///
-    /// Clamping to the recorded debt is what makes this safe to call for an
-    /// id that has already been settled, or twice for the same bytes.
-    pub(crate) fn refund(&self, id: u64, n: usize) {
-        let mut state = lock(&self.state);
-        let Some(debt) = state.debt.get_mut(&id) else {
-            return;
-        };
-        let refund = n.min(*debt);
-        *debt -= refund;
-        if *debt == 0 {
-            state.debt.remove(&id);
-        }
-        state.available += refund;
-        let wakers = std::mem::take(&mut state.wakers);
-        drop(state);
-        for waker in wakers {
-            waker.wake();
-        }
-    }
-
-    /// Returns everything message `id` still owes, for a trailer that ended
-    /// without the rest of its bytes ever being retired (an abort, or a
-    /// discard on the receive side). Idempotent.
-    pub(crate) fn settle(&self, id: u64) {
-        let mut state = lock(&self.state);
-        let Some(debt) = state.debt.remove(&id) else {
-            return;
-        };
-        state.available += debt;
-        let wakers = std::mem::take(&mut state.wakers);
-        drop(state);
-        for waker in wakers {
-            waker.wake();
-        }
-    }
-
-    fn park(&self, waker: &Waker) {
-        let mut state = lock(&self.state);
-        if !state.wakers.iter().any(|parked| parked.will_wake(waker)) {
-            state.wakers.push(waker.clone());
-        }
-    }
-
-    /// Receive side: accounts `n` bytes arriving from the peer under message
-    /// `id`, returning `false` if that overruns the credit this endpoint
-    /// actually granted.
-    fn accept_bytes(&self, id: u64, n: usize) -> bool {
-        let mut state = lock(&self.state);
-        match state.available.checked_sub(n) {
-            Some(remaining) => {
-                state.available = remaining;
-                *state.debt.entry(id).or_default() += n;
-                true
-            }
-            None => false,
-        }
     }
 }
 
@@ -263,6 +116,18 @@ pub(crate) struct SendShared {
     /// established one of those two, so it doesn't need its own
     /// `is_some()`/`is_none()` check anywhere.
     error: Option<(io::ErrorKind, String)>,
+    /// Whether the message carrying this trailer has been admitted to the
+    /// scheduler's active set.
+    ///
+    /// A trailer cannot precede its own payload on the wire, so a producer
+    /// writing into a message that has not started yet can make no progress
+    /// whatever it does. Reserving credit anyway is worse than useless: it is
+    /// a deadlock, because payload quota and trailer credit are exactly the
+    /// two things such a message is waiting for. Several unstarted messages
+    /// can between them reserve the whole trailer pool for fragments that
+    /// cannot be sent, starving the started messages whose completion is the
+    /// only thing that would release the payload quota they are waiting on.
+    started: bool,
     writer_waker: Option<Waker>,
     driver_waker: Option<Waker>,
 }
@@ -286,9 +151,23 @@ impl SendShared {
             buffer: BytesMut::new(),
             state: SendState::Idle,
             error: None,
+            started: false,
             writer_waker: None,
             driver_waker: None,
         }))
+    }
+
+    /// Announces that the message carrying this trailer has been admitted and
+    /// will be driven, releasing any producer parked on that.
+    pub(crate) fn start(shared: &Mutex<Self>) {
+        let mut inner = lock(shared);
+        if inner.started {
+            return;
+        }
+        inner.started = true;
+        let writer = inner.writer_waker.take();
+        drop(inner);
+        wake(writer);
     }
 
     pub(crate) fn poll_action(shared: &Mutex<Self>, cx: &mut Context<'_>) -> Poll<SendAction> {
@@ -693,6 +572,13 @@ impl<T: Unpin> AsyncWrite for TrailerSend<T> {
                 Poll::Pending
             }
             SendState::Idle => {
+                // Nothing may be reserved before the message itself has been
+                // admitted; see `SendShared::started`. Parking here rather
+                // than after the reservation is the whole point.
+                if !inner.started {
+                    register_waker(&mut inner.writer_waker, cx.waker());
+                    return Poll::Pending;
+                }
                 // The only place credit is ever waited for. Doing it here,
                 // before demanding a token, is what keeps a starved trailer
                 // from holding a transport grant hostage — see
@@ -933,26 +819,12 @@ pub(crate) struct RecvShared {
     auto_release: bool,
     /// The route back to the peer, for the `Credit`/`Discard` fragments this
     /// trailer sends on its own behalf.
-    sink: Arc<dyn TrailerSink>,
+    sink: Arc<dyn ControlSink>,
     /// The message id those fragments name.
     id: u64,
     /// The receive-side session pool, so `accept_bytes` can check the
     /// aggregate bound and retirement can give back to it.
     session: Arc<SessionWindow>,
-}
-
-/// The route from a `TrailerRecv` back to its connection's outgoing queue.
-///
-/// Trailer state lives behind an `Arc<Mutex<..>>` that knows nothing about
-/// the application protocol, so this mirrors `session::ReleaseSink`: the
-/// endpoint implements it over its own outgoing channel and hands it in.
-/// Both operations are fire-and-forget — a dead channel means the connection
-/// is gone, which the reader will observe through its own error path.
-pub(crate) trait TrailerSink: Send + Sync + 'static {
-    /// Returns `count` retired bytes for message `id`.
-    fn credit(&self, id: u64, count: u32);
-    /// Tells the peer to stop sending message `id`'s trailer.
-    fn discard(&self, id: u64);
 }
 
 impl RecvShared {
@@ -962,7 +834,7 @@ impl RecvShared {
         credit_interval: usize,
         session: Arc<SessionWindow>,
         id: u64,
-        sink: Arc<dyn TrailerSink>,
+        sink: Arc<dyn ControlSink>,
     ) -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self {
             token: None,
@@ -1018,7 +890,7 @@ impl RecvShared {
     /// optimisations — without them a consumer that retires less than the
     /// interval and then waits for more data deadlocks against a sender that
     /// is waiting for exactly the credit sitting in `pending`.
-    fn retire(inner: &mut Self, len: usize) -> Option<(Arc<dyn TrailerSink>, u64, u32)> {
+    fn retire(inner: &mut Self, len: usize) -> Option<(Arc<dyn ControlSink>, u64, u32)> {
         // `discard` already returned this trailer's whole outstanding debt
         // to the pool in one go. Bytes retired after that point — `poll_read`
         // still serves whatever was left in `stage`, and `discard` does not
@@ -1059,7 +931,7 @@ impl RecvShared {
     }
 
     /// Emits whatever credit has accumulated, whatever the threshold says.
-    fn flush(inner: &mut Self) -> Option<(Arc<dyn TrailerSink>, u64, u32)> {
+    fn flush(inner: &mut Self) -> Option<(Arc<dyn ControlSink>, u64, u32)> {
         if inner.state == RecvState::Discard || inner.pending == 0 {
             return None;
         }
@@ -1693,7 +1565,11 @@ mod tests {
 
     fn send_shared_id(id: u64, limits: Limits) -> Arc<Mutex<SendShared>> {
         let session = Arc::new(SessionWindow::new(limits.trailer_session_window));
-        SendShared::new(Kind::Request, id, &limits, session)
+        let shared = SendShared::new(Kind::Request, id, &limits, session);
+        // These tests stand in for a message the scheduler has already
+        // admitted; the unstarted case has its own test below.
+        SendShared::start(&shared);
+        shared
     }
 
     /// A `RecvShared` with a sink that records what it would have sent, so
@@ -1704,7 +1580,11 @@ mod tests {
         discards: Mutex<Vec<u64>>,
     }
 
-    impl TrailerSink for Arc<RecordingSink> {
+    impl ControlSink for Arc<RecordingSink> {
+        fn payload_credit(&self, _count: u32) {
+            unreachable!("trailer tests never release payload quota")
+        }
+
         fn credit(&self, id: u64, count: u32) {
             lock(&self.credits).push((id, count));
         }
@@ -2037,12 +1917,43 @@ mod tests {
     /// Exhausting the pool parks the writer instead of failing it. This is
     /// the whole behavioural change from the old `max_trailer_size` abort: a
     /// slow consumer throttles the sender, it does not break it.
+    /// A trailer whose message has not been admitted yet must reserve
+    /// nothing. It cannot send what it stages — a trailer fragment can never
+    /// precede its own payload — and the credit it took would be held against
+    /// the trailers that *can* send, whose completion is the only thing that
+    /// would free the payload quota the unadmitted message is waiting for.
+    #[tokio::test]
+    async fn an_unstarted_trailer_reserves_no_credit() {
+        let session = Arc::new(SessionWindow::new(64));
+        // Ordinary staging limits, so the write after `start` completes
+        // against the buffer rather than demanding a transport grant this
+        // test has no driver to supply.
+        let shared = SendShared::new(Kind::Request, 1, &Limits::default(), session.clone());
+        let mut trailer = TrailerSend::new(shared.clone(), ());
+
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            Pin::new(&mut trailer).poll_write(&mut cx, b"abcd"),
+            Poll::Pending
+        ));
+        assert_eq!(session.available(), 64, "nothing may be spent yet");
+        assert_eq!(lock(&shared).state, SendState::Idle);
+
+        SendShared::start(&shared);
+        let written = std::future::poll_fn(|cx| Pin::new(&mut trailer).poll_write(cx, b"abcd"))
+            .await
+            .unwrap();
+        assert_eq!(written, 4);
+        assert_eq!(session.available(), 60);
+    }
+
     #[tokio::test]
     async fn exhausted_credit_parks_the_writer_until_credit_arrives() {
         let (sender, _) = generic(tokio::io::empty(), tokio::io::sink());
         let mut sender = AnySender::Generic(sender);
         let session = Arc::new(SessionWindow::new(4));
         let shared = SendShared::new(Kind::Request, 1, &zero_copy_limits(), session.clone());
+        SendShared::start(&shared);
         let mut trailer = TrailerSend::new(shared.clone(), ());
 
         // Spend the whole 4-byte pool.
@@ -2093,6 +2004,7 @@ mod tests {
             ..zero_copy_limits()
         };
         let shared = SendShared::new(Kind::Request, 1, &limits, session.clone());
+        SendShared::start(&shared);
         let mut trailer = TrailerSend::new(shared.clone(), ());
         let mut total = 0;
         for _ in 0..4 {
@@ -2122,6 +2034,8 @@ mod tests {
         let limits = zero_copy_limits();
         let first = SendShared::new(Kind::Request, 1, &limits, session.clone());
         let second = SendShared::new(Kind::Request, 2, &limits, session.clone());
+        SendShared::start(&first);
+        SendShared::start(&second);
 
         let mut trailer = TrailerSend::new(first.clone(), ());
         demand(&mut trailer, b"abcdefgh");
@@ -2167,6 +2081,7 @@ mod tests {
         let mut sender = AnySender::Generic(sender);
         let session = Arc::new(SessionWindow::new(64));
         let shared = SendShared::new(Kind::Request, 1, &zero_copy_limits(), session.clone());
+        SendShared::start(&shared);
         let mut trailer = TrailerSend::new(shared.clone(), ());
         demand(&mut trailer, b"abcdefgh");
         let lease = unsafe { SendShared::grant(&shared, sender.send(), 1024) };

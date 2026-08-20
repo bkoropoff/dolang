@@ -61,7 +61,10 @@ impl<P: Protocol> Future for Call<P> {
 `CallResult<R>` wraps the response together with an optional inbound trailer:
 `into_response(self) -> R` discards any trailer, `into_response_trailer(self)
 -> (R, Option<TrailerRecv>)` retains it. See
-[Payload Trailers](#payload-trailers-and-fragmentation).
+[Payload Trailers](#payload-trailers-and-fragmentation). It also carries the
+response's [payload quota](#payload-quota), released when it is decomposed or
+dropped, or handed to a caller that wants to release later through
+`take_payload_credit(&mut self) -> PayloadCredit`.
 
 Per-variant request/response typing is intentionally deferred. An
 application-level macro can later generate a dispatch enum and a trait that
@@ -90,10 +93,10 @@ let client: Client<Vfs> = unbound.bind();
 
 `Builder::new(name, versions)` takes the mandatory application-protocol
 descriptor as two plain arguments. Chainable setters
-(`max_fragment_size`, `max_payload_size`, `trailer_session_window`,
-`trailer_credit_interval`, `trailer_recv_copy_threshold`,
-`trailer_recv_demand_copy_threshold`, `trailer_send_copy_threshold`,
-`max_concurrent_calls`) override individual size
+(`max_fragment_size`, `max_payload_size`, `max_outstanding_payload`,
+`trailer_session_window`, `trailer_credit_interval`,
+`trailer_recv_copy_threshold`, `trailer_recv_demand_copy_threshold`,
+`trailer_send_copy_threshold`, `max_concurrent_calls`) override individual size
 and concurrency limits;
 these compose the crate-private `Limits` struct, which is not itself public.
 Terminal `async` methods consume the builder and negotiate over a specific
@@ -165,6 +168,7 @@ impl<P: Protocol> CallContext<P> {
     fn trailer_manual_credit(&mut self) -> Option<&mut TrailerRecv>;
     fn respond(self, response: P::Response);
     fn respond_with_trailer(self, response: P::Response) -> TrailerSend<()>;
+    fn release_payload(&mut self);
     fn shutdown(&self);
     async fn cancel_guard<T, F>(&mut self, operation: F) -> Result<T, RequestCancelled>
     where
@@ -227,6 +231,7 @@ Negotiate { id, payload }
 Ack       { id }
 Release   { id, count }
 Credit    { id, count }
+PayloadCredit    { count }
 ```
 
 `Request` and `Response` provide ordinary RPC correlation. `Error` is a
@@ -242,6 +247,10 @@ other kind is valid on a connection. `Ack` confirms the boundary marked by
 [trailer flow-control credit](#trailer-flow-control). Both carry a 4-byte
 count and tolerate an unknown `id`, because in both cases the sender may
 legitimately have retired the thing named while the message was in flight.
+`PayloadCredit` returns [payload quota](#payload-quota) and is the one kind
+with no `id` at all: quota is charged per message but released per call, and
+dropping the attribution is what lets any number of retirements coalesce into
+one count. Its `id` field is reserved and must be zero.
 
 The exact binary envelope is an implementation detail, but it must preserve
 frame boundaries and associate native-handle attachment serialization state
@@ -562,11 +571,12 @@ socket offers, and code layered on top should own the pairing itself.
 
 #### One Pool, No Per-Trailer Window
 
-The pool is the *only* credit limit. A sender that lets one trailer consume the
-whole pool starves only its own other trailers. Since `Credit` indicates which
-message ID is responsible for returned quota, the sender can always attribute
-quota consumption to its individual streams and apply per-stream limiting as
-local policy.
+The pool is the only credit limit trailers have — postcard payloads are metered
+separately, see [Payload Quota](#payload-quota). A sender that lets one trailer
+consume the whole pool starves only its own other trailers. Since `Credit`
+indicates which message ID is responsible for returned quota, the sender can
+always attribute quota consumption to its individual streams and apply
+per-stream limiting as local policy.
 
 That stays safe only because the receiver never assumes the pool is the sole
 reason a sender might be parked. A private per-stream budget is invisible on
@@ -634,6 +644,261 @@ Both ends reach zero without either counting the bytes on the wire, because
 alternative — crediting the racing fragments explicitly — would require the
 sender to keep a dead trailer's ledger entry alive until every byte it ever
 sent had been credited, with no crisp point at which it could be dropped.
+
+## Payload Quota
+
+`max_payload_size` bounds one message and cannot bound the sum. Multiplied by
+`max_concurrent_calls` it is the whole reassembly footprint a peer can demand,
+and a peer reaches it cheaply by opening that many messages and sending one
+fragment of each. `max_outstanding_payload` bounds the sum directly: total
+charged postcard bytes across every call that has not yet released.
+
+Trailers keep no size cap because they are streamable and can be paced
+incrementally. Payloads cannot — a payload has to be reassembled whole before
+it can be deserialized — so a cap is the only bound available, and the two
+rules invert.
+
+The quota measures wire bytes. The deserialized form is `O(serialized size)`,
+so that is an adequate proxy, but postcard is compact and a struct-heavy
+payload can land at four to eight times its wire size once padding and
+per-node overhead are counted. The default is chosen knowing that.
+
+### The Whole Call, Not Just Reassembly
+
+Counting buffered bytes across incomplete messages and releasing at dispatch
+would bound only the reassembly buffers. A payload's memory does not end at
+dispatch; it ends when the application is done with it. Dispatched payloads
+would still be bounded by `max_concurrent_calls` × `max_payload_size` — the
+exact product this limit exists to escape. It would close the cheap attack
+without lowering the peak.
+
+So the quota is charged for the whole call lifecycle and released when the
+application is done with the payload. That makes it a byte-denominated
+concurrency bound, which is the real prize: `max_concurrent_calls` can be
+generous — the default is 1024 — without also admitting 1024 large calls.
+
+### Charge At Admission
+
+The sender subtracts a message's **full** payload size when it moves from
+`waiting` into `active`, before its first fragment goes out, and does not
+restore it until the peer's release arrives. A message starts only if its
+whole payload fits in the remaining credit; otherwise it waits, unstarted,
+holding nothing, and cancellable with no wire trace.
+
+Charging at admission rather than incrementally is what removes the deadlock
+class entirely. Incremental charging lets several messages reach a
+partially-sent state that no remaining credit can drive to completion,
+recoverable only by cancelling and reissuing them — and nothing releases
+credit until something completes, so nothing completes. Charge-at-admission
+makes that unreachable by construction: anything started can always be
+finished.
+
+It costs almost nothing in utilization, because under end-of-use release a
+fully-sent message holds its entire payload against the pool anyway. The only
+window where "reserved" differs from "buffered at the peer" is the
+transmission itself. Nor does it reduce interleaving: a 16 MiB pool admits
+eight 2 MiB messages at once, which round-robin among themselves exactly as
+they would unconstrained.
+
+The sender's reservation therefore precedes the receiver's accounting and is
+released after it, so the safety argument does not depend on transport
+ordering the way a dispatch-time scheme would.
+
+Cancellation settles in two parts, because the two halves come back from
+different places. What was earmarked but never transmitted is buffered nowhere
+and is reclaimed locally, immediately. What did reach the wire is in the
+peer's reassembler, and only the peer can say when it is gone — it credits
+that part back when it retires the aborted message. Together they are exactly
+what was charged.
+
+### Release
+
+Every release path is **drop-driven, not call-driven**. A dropped
+`CallResult`, a `CallContext` whose handler panicked, a handler that returns
+without responding — each must release, and does, because each drops the
+charge that travelled with the message. A missed release is not a delayed
+release; it is a permanent subtraction from the pool, and enough of them stall
+the connection with no diagnostic. There is no reconciliation protocol worth
+building to recover from that — a session-level "ids I am still charging you
+for" exchange is far more machinery than the feature — so the drop paths are
+the entire defense.
+
+- **Server**: `CallContext::release_payload` releases explicitly; otherwise the
+  context's drop does it, whichever way the call ends.
+- **Client**: `CallResult` releases when decomposed or dropped, or
+  `take_payload_credit` extracts a `PayloadCredit` token to hold and drop
+  later. The token is where this is easiest to get wrong, since it is the one
+  release that outlives the obvious scope.
+- **Cancelled before the last fragment**: no charge was ever handed out, so the
+  reassembler settles the id itself on the `ABORT` path.
+
+Settlement is keyed by message id in the same ledger the trailer pools use, and
+`settle` clamps to the recorded debt, so releasing twice cannot over-credit.
+
+### Two Pools, One Mechanism
+
+Payload quota and trailer credit are separate pools sharing `SessionWindow` as
+a mechanism. Merging them is a deadlock class, not a tuning mistake.
+
+Take the ordinary streaming-upload shape: a small descriptor payload, a large
+trailer, and a handler that reads the trailer to completion before responding.
+The payload's charge is held until the handler completes; the handler cannot
+complete until it has consumed the trailer; the trailer needs credit. One such
+call is fine because its own payload is small. `N` of them whose payloads sum
+to a shared pool all wedge: each holds payload quota, each needs trailer
+credit, and none can release. Pricing a trailer fragment into the admission
+cost would guarantee only that the trailer can *start*, not that it can
+continue. Closing it by contract — "a handler consuming a trailer must release
+payload quota first" — is a rule whose violation deadlocks rather than
+degrades, on the most common trailer pattern there is.
+
+Two further reasons, independent of the deadlock:
+
+- **The dynamics do not mix.** Trailer credit recycles continuously as the
+  consumer reads; payload quota is held long and released once. Shared,
+  streaming throughput becomes hostage to unrelated calls' response latency.
+- **It breaks a documented property.** A sender letting one trailer consume
+  the pool is supposed to starve only its own other trailers, which is what
+  makes "no per-trailer window" defensible. Shared, a bulk trailer would
+  starve call admission too.
+
+The cost is that total peer-attributable receiver memory is the sum of two
+numbers rather than one.
+
+### Credit, Enforcement, And Scheduling
+
+The negotiated `max_outstanding_payload` is the initial credit, and the rest is
+the same shape as trailer credit. `PayloadCredit` carries only a count — no
+`id` — so returns coalesce into a single number however many calls retired;
+the scheduler merges any already queued into one fragment, and gives it the
+same priority as `Credit`, since the peer may be parked with nothing. There is
+no coalescing *threshold*: a release is already coarse, so credit is flushed on
+every one, and no threshold means no threshold-induced deadlock.
+
+The receiver enforces the aggregate where it already enforces the per-message
+cap, right before it extends the reassembly buffer, and a breach is a protocol
+error exactly like the others — fatal to the connection. There is no flow
+control to fall back on: this is the backstop against a peer that ignores the
+credit it was issued, not a mechanism the healthy path is expected to touch.
+Making it a credit loop is also what keeps the check honest, since it fires
+when the peer exceeds *issued* credit rather than because the local
+application was slow to release.
+
+Negotiation keeps `max_outstanding_payload` at least `max_payload_size` in
+both directions — raised before the handshake is built, and `max_payload_size`
+lowered to it afterwards — because `clamp_limits` mins each field
+independently, so a peer with a small quota can break the relationship even
+when both endpoints are individually valid. That is a peer decision, not a
+misconfiguration, so it is normalized rather than rejected.
+
+Scheduling is deliberately minimal: FIFO admission out of `waiting`, which is
+starvation-free on its own, unchanged round-robin among admitted messages, and
+a genuine park when nothing can be admitted. Exhausted quota is a park rather
+than a reorder, which splits one question the scheduler used to answer once.
+`ready` must be polled while a send waits on quota, since that poll is where
+it registers on the pool — gate it on "is there work" and the credit that
+would start the send arrives with nobody listening. That splits the scheduler's
+old single "is there anything to do" question into two: `has_work`, which
+counts only what has already been committed to the wire, and `has_pending`,
+which also counts sends parked on quota. Which one is the *drain* condition
+depends on whether the receive half is still there to deliver credit, and that
+is what [Shutdown And Draining](#shutdown-and-draining) is about.
+
+Control fragments and trailer-phase sends are never gated by the quota: a
+handler blocked on an inbound trailer cannot complete, and therefore cannot
+release. A trailer producer, symmetrically, must reserve no *trailer* credit
+until its own message has been admitted — a trailer fragment can never precede
+its payload, so credit taken before then is held for bytes that cannot move,
+and several unadmitted messages can between them hold the whole trailer pool
+against the started messages whose completion is the only thing that would
+free the payload quota they are waiting for. That is the one place the two
+pools would otherwise still meet.
+
+### The Contract This Creates
+
+Holding the pool for the whole call means a long-pending call with a large
+payload throttles the connection. Indefinitely pending calls are legitimate —
+an event poll is the usual shape — and a large payload on one is unusual but
+not unthinkable. This is documented as a caveat with an escape hatch rather
+than designed around: **release explicitly if you are going to pend for a long
+time, or don't mix large payloads with slow responses.** Violating it degrades
+throughput. It does not hang anything.
+
+## Shutdown And Draining
+
+Each endpoint runs two long-lived futures, a receive driver and a send driver,
+raced against each other. They stay at arm's length on purpose. Neither is
+cancel-safe — the receiver holds bytes already consumed from the transport in
+a partially read fragment, the sender holds a fragment partially committed to
+it — so each has to be polled as a whole rather than stepped, and folding them
+into one loop would mean a stalled write blocks reading, which deadlocks
+against a peer that is itself blocked writing. Keeping them independently
+pollable is what makes read progress and write progress independent.
+
+That independence leaves exactly one thing neither can decide alone: when the
+send driver is allowed to stop. Its own state says whether it still holds work;
+only the receive half knows whether more work can still arrive, and whether the
+peer is still there to return the credit a parked send is waiting on. So one
+bit crosses between them — the drain mode, published by the receive driver over
+a `watch` and observed by the send driver.
+
+### Why It Cannot Just Drop The Send
+
+Payload quota made the scheduler able to hold a message back indefinitely. A
+send that does not fit the session budget waits for credit, and that credit
+arrives through the *receive* half. A writer draining after its reader is gone
+can therefore be holding a send that will never proceed.
+
+Dropping it is not an option. A graceful shutdown promises that work already
+accepted still finishes, and silently discarding a queued response breaks that
+— the peer's call fails with a connection error for a response the server
+had already produced. So the ordering has to be inverted relative to the
+obvious one: the receive driver stays alive until the send driver has drained,
+rather than the send driver being torn down once the receive driver ends.
+
+### The Three Modes
+
+`Running` is the live session. The send driver stops only if its channel
+closes, which means every handle that could still queue work is gone.
+
+`Graceful` is published by the receive driver once shutdown has been requested
+*and* every dispatched call has answered. The send driver then finishes
+everything it holds, `has_pending` rather than `has_work`, parked sends
+included — the receive half is still running, so the credit that releases them
+can still arrive. The condition also requires the outgoing channel to be
+drained: a handler queues its response and *then* completes, and completing is
+what seals the drain, so at the instant the signal lands the last response may
+still be in the channel rather than in the scheduler.
+
+`Abrupt` is published unconditionally on the receive driver's way out, and it
+sticks — it cannot be downgraded. No further credit can arrive, so the send
+driver flushes only `has_work`, what it had already committed to the wire, and
+abandons the rest. This is what keeps a lost peer from turning into a hang, and
+it is why the two predicates exist.
+
+Between the request to shut down and the seal, the receive driver keeps reading
+but stops taking on new calls: an arriving request is refused with an error
+rather than dispatched, and dropping its charge returns its payload quota to
+the peer — this end is still reading, so that credit is still worth sending.
+
+### Termination Is The Caller's To Bound
+
+`Graceful` is unbounded by construction: it waits for credit a peer may never
+send, and a peer that stops reading at its own shutdown will hold this end open
+indefinitely. The bound belongs to the caller, who can wrap the endpoint's
+driving future in a timeout — dropping it aborts both halves at once. This
+crate does not depend on a timer, so it does not impose a policy of its own.
+
+### The Client
+
+The client's writer drains on `has_work`, which is `Abrupt` by another name,
+and deliberately. Both ways its channel can close — `Client::close` and
+dropping the last handle — also stop the reader and fail every pending call, so
+no credit can arrive and no promise is broken by abandoning a parked send. The
+client has no graceful close to drain for. If it gains one it needs the
+server's treatment, a drain signal and a reader kept alive past the writer;
+widening the condition on its own would only convert the abandonment into a
+hang.
 
 ## Cancellation
 

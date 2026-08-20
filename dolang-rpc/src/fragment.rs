@@ -23,6 +23,7 @@ use crate::{
         AnyReceiver, AnySender, OutgoingHandles, ReceivedHandles, Receiver, RecvFrame, SendFrame,
         Sender,
     },
+    window::{ControlSink, PayloadBudget, PayloadCharge, SessionWindow},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -80,6 +81,19 @@ pub(crate) enum Kind {
     /// finished or aborted the trailer already, and the two race by
     /// construction.
     Credit = 8,
+    /// Returns postcard payload quota. Session-scoped in a way `Kind::Credit`
+    /// is not: the `id` field is unused and must be zero, and the 4-byte
+    /// payload carries the total bytes released since the last one.
+    ///
+    /// Dropping the id is the point. Payload quota is charged per message but
+    /// released per *call*, and any number of calls may retire between two
+    /// turns of the writer; naming each one would put an otherwise pointless
+    /// fragment on the wire per retirement. A bare count coalesces them all.
+    /// Nothing needs the attribution, either: unlike a trailer sender, which
+    /// keeps its pool debt keyed by id so a `Discard` can refund a whole
+    /// remainder implicitly, a payload sender knows exactly what it charged
+    /// each send and settles a cancelled one from its own records.
+    PayloadCredit = 9,
 }
 
 impl TryFrom<u8> for Kind {
@@ -96,6 +110,7 @@ impl TryFrom<u8> for Kind {
             6 => Ok(Self::Ack),
             7 => Ok(Self::Release),
             8 => Ok(Self::Credit),
+            9 => Ok(Self::PayloadCredit),
             _ => Err(Error::Protocol(format!("unknown frame kind {value}"))),
         }
     }
@@ -292,6 +307,7 @@ struct HandshakeV1 {
     key: Option<[u8; 32]>,
     max_concurrent_calls: u32,
     trailer_session_window: u32,
+    max_outstanding_payload: u32,
 }
 
 impl fmt::Debug for HandshakeV1 {
@@ -304,6 +320,7 @@ impl fmt::Debug for HandshakeV1 {
             .field("key", &self.key.map(|_| "<redacted>"))
             .field("max_concurrent_calls", &self.max_concurrent_calls)
             .field("trailer_session_window", &self.trailer_session_window)
+            .field("max_outstanding_payload", &self.max_outstanding_payload)
             .finish()
     }
 }
@@ -325,6 +342,7 @@ impl HandshakeV1 {
             key: auth.map(|auth| auth.advertise()),
             max_concurrent_calls: clamp(limits.max_concurrent_calls),
             trailer_session_window: clamp(limits.trailer_session_window),
+            max_outstanding_payload: clamp(limits.max_outstanding_payload),
         }
     }
 
@@ -337,11 +355,20 @@ impl HandshakeV1 {
     /// `trailer_credit_interval` is absent: it is local coalescing
     /// granularity, not a bound the peer relies on, so it needs no agreement.
     ///
-    /// The session credit pool is floored at 1 afterwards. Only zero
+    /// The trailer credit pool is floored at 1 afterwards. Only zero
     /// deadlocks: the sender would park before its first byte, and no credit
     /// could ever arrive because retirement requires bytes that were never
     /// sent. A pool below `max_fragment_size` is legal and merely produces
     /// short fragments.
+    ///
+    /// `max_payload_size` is lowered to the negotiated
+    /// `max_outstanding_payload` at the very end. Every field above is minned
+    /// independently, so a peer with a small quota can break the relationship
+    /// between the two even when both endpoints are individually valid — and
+    /// a per-message cap above the aggregate pool would make a legal single
+    /// message unsendable. That is a peer decision rather than a local
+    /// misconfiguration, so it is normalized rather than rejected. (The other
+    /// direction is handled before the handshake is built; see `negotiate`.)
     fn clamp_limits(&self, limits: &mut Limits) {
         limits.max_fragment_size = limits
             .max_fragment_size
@@ -366,6 +393,10 @@ impl HandshakeV1 {
             .trailer_session_window
             .min(self.trailer_session_window as usize)
             .max(1);
+        limits.max_outstanding_payload = limits
+            .max_outstanding_payload
+            .min(self.max_outstanding_payload as usize);
+        limits.max_payload_size = limits.max_payload_size.min(limits.max_outstanding_payload);
     }
 }
 
@@ -451,6 +482,14 @@ pub(crate) async fn negotiate(
     app_protocol: (&str, &[u16]),
     auth: Option<Auth>,
 ) -> Result<NegotiationResult, Error> {
+    // Advertise a quota that can actually carry a legal message. A
+    // `max_outstanding_payload` below `max_payload_size` means a single
+    // message at the per-message cap could never be admitted, so raise it
+    // rather than refuse the configuration. `clamp_limits` handles the
+    // mirror case, where the *peer's* quota is what breaks the relationship.
+    let mut limits = *limits;
+    limits.max_outstanding_payload = limits.max_outstanding_payload.max(limits.max_payload_size);
+    let limits = &limits;
     let local_blob =
         postcard::to_stdvec(&HandshakeV1::from_limits(limits, auth)).map_err(postcard_err)?;
     let (local_name, local_versions) = app_protocol;
@@ -672,6 +711,10 @@ pub(crate) struct Message {
     pub(crate) payload: Bytes,
     pub(crate) handles: ReceivedHandles,
     pub(crate) trailer: Option<Arc<std::sync::Mutex<RecvShared>>>,
+    /// This message's share of the receive-side payload quota. Travels with
+    /// the message so that whatever ends up owning the call also owns the
+    /// release, and no path can answer the call without dropping it.
+    pub(crate) charge: PayloadCharge,
 }
 
 pub(crate) enum Event {
@@ -702,6 +745,11 @@ pub(crate) enum Event {
     Trailer {
         shared: Arc<std::sync::Mutex<RecvShared>>,
         len: usize,
+    },
+    /// The peer released `count` bytes of payload quota, for no particular
+    /// message. See [`Kind::PayloadCredit`].
+    PayloadCredit {
+        count: u32,
     },
     /// The peer dropped `count` references to the opaque named by `id`.
     /// Unknown ids are tolerated; see [`Kind::Release`].
@@ -758,12 +806,22 @@ pub(crate) struct Reassembler {
     /// Unretired trailer bytes across every open trailer, bounded by
     /// `Limits::trailer_session_window`. Shared with each trailer's
     /// `RecvShared` so credit emission and this check see one number.
-    session_credit: Arc<crate::trailer::SessionWindow>,
+    session_credit: Arc<SessionWindow>,
+    /// Charged postcard bytes across every call this end has not released,
+    /// bounded by `Limits::max_outstanding_payload`. Shared with the
+    /// `PayloadCharge` handed out with each completed message, since a
+    /// payload's charge outlives the reassembler entry that took it.
+    ///
+    /// A separate pool from `session_credit` on purpose: a handler that must
+    /// consume a trailer before it can release its payload would deadlock
+    /// against a shared one. See [`crate::window`].
+    payload_credit: Arc<SessionWindow>,
     /// The route back to the peer handed to every trailer this reassembler
-    /// opens, so a trailer can credit or discard itself. Connection-scoped
-    /// like `session_credit`, and erased to a trait object here because the
-    /// reassembler is generic over no application protocol.
-    trailer_sink: Arc<dyn crate::trailer::TrailerSink>,
+    /// opens and every charge it hands out, so either can credit or discard
+    /// itself. Connection-scoped like the pools above, and erased to a trait
+    /// object here because the reassembler is generic over no application
+    /// protocol.
+    sink: Arc<dyn ControlSink>,
 }
 
 impl Reassembler {
@@ -778,15 +836,24 @@ impl Reassembler {
         self.payload_phase
     }
 
-    pub(crate) fn new(limits: Limits, trailer_sink: Arc<dyn crate::trailer::TrailerSink>) -> Self {
+    /// A handle on message `id`'s share of the payload quota, releasing it
+    /// when dropped.
+    ///
+    /// Cheap and idempotent, because the debt lives in the pool keyed by id
+    /// rather than in the handle: two of these for one id release the same
+    /// bytes once, not twice.
+    fn charge(&self, id: u64) -> PayloadCharge {
+        PayloadCharge::new(self.payload_credit.clone(), self.sink.clone(), id)
+    }
+
+    pub(crate) fn new(limits: Limits, sink: Arc<dyn ControlSink>) -> Self {
         Self {
             limits,
             incomplete: HashMap::new(),
             payload_phase: 0,
-            session_credit: Arc::new(crate::trailer::SessionWindow::new(
-                limits.trailer_session_window,
-            )),
-            trailer_sink,
+            session_credit: Arc::new(SessionWindow::new(limits.trailer_session_window)),
+            payload_credit: Arc::new(SessionWindow::new(limits.max_outstanding_payload)),
+            sink,
         }
     }
 
@@ -863,6 +930,33 @@ impl Reassembler {
             return Ok(Event::Credit { id, count });
         }
 
+        if kind == Kind::PayloadCredit {
+            #[cfg(unix)]
+            let has_handles = !fragment_handles.is_empty();
+            #[cfg(not(unix))]
+            let has_handles = false;
+            // `id` is not merely unused but reserved: rejecting a nonzero one
+            // keeps the field free for a future revision to give it meaning
+            // without ambiguity about what an old peer put there.
+            if !first || !last || abort || trailer || want_ack || payload_len != 4 || has_handles {
+                return Err(Error::Protocol("invalid PayloadCredit fragment".into()));
+            }
+            if id != 0 {
+                return Err(Error::Protocol(
+                    "PayloadCredit fragment must not name a message".into(),
+                ));
+            }
+            let mut payload = BytesMut::with_capacity(4);
+            read_payload(frame, &mut payload, 4).await?;
+            let count = payload.get_u32_le();
+            if count == 0 {
+                return Err(Error::Protocol(
+                    "PayloadCredit fragment must release at least one byte".into(),
+                ));
+            }
+            return Ok(Event::PayloadCredit { count });
+        }
+
         if want_ack && (abort || !matches!(kind, Kind::Request | Kind::Response)) {
             return Err(Error::Protocol("invalid WANT_ACK fragment".into()));
         }
@@ -895,6 +989,14 @@ impl Reassembler {
                     io::Error::new(io::ErrorKind::Interrupted, "trailer was aborted"),
                 );
             }
+            // A message cancelled before its last fragment never reached the
+            // application, so no `PayloadCharge` was ever handed out to
+            // release its quota. Settle it here instead: whatever the peer
+            // managed to send is buffered nowhere now, and it is owed the
+            // credit for it. (A message aborted *after* dispatch has a live
+            // charge, and `settle` clamps to the recorded debt, so this
+            // cannot double-credit either way.)
+            self.charge(id).release();
             return Ok(Event::Aborted {
                 kind: entry.kind,
                 id,
@@ -995,6 +1097,15 @@ impl Reassembler {
         }
 
         if first && last {
+            // Whole in one fragment: it holds no reassembly buffer, but it
+            // does hold a deserialized payload for as long as the call runs,
+            // which is what the quota actually bounds. Charged before the
+            // bytes are read, exactly as the multi-fragment path below does.
+            if !self.payload_credit.accept_bytes(id, payload_len) {
+                return Err(Error::Protocol(format!(
+                    "message {id} exceeded the session payload quota"
+                )));
+            }
             let mut payload = BytesMut::with_capacity(payload_len);
             read_payload(frame, &mut payload, payload_len).await?;
             #[cfg(unix)]
@@ -1027,6 +1138,7 @@ impl Reassembler {
                 payload: payload.freeze(),
                 handles,
                 trailer: None,
+                charge: self.charge(id),
             };
             return Ok(if want_ack {
                 Event::Ack {
@@ -1080,6 +1192,18 @@ impl Reassembler {
                 "message {id} exceeds the maximum payload size"
             )));
         }
+        // The aggregate bound, checked in the same breath as the per-message
+        // one and fatal in the same way. A well-behaved peer parks on an
+        // empty quota rather than overrunning it, so this is the backstop
+        // against one that ignores the credit it was issued — there is no
+        // flow control to fall back on, and the healthy path never reaches
+        // it. Charged here rather than at completion because the buffer is
+        // occupied from this fragment onward, not from the last one.
+        if !self.payload_credit.accept_bytes(id, payload_len) {
+            return Err(Error::Protocol(format!(
+                "message {id} exceeded the session payload quota"
+            )));
+        }
         entry.postcard.reserve(payload_len);
         read_payload(frame, &mut entry.postcard, payload_len).await?;
         #[cfg(unix)]
@@ -1119,7 +1243,7 @@ impl Reassembler {
                 self.limits.trailer_credit_interval,
                 self.session_credit.clone(),
                 id,
-                self.trailer_sink.clone(),
+                self.sink.clone(),
             );
             entry.trailer = Some(shared.clone());
             entry.trailer_phase = true;
@@ -1133,6 +1257,7 @@ impl Reassembler {
                 payload: mem::take(&mut entry.postcard).freeze(),
                 handles: mem::take(&mut entry.handles),
                 trailer: Some(shared),
+                charge: self.charge(id),
             };
             return Ok(if want_ack {
                 Event::Ack {
@@ -1153,6 +1278,7 @@ impl Reassembler {
                 payload: entry.postcard.freeze(),
                 handles: entry.handles,
                 trailer: None,
+                charge: self.charge(id),
             };
             return Ok(if want_ack {
                 Event::Ack {
@@ -1227,15 +1353,22 @@ struct ActiveSend {
     /// unmissable: the scheduler is the only thing that knows where the
     /// payload actually ends.
     ledger: Option<Ledger>,
+    /// Payload quota debited for this send when it was admitted — always the
+    /// whole `payload.len()`, never a running total. Kept so a cancellation
+    /// can work out how much of the charge the peer never received and hand
+    /// that part straight back; zero while the send is still in `waiting`.
+    charged: usize,
 }
 
 /// A control-priority item: a zero-payload `Cancel`/`Error`/`Ack`, an `ABORT`
-/// for a message whose FIRST fragment already went out, or a `Release`.
+/// for a message whose FIRST fragment already went out, a `Release`, or
+/// either flavour of credit.
 enum ControlSend {
     Empty { kind: Kind, id: u64 },
     Abort { id: u64 },
     Release { id: u64, count: u32 },
     Credit { id: u64, count: u32 },
+    PayloadCredit { count: u32 },
 }
 
 /// Outcome of attempting to cancel an in-flight outbound send.
@@ -1272,10 +1405,21 @@ pub(crate) enum AdvanceOutcome {
 /// it asked for.
 pub(crate) struct Scheduler {
     active: VecDeque<ActiveSend>,
-    /// Multi-fragment sends admitted but not yet started (no concurrency
-    /// slot, or no byte budget, free at admission time).
+    /// Sends admitted but not yet started, because no concurrency slot or no
+    /// payload quota was free at admission time. Nothing here has reached the
+    /// wire or charged anything, so a send can be cancelled out of it with no
+    /// trace and no settlement.
+    ///
+    /// Drained strictly in order (see [`Scheduler::promote_waiting`]), which
+    /// is starvation-free on its own and is the whole scheduling policy under
+    /// quota constraint. Anything smarter is a separate concern.
     waiting: VecDeque<ActiveSend>,
     control: VecDeque<ControlSend>,
+    /// This end's remaining share of the peer's payload quota. A message is
+    /// charged its whole payload before its first fragment goes out and holds
+    /// it until the peer's application releases, so what is left here is what
+    /// may still be started.
+    payload_budget: Arc<PayloadBudget>,
     active_fragmented: usize,
     max_active_fragmented: usize,
     /// Payload budget per fragment write, already reduced from
@@ -1299,11 +1443,12 @@ pub(crate) struct Scheduler {
 const MAX_FRAGMENT_SHIFT: u32 = 7;
 
 impl Scheduler {
-    pub(crate) fn new(limits: &Limits) -> Self {
+    pub(crate) fn new(limits: &Limits, payload_budget: Arc<PayloadBudget>) -> Self {
         Self {
             active: VecDeque::new(),
             waiting: VecDeque::new(),
             control: VecDeque::new(),
+            payload_budget,
             active_fragmented: 0,
             max_active_fragmented: limits.max_concurrent_calls.max(1),
             max_fragment_size: limits
@@ -1338,6 +1483,25 @@ impl Scheduler {
         }
     }
 
+    /// Queues a payload-bearing message, starting it immediately if both a
+    /// concurrency slot and its whole payload's worth of quota are free.
+    ///
+    /// The quota is charged in full here, before the first fragment goes out,
+    /// rather than incrementally as fragments are written. That is what
+    /// removes the deadlock class outright: incremental charging lets several
+    /// messages reach a partially-sent state that no remaining credit can
+    /// drive to completion, recoverable only by cancelling and reissuing
+    /// them, while nothing releases credit until something completes. Charging
+    /// at admission makes that unreachable — anything started can always be
+    /// finished — and costs almost nothing in utilization, because a
+    /// fully-sent message holds its whole payload against the pool anyway
+    /// until the peer's application releases it. The only window where
+    /// "reserved" differs from "buffered at the peer" is the transmission
+    /// itself.
+    ///
+    /// It does not reduce interleaving either: a 16 MiB pool admits eight
+    /// 2 MiB messages at once, which round-robin among themselves exactly as
+    /// they would unconstrained.
     pub(crate) fn admit_message(
         &mut self,
         kind: Kind,
@@ -1353,23 +1517,8 @@ impl Scheduler {
         let handles_fit = true;
         #[cfg(not(unix))]
         let _ = handles;
-        if trailer.is_none() && payload.len() <= self.max_fragment_size && handles_fit {
-            self.active.push_back(ActiveSend {
-                id,
-                kind,
-                payload,
-                offset: 0,
-                #[cfg(unix)]
-                handles,
-                #[cfg(unix)]
-                handle_offset: 0,
-                trailer,
-                started: false,
-                multi_fragment: false,
-                ledger: Some(ledger),
-            });
-            return;
-        }
+        let multi_fragment =
+            !(trailer.is_none() && payload.len() <= self.max_fragment_size && handles_fit);
         let send = ActiveSend {
             id,
             kind,
@@ -1381,14 +1530,66 @@ impl Scheduler {
             handle_offset: 0,
             trailer,
             started: false,
-            multi_fragment: true,
+            multi_fragment,
             ledger: Some(ledger),
+            charged: 0,
         };
-        if self.active_fragmented < self.max_active_fragmented {
-            self.active_fragmented += 1;
-            self.active.push_back(send);
+        // A message may only jump the queue if nothing is already waiting.
+        // Admission out of `waiting` is FIFO, and letting a small message
+        // past a large one that is only short of quota would starve the
+        // large one for as long as small ones keep arriving.
+        if self.waiting.is_empty() && self.try_charge(&send) {
+            self.start(send);
         } else {
             self.waiting.push_back(send);
+        }
+    }
+
+    /// Takes what `send` needs to start — a concurrency slot if it needs one,
+    /// and quota for its whole payload — reporting whether both were
+    /// available.
+    ///
+    /// The quota debit happens here rather than in `start` because it is the
+    /// half that can fail. It is all-or-nothing, so a `false` return has
+    /// charged nothing; the slot is claimed in `start`, once both are known
+    /// to be in hand.
+    fn try_charge(&self, send: &ActiveSend) -> bool {
+        if send.multi_fragment && self.active_fragmented >= self.max_active_fragmented {
+            return false;
+        }
+        self.payload_budget.try_debit(send.payload.len())
+    }
+
+    /// Moves a send `try_charge` has already paid for into `active`.
+    fn start(&mut self, mut send: ActiveSend) {
+        send.charged = send.payload.len();
+        if send.multi_fragment {
+            self.active_fragmented += 1;
+        }
+        // Only now may its trailer producer start spending trailer credit.
+        // Until a message is being driven, a trailer fragment it staged could
+        // never go out — and the credit it reserved for one would be held
+        // against every trailer that *could* be sent. See
+        // `SendShared::started`.
+        if let Trailer::Stream(shared) = &send.trailer {
+            SendShared::start(shared);
+        }
+        self.active.push_back(send);
+    }
+
+    /// Starts as many head-of-queue waiting sends as now fit.
+    ///
+    /// Stops at the first one that does not, rather than looking past it for
+    /// something smaller: skipping ahead is what would let a large message
+    /// wait forever. Called whenever either constraint loosens — a send
+    /// completing or being cancelled, or the peer returning quota.
+    pub(crate) fn promote_waiting(&mut self) {
+        while let Some(send) = self.waiting.front() {
+            if !self.try_charge(send) {
+                break;
+            }
+            let send = self.waiting.pop_front().expect("front was just observed");
+            self.start(send);
         }
     }
 
@@ -1428,6 +1629,36 @@ impl Scheduler {
         self.control.push_back(ControlSend::Credit { id, count });
     }
 
+    /// Admits a `PayloadCredit` returning `count` bytes of payload quota,
+    /// ahead of ordinary sends and merged with any already queued.
+    ///
+    /// Merging is why the fragment carries no message id. Calls retire
+    /// independently and often in bursts, and each one that had to name
+    /// itself would cost a fragment; a bare count collapses however many
+    /// retired since the writer last ran into one number. The priority is
+    /// there for the same reason as `admit_credit`: the peer may be parked
+    /// with nothing, and every ordinary fragment queued ahead of this is time
+    /// it stays that way.
+    ///
+    /// There is no coalescing *threshold* to go with it. A release is already
+    /// coarse — one per call, and at least a whole payload — so credit is
+    /// flushed on every one, and the only batching is whatever the writer has
+    /// not yet drained. A threshold would buy little and would reintroduce
+    /// the class of deadlock the trailer side has to spend three force-flush
+    /// clauses avoiding.
+    pub(crate) fn admit_payload_credit(&mut self, count: u32) {
+        debug_assert!(count > 0, "a credit must release at least one byte");
+        if let Some(ControlSend::PayloadCredit { count: pending }) = self
+            .control
+            .iter_mut()
+            .find(|item| matches!(item, ControlSend::PayloadCredit { .. }))
+        {
+            *pending = pending.saturating_add(count);
+            return;
+        }
+        self.control.push_back(ControlSend::PayloadCredit { count });
+    }
+
     /// Attempts to cancel an in-flight or not-yet-started outbound send.
     ///
     /// If the send carries a `Trailer::Stream`, its `SendShared` is put into
@@ -1441,7 +1672,9 @@ impl Scheduler {
             if let Trailer::Stream(shared) = &send.trailer {
                 SendShared::discard(shared);
             }
-            // Nothing of this message ever reached the wire.
+            // Nothing of this message ever reached the wire, and nothing was
+            // ever charged for it: a waiting send holds no quota, which is
+            // exactly what makes charge-at-admission cheap to cancel.
             if let Some(ledger) = send.ledger.take() {
                 ledger.rescind();
             }
@@ -1463,9 +1696,19 @@ impl Scheduler {
             if let Some(ledger) = send.ledger.take() {
                 ledger.rescind();
             }
+            // Settle the charge in two parts, because the two halves come
+            // back from different places. What was earmarked at admission but
+            // never transmitted is buffered nowhere and can be reclaimed
+            // here, immediately. What did reach the wire is sitting in the
+            // peer's reassembler, and only the peer can say when it is gone —
+            // it credits that part back when it retires the aborted message.
+            // Together they are exactly `charged`, with no byte counted twice
+            // and none stranded.
+            self.payload_budget.credit(send.charged - send.offset);
             if send.multi_fragment {
-                self.free_fragmented_slot();
+                self.active_fragmented -= 1;
             }
+            self.promote_waiting();
             return AbortOutcome::Discarded {
                 started,
                 dispatched,
@@ -1497,31 +1740,65 @@ impl Scheduler {
         }
     }
 
-    /// Releases the concurrency slot held by a completed or cancelled
-    /// multi-fragment send, then promotes the next waiting send if there's
-    /// now room for it.
+    /// Releases the concurrency slot held by a completed multi-fragment send,
+    /// then starts whatever now fits.
+    ///
+    /// The quota the send holds is deliberately *not* released here. Its
+    /// payload is on the wire and about to be buffered by the peer, which is
+    /// precisely the memory the pool is bounding; it comes back as a
+    /// `PayloadCredit` once the peer's application is done with the call.
     fn free_fragmented_slot(&mut self) {
         self.active_fragmented -= 1;
-        if let Some(next) = self.waiting.pop_front() {
-            self.active_fragmented += 1;
-            self.active.push_back(next);
-        }
+        self.promote_waiting();
     }
 
-    /// Whether `advance` has anything to send right now.
+    /// Whether the scheduler holds work it has already committed to the
+    /// wire and must finish.
+    ///
+    /// Deliberately excludes `waiting`: a send held back for quota can only
+    /// start when the peer returns credit, and credit arrives through the
+    /// receive half. This is therefore the drain condition for
+    /// [`Drain::Abrupt`](crate::driver::Drain::Abrupt) — the receive half is
+    /// gone, no credit can arrive, and counting a waiting send would turn
+    /// shutdown into a hang.
     pub(crate) fn has_work(&self) -> bool {
         !self.control.is_empty() || !self.active.is_empty()
     }
 
+    /// Whether the scheduler holds anything at all.
+    ///
+    /// Counts `waiting`, so it is both the gate on polling
+    /// [`Scheduler::ready`] — where a quota-blocked send registers on the
+    /// pool, and which would never be armed by `has_work` alone in a session
+    /// with nothing active — and the drain condition for
+    /// [`Drain::Graceful`](crate::driver::Drain::Graceful), where the receive
+    /// half is still running and the credit that releases a waiting send can
+    /// still arrive.
+    pub(crate) fn has_pending(&self) -> bool {
+        self.has_work() || !self.waiting.is_empty()
+    }
+
     /// Waits until advancing the scheduler would not block on a trailer
-    /// producer. Once this resolves, `advance` must be driven to completion
-    /// without racing ordinary message admission: it may commit part of a
-    /// fragment before yielding on transport readiness.
-    pub(crate) async fn ready(&self) {
+    /// producer or on payload quota. Once this resolves, `advance` must be
+    /// driven to completion without racing ordinary message admission: it may
+    /// commit part of a fragment before yielding on transport readiness.
+    pub(crate) async fn ready(&mut self) {
         std::future::poll_fn(|cx| {
             if !self.control.is_empty() {
                 return Poll::Ready(());
             }
+            // Register on the pool *before* trying to spend it. Quota
+            // returned by the peer lands there from the reader, and a credit
+            // arriving between a failed debit and a later park would be lost:
+            // the wake it triggered would find no one registered, and the
+            // writer would park on credit it had already been given.
+            if !self.waiting.is_empty() {
+                self.payload_budget.park(cx.waker());
+            }
+            // The reader can only wake this poll, not reshuffle the queues,
+            // so the promotion has to happen here for a wake-up to become
+            // progress.
+            self.promote_waiting();
             for send in &self.active {
                 if send.offset != send.payload.len() {
                     return Poll::Ready(());
@@ -1532,6 +1809,10 @@ impl Scheduler {
                     _ => return Poll::Ready(()),
                 }
             }
+            // Nothing in `active` can move and nothing waiting could start.
+            // Exhausted quota is a genuine park rather than a reorder, which
+            // is why `ready` may resolve to nothing here while `has_work`
+            // stays true: the loop parks instead of spinning.
             Poll::Pending
         })
         .await
@@ -1776,6 +2057,17 @@ impl Scheduler {
                 },
                 Some(count),
             ),
+            ControlSend::PayloadCredit { count } => (
+                FragmentHeader {
+                    flags: Flags::FIRST | Flags::LAST,
+                    kind: Kind::PayloadCredit,
+                    // Reserved, and validated as zero on receipt: payload
+                    // quota is released per call but returned per session.
+                    id: 0,
+                    payload_len: 4,
+                },
+                Some(count),
+            ),
         };
         let mut buffer = match count {
             None => header.encode(),
@@ -1794,20 +2086,32 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
 
-    /// A reassembler whose trailers have nowhere to send credit. Every test
-    /// here drives the wire format rather than the credit loop, which has
-    /// its own tests in `trailer`.
+    /// A reassembler whose credit has nowhere to go. Every test here drives
+    /// the wire format rather than the credit loop, which has its own tests
+    /// in `trailer`.
     fn new_reassembler(limits: Limits) -> Reassembler {
-        struct NullSink;
-        impl crate::trailer::TrailerSink for NullSink {
-            fn credit(&self, _id: u64, _count: u32) {}
-            fn discard(&self, _id: u64) {}
-        }
         Reassembler::new(limits, Arc::new(NullSink))
+    }
+
+    struct NullSink;
+    impl ControlSink for NullSink {
+        fn credit(&self, _id: u64, _count: u32) {}
+        fn payload_credit(&self, _count: u32) {}
+        fn discard(&self, _id: u64) {}
+    }
+
+    /// A scheduler with the payload quota `limits` asks for. Tests that care
+    /// about the quota build their own budget instead, so they can watch it.
+    fn new_scheduler(limits: &Limits) -> Scheduler {
+        Scheduler::new(
+            limits,
+            Arc::new(PayloadBudget::new(limits.max_outstanding_payload)),
+        )
     }
     use std::io;
     #[cfg(unix)]
     use std::os::fd::OwnedFd;
+    use std::time::Duration;
 
     use super::*;
 
@@ -1889,7 +2193,11 @@ mod tests {
     #[test]
     fn hardened_defaults_bound_calls_and_native_handles() {
         let limits = Limits::default();
-        assert_eq!(limits.max_concurrent_calls, 128);
+        // A count rather than a memory bound: what stops a peer turning this
+        // into gigabytes of reassembly is `max_outstanding_payload`, which is
+        // why the count can afford to be generous.
+        assert_eq!(limits.max_concurrent_calls, 1024);
+        assert_eq!(limits.max_outstanding_payload, 16 * 1024 * 1024);
         assert_eq!(limits.max_handles_per_fragment, 8);
         assert_eq!(limits.max_handles_per_message, 8);
     }
@@ -2674,7 +2982,7 @@ mod tests {
             max_fragment_size: 1024 + RawFragmentHeader::LEN,
             ..Limits::default()
         };
-        let mut scheduler = Scheduler::new(&limits);
+        let mut scheduler = new_scheduler(&limits);
         assert_eq!(scheduler.effective_fragment_size(), 1024);
 
         scheduler.record_write_atomicity(false);
@@ -2698,7 +3006,7 @@ mod tests {
             max_fragment_size: 1024 + RawFragmentHeader::LEN,
             ..Limits::default()
         };
-        let mut scheduler = Scheduler::new(&limits);
+        let mut scheduler = new_scheduler(&limits);
         for _ in 0..20 {
             scheduler.record_write_atomicity(false);
         }
@@ -2712,7 +3020,7 @@ mod tests {
             max_fragment_size: 4 + RawFragmentHeader::LEN,
             ..Limits::default()
         };
-        let mut scheduler = Scheduler::new(&limits);
+        let mut scheduler = new_scheduler(&limits);
         scheduler.admit_message(
             Kind::Request,
             1,
@@ -2745,7 +3053,7 @@ mod tests {
 
     #[tokio::test]
     async fn scheduler_prioritizes_ack() {
-        let mut scheduler = Scheduler::new(&Limits::default());
+        let mut scheduler = new_scheduler(&Limits::default());
         scheduler.admit_message(
             Kind::Request,
             1,
@@ -2772,7 +3080,7 @@ mod tests {
             max_concurrent_calls: 1,
             ..Limits::default()
         };
-        let mut scheduler = Scheduler::new(&limits);
+        let mut scheduler = new_scheduler(&limits);
         // Occupies the only fragmented-concurrency slot.
         scheduler.admit_message(
             Kind::Request,
@@ -2811,7 +3119,7 @@ mod tests {
             max_concurrent_calls: 1,
             ..Limits::default()
         };
-        let mut scheduler = Scheduler::new(&limits);
+        let mut scheduler = new_scheduler(&limits);
         scheduler.admit_message(
             Kind::Request,
             1,
@@ -2839,7 +3147,7 @@ mod tests {
             max_fragment_size: 20,
             ..Limits::default()
         };
-        let mut scheduler = Scheduler::new(&limits);
+        let mut scheduler = new_scheduler(&limits);
         scheduler.admit_message(
             Kind::Request,
             1,
@@ -2866,7 +3174,7 @@ mod tests {
             max_concurrent_calls: 1,
             ..Limits::default()
         };
-        let mut scheduler = Scheduler::new(&limits);
+        let mut scheduler = new_scheduler(&limits);
         scheduler.admit_message(
             Kind::Request,
             1,
@@ -2902,7 +3210,7 @@ mod tests {
 
     #[test]
     fn scheduler_try_cancel_active_reports_not_active_after_terminal_sent() {
-        let mut scheduler = Scheduler::new(&Limits::default());
+        let mut scheduler = new_scheduler(&Limits::default());
         scheduler.admit_message(
             Kind::Request,
             1,
@@ -2920,7 +3228,7 @@ mod tests {
 
     #[test]
     fn scheduler_try_cancel_active_reports_not_started_before_any_fragment_sent() {
-        let mut scheduler = Scheduler::new(&Limits::default());
+        let mut scheduler = new_scheduler(&Limits::default());
         scheduler.admit_message(
             Kind::Request,
             1,
@@ -2941,7 +3249,7 @@ mod tests {
             max_fragment_size: 4 + RawFragmentHeader::LEN,
             ..Limits::default()
         };
-        let mut scheduler = Scheduler::new(&limits);
+        let mut scheduler = new_scheduler(&limits);
         scheduler.admit_message(
             Kind::Request,
             1,
@@ -2967,7 +3275,7 @@ mod tests {
             max_concurrent_calls: 1,
             ..Limits::default()
         };
-        let mut scheduler = Scheduler::new(&limits);
+        let mut scheduler = new_scheduler(&limits);
         scheduler.admit_message(
             Kind::Request,
             1,
@@ -3002,7 +3310,7 @@ mod tests {
             max_concurrent_calls: 1,
             ..Limits::default()
         };
-        let mut scheduler = Scheduler::new(&limits);
+        let mut scheduler = new_scheduler(&limits);
         // A trailer forces multi_fragment (and a terminal commit), occupying
         // the only concurrency slot even with a tiny postcard payload.
         scheduler.admit_message(
@@ -3014,7 +3322,7 @@ mod tests {
                 Kind::Request,
                 1,
                 &Limits { ..limits },
-                Arc::new(crate::trailer::SessionWindow::new(usize::MAX)),
+                Arc::new(SessionWindow::new(usize::MAX)),
             )),
             Default::default(),
         );
@@ -3072,12 +3380,12 @@ mod tests {
         use tokio::io::AsyncWriteExt;
 
         let limits = Limits::default();
-        let mut scheduler = Scheduler::new(&limits);
+        let mut scheduler = new_scheduler(&limits);
         let shared = SendShared::new(
             Kind::Request,
             1,
             &Limits { ..limits },
-            Arc::new(crate::trailer::SessionWindow::new(usize::MAX)),
+            Arc::new(SessionWindow::new(usize::MAX)),
         );
         scheduler.admit_message(
             Kind::Request,
@@ -3520,5 +3828,380 @@ mod tests {
         .expect("negotiate write/read deadlocked on a small transport buffer");
         assert_eq!(result.0, payload);
         assert_eq!(result.1, payload);
+    }
+
+    /// A budget a test can watch, and the scheduler that spends it.
+    fn quota_scheduler(limits: &Limits) -> (Scheduler, Arc<PayloadBudget>) {
+        let budget = Arc::new(PayloadBudget::new(limits.max_outstanding_payload));
+        (Scheduler::new(limits, budget.clone()), budget)
+    }
+
+    fn quota_limits(quota: usize) -> Limits {
+        Limits {
+            max_fragment_size: 4 + RawFragmentHeader::LEN,
+            max_outstanding_payload: quota,
+            ..Limits::default()
+        }
+    }
+
+    fn admit(scheduler: &mut Scheduler, id: u64, payload: &'static [u8]) {
+        scheduler.admit_message(
+            Kind::Request,
+            id,
+            Bytes::from_static(payload),
+            Default::default(),
+            Trailer::None,
+            Default::default(),
+        );
+    }
+
+    /// The whole payload is charged before its first fragment goes out, so a
+    /// message that does not fit does not start at all. Charging incrementally
+    /// would let it start and then strand it half-sent with nothing able to
+    /// finish it.
+    #[test]
+    fn a_message_that_does_not_fit_the_quota_waits_unstarted() {
+        let limits = quota_limits(8);
+        let (mut scheduler, budget) = quota_scheduler(&limits);
+
+        admit(&mut scheduler, 1, b"AAAAAA");
+        assert_eq!(budget.available(), 2, "charged its whole payload at once");
+        assert_eq!(scheduler.active.len(), 1);
+
+        admit(&mut scheduler, 2, b"BBBB");
+        assert_eq!(scheduler.waiting.len(), 1, "does not fit in the remainder");
+        assert_eq!(budget.available(), 2, "and so was charged nothing");
+    }
+
+    /// A quota-blocked send has to be visible to the poll that registers it on
+    /// the pool, and invisible to the drain condition that would otherwise wait
+    /// for credit no longer coming. Before the quota existed only a completing
+    /// active send could promote, so a nonempty `waiting` implied a nonempty
+    /// `active` and the two questions had one answer.
+    #[tokio::test]
+    async fn a_quota_blocked_send_is_pending_but_not_drainable_work() {
+        let limits = quota_limits(4);
+        let (mut scheduler, _budget) = quota_scheduler(&limits);
+        admit(&mut scheduler, 1, b"AAAAAAAA");
+
+        assert!(scheduler.waiting.len() == 1 && scheduler.active.is_empty());
+        assert!(
+            scheduler.has_pending(),
+            "`ready` must be polled, or the credit that would start this send              arrives with nobody registered on the pool"
+        );
+        assert!(
+            !scheduler.has_work(),
+            "but it is not work a draining writer could ever finish: credit              comes through the receive half, which is gone by then"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), scheduler.ready())
+                .await
+                .is_err(),
+            "an exhausted quota is a park, not a spin"
+        );
+    }
+
+    /// Credit returned by the peer arrives on the pool from the reader, which
+    /// can only wake the writer. Promotion therefore has to happen inside
+    /// `ready`, or the wake-up finds nothing to do and parks again.
+    #[tokio::test]
+    async fn returned_quota_starts_a_waiting_send() {
+        let limits = quota_limits(4);
+        let (mut scheduler, budget) = quota_scheduler(&limits);
+        admit(&mut scheduler, 1, b"AAAAAAAA");
+        assert_eq!(scheduler.waiting.len(), 1);
+
+        budget.credit(4);
+        tokio::time::timeout(Duration::from_millis(50), scheduler.ready())
+            .await
+            .expect("credit should have made the send ready");
+        assert_eq!(scheduler.active.len(), 1);
+        assert_eq!(scheduler.waiting.len(), 0);
+        assert_eq!(budget.available(), 0);
+    }
+
+    /// FIFO is the whole scheduling policy under quota constraint, and it is
+    /// starvation-free precisely because a small message may not go around a
+    /// large one that is merely short of credit.
+    #[test]
+    fn admission_out_of_the_waiting_queue_is_fifo() {
+        let limits = quota_limits(8);
+        let (mut scheduler, budget) = quota_scheduler(&limits);
+
+        admit(&mut scheduler, 1, b"AAAAAAAA");
+        admit(&mut scheduler, 2, b"BBBBBBBB");
+        admit(&mut scheduler, 3, b"C");
+        assert_eq!(scheduler.waiting.len(), 2, "the short one queues behind");
+
+        budget.credit(8);
+        scheduler.promote_waiting();
+        assert_eq!(
+            scheduler.active.iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![1, 2],
+            "the large message that was waiting first goes first"
+        );
+        assert_eq!(scheduler.waiting.len(), 1, "and 3 still waits its turn");
+    }
+
+    /// Cancellation splits the charge, because the two halves come back from
+    /// different places: what never reached the wire is reclaimed locally, and
+    /// what did is credited by the peer when it retires the aborted message.
+    #[tokio::test]
+    async fn cancelling_a_partly_sent_message_refunds_only_the_unsent_part() {
+        let limits = quota_limits(8);
+        let (mut scheduler, budget) = quota_scheduler(&limits);
+        let (mut transport, mut wire) = sender_pair();
+
+        admit(&mut scheduler, 1, b"AAAAAAAA");
+        assert_eq!(budget.available(), 0);
+
+        // One 4-byte fragment out of eight.
+        scheduler.advance(&mut transport).await.unwrap();
+        let (_, _, _, payload) = read_wire_fragment(&mut wire).await;
+        assert_eq!(payload.len(), 4);
+
+        assert!(matches!(
+            scheduler.try_cancel_active(1),
+            AbortOutcome::Discarded { started: true, .. }
+        ));
+        assert_eq!(
+            budget.available(),
+            4,
+            "only the four bytes the peer never saw come back here"
+        );
+    }
+
+    /// Nothing was charged for a send that never started, so cancelling it
+    /// settles nothing and leaves the pool exactly as it was.
+    #[test]
+    fn cancelling_a_waiting_message_settles_nothing() {
+        let limits = quota_limits(4);
+        let (mut scheduler, budget) = quota_scheduler(&limits);
+        admit(&mut scheduler, 1, b"AAAA");
+        admit(&mut scheduler, 2, b"BBBB");
+        assert_eq!(budget.available(), 0);
+
+        assert!(matches!(
+            scheduler.try_cancel_active(2),
+            AbortOutcome::Discarded { started: false, .. }
+        ));
+        assert_eq!(budget.available(), 0, "message 1 still holds all of it");
+    }
+
+    /// Control fragments must never be gated by the quota. A peer parked on an
+    /// exhausted pool is waiting for exactly these, and a handler blocked on an
+    /// inbound trailer cannot complete — and therefore cannot release — until
+    /// its credit gets out.
+    #[tokio::test]
+    async fn control_fragments_go_out_with_the_quota_exhausted() {
+        let limits = quota_limits(4);
+        let (mut scheduler, _budget) = quota_scheduler(&limits);
+        let (mut transport, mut wire) = sender_pair();
+
+        admit(&mut scheduler, 1, b"AAAA");
+        admit(&mut scheduler, 2, b"BBBB");
+        assert_eq!(scheduler.waiting.len(), 1);
+        scheduler.admit_credit(9, 64);
+
+        scheduler.advance(&mut transport).await.unwrap();
+        let (_, kind, id, payload) = read_wire_fragment(&mut wire).await;
+        assert_eq!(kind, Kind::Credit);
+        assert_eq!(id, 9);
+        assert_eq!(u32::from_le_bytes(payload.try_into().unwrap()), 64);
+    }
+
+    /// Payload credit names no message, so several releases collapse into one
+    /// fragment rather than one apiece. Calls retire in bursts, and a fragment
+    /// per retirement would be pure overhead.
+    #[tokio::test]
+    async fn payload_credit_coalesces_into_a_single_fragment() {
+        let limits = Limits::default();
+        let (mut scheduler, _budget) = quota_scheduler(&limits);
+        let (mut transport, mut wire) = sender_pair();
+
+        scheduler.admit_payload_credit(10);
+        scheduler.admit_payload_credit(20);
+        scheduler.admit_payload_credit(12);
+        assert_eq!(scheduler.control.len(), 1);
+
+        scheduler.advance(&mut transport).await.unwrap();
+        let (flags, kind, id, payload) = read_wire_fragment(&mut wire).await;
+        assert_eq!(kind, Kind::PayloadCredit);
+        assert_eq!(flags, Flags::FIRST | Flags::LAST);
+        assert_eq!(id, 0, "the id field is reserved and must be zero");
+        assert_eq!(u32::from_le_bytes(payload.try_into().unwrap()), 42);
+    }
+
+    /// The aggregate backstop. Each message is legal on its own — the point of
+    /// the limit is that their sum is not. A well-behaved peer parks rather
+    /// than reaching this, so it is connection-fatal like the other framing
+    /// violations.
+    #[tokio::test]
+    async fn rejects_messages_exceeding_the_session_payload_quota() {
+        let limits = Limits {
+            max_payload_size: 4,
+            max_outstanding_payload: 6,
+            ..Limits::default()
+        };
+        let mut reassembler = new_reassembler(limits);
+
+        let mut frame = FakeRecvFrame::new(fast_path_bytes(1, Kind::Request, b"AAAA"));
+        let header = read_fragment_header(&mut frame).await.unwrap();
+        // Held, not dropped: the first message's charge is what leaves no room
+        // for the second, and dropping it here would release it.
+        let _first = reassembler.accept(header, &mut frame).await.unwrap();
+
+        let mut frame = FakeRecvFrame::new(fast_path_bytes(2, Kind::Request, b"BBBB"));
+        let header = read_fragment_header(&mut frame).await.unwrap();
+        let Err(error) = reassembler.accept(header, &mut frame).await else {
+            panic!("expected a protocol error");
+        };
+        assert!(
+            format!("{error}").contains("session payload quota"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// Dropping the charge that travelled with a message is what returns its
+    /// quota — to the pool and, through the sink, to the peer. Every way a call
+    /// can end goes through this one drop.
+    #[tokio::test]
+    async fn retiring_a_message_returns_its_quota_to_the_peer() {
+        struct Sink(std::sync::Mutex<Vec<u32>>);
+        impl ControlSink for Arc<Sink> {
+            fn credit(&self, _id: u64, _count: u32) {}
+            fn payload_credit(&self, count: u32) {
+                self.0.lock().unwrap().push(count);
+            }
+            fn discard(&self, _id: u64) {}
+        }
+        let sink = Arc::new(Sink(Default::default()));
+        let limits = Limits {
+            max_outstanding_payload: 16,
+            ..Limits::default()
+        };
+        let mut reassembler = Reassembler::new(limits, Arc::new(sink.clone()));
+
+        let mut frame = FakeRecvFrame::new(fast_path_bytes(1, Kind::Request, b"AAAA"));
+        let header = read_fragment_header(&mut frame).await.unwrap();
+        let Event::Message(message) = reassembler.accept(header, &mut frame).await.unwrap() else {
+            panic!("expected a complete message");
+        };
+        assert_eq!(reassembler.payload_credit.available(), 12);
+        assert!(sink.0.lock().unwrap().is_empty(), "not released yet");
+
+        drop(message);
+        assert_eq!(reassembler.payload_credit.available(), 16);
+        assert_eq!(*sink.0.lock().unwrap(), vec![4]);
+    }
+
+    /// A message cancelled before its last fragment never reaches the
+    /// application, so no charge is ever handed out to release it. The
+    /// reassembler settles it instead — and credits the peer for what it did
+    /// manage to send, which is buffered nowhere now.
+    #[tokio::test]
+    async fn aborting_a_partial_message_returns_its_quota() {
+        let limits = Limits {
+            max_fragment_size: 4 + RawFragmentHeader::LEN,
+            max_outstanding_payload: 16,
+            ..Limits::default()
+        };
+        let mut reassembler = new_reassembler(limits);
+
+        let mut frame = FakeRecvFrame::new(fragment_bytes(Flags::FIRST, 1, Kind::Request, b"AAAA"));
+        let header = read_fragment_header(&mut frame).await.unwrap();
+        reassembler.accept(header, &mut frame).await.unwrap();
+        assert_eq!(reassembler.payload_credit.available(), 12);
+
+        let mut frame = FakeRecvFrame::new(fragment_bytes(Flags::ABORT, 1, Kind::Request, b""));
+        let header = read_fragment_header(&mut frame).await.unwrap();
+        reassembler.accept(header, &mut frame).await.unwrap();
+        assert_eq!(reassembler.payload_credit.available(), 16);
+    }
+
+    /// The id field is reserved rather than merely unused, so a future
+    /// revision can give it meaning without wondering what an old peer put
+    /// there.
+    #[tokio::test]
+    async fn rejects_payload_credit_naming_a_message() {
+        let mut reassembler = new_reassembler(Limits::default());
+        let mut frame = FakeRecvFrame::new(fragment_bytes(
+            Flags::FIRST | Flags::LAST,
+            7,
+            Kind::PayloadCredit,
+            &1u32.to_le_bytes(),
+        ));
+        let header = read_fragment_header(&mut frame).await.unwrap();
+        let Err(error) = reassembler.accept(header, &mut frame).await else {
+            panic!("expected a protocol error");
+        };
+        assert!(
+            format!("{error}").contains("must not name a message"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_empty_payload_credit() {
+        let mut reassembler = new_reassembler(Limits::default());
+        let mut frame = FakeRecvFrame::new(fragment_bytes(
+            Flags::FIRST | Flags::LAST,
+            0,
+            Kind::PayloadCredit,
+            &0u32.to_le_bytes(),
+        ));
+        let header = read_fragment_header(&mut frame).await.unwrap();
+        let Err(error) = reassembler.accept(header, &mut frame).await else {
+            panic!("expected a protocol error");
+        };
+        assert!(
+            format!("{error}").contains("at least one byte"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// A per-message cap above the aggregate pool describes a message that
+    /// could never be sent. Both ends can produce that combination — this end
+    /// by configuration, the peer by advertising a small quota — so both are
+    /// normalized rather than rejected.
+    #[test]
+    fn negotiation_keeps_the_quota_at_or_above_the_per_message_cap() {
+        let generous = HandshakeV1::from_limits(
+            &Limits {
+                max_payload_size: 1024,
+                max_outstanding_payload: 64 * 1024,
+                ..Limits::default()
+            },
+            None,
+        );
+        let stingy = HandshakeV1::from_limits(
+            &Limits {
+                max_payload_size: 1024,
+                max_outstanding_payload: 512,
+                ..Limits::default()
+            },
+            None,
+        );
+
+        // A peer whose whole pool is smaller than our per-message cap drags
+        // the cap down with it.
+        let mut limits = Limits {
+            max_payload_size: 1024,
+            max_outstanding_payload: 64 * 1024,
+            ..Limits::default()
+        };
+        stingy.clamp_limits(&mut limits);
+        assert_eq!(limits.max_outstanding_payload, 512);
+        assert_eq!(limits.max_payload_size, 512);
+
+        // And a generous peer leaves the relationship alone.
+        let mut limits = Limits {
+            max_payload_size: 1024,
+            max_outstanding_payload: 2048,
+            ..Limits::default()
+        };
+        generous.clamp_limits(&mut limits);
+        assert_eq!(limits.max_outstanding_payload, 2048);
+        assert_eq!(limits.max_payload_size, 1024);
     }
 }
