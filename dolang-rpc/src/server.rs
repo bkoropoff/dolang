@@ -1159,6 +1159,25 @@ impl<P: Protocol> CallContext<P> {
     ) -> Result<Option<T>, InvalidOpaque> {
         self.shared.session.unregister::<T>(value)
     }
+
+    /// Empties a typed opaque resource unless acquired guards
+    /// still share its ownership.
+    ///
+    /// The recoverable counterpart of [`unregister`](Self::unregister): on the
+    /// busy path the resource stays registered and the peer's handle keeps
+    /// working, so a handler can report the operation busy and let the peer
+    /// retry.
+    ///
+    /// # Panics
+    ///
+    /// If the handle was minted by a different session, as with
+    /// [`acquire`](Self::acquire).
+    pub fn try_unregister<T: OpaqueResource>(
+        &self,
+        value: Cite<T::Marker>,
+    ) -> Result<Option<T>, InvalidOpaque> {
+        self.shared.session.try_unregister::<T>(value)
+    }
 }
 
 impl<P: Protocol> Drop for CallContext<P> {
