@@ -35,7 +35,7 @@ fn decode(bytes: &[u8]) -> io::Result<PosixAcl> {
         ));
     }
     let mut entries = Vec::with_capacity((bytes.len() - 4) / 8);
-    for raw in bytes[4..].chunks_exact(8) {
+    for raw in bytes[4..].as_chunks::<8>().0 {
         let tag = u16::from_le_bytes(raw[0..2].try_into().unwrap());
         let perm = u16::from_le_bytes(raw[2..4].try_into().unwrap());
         let id = u32::from_le_bytes(raw[4..8].try_into().unwrap());

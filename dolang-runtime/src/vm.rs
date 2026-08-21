@@ -702,8 +702,8 @@ impl<'v, 'a> ModuleBuilder<'v, 'a> {
     ///     .commit();
     /// // Module is now available to Do code
     /// ```
-    pub fn commit(mut self) -> &'a mut Builder<'v> {
-        let mut items: Vec<_> = self.contents.drain(..).collect();
+    pub fn commit(self) -> &'a mut Builder<'v> {
+        let mut items = self.contents;
         items.sort_by_key(|(sym, _)| *sym);
         for pair in items.windows(2) {
             if pair[0].0 == pair[1].0 {
