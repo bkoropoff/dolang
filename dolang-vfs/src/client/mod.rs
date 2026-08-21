@@ -3521,6 +3521,7 @@ mod tests {
         assert_eq!(second.to_string(), first.to_string());
 
         client.stop().await.unwrap();
+        client.close().await;
         server.await.unwrap().unwrap();
     }
 }

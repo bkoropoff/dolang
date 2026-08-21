@@ -865,14 +865,18 @@ closes, which means every handle that could still queue work is gone.
 *and* every dispatched call has answered. The send driver then finishes
 everything it holds, `has_pending` rather than `has_work`, parked sends
 included — the receive half is still running, so the credit that releases them
-can still arrive. It then waits for all payload quota charged by those
-responses to return. A peer may have consumed the final response while its
-`PayloadCredit` control message is still queued; closing a pipe transport in
-that interval makes an intermediate relay's write fail. The condition also
-requires the outgoing channel to be drained: a handler queues its response and
-*then* completes, and completing is what seals the drain, so at the instant the
-signal lands the last response may still be in the channel rather than in the
-scheduler.
+can still arrive. The condition also requires the outgoing channel to be
+drained: a handler queues its response and *then* completes, and completing is
+what seals the drain, so at the instant the signal lands the last response may
+still be in the channel rather than in the scheduler.
+
+An empty send side does not complete graceful shutdown. The receive driver
+keeps reading until the peer closes its transport, which gives every control
+message the peer queued before closing a chance to arrive without requiring
+the server to enumerate them. The send driver remains alive as well, so it can
+emit rejections and other control messages prompted by those final reads. The
+client must therefore close its session after receiving the shutdown response.
+That close drains its queued writes before releasing the transport.
 
 `Abrupt` is published unconditionally on the receive driver's way out, and it
 sticks — it cannot be downgraded. No further credit can arrive, so the send
@@ -887,11 +891,11 @@ the peer — this end is still reading, so that credit is still worth sending.
 
 ### Termination Is The Caller's To Bound
 
-`Graceful` is unbounded by construction: it waits for credit a peer may never
-send, and a peer that stops reading at its own shutdown will hold this end open
-indefinitely. The bound belongs to the caller, who can wrap the endpoint's
-driving future in a timeout — dropping it aborts both halves at once. This
-crate does not depend on a timer, so it does not impose a policy of its own.
+`Graceful` is unbounded by construction: a peer that never closes its transport
+will hold this end open indefinitely. The bound belongs to the caller, who can
+wrap the endpoint's driving future in a timeout — dropping it aborts both
+halves at once. This crate does not depend on a timer, so it does not impose a
+policy of its own.
 
 ### The Client
 

@@ -57,6 +57,12 @@ fn is_elevated() -> bool {
 
 static NEXT_PIPE: AtomicU64 = AtomicU64::new(0);
 
+async fn stop_pair(client: Client, server: JoinHandle<std::io::Result<()>>) {
+    client.stop().await.unwrap();
+    client.close().await;
+    server.await.unwrap().unwrap();
+}
+
 #[test]
 fn direct_security_info_reports_token_elevation() {
     let SecurityInfo::Windows(info) = SecurityInfo::current().unwrap() else {
@@ -120,8 +126,7 @@ async fn query_reports_server_target_including_wine() {
     assert_eq!(client.target().is_wine, Some(dolang_winterop::is_wine()));
     assert_eq!(client.security(), &SecurityInfo::current().unwrap());
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 #[tokio::test]
@@ -149,8 +154,7 @@ async fn windows_account_lookup_round_trips_over_rpc() {
         std::io::ErrorKind::NotFound
     );
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 #[tokio::test]
@@ -211,8 +215,7 @@ async fn windows_metadata_and_ownership_round_trip_over_rpc() {
             .unwrap();
     }
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 #[tokio::test]
@@ -243,8 +246,7 @@ async fn client_or_direct_routes_path_and_open_operations() {
     assert_eq!(entry.file_name(), "one.txt");
     assert!(entries.next_entry().await.unwrap().is_none());
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 #[tokio::test]
@@ -278,8 +280,7 @@ async fn spawn_transfers_standard_stream_handles() {
     assert!(stdout.contains("out:hello"), "stdout was {stdout:?}");
     assert!(stderr.contains("err:hello"), "stderr was {stderr:?}");
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 #[tokio::test]
@@ -320,8 +321,7 @@ async fn file_stdio_is_reopened_without_overlapped() {
     assert!(contents.contains("first"), "contents were {contents:?}");
     assert!(contents.contains("second"), "contents were {contents:?}");
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 #[tokio::test]
@@ -333,8 +333,7 @@ async fn spawn_failure_returns_remote_os_error() {
         .await;
     assert!(result.is_err());
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 #[tokio::test]
@@ -352,8 +351,7 @@ async fn streams_run_in_the_server_namespace() {
     let streams = client.streams(typed(&path), true).await.unwrap();
     assert!(streams.iter().any(|entry| entry.name == "zone"));
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 #[tokio::test]

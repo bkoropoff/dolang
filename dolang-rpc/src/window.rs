@@ -24,7 +24,7 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, MutexGuard},
-    task::{Poll, Waker},
+    task::Waker,
 };
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -204,7 +204,6 @@ pub(crate) struct PayloadBudget {
 
 struct PayloadBudgetState {
     available: usize,
-    capacity: usize,
     wakers: Vec<Waker>,
 }
 
@@ -213,7 +212,6 @@ impl PayloadBudget {
         Self {
             state: Mutex::new(PayloadBudgetState {
                 available,
-                capacity: available,
                 wakers: Vec::new(),
             }),
         }
@@ -222,11 +220,6 @@ impl PayloadBudget {
     #[cfg(test)]
     pub(crate) fn available(&self) -> usize {
         lock(&self.state).available
-    }
-
-    pub(crate) fn is_restored(&self) -> bool {
-        let state = lock(&self.state);
-        state.available == state.capacity
     }
 
     /// Takes `n` bytes if the whole amount is available, reporting whether it
@@ -272,31 +265,6 @@ impl PayloadBudget {
         if !state.wakers.iter().any(|parked| parked.will_wake(waker)) {
             state.wakers.push(waker.clone());
         }
-    }
-
-    /// Waits until every byte charged to the peer has been returned.
-    ///
-    /// A graceful server drain uses this after its last response has reached
-    /// the wire. The final payload credit is itself an outbound control
-    /// message at the peer, so closing the transport before it arrives can
-    /// race that write through an intermediate pipe relay.
-    pub(crate) async fn wait_restored(&self) {
-        std::future::poll_fn(|cx| {
-            let mut state = lock(&self.state);
-            if state.available == state.capacity {
-                Poll::Ready(())
-            } else {
-                if !state
-                    .wakers
-                    .iter()
-                    .any(|parked| parked.will_wake(cx.waker()))
-                {
-                    state.wakers.push(cx.waker().clone());
-                }
-                Poll::Pending
-            }
-        })
-        .await
     }
 }
 

@@ -38,6 +38,12 @@ async fn connect_client(socket_path: &Path) -> Client {
     Client::connect(socket_path).await.unwrap()
 }
 
+async fn stop_server(client: Client, server: JoinHandle<()>) {
+    client.stop().await.unwrap();
+    client.close().await;
+    server.await.unwrap();
+}
+
 #[tokio::test]
 async fn direct_query_reports_host_target() {
     let direct = Direct::new().unwrap();
@@ -509,7 +515,7 @@ async fn unix_vfs_connects_to_another_server() {
     inner.stop().await.unwrap();
     drop(inner);
     inner_task.await.unwrap();
-    outer_task.await.unwrap();
+    stop_server(client, outer_task).await;
 }
 
 #[tokio::test]
@@ -1128,8 +1134,7 @@ async fn keyed_client_connects_to_keyed_server() {
         .unwrap();
     assert_eq!(client.target(), &TargetInfo::current());
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap();
+    stop_server(client, server_task).await;
 }
 
 #[tokio::test]
@@ -1149,8 +1154,7 @@ async fn wrong_key_is_rejected_without_disturbing_the_server() {
         .unwrap();
     assert_eq!(client.target(), &TargetInfo::current());
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap();
+    stop_server(client, server_task).await;
 }
 
 #[tokio::test]

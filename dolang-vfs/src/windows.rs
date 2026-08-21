@@ -80,6 +80,8 @@ impl AdminSession {
         };
         if stop_result.is_err() {
             drop(guard.take());
+        } else {
+            self.client.clone().close().await;
         }
         let wait_result = wait_for_exit(&self.process).await;
         if wait_result.is_ok()
