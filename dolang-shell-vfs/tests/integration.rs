@@ -920,18 +920,16 @@ mod login_env {
 /// disappearing at the right moment -- lives in the CLI, not the library.
 #[cfg(unix)]
 mod accept_mode {
-    use std::{
-        io::{BufRead, BufReader, Write},
-        os::unix::fs::PermissionsExt,
-        path::Path,
-        process::{Command, Stdio},
-        time::Duration,
-    };
+    use std::{os::unix::fs::PermissionsExt, path::Path, process::Stdio, time::Duration};
 
     use dolang_rpc::AuthKey;
     use dolang_vfs::client::Client;
     use tempfile::tempdir;
     use tokio::time::timeout;
+    use tokio::{
+        io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+        process::{Child, Command},
+    };
 
     use super::AGENT_BIN;
 
@@ -948,7 +946,7 @@ mod accept_mode {
 
     /// Spawns the agent in `--accept --key-stdin` mode and returns once it has
     /// bound its socket and printed `READY`.
-    fn spawn_accept(socket_path: &Path, key: &[u8]) -> std::process::Child {
+    async fn spawn_accept(socket_path: &Path, key: &[u8]) -> Child {
         let mut child = Command::new(AGENT_BIN)
             .arg("--key-stdin")
             .arg("--accept")
@@ -963,19 +961,23 @@ mod accept_mode {
         let mut stdin = child.stdin.take().expect("stdin not captured");
         stdin
             .write_all(&[u8::try_from(key.len()).unwrap()])
+            .await
             .unwrap();
-        stdin.write_all(key).unwrap();
-        stdin.flush().unwrap();
+        stdin.write_all(key).await.unwrap();
+        stdin.flush().await.unwrap();
         drop(stdin);
 
-        wait_for_ready(&mut child).expect("agent did not become ready");
+        wait_for_ready(&mut child)
+            .await
+            .expect("agent did not become ready");
         child
     }
 
-    fn wait_for_ready(child: &mut std::process::Child) -> std::io::Result<()> {
+    async fn wait_for_ready(child: &mut Child) -> std::io::Result<()> {
         let stdout = child.stdout.take().expect("stdout not captured");
-        for line in BufReader::new(stdout).lines() {
-            if line.map_err(std::io::Error::other)? == "READY" {
+        let mut lines = BufReader::new(stdout).lines();
+        while let Some(line) = lines.next_line().await? {
+            if line == "READY" {
                 return Ok(());
             }
         }
@@ -983,6 +985,13 @@ mod accept_mode {
             std::io::ErrorKind::UnexpectedEof,
             "process exited before READY",
         ))
+    }
+
+    async fn wait_for_exit(child: &mut Child) -> std::process::ExitStatus {
+        timeout(Duration::from_secs(5), child.wait())
+            .await
+            .expect("timeout waiting for agent to exit")
+            .expect("wait")
     }
 
     async fn connect(socket_path: &Path, key: &[u8]) -> Result<Client, dolang_vfs::error::Error> {
@@ -997,7 +1006,7 @@ mod accept_mode {
     #[tokio::test]
     async fn accepts_one_authenticated_client_and_unlinks_the_socket() {
         let (_dir, socket_path) = find_free_socket_path();
-        let mut child = spawn_accept(&socket_path, TEST_KEY);
+        let mut child = spawn_accept(&socket_path, TEST_KEY).await;
 
         let client = connect(&socket_path, TEST_KEY).await.expect("connect");
 
@@ -1015,14 +1024,14 @@ mod accept_mode {
         );
 
         client.stop().await.expect("stop");
-        let status = child.wait().expect("wait");
+        let status = wait_for_exit(&mut child).await;
         assert!(status.success(), "agent exited with {status}");
     }
 
     #[tokio::test]
     async fn a_wrong_key_neither_consumes_the_slot_nor_unlinks_the_socket() {
         let (_dir, socket_path) = find_free_socket_path();
-        let mut child = spawn_accept(&socket_path, TEST_KEY);
+        let mut child = spawn_accept(&socket_path, TEST_KEY).await;
 
         let result = connect(&socket_path, b"an-entirely-different-key").await;
         assert!(result.is_err(), "a client with the wrong key was accepted");
@@ -1037,14 +1046,14 @@ mod accept_mode {
             .await
             .expect("the intended client should still be served");
         client.stop().await.expect("stop");
-        let status = child.wait().expect("wait");
+        let status = wait_for_exit(&mut child).await;
         assert!(status.success(), "agent exited with {status}");
     }
 
     #[tokio::test]
     async fn a_silent_connection_does_not_block_the_intended_client() {
         let (_dir, socket_path) = find_free_socket_path();
-        let mut child = spawn_accept(&socket_path, TEST_KEY);
+        let mut child = spawn_accept(&socket_path, TEST_KEY).await;
 
         // Connect and then say nothing at all, which is what a peer trying to
         // wedge the accept loop would do.
@@ -1054,7 +1063,7 @@ mod accept_mode {
             .await
             .expect("a stalled peer must not block the accept loop");
         client.stop().await.expect("stop");
-        let status = child.wait().expect("wait");
+        let status = wait_for_exit(&mut child).await;
         assert!(status.success(), "agent exited with {status}");
     }
 
@@ -1064,6 +1073,7 @@ mod accept_mode {
             .arg("--key-stdin")
             .arg("--stdio")
             .output()
+            .await
             .expect("failed to spawn agent");
         assert!(!output.status.success());
         let stderr = String::from_utf8_lossy(&output.stderr);

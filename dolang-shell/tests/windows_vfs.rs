@@ -49,7 +49,11 @@ async fn embedded_vfs_mode_serves_and_stops() {
     assert!(metadata.len > 0);
 
     client.stop().await.unwrap();
-    assert!(child.wait().unwrap().success());
+    let status = tokio::task::spawn_blocking(move || child.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(status.success());
 }
 
 #[tokio::test]
