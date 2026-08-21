@@ -10,7 +10,7 @@ use dolang::runtime::{
     object::TypeBuilder,
     strand::InterruptMask,
     unpack,
-    value::{BinEmbryo, TypeObject, View},
+    value::{BinEmbryo, PinBin, PinStr, TypeObject, View},
 };
 use dolang_vfs::{
     AnyFile, FileHandle, OpenOptions, Vfs,
@@ -107,6 +107,22 @@ fn configure_options(opts: &mut impl OpenOptions, mode: &str) {
     }
 }
 
+/// Parses an `offset:` keyword argument.
+fn read_offset<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    offset: Option<Slot<'v, '_>>,
+) -> Result<'v, 's, Option<u64>> {
+    offset
+        .map(|offset| {
+            offset
+                .to_i64(strand)
+                .ok()
+                .and_then(|n| u64::try_from(n).ok())
+                .ok_or_else(|| Error::type_error(strand, "offset must be a non-negative integer"))
+        })
+        .transpose()
+}
+
 fn maximal_utf8_prefix(bytes: &[u8]) -> result::Result<&str, ()> {
     match str::from_utf8(bytes) {
         Ok(s) => Ok(s),
@@ -120,6 +136,97 @@ fn maximal_utf8_prefix(bytes: &[u8]) -> result::Result<&str, ()> {
     }
 }
 
+/// Reads `size` bytes at `offset`, or to the end of the file when `size` is
+/// `None`, looping over short transfers.
+///
+/// [`FileHandle::read_at_into`] is allowed to come up short for reasons other than
+/// the end of the file — a remote read is capped at one chunk, a local one at
+/// whatever the platform chose to return — which is the right contract for Rust
+/// callers but a trap in a script, where the shortfall would surface only on
+/// some filesystems or some transports. So `offset:` in Do means "read this
+/// much", and stops early only at the end of the file.
+///
+/// Fills `embryo` directly rather than accumulating into an owned buffer and
+/// copying: the destination is the collector's memory the result will be built
+/// from, and `read_at_into` places bytes there without an intermediate. It is
+/// not the arena zero-copy the cursor path gets — a blocking backend still
+/// stages through a temporary of its own — but the remote backend, where a
+/// script moving bulk data actually spends its time, reads its reply trailer
+/// straight in.
+async fn read_at_looping<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    file: &AnyFile,
+    embryo: &mut BinEmbryo<'v>,
+    offset: u64,
+    size: Option<usize>,
+) -> Result<'v, 's, ()> {
+    loop {
+        let want = match size {
+            Some(size) if embryo.len() >= size => break,
+            Some(size) => (size - embryo.len()).min(BYTE_STREAM_CHUNK_SIZE),
+            None => BYTE_STREAM_CHUNK_SIZE,
+        };
+        if embryo.spare_capacity_mut().len() < want {
+            embryo.reserve(strand, want);
+        }
+        let at = offset + embryo.len() as u64;
+        // Trimmed to what is still wanted, not to whatever `reserve` rounded
+        // the capacity up to, so a read cannot overshoot the requested size and
+        // there is nothing to truncate afterwards.
+        let spare = embryo.spare_capacity_mut();
+        let end = want.min(spare.len());
+        let read = file
+            .read_at_into(&mut spare[..end], at)
+            .await
+            .into_sys(strand)?;
+        if read == 0 {
+            break;
+        }
+        // SAFETY: `read_at_into` reports how many bytes at the front of the
+        // slice it filled, and initializes exactly those.
+        unsafe { embryo.advance(read) };
+    }
+    Ok(())
+}
+
+/// Writes all of `data` at `offset`, looping over short transfers.
+///
+/// Short for the same reasons as [`read_at_looping`], and looped for the same
+/// reason: a script asking to write a buffer means all of it.
+async fn write_at_looping(file: &AnyFile, data: &[u8], offset: u64) -> io::Result<usize> {
+    let total = data.len();
+    let mut written = 0usize;
+    while written < total {
+        let n = file
+            .write_at_from(&data[written..], offset + written as u64)
+            .await?;
+        if n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "file write made no progress",
+            ));
+        }
+        written += n;
+    }
+    Ok(total)
+}
+
+/// A pinned `Str` or `Bin` payload, held so the bytes underneath it keep their
+/// address for as long as a write is borrowing them.
+enum Pinned<'v, 'a> {
+    Str(PinStr<'v, 'a>),
+    Bin(PinBin<'v, 'a>),
+}
+
+impl<'v, 'a> Pinned<'v, 'a> {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Str(value) => value.as_bytes(),
+            Self::Bin(value) => value,
+        }
+    }
+}
+
 /// A handle to an open file.
 pub(crate) struct File<'v> {
     file: Option<AnyFile>,
@@ -129,6 +236,9 @@ pub(crate) struct File<'v> {
 pub(crate) struct FileAnnex<'v> {
     global: State<'v, Global<'v>>,
     is_binary: bool,
+    /// Whether the file was opened for appending, in which case every write
+    /// lands at the end and an explicit offset cannot be honored.
+    is_append: bool,
 }
 
 pub(crate) async fn open<'v, 's>(
@@ -166,45 +276,151 @@ impl<'v> File<'v> {
         _strand: &Strand<'v, '_>,
         global: State<'v, Global<'v>>,
         file: AnyFile,
-        is_binary: bool,
+        mode: &str,
     ) -> (Self, FileAnnex<'v>) {
         (
             File {
                 file: Some(file),
                 buf: BinEmbryo::new(),
             },
-            FileAnnex { global, is_binary },
+            FileAnnex {
+                global,
+                is_binary: mode.contains('b'),
+                is_append: mode.starts_with('a'),
+            },
         )
     }
 
+    /// Hands this file to a child process as one of its standard streams,
+    /// giving it up here.
+    ///
+    /// The handoff *steals* the file: the seek position is kept in this process
+    /// rather than in the kernel, so two live handles would each believe a
+    /// cursor the other moves. Surrendering the handle makes that unobservable
+    /// — subsequent use gives the ordinary "file is closed" error — instead of
+    /// quietly reading and writing at the wrong places.
     pub(crate) async fn command_send<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &mut Strand<'v, 's>,
     ) -> Result<'v, 's, Option<StdioSend>> {
-        let borrow = this.borrow(strand)?;
+        let mut borrow = this.borrow_mut(strand)?;
         if !borrow.buf.is_empty() {
             return Ok(None);
         }
-        let file_ref = borrow
+        let mut file = borrow
             .file
-            .as_ref()
+            .take()
             .ok_or_else(|| Error::state_error(strand, "file is closed"))?;
-        file_ref.to_stdio_send().await.map(Some).into_sys(strand)
+        // The endpoint carries a position of its own, and the cursor lives on
+        // this side rather than in the kernel, so it has to be stated.
+        let offset = match file.stream_position().await {
+            Ok(offset) => offset,
+            Err(error) => {
+                borrow.file = Some(file);
+                return Err(error).into_sys(strand);
+            }
+        };
+        let stdio = match file.into_stdio_send(offset).await {
+            Ok(stdio) => stdio,
+            // Nothing was handed over, so the file is still the script's.
+            Err(error) => {
+                let (file, error) = error.into_parts();
+                borrow.file = Some(file);
+                return Err(error).into_sys(strand);
+            }
+        };
+        Ok(Some(stdio))
     }
 
+    /// Receives a child process's output into this file, closing it here.
+    ///
+    /// Steals the file for the same reason as [`File::command_send`].
     pub(crate) async fn command_recv<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &mut Strand<'v, 's>,
     ) -> Result<'v, 's, Option<StdioRecv>> {
-        let borrow = this.borrow(strand)?;
+        let mut borrow = this.borrow_mut(strand)?;
         if !borrow.buf.is_empty() {
             return Ok(None);
         }
-        let file_ref = borrow
+        let mut file = borrow
+            .file
+            .take()
+            .ok_or_else(|| Error::state_error(strand, "file is closed"))?;
+        // The endpoint carries a position of its own, and the cursor lives on
+        // this side rather than in the kernel, so it has to be stated.
+        let offset = match file.stream_position().await {
+            Ok(offset) => offset,
+            Err(error) => {
+                borrow.file = Some(file);
+                return Err(error).into_sys(strand);
+            }
+        };
+        let stdio = match file.into_stdio_recv(offset).await {
+            Ok(stdio) => stdio,
+            Err(error) => {
+                let (file, error) = error.into_parts();
+                borrow.file = Some(file);
+                return Err(error).into_sys(strand);
+            }
+        };
+        Ok(Some(stdio))
+    }
+
+    /// Reads at an explicit offset, leaving the cursor and its buffer alone.
+    async fn read_at<'s>(
+        &self,
+        strand: &mut Strand<'v, 's>,
+        offset: u64,
+        size: Option<usize>,
+        is_binary: bool,
+        out: Slot<'v, '_>,
+    ) -> Result<'v, 's, ()> {
+        let file = self
             .file
             .as_ref()
             .ok_or_else(|| Error::state_error(strand, "file is closed"))?;
-        file_ref.to_stdio_recv().await.map(Some).into_sys(strand)
+        let mut buf = BinEmbryo::new_with_capacity(strand, size.unwrap_or(0));
+        read_at_looping(strand, file, &mut buf, offset, size).await?;
+        if is_binary {
+            buf.finish(strand, out);
+            Ok(())
+        } else {
+            // There is no cursor to carry a split character forward on, so
+            // unlike a streaming text read this cannot stash a remainder.
+            buf.finish_str(strand, out)
+                .map_err(|_| Error::runtime(strand, "invalid UTF-8 data"))
+        }
+    }
+
+    /// Writes at an explicit offset, leaving the cursor alone.
+    async fn write_at<'a, 's>(
+        &self,
+        data: Slot<'v, 'a>,
+        offset: u64,
+        strand: &mut Strand<'v, 's>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        // Pinned and written from where it lies rather than copied into a
+        // `Bytes` first: the pin holds the address stable across the write, and
+        // `data` is a rooted argument slot, so the value cannot go away
+        // underneath it. A pin costs nothing today; against a moving collector
+        // this would be worth deciding by payload size, since it trades a
+        // memcpy for holding the address down across a whole transfer.
+        let pinned = match data.view(strand) {
+            View::Str(value) => Pinned::Str(value.pin()),
+            View::Bin(value) => Pinned::Bin(value.pin()),
+            _ => return Err(Error::type_error(strand, "expected `Str` or `Bin`")),
+        };
+        let file = self
+            .file
+            .as_ref()
+            .ok_or_else(|| Error::state_error(strand, "file is closed"))?;
+        let written = write_at_looping(file, pinned.as_slice(), offset)
+            .await
+            .into_sys(strand)?;
+        Output::set(strand, out, written);
+        Ok(())
     }
 
     async fn logical_position<'s>(&mut self, strand: &mut Strand<'v, 's>) -> Result<'v, 's, u64> {
@@ -277,7 +493,7 @@ impl<'v> File<'v> {
             strand
                 .with_slots(async move |strand, [mut handle, mut tmp]| {
                     // Block scope mode: create handle, call block with auto-close
-                    let (file, annex) = File::create(strand, global, file, mode.contains('b'));
+                    let (file, annex) = File::create(strand, global, file, &mode);
                     global
                         .types
                         .file
@@ -294,7 +510,7 @@ impl<'v> File<'v> {
                 .await
         } else {
             // No block: just return the handle in the slot
-            let (file, annex) = File::create(strand, global, file, mode.contains('b'));
+            let (file, annex) = File::create(strand, global, file, &mode);
             global
                 .types
                 .file
@@ -415,14 +631,14 @@ impl<'v> File<'v> {
     }
 
     async fn metadata<'s>(
-        &mut self,
+        &self,
         strand: &mut Strand<'v, 's>,
         global: State<'v, Global<'v>>,
         out: Slot<'v, '_>,
     ) -> Result<'v, 's, ()> {
         let file_ref = self
             .file
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| Error::state_error(strand, "file is closed"))?;
 
         let metadata = file_ref.metadata().await.into_sys(strand)?;
@@ -431,14 +647,14 @@ impl<'v> File<'v> {
     }
 
     async fn fs_metadata<'s>(
-        &mut self,
+        &self,
         strand: &mut Strand<'v, 's>,
         global: State<'v, Global<'v>>,
         out: Slot<'v, '_>,
     ) -> Result<'v, 's, ()> {
         let file_ref = self
             .file
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| Error::state_error(strand, "file is closed"))?;
 
         let metadata = file_ref.fs_metadata().await.into_sys(strand)?;
@@ -587,6 +803,7 @@ impl<'v> Object<'v> for File<'v> {
         let default_acl = builder.sym("default");
         let kind_acl = builder.sym("kind");
         let shared = builder.sym("shared");
+        let offset_sym = builder.sym("offset");
         builder
             .supertype(TypeObject::Iter)
             .supertype(TypeObject::Sink)
@@ -705,7 +922,7 @@ impl<'v> Object<'v> for File<'v> {
                     .await
             })
             .method("read", async move |this, strand, args, out| {
-                let ([], [size]) = unpack!(strand, args, 0, 1)?;
+                let ([], [size, offset]) = unpack!(strand, args, 0, 1, offset_sym = None)?;
                 let size: Option<usize> = size
                     .map(|s| {
                         s.to_i64(strand)
@@ -716,10 +933,22 @@ impl<'v> Object<'v> for File<'v> {
                             })
                     })
                     .transpose()?;
+                let offset = read_offset(strand, offset)?;
 
-                let mut borrow = this.borrow_mut(strand)?;
                 let is_binary = this.annex().is_binary;
 
+                // An explicit offset is a disjoint path: it neither consults
+                // nor disturbs the cursor or the buffer behind it. So it takes
+                // a *shared* borrow, and any number of positional operations
+                // can be in flight on one handle at once — taking the
+                // exclusive borrow here would serialize them for no reason,
+                // and make two concurrent reads a borrow error rather than
+                // two reads.
+                if let Some(offset) = offset {
+                    let borrow = this.borrow(strand)?;
+                    return borrow.read_at(strand, offset, size, is_binary, out).await;
+                }
+                let mut borrow = this.borrow_mut(strand)?;
                 match (is_binary, size) {
                     (true, Some(n)) => borrow.read_binary(n, strand, out).await,
                     (true, None) => borrow.read_binary_all(strand, out).await,
@@ -728,8 +957,26 @@ impl<'v> Object<'v> for File<'v> {
                 }
             })
             .method("write", async move |this, strand, args, out| {
-                let ([data], []) = unpack!(strand, args, 1, 0)?;
-                this.borrow_mut(strand)?.write(data, strand, out).await
+                let ([data], [offset]) = unpack!(strand, args, 1, 0, offset_sym = None)?;
+                let offset = read_offset(strand, offset)?;
+                match offset {
+                    // An append handle writes at the end no matter what offset
+                    // the platform is given, so honoring one is impossible
+                    // rather than merely unimplemented.
+                    Some(_) if this.annex().is_append => Err(Error::state_error(
+                        strand,
+                        "cannot write at an offset on a file opened for appending",
+                    )),
+                    // Shared borrow, for the reason given on `read`.
+                    Some(offset) => {
+                        let borrow = this.borrow(strand)?;
+                        borrow.write_at(data, offset, strand, out).await
+                    }
+                    None => {
+                        let mut borrow = this.borrow_mut(strand)?;
+                        borrow.write(data, strand, out).await
+                    }
+                }
             })
             .method("set_size", async move |this, strand, args, _out| {
                 let ([size], []) = unpack!(strand, args, 1, 0)?;
@@ -753,12 +1000,12 @@ impl<'v> Object<'v> for File<'v> {
                 Ok(())
             })
             .method("metadata", async move |this, strand, _args, out| {
-                this.borrow_mut(strand)?
+                this.borrow(strand)?
                     .metadata(strand, this.annex().global, out)
                     .await
             })
             .method("fs_metadata", async move |this, strand, _args, out| {
-                this.borrow_mut(strand)?
+                this.borrow(strand)?
                     .fs_metadata(strand, this.annex().global, out)
                     .await
             })
@@ -776,10 +1023,10 @@ impl<'v> Object<'v> for File<'v> {
                 let mask = super::sec_desc_mask(strand, owner, group, dacl, sacl)?;
                 let global = this.annex().global;
                 let descriptor = {
-                    let mut borrow = this.borrow_mut(strand)?;
+                    let borrow = this.borrow(strand)?;
                     let file = borrow
                         .file
-                        .as_mut()
+                        .as_ref()
                         .ok_or_else(|| Error::state_error(strand, "file is closed"))?;
                     file.sec_desc(mask).await.into_sys(strand)?
                 };
@@ -794,10 +1041,10 @@ impl<'v> Object<'v> for File<'v> {
                 let default = super::acl_default(strand, default.as_deref())?;
                 super::check_acl_default(strand, kind, default)?;
                 let acl = {
-                    let mut borrow = this.borrow_mut(strand)?;
+                    let borrow = this.borrow(strand)?;
                     let file = borrow
                         .file
-                        .as_mut()
+                        .as_ref()
                         .ok_or_else(|| Error::state_error(strand, "file is closed"))?;
                     file.acl(kind, default).await.into_sys(strand)?
                 };
@@ -815,10 +1062,10 @@ impl<'v> Object<'v> for File<'v> {
                 };
                 let default = super::acl_default(strand, default.as_deref())?;
                 super::check_acl_default(strand, kind, default)?;
-                let mut borrow = this.borrow_mut(strand)?;
+                let borrow = this.borrow(strand)?;
                 let file = borrow
                     .file
-                    .as_mut()
+                    .as_ref()
                     .ok_or_else(|| Error::state_error(strand, "file is closed"))?;
                 file.set_acl(kind, acl.as_ref(), default)
                     .await
@@ -828,10 +1075,10 @@ impl<'v> Object<'v> for File<'v> {
                 let ([descriptor], []) = unpack!(strand, args, 1, 0)?;
                 let global = this.annex().global;
                 let descriptor = crate::security::sec_desc_from_value(strand, global, &descriptor)?;
-                let mut borrow = this.borrow_mut(strand)?;
+                let borrow = this.borrow(strand)?;
                 let file = borrow
                     .file
-                    .as_mut()
+                    .as_ref()
                     .ok_or_else(|| Error::state_error(strand, "file is closed"))?;
                 file.set_sec_desc(&descriptor).await.into_sys(strand)
             })
@@ -865,10 +1112,10 @@ impl<'v> Object<'v> for File<'v> {
                     }
                 };
                 let entries = {
-                    let mut borrow = this.borrow_mut(strand)?;
+                    let borrow = this.borrow(strand)?;
                     let file = borrow
                         .file
-                        .as_mut()
+                        .as_ref()
                         .ok_or_else(|| Error::state_error(strand, "file is closed"))?;
                     file.xattrs(if any {
                         dolang_vfs::xattr::XattrNamespace::Any
@@ -887,10 +1134,10 @@ impl<'v> Object<'v> for File<'v> {
                 let global = this.annex().global;
                 let (name, namespace) = xattr::parse_name(strand, global, &name, namespace)?;
                 let value = {
-                    let mut borrow = this.borrow_mut(strand)?;
+                    let borrow = this.borrow(strand)?;
                     let file = borrow
                         .file
-                        .as_mut()
+                        .as_ref()
                         .ok_or_else(|| Error::state_error(strand, "file is closed"))?;
                     file.xattr(&name, namespace.as_deref())
                         .await
@@ -903,10 +1150,10 @@ impl<'v> Object<'v> for File<'v> {
                 let ([], []) = unpack!(strand, args, 0, 0)?;
                 let global = this.annex().global;
                 let entries = {
-                    let mut borrow = this.borrow_mut(strand)?;
+                    let borrow = this.borrow(strand)?;
                     let file = borrow
                         .file
-                        .as_mut()
+                        .as_ref()
                         .ok_or_else(|| Error::state_error(strand, "file is closed"))?;
                     file.streams().await.into_sys(strand)?
                 };
@@ -917,10 +1164,10 @@ impl<'v> Object<'v> for File<'v> {
                 let global = this.annex().global;
                 let (name, namespace) = xattr::parse_name(strand, global, &name, namespace)?;
                 let value = util::bytes(strand, &value, "value")?;
-                let mut borrow = this.borrow_mut(strand)?;
+                let borrow = this.borrow(strand)?;
                 let file = borrow
                     .file
-                    .as_mut()
+                    .as_ref()
                     .ok_or_else(|| Error::state_error(strand, "file is closed"))?;
                 file.set_xattr(&name, namespace.as_deref(), &value)
                     .await
@@ -930,10 +1177,10 @@ impl<'v> Object<'v> for File<'v> {
                 let ([name], [namespace]) = unpack!(strand, args, 1, 0, namespace = None)?;
                 let global = this.annex().global;
                 let (name, namespace) = xattr::parse_name(strand, global, &name, namespace)?;
-                let mut borrow = this.borrow_mut(strand)?;
+                let borrow = this.borrow(strand)?;
                 let file = borrow
                     .file
-                    .as_mut()
+                    .as_ref()
                     .ok_or_else(|| Error::state_error(strand, "file is closed"))?;
                 file.remove_xattr(&name, namespace.as_deref())
                     .await

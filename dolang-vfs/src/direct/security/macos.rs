@@ -6,7 +6,7 @@ use std::{
     ptr,
 };
 
-use tokio::fs::File;
+use std::fs::File;
 use uuid::Uuid;
 
 use crate::security::{

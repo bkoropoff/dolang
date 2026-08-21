@@ -1,9 +1,11 @@
 use std::io::{self, SeekFrom};
 
+use bytes::{Bytes, BytesMut};
+
 #[cfg(target_os = "linux")]
 use dolang_vfs::xattr::XattrNamespace;
 use dolang_vfs::{
-    AnyCommand, AnyVfs, Child, Command, FileHandle, OpenOptions, Vfs,
+    AnyCommand, AnyVfs, Child, Command, FileHandle, MAX_FILE_READ, OpenOptions, Vfs,
     client::{Client, CommandBuilder},
     direct::Direct,
     directory::{DirEntry, ReadDir},
@@ -18,6 +20,8 @@ use dolang_winterop::security::SecInfo;
 use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use typed_path::{Utf8TypedPath, Utf8UnixPath, Utf8WindowsPath};
+
+use crate::support;
 
 async fn connected_pair() -> (Client, tokio::task::JoinHandle<io::Result<()>>) {
     let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
@@ -496,7 +500,7 @@ async fn retained_files_can_be_used_for_remote_stdio() {
     stdin.write_all(b"remote-input\n").await.unwrap();
     stdin.seek(SeekFrom::Start(0)).await.unwrap();
     let mut command = command_with_args(&client, stdin_command());
-    command.stdin(stdin.to_stdio_recv().await.unwrap()).unwrap();
+    command.stdin(support::stdio_recv(stdin).await).unwrap();
     let mut child = command.spawn().await.unwrap();
     assert!(child.wait().await.unwrap().success());
 
@@ -506,9 +510,7 @@ async fn retained_files_can_be_used_for_remote_stdio() {
         .await
         .unwrap();
     let mut command = command_with_args(&client, stdout_command());
-    command
-        .stdout(stdout.to_stdio_send().await.unwrap())
-        .unwrap();
+    command.stdout(support::stdio_send(stdout).await).unwrap();
     let mut child = command.spawn().await.unwrap();
     assert!(child.wait().await.unwrap().success());
 
@@ -518,9 +520,7 @@ async fn retained_files_can_be_used_for_remote_stdio() {
         .await
         .unwrap();
     let mut command = command_with_args(&client, stderr_command());
-    command
-        .stderr(stderr.to_stdio_send().await.unwrap())
-        .unwrap();
+    command.stderr(support::stdio_send(stderr).await).unwrap();
     let mut child = command.spawn().await.unwrap();
     assert!(child.wait().await.unwrap().success());
 
@@ -612,7 +612,7 @@ async fn direct_file_relays_as_remote_process_stdin() {
     stdin.seek(SeekFrom::Start(0)).await.unwrap();
 
     let mut command = command_with_args_any(&remote_vfs, stdin_command());
-    command.stdin(stdin.to_stdio_recv().await.unwrap()).unwrap();
+    command.stdin(support::stdio_recv(stdin).await).unwrap();
     let mut child = command.spawn().await.unwrap();
     assert!(child.wait().await.unwrap().success());
 
@@ -636,7 +636,7 @@ async fn remote_file_relays_as_direct_process_stdin() {
     stdin.seek(SeekFrom::Start(0)).await.unwrap();
 
     let mut command = command_with_args_any(&direct_vfs, stdin_command());
-    command.stdin(stdin.to_stdio_recv().await.unwrap()).unwrap();
+    command.stdin(support::stdio_recv(stdin).await).unwrap();
     let mut child = command.spawn().await.unwrap();
     assert!(child.wait().await.unwrap().success());
 
@@ -659,9 +659,7 @@ async fn remote_process_stdout_relays_into_direct_file() {
         .unwrap();
 
     let mut command = command_with_args_any(&remote_vfs, stdout_command());
-    command
-        .stdout(stdout.to_stdio_send().await.unwrap())
-        .unwrap();
+    command.stdout(support::stdio_send(stdout).await).unwrap();
     let mut child = command.spawn().await.unwrap();
     assert!(child.wait().await.unwrap().success());
 
@@ -719,7 +717,7 @@ async fn file_relays_between_two_remote_sessions() {
     stdin.write_all(b"remote-input\n").await.unwrap();
     stdin.seek(SeekFrom::Start(0)).await.unwrap();
     let mut command = command_with_args_any(&second_vfs, stdin_command());
-    command.stdin(stdin.to_stdio_recv().await.unwrap()).unwrap();
+    command.stdin(support::stdio_recv(stdin).await).unwrap();
     let mut child = command.spawn().await.unwrap();
     assert!(child.wait().await.unwrap().success());
 
@@ -729,9 +727,7 @@ async fn file_relays_between_two_remote_sessions() {
         .await
         .unwrap();
     let mut command = command_with_args_any(&second_vfs, stdout_command());
-    command
-        .stdout(stdout.to_stdio_send().await.unwrap())
-        .unwrap();
+    command.stdout(support::stdio_send(stdout).await).unwrap();
     let mut child = command.spawn().await.unwrap();
     assert!(child.wait().await.unwrap().success());
 
@@ -779,14 +775,14 @@ async fn pipeline_relays_across_three_domains() {
 
     let mut stage_a = command_with_args_any(&a_vfs, cat_command());
     stage_a
-        .stdin(stdin_file.to_stdio_recv().await.unwrap())
+        .stdin(support::stdio_recv(stdin_file).await)
         .unwrap();
     stage_a.stdout(mid_send).unwrap();
 
     let mut stage_b = command_with_args_any(&b_vfs, cat_command());
     stage_b.stdin(mid_recv).unwrap();
     stage_b
-        .stdout(stdout_file.to_stdio_send().await.unwrap())
+        .stdout(support::stdio_send(stdout_file).await)
         .unwrap();
 
     let run = async {
@@ -992,8 +988,6 @@ async fn regular_file_round_trip_over_generic_stream() {
     assert_eq!(file.metadata().await.unwrap().len, 6);
     assert!(file.fs_metadata().await.unwrap().capacity > 0);
 
-    let stdio = file.to_stdio_recv().await.unwrap();
-    drop(stdio);
     assert_eq!(file.seek(SeekFrom::Start(0)).await.unwrap(), 0);
     let mut prefix = [0; 4];
     file.read_exact(&mut prefix).await.unwrap();
@@ -1015,6 +1009,110 @@ async fn regular_file_round_trip_over_generic_stream() {
     data.clear();
     file.read_to_end(&mut data).await.unwrap();
     assert_eq!(data, b"abc");
+    file.close().await.unwrap();
+
+    // Making a stdio endpoint and dropping it unused must leave the peer
+    // undisturbed. It needs a handle of its own, since the handoff consumes the
+    // one it is given.
+    let mut options = client.open_options();
+    options.read(true);
+    let handoff = OpenOptions::open(&options, path.to_path()).await.unwrap();
+    drop(support::stdio_recv(handoff).await);
+
+    client.stop().await.unwrap();
+    server_task.await.unwrap().unwrap();
+}
+
+// The tests below pin behavior that the move to positional I/O must either
+// preserve or deliberately change. They exist so that a change in any of them
+// shows up as a test diff rather than as silent drift.
+
+/// `close` must succeed even when a read left trailer bytes undelivered.
+///
+/// `RemoteFile::cancel_pending` currently reaches quiescence by draining the
+/// remainder to EOF, because the server holds the file until the trailer's
+/// terminal fragment commits. If that handshake changes, this is the test that
+/// should catch it.
+#[tokio::test]
+async fn remote_file_closes_with_a_read_trailer_outstanding() {
+    let (client, server_task) = connected_pair().await;
+    let temp = tempdir().unwrap();
+    let path = typed_path(temp.path().join("partial")).unwrap();
+
+    let mut options = client.open_options();
+    options.read(true).write(true).create(true).truncate(true);
+    let mut file = OpenOptions::open(&options, path.to_path()).await.unwrap();
+
+    // Large enough that one `poll_read` is unlikely to consume the whole
+    // trailer, so the close path has something left to reconcile.
+    let payload = vec![0x5Au8; 512 * 1024];
+    file.write_all(&payload).await.unwrap();
+    file.flush().await.unwrap();
+    assert_eq!(file.seek(SeekFrom::Start(0)).await.unwrap(), 0);
+
+    let mut buf = vec![0u8; payload.len()];
+    let read = file.read(&mut buf).await.unwrap();
+    assert!(read > 0, "expected some bytes before closing");
+
+    file.close().await.unwrap();
+
+    client.stop().await.unwrap();
+    server_task.await.unwrap().unwrap();
+}
+
+/// Append-mode writes land at the end regardless of where the cursor is.
+///
+/// The remote backend really does set `O_APPEND` (the open request carries the
+/// flag and the server replays it), so a seek before a write must not move
+/// where the bytes go. Positional writes cannot honor an offset on such a
+/// handle, which is why they will be rejected outright.
+#[tokio::test]
+async fn remote_append_writes_ignore_the_cursor() {
+    let (client, server_task) = connected_pair().await;
+    let temp = tempdir().unwrap();
+    let path = typed_path(temp.path().join("appended")).unwrap();
+
+    let mut options = client.open_options();
+    options.read(true).write(true).create(true).truncate(true);
+    let mut file = OpenOptions::open(&options, path.to_path()).await.unwrap();
+    file.write_all(b"first").await.unwrap();
+    file.flush().await.unwrap();
+    file.close().await.unwrap();
+
+    let mut options = client.open_options();
+    options.read(true).append(true);
+    let mut file = OpenOptions::open(&options, path.to_path()).await.unwrap();
+    // Rewinding must not make the write overwrite "first".
+    file.seek(SeekFrom::Start(0)).await.unwrap();
+    file.write_all(b"second").await.unwrap();
+    file.flush().await.unwrap();
+    assert_eq!(file.metadata().await.unwrap().len, 11);
+    file.close().await.unwrap();
+
+    assert_eq!(
+        std::fs::read(temp.path().join("appended")).unwrap(),
+        b"firstsecond"
+    );
+
+    client.stop().await.unwrap();
+    server_task.await.unwrap().unwrap();
+}
+
+/// An opaque handle has no local descriptor to surrender, from the moment it
+/// is opened. `dolang-ext-sqlite` depends on this failing rather than
+/// panicking or hanging, and on the handle surviving the refusal.
+#[tokio::test]
+async fn remote_try_into_std_fails_immediately_after_open() {
+    let (client, server_task) = connected_pair().await;
+    let temp = tempdir().unwrap();
+    let path = typed_path(temp.path().join("opaque")).unwrap();
+
+    let mut options = client.open_options();
+    options.read(true).write(true).create(true).truncate(true);
+    let file = OpenOptions::open(&options, path.to_path()).await.unwrap();
+
+    let file = file.try_into_std().await.unwrap_err();
+    // The handle is still usable after the refusal.
     file.close().await.unwrap();
 
     client.stop().await.unwrap();
@@ -1044,6 +1142,26 @@ async fn remote_file_locks_round_trip() {
     lock.release().await.unwrap();
     let mut lock = second.lock(request).await.unwrap().expect("lock acquired");
     lock.release().await.unwrap();
+
+    // A lock dropped without an explicit release still unlocks, by way of a
+    // fire-and-forget request naming the lock's own handle. Nothing orders that
+    // against this task, so poll for the effect rather than assume it landed.
+    let lock = first.lock(request).await.unwrap().expect("lock acquired");
+    assert!(second.lock(request).await.unwrap().is_none());
+    drop(lock);
+    let mut reacquired = None;
+    for _ in 0..200 {
+        if let Some(lock) = second.lock(request).await.unwrap() {
+            reacquired = Some(lock);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    reacquired
+        .expect("dropping a lock releases it")
+        .release()
+        .await
+        .unwrap();
 
     first.close().await.unwrap();
     second.close().await.unwrap();
@@ -1075,7 +1193,7 @@ async fn security_descriptor_round_trip_over_generic_stream() {
 
     let mut options = client.open_options();
     options.read(true);
-    let mut file = OpenOptions::open(&options, path.to_path()).await.unwrap();
+    let file = OpenOptions::open(&options, path.to_path()).await.unwrap();
     assert!(
         file.sec_desc(SecInfo::OWNER)
             .await
@@ -1098,7 +1216,7 @@ async fn regular_file_xattrs_round_trip_over_generic_stream() {
 
     let mut options = client.open_options();
     options.read(true).write(true).create(true).truncate(true);
-    let mut file = OpenOptions::open(&options, path.to_path()).await.unwrap();
+    let file = OpenOptions::open(&options, path.to_path()).await.unwrap();
 
     file.set_xattr("remote", Some("user"), b"value")
         .await
@@ -1155,5 +1273,274 @@ async fn stop_drains_outstanding_pipe_endpoints() {
         .expect("stop did not complete after endpoints were closed")
         .unwrap()
         .expect("stop should succeed");
+    server_task.await.unwrap().unwrap();
+}
+
+/// Relative and end-relative seeks resolve against a cursor this side owns.
+///
+/// The protocol carries no seek: `Start` and `Current` are arithmetic here, and
+/// only `End` asks the peer anything. This pins that all three agree with what
+/// a kernel cursor would have reported, including that a short read advances
+/// the cursor by the bytes actually delivered rather than the bytes requested.
+#[tokio::test]
+async fn remote_relative_seeks_track_the_client_cursor() {
+    let (client, server_task) = connected_pair().await;
+    let temp = tempdir().unwrap();
+    let path = typed_path(temp.path().join("cursor")).unwrap();
+
+    let mut options = client.open_options();
+    options.read(true).write(true).create(true).truncate(true);
+    let mut file = OpenOptions::open(&options, path.to_path()).await.unwrap();
+
+    file.write_all(b"0123456789").await.unwrap();
+    file.flush().await.unwrap();
+    assert_eq!(file.stream_position().await.unwrap(), 10);
+
+    assert_eq!(file.seek(SeekFrom::End(0)).await.unwrap(), 10);
+    assert_eq!(file.seek(SeekFrom::End(-4)).await.unwrap(), 6);
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail).await.unwrap();
+    assert_eq!(tail, b"6789");
+    assert_eq!(file.stream_position().await.unwrap(), 10);
+
+    assert_eq!(file.seek(SeekFrom::Start(2)).await.unwrap(), 2);
+    assert_eq!(file.seek(SeekFrom::Current(3)).await.unwrap(), 5);
+    assert_eq!(file.seek(SeekFrom::Current(-1)).await.unwrap(), 4);
+
+    // A read that asks for more than is left must leave the cursor at EOF, not
+    // past it.
+    let mut oversized = [0u8; 64];
+    let read = file.read(&mut oversized).await.unwrap();
+    assert_eq!(&oversized[..read], &b"456789"[..read]);
+    assert_eq!(file.stream_position().await.unwrap(), 4 + read as u64);
+
+    // Seeking before the start is an error, and must not disturb the cursor.
+    let position = file.stream_position().await.unwrap();
+    assert!(file.seek(SeekFrom::Start(0)).await.is_ok());
+    assert!(file.seek(SeekFrom::Current(-1)).await.is_err());
+    assert_eq!(
+        file.seek(SeekFrom::Start(position)).await.unwrap(),
+        position
+    );
+
+    // Seeking past the end is legal and reads as EOF.
+    assert_eq!(file.seek(SeekFrom::End(16)).await.unwrap(), 26);
+    assert_eq!(file.read(&mut oversized).await.unwrap(), 0);
+
+    file.close().await.unwrap();
+
+    client.stop().await.unwrap();
+    server_task.await.unwrap().unwrap();
+}
+
+/// Positional operations work over the wire and ignore the handle's cursor.
+///
+/// The cursor and the positional operations are two disjoint paths over one
+/// file: neither may observe the other. This also pins that several reads can
+/// be outstanding on one handle at once — the whole point of making the file
+/// API positional, and impossible while the peer serialized every operation on
+/// one handle behind a mutex.
+#[tokio::test]
+async fn remote_positional_io_is_independent_of_the_cursor() {
+    let (client, server_task) = connected_pair().await;
+    let temp = tempdir().unwrap();
+    let path = typed_path(temp.path().join("positional")).unwrap();
+
+    let mut options = client.open_options();
+    options.read(true).write(true).create(true).truncate(true);
+    let mut file = OpenOptions::open(&options, path.to_path()).await.unwrap();
+
+    assert_eq!(
+        file.write_at(Bytes::from_static(b"abcdefghij"), 0)
+            .await
+            .unwrap(),
+        10
+    );
+    // The cursor never moved, so the stream still starts at the beginning.
+    assert_eq!(file.stream_position().await.unwrap(), 0);
+
+    let mut buf = BytesMut::with_capacity(4);
+    assert_eq!(file.read_at(&mut buf, 4).await.unwrap(), 4);
+    assert_eq!(&buf[..], b"efgh");
+    // Reads append into spare capacity, so a cleared buffer recycles.
+    buf.clear();
+    buf.reserve(64);
+    assert_eq!(file.read_at(&mut buf, 8).await.unwrap(), 2);
+    assert_eq!(&buf[..], b"ij");
+
+    // Past the end is end of file, not an error.
+    buf.clear();
+    assert_eq!(file.read_at(&mut buf, 100).await.unwrap(), 0);
+    assert!(buf.is_empty());
+
+    // Several reads in flight on one handle, issued before any is awaited.
+    let mut bufs: Vec<_> = (0..5).map(|_| BytesMut::with_capacity(2)).collect();
+    let reads: Vec<_> = bufs
+        .iter_mut()
+        .enumerate()
+        .map(|(i, buf)| file.read_at(buf, i as u64 * 2))
+        .collect();
+    for read in reads {
+        assert_eq!(read.await.unwrap(), 2);
+    }
+    let seen: Vec<u8> = bufs.iter().flat_map(|buf| buf.iter().copied()).collect();
+    assert_eq!(seen, b"abcdefghij");
+
+    // A positional write still leaves the cursor alone, and the cursor-based
+    // path still sees what the positional one wrote.
+    file.write_at(Bytes::from_static(b"XY"), 2).await.unwrap();
+    let mut whole = Vec::new();
+    file.read_to_end(&mut whole).await.unwrap();
+    assert_eq!(whole, b"abXYefghij");
+
+    file.close().await.unwrap();
+
+    // `offset:` has no meaning on an append handle, so it is refused rather
+    // than silently landing somewhere else.
+    let mut options = client.open_options();
+    options.read(true).append(true);
+    let file = OpenOptions::open(&options, path.to_path()).await.unwrap();
+    let error = file
+        .write_at(Bytes::from_static(b"nope"), 0)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    let (written, end) = file.append(Bytes::from_static(b"!!")).await.unwrap();
+    assert_eq!((written, end), (2, 12));
+    file.close().await.unwrap();
+
+    client.stop().await.unwrap();
+    server_task.await.unwrap().unwrap();
+}
+
+/// Every remote read is bounded, so that the peer can hold the whole reply and
+/// report a filesystem failure in the response rather than by abandoning the
+/// trailer.
+#[tokio::test]
+async fn remote_reads_are_capped_at_one_chunk() {
+    let (client, server_task) = connected_pair().await;
+    let temp = tempdir().unwrap();
+    let path = typed_path(temp.path().join("large")).unwrap();
+
+    let size = MAX_FILE_READ + 4096;
+    let source: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+
+    let mut options = client.open_options();
+    options.read(true).write(true).create(true).truncate(true);
+    let mut file = OpenOptions::open(&options, path.to_path()).await.unwrap();
+    file.write_all(&source).await.unwrap();
+    file.seek(SeekFrom::Start(0)).await.unwrap();
+
+    // Asking for the whole file in one positional read gets exactly one chunk.
+    // Short, but not end of file — the caller has to come back for the rest.
+    let mut buf = BytesMut::with_capacity(size);
+    assert_eq!(file.read_at(&mut buf, 0).await.unwrap(), MAX_FILE_READ);
+    assert_eq!(&buf[..], &source[..MAX_FILE_READ]);
+
+    let mut tail = BytesMut::with_capacity(size);
+    file.read_at(&mut tail, MAX_FILE_READ as u64).await.unwrap();
+    assert_eq!(&tail[..], &source[MAX_FILE_READ..]);
+
+    // The cursor path is clamped the same way, and `read_to_end` loops over
+    // that transparently, so nothing above it observes the boundary.
+    let mut once = vec![0u8; size];
+    let read = file.read(&mut once).await.unwrap();
+    assert_eq!(read, MAX_FILE_READ);
+    let mut rest = Vec::new();
+    file.read_to_end(&mut rest).await.unwrap();
+    assert_eq!(read + rest.len(), size);
+    assert_eq!(&rest[..], &source[MAX_FILE_READ..]);
+
+    file.close().await.unwrap();
+    client.stop().await.unwrap();
+    server_task.await.unwrap().unwrap();
+}
+
+/// The borrowed-destination read is the one that lands the reply trailer
+/// directly in the caller's storage, so it has to agree with the owned-buffer
+/// route on counts, on the one-chunk cap, and on where the bytes end up.
+#[tokio::test]
+async fn remote_read_at_into_lands_the_trailer_in_the_destination() {
+    let (client, server_task) = connected_pair().await;
+    let temp = tempdir().unwrap();
+    let path = typed_path(temp.path().join("into")).unwrap();
+
+    let size = MAX_FILE_READ + 4096;
+    let source: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+
+    let mut options = client.open_options();
+    options.read(true).write(true).create(true).truncate(true);
+    let file = OpenOptions::open(&options, path.to_path()).await.unwrap();
+    // Written from borrowed storage rather than an owned `Bytes`: the trailer
+    // only ever needed a slice.
+    let mut written = 0;
+    while written < size {
+        written += file
+            .write_at_from(&source[written..], written as u64)
+            .await
+            .unwrap();
+    }
+    file.commit().await.unwrap();
+
+    let mut buf = vec![std::mem::MaybeUninit::<u8>::uninit(); size];
+    let read = file.read_at_into(&mut buf, 0).await.unwrap();
+    assert_eq!(read, MAX_FILE_READ, "capped at one chunk, as `read_at` is");
+    let filled: Vec<u8> = buf[..read]
+        .iter()
+        .map(|byte| unsafe { byte.assume_init() })
+        .collect();
+    assert_eq!(filled, source[..MAX_FILE_READ]);
+
+    let tail = file
+        .read_at_into(&mut buf, MAX_FILE_READ as u64)
+        .await
+        .unwrap();
+    assert_eq!(tail, size - MAX_FILE_READ);
+    let filled: Vec<u8> = buf[..tail]
+        .iter()
+        .map(|byte| unsafe { byte.assume_init() })
+        .collect();
+    assert_eq!(filled, source[MAX_FILE_READ..]);
+
+    assert_eq!(
+        file.read_at_into(&mut buf, size as u64).await.unwrap(),
+        0,
+        "past the end is a zero-length transfer"
+    );
+
+    file.close().await.unwrap();
+    client.stop().await.unwrap();
+    server_task.await.unwrap().unwrap();
+}
+
+/// A filesystem error part way through a read must reach the caller as itself,
+/// not as the broken-pipe abort an abandoned trailer would produce.
+#[cfg(unix)]
+#[tokio::test]
+async fn remote_read_failure_reports_its_error_kind() {
+    let (client, server_task) = connected_pair().await;
+    let temp = tempdir().unwrap();
+    // A directory opens read-only on unix but cannot be read from, which is a
+    // failure of the read itself rather than of opening or of the transport.
+    let path = typed_path(temp.path().to_path_buf()).unwrap();
+
+    let mut options = client.open_options();
+    options.read(true);
+    let mut file = OpenOptions::open(&options, path.to_path()).await.unwrap();
+
+    let mut buf = BytesMut::with_capacity(64);
+    let error = file.read_at(&mut buf, 0).await.unwrap_err();
+    assert_ne!(error.kind(), io::ErrorKind::BrokenPipe);
+    // A failed read gives the buffer back rather than consuming it: there is
+    // nothing wrong with the allocation, only with the read.
+    assert_eq!(buf.capacity(), 64);
+    assert_eq!(error.kind(), io::ErrorKind::IsADirectory);
+
+    let mut buf = [0u8; 64];
+    let error = file.read(&mut buf).await.unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::IsADirectory);
+
+    file.close().await.unwrap();
+    client.stop().await.unwrap();
     server_task.await.unwrap().unwrap();
 }

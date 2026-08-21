@@ -1,6 +1,6 @@
 use std::{ffi::CStr, io, os::fd::AsFd, path::Path};
 
-use tokio::fs::File;
+use std::fs::File;
 
 use crate::{
     direct::{Direct, unix::UnixXattrTarget},

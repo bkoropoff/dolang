@@ -6,7 +6,7 @@ use std::{
     ptr,
 };
 
-use tokio::fs::File;
+use std::fs::File;
 
 use crate::security::{
     Acl, AclKind, Nfs4Ace, Nfs4AceFlags, Nfs4AceMask, Nfs4AceQualifier, Nfs4AceType, Nfs4Acl,

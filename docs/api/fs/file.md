@@ -11,19 +11,42 @@ runtime error.
 
 ## Methods
 
-### `write data`
+### `write data :offset?`
 
 Writes data to the file.
 
 #### Parameters
 
-| Name   | Type         | Description                                       |
-| ------ | ------------ | ------------------------------------------------- |
-| `data` | `Str`\|`Bin` | Data to write. Strings are written as UTF-8 text. |
+| Name     | Type                     | Description                                                                |
+| -------- | ------------------------ | -------------------------------------------------------------------------- |
+| `data`   | `Str`\|`Bin`             | Data to write. Strings are written as UTF-8 text.                          |
+| `offset` | [`Int`](../std/index.md) | Byte offset to write at. Without it, writes at the cursor and advances it. |
+
+##### Writing at an offset
+
+`offset:` writes at an absolute position and leaves the cursor where it was,
+so it can be used alongside streaming writes on the same handle, and several
+regions of a file can be written without seeking between them. Writing past the
+end extends the file, zero-filling the gap.
+
+As with [`read`](#read-size-offset), any number of positional writes may be in
+flight on one handle at once.
+
+All of `data` is written, however many transfers that takes.
 
 #### Returns
 
 [`Int`](../std/index.md) (number of bytes written)
+
+#### Errors
+
+| Exception                                  | Condition                                  |
+| ------------------------------------------ | ------------------------------------------ |
+| [`StateError`](../std/state-error.md)      | `offset:` on a file opened for appending   |
+
+An append handle writes at the end of the file no matter what offset the
+platform is given, so an explicit one cannot be honored rather than merely
+being unimplemented.
 
 #### Example
 
@@ -35,6 +58,10 @@ open output.txt w do |file|
   # Write binary data
   let binary = b"Hello"
   file.write binary
+
+# Patch a record in place without disturbing the cursor
+open data.bin r+b do |file|
+  file.write $record offset: (index * 64)
 ```
 
 ### `set_size size`
@@ -127,15 +154,35 @@ file.try_lock (..) do |lock|
     update_index()
 ```
 
-### `read :size?`
+### `read size? :offset?`
 
 Reads data from the file.
 
 #### Parameters
 
-| Name   | Type                     | Description                                                              |
-| ------ | ------------------------ | ------------------------------------------------------------------------ |
-| `size` | [`Int`](../std/index.md) | Number of bytes to read. If [`nil`](../std/index.md), reads entire file. |
+| Name     | Type                     | Description                                                                |
+| -------- | ------------------------ | -------------------------------------------------------------------------- |
+| `size`   | [`Int`](../std/index.md) | Number of bytes to read. If [`nil`](../std/index.md), reads to the end.    |
+| `offset` | [`Int`](../std/index.md) | Byte offset to read from. Without it, reads at the cursor and advances it. |
+
+##### Reading at an offset
+
+`offset:` reads from an absolute position and leaves the cursor where it was,
+so it can be used alongside streaming reads on the same handle, and several
+regions of a file can be read without seeking between them.
+
+Because a positional read touches nothing shared, any number of them may be in
+flight on one handle at once — several strands can read different regions of
+the same open file concurrently. Streaming reads still take the handle
+exclusively, since they move the cursor.
+
+`size` bytes are read however many transfers that takes; a shorter result means
+the end of the file was reached, and reading entirely past the end gives an
+empty result rather than an error.
+
+In text mode the bytes read must be complete UTF-8. There is no cursor for a
+positional read to carry a split character forward on, so unlike a streaming
+read it cannot hold a partial character back for next time.
 
 #### Returns
 
@@ -154,6 +201,10 @@ open input.txt r do |file|
 open data.bin rb do |file|
   let header = file.read 4
   let rest = file.read()
+
+# Read a record without moving the cursor
+open data.bin rb do |file|
+  let record = file.read 64 offset: (index * 64)
 ```
 
 ### `metadata()`
@@ -506,7 +557,13 @@ open data.txt r do |file|
 ### `close()`
 
 Explicitly closes the file. Required if you didn't use the `func` parameter to
-`open()`.
+`open()`. Closing a file that is already closed does nothing.
+
+Passing a file to a child process as `stdin:`, `stdout:`, or `stderr:` also
+closes it: the child receives the file itself, and the seek position is kept by
+this process rather than by the operating system, so two live handles would each
+believe a cursor the other moves. Use the file after the handoff and it raises
+the ordinary closed-file error.
 
 #### Example
 

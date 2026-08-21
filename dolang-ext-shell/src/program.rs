@@ -191,7 +191,7 @@ async fn resolve_io_file<'v, 's>(
     };
 
     let file = file::open(strand, global, path.to_path(), mode).await?;
-    let (file, annex) = File::create(strand, global, file, mode.contains('b'));
+    let (file, annex) = File::create(strand, global, file, mode);
     global
         .types
         .file

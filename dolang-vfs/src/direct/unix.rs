@@ -1,4 +1,4 @@
-use super::{Direct, DirectChild, DirectCommand};
+use super::{Direct, DirectChild, DirectCommand, DirectFile};
 use crate::metadata::{FsMetadataFamily, Mode, UnixFsMetadata, UnixFsMetadataPlatform};
 #[cfg(target_os = "linux")]
 use crate::metadata::{MetadataFamily, UnixMetadata, UnixMetadataPlatform};
@@ -11,6 +11,7 @@ use crate::{
 use dolang_winterop::security::SecDesc;
 #[cfg(target_os = "linux")]
 use std::os::fd::RawFd;
+use std::sync::Arc;
 use std::{
     collections::HashMap,
     ffi::{CStr, CString, OsString},
@@ -23,7 +24,7 @@ use std::{
     },
     path::{Path, PathBuf},
 };
-use tokio::fs::{self, File, OpenOptions};
+use tokio::fs::{self, OpenOptions};
 use tokio::time::{Duration, timeout};
 
 #[cfg(target_os = "linux")]
@@ -52,6 +53,16 @@ mod linux_attrs {
 pub(super) enum UnixXattrTarget<'a> {
     Fd(BorrowedFd<'a>),
     Path(&'a CStr, bool),
+}
+
+impl DirectFile {
+    pub(super) fn pread(file: &std::fs::File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+        std::os::unix::fs::FileExt::read_at(file, buf, offset)
+    }
+
+    pub(super) fn pwrite(file: &std::fs::File, buf: &[u8], offset: u64) -> io::Result<usize> {
+        std::os::unix::fs::FileExt::write_at(file, buf, offset)
+    }
 }
 
 impl Direct {
@@ -141,7 +152,7 @@ impl Direct {
     }
 
     pub(super) fn sec_desc_from_file(
-        _file: &File,
+        _file: &std::fs::File,
         _mask: dolang_winterop::security::SecInfo,
     ) -> io::Result<SecDesc> {
         Err(io::Error::new(
@@ -150,7 +161,10 @@ impl Direct {
         ))
     }
 
-    pub(super) fn set_sec_desc_file(_file: &File, _descriptor: &SecDesc) -> io::Result<()> {
+    pub(super) fn set_sec_desc_file(
+        _file: &std::fs::File,
+        _descriptor: &SecDesc,
+    ) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "security descriptors are only supported on Windows",
@@ -285,7 +299,7 @@ impl Direct {
         }
     }
 
-    pub(super) fn fs_metadata_from_file(file: &File) -> io::Result<FsMetadata> {
+    pub(super) fn fs_metadata_from_file(file: &std::fs::File) -> io::Result<FsMetadata> {
         Self::statvfs_from_fd(file.as_fd()).map(Self::fs_metadata_from_statvfs)
     }
 
@@ -330,7 +344,7 @@ impl Direct {
     #[cfg(target_os = "linux")]
     pub(super) fn metadata_with_attrs(
         metadata: std::fs::Metadata,
-        file: &File,
+        file: &std::fs::File,
     ) -> io::Result<Metadata> {
         let mut metadata = crate::metadata::metadata_from_std(metadata);
         if !matches!(
@@ -473,7 +487,7 @@ impl Direct {
     #[cfg(any(target_os = "freebsd", target_os = "macos"))]
     pub(super) fn metadata_with_attrs(
         metadata: std::fs::Metadata,
-        _file: &File,
+        _file: &std::fs::File,
     ) -> io::Result<Metadata> {
         Ok(crate::metadata::metadata_from_std(metadata))
     }
@@ -1568,10 +1582,10 @@ impl Direct {
     }
 
     pub(super) async fn impl_file_xattrs(
-        file: &File,
+        file: &Arc<std::fs::File>,
         namespace: XattrNamespace<'_>,
     ) -> Result<Vec<XattrEntry>, io::Error> {
-        let file = file.try_clone().await?;
+        let file = Arc::clone(file);
         let namespace = Self::unix_xattr_namespace(namespace)?;
         tokio::task::spawn_blocking(move || {
             Self::unix_list_xattrs(UnixXattrTarget::Fd(file.as_fd()), namespace)
@@ -1581,11 +1595,11 @@ impl Direct {
     }
 
     pub(super) async fn impl_file_xattr(
-        file: &File,
+        file: &Arc<std::fs::File>,
         name: &str,
         namespace: Option<&str>,
     ) -> Result<Vec<u8>, io::Error> {
-        let file = file.try_clone().await?;
+        let file = Arc::clone(file);
         let name = Self::xattr_name(name, namespace)?;
         tokio::task::spawn_blocking(move || {
             Self::unix_get_xattr(UnixXattrTarget::Fd(file.as_fd()), &name)
@@ -1594,7 +1608,9 @@ impl Direct {
         .unwrap_or_else(|_| Err(io::Error::from_raw_os_error(libc::EIO)))
     }
 
-    pub(super) async fn impl_file_streams(_file: &File) -> Result<Vec<StreamEntry>, io::Error> {
+    pub(super) async fn impl_file_streams(
+        _file: &Arc<std::fs::File>,
+    ) -> Result<Vec<StreamEntry>, io::Error> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "streams are not supported on this platform",
@@ -1602,12 +1618,12 @@ impl Direct {
     }
 
     pub(super) async fn impl_file_set_xattr(
-        file: &File,
+        file: &Arc<std::fs::File>,
         name: &str,
         namespace: Option<&str>,
         value: &[u8],
     ) -> Result<(), io::Error> {
-        let file = file.try_clone().await?;
+        let file = Arc::clone(file);
         let name = Self::xattr_name(name, namespace)?;
         let value = value.to_vec();
         tokio::task::spawn_blocking(move || {
@@ -1618,11 +1634,11 @@ impl Direct {
     }
 
     pub(super) async fn impl_file_remove_xattr(
-        file: &File,
+        file: &Arc<std::fs::File>,
         name: &str,
         namespace: Option<&str>,
     ) -> Result<(), io::Error> {
-        let file = file.try_clone().await?;
+        let file = Arc::clone(file);
         let name = Self::xattr_name(name, namespace)?;
         tokio::task::spawn_blocking(move || {
             Self::unix_remove_xattr(UnixXattrTarget::Fd(file.as_fd()), &name)

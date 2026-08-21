@@ -544,7 +544,7 @@ async fn set_size<'v, 's>(
     let path = prepend_cwd(strand, global, path)?;
     let local = global.local.get(strand);
     let vfs = local.vfs();
-    let mut file = vfs
+    let file = vfs
         .open_options()
         .read(true)
         .write(true)

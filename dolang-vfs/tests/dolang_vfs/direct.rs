@@ -310,12 +310,12 @@ async fn byte_range_locks_contend_and_release() {
     );
 }
 
-// Whole-file locks work everywhere on Unix, FreeBSD's `flock` included, and
-// `to_stdio_send` duplicates the descriptor rather than reopening the file, so
-// the duplicate shares the lock on every one of these platforms.
+// Whole-file locks work everywhere on Unix, FreeBSD's `flock` included, and the
+// child inherits this very descriptor there, so it would share the lock on
+// every one of these platforms if the handoff did not lift it first.
 #[cfg(unix)]
 #[tokio::test]
-async fn closing_a_file_releases_locks_held_by_duplicate_handles() {
+async fn handing_a_file_to_a_child_releases_its_locks() {
     let direct = Direct::new().unwrap();
     let dir = tempdir().unwrap();
     let path = dir.path().join("closed-locks");
@@ -332,10 +332,10 @@ async fn closing_a_file_releases_locks_held_by_duplicate_handles() {
         .await
         .unwrap()
         .unwrap();
-    // A duplicate of the same open file description outlives the close, so the
-    // lock stays in force unless the close unlocks explicitly.
-    let duplicate = first.to_stdio_send().await.unwrap();
-    first.close().await.unwrap();
+    // The description outlives this handle in the child, so closing our end
+    // would not lift the lock; the handoff has to unlock in band, exactly as
+    // `close` does.
+    let handed_over = first.into_stdio_send(0).await.unwrap();
 
     assert!(
         second
@@ -349,8 +349,10 @@ async fn closing_a_file_releases_locks_held_by_duplicate_handles() {
             .unwrap()
             .is_some()
     );
+    // Already released above; releasing again must be a no-op rather than an
+    // error, since the script never asked for the lock to come off.
     held.release().await.unwrap();
-    drop(duplicate);
+    drop(handed_over);
 }
 
 #[cfg(target_os = "freebsd")]
@@ -635,6 +637,316 @@ async fn direct_open_options_round_trip() {
     assert_eq!(contents, "hello");
 }
 
+/// A FIFO has no seekable offset, so `pread`/`pwrite` fail on it with
+/// `ESPIPE` where plain `read`/`write` succeed. Streaming a non-regular file
+/// has to keep working, since `open` reaches FIFOs, terminals and sockets just
+/// as readily as it reaches regular files.
+#[cfg(unix)]
+#[tokio::test]
+async fn direct_streams_a_non_seekable_file() {
+    let direct = Direct::new().unwrap();
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("fifo");
+    nix::unistd::mkfifo(path.as_path(), nix::sys::stat::Mode::S_IRWXU).unwrap();
+
+    let mut options = direct.open_options();
+    // Opening read-write keeps the FIFO from blocking for a peer.
+    let mut file = options
+        .read(true)
+        .write(true)
+        .open(typed(&path))
+        .await
+        .unwrap();
+
+    tokio::io::AsyncWriteExt::write_all(&mut file, b"through the pipe")
+        .await
+        .unwrap();
+
+    let mut buf = [0u8; 16];
+    tokio::io::AsyncReadExt::read_exact(&mut file, &mut buf)
+        .await
+        .unwrap();
+    assert_eq!(&buf, b"through the pipe");
+
+    file.close().await.unwrap();
+}
+
+/// Positional I/O names the offset it acts on and leaves the stream cursor
+/// alone, in both directions.
+#[tokio::test]
+async fn direct_positional_io_ignores_the_cursor() {
+    let direct = Direct::new().unwrap();
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("positional.bin");
+    std::fs::write(&path, b"0123456789").unwrap();
+
+    let mut options = direct.open_options();
+    let mut file = options
+        .read(true)
+        .write(true)
+        .open(typed(&path))
+        .await
+        .unwrap();
+
+    // Move the stream cursor somewhere unrelated first.
+    assert_eq!(
+        tokio::io::AsyncSeekExt::seek(&mut file, io::SeekFrom::Start(7))
+            .await
+            .unwrap(),
+        7
+    );
+
+    let mut buf = bytes::BytesMut::with_capacity(4);
+    assert_eq!(file.read_at(&mut buf, 2).await.unwrap(), 4);
+    assert_eq!(&buf[..], b"2345");
+
+    assert_eq!(
+        file.write_at(bytes::Bytes::from_static(b"ab"), 0)
+            .await
+            .unwrap(),
+        2
+    );
+
+    // The cursor is exactly where the seek left it.
+    assert_eq!(
+        tokio::io::AsyncSeekExt::stream_position(&mut file)
+            .await
+            .unwrap(),
+        7
+    );
+
+    file.close().await.unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"ab23456789");
+}
+
+/// Reading past the end reports end of file by returning no bytes, and a
+/// short read at the boundary returns only what exists.
+#[tokio::test]
+async fn direct_read_at_reports_short_reads_and_eof() {
+    let direct = Direct::new().unwrap();
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("short.bin");
+    std::fs::write(&path, b"abcdef").unwrap();
+
+    let mut options = direct.open_options();
+    let file = options.read(true).open(typed(&path)).await.unwrap();
+
+    let mut buf = bytes::BytesMut::with_capacity(64);
+    assert_eq!(file.read_at(&mut buf, 4).await.unwrap(), 2);
+    assert_eq!(&buf[..], b"ef");
+
+    // Reads append into the buffer's spare capacity rather than replacing
+    // what is there, so a recycled buffer has to be cleared first.
+    let before = buf.len();
+    assert_eq!(file.read_at(&mut buf, 99).await.unwrap(), 0);
+    assert_eq!(buf.len(), before, "a read past the end adds nothing");
+
+    buf.clear();
+    assert_eq!(
+        file.read_at(&mut buf, 99).await.unwrap(),
+        0,
+        "end of file is a zero-length transfer"
+    );
+    assert!(buf.is_empty());
+
+    file.close().await.unwrap();
+}
+
+/// The borrowed-destination read agrees with the owned-buffer one on counts and
+/// end of file, and reports only what it actually filled.
+#[tokio::test]
+async fn direct_read_at_into_fills_the_front_of_the_destination() {
+    let direct = Direct::new().unwrap();
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("into.bin");
+    std::fs::write(&path, b"abcdef").unwrap();
+
+    let mut options = direct.open_options();
+    let file = options.read(true).open(typed(&path)).await.unwrap();
+
+    let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); 64];
+    let read = file.read_at_into(&mut buf, 4).await.unwrap();
+    assert_eq!(read, 2);
+    // Only the reported prefix may be read back; the rest is still
+    // uninitialized and stays that way.
+    let filled: Vec<u8> = buf[..read]
+        .iter()
+        .map(|byte| unsafe { byte.assume_init() })
+        .collect();
+    assert_eq!(filled, b"ef");
+
+    assert_eq!(
+        file.read_at_into(&mut buf, 99).await.unwrap(),
+        0,
+        "end of file is a zero-length transfer"
+    );
+
+    let mut empty: [std::mem::MaybeUninit<u8>; 0] = [];
+    assert_eq!(
+        file.read_at_into(&mut empty, 0).await.unwrap(),
+        0,
+        "nowhere to put anything is a zero-length transfer, not an error"
+    );
+
+    file.close().await.unwrap();
+}
+
+/// The borrowed-source write agrees with the owned one, and refuses an explicit
+/// offset on an append handle for the same reason `write_at` does.
+#[tokio::test]
+async fn direct_write_at_from_borrows_its_source() {
+    let direct = Direct::new().unwrap();
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("from.bin");
+    std::fs::write(&path, b"......").unwrap();
+
+    let mut options = direct.open_options();
+    let file = options
+        .read(true)
+        .write(true)
+        .open(typed(&path))
+        .await
+        .unwrap();
+
+    let source = b"xy".to_vec();
+    assert_eq!(file.write_at_from(&source, 2).await.unwrap(), 2);
+    file.commit().await.unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"..xy..");
+    file.close().await.unwrap();
+
+    let mut options = direct.open_options();
+    let appender = options
+        .append(true)
+        .write(true)
+        .open(typed(&path))
+        .await
+        .unwrap();
+    let error = appender.write_at_from(&source, 0).await.unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    appender.close().await.unwrap();
+}
+
+/// A handoff the handle is too busy for must hand the handle back intact, so a
+/// caller can retry once the outstanding work finishes.
+#[tokio::test]
+async fn a_busy_handoff_returns_the_handle() {
+    let direct = Direct::new().unwrap();
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("busy.bin");
+    std::fs::write(&path, b"abcdef").unwrap();
+
+    let mut options = direct.open_options();
+    let file = options.read(true).open(typed(&path)).await.unwrap();
+
+    // A positional operation takes its own reference to the descriptor when it
+    // is created, so holding the future without polling it is enough to make
+    // the handle non-exclusive.
+    let mut buf = bytes::BytesMut::with_capacity(8);
+    let pending = file.read_at(&mut buf, 0);
+
+    let failed = file.into_stdio_send(0).await.unwrap_err();
+    assert_eq!(
+        failed.error().kind(),
+        dolang_vfs::error::ErrorKind::ResourceBusy
+    );
+    let file = failed.into_handle();
+
+    // Nothing was surrendered, so the handle still works and the retry lands
+    // once the outstanding operation is gone.
+    assert_eq!(pending.await.unwrap(), 6);
+    assert_eq!(&buf[..], b"abcdef");
+    drop(file.into_stdio_send(0).await.unwrap());
+}
+
+/// The point of the positional API: many operations in flight on one handle,
+/// with no serialization between them.
+#[tokio::test]
+async fn direct_positional_reads_run_concurrently() {
+    let direct = Direct::new().unwrap();
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("windows.bin");
+    let payload: Vec<u8> = (0..64u32).map(|i| i as u8).collect();
+    std::fs::write(&path, &payload).unwrap();
+
+    let mut options = direct.open_options();
+    let file = options.read(true).open(typed(&path)).await.unwrap();
+
+    // Issue every window before awaiting any of them. This only compiles
+    // because the operations take `&self` and their futures do not borrow the
+    // handle — only their own buffer, which is why each window needs one.
+    let mut bufs: Vec<_> = (0..8).map(|_| bytes::BytesMut::with_capacity(8)).collect();
+    let pending: Vec<_> = bufs
+        .iter_mut()
+        .enumerate()
+        .map(|(i, buf)| file.read_at(buf, i as u64 * 8))
+        .collect();
+
+    for future in pending {
+        assert_eq!(future.await.unwrap(), 8);
+    }
+    let seen: Vec<u8> = bufs.iter().flat_map(|buf| buf.iter().copied()).collect();
+    assert_eq!(seen, payload);
+
+    file.close().await.unwrap();
+}
+
+/// An append handle has no meaningful notion of "write here", so asking for
+/// one is refused rather than silently appending — which is what the kernel
+/// would do with the offset thrown away.
+#[tokio::test]
+async fn direct_write_at_is_rejected_on_an_append_handle() {
+    let direct = Direct::new().unwrap();
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("append.log");
+    std::fs::write(&path, b"start").unwrap();
+
+    let mut options = direct.open_options();
+    let file = options.append(true).open(typed(&path)).await.unwrap();
+
+    let error = file
+        .write_at(bytes::Bytes::from_static(b"x"), 0)
+        .await
+        .expect_err("positional write on an append handle");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+
+    // The atomic append path still works, and reports where it landed.
+    let (written, end) = file
+        .append(bytes::Bytes::from_static(b"more"))
+        .await
+        .unwrap();
+    assert_eq!(written, 4);
+    assert_eq!(end, 9);
+
+    file.close().await.unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"startmore");
+}
+
+/// Closing while an operation is still outstanding consumes the handle and
+/// lets cleanup finish asynchronously, but says so — the same contract the
+/// remote backend has always had for an opaque file still in use.
+#[tokio::test]
+async fn direct_close_reports_busy_with_an_operation_outstanding() {
+    let direct = Direct::new().unwrap();
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("busy.bin");
+    std::fs::write(&path, vec![7u8; 1024]).unwrap();
+
+    let mut options = direct.open_options();
+    let file = options.read(true).open(typed(&path)).await.unwrap();
+
+    let mut buf = bytes::BytesMut::with_capacity(1024);
+    let outstanding = file.read_at(&mut buf, 0);
+    let error = file
+        .close()
+        .await
+        .expect_err("close with an operation outstanding");
+    assert_eq!(error.kind(), dolang_vfs::error::ErrorKind::ResourceBusy);
+
+    // The detached operation still completes against the descriptor it holds.
+    assert_eq!(outstanding.await.unwrap(), 1024);
+    assert_eq!(buf.len(), 1024);
+}
+
 #[tokio::test]
 async fn direct_symlink_metadata_and_read_link() {
     let direct = Direct::new().unwrap();
@@ -741,7 +1053,7 @@ async fn direct_file_fs_metadata_basic() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("fsmeta-file.txt");
     tokio::fs::write(&path, "hello").await.unwrap();
-    let mut file = direct
+    let file = direct
         .open_options()
         .read(true)
         .open(typed(&path))
@@ -785,7 +1097,7 @@ async fn direct_security_descriptor_path_and_file() {
         Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied),
     }
 
-    let mut file = direct
+    let file = direct
         .open_options()
         .read(true)
         .open(typed(&path))
@@ -939,7 +1251,7 @@ async fn direct_windows_streams() {
     tokio::fs::write(&path, "base").await.unwrap();
     tokio::fs::write(&stream_path, "stream").await.unwrap();
 
-    let mut file = direct
+    let file = direct
         .open_options()
         .read(true)
         .open(typed(&path))

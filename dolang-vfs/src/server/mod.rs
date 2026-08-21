@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::time::Duration;
 
+use bytes::{Buf, BytesMut};
 #[cfg(unix)]
 use dolang_rpc::AuthKey;
 use dolang_rpc::{
@@ -21,7 +22,7 @@ use dolang_rpc::{
 use dolang_winterop::security::SecDesc;
 #[cfg(unix)]
 use std::os::unix::io::OwnedFd;
-use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::NamedPipeClient;
 #[cfg(all(docsrs, not(windows)))]
@@ -39,8 +40,8 @@ use crate::extension::ExtContext;
 use crate::file::{FileLock, FileLockRequest};
 use crate::security::{Acl, AclKind};
 use crate::{
-    AnyFile, AnyVfs, Child as _, Command as _, Error, FileHandle as _, FsMetadata, Metadata,
-    OpenOptions as _, STREAM_CHUNK_SIZE, SessionMode, StdioRecv, StdioSend, StreamEntry,
+    AnyFile, AnyVfs, Child as _, Command as _, Error, FileHandle as _, FsMetadata, MAX_FILE_READ,
+    Metadata, OpenOptions as _, STREAM_CHUNK_SIZE, SessionMode, StdioRecv, StdioSend, StreamEntry,
     Utf8TypedPath, Vfs, XattrEntry,
     protocol::{
         AccessRequest, AclRequest, CanonicalizeRequest, CopyRequest, CreateDirRequest,
@@ -165,11 +166,60 @@ impl OpaqueResource for RetainedVfs {
     type Marker = crate::session::VfsMarker;
 }
 
-struct RetainedFile(
-    Mutex<AnyFile>,
-    std::sync::Mutex<std::collections::HashMap<u64, Arc<tokio::sync::Mutex<FileLock>>>>,
-    std::sync::atomic::AtomicU64,
-);
+/// Reads the whole of `len` bytes at `offset`, or as much as exists.
+///
+/// Deliberately buffers the entire answer instead of streaming it: the response
+/// header goes out first and is the only place a structured error can be
+/// reported, so the read has to have already succeeded by the time it is sent.
+/// `len` is bounded by [`MAX_FILE_READ`] at the call site, which is what makes
+/// buffering it whole affordable.
+///
+/// One [`FileHandle::read_at`] may come up short for reasons other than the end
+/// of the file — a nested remote file clamps at one chunk, and a positional read
+/// is permitted to be short in general — so this loops rather than treating the
+/// first short read as the end.
+async fn read_file_range(file: &AnyFile, offset: u64, len: usize) -> io::Result<BytesMut> {
+    let mut buf = BytesMut::with_capacity(len);
+    while buf.len() < len {
+        let at = offset + buf.len() as u64;
+        if file.read_at(&mut buf, at).await? == 0 {
+            break;
+        }
+    }
+    // `read_at` fills the spare capacity, which the allocator may have rounded
+    // up past `len`. Delivering those extra bytes would be a protocol violation
+    // on the peer's side, so trim back to what was asked for.
+    buf.truncate(len);
+    Ok(buf)
+}
+
+/// Accumulates up to one chunk from `trailer`, or `None` at its end.
+///
+/// Bounds how much of a write is held in memory at once: the peer may submit a
+/// trailer far larger than a chunk, and the positional write it feeds wants an
+/// owned buffer.
+async fn next_trailer_chunk(
+    trailer: &mut dolang_rpc::trailer::TrailerRecv,
+) -> io::Result<Option<BytesMut>> {
+    let mut buf = BytesMut::with_capacity(STREAM_CHUNK_SIZE);
+    // Spare capacity is never zero while this loop runs, so `read_buf` fills
+    // the buffer rather than growing it.
+    while buf.len() < STREAM_CHUNK_SIZE && trailer.read_buf(&mut buf).await? != 0 {}
+    Ok((!buf.is_empty()).then_some(buf))
+}
+
+struct RetainedFile(AnyFile);
+
+/// A lock the peer still holds, addressed by its own opaque handle.
+///
+/// Not wrapped in a mutex: releasing is the only thing ever done with one, and
+/// that unregisters the lock first, so the releasing task has it by value and
+/// no other task can still reach it.
+struct RetainedFileLock(FileLock);
+
+impl OpaqueResource for RetainedFileLock {
+    type Marker = crate::session::FileLockMarker;
+}
 
 struct RetainedReadDir(Mutex<crate::ReadDir>);
 
@@ -602,8 +652,10 @@ async fn serve_connection(
                     connection.handle_child_terminate(&context, child).await
                 }
                 RequestKind::ChildClose { child } => connection.handle_child_close(&context, child),
-                RequestKind::FileRead { file, len } => {
-                    connection.handle_file_read(context, file, len).await;
+                RequestKind::FileRead { file, offset, len } => {
+                    connection
+                        .handle_file_read(context, file, offset, len)
+                        .await;
                     return;
                 }
                 RequestKind::StdioRecvRead { stdio, len } => {
@@ -747,11 +799,14 @@ impl Connection {
             RequestKind::Pipe => ResponseKind::Pipe(self.handle_pipe(context).await),
             RequestKind::Open(request) => self.handle_open(context, request).await,
             RequestKind::FileRead { .. } => unreachable!(),
-            RequestKind::FileWrite { file } => {
-                ResponseKind::FileWrite(self.handle_file_write(context, file).await)
+            RequestKind::FileWrite { file, offset } => {
+                ResponseKind::FileWrite(self.handle_file_write(context, file, offset).await)
             }
-            RequestKind::FileSeek { file, position } => {
-                ResponseKind::FileSeek(self.handle_file_seek(context, file, position.into()).await)
+            RequestKind::FileAppend { file } => {
+                ResponseKind::FileAppend(self.handle_file_append(context, file).await)
+            }
+            RequestKind::FileSize { file } => {
+                ResponseKind::FileSize(self.handle_file_size(context, file).await)
             }
             RequestKind::FileFlush { file } => {
                 ResponseKind::FileFlush(self.handle_file_flush(context, file).await)
@@ -762,15 +817,13 @@ impl Connection {
             RequestKind::FileLock { file, request } => {
                 self.handle_file_lock(context, file, request).await
             }
-            RequestKind::FileUnlock { file, lock } => {
-                self.handle_file_unlock(context, file, lock).await
-            }
-            RequestKind::FileToStdioSend { file } => {
-                ResponseKind::FileToStdioSend(self.handle_file_to_stdio_send(context, file).await)
-            }
-            RequestKind::FileToStdioRecv { file } => {
-                ResponseKind::FileToStdioRecv(self.handle_file_to_stdio_recv(context, file).await)
-            }
+            RequestKind::FileUnlock { lock } => self.handle_file_unlock(context, lock).await,
+            RequestKind::FileToStdioSend { file, offset } => ResponseKind::FileToStdioSend(
+                self.handle_file_to_stdio_send(context, file, offset).await,
+            ),
+            RequestKind::FileToStdioRecv { file, offset } => ResponseKind::FileToStdioRecv(
+                self.handle_file_to_stdio_recv(context, file, offset).await,
+            ),
             RequestKind::StdioSendClose { stdio } => {
                 ResponseKind::StdioSendClose(self.close_stdio_send(context, stdio))
             }
@@ -1312,6 +1365,12 @@ impl Connection {
                 return;
             }
         };
+        // Unlike `handle_file_read`, this streams: the source is a pipe of
+        // unknown length, so there is nothing to hold and the answer cannot be
+        // known before responding. A failure part way through therefore has to
+        // report itself by abandoning the trailer, which for a byte stream is
+        // the right shape anyway — it is a teardown, not an operation that
+        // failed with a particular errno the peer could act on.
         let mut send = context.respond_with_trailer(ResponseKind::StdioRecvRead(Ok(())));
         let copied = {
             let mut guard = stdio.stdio.lock().await;
@@ -1321,9 +1380,9 @@ impl Connection {
             );
             io::copy_buf(&mut source, &mut send).await.is_ok()
         };
-        // Released before the terminal fragment, as in `handle_file_read`:
-        // the peer may hand the endpoint to a child or close it as soon as
-        // the trailer ends, and both consume the endpoint.
+        // Released before the terminal fragment: the peer may hand the endpoint
+        // to a child or close it as soon as the trailer ends, and both consume
+        // the endpoint.
         drop(stdio);
         if copied {
             send.finish();
@@ -1369,11 +1428,7 @@ impl Connection {
                 if self.mode == SessionMode::Remote
                     || matches!(req.handle_preference, OpenHandlePreference::Opaque)
                 {
-                    let file = context.register(RetainedFile(
-                        Mutex::new(file),
-                        std::sync::Mutex::new(std::collections::HashMap::new()),
-                        std::sync::atomic::AtomicU64::new(0),
-                    ));
+                    let file = context.register(RetainedFile(file));
                     ResponseKind::Open(Ok(OpenHandle::Opaque(file)))
                 } else {
                     let handle: DefaultHandle = file.try_into_std().await.unwrap().into();
@@ -1397,10 +1452,38 @@ impl Connection {
         })
     }
 
+    /// Takes a file out of the session's registry, for an operation that
+    /// consumes it.
+    ///
+    /// Uses the recovering [`try_unregister`], so a file with operations still
+    /// in flight stays registered and the peer can retry once they finish;
+    /// [`handle_file_close`](Self::handle_file_close) deliberately does not,
+    /// because a close must still take effect after the racing operation ends.
+    ///
+    /// [`try_unregister`]: dolang_rpc::server::CallContext::try_unregister
+    fn take_file(
+        &self,
+        context: &CallContext<VfsProtocol>,
+        file: Cite<FileMarker>,
+    ) -> Result<RetainedFile, WireError> {
+        match context.try_unregister::<RetainedFile>(file) {
+            Ok(Some(file)) => Ok(file),
+            Ok(None) => Err(wire_error(io::Error::new(
+                io::ErrorKind::ResourceBusy,
+                "opaque file is in use",
+            ))),
+            Err(_) => Err(wire_error(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid opaque file",
+            ))),
+        }
+    }
+
     async fn handle_file_read(
         &self,
         context: CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
+        offset: u64,
         len: usize,
     ) {
         let file = match self.retained_file(&context, file) {
@@ -1410,22 +1493,29 @@ impl Connection {
                 return;
             }
         };
-        let mut send = context.respond_with_trailer(ResponseKind::FileRead(Ok(())));
-        let copied = {
-            let mut guard = file.0.lock().await;
-            let mut source = io::BufReader::with_capacity(
-                len.clamp(1, STREAM_CHUNK_SIZE),
-                (&mut *guard).take(len as u64),
-            );
-            io::copy_buf(&mut source, &mut send).await.is_ok()
-        };
-        // Release the file before the trailer's terminal fragment goes out.
-        // Finishing the trailer is what tells the peer this read is over, and
-        // the peer is entitled to close the file the moment it sees that; if
-        // we were still holding a reference at that point, its `FileClose`
-        // would find the file in use and fail.
+        // Read before responding. Once the response header is out the only way
+        // left to report a failure is to abandon the trailer, which reaches the
+        // peer as a bare `BrokenPipe` abort with the real error discarded — so
+        // the read has to have already succeeded or failed by then. Clamping is
+        // what makes holding the whole answer affordable, and it also stops the
+        // peer from choosing the size of this allocation.
+        let data = read_file_range(&file.0, offset, len.min(MAX_FILE_READ)).await;
+        // Release the file before anything at all goes back. The peer is
+        // entitled to close the file the moment it sees this read conclude, and
+        // a reference still held here would make its `FileClose` fail as in
+        // use. Buffering the answer first is what lets the guard be dropped
+        // this early — earlier than when the read was streamed, where it had to
+        // live until the last fragment.
         drop(file);
-        if copied {
+        let data = match data {
+            Ok(data) => data,
+            Err(error) => {
+                context.respond(ResponseKind::FileRead(Err(wire_error(error))));
+                return;
+            }
+        };
+        let mut send = context.respond_with_trailer(ResponseKind::FileRead(Ok(())));
+        if send.write_all(&data).await.is_ok() {
             send.finish();
         }
     }
@@ -1434,34 +1524,80 @@ impl Connection {
         &self,
         context: &mut CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
+        offset: u64,
     ) -> Result<usize, WireError> {
         let file = self.retained_file(context, file)?;
-        let trailer = context.trailer().ok_or_else(|| {
+        let mut trailer = Self::write_trailer(context)?;
+        let mut written = 0usize;
+        while let Some(chunk) = next_trailer_chunk(&mut trailer).await.map_err(wire_error)? {
+            let mut chunk = chunk.freeze();
+            while !chunk.is_empty() {
+                let n = file
+                    .0
+                    .write_at(chunk.clone(), offset + written as u64)
+                    .await
+                    .map_err(wire_error)?;
+                if n == 0 {
+                    return Err(wire_error(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "file write made no progress",
+                    )));
+                }
+                chunk.advance(n);
+                written += n;
+            }
+        }
+        Ok(written)
+    }
+
+    async fn handle_file_append(
+        &self,
+        context: &mut CallContext<VfsProtocol>,
+        file: Cite<FileMarker>,
+    ) -> Result<(usize, u64), WireError> {
+        let file = self.retained_file(context, file)?;
+        let mut trailer = Self::write_trailer(context)?;
+        // The offset of an append is the description's business, not ours. The
+        // peer cannot know where the data landed either, so report the
+        // resulting position along with the count.
+        let mut written = 0usize;
+        let mut end = file.0.metadata().await.map_err(wire_error)?.len;
+        while let Some(chunk) = next_trailer_chunk(&mut trailer).await.map_err(wire_error)? {
+            let mut chunk = chunk.freeze();
+            while !chunk.is_empty() {
+                let (n, position) = file.0.append(chunk.clone()).await.map_err(wire_error)?;
+                if n == 0 {
+                    return Err(wire_error(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "file append made no progress",
+                    )));
+                }
+                chunk.advance(n);
+                written += n;
+                end = position;
+            }
+        }
+        Ok((written, end))
+    }
+
+    fn write_trailer(
+        context: &mut CallContext<VfsProtocol>,
+    ) -> Result<dolang_rpc::trailer::TrailerRecv, WireError> {
+        context.trailer().ok_or_else(|| {
             wire_error(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "file write request is missing its data trailer",
             ))
-        })?;
-        let mut trailer = io::BufReader::with_capacity(STREAM_CHUNK_SIZE, trailer);
-        let len = io::copy_buf(&mut trailer, &mut *file.0.lock().await)
-            .await
-            .map_err(wire_error)?;
-        usize::try_from(len).map_err(|_| {
-            wire_error(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "file trailer length does not fit in usize",
-            ))
         })
     }
 
-    async fn handle_file_seek(
+    async fn handle_file_size(
         &self,
         context: &CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
-        position: io::SeekFrom,
     ) -> Result<u64, WireError> {
         let file = self.retained_file(context, file)?;
-        file.0.lock().await.seek(position).await.map_err(wire_error)
+        Ok(file.0.metadata().await.map_err(wire_error)?.len)
     }
 
     async fn handle_file_flush(
@@ -1470,7 +1606,7 @@ impl Connection {
         file: Cite<FileMarker>,
     ) -> Result<(), WireError> {
         let file = self.retained_file(context, file)?;
-        file.0.lock().await.flush().await.map_err(wire_error)
+        file.0.commit().await.map_err(wire_error)
     }
 
     async fn handle_file_set_size(
@@ -1480,23 +1616,27 @@ impl Connection {
         size: u64,
     ) -> Result<(), WireError> {
         let file = self.retained_file(context, file)?;
-        file.0.lock().await.set_size(size).await.map_err(wire_error)
+        file.0.set_size(size).await.map_err(wire_error)
     }
 
     async fn handle_file_to_stdio_send(
         &self,
         context: &CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
+        offset: u64,
     ) -> Result<Gift<crate::session::StdioSendMarker>, WireError> {
-        let file = self.retained_file(context, file)?;
+        // Before the file is taken, so that running out of endpoint slots
+        // leaves the peer's handle alone.
+        let slot = self.reserve_stdio()?;
+        let file = self.take_file(context, file)?;
+        // The peer's cursor is the one that matters, and the descriptor the
+        // child inherits carries a position of its own, so plant it explicitly
+        // rather than letting this side's idea of the position decide.
         let stdio = file
             .0
-            .lock()
+            .into_stdio_send(offset)
             .await
-            .to_stdio_send()
-            .await
-            .map_err(wire_error)?;
-        let slot = self.reserve_stdio()?;
+            .map_err(handoff_error)?;
         Ok(context.register(RetainedStdioSend {
             stdio: Mutex::new(stdio),
             _slot: slot,
@@ -1507,16 +1647,18 @@ impl Connection {
         &self,
         context: &CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
+        offset: u64,
     ) -> Result<Gift<crate::session::StdioRecvMarker>, WireError> {
-        let file = self.retained_file(context, file)?;
+        let slot = self.reserve_stdio()?;
+        let file = self.take_file(context, file)?;
+        // The peer's cursor is the one that matters, and the descriptor the
+        // child inherits carries a position of its own, so plant it explicitly
+        // rather than letting this side's idea of the position decide.
         let stdio = file
             .0
-            .lock()
+            .into_stdio_recv(offset)
             .await
-            .to_stdio_recv()
-            .await
-            .map_err(wire_error)?;
-        let slot = self.reserve_stdio()?;
+            .map_err(handoff_error)?;
         Ok(context.register(RetainedStdioRecv {
             stdio: Mutex::new(stdio),
             _slot: slot,
@@ -1529,7 +1671,7 @@ impl Connection {
         file: Cite<FileMarker>,
     ) -> Result<Metadata, WireError> {
         let file = self.retained_file(context, file)?;
-        file.0.lock().await.metadata().await.map_err(wire_error)
+        file.0.metadata().await.map_err(wire_error)
     }
 
     async fn handle_file_fs_metadata(
@@ -1538,7 +1680,7 @@ impl Connection {
         file: Cite<FileMarker>,
     ) -> Result<FsMetadata, WireError> {
         let file = self.retained_file(context, file)?;
-        file.0.lock().await.fs_metadata().await.map_err(wire_error)
+        file.0.fs_metadata().await.map_err(wire_error)
     }
 
     async fn handle_file_sec_desc(
@@ -1548,7 +1690,7 @@ impl Connection {
         mask: dolang_winterop::security::SecInfo,
     ) -> Result<SecDesc, WireError> {
         let file = self.retained_file(context, file)?;
-        file.0.lock().await.sec_desc(mask).await.map_err(wire_error)
+        file.0.sec_desc(mask).await.map_err(wire_error)
     }
 
     async fn handle_file_acl(
@@ -1559,12 +1701,7 @@ impl Connection {
         default: bool,
     ) -> Result<Option<Acl>, WireError> {
         let file = self.retained_file(context, file)?;
-        file.0
-            .lock()
-            .await
-            .acl(kind, default)
-            .await
-            .map_err(wire_error)
+        file.0.acl(kind, default).await.map_err(wire_error)
     }
 
     async fn handle_file_set_acl(
@@ -1577,8 +1714,6 @@ impl Connection {
     ) -> Result<(), WireError> {
         let file = self.retained_file(context, file)?;
         file.0
-            .lock()
-            .await
             .set_acl(kind, acl.as_ref(), default)
             .await
             .map_err(wire_error)
@@ -1591,12 +1726,7 @@ impl Connection {
         sec_desc: SecDesc,
     ) -> Result<(), WireError> {
         let file = self.retained_file(context, file)?;
-        file.0
-            .lock()
-            .await
-            .set_sec_desc(&sec_desc)
-            .await
-            .map_err(wire_error)
+        file.0.set_sec_desc(&sec_desc).await.map_err(wire_error)
     }
 
     async fn handle_file_xattrs(
@@ -1607,8 +1737,6 @@ impl Connection {
     ) -> Result<Vec<XattrEntry>, WireError> {
         let file = self.retained_file(context, file)?;
         file.0
-            .lock()
-            .await
             .xattrs(namespace.as_borrowed())
             .await
             .map_err(wire_error)
@@ -1623,8 +1751,6 @@ impl Connection {
     ) -> Result<Vec<u8>, WireError> {
         let file = self.retained_file(context, file)?;
         file.0
-            .lock()
-            .await
             .xattr(&name, namespace.as_deref())
             .await
             .map_err(wire_error)
@@ -1636,7 +1762,7 @@ impl Connection {
         file: Cite<FileMarker>,
     ) -> Result<Vec<StreamEntry>, WireError> {
         let file = self.retained_file(context, file)?;
-        file.0.lock().await.streams().await.map_err(wire_error)
+        file.0.streams().await.map_err(wire_error)
     }
 
     async fn handle_file_set_xattr(
@@ -1649,8 +1775,6 @@ impl Connection {
     ) -> Result<(), WireError> {
         let file = self.retained_file(context, file)?;
         file.0
-            .lock()
-            .await
             .set_xattr(&name, namespace.as_deref(), &value)
             .await
             .map_err(wire_error)
@@ -1665,8 +1789,6 @@ impl Connection {
     ) -> Result<(), WireError> {
         let file = self.retained_file(context, file)?;
         file.0
-            .lock()
-            .await
             .remove_xattr(&name, namespace.as_deref())
             .await
             .map_err(wire_error)
@@ -1683,7 +1805,7 @@ impl Connection {
             Err(error) => return ResponseKind::FileLock(Err(error)),
         };
         let acquired = context
-            .cancel_guard(async |_context| retained.0.lock().await.lock(request).await)
+            .cancel_guard(async |_context| retained.0.lock(request).await)
             .await;
         let acquired = match acquired {
             Ok(result) => match result {
@@ -1697,42 +1819,28 @@ impl Connection {
                 ))));
             }
         };
-        let lock = acquired.map(|lock| {
-            let id = retained.2.fetch_add(1, Ordering::Relaxed);
-            retained
-                .1
-                .lock()
-                .unwrap()
-                .insert(id, Arc::new(tokio::sync::Mutex::new(lock)));
-            id
-        });
-        ResponseKind::FileLock(Ok(lock))
+        drop(retained);
+        // The lock gets an opaque handle of its own rather than an id in a
+        // table hanging off the file. Nothing needs it to be reachable from the
+        // file: closing a file releases every lock held on it in band, and a
+        // lock dropped without an explicit release still releases itself.
+        ResponseKind::FileLock(Ok(
+            acquired.map(|lock| context.register(RetainedFileLock(lock)))
+        ))
     }
 
     async fn handle_file_unlock(
         &self,
         context: &CallContext<VfsProtocol>,
-        file: Cite<FileMarker>,
-        lock: u64,
+        lock: Cite<crate::session::FileLockMarker>,
     ) -> ResponseKind {
-        let retained = match self.retained_file(context, file) {
-            Ok(retained) => retained,
-            Err(_) => return ResponseKind::FileUnlock(Ok(())),
+        // Releasing consumes the lock, so a handle that is unknown or already
+        // released is a no-op rather than an error, as it was when the peer
+        // named locks by id.
+        let Ok(Some(mut lock)) = context.unregister::<RetainedFileLock>(lock) else {
+            return ResponseKind::FileUnlock(Ok(()));
         };
-        let retained_lock = retained.1.lock().unwrap().get(&lock).cloned();
-        let result = match retained_lock {
-            Some(retained_lock) => retained_lock
-                .lock()
-                .await
-                .release()
-                .await
-                .map_err(wire_error),
-            None => Ok(()),
-        };
-        if result.is_ok() {
-            retained.1.lock().unwrap().remove(&lock);
-        }
-        ResponseKind::FileUnlock(result)
+        ResponseKind::FileUnlock(lock.0.release().await.map_err(wire_error))
     }
 
     async fn handle_file_close(
@@ -1746,21 +1854,9 @@ impl Connection {
         };
         drop(retained);
         let result = match context.unregister::<RetainedFile>(file) {
-            Ok(Some(file)) => {
-                let locks = file.1.into_inner().unwrap().into_values();
-                let mut lock_error = None;
-                for lock in locks {
-                    if let Err(error) = lock.lock().await.release().await
-                        && lock_error.is_none()
-                    {
-                        lock_error = Some(error);
-                    }
-                }
-                match lock_error {
-                    Some(error) => Err(wire_error(error)),
-                    None => file.0.into_inner().close().await.map_err(wire_error),
-                }
-            }
+            // `close` releases every lock still held on the file in band, so
+            // there is nothing to unwind here first.
+            Ok(Some(file)) => file.0.close().await.map_err(wire_error),
             Ok(None) => Err(wire_error(io::Error::new(
                 io::ErrorKind::ResourceBusy,
                 "opaque file is in use",
@@ -2180,6 +2276,18 @@ impl Connection {
                 .await,
         ))
     }
+}
+
+/// Reports a handoff that did not happen.
+///
+/// The handle it carries back is dropped here rather than restored: the
+/// registration was already retired to take it, and a fresh one would answer to
+/// an id the peer does not hold. The peer's handle is dead either way, so the
+/// file is closed instead of leaked. The one failure this side *can* recover
+/// from — a busy file — is caught before the file is taken at all, in
+/// [`take_file`](Session::take_file).
+fn handoff_error<H>(error: crate::HandoffError<H>) -> WireError {
+    wire_error(error.into_error())
 }
 
 fn wire_error(error: impl Into<Error>) -> WireError {

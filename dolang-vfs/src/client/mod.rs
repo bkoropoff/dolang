@@ -1,11 +1,15 @@
 use std::{
     collections::HashMap,
-    future::Future,
+    future::{Future, poll_fn},
     io,
     io::IsTerminal,
+    mem,
     path::{Path, PathBuf},
     pin::Pin,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     task::{Context, Poll},
 };
 
@@ -19,6 +23,7 @@ use std::os::windows::io::{AsHandle, OwnedHandle};
 #[cfg(all(docsrs, not(windows)))]
 struct OwnedHandle;
 
+use bytes::{Bytes, BytesMut};
 #[cfg(unix)]
 use dolang_rpc::AuthKey;
 use dolang_rpc::{
@@ -44,9 +49,10 @@ use crate::extension::VfsExtension;
 use crate::protocol::AccessRequest;
 use crate::session::Query;
 use crate::{
-    Acl, AclKind, Child, Command, FileHandle, FsMetadata, Metadata, MetadataPatch, PrincipalId,
-    PrincipalIdKind, ProcessStatus, ReadDir, STREAM_CHUNK_SIZE, SessionMode, SidName, StdioRecv,
-    StdioSend, StreamEntry, Utf8TypedPath, Utf8TypedPathBuf, Vfs, XattrEntry,
+    Acl, AclKind, Child, Command, FileHandle, FsMetadata, HandoffError, MAX_FILE_READ, Metadata,
+    MetadataPatch, PrincipalId, PrincipalIdKind, ProcessStatus, ReadDir, STREAM_CHUNK_SIZE,
+    SessionMode, SidName, StdioRecv, StdioSend, StreamEntry, Utf8TypedPath, Utf8TypedPathBuf, Vfs,
+    XattrEntry,
     direct::DirectFile,
     path::WellKnownPath,
     protocol::{
@@ -95,6 +101,20 @@ enum ClientFileInner {
 struct RemoteFile {
     client: Client,
     file: Gift<crate::session::FileMarker>,
+    /// The seek position, maintained entirely on this side: the VFS protocol
+    /// carries an explicit offset on every operation and the peer keeps no
+    /// position of its own. Advanced by bytes actually transferred, so a short
+    /// read at EOF leaves it where the data stopped, exactly as the kernel
+    /// would.
+    cursor: AtomicU64,
+    /// Whether the peer opened this file for append. Append writes have to use
+    /// [`RequestKind::FileAppend`], since the offset on a positional write is
+    /// ignored on an append-mode description and the resulting position can
+    /// only be learned from the peer.
+    append: bool,
+    /// Distance from the end requested by a pending `SeekFrom::End`, applied
+    /// once the [`RequestKind::FileSize`] reply lands.
+    seek_delta: i64,
     pending: Option<PendingFileOperation>,
     read_body: Option<PendingTrailerRead>,
     write_body: Option<PendingTrailerWrite>,
@@ -102,21 +122,21 @@ struct RemoteFile {
 
 pub(crate) struct RemoteFileLock {
     client: Client,
-    file: Gift<crate::session::FileMarker>,
-    lock: Option<u64>,
+    /// The peer's handle for the held lock, taken once it is released.
+    ///
+    /// It names the lock directly, so releasing needs nothing from the file the
+    /// lock was taken on — including the file still being open.
+    lock: Option<Gift<crate::session::FileLockMarker>>,
 }
 
 impl RemoteFileLock {
     pub(crate) async fn release(&mut self) -> crate::Result<()> {
-        let Some(lock) = self.lock else {
+        let Some(lock) = self.lock.as_ref() else {
             return Ok(());
         };
         match self
             .client
-            .request(RequestKind::FileUnlock {
-                file: self.file.cite(),
-                lock,
-            })
+            .request(RequestKind::FileUnlock { lock: lock.cite() })
             .await?
         {
             ResponseKind::FileUnlock(result) => {
@@ -138,9 +158,10 @@ impl Drop for RemoteFileLock {
             return;
         };
         let client = self.client.clone();
-        let file = self.file.cite();
         runtime.spawn(async move {
-            let _ = client.request(RequestKind::FileUnlock { file, lock }).await;
+            let _ = client
+                .request(RequestKind::FileUnlock { lock: lock.cite() })
+                .await;
         });
     }
 }
@@ -168,7 +189,7 @@ struct PendingTrailerRead {
 enum FileOperationKind {
     Read,
     Flush,
-    Seek,
+    Size,
 }
 
 impl std::fmt::Debug for ClientFile {
@@ -205,10 +226,13 @@ impl ClientFile {
         )))
     }
 
-    fn from_remote(client: Client, file: Gift<crate::session::FileMarker>) -> Self {
+    fn from_remote(client: Client, file: Gift<crate::session::FileMarker>, append: bool) -> Self {
         Self(ClientFileInner::Remote(RemoteFile {
             client,
             file,
+            cursor: AtomicU64::new(0),
+            append,
+            seek_delta: 0,
             pending: None,
             read_body: None,
             write_body: None,
@@ -219,6 +243,268 @@ impl ClientFile {
 impl RemoteFile {
     fn cite(&self) -> Cite<crate::session::FileMarker> {
         self.file.cite()
+    }
+
+    /// Asks the peer to convert this file into a standard-output endpoint at
+    /// `offset`, consuming it on that side.
+    ///
+    /// Takes `&self` rather than consuming, so that the caller keeps the handle
+    /// to hand back when this fails. The peer only retires its registration on
+    /// success; a failure — a busy file above all — leaves it registered and
+    /// this handle usable.
+    async fn stdio_send(&self, offset: u64) -> crate::Result<StdioSend> {
+        self.idle()?;
+        match self
+            .client
+            .request(RequestKind::FileToStdioSend {
+                file: self.cite(),
+                offset,
+            })
+            .await?
+        {
+            ResponseKind::FileToStdioSend(result) => result
+                .map(|stdio| {
+                    StdioSend::Remote(RemoteStdioSend {
+                        client: self.client.clone(),
+                        stdio: Some(stdio),
+                        pending: None,
+                        write_body: None,
+                    })
+                })
+                .map_err(Into::into),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    /// Asks the peer to convert this file into a standard-input endpoint at
+    /// `offset`. See [`stdio_send`](Self::stdio_send).
+    async fn stdio_recv(&self, offset: u64) -> crate::Result<StdioRecv> {
+        self.idle()?;
+        match self
+            .client
+            .request(RequestKind::FileToStdioRecv {
+                file: self.cite(),
+                offset,
+            })
+            .await?
+        {
+            ResponseKind::FileToStdioRecv(result) => result
+                .map(|stdio| {
+                    StdioRecv::Remote(RemoteStdioRecv {
+                        client: self.client.clone(),
+                        stdio: Some(stdio),
+                        pending: None,
+                        read_body: None,
+                    })
+                })
+                .map_err(Into::into),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    /// Reads at `offset` over the wire, appending into `buf`'s spare capacity.
+    ///
+    /// Detached from the handle: it takes a citation and its own clone of the
+    /// client, so several may be outstanding at once. It deliberately touches
+    /// none of `cursor`, `pending`, `read_body`, or `write_body` — positional
+    /// operations and the cursor-based poll path share nothing but the file.
+    fn read_at<'b>(
+        &self,
+        buf: &'b mut BytesMut,
+        offset: u64,
+    ) -> impl Future<Output = io::Result<usize>> + Send + use<'b> {
+        let client = self.client.clone();
+        let file = self.cite();
+        async move {
+            // Taken for the duration and put back below, matching the direct
+            // backend's contract rather than having two: a cancelled read
+            // leaves the buffer empty on either route.
+            let mut taken = mem::take(buf);
+            let before = taken.len();
+            // The transfer runs against the taken buffer; the buffer goes back
+            // to the caller afterwards whether or not it succeeded, since a
+            // failed read spoils nothing about the allocation.
+            let dst = &mut taken;
+            let result = async move {
+                // Clamped, not looped: this is the low-level positional read,
+                // and a short return is part of its contract. Looping belongs
+                // to the callers that need every byte.
+                let len = dst.spare_capacity_mut().len().min(MAX_FILE_READ);
+                if len == 0 {
+                    return Ok(());
+                }
+                let mut trailer = Self::begin_read(client, file, offset, len).await?;
+                let mut remaining = len;
+                while remaining > 0 {
+                    // `read_buf` writes into the spare capacity and only grows
+                    // the buffer once that is exhausted, which the loop
+                    // condition prevents, so the transfer stays inside what was
+                    // asked for.
+                    let read = trailer.read_buf(dst).await?;
+                    if read == 0 {
+                        return Ok(());
+                    }
+                    remaining -= read;
+                }
+                Self::finish_read(&mut trailer).await
+            }
+            .await;
+            let read = taken.len() - before;
+            *buf = taken;
+            result.map(|()| read)
+        }
+    }
+
+    /// Writes `data` at `offset` over the wire, returning the byte count.
+    fn write_at(
+        &self,
+        data: Bytes,
+        offset: u64,
+    ) -> impl Future<Output = io::Result<usize>> + Send + use<> {
+        let client = self.client.clone();
+        let file = self.cite();
+        let append = self.append;
+        async move {
+            if append {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "cannot write at an offset on a file opened for append",
+                ));
+            }
+            match Self::send_write(client, RequestKind::FileWrite { file, offset }, &data).await? {
+                ResponseKind::FileWrite(result) => result.map_err(wire_io),
+                response => Err(unexpected(response)),
+            }
+        }
+    }
+
+    /// Reads into the uninitialized `buf` starting at `offset`, returning how
+    /// many bytes at its front were filled.
+    ///
+    /// The reply trailer lands directly in `buf`, which is the point: this
+    /// route exists so a caller whose destination is not a [`BytesMut`] does
+    /// not pay a copy out of one. There is no intermediate storage, so nothing
+    /// is lost by cancelling and nothing has to be handed back.
+    fn read_at_into<'b>(
+        &self,
+        buf: &'b mut [mem::MaybeUninit<u8>],
+        offset: u64,
+    ) -> impl Future<Output = io::Result<usize>> + Send + use<'b> {
+        let client = self.client.clone();
+        let file = self.cite();
+        async move {
+            let len = buf.len().min(MAX_FILE_READ);
+            if len == 0 {
+                return Ok(0);
+            }
+            let mut trailer = Self::begin_read(client, file, offset, len).await?;
+            let mut dst = ReadBuf::uninit(&mut buf[..len]);
+            while dst.remaining() > 0 {
+                let before = dst.filled().len();
+                poll_fn(|cx| Pin::new(&mut trailer).poll_read(cx, &mut dst)).await?;
+                if dst.filled().len() == before {
+                    // End of the reply, short of what was asked for.
+                    return Ok(before);
+                }
+            }
+            Self::finish_read(&mut trailer).await?;
+            Ok(dst.filled().len())
+        }
+    }
+
+    /// Writes `data` at `offset` over the wire from borrowed storage.
+    fn write_at_from<'b>(
+        &self,
+        data: &'b [u8],
+        offset: u64,
+    ) -> impl Future<Output = io::Result<usize>> + Send + use<'b> {
+        let client = self.client.clone();
+        let file = self.cite();
+        let append = self.append;
+        async move {
+            if append {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "cannot write at an offset on a file opened for append",
+                ));
+            }
+            // Into the trailer straight from the caller's storage: `send_write`
+            // only ever wanted a slice, so borrowing costs this path nothing
+            // that owning it gained.
+            match Self::send_write(client, RequestKind::FileWrite { file, offset }, data).await? {
+                ResponseKind::FileWrite(result) => result.map_err(wire_io),
+                response => Err(unexpected(response)),
+            }
+        }
+    }
+
+    /// Appends `data` over the wire, returning the byte count and the position
+    /// just past what was written.
+    fn append(&self, data: Bytes) -> impl Future<Output = io::Result<(usize, u64)>> + Send + use<> {
+        let client = self.client.clone();
+        let file = self.cite();
+        async move {
+            match Self::send_write(client, RequestKind::FileAppend { file }, &data).await? {
+                ResponseKind::FileAppend(result) => result.map_err(wire_io),
+                response => Err(unexpected(response)),
+            }
+        }
+    }
+
+    /// Issues the read and hands back the trailer its bytes arrive on.
+    async fn begin_read(
+        client: Client,
+        file: Cite<crate::session::FileMarker>,
+        offset: u64,
+        len: usize,
+    ) -> io::Result<TrailerRecv> {
+        let (response, trailer) = client
+            .call(RequestKind::FileRead { file, offset, len })
+            .await
+            .map_err(rpc_error)?
+            .into_response_trailer();
+        match response {
+            ResponseKind::Error(error) => return Err(wire_io(error)),
+            ResponseKind::FileRead(result) => result.map_err(wire_io)?,
+            response => return Err(unexpected(response)),
+        }
+        trailer.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "file read response is missing its data trailer",
+            )
+        })
+    }
+
+    /// Observes the end of a fully-consumed read trailer.
+    ///
+    /// The peer holds the file until the trailer's terminal fragment commits,
+    /// so having taken every byte is not the end of the read. Observing the end
+    /// here rather than dropping mid-stream also catches a byte past the
+    /// requested length as the protocol violation it is.
+    async fn finish_read(trailer: &mut TrailerRecv) -> io::Result<()> {
+        let mut past_the_end = [0u8; 1];
+        if trailer.read(&mut past_the_end).await? != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "file read response exceeds requested length",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn send_write(
+        client: Client,
+        request: RequestKind,
+        data: &[u8],
+    ) -> io::Result<ResponseKind> {
+        let mut send = client.call_with_trailer(request);
+        send.write_all(data).await?;
+        let response = send.finish().await.map_err(rpc_error)?.into_response();
+        match response {
+            ResponseKind::Error(error) => Err(wire_io(error)),
+            response => Ok(response),
+        }
     }
 
     fn poll_request(
@@ -277,19 +563,11 @@ impl RemoteFile {
     }
 
     async fn cancel_pending(&mut self) {
-        if let Some(mut body) = self.read_body.take() {
-            // Getting every byte we asked for isn't the end of the read: the
-            // peer holds the file until it commits the trailer's terminal
-            // fragment, so anything sent before we observe EOF here races an
-            // operation the peer still counts as in flight. What is left is
-            // bounded by the length this read asked for, so draining it is
-            // cheap; discarding instead would only trade those bytes for a
-            // round trip to tell the peer to stop sending them.
-            let mut sink = Vec::with_capacity(STREAM_CHUNK_SIZE);
-            while matches!(body.recv.read_buf(&mut sink).await, Ok(1..)) {
-                sink.clear();
-            }
-        }
+        // A read trailer can simply be dropped. The peer releases the file
+        // before it responds at all now that it reads the range up front, so
+        // nothing it still counts as in flight depends on us draining this;
+        // `TrailerRecv::drop` notifies the peer and refunds the pool on its own.
+        self.read_body = None;
         if let Some(mut pending) = self.write_body.take()
             && let Some(mut call) = pending.call.take()
         {
@@ -312,6 +590,12 @@ impl AsyncRead for ClientFile {
         match &mut self.0 {
             ClientFileInner::Direct(file) => Pin::new(file).poll_read(cx, buf),
             ClientFileInner::Remote(file) => loop {
+                // This reads the trailer straight into the caller's `ReadBuf`,
+                // which for the Do-side `fs.File` is arena memory the collector
+                // adopts without a copy. Do not "simplify" this by delegating to
+                // a positional `read_at`: that would land the data in an owned
+                // `BytesMut` first and cost a chunk-sized copy per read, with
+                // nothing failing to say so.
                 if buf.remaining() == 0 {
                     return Poll::Ready(Ok(()));
                 }
@@ -334,6 +618,12 @@ impl AsyncRead for ClientFile {
                             }
                             body.remaining -= read;
                             body.read += read;
+                            // Advance only by what the caller has actually
+                            // seen. Bytes still buffered in the trailer are
+                            // discarded by `start_seek`, so counting them here
+                            // would push the cursor past the last byte anyone
+                            // received.
+                            file.cursor.fetch_add(read as u64, Ordering::Relaxed);
                             if read > 0 {
                                 return Poll::Ready(Ok(()));
                             }
@@ -346,11 +636,17 @@ impl AsyncRead for ClientFile {
                         }
                     }
                 }
-                let requested = buf.remaining();
+                // A short read is always legal for `AsyncRead`, so a request
+                // for more than one chunk simply comes back in several; the
+                // peer has to have the whole reply in hand before it can answer
+                // at all, which is what bounds this.
+                let requested = buf.remaining().min(MAX_FILE_READ);
+                let offset = file.cursor.load(Ordering::Relaxed);
                 match file.poll_request(cx, FileOperationKind::Read, |file| {
                     (
                         RequestKind::FileRead {
                             file,
+                            offset,
                             len: requested,
                         },
                         None,
@@ -396,11 +692,16 @@ impl AsyncWrite for ClientFile {
                     return Poll::Ready(Ok(0));
                 }
                 if file.write_body.is_none() {
+                    let request = if file.append {
+                        RequestKind::FileAppend { file: file.cite() }
+                    } else {
+                        RequestKind::FileWrite {
+                            file: file.cite(),
+                            offset: file.cursor.load(Ordering::Relaxed),
+                        }
+                    };
                     file.write_body = Some(PendingTrailerWrite {
-                        send: Some(
-                            file.client
-                                .call_with_trailer(RequestKind::FileWrite { file: file.cite() }),
-                        ),
+                        send: Some(file.client.call_with_trailer(request)),
                         call: None,
                         target: buf.len(),
                         sent: 0,
@@ -416,22 +717,14 @@ impl AsyncWrite for ClientFile {
                             let unreported = pending.unreported;
                             file.write_body = None;
                             let response = result.map_err(rpc_error)?.into_response();
-                            match response {
-                                ResponseKind::Error(error) => {
-                                    return Poll::Ready(Err(wire_io(error)));
-                                }
-                                ResponseKind::FileWrite(result) => {
-                                    let written = result.map_err(wire_io)?;
-                                    if written != target {
-                                        return Poll::Ready(Err(io::Error::new(
-                                            io::ErrorKind::InvalidData,
-                                            "file write response does not acknowledge the submitted trailer",
-                                        )));
-                                    }
-                                    return Poll::Ready(Ok(unreported));
-                                }
-                                response => return Poll::Ready(Err(unexpected(response))),
+                            let written = ack_write(&file.cursor, response)?;
+                            if written != target {
+                                return Poll::Ready(Err(io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    "file write response does not acknowledge the submitted trailer",
+                                )));
                             }
+                            return Poll::Ready(Ok(unreported));
                         }
                     }
                 }
@@ -471,13 +764,7 @@ impl AsyncWrite for ClientFile {
                         Poll::Ready(result) => {
                             file.write_body = None;
                             Poll::Ready(result.map_err(rpc_error).and_then(|result| {
-                                match result.into_response() {
-                                    ResponseKind::FileWrite(result) => {
-                                        result.map(|_| ()).map_err(wire_io)
-                                    }
-                                    ResponseKind::Error(error) => Err(wire_io(error)),
-                                    response => Err(unexpected(response)),
-                                }
+                                ack_write(&file.cursor, result.into_response()).map(|_| ())
                             }))
                         }
                     };
@@ -517,13 +804,33 @@ impl AsyncSeek for ClientFile {
                     file.read_body.take();
                 }
                 file.idle().map_err(crate::Error::into_io_error)?;
-                file.pending = Some(PendingFileOperation {
-                    kind: FileOperationKind::Seek,
-                    call: file.client.call(RequestKind::FileSeek {
-                        file: file.cite(),
-                        position: position.into(),
-                    }),
-                });
+                file.seek_delta = 0;
+                // `Start` and `Current` are answerable here: the cursor is
+                // ours. Only `End` has to ask the peer how long the file is.
+                let absolute = match position {
+                    io::SeekFrom::Start(offset) => Some(offset),
+                    io::SeekFrom::Current(delta) => Some(
+                        file.cursor
+                            .load(Ordering::Relaxed)
+                            .checked_add_signed(delta)
+                            .ok_or_else(negative_seek)?,
+                    ),
+                    io::SeekFrom::End(delta) => {
+                        file.seek_delta = delta;
+                        None
+                    }
+                };
+                match absolute {
+                    Some(offset) => file.cursor.store(offset, Ordering::Relaxed),
+                    None => {
+                        file.pending = Some(PendingFileOperation {
+                            kind: FileOperationKind::Size,
+                            call: file
+                                .client
+                                .call(RequestKind::FileSize { file: file.cite() }),
+                        });
+                    }
+                }
                 Ok(())
             }
         }
@@ -533,18 +840,26 @@ impl AsyncSeek for ClientFile {
         match &mut self.0 {
             ClientFileInner::Direct(file) => Pin::new(file).poll_complete(cx),
             ClientFileInner::Remote(file) => {
-                match file.poll_request(cx, FileOperationKind::Seek, |file| {
-                    (
-                        RequestKind::FileSeek {
-                            file,
-                            position: io::SeekFrom::Current(0).into(),
-                        },
-                        None,
-                    )
+                // Nothing outstanding means the seek already landed in the
+                // cursor, or there was no seek at all and the caller just wants
+                // the position.
+                if file.pending.is_none() {
+                    return Poll::Ready(Ok(file.cursor.load(Ordering::Relaxed)));
+                }
+                match file.poll_request(cx, FileOperationKind::Size, |file| {
+                    (RequestKind::FileSize { file }, None)
                 }) {
                     Poll::Pending => Poll::Pending,
-                    Poll::Ready(Ok((ResponseKind::FileSeek(result), _))) => {
-                        Poll::Ready(result.map_err(wire_io))
+                    Poll::Ready(Ok((ResponseKind::FileSize(result), _))) => {
+                        let len = match result.map_err(wire_io) {
+                            Ok(len) => len,
+                            Err(error) => return Poll::Ready(Err(error)),
+                        };
+                        let Some(offset) = len.checked_add_signed(file.seek_delta) else {
+                            return Poll::Ready(Err(negative_seek()));
+                        };
+                        file.cursor.store(offset, Ordering::Relaxed);
+                        Poll::Ready(Ok(offset))
                     }
                     Poll::Ready(Ok((response, _))) => Poll::Ready(Err(unexpected(response))),
                     Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
@@ -555,55 +870,121 @@ impl AsyncSeek for ClientFile {
 }
 
 impl FileHandle for ClientFile {
-    async fn to_stdio_send(&self) -> crate::Result<StdioSend> {
+    fn read_at<'b>(
+        &self,
+        buf: &'b mut BytesMut,
+        offset: u64,
+    ) -> impl Future<Output = io::Result<usize>> + Send + use<'b> {
         match &self.0 {
-            ClientFileInner::Direct(file) => file.to_stdio_send().await,
+            ClientFileInner::Direct(file) => crate::EitherFuture::Left(file.read_at(buf, offset)),
+            ClientFileInner::Remote(file) => crate::EitherFuture::Right(file.read_at(buf, offset)),
+        }
+    }
+
+    fn write_at(
+        &self,
+        data: Bytes,
+        offset: u64,
+    ) -> impl Future<Output = io::Result<usize>> + Send + use<> {
+        match &self.0 {
+            ClientFileInner::Direct(file) => crate::EitherFuture::Left(file.write_at(data, offset)),
             ClientFileInner::Remote(file) => {
-                file.idle()?;
+                crate::EitherFuture::Right(file.write_at(data, offset))
+            }
+        }
+    }
+
+    fn append(&self, data: Bytes) -> impl Future<Output = io::Result<(usize, u64)>> + Send + use<> {
+        match &self.0 {
+            ClientFileInner::Direct(file) => crate::EitherFuture::Left(file.append(data)),
+            ClientFileInner::Remote(file) => crate::EitherFuture::Right(file.append(data)),
+        }
+    }
+
+    fn read_at_into<'b>(
+        &self,
+        buf: &'b mut [mem::MaybeUninit<u8>],
+        offset: u64,
+    ) -> impl Future<Output = io::Result<usize>> + Send + use<'b> {
+        match &self.0 {
+            ClientFileInner::Direct(file) => {
+                crate::EitherFuture::Left(file.read_at_into(buf, offset))
+            }
+            ClientFileInner::Remote(file) => {
+                crate::EitherFuture::Right(file.read_at_into(buf, offset))
+            }
+        }
+    }
+
+    fn write_at_from<'b>(
+        &self,
+        data: &'b [u8],
+        offset: u64,
+    ) -> impl Future<Output = io::Result<usize>> + Send + use<'b> {
+        match &self.0 {
+            ClientFileInner::Direct(file) => {
+                crate::EitherFuture::Left(file.write_at_from(data, offset))
+            }
+            ClientFileInner::Remote(file) => {
+                crate::EitherFuture::Right(file.write_at_from(data, offset))
+            }
+        }
+    }
+
+    async fn commit(&self) -> crate::Result<()> {
+        match &self.0 {
+            ClientFileInner::Direct(file) => file.commit().await,
+            ClientFileInner::Remote(file) => {
                 match file
                     .client
-                    .request(RequestKind::FileToStdioSend { file: file.cite() })
+                    .request(RequestKind::FileFlush { file: file.cite() })
                     .await?
                 {
-                    ResponseKind::FileToStdioSend(result) => result
-                        .map(|stdio| {
-                            StdioSend::Remote(RemoteStdioSend {
-                                client: file.client.clone(),
-                                stdio: Some(stdio),
-                                pending: None,
-                                write_body: None,
-                            })
-                        })
-                        .map_err(Into::into),
+                    ResponseKind::FileFlush(result) => result.map_err(Into::into),
                     response => Err(unexpected(response).into()),
                 }
             }
         }
     }
 
-    async fn to_stdio_recv(&self) -> crate::Result<StdioRecv> {
-        match &self.0 {
-            ClientFileInner::Direct(file) => file.to_stdio_recv().await,
-            ClientFileInner::Remote(file) => {
-                file.idle()?;
-                match file
-                    .client
-                    .request(RequestKind::FileToStdioRecv { file: file.cite() })
-                    .await?
-                {
-                    ResponseKind::FileToStdioRecv(result) => result
-                        .map(|stdio| {
-                            StdioRecv::Remote(RemoteStdioRecv {
-                                client: file.client.clone(),
-                                stdio: Some(stdio),
-                                pending: None,
-                                read_body: None,
-                            })
-                        })
-                        .map_err(Into::into),
-                    response => Err(unexpected(response).into()),
-                }
-            }
+    async fn into_stdio_send(
+        self,
+        offset: u64,
+    ) -> std::result::Result<StdioSend, HandoffError<Self>> {
+        match self.0 {
+            ClientFileInner::Direct(file) => file
+                .into_stdio_send(offset)
+                .await
+                .map_err(|error| crate::rewrap(error, |file| Self(ClientFileInner::Direct(file)))),
+            ClientFileInner::Remote(file) => match file.stdio_send(offset).await {
+                // The peer consumed the file, so this handle simply goes away:
+                // dropping its reference names an id the peer has already
+                // retired, which it ignores.
+                Ok(stdio) => Ok(stdio),
+                Err(error) => Err(HandoffError::new(
+                    Self(ClientFileInner::Remote(file)),
+                    error,
+                )),
+            },
+        }
+    }
+
+    async fn into_stdio_recv(
+        self,
+        offset: u64,
+    ) -> std::result::Result<StdioRecv, HandoffError<Self>> {
+        match self.0 {
+            ClientFileInner::Direct(file) => file
+                .into_stdio_recv(offset)
+                .await
+                .map_err(|error| crate::rewrap(error, |file| Self(ClientFileInner::Direct(file)))),
+            ClientFileInner::Remote(file) => match file.stdio_recv(offset).await {
+                Ok(stdio) => Ok(stdio),
+                Err(error) => Err(HandoffError::new(
+                    Self(ClientFileInner::Remote(file)),
+                    error,
+                )),
+            },
         }
     }
 
@@ -626,8 +1007,8 @@ impl FileHandle for ClientFile {
         }
     }
 
-    async fn set_size(&mut self, size: u64) -> crate::Result<()> {
-        match &mut self.0 {
+    async fn set_size(&self, size: u64) -> crate::Result<()> {
+        match &self.0 {
             ClientFileInner::Direct(file) => file.set_size(size).await,
             ClientFileInner::Remote(file) => {
                 file.idle()?;
@@ -646,8 +1027,8 @@ impl FileHandle for ClientFile {
         }
     }
 
-    async fn metadata(&mut self) -> crate::Result<Metadata> {
-        match &mut self.0 {
+    async fn metadata(&self) -> crate::Result<Metadata> {
+        match &self.0 {
             ClientFileInner::Direct(file) => file.metadata().await,
             ClientFileInner::Remote(file) => {
                 file.idle()?;
@@ -663,8 +1044,8 @@ impl FileHandle for ClientFile {
         }
     }
 
-    async fn fs_metadata(&mut self) -> crate::Result<FsMetadata> {
-        match &mut self.0 {
+    async fn fs_metadata(&self) -> crate::Result<FsMetadata> {
+        match &self.0 {
             ClientFileInner::Direct(file) => file.fs_metadata().await,
             ClientFileInner::Remote(file) => {
                 file.idle()?;
@@ -680,8 +1061,8 @@ impl FileHandle for ClientFile {
         }
     }
 
-    async fn acl(&mut self, kind: AclKind, default: bool) -> crate::Result<Option<Acl>> {
-        match &mut self.0 {
+    async fn acl(&self, kind: AclKind, default: bool) -> crate::Result<Option<Acl>> {
+        match &self.0 {
             ClientFileInner::Direct(file) => file.acl(kind, default).await,
             ClientFileInner::Remote(file) => {
                 file.idle()?;
@@ -701,13 +1082,8 @@ impl FileHandle for ClientFile {
         }
     }
 
-    async fn set_acl(
-        &mut self,
-        kind: AclKind,
-        acl: Option<&Acl>,
-        default: bool,
-    ) -> crate::Result<()> {
-        match &mut self.0 {
+    async fn set_acl(&self, kind: AclKind, acl: Option<&Acl>, default: bool) -> crate::Result<()> {
+        match &self.0 {
             ClientFileInner::Direct(file) => file.set_acl(kind, acl, default).await,
             ClientFileInner::Remote(file) => {
                 file.idle()?;
@@ -728,11 +1104,8 @@ impl FileHandle for ClientFile {
         }
     }
 
-    async fn sec_desc(
-        &mut self,
-        mask: dolang_winterop::security::SecInfo,
-    ) -> crate::Result<SecDesc> {
-        match &mut self.0 {
+    async fn sec_desc(&self, mask: dolang_winterop::security::SecInfo) -> crate::Result<SecDesc> {
+        match &self.0 {
             ClientFileInner::Direct(file) => file.sec_desc(mask).await,
             ClientFileInner::Remote(file) => {
                 file.idle()?;
@@ -751,8 +1124,8 @@ impl FileHandle for ClientFile {
         }
     }
 
-    async fn set_sec_desc(&mut self, sec_desc: &SecDesc) -> crate::Result<()> {
-        match &mut self.0 {
+    async fn set_sec_desc(&self, sec_desc: &SecDesc) -> crate::Result<()> {
+        match &self.0 {
             ClientFileInner::Direct(file) => file.set_sec_desc(sec_desc).await,
             ClientFileInner::Remote(file) => {
                 file.idle()?;
@@ -771,11 +1144,8 @@ impl FileHandle for ClientFile {
         }
     }
 
-    async fn xattrs(
-        &mut self,
-        namespace: crate::XattrNamespace<'_>,
-    ) -> crate::Result<Vec<XattrEntry>> {
-        match &mut self.0 {
+    async fn xattrs(&self, namespace: crate::XattrNamespace<'_>) -> crate::Result<Vec<XattrEntry>> {
+        match &self.0 {
             ClientFileInner::Direct(file) => file.xattrs(namespace).await,
             ClientFileInner::Remote(file) => {
                 file.idle()?;
@@ -794,8 +1164,8 @@ impl FileHandle for ClientFile {
         }
     }
 
-    async fn xattr(&mut self, name: &str, namespace: Option<&str>) -> crate::Result<Vec<u8>> {
-        match &mut self.0 {
+    async fn xattr(&self, name: &str, namespace: Option<&str>) -> crate::Result<Vec<u8>> {
+        match &self.0 {
             ClientFileInner::Direct(file) => file.xattr(name, namespace).await,
             ClientFileInner::Remote(file) => {
                 file.idle()?;
@@ -815,8 +1185,8 @@ impl FileHandle for ClientFile {
         }
     }
 
-    async fn streams(&mut self) -> crate::Result<Vec<StreamEntry>> {
-        match &mut self.0 {
+    async fn streams(&self) -> crate::Result<Vec<StreamEntry>> {
+        match &self.0 {
             ClientFileInner::Direct(file) => file.streams().await,
             ClientFileInner::Remote(file) => {
                 file.idle()?;
@@ -833,12 +1203,12 @@ impl FileHandle for ClientFile {
     }
 
     async fn set_xattr(
-        &mut self,
+        &self,
         name: &str,
         namespace: Option<&str>,
         value: &[u8],
     ) -> crate::Result<()> {
-        match &mut self.0 {
+        match &self.0 {
             ClientFileInner::Direct(file) => file.set_xattr(name, namespace, value).await,
             ClientFileInner::Remote(file) => {
                 file.idle()?;
@@ -859,8 +1229,8 @@ impl FileHandle for ClientFile {
         }
     }
 
-    async fn remove_xattr(&mut self, name: &str, namespace: Option<&str>) -> crate::Result<()> {
-        match &mut self.0 {
+    async fn remove_xattr(&self, name: &str, namespace: Option<&str>) -> crate::Result<()> {
+        match &self.0 {
             ClientFileInner::Direct(file) => file.remove_xattr(name, namespace).await,
             ClientFileInner::Remote(file) => {
                 file.idle()?;
@@ -901,7 +1271,6 @@ impl FileHandle for ClientFile {
                             lock.map(|lock| {
                                 crate::file::FileLock::remote(RemoteFileLock {
                                     client: file.client.clone(),
-                                    file: file.file.clone(),
                                     lock: Some(lock),
                                 })
                             })
@@ -926,6 +1295,36 @@ impl FileHandle for ClientFile {
 
 fn wire_io(error: crate::protocol::WireError) -> io::Error {
     crate::Error::from(error).into_io_error()
+}
+
+fn negative_seek() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "invalid seek to a negative or overflowing position",
+    )
+}
+
+/// Applies a write acknowledgement to the cursor and reports the byte count.
+///
+/// A positional write lands exactly where it was aimed, so the cursor simply
+/// advances by what the peer accepted. An append write does not: the offset it
+/// used is the peer's business, so the reply carries the resulting position and
+/// the cursor takes it verbatim.
+fn ack_write(cursor: &AtomicU64, response: ResponseKind) -> io::Result<usize> {
+    match response {
+        ResponseKind::Error(error) => Err(wire_io(error)),
+        ResponseKind::FileWrite(result) => {
+            let written = result.map_err(wire_io)?;
+            cursor.fetch_add(written as u64, Ordering::Relaxed);
+            Ok(written)
+        }
+        ResponseKind::FileAppend(result) => {
+            let (written, end) = result.map_err(wire_io)?;
+            cursor.store(end, Ordering::Relaxed);
+            Ok(written)
+        }
+        response => Err(unexpected(response)),
+    }
 }
 
 fn query_from_wire(response: QueryResponse) -> Query {
@@ -2441,7 +2840,11 @@ impl crate::OpenOptions for OpenOptions<'_> {
                     self.write,
                     self.append,
                 )),
-                OpenHandle::Opaque(file) => Ok(ClientFile::from_remote(self.client.clone(), file)),
+                OpenHandle::Opaque(file) => Ok(ClientFile::from_remote(
+                    self.client.clone(),
+                    file,
+                    self.append,
+                )),
             },
             response => Err(unexpected(response).into()),
         }

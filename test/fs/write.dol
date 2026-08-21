@@ -17,6 +17,7 @@ import sys
 import shell
 import std:
   - RuntimeError
+  - StateError
 
 #[agent.test]
 def write_and_read_back_text()
@@ -91,6 +92,52 @@ def sink_put_terminates_only_when_asked()
       b"one\n"
     open $test_path rb do |file|
       assert_eq $file.read() $expected
+
+#[agent.test]
+def write_at_offset()
+    let test_path = "test_write_offset.txt"
+    write $test_path "abcdefghij"
+
+    open $test_path "r+" do |f|
+      # An explicit offset neither consults nor moves the cursor.
+      assert_eq (f.write "XY" offset: 2) 2
+      assert_eq $f.tell() 0
+      assert_eq $f.read(4) "abXY"
+      assert_eq $f.tell() 4
+
+      # Writing past the end extends the file, zero-filling the gap.
+      assert_eq (f.write "Z" offset: 11) 1
+
+    assert_eq (read test_path) "abXYefghij\0Z"
+    remove $test_path
+
+#[agent.test]
+def write_at_offset_transfers_the_whole_count()
+    # One positional write may transfer less than asked, so `offset:` loops
+    # internally; without that this leaves a truncated file on some backends.
+    let test_path = "test_write_offset_large.txt"
+    let data = ("abcdefghij".repeat 200000)
+
+    open $test_path "w+" do |f|
+      assert_eq (f.write data offset: 0) $data.len
+    assert_eq (read test_path) $data
+    remove $test_path
+
+#[agent.test]
+def write_at_offset_is_refused_in_append_mode()
+    # Every write on an append handle lands at the end regardless of the
+    # offset the platform is handed, so an offset cannot be honored at all.
+    let test_path = "test_write_offset_append.txt"
+    write $test_path "abc"
+
+    open $test_path a do |f|
+      assert_throws $StateError do
+        f.write "X" offset: 0
+      # The handle still works without one.
+      assert_eq (f.write "d") 1
+
+    assert_eq (read test_path) "abcd"
+    remove $test_path
 
 #[agent.test]
 def write_to_file_opened_in_append_mode()
