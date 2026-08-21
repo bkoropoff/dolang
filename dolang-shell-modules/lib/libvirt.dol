@@ -196,12 +196,17 @@ def raw_undefine name connect_uri ...options
   catch proc.Error: _
     virsh $connect_uri undefine $name ...options
 
-def copy_chunks input output indicator
+let CHUNK_SIZE = (512 * 1024)
+let PARALLEL = 8
+
+def copy_chunks total input output indicator
   strand.pipeline
-    do while let chunk = input.read(1024 * 1024)
-      strand.put $chunk
-    do for chunk
-      output.write $chunk
+    do strand.pool $PARALLEL (Range 0 total CHUNK_SIZE) do |offset|
+      let chunk = input.read $CHUNK_SIZE :offset
+      strand.put [offset, chunk]
+    do strand.pool $PARALLEL $strand.input() do |item|
+      let offset chunk = item
+      output.write $chunk :offset
       indicator.delta $chunk.len
 
 def payload_directory user
@@ -679,10 +684,9 @@ pub class Domain
         do |indicator|
           self.with ...options do
             destination.open wb do |output|
-              copy_chunks $input $output $indicator
+              copy_chunks $total $input $output $indicator
             if (chmod != nil)
               destination.set_metadata mode: $chmod
-    nil
 
   # Copies one file from the domain to the local VFS.
   pub def download self source destination ...options
@@ -697,8 +701,7 @@ pub class Domain
             icon: ⬇️
             total: $total
             units: :BYTES:
-            do |indicator| copy_chunks $input $output $indicator
-    nil
+            do |indicator| copy_chunks $total $input $output $indicator
 
   # Undefines the domain and removes a validated managed overlay.
   pub def undefine self
