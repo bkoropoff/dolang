@@ -81,8 +81,11 @@ impl Sid {
         identifier_authority_bytes[2..].copy_from_slice(&bytes[2..8]);
         let identifier_authority = u64::from_be_bytes(identifier_authority_bytes);
         let sub_authorities = bytes[8..]
-            .chunks_exact(4)
-            .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()));
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .copied()
+            .map(u32::from_le_bytes);
         Self::new(identifier_authority, sub_authorities)
     }
 

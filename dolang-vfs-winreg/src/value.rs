@@ -56,8 +56,11 @@ mod raw {
     }
 
     fn bytes_to_units(data: &[u8]) -> Vec<u16> {
-        data.chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        data.as_chunks::<2>()
+            .0
+            .iter()
+            .copied()
+            .map(u16::from_le_bytes)
             .collect()
     }
 

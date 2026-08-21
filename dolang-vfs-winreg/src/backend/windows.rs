@@ -257,8 +257,11 @@ unsafe fn native_key_name(handle: HKEY) -> Result<String, Error> {
             ));
         }
         let units: Vec<u16> = data
-            .chunks_exact(2)
-            .map(|p| u16::from_le_bytes([p[0], p[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .copied()
+            .map(u16::from_le_bytes)
             .collect();
         return String::from_utf16(&units).map_err(|_| {
             Error::new(
@@ -476,8 +479,11 @@ unsafe fn read_link(parent: HKEY, subpath: &str, view: View) -> Result<LinkTarge
         ));
     }
     let units: Vec<u16> = data
-        .chunks_exact(2)
-        .map(|p| u16::from_le_bytes([p[0], p[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .copied()
+        .map(u16::from_le_bytes)
         .collect();
     let native = String::from_utf16(&units).map_err(|_| {
         Error::new(
