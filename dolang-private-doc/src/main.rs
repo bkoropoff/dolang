@@ -78,52 +78,42 @@ fn is_def_site(entry: &TokEntry) -> bool {
     }
 }
 
-/// Scan backward from index `i` to find the preceding block of contiguous comment lines.
-/// Returns the comment text with `# ` stripped, joined as markdown (in forward order).
-fn extract_doc(entries: &[TokEntry], i: usize, content: &[u8]) -> String {
-    // The def name is on some line L. Find the start line by scanning back through
-    // keywords on the same line (pub/def/class/let may precede the name).
-    let def_line = entries[i].line;
-
-    // Scan backward collecting comment tokens on lines def_line-1, def_line-2, etc.
-    // Stop as soon as there's a gap.
+/// Scans backward for the preceding block of doc comments, skipping decorators.
+fn extract_doc(entry: &TokEntry, content: &[u8]) -> String {
+    let prefix = std::str::from_utf8(&content[..entry.start]).unwrap_or("");
+    let prefix = prefix.rsplit_once('\n').map_or("", |(lines, _)| lines);
     let mut comment_lines: Vec<String> = Vec::new();
-    let mut expected_line = def_line.saturating_sub(1);
-    let mut j = i;
-    loop {
-        if j == 0 {
+    let mut lines = prefix.lines().rev().peekable();
+
+    while lines
+        .peek()
+        .is_some_and(|line| line.trim_start().starts_with("#["))
+    {
+        lines.next();
+    }
+    for line in lines {
+        let line = line.trim_start();
+        if !line.starts_with('#') || line.starts_with("#[") {
             break;
         }
-        j -= 1;
-        let e = &entries[j];
-        match &e.token {
-            Token::Comment => {
-                if e.line == expected_line {
-                    let raw = src_text(content, e.start, e.end);
-                    // Strip leading `# ` or `#`
-                    let stripped = raw
-                        .strip_prefix("# ")
-                        .or_else(|| raw.strip_prefix('#'))
-                        .unwrap_or(raw);
-                    comment_lines.push(stripped.to_owned());
-                    if expected_line > 0 {
-                        expected_line -= 1;
-                    } else {
-                        break;
-                    }
-                } else if e.line < expected_line {
-                    // Gap — stop
-                    break;
-                }
-                // e.line > expected_line: comment on same def line or after — skip
-            }
-            // Non-comment tokens on preceding lines break the contiguous block
-            _ if e.line < expected_line => break,
-            _ => {}
-        }
+        let stripped = line
+            .strip_prefix("# ")
+            .or_else(|| line.strip_prefix('#'))
+            .unwrap_or(line);
+        comment_lines.push(stripped.to_owned());
     }
     comment_lines.reverse();
     comment_lines.join("\n")
+}
+
+fn has_decorator(entry: &TokEntry, content: &[u8], decorator: &str) -> bool {
+    let prefix = std::str::from_utf8(&content[..entry.start]).unwrap_or("");
+    let prefix = prefix.rsplit_once('\n').map_or("", |(lines, _)| lines);
+    prefix
+        .lines()
+        .rev()
+        .take_while(|line| line.trim_start().starts_with("#["))
+        .any(|line| line.trim() == format!("#[{decorator}]"))
 }
 
 /// Determine if a token is a special method definition (e.g. `(init)`).
@@ -345,7 +335,7 @@ fn main() -> io::Result<()> {
         } else {
             src_text(&content, e.start, e.end).to_owned()
         };
-        let doc = extract_doc(&entries, i, &content);
+        let doc = extract_doc(e, &content);
         let span = span_json(e);
 
         match &e.origin {
@@ -364,16 +354,26 @@ fn main() -> io::Result<()> {
                 top_level.push((e.start, Value::Null)); // placeholder, filled later
             }
             Some(Origin::Method { class: cls, .. }) => {
-                let params = params_json(collect_params(&entries, i, &content));
-                let member = json!({
-                    "kind": "method",
-                    "name": name,
-                    "pub": pub_flag,
-                    "special": special,
-                    "span": span,
-                    "doc": doc,
-                    "params": params,
-                });
+                let member = if has_decorator(e, &content, "getter") {
+                    json!({
+                        "kind": "field",
+                        "name": name,
+                        "pub": pub_flag,
+                        "span": span,
+                        "doc": doc,
+                    })
+                } else {
+                    let params = params_json(collect_params(&entries, i, &content));
+                    json!({
+                        "kind": "method",
+                        "name": name,
+                        "pub": pub_flag,
+                        "special": special,
+                        "span": span,
+                        "doc": doc,
+                        "params": params,
+                    })
+                };
                 class_members
                     .entry(cls.start().byte_offset())
                     .or_default()
