@@ -596,10 +596,6 @@ async fn run_monitor<'v, 's>(
         }
         Ok(())
     } else {
-        if res.signal() == Some(13) {
-            return Err(Error::sink_stop(strand));
-        }
-
         Err(error::proc_status_error(strand, name, res))
     }
 }
