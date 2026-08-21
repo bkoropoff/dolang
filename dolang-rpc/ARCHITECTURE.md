@@ -865,10 +865,14 @@ closes, which means every handle that could still queue work is gone.
 *and* every dispatched call has answered. The send driver then finishes
 everything it holds, `has_pending` rather than `has_work`, parked sends
 included — the receive half is still running, so the credit that releases them
-can still arrive. The condition also requires the outgoing channel to be
-drained: a handler queues its response and *then* completes, and completing is
-what seals the drain, so at the instant the signal lands the last response may
-still be in the channel rather than in the scheduler.
+can still arrive. It then waits for all payload quota charged by those
+responses to return. A peer may have consumed the final response while its
+`PayloadCredit` control message is still queued; closing a pipe transport in
+that interval makes an intermediate relay's write fail. The condition also
+requires the outgoing channel to be drained: a handler queues its response and
+*then* completes, and completing is what seals the drain, so at the instant the
+signal lands the last response may still be in the channel rather than in the
+scheduler.
 
 `Abrupt` is published unconditionally on the receive driver's way out, and it
 sticks — it cannot be downgraded. No further credit can arrive, so the send

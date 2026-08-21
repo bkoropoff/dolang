@@ -800,7 +800,11 @@ impl<P: Protocol> SendDriver<P> {
                 // last response may still be sitting in the channel, not yet
                 // admitted to the scheduler, which would leave `has_pending`
                 // reporting nothing to do.
-                Drain::Graceful => !self.scheduler.has_pending() && self.outgoing.is_empty(),
+                Drain::Graceful => {
+                    !self.scheduler.has_pending()
+                        && self.outgoing.is_empty()
+                        && self.shared.payload_budget.is_restored()
+                }
                 Drain::Abrupt => !self.scheduler.has_work(),
             };
             if done {
@@ -818,6 +822,12 @@ impl<P: Protocol> SendDriver<P> {
                 // terminal condition is the whole of the arm — the loop head
                 // above does the work.
                 _ = self.drain.changed() => {}
+                // Once the response queue is empty, graceful shutdown still
+                // owes the peer time to return the payload credits for those
+                // responses. EOF changes the drain mode to `Abrupt` through
+                // the receive driver, so a departed peer cannot strand this.
+                _ = self.shared.payload_budget.wait_restored(),
+                    if mode == Drain::Graceful && !self.shared.payload_budget.is_restored() => {}
                 // Not raced against anything — see the matching comment in
                 // client.rs's writer loop. A dropped send future could leave a
                 // committed partial fragment on the transport, or — on

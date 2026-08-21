@@ -2243,6 +2243,38 @@ async fn graceful_shutdown_delivers_responses_blocked_on_payload_quota() {
 }
 
 #[tokio::test]
+async fn graceful_shutdown_waits_for_the_last_response_payload_credit() {
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    let mut server = drain_server(server_io);
+    let client = drain_client(client_io).await;
+
+    let response = client.call(DrainRequest::Big);
+    let shutdown = client.call(DrainRequest::Shutdown);
+    let mut response = response.await.unwrap();
+    let credit = response.take_payload_credit();
+    assert_eq!(response.into_response().0.len(), BIG);
+    assert_eq!(
+        shutdown.await.unwrap().into_response(),
+        DrainResponse(Vec::new())
+    );
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut server)
+            .await
+            .is_err(),
+        "server exited while the client's final payload credit was still held",
+    );
+
+    credit.release();
+    tokio::time::timeout(Duration::from_secs(5), &mut server)
+        .await
+        .expect("server did not finish after its payload credit returned")
+        .unwrap()
+        .unwrap();
+    client.close().await;
+}
+
+#[tokio::test]
 async fn a_lost_peer_does_not_hang_a_send_blocked_on_payload_quota() {
     // The mirror of the test above: with the receive half gone there is no
     // credit left to wait for, so the writer must abandon what it cannot
