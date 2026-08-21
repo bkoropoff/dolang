@@ -77,7 +77,7 @@ jobs:
         run: dodo.run lint
 
       - name: Run tests
-        run: dodo.run test
+        run: dodo.run test --full
 
       # Runs on the runner rather than in the VM, and before teardown: the
       # domain disk drops guest flushes, so the caches have to be copied out
