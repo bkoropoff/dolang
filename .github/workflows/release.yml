@@ -43,6 +43,7 @@ jobs:
         uses: ./.github/actions/setup-runner
         with:
           target: ${{ matrix.target }}
+          virt: ${{ matrix.target == 'x86_64-freebsd' }}
 
       - name: Build and install release binaries
         run: |
@@ -62,7 +63,7 @@ jobs:
             fs.copy
               target/$((str $ sys.cpu_info().arch).lower())-pc-windows-msvc/debug/dolang-private-polyfill.exe
               release/bin/dolang-private-polyfill.exe
-          run release/bin/dolang --module-path testlib -m test -- test
+          run release/bin/dolang --module-path testlib -m test --tags !release test
           if is_win
             # Now remove it
             fs.remove release/bin/dolang-private-polyfill.exe
@@ -104,10 +105,44 @@ jobs:
         with:
           upload: true
 
+  release-tests:
+    name: Release Integration
+    needs: dist
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup runner
+        uses: ./.github/actions/setup-runner
+        with:
+          rust: false
+          virt: true
+
+      - name: Download x86-64 artifacts
+        uses: actions/download-artifact@v6
+        with:
+          pattern: dolang-x86_64-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Run release integration tests
+        run: |
+          import fs:
+            - Path
+
+          let bin = Path("release-test-bin").absolute()
+          bin.create_dir all: true
+          run tar -xzf artifacts/dolang-x86_64-linux.tar.gz -C $bin
+          let archive = Path("artifacts/dolang-x86_64-freebsd.tar.gz").absolute()
+          env DOLANG_LIBVIRT_TEST_ARCHIVE: $archive do
+            run $bin/dolang --module-path testlib -m test
+              --tags release test
+
   create-release:
     name: Create Release
     if: github.ref_type == 'tag' && (github.ref_name == 'bootstrap' || startsWith(github.ref_name, 'v'))
-    needs: [dist, vsix]
+    needs: [dist, vsix, release-tests]
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -66,6 +66,7 @@ jobs:
         uses: ./.github/actions/setup-runner
         with:
           target: ${{ matrix.target }}
+          virt: ${{ matrix.target == 'x86_64-freebsd' }}
           save-cache: ${{ github.ref == 'refs/heads/master' }}
 
       # Skipped in the VM: `clippy --all-targets` compiles the whole dependency

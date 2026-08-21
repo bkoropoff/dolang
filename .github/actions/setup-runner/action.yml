@@ -11,6 +11,9 @@ inputs:
   rust:
     description: Install the Rust toolchain and shared build cache
     default: "true"
+  virt:
+    description: Install host virtualization prerequisites on Linux
+    default: "false"
   save-cache:
     description: >
       Save updated caches for a later run to restore. Caches are scoped to the
@@ -104,12 +107,14 @@ runs:
         CI_SHELL: ${{ github.action_path }}/lib/shell.dol
         CI_TARGET: ${{ inputs.target }}
         CI_RUST: ${{ inputs.rust }}
+        CI_VIRT: ${{ inputs.virt }}
       run: |
         import ci
         ci.setup
           shell: $env["CI_SHELL"]
           target: $env["CI_TARGET"]
           rust: (env["CI_RUST"] == "true")
+          virt: (env["CI_VIRT"] == "true")
 
     # The counterpart to "Restore CI VM assets" above. Placed here, right
     # after the assets are created, rather than left to run automatically at
