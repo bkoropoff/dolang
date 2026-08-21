@@ -1,8 +1,7 @@
 #![deny(warnings)]
 
 use dolang_vfs::{
-    AnyVfs,
-    direct::Direct,
+    Vfs,
     error::{Error, ErrorKind},
 };
 #[cfg(windows)]
@@ -24,7 +23,7 @@ mod stub {
     //! Non-Windows backends omit the extension capability. The public wrapper
     //! converts that absence into a clear `Unsupported` error.
 
-    use dolang_vfs::{client::Client, server::Server};
+    use dolang_vfs::server::Server;
     use tempfile::tempdir;
     use tokio::task::JoinHandle;
 
@@ -40,7 +39,7 @@ mod stub {
 
     #[tokio::test]
     async fn direct_dispatch_reports_unsupported() {
-        let vfs = AnyVfs::Direct(Direct::new().unwrap());
+        let vfs = Vfs::direct().unwrap();
         let error = expect_err(
             Key::open_root(
                 &vfs,
@@ -58,8 +57,8 @@ mod stub {
         let dir = tempdir().unwrap();
         let socket_path = dir.path().join("vfs.sock");
         let _server = start_server(&socket_path).await;
-        let client = Client::connect(&socket_path).await.unwrap();
-        let vfs = AnyVfs::Client(client);
+        let client = Vfs::connect(&socket_path).await.unwrap();
+        let vfs = client;
         let error = expect_err(
             Key::open_root(
                 &vfs,
@@ -87,7 +86,7 @@ mod live {
         sync::atomic::{AtomicU64, Ordering},
     };
 
-    use dolang_vfs::{client::Client, server::Server};
+    use dolang_vfs::server::Server;
     use dolang_vfs_winreg::Value;
     use tokio::{
         net::windows::named_pipe::{ClientOptions, ServerOptions},
@@ -113,7 +112,7 @@ mod live {
 
     static NEXT_PIPE: AtomicU64 = AtomicU64::new(0);
 
-    async fn connected_client() -> (Client, JoinHandle<std::io::Result<()>>) {
+    async fn connected_client() -> (Vfs, JoinHandle<Result<(), Error>>) {
         let id = NEXT_PIPE.fetch_add(1, Ordering::Relaxed);
         let name = format!(r"\\.\pipe\dolang-vfs-winreg-{}-{id}", std::process::id());
         let client_pipe = ServerOptions::new()
@@ -130,24 +129,23 @@ mod live {
                 .serve()
                 .await
         });
-        let client =
-            unsafe { Client::from_named_pipe_server(client_pipe, current_process_handle()) }
-                .await
-                .unwrap();
+        let client = unsafe { Vfs::from_named_pipe_server(client_pipe, current_process_handle()) }
+            .await
+            .unwrap();
         (client, server_task)
     }
 
     /// A client/server pair forced into `SessionMode::Remote` even though
     /// they run in the same process, over an in-memory duplex stream. This
     /// pins down the opaque-handle fallback path independent of transport:
-    /// `Client::new`/`Server::new` always report `SessionMode::Remote`
+    /// `AnyVfs::new`/`Server::new` always report `SessionMode::Remote`
     /// regardless of what stream backs them, unlike the named-pipe
     /// transport used by `connected_client`, which is always `Native`.
-    async fn forced_remote_client() -> (Client, JoinHandle<std::io::Result<()>>) {
+    async fn forced_remote_client() -> (Vfs, JoinHandle<Result<(), Error>>) {
         let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
         let server_task =
             tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
-        let client = Client::new(client_stream).await.unwrap();
+        let client = Vfs::new(client_stream).await.unwrap();
         (client, server_task)
     }
 
@@ -156,7 +154,7 @@ mod live {
     /// Returns the `dolang-vfs-winreg-tests` key (so the caller can delete
     /// the scratch key by name when done), the scratch key's own name, and
     /// the scratch key itself.
-    async fn scratch_key(vfs: &AnyVfs) -> (Key, String, Key) {
+    async fn scratch_key(vfs: &Vfs) -> (Key, String, Key) {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
 
@@ -188,7 +186,7 @@ mod live {
         (parent, name, scratch)
     }
 
-    async fn exercise(vfs: &AnyVfs) {
+    async fn exercise(vfs: &Vfs) {
         let (parent, scratch_name, scratch) = scratch_key(vfs).await;
 
         // Enumerate on an empty key.
@@ -486,7 +484,7 @@ mod live {
 
     #[tokio::test]
     async fn direct_dispatch_exercises_real_registry() {
-        exercise(&AnyVfs::Direct(Direct::new().unwrap())).await;
+        exercise(&Vfs::direct().unwrap()).await;
     }
 
     /// Runs [`exercise`] over a remote `client`/`server` pair, always
@@ -500,7 +498,7 @@ mod live {
     /// itself as a task lets a panic there be caught as a `JoinError`
     /// instead, so the server task can still be joined and its outcome
     /// folded into the failure before resuming the original panic.
-    async fn run_remote_exercise(vfs: AnyVfs, server: JoinHandle<std::io::Result<()>>) {
+    async fn run_remote_exercise(vfs: Vfs, server: JoinHandle<Result<(), Error>>) {
         let exercise_result = tokio::spawn(async move {
             exercise(&vfs).await;
             vfs
@@ -530,7 +528,7 @@ mod live {
     #[tokio::test]
     async fn remote_dispatch_exercises_real_registry() {
         let (client, server) = connected_client().await;
-        run_remote_exercise(AnyVfs::Client(client), server).await;
+        run_remote_exercise(client, server).await;
     }
 
     /// Same exercise, but over a session forced into `SessionMode::Remote`
@@ -540,6 +538,6 @@ mod live {
     #[tokio::test]
     async fn forced_remote_dispatch_exercises_real_registry() {
         let (client, server) = forced_remote_client().await;
-        run_remote_exercise(AnyVfs::Client(client), server).await;
+        run_remote_exercise(client, server).await;
     }
 }

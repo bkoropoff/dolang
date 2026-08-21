@@ -10,7 +10,7 @@ use tokio::runtime::Builder;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 
-use crate::Server;
+use crate::server::Server;
 
 enum EnvOp {
     Set(OsString, OsString),
@@ -89,7 +89,11 @@ fn split_assignment(arg: &OsStr) -> Option<(OsString, OsString)> {
 }
 
 /// Runs the VFS service using command-line `args`.
-pub fn main(args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> io::Result<()> {
+pub fn main(args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> crate::error::Result<()> {
+    Ok(main_io(args)?)
+}
+
+fn main_io(args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> io::Result<()> {
     let mut env_ops = Vec::new();
     let mut cwd: Option<PathBuf> = None;
     let mut mode: Option<String> = None;
@@ -311,19 +315,19 @@ fn serve_stdio() -> io::Result<()> {
 
         let server = Server::new_split(stdin, stdout)
             .await
-            .map_err(crate::Error::into_io_error)?;
+            .map_err(crate::error::Error::into_io_error)?;
         #[cfg(windows)]
         {
             tokio::select! {
                 result = server.serve() => result,
-                result = windows_interrupt_signal() => result,
+                result = windows_interrupt_signal() => Ok(result?),
             }
         }
         #[cfg(unix)]
         {
             tokio::select! {
                 result = server.serve() => result,
-                result = unix_interrupt_signal() => result,
+                result = unix_interrupt_signal() => Ok(result?),
             }
         }
         #[cfg(not(any(windows, unix)))]
@@ -346,7 +350,7 @@ fn serve_stdio() -> io::Result<()> {
     #[cfg(not(windows))]
     drop(runtime);
 
-    result
+    Ok(result?)
 }
 
 /// Raised kernel pipe buffer size requested for the `--stdio` fast path.
@@ -540,7 +544,7 @@ async fn accept_loop(server: Server, print_ready: bool) -> Result<(), io::Error>
     }
 
     tokio::select! {
-        res = server.accept() => res,
+        res = server.accept() => Ok(res?),
         _ = sigint.recv() => Ok(()),
         _ = sigterm.recv() => Ok(()),
     }
@@ -594,7 +598,7 @@ fn foreground(socket_path: &Path, key: Option<dolang_rpc::AuthKey>) -> io::Resul
 fn accept_one(socket_path: &Path, key: Option<dolang_rpc::AuthKey>) -> io::Result<()> {
     let rt = Builder::new_current_thread().enable_all().build()?;
 
-    rt.block_on(async move {
+    Ok(rt.block_on(async move {
         let parent = socket_parent(socket_path)?;
         if socket_path.exists() {
             let _ = std::fs::remove_file(socket_path);
@@ -624,7 +628,7 @@ fn accept_one(socket_path: &Path, key: Option<dolang_rpc::AuthKey>) -> io::Resul
             let _ = std::fs::remove_file(socket_path);
         }
         res
-    })
+    })?)
 }
 
 #[cfg(windows)]
@@ -632,12 +636,12 @@ fn serve_named_pipe(pipe_name: &OsStr) -> io::Result<()> {
     use tokio::net::windows::named_pipe::ClientOptions;
 
     let runtime = Builder::new_current_thread().enable_all().build()?;
-    runtime.block_on(async move {
+    Ok(runtime.block_on(async move {
         let pipe = ClientOptions::new().open(pipe_name)?;
         let server = Server::from_named_pipe_client(pipe).await?;
         tokio::select! {
             result = server.serve() => result,
-            result = windows_interrupt_signal() => result,
+            result = windows_interrupt_signal() => Ok(result?),
         }
-    })
+    })?)
 }

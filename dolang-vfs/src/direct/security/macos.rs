@@ -1,6 +1,5 @@
 use std::{
     ffi::CStr,
-    io,
     os::fd::{AsFd, AsRawFd},
     path::Path,
     ptr,
@@ -9,15 +8,16 @@ use std::{
 use std::fs::File;
 use uuid::Uuid;
 
+use crate::error::{Error, ErrorKind, Result};
 use crate::security::{
     Acl, AclKind, MacosAce, MacosAceFlags, MacosAceMask, MacosAceType, MacosAcl,
 };
 
 use super::{cpath, unsupported_kind};
 
-fn call(result: libc::c_int) -> io::Result<()> {
+fn call(result: libc::c_int) -> Result<()> {
     if result < 0 {
-        Err(io::Error::last_os_error())
+        Err(Error::last_os_error())
     } else {
         Ok(())
     }
@@ -182,10 +182,10 @@ mod acl {
         path: Option<&CStr>,
         fd: libc::c_int,
         follow: bool,
-    ) -> io::Result<Option<MacosAcl>> {
+    ) -> Result<Option<MacosAcl>> {
         let acl = OwnedAcl(unsafe { get_native(path, fd, follow) });
         if acl.0.is_null() {
-            let error = io::Error::last_os_error();
+            let error = Error::last_os_error();
             // The target has no extended ACL at all.
             let no_acl = match error.raw_os_error() {
                 Some(libc::EINVAL) => true,
@@ -211,7 +211,7 @@ mod acl {
             // ever pass ACL_FIRST_ENTRY/ACL_NEXT_ENTRY, so EINVAL from this
             // call can only mean "no more entries" in our usage).
             if unsafe { acl_get_entry(acl.0, entry_id, &mut entry) } != 0 {
-                let error = io::Error::last_os_error();
+                let error = Error::last_os_error();
                 if error.raw_os_error() == Some(libc::EINVAL) {
                     break;
                 }
@@ -230,8 +230,8 @@ mod acl {
                 ACL_EXTENDED_ALLOW => MacosAceType::Allow,
                 ACL_EXTENDED_DENY => MacosAceType::Deny,
                 _ => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Unsupported,
+                    return Err(Error::new(
+                        ErrorKind::Unsupported,
                         "macOS extended ACL entry has an unrecognized tag",
                     ));
                 }
@@ -239,7 +239,7 @@ mod acl {
 
             let value = unsafe { acl_get_qualifier(entry) };
             if value.is_null() {
-                return Err(io::Error::last_os_error());
+                return Err(Error::last_os_error());
             }
             // SAFETY: for ACL_EXTENDED_ALLOW/ACL_EXTENDED_DENY entries the
             // qualifier is always a 16-byte guid_t.
@@ -252,7 +252,7 @@ mod acl {
             for (bit, native) in MASK_BITS {
                 let value = unsafe { acl_get_perm_np(permset, *native) };
                 if value < 0 {
-                    return Err(io::Error::last_os_error());
+                    return Err(Error::last_os_error());
                 }
                 mask.set(*bit, value != 0);
             }
@@ -261,7 +261,7 @@ mod acl {
             for (bit, native) in FLAG_BITS {
                 let value = unsafe { acl_get_flag_np(flagset, *native) };
                 if value < 0 {
-                    return Err(io::Error::last_os_error());
+                    return Err(Error::last_os_error());
                 }
                 flags.set(*bit, value != 0);
             }
@@ -285,7 +285,7 @@ mod acl {
         fd: libc::c_int,
         follow: bool,
         acl: Option<&MacosAcl>,
-    ) -> io::Result<()> {
+    ) -> Result<()> {
         let entries: &[MacosAce] = acl.map(MacosAcl::entries).unwrap_or_default();
 
         let mut native = OwnedAcl(unsafe {
@@ -293,11 +293,11 @@ mod acl {
                 entries
                     .len()
                     .try_into()
-                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "ACL is too large"))?,
+                    .map_err(|_| Error::new(ErrorKind::InvalidInput, "ACL is too large"))?,
             )
         });
         if native.0.is_null() {
-            return Err(io::Error::last_os_error());
+            return Err(Error::last_os_error());
         }
         for ace in entries {
             let tag = match ace.ace_type {
@@ -335,7 +335,7 @@ mod acl {
     }
 }
 
-pub(super) fn get(path: &Path, kind: AclKind, follow: bool) -> io::Result<Option<Acl>> {
+pub(super) fn get(path: &Path, kind: AclKind, follow: bool) -> Result<Option<Acl>> {
     match kind {
         AclKind::Macos => {
             let cpath = cpath(path)?;
@@ -345,7 +345,7 @@ pub(super) fn get(path: &Path, kind: AclKind, follow: bool) -> io::Result<Option
     }
 }
 
-pub(super) fn set(path: &Path, kind: AclKind, acl: Option<&Acl>, follow: bool) -> io::Result<()> {
+pub(super) fn set(path: &Path, kind: AclKind, acl: Option<&Acl>, follow: bool) -> Result<()> {
     match kind {
         AclKind::Macos => {
             let cpath = cpath(path)?;
@@ -355,14 +355,14 @@ pub(super) fn set(path: &Path, kind: AclKind, acl: Option<&Acl>, follow: bool) -
     }
 }
 
-pub(super) fn get_fd(file: &File, kind: AclKind) -> io::Result<Option<Acl>> {
+pub(super) fn get_fd(file: &File, kind: AclKind) -> Result<Option<Acl>> {
     match kind {
         AclKind::Macos => Ok(acl::get(None, file.as_fd().as_raw_fd(), true)?.map(Acl::Macos)),
         AclKind::Posix | AclKind::Nfs4 => Err(unsupported_kind(kind)),
     }
 }
 
-pub(super) fn set_fd(file: &File, kind: AclKind, acl: Option<&Acl>) -> io::Result<()> {
+pub(super) fn set_fd(file: &File, kind: AclKind, acl: Option<&Acl>) -> Result<()> {
     match kind {
         AclKind::Macos => acl::set(
             None,
@@ -392,23 +392,23 @@ mod mbr {
         fn mbr_uuid_to_id(uu: *const u8, id: *mut u32, id_type: *mut libc::c_int) -> libc::c_int;
     }
 
-    fn call(result: libc::c_int) -> io::Result<()> {
+    fn call(result: libc::c_int) -> Result<()> {
         // mbr_*() functions return an error number directly on failure,
         // rather than -1 with errno set.
         if result != 0 {
-            Err(io::Error::from_raw_os_error(result))
+            Err(Error::from_raw_os_error(result))
         } else {
             Ok(())
         }
     }
 
-    pub(super) fn uid_to_uuid(uid: u32) -> io::Result<Uuid> {
+    pub(super) fn uid_to_uuid(uid: u32) -> Result<Uuid> {
         let mut uu = [0u8; 16];
         call(unsafe { mbr_uid_to_uuid(uid, uu.as_mut_ptr()) })?;
         Ok(Uuid::from_bytes(uu))
     }
 
-    pub(super) fn gid_to_uuid(gid: u32) -> io::Result<Uuid> {
+    pub(super) fn gid_to_uuid(gid: u32) -> Result<Uuid> {
         let mut uu = [0u8; 16];
         call(unsafe { mbr_gid_to_uuid(gid, uu.as_mut_ptr()) })?;
         Ok(Uuid::from_bytes(uu))
@@ -419,23 +419,23 @@ mod mbr {
         Gid(u32),
     }
 
-    pub(super) fn uuid_to_id(uuid: Uuid) -> io::Result<ResolvedId> {
+    pub(super) fn uuid_to_id(uuid: Uuid) -> Result<ResolvedId> {
         let mut id = 0u32;
         let mut id_type = 0;
         call(unsafe { mbr_uuid_to_id(uuid.as_bytes().as_ptr(), &mut id, &mut id_type) })?;
         match id_type {
             ID_TYPE_UID => Ok(ResolvedId::Uid(id)),
             ID_TYPE_GID => Ok(ResolvedId::Gid(id)),
-            _ => Err(io::Error::other(
+            _ => Err(Error::other(
                 "mbr_uuid_to_id returned an unrecognized id type",
             )),
         }
     }
 }
 
-fn invalid_combo() -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidInput,
+fn invalid_combo() -> Error {
+    Error::new(
+        ErrorKind::InvalidInput,
         "unsupported principal ID conversion",
     )
 }
@@ -443,7 +443,7 @@ fn invalid_combo() -> io::Error {
 pub(super) fn resolve_principal_id(
     input: crate::security::PrincipalId,
     want: crate::security::PrincipalIdKind,
-) -> io::Result<crate::security::PrincipalId> {
+) -> Result<crate::security::PrincipalId> {
     use crate::security::{PrincipalId, PrincipalIdKind};
 
     match (input, want) {

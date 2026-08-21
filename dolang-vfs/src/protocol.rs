@@ -12,26 +12,34 @@ use serde::{
     de::{Error as _, SeqAccess, Visitor},
     ser::SerializeTuple,
 };
+use typed_path::{Utf8TypedPath, Utf8TypedPathBuf, Utf8UnixPath, Utf8WindowsPath};
 
+use crate::directory::DirEntry;
+use crate::error::Error;
 use crate::extension::ErasedVfsExtension;
-pub(crate) use crate::security::{Acl, AclKind, PrincipalId, PrincipalIdKind};
-pub(crate) use crate::{
-    DirEntry, FsMetadata, Metadata, MetadataPatch, SecurityInfo, SidName, StreamEntry, TargetInfo,
-    XattrEntry, XattrNamespace, path::WellKnownPath,
+use crate::metadata::{FsMetadata, Metadata, MetadataPatch};
+use crate::process::{ProcessControl, ProcessStatus, TerminationPolicy};
+use crate::security::{SecurityInfo, SidName};
+use crate::target::TargetInfo;
+use crate::xattr::{XattrEntry, XattrNamespace};
+use crate::{
+    file::StreamEntry,
+    path::WellKnownPath,
+    security::{Acl, AclKind, PrincipalId, PrincipalIdKind},
 };
-pub(crate) use dolang_winterop::security::{SecDesc, SecInfo, Sid};
+use dolang_winterop::security::{SecDesc, SecInfo, Sid};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(transparent)]
-pub(crate) struct WireError(crate::Error);
+pub(crate) struct WireError(Error);
 
-impl From<crate::Error> for WireError {
-    fn from(error: crate::Error) -> Self {
+impl From<Error> for WireError {
+    fn from(error: Error) -> Self {
         Self(error)
     }
 }
 
-impl From<WireError> for crate::Error {
+impl From<WireError> for Error {
     fn from(error: WireError) -> Self {
         error.0
     }
@@ -93,25 +101,25 @@ pub(crate) struct WirePath {
 }
 
 impl WirePath {
-    pub(crate) fn empty_like(path: crate::Utf8TypedPath<'_>) -> Self {
+    pub(crate) fn empty_like(path: Utf8TypedPath<'_>) -> Self {
         Self {
             kind: match path {
-                crate::Utf8TypedPath::Unix(_) => WirePathKind::Unix,
-                crate::Utf8TypedPath::Windows(_) => WirePathKind::Windows,
+                Utf8TypedPath::Unix(_) => WirePathKind::Unix,
+                Utf8TypedPath::Windows(_) => WirePathKind::Windows,
             },
             path: String::new(),
         }
     }
 }
 
-impl From<crate::Utf8TypedPath<'_>> for WirePath {
-    fn from(path: crate::Utf8TypedPath<'_>) -> Self {
+impl From<Utf8TypedPath<'_>> for WirePath {
+    fn from(path: Utf8TypedPath<'_>) -> Self {
         match path {
-            crate::Utf8TypedPath::Unix(path) => Self {
+            Utf8TypedPath::Unix(path) => Self {
                 kind: WirePathKind::Unix,
                 path: path.as_str().to_owned(),
             },
-            crate::Utf8TypedPath::Windows(path) => Self {
+            Utf8TypedPath::Windows(path) => Self {
                 kind: WirePathKind::Windows,
                 path: path.as_str().to_owned(),
             },
@@ -119,47 +127,43 @@ impl From<crate::Utf8TypedPath<'_>> for WirePath {
     }
 }
 
-impl From<crate::Utf8TypedPathBuf> for WirePath {
-    fn from(path: crate::Utf8TypedPathBuf) -> Self {
+impl From<Utf8TypedPathBuf> for WirePath {
+    fn from(path: Utf8TypedPathBuf) -> Self {
         path.to_path().into()
     }
 }
 
-impl<'a> From<&'a WirePath> for crate::Utf8TypedPath<'a> {
+impl<'a> From<&'a WirePath> for Utf8TypedPath<'a> {
     fn from(path: &'a WirePath) -> Self {
         match path.kind {
-            WirePathKind::Unix => crate::Utf8TypedPath::Unix(crate::Utf8UnixPath::new(&path.path)),
-            WirePathKind::Windows => {
-                crate::Utf8TypedPath::Windows(crate::Utf8WindowsPath::new(&path.path))
-            }
+            WirePathKind::Unix => Utf8TypedPath::Unix(Utf8UnixPath::new(&path.path)),
+            WirePathKind::Windows => Utf8TypedPath::Windows(Utf8WindowsPath::new(&path.path)),
         }
     }
 }
 
-impl From<WirePath> for crate::Utf8TypedPathBuf {
+impl From<WirePath> for Utf8TypedPathBuf {
     fn from(path: WirePath) -> Self {
         match path.kind {
-            WirePathKind::Unix => crate::Utf8TypedPathBuf::from_unix(path.path),
-            WirePathKind::Windows => crate::Utf8TypedPathBuf::from_windows(path.path),
+            WirePathKind::Unix => Utf8TypedPathBuf::from_unix(path.path),
+            WirePathKind::Windows => Utf8TypedPathBuf::from_windows(path.path),
         }
     }
 }
 
 impl TryFrom<PathBuf> for WirePath {
-    type Error = crate::Error;
+    type Error = Error;
 
     fn try_from(path: PathBuf) -> Result<Self, Self::Error> {
-        crate::path::typed_path(path)
-            .map(Into::into)
-            .map_err(Into::into)
+        crate::path::typed_path(path).map(Into::into)
     }
 }
 
 impl TryFrom<WirePath> for PathBuf {
-    type Error = crate::Error;
+    type Error = Error;
 
     fn try_from(path: WirePath) -> Result<Self, Self::Error> {
-        crate::path::native_path(crate::Utf8TypedPathBuf::from(path).to_path()).map_err(Into::into)
+        crate::path::native_path(Utf8TypedPathBuf::from(path).to_path())
     }
 }
 
@@ -167,9 +171,11 @@ impl TryFrom<WirePath> for PathBuf {
 mod tests {
     use std::path::PathBuf;
 
+    use typed_path::{Utf8TypedPath, Utf8TypedPathBuf, Utf8UnixPath, Utf8WindowsPath};
+
     use super::{WireError, WirePath, WirePathKind};
     use crate::{
-        Error, ErrorKind, Utf8TypedPath, Utf8TypedPathBuf, Utf8UnixPath, Utf8WindowsPath,
+        error::{Error, ErrorKind},
         target::OperatingSystem,
     };
 
@@ -277,8 +283,8 @@ pub(crate) struct SpawnRequest {
     pub(crate) stdin: StdioRecvTarget,
     pub(crate) stdout: StdioSendTarget,
     pub(crate) stderr: StdioSendTarget,
-    pub(crate) process_control: crate::ProcessControl,
-    pub(crate) termination_policy: crate::TerminationPolicy,
+    pub(crate) process_control: ProcessControl,
+    pub(crate) termination_policy: TerminationPolicy,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -740,7 +746,9 @@ pub(crate) enum RequestKind {
     WellKnownPath(WellKnownPathRequest),
     Stop,
     ClearCache,
-    Pipe,
+    Pipe {
+        buf_size: Option<usize>,
+    },
     Open(OpenRequest),
     FileRead {
         file: Cite<crate::session::FileMarker>,
@@ -892,8 +900,8 @@ pub(crate) enum RequestKind {
 pub(crate) enum ResponseKind {
     Error(WireError),
     Spawn(Result<Gift<crate::session::ChildMarker>, WireError>),
-    ChildWait(Result<crate::ProcessStatus, WireError>),
-    ChildTerminate(Result<Option<crate::ProcessStatus>, WireError>),
+    ChildWait(Result<ProcessStatus, WireError>),
+    ChildTerminate(Result<Option<ProcessStatus>, WireError>),
     ChildClose(Result<(), WireError>),
     Query(Result<QueryResponse, WireError>),
     UserName(Result<String, WireError>),

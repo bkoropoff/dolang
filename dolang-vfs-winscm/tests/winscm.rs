@@ -1,8 +1,7 @@
 #![deny(warnings)]
 
 use dolang_vfs::{
-    AnyVfs,
-    direct::Direct,
+    Vfs,
     error::{Error, ErrorKind},
 };
 use dolang_vfs_winscm::ScManager;
@@ -22,7 +21,7 @@ mod stub {
     //! Non-Windows backends omit the extension capability. The public wrapper
     //! converts that absence into a clear `Unsupported` error.
 
-    use dolang_vfs::{client::Client, server::Server};
+    use dolang_vfs::server::Server;
     use dolang_vfs_winscm::ServiceAccess;
     use tempfile::tempdir;
     use tokio::task::JoinHandle;
@@ -39,7 +38,7 @@ mod stub {
 
     #[tokio::test]
     async fn direct_dispatch_reports_unsupported() {
-        let vfs = AnyVfs::Direct(Direct::new().unwrap());
+        let vfs = Vfs::direct().unwrap();
         let error = expect_err(ScManager::open(&vfs, ServiceAccess::SC_MANAGER_CONNECT).await);
         assert_eq!(error.kind(), ErrorKind::Unsupported);
     }
@@ -49,8 +48,8 @@ mod stub {
         let dir = tempdir().unwrap();
         let socket_path = dir.path().join("vfs.sock");
         let _server = start_server(&socket_path).await;
-        let client = Client::connect(&socket_path).await.unwrap();
-        let vfs = AnyVfs::Client(client);
+        let client = Vfs::connect(&socket_path).await.unwrap();
+        let vfs = client;
         let error = expect_err(ScManager::open(&vfs, ServiceAccess::SC_MANAGER_CONNECT).await);
         assert_eq!(error.kind(), ErrorKind::Unsupported);
     }
@@ -75,7 +74,7 @@ mod live {
         time::Duration,
     };
 
-    use dolang_vfs::{client::Client, server::Server};
+    use dolang_vfs::server::Server;
     use dolang_vfs_winscm::{
         CreateServiceOptions, ErrorControl, NotifyMask, Service, ServiceAccess,
         ServiceConfigUpdate, ServiceState, ServiceStateFilter, ServiceType, StartType,
@@ -125,7 +124,7 @@ mod live {
 
     static NEXT_PIPE: AtomicU64 = AtomicU64::new(0);
 
-    async fn connected_client() -> (Client, JoinHandle<std::io::Result<()>>) {
+    async fn connected_client() -> (Vfs, JoinHandle<Result<(), Error>>) {
         let id = NEXT_PIPE.fetch_add(1, Ordering::Relaxed);
         let name = format!(r"\\.\pipe\dolang-vfs-winscm-{}-{id}", std::process::id());
         let client_pipe = ServerOptions::new()
@@ -142,10 +141,9 @@ mod live {
                 .serve()
                 .await
         });
-        let client =
-            unsafe { Client::from_named_pipe_server(client_pipe, current_process_handle()) }
-                .await
-                .unwrap();
+        let client = unsafe { Vfs::from_named_pipe_server(client_pipe, current_process_handle()) }
+            .await
+            .unwrap();
         (client, server_task)
     }
 
@@ -153,11 +151,11 @@ mod live {
     /// they run in the same process, over an in-memory duplex stream —
     /// exercises remote dispatch's wire (de)serialization path even though
     /// this extension never uses native-handle passthrough itself.
-    async fn forced_remote_client() -> (Client, JoinHandle<std::io::Result<()>>) {
+    async fn forced_remote_client() -> (Vfs, JoinHandle<Result<(), Error>>) {
         let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
         let server_task =
             tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
-        let client = Client::new(client_stream).await.unwrap();
+        let client = Vfs::new(client_stream).await.unwrap();
         (client, server_task)
     }
 
@@ -174,7 +172,7 @@ mod live {
     /// Opens the SC manager and creates a uniquely named scratch service,
     /// returning `None` (with a printed message) if that requires
     /// privileges this test process doesn't have, rather than failing.
-    async fn scratch_service(vfs: &AnyVfs) -> Option<(ScManager, Service, String)> {
+    async fn scratch_service(vfs: &Vfs) -> Option<(ScManager, Service, String)> {
         let manager = match ScManager::open(
             vfs,
             ServiceAccess::SC_MANAGER_CREATE_SERVICE
@@ -244,7 +242,7 @@ mod live {
         let _ = name;
     }
 
-    async fn exercise(vfs: &AnyVfs) {
+    async fn exercise(vfs: &Vfs) {
         let Some((manager, service, name)) = scratch_service(vfs).await else {
             return;
         };
@@ -409,7 +407,7 @@ mod live {
     /// scoped to just that one call) and `ApcContext::cancel_guard`'s
     /// hazard-drain path (see `dolang-winterop::apc`'s module doc) from a
     /// real caller, not just synthetic unit tests.
-    async fn exercise_cancellation(vfs: &AnyVfs) {
+    async fn exercise_cancellation(vfs: &Vfs) {
         let Some((manager, service, name)) = scratch_service(vfs).await else {
             return;
         };
@@ -483,13 +481,13 @@ mod live {
     /// flakiness either way.
     #[tokio::test]
     async fn live_exercises_real_scm() {
-        exercise(&AnyVfs::Direct(Direct::new().unwrap())).await;
-        exercise_cancellation(&AnyVfs::Direct(Direct::new().unwrap())).await;
+        exercise(&Vfs::direct().unwrap()).await;
+        exercise_cancellation(&Vfs::direct().unwrap()).await;
 
         let (client, _server) = connected_client().await;
-        exercise(&AnyVfs::Client(client)).await;
+        exercise(&client).await;
 
         let (client, _server) = forced_remote_client().await;
-        exercise(&AnyVfs::Client(client)).await;
+        exercise(&client).await;
     }
 }

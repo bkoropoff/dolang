@@ -1,9 +1,7 @@
 #![cfg(unix)]
 use dolang_rpc::AuthKey;
 use dolang_vfs::{
-    Child, Command, FileHandle, OpenOptions, Vfs,
-    client::Client,
-    direct::Direct,
+    Vfs,
     file::AccessFlags,
     metadata::{FileType, MetadataPatch, Mode},
     security::{OwnershipIdentity, SecurityInfo},
@@ -34,11 +32,11 @@ async fn start_server(socket_path: &Path) -> JoinHandle<()> {
     })
 }
 
-async fn connect_client(socket_path: &Path) -> Client {
-    Client::connect(socket_path).await.unwrap()
+async fn connect_client(socket_path: &Path) -> Vfs {
+    Vfs::connect(socket_path).await.unwrap()
 }
 
-async fn stop_server(client: Client, server: JoinHandle<()>) {
+async fn stop_server(client: Vfs, server: JoinHandle<()>) {
     client.stop().await.unwrap();
     client.close().await;
     server.await.unwrap();
@@ -46,7 +44,7 @@ async fn stop_server(client: Client, server: JoinHandle<()>) {
 
 #[tokio::test]
 async fn direct_query_reports_host_target() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     assert!(direct.env().next().is_some());
     assert!(direct.cwd().is_absolute());
     assert!(direct.current_exe().is_absolute());
@@ -73,7 +71,7 @@ async fn direct_query_reports_host_target() {
 
 #[tokio::test]
 async fn direct_resolves_unix_user_and_group_names() {
-    let vfs = Direct::new().unwrap();
+    let vfs = Vfs::direct().unwrap();
     let uid = geteuid().as_raw();
     let gid = getegid().as_raw();
     let user = vfs.user_name(uid).await.unwrap();
@@ -131,7 +129,7 @@ async fn client_from_owned_fd() {
 
     let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
     let fd: OwnedFd = stream.into_std().unwrap().into();
-    let client = Client::from_owned_fd(fd).await.unwrap();
+    let client = Vfs::from_owned_fd(fd).await.unwrap();
 
     let mut child = client.command(typed_str("true")).spawn().await.unwrap();
     let status = child.wait().await.unwrap();
@@ -1016,7 +1014,7 @@ async fn glob_invalid_pattern() {
 
 #[tokio::test]
 async fn glob_local_basic_matching() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
 
     // Create test files
@@ -1037,7 +1035,7 @@ async fn glob_local_basic_matching() {
 
 #[tokio::test]
 async fn glob_local_recursive() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
 
     // Create nested directory structure
@@ -1059,7 +1057,7 @@ async fn glob_local_recursive() {
 
 #[tokio::test]
 async fn glob_local_max_depth() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
 
     // Create nested directory structure
@@ -1082,7 +1080,7 @@ async fn glob_local_max_depth() {
 
 #[tokio::test]
 async fn glob_local_no_matches() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
 
     std::fs::write(dir.path().join("file.txt"), "content").unwrap();
@@ -1098,7 +1096,7 @@ async fn glob_local_no_matches() {
 
 #[tokio::test]
 async fn glob_local_invalid_pattern() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
 
     // Test glob with invalid pattern (should return error)
@@ -1129,7 +1127,7 @@ async fn keyed_client_connects_to_keyed_server() {
     let socket_path = dir.path().join("test.sock");
     let server_task = start_keyed_server(&socket_path, TEST_KEY).await;
 
-    let client = Client::connect_with_key(&socket_path, Some(AuthKey::new(TEST_KEY).unwrap()))
+    let client = Vfs::connect_with_key(&socket_path, Some(AuthKey::new(TEST_KEY).unwrap()))
         .await
         .unwrap();
     assert_eq!(client.target(), &TargetInfo::current());
@@ -1144,12 +1142,12 @@ async fn wrong_key_is_rejected_without_disturbing_the_server() {
     let server_task = start_keyed_server(&socket_path, TEST_KEY).await;
 
     let wrong = AuthKey::new(b"an-entirely-different-key").unwrap();
-    let result = Client::connect_with_key(&socket_path, Some(wrong)).await;
+    let result = Vfs::connect_with_key(&socket_path, Some(wrong)).await;
     assert!(result.is_err(), "a client with the wrong key was accepted");
 
     // The rejected attempt must not have cost the real client anything: the
     // server is still listening and still accepts a correct key.
-    let client = Client::connect_with_key(&socket_path, Some(AuthKey::new(TEST_KEY).unwrap()))
+    let client = Vfs::connect_with_key(&socket_path, Some(AuthKey::new(TEST_KEY).unwrap()))
         .await
         .unwrap();
     assert_eq!(client.target(), &TargetInfo::current());
@@ -1163,7 +1161,7 @@ async fn unkeyed_client_is_rejected_by_a_keyed_server() {
     let socket_path = dir.path().join("test.sock");
     let server_task = start_keyed_server(&socket_path, TEST_KEY).await;
 
-    let result = Client::connect(&socket_path).await;
+    let result = Vfs::connect(&socket_path).await;
     assert!(result.is_err(), "an unkeyed client was accepted");
 
     server_task.abort();
@@ -1176,8 +1174,7 @@ async fn keyed_client_is_rejected_by_an_unkeyed_server() {
     let socket_path = dir.path().join("test.sock");
     let server_task = start_server(&socket_path).await;
 
-    let result =
-        Client::connect_with_key(&socket_path, Some(AuthKey::new(TEST_KEY).unwrap())).await;
+    let result = Vfs::connect_with_key(&socket_path, Some(AuthKey::new(TEST_KEY).unwrap())).await;
     assert!(
         result.is_err(),
         "a keyed client was accepted by an unkeyed server"

@@ -194,12 +194,17 @@ pub struct Error {
 
 impl Error {
     /// Creates an error without a native error number.
-    pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
+    pub fn new(kind: ErrorKind, message: impl ToString) -> Self {
         Self {
             kind,
-            message: message.into(),
+            message: message.to_string(),
             system_code: None,
         }
+    }
+
+    /// Creates an unclassified error from a displayable value.
+    pub fn other(error: impl ToString) -> Self {
+        Self::new(ErrorKind::Other, error.to_string())
     }
 
     /// Creates an error with a native error number and its source platform.
@@ -220,6 +225,11 @@ impl Error {
     pub fn from_raw_os_error(raw: i32) -> Self {
         let error = io::Error::from_raw_os_error(raw);
         Self::from_raw_os_error_with_message(raw, error.to_string())
+    }
+
+    /// Captures the calling thread's last operating-system error.
+    pub fn last_os_error() -> Self {
+        io::Error::last_os_error().into()
     }
 
     /// Converts a native error number from the current host while preserving
@@ -273,6 +283,25 @@ impl From<io::Error> for Error {
             Some(raw) => Self::from_system_code(kind, message, OperatingSystem::current(), raw),
             None => Self::new(kind, message),
         }
+    }
+}
+
+impl From<std::ffi::NulError> for Error {
+    fn from(error: std::ffi::NulError) -> Self {
+        io::Error::from(error).into()
+    }
+}
+
+#[cfg(unix)]
+impl From<nix::errno::Errno> for Error {
+    fn from(error: nix::errno::Errno) -> Self {
+        Self::from_raw_os_error(error as i32)
+    }
+}
+
+impl From<Error> for io::Error {
+    fn from(error: Error) -> Self {
+        error.into_io_error()
     }
 }
 

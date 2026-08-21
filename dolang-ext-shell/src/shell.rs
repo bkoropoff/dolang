@@ -32,10 +32,8 @@ use crate::{
 };
 use dolang::runtime::value::View;
 use dolang_vfs::{
-    AnyVfs, Vfs as _,
-    client::Client,
+    Vfs as VfsVfs,
     process::{StdioRecv, StdioSend},
-    session::VfsSession,
 };
 use std::collections::HashMap;
 use typed_path::Utf8TypedPathBuf;
@@ -405,7 +403,7 @@ async fn negotiate_stream_pipes<'v, 's>(
 pub(crate) struct Vfs;
 
 pub(crate) struct VfsAnnex<'v> {
-    vfs: AnyVfs,
+    vfs: VfsVfs,
     source: VfsSource,
     global: State<'v, Global<'v>>,
 }
@@ -413,7 +411,7 @@ pub(crate) struct VfsAnnex<'v> {
 enum VfsSource {
     Stream,
     Unix(Utf8TypedPathBuf),
-    WindowsAdmin(VfsSession),
+    WindowsAdmin,
 }
 
 impl<'v> Object<'v> for Vfs {
@@ -434,7 +432,7 @@ impl<'v> Object<'v> for Vfs {
             VfsSource::Unix(socket) => {
                 fmt!(strand, w, "<shell.Vfs socket: {socket:?}>")
             }
-            VfsSource::WindowsAdmin(_) => {
+            VfsSource::WindowsAdmin => {
                 fmt!(strand, w, "<shell.Vfs windows admin>")
             }
         }
@@ -474,7 +472,7 @@ impl<'v> Object<'v> for Vfs {
                     global.local.get(strand).set_pending_pipe_buffer_size(None);
                     let (recv_guard, recv, send_guard, send) = negotiated?;
 
-                    let client = match Client::new_split(recv, send).await {
+                    let vfs = match VfsVfs::new_split(recv, send).await {
                         Ok(client) => client,
                         Err(negotiate_error) => {
                             let join = global.syms.join;
@@ -489,7 +487,7 @@ impl<'v> Object<'v> for Vfs {
                         strand,
                         Vfs,
                         VfsAnnex {
-                            vfs: client.into(),
+                            vfs,
                             source: VfsSource::Stream,
                             global,
                         },
@@ -597,7 +595,7 @@ impl<'v> Object<'v> for Vfs {
             match &borrow.source {
                 VfsSource::Stream => unreachable!("stream VFS returned without joining"),
                 VfsSource::Unix(_) => error::io_result(strand, borrow.vfs.stop().await)?,
-                VfsSource::WindowsAdmin(session) => error::io_result(strand, session.stop().await)?,
+                VfsSource::WindowsAdmin => error::io_result(strand, borrow.vfs.stop().await)?,
             }
             Ok(())
         });
@@ -664,18 +662,17 @@ impl<'v> Object<'v> for Vfs {
                 })?;
             }
             let vfs = global.local.get(strand).vfs();
-            let session = error::io_result(
+            let vfs = error::io_result(
                 strand,
                 vfs.windows_admin(cwd.to_path(), env_overrides, elevate)
                     .await,
             )?;
-            let client = session.client().clone();
             global.types.vfs.create_with_annex(
                 strand,
                 Vfs,
                 VfsAnnex {
-                    vfs: client.into(),
-                    source: VfsSource::WindowsAdmin(session),
+                    vfs,
+                    source: VfsSource::WindowsAdmin,
                     global,
                 },
                 out,
@@ -754,7 +751,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             let (vfs, path, cwd, env) = {
                 let local = global.local.get(strand);
                 let vfs = local.vfs();
-                if !matches!(vfs, AnyVfs::Direct(_)) {
+                if !vfs.is_direct() {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::Unsupported,
                         "shell.exec is only supported on the host VFS",
@@ -780,7 +777,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                     })?;
                 (vfs, path, cwd, env.flatten_delta().into_iter().collect())
             };
-            debug_assert!(matches!(vfs, AnyVfs::Direct(_)));
+            debug_assert!(vfs.is_direct());
 
             let program = dolang_vfs::path::native_path(path.to_path()).into_sys(strand)?;
             let cwd = dolang_vfs::path::native_path(cwd.to_path()).into_sys(strand)?;
@@ -929,8 +926,8 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 Some(Arg::Key(sym, _)) => return Err(Error::unexpected_key(strand, sym)),
             };
 
-            let host_vfs = error::io_result(strand, dolang_vfs::direct::Direct::new())?;
-            Local::with_vfs(strand, global, host_vfs.into(), async move |strand| {
+            let host_vfs = error::io_result(strand, VfsVfs::direct())?;
+            Local::with_vfs(strand, global, host_vfs, async move |strand| {
                 func.call(strand, args, out).await
             })
             .await

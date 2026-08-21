@@ -4,7 +4,10 @@ use std::{
     sync::{Arc, Mutex, OnceLock, Weak},
 };
 
-use crate::file::{FileLockBehavior, FileLockMode, FileLockRange, FileLockRequest};
+use crate::{
+    error::Result,
+    file::{FileLockBehavior, FileLockMode, FileLockRange, FileLockRequest},
+};
 
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
@@ -108,7 +111,7 @@ pub(crate) struct DirectFileLock {
 }
 
 impl DirectFileLock {
-    pub(crate) async fn release(&mut self) -> crate::Result<()> {
+    pub(crate) async fn release(&mut self) -> Result<()> {
         let Some(table) = self.table.upgrade() else {
             return Ok(());
         };

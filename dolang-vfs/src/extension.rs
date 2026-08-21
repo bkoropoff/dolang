@@ -25,6 +25,7 @@ use std::{
     collections::HashMap,
     future::Future,
     pin::Pin,
+    result,
     sync::{Arc, OnceLock},
 };
 
@@ -35,8 +36,11 @@ use dolang_rpc::{
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::protocol::VfsProtocol;
 use crate::session::ExtensionSet;
+use crate::{
+    error::{Error, ErrorKind, Result},
+    protocol::VfsProtocol,
+};
 
 #[doc(hidden)]
 pub mod __private {
@@ -190,9 +194,9 @@ struct Registry {
     handlers: HashMap<(&'static str, u16), &'static dyn ErasedVfsExtension>,
 }
 
-static REGISTERED: OnceLock<crate::Result<Registry>> = OnceLock::new();
+static REGISTERED: OnceLock<Result<Registry>> = OnceLock::new();
 
-fn registry() -> crate::Result<&'static Registry> {
+fn registry() -> Result<&'static Registry> {
     REGISTERED
         .get_or_init(|| {
             let mut handlers = HashMap::new();
@@ -206,8 +210,8 @@ fn registry() -> crate::Result<&'static Registry> {
                     .insert((extension.name(), extension.version()), extension)
                     .is_some()
                 {
-                    return Err(crate::Error::new(
-                        crate::ErrorKind::AlreadyExists,
+                    return Err(Error::new(
+                        ErrorKind::AlreadyExists,
                         format!(
                             "duplicate VFS extension registration: {} version {}",
                             extension.name(),
@@ -230,7 +234,7 @@ fn registry() -> crate::Result<&'static Registry> {
         .map_err(Clone::clone)
 }
 
-pub(crate) fn registered() -> crate::Result<&'static ExtensionSet> {
+pub(crate) fn registered() -> Result<&'static ExtensionSet> {
     Ok(&registry()?.capabilities)
 }
 
@@ -273,7 +277,7 @@ pub struct DirectContext {
 /// Presents the same register/acquire/unregister/cancel_guard surface
 /// regardless of whether the call arrived directly (in-process) or over a
 /// real RPC session, mirroring the existing direct/remote enum-dispatch
-/// pattern used elsewhere in this crate (e.g. `AnyVfs`, `ClientFileInner`).
+/// pattern used elsewhere in this crate (e.g. `AnyVfs`, `AnyFile`).
 ///
 /// The direct/remote backing types are intentionally private, so extension
 /// code can use this one context without depending on the crate's wire
@@ -329,7 +333,7 @@ impl<'a> ExtContext<'a> {
     pub async fn cancel_guard<T, F>(
         &mut self,
         operation: F,
-    ) -> Result<T, dolang_rpc::server::RequestCancelled>
+    ) -> result::Result<T, dolang_rpc::server::RequestCancelled>
     where
         F: for<'b> AsyncFnOnce(&'b mut ExtContext<'b>) -> T,
     {
@@ -381,7 +385,7 @@ impl<'a> ExtContext<'a> {
     pub fn acquire<T: ExtResource>(
         &self,
         handle: ExtCite<T::Marker>,
-    ) -> Result<ExtGuard<T>, InvalidHandle> {
+    ) -> result::Result<ExtGuard<T>, InvalidHandle> {
         match (&self.inner, handle.0) {
             (Inner::Direct(_), CiteRepr::Direct(value)) => {
                 if (*value).type_id() != TypeId::of::<T>() {
@@ -403,7 +407,7 @@ impl<'a> ExtContext<'a> {
     pub fn unregister<T: ExtResource>(
         &self,
         handle: ExtCite<T::Marker>,
-    ) -> Result<Option<T>, InvalidHandle> {
+    ) -> result::Result<Option<T>, InvalidHandle> {
         match (&self.inner, handle.0) {
             (Inner::Direct(_), CiteRepr::Direct(value)) => {
                 if (*value).type_id() != TypeId::of::<T>() {
@@ -503,7 +507,7 @@ macro_rules! ext_handle {
         }
 
         impl<M: 'static> Serialize for $name<M> {
-            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            fn serialize<S: Serializer>(&self, serializer: S) -> result::Result<S::Ok, S::Error> {
                 match &self.0 {
                     $repr::Remote(handle) => handle.serialize(serializer),
                     $repr::Direct(_) => Err(serde::ser::Error::custom(
@@ -519,13 +523,13 @@ ext_handle!(ExtGift, GiftRepr);
 ext_handle!(ExtCite, CiteRepr);
 
 impl<'de, M: 'static> Deserialize<'de> for ExtGift<M> {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> result::Result<Self, D::Error> {
         Gift::<M>::deserialize(deserializer).map(|gift| Self(GiftRepr::Remote(gift)))
     }
 }
 
 impl<'de, M: 'static> Deserialize<'de> for ExtCite<M> {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> result::Result<Self, D::Error> {
         Cite::<M>::deserialize(deserializer).map(|cite| Self(CiteRepr::Remote(cite)))
     }
 }
@@ -586,13 +590,13 @@ impl ExtOsHandle {
 }
 
 impl Serialize for ExtOsHandle {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> result::Result<S::Ok, S::Error> {
         self.0.serialize(serializer)
     }
 }
 
 impl<'de> Deserialize<'de> for ExtOsHandle {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> result::Result<Self, D::Error> {
         dolang_rpc::handle::OsHandle::deserialize(deserializer).map(Self)
     }
 }

@@ -1,16 +1,21 @@
-use super::{Direct, DirectChild, DirectCommand, DirectFile, DirectOpenOptions};
-use crate::metadata::{FsMetadataFamily, WindowsFsMetadata, metadata_from_std, metadata_with_sids};
+use super::{Child, Command, Direct, File, OpenOptions};
 use crate::{
-    AttrFlags, AttrsPatch, FsMetadata, Metadata, MetadataPatch, OpenOptions as _,
-    OwnershipIdentity, SidName, StreamEntry, Utf8TypedPath, Utf8WindowsPath, XattrEntry,
-    XattrNamespace, security::SidNameUse,
+    directory::{DirEntry, DirEntryFamily},
+    error::{Error, ErrorKind, Result},
+    file::{AccessFlags, StreamEntry},
+    metadata::{
+        AttrFlags, AttrsPatch, FileType, FsMetadata, FsMetadataFamily, Metadata, MetadataPatch,
+        WindowsFsMetadata, metadata_from_std, metadata_with_sids,
+    },
+    security::{Acl, AclKind, OwnershipIdentity, SidName, SidNameUse},
+    xattr::{XattrEntry, XattrNamespace},
 };
 use dolang_winterop::security::{SecDesc, SecDescControl, SecInfo, Sid};
 use std::{
     collections::HashMap,
     ffi::OsString,
     fs::{File as StdFile, OpenOptions as StdOpenOptions},
-    io, mem,
+    mem,
     os::windows::{
         ffi::{OsStrExt, OsStringExt},
         fs::OpenOptionsExt,
@@ -22,9 +27,10 @@ use std::{
     time::SystemTime,
 };
 use tokio::{
-    fs::{self, OpenOptions},
+    fs::{self, OpenOptions as TokioOpenOptions},
     time::{Duration, timeout},
 };
+use typed_path::{Utf8TypedPath, Utf8WindowsPath};
 use windows_sys::{
     Wdk::Storage::FileSystem::{
         FILE_FULL_EA_INFORMATION, FILE_GET_EA_INFORMATION, FILE_RENAME_POSIX_SEMANTICS,
@@ -89,47 +95,83 @@ use windows_sys::{
     core::GUID,
 };
 
-impl DirectFile {
+#[derive(Debug)]
+pub(crate) struct ReadDir {
+    inner: Box<tokio::fs::ReadDir>,
+}
+
+impl ReadDir {
+    pub(super) async fn open(path: &Path) -> Result<Self> {
+        Ok(Self {
+            inner: Box::new(tokio::fs::read_dir(path).await?),
+        })
+    }
+
+    pub(crate) async fn next_entry(&mut self) -> Result<Option<DirEntry>> {
+        let Some(entry) = self.inner.next_entry().await? else {
+            return Ok(None);
+        };
+        let file_type = entry.file_type().await?;
+        let file_type = if file_type.is_file() {
+            FileType::File
+        } else if file_type.is_dir() {
+            FileType::Dir
+        } else if file_type.is_symlink() {
+            FileType::Symlink
+        } else {
+            FileType::Unknown
+        };
+        let file_name = entry.file_name().into_string().map_err(|_| {
+            Error::new(ErrorKind::InvalidData, "directory entry is not valid UTF-8")
+        })?;
+        Ok(Some(DirEntry::new(
+            file_name,
+            file_type,
+            DirEntryFamily::Windows,
+        )))
+    }
+}
+
+impl File {
     /// Reads at an absolute offset.
     ///
     /// Windows has no true positional read: `seek_read` moves the handle's
     /// file pointer as a side effect. That is harmless because shared code
     /// never consumes that pointer and materializes the cursor before handing
     /// the descriptor to another process.
-    pub(super) fn pread(file: &std::fs::File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
-        std::os::windows::fs::FileExt::seek_read(file, buf, offset)
+    pub(super) fn pread(file: &std::fs::File, buf: &mut [u8], offset: u64) -> Result<usize> {
+        Ok(std::os::windows::fs::FileExt::seek_read(file, buf, offset)?)
     }
 
-    pub(super) fn pwrite(file: &std::fs::File, buf: &[u8], offset: u64) -> io::Result<usize> {
-        std::os::windows::fs::FileExt::seek_write(file, buf, offset)
+    pub(super) fn pwrite(file: &std::fs::File, buf: &[u8], offset: u64) -> Result<usize> {
+        Ok(std::os::windows::fs::FileExt::seek_write(
+            file, buf, offset,
+        )?)
     }
 }
 
-fn typed_windows_path(path: &Path) -> io::Result<Utf8TypedPath<'_>> {
+fn typed_windows_path(path: &Path) -> Result<Utf8TypedPath<'_>> {
     let path = path
         .to_str()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "path is not UTF-8"))?;
+        .ok_or_else(|| Error::new(ErrorKind::InvalidData, "path is not UTF-8"))?;
     Ok(Utf8TypedPath::Windows(Utf8WindowsPath::new(path)))
 }
 
 impl Direct {
-    pub(super) async fn impl_access(
-        _path: PathBuf,
-        _mode: crate::file::AccessFlags,
-    ) -> io::Result<()> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
+    pub(super) async fn impl_access(_path: PathBuf, _mode: AccessFlags) -> Result<()> {
+        Err(Error::new(
+            ErrorKind::Unsupported,
             "POSIX access checks are not supported on Windows",
         ))
     }
 
-    pub(super) async fn impl_rename(from: PathBuf, to: PathBuf, replace: bool) -> io::Result<()> {
+    pub(super) async fn impl_rename(from: PathBuf, to: PathBuf, replace: bool) -> Result<()> {
         tokio::task::spawn_blocking(move || Self::rename_path(&from, &to, replace))
             .await
-            .unwrap_or_else(|_| Err(io::Error::other("rename task failed")))
+            .unwrap_or_else(|_| Err(Error::other("rename task failed")))
     }
 
-    fn rename_path(from: &Path, to: &Path, replace: bool) -> io::Result<()> {
+    fn rename_path(from: &Path, to: &Path, replace: bool) -> Result<()> {
         let mut from = Self::rename_path_wide(from)?;
         from.push(0);
         let handle = unsafe {
@@ -144,7 +186,7 @@ impl Direct {
             )
         };
         if handle == INVALID_HANDLE_VALUE {
-            return Err(io::Error::last_os_error());
+            return Err(Error::last_os_error());
         }
         let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
 
@@ -166,13 +208,10 @@ impl Direct {
         }
     }
 
-    fn rename_path_wide(path: &Path) -> io::Result<Vec<u16>> {
+    fn rename_path_wide(path: &Path) -> Result<Vec<u16>> {
         let path: Vec<_> = path.as_os_str().encode_wide().collect();
         if path.contains(&0) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "path contains NUL",
-            ));
+            return Err(Error::new(ErrorKind::InvalidInput, "path contains NUL"));
         }
         Ok(path)
     }
@@ -182,18 +221,18 @@ impl Direct {
         to: &Path,
         replace: bool,
         extended: bool,
-    ) -> io::Result<()> {
+    ) -> Result<()> {
         let to = Self::rename_path_wide(to)?;
         let name_bytes = to
             .len()
             .checked_mul(mem::size_of::<u16>())
             .and_then(|len| u32::try_from(len).ok())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path is too long"))?;
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "path is too long"))?;
         let offset = mem::offset_of!(FILE_RENAME_INFO, FileName);
         let buffer_len = offset
             .checked_add(name_bytes as usize)
             .and_then(|len| len.checked_add(mem::size_of::<u16>()))
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path is too long"))?;
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "path is too long"))?;
         let word_size = mem::size_of::<usize>();
         let mut buffer = vec![0usize; buffer_len.div_ceil(word_size)];
         let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
@@ -215,50 +254,50 @@ impl Direct {
         }
 
         let buffer_len = u32::try_from(buffer_len)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path is too long"))?;
+            .map_err(|_| Error::new(ErrorKind::InvalidInput, "path is too long"))?;
         let class = if extended {
             FileRenameInfoEx
         } else {
             FileRenameInfo
         };
         if unsafe { SetFileInformationByHandle(handle, class, info.cast(), buffer_len) } == 0 {
-            return Err(io::Error::last_os_error());
+            return Err(Error::last_os_error());
         }
         Ok(())
     }
 
     pub(super) fn acl_from_path(
         _path: &Path,
-        _kind: crate::security::AclKind,
+        _kind: AclKind,
         _default: bool,
         _follow: bool,
-    ) -> io::Result<Option<crate::security::Acl>> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
+    ) -> Result<Option<Acl>> {
+        Err(Error::new(
+            ErrorKind::Unsupported,
             "ACLs are not supported on Windows",
         ))
     }
 
     pub(super) fn set_acl_path(
         _path: &Path,
-        _kind: crate::security::AclKind,
-        _acl: Option<&crate::security::Acl>,
+        _kind: AclKind,
+        _acl: Option<&Acl>,
         _default: bool,
         _follow: bool,
-    ) -> io::Result<()> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
+    ) -> Result<()> {
+        Err(Error::new(
+            ErrorKind::Unsupported,
             "ACLs are not supported on Windows",
         ))
     }
 
     pub(super) fn acl_from_file(
         _file: &std::fs::File,
-        _kind: crate::security::AclKind,
+        _kind: AclKind,
         _default: bool,
-    ) -> io::Result<Option<crate::security::Acl>> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
+    ) -> Result<Option<Acl>> {
+        Err(Error::new(
+            ErrorKind::Unsupported,
             "ACLs are not supported on Windows",
         ))
     }
@@ -268,14 +307,14 @@ impl Direct {
         _kind: crate::security::AclKind,
         _acl: Option<&crate::security::Acl>,
         _default: bool,
-    ) -> io::Result<()> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
+    ) -> Result<()> {
+        Err(Error::new(
+            ErrorKind::Unsupported,
             "ACLs are not supported on Windows",
         ))
     }
 
-    fn security_handle(path: &Path, access: u32, follow: bool) -> io::Result<OwnedHandle> {
+    fn security_handle(path: &Path, access: u32, follow: bool) -> Result<OwnedHandle> {
         let path = Self::path_wide(path);
         let mut flags = FILE_FLAG_BACKUP_SEMANTICS;
         if !follow {
@@ -294,7 +333,7 @@ impl Direct {
                 )
             };
             if handle == INVALID_HANDLE_VALUE {
-                return Err(io::Error::last_os_error());
+                return Err(Error::last_os_error());
             }
             Ok(unsafe { OwnedHandle::from_raw_handle(handle) })
         };
@@ -308,7 +347,7 @@ impl Direct {
     fn sec_desc_from_handle(
         handle: BorrowedHandle<'_>,
         mask: dolang_winterop::security::SecInfo,
-    ) -> io::Result<SecDesc> {
+    ) -> Result<SecDesc> {
         let mut descriptor = ptr::null_mut();
         let query_mask = if mask.is_empty() {
             SecInfo::OWNER
@@ -328,7 +367,7 @@ impl Direct {
             )
         };
         if error != 0 {
-            return Err(io::Error::from_raw_os_error(error as i32));
+            return Err(Error::from_raw_os_error(error as i32));
         }
         struct LocalDescriptor(*mut std::ffi::c_void);
         impl Drop for LocalDescriptor {
@@ -342,10 +381,10 @@ impl Direct {
         let length = unsafe { GetSecurityDescriptorLength(descriptor.0) } as usize;
         let bytes = unsafe { slice::from_raw_parts(descriptor.0.cast::<u8>(), length) };
         SecDesc::from_bytes_with_mask(bytes, mask)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+            .map_err(|error| Error::new(ErrorKind::InvalidData, error))
     }
 
-    fn set_sec_desc_on_handle(handle: BorrowedHandle<'_>, descriptor: &SecDesc) -> io::Result<()> {
+    fn set_sec_desc_on_handle(handle: BorrowedHandle<'_>, descriptor: &SecDesc) -> Result<()> {
         let mask = descriptor.mask() & SecInfo::ALL;
         if mask.is_empty() {
             return Ok(());
@@ -406,7 +445,7 @@ impl Direct {
             if error == 0 {
                 Ok(())
             } else {
-                Err(io::Error::from_raw_os_error(error as i32))
+                Err(Error::from_raw_os_error(error as i32))
             }
         };
         if mask.contains(SecInfo::SACL) {
@@ -420,7 +459,7 @@ impl Direct {
         path: &Path,
         mask: dolang_winterop::security::SecInfo,
         follow: bool,
-    ) -> io::Result<SecDesc> {
+    ) -> Result<SecDesc> {
         let mask = mask & SecInfo::ALL;
         let access = if mask.is_empty() || mask.intersects(SecInfo::ALL - SecInfo::SACL) {
             READ_CONTROL
@@ -435,11 +474,7 @@ impl Direct {
         Self::sec_desc_from_handle(handle.as_handle(), mask)
     }
 
-    pub(super) fn set_sec_desc_path(
-        path: &Path,
-        descriptor: &SecDesc,
-        follow: bool,
-    ) -> io::Result<()> {
+    pub(super) fn set_sec_desc_path(path: &Path, descriptor: &SecDesc, follow: bool) -> Result<()> {
         let mask = descriptor.mask();
         let mut access = 0;
         if mask.intersects(SecInfo::OWNER | SecInfo::GROUP) {
@@ -458,16 +493,16 @@ impl Direct {
     pub(super) fn sec_desc_from_file(
         file: &std::fs::File,
         mask: dolang_winterop::security::SecInfo,
-    ) -> io::Result<SecDesc> {
+    ) -> Result<SecDesc> {
         let mask = mask & SecInfo::ALL;
         Self::sec_desc_from_handle(file.as_handle(), mask)
     }
 
-    pub(super) fn set_sec_desc_file(file: &std::fs::File, descriptor: &SecDesc) -> io::Result<()> {
+    pub(super) fn set_sec_desc_file(file: &std::fs::File, descriptor: &SecDesc) -> Result<()> {
         Self::set_sec_desc_on_handle(file.as_handle(), descriptor)
     }
 
-    fn sid_name_use(value: i32) -> io::Result<SidNameUse> {
+    fn sid_name_use(value: i32) -> Result<SidNameUse> {
         match value {
             SID_TYPE_USER => Ok(SidNameUse::User),
             SID_TYPE_GROUP => Ok(SidNameUse::Group),
@@ -480,23 +515,23 @@ impl Direct {
             SID_TYPE_COMPUTER => Ok(SidNameUse::Computer),
             SID_TYPE_LABEL => Ok(SidNameUse::Label),
             SID_TYPE_LOGON_SESSION => Ok(SidNameUse::LogonSession),
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
+            _ => Err(Error::new(
+                ErrorKind::InvalidData,
                 "LookupAccount returned an invalid SID name use",
             )),
         }
     }
 
-    fn lookup_error(error: io::Error) -> crate::Error {
+    fn lookup_error(error: Error) -> Error {
         if error.raw_os_error() == Some(ERROR_NONE_MAPPED as i32) {
-            crate::Error::from_system_code(
-                crate::ErrorKind::NotFound,
+            Error::from_system_code(
+                ErrorKind::NotFound,
                 error.to_string(),
                 crate::target::OperatingSystem::Windows,
                 ERROR_NONE_MAPPED as i32,
             )
         } else {
-            error.into()
+            error
         }
     }
 
@@ -509,7 +544,7 @@ impl Direct {
         String::from_utf16_lossy(value)
     }
 
-    fn lookup_sid_name(sid: Sid) -> crate::Result<SidName> {
+    fn lookup_sid_name(sid: Sid) -> crate::error::Result<SidName> {
         let mut sid_bytes = sid.to_bytes();
         let mut name_len = 0;
         let mut domain_len = 0;
@@ -525,7 +560,7 @@ impl Direct {
                 &mut kind,
             );
         }
-        let error = io::Error::last_os_error();
+        let error = Error::last_os_error();
         if error.raw_os_error() != Some(ERROR_INSUFFICIENT_BUFFER as i32) {
             return Err(Self::lookup_error(error));
         }
@@ -543,7 +578,7 @@ impl Direct {
             )
         } == 0
         {
-            return Err(Self::lookup_error(io::Error::last_os_error()));
+            return Err(Self::lookup_error(Error::last_os_error()));
         }
         Ok(SidName {
             sid,
@@ -553,7 +588,7 @@ impl Direct {
         })
     }
 
-    fn lookup_account_sid(name: &str) -> io::Result<Sid> {
+    fn lookup_account_sid(name: &str) -> Result<Sid> {
         let name: Vec<u16> = OsString::from(name)
             .encode_wide()
             .chain(std::iter::once(0))
@@ -572,7 +607,7 @@ impl Direct {
                 &mut kind,
             );
         }
-        let error = io::Error::last_os_error();
+        let error = Error::last_os_error();
         if error.raw_os_error() != Some(ERROR_INSUFFICIENT_BUFFER as i32) {
             return Err(error);
         }
@@ -591,51 +626,51 @@ impl Direct {
             )
         } == 0
         {
-            return Err(io::Error::last_os_error());
+            return Err(Error::last_os_error());
         }
         let bytes = unsafe {
             slice::from_raw_parts(sid.as_ptr().cast::<u8>(), usize::try_from(sid_len).unwrap())
         };
-        Sid::from_bytes(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+        Sid::from_bytes(bytes).map_err(|error| Error::new(ErrorKind::InvalidData, error))
     }
 
-    pub(super) async fn impl_sid_name(&self, sid: &Sid) -> crate::Result<SidName> {
+    pub(super) async fn impl_sid_name(&self, sid: &Sid) -> crate::error::Result<SidName> {
         let sid = sid.clone();
         tokio::task::spawn_blocking(move || Self::lookup_sid_name(sid))
             .await
-            .unwrap_or_else(|_| Err(io::Error::other("SID lookup task failed").into()))
+            .unwrap_or_else(|_| Err(Error::other("SID lookup task failed")))
     }
 
-    pub(super) async fn impl_account_name(&self, name: &str) -> crate::Result<SidName> {
+    pub(super) async fn impl_account_name(&self, name: &str) -> crate::error::Result<SidName> {
         let name = name.to_owned();
         tokio::task::spawn_blocking(move || {
             let sid = Self::lookup_account_sid(&name).map_err(Self::lookup_error)?;
             Self::lookup_sid_name(sid)
         })
         .await
-        .unwrap_or_else(|_| Err(io::Error::other("account lookup task failed").into()))
+        .unwrap_or_else(|_| Err(Error::other("account lookup task failed")))
     }
 
-    pub(super) fn program_not_found_error() -> io::Error {
-        io::Error::from_raw_os_error(ERROR_FILE_NOT_FOUND as i32)
+    pub(super) fn program_not_found_error() -> Error {
+        Error::from_raw_os_error(ERROR_FILE_NOT_FOUND as i32)
     }
 
-    pub(super) fn directory_requires_all_error() -> io::Error {
-        io::Error::new(
-            io::ErrorKind::IsADirectory,
+    pub(super) fn directory_requires_all_error() -> Error {
+        Error::new(
+            ErrorKind::IsADirectory,
             "directory operations require all: true",
         )
     }
 
-    pub(super) fn directory_not_empty_error() -> io::Error {
-        io::Error::from(io::ErrorKind::DirectoryNotEmpty)
+    pub(super) fn directory_not_empty_error() -> Error {
+        Error::new(ErrorKind::DirectoryNotEmpty, "directory not empty")
     }
 
-    pub(super) fn not_a_directory_error() -> io::Error {
-        io::Error::from(io::ErrorKind::NotADirectory)
+    pub(super) fn not_a_directory_error() -> Error {
+        Error::new(ErrorKind::NotADirectory, "not a directory")
     }
 
-    fn final_path_from_handle(handle: BorrowedHandle<'_>) -> io::Result<PathBuf> {
+    fn final_path_from_handle(handle: BorrowedHandle<'_>) -> Result<PathBuf> {
         let mut path = vec![0u16; 32768];
         let len = unsafe {
             GetFinalPathNameByHandleW(
@@ -646,17 +681,17 @@ impl Direct {
             )
         };
         if len == 0 {
-            return Err(io::Error::last_os_error());
+            return Err(Error::last_os_error());
         }
         let len = usize::try_from(len).unwrap_or(path.len());
         if len >= path.len() {
-            return Err(io::Error::other("path buffer too small"));
+            return Err(Error::other("path buffer too small"));
         }
         path.truncate(len);
         Ok(dunce::simplified(&PathBuf::from(OsString::from_wide(&path))).to_path_buf())
     }
 
-    fn volume_root_path(path: &Path) -> io::Result<PathBuf> {
+    fn volume_root_path(path: &Path) -> Result<PathBuf> {
         match path.components().next() {
             Some(Component::Prefix(prefix)) => match prefix.kind() {
                 Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => {
@@ -669,19 +704,19 @@ impl Direct {
                         share.to_string_lossy()
                     )))
                 }
-                _ => Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
+                _ => Err(Error::new(
+                    ErrorKind::InvalidInput,
                     "unsupported Windows path prefix",
                 )),
             },
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
+            _ => Err(Error::new(
+                ErrorKind::InvalidInput,
                 "path has no Windows volume prefix",
             )),
         }
     }
 
-    fn fs_query_root_metadata(root: &Path) -> io::Result<(u64, u64, u64, u32, u32, u32)> {
+    fn fs_query_root_metadata(root: &Path) -> Result<(u64, u64, u64, u32, u32, u32)> {
         let root_str = Self::path_wide(root);
         let mut available = 0u64;
         let mut capacity = 0u64;
@@ -690,7 +725,7 @@ impl Direct {
             GetDiskFreeSpaceExW(root_str.as_ptr(), &mut available, &mut capacity, &mut free)
         };
         if ok == 0 {
-            return Err(io::Error::last_os_error());
+            return Err(Error::last_os_error());
         }
 
         let root_handle = Self::open_for_metadata(root, true)?;
@@ -711,13 +746,13 @@ impl Direct {
             )
         };
         if ok == 0 {
-            return Err(io::Error::last_os_error());
+            return Err(Error::last_os_error());
         }
 
         Ok((available, capacity, free, serial, max_component, flags))
     }
 
-    fn fs_metadata_from_handle(handle: BorrowedHandle<'_>) -> io::Result<FsMetadata> {
+    fn fs_metadata_from_handle(handle: BorrowedHandle<'_>) -> Result<FsMetadata> {
         let root = Self::volume_root_path(&Self::final_path_from_handle(handle)?)?;
         let (available, capacity, free, serial, max_component, flags) =
             Self::fs_query_root_metadata(&root)?;
@@ -735,14 +770,14 @@ impl Direct {
         })
     }
 
-    pub(super) fn fs_metadata_from_file(file: &std::fs::File) -> io::Result<FsMetadata> {
+    pub(super) fn fs_metadata_from_file(file: &std::fs::File) -> Result<FsMetadata> {
         Self::fs_metadata_from_handle(file.as_handle())
     }
 
     pub(super) fn metadata_with_security(
         metadata: std::fs::Metadata,
         file: &std::fs::File,
-    ) -> io::Result<Metadata> {
+    ) -> Result<Metadata> {
         let descriptor = Self::sec_desc_from_file(file, SecInfo::OWNER | SecInfo::GROUP)?;
         Ok(metadata_with_sids(
             metadata_from_std(metadata),
@@ -751,7 +786,7 @@ impl Direct {
         ))
     }
 
-    pub(super) fn metadata_from_path(path: &Path, follow: bool) -> io::Result<Metadata> {
+    pub(super) fn metadata_from_path(path: &Path, follow: bool) -> Result<Metadata> {
         let metadata = if follow {
             std::fs::metadata(path)?
         } else {
@@ -765,7 +800,7 @@ impl Direct {
         ))
     }
 
-    pub(super) fn fs_metadata_from_path(path: &Path, follow: bool) -> io::Result<FsMetadata> {
+    pub(super) fn fs_metadata_from_path(path: &Path, follow: bool) -> Result<FsMetadata> {
         let root = if follow {
             Self::volume_root_path(&std::fs::canonicalize(path)?)?
         } else {
@@ -791,7 +826,7 @@ impl Direct {
         path.as_os_str().encode_wide().chain([0]).collect()
     }
 
-    fn set_windows_compression(path: &[u16], compressed: bool) -> io::Result<()> {
+    fn set_windows_compression(path: &[u16], compressed: bool) -> Result<()> {
         let handle = unsafe {
             CreateFileW(
                 path.as_ptr(),
@@ -804,7 +839,7 @@ impl Direct {
             )
         };
         if handle == INVALID_HANDLE_VALUE {
-            return Err(io::Error::last_os_error());
+            return Err(Error::last_os_error());
         }
         let _handle = unsafe { OwnedHandle::from_raw_handle(handle) };
 
@@ -827,18 +862,18 @@ impl Direct {
             )
         } == 0
         {
-            Err(io::Error::last_os_error())
+            Err(Error::last_os_error())
         } else {
             Ok(())
         }
     }
 
-    pub(super) fn open_for_metadata(path: &Path, follow: bool) -> io::Result<Arc<StdFile>> {
+    pub(super) fn open_for_metadata(path: &Path, follow: bool) -> Result<Arc<StdFile>> {
         let handle = Self::security_handle(path, 0, follow)?;
         Ok(Arc::new(StdFile::from(handle)))
     }
 
-    fn validate_attrs_patch(patch: AttrsPatch) -> io::Result<()> {
+    fn validate_attrs_patch(patch: AttrsPatch) -> Result<()> {
         let supported = AttrFlags::READONLY
             .union(AttrFlags::HIDDEN)
             .union(AttrFlags::SYSTEM)
@@ -848,8 +883,8 @@ impl Direct {
             .union(AttrFlags::OFFLINE)
             .union(AttrFlags::NOT_CONTENT_INDEXED);
         if !patch.requested().difference(supported).is_empty() {
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
+            Err(Error::new(
+                ErrorKind::Unsupported,
                 "one or more attributes cannot be set on this platform",
             ))
         } else {
@@ -857,7 +892,7 @@ impl Direct {
         }
     }
 
-    pub(super) fn set_attrs_path(path: PathBuf, patch: AttrsPatch) -> io::Result<()> {
+    pub(super) fn set_attrs_path(path: PathBuf, patch: AttrsPatch) -> Result<()> {
         Self::validate_attrs_patch(patch)?;
 
         if patch.is_empty() {
@@ -867,7 +902,7 @@ impl Direct {
         let path = Self::path_wide(&path);
         let mut attrs = unsafe { GetFileAttributesW(path.as_ptr()) };
         if attrs == INVALID_FILE_ATTRIBUTES {
-            return Err(io::Error::last_os_error());
+            return Err(Error::last_os_error());
         }
 
         for (semantic, native) in [
@@ -899,7 +934,7 @@ impl Direct {
         if patch.requested().intersects(ordinary) {
             let res = unsafe { SetFileAttributesW(path.as_ptr(), attrs) };
             if res == 0 {
-                return Err(io::Error::last_os_error());
+                return Err(Error::last_os_error());
             }
         }
 
@@ -912,7 +947,7 @@ impl Direct {
         Ok(())
     }
 
-    pub(crate) fn known_folder(folder_id: &GUID) -> Result<PathBuf, io::Error> {
+    pub(crate) fn known_folder(folder_id: &GUID) -> Result<PathBuf> {
         unsafe extern "C" {
             fn wcslen(buf: *const u16) -> usize;
         }
@@ -932,21 +967,19 @@ impl Direct {
                 Ok(out)
             } else {
                 CoTaskMemFree(path.cast());
-                Err(io::Error::from_raw_os_error(result))
+                Err(Error::from_raw_os_error(result))
             }
         }
     }
 
-    pub(super) fn home_dir_platform(
-        _env: &HashMap<String, Option<String>>,
-    ) -> Result<PathBuf, io::Error> {
+    pub(super) fn home_dir_platform(_env: &HashMap<String, Option<String>>) -> Result<PathBuf> {
         Self::known_folder(&FOLDERID_Profile)
     }
 
     pub(super) fn cache_dir_platform(
         app: Option<&str>,
         _env: &HashMap<String, Option<String>>,
-    ) -> Result<PathBuf, io::Error> {
+    ) -> Result<PathBuf> {
         let base = Self::known_folder(&FOLDERID_LocalAppData)?;
         Ok(match app {
             Some(app) => base.join(app).join("Cache"),
@@ -954,9 +987,7 @@ impl Direct {
         })
     }
 
-    pub(super) fn temp_dir_platform(
-        env: &HashMap<String, Option<String>>,
-    ) -> Result<PathBuf, io::Error> {
+    pub(super) fn temp_dir_platform(env: &HashMap<String, Option<String>>) -> Result<PathBuf> {
         let override_value = |key: &str| match env
             .iter()
             .find(|(candidate, _)| candidate.eq_ignore_ascii_case(key))
@@ -970,8 +1001,8 @@ impl Direct {
                 if path.is_absolute() {
                     return Ok(path);
                 }
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
                     format!("{key} must be an absolute path"),
                 ));
             }
@@ -979,27 +1010,27 @@ impl Direct {
         Ok(std::env::temp_dir())
     }
 
-    fn nt_error(status: windows_sys::Win32::Foundation::NTSTATUS) -> io::Error {
-        io::Error::from_raw_os_error(unsafe { RtlNtStatusToDosError(status) } as i32)
+    fn nt_error(status: windows_sys::Win32::Foundation::NTSTATUS) -> Error {
+        Error::from_raw_os_error(unsafe { RtlNtStatusToDosError(status) } as i32)
     }
 
-    pub(super) fn windows_xattr_name(name: &str, namespace: Option<&str>) -> io::Result<Vec<u8>> {
+    pub(super) fn windows_xattr_name(name: &str, namespace: Option<&str>) -> Result<Vec<u8>> {
         if namespace.is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
                 "xattr namespaces are not supported on this platform",
             ));
         }
         if name.as_bytes().contains(&0) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
                 "xattr name contains NUL",
             ));
         }
         let name = name.as_bytes().to_vec();
         let Ok(_len) = u8::try_from(name.len()) else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
                 "xattr name is too long",
             ));
         };
@@ -1010,11 +1041,11 @@ impl Direct {
         (len + 3) & !3
     }
 
-    fn windows_get_ea_list(name: &[u8]) -> io::Result<Vec<u8>> {
-        let len =
-            usize::from(u8::try_from(name.len()).map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidInput, "xattr name is too long")
-            })?);
+    fn windows_get_ea_list(name: &[u8]) -> Result<Vec<u8>> {
+        let len = usize::from(
+            u8::try_from(name.len())
+                .map_err(|_| Error::new(ErrorKind::InvalidInput, "xattr name is too long"))?,
+        );
         let size =
             Self::align_windows_ea(std::mem::offset_of!(FILE_GET_EA_INFORMATION, EaName) + len + 1);
         let mut buf = vec![0u8; size];
@@ -1031,14 +1062,15 @@ impl Direct {
         Ok(buf)
     }
 
-    fn windows_full_ea(name: &[u8], value: &[u8]) -> io::Result<Vec<u8>> {
-        let name_len =
-            usize::from(u8::try_from(name.len()).map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidInput, "xattr name is too long")
-            })?);
-        let value_len = usize::from(u16::try_from(value.len()).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidInput, "xattr value is too large")
-        })?);
+    fn windows_full_ea(name: &[u8], value: &[u8]) -> Result<Vec<u8>> {
+        let name_len = usize::from(
+            u8::try_from(name.len())
+                .map_err(|_| Error::new(ErrorKind::InvalidInput, "xattr name is too long"))?,
+        );
+        let value_len = usize::from(
+            u16::try_from(value.len())
+                .map_err(|_| Error::new(ErrorKind::InvalidInput, "xattr value is too large"))?,
+        );
         let size = Self::align_windows_ea(
             std::mem::offset_of!(FILE_FULL_EA_INFORMATION, EaName) + name_len + 1 + value_len,
         );
@@ -1056,16 +1088,13 @@ impl Direct {
         Ok(buf)
     }
 
-    fn windows_parse_full_ea_chunk(buf: &[u8]) -> io::Result<Vec<XattrEntry>> {
+    fn windows_parse_full_ea_chunk(buf: &[u8]) -> Result<Vec<XattrEntry>> {
         let mut entries = Vec::new();
         let mut offset = 0usize;
         while offset < buf.len() {
             let remaining = &buf[offset..];
             if remaining.len() < std::mem::size_of::<FILE_FULL_EA_INFORMATION>() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "EA buffer truncated",
-                ));
+                return Err(Error::new(ErrorKind::InvalidData, "EA buffer truncated"));
             }
             let entry = unsafe { &*remaining.as_ptr().cast::<FILE_FULL_EA_INFORMATION>() };
             let name_len = usize::from(entry.EaNameLength);
@@ -1075,20 +1104,16 @@ impl Direct {
                 .checked_add(name_len)
                 .and_then(|v| v.checked_add(1))
                 .and_then(|v| v.checked_add(value_len))
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "EA buffer overflow"))?;
+                .ok_or_else(|| Error::new(ErrorKind::InvalidData, "EA buffer overflow"))?;
             if total_len > remaining.len() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "EA entry truncated",
-                ));
+                return Err(Error::new(ErrorKind::InvalidData, "EA entry truncated"));
             }
             let name = unsafe {
                 slice::from_raw_parts(entry.EaName.as_ptr().cast::<u8>(), name_len).to_vec()
             };
             entries.push(XattrEntry {
-                name: String::from_utf8(name).map_err(|_| {
-                    io::Error::new(io::ErrorKind::InvalidData, "xattr name is not UTF-8")
-                })?,
+                name: String::from_utf8(name)
+                    .map_err(|_| Error::new(ErrorKind::InvalidData, "xattr name is not UTF-8"))?,
                 namespace: None,
                 size: Some(value_len as u64),
                 flags: Some(entry.Flags),
@@ -1096,12 +1121,11 @@ impl Direct {
             if entry.NextEntryOffset == 0 {
                 break;
             }
-            let next = usize::try_from(entry.NextEntryOffset).map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidData, "invalid EA entry offset")
-            })?;
+            let next = usize::try_from(entry.NextEntryOffset)
+                .map_err(|_| Error::new(ErrorKind::InvalidData, "invalid EA entry offset"))?;
             if next > remaining.len() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
                     "invalid EA entry offset",
                 ));
             }
@@ -1110,12 +1134,9 @@ impl Direct {
         Ok(entries)
     }
 
-    fn windows_parse_full_ea_value(buf: &[u8]) -> io::Result<(String, Vec<u8>)> {
+    fn windows_parse_full_ea_value(buf: &[u8]) -> Result<(String, Vec<u8>)> {
         if buf.len() < mem::size_of::<FILE_FULL_EA_INFORMATION>() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "EA buffer truncated",
-            ));
+            return Err(Error::new(ErrorKind::InvalidData, "EA buffer truncated"));
         }
         let entry = unsafe { &*buf.as_ptr().cast::<FILE_FULL_EA_INFORMATION>() };
         let name_len = usize::from(entry.EaNameLength);
@@ -1124,21 +1145,18 @@ impl Direct {
         let value_offset = mem::offset_of!(FILE_FULL_EA_INFORMATION, EaName) + name_len + 1;
         let end = value_offset
             .checked_add(value_len)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "EA buffer overflow"))?;
+            .ok_or_else(|| Error::new(ErrorKind::InvalidData, "EA buffer overflow"))?;
         if end > buf.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "EA entry truncated",
-            ));
+            return Err(Error::new(ErrorKind::InvalidData, "EA entry truncated"));
         }
         let name = String::from_utf8(buf[name_offset..name_offset + name_len].to_vec())
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "xattr name is not UTF-8"))?;
+            .map_err(|_| Error::new(ErrorKind::InvalidData, "xattr name is not UTF-8"))?;
         Ok((name, buf[value_offset..end].to_vec()))
     }
 
     pub(super) unsafe fn windows_list_xattrs(
         handle: BorrowedHandle<'_>,
-    ) -> io::Result<Vec<XattrEntry>> {
+    ) -> Result<Vec<XattrEntry>> {
         let handle = handle.as_raw_handle();
         let mut entries = Vec::new();
         let mut restart_scan = true;
@@ -1188,7 +1206,7 @@ impl Direct {
     pub(super) unsafe fn windows_get_xattr(
         handle: BorrowedHandle<'_>,
         name: &[u8],
-    ) -> io::Result<Vec<u8>> {
+    ) -> Result<Vec<u8>> {
         let handle = handle.as_raw_handle();
         let ea_list = Self::windows_get_ea_list(name)?;
         let mut buf = vec![0u8; 256];
@@ -1212,8 +1230,8 @@ impl Direct {
                     let (found_name, value) =
                         Self::windows_parse_full_ea_value(&buf[..iosb.Information])?;
                     if value.is_empty() {
-                        return Err(io::Error::new(
-                            io::ErrorKind::NotFound,
+                        return Err(Error::new(
+                            ErrorKind::NotFound,
                             format!("xattr {found_name:?} not found"),
                         ));
                     }
@@ -1232,7 +1250,7 @@ impl Direct {
         handle: BorrowedHandle<'_>,
         name: &[u8],
         value: &[u8],
-    ) -> io::Result<()> {
+    ) -> Result<()> {
         let handle = handle.as_raw_handle();
         let ea = Self::windows_full_ea(name, value)?;
         let mut iosb = IO_STATUS_BLOCK::default();
@@ -1251,53 +1269,48 @@ impl Direct {
         }
     }
 
-    fn windows_parse_stream_name(name: &str) -> io::Result<(String, String)> {
-        let rest = name.strip_prefix(':').ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "stream name missing `:` prefix")
-        })?;
-        let split = rest.rfind(':').ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "stream name missing type suffix",
-            )
-        })?;
-        let stream_type = rest[split + 1..].strip_prefix('$').ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "stream type missing `$` prefix")
-        })?;
+    fn windows_parse_stream_name(name: &str) -> Result<(String, String)> {
+        let rest = name
+            .strip_prefix(':')
+            .ok_or_else(|| Error::new(ErrorKind::InvalidData, "stream name missing `:` prefix"))?;
+        let split = rest
+            .rfind(':')
+            .ok_or_else(|| Error::new(ErrorKind::InvalidData, "stream name missing type suffix"))?;
+        let stream_type = rest[split + 1..]
+            .strip_prefix('$')
+            .ok_or_else(|| Error::new(ErrorKind::InvalidData, "stream type missing `$` prefix"))?;
         Ok((rest[..split].to_owned(), stream_type.to_owned()))
     }
 
-    fn windows_parse_streams(buf: &[u8]) -> io::Result<Vec<StreamEntry>> {
+    fn windows_parse_streams(buf: &[u8]) -> Result<Vec<StreamEntry>> {
         let mut streams = Vec::new();
         let mut offset = 0usize;
         while offset < buf.len() {
             if buf.len() - offset < mem::size_of::<FILE_STREAM_INFO>() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
                     "truncated FILE_STREAM_INFO entry",
                 ));
             }
             let info = unsafe { &*buf[offset..].as_ptr().cast::<FILE_STREAM_INFO>() };
             let name_len = usize::try_from(info.StreamNameLength)
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "stream name too large"))?;
+                .map_err(|_| Error::new(ErrorKind::InvalidData, "stream name too large"))?;
             if name_len % 2 != 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
                     "invalid stream name length",
                 ));
             }
             let name_slice =
                 unsafe { slice::from_raw_parts(info.StreamName.as_ptr(), name_len / 2) };
-            let raw_name = String::from_utf16(name_slice).map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidData, "stream name is not UTF-16")
-            })?;
+            let raw_name = String::from_utf16(name_slice)
+                .map_err(|_| Error::new(ErrorKind::InvalidData, "stream name is not UTF-16"))?;
             let (name, r#type) = Self::windows_parse_stream_name(&raw_name)?;
-            let size = u64::try_from(info.StreamSize).map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidData, "stream size out of range")
-            })?;
+            let size = u64::try_from(info.StreamSize)
+                .map_err(|_| Error::new(ErrorKind::InvalidData, "stream size out of range"))?;
             let alloc_size = u64::try_from(info.StreamAllocationSize).map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
+                Error::new(
+                    ErrorKind::InvalidData,
                     "stream allocation size out of range",
                 )
             })?;
@@ -1309,16 +1322,13 @@ impl Direct {
             });
 
             let next = usize::try_from(info.NextEntryOffset).map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "stream entry offset out of range",
-                )
+                Error::new(ErrorKind::InvalidData, "stream entry offset out of range")
             })?;
             if next == 0 {
                 break;
             }
             offset = offset.checked_add(next).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "stream entry offset overflow")
+                Error::new(ErrorKind::InvalidData, "stream entry offset overflow")
             })?;
         }
         Ok(streams)
@@ -1326,7 +1336,7 @@ impl Direct {
 
     pub(super) unsafe fn windows_list_streams(
         handle: BorrowedHandle<'_>,
-    ) -> io::Result<Vec<StreamEntry>> {
+    ) -> Result<Vec<StreamEntry>> {
         let handle = handle.as_raw_handle();
         let mut len = 4096usize;
         loop {
@@ -1342,7 +1352,7 @@ impl Direct {
             if status != 0 {
                 return Self::windows_parse_streams(&buf);
             }
-            let err = io::Error::last_os_error();
+            let err = Error::last_os_error();
             if err.raw_os_error() == Some(ERROR_MORE_DATA as i32) {
                 len = len.saturating_mul(2);
                 continue;
@@ -1354,7 +1364,7 @@ impl Direct {
         }
     }
 
-    pub(super) async fn impl_symlink(cwd: &Path, src: &Path, dst: &Path) -> io::Result<()> {
+    pub(super) async fn impl_symlink(cwd: &Path, src: &Path, dst: &Path) -> Result<()> {
         let metadata = fs::metadata(cwd.join(src)).await?;
         if metadata.is_dir() {
             Self::impl_symlink_dir(src, dst).await
@@ -1363,19 +1373,19 @@ impl Direct {
         }
     }
 
-    pub(super) async fn impl_symlink_dir(src: &Path, dst: &Path) -> io::Result<()> {
-        fs::symlink_dir(src, dst).await
+    pub(super) async fn impl_symlink_dir(src: &Path, dst: &Path) -> Result<()> {
+        Ok(fs::symlink_dir(src, dst).await?)
     }
 
-    pub(super) async fn impl_symlink_file(src: &Path, dst: &Path) -> io::Result<()> {
-        fs::symlink_file(src, dst).await
+    pub(super) async fn impl_symlink_file(src: &Path, dst: &Path) -> Result<()> {
+        Ok(fs::symlink_file(src, dst).await?)
     }
 
-    pub(super) async fn impl_copy_symlink(src: &Path, dst: &Path) -> io::Result<()> {
+    pub(super) async fn impl_copy_symlink(src: &Path, dst: &Path) -> Result<()> {
         let (src, dst) = (src.to_path_buf(), dst.to_path_buf());
         tokio::task::spawn_blocking(move || Self::copy_reparse_point_sync(&src, &dst))
             .await
-            .unwrap_or_else(|_| Err(io::Error::other("copy symlink task failed")))
+            .unwrap_or_else(|_| Err(Error::other("copy symlink task failed")))
     }
 
     /// Duplicates a reparse point (symlink, junction, or otherwise) byte for
@@ -1383,7 +1393,7 @@ impl Direct {
     /// (relative vs. absolute, print name vs. substitute name, and the
     /// reparse tag itself) that re-deriving a fresh reparse point from a
     /// resolved target path cannot recover.
-    fn copy_reparse_point_sync(src: &Path, dst: &Path) -> io::Result<()> {
+    fn copy_reparse_point_sync(src: &Path, dst: &Path) -> Result<()> {
         let is_dir = std::fs::symlink_metadata(src)?.is_dir();
 
         let mut read_opts = StdOpenOptions::new();
@@ -1407,7 +1417,7 @@ impl Direct {
             )
         } == 0
         {
-            return Err(io::Error::last_os_error());
+            return Err(Error::last_os_error());
         }
         drop(src_file);
 
@@ -1428,7 +1438,7 @@ impl Direct {
             Ok(file) => file,
             Err(err) => {
                 Self::remove_reparse_placeholder(dst, is_dir);
-                return Err(err);
+                return Err(err.into());
             }
         };
 
@@ -1447,7 +1457,7 @@ impl Direct {
         };
         drop(dst_file);
         if ok == 0 {
-            let err = io::Error::last_os_error();
+            let err = Error::last_os_error();
             Self::remove_reparse_placeholder(dst, is_dir);
             return Err(err);
         }
@@ -1467,22 +1477,18 @@ impl Direct {
         path: &Path,
         namespace: XattrNamespace<'_>,
         follow: bool,
-    ) -> Result<Vec<XattrEntry>, io::Error> {
+    ) -> Result<Vec<XattrEntry>> {
         let file = self
             .direct_open_options()
             .read(true)
             .no_follow(!follow)
             .open(typed_windows_path(path)?)
             .await
-            .map_err(crate::Error::into_io_error)?;
+            .map_err(crate::error::Error::into_io_error)?;
         Self::impl_file_xattrs(&file.file, namespace).await
     }
 
-    pub(super) async fn impl_streams(
-        &self,
-        path: &Path,
-        follow: bool,
-    ) -> Result<Vec<StreamEntry>, io::Error> {
+    pub(super) async fn impl_streams(&self, path: &Path, follow: bool) -> Result<Vec<StreamEntry>> {
         let file = Self::open_for_metadata(path, follow)?;
         Self::impl_file_streams(&file).await
     }
@@ -1493,14 +1499,14 @@ impl Direct {
         name: &str,
         namespace: Option<&str>,
         follow: bool,
-    ) -> Result<Vec<u8>, io::Error> {
+    ) -> Result<Vec<u8>> {
         let file = self
             .direct_open_options()
             .read(true)
             .no_follow(!follow)
             .open(typed_windows_path(path)?)
             .await
-            .map_err(crate::Error::into_io_error)?;
+            .map_err(crate::error::Error::into_io_error)?;
         Self::impl_file_xattr(&file.file, name, namespace).await
     }
 
@@ -1511,14 +1517,14 @@ impl Direct {
         namespace: Option<&str>,
         value: &[u8],
         follow: bool,
-    ) -> Result<(), io::Error> {
+    ) -> Result<()> {
         let file = self
             .direct_open_options()
             .write(true)
             .no_follow(!follow)
             .open(typed_windows_path(path)?)
             .await
-            .map_err(crate::Error::into_io_error)?;
+            .map_err(crate::error::Error::into_io_error)?;
         Self::impl_file_set_xattr(&file.file, name, namespace, value).await
     }
 
@@ -1528,7 +1534,7 @@ impl Direct {
         name: &str,
         namespace: Option<&str>,
         follow: bool,
-    ) -> Result<(), io::Error> {
+    ) -> Result<()> {
         let file = self
             .direct_open_options()
             .read(true)
@@ -1536,47 +1542,45 @@ impl Direct {
             .no_follow(!follow)
             .open(typed_windows_path(path)?)
             .await
-            .map_err(crate::Error::into_io_error)?;
+            .map_err(crate::error::Error::into_io_error)?;
         Self::impl_file_remove_xattr(&file.file, name, namespace).await
     }
 
     pub(super) async fn impl_file_xattrs(
         file: &Arc<std::fs::File>,
         namespace: XattrNamespace<'_>,
-    ) -> Result<Vec<XattrEntry>, io::Error> {
+    ) -> Result<Vec<XattrEntry>> {
         if let XattrNamespace::Named(_) = namespace {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
                 "xattr namespaces are not supported on this platform",
             ));
         }
         let file = Arc::clone(file);
         tokio::task::spawn_blocking(move || unsafe { Self::windows_list_xattrs(file.as_handle()) })
             .await
-            .unwrap_or_else(|e| Err(io::Error::other(e)))
+            .unwrap_or_else(|e| Err(Error::other(e)))
     }
 
     pub(super) async fn impl_file_xattr(
         file: &Arc<std::fs::File>,
         name: &str,
         namespace: Option<&str>,
-    ) -> Result<Vec<u8>, io::Error> {
+    ) -> Result<Vec<u8>> {
         let name = Self::windows_xattr_name(name, namespace)?;
         let file = Arc::clone(file);
         tokio::task::spawn_blocking(move || unsafe {
             Self::windows_get_xattr(file.as_handle(), &name)
         })
         .await
-        .unwrap_or_else(|e| Err(io::Error::other(e)))
+        .unwrap_or_else(|e| Err(Error::other(e)))
     }
 
-    pub(super) async fn impl_file_streams(
-        file: &Arc<std::fs::File>,
-    ) -> Result<Vec<StreamEntry>, io::Error> {
+    pub(super) async fn impl_file_streams(file: &Arc<std::fs::File>) -> Result<Vec<StreamEntry>> {
         let file = Arc::clone(file);
         tokio::task::spawn_blocking(move || unsafe { Self::windows_list_streams(file.as_handle()) })
             .await
-            .unwrap_or_else(|e| Err(io::Error::other(e)))
+            .unwrap_or_else(|e| Err(Error::other(e)))
     }
 
     pub(super) async fn impl_file_set_xattr(
@@ -1584,10 +1588,10 @@ impl Direct {
         name: &str,
         namespace: Option<&str>,
         value: &[u8],
-    ) -> Result<(), io::Error> {
+    ) -> Result<()> {
         if value.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
                 "empty xattr values are not supported on this platform",
             ));
         }
@@ -1598,40 +1602,40 @@ impl Direct {
             Self::windows_set_xattr(file.as_handle(), &name, &value)
         })
         .await
-        .unwrap_or_else(|e| Err(io::Error::other(e)))
+        .unwrap_or_else(|e| Err(Error::other(e)))
     }
 
     pub(super) async fn impl_file_remove_xattr(
         file: &Arc<std::fs::File>,
         name: &str,
         namespace: Option<&str>,
-    ) -> Result<(), io::Error> {
+    ) -> Result<()> {
         let name = Self::windows_xattr_name(name, namespace)?;
         let file = Arc::clone(file);
         tokio::task::spawn_blocking(move || unsafe {
             Self::windows_set_xattr(file.as_handle(), &name, &[])
         })
         .await
-        .unwrap_or_else(|e| Err(io::Error::other(e)))
+        .unwrap_or_else(|e| Err(Error::other(e)))
     }
 
     pub(super) async fn impl_set_metadata(
         &self,
         paths: &[PathBuf],
         patch: MetadataPatch,
-    ) -> Result<(), io::Error> {
+    ) -> Result<()> {
         if patch.is_empty() {
             return Ok(());
         }
         if patch.mode.is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
+            return Err(Error::new(
+                ErrorKind::Unsupported,
                 "mode cannot be set on this platform",
             ));
         }
         if !patch.follow && !patch.attrs.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
+            return Err(Error::new(
+                ErrorKind::Unsupported,
                 "attributes cannot be set without following symlinks on this platform",
             ));
         }
@@ -1651,8 +1655,8 @@ impl Direct {
                         Ok(sid)
                     }
                 }
-                OwnershipIdentity::Id(_) => Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
+                OwnershipIdentity::Id(_) => Err(Error::new(
+                    ErrorKind::InvalidInput,
                     "numeric ownership IDs are not supported on Windows",
                 )),
             };
@@ -1672,7 +1676,7 @@ impl Direct {
             } else {
                 Some(
                     SecDesc::new(mask, 0, SecDescControl::empty(), user, group, None, None)
-                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+                        .map_err(|error| Error::new(ErrorKind::InvalidData, error))?,
                 )
             };
 
@@ -1696,14 +1700,14 @@ impl Direct {
             Ok(())
         })
         .await
-        .unwrap_or_else(|_| Err(io::Error::other("failed to join metadata update task")))
+        .unwrap_or_else(|_| Err(Error::other("failed to join metadata update task")))
     }
 
-    pub(super) async fn impl_canonicalize(&self, path: &Path) -> Result<PathBuf, io::Error> {
+    pub(super) async fn impl_canonicalize(&self, path: &Path) -> Result<PathBuf> {
         let path = path.to_path_buf();
-        tokio::task::spawn_blocking(move || dunce::canonicalize(path))
+        tokio::task::spawn_blocking(move || -> Result<PathBuf> { Ok(dunce::canonicalize(path)?) })
             .await
-            .unwrap_or_else(|e| Err(io::Error::other(e)))
+            .unwrap_or_else(|e| Err(Error::other(e)))
     }
 
     fn set_file_times_path(
@@ -1712,7 +1716,7 @@ impl Direct {
         modified: Option<i128>,
         created: Option<i128>,
         follow: bool,
-    ) -> Result<(), io::Error> {
+    ) -> Result<()> {
         use std::{fs::FileTimes, os::windows::fs::FileTimesExt};
         use windows_sys::Win32::Storage::FileSystem::FILE_WRITE_ATTRIBUTES;
 
@@ -1734,28 +1738,28 @@ impl Direct {
         if let Some(created) = created {
             times = times.set_created(nanos_to_system_time(created)?);
         }
-        file.set_times(times)
+        Ok(file.set_times(times)?)
     }
 }
 
 impl Direct {
-    fn direct_open_options(&self) -> DirectOpenOptions {
-        DirectOpenOptions::default()
+    fn direct_open_options(&self) -> OpenOptions {
+        OpenOptions::default()
     }
 }
 
-impl DirectChild {
-    pub(super) async fn impl_terminate(self) -> io::Result<Option<std::process::ExitStatus>> {
+impl Child {
+    pub(super) async fn impl_terminate(self) -> Result<Option<std::process::ExitStatus>> {
         let pid = self.inner.id();
         let mut child = self.inner;
         let Some(pid) = pid else {
-            return child.wait().await.map(Some);
+            return Ok(child.wait().await.map(Some)?);
         };
         let _ = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) };
 
         let wait = async {
-            if self.process_control == crate::ProcessControl::Foreground {
-                return child.wait().await;
+            if self.process_control == crate::process::ProcessControl::Foreground {
+                return Ok(child.wait().await?);
             }
             loop {
                 let active = if let Some(job) = &self.job {
@@ -1770,14 +1774,14 @@ impl DirectChild {
                         )
                     };
                     if result == 0 {
-                        return Err(io::Error::last_os_error());
+                        return Err(Error::last_os_error());
                     }
                     info.ActiveProcesses != 0
                 } else {
                     false
                 };
                 if !active {
-                    return child.wait().await;
+                    return Ok(child.wait().await?);
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
@@ -1790,46 +1794,43 @@ impl DirectChild {
         }
         if let Some(job) = &self.job {
             if unsafe { TerminateJobObject(job.as_raw_handle(), 1) } == 0 {
-                return Err(io::Error::last_os_error());
+                return Err(Error::last_os_error());
             }
         } else {
             let _ = child.start_kill();
         }
-        child.wait().await.map(Some)
+        Ok(child.wait().await.map(Some)?)
     }
 }
 
-impl DirectCommand<'_> {
-    pub(super) fn configure_process(
-        &self,
-        command: &mut tokio::process::Command,
-    ) -> io::Result<()> {
+impl Command<'_> {
+    pub(super) fn configure_process(&self, command: &mut tokio::process::Command) -> Result<()> {
         let mut flags = CREATE_NEW_PROCESS_GROUP;
-        if self.process_control == crate::ProcessControl::Background {
+        if self.process_control == crate::process::ProcessControl::Background {
             flags |= CREATE_SUSPENDED;
         }
         command.creation_flags(flags);
         Ok(())
     }
 
-    pub(super) fn finish_spawn(&self, mut child: tokio::process::Child) -> io::Result<DirectChild> {
-        let job = if self.process_control == crate::ProcessControl::Background {
+    pub(super) fn finish_spawn(&self, mut child: tokio::process::Child) -> Result<Child> {
+        let job = if self.process_control == crate::process::ProcessControl::Background {
             let handle = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
             if handle.is_null() {
                 let _ = child.start_kill();
-                return Err(io::Error::last_os_error());
+                return Err(Error::last_os_error());
             }
             let job = unsafe { OwnedHandle::from_raw_handle(handle) };
             let Some(pid) = child.id() else {
                 let _ = child.start_kill();
-                return Err(io::Error::other("spawned process has no process ID"));
+                return Err(Error::other("spawned process has no process ID"));
             };
             let Some(process) = child.raw_handle() else {
                 let _ = child.start_kill();
-                return Err(io::Error::other("spawned process has no process handle"));
+                return Err(Error::other("spawned process has no process handle"));
             };
             if unsafe { AssignProcessToJobObject(job.as_raw_handle(), process) } == 0 {
-                let error = io::Error::last_os_error();
+                let error = Error::last_os_error();
                 let _ = child.start_kill();
                 return Err(error);
             }
@@ -1841,7 +1842,7 @@ impl DirectCommand<'_> {
         } else {
             None
         };
-        Ok(DirectChild::new(
+        Ok(Child::new(
             child,
             self.process_control,
             self.termination_policy,
@@ -1849,14 +1850,14 @@ impl DirectCommand<'_> {
         ))
     }
 
-    pub(super) fn impl_stdout_inherit_stderr(&mut self) -> io::Result<&mut Self> {
+    pub(super) fn impl_stdout_inherit_stderr(&mut self) -> Result<&mut Self> {
         self.stdout = Some(std::process::Stdio::from(
             std::io::stderr().as_handle().try_clone_to_owned()?,
         ));
         Ok(self)
     }
 
-    pub(super) fn impl_stderr_inherit_stdout(&mut self) -> io::Result<&mut Self> {
+    pub(super) fn impl_stderr_inherit_stdout(&mut self) -> Result<&mut Self> {
         self.stderr = Some(std::process::Stdio::from(
             std::io::stdout().as_handle().try_clone_to_owned()?,
         ));
@@ -1864,49 +1865,49 @@ impl DirectCommand<'_> {
     }
 }
 
-fn resume_process(pid: u32) -> io::Result<()> {
+fn resume_process(pid: u32) -> Result<()> {
     // std::process closes the primary thread handle returned by CreateProcess.
     // A newly created suspended process has only that thread, so locate it by
     // owner PID before allowing the process to execute.
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
     if snapshot == INVALID_HANDLE_VALUE {
-        return Err(io::Error::last_os_error());
+        return Err(Error::last_os_error());
     }
     let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot) };
     let mut entry: THREADENTRY32 = unsafe { mem::zeroed() };
     entry.dwSize = mem::size_of::<THREADENTRY32>() as u32;
     if unsafe { Thread32First(snapshot.as_raw_handle(), &raw mut entry) } == 0 {
-        return Err(io::Error::last_os_error());
+        return Err(Error::last_os_error());
     }
     loop {
         if entry.th32OwnerProcessID == pid {
             let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
             if thread.is_null() {
-                return Err(io::Error::last_os_error());
+                return Err(Error::last_os_error());
             }
             let thread = unsafe { OwnedHandle::from_raw_handle(thread) };
             if unsafe { ResumeThread(thread.as_raw_handle()) } == u32::MAX {
-                return Err(io::Error::last_os_error());
+                return Err(Error::last_os_error());
             }
             return Ok(());
         }
         if unsafe { Thread32Next(snapshot.as_raw_handle(), &raw mut entry) } == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
+            return Err(Error::new(
+                ErrorKind::NotFound,
                 "spawned process has no primary thread",
             ));
         }
     }
 }
 
-fn nanos_to_system_time(nanos: i128) -> io::Result<SystemTime> {
+fn nanos_to_system_time(nanos: i128) -> Result<SystemTime> {
     let (negative, nanos) = if nanos < 0 {
         (true, nanos.unsigned_abs())
     } else {
         (false, nanos as u128)
     };
     let secs = u64::try_from(nanos / 1_000_000_000)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid timestamp"))?;
+        .map_err(|_| Error::new(ErrorKind::InvalidInput, "invalid timestamp"))?;
     let subsec_nanos =
         u32::try_from(nanos % 1_000_000_000).expect("nanosecond remainder is in u32 range");
     let duration = Duration::new(secs, subsec_nanos);
@@ -1915,11 +1916,11 @@ fn nanos_to_system_time(nanos: i128) -> io::Result<SystemTime> {
     } else {
         SystemTime::UNIX_EPOCH.checked_add(duration)
     };
-    time.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid timestamp"))
+    time.ok_or_else(|| Error::new(ErrorKind::InvalidInput, "invalid timestamp"))
 }
 
-impl super::DirectOpenOptions {
-    pub(super) fn apply_no_follow_flags(&self, opts: &mut OpenOptions) {
+impl OpenOptions {
+    pub(super) fn apply_no_follow_flags(&self, opts: &mut TokioOpenOptions) {
         if self.no_follow {
             opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
         }

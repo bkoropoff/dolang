@@ -1,8 +1,10 @@
 //! Target-path conversion and target-relative well-known locations.
 
 use serde::{Deserialize, Serialize};
-use std::{io, path::PathBuf};
+use std::path::PathBuf;
 use typed_path::{PathType, Utf8TypedPath, Utf8TypedPathBuf};
+
+use crate::error::{Error, ErrorKind, Result};
 
 /// A standard location resolved by a VFS target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,15 +18,15 @@ pub enum WellKnownPath {
 }
 
 /// Converts a path in this target's syntax into a native host path.
-pub fn native_path(path: Utf8TypedPath<'_>) -> io::Result<PathBuf> {
+pub fn native_path(path: Utf8TypedPath<'_>) -> Result<PathBuf> {
     let matches_target = if cfg!(windows) {
         path.is_windows()
     } else {
         path.is_unix()
     };
     if !matches_target {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
             "path style does not match VFS target",
         ));
     }
@@ -32,11 +34,11 @@ pub fn native_path(path: Utf8TypedPath<'_>) -> io::Result<PathBuf> {
 }
 
 /// Converts a native host path into a UTF-8 path tagged with host syntax.
-pub fn typed_path(path: PathBuf) -> io::Result<Utf8TypedPathBuf> {
+pub fn typed_path(path: PathBuf) -> Result<Utf8TypedPathBuf> {
     let path = path
         .into_os_string()
         .into_string()
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "path is not valid UTF-8"))?;
+        .map_err(|_| Error::new(ErrorKind::InvalidData, "path is not valid UTF-8"))?;
     Ok(if cfg!(windows) {
         Utf8TypedPathBuf::from_windows(path)
     } else {

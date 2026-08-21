@@ -7,11 +7,10 @@
 //! implementation detail, same as `dolang-vfs` never exposing its own
 //! `RequestKind`/`ResponseKind`/`VfsProtocol`.
 
-use dolang_vfs::extension::{ExtCite, ExtGift, VfsExtension};
 use dolang_vfs::{
-    AnyVfs, Vfs,
-    direct::Direct,
+    Vfs,
     error::{Error, ErrorKind},
+    extension::{ExtCite, ExtGift, VfsExtension},
 };
 use dolang_winterop::security::SecDesc;
 use std::sync::{Arc, Weak};
@@ -39,27 +38,23 @@ fn unexpected(request: &str) -> Error {
 }
 
 /// Turns a `WinRegResponse::Key` into a [`Key`], adopting a native handle
-/// (see [`KeyHandle`]) into a fresh, purely local [`AnyVfs::Direct`] VFS if
+/// (see [`KeyHandle`]) into a fresh, purely local [`AnyVfs`] if
 /// necessary.
 ///
 /// Adoption pays the cost of one extra in-process `call_extension` — cheap,
 /// since `Direct` dispatch never serializes — and only happens once per
 /// chain of same-machine keys: every subsequent operation on the returned
 /// `Key` (including opening its own subkeys) is dispatched through that
-/// `AnyVfs::Direct`, which is itself always `native_capable() == false`, so
+/// a direct `AnyVfs`, which is itself always `native_capable() == false`, so
 /// it always takes the ordinary in-process [`ExtGift`] path from then on.
-async fn from_response(
-    vfs: &AnyVfs,
-    request: &str,
-    response: WinRegResponse,
-) -> Result<Key, Error> {
+async fn from_response(vfs: &Vfs, request: &str, response: WinRegResponse) -> Result<Key, Error> {
     match response {
         WinRegResponse::Key(KeyHandle::Opaque(handle)) => Ok(Key {
             vfs: vfs.clone(),
             handle: Arc::new(KeyState::new(vfs.clone(), handle)),
         }),
         WinRegResponse::Key(KeyHandle::Native(os_handle)) => {
-            let local = AnyVfs::Direct(Direct::new()?);
+            let local = Vfs::direct()?;
             let adopted = local
                 .call_extension::<WinRegExt>(WinRegRequest::AdoptNative { handle: os_handle })
                 .await??;
@@ -84,17 +79,17 @@ async fn from_response(
 /// one `AnyVfs` to an operation routed through a different one, since no
 /// method after the bootstrap call accepts a `vfs` argument at all.
 pub struct Key {
-    vfs: AnyVfs,
+    vfs: Vfs,
     handle: Arc<KeyState>,
 }
 
 struct KeyState {
-    vfs: AnyVfs,
+    vfs: Vfs,
     opaque: Option<ExtGift<KeyMarker>>,
 }
 
 impl KeyState {
-    fn new(vfs: AnyVfs, opaque: ExtGift<KeyMarker>) -> Self {
+    fn new(vfs: Vfs, opaque: ExtGift<KeyMarker>) -> Self {
         Self {
             vfs,
             opaque: Some(opaque),
@@ -133,7 +128,7 @@ impl Drop for KeyState {
 impl Key {
     /// Opens a predefined root key (e.g. `HKEY_LOCAL_MACHINE`).
     pub async fn open_root(
-        vfs: &AnyVfs,
+        vfs: &Vfs,
         root: PredefinedRoot,
         view: View,
         access: Access,
@@ -449,7 +444,7 @@ impl Key {
 
 /// A live forward enumeration of registry subkey names.
 pub struct SubKeys {
-    vfs: AnyVfs,
+    vfs: Vfs,
     key: Weak<KeyState>,
     len: u32,
     index: u32,
@@ -498,7 +493,7 @@ impl SubKeys {
 
 /// A live forward enumeration of registry values.
 pub struct Values {
-    vfs: AnyVfs,
+    vfs: Vfs,
     key: Weak<KeyState>,
     len: u32,
     index: u32,
@@ -551,7 +546,7 @@ mod tests {
 
     #[tokio::test]
     async fn unexpected_key_response_returns_error() {
-        let vfs = AnyVfs::Direct(Direct::new().unwrap());
+        let vfs = Vfs::direct().unwrap();
         let error = match from_response(&vfs, "OpenRoot", WinRegResponse::Ack).await {
             Ok(_) => panic!("expected an error"),
             Err(error) => error,

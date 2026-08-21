@@ -1,6 +1,6 @@
 use std::process::Stdio;
 
-use dolang_vfs::{Vfs, direct::Direct};
+use dolang_vfs::Vfs;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     process::Command,
@@ -9,7 +9,7 @@ use tokio::{
 
 #[tokio::test]
 async fn pipe_round_trip() {
-    let (mut send, mut recv) = Direct::new().unwrap().pipe().await.unwrap();
+    let (mut send, mut recv) = Vfs::direct().unwrap().pipe(None).await.unwrap();
 
     send.write_all(b"hello world").await.unwrap();
     drop(send);
@@ -21,7 +21,7 @@ async fn pipe_round_trip() {
 
 #[tokio::test]
 async fn pipe_reports_eof_after_sender_drop() {
-    let (send, mut recv) = Direct::new().unwrap().pipe().await.unwrap();
+    let (send, mut recv) = Vfs::direct().unwrap().pipe(None).await.unwrap();
     drop(send);
 
     let mut buf = [0; 16];
@@ -31,7 +31,7 @@ async fn pipe_reports_eof_after_sender_drop() {
 
 #[tokio::test]
 async fn pipe_reports_write_failure_after_receiver_drop() {
-    let (mut send, recv) = Direct::new().unwrap().pipe().await.unwrap();
+    let (mut send, recv) = Vfs::direct().unwrap().pipe(None).await.unwrap();
     let mut child = close_stdin_immediately(recv.into_stdio().await.unwrap());
     let status = child.wait().await.unwrap();
     assert!(status.success());
@@ -61,7 +61,7 @@ async fn pipe_reports_write_failure_after_receiver_drop() {
 
 #[tokio::test]
 async fn pipe_recv_can_be_used_as_child_stdin() {
-    let (mut send, recv) = Direct::new().unwrap().pipe().await.unwrap();
+    let (mut send, recv) = Vfs::direct().unwrap().pipe(None).await.unwrap();
     let child = cat_stdin_to_stdout(recv.into_stdio().await.unwrap());
 
     #[cfg(unix)]
@@ -77,7 +77,7 @@ async fn pipe_recv_can_be_used_as_child_stdin() {
 
 #[tokio::test]
 async fn pipe_send_can_be_used_as_child_stdout() {
-    let (send, mut recv) = Direct::new().unwrap().pipe().await.unwrap();
+    let (send, mut recv) = Vfs::direct().unwrap().pipe(None).await.unwrap();
     let mut child = write_hello_to_stdout(send.into_stdio().await.unwrap());
 
     let mut buf = Vec::new();

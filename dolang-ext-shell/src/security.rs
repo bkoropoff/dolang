@@ -18,7 +18,6 @@ use dolang::{
     },
 };
 use dolang_vfs::{
-    Vfs as _,
     security::{
         Acl as VfsAnyAcl, AclKind as VfsAclKind, MacosAce as VfsMacosAce,
         MacosAceFlags as VfsMacosAceFlags, MacosAceMask as VfsMacosAceMask,

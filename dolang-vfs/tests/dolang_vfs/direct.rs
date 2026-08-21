@@ -7,9 +7,8 @@ use dolang_vfs::metadata::{AttrFlags, AttrsPatch};
 #[cfg(any(unix, windows))]
 use dolang_vfs::process::{ProcessControl, Signal, TerminationPolicy};
 use dolang_vfs::{
-    Child, Command, FileHandle, OpenOptions, Vfs,
-    direct::Direct,
-    file::{FileLockBehavior, FileLockMode, FileLockRange, FileLockRequest},
+    Vfs,
+    file::{File, FileLockBehavior, FileLockMode, FileLockRange, FileLockRequest},
     metadata::{FileType, MetadataPatch},
 };
 #[cfg(windows)]
@@ -44,7 +43,7 @@ fn typed_str(path: &str) -> Utf8TypedPath<'_> {
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 #[tokio::test]
 async fn rename_can_refuse_to_replace_destination() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let from = dir.path().join("rename-from");
     let to = dir.path().join("rename-to");
@@ -71,7 +70,7 @@ async fn rename_can_refuse_to_replace_destination() {
 #[cfg(target_os = "freebsd")]
 #[tokio::test]
 async fn rename_without_replacement_is_unsupported() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let from = dir.path().join("rename-from");
     let to = dir.path().join("rename-to");
@@ -98,7 +97,7 @@ async fn rename_replaces_an_open_destination() {
         return;
     }
 
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let from = dir.path().join("rename-from");
     let to = dir.path().join("rename-to");
@@ -139,7 +138,7 @@ fn process_exists(pid: libc::pid_t) -> bool {
 #[cfg(unix)]
 #[tokio::test]
 async fn background_termination_signals_the_process_group() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let pid_path = dir.path().join("descendant.pid");
     let script = format!("sleep 60 & echo $! > '{}'; wait", pid_path.display());
@@ -169,7 +168,7 @@ async fn background_termination_signals_the_process_group() {
 #[cfg(unix)]
 #[tokio::test]
 async fn force_false_orphans_the_background_process_group() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let pid_path = dir.path().join("group.pid");
     let script = format!(
@@ -198,7 +197,7 @@ async fn force_false_orphans_the_background_process_group() {
 
 #[cfg(windows)]
 async fn assert_windows_termination(control: ProcessControl) {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let mut command = direct.command(Utf8TypedPath::Windows(Utf8WindowsPath::new("cmd")));
     command
         .arg("/C")
@@ -242,7 +241,7 @@ fn lock_request(
     }
 }
 
-async fn open_lock_file(direct: &Direct, path: &Path) -> dolang_vfs::direct::DirectFile {
+async fn open_lock_file(direct: &Vfs, path: &Path) -> File {
     direct
         .open_options()
         .read(true)
@@ -256,7 +255,7 @@ async fn open_lock_file(direct: &Direct, path: &Path) -> dolang_vfs::direct::Dir
 #[cfg(not(target_os = "freebsd"))]
 #[tokio::test]
 async fn byte_range_locks_contend_and_release() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let path = dir.path().join("locks");
     let first = open_lock_file(&direct, &path).await;
@@ -316,7 +315,7 @@ async fn byte_range_locks_contend_and_release() {
 #[cfg(unix)]
 #[tokio::test]
 async fn handing_a_file_to_a_child_releases_its_locks() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let path = dir.path().join("closed-locks");
     let first = open_lock_file(&direct, &path).await;
@@ -358,7 +357,7 @@ async fn handing_a_file_to_a_child_releases_its_locks() {
 #[cfg(target_os = "freebsd")]
 #[tokio::test]
 async fn byte_range_locks_are_rejected() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let path = dir.path().join("byte-range-locks");
     let file = open_lock_file(&direct, &path).await;
@@ -379,7 +378,7 @@ async fn byte_range_locks_are_rejected() {
 
 #[tokio::test]
 async fn shared_locks_and_same_handle_overlap_rules() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let path = dir.path().join("shared-locks");
     let first = open_lock_file(&direct, &path).await;
@@ -434,7 +433,7 @@ async fn shared_locks_and_same_handle_overlap_rules() {
 #[cfg(unix)]
 #[tokio::test]
 async fn finite_empty_range_is_rejected() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let path = dir.path().join("empty-lock");
     let first = open_lock_file(&direct, &path).await;
@@ -454,7 +453,7 @@ async fn finite_empty_range_is_rejected() {
 #[cfg(windows)]
 #[tokio::test]
 async fn finite_empty_range_uses_native_windows_behavior() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let path = dir.path().join("empty-lock");
     let first = open_lock_file(&direct, &path).await;
@@ -615,7 +614,7 @@ fn successful_command() -> (&'static str, [&'static str; 2]) {
 
 #[tokio::test]
 async fn direct_open_options_round_trip() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let path = dir.path().join("file.txt");
 
@@ -644,7 +643,7 @@ async fn direct_open_options_round_trip() {
 #[cfg(unix)]
 #[tokio::test]
 async fn direct_streams_a_non_seekable_file() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let path = dir.path().join("fifo");
     nix::unistd::mkfifo(path.as_path(), nix::sys::stat::Mode::S_IRWXU).unwrap();
@@ -675,7 +674,7 @@ async fn direct_streams_a_non_seekable_file() {
 /// alone, in both directions.
 #[tokio::test]
 async fn direct_positional_io_ignores_the_cursor() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let path = dir.path().join("positional.bin");
     std::fs::write(&path, b"0123456789").unwrap();
@@ -723,7 +722,7 @@ async fn direct_positional_io_ignores_the_cursor() {
 /// short read at the boundary returns only what exists.
 #[tokio::test]
 async fn direct_read_at_reports_short_reads_and_eof() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let path = dir.path().join("short.bin");
     std::fs::write(&path, b"abcdef").unwrap();
@@ -756,7 +755,7 @@ async fn direct_read_at_reports_short_reads_and_eof() {
 /// end of file, and reports only what it actually filled.
 #[tokio::test]
 async fn direct_read_at_into_fills_the_front_of_the_destination() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let path = dir.path().join("into.bin");
     std::fs::write(&path, b"abcdef").unwrap();
@@ -795,7 +794,7 @@ async fn direct_read_at_into_fills_the_front_of_the_destination() {
 /// offset on an append handle for the same reason `write_at` does.
 #[tokio::test]
 async fn direct_write_at_from_borrows_its_source() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let path = dir.path().join("from.bin");
     std::fs::write(&path, b"......").unwrap();
@@ -830,7 +829,7 @@ async fn direct_write_at_from_borrows_its_source() {
 /// caller can retry once the outstanding work finishes.
 #[tokio::test]
 async fn a_busy_handoff_returns_the_handle() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let path = dir.path().join("busy.bin");
     std::fs::write(&path, b"abcdef").unwrap();
@@ -862,7 +861,7 @@ async fn a_busy_handoff_returns_the_handle() {
 /// with no serialization between them.
 #[tokio::test]
 async fn direct_positional_reads_run_concurrently() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let path = dir.path().join("windows.bin");
     let payload: Vec<u8> = (0..64u32).map(|i| i as u8).collect();
@@ -895,7 +894,7 @@ async fn direct_positional_reads_run_concurrently() {
 /// would do with the offset thrown away.
 #[tokio::test]
 async fn direct_write_at_is_rejected_on_an_append_handle() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let path = dir.path().join("append.log");
     std::fs::write(&path, b"start").unwrap();
@@ -926,7 +925,7 @@ async fn direct_write_at_is_rejected_on_an_append_handle() {
 /// remote backend has always had for an opaque file still in use.
 #[tokio::test]
 async fn direct_close_reports_busy_with_an_operation_outstanding() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let path = dir.path().join("busy.bin");
     std::fs::write(&path, vec![7u8; 1024]).unwrap();
@@ -949,7 +948,7 @@ async fn direct_close_reports_busy_with_an_operation_outstanding() {
 
 #[tokio::test]
 async fn direct_symlink_metadata_and_read_link() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let target = dir.path().join("target.txt");
     let link = dir.path().join("link.txt");
@@ -970,7 +969,7 @@ async fn direct_symlink_metadata_and_read_link() {
 
 #[tokio::test]
 async fn direct_copy_symlink_preserves_link() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let target = dir.path().join("target.txt");
     let link = dir.path().join("link.txt");
@@ -996,7 +995,7 @@ async fn direct_copy_symlink_preserves_link() {
 
 #[tokio::test]
 async fn direct_hard_link_round_trip() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let target = dir.path().join("target.txt");
     let link = dir.path().join("link.txt");
@@ -1013,7 +1012,7 @@ async fn direct_hard_link_round_trip() {
 #[cfg(windows)]
 #[tokio::test]
 async fn direct_metadata_windows_attributes() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let path = dir.path().join("readonly.txt");
     tokio::fs::write(&path, "hello").await.unwrap();
@@ -1035,7 +1034,7 @@ async fn direct_metadata_windows_attributes() {
 
 #[tokio::test]
 async fn direct_fs_metadata_basic() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let path = dir.path().join("fsmeta.txt");
     tokio::fs::write(&path, "hello").await.unwrap();
@@ -1049,7 +1048,7 @@ async fn direct_fs_metadata_basic() {
 
 #[tokio::test]
 async fn direct_file_fs_metadata_basic() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let path = dir.path().join("fsmeta-file.txt");
     tokio::fs::write(&path, "hello").await.unwrap();
@@ -1069,7 +1068,7 @@ async fn direct_file_fs_metadata_basic() {
 #[cfg(windows)]
 #[tokio::test]
 async fn direct_security_descriptor_path_and_file() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let path = dir.path().join("security.txt");
     tokio::fs::write(&path, "hello").await.unwrap();
@@ -1110,7 +1109,7 @@ async fn direct_security_descriptor_path_and_file() {
 #[cfg(unix)]
 #[tokio::test]
 async fn direct_security_descriptors_are_unsupported() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let path = dir.path().join("security.txt");
     tokio::fs::write(&path, "hello").await.unwrap();
@@ -1129,7 +1128,7 @@ async fn direct_security_descriptors_are_unsupported() {
 #[cfg(unix)]
 #[tokio::test]
 async fn direct_set_metadata_rejects_created_timestamp() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let path = dir.path().join("timestamps.txt");
     tokio::fs::write(&path, "hello").await.unwrap();
@@ -1151,7 +1150,7 @@ async fn direct_set_metadata_rejects_created_timestamp() {
 #[cfg(windows)]
 #[tokio::test]
 async fn direct_windows_attrs() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let path = dir.path().join("attrs.txt");
     tokio::fs::write(&path, "hello").await.unwrap();
@@ -1244,7 +1243,7 @@ async fn direct_windows_streams() {
         return;
     }
 
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let path = dir.path().join("streams.txt");
     let stream_path = dir.path().join("streams.txt:zone");
@@ -1275,7 +1274,7 @@ async fn direct_windows_streams() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn direct_linux_attrs() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let path = dir.path().join("attrs.txt");
     tokio::fs::write(&path, "hello").await.unwrap();
@@ -1345,7 +1344,7 @@ async fn direct_linux_attrs() {
 async fn direct_metadata_handles_unix_socket_without_inode_attrs() {
     use std::os::unix::net::UnixListener;
 
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let path = dir.path().join("metadata.sock");
     let _listener = UnixListener::bind(&path).unwrap();
@@ -1357,7 +1356,7 @@ async fn direct_metadata_handles_unix_socket_without_inode_attrs() {
 
 #[tokio::test]
 async fn direct_copy_move_and_glob() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let src = dir.path().join("src");
     let nested = src.join("nested");
@@ -1402,7 +1401,7 @@ async fn direct_copy_move_and_glob() {
 
 #[tokio::test]
 async fn direct_remove_dir_ignore_prunes_empty_branches() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let root = dir.path().join("root");
     tokio::fs::create_dir_all(root.join("keep").join("child"))
@@ -1424,7 +1423,7 @@ async fn direct_remove_dir_ignore_prunes_empty_branches() {
 
 #[tokio::test]
 async fn direct_basic_spawn() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let (program, args) = successful_command();
     let mut command = direct.command(typed_str(program));
     command.arg(args[0]).arg(args[1]);
@@ -1435,7 +1434,7 @@ async fn direct_basic_spawn() {
 
 #[tokio::test]
 async fn direct_spawn_failure() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let result = direct
         .command(typed_str("nonexistent_command_12345"))
         .spawn()
@@ -1445,7 +1444,7 @@ async fn direct_spawn_failure() {
 
 #[tokio::test]
 async fn direct_exit_code() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let (program, args) = failing_exit_command();
     let mut command = direct.command(typed_str(program));
     command.arg(args[0]).arg(args[1]);
@@ -1457,7 +1456,7 @@ async fn direct_exit_code() {
 
 #[tokio::test]
 async fn direct_env_vars() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let (program, args) = env_forwarding_command();
     let mut command = direct.command(typed_str(program));
     command.arg(args[0]).arg(args[1]).env("TEST_VAR", "value");
@@ -1469,7 +1468,7 @@ async fn direct_env_vars() {
 #[cfg(unix)]
 #[tokio::test]
 async fn direct_well_known_home_dir_prefers_absolute_home_override() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let env = HashMap::from([(String::from("HOME"), Some(String::from("/tmp/test-home")))]);
 
     let path = direct
@@ -1483,7 +1482,7 @@ async fn direct_well_known_home_dir_prefers_absolute_home_override() {
 #[cfg(unix)]
 #[tokio::test]
 async fn direct_well_known_temp_dir_prefers_tmpdir_override() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let env = HashMap::from([(String::from("TMPDIR"), Some(String::from("/tmp/test-temp")))]);
 
     let path = direct
@@ -1497,7 +1496,7 @@ async fn direct_well_known_temp_dir_prefers_tmpdir_override() {
 #[cfg(unix)]
 #[tokio::test]
 async fn direct_well_known_temp_dir_falls_back_to_tmp() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let env = HashMap::from([(String::from("TMPDIR"), None)]);
 
     let path = direct
@@ -1511,7 +1510,7 @@ async fn direct_well_known_temp_dir_falls_back_to_tmp() {
 #[cfg(unix)]
 #[tokio::test]
 async fn direct_well_known_home_dir_rejects_relative_home_override() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let env = HashMap::from([(String::from("HOME"), Some(String::from("relative-home")))]);
 
     let err = direct
@@ -1525,7 +1524,7 @@ async fn direct_well_known_home_dir_rejects_relative_home_override() {
 #[cfg(all(unix, not(target_os = "macos")))]
 #[tokio::test]
 async fn direct_well_known_cache_dir_prefers_xdg_override() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let env = HashMap::from([
         (
             String::from("XDG_CACHE_HOME"),
@@ -1545,7 +1544,7 @@ async fn direct_well_known_cache_dir_prefers_xdg_override() {
 #[cfg(all(unix, not(target_os = "macos")))]
 #[tokio::test]
 async fn direct_well_known_cache_dir_falls_back_to_home() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let env = HashMap::from([
         (String::from("HOME"), Some(String::from("/tmp/test-home"))),
         (String::from("XDG_CACHE_HOME"), None),
@@ -1562,7 +1561,7 @@ async fn direct_well_known_cache_dir_falls_back_to_home() {
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn direct_well_known_cache_dir_uses_macos_convention() {
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let env = HashMap::from([
         (String::from("HOME"), Some(String::from("/tmp/test-home"))),
         (

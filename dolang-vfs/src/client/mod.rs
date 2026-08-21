@@ -1,15 +1,11 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
+    fmt,
     future::{Future, poll_fn},
-    io,
-    io::IsTerminal,
+    io::{self, IsTerminal},
     mem,
-    path::{Path, PathBuf},
     pin::Pin,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, OnceLock},
     task::{Context, Poll},
 };
 
@@ -43,28 +39,35 @@ use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf},
     task::JoinHandle,
 };
+use typed_path::{Utf8TypedPath, Utf8TypedPathBuf};
 
-use crate::extension::VfsExtension;
-use crate::protocol::AccessRequest;
-use crate::session::Query;
 use crate::{
-    Acl, AclKind, Child, Command, FileHandle, FsMetadata, HandoffError, MAX_FILE_READ, Metadata,
-    MetadataPatch, PrincipalId, PrincipalIdKind, ProcessStatus, ReadDir, STREAM_CHUNK_SIZE,
-    SessionMode, SidName, StdioRecv, StdioSend, StreamEntry, Utf8TypedPath, Utf8TypedPathBuf, Vfs,
-    XattrEntry,
-    direct::DirectFile,
+    MAX_FILE_READ, STREAM_CHUNK_SIZE, SessionMode, Vfs, client, direct,
+    directory::{self, DirEntry},
+    error::{Error, ErrorKind, HandoffError, Result},
+    extension::VfsExtension,
+    file::{AccessFlags, File as VfsFile, FileLock, FileLockRequest, StreamEntry},
+    metadata::{FsMetadata, Metadata, MetadataPatch},
     path::WellKnownPath,
+    process::{self, ProcessControl, ProcessStatus, StdioRecv, StdioSend, TerminationPolicy},
     protocol::{
-        AclRequest, CanonicalizeRequest, CopyRequest, CreateDirRequest, ExtensionRequest,
-        ExtensionResponse, FsMetadataRequest, GlobRequest, HardLinkRequest, MetadataRequest,
-        MoveRequest, OpenHandle, OpenHandlePreference, OpenRequest, OpenVfsHandle, QueryResponse,
-        ReadLinkRequest, RemoveDirRequest, RemoveRequest, RenameRequest, Request, RequestKind,
-        ResponseKind, SecDescRequest, SetAclRequest, SetMetadataRequest, SetSecDescRequest,
-        SetXattrRequest, SpawnRequest, StdioRecvTarget, StdioSendTarget, StreamsRequest,
-        SymlinkKind, SymlinkRequest, UnixVfsRequest, VfsProtocol, WellKnownPathRequest,
-        WindowsAdminRequest, WirePath, XattrNamespaceRequest, XattrRequest, XattrsRequest,
-        rpc_builder,
+        AccessRequest, AclRequest, CanonicalizeRequest, CopyRequest, CreateDirRequest,
+        ExtensionRequest, ExtensionResponse, FsMetadataRequest, GlobRequest, HardLinkRequest,
+        MetadataRequest, MoveRequest, OpenHandle, OpenHandlePreference, OpenRequest, OpenVfsHandle,
+        QueryResponse, ReadLinkRequest, RemoveDirRequest, RemoveRequest, RenameRequest, Request,
+        RequestKind, ResponseKind, SecDescRequest, SetAclRequest, SetMetadataRequest,
+        SetSecDescRequest, SetXattrRequest, SpawnRequest, StdioRecvTarget, StdioSendTarget,
+        StreamsRequest, SymlinkKind, SymlinkRequest, UnixVfsRequest, VfsProtocol,
+        WellKnownPathRequest, WindowsAdminRequest, WireError, WirePath, XattrNamespaceRequest,
+        XattrRequest, XattrsRequest, rpc_builder,
     },
+    security::{Acl, AclKind, PrincipalId, PrincipalIdKind, SecurityInfo, SidName},
+    session::{
+        ChildMarker, ExtensionSet, FileLockMarker, FileMarker, Query, ReadDirMarker,
+        StdioRecvMarker, StdioSendMarker, VfsMarker,
+    },
+    target::TargetInfo,
+    xattr::{XattrEntry, XattrNamespace},
 };
 
 /// Client for a VFS agent session.
@@ -76,7 +79,9 @@ use crate::{
 #[derive(Clone)]
 pub struct Client {
     shared: Arc<ClientShared>,
-    vfs: Option<Gift<crate::session::VfsMarker>>,
+    vfs: Option<Gift<VfsMarker>>,
+    #[cfg(windows)]
+    pub(crate) process: Option<Arc<crate::windows::OwnedProcess>>,
 }
 
 struct ClientShared {
@@ -87,30 +92,101 @@ struct ClientShared {
 
 /// A file handle returned by a [`Client`] operation.
 ///
-/// Depending on the transport and the server's choice, this may hold a native
-/// local file descriptor/handle or an opaque remote file reference. It
-/// implements [`FileHandle`] in either case.
-pub struct ClientFile(ClientFileInner);
-
-enum ClientFileInner {
-    Direct(DirectFile),
-    Remote(RemoteFile),
+/// Holds an opaque remote file reference.
+pub struct File {
+    client: Client,
+    file: Gift<FileMarker>,
+    append: bool,
+    cursor: OnceLock<Box<ClientCursor>>,
 }
 
-struct RemoteFile {
+pub(crate) struct ReadDir {
     client: Client,
-    file: Gift<crate::session::FileMarker>,
+    handle: Option<Gift<ReadDirMarker>>,
+    entries: VecDeque<DirEntry>,
+}
+
+fn vfs_io(error: Error) -> io::Error {
+    io::Error::new(error.kind().into(), error.to_string())
+}
+
+impl fmt::Debug for ReadDir {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReadDir")
+            .field("handle", &self.handle)
+            .field("buffered", &self.entries.len())
+            .finish()
+    }
+}
+
+impl ReadDir {
+    fn new(client: Client, handle: Gift<ReadDirMarker>) -> Self {
+        Self {
+            client,
+            handle: Some(handle),
+            entries: VecDeque::new(),
+        }
+    }
+
+    pub(crate) async fn next_entry(&mut self) -> Result<Option<DirEntry>> {
+        if let Some(entry) = self.entries.pop_front() {
+            return Ok(Some(entry));
+        }
+        let Some(handle) = self.handle.as_ref().map(Gift::cite) else {
+            return Ok(None);
+        };
+        match self
+            .client
+            .request(RequestKind::ReadDirNext { read_dir: handle })
+            .await
+            .map_err(vfs_io)?
+        {
+            ResponseKind::ReadDirNext(result) => {
+                let page = result.map_err(Error::from).map_err(vfs_io)?;
+                if page.done {
+                    self.handle = None;
+                }
+                self.entries = page.entries.into();
+                Ok(self.entries.pop_front())
+            }
+            _ => Err(Error::new(
+                ErrorKind::Other,
+                "unexpected response for ReadDirNext",
+            )),
+        }
+    }
+}
+
+impl Drop for ReadDir {
+    fn drop(&mut self) {
+        let Some(read_dir) = self.handle.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let client = self.client.clone();
+        runtime.spawn(async move {
+            let _ = client
+                .request(RequestKind::ReadDirClose {
+                    read_dir: read_dir.cite(),
+                })
+                .await;
+        });
+    }
+}
+
+struct ClientCursor {
     /// The seek position, maintained entirely on this side: the VFS protocol
     /// carries an explicit offset on every operation and the peer keeps no
     /// position of its own. Advanced by bytes actually transferred, so a short
     /// read at EOF leaves it where the data stopped, exactly as the kernel
     /// would.
-    cursor: AtomicU64,
+    cursor: u64,
     /// Whether the peer opened this file for append. Append writes have to use
     /// [`RequestKind::FileAppend`], since the offset on a positional write is
     /// ignored on an append-mode description and the resulting position can
     /// only be learned from the peer.
-    append: bool,
     /// Distance from the end requested by a pending `SeekFrom::End`, applied
     /// once the [`RequestKind::FileSize`] reply lands.
     seek_delta: i64,
@@ -125,11 +201,11 @@ pub(crate) struct RemoteFileLock {
     ///
     /// It names the lock directly, so releasing needs nothing from the file the
     /// lock was taken on — including the file still being open.
-    lock: Option<Gift<crate::session::FileLockMarker>>,
+    lock: Option<Gift<FileLockMarker>>,
 }
 
 impl RemoteFileLock {
-    pub(crate) async fn release(&mut self) -> crate::Result<()> {
+    pub(crate) async fn release(&mut self) -> Result<()> {
         let Some(lock) = self.lock.as_ref() else {
             return Ok(());
         };
@@ -139,7 +215,7 @@ impl RemoteFileLock {
             .await?
         {
             ResponseKind::FileUnlock(result) => {
-                result.map_err(crate::Error::from)?;
+                result.map_err(Error::from)?;
                 self.lock = None;
                 Ok(())
             }
@@ -191,56 +267,50 @@ enum FileOperationKind {
     Size,
 }
 
-impl std::fmt::Debug for ClientFile {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("ClientFile").field(&self.0).finish()
-    }
-}
-
-impl std::fmt::Debug for ClientFileInner {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Direct(file) => file.fmt(f),
-            Self::Remote(file) => file.fmt(f),
-        }
-    }
-}
-
-impl std::fmt::Debug for RemoteFile {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RemoteFile")
+impl fmt::Debug for File {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClientFile")
             .field("file", &self.file)
             .field(
                 "pending",
-                &self.pending.as_ref().map(|pending| pending.kind),
+                &self
+                    .cursor
+                    .get()
+                    .and_then(|cursor| cursor.pending.as_ref())
+                    .map(|pending| pending.kind),
             )
             .finish_non_exhaustive()
     }
 }
 
-impl ClientFile {
-    fn from_std(file: std::fs::File, read: bool, write: bool, append: bool) -> Self {
-        Self(ClientFileInner::Direct(DirectFile::from_std(
-            file, read, write, append,
-        )))
-    }
-
-    fn from_remote(client: Client, file: Gift<crate::session::FileMarker>, append: bool) -> Self {
-        Self(ClientFileInner::Remote(RemoteFile {
+impl File {
+    fn new(client: Client, file: Gift<FileMarker>, append: bool) -> Self {
+        Self {
             client,
             file,
-            cursor: AtomicU64::new(0),
             append,
-            seek_delta: 0,
-            pending: None,
-            read_body: None,
-            write_body: None,
-        }))
+            cursor: OnceLock::new(),
+        }
     }
-}
 
-impl RemoteFile {
-    fn cite(&self) -> Cite<crate::session::FileMarker> {
+    fn cursor(&mut self) -> &mut ClientCursor {
+        if self.cursor.get().is_none() {
+            assert!(
+                self.cursor
+                    .set(Box::new(ClientCursor {
+                        cursor: 0,
+                        seek_delta: 0,
+                        pending: None,
+                        read_body: None,
+                        write_body: None,
+                    }))
+                    .is_ok()
+            );
+        }
+        self.cursor.get_mut().unwrap()
+    }
+
+    fn cite(&self) -> Cite<FileMarker> {
         self.file.cite()
     }
 
@@ -251,7 +321,7 @@ impl RemoteFile {
     /// to hand back when this fails. The peer only retires its registration on
     /// success; a failure — a busy file above all — leaves it registered and
     /// this handle usable.
-    async fn stdio_send(&self, offset: u64) -> crate::Result<StdioSend> {
+    async fn stdio_send(&self, offset: u64) -> Result<StdioSend> {
         self.idle()?;
         match self
             .client
@@ -277,7 +347,7 @@ impl RemoteFile {
 
     /// Asks the peer to convert this file into a standard-input endpoint at
     /// `offset`. See [`stdio_send`](Self::stdio_send).
-    async fn stdio_recv(&self, offset: u64) -> crate::Result<StdioRecv> {
+    async fn stdio_recv(&self, offset: u64) -> Result<StdioRecv> {
         self.idle()?;
         match self
             .client
@@ -307,11 +377,11 @@ impl RemoteFile {
     /// client, so several may be outstanding at once. It deliberately touches
     /// none of `cursor`, `pending`, `read_body`, or `write_body` — positional
     /// operations and the cursor-based poll path share nothing but the file.
-    fn read_at<'b>(
+    pub(crate) fn read_at<'b>(
         &self,
         buf: &'b mut BytesMut,
         offset: u64,
-    ) -> impl Future<Output = io::Result<usize>> + Send + use<'b> {
+    ) -> impl Future<Output = Result<usize>> + Send + use<'b> {
         let client = self.client.clone();
         let file = self.cite();
         async move {
@@ -350,29 +420,29 @@ impl RemoteFile {
             .await;
             let read = taken.len() - before;
             *buf = taken;
-            result.map(|()| read)
+            Ok(result.map(|()| read)?)
         }
     }
 
     /// Writes `data` at `offset` over the wire, returning the byte count.
-    fn write_at(
+    pub(crate) fn write_at(
         &self,
         data: Bytes,
         offset: u64,
-    ) -> impl Future<Output = io::Result<usize>> + Send + use<> {
+    ) -> impl Future<Output = Result<usize>> + Send + use<> {
         let client = self.client.clone();
         let file = self.cite();
         let append = self.append;
         async move {
             if append {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
                     "cannot write at an offset on a file opened for append",
                 ));
             }
             match Self::send_write(client, RequestKind::FileWrite { file, offset }, &data).await? {
-                ResponseKind::FileWrite(result) => result.map_err(wire_io),
-                response => Err(unexpected(response)),
+                ResponseKind::FileWrite(result) => Ok(result.map_err(wire_io)?),
+                response => Err(unexpected(response).into()),
             }
         }
     }
@@ -384,11 +454,11 @@ impl RemoteFile {
     /// route exists so a caller whose destination is not a [`BytesMut`] does
     /// not pay a copy out of one. There is no intermediate storage, so nothing
     /// is lost by cancelling and nothing has to be handed back.
-    fn read_at_into<'b>(
+    pub(crate) fn read_at_into<'b>(
         &self,
         buf: &'b mut [mem::MaybeUninit<u8>],
         offset: u64,
-    ) -> impl Future<Output = io::Result<usize>> + Send + use<'b> {
+    ) -> impl Future<Output = Result<usize>> + Send + use<'b> {
         let client = self.client.clone();
         let file = self.cite();
         async move {
@@ -412,18 +482,18 @@ impl RemoteFile {
     }
 
     /// Writes `data` at `offset` over the wire from borrowed storage.
-    fn write_at_from<'b>(
+    pub(crate) fn write_at_from<'b>(
         &self,
         data: &'b [u8],
         offset: u64,
-    ) -> impl Future<Output = io::Result<usize>> + Send + use<'b> {
+    ) -> impl Future<Output = Result<usize>> + Send + use<'b> {
         let client = self.client.clone();
         let file = self.cite();
         let append = self.append;
         async move {
             if append {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
                     "cannot write at an offset on a file opened for append",
                 ));
             }
@@ -431,21 +501,24 @@ impl RemoteFile {
             // only ever wanted a slice, so borrowing costs this path nothing
             // that owning it gained.
             match Self::send_write(client, RequestKind::FileWrite { file, offset }, data).await? {
-                ResponseKind::FileWrite(result) => result.map_err(wire_io),
-                response => Err(unexpected(response)),
+                ResponseKind::FileWrite(result) => Ok(result.map_err(wire_io)?),
+                response => Err(unexpected(response).into()),
             }
         }
     }
 
     /// Appends `data` over the wire, returning the byte count and the position
     /// just past what was written.
-    fn append(&self, data: Bytes) -> impl Future<Output = io::Result<(usize, u64)>> + Send + use<> {
+    pub(crate) fn append(
+        &self,
+        data: Bytes,
+    ) -> impl Future<Output = Result<(usize, u64)>> + Send + use<> {
         let client = self.client.clone();
         let file = self.cite();
         async move {
             match Self::send_write(client, RequestKind::FileAppend { file }, &data).await? {
-                ResponseKind::FileAppend(result) => result.map_err(wire_io),
-                response => Err(unexpected(response)),
+                ResponseKind::FileAppend(result) => Ok(result.map_err(wire_io)?),
+                response => Err(unexpected(response).into()),
             }
         }
     }
@@ -453,7 +526,7 @@ impl RemoteFile {
     /// Issues the read and hands back the trailer its bytes arrive on.
     async fn begin_read(
         client: Client,
-        file: Cite<crate::session::FileMarker>,
+        file: Cite<FileMarker>,
         offset: u64,
         len: usize,
     ) -> io::Result<TrailerRecv> {
@@ -510,19 +583,17 @@ impl RemoteFile {
         &mut self,
         cx: &mut Context<'_>,
         kind: FileOperationKind,
-        request: impl FnOnce(Cite<crate::session::FileMarker>) -> (RequestKind, Option<Vec<u8>>),
+        request: impl FnOnce(Cite<FileMarker>) -> (RequestKind, Option<Vec<u8>>),
     ) -> Poll<io::Result<(ResponseKind, Option<TrailerRecv>)>> {
-        if self.pending.is_none() {
+        if self.cursor().pending.is_none() {
             let (request, trailer) = request(self.cite());
-            self.pending = Some(PendingFileOperation {
-                kind,
-                call: {
-                    assert!(trailer.is_none());
-                    self.client.call(request)
-                },
-            });
+            let call = {
+                assert!(trailer.is_none());
+                self.client.call(request)
+            };
+            self.cursor().pending = Some(PendingFileOperation { kind, call });
         }
-        let pending = self.pending.as_mut().unwrap();
+        let pending = self.cursor().pending.as_mut().unwrap();
         if pending.kind != kind {
             return Poll::Ready(Err(io::Error::other(format!(
                 "file operation {:?} polled while {:?} is pending",
@@ -532,7 +603,7 @@ impl RemoteFile {
         match Pin::new(&mut pending.call).poll(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(result) => {
-                self.pending = None;
+                self.cursor().pending = None;
                 let (response, trailer) = result.map_err(rpc_error)?.into_response_trailer();
                 Poll::Ready(match response {
                     ResponseKind::Error(error) => Err(wire_io(error)),
@@ -542,15 +613,18 @@ impl RemoteFile {
         }
     }
 
-    fn idle(&self) -> crate::Result<()> {
-        if self
+    fn idle(&self) -> Result<()> {
+        let Some(cursor) = self.cursor.get() else {
+            return Ok(());
+        };
+        if cursor
             .read_body
             .as_ref()
             .is_some_and(|body| body.remaining != 0)
-            || self.write_body.is_some()
+            || cursor.write_body.is_some()
         {
             Err(io::Error::other("file trailer operation is still pending").into())
-        } else if let Some(pending) = &self.pending {
+        } else if let Some(pending) = &cursor.pending {
             Err(io::Error::other(format!(
                 "file operation {:?} is still pending",
                 pending.kind
@@ -566,734 +640,580 @@ impl RemoteFile {
         // before it responds at all now that it reads the range up front, so
         // nothing it still counts as in flight depends on us draining this;
         // `TrailerRecv::drop` notifies the peer and refunds the pool on its own.
-        self.read_body = None;
-        if let Some(mut pending) = self.write_body.take()
+        let Some(cursor) = self.cursor.get_mut() else {
+            return;
+        };
+        cursor.read_body = None;
+        if let Some(mut pending) = cursor.write_body.take()
             && let Some(mut call) = pending.call.take()
         {
             call.cancel();
             let _ = call.await;
         }
-        if let Some(mut pending) = self.pending.take() {
+        if let Some(mut pending) = cursor.pending.take() {
             pending.call.cancel();
             let _ = pending.call.await;
         }
     }
 }
 
-impl AsyncRead for ClientFile {
+impl AsyncRead for File {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        match &mut self.0 {
-            ClientFileInner::Direct(file) => Pin::new(file).poll_read(cx, buf),
-            ClientFileInner::Remote(file) => loop {
-                // This reads the trailer straight into the caller's `ReadBuf`,
-                // which for the Do-side `fs.File` is arena memory the collector
-                // adopts without a copy. Do not "simplify" this by delegating to
-                // a positional `read_at`: that would land the data in an owned
-                // `BytesMut` first and cost a chunk-sized copy per read, with
-                // nothing failing to say so.
-                if buf.remaining() == 0 {
-                    return Poll::Ready(Ok(()));
-                }
-                if let Some(body) = file.read_body.as_mut() {
-                    let before = buf.filled().len();
-                    match Pin::new(&mut body.recv).poll_read(cx, buf) {
-                        Poll::Pending => return Poll::Pending,
-                        Poll::Ready(Err(error)) => {
-                            file.read_body = None;
-                            return Poll::Ready(Err(error));
-                        }
-                        Poll::Ready(Ok(())) => {
-                            let read = buf.filled().len() - before;
-                            if read > body.remaining {
-                                file.read_body = None;
-                                return Poll::Ready(Err(io::Error::new(
-                                    io::ErrorKind::InvalidData,
-                                    "file read response exceeds requested length",
-                                )));
-                            }
-                            body.remaining -= read;
-                            body.read += read;
-                            // Advance only by what the caller has actually
-                            // seen. Bytes still buffered in the trailer are
-                            // discarded by `start_seek`, so counting them here
-                            // would push the cursor past the last byte anyone
-                            // received.
-                            file.cursor.fetch_add(read as u64, Ordering::Relaxed);
-                            if read > 0 {
-                                return Poll::Ready(Ok(()));
-                            }
-                            let empty = body.read == 0;
-                            file.read_body = None;
-                            if empty {
-                                return Poll::Ready(Ok(()));
-                            }
-                            continue;
-                        }
-                    }
-                }
-                // A short read is always legal for `AsyncRead`, so a request
-                // for more than one chunk simply comes back in several; the
-                // peer has to have the whole reply in hand before it can answer
-                // at all, which is what bounds this.
-                let requested = buf.remaining().min(MAX_FILE_READ);
-                let offset = file.cursor.load(Ordering::Relaxed);
-                match file.poll_request(cx, FileOperationKind::Read, |file| {
-                    (
-                        RequestKind::FileRead {
-                            file,
-                            offset,
-                            len: requested,
-                        },
-                        None,
-                    )
-                }) {
+        let file = &mut *self;
+        loop {
+            // This reads the trailer straight into the caller's `ReadBuf`,
+            // which for the Do-side `fs.File` is arena memory the collector
+            // adopts without a copy. Do not "simplify" this by delegating to
+            // a positional `read_at`: that would land the data in an owned
+            // `BytesMut` first and cost a chunk-sized copy per read, with
+            // nothing failing to say so.
+            if buf.remaining() == 0 {
+                return Poll::Ready(Ok(()));
+            }
+            let cursor = file.cursor();
+            if let Some(body) = cursor.read_body.as_mut() {
+                let before = buf.filled().len();
+                match Pin::new(&mut body.recv).poll_read(cx, buf) {
                     Poll::Pending => return Poll::Pending,
-                    Poll::Ready(Ok((ResponseKind::FileRead(result), trailer))) => {
-                        if let Err(error) = result.map_err(wire_io) {
-                            return Poll::Ready(Err(error));
-                        }
-                        let Some(trailer) = trailer else {
+                    Poll::Ready(Err(error)) => {
+                        cursor.read_body = None;
+                        return Poll::Ready(Err(error));
+                    }
+                    Poll::Ready(Ok(())) => {
+                        let read = buf.filled().len() - before;
+                        if read > body.remaining {
+                            cursor.read_body = None;
                             return Poll::Ready(Err(io::Error::new(
                                 io::ErrorKind::InvalidData,
-                                "file read response is missing its data trailer",
+                                "file read response exceeds requested length",
                             )));
-                        };
-                        file.read_body = Some(PendingTrailerRead {
-                            recv: trailer,
-                            remaining: requested,
-                            read: 0,
-                        });
+                        }
+                        body.remaining -= read;
+                        body.read += read;
+                        // Advance only by what the caller has actually
+                        // seen. Bytes still buffered in the trailer are
+                        // discarded by `start_seek`, so counting them here
+                        // would push the cursor past the last byte anyone
+                        // received.
+                        cursor.cursor += read as u64;
+                        if read > 0 {
+                            return Poll::Ready(Ok(()));
+                        }
+                        let empty = body.read == 0;
+                        cursor.read_body = None;
+                        if empty {
+                            return Poll::Ready(Ok(()));
+                        }
+                        continue;
                     }
-                    Poll::Ready(Ok((response, _))) => {
-                        return Poll::Ready(Err(unexpected(response)));
-                    }
-                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 }
-            },
+            }
+            // A short read is always legal for `AsyncRead`, so a request
+            // for more than one chunk simply comes back in several; the
+            // peer has to have the whole reply in hand before it can answer
+            // at all, which is what bounds this.
+            let requested = buf.remaining().min(MAX_FILE_READ);
+            let offset = file.cursor().cursor;
+            match file.poll_request(cx, FileOperationKind::Read, |file| {
+                (
+                    RequestKind::FileRead {
+                        file,
+                        offset,
+                        len: requested,
+                    },
+                    None,
+                )
+            }) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Ok((ResponseKind::FileRead(result), trailer))) => {
+                    if let Err(error) = result.map_err(wire_io) {
+                        return Poll::Ready(Err(error));
+                    }
+                    let Some(trailer) = trailer else {
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "file read response is missing its data trailer",
+                        )));
+                    };
+                    file.cursor().read_body = Some(PendingTrailerRead {
+                        recv: trailer,
+                        remaining: requested,
+                        read: 0,
+                    });
+                }
+                Poll::Ready(Ok((response, _))) => {
+                    return Poll::Ready(Err(unexpected(response)));
+                }
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            }
         }
     }
 }
 
-impl AsyncWrite for ClientFile {
+impl AsyncWrite for File {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        match &mut self.0 {
-            ClientFileInner::Direct(file) => Pin::new(file).poll_write(cx, buf),
-            ClientFileInner::Remote(file) => {
-                if buf.is_empty() {
-                    return Poll::Ready(Ok(0));
+        let file = &mut *self;
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        if file.cursor().write_body.is_none() {
+            let request = if file.append {
+                RequestKind::FileAppend { file: file.cite() }
+            } else {
+                RequestKind::FileWrite {
+                    file: file.cite(),
+                    offset: file.cursor().cursor,
                 }
-                if file.write_body.is_none() {
-                    let request = if file.append {
-                        RequestKind::FileAppend { file: file.cite() }
-                    } else {
-                        RequestKind::FileWrite {
-                            file: file.cite(),
-                            offset: file.cursor.load(Ordering::Relaxed),
-                        }
-                    };
-                    file.write_body = Some(PendingTrailerWrite {
-                        send: Some(file.client.call_with_trailer(request)),
-                        call: None,
-                        target: buf.len(),
-                        sent: 0,
-                        unreported: 0,
-                    });
-                }
-                let pending = file.write_body.as_mut().unwrap();
-                if let Some(call) = pending.call.as_mut() {
-                    match Pin::new(call).poll(cx) {
-                        Poll::Pending => return Poll::Pending,
-                        Poll::Ready(result) => {
-                            let target = pending.target;
-                            let unreported = pending.unreported;
-                            file.write_body = None;
-                            let response = result.map_err(rpc_error)?.into_response();
-                            let written = ack_write(&file.cursor, response)?;
-                            if written != target {
-                                return Poll::Ready(Err(io::Error::new(
-                                    io::ErrorKind::InvalidData,
-                                    "file write response does not acknowledge the submitted trailer",
-                                )));
-                            }
-                            return Poll::Ready(Ok(unreported));
-                        }
+            };
+            file.cursor().write_body = Some(PendingTrailerWrite {
+                send: Some(file.client.call_with_trailer(request)),
+                call: None,
+                target: buf.len(),
+                sent: 0,
+                unreported: 0,
+            });
+        }
+        let pending = file.cursor().write_body.as_mut().unwrap();
+        if let Some(call) = pending.call.as_mut() {
+            match Pin::new(call).poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(result) => {
+                    let target = pending.target;
+                    let unreported = pending.unreported;
+                    file.cursor().write_body = None;
+                    let response = result.map_err(rpc_error)?.into_response();
+                    let written = ack_write(&mut file.cursor().cursor, response)?;
+                    if written != target {
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "file write response does not acknowledge the submitted trailer",
+                        )));
                     }
+                    return Poll::Ready(Ok(unreported));
                 }
-                let remaining = pending.target - pending.sent;
-                let send = pending.send.as_mut().unwrap();
-                match Pin::new(send).poll_write(cx, &buf[..buf.len().min(remaining)]) {
-                    Poll::Pending => Poll::Pending,
-                    Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
-                    Poll::Ready(Ok(n)) => {
-                        pending.sent += n;
-                        if pending.sent == pending.target {
-                            let send = pending.send.take().unwrap();
-                            pending.call = Some(send.finish());
-                            pending.unreported = n;
-                            cx.waker().wake_by_ref();
-                            return Poll::Pending;
-                        }
-                        Poll::Ready(Ok(n))
-                    }
+            }
+        }
+        let remaining = pending.target - pending.sent;
+        let send = pending.send.as_mut().unwrap();
+        match Pin::new(send).poll_write(cx, &buf[..buf.len().min(remaining)]) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Ready(Ok(n)) => {
+                pending.sent += n;
+                if pending.sent == pending.target {
+                    let send = pending.send.take().unwrap();
+                    pending.call = Some(send.finish());
+                    pending.unreported = n;
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
                 }
+                Poll::Ready(Ok(n))
             }
         }
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match &mut self.0 {
-            ClientFileInner::Direct(file) => Pin::new(file).poll_flush(cx),
-            ClientFileInner::Remote(file) => {
-                if let Some(pending) = file.write_body.as_mut() {
-                    if pending.call.is_none() {
-                        let send = pending.send.take().unwrap();
-                        pending.call = Some(send.finish());
-                    }
-                    let call = pending.call.as_mut().unwrap();
-                    return match Pin::new(call).poll(cx) {
-                        Poll::Pending => Poll::Pending,
-                        Poll::Ready(result) => {
-                            file.write_body = None;
-                            Poll::Ready(result.map_err(rpc_error).and_then(|result| {
-                                ack_write(&file.cursor, result.into_response()).map(|_| ())
-                            }))
-                        }
-                    };
-                }
-                match file.poll_request(cx, FileOperationKind::Flush, |file| {
-                    (RequestKind::FileFlush { file }, None)
-                }) {
-                    Poll::Pending => Poll::Pending,
-                    Poll::Ready(Ok((ResponseKind::FileFlush(result), _))) => {
-                        Poll::Ready(result.map_err(wire_io))
-                    }
-                    Poll::Ready(Ok((response, _))) => Poll::Ready(Err(unexpected(response))),
-                    Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
-                }
+        let file = &mut *self;
+        if let Some(pending) = file.cursor().write_body.as_mut() {
+            if pending.call.is_none() {
+                let send = pending.send.take().unwrap();
+                pending.call = Some(send.finish());
             }
+            let call = pending.call.as_mut().unwrap();
+            return match Pin::new(call).poll(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(result) => {
+                    file.cursor().write_body = None;
+                    Poll::Ready(result.map_err(rpc_error).and_then(|result| {
+                        ack_write(&mut file.cursor().cursor, result.into_response()).map(|_| ())
+                    }))
+                }
+            };
+        }
+        match file.poll_request(cx, FileOperationKind::Flush, |file| {
+            (RequestKind::FileFlush { file }, None)
+        }) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok((ResponseKind::FileFlush(result), _))) => {
+                Poll::Ready(result.map_err(wire_io))
+            }
+            Poll::Ready(Ok((response, _))) => Poll::Ready(Err(unexpected(response))),
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
         }
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match &mut self.0 {
-            ClientFileInner::Direct(file) => Pin::new(file).poll_shutdown(cx),
-            ClientFileInner::Remote(_) => self.as_mut().poll_flush(cx),
-        }
+        self.as_mut().poll_flush(cx)
     }
 }
 
-impl AsyncSeek for ClientFile {
+impl AsyncSeek for File {
     fn start_seek(mut self: Pin<&mut Self>, position: io::SeekFrom) -> io::Result<()> {
-        match &mut self.0 {
-            ClientFileInner::Direct(file) => Pin::new(file).start_seek(position),
-            ClientFileInner::Remote(file) => {
-                if file
-                    .read_body
-                    .as_ref()
-                    .is_some_and(|body| body.remaining != 0)
-                {
-                    file.read_body.take();
-                }
-                file.idle().map_err(crate::Error::into_io_error)?;
-                file.seek_delta = 0;
-                // `Start` and `Current` are answerable here: the cursor is
-                // ours. Only `End` has to ask the peer how long the file is.
-                let absolute = match position {
-                    io::SeekFrom::Start(offset) => Some(offset),
-                    io::SeekFrom::Current(delta) => Some(
-                        file.cursor
-                            .load(Ordering::Relaxed)
-                            .checked_add_signed(delta)
-                            .ok_or_else(negative_seek)?,
-                    ),
-                    io::SeekFrom::End(delta) => {
-                        file.seek_delta = delta;
-                        None
-                    }
-                };
-                match absolute {
-                    Some(offset) => file.cursor.store(offset, Ordering::Relaxed),
-                    None => {
-                        file.pending = Some(PendingFileOperation {
-                            kind: FileOperationKind::Size,
-                            call: file
-                                .client
-                                .call(RequestKind::FileSize { file: file.cite() }),
-                        });
-                    }
-                }
-                Ok(())
+        let file = &mut *self;
+        if file
+            .cursor()
+            .read_body
+            .as_ref()
+            .is_some_and(|body| body.remaining != 0)
+        {
+            file.cursor().read_body.take();
+        }
+        file.idle().map_err(Error::into_io_error)?;
+        file.cursor().seek_delta = 0;
+        // `Start` and `Current` are answerable here: the cursor is
+        // ours. Only `End` has to ask the peer how long the file is.
+        let absolute = match position {
+            io::SeekFrom::Start(offset) => Some(offset),
+            io::SeekFrom::Current(delta) => Some(
+                file.cursor()
+                    .cursor
+                    .checked_add_signed(delta)
+                    .ok_or_else(negative_seek)?,
+            ),
+            io::SeekFrom::End(delta) => {
+                file.cursor().seek_delta = delta;
+                None
+            }
+        };
+        match absolute {
+            Some(offset) => file.cursor().cursor = offset,
+            None => {
+                file.cursor().pending = Some(PendingFileOperation {
+                    kind: FileOperationKind::Size,
+                    call: file
+                        .client
+                        .call(RequestKind::FileSize { file: file.cite() }),
+                });
             }
         }
+        Ok(())
     }
 
     fn poll_complete(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<u64>> {
-        match &mut self.0 {
-            ClientFileInner::Direct(file) => Pin::new(file).poll_complete(cx),
-            ClientFileInner::Remote(file) => {
-                // Nothing outstanding means the seek already landed in the
-                // cursor, or there was no seek at all and the caller just wants
-                // the position.
-                if file.pending.is_none() {
-                    return Poll::Ready(Ok(file.cursor.load(Ordering::Relaxed)));
-                }
-                match file.poll_request(cx, FileOperationKind::Size, |file| {
-                    (RequestKind::FileSize { file }, None)
-                }) {
-                    Poll::Pending => Poll::Pending,
-                    Poll::Ready(Ok((ResponseKind::FileSize(result), _))) => {
-                        let len = match result.map_err(wire_io) {
-                            Ok(len) => len,
-                            Err(error) => return Poll::Ready(Err(error)),
-                        };
-                        let Some(offset) = len.checked_add_signed(file.seek_delta) else {
-                            return Poll::Ready(Err(negative_seek()));
-                        };
-                        file.cursor.store(offset, Ordering::Relaxed);
-                        Poll::Ready(Ok(offset))
-                    }
-                    Poll::Ready(Ok((response, _))) => Poll::Ready(Err(unexpected(response))),
-                    Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
-                }
+        let file = &mut *self;
+        // Nothing outstanding means the seek already landed in the
+        // cursor, or there was no seek at all and the caller just wants
+        // the position.
+        if file.cursor().pending.is_none() {
+            return Poll::Ready(Ok(file.cursor().cursor));
+        }
+        match file.poll_request(cx, FileOperationKind::Size, |file| {
+            (RequestKind::FileSize { file }, None)
+        }) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok((ResponseKind::FileSize(result), _))) => {
+                let len = match result.map_err(wire_io) {
+                    Ok(len) => len,
+                    Err(error) => return Poll::Ready(Err(error)),
+                };
+                let Some(offset) = len.checked_add_signed(file.cursor().seek_delta) else {
+                    return Poll::Ready(Err(negative_seek()));
+                };
+                file.cursor().cursor = offset;
+                Poll::Ready(Ok(offset))
             }
+            Poll::Ready(Ok((response, _))) => Poll::Ready(Err(unexpected(response))),
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
         }
     }
 }
 
-impl FileHandle for ClientFile {
-    fn read_at<'b>(
-        &self,
-        buf: &'b mut BytesMut,
-        offset: u64,
-    ) -> impl Future<Output = io::Result<usize>> + Send + use<'b> {
-        match &self.0 {
-            ClientFileInner::Direct(file) => crate::EitherFuture::Left(file.read_at(buf, offset)),
-            ClientFileInner::Remote(file) => crate::EitherFuture::Right(file.read_at(buf, offset)),
+impl File {
+    pub(crate) async fn commit(&self) -> Result<()> {
+        let file = self;
+        match file
+            .client
+            .request(RequestKind::FileFlush { file: file.cite() })
+            .await?
+        {
+            ResponseKind::FileFlush(result) => result.map_err(Into::into),
+            response => Err(unexpected(response).into()),
         }
     }
 
-    fn write_at(
-        &self,
-        data: Bytes,
-        offset: u64,
-    ) -> impl Future<Output = io::Result<usize>> + Send + use<> {
-        match &self.0 {
-            ClientFileInner::Direct(file) => crate::EitherFuture::Left(file.write_at(data, offset)),
-            ClientFileInner::Remote(file) => {
-                crate::EitherFuture::Right(file.write_at(data, offset))
-            }
-        }
-    }
-
-    fn append(&self, data: Bytes) -> impl Future<Output = io::Result<(usize, u64)>> + Send + use<> {
-        match &self.0 {
-            ClientFileInner::Direct(file) => crate::EitherFuture::Left(file.append(data)),
-            ClientFileInner::Remote(file) => crate::EitherFuture::Right(file.append(data)),
-        }
-    }
-
-    fn read_at_into<'b>(
-        &self,
-        buf: &'b mut [mem::MaybeUninit<u8>],
-        offset: u64,
-    ) -> impl Future<Output = io::Result<usize>> + Send + use<'b> {
-        match &self.0 {
-            ClientFileInner::Direct(file) => {
-                crate::EitherFuture::Left(file.read_at_into(buf, offset))
-            }
-            ClientFileInner::Remote(file) => {
-                crate::EitherFuture::Right(file.read_at_into(buf, offset))
-            }
-        }
-    }
-
-    fn write_at_from<'b>(
-        &self,
-        data: &'b [u8],
-        offset: u64,
-    ) -> impl Future<Output = io::Result<usize>> + Send + use<'b> {
-        match &self.0 {
-            ClientFileInner::Direct(file) => {
-                crate::EitherFuture::Left(file.write_at_from(data, offset))
-            }
-            ClientFileInner::Remote(file) => {
-                crate::EitherFuture::Right(file.write_at_from(data, offset))
-            }
-        }
-    }
-
-    async fn commit(&self) -> crate::Result<()> {
-        match &self.0 {
-            ClientFileInner::Direct(file) => file.commit().await,
-            ClientFileInner::Remote(file) => {
-                match file
-                    .client
-                    .request(RequestKind::FileFlush { file: file.cite() })
-                    .await?
-                {
-                    ResponseKind::FileFlush(result) => result.map_err(Into::into),
-                    response => Err(unexpected(response).into()),
-                }
-            }
-        }
-    }
-
-    async fn into_stdio_send(
+    pub(crate) async fn into_stdio_send(
         self,
         offset: u64,
     ) -> std::result::Result<StdioSend, HandoffError<Self>> {
-        match self.0 {
-            ClientFileInner::Direct(file) => file
-                .into_stdio_send(offset)
-                .await
-                .map_err(|error| crate::rewrap(error, |file| Self(ClientFileInner::Direct(file)))),
-            ClientFileInner::Remote(file) => match file.stdio_send(offset).await {
-                // The peer consumed the file, so this handle simply goes away:
-                // dropping its reference names an id the peer has already
-                // retired, which it ignores.
-                Ok(stdio) => Ok(stdio),
-                Err(error) => Err(HandoffError::new(
-                    Self(ClientFileInner::Remote(file)),
-                    error,
-                )),
-            },
+        let file = self;
+        match file.stdio_send(offset).await {
+            // The peer consumed the file, so this handle simply goes away:
+            // dropping its reference names an id the peer has already
+            // retired, which it ignores.
+            Ok(stdio) => Ok(stdio),
+            Err(error) => Err(HandoffError::new(file, error)),
         }
     }
 
-    async fn into_stdio_recv(
+    pub(crate) async fn into_stdio_recv(
         self,
         offset: u64,
     ) -> std::result::Result<StdioRecv, HandoffError<Self>> {
-        match self.0 {
-            ClientFileInner::Direct(file) => file
-                .into_stdio_recv(offset)
-                .await
-                .map_err(|error| crate::rewrap(error, |file| Self(ClientFileInner::Direct(file)))),
-            ClientFileInner::Remote(file) => match file.stdio_recv(offset).await {
-                Ok(stdio) => Ok(stdio),
-                Err(error) => Err(HandoffError::new(
-                    Self(ClientFileInner::Remote(file)),
-                    error,
-                )),
-            },
+        let file = self;
+        match file.stdio_recv(offset).await {
+            Ok(stdio) => Ok(stdio),
+            Err(error) => Err(HandoffError::new(file, error)),
         }
     }
 
-    async fn close(self) -> crate::Result<()> {
-        match self.0 {
-            ClientFileInner::Direct(file) => file.close().await,
-            ClientFileInner::Remote(mut file) => {
-                file.cancel_pending().await;
-                match file
-                    .client
-                    .request(RequestKind::FileClose {
-                        file: file.file.cite(),
-                    })
-                    .await?
-                {
-                    ResponseKind::FileClose(result) => result.map_err(Into::into),
-                    response => Err(unexpected(response).into()),
-                }
-            }
+    pub(crate) async fn close(self) -> Result<()> {
+        let mut file = self;
+        file.cancel_pending().await;
+        match file
+            .client
+            .request(RequestKind::FileClose {
+                file: file.file.cite(),
+            })
+            .await?
+        {
+            ResponseKind::FileClose(result) => result.map_err(Into::into),
+            response => Err(unexpected(response).into()),
         }
     }
 
-    async fn set_size(&self, size: u64) -> crate::Result<()> {
-        match &self.0 {
-            ClientFileInner::Direct(file) => file.set_size(size).await,
-            ClientFileInner::Remote(file) => {
-                file.idle()?;
-                match file
-                    .client
-                    .request(RequestKind::FileSetSize {
-                        file: file.cite(),
-                        size,
-                    })
-                    .await?
-                {
-                    ResponseKind::FileSetSize(result) => result.map_err(Into::into),
-                    response => Err(unexpected(response).into()),
-                }
-            }
+    pub(crate) async fn set_size(&self, size: u64) -> Result<()> {
+        let file = self;
+        file.idle()?;
+        match file
+            .client
+            .request(RequestKind::FileSetSize {
+                file: file.cite(),
+                size,
+            })
+            .await?
+        {
+            ResponseKind::FileSetSize(result) => result.map_err(Into::into),
+            response => Err(unexpected(response).into()),
         }
     }
 
-    async fn metadata(&self) -> crate::Result<Metadata> {
-        match &self.0 {
-            ClientFileInner::Direct(file) => file.metadata().await,
-            ClientFileInner::Remote(file) => {
-                file.idle()?;
-                match file
-                    .client
-                    .request(RequestKind::FileMetadata { file: file.cite() })
-                    .await?
-                {
-                    ResponseKind::FileMetadata(result) => result.map_err(Into::into),
-                    response => Err(unexpected(response).into()),
-                }
-            }
+    pub(crate) async fn metadata(&self) -> Result<Metadata> {
+        let file = self;
+        file.idle()?;
+        match file
+            .client
+            .request(RequestKind::FileMetadata { file: file.cite() })
+            .await?
+        {
+            ResponseKind::FileMetadata(result) => result.map_err(Into::into),
+            response => Err(unexpected(response).into()),
         }
     }
 
-    async fn fs_metadata(&self) -> crate::Result<FsMetadata> {
-        match &self.0 {
-            ClientFileInner::Direct(file) => file.fs_metadata().await,
-            ClientFileInner::Remote(file) => {
-                file.idle()?;
-                match file
-                    .client
-                    .request(RequestKind::FileFsMetadata { file: file.cite() })
-                    .await?
-                {
-                    ResponseKind::FileFsMetadata(result) => result.map_err(Into::into),
-                    response => Err(unexpected(response).into()),
-                }
-            }
+    pub(crate) async fn fs_metadata(&self) -> Result<FsMetadata> {
+        let file = self;
+        file.idle()?;
+        match file
+            .client
+            .request(RequestKind::FileFsMetadata { file: file.cite() })
+            .await?
+        {
+            ResponseKind::FileFsMetadata(result) => result.map_err(Into::into),
+            response => Err(unexpected(response).into()),
         }
     }
 
-    async fn acl(&self, kind: AclKind, default: bool) -> crate::Result<Option<Acl>> {
-        match &self.0 {
-            ClientFileInner::Direct(file) => file.acl(kind, default).await,
-            ClientFileInner::Remote(file) => {
-                file.idle()?;
-                match file
-                    .client
-                    .request(RequestKind::FileAcl {
-                        file: file.cite(),
-                        kind,
-                        default,
-                    })
-                    .await?
-                {
-                    ResponseKind::FileAcl(result) => result.map_err(Into::into),
-                    response => Err(unexpected(response).into()),
-                }
-            }
+    pub(crate) async fn acl(&self, kind: AclKind, default: bool) -> Result<Option<Acl>> {
+        let file = self;
+        file.idle()?;
+        match file
+            .client
+            .request(RequestKind::FileAcl {
+                file: file.cite(),
+                kind,
+                default,
+            })
+            .await?
+        {
+            ResponseKind::FileAcl(result) => result.map_err(Into::into),
+            response => Err(unexpected(response).into()),
         }
     }
 
-    async fn set_acl(&self, kind: AclKind, acl: Option<&Acl>, default: bool) -> crate::Result<()> {
-        match &self.0 {
-            ClientFileInner::Direct(file) => file.set_acl(kind, acl, default).await,
-            ClientFileInner::Remote(file) => {
-                file.idle()?;
-                match file
-                    .client
-                    .request(RequestKind::FileSetAcl {
-                        file: file.cite(),
-                        kind,
-                        acl: acl.cloned(),
-                        default,
-                    })
-                    .await?
-                {
-                    ResponseKind::FileSetAcl(result) => result.map_err(Into::into),
-                    response => Err(unexpected(response).into()),
-                }
-            }
+    pub(crate) async fn set_acl(
+        &self,
+        kind: AclKind,
+        acl: Option<&Acl>,
+        default: bool,
+    ) -> Result<()> {
+        let file = self;
+        file.idle()?;
+        match file
+            .client
+            .request(RequestKind::FileSetAcl {
+                file: file.cite(),
+                kind,
+                acl: acl.cloned(),
+                default,
+            })
+            .await?
+        {
+            ResponseKind::FileSetAcl(result) => result.map_err(Into::into),
+            response => Err(unexpected(response).into()),
         }
     }
 
-    async fn sec_desc(&self, mask: dolang_winterop::security::SecInfo) -> crate::Result<SecDesc> {
-        match &self.0 {
-            ClientFileInner::Direct(file) => file.sec_desc(mask).await,
-            ClientFileInner::Remote(file) => {
-                file.idle()?;
-                match file
-                    .client
-                    .request(RequestKind::FileSecDesc {
-                        file: file.cite(),
-                        mask,
-                    })
-                    .await?
-                {
-                    ResponseKind::FileSecDesc(result) => result.map_err(Into::into),
-                    response => Err(unexpected(response).into()),
-                }
-            }
+    pub(crate) async fn sec_desc(
+        &self,
+        mask: dolang_winterop::security::SecInfo,
+    ) -> Result<SecDesc> {
+        let file = self;
+        file.idle()?;
+        match file
+            .client
+            .request(RequestKind::FileSecDesc {
+                file: file.cite(),
+                mask,
+            })
+            .await?
+        {
+            ResponseKind::FileSecDesc(result) => result.map_err(Into::into),
+            response => Err(unexpected(response).into()),
         }
     }
 
-    async fn set_sec_desc(&self, sec_desc: &SecDesc) -> crate::Result<()> {
-        match &self.0 {
-            ClientFileInner::Direct(file) => file.set_sec_desc(sec_desc).await,
-            ClientFileInner::Remote(file) => {
-                file.idle()?;
-                match file
-                    .client
-                    .request(RequestKind::FileSetSecDesc {
-                        file: file.cite(),
-                        sec_desc: sec_desc.clone(),
-                    })
-                    .await?
-                {
-                    ResponseKind::FileSetSecDesc(result) => result.map_err(Into::into),
-                    response => Err(unexpected(response).into()),
-                }
-            }
+    pub(crate) async fn set_sec_desc(&self, sec_desc: &SecDesc) -> Result<()> {
+        let file = self;
+        file.idle()?;
+        match file
+            .client
+            .request(RequestKind::FileSetSecDesc {
+                file: file.cite(),
+                sec_desc: sec_desc.clone(),
+            })
+            .await?
+        {
+            ResponseKind::FileSetSecDesc(result) => result.map_err(Into::into),
+            response => Err(unexpected(response).into()),
         }
     }
 
-    async fn xattrs(&self, namespace: crate::XattrNamespace<'_>) -> crate::Result<Vec<XattrEntry>> {
-        match &self.0 {
-            ClientFileInner::Direct(file) => file.xattrs(namespace).await,
-            ClientFileInner::Remote(file) => {
-                file.idle()?;
-                match file
-                    .client
-                    .request(RequestKind::FileXattrs {
-                        file: file.cite(),
-                        namespace: XattrNamespaceRequest::from(namespace),
-                    })
-                    .await?
-                {
-                    ResponseKind::FileXattrs(result) => result.map_err(Into::into),
-                    response => Err(unexpected(response).into()),
-                }
-            }
+    pub(crate) async fn xattrs(&self, namespace: XattrNamespace<'_>) -> Result<Vec<XattrEntry>> {
+        let file = self;
+        file.idle()?;
+        match file
+            .client
+            .request(RequestKind::FileXattrs {
+                file: file.cite(),
+                namespace: XattrNamespaceRequest::from(namespace),
+            })
+            .await?
+        {
+            ResponseKind::FileXattrs(result) => result.map_err(Into::into),
+            response => Err(unexpected(response).into()),
         }
     }
 
-    async fn xattr(&self, name: &str, namespace: Option<&str>) -> crate::Result<Vec<u8>> {
-        match &self.0 {
-            ClientFileInner::Direct(file) => file.xattr(name, namespace).await,
-            ClientFileInner::Remote(file) => {
-                file.idle()?;
-                match file
-                    .client
-                    .request(RequestKind::FileXattr {
-                        file: file.cite(),
-                        name: name.to_owned(),
-                        namespace: namespace.map(str::to_owned),
-                    })
-                    .await?
-                {
-                    ResponseKind::FileXattr(result) => result.map_err(Into::into),
-                    response => Err(unexpected(response).into()),
-                }
-            }
+    pub(crate) async fn xattr(&self, name: &str, namespace: Option<&str>) -> Result<Vec<u8>> {
+        let file = self;
+        file.idle()?;
+        match file
+            .client
+            .request(RequestKind::FileXattr {
+                file: file.cite(),
+                name: name.to_owned(),
+                namespace: namespace.map(str::to_owned),
+            })
+            .await?
+        {
+            ResponseKind::FileXattr(result) => result.map_err(Into::into),
+            response => Err(unexpected(response).into()),
         }
     }
 
-    async fn streams(&self) -> crate::Result<Vec<StreamEntry>> {
-        match &self.0 {
-            ClientFileInner::Direct(file) => file.streams().await,
-            ClientFileInner::Remote(file) => {
-                file.idle()?;
-                match file
-                    .client
-                    .request(RequestKind::FileStreams { file: file.cite() })
-                    .await?
-                {
-                    ResponseKind::FileStreams(result) => result.map_err(Into::into),
-                    response => Err(unexpected(response).into()),
-                }
-            }
+    pub(crate) async fn streams(&self) -> Result<Vec<StreamEntry>> {
+        let file = self;
+        file.idle()?;
+        match file
+            .client
+            .request(RequestKind::FileStreams { file: file.cite() })
+            .await?
+        {
+            ResponseKind::FileStreams(result) => result.map_err(Into::into),
+            response => Err(unexpected(response).into()),
         }
     }
 
-    async fn set_xattr(
+    pub(crate) async fn set_xattr(
         &self,
         name: &str,
         namespace: Option<&str>,
         value: &[u8],
-    ) -> crate::Result<()> {
-        match &self.0 {
-            ClientFileInner::Direct(file) => file.set_xattr(name, namespace, value).await,
-            ClientFileInner::Remote(file) => {
-                file.idle()?;
-                match file
-                    .client
-                    .request(RequestKind::FileSetXattr {
-                        file: file.cite(),
-                        name: name.to_owned(),
-                        namespace: namespace.map(str::to_owned),
-                        value: value.to_vec(),
-                    })
-                    .await?
-                {
-                    ResponseKind::FileSetXattr(result) => result.map_err(Into::into),
-                    response => Err(unexpected(response).into()),
-                }
-            }
+    ) -> Result<()> {
+        let file = self;
+        file.idle()?;
+        match file
+            .client
+            .request(RequestKind::FileSetXattr {
+                file: file.cite(),
+                name: name.to_owned(),
+                namespace: namespace.map(str::to_owned),
+                value: value.to_vec(),
+            })
+            .await?
+        {
+            ResponseKind::FileSetXattr(result) => result.map_err(Into::into),
+            response => Err(unexpected(response).into()),
         }
     }
 
-    async fn remove_xattr(&self, name: &str, namespace: Option<&str>) -> crate::Result<()> {
-        match &self.0 {
-            ClientFileInner::Direct(file) => file.remove_xattr(name, namespace).await,
-            ClientFileInner::Remote(file) => {
-                file.idle()?;
-                match file
-                    .client
-                    .request(RequestKind::FileRemoveXattr {
-                        file: file.cite(),
-                        name: name.to_owned(),
-                        namespace: namespace.map(str::to_owned),
-                    })
-                    .await?
-                {
-                    ResponseKind::FileRemoveXattr(result) => result.map_err(Into::into),
-                    response => Err(unexpected(response).into()),
-                }
-            }
+    pub(crate) async fn remove_xattr(&self, name: &str, namespace: Option<&str>) -> Result<()> {
+        let file = self;
+        file.idle()?;
+        match file
+            .client
+            .request(RequestKind::FileRemoveXattr {
+                file: file.cite(),
+                name: name.to_owned(),
+                namespace: namespace.map(str::to_owned),
+            })
+            .await?
+        {
+            ResponseKind::FileRemoveXattr(result) => result.map_err(Into::into),
+            response => Err(unexpected(response).into()),
         }
     }
 
-    async fn lock(
-        &self,
-        request: crate::file::FileLockRequest,
-    ) -> crate::Result<Option<crate::file::FileLock>> {
-        match &self.0 {
-            ClientFileInner::Direct(file) => file.lock(request).await,
-            ClientFileInner::Remote(file) => {
-                file.idle()?;
-                match file
-                    .client
-                    .request(RequestKind::FileLock {
-                        file: file.cite(),
-                        request,
-                    })
-                    .await?
-                {
-                    ResponseKind::FileLock(result) => result
-                        .map(|lock| {
-                            lock.map(|lock| {
-                                crate::file::FileLock::remote(RemoteFileLock {
-                                    client: file.client.clone(),
-                                    lock: Some(lock),
-                                })
-                            })
+    pub(crate) async fn lock(&self, request: FileLockRequest) -> Result<Option<FileLock>> {
+        let file = self;
+        file.idle()?;
+        match file
+            .client
+            .request(RequestKind::FileLock {
+                file: file.cite(),
+                request,
+            })
+            .await?
+        {
+            ResponseKind::FileLock(result) => result
+                .map(|lock| {
+                    lock.map(|lock| {
+                        FileLock::remote(RemoteFileLock {
+                            client: file.client.clone(),
+                            lock: Some(lock),
                         })
-                        .map_err(Into::into),
-                    response => Err(unexpected(response).into()),
-                }
-            }
+                    })
+                })
+                .map_err(Into::into),
+            response => Err(unexpected(response).into()),
         }
     }
 
-    async fn try_into_std(self) -> std::result::Result<std::fs::File, Self> {
-        match self.0 {
-            ClientFileInner::Direct(file) => file
-                .try_into_std()
-                .await
-                .map_err(|file| Self(ClientFileInner::Direct(file))),
-            ClientFileInner::Remote(file) => Err(Self(ClientFileInner::Remote(file))),
-        }
+    pub(crate) async fn try_into_std(self) -> std::result::Result<std::fs::File, Self> {
+        Err(self)
     }
 }
 
-fn wire_io(error: crate::protocol::WireError) -> io::Error {
-    crate::Error::from(error).into_io_error()
+fn wire_io(error: WireError) -> io::Error {
+    Error::from(error).into_io_error()
 }
 
 fn negative_seek() -> io::Error {
@@ -1309,17 +1229,17 @@ fn negative_seek() -> io::Error {
 /// advances by what the peer accepted. An append write does not: the offset it
 /// used is the peer's business, so the reply carries the resulting position and
 /// the cursor takes it verbatim.
-fn ack_write(cursor: &AtomicU64, response: ResponseKind) -> io::Result<usize> {
+fn ack_write(cursor: &mut u64, response: ResponseKind) -> io::Result<usize> {
     match response {
         ResponseKind::Error(error) => Err(wire_io(error)),
         ResponseKind::FileWrite(result) => {
             let written = result.map_err(wire_io)?;
-            cursor.fetch_add(written as u64, Ordering::Relaxed);
+            *cursor += written as u64;
             Ok(written)
         }
         ResponseKind::FileAppend(result) => {
             let (written, end) = result.map_err(wire_io)?;
-            cursor.store(end, Ordering::Relaxed);
+            *cursor = end;
             Ok(written)
         }
         response => Err(unexpected(response)),
@@ -1349,8 +1269,8 @@ impl Client {
     async fn initialize(
         rpc: dolang_rpc::client::Client<VfsProtocol>,
         mode: SessionMode,
-        vfs: Option<Gift<crate::session::VfsMarker>>,
-    ) -> crate::Result<Self> {
+        vfs: Option<Gift<VfsMarker>>,
+    ) -> Result<Self> {
         let response = rpc
             .call(Request {
                 vfs: vfs.as_ref().map(Gift::cite),
@@ -1362,10 +1282,12 @@ impl Client {
         let ResponseKind::Query(result) = response else {
             return Err(unexpected(response).into());
         };
-        let query = result.map_err(crate::Error::from).map(query_from_wire)?;
+        let query = result.map_err(Error::from).map(query_from_wire)?;
         Ok(Self {
             shared: Arc::new(ClientShared { rpc, mode, query }),
             vfs,
+            #[cfg(windows)]
+            process: None,
         })
     }
 
@@ -1381,7 +1303,7 @@ impl Client {
     ///
     /// This transport cannot transfer native handles, so files, subprocesses,
     /// and stdio endpoints are represented by remote references and relays.
-    pub async fn new<T>(stream: T) -> crate::Result<Self>
+    pub(crate) async fn new<T>(stream: T) -> Result<Self>
     where
         T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
@@ -1396,7 +1318,7 @@ impl Client {
     /// Starts an opaque-only VFS client on separate reader and writer streams.
     ///
     /// This has the same opaque-only behavior as [`new`](Self::new).
-    pub async fn new_split<R, W>(reader: R, writer: W) -> crate::Result<Self>
+    pub(crate) async fn new_split<R, W>(reader: R, writer: W) -> Result<Self>
     where
         R: AsyncRead + Send + 'static,
         W: AsyncWrite + Send + 'static,
@@ -1421,7 +1343,7 @@ impl Client {
     ///
     /// This transport supports native file-descriptor transfer.
     #[cfg(unix)]
-    pub async fn connect(path: impl AsRef<Path>) -> crate::Result<Self> {
+    pub(crate) async fn connect(path: impl AsRef<std::path::Path>) -> Result<Self> {
         Self::connect_with_key(path, None).await
     }
 
@@ -1435,10 +1357,10 @@ impl Client {
     /// first. Both ends must agree: a key here requires a keyed agent, and an
     /// agent expecting one refuses an unkeyed client. See [`dolang_rpc::auth`].
     #[cfg(unix)]
-    pub async fn connect_with_key(
-        path: impl AsRef<Path>,
+    pub(crate) async fn connect_with_key(
+        path: impl AsRef<std::path::Path>,
         key: Option<AuthKey>,
-    ) -> crate::Result<Self> {
+    ) -> Result<Self> {
         Self::from_std_stream(UnixStream::connect(path).await?.into_std()?, key).await
     }
 
@@ -1446,12 +1368,12 @@ impl Client {
     ///
     /// This transport supports native file-descriptor transfer.
     #[cfg(unix)]
-    pub async fn from_stream(stream: UnixStream) -> crate::Result<Self> {
+    pub(crate) async fn from_stream(stream: UnixStream) -> Result<Self> {
         Self::from_std_stream(stream.into_std()?, None).await
     }
 
     #[cfg(unix)]
-    async fn from_std_stream(stream: StdUnixStream, key: Option<AuthKey>) -> crate::Result<Self> {
+    async fn from_std_stream(stream: StdUnixStream, key: Option<AuthKey>) -> Result<Self> {
         let rpc = rpc_builder(key)
             .client_unix(stream)
             .await
@@ -1465,17 +1387,17 @@ impl Client {
     ///
     /// This transport supports native file-descriptor transfer.
     #[cfg(unix)]
-    pub async fn from_owned_fd(value: OwnedFd) -> crate::Result<Self> {
+    pub(crate) async fn from_owned_fd(value: OwnedFd) -> Result<Self> {
         Self::from_owned_fd_with_key(value, None).await
     }
 
     /// Starts a VFS client on an already-connected Unix-domain socket file
     /// descriptor, proving knowledge of a pre-shared key.
     #[cfg(unix)]
-    pub async fn from_owned_fd_with_key(
+    pub(crate) async fn from_owned_fd_with_key(
         value: OwnedFd,
         key: Option<AuthKey>,
-    ) -> crate::Result<Self> {
+    ) -> Result<Self> {
         let stream = StdUnixStream::from(value);
         stream.set_nonblocking(true)?;
         Self::from_std_stream(stream, key).await
@@ -1490,10 +1412,10 @@ impl Client {
     #[cfg(any(windows, docsrs))]
     #[cfg_attr(docsrs, doc(cfg(windows)))]
     #[cfg_attr(all(docsrs, not(windows)), allow(private_interfaces))]
-    pub async unsafe fn from_named_pipe_server(
+    pub(crate) async unsafe fn from_named_pipe_server(
         pipe: NamedPipeServer,
         server_process: OwnedHandle,
-    ) -> crate::Result<Self> {
+    ) -> Result<Self> {
         #[cfg(windows)]
         {
             let rpc = unsafe { rpc_builder(None).client_named_pipe_server(pipe, server_process) }
@@ -1509,7 +1431,7 @@ impl Client {
         }
     }
 
-    fn unsupported<T>(&self, operation: &str) -> crate::Result<T> {
+    fn unsupported<T>(&self, operation: &str) -> Result<T> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             format!("{operation} is not supported by a remote VFS session"),
@@ -1531,24 +1453,20 @@ impl Client {
         })
     }
 
-    pub(crate) async fn request(&self, request: RequestKind) -> crate::Result<ResponseKind> {
+    pub(crate) async fn request(&self, request: RequestKind) -> Result<ResponseKind> {
         let response = self
             .call(request)
             .await
             .map_err(rpc_error)
-            .map_err(crate::Error::from)?
+            .map_err(Error::from)?
             .into_response();
         match response {
-            ResponseKind::Error(error) => Err(crate::Error::from(error)),
+            ResponseKind::Error(error) => Err(Error::from(error)),
             response => Ok(response),
         }
     }
 
-    async fn unix_vfs(
-        &self,
-        path: Utf8TypedPath<'_>,
-        key: Option<&[u8]>,
-    ) -> crate::Result<crate::AnyVfs> {
+    async fn unix_vfs(&self, path: Utf8TypedPath<'_>, key: Option<&[u8]>) -> Result<Vfs> {
         // The key is sent because the peer may have to establish the nested
         // connection itself (the `Opaque` arm below), and which arm it takes
         // is its decision, not ours. When it returns a descriptor instead, we
@@ -1558,7 +1476,7 @@ impl Client {
             key: key.map(<[u8]>::to_vec),
         };
         match self.request(RequestKind::UnixVfs(request)).await? {
-            ResponseKind::UnixVfs(result) => match result.map_err(crate::Error::from)? {
+            ResponseKind::UnixVfs(result) => match result.map_err(Error::from)? {
                 OpenVfsHandle::Native(handle) => {
                     #[cfg(unix)]
                     {
@@ -1566,9 +1484,9 @@ impl Client {
                             .map(AuthKey::new)
                             .transpose()
                             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-                        Ok(Self::from_owned_fd_with_key(handle.into_inner(), key)
-                            .await?
-                            .into())
+                        Ok(Vfs::from_client(
+                            Self::from_owned_fd_with_key(handle.into_inner(), key).await?,
+                        ))
                     }
                     #[cfg(not(unix))]
                     {
@@ -1580,13 +1498,9 @@ impl Client {
                         .into())
                     }
                 }
-                OpenVfsHandle::Opaque(vfs) => {
-                    Ok(
-                        Self::initialize(self.shared.rpc.clone(), self.shared.mode, Some(vfs))
-                            .await?
-                            .into(),
-                    )
-                }
+                OpenVfsHandle::Opaque(vfs) => Ok(Vfs::from_client(
+                    Self::initialize(self.shared.rpc.clone(), self.shared.mode, Some(vfs)).await?,
+                )),
             },
             response => Err(unexpected(response).into()),
         }
@@ -1597,7 +1511,7 @@ impl Client {
         cwd: Utf8TypedPath<'_>,
         env: HashMap<String, Option<String>>,
         elevate: bool,
-    ) -> crate::Result<crate::session::VfsSession> {
+    ) -> Result<Vfs> {
         let request = WindowsAdminRequest {
             cwd: cwd.into(),
             env,
@@ -1605,10 +1519,16 @@ impl Client {
         };
         match self.request(RequestKind::WindowsAdmin(request)).await? {
             ResponseKind::WindowsAdmin(result) => {
-                let vfs = result.map_err(crate::Error::from)?;
-                Ok(crate::session::VfsSession::from_client(
-                    Self::initialize(self.shared.rpc.clone(), self.shared.mode, Some(vfs)).await?,
-                ))
+                let vfs = result.map_err(Error::from)?;
+                let client =
+                    Self::initialize(self.shared.rpc.clone(), self.shared.mode, Some(vfs)).await?;
+                #[cfg(windows)]
+                let client = {
+                    let mut client = client;
+                    client.process.clone_from(&self.process);
+                    client
+                };
+                Ok(Vfs::from_client(client))
             }
             response => Err(unexpected(response).into()),
         }
@@ -1623,7 +1543,7 @@ impl Client {
     pub async fn call_extension<T: VfsExtension>(
         &self,
         request: T::Request,
-    ) -> crate::Result<T::Response> {
+    ) -> Result<T::Response> {
         let wire = RequestKind::Extension(ExtensionRequest {
             name: T::NAME.to_string(),
             version: T::VERSION,
@@ -1638,143 +1558,24 @@ impl Client {
         }
     }
 
-    /// Resolves a Unix user ID on the target.
-    pub async fn user_name(&self, uid: u32) -> crate::Result<String> {
-        match self.request(RequestKind::UserName { uid }).await? {
-            ResponseKind::UserName(result) => result.map_err(Into::into),
-            response => Err(unexpected(response).into()),
-        }
-    }
-
-    /// Resolves a Unix user name on the target.
-    pub async fn user_id(&self, name: &str) -> crate::Result<u32> {
-        match self
-            .request(RequestKind::UserId {
-                name: name.to_owned(),
-            })
-            .await?
-        {
-            ResponseKind::UserId(result) => result.map_err(Into::into),
-            response => Err(unexpected(response).into()),
-        }
-    }
-
-    /// Resolves a Unix group ID on the target.
-    pub async fn group_name(&self, gid: u32) -> crate::Result<String> {
-        match self.request(RequestKind::GroupName { gid }).await? {
-            ResponseKind::GroupName(result) => result.map_err(Into::into),
-            response => Err(unexpected(response).into()),
-        }
-    }
-
-    /// Resolves a Unix group name on the target.
-    pub async fn group_id(&self, name: &str) -> crate::Result<u32> {
-        match self
-            .request(RequestKind::GroupId {
-                name: name.to_owned(),
-            })
-            .await?
-        {
-            ResponseKind::GroupId(result) => result.map_err(Into::into),
-            response => Err(unexpected(response).into()),
-        }
-    }
-
-    /// Resolves a Windows SID on the target.
-    pub async fn sid_name(&self, sid: &Sid) -> crate::Result<SidName> {
-        match self
-            .request(RequestKind::SidName { sid: sid.clone() })
-            .await?
-        {
-            ResponseKind::SidName(result) => result.map_err(Into::into),
-            response => Err(unexpected(response).into()),
-        }
-    }
-
-    /// Resolves a Windows account name on the target.
-    pub async fn account_name(&self, name: &str) -> crate::Result<SidName> {
-        match self
-            .request(RequestKind::AccountName {
-                name: name.to_owned(),
-            })
-            .await?
-        {
-            ResponseKind::AccountName(result) => result.map_err(Into::into),
-            response => Err(unexpected(response).into()),
-        }
-    }
-
-    /// Converts a principal ID from one representation to another on the
-    /// target.
-    pub async fn resolve_principal_id(
-        &self,
-        input: PrincipalId,
-        want: PrincipalIdKind,
-    ) -> crate::Result<PrincipalId> {
-        match self
-            .request(RequestKind::ResolvePrincipalId { input, want })
-            .await?
-        {
-            ResponseKind::ResolvePrincipalId(result) => result.map_err(Into::into),
-            response => Err(unexpected(response).into()),
-        }
-    }
-
-    /// Resolve a program path using the daemon's PATH resolution.
-    pub async fn which(
-        &self,
-        program: impl AsRef<Path>,
-        path: Option<&str>,
-        cwd: Option<&Path>,
-    ) -> crate::Result<Option<PathBuf>> {
-        let request = RequestKind::Which {
-            program: program.as_ref().to_path_buf().try_into()?,
-            path: path.map(str::to_owned),
-            cwd: cwd
-                .map(|path| WirePath::try_from(path.to_path_buf()))
-                .transpose()?,
-        };
-        match self.request(request).await? {
-            ResponseKind::Which(result) => result
-                .map_err(crate::Error::from)?
-                .map(TryInto::try_into)
-                .transpose(),
-            response => Err(unexpected(response).into()),
-        }
-    }
-
-    /// Resolves a target-specific well-known path.
-    pub async fn well_known_path(
-        &self,
-        key: WellKnownPath,
-        app: Option<&str>,
-        env: &HashMap<String, Option<String>>,
-    ) -> crate::Result<PathBuf> {
-        let request = WellKnownPathRequest {
-            key,
-            app: app.map(str::to_owned),
-            env: env.clone(),
-        };
-        match self.request(RequestKind::WellKnownPath(request)).await? {
-            ResponseKind::WellKnownPath(result) => result.map_err(crate::Error::from)?.try_into(),
-            response => Err(unexpected(response).into()),
-        }
-    }
-
     /// Signal the daemon to stop accepting new connections.
-    pub async fn stop(&self) -> crate::Result<()> {
-        match self.request(RequestKind::Stop).await? {
-            ResponseKind::Stop => Ok(()),
-            response => Err(unexpected(response).into()),
+    pub async fn stop(&self) -> Result<()> {
+        let stop_result = match self.request(RequestKind::Stop).await {
+            Ok(ResponseKind::Stop) => Ok(()),
+            Ok(response) => Err(Error::from(unexpected(response))),
+            Err(error) => Err(error),
+        };
+        #[cfg(windows)]
+        if let Some(process) = &self.process {
+            if stop_result.is_ok() {
+                self.clone().close().await;
+            } else {
+                process.terminate();
+            }
+            let wait_result = process.stop().await.map_err(Error::from);
+            return stop_result.and(wait_result);
         }
-    }
-
-    /// Clear the server's path resolution cache.
-    pub async fn clear_cache(&self) -> crate::Result<()> {
-        match self.request(RequestKind::ClearCache).await? {
-            ResponseKind::ClearCache(result) => result.map_err(crate::Error::from),
-            response => Err(unexpected(response).into()),
-        }
+        stop_result
     }
 }
 
@@ -1844,7 +1645,7 @@ fn clone_stderr_handle() -> io::Result<DefaultHandle> {
 /// Builder for constructing a process-spawn request on a remote VFS.
 ///
 /// Configure arguments, environment, working directory, and standard streams,
-/// then call [`spawn`](crate::Command::spawn). This concrete API accepts host
+/// then call [`spawn`](crate::process::Command::spawn). This concrete API accepts host
 /// [`Path`] values; use [`Vfs::command`]
 /// when the target's path syntax may differ from the host's.
 ///
@@ -1862,7 +1663,7 @@ fn clone_stderr_handle() -> io::Result<DefaultHandle> {
 ///     .spawn()
 ///     .await?;
 /// ```
-pub struct CommandBuilder<'a> {
+pub struct Command<'a> {
     client: &'a Client,
     program: WirePath,
     args: Vec<String>,
@@ -1871,15 +1672,15 @@ pub struct CommandBuilder<'a> {
     stdin: ClientRecv,
     stdout: ClientSend,
     stderr: ClientSend,
-    process_control: crate::ProcessControl,
-    termination_policy: crate::TerminationPolicy,
+    process_control: ProcessControl,
+    termination_policy: TerminationPolicy,
 }
 
 /// A process spawned by a [`Client`].
 ///
 /// It implements [`Child`]; any relay tasks for cross-domain
 /// standard streams are owned by this value.
-pub struct ClientChild {
+pub struct Child {
     client: Client,
     state: ClientChildState,
     relays: ClientRelays,
@@ -1904,9 +1705,9 @@ struct PreparedRelays {
 }
 
 enum ClientChildState {
-    Live(Gift<crate::session::ChildMarker>),
+    Live(Gift<ChildMarker>),
     Exited(ProcessStatus),
-    Lost(crate::protocol::WireError),
+    Lost(WireError),
 }
 
 /// A writable standard-stream endpoint owned by a remote VFS session.
@@ -1915,7 +1716,7 @@ enum ClientChildState {
 /// closes the corresponding remote endpoint.
 pub struct RemoteStdioSend {
     client: Client,
-    stdio: Option<Gift<crate::session::StdioSendMarker>>,
+    stdio: Option<Gift<StdioSendMarker>>,
     pending: Option<(StdioSendOperation, Call<VfsProtocol>)>,
     write_body: Option<PendingTrailerWrite>,
 }
@@ -1925,7 +1726,7 @@ pub struct RemoteStdioSend {
 /// This implements [`AsyncRead`].
 pub struct RemoteStdioRecv {
     client: Client,
-    stdio: Option<Gift<crate::session::StdioRecvMarker>>,
+    stdio: Option<Gift<StdioRecvMarker>>,
     pending: Option<Call<VfsProtocol>>,
     read_body: Option<PendingTrailerRead>,
 }
@@ -1935,8 +1736,8 @@ enum StdioSendOperation {
     Close,
 }
 
-impl std::fmt::Debug for RemoteStdioSend {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for RemoteStdioSend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RemoteStdioSend")
             .field("stdio", &self.stdio)
             .field("pending", &self.pending.as_ref().map(|p| p.0))
@@ -1944,8 +1745,8 @@ impl std::fmt::Debug for RemoteStdioSend {
     }
 }
 
-impl std::fmt::Debug for RemoteStdioRecv {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for RemoteStdioRecv {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RemoteStdioRecv")
             .field("stdio", &self.stdio)
             .field("pending", &self.pending.is_some())
@@ -2185,9 +1986,10 @@ impl RemoteStdioSend {
         &self.client
     }
 
-    pub(crate) async fn try_clone(&self) -> io::Result<Self> {
+    pub(crate) async fn try_clone(&self) -> Result<Self> {
         if self.pending.is_some() {
-            return Err(io::Error::other(
+            return Err(Error::new(
+                ErrorKind::ResourceBusy,
                 "cannot clone stdio send while an operation is pending",
             ));
         }
@@ -2199,18 +2001,17 @@ impl RemoteStdioSend {
             .request(RequestKind::StdioSendClone {
                 stdio: stdio.cite(),
             })
-            .await
-            .map_err(crate::Error::into_io_error)?
+            .await?
         {
-            ResponseKind::StdioSendClone(result) => result
+            ResponseKind::StdioSendClone(result) => Ok(result
                 .map(|stdio| Self {
                     client: self.client.clone(),
                     stdio: Some(stdio),
                     pending: None,
                     write_body: None,
                 })
-                .map_err(wire_io),
-            response => Err(unexpected(response)),
+                .map_err(wire_io)?),
+            response => Err(unexpected(response).into()),
         }
     }
 }
@@ -2220,9 +2021,10 @@ impl RemoteStdioRecv {
         &self.client
     }
 
-    pub(crate) async fn try_clone(&self) -> io::Result<Self> {
+    pub(crate) async fn try_clone(&self) -> Result<Self> {
         if self.pending.is_some() {
-            return Err(io::Error::other(
+            return Err(Error::new(
+                ErrorKind::ResourceBusy,
                 "cannot clone stdio receive while an operation is pending",
             ));
         }
@@ -2237,18 +2039,17 @@ impl RemoteStdioRecv {
             .request(RequestKind::StdioRecvClone {
                 stdio: stdio.cite(),
             })
-            .await
-            .map_err(crate::Error::into_io_error)?
+            .await?
         {
-            ResponseKind::StdioRecvClone(result) => result
+            ResponseKind::StdioRecvClone(result) => Ok(result
                 .map(|stdio| Self {
                     client: self.client.clone(),
                     stdio: Some(stdio),
                     pending: None,
                     read_body: None,
                 })
-                .map_err(wire_io),
-            response => Err(unexpected(response)),
+                .map_err(wire_io)?),
+            response => Err(unexpected(response).into()),
         }
     }
 }
@@ -2268,7 +2069,7 @@ enum ClientSend {
     Resource(StdioSend),
 }
 
-impl<'a> CommandBuilder<'a> {
+impl<'a> Command<'a> {
     fn new(client: &'a Client, program: Utf8TypedPath<'_>) -> Self {
         Self {
             client,
@@ -2279,8 +2080,8 @@ impl<'a> CommandBuilder<'a> {
             stdin: ClientRecv::Null,
             stdout: ClientSend::Null,
             stderr: ClientSend::Null,
-            process_control: crate::ProcessControl::Foreground,
-            termination_policy: crate::TerminationPolicy::default(),
+            process_control: ProcessControl::Foreground,
+            termination_policy: TerminationPolicy::default(),
         }
     }
 
@@ -2288,11 +2089,11 @@ impl<'a> CommandBuilder<'a> {
         client: &Client,
         stdio: ClientRecv,
         relays: &mut PreparedRelays,
-    ) -> crate::Result<StdioRecvTarget> {
+    ) -> Result<StdioRecvTarget> {
         match stdio {
             ClientRecv::Null => Ok(StdioRecvTarget::Null),
             ClientRecv::Inherit => {
-                let (send, recv) = client.pipe().await?;
+                let (send, recv) = client.pipe(None).await?;
                 relays.stdin = Some(send);
                 let StdioRecv::Remote(remote) = recv else {
                     return Err(io::Error::other(
@@ -2321,16 +2122,12 @@ impl<'a> CommandBuilder<'a> {
         }
     }
 
-    fn prepare_remote_recv(
-        client: &Client,
-        remote: RemoteStdioRecv,
-    ) -> crate::Result<StdioRecvTarget> {
+    fn prepare_remote_recv(client: &Client, remote: RemoteStdioRecv) -> Result<StdioRecvTarget> {
         if !client.is_same_vfs(&remote.client) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
                 "stdio receive belongs to a different VFS session",
-            )
-            .into());
+            ));
         }
         Ok(StdioRecvTarget::Opaque(
             remote.stdio.as_ref().unwrap().cite(),
@@ -2341,12 +2138,12 @@ impl<'a> CommandBuilder<'a> {
         client: &Client,
         stdio: ClientSend,
         relays: &mut PreparedRelays,
-    ) -> crate::Result<StdioSendTarget> {
+    ) -> Result<StdioSendTarget> {
         match stdio {
             ClientSend::Null => Ok(StdioSendTarget::Null),
             ClientSend::Stdout => Ok(StdioSendTarget::Stdout),
             ClientSend::Inherit(output) => {
-                let (send, recv) = client.pipe().await?;
+                let (send, recv) = client.pipe(None).await?;
                 relays.outputs.push((recv, output));
                 let StdioSend::Remote(remote) = send else {
                     return Err(io::Error::other(
@@ -2375,16 +2172,12 @@ impl<'a> CommandBuilder<'a> {
         }
     }
 
-    fn prepare_remote_send(
-        client: &Client,
-        remote: RemoteStdioSend,
-    ) -> crate::Result<StdioSendTarget> {
+    fn prepare_remote_send(client: &Client, remote: RemoteStdioSend) -> Result<StdioSendTarget> {
         if !client.is_same_vfs(&remote.client) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
                 "stdio send belongs to a different VFS session",
-            )
-            .into());
+            ));
         }
         Ok(StdioSendTarget::Opaque(
             remote.stdio.as_ref().unwrap().cite(),
@@ -2396,7 +2189,7 @@ impl<'a> CommandBuilder<'a> {
         stdout: ClientSend,
         stderr: ClientSend,
         relays: &mut PreparedRelays,
-    ) -> crate::Result<(StdioSendTarget, StdioSendTarget)> {
+    ) -> Result<(StdioSendTarget, StdioSendTarget)> {
         let stdout = Self::prepare_send(client, stdout, relays).await?;
         let stderr = Self::prepare_send(client, stderr, relays).await?;
         Ok((stdout, stderr))
@@ -2446,8 +2239,8 @@ impl ClientRelays {
     }
 }
 
-impl ClientChild {
-    fn result(&self) -> Option<crate::Result<ProcessStatus>> {
+impl Child {
+    fn result(&self) -> Option<Result<ProcessStatus>> {
         match &self.state {
             ClientChildState::Live(_) => None,
             ClientChildState::Exited(status) => Some(Ok(*status)),
@@ -2455,10 +2248,7 @@ impl ClientChild {
         }
     }
 
-    fn store_result(
-        &mut self,
-        result: &std::result::Result<ProcessStatus, crate::protocol::WireError>,
-    ) {
+    fn store_result(&mut self, result: &std::result::Result<ProcessStatus, WireError>) {
         self.state = match result {
             Ok(status) => ClientChildState::Exited(*status),
             Err(error) => ClientChildState::Lost(error.clone()),
@@ -2466,7 +2256,7 @@ impl ClientChild {
     }
 }
 
-impl Drop for ClientChild {
+impl Drop for Child {
     fn drop(&mut self) {
         // Reaping the child is the opaque's own business: dropping the last
         // handle on it releases the registration, which drops the retained
@@ -2475,8 +2265,8 @@ impl Drop for ClientChild {
     }
 }
 
-impl Child for ClientChild {
-    async fn wait(&mut self) -> crate::Result<ProcessStatus> {
+impl Child {
+    pub(crate) async fn wait(&mut self) -> Result<ProcessStatus> {
         if let Some(result) = self.result() {
             return result;
         }
@@ -2499,7 +2289,7 @@ impl Child for ClientChild {
         }
     }
 
-    async fn terminate(mut self) -> crate::Result<Option<ProcessStatus>> {
+    pub(crate) async fn terminate(mut self) -> Result<Option<ProcessStatus>> {
         self.relays.abort_stdin();
         if let Some(result) = self.result() {
             return result.map(Some);
@@ -2526,37 +2316,33 @@ impl Child for ClientChild {
     }
 }
 
-impl<'a> Command for CommandBuilder<'a> {
-    type Child = ClientChild;
-    type StdioSend = StdioSend;
-    type StdioRecv = StdioRecv;
-
-    fn arg(&mut self, arg: &str) -> &mut Self {
+impl<'a> Command<'a> {
+    pub(crate) fn arg(&mut self, arg: &str) -> &mut Self {
         self.args.push(arg.to_owned());
         self
     }
 
-    fn env(&mut self, key: &str, val: &str) -> &mut Self {
+    pub(crate) fn env(&mut self, key: &str, val: &str) -> &mut Self {
         self.env.insert(key.to_owned(), Some(val.to_owned()));
         self
     }
 
-    fn env_remove(&mut self, key: &str) -> &mut Self {
+    pub(crate) fn env_remove(&mut self, key: &str) -> &mut Self {
         self.env.insert(key.to_owned(), None);
         self
     }
 
-    fn current_dir(&mut self, dir: Utf8TypedPath<'_>) -> &mut Self {
+    pub(crate) fn current_dir(&mut self, dir: Utf8TypedPath<'_>) -> &mut Self {
         self.cwd = Some(dir.into());
         self
     }
 
-    fn stdin(&mut self, stdio: StdioRecv) -> io::Result<&mut Self> {
+    pub(crate) fn stdin(&mut self, stdio: StdioRecv) -> Result<&mut Self> {
         if let StdioRecv::Remote(remote) = &stdio
             && !self.client.is_same_vfs(&remote.client)
         {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
                 "stdio receive belongs to a different VFS session",
             ));
         }
@@ -2564,12 +2350,12 @@ impl<'a> Command for CommandBuilder<'a> {
         Ok(self)
     }
 
-    fn stdout(&mut self, stdio: StdioSend) -> io::Result<&mut Self> {
+    pub(crate) fn stdout(&mut self, stdio: StdioSend) -> Result<&mut Self> {
         if let StdioSend::Remote(remote) = &stdio
             && !self.client.is_same_vfs(&remote.client)
         {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
                 "stdio send belongs to a different VFS session",
             ));
         }
@@ -2577,7 +2363,7 @@ impl<'a> Command for CommandBuilder<'a> {
         Ok(self)
     }
 
-    fn stdin_inherit(&mut self) -> io::Result<&mut Self> {
+    pub(crate) fn stdin_inherit(&mut self) -> Result<&mut Self> {
         self.stdin = if self.client.mode() == SessionMode::Remote {
             if std::io::stdin().is_terminal() {
                 ClientRecv::Null
@@ -2590,7 +2376,7 @@ impl<'a> Command for CommandBuilder<'a> {
         Ok(self)
     }
 
-    fn stdout_inherit(&mut self) -> io::Result<&mut Self> {
+    pub(crate) fn stdout_inherit(&mut self) -> Result<&mut Self> {
         self.stdout = if self.client.mode() == SessionMode::Remote {
             ClientSend::Inherit(HostOutput::Stdout)
         } else {
@@ -2599,7 +2385,7 @@ impl<'a> Command for CommandBuilder<'a> {
         Ok(self)
     }
 
-    fn stdout_inherit_stderr(&mut self) -> io::Result<&mut Self> {
+    pub(crate) fn stdout_inherit_stderr(&mut self) -> Result<&mut Self> {
         self.stdout = if self.client.mode() == SessionMode::Remote {
             ClientSend::Inherit(HostOutput::Stderr)
         } else {
@@ -2608,22 +2394,22 @@ impl<'a> Command for CommandBuilder<'a> {
         Ok(self)
     }
 
-    fn stdin_null(&mut self) -> &mut Self {
+    pub(crate) fn stdin_null(&mut self) -> &mut Self {
         self.stdin = ClientRecv::Null;
         self
     }
 
-    fn stdout_null(&mut self) -> &mut Self {
+    pub(crate) fn stdout_null(&mut self) -> &mut Self {
         self.stdout = ClientSend::Null;
         self
     }
 
-    fn stderr(&mut self, stdio: StdioSend) -> io::Result<&mut Self> {
+    pub(crate) fn stderr(&mut self, stdio: StdioSend) -> Result<&mut Self> {
         if let StdioSend::Remote(remote) = &stdio
             && !self.client.is_same_vfs(&remote.client)
         {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
                 "stdio send belongs to a different VFS session",
             ));
         }
@@ -2631,7 +2417,7 @@ impl<'a> Command for CommandBuilder<'a> {
         Ok(self)
     }
 
-    fn stderr_inherit(&mut self) -> io::Result<&mut Self> {
+    pub(crate) fn stderr_inherit(&mut self) -> Result<&mut Self> {
         self.stderr = if self.client.mode() == SessionMode::Remote {
             ClientSend::Inherit(HostOutput::Stderr)
         } else {
@@ -2640,12 +2426,12 @@ impl<'a> Command for CommandBuilder<'a> {
         Ok(self)
     }
 
-    fn stderr_to_stdout(&mut self) -> io::Result<&mut Self> {
+    pub(crate) fn stderr_to_stdout(&mut self) -> Result<&mut Self> {
         self.stderr = ClientSend::Stdout;
         Ok(self)
     }
 
-    fn stderr_inherit_stdout(&mut self) -> io::Result<&mut Self> {
+    pub(crate) fn stderr_inherit_stdout(&mut self) -> Result<&mut Self> {
         self.stderr = if self.client.mode() == SessionMode::Remote {
             ClientSend::Inherit(HostOutput::Stdout)
         } else {
@@ -2654,22 +2440,22 @@ impl<'a> Command for CommandBuilder<'a> {
         Ok(self)
     }
 
-    fn stderr_null(&mut self) -> &mut Self {
+    pub(crate) fn stderr_null(&mut self) -> &mut Self {
         self.stderr = ClientSend::Null;
         self
     }
 
-    fn process_control(&mut self, control: crate::ProcessControl) -> &mut Self {
+    pub(crate) fn process_control(&mut self, control: ProcessControl) -> &mut Self {
         self.process_control = control;
         self
     }
 
-    fn termination_policy(&mut self, policy: crate::TerminationPolicy) -> &mut Self {
+    pub(crate) fn termination_policy(&mut self, policy: TerminationPolicy) -> &mut Self {
         self.termination_policy = policy;
         self
     }
 
-    async fn spawn(self) -> crate::Result<Self::Child> {
+    pub(crate) async fn spawn(self) -> Result<Child> {
         let Self {
             client,
             program,
@@ -2698,7 +2484,7 @@ impl<'a> Command for CommandBuilder<'a> {
         };
         match client.request(RequestKind::Spawn(req)).await? {
             ResponseKind::Spawn(result) => result
-                .map(|child| ClientChild {
+                .map(|child| Child {
                     client: client.clone(),
                     state: ClientChildState::Live(child),
                     relays: relays.start(),
@@ -2712,7 +2498,7 @@ impl<'a> Command for CommandBuilder<'a> {
 /// Builder for opening files through a [`Client`].
 ///
 /// Configure access and creation modes, then call
-/// [`OpenOptions::open`](crate::OpenOptions::open). This concrete API accepts
+/// [`OpenOptions::open`](crate::file::OpenOptions::open). This concrete API accepts
 /// host [`Path`] values; use
 /// [`Vfs::open_options`] when the target's path
 /// syntax may differ from the host's.
@@ -2754,45 +2540,43 @@ impl<'a> OpenOptions<'a> {
     }
 }
 
-impl crate::OpenOptions for OpenOptions<'_> {
-    type File = ClientFile;
-
-    fn read(&mut self, read: bool) -> &mut Self {
+impl OpenOptions<'_> {
+    pub fn read(&mut self, read: bool) -> &mut Self {
         self.read = read;
         self
     }
 
-    fn write(&mut self, write: bool) -> &mut Self {
+    pub fn write(&mut self, write: bool) -> &mut Self {
         self.write = write;
         self
     }
 
-    fn append(&mut self, append: bool) -> &mut Self {
+    pub fn append(&mut self, append: bool) -> &mut Self {
         self.append = append;
         self
     }
 
-    fn create(&mut self, create: bool) -> &mut Self {
+    pub fn create(&mut self, create: bool) -> &mut Self {
         self.create = create;
         self
     }
 
-    fn create_new(&mut self, create_new: bool) -> &mut Self {
+    pub fn create_new(&mut self, create_new: bool) -> &mut Self {
         self.create_new = create_new;
         self
     }
 
-    fn truncate(&mut self, truncate: bool) -> &mut Self {
+    pub fn truncate(&mut self, truncate: bool) -> &mut Self {
         self.truncate = truncate;
         self
     }
 
-    fn no_follow(&mut self, no_follow: bool) -> &mut Self {
+    pub fn no_follow(&mut self, no_follow: bool) -> &mut Self {
         self.no_follow = no_follow;
         self
     }
 
-    async fn open(&self, path: Utf8TypedPath<'_>) -> crate::Result<ClientFile> {
+    pub async fn open(&self, path: Utf8TypedPath<'_>) -> Result<VfsFile> {
         let req = OpenRequest {
             path: path.into(),
             read: self.read,
@@ -2809,38 +2593,26 @@ impl crate::OpenOptions for OpenOptions<'_> {
             },
         };
         match self.client.request(RequestKind::Open(req)).await? {
-            ResponseKind::Open(result) => match result.map_err(crate::Error::from)? {
-                OpenHandle::Native(handle) => Ok(ClientFile::from_std(
+            ResponseKind::Open(result) => match result.map_err(Error::from)? {
+                OpenHandle::Native(handle) => Ok(VfsFile::direct(direct::File::from_std(
                     handle.into_inner().into(),
                     self.read,
                     self.write,
                     self.append,
-                )),
-                OpenHandle::Opaque(file) => Ok(ClientFile::from_remote(
+                ))),
+                OpenHandle::Opaque(file) => Ok(VfsFile::client(client::File::new(
                     self.client.clone(),
                     file,
                     self.append,
-                )),
+                ))),
             },
             response => Err(unexpected(response).into()),
         }
     }
 }
 
-impl Vfs for Client {
-    type File = ClientFile;
-    type StdioSend = StdioSend;
-    type StdioRecv = StdioRecv;
-    type OpenOptions<'a>
-        = OpenOptions<'a>
-    where
-        Self: 'a;
-    type Command<'a>
-        = CommandBuilder<'a>
-    where
-        Self: 'a;
-
-    fn env(&self) -> Box<dyn Iterator<Item = (String, String)> + '_> {
+impl Client {
+    pub fn env(&self) -> Box<dyn Iterator<Item = (String, String)> + '_> {
         Box::new(
             self.shared
                 .query
@@ -2850,71 +2622,63 @@ impl Vfs for Client {
         )
     }
 
-    fn cwd(&self) -> Utf8TypedPath<'_> {
+    pub fn cwd(&self) -> Utf8TypedPath<'_> {
         self.shared.query.cwd.to_path()
     }
 
-    fn current_exe(&self) -> Utf8TypedPath<'_> {
+    pub fn current_exe(&self) -> Utf8TypedPath<'_> {
         self.shared.query.current_exe.to_path()
     }
 
-    fn target(&self) -> &crate::TargetInfo {
+    pub fn target(&self) -> &TargetInfo {
         &self.shared.query.target
     }
 
-    fn security(&self) -> &crate::SecurityInfo {
+    pub fn security(&self) -> &SecurityInfo {
         &self.shared.query.security
     }
 
-    fn extensions(&self) -> &crate::session::ExtensionSet {
+    pub fn extensions(&self) -> &ExtensionSet {
         &self.shared.query.extensions
     }
 
-    fn open_options(&self) -> Self::OpenOptions<'_> {
+    pub fn open_options(&self) -> OpenOptions<'_> {
         OpenOptions::new(self)
     }
 
-    fn command(&self, program: Utf8TypedPath<'_>) -> Self::Command<'_> {
-        CommandBuilder::new(self, program)
+    pub fn command(&self, program: Utf8TypedPath<'_>) -> Command<'_> {
+        Command::new(self, program)
     }
 
-    async fn access(
-        &self,
-        path: Utf8TypedPath<'_>,
-        mode: crate::file::AccessFlags,
-    ) -> crate::Result<()> {
+    pub async fn access(&self, path: Utf8TypedPath<'_>, mode: AccessFlags) -> Result<()> {
         let request = AccessRequest {
             path: path.to_path_buf().into(),
             mode: mode.bits(),
         };
         match self.request(RequestKind::Access(request)).await? {
-            ResponseKind::Access(result) => result.map_err(crate::Error::from),
+            ResponseKind::Access(result) => result.map_err(Error::from),
             response => Err(unexpected(response).into()),
         }
     }
 
-    async fn unix_socket(
-        &self,
-        path: Utf8TypedPath<'_>,
-        key: Option<&[u8]>,
-    ) -> crate::Result<crate::AnyVfs> {
+    pub async fn unix_socket(&self, path: Utf8TypedPath<'_>, key: Option<&[u8]>) -> Result<Vfs> {
         self.unix_vfs(path, key).await
     }
 
-    async fn windows_admin(
+    pub async fn windows_admin(
         &self,
         cwd: Utf8TypedPath<'_>,
         env: HashMap<String, Option<String>>,
         elevate: bool,
-    ) -> crate::Result<crate::session::VfsSession> {
+    ) -> Result<Vfs> {
         self.windows_admin_vfs(cwd, env, elevate).await
     }
 
-    async fn pipe(&self) -> crate::Result<(StdioSend, StdioRecv)> {
+    pub async fn pipe(&self, buf_size: Option<usize>) -> Result<(StdioSend, StdioRecv)> {
         if self.mode() == SessionMode::Native {
-            return crate::process::pipe(None).map_err(Into::into);
+            return process::pipe(buf_size).map_err(Into::into);
         }
-        match self.request(RequestKind::Pipe).await? {
+        match self.request(RequestKind::Pipe { buf_size }).await? {
             ResponseKind::Pipe(result) => result
                 .map(|pipe| {
                     (
@@ -2937,131 +2701,170 @@ impl Vfs for Client {
         }
     }
 
-    async fn user_name(&self, uid: u32) -> crate::Result<String> {
-        Client::user_name(self, uid).await
+    pub async fn user_name(&self, uid: u32) -> Result<String> {
+        match self.request(RequestKind::UserName { uid }).await? {
+            ResponseKind::UserName(result) => result.map_err(Into::into),
+            response => Err(unexpected(response).into()),
+        }
     }
 
-    async fn user_id(&self, name: &str) -> crate::Result<u32> {
-        Client::user_id(self, name).await
+    pub async fn user_id(&self, name: &str) -> Result<u32> {
+        match self
+            .request(RequestKind::UserId {
+                name: name.to_owned(),
+            })
+            .await?
+        {
+            ResponseKind::UserId(result) => result.map_err(Into::into),
+            response => Err(unexpected(response).into()),
+        }
     }
 
-    async fn group_name(&self, gid: u32) -> crate::Result<String> {
-        Client::group_name(self, gid).await
+    pub async fn group_name(&self, gid: u32) -> Result<String> {
+        match self.request(RequestKind::GroupName { gid }).await? {
+            ResponseKind::GroupName(result) => result.map_err(Into::into),
+            response => Err(unexpected(response).into()),
+        }
     }
 
-    async fn group_id(&self, name: &str) -> crate::Result<u32> {
-        Client::group_id(self, name).await
+    pub async fn group_id(&self, name: &str) -> Result<u32> {
+        match self
+            .request(RequestKind::GroupId {
+                name: name.to_owned(),
+            })
+            .await?
+        {
+            ResponseKind::GroupId(result) => result.map_err(Into::into),
+            response => Err(unexpected(response).into()),
+        }
     }
 
-    async fn sid_name(&self, sid: &Sid) -> crate::Result<SidName> {
-        Client::sid_name(self, sid).await
+    pub async fn sid_name(&self, sid: &Sid) -> Result<SidName> {
+        match self
+            .request(RequestKind::SidName { sid: sid.clone() })
+            .await?
+        {
+            ResponseKind::SidName(result) => result.map_err(Into::into),
+            response => Err(unexpected(response).into()),
+        }
     }
 
-    async fn account_name(&self, name: &str) -> crate::Result<SidName> {
-        Client::account_name(self, name).await
+    pub async fn account_name(&self, name: &str) -> Result<SidName> {
+        match self
+            .request(RequestKind::AccountName {
+                name: name.to_owned(),
+            })
+            .await?
+        {
+            ResponseKind::AccountName(result) => result.map_err(Into::into),
+            response => Err(unexpected(response).into()),
+        }
     }
 
-    async fn resolve_principal_id(
+    pub async fn resolve_principal_id(
         &self,
         input: PrincipalId,
         want: PrincipalIdKind,
-    ) -> crate::Result<PrincipalId> {
-        Client::resolve_principal_id(self, input, want).await
+    ) -> Result<PrincipalId> {
+        match self
+            .request(RequestKind::ResolvePrincipalId { input, want })
+            .await?
+        {
+            ResponseKind::ResolvePrincipalId(result) => result.map_err(Into::into),
+            response => Err(unexpected(response).into()),
+        }
     }
 
-    async fn read_dir(&self, path: Utf8TypedPath<'_>) -> crate::Result<ReadDir> {
+    pub(crate) async fn read_dir(&self, path: Utf8TypedPath<'_>) -> Result<directory::ReadDir> {
         match self
             .request(RequestKind::ReadDir { path: path.into() })
             .await?
         {
             ResponseKind::ReadDir(result) => result
-                .map(|read_dir| ReadDir::from_remote(self.clone(), read_dir))
-                .map_err(crate::Error::from),
+                .map(|read_dir| directory::ReadDir::client(ReadDir::new(self.clone(), read_dir)))
+                .map_err(Error::from),
             response => Err(unexpected(response).into()),
         }
     }
 
-    async fn which(
+    pub async fn which(
         &self,
         program: Utf8TypedPath<'_>,
         path: Option<&str>,
         cwd: Option<Utf8TypedPath<'_>>,
-    ) -> crate::Result<Option<Utf8TypedPathBuf>> {
+    ) -> Result<Option<Utf8TypedPathBuf>> {
         let request = RequestKind::Which {
             program: program.into(),
             path: path.map(str::to_owned),
             cwd: cwd.map(Into::into),
         };
         match self.request(request).await? {
-            ResponseKind::Which(result) => result
-                .map(|path| path.map(Into::into))
-                .map_err(crate::Error::from),
+            ResponseKind::Which(result) => {
+                result.map(|path| path.map(Into::into)).map_err(Error::from)
+            }
             response => Err(unexpected(response).into()),
         }
     }
 
-    async fn well_known_path(
+    pub async fn well_known_path(
         &self,
         key: WellKnownPath,
         app: Option<&str>,
         env: &HashMap<String, Option<String>>,
-    ) -> crate::Result<Utf8TypedPathBuf> {
+    ) -> Result<Utf8TypedPathBuf> {
         let request = WellKnownPathRequest {
             key,
             app: app.map(str::to_owned),
             env: env.clone(),
         };
         match self.request(RequestKind::WellKnownPath(request)).await? {
-            ResponseKind::WellKnownPath(result) => {
-                result.map(Into::into).map_err(crate::Error::from)
-            }
+            ResponseKind::WellKnownPath(result) => result.map(Into::into).map_err(Error::from),
             response => Err(unexpected(response).into()),
         }
     }
 
-    async fn clear_cache(&self) -> crate::Result<()> {
-        Client::clear_cache(self).await
+    pub async fn clear_cache(&self) -> Result<()> {
+        match self.request(RequestKind::ClearCache).await? {
+            ResponseKind::ClearCache(result) => result.map_err(Error::from),
+            response => Err(unexpected(response).into()),
+        }
     }
 
-    async fn xattrs(
+    pub async fn xattrs(
         &self,
         path: Utf8TypedPath<'_>,
-        namespace: crate::XattrNamespace<'_>,
+        namespace: XattrNamespace<'_>,
         follow: bool,
-    ) -> crate::Result<Vec<XattrEntry>> {
+    ) -> Result<Vec<XattrEntry>> {
         let request = XattrsRequest {
             path: path.into(),
             namespace: namespace.into(),
             follow,
         };
         match self.request(RequestKind::Xattrs(request)).await? {
-            ResponseKind::Xattrs(result) => result.map_err(crate::Error::from),
+            ResponseKind::Xattrs(result) => result.map_err(Error::from),
             response => Err(unexpected(response).into()),
         }
     }
 
-    async fn streams(
-        &self,
-        path: Utf8TypedPath<'_>,
-        follow: bool,
-    ) -> crate::Result<Vec<StreamEntry>> {
+    pub async fn streams(&self, path: Utf8TypedPath<'_>, follow: bool) -> Result<Vec<StreamEntry>> {
         let request = StreamsRequest {
             path: path.into(),
             follow,
         };
         match self.request(RequestKind::Streams(request)).await? {
-            ResponseKind::Streams(result) => result.map_err(crate::Error::from),
+            ResponseKind::Streams(result) => result.map_err(Error::from),
             response => Err(unexpected(response).into()),
         }
     }
 
-    async fn xattr(
+    pub async fn xattr(
         &self,
         path: Utf8TypedPath<'_>,
         name: &str,
         namespace: Option<&str>,
         follow: bool,
-    ) -> crate::Result<Vec<u8>> {
+    ) -> Result<Vec<u8>> {
         let request = XattrRequest {
             path: path.into(),
             name: name.to_owned(),
@@ -3069,19 +2872,19 @@ impl Vfs for Client {
             follow,
         };
         match self.request(RequestKind::Xattr(request)).await? {
-            ResponseKind::Xattr(result) => result.map_err(crate::Error::from),
+            ResponseKind::Xattr(result) => result.map_err(Error::from),
             response => Err(unexpected(response).into()),
         }
     }
 
-    async fn set_xattr(
+    pub async fn set_xattr(
         &self,
         path: Utf8TypedPath<'_>,
         name: &str,
         namespace: Option<&str>,
         value: &[u8],
         follow: bool,
-    ) -> crate::Result<()> {
+    ) -> Result<()> {
         let request = SetXattrRequest {
             path: path.into(),
             name: name.to_owned(),
@@ -3090,18 +2893,18 @@ impl Vfs for Client {
             follow,
         };
         match self.request(RequestKind::SetXattr(request)).await? {
-            ResponseKind::SetXattr(result) => result.map_err(crate::Error::from),
+            ResponseKind::SetXattr(result) => result.map_err(Error::from),
             response => Err(unexpected(response).into()),
         }
     }
 
-    async fn remove_xattr(
+    pub async fn remove_xattr(
         &self,
         path: Utf8TypedPath<'_>,
         name: &str,
         namespace: Option<&str>,
         follow: bool,
-    ) -> crate::Result<()> {
+    ) -> Result<()> {
         let request = XattrRequest {
             path: path.into(),
             name: name.to_owned(),
@@ -3109,53 +2912,49 @@ impl Vfs for Client {
             follow,
         };
         match self.request(RequestKind::RemoveXattr(request)).await? {
-            ResponseKind::RemoveXattr(result) => result.map_err(crate::Error::from),
+            ResponseKind::RemoveXattr(result) => result.map_err(Error::from),
             response => Err(unexpected(response).into()),
         }
     }
 
-    async fn remove(&self, path: Utf8TypedPath<'_>, all: bool, ignore: bool) -> crate::Result<()> {
+    pub async fn remove(&self, path: Utf8TypedPath<'_>, all: bool, ignore: bool) -> Result<()> {
         let request = RemoveRequest {
             path: path.into(),
             all,
             ignore,
         };
         match self.request(RequestKind::Remove(request)).await? {
-            ResponseKind::Remove(result) => result.map_err(crate::Error::from),
+            ResponseKind::Remove(result) => result.map_err(Error::from),
             response => Err(unexpected(response).into()),
         }
     }
 
-    async fn metadata(&self, path: Utf8TypedPath<'_>) -> crate::Result<Metadata> {
+    pub async fn metadata(&self, path: Utf8TypedPath<'_>) -> Result<Metadata> {
         let request = MetadataRequest { path: path.into() };
         match self.request(RequestKind::Metadata(request)).await? {
-            ResponseKind::Metadata(result) => result.map_err(crate::Error::from),
+            ResponseKind::Metadata(result) => result.map_err(Error::from),
             response => Err(unexpected(response).into()),
         }
     }
 
-    async fn fs_metadata(
-        &self,
-        path: Utf8TypedPath<'_>,
-        follow: bool,
-    ) -> crate::Result<FsMetadata> {
+    pub async fn fs_metadata(&self, path: Utf8TypedPath<'_>, follow: bool) -> Result<FsMetadata> {
         let request = FsMetadataRequest {
             path: path.into(),
             follow,
         };
         match self.request(RequestKind::FsMetadata(request)).await? {
-            ResponseKind::FsMetadata(result) => result.map_err(crate::Error::from),
+            ResponseKind::FsMetadata(result) => result.map_err(Error::from),
             response => Err(unexpected(response).into()),
         }
     }
 
-    async fn acl(
+    pub async fn acl(
         &self,
         path: Utf8TypedPath<'_>,
         kind: AclKind,
         default: bool,
         follow: bool,
-    ) -> crate::Result<Option<Acl>> {
+    ) -> Result<Option<Acl>> {
         let request = AclRequest {
             path: path.into(),
             kind,
@@ -3163,19 +2962,19 @@ impl Vfs for Client {
             follow,
         };
         match self.request(RequestKind::Acl(request)).await? {
-            ResponseKind::Acl(result) => result.map_err(crate::Error::from),
+            ResponseKind::Acl(result) => result.map_err(Error::from),
             response => Err(unexpected(response).into()),
         }
     }
 
-    async fn set_acl(
+    pub async fn set_acl(
         &self,
         path: Utf8TypedPath<'_>,
         kind: AclKind,
         acl: Option<&Acl>,
         default: bool,
         follow: bool,
-    ) -> crate::Result<()> {
+    ) -> Result<()> {
         let request = SetAclRequest {
             path: path.into(),
             kind,
@@ -3184,130 +2983,125 @@ impl Vfs for Client {
             follow,
         };
         match self.request(RequestKind::SetAcl(request)).await? {
-            ResponseKind::SetAcl(result) => result.map_err(crate::Error::from),
+            ResponseKind::SetAcl(result) => result.map_err(Error::from),
             response => Err(unexpected(response).into()),
         }
     }
 
-    async fn sec_desc(
+    pub async fn sec_desc(
         &self,
         path: Utf8TypedPath<'_>,
         mask: dolang_winterop::security::SecInfo,
         follow: bool,
-    ) -> crate::Result<SecDesc> {
+    ) -> Result<SecDesc> {
         let request = SecDescRequest {
             path: path.into(),
             mask,
             follow,
         };
         match self.request(RequestKind::SecDesc(request)).await? {
-            ResponseKind::SecDesc(result) => result.map_err(crate::Error::from),
+            ResponseKind::SecDesc(result) => result.map_err(Error::from),
             response => Err(unexpected(response).into()),
         }
     }
 
-    async fn set_sec_desc(
+    pub async fn set_sec_desc(
         &self,
         path: Utf8TypedPath<'_>,
         sec_desc: &SecDesc,
         follow: bool,
-    ) -> crate::Result<()> {
+    ) -> Result<()> {
         let request = SetSecDescRequest {
             path: path.into(),
             sec_desc: sec_desc.clone(),
             follow,
         };
         match self.request(RequestKind::SetSecDesc(request)).await? {
-            ResponseKind::SetSecDesc(result) => result.map_err(crate::Error::from),
+            ResponseKind::SetSecDesc(result) => result.map_err(Error::from),
             response => Err(unexpected(response).into()),
         }
     }
 
-    async fn create_dir(&self, path: Utf8TypedPath<'_>, all: bool) -> crate::Result<()> {
+    pub async fn create_dir(&self, path: Utf8TypedPath<'_>, all: bool) -> Result<()> {
         let request = CreateDirRequest {
             path: path.into(),
             all,
         };
         match self.request(RequestKind::CreateDir(request)).await? {
-            ResponseKind::CreateDir(result) => result.map_err(crate::Error::from),
+            ResponseKind::CreateDir(result) => result.map_err(Error::from),
             response => Err(unexpected(response).into()),
         }
     }
 
-    async fn remove_dir(
-        &self,
-        path: Utf8TypedPath<'_>,
-        all: bool,
-        ignore: bool,
-    ) -> crate::Result<()> {
+    pub async fn remove_dir(&self, path: Utf8TypedPath<'_>, all: bool, ignore: bool) -> Result<()> {
         let request = RemoveDirRequest {
             path: path.into(),
             ignore,
             all,
         };
         match self.request(RequestKind::RemoveDir(request)).await? {
-            ResponseKind::RemoveDir(result) => result.map_err(crate::Error::from),
+            ResponseKind::RemoveDir(result) => result.map_err(Error::from),
             response => Err(unexpected(response).into()),
         }
     }
 
-    async fn copy(
+    pub async fn copy(
         &self,
         from: Utf8TypedPath<'_>,
         to: Utf8TypedPath<'_>,
         all: bool,
-    ) -> crate::Result<()> {
+    ) -> Result<()> {
         let request = CopyRequest {
             from: from.into(),
             to: to.into(),
             all,
         };
         match self.request(RequestKind::Copy(request)).await? {
-            ResponseKind::Copy(result) => result.map_err(crate::Error::from),
+            ResponseKind::Copy(result) => result.map_err(Error::from),
             response => Err(unexpected(response).into()),
         }
     }
 
-    async fn rename(
+    pub async fn rename(
         &self,
         from: Utf8TypedPath<'_>,
         to: Utf8TypedPath<'_>,
         replace: bool,
-    ) -> crate::Result<()> {
+    ) -> Result<()> {
         let request = RenameRequest {
             from: from.into(),
             to: to.into(),
             replace,
         };
         match self.request(RequestKind::Rename(request)).await? {
-            ResponseKind::Rename(result) => result.map_err(crate::Error::from),
+            ResponseKind::Rename(result) => result.map_err(Error::from),
             response => Err(unexpected(response).into()),
         }
     }
 
-    async fn move_(
+    pub async fn move_(
         &self,
         from: Utf8TypedPath<'_>,
         to: Utf8TypedPath<'_>,
         all: bool,
-    ) -> crate::Result<()> {
+    ) -> Result<()> {
         let request = MoveRequest {
             from: from.into(),
             to: to.into(),
             all,
         };
         match self.request(RequestKind::Move(request)).await? {
-            ResponseKind::Move(result) => result.map_err(crate::Error::from),
+            ResponseKind::Move(result) => result.map_err(Error::from),
             response => Err(unexpected(response).into()),
         }
     }
 
-    async fn symlink(
+    pub async fn symlink(
         &self,
         cwd: Utf8TypedPath<'_>,
         src: Utf8TypedPath<'_>,
         dst: Utf8TypedPath<'_>,
-    ) -> crate::Result<()> {
+    ) -> Result<()> {
         let request = SymlinkRequest {
             cwd: cwd.into(),
             src: src.into(),
@@ -3315,27 +3109,23 @@ impl Vfs for Client {
             kind: SymlinkKind::Infer,
         };
         match self.request(RequestKind::Symlink(request)).await? {
-            ResponseKind::Symlink(result) => result.map_err(crate::Error::from),
+            ResponseKind::Symlink(result) => result.map_err(Error::from),
             response => Err(unexpected(response).into()),
         }
     }
 
-    async fn hard_link(&self, src: Utf8TypedPath<'_>, dst: Utf8TypedPath<'_>) -> crate::Result<()> {
+    pub async fn hard_link(&self, src: Utf8TypedPath<'_>, dst: Utf8TypedPath<'_>) -> Result<()> {
         let request = HardLinkRequest {
             src: src.into(),
             dst: dst.into(),
         };
         match self.request(RequestKind::HardLink(request)).await? {
-            ResponseKind::HardLink(result) => result.map_err(crate::Error::from),
+            ResponseKind::HardLink(result) => result.map_err(Error::from),
             response => Err(unexpected(response).into()),
         }
     }
 
-    async fn symlink_dir(
-        &self,
-        src: Utf8TypedPath<'_>,
-        dst: Utf8TypedPath<'_>,
-    ) -> crate::Result<()> {
+    pub async fn symlink_dir(&self, src: Utf8TypedPath<'_>, dst: Utf8TypedPath<'_>) -> Result<()> {
         let request = SymlinkRequest {
             cwd: WirePath::empty_like(src),
             src: src.into(),
@@ -3343,16 +3133,12 @@ impl Vfs for Client {
             kind: SymlinkKind::Dir,
         };
         match self.request(RequestKind::Symlink(request)).await? {
-            ResponseKind::Symlink(result) => result.map_err(crate::Error::from),
+            ResponseKind::Symlink(result) => result.map_err(Error::from),
             response => Err(unexpected(response).into()),
         }
     }
 
-    async fn symlink_file(
-        &self,
-        src: Utf8TypedPath<'_>,
-        dst: Utf8TypedPath<'_>,
-    ) -> crate::Result<()> {
+    pub async fn symlink_file(&self, src: Utf8TypedPath<'_>, dst: Utf8TypedPath<'_>) -> Result<()> {
         let request = SymlinkRequest {
             cwd: WirePath::empty_like(src),
             src: src.into(),
@@ -3360,59 +3146,57 @@ impl Vfs for Client {
             kind: SymlinkKind::File,
         };
         match self.request(RequestKind::Symlink(request)).await? {
-            ResponseKind::Symlink(result) => result.map_err(crate::Error::from),
+            ResponseKind::Symlink(result) => result.map_err(Error::from),
             response => Err(unexpected(response).into()),
         }
     }
 
-    async fn symlink_metadata(&self, path: Utf8TypedPath<'_>) -> crate::Result<Metadata> {
+    pub async fn symlink_metadata(&self, path: Utf8TypedPath<'_>) -> Result<Metadata> {
         let request = MetadataRequest { path: path.into() };
         match self.request(RequestKind::SymlinkMetadata(request)).await? {
-            ResponseKind::SymlinkMetadata(result) => result.map_err(crate::Error::from),
+            ResponseKind::SymlinkMetadata(result) => result.map_err(Error::from),
             response => Err(unexpected(response).into()),
         }
     }
 
-    async fn set_metadata(
+    pub async fn set_metadata(
         &self,
         paths: &[Utf8TypedPathBuf],
         patch: MetadataPatch,
-    ) -> crate::Result<()> {
+    ) -> Result<()> {
         let request = SetMetadataRequest {
             paths: paths.iter().map(|path| path.to_path().into()).collect(),
             patch,
         };
         match self.request(RequestKind::SetMetadata(request)).await? {
-            ResponseKind::SetMetadata(result) => result.map_err(crate::Error::from),
+            ResponseKind::SetMetadata(result) => result.map_err(Error::from),
             response => Err(unexpected(response).into()),
         }
     }
 
-    async fn canonicalize(&self, path: Utf8TypedPath<'_>) -> crate::Result<Utf8TypedPathBuf> {
+    pub async fn canonicalize(&self, path: Utf8TypedPath<'_>) -> Result<Utf8TypedPathBuf> {
         let request = CanonicalizeRequest { path: path.into() };
         match self.request(RequestKind::Canonicalize(request)).await? {
-            ResponseKind::Canonicalize(result) => {
-                result.map_err(crate::Error::from).map(Into::into)
-            }
+            ResponseKind::Canonicalize(result) => result.map_err(Error::from).map(Into::into),
             response => Err(unexpected(response).into()),
         }
     }
 
-    async fn read_link(&self, path: Utf8TypedPath<'_>) -> crate::Result<Utf8TypedPathBuf> {
+    pub async fn read_link(&self, path: Utf8TypedPath<'_>) -> Result<Utf8TypedPathBuf> {
         let request = ReadLinkRequest { path: path.into() };
         match self.request(RequestKind::ReadLink(request)).await? {
-            ResponseKind::ReadLink(result) => result.map_err(crate::Error::from).map(Into::into),
+            ResponseKind::ReadLink(result) => result.map_err(Error::from).map(Into::into),
             response => Err(unexpected(response).into()),
         }
     }
 
-    async fn glob(
+    pub async fn glob(
         &self,
         pattern: impl Into<String>,
         root: Utf8TypedPath<'_>,
         follow_symlinks: bool,
         max_depth: Option<usize>,
-    ) -> crate::Result<Vec<Utf8TypedPathBuf>> {
+    ) -> Result<Vec<Utf8TypedPathBuf>> {
         let request = GlobRequest {
             pattern: pattern.into(),
             root: root.into(),
@@ -3421,7 +3205,7 @@ impl Vfs for Client {
         };
         match self.request(RequestKind::Glob(request)).await? {
             ResponseKind::Glob(result) => Ok(result
-                .map_err(crate::Error::from)?
+                .map_err(Error::from)?
                 .into_iter()
                 .map(Utf8TypedPathBuf::from)
                 .collect()),
@@ -3435,7 +3219,7 @@ mod tests {
     use std::io;
 
     use super::{Client, ClientChildState, rpc_error};
-    use crate::{Child as _, Command as _, Server, Vfs as _, protocol::RequestKind};
+    use crate::{protocol::RequestKind, server::Server};
 
     #[test]
     fn rpc_errors_have_portable_io_kinds() {
@@ -3478,18 +3262,19 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn successful_command(client: &Client) -> super::CommandBuilder<'_> {
-        let mut command =
-            client.command(crate::Utf8TypedPath::Unix(crate::Utf8UnixPath::new("sh")));
+    fn successful_command(client: &Client) -> super::Command<'_> {
+        use typed_path::{Utf8TypedPath, Utf8UnixPath};
+
+        let mut command = client.command(Utf8TypedPath::Unix(Utf8UnixPath::new("sh")));
         command.arg("-c").arg("exit 0");
         command
     }
 
     #[cfg(windows)]
-    fn successful_command(client: &Client) -> super::CommandBuilder<'_> {
-        let mut command = client.command(crate::Utf8TypedPath::Windows(
-            crate::Utf8WindowsPath::new("cmd"),
-        ));
+    fn successful_command(client: &Client) -> super::Command<'_> {
+        use typed_path::{Utf8TypedPath, Utf8WindowsPath};
+
+        let mut command = client.command(Utf8TypedPath::Windows(Utf8WindowsPath::new("cmd")));
         command.arg("/C").arg("exit 0");
         command
     }

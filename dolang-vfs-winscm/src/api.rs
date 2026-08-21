@@ -7,10 +7,10 @@
 //! `dolang-vfs` never exposing its own `RequestKind`/`ResponseKind`/
 //! `VfsProtocol`.
 
-use dolang_vfs::extension::{ExtCite, ExtGift, VfsExtension};
 use dolang_vfs::{
-    AnyVfs, Vfs,
+    Vfs,
     error::{Error, ErrorKind},
+    extension::{ExtCite, ExtGift, VfsExtension},
 };
 use dolang_winterop::security::SecDesc;
 use std::sync::{Arc, Weak};
@@ -37,17 +37,17 @@ fn unexpected(request: &str) -> Error {
 
 /// An open handle to the Service Control Manager database.
 pub struct ScManager {
-    vfs: AnyVfs,
+    vfs: Vfs,
     handle: Arc<ScManagerState>,
 }
 
 struct ScManagerState {
-    vfs: AnyVfs,
+    vfs: Vfs,
     opaque: Option<ExtGift<ScManagerMarker>>,
 }
 
 impl ScManagerState {
-    fn new(vfs: AnyVfs, opaque: ExtGift<ScManagerMarker>) -> Self {
+    fn new(vfs: Vfs, opaque: ExtGift<ScManagerMarker>) -> Self {
         Self {
             vfs,
             opaque: Some(opaque),
@@ -89,7 +89,7 @@ impl Drop for ScManagerState {
 
 impl ScManager {
     /// Opens the Service Control Manager database.
-    pub async fn open(vfs: &AnyVfs, access: ServiceAccess) -> Result<ScManager, Error> {
+    pub async fn open(vfs: &Vfs, access: ServiceAccess) -> Result<ScManager, Error> {
         if vfs
             .extensions()
             .maximum_common_version(WinScmExt::NAME, &[WinScmExt::VERSION])
@@ -238,7 +238,7 @@ impl ScManager {
 
 /// A live forward enumeration of services.
 pub struct Services {
-    vfs: AnyVfs,
+    vfs: Vfs,
     manager: Weak<ScManagerState>,
     service_type: ServiceType,
     state_filter: ServiceStateFilter,
@@ -287,7 +287,7 @@ impl Services {
 
 /// An open handle to a specific service.
 pub struct Service {
-    vfs: AnyVfs,
+    vfs: Vfs,
     handle: ExtGift<ServiceMarker>,
 }
 

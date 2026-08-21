@@ -32,64 +32,48 @@ use windows_sys::Win32::{
     },
 };
 
-use crate::Client;
+use crate::client::Client;
 
 const EXIT_STARTUP_FAILURE: u32 = 1;
 
-/// An elevated Windows VFS session.
-pub(crate) struct AdminSession {
-    client: Client,
+pub(crate) struct OwnedProcess {
     process: OwnedHandle,
     stopped: AtomicBool,
 }
 
-impl AdminSession {
-    /// Launches an elevated copy of the current executable and connects to it.
-    pub(crate) async fn launch(
-        cwd: impl Into<PathBuf>,
-        env: HashMap<String, Option<String>>,
-    ) -> io::Result<Self> {
-        launch_with(cwd.into(), env, launch_elevated).await
-    }
+/// Launches an elevated copy of the current executable and connects to it.
+pub(crate) async fn launch_admin(
+    cwd: impl Into<PathBuf>,
+    env: HashMap<String, Option<String>>,
+) -> io::Result<Client> {
+    launch_with(cwd.into(), env, launch_elevated).await
+}
 
-    /// Launches a non-elevated copy of the current executable for automated tests.
-    #[doc(hidden)]
-    pub(crate) async fn launch_unelevated(
-        cwd: impl Into<PathBuf>,
-        env: HashMap<String, Option<String>>,
-    ) -> io::Result<Self> {
-        launch_with(cwd.into(), env, launch_process).await
-    }
+/// Launches a non-elevated copy of the current executable for automated tests.
+#[doc(hidden)]
+pub(crate) async fn launch_unelevated(
+    cwd: impl Into<PathBuf>,
+    env: HashMap<String, Option<String>>,
+) -> io::Result<Client> {
+    launch_with(cwd.into(), env, launch_process).await
+}
 
-    /// Returns the VFS RPC client for this session.
-    pub(crate) fn client(&self) -> &Client {
-        &self.client
+impl OwnedProcess {
+    pub(crate) fn terminate(&self) {
+        terminate(&self.process);
     }
 
     /// Stops the VFS server and waits for the elevated process to exit.
     pub(crate) async fn stop(&self) -> io::Result<()> {
         let should_stop = !self.stopped.swap(true, Ordering::AcqRel);
         let mut guard = should_stop.then(|| ProcessGuard::new(&self.process));
-        let stop_result = if should_stop {
-            self.client
-                .stop()
-                .await
-                .map_err(crate::Error::into_io_error)
-        } else {
-            Ok(())
-        };
-        if stop_result.is_err() {
-            drop(guard.take());
-        } else {
-            self.client.clone().close().await;
-        }
         let wait_result = wait_for_exit(&self.process).await;
         if wait_result.is_ok()
             && let Some(guard) = guard.take()
         {
             guard.disarm();
         }
-        stop_result.and(wait_result)
+        wait_result
     }
 }
 
@@ -97,7 +81,7 @@ async fn launch_with(
     cwd: PathBuf,
     env: HashMap<String, Option<String>>,
     launcher: impl FnOnce(&Path, &[OsString], &Path) -> io::Result<OwnedHandle> + Send + 'static,
-) -> io::Result<AdminSession> {
+) -> io::Result<Client> {
     let pipe_name = random_pipe_name();
     let pipe = create_pipe(&pipe_name)?;
     let executable =
@@ -110,16 +94,16 @@ async fn launch_with(
 
     connect_or_exit(&pipe, &process).await?;
     let client_process = process.as_handle().try_clone_to_owned()?;
-    let client = unsafe { Client::from_named_pipe_server(pipe, client_process) }
+    let mut client = unsafe { Client::from_named_pipe_server(pipe, client_process) }
         .await
-        .map_err(crate::Error::into_io_error)?;
+        .map_err(crate::error::Error::into_io_error)?;
     guard.disarm();
 
-    Ok(AdminSession {
-        client,
+    client.process = Some(std::sync::Arc::new(OwnedProcess {
         process,
         stopped: AtomicBool::new(false),
-    })
+    }));
+    Ok(client)
 }
 
 fn launch_args(
@@ -193,7 +177,7 @@ fn with_sta_com<T>(f: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
     f()
 }
 
-impl Drop for AdminSession {
+impl Drop for OwnedProcess {
     fn drop(&mut self) {
         if !self.stopped.load(Ordering::Acquire) && !has_exited(&self.process) {
             terminate(&self.process);

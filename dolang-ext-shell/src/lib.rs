@@ -34,10 +34,12 @@ use std::{
 #[cfg(unix)]
 use std::{io::stderr, os::fd::AsFd};
 
-pub use crate::error::{ErrorExt, ResultExt};
-pub use crate::global::ProgramSource;
+pub use crate::{
+    error::{ErrorExt, ResultExt},
+    global::ProgramSource,
+};
 use dolang::runtime::{Error, Output, Result, Strand, Value};
-pub use dolang_vfs::{AnyVfs, FileHandle};
+pub use dolang_vfs::Vfs;
 #[cfg(unix)]
 use nix::sys::termios::{LocalFlags, SetArg, tcgetattr, tcsetattr};
 pub use shell::{Exec, Exit};
@@ -235,7 +237,7 @@ pub async fn open<'v, 's>(
     strand: &mut Strand<'v, 's>,
     path: &path::Path,
     mode: &str,
-) -> io::Result<dolang_vfs::AnyFile> {
+) -> io::Result<dolang_vfs::file::File> {
     match mode {
         "r" | "w" | "a" | "r+" | "w+" | "a+" => {}
         _ => return Err(io::Error::other(format!("invalid mode: {}", mode))),
@@ -281,7 +283,7 @@ pub fn sec_desc_from_value<'v, 's>(
 /// Returns the [`AnyVfs`] in scope for the strand (the ambient
 /// filesystem/registry/etc. backend — direct or remote — for the current
 /// shell/session/container context).
-pub fn vfs<'v, 's, 'a>(strand: &'a Strand<'v, 's>) -> AnyVfs {
+pub fn vfs<'v, 's, 'a>(strand: &'a Strand<'v, 's>) -> Vfs {
     let global = strand.state::<Global<'v>>();
     let local = global.local.get(strand);
     local.vfs()

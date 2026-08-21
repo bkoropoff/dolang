@@ -1,6 +1,5 @@
 use std::{
     ffi::{CStr, c_void},
-    io,
     os::fd::{AsFd, AsRawFd},
     path::Path,
     ptr,
@@ -8,6 +7,7 @@ use std::{
 
 use std::fs::File;
 
+use crate::error::{Error, ErrorKind, Result};
 use crate::security::{
     Acl, AclKind, Nfs4Ace, Nfs4AceFlags, Nfs4AceMask, Nfs4AceQualifier, Nfs4AceType, Nfs4Acl,
     Permission, PosixAce, PosixAcl, PosixAclQualifier,
@@ -15,9 +15,9 @@ use crate::security::{
 
 use super::{canonical_entries, cpath, unsupported_kind};
 
-fn call(result: libc::c_int) -> io::Result<()> {
+fn call(result: libc::c_int) -> Result<()> {
     if result < 0 {
-        Err(io::Error::last_os_error())
+        Err(Error::last_os_error())
     } else {
         Ok(())
     }
@@ -111,7 +111,7 @@ mod posix {
         fd: libc::c_int,
         default: bool,
         follow: bool,
-    ) -> io::Result<Option<PosixAcl>> {
+    ) -> Result<Option<PosixAcl>> {
         if !default && fd < 0 {
             let result = unsafe {
                 if follow {
@@ -121,7 +121,7 @@ mod posix {
                 }
             };
             if result < 0 {
-                return Err(io::Error::last_os_error());
+                return Err(Error::last_os_error());
             }
             if result == 0 {
                 return Ok(None);
@@ -130,13 +130,13 @@ mod posix {
 
         let acl = OwnedAcl(unsafe { get_native(path, fd, default, follow) });
         if acl.0.is_null() {
-            return Err(io::Error::last_os_error());
+            return Err(Error::last_os_error());
         }
         let mut brand = 0;
         call(unsafe { acl_get_brand_np(acl.0, &mut brand) })?;
         if brand != ACL_BRAND_POSIX {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
+            return Err(Error::new(
+                ErrorKind::Unsupported,
                 "filesystem ACL is not POSIX.1e",
             ));
         }
@@ -164,7 +164,7 @@ mod posix {
                 ACL_USER | ACL_GROUP => {
                     let value = unsafe { acl_get_qualifier(entry) };
                     if value.is_null() {
-                        return Err(io::Error::last_os_error());
+                        return Err(Error::last_os_error());
                     }
                     let id = unsafe { *(value.cast::<u32>()) };
                     unsafe {
@@ -177,8 +177,8 @@ mod posix {
                     }
                 }
                 _ => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Unsupported,
+                    return Err(Error::new(
+                        ErrorKind::Unsupported,
                         "FreeBSD ACL contains a non-POSIX entry",
                     ));
                 }
@@ -186,7 +186,7 @@ mod posix {
             let has = |permission| {
                 let value = unsafe { acl_get_perm_np(permset, permission) };
                 if value < 0 {
-                    Err(io::Error::last_os_error())
+                    Err(Error::last_os_error())
                 } else {
                     Ok(value != 0)
                 }
@@ -207,7 +207,7 @@ mod posix {
         } else {
             PosixAcl::new(entries)
                 .map(Some)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+                .map_err(|error| Error::new(ErrorKind::InvalidData, error))
         }
     }
 
@@ -244,10 +244,10 @@ mod posix {
         }
     }
 
-    fn strip_access(path: Option<&CStr>, fd: libc::c_int, follow: bool) -> io::Result<()> {
+    fn strip_access(path: Option<&CStr>, fd: libc::c_int, follow: bool) -> Result<()> {
         let current = OwnedAcl(unsafe { get_native(path, fd, false, follow) });
         if current.0.is_null() {
-            return Err(io::Error::last_os_error());
+            return Err(Error::last_os_error());
         }
         let mut trivial = 0;
         call(unsafe { acl_is_trivial_np(current.0, &mut trivial) })?;
@@ -278,7 +278,7 @@ mod posix {
                     for permission in [ACL_READ, ACL_WRITE, ACL_EXECUTE] {
                         let value = unsafe { acl_get_perm_np(permset, permission) };
                         if value < 0 {
-                            return Err(io::Error::last_os_error());
+                            return Err(Error::last_os_error());
                         }
                         if value != 0 {
                             permissions |= permission;
@@ -293,8 +293,8 @@ mod posix {
 
         if let Some(mask_permissions) = mask_permissions {
             if group_permset.is_null() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
                     "POSIX ACL has no owning-group entry",
                 ));
             }
@@ -302,7 +302,7 @@ mod posix {
             for permission in [ACL_READ, ACL_WRITE, ACL_EXECUTE] {
                 let value = unsafe { acl_get_perm_np(group_permset, permission) };
                 if value < 0 {
-                    return Err(io::Error::last_os_error());
+                    return Err(Error::last_os_error());
                 }
                 if value != 0 {
                     group_permissions |= permission;
@@ -319,7 +319,7 @@ mod posix {
 
         let stripped = OwnedAcl(unsafe { acl_strip_np(current.0, 0) });
         if stripped.0.is_null() {
-            return Err(io::Error::last_os_error());
+            return Err(Error::last_os_error());
         }
         call(unsafe { set_native(path, fd, false, follow, stripped.0) })
     }
@@ -330,7 +330,7 @@ mod posix {
         acl: Option<&PosixAcl>,
         default: bool,
         follow: bool,
-    ) -> io::Result<()> {
+    ) -> Result<()> {
         let Some(acl) = acl else {
             if !default {
                 return strip_access(path, fd, follow);
@@ -347,11 +347,11 @@ mod posix {
                 acl.entries()
                     .len()
                     .try_into()
-                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "ACL is too large"))?,
+                    .map_err(|_| Error::new(ErrorKind::InvalidInput, "ACL is too large"))?,
             )
         });
         if native.0.is_null() {
-            return Err(io::Error::last_os_error());
+            return Err(Error::last_os_error());
         }
         for ace in canonical_entries(acl) {
             let (tag, id) = match ace.qualifier {
@@ -525,10 +525,10 @@ mod nfs4 {
         path: Option<&CStr>,
         fd: libc::c_int,
         follow: bool,
-    ) -> io::Result<Option<Nfs4Acl>> {
+    ) -> Result<Option<Nfs4Acl>> {
         let acl = OwnedAcl(unsafe { get_native(path, fd, follow) });
         if acl.0.is_null() {
-            let error = io::Error::last_os_error();
+            let error = Error::last_os_error();
             // The filesystem/object does not carry an NFSv4-branded ACL
             // (e.g. it has a POSIX.1e ACL, or no extended ACL at all).
             if error.raw_os_error() == Some(libc::EINVAL) {
@@ -566,7 +566,7 @@ mod nfs4 {
                 ACL_USER | ACL_GROUP => {
                     let value = unsafe { acl_get_qualifier(entry) };
                     if value.is_null() {
-                        return Err(io::Error::last_os_error());
+                        return Err(Error::last_os_error());
                     }
                     let id = unsafe { *(value.cast::<u32>()) };
                     unsafe {
@@ -579,8 +579,8 @@ mod nfs4 {
                     }
                 }
                 _ => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Unsupported,
+                    return Err(Error::new(
+                        ErrorKind::Unsupported,
                         "FreeBSD NFSv4 ACL contains an unrecognized entry tag",
                     ));
                 }
@@ -592,8 +592,8 @@ mod nfs4 {
                 ACL_ENTRY_TYPE_AUDIT => Nfs4AceType::Audit,
                 ACL_ENTRY_TYPE_ALARM => Nfs4AceType::Alarm,
                 _ => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Unsupported,
+                    return Err(Error::new(
+                        ErrorKind::Unsupported,
                         "FreeBSD NFSv4 ACL entry has an unrecognized entry type",
                     ));
                 }
@@ -603,7 +603,7 @@ mod nfs4 {
             for (bit, native) in MASK_BITS {
                 let value = unsafe { acl_get_perm_np(permset, *native) };
                 if value < 0 {
-                    return Err(io::Error::last_os_error());
+                    return Err(Error::last_os_error());
                 }
                 mask.set(*bit, value != 0);
             }
@@ -612,7 +612,7 @@ mod nfs4 {
             for (bit, native) in FLAG_BITS {
                 let value = unsafe { acl_get_flag_np(flagset, *native) };
                 if value < 0 {
-                    return Err(io::Error::last_os_error());
+                    return Err(Error::last_os_error());
                 }
                 flags.set(*bit, value != 0);
             }
@@ -638,7 +638,7 @@ mod nfs4 {
         fd: libc::c_int,
         follow: bool,
         acl: Option<&Nfs4Acl>,
-    ) -> io::Result<()> {
+    ) -> Result<()> {
         // Unlike a POSIX.1e ACL (an optional extended attribute), an NFSv4
         // ACL is a file's native security descriptor: FreeBSD implements
         // ACL removal as `VOP_SETACL(vp, type, NULL, ...)`, and UFS's NFSv4
@@ -647,8 +647,8 @@ mod nfs4 {
         // NFSv4 ACL back to "none", only ways to replace it with another
         // (possibly mode-equivalent) one.
         let Some(acl) = acl else {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
+            return Err(Error::new(
+                ErrorKind::Unsupported,
                 "NFSv4 ACLs cannot be removed, only replaced",
             ));
         };
@@ -658,11 +658,11 @@ mod nfs4 {
                 acl.entries()
                     .len()
                     .try_into()
-                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "ACL is too large"))?,
+                    .map_err(|_| Error::new(ErrorKind::InvalidInput, "ACL is too large"))?,
             )
         });
         if native.0.is_null() {
-            return Err(io::Error::last_os_error());
+            return Err(Error::last_os_error());
         }
         for ace in acl.entries() {
             let (tag, id) = match ace.qualifier {
@@ -713,12 +713,7 @@ mod nfs4 {
 
 // --- Dispatch ---
 
-pub(super) fn get(
-    path: &Path,
-    kind: AclKind,
-    default: bool,
-    follow: bool,
-) -> io::Result<Option<Acl>> {
+pub(super) fn get(path: &Path, kind: AclKind, default: bool, follow: bool) -> Result<Option<Acl>> {
     let cpath = cpath(path)?;
     match kind {
         AclKind::Posix => Ok(posix::get(Some(&cpath), -1, default, follow)?.map(Acl::Posix)),
@@ -733,7 +728,7 @@ pub(super) fn set(
     acl: Option<&Acl>,
     default: bool,
     follow: bool,
-) -> io::Result<()> {
+) -> Result<()> {
     let cpath = cpath(path)?;
     match kind {
         AclKind::Posix => posix::set(
@@ -748,7 +743,7 @@ pub(super) fn set(
     }
 }
 
-pub(super) fn get_fd(file: &File, kind: AclKind, default: bool) -> io::Result<Option<Acl>> {
+pub(super) fn get_fd(file: &File, kind: AclKind, default: bool) -> Result<Option<Acl>> {
     let fd = file.as_fd().as_raw_fd();
     match kind {
         AclKind::Posix => Ok(posix::get(None, fd, default, true)?.map(Acl::Posix)),
@@ -757,12 +752,7 @@ pub(super) fn get_fd(file: &File, kind: AclKind, default: bool) -> io::Result<Op
     }
 }
 
-pub(super) fn set_fd(
-    file: &File,
-    kind: AclKind,
-    acl: Option<&Acl>,
-    default: bool,
-) -> io::Result<()> {
+pub(super) fn set_fd(file: &File, kind: AclKind, acl: Option<&Acl>, default: bool) -> Result<()> {
     let fd = file.as_fd().as_raw_fd();
     match kind {
         AclKind::Posix => posix::set(None, fd, super::split_posix(kind, acl)?, default, true),

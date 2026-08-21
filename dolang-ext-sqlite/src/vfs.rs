@@ -35,7 +35,7 @@ use sqlite_plugin::{
 };
 
 use dolang_vfs::{
-    AnyVfs, FileHandle as _, OpenOptions, Vfs as _,
+    Vfs as VfsVfs,
     error::{Error, ErrorKind},
 };
 use typed_path::{Utf8TypedPath, Utf8UnixPath};
@@ -106,11 +106,11 @@ type SqliteErr = i32;
 
 thread_local! {
     /// Thread-local shell VFS client for VFS callbacks.
-    static SHELL_VFS: RefCell<Option<AnyVfs>> = const { RefCell::new(None) };
+    static SHELL_VFS: RefCell<Option<VfsVfs>> = const { RefCell::new(None) };
 }
 
 /// Set the shell VFS in thread-local storage for the duration of the closure.
-pub(crate) fn with_shell<F, R>(vfs: AnyVfs, f: F) -> R
+pub(crate) fn with_shell<F, R>(vfs: VfsVfs, f: F) -> R
 where
     F: FnOnce() -> R,
 {
@@ -126,9 +126,9 @@ where
     f()
 }
 
-fn get_shell_client() -> AnyVfs {
+fn get_shell_vfs() -> VfsVfs {
     SHELL_VFS
-        .with(|vfs: &RefCell<Option<AnyVfs>>| vfs.borrow().clone())
+        .with(|vfs| vfs.borrow().clone())
         .expect("VFS entered without shell VFS set")
 }
 
@@ -515,7 +515,7 @@ fn open_or_join_shm(handle: &mut ShellFileHandle) -> VfsResult<()> {
             // First connection: open the shm file via the shell VFS helper.
             // The helper sends the fd back via SCM_RIGHTS; mmap works on it normally.
             let shm_path_clone = shm_path.clone();
-            let client = get_shell_client();
+            let client = get_shell_vfs();
             let (shm_file, is_readonly) = block_on_shell(async move {
                 // Try read+write with O_CREAT first.
                 match client
@@ -632,7 +632,7 @@ impl Vfs for ShellVfs {
     type Handle = ShellFileHandle;
 
     fn open(&self, path: Option<&str>, opts: OpenOpts) -> VfsResult<Self::Handle> {
-        let client = get_shell_client();
+        let client = get_shell_vfs();
         let db_path = path.map(|p| p.to_string());
 
         let readonly = matches!(opts.mode(), OpenMode::ReadOnly);
@@ -724,7 +724,7 @@ impl Vfs for ShellVfs {
 
     fn delete(&self, path: &str) -> VfsResult<()> {
         let path = path.to_string();
-        let client = get_shell_client();
+        let client = get_shell_vfs();
         block_on_shell(async move {
             client
                 .remove(Utf8TypedPath::Unix(Utf8UnixPath::new(&path)), false, false)
@@ -735,7 +735,7 @@ impl Vfs for ShellVfs {
 
     fn access(&self, path: &str, flags: AccessFlags) -> VfsResult<bool> {
         let path = path.to_string();
-        let client = get_shell_client();
+        let client = get_shell_vfs();
 
         // Map sqlite_plugin AccessFlags to nix::unistd::AccessFlags
         let mode = match flags {
@@ -972,7 +972,7 @@ impl Vfs for ShellVfs {
         // 5. Delete temp/delete-on-close files.  Like SQLite's unixClose, we ignore errors
         //    here: a failed unlink is non-fatal and the file will be cleaned up eventually.
         if let Some(path) = delete_on_close {
-            let client = get_shell_client();
+            let client = get_shell_vfs();
             let _ = block_on_shell(async move {
                 client
                     .remove(Utf8TypedPath::Unix(Utf8UnixPath::new(&path)), false, false)
@@ -1217,7 +1217,7 @@ impl Vfs for ShellVfs {
             && is_last
             && let Some(path) = shm_path
         {
-            let client = get_shell_client();
+            let client = get_shell_vfs();
             let _ = block_on_shell(async move {
                 client
                     .remove(Utf8TypedPath::Unix(Utf8UnixPath::new(&path)), false, false)
