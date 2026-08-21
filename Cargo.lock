@@ -1326,7 +1326,6 @@ dependencies = [
  "libc",
  "rustyline",
  "tokio",
- "wax",
  "windows-sys 0.61.2",
 ]
 

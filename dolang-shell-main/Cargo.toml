@@ -21,7 +21,6 @@ console = "0.16.2"
 crossterm = "0.29.0"
 directories = "6.0.0"
 rustyline = "18.0.0"
-wax = { version = "0.7", features = ["walk"] }
 
 [dependencies.tokio]
 version = "1.48.0"

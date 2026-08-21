@@ -3,9 +3,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[cfg(windows)]
-use wax::{Glob, walk::Entry as _};
-
 #[derive(Debug)]
 pub(crate) struct Cli {
     pub(crate) path: Option<PathBuf>,
@@ -204,7 +201,7 @@ pub(crate) fn parse_from(
         return ParseOutcome::Error(missing_target_error(&program, "--main"));
     }
 
-    let args = match expand_trailing_args(trailing) {
+    let args = match trailing.into_iter().map(into_string).collect() {
         Ok(args) => args,
         Err(message) => return ParseOutcome::Error(argument_error(&program, message)),
     };
@@ -318,76 +315,9 @@ fn is_option_like(arg: &OsStr) -> bool {
         .is_some_and(|arg| arg.starts_with('-') && arg != "-")
 }
 
-fn expand_trailing_args(args: Vec<OsString>) -> Result<Vec<String>, String> {
-    #[cfg(windows)]
-    {
-        expand_trailing_args_windows(args)
-    }
-
-    #[cfg(not(windows))]
-    {
-        args.into_iter()
-            .map(into_string)
-            .collect::<Result<Vec<_>, _>>()
-    }
-}
-
 fn into_string(arg: OsString) -> Result<String, String> {
     arg.into_string()
         .map_err(|arg| format!("argument '{}' is not valid UTF-8", arg.to_string_lossy()))
-}
-
-#[cfg(windows)]
-fn expand_trailing_args_windows(args: Vec<OsString>) -> Result<Vec<String>, String> {
-    let cwd = std::env::current_dir()
-        .map_err(|err| format!("failed to determine current directory: {err}"))?;
-    let mut expanded = Vec::new();
-
-    for arg in args {
-        let pattern = into_string(arg)?;
-        if !looks_like_glob(&pattern) {
-            expanded.push(pattern);
-            continue;
-        }
-
-        let glob = match Glob::new(&pattern) {
-            Ok(glob) => glob,
-            Err(_) => {
-                expanded.push(pattern);
-                continue;
-            }
-        };
-
-        let (prefix, glob) = glob.partition();
-        let mut matches = Vec::new();
-
-        if let Some(glob) = glob {
-            for entry in glob.walk(cwd.join(&prefix)) {
-                let entry = entry.map_err(|err| format!("failed to expand '{pattern}': {err}"))?;
-                matches.push(prefix.join(entry.root_relative_paths().1));
-            }
-        } else if cwd.join(&prefix).exists() {
-            matches.push(prefix);
-        }
-
-        if matches.is_empty() {
-            expanded.push(pattern);
-            continue;
-        }
-
-        expanded.extend(
-            matches
-                .into_iter()
-                .map(|path| path.to_string_lossy().into_owned()),
-        );
-    }
-
-    Ok(expanded)
-}
-
-#[cfg(windows)]
-fn looks_like_glob(pattern: &str) -> bool {
-    pattern.contains('*') || pattern.contains('?') || pattern.contains('[') || pattern.contains('{')
 }
 
 #[cfg(test)]
