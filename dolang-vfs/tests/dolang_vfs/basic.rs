@@ -38,6 +38,12 @@ async fn connect_client(socket_path: &Path) -> Client {
     Client::connect(socket_path).await.unwrap()
 }
 
+async fn stop_server(client: Client, server: JoinHandle<()>) {
+    client.stop().await.unwrap();
+    client.close().await;
+    server.await.unwrap();
+}
+
 #[tokio::test]
 async fn direct_query_reports_host_target() {
     let direct = Direct::new().unwrap();
@@ -506,10 +512,10 @@ async fn unix_vfs_connects_to_another_server() {
     let inner = client.unix_socket(typed(&inner_path), None).await.unwrap();
     assert_eq!(inner.target(), &TargetInfo::current());
 
-    inner.as_client().unwrap().stop().await.unwrap();
-    client.stop().await.unwrap();
+    inner.stop().await.unwrap();
+    drop(inner);
     inner_task.await.unwrap();
-    outer_task.await.unwrap();
+    stop_server(client, outer_task).await;
 }
 
 #[tokio::test]
@@ -803,20 +809,20 @@ async fn access_existing_file() {
     let client = connect_client(&socket_path).await;
 
     // Test existence check (F_OK)
-    let result = client.access(&test_file, AccessFlags::F_OK).await;
+    let result = client.access(typed(&test_file), AccessFlags::F_OK).await;
     assert!(result.is_ok(), "File should exist");
 
     // Test read permission (R_OK)
-    let result = client.access(&test_file, AccessFlags::R_OK).await;
+    let result = client.access(typed(&test_file), AccessFlags::R_OK).await;
     assert!(result.is_ok(), "File should be readable");
 
     // Test write permission (W_OK)
-    let result = client.access(&test_file, AccessFlags::W_OK).await;
+    let result = client.access(typed(&test_file), AccessFlags::W_OK).await;
     assert!(result.is_ok(), "File should be writable");
 
     // Test combined read and write
     let result = client
-        .access(&test_file, AccessFlags::R_OK | AccessFlags::W_OK)
+        .access(typed(&test_file), AccessFlags::R_OK | AccessFlags::W_OK)
         .await;
     assert!(result.is_ok(), "File should be readable and writable");
 
@@ -834,9 +840,8 @@ async fn access_nonexistent_file() {
     let client = connect_client(&socket_path).await;
 
     // Test existence check on non-existent file
-    let result = client
-        .access(dir.path().join("nonexistent.txt"), AccessFlags::F_OK)
-        .await;
+    let missing = dir.path().join("nonexistent.txt");
+    let result = client.access(typed(&missing), AccessFlags::F_OK).await;
     assert!(
         result.is_err(),
         "Non-existent file should fail access check"
@@ -1129,8 +1134,7 @@ async fn keyed_client_connects_to_keyed_server() {
         .unwrap();
     assert_eq!(client.target(), &TargetInfo::current());
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap();
+    stop_server(client, server_task).await;
 }
 
 #[tokio::test]
@@ -1150,8 +1154,7 @@ async fn wrong_key_is_rejected_without_disturbing_the_server() {
         .unwrap();
     assert_eq!(client.target(), &TargetInfo::current());
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap();
+    stop_server(client, server_task).await;
 }
 
 #[tokio::test]

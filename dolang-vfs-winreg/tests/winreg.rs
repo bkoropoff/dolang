@@ -508,10 +508,8 @@ mod live {
         .await;
         match exercise_result {
             Ok(vfs) => {
-                let AnyVfs::Client(client) = vfs else {
-                    unreachable!()
-                };
-                client.stop().await.unwrap();
+                vfs.stop().await.unwrap();
+                vfs.close().await;
                 server.await.unwrap().unwrap();
             }
             Err(exercise_panic) => {

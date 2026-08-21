@@ -35,8 +35,7 @@ use sqlite_plugin::{
 };
 
 use dolang_vfs::{
-    FileHandle as _, OpenOptions, Vfs as _,
-    client::Client,
+    AnyVfs, FileHandle as _, OpenOptions, Vfs as _,
     error::{Error, ErrorKind},
 };
 use typed_path::{Utf8TypedPath, Utf8UnixPath};
@@ -107,30 +106,30 @@ type SqliteErr = i32;
 
 thread_local! {
     /// Thread-local shell VFS client for VFS callbacks.
-    static SHELL_CLIENT: RefCell<Option<Client>> = const { RefCell::new(None) };
+    static SHELL_VFS: RefCell<Option<AnyVfs>> = const { RefCell::new(None) };
 }
 
-/// Set the shell VFS client in thread-local storage for the duration of the closure.
-pub(crate) fn with_shell<F, R>(client: Client, f: F) -> R
+/// Set the shell VFS in thread-local storage for the duration of the closure.
+pub(crate) fn with_shell<F, R>(vfs: AnyVfs, f: F) -> R
 where
     F: FnOnce() -> R,
 {
     struct ClearOnDrop;
     impl Drop for ClearOnDrop {
         fn drop(&mut self) {
-            SHELL_CLIENT.with(|c| *c.borrow_mut() = None);
+            SHELL_VFS.with(|vfs| *vfs.borrow_mut() = None);
         }
     }
 
-    SHELL_CLIENT.with(|c| *c.borrow_mut() = Some(client));
+    SHELL_VFS.with(|current| *current.borrow_mut() = Some(vfs));
     let _guard = ClearOnDrop;
     f()
 }
 
-fn get_shell_client() -> Client {
-    SHELL_CLIENT
-        .with(|c: &RefCell<Option<Client>>| c.borrow().clone())
-        .expect("VFS entered without client set")
+fn get_shell_client() -> AnyVfs {
+    SHELL_VFS
+        .with(|vfs: &RefCell<Option<AnyVfs>>| vfs.borrow().clone())
+        .expect("VFS entered without shell VFS set")
 }
 
 /// Execute an async shell VFS operation from a synchronous VFS context.
@@ -748,7 +747,10 @@ impl Vfs for ShellVfs {
         };
 
         block_on_shell(async move {
-            match client.access(&path, mode).await {
+            match client
+                .access(Utf8TypedPath::Unix(Utf8UnixPath::new(&path)), mode)
+                .await
+            {
                 Ok(_) => Ok(true),
                 Err(_) => Ok(false),
             }

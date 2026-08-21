@@ -2,9 +2,20 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Access permission flags accepted by the Unix `access` VFS extension method.
-#[cfg(unix)]
-pub use nix::unistd::AccessFlags;
+bitflags::bitflags! {
+    /// Permissions checked by [`Vfs::access`](crate::Vfs::access).
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct AccessFlags: i32 {
+        /// Checks execute permission.
+        const X_OK = 1;
+        /// Checks write permission.
+        const W_OK = 2;
+        /// Checks read permission.
+        const R_OK = 4;
+        /// Checks only whether the path exists.
+        const F_OK = 0;
+    }
+}
 
 /// Lock access requested for a byte range of a file.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

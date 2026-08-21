@@ -330,6 +330,7 @@ async fn split_transport_round_trip() {
             .into_response(),
         Response(0)
     );
+    client.close().await;
     assert!(server.await.unwrap().is_ok());
 }
 
@@ -474,8 +475,8 @@ async fn server_shutdown_drains_outstanding_requests() {
     let shutdown = client.call(Request::Shutdown);
     assert_eq!(shutdown.await.unwrap().into_response(), Response(99));
     assert_eq!(slow.await.unwrap().into_response(), Response(20));
-    assert!(server.await.unwrap().is_ok());
     client.close().await;
+    assert!(server.await.unwrap().is_ok());
 }
 
 #[tokio::test]
@@ -2238,21 +2239,19 @@ async fn graceful_shutdown_delivers_responses_blocked_on_payload_quota() {
         shutdown.await.unwrap().into_response(),
         DrainResponse(Vec::new())
     );
-    assert!(server.await.unwrap().is_ok());
     client.close().await;
+    assert!(server.await.unwrap().is_ok());
 }
 
 #[tokio::test]
-async fn graceful_shutdown_waits_for_the_last_response_payload_credit() {
+async fn graceful_shutdown_waits_for_the_client_transport_to_close() {
     let (client_io, server_io) = tokio::io::duplex(8192);
     let mut server = drain_server(server_io);
     let client = drain_client(client_io).await;
 
     let response = client.call(DrainRequest::Big);
     let shutdown = client.call(DrainRequest::Shutdown);
-    let mut response = response.await.unwrap();
-    let credit = response.take_payload_credit();
-    assert_eq!(response.into_response().0.len(), BIG);
+    assert_eq!(response.await.unwrap().into_response().0.len(), BIG);
     assert_eq!(
         shutdown.await.unwrap().into_response(),
         DrainResponse(Vec::new())
@@ -2262,16 +2261,15 @@ async fn graceful_shutdown_waits_for_the_last_response_payload_credit() {
         tokio::time::timeout(Duration::from_millis(50), &mut server)
             .await
             .is_err(),
-        "server exited while the client's final payload credit was still held",
+        "server exited before the client closed its transport",
     );
 
-    credit.release();
+    client.close().await;
     tokio::time::timeout(Duration::from_secs(5), &mut server)
         .await
-        .expect("server did not finish after its payload credit returned")
+        .expect("server did not finish after the client transport closed")
         .unwrap()
         .unwrap();
-    client.close().await;
 }
 
 #[tokio::test]
@@ -2328,6 +2326,6 @@ async fn a_drain_refuses_new_calls_but_finishes_the_ones_it_has() {
         held.await.unwrap().into_response(),
         DrainResponse(Vec::new())
     );
-    assert!(server.await.unwrap().is_ok());
     client.close().await;
+    assert!(server.await.unwrap().is_ok());
 }

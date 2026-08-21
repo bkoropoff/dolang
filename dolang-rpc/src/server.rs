@@ -388,20 +388,21 @@ impl<P: Protocol> Server<P> {
             drain_signal,
         )
         .run();
+        tokio::pin!(recv);
         let result = tokio::select! {
-            result = recv => result,
-            // Two ways to arrive here. A graceful drain completed: the
-            // receive driver published `Drain::Graceful` once its last
-            // handler answered, and the send driver has since emptied its
-            // scheduler — quota-blocked sends included, which is the whole
-            // reason the receive half was kept alive to reach this point.
-            // Or the send driver failed, which ends the session and which
-            // nothing else would notice.
-            //
-            // Either way the receive future is dropped rather than resumed.
-            // A half-read fragment costs nothing now: no further inbound
-            // work can matter once the send half is done.
-            result = &mut send => return result,
+            result = &mut recv => result,
+            // A successful send-side exit is not the end of the connection.
+            // In practice graceful mode keeps the driver alive until the
+            // receiver ends, so this only covers the ordinary channel-close
+            // path. A send failure is fatal immediately because no further
+            // receive-side progress can repair it.
+            result = &mut send => {
+                result?;
+                return match recv.await {
+                    Err(Error::ConnectionClosed) => Ok(()),
+                    result => result,
+                };
+            }
         };
         // The receive half ended first, so the session is failing or the peer
         // is gone. It published `Drain::Abrupt` on the way out; the send
@@ -492,9 +493,9 @@ where
     /// keeps being read, because the calls already dispatched still have to
     /// answer and the flow-control credit their responses may be waiting on
     /// arrives through this half. Once those handlers have finished, this
-    /// driver publishes [`Drain::Graceful`] and keeps reading until the send
-    /// driver has emptied its scheduler; [`Server::serve`] ends this future
-    /// by dropping it at that point.
+    /// driver publishes [`Drain::Graceful`] and keeps reading until the peer
+    /// closes its transport, including after the send driver has emptied its
+    /// scheduler.
     ///
     /// Beyond publishing that signal it knows nothing of the send driver.
     async fn run(mut self) -> Result<(), Error> {
@@ -728,7 +729,11 @@ where
         // any `Graceful` already published, including one this very drain
         // set a moment ago before the transport gave out.
         self.drain.set(Drain::Abrupt);
-        result
+        if draining && matches!(&result, Err(Error::ConnectionClosed)) {
+            Ok(())
+        } else {
+            result
+        }
     }
 }
 
@@ -773,9 +778,9 @@ impl<P: Protocol> SendDriver<P> {
     /// * [`Drain::Running`] — the channel closed. Every handle that could
     ///   queue work is gone, including the receive driver's, so no credit can
     ///   arrive either; finish what is already started.
-    /// * [`Drain::Graceful`] — shutdown was requested and everything that
-    ///   was going to be queued has been. The receive half is still running,
-    ///   so finish *everything*, quota-blocked sends included.
+    /// * [`Drain::Graceful`] — shutdown was requested. The receive half is
+    ///   still running, so finish *everything*, quota-blocked sends included,
+    ///   then remain available for control messages until that half ends.
     /// * [`Drain::Abrupt`] — the receive half is gone. Finish what is
     ///   already started and abandon the rest.
     ///
@@ -800,11 +805,11 @@ impl<P: Protocol> SendDriver<P> {
                 // last response may still be sitting in the channel, not yet
                 // admitted to the scheduler, which would leave `has_pending`
                 // reporting nothing to do.
-                Drain::Graceful => {
-                    !self.scheduler.has_pending()
-                        && self.outgoing.is_empty()
-                        && self.shared.payload_budget.is_restored()
-                }
+                // The receive driver retains a sender until its transport
+                // ends. Staying alive until the channel closes preserves the
+                // send transport for rejection and control messages received
+                // after the response drain first becomes quiescent.
+                Drain::Graceful => closed && !self.scheduler.has_pending(),
                 Drain::Abrupt => !self.scheduler.has_work(),
             };
             if done {
@@ -822,12 +827,6 @@ impl<P: Protocol> SendDriver<P> {
                 // terminal condition is the whole of the arm — the loop head
                 // above does the work.
                 _ = self.drain.changed() => {}
-                // Once the response queue is empty, graceful shutdown still
-                // owes the peer time to return the payload credits for those
-                // responses. EOF changes the drain mode to `Abrupt` through
-                // the receive driver, so a departed peer cannot strand this.
-                _ = self.shared.payload_budget.wait_restored(),
-                    if mode == Drain::Graceful && !self.shared.payload_budget.is_restored() => {}
                 // Not raced against anything — see the matching comment in
                 // client.rs's writer loop. A dropped send future could leave a
                 // committed partial fragment on the transport, or — on

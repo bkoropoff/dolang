@@ -527,19 +527,13 @@ impl<'v> Object<'v> for Vfs {
                 strand,
                 vfs.unix_socket(path.to_path(), key.as_deref()).await,
             )?;
-            let client = vfs.into_client().ok_or_else(|| {
-                Error::runtime(
-                    strand,
-                    "Unix VFS connection did not return a client backend",
-                )
-            })?;
             let source = VfsSource::Unix(path.clone());
 
             global.types.vfs.create_with_annex(
                 strand,
                 Vfs,
                 VfsAnnex {
-                    vfs: client.into(),
+                    vfs,
                     source,
                     global,
                 },
@@ -577,15 +571,10 @@ impl<'v> Object<'v> for Vfs {
                 // which own the stdio pipe handles after negotiation. Joining
                 // then closes the stream endpoints and waits for the launcher
                 // to observe the helper's exit.
-                let client = this
-                    .annex()
-                    .vfs
-                    .as_client()
-                    .expect("remote VFS is not a client")
-                    .clone();
+                let vfs = this.annex().vfs.clone();
                 let global = this.annex().global;
-                let stop_result = client.stop().await;
-                client.close().await;
+                let stop_result = vfs.stop().await;
+                vfs.close().await;
                 let join_result = strand
                     .with_slots(async move |strand, [mut stream, mut output]| {
                         let borrow = this.borrow(strand)?;
@@ -607,15 +596,7 @@ impl<'v> Object<'v> for Vfs {
             let borrow = this.annex();
             match &borrow.source {
                 VfsSource::Stream => unreachable!("stream VFS returned without joining"),
-                VfsSource::Unix(_) => error::io_result(
-                    strand,
-                    borrow
-                        .vfs
-                        .as_client()
-                        .expect("remote VFS is not a client")
-                        .stop()
-                        .await,
-                )?,
+                VfsSource::Unix(_) => error::io_result(strand, borrow.vfs.stop().await)?,
                 VfsSource::WindowsAdmin(session) => error::io_result(strand, session.stop().await)?,
             }
             Ok(())

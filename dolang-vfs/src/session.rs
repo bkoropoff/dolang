@@ -183,6 +183,8 @@ impl VfsSession {
         if let Some(session) = &self.windows {
             return session.stop().await.map_err(Into::into);
         }
-        self.client.stop().await
+        self.client.stop().await?;
+        self.client.clone().close().await;
+        Ok(())
     }
 }

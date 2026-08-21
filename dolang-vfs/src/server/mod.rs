@@ -2,12 +2,12 @@ use std::{
     result,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
     },
 };
 
 #[cfg(unix)]
-use std::path::{Path, PathBuf};
+use std::path::Path;
 #[cfg(unix)]
 use std::time::Duration;
 
@@ -438,14 +438,8 @@ impl Server {
             // includes authentication: an unauthenticated peer fails here and
             // never reaches `serve_connection`.
             let rpc = rpc_builder(key).server_unix(stream).await?.bind();
-            let stop = Arc::new(AtomicBool::new(false));
-            let stop_handler = stop.clone();
             let handler = connection.clone();
-            let result = serve_connection(rpc, handler, stop_handler).await;
-            if stop.load(Ordering::Acquire) {
-                let _ = connection.server.shutdown_tx.send(());
-            }
-            result
+            serve_connection(rpc, handler).await
         });
         Ok(())
     }
@@ -456,7 +450,7 @@ impl Server {
     /// disconnects are ignored; unexpected handler failures are reported to
     /// standard error.
     #[cfg(unix)]
-    pub async fn accept(self) -> Result<(), io::Error> {
+    pub async fn accept(mut self) -> Result<(), io::Error> {
         let mut shutdown_rx = self.shared.shutdown_tx.subscribe();
         let mut handlers = JoinSet::new();
 
@@ -471,6 +465,7 @@ impl Server {
                     report_handler_exit(result.unwrap());
                 }
                 _ = shutdown_rx.changed() => {
+                    self.listener.take();
                     break;
                 }
             }
@@ -537,8 +532,7 @@ impl Server {
         established();
 
         let Negotiated { rpc, connection } = session;
-        let stop = Arc::new(AtomicBool::new(false));
-        match serve_connection(rpc, connection, stop).await {
+        match serve_connection(rpc, connection).await {
             Ok(()) => Ok(()),
             Err(error) if orderly_disconnect(&error) => Ok(()),
             Err(error) => Err(io::Error::other(error)),
@@ -592,12 +586,11 @@ impl Server {
             mode: self.mode,
             drain: Drain::new(),
         });
-        let stop = Arc::new(AtomicBool::new(false));
         let rpc = self
             .rpc
             .take()
             .expect("server does not own a connected session");
-        match serve_connection(rpc, connection, stop).await {
+        match serve_connection(rpc, connection).await {
             Ok(()) => Ok(()),
             Err(error) if orderly_disconnect(&error) => Ok(()),
             Err(error) => Err(io::Error::other(error)),
@@ -632,11 +625,10 @@ fn orderly_disconnect(error: &dolang_rpc::Error) -> bool {
 async fn serve_connection(
     rpc: dolang_rpc::server::Server<VfsProtocol>,
     connection: Arc<Connection>,
-    stop: Arc<AtomicBool>,
 ) -> Result<(), dolang_rpc::Error> {
     rpc.serve(async move |mut context, Request { vfs, kind }| {
         let response = if matches!(kind, RequestKind::Stop) {
-            connection.handle_stop(&mut context, vfs, &stop).await
+            connection.handle_stop(&mut context, vfs).await
         } else if let Err(error) = connection.select(&context, vfs.clone()) {
             ResponseKind::Error(error)
         } else {
@@ -698,10 +690,12 @@ impl Connection {
         &self,
         context: &mut CallContext<VfsProtocol>,
         vfs: Option<Cite<crate::session::VfsMarker>>,
-        stop: &AtomicBool,
     ) -> ResponseKind {
         let Some(vfs) = vfs else {
-            stop.store(true, Ordering::Release);
+            // Stop accepting immediately. Existing sessions have their own
+            // connection tasks and continue draining independently.
+            #[cfg(unix)]
+            let _ = self.server.shutdown_tx.send(());
             // Reject new stdio endpoints, then keep serving reads, writes and
             // closes on the ones already handed out until they are all closed.
             // The rpc serve loop polls request handlers on the same task as it
@@ -715,7 +709,7 @@ impl Connection {
             Ok(retained) => retained,
             Err(_) => return ResponseKind::Error(Self::invalid_opaque("VFS")),
         };
-        let client = retained.vfs.as_client().cloned();
+        let retained_vfs = retained.vfs.clone();
         drop(retained);
         let retained = context.unregister::<RetainedVfs>(vfs).ok().flatten();
         if let Some(session) = retained.and_then(|retained| retained.session) {
@@ -724,10 +718,7 @@ impl Connection {
                 Err(error) => ResponseKind::Error(wire_error(error)),
             };
         }
-        let Some(client) = client else {
-            return ResponseKind::Error(Self::invalid_opaque("VFS"));
-        };
-        match client.stop().await {
+        match retained_vfs.stop().await {
             Ok(()) => ResponseKind::Stop,
             Err(error) => ResponseKind::Error(wire_error(error)),
         }
@@ -2162,39 +2153,12 @@ impl Connection {
         ResponseKind::ReadLink(Self::wire_result(result))
     }
 
-    #[cfg(unix)]
     async fn handle_access(&self, req: AccessRequest) -> ResponseKind {
-        use nix::unistd::{AccessFlags, access};
-
-        let path = req.path;
-        let mode = req.mode;
-
-        tokio::task::spawn_blocking(move || {
-            let path = match PathBuf::try_from(path) {
-                Ok(path) => path,
-                Err(_) => {
-                    return ResponseKind::Access(
-                        Err(Error::from_raw_os_error(libc::EINVAL).into()),
-                    );
-                }
-            };
-            let flags = AccessFlags::from_bits(mode).unwrap_or(AccessFlags::empty());
-            match access(&path, flags) {
-                Ok(()) => ResponseKind::Access(Ok(())),
-                Err(e) => ResponseKind::Access(Err(Error::from_raw_os_error(e as i32).into())),
-            }
-        })
-        .await
-        .unwrap_or_else(|_| ResponseKind::Access(Err(Error::from_raw_os_error(libc::EIO).into())))
-    }
-
-    #[cfg(not(unix))]
-    async fn handle_access(&self, _req: AccessRequest) -> ResponseKind {
-        ResponseKind::Access(Err(Error::new(
-            crate::ErrorKind::Unsupported,
-            "POSIX access checks are not supported on this platform",
-        )
-        .into()))
+        let mode = crate::file::AccessFlags::from_bits(req.mode)
+            .unwrap_or(crate::file::AccessFlags::empty());
+        ResponseKind::Access(Self::wire_result(
+            self.server.vfs.access(request_path(&req.path), mode).await,
+        ))
     }
 
     async fn handle_glob(&self, req: GlobRequest) -> ResponseKind {
@@ -2388,6 +2352,7 @@ mod tests {
         );
 
         let _ = client.call(request(RequestKind::Stop)).await.unwrap();
+        client.close().await;
         server.await.unwrap().unwrap();
     }
 }

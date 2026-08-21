@@ -2126,6 +2126,16 @@ impl Vfs for Direct {
         Ok(typed_path(fs::read_link(native_path(path)?).await?)?)
     }
 
+    async fn access(
+        &self,
+        path: Utf8TypedPath<'_>,
+        mode: crate::file::AccessFlags,
+    ) -> crate::Result<()> {
+        Self::impl_access(native_path(path)?, mode)
+            .await
+            .map_err(Into::into)
+    }
+
     async fn glob(
         &self,
         pattern: impl Into<String>,

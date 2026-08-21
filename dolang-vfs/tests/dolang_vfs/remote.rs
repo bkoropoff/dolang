@@ -51,6 +51,12 @@ async fn connected_split_pair() -> (Client, tokio::task::JoinHandle<io::Result<(
     )
 }
 
+async fn stop_pair(client: Client, server: tokio::task::JoinHandle<io::Result<()>>) {
+    client.stop().await.unwrap();
+    client.close().await;
+    server.await.unwrap().unwrap();
+}
+
 #[cfg(not(windows))]
 #[tokio::test]
 async fn windows_admin_reports_unsupported_from_non_windows_backend() {
@@ -63,8 +69,7 @@ async fn windows_admin_reports_unsupported_from_non_windows_backend() {
         .expect("non-Windows backend unexpectedly opened an administrator VFS");
     assert_eq!(error.kind(), io::ErrorKind::Unsupported);
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 #[cfg(unix)]
@@ -209,11 +214,11 @@ async fn opaque_session_chains_to_unix_vfs() {
     let mut child = command.spawn().await.unwrap();
     assert!(child.wait().await.unwrap().success());
 
-    inner.as_client().unwrap().stop().await.unwrap();
+    inner.stop().await.unwrap();
+    drop(inner);
     inner_task.await.unwrap().unwrap();
     assert_eq!(outer.target(), &dolang_vfs::target::TargetInfo::current());
-    outer.stop().await.unwrap();
-    outer_task.await.unwrap().unwrap();
+    stop_pair(outer, outer_task).await;
 }
 
 #[cfg(unix)]
@@ -238,12 +243,13 @@ async fn opaque_session_supports_multiple_vfs_hops() {
         .unwrap();
     assert_eq!(inner.target(), &dolang_vfs::target::TargetInfo::current());
 
-    inner.as_client().unwrap().stop().await.unwrap();
+    inner.stop().await.unwrap();
+    drop(inner);
     inner_task.await.unwrap().unwrap();
-    middle.as_client().unwrap().stop().await.unwrap();
+    middle.stop().await.unwrap();
+    drop(middle);
     middle_task.await.unwrap().unwrap();
-    outer.stop().await.unwrap();
-    outer_task.await.unwrap().unwrap();
+    stop_pair(outer, outer_task).await;
 }
 
 #[cfg(unix)]
@@ -260,13 +266,11 @@ async fn outer_teardown_does_not_stop_retained_vfs_daemon() {
         .await
         .unwrap();
     drop(inner);
-    outer.stop().await.unwrap();
-    outer_task.await.unwrap().unwrap();
+    stop_pair(outer, outer_task).await;
 
     let direct = Client::connect(&socket).await.unwrap();
     assert!(direct.cwd().is_absolute());
-    direct.stop().await.unwrap();
-    inner_task.await.unwrap().unwrap();
+    stop_pair(direct, inner_task).await;
 }
 
 #[tokio::test]
@@ -299,8 +303,7 @@ async fn path_operations_work_over_generic_stream() {
         .await
         .unwrap();
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 #[tokio::test]
@@ -325,18 +328,16 @@ async fn rename_replace_flag_works_over_generic_stream() {
     assert_eq!(tokio::fs::read(&first_native).await.unwrap(), b"first");
     assert_eq!(tokio::fs::read(&second_native).await.unwrap(), b"second");
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 #[tokio::test]
 async fn query_and_stop_work_over_split_streams() {
     let (client, server_task) = connected_split_pair().await;
     assert_eq!(client.target(), &TargetInfo::current());
-    client.stop().await.unwrap();
     assert_eq!(client.target(), &TargetInfo::current());
     assert!(client.cwd().is_absolute());
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 #[cfg(unix)]
@@ -360,8 +361,7 @@ async fn unix_identity_lookup_works_over_rpc() {
         io::ErrorKind::NotFound
     );
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 #[tokio::test]
@@ -391,8 +391,7 @@ async fn null_stdio_processes_work_over_generic_stream() {
         .await;
     assert!(result.is_err());
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 #[tokio::test]
@@ -410,8 +409,7 @@ async fn opaque_pipe_transfers_bytes_and_reports_eof() {
 
     // Stopping drains outstanding endpoints, so release them first.
     drop(recv);
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 #[tokio::test]
@@ -430,8 +428,7 @@ async fn opaque_pipe_clones_have_independent_ownership() {
 
     // Stopping drains outstanding endpoints, so release them first.
     drop(recv);
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 #[tokio::test]
@@ -454,8 +451,7 @@ async fn opaque_pipe_reports_broken_pipe_after_receiver_drop() {
 
     // Stopping drains outstanding endpoints, so release them first.
     drop(send);
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 #[tokio::test]
@@ -480,8 +476,7 @@ async fn opaque_pipe_connects_remote_children_without_client_relay() {
     assert!(producer.wait().await.unwrap().success());
     assert!(consumer.wait().await.unwrap().success());
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 #[tokio::test]
@@ -539,8 +534,7 @@ async fn retained_files_can_be_used_for_remote_stdio() {
     assert_eq!(stdout_data.trim_end(), "remote-stdout");
     assert_eq!(stderr_data.trim_end(), "remote-stderr");
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 // Relaying stdin can cause an wedged tokio blocking reader thread;
@@ -571,8 +565,7 @@ async fn inherited_stdio_is_relayed_over_generic_stream() {
     command.stdout_inherit().unwrap();
     assert!(command.spawn().await.is_err());
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 #[tokio::test]
@@ -591,6 +584,8 @@ async fn opaque_stdio_is_rejected_by_a_different_client_session() {
 
     first.stop().await.unwrap();
     second.stop().await.unwrap();
+    first.close().await;
+    second.close().await;
     first_server.await.unwrap().unwrap();
     second_server.await.unwrap().unwrap();
 }
@@ -616,8 +611,7 @@ async fn direct_file_relays_as_remote_process_stdin() {
     let mut child = command.spawn().await.unwrap();
     assert!(child.wait().await.unwrap().success());
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 #[tokio::test]
@@ -640,8 +634,7 @@ async fn remote_file_relays_as_direct_process_stdin() {
     let mut child = command.spawn().await.unwrap();
     assert!(child.wait().await.unwrap().success());
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 #[tokio::test]
@@ -672,8 +665,7 @@ async fn remote_process_stdout_relays_into_direct_file() {
     stdout.read_to_string(&mut stdout_data).await.unwrap();
     assert_eq!(stdout_data.trim_end(), "remote-stdout");
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 #[tokio::test]
@@ -696,6 +688,8 @@ async fn pipe_relays_between_two_remote_sessions() {
 
     first.stop().await.unwrap();
     second.stop().await.unwrap();
+    first.close().await;
+    second.close().await;
     first_server.await.unwrap().unwrap();
     second_server.await.unwrap().unwrap();
 }
@@ -742,6 +736,8 @@ async fn file_relays_between_two_remote_sessions() {
 
     first.stop().await.unwrap();
     second.stop().await.unwrap();
+    first.close().await;
+    second.close().await;
     first_server.await.unwrap().unwrap();
     second_server.await.unwrap().unwrap();
 }
@@ -806,6 +802,8 @@ async fn pipeline_relays_across_three_domains() {
 
     a.stop().await.unwrap();
     b.stop().await.unwrap();
+    a.close().await;
+    b.close().await;
     a_server.await.unwrap().unwrap();
     b_server.await.unwrap().unwrap();
 }
@@ -826,8 +824,7 @@ async fn same_domain_pipe_stays_direct_through_any_vfs() {
     assert!(producer.wait().await.unwrap().success());
     assert!(consumer.wait().await.unwrap().success());
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 #[tokio::test]
@@ -861,8 +858,7 @@ async fn cross_domain_stdin_relay_is_aborted_on_terminate() {
     .unwrap();
     assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 #[tokio::test]
@@ -876,8 +872,7 @@ async fn cross_domain_stdio_cleans_up_after_launch_failure() {
     command.stdin(recv).unwrap();
     assert!(command.spawn().await.is_err());
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 #[tokio::test]
@@ -904,8 +899,7 @@ async fn dropping_any_child_aborts_cross_domain_relay() {
     .unwrap();
     assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 #[tokio::test]
@@ -921,8 +915,7 @@ async fn remote_process_can_be_terminated() {
         .unwrap();
     assert!(!status.unwrap().success());
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 async fn collect_entries(mut read_dir: ReadDir) -> Vec<DirEntry> {
@@ -969,8 +962,7 @@ async fn directory_enumeration_round_trip_over_generic_stream() {
         assert_eq!(remote, local);
     }
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 #[tokio::test]
@@ -1019,8 +1011,7 @@ async fn regular_file_round_trip_over_generic_stream() {
     let handoff = OpenOptions::open(&options, path.to_path()).await.unwrap();
     drop(support::stdio_recv(handoff).await);
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 // The tests below pin behavior that the move to positional I/O must either
@@ -1056,8 +1047,7 @@ async fn remote_file_closes_with_a_read_trailer_outstanding() {
 
     file.close().await.unwrap();
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 /// Append-mode writes land at the end regardless of where the cursor is.
@@ -1094,8 +1084,7 @@ async fn remote_append_writes_ignore_the_cursor() {
         b"firstsecond"
     );
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 /// An opaque handle has no local descriptor to surrender, from the moment it
@@ -1115,8 +1104,7 @@ async fn remote_try_into_std_fails_immediately_after_open() {
     // The handle is still usable after the refusal.
     file.close().await.unwrap();
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 #[tokio::test]
@@ -1165,8 +1153,7 @@ async fn remote_file_locks_round_trip() {
 
     first.close().await.unwrap();
     second.close().await.unwrap();
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 #[cfg(windows)]
@@ -1203,8 +1190,7 @@ async fn security_descriptor_round_trip_over_generic_stream() {
     );
     file.close().await.unwrap();
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 #[cfg(target_os = "linux")]
@@ -1233,8 +1219,7 @@ async fn regular_file_xattrs_round_trip_over_generic_stream() {
     assert!(file.xattr("remote", Some("user")).await.is_err());
     file.close().await.unwrap();
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 #[tokio::test]
@@ -1273,6 +1258,7 @@ async fn stop_drains_outstanding_pipe_endpoints() {
         .expect("stop did not complete after endpoints were closed")
         .unwrap()
         .expect("stop should succeed");
+    client.close().await;
     server_task.await.unwrap().unwrap();
 }
 
@@ -1329,8 +1315,7 @@ async fn remote_relative_seeks_track_the_client_cursor() {
 
     file.close().await.unwrap();
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 /// Positional operations work over the wire and ignore the handle's cursor.
@@ -1409,8 +1394,7 @@ async fn remote_positional_io_is_independent_of_the_cursor() {
     assert_eq!((written, end), (2, 12));
     file.close().await.unwrap();
 
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 /// Every remote read is bounded, so that the peer can hold the whole reply and
@@ -1452,8 +1436,7 @@ async fn remote_reads_are_capped_at_one_chunk() {
     assert_eq!(&rest[..], &source[MAX_FILE_READ..]);
 
     file.close().await.unwrap();
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 /// The borrowed-destination read is the one that lands the reply trailer
@@ -1509,8 +1492,7 @@ async fn remote_read_at_into_lands_the_trailer_in_the_destination() {
     );
 
     file.close().await.unwrap();
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
 
 /// A filesystem error part way through a read must reach the caller as itself,
@@ -1541,6 +1523,5 @@ async fn remote_read_failure_reports_its_error_kind() {
     assert_eq!(error.kind(), io::ErrorKind::IsADirectory);
 
     file.close().await.unwrap();
-    client.stop().await.unwrap();
-    server_task.await.unwrap().unwrap();
+    stop_pair(client, server_task).await;
 }
