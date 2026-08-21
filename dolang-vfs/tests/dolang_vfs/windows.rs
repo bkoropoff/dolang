@@ -225,7 +225,7 @@ async fn client_or_direct_routes_path_and_open_operations() {
 
     let (client, server_task) = connected_pair().await;
     let vfs = AnyVfs::from(client.clone());
-    assert!(vfs.as_client().is_some());
+    assert!(!vfs.is_direct());
 
     let mut options = vfs.open_options();
     options.write(true).create_new(true);

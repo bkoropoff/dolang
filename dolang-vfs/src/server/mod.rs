@@ -715,7 +715,7 @@ impl Connection {
             Ok(retained) => retained,
             Err(_) => return ResponseKind::Error(Self::invalid_opaque("VFS")),
         };
-        let client = retained.vfs.as_client().cloned();
+        let retained_vfs = retained.vfs.clone();
         drop(retained);
         let retained = context.unregister::<RetainedVfs>(vfs).ok().flatten();
         if let Some(session) = retained.and_then(|retained| retained.session) {
@@ -724,10 +724,7 @@ impl Connection {
                 Err(error) => ResponseKind::Error(wire_error(error)),
             };
         }
-        let Some(client) = client else {
-            return ResponseKind::Error(Self::invalid_opaque("VFS"));
-        };
-        match client.stop().await {
+        match retained_vfs.stop().await {
             Ok(()) => ResponseKind::Stop,
             Err(error) => ResponseKind::Error(wire_error(error)),
         }

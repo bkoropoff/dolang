@@ -506,8 +506,8 @@ async fn unix_vfs_connects_to_another_server() {
     let inner = client.unix_socket(typed(&inner_path), None).await.unwrap();
     assert_eq!(inner.target(), &TargetInfo::current());
 
-    inner.as_client().unwrap().stop().await.unwrap();
-    client.stop().await.unwrap();
+    inner.stop().await.unwrap();
+    drop(inner);
     inner_task.await.unwrap();
     outer_task.await.unwrap();
 }

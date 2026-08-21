@@ -209,7 +209,8 @@ async fn opaque_session_chains_to_unix_vfs() {
     let mut child = command.spawn().await.unwrap();
     assert!(child.wait().await.unwrap().success());
 
-    inner.as_client().unwrap().stop().await.unwrap();
+    inner.stop().await.unwrap();
+    drop(inner);
     inner_task.await.unwrap().unwrap();
     assert_eq!(outer.target(), &dolang_vfs::target::TargetInfo::current());
     outer.stop().await.unwrap();
@@ -238,9 +239,11 @@ async fn opaque_session_supports_multiple_vfs_hops() {
         .unwrap();
     assert_eq!(inner.target(), &dolang_vfs::target::TargetInfo::current());
 
-    inner.as_client().unwrap().stop().await.unwrap();
+    inner.stop().await.unwrap();
+    drop(inner);
     inner_task.await.unwrap().unwrap();
-    middle.as_client().unwrap().stop().await.unwrap();
+    middle.stop().await.unwrap();
+    drop(middle);
     middle_task.await.unwrap().unwrap();
     outer.stop().await.unwrap();
     outer_task.await.unwrap().unwrap();

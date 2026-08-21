@@ -1432,19 +1432,24 @@ impl From<Direct> for AnyVfs {
 }
 
 impl AnyVfs {
-    /// Returns the remote client when this is the remote variant.
-    pub fn as_client(&self) -> Option<&client::Client> {
+    /// Returns whether this VFS accesses the local process directly.
+    pub fn is_direct(&self) -> bool {
+        matches!(self, Self::Direct(_))
+    }
+
+    /// Stops a remote backend. Direct backends require no shutdown.
+    pub async fn stop(&self) -> Result<()> {
         match self {
-            Self::Client(client) => Some(client),
-            Self::Direct(_) => None,
+            Self::Client(client) => client.stop().await,
+            Self::Direct(_) => Ok(()),
         }
     }
 
-    /// Returns the remote client when this is the remote variant.
-    pub fn into_client(self) -> Option<client::Client> {
+    /// Closes a remote backend. Direct backends require no shutdown.
+    pub async fn close(self) {
         match self {
-            Self::Client(client) => Some(client),
-            Self::Direct(_) => None,
+            Self::Client(client) => client.close().await,
+            Self::Direct(_) => {}
         }
     }
 

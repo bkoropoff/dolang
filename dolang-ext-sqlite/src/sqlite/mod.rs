@@ -147,11 +147,11 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             #[cfg(unix)]
             {
                 // Check if we're in a container context
-                let vfs = dolang_ext_shell::vfs(strand).as_client().cloned();
+                let vfs = dolang_ext_shell::vfs(strand);
                 let path = path.clone();
 
                 // Open the connection with appropriate VFS
-                if let Some(vfs) = vfs {
+                if !vfs.is_direct() {
                     raw = tokio::task::spawn_blocking(move || {
                         crate::vfs::with_shell(vfs, || {
                             let mut raw: *mut sqlite3 = ptr::null_mut();
@@ -220,7 +220,8 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                                 pending_close: Cell::new(false),
                                 epoch: Cell::new(0),
                                 #[cfg(unix)]
-                                agent: dolang_ext_shell::vfs(strand).as_client().cloned(),
+                                agent: (!dolang_ext_shell::vfs(strand).is_direct())
+                                    .then(|| dolang_ext_shell::vfs(strand)),
                                 busy_retries,
                                 busy_min_wait,
                                 busy_max_wait,

@@ -15,7 +15,7 @@ use dolang::runtime::{
 };
 
 #[cfg(unix)]
-use dolang_vfs::client::Client;
+use dolang_vfs::AnyVfs;
 use libsqlite3_sys::{
     SQLITE_OK, sqlite3, sqlite3_exec, sqlite3_prepare_v2, sqlite3_randomness, sqlite3_stmt,
 };
@@ -59,9 +59,9 @@ pub(crate) struct ConnectionAnnex<'v> {
     pub(super) pending_close: Cell<bool>,
     /// Epoch counter bumped on transaction begin/end/close
     pub(super) epoch: Cell<Epoch>,
-    /// Optional shell VFS client for container-aware operations.
+    /// Optional shell VFS for container-aware operations.
     #[cfg(unix)]
-    pub(super) agent: Option<Client>,
+    pub(super) agent: Option<AnyVfs>,
     /// Maximum number of retries on SQLITE_BUSY
     pub(super) busy_retries: u32,
     /// Initial wait time in milliseconds for retry backoff
