@@ -29,6 +29,31 @@ def parse_filter value
     throw args.Error "invalid --filter glob: $value"
   value
 
+def parse_tags value
+  let group = []
+  for alternative = value.split ","
+    if (alternative == "" || alternative == "!")
+      throw args.Error "invalid --tags expression: $value"
+    if alternative.starts_with "!"
+      group.push [true, alternative[1..]]
+    else
+      group.push [false, alternative]
+  group
+
+def tag_filter groups info
+  for group = groups
+    let matched = group.any do |alternative|
+      let negated tag = alternative
+      let present = info.tags.contains $tag
+      (negated && !present || !negated && present)
+    if !matched
+      return false
+  true
+
+def module_name path
+  let name = str $path.without_ext()
+  name.replace "\\" "/"
+
 args.with args: $shell.args
   help: Run Do unit test modules.
   - opt: jobs
@@ -46,6 +71,11 @@ args.with args: $shell.args
     parse: $parse_filter
     default: **
     help: Glob filter for test names in `stem/test` form
+  - opt: tags
+    parse: $parse_tags
+    collect: true
+    meta: TAGS
+    help: Comma-separated tag alternatives; repeat for AND groups
   - opt: timeout
     parse: $parse_timeout
     default: 600
@@ -58,7 +88,11 @@ args.with args: $shell.args
     collect: true
     help: Test directories or files to run.
   do |p|
-    let :filter :jobs :module_jobs :timeout :no_capture :paths ... = p
+    let :filter :tags :jobs :module_jobs :timeout :no_capture :paths ... = p
+    let name_filter = Glob $filter
+    let filter = do |info|
+      (name_filter.matches "$(module_name info.module)/$(info.name)" &&
+        tag_filter tags info)
     let rc = progress.with do
       test.run
         jobs: $jobs

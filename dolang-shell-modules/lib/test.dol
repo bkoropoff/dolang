@@ -1,8 +1,6 @@
 import compile load progress strand term
   fs:
     - Path
-  glob:
-    - Glob
   time:
     - timeout
 
@@ -13,6 +11,54 @@ let name_style = term.style dim: true
 let note_style = term.style bold: true
 
 let collect_key = strand.Key()
+
+class TestCase
+  pub field module name tags func
+
+  def (init) self module name tags func
+    self.module = module
+    self.name = name
+    self.tags = tags
+    self.func = func
+
+class TestCollection
+  field module
+  field tests = []
+  field tags = []
+
+  def (init) self module
+    self.#module = module
+
+  pub def add self name tags func
+    self.#tests.push $TestCase(self.#module, name, Tuple([...self.#tags, ...tags]), func)
+
+  pub def add_tags self tags
+    self.#tags.push ...tags
+
+  pub def take self
+    self.#tests
+
+# Read-only metadata for a discovered test.
+pub class TestInfo
+  field case
+
+  def (init) self case
+    self.#case = case
+
+  # The `Path` of the module containing the test.
+  #[getter]
+  pub def module self
+    self.#case.module
+
+  # The registered test name without normalization.
+  #[getter]
+  pub def name self
+    self.#case.name
+
+  # The immutable test tags. Order and duplicates are preserved.
+  #[getter]
+  pub def tags self
+    self.#case.tags
 
 class ModuleCompileError: std.RuntimeError
   pub field path output
@@ -44,11 +90,11 @@ class Harness
     self.#module_jobs = strand.Resource $module_jobs
     self.#jobs = strand.Resource $jobs
     self.#timeout = timeout
-    self.#filter = Glob $filter
+    self.#filter = filter
     self.#capture = capture
 
-  def matches_filter self path test
-     self.#filter.matches "$(module_name path)/$test"
+  def matches_filter self case
+    self.#filter $TestInfo(case)
 
   def record_test self
     self.#total = (self.#total + 1)
@@ -71,24 +117,24 @@ class Harness
     else
       func()
 
-  def run_test self path name func
+  def run_test self case
     self.#record_test()
     let output = StrBuf()
     try
-      self.#with_capture $output do self.#with_timeout $func
+      self.#with_capture $output do self.#with_timeout $case.func
       self.#record_success()
     catch std.RuntimeError: e
       let captured = (self.#capture && output.freeze())
-      self.#record_error $e $(strand.error_backtrace()) $path $name $captured
+      self.#record_error $e $(strand.error_backtrace()) $case.module $case.name $captured
 
-  def run_module self path tests
-    progress.show message: (module_name path) icon: ▶ total: $tests.len do |w|
+  def run_module self path cases
+    progress.show message: (module_name path) icon: ▶ total: $cases.len do |w|
       strand.fork
-        for name func = tests
+        for case = cases
           do self.#jobs.with do
-            progress.show message: $name do |_|
+            progress.show message: $case.name do |_|
               w.update icon: ▼
-              self.#run_test $path $name $func
+              self.#run_test $case
               w.delta()
 
   def run_file self path
@@ -100,12 +146,12 @@ class Harness
       if (!compiled.ok || warnings)
         throw ModuleCompileError $path $compiled
 
-      collect_key.value = []
+      collect_key.value = TestCollection $path
       self.#with_capture $output do self.#with_timeout do load.run $compiled.bytecode
-      let tests = collect_key.value
+      let cases = collect_key.value.take()
       collect_key.value = nil
-      tests = [...tests.filter(do |test| self.#matches_filter path test[0])]
-      self.#run_module $path $tests
+      cases = [...cases.filter(do |case| self.#matches_filter case)]
+      self.#run_module $path $cases
     catch std.RuntimeError: e
       collect_key.value = nil
       let captured = (self.#capture && output.freeze())
@@ -198,31 +244,65 @@ class Fixture
 pub def fixture wrap
   do |func| Fixture $wrap $func
 
-# Register a test case that runs `func` with no arguments.  `name`, if unspecified,
-# defaults to the `Str` coercion of `func`, which for `def`s is simply the function
-# name.  This function is suitable for use as a decorator:
+# Registers a zero-argument test callable.
 #
-# ```
-# #[test]
-# def the_test()
-#   do_something()
+# # Parameters
 #
-# #[test name: "alternate_name"]
-# def overriden_name()
-#   do_something_else()
-# ```
+# `name` is the reporting name and defaults to `str(func)`. `tags` is an
+# iterable of strings; order and duplicates are preserved. `func` is supplied
+# implicitly when this function is used as a decorator.
 #
 # # Returns
-# If `func` is not specified, returns a function that takes the test case function instead
-# (for use as a decorator). Otherwise, returns `func`
+#
+# Returns `func`, or a decorator awaiting it when `func` is omitted.
+#
+# # Example
+#
+# ```
+# #[test name: "connects" tags: ["integration", "linux"]]
+# def connects_to_service()
+#   connect()
+# ```
 pub def test
   :name = nil
+  :tags = []
   func = nil
 do
   if (func == nil)
-    return do |func| test :name $func
-  collect_key.value.push [name || str(func), func]
+    return do |func| test name: $name tags: $tags $func
+  let tag_values = []
+  for tag = tags
+    if !(type tag Str)
+      throw std.TypeError "test tags: expected strings"
+    tag_values.push $tag
+  collect_key.value.add (name || str(func)) $tag_values $func
   func
+
+# Adds tags to tests subsequently registered in the current module.
+#
+# Repeated calls accumulate tags. Module tags precede tags supplied directly
+# to `test`; order and duplicates are preserved.
+#
+# # Parameters
+#
+# `values` are the string tags to add.
+#
+# # Example
+#
+# ```
+# tags "integration" "linux"
+#
+# #[test tags: ["slow"]]
+# def connects()
+#   connect()
+# ```
+pub def tags ...values
+  let tag_values = []
+  for tag = values.pos_only()
+    if !(type tag Str)
+      throw std.TypeError "test tags: expected strings"
+    tag_values.push $tag
+  collect_key.value.add_tags $tag_values
 
 pub class Assert: std.RuntimeError
   pub field message = nil
@@ -298,11 +378,33 @@ pub def assert_type expected value msg = nil
     else
       throw Assert "$value @ $(type value) <: $expected"
 
-# Runs tests discovered under the trailing file and directory paths.
+# Discovers and runs tests under the trailing file and directory paths.
+#
+# # Parameters
+#
+# `jobs` and `module_jobs` limit concurrent tests and modules. `filter` is a
+# predicate receiving a `TestInfo` and defaults to accepting every test.
+# `timeout` is the per-test and module-load timeout in seconds. `capture`
+# captures output and shows it for failures. `paths` contains test files or
+# directories.
+#
+# The bundled `dolang -m test` command retains `--filter` glob matching against
+# `module/name`. Its repeatable `--tags` option splits each occurrence on
+# commas: alternatives in one occurrence are ORed, while occurrences are
+# ANDed. Prefix a tag with `!` to require its absence. Matching is exact and
+# case-sensitive.
+#
+# `--tags !windows,!macos` means “not Windows OR not macOS.” Use
+# `--tags !windows --tags !macos` to exclude both.
+#
+# # Returns
+#
+# Returns zero when all selected tests pass, or one when any module or test
+# fails.
 pub def run
   :jobs = 8
   :module_jobs = 4
-  :filter = "**"
+  :filter = (do |_| true)
   :timeout = 600
   :capture = true
   ...paths
