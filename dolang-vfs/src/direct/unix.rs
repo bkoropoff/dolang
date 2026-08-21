@@ -66,6 +66,18 @@ impl DirectFile {
 }
 
 impl Direct {
+    pub(super) async fn impl_access(
+        path: PathBuf,
+        mode: crate::file::AccessFlags,
+    ) -> io::Result<()> {
+        let mode = nix::unistd::AccessFlags::from_bits(mode.bits())
+            .unwrap_or(nix::unistd::AccessFlags::empty());
+        tokio::task::spawn_blocking(move || nix::unistd::access(&path, mode))
+            .await
+            .map_err(io::Error::other)?
+            .map_err(|error| io::Error::from_raw_os_error(error as i32))
+    }
+
     pub(super) async fn impl_rename(from: PathBuf, to: PathBuf, replace: bool) -> io::Result<()> {
         if replace {
             return fs::rename(from, to).await;

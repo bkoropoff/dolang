@@ -803,20 +803,20 @@ async fn access_existing_file() {
     let client = connect_client(&socket_path).await;
 
     // Test existence check (F_OK)
-    let result = client.access(&test_file, AccessFlags::F_OK).await;
+    let result = client.access(typed(&test_file), AccessFlags::F_OK).await;
     assert!(result.is_ok(), "File should exist");
 
     // Test read permission (R_OK)
-    let result = client.access(&test_file, AccessFlags::R_OK).await;
+    let result = client.access(typed(&test_file), AccessFlags::R_OK).await;
     assert!(result.is_ok(), "File should be readable");
 
     // Test write permission (W_OK)
-    let result = client.access(&test_file, AccessFlags::W_OK).await;
+    let result = client.access(typed(&test_file), AccessFlags::W_OK).await;
     assert!(result.is_ok(), "File should be writable");
 
     // Test combined read and write
     let result = client
-        .access(&test_file, AccessFlags::R_OK | AccessFlags::W_OK)
+        .access(typed(&test_file), AccessFlags::R_OK | AccessFlags::W_OK)
         .await;
     assert!(result.is_ok(), "File should be readable and writable");
 
@@ -834,9 +834,8 @@ async fn access_nonexistent_file() {
     let client = connect_client(&socket_path).await;
 
     // Test existence check on non-existent file
-    let result = client
-        .access(dir.path().join("nonexistent.txt"), AccessFlags::F_OK)
-        .await;
+    let missing = dir.path().join("nonexistent.txt");
+    let result = client.access(typed(&missing), AccessFlags::F_OK).await;
     assert!(
         result.is_err(),
         "Non-existent file should fail access check"

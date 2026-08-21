@@ -45,7 +45,6 @@ use tokio::{
 };
 
 use crate::extension::VfsExtension;
-#[cfg(unix)]
 use crate::protocol::AccessRequest;
 use crate::session::Query;
 use crate::{
@@ -1615,29 +1614,6 @@ impl Client {
         }
     }
 
-    /// Check file accessibility.
-    ///
-    /// Mode is a bitmask of accessibility flags from [`AccessFlags`](crate::file::AccessFlags):
-    /// - `AccessFlags::F_OK`: Test for existence
-    /// - `AccessFlags::R_OK`: Test for read permission
-    /// - `AccessFlags::W_OK`: Test for write permission
-    /// - `AccessFlags::X_OK`: Test for execute permission
-    #[cfg(unix)]
-    pub async fn access(
-        &self,
-        path: impl AsRef<Path>,
-        mode: crate::file::AccessFlags,
-    ) -> crate::Result<()> {
-        let request = AccessRequest {
-            path: path.as_ref().to_path_buf().try_into()?,
-            mode: mode.bits(),
-        };
-        match self.request(RequestKind::Access(request)).await? {
-            ResponseKind::Access(result) => result.map_err(crate::Error::from),
-            response => Err(unexpected(response).into()),
-        }
-    }
-
     /// Calls a registered VFS extension.
     ///
     /// The extension must be linked into both this process and the peer
@@ -2900,6 +2876,21 @@ impl Vfs for Client {
 
     fn command(&self, program: Utf8TypedPath<'_>) -> Self::Command<'_> {
         CommandBuilder::new(self, program)
+    }
+
+    async fn access(
+        &self,
+        path: Utf8TypedPath<'_>,
+        mode: crate::file::AccessFlags,
+    ) -> crate::Result<()> {
+        let request = AccessRequest {
+            path: path.to_path_buf().into(),
+            mode: mode.bits(),
+        };
+        match self.request(RequestKind::Access(request)).await? {
+            ResponseKind::Access(result) => result.map_err(crate::Error::from),
+            response => Err(unexpected(response).into()),
+        }
     }
 
     async fn unix_socket(

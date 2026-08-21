@@ -2162,39 +2162,12 @@ impl Connection {
         ResponseKind::ReadLink(Self::wire_result(result))
     }
 
-    #[cfg(unix)]
     async fn handle_access(&self, req: AccessRequest) -> ResponseKind {
-        use nix::unistd::{AccessFlags, access};
-
-        let path = req.path;
-        let mode = req.mode;
-
-        tokio::task::spawn_blocking(move || {
-            let path = match PathBuf::try_from(path) {
-                Ok(path) => path,
-                Err(_) => {
-                    return ResponseKind::Access(
-                        Err(Error::from_raw_os_error(libc::EINVAL).into()),
-                    );
-                }
-            };
-            let flags = AccessFlags::from_bits(mode).unwrap_or(AccessFlags::empty());
-            match access(&path, flags) {
-                Ok(()) => ResponseKind::Access(Ok(())),
-                Err(e) => ResponseKind::Access(Err(Error::from_raw_os_error(e as i32).into())),
-            }
-        })
-        .await
-        .unwrap_or_else(|_| ResponseKind::Access(Err(Error::from_raw_os_error(libc::EIO).into())))
-    }
-
-    #[cfg(not(unix))]
-    async fn handle_access(&self, _req: AccessRequest) -> ResponseKind {
-        ResponseKind::Access(Err(Error::new(
-            crate::ErrorKind::Unsupported,
-            "POSIX access checks are not supported on this platform",
-        )
-        .into()))
+        let mode = crate::file::AccessFlags::from_bits(req.mode)
+            .unwrap_or(crate::file::AccessFlags::empty());
+        ResponseKind::Access(Self::wire_result(
+            self.server.vfs.access(request_path(&req.path), mode).await,
+        ))
     }
 
     async fn handle_glob(&self, req: GlobRequest) -> ResponseKind {

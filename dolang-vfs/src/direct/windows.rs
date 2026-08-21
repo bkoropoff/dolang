@@ -113,6 +113,16 @@ fn typed_windows_path(path: &Path) -> io::Result<Utf8TypedPath<'_>> {
 }
 
 impl Direct {
+    pub(super) async fn impl_access(
+        _path: PathBuf,
+        _mode: crate::file::AccessFlags,
+    ) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "POSIX access checks are not supported on Windows",
+        ))
+    }
+
     pub(super) async fn impl_rename(from: PathBuf, to: PathBuf, replace: bool) -> io::Result<()> {
         tokio::task::spawn_blocking(move || Self::rename_path(&from, &to, replace))
             .await

@@ -599,6 +599,8 @@ pub trait Vfs {
     async fn canonicalize(&self, path: Utf8TypedPath<'_>) -> Result<Utf8TypedPathBuf>;
     /// Returns the destination of a symbolic link.
     async fn read_link(&self, path: Utf8TypedPath<'_>) -> Result<Utf8TypedPathBuf>;
+    /// Checks whether the process can access a path with the requested permissions.
+    async fn access(&self, path: Utf8TypedPath<'_>, mode: file::AccessFlags) -> Result<()>;
     /// Expands a glob pattern beneath `root`.
     async fn glob(
         &self,
@@ -1927,6 +1929,13 @@ impl Vfs for AnyVfs {
         match self {
             Self::Client(client) => client.read_link(path).await,
             Self::Direct(direct) => direct.read_link(path).await,
+        }
+    }
+
+    async fn access(&self, path: Utf8TypedPath<'_>, mode: file::AccessFlags) -> crate::Result<()> {
+        match self {
+            Self::Client(client) => client.access(path, mode).await,
+            Self::Direct(direct) => direct.access(path, mode).await,
         }
     }
 
