@@ -592,6 +592,52 @@ impl Session {
         Ok(Arc::try_unwrap(resource).ok())
     }
 
+    /// Empties the handle, returning the resource if this call held the last
+    /// reference to it and *restoring* it if it did not.
+    ///
+    /// The recovering counterpart of [`unregister`](Self::unregister). On the
+    /// `None` path the resource goes back into the table under the same lock
+    /// that took it, so nothing observed it missing and the handle the peer
+    /// holds keeps working; the caller reports the operation busy without
+    /// having destroyed anything.
+    ///
+    /// That is only sound for an operation which does nothing else on the busy
+    /// path. `unregister` deliberately does not restore, because a close that
+    /// races an in-flight write must still take effect once the write finishes
+    /// — resurrecting the table's reference there would turn the close into a
+    /// silent no-op. Use this one where failing is genuinely a no-op, such as a
+    /// consuming conversion that the caller may retry.
+    pub(crate) fn try_unregister<T: OpaqueResource>(
+        &self,
+        value: Cite<T::Marker>,
+    ) -> Result<Option<T>, InvalidOpaque> {
+        // Unreachable for a decoded citation, as in `acquire`.
+        let Inner::Local(local) = &value.inner else {
+            return Err(InvalidOpaque);
+        };
+        self.check_serial(local.serial);
+        let mut tables = self.tables.lock().unwrap();
+        let entry = tables.local.get_mut(&local.id).ok_or(InvalidOpaque)?;
+        if entry.ty != TypeId::of::<T>() {
+            return Err(InvalidOpaque);
+        }
+        let resource = entry.resource.take().ok_or(InvalidOpaque)?;
+        let resource = match resource.downcast::<T>() {
+            Ok(resource) => resource,
+            Err(resource) => {
+                entry.resource = Some(resource);
+                return Err(InvalidOpaque);
+            }
+        };
+        match Arc::try_unwrap(resource) {
+            Ok(value) => Ok(Some(value)),
+            Err(shared) => {
+                entry.resource = Some(shared);
+                Ok(None)
+            }
+        }
+    }
+
     /// Applies a release frame from the peer. Unknown ids are ignored: a
     /// consuming operation races the peer's release by construction.
     pub(crate) fn release(&self, id: u64, count: u32) {
@@ -988,6 +1034,42 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(value.0, 42);
+    }
+
+    #[test]
+    fn try_unregister_restores_a_shared_value() {
+        let (session, _) = session();
+        let opaque = session.register(Value(42));
+        let guard = session.acquire::<Value>(cited(&session, &opaque)).unwrap();
+        assert!(
+            session
+                .try_unregister::<Value>(cited(&session, &opaque))
+                .unwrap()
+                .is_none()
+        );
+        drop(guard);
+        // Unlike `unregister`, the handle is still live afterwards, so a retry
+        // once the guard is gone succeeds.
+        assert_eq!(
+            session
+                .try_unregister::<Value>(cited(&session, &opaque))
+                .unwrap()
+                .unwrap()
+                .0,
+            42
+        );
+    }
+
+    #[test]
+    fn try_unregister_returns_exclusively_owned_value() {
+        let (session, _) = session();
+        let opaque = session.register(Value(42));
+        let value = session
+            .try_unregister::<Value>(cited(&session, &opaque))
+            .unwrap()
+            .unwrap();
+        assert_eq!(value.0, 42);
+        assert!(session.acquire::<Value>(cited(&session, &opaque)).is_err());
     }
 
     #[test]
