@@ -226,6 +226,7 @@ pub def setup
   :shell
   :target = nil
   :rust = true
+  :virt = false
 do
   # Filled in by "create CI VM" below when `target` needs one.
   let vm = nil
@@ -239,17 +240,17 @@ do
         - name: "configure cargo"
           icon: 🦀
           do configure_cargo()
+      if (virt && sys.os_info().os == :LINUX: && sys.cpu_info().arch == :X86_64:)
+        - name: "install virtualization packages"
+          icon: 📦
+          do install_virt()
+        - name: "unconfine user namespaces"
+          icon: 🔓
+          do unconfine()
       if (target == "x86_64-freebsd")
         # The VM is left running: GitHub runners are ephemeral, so it dies
         # with the job. `setup` exports `DOLANG_CI_VM` below once these have
         # run, pointing the `dolang-ci` wrapper at it for the rest of the job.
-        - name: "install virtualization packages"
-          icon: 📦
-          do 
-            install_virt()
-        - name: "unconfine user namespaces"
-          icon: 🔓
-          do unconfine()
         - name: "reclaim runner disk space"
           icon: 🧹
           do sudo.with do fs.remove all: true ignore: true ...RUNNER_BALLAST

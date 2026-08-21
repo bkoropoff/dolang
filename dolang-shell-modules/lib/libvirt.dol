@@ -571,6 +571,7 @@ pub class Domain
     catch proc.Error: e
       if missing_domain_error $stderr
         throw NoDomainError $self.name
+      echo $"\n".join(stderr)
       throw e
     xml.decode $source
 

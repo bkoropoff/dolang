@@ -1,0 +1,82 @@
+import digest libvirt sys test
+  fs:
+    - Path
+    - with_temp_dir
+
+test.tags slow release
+
+let FREEBSD_IMAGE = "https://download.freebsd.org/releases/VM-IMAGES/15.1-RELEASE/amd64/Latest/FreeBSD-15.1-RELEASE-amd64-BASIC-CLOUDINIT-ufs.raw.xz"
+let CACHE_DIR = Path(".cache").absolute()
+let DOLANG = if let archive = env.get "DOLANG_LIBVIRT_TEST_ARCHIVE"
+  Path $archive
+else
+  "bootstrap"
+
+if (sys.os_info().os != :LINUX:)
+  test.skip "libvirt provisioning requires Linux"
+if (sys.cpu_info().arch != :X86_64:)
+  test.skip "the FreeBSD CI image requires x86-64"
+for program = ["virsh", "libvirtd", "qemu-img", "cloud-localds", "genisoimage", "ssh", "scp", "ssh-keygen"]
+  if !run[program].which()
+    test.skip "$program is not installed"
+
+#[test.fixture]
+def cached block
+  CACHE_DIR.create_dir all: true
+  env XDG_CACHE_HOME: $CACHE_DIR XDG_DATA_HOME: (CACHE_DIR / "local") do block()
+
+#[test.test]
+#[cached]
+def provision_freebsd_and_run_command()
+  with_temp_dir do |dir|
+    let source = (dir / "upload.bin")
+    let downloaded = (dir / "download.bin")
+    run dd if=/dev/urandom of=$source bs=1M count=16 status=none
+    let source_data = source.read b
+    let expected = digest.blake3 $source_data
+
+    let domain = libvirt.create
+      image: $FREEBSD_IMAGE
+      os: :FREEBSD:
+      dolang: $DOLANG
+      app: dolang-libvirt-test
+      memory: 12288
+      vcpus: 4
+      disk_size: 50G
+      cache: :UNSAFE:
+      packages:
+        - sqlite3
+        - pkgconf
+        - curl
+        - llvm19
+        - sudo
+      init:
+        add:
+          target: /etc/rc.conf.d/firstboot_pkg_upgrade
+          content: |
+            firstboot_pkg_upgrade_enable="NO"
+        add:
+          target: /usr/local/etc/sudoers.d/ci
+          content: |
+            ci ALL=(ALL) NOPASSWD: ALL
+          chmod: 0o440
+          owner: "root:wheel"
+      add:
+        target: /home/ci/.profile
+        content: r|
+          PATH="$HOME/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          export PATH
+        chmod: 0o644
+
+    try
+      let output = domain.with do sub do run printf "hello world"
+      test.assert_eq $output "hello world"
+
+      domain.upload $source /tmp/dolang-libvirt-transfer.bin
+      domain.download /tmp/dolang-libvirt-transfer.bin $downloaded
+      let downloaded_data = downloaded.read b
+      test.assert_eq (digest.blake3 downloaded_data) $expected
+    finally
+      if (domain.state() != :SHUTOFF:)
+        domain.destroy()
+      domain.undefine()
