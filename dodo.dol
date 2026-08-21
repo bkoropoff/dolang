@@ -150,8 +150,11 @@ class Spec
     self.cargo build --bin dolang-vfs --bin dolang-private-polyfill
     self.cargo ...rest
 
-def default_shell_tests()
-  ["test"]
+def default_shell_tests full
+  $
+    test
+    if !full
+      --tags !slow
 
 def mkdocs_build_tools spec
   spec.cargo build
@@ -174,13 +177,13 @@ def with_mkdocs spec func
 def cargo_test spec rest
   spec.cargo test ...rest
 
-def shell_test spec tests
+def shell_test spec args
   spec.cargo_vfs run --bin dolang -- --module-path testlib -m test
-    ...(tests || default_shell_tests())
+    ...(args.args || default_shell_tests args.full)
 
-def both_test spec
+def both_test spec args
   cargo_test $spec []
-  shell_test $spec nil
+  shell_test $spec $ record args: nil full: $args.full
 
 def can_write_dir path
   try
@@ -289,15 +292,19 @@ return $
   "shell-test":
     help: run shell integration tests
     - arg: args
-      help: arguments to `dolang -m test` (default: $default_shell_tests())
+      help: arguments to `dolang -m test` (default: $(default_shell_tests false))
       collect: true
+    - flag: full
+      help: run all tests by default (superseded by `args`)
     do |args|
-      shell_test (Spec args) $args.args
+      shell_test (Spec args) $args
 
   "test":
     help: run all tests
+    - flag: full
+      help: run all tests by default
     do |args|
-      both_test (Spec args)
+      both_test (Spec args) $args
 
   "gen-bytecode-fuzz-seeds":
     help: generate bytecode fuzz seeds

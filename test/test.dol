@@ -1,0 +1,163 @@
+import proc shell
+  fs:
+    - with_temp_dir
+  test:
+    - TestInfo
+    - assert_eq
+    - assert_throws
+    - assert_type
+    - test
+    run: run_tests
+
+#[test]
+def metadata_and_predicate_filtering()
+  with_temp_dir do |dir|
+    let path = (dir / "metadata.dol")
+    path.write r|
+      import test:
+        - test
+
+      #[test name: "raw/custom" tags: ["fast", "linux", "fast"]]
+      def selected()
+        nil
+
+      #[test]
+      def rejected()
+        throw std.RuntimeError "predicate should exclude this test"
+
+    let seen = []
+    let filter = do |info|
+      assert_type $TestInfo $info
+      seen.push [info.module, info.name, info.tags]
+      (info.name == "raw/custom")
+    let rc = run_tests jobs: 1 module_jobs: 1 filter: $filter capture: true $path
+    assert_eq $rc 0
+    assert_eq $seen.len 2
+    assert_eq $seen[0][0] $path
+    assert_eq $seen[0][1] "raw/custom"
+    assert_eq $seen[0][2] (Tuple ["fast", "linux", "fast"])
+    assert_eq $seen[1][0] $path
+    assert_eq $seen[1][1] "rejected"
+    assert_eq $seen[1][2] (Tuple [])
+
+#[test]
+def module_tags_are_prepended_to_test_tags()
+  with_temp_dir do |dir|
+    let path = (dir / "module-tags.dol")
+    path.write r|
+      import test
+
+      test.tags "suite" "linux" "suite"
+
+      #[test.test name: "first" tags: ["fast", "linux"]]
+      def first()
+        nil
+
+      test.tags "later"
+
+      #[test.test]
+      def second()
+        nil
+
+    let seen = []
+    let filter = do |info|
+      seen.push [info.name, info.tags]
+      true
+    assert_eq (run_tests jobs: 1 module_jobs: 1 filter: filter capture: true path) 0
+    assert_eq $seen.len 2
+    assert_eq $seen[0] ["first", Tuple(["suite", "linux", "suite", "fast", "linux"])]
+    assert_eq $seen[1] ["second", Tuple(["suite", "linux", "suite", "later"])]
+
+#[test]
+def rejects_non_string_tags()
+  with_temp_dir do |dir|
+    let path = (dir / "bad-tags.dol")
+    path.write r|
+      import test:
+        - test
+
+      #[test tags: ["ok", 42]]
+      def bad()
+        nil
+
+    assert_eq (run_tests jobs: 1 module_jobs: 1 capture: true path) 1
+
+    path.write r|
+      import test
+      test.tags "ok" 42
+
+    assert_eq (run_tests jobs: 1 module_jobs: 1 capture: true path) 1
+
+def tagged_module dir
+  let path = (dir / "tagged.dol")
+  path.write r|
+    import fs:
+      - Path
+    import test:
+      - test
+
+    let marker_dir = Path $env["DOLANG_TEST_MARKER_DIR"]
+
+    #[test tags: ["fast", "linux"]]
+    def alpha()
+      (marker_dir / "alpha").write "yes"
+
+    #[test tags: ["slow", "linux"]]
+    def beta()
+      (marker_dir / "beta").write "yes"
+
+    #[test tags: ["fast", "windows"]]
+    def gamma()
+      (marker_dir / "gamma").write "yes"
+
+    #[test]
+    def plain()
+      (marker_dir / "plain").write "yes"
+
+  path
+
+def run_cli dir path ...args
+  for name = ["alpha", "beta", "gamma", "plain"]
+    let marker = (dir / name)
+    if marker.exists()
+      marker.remove()
+  env DOLANG_TEST_MARKER_DIR: $dir do
+    run $shell.exe --no-cache -m test --no-capture ...args $path
+
+def assert_markers dir expected
+  for name = ["alpha", "beta", "gamma", "plain"]
+    assert_eq $(dir / name).exists() $expected.contains(name) $name
+
+#[test]
+def cli_tag_selection()
+  with_temp_dir do |dir|
+    let path = tagged_module $dir
+
+    run_cli $dir $path
+    assert_markers $dir ["alpha", "beta", "gamma", "plain"]
+
+    run_cli $dir $path --tags fast,slow
+    assert_markers $dir ["alpha", "beta", "gamma"]
+
+    run_cli $dir $path --tags fast,slow --tags linux
+    assert_markers $dir ["alpha", "beta"]
+
+    run_cli $dir $path --tags !windows
+    assert_markers $dir ["alpha", "beta", "plain"]
+
+    run_cli $dir $path --tags !windows,!macos
+    assert_markers $dir ["alpha", "beta", "gamma", "plain"]
+
+    run_cli $dir $path --tags !windows --tags !linux
+    assert_markers $dir ["plain"]
+
+    run_cli $dir $path --filter "**/alpha" --tags fast
+    assert_markers $dir ["alpha"]
+
+#[test]
+def cli_rejects_malformed_tag_expressions()
+  with_temp_dir do |dir|
+    let path = tagged_module $dir
+    for expression = ["", "!", "fast,", ",fast", "fast,,slow"]
+      assert_throws $proc.Error do
+        run $shell.exe --no-cache -m test --tags $expression $path

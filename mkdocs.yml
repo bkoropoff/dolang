@@ -356,6 +356,7 @@ nav:
     - test:
       - api/test/index.md
       - api/test/skip.md
+      - api/test/test-info.md
     - time:
       - api/time/index.md
       - api/time/datetime.md
