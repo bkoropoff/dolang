@@ -6,11 +6,24 @@ edition = "2024"
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+autobins = false
+
+[[bin]]
+name = "dolang-vfs"
+path = "src/bin/dolang-vfs.rs"
+test = false
+
+[features]
+default = ["winreg", "winscm"]
+winreg = ["dep:dolang-vfs-winreg"]
+winscm = ["dep:dolang-vfs-winscm"]
 
 [dependencies]
 base64 = "0.22.1"
 dolang-rpc = { path = "../dolang-rpc", version = "0.1.1" }
 dolang-vfs = { path = "../dolang-vfs", version = "0.1.1" }
+dolang-vfs-winreg = { path = "../dolang-vfs-winreg", version = "0.1.1", optional = true }
+dolang-vfs-winscm = { path = "../dolang-vfs-winscm", version = "0.1.1", optional = true }
 tokio = { version = "1.48.0", features = ["io-std", "io-util", "macros", "net", "rt", "signal"] }
 
 [target.'cfg(unix)'.dependencies]
@@ -19,3 +32,12 @@ nix = { version = "0.31", features = ["fs", "user"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Environment", "Win32_System_Registry", "Win32_UI_Shell"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1.48.0", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+typed-path.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+futures = "0.3"
+libc = "0.2"
