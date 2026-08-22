@@ -22,7 +22,7 @@ use crate::{
     method,
     object::{
         self, BoundMethod, array, backtrace,
-        class::iter_natives,
+        class::{self, iter_natives},
         dict,
         function::Function,
         protocol::{Dispatch, GcObj, Header, Inspect, Protocol, Spread, SpreadContext, TypeHandle},
@@ -426,10 +426,24 @@ impl<'v> Value<'v> {
         vm: &Vm<'v>,
         vtbl: TypeHandle<'v, T>,
     ) -> Option<gc::Borrow<'v, 'a, Header, T>> {
+        self.downcast_native_with(vm.builtin_types().class_instance, vtbl)
+    }
+
+    /// [`Value::downcast_native`] against a pre-obtained [`ClassInstance`] type handle.
+    ///
+    /// Handles are plain vtable pointers, so a caller that has one cached (such as
+    /// [`Type`](crate::object::Type)) can look through subclass slots without holding a
+    /// [`Vm`] reference — which matters in contexts where none exists, such as
+    /// [`Object::finalize`](crate::object::Object::finalize).
+    pub(crate) fn downcast_native_with<'a, T: ?Sized + Protocol<'v>>(
+        &'a self,
+        class_instance: TypeHandle<'v, class::ClassInstance<'v>>,
+        vtbl: TypeHandle<'v, T>,
+    ) -> Option<gc::Borrow<'v, 'a, Header, T>> {
         if let Some(borrow) = self.downcast_ref(vtbl) {
             return Some(borrow);
         }
-        let ci_borrow = self.downcast_ref(vm.builtin_types().class_instance)?;
+        let ci_borrow = self.downcast_ref(class_instance)?;
         for slot_val in iter_natives(ci_borrow) {
             if let Some(borrow) = slot_val.downcast_ref(vtbl) {
                 return Some(borrow);
