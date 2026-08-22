@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// Operating system that produced a target description or native error code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum OperatingSystem {
     /// FreeBSD.
     FreeBsd,
@@ -46,6 +47,7 @@ impl OperatingSystem {
 
 /// CPU architecture reported by a VFS target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Architecture {
     /// 64-bit x86.
     X86_64,
@@ -66,13 +68,13 @@ pub enum OperatingSystemFamily {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TargetInfo {
     /// Target operating system.
-    pub operating_system: OperatingSystem,
+    pub(crate) os: OperatingSystem,
     /// Target CPU architecture.
-    pub architecture: Architecture,
+    pub(crate) arch: Architecture,
     /// Number of logical CPUs available to the target.
-    pub logical_cpu_count: u32,
+    pub(crate) logical_cpus: u32,
     /// Whether the target is Windows running under Wine, when applicable.
-    pub is_wine: Option<bool>,
+    pub(crate) is_wine: Option<bool>,
 }
 
 impl Architecture {
@@ -96,13 +98,30 @@ impl OperatingSystem {
         }
     }
 }
+
 impl TargetInfo {
+    /// Returns the target operating system.
+    pub const fn os(&self) -> OperatingSystem {
+        self.os
+    }
+    /// Returns the target CPU architecture.
+    pub const fn arch(&self) -> Architecture {
+        self.arch
+    }
+    /// Returns the number of logical CPUs available to the target.
+    pub const fn logical_cpus(&self) -> u32 {
+        self.logical_cpus
+    }
+    /// Returns whether Windows is running under Wine, when applicable.
+    pub const fn is_wine(&self) -> Option<bool> {
+        self.is_wine
+    }
     /// Returns a description of the current host.
     pub fn current() -> Self {
         Self {
-            operating_system: OperatingSystem::current(),
-            architecture: Architecture::current(),
-            logical_cpu_count: std::thread::available_parallelism()
+            os: OperatingSystem::current(),
+            arch: Architecture::current(),
+            logical_cpus: std::thread::available_parallelism()
                 .map_or(1, |count| u32::try_from(count.get()).unwrap_or(u32::MAX)),
             is_wine: current_wine_status(),
         }

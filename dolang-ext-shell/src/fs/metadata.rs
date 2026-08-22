@@ -244,14 +244,14 @@ impl<'v> Object<'v> for Metadata {
         let opaque = builder.sym("opaque");
         builder
             .get("size", |this, strand, out| {
-                Output::set(strand, out, this.annex().inner.len);
+                Output::set(strand, out, this.annex().inner.len());
                 Ok(())
             })
             .get("type", |this, strand, out| {
                 Output::set(
                     strand,
                     out,
-                    file_type_to_sym(this.annex().inner.file_type, this.annex().global),
+                    file_type_to_sym(this.annex().inner.file_type(), this.annex().global),
                 );
                 Ok(())
             })
@@ -260,8 +260,8 @@ impl<'v> Object<'v> for Metadata {
                 write_timestamp(
                     strand,
                     annex.global,
-                    annex.inner.mtime,
-                    annex.inner.mtime_nsec,
+                    annex.inner.mtime(),
+                    annex.inner.mtime_nsec(),
                     out,
                 )
             })
@@ -270,8 +270,8 @@ impl<'v> Object<'v> for Metadata {
                 write_timestamp(
                     strand,
                     annex.global,
-                    annex.inner.atime,
-                    annex.inner.atime_nsec,
+                    annex.inner.atime(),
+                    annex.inner.atime_nsec(),
                     out,
                 )
             })
@@ -280,8 +280,8 @@ impl<'v> Object<'v> for Metadata {
                 write_timestamp(
                     strand,
                     annex.global,
-                    annex.inner.ctime,
-                    annex.inner.ctime_nsec,
+                    annex.inner.ctime(),
+                    annex.inner.ctime_nsec(),
                     out,
                 )
             })
@@ -294,36 +294,41 @@ impl<'v> Object<'v> for Metadata {
                     .global
                     .types
                     .mode
-                    .create_flags(strand, Mode(unix.mode), out);
+                    .create_flags(strand, Mode(unix.mode()), out);
                 Ok(())
             })
             .get("dev", move |this, strand, out| {
-                util::option_field(strand, this.annex().inner.unix().map(|v| v.dev), dev, out)
+                util::option_field(strand, this.annex().inner.unix().map(|v| v.dev()), dev, out)
             })
             .get("ino", move |this, strand, out| {
-                util::option_field(strand, this.annex().inner.unix().map(|v| v.ino), ino, out)
+                util::option_field(strand, this.annex().inner.unix().map(|v| v.ino()), ino, out)
             })
             .get("nlink", move |this, strand, out| {
                 util::option_field(
                     strand,
-                    this.annex().inner.unix().map(|v| v.nlink),
+                    this.annex().inner.unix().map(|v| v.nlink()),
                     nlink,
                     out,
                 )
             })
             .get("uid", move |this, strand, out| {
-                util::option_field(strand, this.annex().inner.unix().map(|v| v.uid), uid, out)
+                util::option_field(strand, this.annex().inner.unix().map(|v| v.uid()), uid, out)
             })
             .get("gid", move |this, strand, out| {
-                util::option_field(strand, this.annex().inner.unix().map(|v| v.gid), gid, out)
+                util::option_field(strand, this.annex().inner.unix().map(|v| v.gid()), gid, out)
             })
             .get("rdev", move |this, strand, out| {
-                util::option_field(strand, this.annex().inner.unix().map(|v| v.rdev), rdev, out)
+                util::option_field(
+                    strand,
+                    this.annex().inner.unix().map(|v| v.rdev()),
+                    rdev,
+                    out,
+                )
             })
             .get("blksize", move |this, strand, out| {
                 util::option_field(
                     strand,
-                    this.annex().inner.unix().map(|v| v.blksize),
+                    this.annex().inner.unix().map(|v| v.block_size()),
                     blksize,
                     out,
                 )
@@ -331,7 +336,7 @@ impl<'v> Object<'v> for Metadata {
             .get("blocks", move |this, strand, out| {
                 util::option_field(
                     strand,
-                    this.annex().inner.unix().map(|v| v.blocks),
+                    this.annex().inner.unix().map(|v| v.blocks()),
                     blocks,
                     out,
                 )
@@ -349,7 +354,11 @@ impl<'v> Object<'v> for Metadata {
             })
             .get("user", move |this, strand, mut out| {
                 let annex = this.annex();
-                let Some(value) = annex.inner.windows().and_then(|value| value.user.clone()) else {
+                let Some(value) = annex
+                    .inner
+                    .windows()
+                    .and_then(|value| value.user().cloned())
+                else {
                     return Err(Error::field(strand, user));
                 };
                 crate::security::create_sid(strand, annex.global, value, &mut out);
@@ -357,7 +366,10 @@ impl<'v> Object<'v> for Metadata {
             })
             .get("group", move |this, strand, mut out| {
                 let annex = this.annex();
-                let Some(value) = annex.inner.windows().and_then(|value| value.group.clone())
+                let Some(value) = annex
+                    .inner
+                    .windows()
+                    .and_then(|value| value.group().cloned())
                 else {
                     return Err(Error::field(strand, group));
                 };
@@ -365,20 +377,14 @@ impl<'v> Object<'v> for Metadata {
                 Ok(())
             })
             .get("linux_attrs", move |this, strand, out| {
-                match &this.annex().inner.family {
-                    dolang_vfs::metadata::MetadataFamily::Unix(
-                        dolang_vfs::metadata::UnixMetadata {
-                            platform: dolang_vfs::metadata::UnixMetadataPlatform::Linux { attrs },
-                            ..
-                        },
-                    ) => {
-                        if let Some(attrs) = attrs {
-                            Output::set(strand, out, *attrs);
-                        }
-                        Ok(())
-                    }
-                    _ => Err(Error::field(strand, linux_attrs)),
+                let annex = this.annex();
+                let Some(unix) = annex.inner.unix() else {
+                    return Err(Error::field(strand, linux_attrs));
+                };
+                if let Some(attrs) = unix.linux_attrs() {
+                    Output::set(strand, out, attrs);
                 }
+                Ok(())
             })
             .get("macos_attrs", move |this, strand, out| {
                 util::option_field(strand, this.annex().inner.macos_attrs(), macos_attrs, out)

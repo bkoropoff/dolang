@@ -46,7 +46,7 @@ async fn embedded_vfs_mode_serves_and_stops() {
     let current_exe = std::env::current_exe().unwrap();
     let current_exe = Utf8TypedPath::Windows(Utf8WindowsPath::new(current_exe.to_str().unwrap()));
     let metadata = client.metadata(current_exe).await.unwrap();
-    assert!(metadata.len > 0);
+    assert!(!metadata.is_empty());
 
     client.stop().await.unwrap();
     client.close().await;

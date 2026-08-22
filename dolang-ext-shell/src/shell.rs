@@ -722,7 +722,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             // A function rather than a getter: the answer follows the VFS
             // target, so it is a question about the current context rather
             // than a constant of the module.
-            let os = global.local.get(strand).target().operating_system;
+            let os = global.local.get(strand).target().os();
             let ending = std::str::from_utf8(line_ending(os)).unwrap();
             Output::set(strand, out, ending);
             Ok(())

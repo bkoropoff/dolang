@@ -231,12 +231,7 @@ impl<'v> strand::Local<'v> for Local {
         Self {
             cwd: RefCell::new(vfs.cwd().to_path_buf()),
             env: RefCell::new(Rc::new(Env::derived(
-                Rc::new(Env::new(
-                    None,
-                    true,
-                    vfs.env(),
-                    vfs.target().operating_system,
-                )),
+                Rc::new(Env::new(None, true, vfs.env(), vfs.target().os())),
                 Default::default(),
             ))),
             vfs: RefCell::new(vfs),
@@ -316,12 +311,7 @@ impl Local {
         f: impl AsyncFnOnce(&mut Strand<'v, 's>) -> R,
     ) -> R {
         let cwd = vfs.cwd().to_path_buf();
-        let env = Rc::new(Env::new(
-            None,
-            true,
-            vfs.env(),
-            vfs.target().operating_system,
-        ));
+        let env = Rc::new(Env::new(None, true, vfs.env(), vfs.target().os()));
         let local = global.local.get(strand);
         let orig_vfs = local.replace_vfs(vfs);
         let orig_cwd = local.replace_cwd(cwd);

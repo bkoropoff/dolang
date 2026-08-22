@@ -12,7 +12,7 @@
 //! The topology deliberately mirrors a real deployment: client and server
 //! each get their own **current-thread** runtime on their own thread, as
 //! `dolang-shell` and the `dolang-vfs` agent both do
-//! (`dolang-vfs/src/service.rs`, `dolang-shell-main/src/lib.rs`). This
+//! (`dolang-shell-vfs/src/lib.rs`, `dolang-shell-main/src/lib.rs`). This
 //! matters for what the numbers mean — the trailer send path hands a
 //! fragment straight to the transport when the driver can be reached
 //! cooperatively, and that handoff behaves differently on a multi-threaded
@@ -42,6 +42,7 @@ mod bench {
 
     /// Matches the buffer `dolang-ext-shell` requests for its remote VFS
     /// subprocess transport (`REMOTE_VFS_PIPE_BUFFER_SIZE`).
+    #[cfg(target_os = "linux")]
     const PIPE_BUFFER_SIZE: usize = 1024 * 1024;
 
     /// Creates a pipe as raw descriptors, so each end can be registered with

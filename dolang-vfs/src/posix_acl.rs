@@ -1,7 +1,7 @@
 use serde::{Deserialize, Deserializer, Serialize, de};
 use std::{collections::HashSet, error, fmt};
 
-use crate::metadata::Permission;
+use crate::security::Permission;
 
 /// The principal or class selected by a POSIX.1e ACL entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -24,9 +24,27 @@ pub enum PosixAclQualifier {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PosixAce {
     /// Principal or class controlled by this entry.
-    pub qualifier: PosixAclQualifier,
+    pub(crate) qualifier: PosixAclQualifier,
     /// Permissions granted by this entry.
-    pub permissions: Permission,
+    pub(crate) permissions: Permission,
+}
+
+impl PosixAce {
+    /// Creates a POSIX ACL entry.
+    pub const fn new(qualifier: PosixAclQualifier, permissions: Permission) -> Self {
+        Self {
+            qualifier,
+            permissions,
+        }
+    }
+    /// Returns the principal or class to which this entry applies.
+    pub const fn qualifier(self) -> PosixAclQualifier {
+        self.qualifier
+    }
+    /// Returns the permissions granted by this entry.
+    pub const fn permissions(self) -> Permission {
+        self.permissions
+    }
 }
 
 /// A validated, portable POSIX.1e access-control list.
@@ -64,6 +82,7 @@ impl<'de> Deserialize<'de> for PosixAcl {
 
 /// Validation error returned while constructing a POSIX ACL.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PosixAclError {
     /// The ACL contains no entries.
     Empty,

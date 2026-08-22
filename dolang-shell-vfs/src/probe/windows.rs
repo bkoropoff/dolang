@@ -27,22 +27,26 @@ use std::{
     ffi::{OsStr, OsString},
     io,
     os::windows::ffi::{OsStrExt, OsStringExt},
-    ptr,
+    path::PathBuf,
+    ptr, slice,
 };
 
 use windows_sys::Win32::{
-    Foundation::{ERROR_MORE_DATA, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS},
+    Foundation::{ERROR_MORE_DATA, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, S_OK},
     System::{
+        Com::CoTaskMemFree,
         Environment::ExpandEnvironmentStringsW,
         Registry::{
             HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, REG_EXPAND_SZ, REG_SZ,
             RegCloseKey, RegEnumValueW, RegOpenKeyExW,
         },
     },
-    UI::Shell::{FOLDERID_LocalAppData, FOLDERID_Profile, FOLDERID_RoamingAppData},
+    UI::Shell::{
+        FOLDERID_LocalAppData, FOLDERID_Profile, FOLDERID_RoamingAppData, KF_FLAG_DONT_VERIFY,
+        SHGetKnownFolderPath,
+    },
 };
-
-use crate::direct::Direct;
+use windows_sys::core::GUID;
 
 /// Machine-wide environment key.
 const MACHINE_KEY: &str = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
@@ -69,7 +73,7 @@ pub(crate) unsafe fn import(_shell: Option<&OsStr>) -> io::Result<()> {
         ] {
             // A missing known folder is not fatal: the stale value is no worse
             // than what we started with.
-            if let Ok(path) = Direct::known_folder(folder) {
+            if let Ok(path) = known_folder(folder) {
                 std::env::set_var(name, path);
             }
         }
@@ -90,6 +94,31 @@ pub(crate) unsafe fn import(_shell: Option<&OsStr>) -> io::Result<()> {
     }
 
     Ok(())
+}
+
+fn known_folder(folder_id: &GUID) -> io::Result<PathBuf> {
+    unsafe extern "C" {
+        fn wcslen(buf: *const u16) -> usize;
+    }
+
+    unsafe {
+        let mut path = ptr::null_mut();
+        let result = SHGetKnownFolderPath(
+            folder_id,
+            KF_FLAG_DONT_VERIFY as u32,
+            ptr::null_mut(),
+            &mut path,
+        );
+        if result == S_OK {
+            let path_slice = slice::from_raw_parts(path, wcslen(path));
+            let out = PathBuf::from(OsString::from_wide(path_slice));
+            CoTaskMemFree(path.cast());
+            Ok(out)
+        } else {
+            CoTaskMemFree(path.cast());
+            Err(io::Error::from_raw_os_error(result))
+        }
+    }
 }
 
 /// Read every string value of a registry key, expanding `REG_EXPAND_SZ`.

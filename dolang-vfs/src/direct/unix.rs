@@ -6,13 +6,13 @@ use crate::metadata::{MetadataFamily, UnixMetadata, UnixMetadataPlatform};
 use crate::{
     error::{Error, ErrorKind, Result},
     file::StreamEntry,
+    file::{XattrEntry, XattrNamespace},
     metadata::{
         FileType, FsMetadata, FsMetadataFamily, MetadataPatch, Mode, UnixFsMetadata,
         UnixFsMetadataPlatform,
     },
     process::ProcessControl,
     security::OwnershipIdentity,
-    xattr::{XattrEntry, XattrNamespace},
 };
 use dolang_winterop::security::SecDesc;
 #[cfg(target_os = "linux")]

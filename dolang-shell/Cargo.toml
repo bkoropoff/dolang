@@ -12,6 +12,11 @@ autobins = false
 name = "dolang"
 path = "src/main.rs"
 
+[[bin]]
+name = "dolang-vfs"
+path = "src/vfs.rs"
+test = false
+
 [features]
 default = ["base64", "digest", "json", "regex", "glob", "http", "http_mock", "zip", "tar", "sqlite", "xml", "yaml", "progress", "rand", "toml", "patch", "winreg", "winscm"]
 debug = ["dolang-shell-main/debug"]
@@ -32,10 +37,13 @@ progress = ["dep:dolang-ext-progress"]
 rand = ["dep:dolang-ext-rand"]
 toml = ["dep:dolang-ext-toml"]
 patch = ["dep:dolang-ext-patch"]
-winreg = ["dep:dolang-ext-winreg"]
-winscm = ["dep:dolang-ext-winscm"]
+winreg = ["dep:dolang-ext-winreg", "dep:dolang-vfs-winreg"]
+winscm = ["dep:dolang-ext-winscm", "dep:dolang-vfs-winscm"]
 
 [dependencies]
+dolang-shell-vfs = { path = "../dolang-shell-vfs", version = "0.1.1" }
+dolang-vfs-winreg = { path = "../dolang-vfs-winreg", version = "0.1.1", optional = true }
+dolang-vfs-winscm = { path = "../dolang-vfs-winscm", version = "0.1.1", optional = true }
 [dependencies.dolang-shell-main]
 path = "../dolang-shell-main"
 version = "0.1.1"
@@ -52,9 +60,17 @@ version = "0.1.1"
 path = "../dolang-vfs"
 version = "0.1.1"
 
-[target.'cfg(windows)'.dev-dependencies]
-tokio = { version = "1.48.0", features = ["io-util", "macros", "net", "process", "rt"] }
+[dev-dependencies]
+base64 = "0.22.1"
+dolang-rpc = { path = "../dolang-rpc", version = "0.1.1" }
+dolang-vfs = { path = "../dolang-vfs", version = "0.1.1" }
+tempfile = "3"
+tokio = { version = "1.48.0", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 typed-path.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+futures = "0.3"
+libc = "0.2"
 
 [dependencies.dolang-ext-digest]
 path = "../dolang-ext-digest"

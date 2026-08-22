@@ -60,7 +60,7 @@ fn main() {
 fn run_vfs_mode(args: impl IntoIterator<Item = OsString>) -> Option<i32> {
     let args: Vec<OsString> = args.into_iter().collect();
     let vfs_pos = args.iter().position(|a| a == "--vfs")?;
-    let code = match dolang_vfs::service::main(args[vfs_pos + 1..].iter()) {
+    let code = match dolang_shell_vfs::main(args[vfs_pos + 1..].iter()) {
         Ok(()) => 0,
         Err(error) => {
             eprintln!("error: {error}");

@@ -1281,6 +1281,7 @@ dependencies = [
 name = "dolang-shell"
 version = "0.1.1"
 dependencies = [
+ "base64",
  "dolang",
  "dolang-ext-base64",
  "dolang-ext-compile",
@@ -1304,9 +1305,16 @@ dependencies = [
  "dolang-ext-yaml",
  "dolang-ext-zip",
  "dolang-private-bundle",
+ "dolang-rpc",
  "dolang-shell-main",
  "dolang-shell-modules",
+ "dolang-shell-vfs",
  "dolang-vfs",
+ "dolang-vfs-winreg",
+ "dolang-vfs-winscm",
+ "futures",
+ "libc",
+ "tempfile",
  "tokio",
  "typed-path",
 ]
@@ -1344,20 +1352,16 @@ dependencies = [
  "base64",
  "dolang-rpc",
  "dolang-vfs",
- "dolang-vfs-winreg",
- "dolang-vfs-winscm",
- "futures",
  "libc",
- "tempfile",
+ "nix",
  "tokio",
- "typed-path",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "dolang-vfs"
 version = "0.1.1"
 dependencies = [
- "base64",
  "bitflags",
  "bytes",
  "criterion",

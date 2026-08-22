@@ -88,13 +88,46 @@ pub enum Nfs4AceQualifier {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Nfs4Ace {
     /// Whether this entry allows, denies, audits, or alarms.
-    pub ace_type: Nfs4AceType,
+    pub(crate) ace_type: Nfs4AceType,
     /// Principal controlled by this entry.
-    pub qualifier: Nfs4AceQualifier,
+    pub(crate) qualifier: Nfs4AceQualifier,
     /// Permissions named by this entry.
-    pub mask: Nfs4AceMask,
+    pub(crate) mask: Nfs4AceMask,
     /// Inheritance and audit/alarm flags.
-    pub flags: Nfs4AceFlags,
+    pub(crate) flags: Nfs4AceFlags,
+}
+
+impl Nfs4Ace {
+    /// Creates an NFSv4 ACL entry.
+    pub const fn new(
+        ace_type: Nfs4AceType,
+        qualifier: Nfs4AceQualifier,
+        mask: Nfs4AceMask,
+        flags: Nfs4AceFlags,
+    ) -> Self {
+        Self {
+            ace_type,
+            qualifier,
+            mask,
+            flags,
+        }
+    }
+    /// Returns whether this entry allows or denies access.
+    pub const fn ace_type(self) -> Nfs4AceType {
+        self.ace_type
+    }
+    /// Returns the principal to which this entry applies.
+    pub const fn qualifier(self) -> Nfs4AceQualifier {
+        self.qualifier
+    }
+    /// Returns the access-rights mask.
+    pub const fn mask(self) -> Nfs4AceMask {
+        self.mask
+    }
+    /// Returns the inheritance and qualifier flags.
+    pub const fn flags(self) -> Nfs4AceFlags {
+        self.flags
+    }
 }
 
 /// A portable NFSv4 access-control list.

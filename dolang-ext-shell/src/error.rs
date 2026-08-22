@@ -432,6 +432,7 @@ fn sys_error<'v, 's>(strand: &mut Strand<'v, 's>, error: VfsError) -> Error<'v, 
         ErrorKind::OutOfMemory => {
             create_sys_error(strand, global.types.out_of_memory, message, system_code)
         }
+        _ => create_sys_error(strand, global.types.sys_error, message, system_code),
     }
 }
 
@@ -474,7 +475,7 @@ pub(crate) fn proc_status_error<'v, 's>(
     status: dolang_vfs::process::ProcessStatus,
 ) -> Error<'v, 's> {
     let global = strand.state::<Global<'v>>();
-    let operating_system = global.local.get(strand).target().operating_system;
+    let operating_system = global.local.get(strand).target().os();
     Error::object_with_annex(
         strand,
         global.types.proc_error,

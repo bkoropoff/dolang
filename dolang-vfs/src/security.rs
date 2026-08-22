@@ -6,16 +6,30 @@ use serde::{Deserialize, Serialize};
 use std::io;
 
 use crate::error::Result;
-pub use crate::macos_acl::{MacosAce, MacosAceFlags, MacosAceMask, MacosAceType, MacosAcl};
-pub use crate::metadata::{Mode, Permission};
-pub use crate::nfs4_acl::{
-    Nfs4Ace, Nfs4AceFlags, Nfs4AceMask, Nfs4AceQualifier, Nfs4AceType, Nfs4Acl,
+pub use crate::{
+    macos_acl::{MacosAce, MacosAceFlags, MacosAceMask, MacosAceType, MacosAcl},
+    nfs4_acl::{Nfs4Ace, Nfs4AceFlags, Nfs4AceMask, Nfs4AceQualifier, Nfs4AceType, Nfs4Acl},
+    posix_acl::{PosixAce, PosixAcl, PosixAclError, PosixAclQualifier},
 };
-pub use crate::posix_acl::{PosixAce, PosixAcl, PosixAclError, PosixAclQualifier};
+
+bitflags::bitflags! {
+    /// Unix read/write/execute permission bits, as granted by one class of a
+    /// [`crate::metadata::Mode`] or one entry of a POSIX ACL.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    pub struct Permission: u8 {
+        /// Grants read access.
+        const READ = 0o4;
+        /// Grants write access.
+        const WRITE = 0o2;
+        /// Grants execute or directory-search access.
+        const EXECUTE = 0o1;
+    }
+}
 
 /// Selects which kind of access-control list a `get_acl`-style operation
 /// should read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum AclKind {
     /// POSIX.1e ACL.
     Posix,
@@ -31,6 +45,7 @@ pub enum AclKind {
 /// ones, which infer the kind from the variant rather than taking a separate
 /// selector.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Acl {
     /// POSIX.1e ACL.
     Posix(PosixAcl),
@@ -55,6 +70,7 @@ impl Acl {
 /// [`Vfs::resolve_principal_id`](crate::Vfs::resolve_principal_id) to
 /// convert between them (e.g. a Unix uid/gid and a macOS `guid_t`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum PrincipalId {
     /// A Unix user ID.
     Uid(u32),
@@ -67,6 +83,7 @@ pub enum PrincipalId {
 /// Selects which [`PrincipalId`] variant a `resolve_principal_id`-style
 /// operation should produce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum PrincipalIdKind {
     /// Resolve to a Unix user ID.
     Uid,
@@ -78,6 +95,7 @@ pub enum PrincipalIdKind {
 
 /// An owner or group selected by numeric ID, account name, or Windows SID.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum OwnershipIdentity {
     /// A platform numeric user or group ID.
     Id(u32),
@@ -89,7 +107,11 @@ pub enum OwnershipIdentity {
 
 /// Snapshot of a VFS target's process security context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SecurityInfo {
+#[serde(transparent)]
+pub struct SecurityInfo(SecurityInfoInner);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+enum SecurityInfoInner {
     /// Unix identity information.
     Unix(UnixSecurityInfo),
     /// Windows token information.
@@ -100,43 +122,44 @@ pub enum SecurityInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnixSecurityInfo {
     /// Real user ID.
-    pub uid: u32,
+    pub(crate) uid: u32,
     /// Real group ID.
-    pub gid: u32,
+    pub(crate) gid: u32,
     /// Effective user ID.
-    pub euid: u32,
+    pub(crate) euid: u32,
     /// Effective group ID.
-    pub egid: u32,
+    pub(crate) egid: u32,
     /// Supplementary group IDs.
-    pub group_ids: Vec<u32>,
+    pub(crate) group_ids: Vec<u32>,
 }
 
 /// Windows token information for a VFS target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WindowsTokenInfo {
     /// Whether the token has elevated administrator privileges.
-    pub is_elevated: bool,
+    pub(crate) is_elevated: bool,
     /// Token user SID.
-    pub user_sid: Sid,
+    pub(crate) user_sid: Sid,
     /// Token owner SID.
-    pub owner_sid: Sid,
+    pub(crate) owner_sid: Sid,
     /// Token primary group SID.
-    pub primary_group_sid: Sid,
+    pub(crate) primary_group_sid: Sid,
     /// Token group memberships.
-    pub groups: Vec<TokenGroup>,
+    pub(crate) groups: Vec<TokenGroup>,
 }
 
 /// A Windows token group SID and its attribute mask.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenGroup {
     /// Group security identifier.
-    pub sid: Sid,
+    pub(crate) sid: Sid,
     /// Native group attributes bitmask.
-    pub attributes: TokenGroupAttributes,
+    pub(crate) attributes: TokenGroupAttributes,
 }
 
 /// Classification returned by Windows account-name lookup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum SidNameUse {
     /// User account.
     User,
@@ -166,22 +189,91 @@ pub enum SidNameUse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SidName {
     /// Resolved security identifier.
-    pub sid: Sid,
+    pub(crate) sid: Sid,
     /// Account name.
-    pub name: String,
+    pub(crate) name: String,
     /// Account domain.
-    pub domain: String,
+    pub(crate) domain: String,
     /// Account classification.
-    pub kind: SidNameUse,
+    pub(crate) kind: SidNameUse,
 }
 
 impl SecurityInfo {
+    /// Returns the Unix security information, if this is a Unix target.
+    pub fn unix(&self) -> Option<&UnixSecurityInfo> {
+        match &self.0 {
+            SecurityInfoInner::Unix(info) => Some(info),
+            _ => None,
+        }
+    }
+    /// Returns the Windows token information, if this is a Windows target.
+    pub fn windows(&self) -> Option<&WindowsTokenInfo> {
+        match &self.0 {
+            SecurityInfoInner::Windows(info) => Some(info),
+            _ => None,
+        }
+    }
     /// Captures the security context of the current process.
     pub fn current() -> Result<Self> {
         #[cfg(unix)]
-        return Ok(Self::Unix(UnixSecurityInfo::current()?));
+        return Ok(Self(SecurityInfoInner::Unix(UnixSecurityInfo::current()?)));
         #[cfg(windows)]
-        return Ok(Self::Windows(WindowsTokenInfo::current()?));
+        return Ok(Self(SecurityInfoInner::Windows(
+            WindowsTokenInfo::current()?
+        )));
+    }
+}
+
+impl UnixSecurityInfo {
+    /// Returns the real user ID.
+    pub const fn uid(&self) -> u32 {
+        self.uid
+    }
+    /// Returns the real group ID.
+    pub const fn gid(&self) -> u32 {
+        self.gid
+    }
+    /// Returns the effective user ID.
+    pub const fn effective_uid(&self) -> u32 {
+        self.euid
+    }
+    /// Returns the effective group ID.
+    pub const fn effective_gid(&self) -> u32 {
+        self.egid
+    }
+    /// Returns the supplementary group IDs.
+    pub fn group_ids(&self) -> &[u32] {
+        &self.group_ids
+    }
+}
+
+impl TokenGroup {
+    /// Returns the group security identifier.
+    pub fn sid(&self) -> &Sid {
+        &self.sid
+    }
+    /// Returns the native token-group attributes.
+    pub const fn attributes(&self) -> TokenGroupAttributes {
+        self.attributes
+    }
+}
+
+impl SidName {
+    /// Returns the resolved security identifier.
+    pub fn sid(&self) -> &Sid {
+        &self.sid
+    }
+    /// Returns the account name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    /// Returns the account domain.
+    pub fn domain(&self) -> &str {
+        &self.domain
+    }
+    /// Returns the account classification.
+    pub const fn kind(&self) -> SidNameUse {
+        self.kind
     }
 }
 
@@ -259,6 +351,26 @@ fn current_group_ids(euid: nix::unistd::Uid, egid: nix::unistd::Gid) -> Result<V
 }
 
 impl WindowsTokenInfo {
+    /// Returns whether the token has elevated administrator privileges.
+    pub const fn is_elevated(&self) -> bool {
+        self.is_elevated
+    }
+    /// Returns the token user SID.
+    pub fn user_sid(&self) -> &Sid {
+        &self.user_sid
+    }
+    /// Returns the token owner SID.
+    pub fn owner_sid(&self) -> &Sid {
+        &self.owner_sid
+    }
+    /// Returns the token primary group SID.
+    pub fn primary_group_sid(&self) -> &Sid {
+        &self.primary_group_sid
+    }
+    /// Returns the token group memberships.
+    pub fn groups(&self) -> &[TokenGroup] {
+        &self.groups
+    }
     /// Returns the logon SID identified by the token group attributes.
     pub fn logon_sid(&self) -> Option<&Sid> {
         self.groups

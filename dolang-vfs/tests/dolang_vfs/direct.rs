@@ -3,12 +3,12 @@ use std::collections::HashMap;
 use std::{io, path::Path};
 
 #[cfg(any(windows, target_os = "linux"))]
-use dolang_vfs::metadata::{AttrFlags, AttrsPatch};
+use dolang_vfs::metadata::AttrFlags;
 #[cfg(any(unix, windows))]
 use dolang_vfs::process::{ProcessControl, Signal, TerminationPolicy};
 use dolang_vfs::{
     Vfs,
-    file::{File, FileLockBehavior, FileLockMode, FileLockRange, FileLockRequest},
+    file::{File, FileLockBehavior, FileLockMode, FileLockRange},
     metadata::{FileType, MetadataPatch},
 };
 #[cfg(windows)]
@@ -26,9 +26,9 @@ fn typed(path: &Path) -> Utf8TypedPath<'_> {
 }
 
 #[cfg(any(windows, target_os = "linux"))]
-fn attr_patch(flag: AttrFlags, value: bool) -> AttrsPatch {
-    let mut patch = AttrsPatch::default();
-    patch.update(flag, Some(value));
+fn attr_patch(flag: AttrFlags, value: bool) -> MetadataPatch {
+    let mut patch = MetadataPatch::new();
+    patch.attribute(flag, Some(value));
     patch
 }
 
@@ -147,11 +147,11 @@ async fn background_termination_signals_the_process_group() {
         .arg("-c")
         .arg(&script)
         .process_control(ProcessControl::Background)
-        .termination_policy(TerminationPolicy {
-            signal: Signal::Term,
-            grace: std::time::Duration::from_secs(1),
-            force: true,
-        });
+        .termination_policy(TerminationPolicy::new(
+            Signal::Term,
+            std::time::Duration::from_secs(1),
+            true,
+        ));
     let child = command.spawn().await.unwrap();
     let descendant = wait_for_pid(&pid_path).await;
 
@@ -180,11 +180,11 @@ async fn force_false_orphans_the_background_process_group() {
         .arg("-c")
         .arg(&script)
         .process_control(ProcessControl::Background)
-        .termination_policy(TerminationPolicy {
-            signal: Signal::Term,
-            grace: std::time::Duration::from_millis(50),
-            force: false,
-        });
+        .termination_policy(TerminationPolicy::new(
+            Signal::Term,
+            std::time::Duration::from_millis(50),
+            false,
+        ));
     let child = command.spawn().await.unwrap();
     let group = wait_for_pid(&pid_path).await;
 
@@ -203,11 +203,11 @@ async fn assert_windows_termination(control: ProcessControl) {
         .arg("/C")
         .arg("ping -n 60 127.0.0.1 >nul")
         .process_control(control)
-        .termination_policy(TerminationPolicy {
-            signal: Signal::Term,
-            grace: std::time::Duration::from_millis(50),
-            force: true,
-        });
+        .termination_policy(TerminationPolicy::new(
+            Signal::Term,
+            std::time::Duration::from_millis(50),
+            true,
+        ));
     let child = command.spawn().await.unwrap();
     let status = tokio::time::timeout(std::time::Duration::from_secs(5), child.terminate())
         .await
@@ -233,11 +233,23 @@ fn lock_request(
     end: Option<u64>,
     mode: FileLockMode,
     behavior: FileLockBehavior,
-) -> FileLockRequest {
-    FileLockRequest {
-        range: FileLockRange { start, end },
-        mode,
-        behavior,
+) -> (FileLockRange, FileLockMode, FileLockBehavior) {
+    (FileLockRange::new(start, end).unwrap(), mode, behavior)
+}
+
+trait FileLockTestExt {
+    async fn lock_request(
+        &self,
+        request: (FileLockRange, FileLockMode, FileLockBehavior),
+    ) -> dolang_vfs::error::Result<Option<dolang_vfs::file::FileLock>>;
+}
+
+impl FileLockTestExt for File {
+    async fn lock_request(
+        &self,
+        (range, mode, behavior): (FileLockRange, FileLockMode, FileLockBehavior),
+    ) -> dolang_vfs::error::Result<Option<dolang_vfs::file::FileLock>> {
+        self.lock(range, mode, behavior).await
     }
 }
 
@@ -262,7 +274,7 @@ async fn byte_range_locks_contend_and_release() {
     let second = open_lock_file(&direct, &path).await;
 
     let mut exclusive = first
-        .lock(lock_request(
+        .lock_request(lock_request(
             0,
             Some(10),
             FileLockMode::Exclusive,
@@ -273,7 +285,7 @@ async fn byte_range_locks_contend_and_release() {
         .unwrap();
     assert!(
         second
-            .lock(lock_request(
+            .lock_request(lock_request(
                 0,
                 Some(10),
                 FileLockMode::Exclusive,
@@ -284,7 +296,7 @@ async fn byte_range_locks_contend_and_release() {
             .is_none()
     );
     let mut adjacent = second
-        .lock(lock_request(
+        .lock_request(lock_request(
             10,
             Some(20),
             FileLockMode::Exclusive,
@@ -297,7 +309,7 @@ async fn byte_range_locks_contend_and_release() {
     exclusive.release().await.unwrap();
     assert!(
         second
-            .lock(lock_request(
+            .lock_request(lock_request(
                 0,
                 Some(10),
                 FileLockMode::Exclusive,
@@ -322,7 +334,7 @@ async fn handing_a_file_to_a_child_releases_its_locks() {
     let second = open_lock_file(&direct, &path).await;
 
     let mut held = first
-        .lock(lock_request(
+        .lock_request(lock_request(
             0,
             None,
             FileLockMode::Exclusive,
@@ -338,7 +350,7 @@ async fn handing_a_file_to_a_child_releases_its_locks() {
 
     assert!(
         second
-            .lock(lock_request(
+            .lock_request(lock_request(
                 0,
                 None,
                 FileLockMode::Exclusive,
@@ -364,7 +376,7 @@ async fn byte_range_locks_are_rejected() {
 
     for (start, end) in [(0, Some(10)), (1, None)] {
         let error = file
-            .lock(lock_request(
+            .lock_request(lock_request(
                 start,
                 end,
                 FileLockMode::Exclusive,
@@ -386,7 +398,7 @@ async fn shared_locks_and_same_handle_overlap_rules() {
     let third = open_lock_file(&direct, &path).await;
 
     let _first_shared = first
-        .lock(lock_request(
+        .lock_request(lock_request(
             0,
             None,
             FileLockMode::Shared,
@@ -396,7 +408,7 @@ async fn shared_locks_and_same_handle_overlap_rules() {
         .unwrap()
         .unwrap();
     let _second_shared = second
-        .lock(lock_request(
+        .lock_request(lock_request(
             0,
             None,
             FileLockMode::Shared,
@@ -407,7 +419,7 @@ async fn shared_locks_and_same_handle_overlap_rules() {
         .unwrap();
     assert!(
         third
-            .lock(lock_request(
+            .lock_request(lock_request(
                 0,
                 None,
                 FileLockMode::Exclusive,
@@ -419,7 +431,7 @@ async fn shared_locks_and_same_handle_overlap_rules() {
     );
     assert!(
         first
-            .lock(lock_request(
+            .lock_request(lock_request(
                 0,
                 None,
                 FileLockMode::Shared,
@@ -439,7 +451,7 @@ async fn finite_empty_range_is_rejected() {
     let first = open_lock_file(&direct, &path).await;
 
     let error = first
-        .lock(lock_request(
+        .lock_request(lock_request(
             4,
             Some(4),
             FileLockMode::Exclusive,
@@ -460,7 +472,7 @@ async fn finite_empty_range_uses_native_windows_behavior() {
     let second = open_lock_file(&direct, &path).await;
 
     let error = first
-        .lock(lock_request(
+        .lock_request(lock_request(
             0,
             Some(0),
             FileLockMode::Exclusive,
@@ -471,7 +483,7 @@ async fn finite_empty_range_uses_native_windows_behavior() {
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
 
     let _empty = first
-        .lock(lock_request(
+        .lock_request(lock_request(
             4,
             Some(4),
             FileLockMode::Exclusive,
@@ -482,7 +494,7 @@ async fn finite_empty_range_uses_native_windows_behavior() {
         .unwrap();
 
     let mut same = first
-        .lock(lock_request(
+        .lock_request(lock_request(
             4,
             Some(4),
             FileLockMode::Exclusive,
@@ -495,7 +507,7 @@ async fn finite_empty_range_uses_native_windows_behavior() {
 
     assert!(
         second
-            .lock(lock_request(
+            .lock_request(lock_request(
                 0,
                 None,
                 FileLockMode::Exclusive,
@@ -507,7 +519,7 @@ async fn finite_empty_range_uses_native_windows_behavior() {
     );
 
     let mut same = second
-        .lock(lock_request(
+        .lock_request(lock_request(
             4,
             Some(4),
             FileLockMode::Exclusive,
@@ -519,7 +531,7 @@ async fn finite_empty_range_uses_native_windows_behavior() {
     same.release().await.unwrap();
 
     let mut ending_at_offset = second
-        .lock(lock_request(
+        .lock_request(lock_request(
             0,
             Some(4),
             FileLockMode::Exclusive,
@@ -531,7 +543,7 @@ async fn finite_empty_range_uses_native_windows_behavior() {
     ending_at_offset.release().await.unwrap();
 
     let mut starting_at_offset = second
-        .lock(lock_request(
+        .lock_request(lock_request(
             4,
             Some(8),
             FileLockMode::Exclusive,
@@ -543,7 +555,7 @@ async fn finite_empty_range_uses_native_windows_behavior() {
     starting_at_offset.release().await.unwrap();
 
     let mut open_ended_at_offset = second
-        .lock(lock_request(
+        .lock_request(lock_request(
             4,
             None,
             FileLockMode::Exclusive,
@@ -555,7 +567,7 @@ async fn finite_empty_range_uses_native_windows_behavior() {
     open_ended_at_offset.release().await.unwrap();
 
     let error = second
-        .lock(lock_request(
+        .lock_request(lock_request(
             u64::MAX,
             None,
             FileLockMode::Exclusive,
@@ -567,7 +579,7 @@ async fn finite_empty_range_uses_native_windows_behavior() {
 
     assert!(
         second
-            .lock(lock_request(
+            .lock_request(lock_request(
                 3,
                 Some(5),
                 FileLockMode::Exclusive,
@@ -809,7 +821,6 @@ async fn direct_write_at_from_borrows_its_source() {
 
     let source = b"xy".to_vec();
     assert_eq!(file.write_at_from(&source, 2).await.unwrap(), 2);
-    file.commit().await.unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), b"..xy..");
     file.close().await.unwrap();
 
@@ -960,7 +971,7 @@ async fn direct_symlink_metadata_and_read_link() {
         .unwrap();
 
     let metadata = direct.symlink_metadata(typed(&link)).await.unwrap();
-    assert_eq!(metadata.file_type, FileType::Symlink);
+    assert_eq!(metadata.file_type(), FileType::Symlink);
     assert_eq!(
         direct.read_link(typed(&link)).await.unwrap().as_str(),
         target.to_str().unwrap()
@@ -986,7 +997,7 @@ async fn direct_copy_symlink_preserves_link() {
         .unwrap();
 
     let metadata = direct.symlink_metadata(typed(&copied)).await.unwrap();
-    assert_eq!(metadata.file_type, FileType::Symlink);
+    assert_eq!(metadata.file_type(), FileType::Symlink);
     assert_eq!(
         direct.read_link(typed(&copied)).await.unwrap().as_str(),
         target.to_str().unwrap()
@@ -1040,10 +1051,10 @@ async fn direct_fs_metadata_basic() {
     tokio::fs::write(&path, "hello").await.unwrap();
 
     let metadata = direct.fs_metadata(typed(&path), true).await.unwrap();
-    assert!(metadata.capacity > 0);
-    assert!(metadata.free > 0);
-    assert!(metadata.available > 0);
-    assert!(metadata.block_size > 0 || cfg!(windows));
+    assert!(metadata.capacity() > 0);
+    assert!(metadata.free() > 0);
+    assert!(metadata.available() > 0);
+    assert!(metadata.block_size() > 0 || cfg!(windows));
 }
 
 #[tokio::test]
@@ -1060,9 +1071,9 @@ async fn direct_file_fs_metadata_basic() {
         .unwrap();
 
     let metadata = file.fs_metadata().await.unwrap();
-    assert!(metadata.capacity > 0);
-    assert!(metadata.free > 0);
-    assert!(metadata.available > 0);
+    assert!(metadata.capacity() > 0);
+    assert!(metadata.free() > 0);
+    assert!(metadata.available() > 0);
 }
 
 #[cfg(windows)]
@@ -1136,10 +1147,7 @@ async fn direct_set_metadata_rejects_created_timestamp() {
     let err = direct
         .set_metadata(
             &[typed(&path).to_path_buf()],
-            MetadataPatch {
-                created: Some(1_000_000_000),
-                ..MetadataPatch::default()
-            },
+            MetadataPatch::new().with_created(1_000_000_000),
         )
         .await
         .unwrap_err();
@@ -1158,10 +1166,7 @@ async fn direct_windows_attrs() {
     direct
         .set_metadata(
             &[typed(&path).to_path_buf()],
-            MetadataPatch {
-                attrs: attr_patch(AttrFlags::READONLY, true),
-                ..Default::default()
-            },
+            attr_patch(AttrFlags::READONLY, true),
         )
         .await
         .unwrap();
@@ -1177,10 +1182,7 @@ async fn direct_windows_attrs() {
     direct
         .set_metadata(
             &[typed(&path).to_path_buf()],
-            MetadataPatch {
-                attrs: attr_patch(AttrFlags::READONLY, false),
-                ..Default::default()
-            },
+            attr_patch(AttrFlags::READONLY, false),
         )
         .await
         .unwrap();
@@ -1200,10 +1202,7 @@ async fn direct_windows_attrs() {
     direct
         .set_metadata(
             &[typed(&path).to_path_buf()],
-            MetadataPatch {
-                attrs: attr_patch(AttrFlags::COMPRESSED, true),
-                ..Default::default()
-            },
+            attr_patch(AttrFlags::COMPRESSED, true),
         )
         .await
         .unwrap();
@@ -1219,10 +1218,7 @@ async fn direct_windows_attrs() {
     direct
         .set_metadata(
             &[typed(&path).to_path_buf()],
-            MetadataPatch {
-                attrs: attr_patch(AttrFlags::COMPRESSED, false),
-                ..Default::default()
-            },
+            attr_patch(AttrFlags::COMPRESSED, false),
         )
         .await
         .unwrap();
@@ -1258,16 +1254,16 @@ async fn direct_windows_streams() {
         .unwrap();
     let streams = file.streams().await.unwrap();
     assert!(streams.iter().any(|entry| {
-        entry.name.is_empty()
-            && entry.r#type == "DATA"
-            && entry.size == 4
-            && entry.alloc_size >= entry.size
+        entry.name().is_empty()
+            && entry.stream_type() == "DATA"
+            && entry.size() == 4
+            && entry.alloc_size() >= entry.size()
     }));
     assert!(streams.iter().any(|entry| {
-        entry.name == "zone"
-            && entry.r#type == "DATA"
-            && entry.size == 6
-            && entry.alloc_size >= entry.size
+        entry.name() == "zone"
+            && entry.stream_type() == "DATA"
+            && entry.size() == 6
+            && entry.alloc_size() >= entry.size()
     }));
 }
 
@@ -1295,10 +1291,7 @@ async fn direct_linux_attrs() {
     if let Err(err) = direct
         .set_metadata(
             &[typed(&path).to_path_buf()],
-            MetadataPatch {
-                attrs: attr_patch(AttrFlags::NO_DUMP, true),
-                ..Default::default()
-            },
+            attr_patch(AttrFlags::NO_DUMP, true),
         )
         .await
     {
@@ -1323,10 +1316,7 @@ async fn direct_linux_attrs() {
     direct
         .set_metadata(
             &[typed(&path).to_path_buf()],
-            MetadataPatch {
-                attrs: attr_patch(AttrFlags::NO_DUMP, false),
-                ..Default::default()
-            },
+            attr_patch(AttrFlags::NO_DUMP, false),
         )
         .await
         .unwrap();
@@ -1350,7 +1340,7 @@ async fn direct_metadata_handles_unix_socket_without_inode_attrs() {
     let _listener = UnixListener::bind(&path).unwrap();
 
     let metadata = direct.metadata(typed(&path)).await.unwrap();
-    assert_eq!(metadata.file_type, FileType::Socket);
+    assert_eq!(metadata.file_type(), FileType::Socket);
     assert_eq!(metadata.linux_attrs(), None);
 }
 

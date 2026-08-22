@@ -28,15 +28,18 @@ use wax::{
 };
 
 use crate::{
+    Vfs, directory,
     error::{Error, ErrorKind, HandoffError, Result},
-    file::StreamEntry,
+    extension::ExtensionSet,
+    extension::{self, DirectContext, ExtContext, VfsExtension},
+    file::{self, AccessFlags, FileLockRequest, StreamEntry},
+    file::{XattrEntry, XattrNamespace},
     metadata::{FsMetadata, Metadata, MetadataPatch},
     path::{WellKnownPath, native_path, typed_path},
-    process::{ProcessControl, ProcessStatus, StdioRecv, StdioSend, TerminationPolicy},
-    security::{Acl, AclKind, SecurityInfo, SidName},
-    session::{ExtensionSet, Query},
+    process::{self, ProcessControl, ProcessStatus, StdioRecv, StdioSend, TerminationPolicy},
+    security::{Acl, AclKind, PrincipalId, PrincipalIdKind, SecurityInfo, SidName},
+    session::{self, Query},
     target::TargetInfo,
-    xattr::{XattrEntry, XattrNamespace},
 };
 use dolang_winterop::security::{SecDesc, Sid};
 
@@ -58,7 +61,7 @@ pub(crate) use unix::ReadDir;
 #[cfg(windows)]
 pub(crate) use windows::ReadDir;
 
-pub(crate) use lock::{DirectFileLock, DirectFileLocks};
+pub(crate) use lock::{FileLock, FileLocks};
 
 /// A [`Vfs`] that operates in the local process environment.
 #[derive(Debug, Clone)]
@@ -121,15 +124,15 @@ pub struct Child {
 #[derive(Debug)]
 pub struct File {
     file: Arc<std::fs::File>,
-    flags: DirectFileFlags,
-    locks: DirectFileLocks,
+    flags: FileFlags,
+    locks: FileLocks,
     cursor: OnceLock<Box<CursorState>>,
 }
 
 bitflags::bitflags! {
     /// Properties fixed when a file is opened.
     #[derive(Clone, Copy, Debug)]
-    struct DirectFileFlags: u8 {
+    struct FileFlags: u8 {
         const READ = 1 << 0;
         const WRITE = 1 << 1;
         const APPEND = 1 << 2;
@@ -301,14 +304,14 @@ impl File {
         // One `fstat` on an already-open descriptor, to know up front whether
         // offsets mean anything for this file.
         let seekable = file.metadata().map(|meta| meta.is_file()).unwrap_or(false);
-        let mut flags = DirectFileFlags::empty();
-        flags.set(DirectFileFlags::READ, read);
-        flags.set(DirectFileFlags::WRITE, write);
-        flags.set(DirectFileFlags::APPEND, append);
-        flags.set(DirectFileFlags::SEEKABLE, seekable);
+        let mut flags = FileFlags::empty();
+        flags.set(FileFlags::READ, read);
+        flags.set(FileFlags::WRITE, write);
+        flags.set(FileFlags::APPEND, append);
+        flags.set(FileFlags::SEEKABLE, seekable);
         Self {
             file: Arc::new(file),
-            locks: DirectFileLocks::new(),
+            locks: FileLocks::new(),
             flags,
             cursor: OnceLock::new(),
         }
@@ -333,11 +336,7 @@ impl File {
     /// they read from the *kernel's* offset, which positional I/O has been
     /// bypassing.
     fn materialize(&self, offset: u64) -> io::Result<()> {
-        materialize(
-            &self.file,
-            self.flags.contains(DirectFileFlags::SEEKABLE),
-            offset,
-        )
+        materialize(&self.file, self.flags.contains(FileFlags::SEEKABLE), offset)
     }
 
     /// Surrenders the descriptor to hand it to another process.
@@ -400,7 +399,7 @@ impl File {
             let _ = send;
             // The child reads from the *kernel's* offset, which positional I/O
             // has been bypassing.
-            match materialize(&owned, flags.contains(DirectFileFlags::SEEKABLE), offset) {
+            match materialize(&owned, flags.contains(FileFlags::SEEKABLE), offset) {
                 Ok(()) => Ok(owned),
                 Err(error) => Err(restore(Arc::new(owned), locks, error)),
             }
@@ -436,7 +435,7 @@ fn materialize(file: &std::fs::File, seekable: bool, offset: u64) -> io::Result<
 #[cfg(windows)]
 fn reopen_for_stdio(
     file: &std::fs::File,
-    flags: DirectFileFlags,
+    flags: FileFlags,
     send: bool,
     offset: u64,
 ) -> io::Result<std::fs::File> {
@@ -451,14 +450,14 @@ fn reopen_for_stdio(
         };
 
         let access = if send {
-            if flags.contains(DirectFileFlags::APPEND) {
+            if flags.contains(FileFlags::APPEND) {
                 FILE_GENERIC_WRITE & !FILE_WRITE_DATA
-            } else if flags.contains(DirectFileFlags::WRITE) {
+            } else if flags.contains(FileFlags::WRITE) {
                 GENERIC_WRITE
             } else {
                 0
             }
-        } else if flags.contains(DirectFileFlags::READ) {
+        } else if flags.contains(FileFlags::READ) {
             GENERIC_READ
         } else {
             0
@@ -478,7 +477,7 @@ fn reopen_for_stdio(
         // `ReOpenFile` yields an independent file description whose pointer
         // starts at zero, so unlike the inherited descriptor on Unix it has to
         // be positioned explicitly to match the tracked cursor.
-        materialize(&reopened, flags.contains(DirectFileFlags::SEEKABLE), offset)?;
+        materialize(&reopened, flags.contains(FileFlags::SEEKABLE), offset)?;
         Ok(reopened)
     }
 }
@@ -540,7 +539,7 @@ impl AsyncRead for File {
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         let file = Arc::clone(&this.file);
-        let seekable = this.flags.contains(DirectFileFlags::SEEKABLE);
+        let seekable = this.flags.contains(FileFlags::SEEKABLE);
         loop {
             let state = this.cursor_state();
             let undelivered = state.pending_read.len() - state.pending_pos;
@@ -594,8 +593,8 @@ impl AsyncWrite for File {
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
         let file = Arc::clone(&this.file);
-        let append = this.flags.contains(DirectFileFlags::APPEND);
-        let seekable = this.flags.contains(DirectFileFlags::SEEKABLE);
+        let append = this.flags.contains(FileFlags::APPEND);
+        let seekable = this.flags.contains(FileFlags::SEEKABLE);
         loop {
             let state = this.cursor_state();
             match &mut state.op {
@@ -711,7 +710,7 @@ impl File {
         offset: u64,
     ) -> impl Future<Output = Result<usize>> + Send + use<'b> {
         let file = Arc::clone(&self.file);
-        let seekable = self.flags.contains(DirectFileFlags::SEEKABLE);
+        let seekable = self.flags.contains(FileFlags::SEEKABLE);
         async move {
             let taken = mem::take(buf);
             let (result, taken) = match tokio::task::spawn_blocking(move || {
@@ -739,7 +738,7 @@ impl File {
         offset: u64,
     ) -> impl Future<Output = Result<usize>> + Send + use<'b> {
         let file = Arc::clone(&self.file);
-        let seekable = self.flags.contains(DirectFileFlags::SEEKABLE);
+        let seekable = self.flags.contains(FileFlags::SEEKABLE);
         let want = buf.len().min(MAX_BLOCKING_IO);
         async move {
             let owned = BytesMut::with_capacity(want);
@@ -766,7 +765,7 @@ impl File {
         offset: u64,
     ) -> impl Future<Output = Result<usize>> + Send + use<> {
         let file = Arc::clone(&self.file);
-        let append = self.flags.contains(DirectFileFlags::APPEND);
+        let append = self.flags.contains(FileFlags::APPEND);
         async move {
             if append {
                 return Err(Error::new(
@@ -795,7 +794,7 @@ impl File {
     /// just past what was written.
     pub fn append(&self, data: Bytes) -> impl Future<Output = Result<(usize, u64)>> + Send + use<> {
         let file = Arc::clone(&self.file);
-        let seekable = self.flags.contains(DirectFileFlags::SEEKABLE);
+        let seekable = self.flags.contains(FileFlags::SEEKABLE);
         async move {
             tokio::task::spawn_blocking(move || write_blocking(&file, &data, 0, true, seekable))
                 .await
@@ -817,14 +816,6 @@ impl File {
     ) -> std::result::Result<StdioRecv, HandoffError<Self>> {
         let file = self.into_stdio_file(false, offset).await?;
         Ok(StdioRecv::from_file(TokioFile::from_std(file)))
-    }
-
-    pub(crate) async fn commit(&self) -> Result<()> {
-        // Nothing to do: a positional write reaches the OS as it is issued,
-        // and this handle keeps no write buffer of its own. `poll_flush`
-        // settles the poll surface's in-flight operation, which is state this
-        // cannot see and does not own.
-        Ok(())
     }
 
     pub(crate) async fn close(self) -> Result<()> {
@@ -956,10 +947,7 @@ impl File {
         Direct::impl_file_remove_xattr(&self.file, name, namespace).await
     }
 
-    pub(crate) async fn lock(
-        &self,
-        request: crate::file::FileLockRequest,
-    ) -> Result<Option<crate::file::FileLock>> {
+    pub(crate) async fn lock(&self, request: FileLockRequest) -> Result<Option<file::FileLock>> {
         // A duplicate would be a second descriptor on the same open file
         // description, which is what the lock is keyed on anyway; sharing the
         // original avoids the `dup` and, on Windows, keeps `LockFileEx`
@@ -972,7 +960,7 @@ impl File {
             .locks
             .acquire(handle, request)
             .await
-            .map(|lock| lock.map(crate::file::FileLock::direct))?)
+            .map(|lock| lock.map(file::FileLock::direct))?)
     }
 
     pub(crate) async fn try_into_std(self) -> std::result::Result<std::fs::File, Self> {
@@ -1386,11 +1374,11 @@ impl OpenOptions {
 impl Direct {
     /// Calls a registered VFS extension in-process, with no RPC session or
     /// serialization involved.
-    pub async fn call_extension<T: crate::extension::VfsExtension>(
+    pub async fn call_extension<T: VfsExtension>(
         &self,
         request: T::Request,
     ) -> Result<T::Response> {
-        let ext = crate::extension::lookup(T::NAME, T::VERSION)
+        let ext = extension::lookup(T::NAME, T::VERSION)
             .filter(|extension| extension.available())
             .ok_or_else(|| {
                 Error::new(
@@ -1398,8 +1386,8 @@ impl Direct {
                     format!("VFS extension {} v{} is not available", T::NAME, T::VERSION),
                 )
             })?;
-        let mut state = crate::extension::DirectContext::default();
-        let mut ctx = crate::extension::ExtContext::direct(&mut state);
+        let mut state = DirectContext::default();
+        let mut ctx = ExtContext::direct(&mut state);
         let response = ext.dispatch(&mut ctx, Box::new(request)).await;
         Ok(*response
             .downcast::<T::Response>()
@@ -1540,7 +1528,7 @@ impl Direct {
 
 impl Direct {
     pub(crate) fn env(&self) -> Box<dyn Iterator<Item = (String, String)> + '_> {
-        Box::new(crate::session::current_environment())
+        Box::new(session::current_environment())
     }
 
     pub(crate) fn cwd(&self) -> Utf8TypedPath<'_> {
@@ -1575,14 +1563,14 @@ impl Direct {
         &self,
         path: Utf8TypedPath<'_>,
         key: Option<&[u8]>,
-    ) -> Result<crate::Vfs> {
+    ) -> Result<Vfs> {
         #[cfg(unix)]
         {
             let key = key
                 .map(dolang_rpc::AuthKey::new)
                 .transpose()
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
-            Ok(crate::Vfs::from_client(
+            Ok(Vfs::from_client(
                 crate::client::Client::connect_with_key(native_path(path)?, key).await?,
             ))
         }
@@ -1602,7 +1590,7 @@ impl Direct {
         cwd: Utf8TypedPath<'_>,
         env: HashMap<String, Option<String>>,
         elevate: bool,
-    ) -> Result<crate::Vfs> {
+    ) -> Result<Vfs> {
         #[cfg(windows)]
         {
             let cwd = native_path(cwd)?;
@@ -1611,7 +1599,7 @@ impl Direct {
             } else {
                 crate::windows::launch_unelevated(cwd, env).await
             }?;
-            Ok(crate::Vfs::from_client(client))
+            Ok(Vfs::from_client(client))
         }
         #[cfg(not(windows))]
         {
@@ -1625,7 +1613,7 @@ impl Direct {
     }
 
     pub(crate) async fn pipe(&self, buf_size: Option<usize>) -> Result<(StdioSend, StdioRecv)> {
-        Ok(crate::process::pipe(buf_size)?)
+        Ok(process::pipe(buf_size)?)
     }
 
     pub(crate) async fn user_name(&self, uid: u32) -> Result<String> {
@@ -1694,9 +1682,9 @@ impl Direct {
 
     pub(crate) async fn resolve_principal_id(
         &self,
-        input: crate::security::PrincipalId,
-        want: crate::security::PrincipalIdKind,
-    ) -> Result<crate::security::PrincipalId> {
+        input: PrincipalId,
+        want: PrincipalIdKind,
+    ) -> Result<PrincipalId> {
         #[cfg(unix)]
         return Self::impl_resolve_principal_id(input, want);
         #[cfg(windows)]
@@ -1710,13 +1698,10 @@ impl Direct {
         }
     }
 
-    pub(crate) async fn read_dir(
-        &self,
-        path: Utf8TypedPath<'_>,
-    ) -> Result<crate::directory::ReadDir> {
+    pub(crate) async fn read_dir(&self, path: Utf8TypedPath<'_>) -> Result<directory::ReadDir> {
         ReadDir::open(&native_path(path)?)
             .await
-            .map(crate::directory::ReadDir::direct)
+            .map(directory::ReadDir::direct)
     }
 
     pub(crate) async fn which(
@@ -2027,7 +2012,7 @@ impl Direct {
         let paths = paths
             .iter()
             .map(|path| native_path(path.to_path()))
-            .collect::<crate::error::Result<Vec<_>>>()?;
+            .collect::<Result<Vec<_>>>()?;
         self.impl_set_metadata(&paths, patch).await
     }
 
@@ -2039,11 +2024,7 @@ impl Direct {
         typed_path(fs::read_link(native_path(path)?).await?)
     }
 
-    pub(crate) async fn access(
-        &self,
-        path: Utf8TypedPath<'_>,
-        mode: crate::file::AccessFlags,
-    ) -> Result<()> {
+    pub(crate) async fn access(&self, path: Utf8TypedPath<'_>, mode: AccessFlags) -> Result<()> {
         Self::impl_access(native_path(path)?, mode).await
     }
 
@@ -2083,10 +2064,7 @@ impl Direct {
             }
 
             paths.sort();
-            paths
-                .into_iter()
-                .map(typed_path)
-                .collect::<crate::error::Result<_>>()
+            paths.into_iter().map(typed_path).collect::<Result<_>>()
         })
         .await
         .unwrap_or_else(|e| Err(Error::new(ErrorKind::Other, e.to_string())))

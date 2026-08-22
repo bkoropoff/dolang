@@ -17,11 +17,11 @@ use std::os::fd::OwnedFd;
 use std::os::windows::io::{AsRawHandle, OwnedHandle};
 
 #[derive(Debug)]
-pub(crate) struct DirectFileLocks {
+pub(crate) struct FileLocks {
     table: OnceLock<Arc<LockTable>>,
 }
 
-impl DirectFileLocks {
+impl FileLocks {
     pub(crate) fn new() -> Self {
         Self {
             table: OnceLock::new(),
@@ -32,7 +32,7 @@ impl DirectFileLocks {
         &self,
         handle: NativeHandle,
         request: FileLockRequest,
-    ) -> io::Result<Option<DirectFileLock>> {
+    ) -> io::Result<Option<FileLock>> {
         if request
             .range
             .end
@@ -105,12 +105,12 @@ impl DirectFileLocks {
 }
 
 #[derive(Debug)]
-pub(crate) struct DirectFileLock {
+pub(crate) struct FileLock {
     table: Weak<LockTable>,
     id: u64,
 }
 
-impl DirectFileLock {
+impl FileLock {
     pub(crate) async fn release(&mut self) -> Result<()> {
         let Some(table) = self.table.upgrade() else {
             return Ok(());
@@ -129,7 +129,7 @@ impl DirectFileLock {
     }
 }
 
-impl Drop for DirectFileLock {
+impl Drop for FileLock {
     fn drop(&mut self) {
         if let Some(table) = self.table.upgrade() {
             let Ok(Some(armed)) = table.take_armed(self.id) else {
@@ -192,7 +192,7 @@ impl LockTable {
         })
     }
 
-    fn commit(self: &Arc<Self>, id: u64, armed: ArmedLock) -> io::Result<DirectFileLock> {
+    fn commit(self: &Arc<Self>, id: u64, armed: ArmedLock) -> io::Result<FileLock> {
         let mut state = self.state.lock().unwrap();
         let entry = state
             .entries
@@ -204,7 +204,7 @@ impl LockTable {
             ));
         }
         entry.armed = Some(armed);
-        Ok(DirectFileLock {
+        Ok(FileLock {
             table: Arc::downgrade(self),
             id,
         })
@@ -258,7 +258,7 @@ struct Reservation {
 }
 
 impl Reservation {
-    fn commit(mut self, armed: ArmedLock) -> io::Result<DirectFileLock> {
+    fn commit(mut self, armed: ArmedLock) -> io::Result<FileLock> {
         let table = self
             .table
             .upgrade()

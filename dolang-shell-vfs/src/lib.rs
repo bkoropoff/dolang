@@ -10,7 +10,9 @@ use tokio::runtime::Builder;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 
-use crate::server::Server;
+use dolang_vfs::server::Server;
+
+mod probe;
 
 enum EnvOp {
     Set(OsString, OsString),
@@ -89,7 +91,7 @@ fn split_assignment(arg: &OsStr) -> Option<(OsString, OsString)> {
 }
 
 /// Runs the VFS service using command-line `args`.
-pub fn main(args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> crate::error::Result<()> {
+pub fn main(args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> dolang_vfs::error::Result<()> {
     Ok(main_io(args)?)
 }
 
@@ -236,7 +238,7 @@ fn main_io(args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> io::Result<()> 
         if !mode_args.is_empty() {
             return Err(io::Error::other("--login-env-probe takes no arguments"));
         }
-        return crate::probe::emit();
+        return probe::emit();
     }
 
     // Import the login environment first so that explicit --set and --unset
@@ -244,7 +246,7 @@ fn main_io(args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> io::Result<()> 
     #[cfg(any(unix, windows))]
     if let Some(shell) = &login_env {
         // SAFETY: single-threaded, before tokio
-        unsafe { crate::probe::import(shell.as_deref())? };
+        unsafe { probe::import(shell.as_deref())? };
     }
     #[cfg(not(any(unix, windows)))]
     let _ = &login_env;
@@ -315,7 +317,7 @@ fn serve_stdio() -> io::Result<()> {
 
         let server = Server::new_split(stdin, stdout)
             .await
-            .map_err(crate::error::Error::into_io_error)?;
+            .map_err(dolang_vfs::error::Error::into_io_error)?;
         #[cfg(windows)]
         {
             tokio::select! {
@@ -357,6 +359,18 @@ fn serve_stdio() -> io::Result<()> {
 #[cfg(unix)]
 const STDIO_PIPE_BUFFER_SIZE: usize = 1024 * 1024;
 
+#[cfg(target_os = "linux")]
+fn set_pipe_buffer_size(fd: std::os::fd::RawFd, size: usize) {
+    let size = i32::try_from(size).unwrap_or(i32::MAX);
+    // Best-effort: failure leaves the platform's default pipe size in place.
+    unsafe {
+        libc::fcntl(fd, libc::F_SETPIPE_SZ, size);
+    }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn set_pipe_buffer_size(_fd: std::os::fd::RawFd, _size: usize) {}
+
 /// Wraps process stdin/stdout as non-blocking pipes, bypassing tokio's
 /// `tokio::io::stdin`/`stdout`, which shuttle every read and write through a
 /// dedicated blocking-pool thread since the standard library gives no other
@@ -386,8 +400,8 @@ fn unix_stdio(
     )?)?;
     // The buffer is a property of the pipe itself, shared by both ends, so
     // either side can raise it.
-    crate::process::set_pipe_buffer_size(stdin.as_raw_fd(), STDIO_PIPE_BUFFER_SIZE);
-    crate::process::set_pipe_buffer_size(stdout.as_raw_fd(), STDIO_PIPE_BUFFER_SIZE);
+    set_pipe_buffer_size(stdin.as_raw_fd(), STDIO_PIPE_BUFFER_SIZE);
+    set_pipe_buffer_size(stdout.as_raw_fd(), STDIO_PIPE_BUFFER_SIZE);
     Ok((stdin, stdout))
 }
 

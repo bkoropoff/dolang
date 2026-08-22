@@ -14,7 +14,6 @@ test = true
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(docsrs)"] }
 
 [dependencies]
-base64 = "0.22.1"
 bitflags = { version = "2.9.4", features = ["serde"] }
 bytes = "1"
 tokio = { version = "1.48.0", features = ["io-std", "io-util", "sync", "rt-multi-thread", "rt", "macros", "fs", "net", "process", "time"] }

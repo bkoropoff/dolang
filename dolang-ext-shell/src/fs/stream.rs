@@ -64,9 +64,9 @@ pub(crate) fn stream_path(
         .expect("stream base path must have a file name")
         .to_string();
     name.push(':');
-    name.push_str(entry.name.as_str());
+    name.push_str(entry.name());
     name.push_str(":$");
-    name.push_str(entry.r#type.as_str());
+    name.push_str(entry.stream_type());
     path.set_file_name(name);
     path
 }
@@ -115,19 +115,19 @@ impl<'v> Object<'v> for StreamEntry {
     fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
         builder
             .get("name", |this, strand, out| {
-                Output::set(strand, out, this.annex().inner.name.as_str());
+                Output::set(strand, out, this.annex().inner.name());
                 Ok(())
             })
             .get("type", |this, strand, out| {
-                Output::set(strand, out, this.annex().inner.r#type.as_str());
+                Output::set(strand, out, this.annex().inner.stream_type());
                 Ok(())
             })
             .get("size", |this, strand, out| {
-                Output::set(strand, out, i128::from(this.annex().inner.size));
+                Output::set(strand, out, i128::from(this.annex().inner.size()));
                 Ok(())
             })
             .get("alloc_size", |this, strand, out| {
-                Output::set(strand, out, i128::from(this.annex().inner.alloc_size));
+                Output::set(strand, out, i128::from(this.annex().inner.alloc_size()));
                 Ok(())
             })
     }

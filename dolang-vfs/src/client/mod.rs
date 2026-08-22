@@ -45,29 +45,33 @@ use crate::{
     MAX_FILE_READ, STREAM_CHUNK_SIZE, SessionMode, Vfs, client, direct,
     directory::{self, DirEntry},
     error::{Error, ErrorKind, HandoffError, Result},
+    extension::ExtensionSet,
     extension::VfsExtension,
-    file::{AccessFlags, File as VfsFile, FileLock, FileLockRequest, StreamEntry},
+    file::{self, AccessFlags, File as VfsFile, FileLockRequest, StreamEntry},
+    file::{XattrEntry, XattrNamespace},
     metadata::{FsMetadata, Metadata, MetadataPatch},
     path::WellKnownPath,
-    process::{self, ProcessControl, ProcessStatus, StdioRecv, StdioSend, TerminationPolicy},
+    process::{
+        self, ProcessControl, ProcessStatus, StdioRecv, StdioRecvInner, StdioSend, StdioSendInner,
+        TerminationPolicy,
+    },
     protocol::{
         AccessRequest, AclRequest, CanonicalizeRequest, CopyRequest, CreateDirRequest,
         ExtensionRequest, ExtensionResponse, FsMetadataRequest, GlobRequest, HardLinkRequest,
-        MetadataRequest, MoveRequest, OpenHandle, OpenHandlePreference, OpenRequest, OpenVfsHandle,
+        MetadataRequest, MoveRequest, OpenFlags, OpenHandle, OpenRequest, OpenVfsHandle,
         QueryResponse, ReadLinkRequest, RemoveDirRequest, RemoveRequest, RenameRequest, Request,
         RequestKind, ResponseKind, SecDescRequest, SetAclRequest, SetMetadataRequest,
         SetSecDescRequest, SetXattrRequest, SpawnRequest, StdioRecvTarget, StdioSendTarget,
         StreamsRequest, SymlinkKind, SymlinkRequest, UnixVfsRequest, VfsProtocol,
-        WellKnownPathRequest, WindowsAdminRequest, WireError, WirePath, XattrNamespaceRequest,
-        XattrRequest, XattrsRequest, rpc_builder,
+        WellKnownPathRequest, WindowsAdminRequest, WirePath, XattrNamespaceRequest, XattrRequest,
+        XattrsRequest, rpc_builder,
     },
     security::{Acl, AclKind, PrincipalId, PrincipalIdKind, SecurityInfo, SidName},
     session::{
-        ChildMarker, ExtensionSet, FileLockMarker, FileMarker, Query, ReadDirMarker,
-        StdioRecvMarker, StdioSendMarker, VfsMarker,
+        ChildMarker, FileLockMarker, FileMarker, Query, ReadDirMarker, StdioRecvMarker,
+        StdioSendMarker, VfsMarker,
     },
     target::TargetInfo,
-    xattr::{XattrEntry, XattrNamespace},
 };
 
 /// Client for a VFS agent session.
@@ -106,10 +110,6 @@ pub(crate) struct ReadDir {
     entries: VecDeque<DirEntry>,
 }
 
-fn vfs_io(error: Error) -> io::Error {
-    io::Error::new(error.kind().into(), error.to_string())
-}
-
 impl fmt::Debug for ReadDir {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ReadDir")
@@ -138,11 +138,9 @@ impl ReadDir {
         match self
             .client
             .request(RequestKind::ReadDirNext { read_dir: handle })
-            .await
-            .map_err(vfs_io)?
+            .await?
         {
-            ResponseKind::ReadDirNext(result) => {
-                let page = result.map_err(Error::from).map_err(vfs_io)?;
+            ResponseKind::ReadDirNext(page) => {
                 if page.done {
                     self.handle = None;
                 }
@@ -195,7 +193,7 @@ struct ClientCursor {
     write_body: Option<PendingTrailerWrite>,
 }
 
-pub(crate) struct RemoteFileLock {
+pub(crate) struct FileLock {
     client: Client,
     /// The peer's handle for the held lock, taken once it is released.
     ///
@@ -204,7 +202,7 @@ pub(crate) struct RemoteFileLock {
     lock: Option<Gift<FileLockMarker>>,
 }
 
-impl RemoteFileLock {
+impl FileLock {
     pub(crate) async fn release(&mut self) -> Result<()> {
         let Some(lock) = self.lock.as_ref() else {
             return Ok(());
@@ -214,8 +212,7 @@ impl RemoteFileLock {
             .request(RequestKind::FileUnlock { lock: lock.cite() })
             .await?
         {
-            ResponseKind::FileUnlock(result) => {
-                result.map_err(Error::from)?;
+            ResponseKind::FileUnlock => {
                 self.lock = None;
                 Ok(())
             }
@@ -224,7 +221,7 @@ impl RemoteFileLock {
     }
 }
 
-impl Drop for RemoteFileLock {
+impl Drop for FileLock {
     fn drop(&mut self) {
         let Some(lock) = self.lock.take() else {
             return;
@@ -263,7 +260,6 @@ struct PendingTrailerRead {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FileOperationKind {
     Read,
-    Flush,
     Size,
 }
 
@@ -331,16 +327,14 @@ impl File {
             })
             .await?
         {
-            ResponseKind::FileToStdioSend(result) => result
-                .map(|stdio| {
-                    StdioSend::Remote(RemoteStdioSend {
-                        client: self.client.clone(),
-                        stdio: Some(stdio),
-                        pending: None,
-                        write_body: None,
-                    })
+            ResponseKind::FileToStdioSend(stdio) => Ok({
+                StdioSend::remote(RemoteStdioSend {
+                    client: self.client.clone(),
+                    stdio: Some(stdio),
+                    pending: None,
+                    write_body: None,
                 })
-                .map_err(Into::into),
+            }),
             response => Err(unexpected(response).into()),
         }
     }
@@ -357,16 +351,14 @@ impl File {
             })
             .await?
         {
-            ResponseKind::FileToStdioRecv(result) => result
-                .map(|stdio| {
-                    StdioRecv::Remote(RemoteStdioRecv {
-                        client: self.client.clone(),
-                        stdio: Some(stdio),
-                        pending: None,
-                        read_body: None,
-                    })
+            ResponseKind::FileToStdioRecv(stdio) => Ok({
+                StdioRecv::remote(RemoteStdioRecv {
+                    client: self.client.clone(),
+                    stdio: Some(stdio),
+                    pending: None,
+                    read_body: None,
                 })
-                .map_err(Into::into),
+            }),
             response => Err(unexpected(response).into()),
         }
     }
@@ -441,7 +433,7 @@ impl File {
                 ));
             }
             match Self::send_write(client, RequestKind::FileWrite { file, offset }, &data).await? {
-                ResponseKind::FileWrite(result) => Ok(result.map_err(wire_io)?),
+                ResponseKind::FileWrite(result) => Ok(result),
                 response => Err(unexpected(response).into()),
             }
         }
@@ -501,7 +493,7 @@ impl File {
             // only ever wanted a slice, so borrowing costs this path nothing
             // that owning it gained.
             match Self::send_write(client, RequestKind::FileWrite { file, offset }, data).await? {
-                ResponseKind::FileWrite(result) => Ok(result.map_err(wire_io)?),
+                ResponseKind::FileWrite(result) => Ok(result),
                 response => Err(unexpected(response).into()),
             }
         }
@@ -517,7 +509,7 @@ impl File {
         let file = self.cite();
         async move {
             match Self::send_write(client, RequestKind::FileAppend { file }, &data).await? {
-                ResponseKind::FileAppend(result) => Ok(result.map_err(wire_io)?),
+                ResponseKind::FileAppend(result) => Ok(result),
                 response => Err(unexpected(response).into()),
             }
         }
@@ -529,20 +521,18 @@ impl File {
         file: Cite<FileMarker>,
         offset: u64,
         len: usize,
-    ) -> io::Result<TrailerRecv> {
+    ) -> Result<TrailerRecv> {
         let (response, trailer) = client
             .call(RequestKind::FileRead { file, offset, len })
-            .await
-            .map_err(rpc_error)?
+            .await?
             .into_response_trailer();
-        match response {
-            ResponseKind::Error(error) => return Err(wire_io(error)),
-            ResponseKind::FileRead(result) => result.map_err(wire_io)?,
-            response => return Err(unexpected(response)),
+        match response? {
+            ResponseKind::FileRead => (),
+            response => return Err(unexpected(response).into()),
         }
         trailer.ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
+            Error::new(
+                ErrorKind::InvalidData,
                 "file read response is missing its data trailer",
             )
         })
@@ -565,18 +555,10 @@ impl File {
         Ok(())
     }
 
-    async fn send_write(
-        client: Client,
-        request: RequestKind,
-        data: &[u8],
-    ) -> io::Result<ResponseKind> {
+    async fn send_write(client: Client, request: RequestKind, data: &[u8]) -> Result<ResponseKind> {
         let mut send = client.call_with_trailer(request);
         send.write_all(data).await?;
-        let response = send.finish().await.map_err(rpc_error)?.into_response();
-        match response {
-            ResponseKind::Error(error) => Err(wire_io(error)),
-            response => Ok(response),
-        }
+        send.finish().await?.into_response()
     }
 
     fn poll_request(
@@ -604,11 +586,12 @@ impl File {
             Poll::Pending => Poll::Pending,
             Poll::Ready(result) => {
                 self.cursor().pending = None;
-                let (response, trailer) = result.map_err(rpc_error)?.into_response_trailer();
-                Poll::Ready(match response {
-                    ResponseKind::Error(error) => Err(wire_io(error)),
-                    response => Ok((response, trailer)),
-                })
+                let (response, trailer) = result.map_err(Error::from)?.into_response_trailer();
+                Poll::Ready(
+                    response
+                        .map(|response| (response, trailer))
+                        .map_err(Into::into),
+                )
             }
         }
     }
@@ -729,10 +712,7 @@ impl AsyncRead for File {
                 )
             }) {
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(Ok((ResponseKind::FileRead(result), trailer))) => {
-                    if let Err(error) = result.map_err(wire_io) {
-                        return Poll::Ready(Err(error));
-                    }
+                Poll::Ready(Ok((ResponseKind::FileRead, trailer))) => {
                     let Some(trailer) = trailer else {
                         return Poll::Ready(Err(io::Error::new(
                             io::ErrorKind::InvalidData,
@@ -789,7 +769,10 @@ impl AsyncWrite for File {
                     let target = pending.target;
                     let unreported = pending.unreported;
                     file.cursor().write_body = None;
-                    let response = result.map_err(rpc_error)?.into_response();
+                    let response = result
+                        .map_err(Error::from)?
+                        .into_response()
+                        .map_err(io::Error::from)?;
                     let written = ack_write(&mut file.cursor().cursor, response)?;
                     if written != target {
                         return Poll::Ready(Err(io::Error::new(
@@ -832,22 +815,22 @@ impl AsyncWrite for File {
                 Poll::Pending => Poll::Pending,
                 Poll::Ready(result) => {
                     file.cursor().write_body = None;
-                    Poll::Ready(result.map_err(rpc_error).and_then(|result| {
-                        ack_write(&mut file.cursor().cursor, result.into_response()).map(|_| ())
-                    }))
+                    Poll::Ready(
+                        result
+                            .map_err(Error::from)
+                            .map_err(io::Error::from)
+                            .and_then(|result| {
+                                ack_write(
+                                    &mut file.cursor().cursor,
+                                    result.into_response().map_err(io::Error::from)?,
+                                )
+                                .map(|_| ())
+                            }),
+                    )
                 }
             };
         }
-        match file.poll_request(cx, FileOperationKind::Flush, |file| {
-            (RequestKind::FileFlush { file }, None)
-        }) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Ok((ResponseKind::FileFlush(result), _))) => {
-                Poll::Ready(result.map_err(wire_io))
-            }
-            Poll::Ready(Ok((response, _))) => Poll::Ready(Err(unexpected(response))),
-            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
-        }
+        Poll::Ready(Ok(()))
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -909,11 +892,7 @@ impl AsyncSeek for File {
             (RequestKind::FileSize { file }, None)
         }) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(Ok((ResponseKind::FileSize(result), _))) => {
-                let len = match result.map_err(wire_io) {
-                    Ok(len) => len,
-                    Err(error) => return Poll::Ready(Err(error)),
-                };
+            Poll::Ready(Ok((ResponseKind::FileSize(len), _))) => {
                 let Some(offset) = len.checked_add_signed(file.cursor().seek_delta) else {
                     return Poll::Ready(Err(negative_seek()));
                 };
@@ -927,18 +906,6 @@ impl AsyncSeek for File {
 }
 
 impl File {
-    pub(crate) async fn commit(&self) -> Result<()> {
-        let file = self;
-        match file
-            .client
-            .request(RequestKind::FileFlush { file: file.cite() })
-            .await?
-        {
-            ResponseKind::FileFlush(result) => result.map_err(Into::into),
-            response => Err(unexpected(response).into()),
-        }
-    }
-
     pub(crate) async fn into_stdio_send(
         self,
         offset: u64,
@@ -974,7 +941,7 @@ impl File {
             })
             .await?
         {
-            ResponseKind::FileClose(result) => result.map_err(Into::into),
+            ResponseKind::FileClose => Ok(()),
             response => Err(unexpected(response).into()),
         }
     }
@@ -990,7 +957,7 @@ impl File {
             })
             .await?
         {
-            ResponseKind::FileSetSize(result) => result.map_err(Into::into),
+            ResponseKind::FileSetSize => Ok(()),
             response => Err(unexpected(response).into()),
         }
     }
@@ -1003,7 +970,7 @@ impl File {
             .request(RequestKind::FileMetadata { file: file.cite() })
             .await?
         {
-            ResponseKind::FileMetadata(result) => result.map_err(Into::into),
+            ResponseKind::FileMetadata(result) => Ok(result),
             response => Err(unexpected(response).into()),
         }
     }
@@ -1016,7 +983,7 @@ impl File {
             .request(RequestKind::FileFsMetadata { file: file.cite() })
             .await?
         {
-            ResponseKind::FileFsMetadata(result) => result.map_err(Into::into),
+            ResponseKind::FileFsMetadata(result) => Ok(result),
             response => Err(unexpected(response).into()),
         }
     }
@@ -1033,7 +1000,7 @@ impl File {
             })
             .await?
         {
-            ResponseKind::FileAcl(result) => result.map_err(Into::into),
+            ResponseKind::FileAcl(result) => Ok(result),
             response => Err(unexpected(response).into()),
         }
     }
@@ -1056,7 +1023,7 @@ impl File {
             })
             .await?
         {
-            ResponseKind::FileSetAcl(result) => result.map_err(Into::into),
+            ResponseKind::FileSetAcl => Ok(()),
             response => Err(unexpected(response).into()),
         }
     }
@@ -1075,7 +1042,7 @@ impl File {
             })
             .await?
         {
-            ResponseKind::FileSecDesc(result) => result.map_err(Into::into),
+            ResponseKind::FileSecDesc(result) => Ok(result),
             response => Err(unexpected(response).into()),
         }
     }
@@ -1091,7 +1058,7 @@ impl File {
             })
             .await?
         {
-            ResponseKind::FileSetSecDesc(result) => result.map_err(Into::into),
+            ResponseKind::FileSetSecDesc => Ok(()),
             response => Err(unexpected(response).into()),
         }
     }
@@ -1107,7 +1074,7 @@ impl File {
             })
             .await?
         {
-            ResponseKind::FileXattrs(result) => result.map_err(Into::into),
+            ResponseKind::FileXattrs(result) => Ok(result),
             response => Err(unexpected(response).into()),
         }
     }
@@ -1124,7 +1091,7 @@ impl File {
             })
             .await?
         {
-            ResponseKind::FileXattr(result) => result.map_err(Into::into),
+            ResponseKind::FileXattr(result) => Ok(result),
             response => Err(unexpected(response).into()),
         }
     }
@@ -1137,7 +1104,7 @@ impl File {
             .request(RequestKind::FileStreams { file: file.cite() })
             .await?
         {
-            ResponseKind::FileStreams(result) => result.map_err(Into::into),
+            ResponseKind::FileStreams(result) => Ok(result),
             response => Err(unexpected(response).into()),
         }
     }
@@ -1160,7 +1127,7 @@ impl File {
             })
             .await?
         {
-            ResponseKind::FileSetXattr(result) => result.map_err(Into::into),
+            ResponseKind::FileSetXattr => Ok(()),
             response => Err(unexpected(response).into()),
         }
     }
@@ -1177,12 +1144,12 @@ impl File {
             })
             .await?
         {
-            ResponseKind::FileRemoveXattr(result) => result.map_err(Into::into),
+            ResponseKind::FileRemoveXattr => Ok(()),
             response => Err(unexpected(response).into()),
         }
     }
 
-    pub(crate) async fn lock(&self, request: FileLockRequest) -> Result<Option<FileLock>> {
+    pub(crate) async fn lock(&self, request: FileLockRequest) -> Result<Option<file::FileLock>> {
         let file = self;
         file.idle()?;
         match file
@@ -1193,16 +1160,14 @@ impl File {
             })
             .await?
         {
-            ResponseKind::FileLock(result) => result
-                .map(|lock| {
-                    lock.map(|lock| {
-                        FileLock::remote(RemoteFileLock {
-                            client: file.client.clone(),
-                            lock: Some(lock),
-                        })
+            ResponseKind::FileLock(lock) => Ok({
+                lock.map(|lock| {
+                    file::FileLock::remote(FileLock {
+                        client: file.client.clone(),
+                        lock: Some(lock),
                     })
                 })
-                .map_err(Into::into),
+            }),
             response => Err(unexpected(response).into()),
         }
     }
@@ -1210,10 +1175,6 @@ impl File {
     pub(crate) async fn try_into_std(self) -> std::result::Result<std::fs::File, Self> {
         Err(self)
     }
-}
-
-fn wire_io(error: WireError) -> io::Error {
-    Error::from(error).into_io_error()
 }
 
 fn negative_seek() -> io::Error {
@@ -1231,14 +1192,11 @@ fn negative_seek() -> io::Error {
 /// the cursor takes it verbatim.
 fn ack_write(cursor: &mut u64, response: ResponseKind) -> io::Result<usize> {
     match response {
-        ResponseKind::Error(error) => Err(wire_io(error)),
-        ResponseKind::FileWrite(result) => {
-            let written = result.map_err(wire_io)?;
+        ResponseKind::FileWrite(written) => {
             *cursor += written as u64;
             Ok(written)
         }
-        ResponseKind::FileAppend(result) => {
-            let (written, end) = result.map_err(wire_io)?;
+        ResponseKind::FileAppend((written, end)) => {
             *cursor = end;
             Ok(written)
         }
@@ -1276,13 +1234,12 @@ impl Client {
                 vfs: vfs.as_ref().map(Gift::cite),
                 kind: RequestKind::Query,
             })
-            .await
-            .map_err(rpc_error)?
-            .into_response();
+            .await?
+            .into_response()?;
         let ResponseKind::Query(result) = response else {
             return Err(unexpected(response).into());
         };
-        let query = result.map_err(Error::from).map(query_from_wire)?;
+        let query = query_from_wire(result);
         Ok(Self {
             shared: Arc::new(ClientShared { rpc, mode, query }),
             vfs,
@@ -1307,11 +1264,7 @@ impl Client {
     where
         T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let rpc = rpc_builder(None)
-            .client(stream)
-            .await
-            .map_err(rpc_error)?
-            .bind();
+        let rpc = rpc_builder(None).client(stream).await?.bind();
         Self::initialize(rpc, SessionMode::Remote, None).await
     }
 
@@ -1323,11 +1276,7 @@ impl Client {
         R: AsyncRead + Send + 'static,
         W: AsyncWrite + Send + 'static,
     {
-        let rpc = rpc_builder(None)
-            .client_split(reader, writer)
-            .await
-            .map_err(rpc_error)?
-            .bind();
+        let rpc = rpc_builder(None).client_split(reader, writer).await?.bind();
         Self::initialize(rpc, SessionMode::Remote, None).await
     }
 
@@ -1374,11 +1323,7 @@ impl Client {
 
     #[cfg(unix)]
     async fn from_std_stream(stream: StdUnixStream, key: Option<AuthKey>) -> Result<Self> {
-        let rpc = rpc_builder(key)
-            .client_unix(stream)
-            .await
-            .map_err(rpc_error)?
-            .bind();
+        let rpc = rpc_builder(key).client_unix(stream).await?.bind();
         Self::initialize(rpc, SessionMode::Native, None).await
     }
 
@@ -1419,8 +1364,7 @@ impl Client {
         #[cfg(windows)]
         {
             let rpc = unsafe { rpc_builder(None).client_named_pipe_server(pipe, server_process) }
-                .await
-                .map_err(rpc_error)?
+                .await?
                 .bind();
             Self::initialize(rpc, SessionMode::Native, None).await
         }
@@ -1454,16 +1398,7 @@ impl Client {
     }
 
     pub(crate) async fn request(&self, request: RequestKind) -> Result<ResponseKind> {
-        let response = self
-            .call(request)
-            .await
-            .map_err(rpc_error)
-            .map_err(Error::from)?
-            .into_response();
-        match response {
-            ResponseKind::Error(error) => Err(Error::from(error)),
-            response => Ok(response),
-        }
+        self.call(request).await?.into_response()
     }
 
     async fn unix_vfs(&self, path: Utf8TypedPath<'_>, key: Option<&[u8]>) -> Result<Vfs> {
@@ -1476,7 +1411,7 @@ impl Client {
             key: key.map(<[u8]>::to_vec),
         };
         match self.request(RequestKind::UnixVfs(request)).await? {
-            ResponseKind::UnixVfs(result) => match result.map_err(Error::from)? {
+            ResponseKind::UnixVfs(result) => match result {
                 OpenVfsHandle::Native(handle) => {
                     #[cfg(unix)]
                     {
@@ -1518,8 +1453,7 @@ impl Client {
             elevate,
         };
         match self.request(RequestKind::WindowsAdmin(request)).await? {
-            ResponseKind::WindowsAdmin(result) => {
-                let vfs = result.map_err(Error::from)?;
+            ResponseKind::WindowsAdmin(vfs) => {
                 let client =
                     Self::initialize(self.shared.rpc.clone(), self.shared.mode, Some(vfs)).await?;
                 #[cfg(windows)]
@@ -1550,10 +1484,9 @@ impl Client {
             payload: Box::new(request),
         });
         match self.request(wire).await? {
-            ResponseKind::Extension(Ok(ExtensionResponse { payload, .. })) => Ok(*payload
+            ResponseKind::Extension(ExtensionResponse { payload, .. }) => Ok(*payload
                 .downcast::<T::Response>()
                 .expect("response type matches the extension that produced it")),
-            ResponseKind::Extension(Err(error)) => Err(error.into()),
             response => Err(unexpected(response).into()),
         }
     }
@@ -1576,29 +1509,6 @@ impl Client {
             return stop_result.and(wait_result);
         }
         stop_result
-    }
-}
-
-pub(crate) fn rpc_error(error: dolang_rpc::Error) -> io::Error {
-    match error {
-        dolang_rpc::Error::Io(error) => error,
-        dolang_rpc::Error::Serialize(_)
-        | dolang_rpc::Error::Deserialize(_)
-        | dolang_rpc::Error::Protocol(_) => {
-            io::Error::new(io::ErrorKind::InvalidData, error.to_string())
-        }
-        dolang_rpc::Error::Auth(_) => {
-            io::Error::new(io::ErrorKind::PermissionDenied, error.to_string())
-        }
-        dolang_rpc::Error::ConnectionClosed => {
-            io::Error::new(io::ErrorKind::ConnectionReset, error.to_string())
-        }
-        dolang_rpc::Error::Cancelled => {
-            io::Error::new(io::ErrorKind::Interrupted, error.to_string())
-        }
-        dolang_rpc::Error::UnsupportedCapability => {
-            io::Error::new(io::ErrorKind::Unsupported, error.to_string())
-        }
     }
 }
 
@@ -1707,7 +1617,6 @@ struct PreparedRelays {
 enum ClientChildState {
     Live(Gift<ChildMarker>),
     Exited(ProcessStatus),
-    Lost(WireError),
 }
 
 /// A writable standard-stream endpoint owned by a remote VFS session.
@@ -1794,9 +1703,13 @@ impl AsyncWrite for RemoteStdioSend {
                     let target = pending.target;
                     let unreported = pending.unreported;
                     self.write_body = None;
-                    match result.map_err(rpc_error)?.into_response() {
+                    match result
+                        .map_err(Error::from)?
+                        .into_response()
+                        .map_err(io::Error::from)?
+                    {
                         ResponseKind::StdioSendWrite(result) => {
-                            if result.map_err(wire_io)? != target {
+                            if result != target {
                                 return Poll::Ready(Err(io::Error::new(
                                     io::ErrorKind::InvalidData,
                                     "stdio write response does not acknowledge the submitted trailer",
@@ -1804,7 +1717,6 @@ impl AsyncWrite for RemoteStdioSend {
                             }
                             return Poll::Ready(Ok(unreported));
                         }
-                        ResponseKind::Error(error) => return Poll::Ready(Err(wire_io(error))),
                         response => return Poll::Ready(Err(unexpected(response))),
                     }
                 }
@@ -1838,15 +1750,17 @@ impl AsyncWrite for RemoteStdioSend {
                 Poll::Pending => Poll::Pending,
                 Poll::Ready(result) => {
                     self.write_body = None;
-                    Poll::Ready(result.map_err(rpc_error).and_then(|result| {
-                        match result.into_response() {
-                            ResponseKind::StdioSendWrite(result) => {
-                                result.map(|_| ()).map_err(wire_io)
-                            }
-                            ResponseKind::Error(error) => Err(wire_io(error)),
-                            response => Err(unexpected(response)),
-                        }
-                    }))
+                    Poll::Ready(
+                        result
+                            .map_err(Error::from)
+                            .map_err(io::Error::from)
+                            .and_then(|result| {
+                                match result.into_response().map_err(io::Error::from)? {
+                                    ResponseKind::StdioSendWrite(_) => Ok(()),
+                                    response => Err(unexpected(response)),
+                                }
+                            }),
+                    )
                 }
             };
         }
@@ -1882,15 +1796,15 @@ impl AsyncWrite for RemoteStdioSend {
             Poll::Pending => Poll::Pending,
             Poll::Ready(result) => {
                 self.pending = None;
-                match result.map_err(rpc_error)?.into_response() {
-                    ResponseKind::Error(error) => Poll::Ready(Err(wire_io(error))),
-                    ResponseKind::StdioSendClose(result) => match result.map_err(wire_io) {
-                        Ok(()) => {
-                            self.stdio.take();
-                            Poll::Ready(Ok(()))
-                        }
-                        Err(error) => Poll::Ready(Err(error)),
-                    },
+                match result
+                    .map_err(Error::from)?
+                    .into_response()
+                    .map_err(io::Error::from)?
+                {
+                    ResponseKind::StdioSendClose => {
+                        self.stdio.take();
+                        Poll::Ready(Ok(()))
+                    }
                     response => Poll::Ready(Err(unexpected(response))),
                 }
             }
@@ -1952,27 +1866,23 @@ impl AsyncRead for RemoteStdioRecv {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(result) => {
                     self.pending = None;
-                    let (response, trailer) = result.map_err(rpc_error)?.into_response_trailer();
-                    match response {
-                        ResponseKind::Error(error) => return Poll::Ready(Err(wire_io(error))),
-                        ResponseKind::StdioRecvRead(result) => match result.map_err(wire_io) {
-                            Ok(()) => {
-                                let Some(data) = trailer else {
-                                    return Poll::Ready(Err(io::Error::new(
-                                        io::ErrorKind::InvalidData,
-                                        "stdio read response is missing its data trailer",
-                                    )));
-                                };
-                                let requested = buf.remaining();
-                                self.read_body = Some(PendingTrailerRead {
-                                    recv: data,
-                                    remaining: requested,
-                                    read: 0,
-                                });
-                                continue;
-                            }
-                            Err(error) => return Poll::Ready(Err(error)),
-                        },
+                    let (response, trailer) = result.map_err(Error::from)?.into_response_trailer();
+                    match response.map_err(io::Error::from)? {
+                        ResponseKind::StdioRecvRead => {
+                            let Some(data) = trailer else {
+                                return Poll::Ready(Err(io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    "stdio read response is missing its data trailer",
+                                )));
+                            };
+                            let requested = buf.remaining();
+                            self.read_body = Some(PendingTrailerRead {
+                                recv: data,
+                                remaining: requested,
+                                read: 0,
+                            });
+                            continue;
+                        }
                         response => return Poll::Ready(Err(unexpected(response))),
                     }
                 }
@@ -2003,14 +1913,12 @@ impl RemoteStdioSend {
             })
             .await?
         {
-            ResponseKind::StdioSendClone(result) => Ok(result
-                .map(|stdio| Self {
-                    client: self.client.clone(),
-                    stdio: Some(stdio),
-                    pending: None,
-                    write_body: None,
-                })
-                .map_err(wire_io)?),
+            ResponseKind::StdioSendClone(stdio) => Ok(Self {
+                client: self.client.clone(),
+                stdio: Some(stdio),
+                pending: None,
+                write_body: None,
+            }),
             response => Err(unexpected(response).into()),
         }
     }
@@ -2041,14 +1949,12 @@ impl RemoteStdioRecv {
             })
             .await?
         {
-            ResponseKind::StdioRecvClone(result) => Ok(result
-                .map(|stdio| Self {
-                    client: self.client.clone(),
-                    stdio: Some(stdio),
-                    pending: None,
-                    read_body: None,
-                })
-                .map_err(wire_io)?),
+            ResponseKind::StdioRecvClone(stdio) => Ok(Self {
+                client: self.client.clone(),
+                stdio: Some(stdio),
+                pending: None,
+                read_body: None,
+            }),
             response => Err(unexpected(response).into()),
         }
     }
@@ -2095,7 +2001,7 @@ impl<'a> Command<'a> {
             ClientRecv::Inherit => {
                 let (send, recv) = client.pipe(None).await?;
                 relays.stdin = Some(send);
-                let StdioRecv::Remote(remote) = recv else {
+                let StdioRecv(StdioRecvInner::Remote(remote)) = recv else {
                     return Err(io::Error::other(
                         "remote pipe unexpectedly returned a native receive endpoint",
                     )
@@ -2109,15 +2015,17 @@ impl<'a> Command<'a> {
                 }
                 Ok(StdioRecvTarget::Native(OsHandle::new(handle)))
             }
-            ClientRecv::Resource(stdio) => match stdio {
-                StdioRecv::Native(_) => {
+            ClientRecv::Resource(stdio) => match stdio.0 {
+                StdioRecvInner::Native(native) => {
                     if client.mode() == SessionMode::Remote {
                         return client.unsupported("native process stdio");
                     }
-                    let handle = stdio.into_blocking_handle().await?;
+                    let handle = StdioRecv(StdioRecvInner::Native(native))
+                        .into_blocking_handle()
+                        .await?;
                     Ok(StdioRecvTarget::Native(OsHandle::new(handle)))
                 }
-                StdioRecv::Remote(remote) => Self::prepare_remote_recv(client, remote),
+                StdioRecvInner::Remote(remote) => Self::prepare_remote_recv(client, remote),
             },
         }
     }
@@ -2145,7 +2053,7 @@ impl<'a> Command<'a> {
             ClientSend::Inherit(output) => {
                 let (send, recv) = client.pipe(None).await?;
                 relays.outputs.push((recv, output));
-                let StdioSend::Remote(remote) = send else {
+                let StdioSend(StdioSendInner::Remote(remote)) = send else {
                     return Err(io::Error::other(
                         "remote pipe unexpectedly returned a native send endpoint",
                     )
@@ -2159,15 +2067,17 @@ impl<'a> Command<'a> {
                 }
                 Ok(StdioSendTarget::Native(OsHandle::new(handle)))
             }
-            ClientSend::Resource(stdio) => match stdio {
-                StdioSend::Native(_) => {
+            ClientSend::Resource(stdio) => match stdio.0 {
+                StdioSendInner::Native(native) => {
                     if client.mode() == SessionMode::Remote {
                         return client.unsupported("native process stdio");
                     }
-                    let handle = stdio.into_blocking_handle().await?;
+                    let handle = StdioSend(StdioSendInner::Native(native))
+                        .into_blocking_handle()
+                        .await?;
                     Ok(StdioSendTarget::Native(OsHandle::new(handle)))
                 }
-                StdioSend::Remote(remote) => Self::prepare_remote_send(client, remote),
+                StdioSendInner::Remote(remote) => Self::prepare_remote_send(client, remote),
             },
         }
     }
@@ -2244,15 +2154,11 @@ impl Child {
         match &self.state {
             ClientChildState::Live(_) => None,
             ClientChildState::Exited(status) => Some(Ok(*status)),
-            ClientChildState::Lost(error) => Some(Err(error.clone().into())),
         }
     }
 
-    fn store_result(&mut self, result: &std::result::Result<ProcessStatus, WireError>) {
-        self.state = match result {
-            Ok(status) => ClientChildState::Exited(*status),
-            Err(error) => ClientChildState::Lost(error.clone()),
-        };
+    fn store_result(&mut self, status: ProcessStatus) {
+        self.state = ClientChildState::Exited(status);
     }
 }
 
@@ -2282,7 +2188,7 @@ impl Child {
         {
             ResponseKind::ChildWait(result) => {
                 self.relays.finish();
-                self.store_result(&result);
+                self.store_result(result);
                 self.result().unwrap()
             }
             response => Err(unexpected(response).into()),
@@ -2306,10 +2212,10 @@ impl Child {
         {
             ResponseKind::ChildTerminate(result) => {
                 self.relays.finish();
-                if let Ok(Some(status)) = result {
+                if let Some(status) = result {
                     self.state = ClientChildState::Exited(status);
                 }
-                result.map_err(Into::into)
+                Ok(result)
             }
             response => Err(unexpected(response).into()),
         }
@@ -2338,7 +2244,7 @@ impl<'a> Command<'a> {
     }
 
     pub(crate) fn stdin(&mut self, stdio: StdioRecv) -> Result<&mut Self> {
-        if let StdioRecv::Remote(remote) = &stdio
+        if let StdioRecvInner::Remote(remote) = &stdio.0
             && !self.client.is_same_vfs(&remote.client)
         {
             return Err(Error::new(
@@ -2351,7 +2257,7 @@ impl<'a> Command<'a> {
     }
 
     pub(crate) fn stdout(&mut self, stdio: StdioSend) -> Result<&mut Self> {
-        if let StdioSend::Remote(remote) = &stdio
+        if let StdioSendInner::Remote(remote) = &stdio.0
             && !self.client.is_same_vfs(&remote.client)
         {
             return Err(Error::new(
@@ -2405,7 +2311,7 @@ impl<'a> Command<'a> {
     }
 
     pub(crate) fn stderr(&mut self, stdio: StdioSend) -> Result<&mut Self> {
-        if let StdioSend::Remote(remote) = &stdio
+        if let StdioSendInner::Remote(remote) = &stdio.0
             && !self.client.is_same_vfs(&remote.client)
         {
             return Err(Error::new(
@@ -2483,13 +2389,11 @@ impl<'a> Command<'a> {
             termination_policy,
         };
         match client.request(RequestKind::Spawn(req)).await? {
-            ResponseKind::Spawn(result) => result
-                .map(|child| Child {
-                    client: client.clone(),
-                    state: ClientChildState::Live(child),
-                    relays: relays.start(),
-                })
-                .map_err(Into::into),
+            ResponseKind::Spawn(child) => Ok(Child {
+                client: client.clone(),
+                state: ClientChildState::Live(child),
+                relays: relays.start(),
+            }),
             response => Err(unexpected(response).into()),
         }
     }
@@ -2516,94 +2420,71 @@ impl<'a> Command<'a> {
 /// ```
 pub struct OpenOptions<'a> {
     client: &'a Client,
-    read: bool,
-    write: bool,
-    append: bool,
-    create: bool,
-    create_new: bool,
-    truncate: bool,
-    no_follow: bool,
+    flags: OpenFlags,
 }
 
 impl<'a> OpenOptions<'a> {
     fn new(client: &'a Client) -> Self {
         Self {
             client,
-            read: false,
-            write: false,
-            append: false,
-            create: false,
-            create_new: false,
-            truncate: false,
-            no_follow: false,
+            flags: OpenFlags::empty(),
         }
     }
 }
 
 impl OpenOptions<'_> {
     pub fn read(&mut self, read: bool) -> &mut Self {
-        self.read = read;
+        self.flags.set(OpenFlags::READ, read);
         self
     }
 
     pub fn write(&mut self, write: bool) -> &mut Self {
-        self.write = write;
+        self.flags.set(OpenFlags::WRITE, write);
         self
     }
 
     pub fn append(&mut self, append: bool) -> &mut Self {
-        self.append = append;
+        self.flags.set(OpenFlags::APPEND, append);
         self
     }
 
     pub fn create(&mut self, create: bool) -> &mut Self {
-        self.create = create;
+        self.flags.set(OpenFlags::CREATE, create);
         self
     }
 
     pub fn create_new(&mut self, create_new: bool) -> &mut Self {
-        self.create_new = create_new;
+        self.flags.set(OpenFlags::CREATE_NEW, create_new);
         self
     }
 
     pub fn truncate(&mut self, truncate: bool) -> &mut Self {
-        self.truncate = truncate;
+        self.flags.set(OpenFlags::TRUNCATE, truncate);
         self
     }
 
     pub fn no_follow(&mut self, no_follow: bool) -> &mut Self {
-        self.no_follow = no_follow;
+        self.flags.set(OpenFlags::NO_FOLLOW, no_follow);
         self
     }
 
     pub async fn open(&self, path: Utf8TypedPath<'_>) -> Result<VfsFile> {
         let req = OpenRequest {
             path: path.into(),
-            read: self.read,
-            write: self.write,
-            append: self.append,
-            create: self.create,
-            create_new: self.create_new,
-            truncate: self.truncate,
-            no_follow: self.no_follow,
-            handle_preference: if self.client.mode() == SessionMode::Remote {
-                OpenHandlePreference::Opaque
-            } else {
-                OpenHandlePreference::NativePreferred
-            },
+            flags: self.flags,
         };
         match self.client.request(RequestKind::Open(req)).await? {
-            ResponseKind::Open(result) => match result.map_err(Error::from)? {
+            ResponseKind::Open(result) => match result {
                 OpenHandle::Native(handle) => Ok(VfsFile::direct(direct::File::from_std(
                     handle.into_inner().into(),
-                    self.read,
-                    self.write,
-                    self.append,
+                    self.flags.contains(OpenFlags::READ),
+                    self.flags.contains(OpenFlags::WRITE),
+                    self.flags.contains(OpenFlags::APPEND),
                 ))),
                 OpenHandle::Opaque(file) => Ok(VfsFile::client(client::File::new(
                     self.client.clone(),
                     file,
-                    self.append,
+                    self.flags.contains(OpenFlags::APPEND),
                 ))),
             },
             response => Err(unexpected(response).into()),
@@ -2656,7 +2537,7 @@ impl Client {
             mode: mode.bits(),
         };
         match self.request(RequestKind::Access(request)).await? {
-            ResponseKind::Access(result) => result.map_err(Error::from),
+            ResponseKind::Access => Ok(()),
             response => Err(unexpected(response).into()),
         }
     }
@@ -2679,31 +2560,29 @@ impl Client {
             return process::pipe(buf_size).map_err(Into::into);
         }
         match self.request(RequestKind::Pipe { buf_size }).await? {
-            ResponseKind::Pipe(result) => result
-                .map(|pipe| {
-                    (
-                        StdioSend::Remote(RemoteStdioSend {
-                            client: self.clone(),
-                            stdio: Some(pipe.send),
-                            pending: None,
-                            write_body: None,
-                        }),
-                        StdioRecv::Remote(RemoteStdioRecv {
-                            client: self.clone(),
-                            stdio: Some(pipe.recv),
-                            pending: None,
-                            read_body: None,
-                        }),
-                    )
-                })
-                .map_err(Into::into),
+            ResponseKind::Pipe(pipe) => Ok({
+                (
+                    StdioSend::remote(RemoteStdioSend {
+                        client: self.clone(),
+                        stdio: Some(pipe.send),
+                        pending: None,
+                        write_body: None,
+                    }),
+                    StdioRecv::remote(RemoteStdioRecv {
+                        client: self.clone(),
+                        stdio: Some(pipe.recv),
+                        pending: None,
+                        read_body: None,
+                    }),
+                )
+            }),
             response => Err(unexpected(response).into()),
         }
     }
 
     pub async fn user_name(&self, uid: u32) -> Result<String> {
         match self.request(RequestKind::UserName { uid }).await? {
-            ResponseKind::UserName(result) => result.map_err(Into::into),
+            ResponseKind::UserName(result) => Ok(result),
             response => Err(unexpected(response).into()),
         }
     }
@@ -2715,14 +2594,14 @@ impl Client {
             })
             .await?
         {
-            ResponseKind::UserId(result) => result.map_err(Into::into),
+            ResponseKind::UserId(result) => Ok(result),
             response => Err(unexpected(response).into()),
         }
     }
 
     pub async fn group_name(&self, gid: u32) -> Result<String> {
         match self.request(RequestKind::GroupName { gid }).await? {
-            ResponseKind::GroupName(result) => result.map_err(Into::into),
+            ResponseKind::GroupName(result) => Ok(result),
             response => Err(unexpected(response).into()),
         }
     }
@@ -2734,7 +2613,7 @@ impl Client {
             })
             .await?
         {
-            ResponseKind::GroupId(result) => result.map_err(Into::into),
+            ResponseKind::GroupId(result) => Ok(result),
             response => Err(unexpected(response).into()),
         }
     }
@@ -2744,7 +2623,7 @@ impl Client {
             .request(RequestKind::SidName { sid: sid.clone() })
             .await?
         {
-            ResponseKind::SidName(result) => result.map_err(Into::into),
+            ResponseKind::SidName(result) => Ok(result),
             response => Err(unexpected(response).into()),
         }
     }
@@ -2756,7 +2635,7 @@ impl Client {
             })
             .await?
         {
-            ResponseKind::AccountName(result) => result.map_err(Into::into),
+            ResponseKind::AccountName(result) => Ok(result),
             response => Err(unexpected(response).into()),
         }
     }
@@ -2770,7 +2649,7 @@ impl Client {
             .request(RequestKind::ResolvePrincipalId { input, want })
             .await?
         {
-            ResponseKind::ResolvePrincipalId(result) => result.map_err(Into::into),
+            ResponseKind::ResolvePrincipalId(result) => Ok(result),
             response => Err(unexpected(response).into()),
         }
     }
@@ -2780,9 +2659,10 @@ impl Client {
             .request(RequestKind::ReadDir { path: path.into() })
             .await?
         {
-            ResponseKind::ReadDir(result) => result
-                .map(|read_dir| directory::ReadDir::client(ReadDir::new(self.clone(), read_dir)))
-                .map_err(Error::from),
+            ResponseKind::ReadDir(read_dir) => Ok(directory::ReadDir::client(ReadDir::new(
+                self.clone(),
+                read_dir,
+            ))),
             response => Err(unexpected(response).into()),
         }
     }
@@ -2799,9 +2679,7 @@ impl Client {
             cwd: cwd.map(Into::into),
         };
         match self.request(request).await? {
-            ResponseKind::Which(result) => {
-                result.map(|path| path.map(Into::into)).map_err(Error::from)
-            }
+            ResponseKind::Which(result) => Ok(result.map(Into::into)),
             response => Err(unexpected(response).into()),
         }
     }
@@ -2818,14 +2696,14 @@ impl Client {
             env: env.clone(),
         };
         match self.request(RequestKind::WellKnownPath(request)).await? {
-            ResponseKind::WellKnownPath(result) => result.map(Into::into).map_err(Error::from),
+            ResponseKind::WellKnownPath(result) => Ok(result.into()),
             response => Err(unexpected(response).into()),
         }
     }
 
     pub async fn clear_cache(&self) -> Result<()> {
         match self.request(RequestKind::ClearCache).await? {
-            ResponseKind::ClearCache(result) => result.map_err(Error::from),
+            ResponseKind::ClearCache => Ok(()),
             response => Err(unexpected(response).into()),
         }
     }
@@ -2842,7 +2720,7 @@ impl Client {
             follow,
         };
         match self.request(RequestKind::Xattrs(request)).await? {
-            ResponseKind::Xattrs(result) => result.map_err(Error::from),
+            ResponseKind::Xattrs(result) => Ok(result),
             response => Err(unexpected(response).into()),
         }
     }
@@ -2853,7 +2731,7 @@ impl Client {
             follow,
         };
         match self.request(RequestKind::Streams(request)).await? {
-            ResponseKind::Streams(result) => result.map_err(Error::from),
+            ResponseKind::Streams(result) => Ok(result),
             response => Err(unexpected(response).into()),
         }
     }
@@ -2872,7 +2750,7 @@ impl Client {
             follow,
         };
         match self.request(RequestKind::Xattr(request)).await? {
-            ResponseKind::Xattr(result) => result.map_err(Error::from),
+            ResponseKind::Xattr(result) => Ok(result),
             response => Err(unexpected(response).into()),
         }
     }
@@ -2893,7 +2771,7 @@ impl Client {
             follow,
         };
         match self.request(RequestKind::SetXattr(request)).await? {
-            ResponseKind::SetXattr(result) => result.map_err(Error::from),
+            ResponseKind::SetXattr => Ok(()),
             response => Err(unexpected(response).into()),
         }
     }
@@ -2912,7 +2790,7 @@ impl Client {
             follow,
         };
         match self.request(RequestKind::RemoveXattr(request)).await? {
-            ResponseKind::RemoveXattr(result) => result.map_err(Error::from),
+            ResponseKind::RemoveXattr => Ok(()),
             response => Err(unexpected(response).into()),
         }
     }
@@ -2924,7 +2802,7 @@ impl Client {
             ignore,
         };
         match self.request(RequestKind::Remove(request)).await? {
-            ResponseKind::Remove(result) => result.map_err(Error::from),
+            ResponseKind::Remove => Ok(()),
             response => Err(unexpected(response).into()),
         }
     }
@@ -2932,7 +2810,7 @@ impl Client {
     pub async fn metadata(&self, path: Utf8TypedPath<'_>) -> Result<Metadata> {
         let request = MetadataRequest { path: path.into() };
         match self.request(RequestKind::Metadata(request)).await? {
-            ResponseKind::Metadata(result) => result.map_err(Error::from),
+            ResponseKind::Metadata(result) => Ok(result),
             response => Err(unexpected(response).into()),
         }
     }
@@ -2943,7 +2821,7 @@ impl Client {
             follow,
         };
         match self.request(RequestKind::FsMetadata(request)).await? {
-            ResponseKind::FsMetadata(result) => result.map_err(Error::from),
+            ResponseKind::FsMetadata(result) => Ok(result),
             response => Err(unexpected(response).into()),
         }
     }
@@ -2962,7 +2840,7 @@ impl Client {
             follow,
         };
         match self.request(RequestKind::Acl(request)).await? {
-            ResponseKind::Acl(result) => result.map_err(Error::from),
+            ResponseKind::Acl(result) => Ok(result),
             response => Err(unexpected(response).into()),
         }
     }
@@ -2983,7 +2861,7 @@ impl Client {
             follow,
         };
         match self.request(RequestKind::SetAcl(request)).await? {
-            ResponseKind::SetAcl(result) => result.map_err(Error::from),
+            ResponseKind::SetAcl => Ok(()),
             response => Err(unexpected(response).into()),
         }
     }
@@ -3000,7 +2878,7 @@ impl Client {
             follow,
         };
         match self.request(RequestKind::SecDesc(request)).await? {
-            ResponseKind::SecDesc(result) => result.map_err(Error::from),
+            ResponseKind::SecDesc(result) => Ok(result),
             response => Err(unexpected(response).into()),
         }
     }
@@ -3017,7 +2895,7 @@ impl Client {
             follow,
         };
         match self.request(RequestKind::SetSecDesc(request)).await? {
-            ResponseKind::SetSecDesc(result) => result.map_err(Error::from),
+            ResponseKind::SetSecDesc => Ok(()),
             response => Err(unexpected(response).into()),
         }
     }
@@ -3028,7 +2906,7 @@ impl Client {
             all,
         };
         match self.request(RequestKind::CreateDir(request)).await? {
-            ResponseKind::CreateDir(result) => result.map_err(Error::from),
+            ResponseKind::CreateDir => Ok(()),
             response => Err(unexpected(response).into()),
         }
     }
@@ -3040,7 +2918,7 @@ impl Client {
             all,
         };
         match self.request(RequestKind::RemoveDir(request)).await? {
-            ResponseKind::RemoveDir(result) => result.map_err(Error::from),
+            ResponseKind::RemoveDir => Ok(()),
             response => Err(unexpected(response).into()),
         }
     }
@@ -3057,7 +2935,7 @@ impl Client {
             all,
         };
         match self.request(RequestKind::Copy(request)).await? {
-            ResponseKind::Copy(result) => result.map_err(Error::from),
+            ResponseKind::Copy => Ok(()),
             response => Err(unexpected(response).into()),
         }
     }
@@ -3074,7 +2952,7 @@ impl Client {
             replace,
         };
         match self.request(RequestKind::Rename(request)).await? {
-            ResponseKind::Rename(result) => result.map_err(Error::from),
+            ResponseKind::Rename => Ok(()),
             response => Err(unexpected(response).into()),
         }
     }
@@ -3091,7 +2969,7 @@ impl Client {
             all,
         };
         match self.request(RequestKind::Move(request)).await? {
-            ResponseKind::Move(result) => result.map_err(Error::from),
+            ResponseKind::Move => Ok(()),
             response => Err(unexpected(response).into()),
         }
     }
@@ -3109,7 +2987,7 @@ impl Client {
             kind: SymlinkKind::Infer,
         };
         match self.request(RequestKind::Symlink(request)).await? {
-            ResponseKind::Symlink(result) => result.map_err(Error::from),
+            ResponseKind::Symlink => Ok(()),
             response => Err(unexpected(response).into()),
         }
     }
@@ -3120,7 +2998,7 @@ impl Client {
             dst: dst.into(),
         };
         match self.request(RequestKind::HardLink(request)).await? {
-            ResponseKind::HardLink(result) => result.map_err(Error::from),
+            ResponseKind::HardLink => Ok(()),
             response => Err(unexpected(response).into()),
         }
     }
@@ -3133,7 +3011,7 @@ impl Client {
             kind: SymlinkKind::Dir,
         };
         match self.request(RequestKind::Symlink(request)).await? {
-            ResponseKind::Symlink(result) => result.map_err(Error::from),
+            ResponseKind::Symlink => Ok(()),
             response => Err(unexpected(response).into()),
         }
     }
@@ -3146,7 +3024,7 @@ impl Client {
             kind: SymlinkKind::File,
         };
         match self.request(RequestKind::Symlink(request)).await? {
-            ResponseKind::Symlink(result) => result.map_err(Error::from),
+            ResponseKind::Symlink => Ok(()),
             response => Err(unexpected(response).into()),
         }
     }
@@ -3154,7 +3032,7 @@ impl Client {
     pub async fn symlink_metadata(&self, path: Utf8TypedPath<'_>) -> Result<Metadata> {
         let request = MetadataRequest { path: path.into() };
         match self.request(RequestKind::SymlinkMetadata(request)).await? {
-            ResponseKind::SymlinkMetadata(result) => result.map_err(Error::from),
+            ResponseKind::SymlinkMetadata(result) => Ok(result),
             response => Err(unexpected(response).into()),
         }
     }
@@ -3169,7 +3047,7 @@ impl Client {
             patch,
         };
         match self.request(RequestKind::SetMetadata(request)).await? {
-            ResponseKind::SetMetadata(result) => result.map_err(Error::from),
+            ResponseKind::SetMetadata => Ok(()),
             response => Err(unexpected(response).into()),
         }
     }
@@ -3177,7 +3055,7 @@ impl Client {
     pub async fn canonicalize(&self, path: Utf8TypedPath<'_>) -> Result<Utf8TypedPathBuf> {
         let request = CanonicalizeRequest { path: path.into() };
         match self.request(RequestKind::Canonicalize(request)).await? {
-            ResponseKind::Canonicalize(result) => result.map_err(Error::from).map(Into::into),
+            ResponseKind::Canonicalize(result) => Ok(result.into()),
             response => Err(unexpected(response).into()),
         }
     }
@@ -3185,7 +3063,7 @@ impl Client {
     pub async fn read_link(&self, path: Utf8TypedPath<'_>) -> Result<Utf8TypedPathBuf> {
         let request = ReadLinkRequest { path: path.into() };
         match self.request(RequestKind::ReadLink(request)).await? {
-            ResponseKind::ReadLink(result) => result.map_err(Error::from).map(Into::into),
+            ResponseKind::ReadLink(result) => Ok(result.into()),
             response => Err(unexpected(response).into()),
         }
     }
@@ -3204,11 +3082,9 @@ impl Client {
             max_depth,
         };
         match self.request(RequestKind::Glob(request)).await? {
-            ResponseKind::Glob(result) => Ok(result
-                .map_err(Error::from)?
-                .into_iter()
-                .map(Utf8TypedPathBuf::from)
-                .collect()),
+            ResponseKind::Glob(result) => {
+                Ok(result.into_iter().map(Utf8TypedPathBuf::from).collect())
+            }
             response => Err(unexpected(response).into()),
         }
     }
@@ -3218,46 +3094,50 @@ impl Client {
 mod tests {
     use std::io;
 
-    use super::{Client, ClientChildState, rpc_error};
-    use crate::{protocol::RequestKind, server::Server};
+    use super::{Client, ClientChildState};
+    use crate::{
+        error::{Error, ErrorKind},
+        protocol::{RequestKind, ResponseKind},
+        server::Server,
+    };
 
     #[test]
     fn rpc_errors_have_portable_io_kinds() {
         let cases = [
             (
                 dolang_rpc::Error::Serialize("x".into()),
-                io::ErrorKind::InvalidData,
+                ErrorKind::InvalidData,
             ),
             (
                 dolang_rpc::Error::Deserialize("x".into()),
-                io::ErrorKind::InvalidData,
+                ErrorKind::InvalidData,
             ),
             (
                 dolang_rpc::Error::Protocol("x".into()),
-                io::ErrorKind::InvalidData,
+                ErrorKind::InvalidData,
             ),
             (
                 dolang_rpc::Error::Auth("x".into()),
-                io::ErrorKind::PermissionDenied,
+                ErrorKind::PermissionDenied,
             ),
             (
                 dolang_rpc::Error::ConnectionClosed,
-                io::ErrorKind::ConnectionReset,
+                ErrorKind::ConnectionReset,
             ),
-            (dolang_rpc::Error::Cancelled, io::ErrorKind::Interrupted),
+            (dolang_rpc::Error::Cancelled, ErrorKind::Interrupted),
             (
                 dolang_rpc::Error::UnsupportedCapability,
-                io::ErrorKind::Unsupported,
+                ErrorKind::Unsupported,
             ),
         ];
         for (error, expected) in cases {
-            assert_eq!(rpc_error(error).kind(), expected);
+            assert_eq!(Error::from(error).kind(), expected);
         }
 
         let io_error = io::Error::new(io::ErrorKind::WouldBlock, "wait");
         assert_eq!(
-            rpc_error(dolang_rpc::Error::Io(io_error)).kind(),
-            io::ErrorKind::WouldBlock
+            Error::from(dolang_rpc::Error::Io(io_error)).kind(),
+            ErrorKind::WouldBlock
         );
     }
 
@@ -3295,7 +3175,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let crate::protocol::ResponseKind::ChildClose(Ok(())) = response else {
+        let ResponseKind::ChildClose = response else {
             panic!("child close returned the wrong response");
         };
 

@@ -3,12 +3,12 @@ use std::io::{self, SeekFrom};
 use bytes::{Bytes, BytesMut};
 
 #[cfg(target_os = "linux")]
-use dolang_vfs::xattr::XattrNamespace;
+use dolang_vfs::file::XattrNamespace;
 use dolang_vfs::{
-    MAX_FILE_READ, Vfs,
+    Vfs,
     directory::{DirEntry, ReadDir},
     error::Result as VfsResult,
-    file::{FileLockBehavior, FileLockMode, FileLockRange, FileLockRequest},
+    file::{FileLockBehavior, FileLockMode, FileLockRange},
     metadata::FileType,
     path::typed_path,
     process::Command,
@@ -273,7 +273,7 @@ async fn path_operations_work_over_generic_stream() {
 
     client.create_dir(first.to_path(), false).await.unwrap();
     assert_eq!(
-        client.metadata(first.to_path()).await.unwrap().file_type,
+        client.metadata(first.to_path()).await.unwrap().file_type(),
         FileType::Dir
     );
     client
@@ -914,8 +914,8 @@ async fn regular_file_round_trip_over_generic_stream() {
 
     file.write_all(b"abcdef").await.unwrap();
     file.flush().await.unwrap();
-    assert_eq!(file.metadata().await.unwrap().len, 6);
-    assert!(file.fs_metadata().await.unwrap().capacity > 0);
+    assert_eq!(file.metadata().await.unwrap().len(), 6);
+    assert!(file.fs_metadata().await.unwrap().capacity() > 0);
 
     assert_eq!(file.seek(SeekFrom::Start(0)).await.unwrap(), 0);
     let mut prefix = [0; 4];
@@ -931,7 +931,7 @@ async fn regular_file_round_trip_over_generic_stream() {
     assert_eq!(data, b"abcdef");
 
     let mut file = file.try_into_std().await.unwrap_err();
-    assert_eq!(file.metadata().await.unwrap().len, 6);
+    assert_eq!(file.metadata().await.unwrap().len(), 6);
 
     file.set_size(3).await.unwrap();
     assert_eq!(file.seek(SeekFrom::Start(0)).await.unwrap(), 0);
@@ -1013,7 +1013,7 @@ async fn remote_append_writes_ignore_the_cursor() {
     file.seek(SeekFrom::Start(0)).await.unwrap();
     file.write_all(b"second").await.unwrap();
     file.flush().await.unwrap();
-    assert_eq!(file.metadata().await.unwrap().len, 11);
+    assert_eq!(file.metadata().await.unwrap().len(), 11);
     file.close().await.unwrap();
 
     assert_eq!(
@@ -1053,30 +1053,33 @@ async fn remote_file_locks_round_trip() {
     options.read(true).write(true).create(true);
     let first = options.open(path.to_path()).await.unwrap();
     let second = options.open(path.to_path()).await.unwrap();
-    let request = FileLockRequest {
-        range: FileLockRange {
-            start: 0,
-            end: None,
-        },
-        mode: FileLockMode::Exclusive,
-        behavior: FileLockBehavior::Try,
-    };
+    let range = FileLockRange::to_eof(0);
+    let mode = FileLockMode::Exclusive;
+    let behavior = FileLockBehavior::Try;
 
-    let mut lock = first.lock(request).await.unwrap().unwrap();
-    assert!(second.lock(request).await.unwrap().is_none());
+    let mut lock = first.lock(range, mode, behavior).await.unwrap().unwrap();
+    assert!(second.lock(range, mode, behavior).await.unwrap().is_none());
     lock.release().await.unwrap();
-    let mut lock = second.lock(request).await.unwrap().expect("lock acquired");
+    let mut lock = second
+        .lock(range, mode, behavior)
+        .await
+        .unwrap()
+        .expect("lock acquired");
     lock.release().await.unwrap();
 
     // A lock dropped without an explicit release still unlocks, by way of a
     // fire-and-forget request naming the lock's own handle. Nothing orders that
     // against this task, so poll for the effect rather than assume it landed.
-    let lock = first.lock(request).await.unwrap().expect("lock acquired");
-    assert!(second.lock(request).await.unwrap().is_none());
+    let lock = first
+        .lock(range, mode, behavior)
+        .await
+        .unwrap()
+        .expect("lock acquired");
+    assert!(second.lock(range, mode, behavior).await.unwrap().is_none());
     drop(lock);
     let mut reacquired = None;
     for _ in 0..200 {
-        if let Some(lock) = second.lock(request).await.unwrap() {
+        if let Some(lock) = second.lock(range, mode, behavior).await.unwrap() {
             reacquired = Some(lock);
             break;
         }
@@ -1150,7 +1153,7 @@ async fn regular_file_xattrs_round_trip_over_generic_stream() {
             .await
             .unwrap()
             .iter()
-            .any(|entry| entry.name == "remote" && entry.namespace.as_deref() == Some("user"))
+            .any(|entry| entry.name() == "remote" && entry.namespace() == Some("user"))
     );
     file.remove_xattr("remote", Some("user")).await.unwrap();
     assert!(file.xattr("remote", Some("user")).await.is_err());
@@ -1334,58 +1337,16 @@ async fn remote_positional_io_is_independent_of_the_cursor() {
     stop_pair(client, server_task).await;
 }
 
-/// Every remote read is bounded, so that the peer can hold the whole reply and
-/// report a filesystem failure in the response rather than by abandoning the
-/// trailer.
-#[tokio::test]
-async fn remote_reads_are_capped_at_one_chunk() {
-    let (client, server_task) = connected_pair().await;
-    let temp = tempdir().unwrap();
-    let path = typed_path(temp.path().join("large")).unwrap();
-
-    let size = MAX_FILE_READ + 4096;
-    let source: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
-
-    let mut options = client.open_options();
-    options.read(true).write(true).create(true).truncate(true);
-    let mut file = options.open(path.to_path()).await.unwrap();
-    file.write_all(&source).await.unwrap();
-    file.seek(SeekFrom::Start(0)).await.unwrap();
-
-    // Asking for the whole file in one positional read gets exactly one chunk.
-    // Short, but not end of file — the caller has to come back for the rest.
-    let mut buf = BytesMut::with_capacity(size);
-    assert_eq!(file.read_at(&mut buf, 0).await.unwrap(), MAX_FILE_READ);
-    assert_eq!(&buf[..], &source[..MAX_FILE_READ]);
-
-    let mut tail = BytesMut::with_capacity(size);
-    file.read_at(&mut tail, MAX_FILE_READ as u64).await.unwrap();
-    assert_eq!(&tail[..], &source[MAX_FILE_READ..]);
-
-    // The cursor path is clamped the same way, and `read_to_end` loops over
-    // that transparently, so nothing above it observes the boundary.
-    let mut once = vec![0u8; size];
-    let read = file.read(&mut once).await.unwrap();
-    assert_eq!(read, MAX_FILE_READ);
-    let mut rest = Vec::new();
-    file.read_to_end(&mut rest).await.unwrap();
-    assert_eq!(read + rest.len(), size);
-    assert_eq!(&rest[..], &source[MAX_FILE_READ..]);
-
-    file.close().await.unwrap();
-    stop_pair(client, server_task).await;
-}
-
 /// The borrowed-destination read is the one that lands the reply trailer
-/// directly in the caller's storage, so it has to agree with the owned-buffer
-/// route on counts, on the one-chunk cap, and on where the bytes end up.
+/// directly in the caller's storage. Exercise repeated reads because each read
+/// is allowed to return fewer bytes than the destination can hold.
 #[tokio::test]
 async fn remote_read_at_into_lands_the_trailer_in_the_destination() {
     let (client, server_task) = connected_pair().await;
     let temp = tempdir().unwrap();
     let path = typed_path(temp.path().join("into")).unwrap();
 
-    let size = MAX_FILE_READ + 4096;
+    let size = 16 * 1024;
     let source: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
 
     let mut options = client.open_options();
@@ -1400,27 +1361,21 @@ async fn remote_read_at_into_lands_the_trailer_in_the_destination() {
             .await
             .unwrap();
     }
-    file.commit().await.unwrap();
-
     let mut buf = vec![std::mem::MaybeUninit::<u8>::uninit(); size];
-    let read = file.read_at_into(&mut buf, 0).await.unwrap();
-    assert_eq!(read, MAX_FILE_READ, "capped at one chunk, as `read_at` is");
-    let filled: Vec<u8> = buf[..read]
+    let mut read = 0;
+    while read < size {
+        let count = file
+            .read_at_into(&mut buf[read..], read as u64)
+            .await
+            .unwrap();
+        assert_ne!(count, 0, "read reached EOF before the advertised file size");
+        read += count;
+    }
+    let filled: Vec<u8> = buf
         .iter()
         .map(|byte| unsafe { byte.assume_init() })
         .collect();
-    assert_eq!(filled, source[..MAX_FILE_READ]);
-
-    let tail = file
-        .read_at_into(&mut buf, MAX_FILE_READ as u64)
-        .await
-        .unwrap();
-    assert_eq!(tail, size - MAX_FILE_READ);
-    let filled: Vec<u8> = buf[..tail]
-        .iter()
-        .map(|byte| unsafe { byte.assume_init() })
-        .collect();
-    assert_eq!(filled, source[MAX_FILE_READ..]);
+    assert_eq!(filled, source);
 
     assert_eq!(
         file.read_at_into(&mut buf, size as u64).await.unwrap(),

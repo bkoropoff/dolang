@@ -79,6 +79,7 @@ pub enum ProcessControl {
 
 /// A Unix process signal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Signal {
     Hup,
     Int,
@@ -274,12 +275,14 @@ impl Child {
 /// Returns whether `stdio` can be handed directly to a process spawned in
 /// `target`'s domain without relaying.
 fn is_direct_recv(target: &Vfs, stdio: &StdioRecv) -> bool {
-    match (&target.inner, stdio) {
-        (VfsInner::Direct(_), StdioRecv::Native(_)) => true,
-        (VfsInner::Client(client), StdioRecv::Remote(remote)) => {
+    match (&target.inner, &stdio.0) {
+        (VfsInner::Direct(_), StdioRecvInner::Native(_)) => true,
+        (VfsInner::Client(client), StdioRecvInner::Remote(remote)) => {
             client.is_same_vfs(remote.client())
         }
-        (VfsInner::Client(client), StdioRecv::Native(_)) => client.mode() == SessionMode::Native,
+        (VfsInner::Client(client), StdioRecvInner::Native(_)) => {
+            client.mode() == SessionMode::Native
+        }
         _ => false,
     }
 }
@@ -287,12 +290,14 @@ fn is_direct_recv(target: &Vfs, stdio: &StdioRecv) -> bool {
 /// Returns whether `stdio` can be handed directly to a process spawned in
 /// `target`'s domain without relaying.
 fn is_direct_send(target: &Vfs, stdio: &StdioSend) -> bool {
-    match (&target.inner, stdio) {
-        (VfsInner::Direct(_), StdioSend::Native(_)) => true,
-        (VfsInner::Client(client), StdioSend::Remote(remote)) => {
+    match (&target.inner, &stdio.0) {
+        (VfsInner::Direct(_), StdioSendInner::Native(_)) => true,
+        (VfsInner::Client(client), StdioSendInner::Remote(remote)) => {
             client.is_same_vfs(remote.client())
         }
-        (VfsInner::Client(client), StdioSend::Native(_)) => client.mode() == SessionMode::Native,
+        (VfsInner::Client(client), StdioSendInner::Native(_)) => {
+            client.mode() == SessionMode::Native
+        }
         _ => false,
     }
 }
@@ -613,11 +618,49 @@ impl<'a> Command<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminationPolicy {
     /// Signal sent to request graceful termination.
-    pub signal: Signal,
+    pub(crate) signal: Signal,
     /// Time to wait before optional forced termination.
-    pub grace: Duration,
+    pub(crate) grace: Duration,
     /// Whether to force termination after the grace period.
-    pub force: bool,
+    pub(crate) force: bool,
+}
+
+impl TerminationPolicy {
+    /// Creates a process-termination policy.
+    pub const fn new(signal: Signal, grace: Duration, force: bool) -> Self {
+        Self {
+            signal,
+            grace,
+            force,
+        }
+    }
+    /// Returns the signal used to request graceful termination.
+    pub const fn signal(self) -> Signal {
+        self.signal
+    }
+    /// Returns the grace period before forced termination.
+    pub const fn grace(self) -> Duration {
+        self.grace
+    }
+    /// Returns whether the process is forcibly terminated after the grace period.
+    pub const fn force(self) -> bool {
+        self.force
+    }
+    /// Sets the graceful-termination signal.
+    pub fn set_signal(&mut self, signal: Signal) -> &mut Self {
+        self.signal = signal;
+        self
+    }
+    /// Sets the grace period before forced termination.
+    pub fn set_grace(&mut self, grace: Duration) -> &mut Self {
+        self.grace = grace;
+        self
+    }
+    /// Selects whether to force termination after the grace period.
+    pub fn set_force(&mut self, force: bool) -> &mut Self {
+        self.force = force;
+        self
+    }
 }
 
 impl Default for TerminationPolicy {
@@ -627,6 +670,28 @@ impl Default for TerminationPolicy {
             grace: Duration::from_secs(5),
             force: true,
         }
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::{Signal, TerminationPolicy};
+    use std::time::Duration;
+
+    #[test]
+    fn termination_policy_construction_and_mutation() {
+        let mut policy = TerminationPolicy::new(Signal::Int, Duration::from_secs(2), false);
+        assert_eq!(policy.signal(), Signal::Int);
+        assert_eq!(policy.grace(), Duration::from_secs(2));
+        assert!(!policy.force());
+        policy
+            .set_signal(Signal::Term)
+            .set_grace(Duration::from_secs(3))
+            .set_force(true);
+        assert_eq!(
+            policy,
+            TerminationPolicy::new(Signal::Term, Duration::from_secs(3), true)
+        );
     }
 }
 
@@ -640,7 +705,10 @@ use std::{
 };
 /// A writable standard-I/O endpoint from either a local or remote VFS.
 #[derive(Debug)]
-pub enum StdioSend {
+pub struct StdioSend(pub(crate) StdioSendInner);
+
+#[derive(Debug)]
+pub(crate) enum StdioSendInner {
     /// Endpoint backed by a local OS resource.
     Native(NativeStdioSend),
     /// Endpoint retained by a remote VFS session.
@@ -649,7 +717,10 @@ pub enum StdioSend {
 
 /// A readable standard-I/O endpoint from either a local or remote VFS.
 #[derive(Debug)]
-pub enum StdioRecv {
+pub struct StdioRecv(pub(crate) StdioRecvInner);
+
+#[derive(Debug)]
+pub(crate) enum StdioRecvInner {
     /// Endpoint backed by a local OS resource.
     Native(NativeStdioRecv),
     /// Endpoint retained by a remote VFS session.
@@ -659,7 +730,7 @@ pub enum StdioRecv {
 #[cfg(unix)]
 /// Local writable standard-I/O resource on Unix.
 #[derive(Debug)]
-pub enum NativeStdioSend {
+pub(crate) enum NativeStdioSend {
     /// Unix pipe sender.
     Pipe(tokio::net::unix::pipe::Sender),
     /// Asynchronous file.
@@ -669,7 +740,7 @@ pub enum NativeStdioSend {
 #[cfg(unix)]
 /// Local readable standard-I/O resource on Unix.
 #[derive(Debug)]
-pub enum NativeStdioRecv {
+pub(crate) enum NativeStdioRecv {
     /// Unix pipe receiver.
     Pipe(tokio::net::unix::pipe::Receiver),
     /// Asynchronous file.
@@ -678,7 +749,7 @@ pub enum NativeStdioRecv {
 
 #[cfg(windows)]
 #[derive(Debug)]
-pub enum NativeStdioSend {
+pub(crate) enum NativeStdioSend {
     Pipe {
         inner: Arc<PipeWriter>,
         pending: Option<JoinHandle<io::Result<usize>>>,
@@ -688,7 +759,7 @@ pub enum NativeStdioSend {
 
 #[cfg(windows)]
 #[derive(Debug)]
-pub enum NativeStdioRecv {
+pub(crate) enum NativeStdioRecv {
     Pipe {
         inner: Arc<PipeReader>,
         pending: Option<JoinHandle<(Vec<u8>, io::Result<usize>)>>,
@@ -722,8 +793,8 @@ pub(crate) fn pipe(buf_size: Option<usize>) -> io::Result<(StdioSend, StdioRecv)
             set_pipe_buffer_size(send.as_raw_fd(), size);
         }
         Ok((
-            StdioSend::Native(NativeStdioSend::Pipe(send)),
-            StdioRecv::Native(NativeStdioRecv::Pipe(recv)),
+            StdioSend(StdioSendInner::Native(NativeStdioSend::Pipe(send))),
+            StdioRecv(StdioRecvInner::Native(NativeStdioRecv::Pipe(recv))),
         ))
     }
     #[cfg(windows)]
@@ -733,15 +804,15 @@ pub(crate) fn pipe(buf_size: Option<usize>) -> io::Result<(StdioSend, StdioRecv)
             None => std::io::pipe()?,
         };
         Ok((
-            StdioSend::Native(NativeStdioSend::Pipe {
+            StdioSend(StdioSendInner::Native(NativeStdioSend::Pipe {
                 inner: Arc::new(send),
                 pending: None,
-            }),
-            StdioRecv::Native(NativeStdioRecv::Pipe {
+            })),
+            StdioRecv(StdioRecvInner::Native(NativeStdioRecv::Pipe {
                 inner: Arc::new(recv),
                 pending: None,
                 ready: None,
-            }),
+            })),
         ))
     }
 }
@@ -797,43 +868,54 @@ fn create_pipe_sized(size: usize) -> io::Result<(std::io::PipeReader, std::io::P
 }
 
 impl StdioSend {
-    pub(crate) fn from_file(file: File) -> Self {
-        Self::Native(NativeStdioSend::File(file))
+    /// Creates a writable child-stdio endpoint from a VFS file.
+    pub fn from_file(file: File) -> Self {
+        Self(StdioSendInner::Native(NativeStdioSend::File(file)))
     }
 
+    pub(crate) fn remote(remote: crate::client::RemoteStdioSend) -> Self {
+        Self(StdioSendInner::Remote(remote))
+    }
+
+    /// Clones this writable child-stdio endpoint.
     pub async fn try_clone(&self) -> Result<Self> {
-        match self {
+        match &self.0 {
             #[cfg(unix)]
-            Self::Native(NativeStdioSend::Pipe(pipe)) => {
+            StdioSendInner::Native(NativeStdioSend::Pipe(pipe)) => {
                 let fd = pipe.as_fd().try_clone_to_owned()?;
-                Ok(Self::Native(NativeStdioSend::Pipe(
+                Ok(Self(StdioSendInner::Native(NativeStdioSend::Pipe(
                     tokio::net::unix::pipe::Sender::from_owned_fd_unchecked(fd)?,
-                )))
+                ))))
             }
             #[cfg(windows)]
-            Self::Native(NativeStdioSend::Pipe { inner, .. }) => {
-                Ok(Self::Native(NativeStdioSend::Pipe {
+            StdioSendInner::Native(NativeStdioSend::Pipe { inner, .. }) => {
+                Ok(Self(StdioSendInner::Native(NativeStdioSend::Pipe {
                     inner: Arc::new(inner.try_clone()?),
                     pending: None,
-                }))
+                })))
             }
-            Self::Native(NativeStdioSend::File(file)) => {
-                Ok(Self::Native(NativeStdioSend::File(file.try_clone().await?)))
-            }
-            Self::Remote(remote) => Ok(Self::Remote(remote.try_clone().await?)),
+            StdioSendInner::Native(NativeStdioSend::File(file)) => Ok(Self(
+                StdioSendInner::Native(NativeStdioSend::File(file.try_clone().await?)),
+            )),
+            StdioSendInner::Remote(remote) => Ok(Self::remote(remote.try_clone().await?)),
         }
     }
 
+    /// Converts this endpoint into native process stdio.
+    ///
+    /// Remote endpoints cannot be converted.
     pub async fn into_stdio(self) -> Result<Stdio> {
-        match self {
-            Self::Native(NativeStdioSend::File(file)) => Ok(Stdio::from(file.into_std().await)),
+        match self.0 {
+            StdioSendInner::Native(NativeStdioSend::File(file)) => {
+                Ok(Stdio::from(file.into_std().await))
+            }
             #[cfg(unix)]
-            Self::Native(NativeStdioSend::Pipe(pipe)) => {
+            StdioSendInner::Native(NativeStdioSend::Pipe(pipe)) => {
                 let fd: OwnedFd = pipe.into_blocking_fd()?;
                 Ok(Stdio::from(fd))
             }
             #[cfg(windows)]
-            Self::Native(NativeStdioSend::Pipe { inner, pending }) => {
+            StdioSendInner::Native(NativeStdioSend::Pipe { inner, pending }) => {
                 if pending.is_some() {
                     return Err(Error::new(
                         ErrorKind::ResourceBusy,
@@ -844,7 +926,7 @@ impl StdioSend {
                     .or_else(|inner| inner.try_clone())
                     .map(Stdio::from)?)
             }
-            Self::Remote(_) => Err(Error::new(
+            StdioSendInner::Remote(_) => Err(Error::new(
                 ErrorKind::InvalidInput,
                 "remote stdio cannot be converted to a native handle",
             )),
@@ -852,12 +934,12 @@ impl StdioSend {
     }
 
     pub(crate) async fn into_blocking_handle(self) -> io::Result<DefaultHandle> {
-        match self {
-            Self::Native(NativeStdioSend::File(file)) => Ok(file.into_std().await.into()),
+        match self.0 {
+            StdioSendInner::Native(NativeStdioSend::File(file)) => Ok(file.into_std().await.into()),
             #[cfg(unix)]
-            Self::Native(NativeStdioSend::Pipe(pipe)) => pipe.into_blocking_fd(),
+            StdioSendInner::Native(NativeStdioSend::Pipe(pipe)) => pipe.into_blocking_fd(),
             #[cfg(windows)]
-            Self::Native(NativeStdioSend::Pipe { inner, pending }) => {
+            StdioSendInner::Native(NativeStdioSend::Pipe { inner, pending }) => {
                 if pending.is_some() {
                     return Err(io::Error::other(
                         "cannot convert StdioSend while an async write is in flight",
@@ -866,7 +948,7 @@ impl StdioSend {
                 let pipe = Arc::try_unwrap(inner).or_else(|inner| inner.try_clone())?;
                 Ok(OwnedHandle::from(pipe))
             }
-            Self::Remote(_) => Err(io::Error::new(
+            StdioSendInner::Remote(_) => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "remote stdio has no native handle",
             )),
@@ -875,44 +957,55 @@ impl StdioSend {
 }
 
 impl StdioRecv {
-    pub(crate) fn from_file(file: File) -> Self {
-        Self::Native(NativeStdioRecv::File(file))
+    /// Creates a readable child-stdio endpoint from a VFS file.
+    pub fn from_file(file: File) -> Self {
+        Self(StdioRecvInner::Native(NativeStdioRecv::File(file)))
     }
 
+    pub(crate) fn remote(remote: crate::client::RemoteStdioRecv) -> Self {
+        Self(StdioRecvInner::Remote(remote))
+    }
+
+    /// Clones this readable child-stdio endpoint.
     pub async fn try_clone(&self) -> Result<Self> {
-        match self {
+        match &self.0 {
             #[cfg(unix)]
-            Self::Native(NativeStdioRecv::Pipe(pipe)) => {
+            StdioRecvInner::Native(NativeStdioRecv::Pipe(pipe)) => {
                 let fd = pipe.as_fd().try_clone_to_owned()?;
-                Ok(Self::Native(NativeStdioRecv::Pipe(
+                Ok(Self(StdioRecvInner::Native(NativeStdioRecv::Pipe(
                     tokio::net::unix::pipe::Receiver::from_owned_fd_unchecked(fd)?,
-                )))
+                ))))
             }
             #[cfg(windows)]
-            Self::Native(NativeStdioRecv::Pipe { inner, .. }) => {
-                Ok(Self::Native(NativeStdioRecv::Pipe {
+            StdioRecvInner::Native(NativeStdioRecv::Pipe { inner, .. }) => {
+                Ok(Self(StdioRecvInner::Native(NativeStdioRecv::Pipe {
                     inner: Arc::new(inner.try_clone()?),
                     pending: None,
                     ready: None,
-                }))
+                })))
             }
-            Self::Native(NativeStdioRecv::File(file)) => {
-                Ok(Self::Native(NativeStdioRecv::File(file.try_clone().await?)))
-            }
-            Self::Remote(remote) => Ok(Self::Remote(remote.try_clone().await?)),
+            StdioRecvInner::Native(NativeStdioRecv::File(file)) => Ok(Self(
+                StdioRecvInner::Native(NativeStdioRecv::File(file.try_clone().await?)),
+            )),
+            StdioRecvInner::Remote(remote) => Ok(Self::remote(remote.try_clone().await?)),
         }
     }
 
+    /// Converts this endpoint into native process stdio.
+    ///
+    /// Remote endpoints cannot be converted.
     pub async fn into_stdio(self) -> Result<Stdio> {
-        match self {
-            Self::Native(NativeStdioRecv::File(file)) => Ok(Stdio::from(file.into_std().await)),
+        match self.0 {
+            StdioRecvInner::Native(NativeStdioRecv::File(file)) => {
+                Ok(Stdio::from(file.into_std().await))
+            }
             #[cfg(unix)]
-            Self::Native(NativeStdioRecv::Pipe(pipe)) => {
+            StdioRecvInner::Native(NativeStdioRecv::Pipe(pipe)) => {
                 let fd: OwnedFd = pipe.into_blocking_fd()?;
                 Ok(Stdio::from(fd))
             }
             #[cfg(windows)]
-            Self::Native(NativeStdioRecv::Pipe { inner, pending, .. }) => {
+            StdioRecvInner::Native(NativeStdioRecv::Pipe { inner, pending, .. }) => {
                 if pending.is_some() {
                     return Err(Error::new(
                         ErrorKind::ResourceBusy,
@@ -923,7 +1016,7 @@ impl StdioRecv {
                     .or_else(|inner| inner.try_clone())
                     .map(Stdio::from)?)
             }
-            Self::Remote(_) => Err(Error::new(
+            StdioRecvInner::Remote(_) => Err(Error::new(
                 ErrorKind::InvalidInput,
                 "remote stdio cannot be converted to a native handle",
             )),
@@ -931,12 +1024,12 @@ impl StdioRecv {
     }
 
     pub(crate) async fn into_blocking_handle(self) -> io::Result<DefaultHandle> {
-        match self {
-            Self::Native(NativeStdioRecv::File(file)) => Ok(file.into_std().await.into()),
+        match self.0 {
+            StdioRecvInner::Native(NativeStdioRecv::File(file)) => Ok(file.into_std().await.into()),
             #[cfg(unix)]
-            Self::Native(NativeStdioRecv::Pipe(pipe)) => pipe.into_blocking_fd(),
+            StdioRecvInner::Native(NativeStdioRecv::Pipe(pipe)) => pipe.into_blocking_fd(),
             #[cfg(windows)]
-            Self::Native(NativeStdioRecv::Pipe { inner, pending, .. }) => {
+            StdioRecvInner::Native(NativeStdioRecv::Pipe { inner, pending, .. }) => {
                 if pending.is_some() {
                     return Err(io::Error::other(
                         "cannot convert StdioRecv while an async read is in flight",
@@ -945,7 +1038,7 @@ impl StdioRecv {
                 let pipe = Arc::try_unwrap(inner).or_else(|inner| inner.try_clone())?;
                 Ok(OwnedHandle::from(pipe))
             }
-            Self::Remote(_) => Err(io::Error::new(
+            StdioRecvInner::Remote(_) => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "remote stdio has no native handle",
             )),
@@ -959,23 +1052,23 @@ impl AsyncWrite for StdioSend {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        match &mut *self {
-            Self::Native(native) => Pin::new(native).poll_write(cx, buf),
-            Self::Remote(remote) => Pin::new(remote).poll_write(cx, buf),
+        match &mut self.0 {
+            StdioSendInner::Native(native) => Pin::new(native).poll_write(cx, buf),
+            StdioSendInner::Remote(remote) => Pin::new(remote).poll_write(cx, buf),
         }
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match &mut *self {
-            Self::Native(native) => Pin::new(native).poll_flush(cx),
-            Self::Remote(remote) => Pin::new(remote).poll_flush(cx),
+        match &mut self.0 {
+            StdioSendInner::Native(native) => Pin::new(native).poll_flush(cx),
+            StdioSendInner::Remote(remote) => Pin::new(remote).poll_flush(cx),
         }
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match &mut *self {
-            Self::Native(native) => Pin::new(native).poll_shutdown(cx),
-            Self::Remote(remote) => Pin::new(remote).poll_shutdown(cx),
+        match &mut self.0 {
+            StdioSendInner::Native(native) => Pin::new(native).poll_shutdown(cx),
+            StdioSendInner::Remote(remote) => Pin::new(remote).poll_shutdown(cx),
         }
     }
 }
@@ -986,9 +1079,9 @@ impl AsyncRead for StdioRecv {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        match &mut *self {
-            Self::Native(native) => Pin::new(native).poll_read(cx, buf),
-            Self::Remote(remote) => Pin::new(remote).poll_read(cx, buf),
+        match &mut self.0 {
+            StdioRecvInner::Native(native) => Pin::new(native).poll_read(cx, buf),
+            StdioRecvInner::Remote(remote) => Pin::new(remote).poll_read(cx, buf),
         }
     }
 }

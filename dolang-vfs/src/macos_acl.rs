@@ -73,13 +73,46 @@ pub enum MacosAceType {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MacosAce {
     /// Whether this entry allows or denies.
-    pub ace_type: MacosAceType,
+    pub(crate) ace_type: MacosAceType,
     /// Principal controlled by this entry, as a macOS `guid_t`.
-    pub qualifier: Uuid,
+    pub(crate) qualifier: Uuid,
     /// Permissions named by this entry.
-    pub mask: MacosAceMask,
+    pub(crate) mask: MacosAceMask,
     /// Inheritance flags.
-    pub flags: MacosAceFlags,
+    pub(crate) flags: MacosAceFlags,
+}
+
+impl MacosAce {
+    /// Creates a macOS ACL entry.
+    pub const fn new(
+        ace_type: MacosAceType,
+        qualifier: Uuid,
+        mask: MacosAceMask,
+        flags: MacosAceFlags,
+    ) -> Self {
+        Self {
+            ace_type,
+            qualifier,
+            mask,
+            flags,
+        }
+    }
+    /// Returns whether this entry allows or denies access.
+    pub const fn ace_type(self) -> MacosAceType {
+        self.ace_type
+    }
+    /// Returns the principal UUID.
+    pub const fn qualifier(self) -> Uuid {
+        self.qualifier
+    }
+    /// Returns the access-rights mask.
+    pub const fn mask(self) -> MacosAceMask {
+        self.mask
+    }
+    /// Returns the inheritance flags.
+    pub const fn flags(self) -> MacosAceFlags {
+        self.flags
+    }
 }
 
 /// A portable macOS extended access-control list.

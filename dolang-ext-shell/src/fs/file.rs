@@ -13,10 +13,7 @@ use dolang::runtime::{
     value::{BinEmbryo, PinBin, PinStr, TypeObject, View},
 };
 use dolang_vfs::{
-    file::{
-        File as VfsFile, FileLockBehavior, FileLockMode, FileLockRange, FileLockRequest,
-        OpenOptions,
-    },
+    file::{File as VfsFile, FileLockBehavior, FileLockMode, FileLockRange, OpenOptions},
     process::{StdioRecv, StdioSend},
 };
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
@@ -78,7 +75,7 @@ fn lock_range<'v, 's>(
             "lock range end must not precede its start",
         ));
     }
-    Ok(FileLockRange { start, end })
+    FileLockRange::new(start, end).map_err(|error| Error::value(strand, error.to_string()))
 }
 
 /// Configure OpenOptions based on mode string (supports 'b' suffix for binary mode).
@@ -829,14 +826,10 @@ impl<'v> Object<'v> for File<'v> {
                 strand
                     .with_slots(async move |strand, [mut guard, start, end, step]| {
                         let range = lock_range(strand, &range, [start, end, step])?;
-                        let request = FileLockRequest {
-                            range,
-                            mode: if shared {
-                                FileLockMode::Shared
-                            } else {
-                                FileLockMode::Exclusive
-                            },
-                            behavior: FileLockBehavior::Blocking,
+                        let mode = if shared {
+                            FileLockMode::Shared
+                        } else {
+                            FileLockMode::Exclusive
                         };
                         let lock = {
                             let borrow = this.borrow(strand)?;
@@ -844,7 +837,9 @@ impl<'v> Object<'v> for File<'v> {
                                 .file
                                 .as_ref()
                                 .ok_or_else(|| Error::state_error(strand, "file is closed"))?;
-                            file.lock(request).await.into_sys(strand)?
+                            file.lock(range, mode, FileLockBehavior::Blocking)
+                                .await
+                                .into_sys(strand)?
                         };
                         let lock = lock.expect("blocking file lock did not acquire");
                         let lock_type = this.annex().global.types.file_lock;
@@ -883,14 +878,10 @@ impl<'v> Object<'v> for File<'v> {
                 strand
                     .with_slots(async move |strand, [mut guard, start, end, step]| {
                         let range = lock_range(strand, &range, [start, end, step])?;
-                        let request = FileLockRequest {
-                            range,
-                            mode: if shared {
-                                FileLockMode::Shared
-                            } else {
-                                FileLockMode::Exclusive
-                            },
-                            behavior: FileLockBehavior::Try,
+                        let mode = if shared {
+                            FileLockMode::Shared
+                        } else {
+                            FileLockMode::Exclusive
                         };
                         let lock = {
                             let borrow = this.borrow(strand)?;
@@ -898,7 +889,9 @@ impl<'v> Object<'v> for File<'v> {
                                 .file
                                 .as_ref()
                                 .ok_or_else(|| Error::state_error(strand, "file is closed"))?;
-                            file.lock(request).await.into_sys(strand)?
+                            file.lock(range, mode, FileLockBehavior::Try)
+                                .await
+                                .into_sys(strand)?
                         };
                         let lock_type = this.annex().global.types.file_lock;
                         FileLockObject::create(strand, lock_type, lock, &mut guard);
@@ -1120,11 +1113,11 @@ impl<'v> Object<'v> for File<'v> {
                         .as_ref()
                         .ok_or_else(|| Error::state_error(strand, "file is closed"))?;
                     file.xattrs(if any {
-                        dolang_vfs::xattr::XattrNamespace::Any
+                        dolang_vfs::file::XattrNamespace::Any
                     } else if let Some(ref namespace) = namespace {
-                        dolang_vfs::xattr::XattrNamespace::Named(namespace)
+                        dolang_vfs::file::XattrNamespace::Named(namespace)
                     } else {
-                        dolang_vfs::xattr::XattrNamespace::Default
+                        dolang_vfs::file::XattrNamespace::Default
                     })
                     .await
                     .into_sys(strand)?

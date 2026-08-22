@@ -199,6 +199,7 @@ pub(crate) fn line_ending(operating_system: OperatingSystem) -> &'static [u8] {
     match operating_system {
         OperatingSystem::Windows => b"\r\n",
         OperatingSystem::FreeBsd | OperatingSystem::Linux | OperatingSystem::Macos => b"\n",
+        _ => b"\n",
     }
 }
 

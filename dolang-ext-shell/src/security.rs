@@ -349,19 +349,19 @@ impl<'v> Object<'v> for Identity {
     fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
         builder
             .get("uid", |this, strand, out| {
-                Output::set(strand, out, this.annex().uid);
+                Output::set(strand, out, this.annex().uid());
                 Ok(())
             })
             .get("gid", |this, strand, out| {
-                Output::set(strand, out, this.annex().gid);
+                Output::set(strand, out, this.annex().gid());
                 Ok(())
             })
             .get("euid", |this, strand, out| {
-                Output::set(strand, out, this.annex().euid);
+                Output::set(strand, out, this.annex().effective_uid());
                 Ok(())
             })
             .get("egid", |this, strand, out| {
-                Output::set(strand, out, this.annex().egid);
+                Output::set(strand, out, this.annex().effective_gid());
                 Ok(())
             })
             .get("group_ids", |this, strand, out| {
@@ -507,10 +507,7 @@ impl<'v> Object<'v> for PosixAceObject {
                     this.create_with_annex(
                         strand,
                         PosixAceObject,
-                        VfsPosixAce {
-                            qualifier: $qualifier,
-                            permissions,
-                        },
+                        VfsPosixAce::new($qualifier, permissions),
                         out,
                     );
                     Ok(())
@@ -532,10 +529,7 @@ impl<'v> Object<'v> for PosixAceObject {
                 this.create_with_annex(
                     strand,
                     PosixAceObject,
-                    VfsPosixAce {
-                        qualifier: VfsPosixAclQualifier::User(id),
-                        permissions,
-                    },
+                    VfsPosixAce::new(VfsPosixAclQualifier::User(id), permissions),
                     out,
                 );
                 Ok(())
@@ -548,16 +542,13 @@ impl<'v> Object<'v> for PosixAceObject {
                 this.create_with_annex(
                     strand,
                     PosixAceObject,
-                    VfsPosixAce {
-                        qualifier: VfsPosixAclQualifier::Group(id),
-                        permissions,
-                    },
+                    VfsPosixAce::new(VfsPosixAclQualifier::Group(id), permissions),
                     out,
                 );
                 Ok(())
             })
             .get("type", move |this, strand, out| {
-                let value = match this.annex().qualifier {
+                let value = match this.annex().qualifier() {
                     VfsPosixAclQualifier::UserObj => user_obj,
                     VfsPosixAclQualifier::User(_) => user,
                     VfsPosixAclQualifier::GroupObj => group_obj,
@@ -569,7 +560,7 @@ impl<'v> Object<'v> for PosixAceObject {
                 Ok(())
             })
             .get("id", move |this, strand, out| {
-                let id = match this.annex().qualifier {
+                let id = match this.annex().qualifier() {
                     VfsPosixAclQualifier::User(id) | VfsPosixAclQualifier::Group(id) => id,
                     _ => return Err(Error::field(strand, id_field)),
                 };
@@ -578,7 +569,7 @@ impl<'v> Object<'v> for PosixAceObject {
             })
             .get("permissions", |this, strand, out| {
                 let permission = strand.state::<Global<'v>>().types.permission;
-                permission.create_flags(strand, Permission(this.annex().permissions), out);
+                permission.create_flags(strand, Permission(this.annex().permissions()), out);
                 Ok(())
             })
     }
@@ -839,12 +830,7 @@ impl<'v> Object<'v> for Nfs4AceObject {
                     this.create_with_annex(
                         strand,
                         Nfs4AceObject,
-                        VfsNfs4Ace {
-                            ace_type,
-                            qualifier: $qualifier,
-                            mask,
-                            flags,
-                        },
+                        VfsNfs4Ace::new(ace_type, $qualifier, mask, flags),
                         out,
                     );
                     Ok(())
@@ -876,12 +862,7 @@ impl<'v> Object<'v> for Nfs4AceObject {
                 this.create_with_annex(
                     strand,
                     Nfs4AceObject,
-                    VfsNfs4Ace {
-                        ace_type,
-                        qualifier: VfsNfs4AceQualifier::User(id),
-                        mask,
-                        flags,
-                    },
+                    VfsNfs4Ace::new(ace_type, VfsNfs4AceQualifier::User(id), mask, flags),
                     out,
                 );
                 Ok(())
@@ -905,18 +886,13 @@ impl<'v> Object<'v> for Nfs4AceObject {
                 this.create_with_annex(
                     strand,
                     Nfs4AceObject,
-                    VfsNfs4Ace {
-                        ace_type,
-                        qualifier: VfsNfs4AceQualifier::Group(id),
-                        mask,
-                        flags,
-                    },
+                    VfsNfs4Ace::new(ace_type, VfsNfs4AceQualifier::Group(id), mask, flags),
                     out,
                 );
                 Ok(())
             })
             .get("type", move |this, strand, out| {
-                let value = match this.annex().ace_type {
+                let value = match this.annex().ace_type() {
                     VfsNfs4AceType::Allow => allow,
                     VfsNfs4AceType::Deny => deny,
                     VfsNfs4AceType::Audit => audit,
@@ -926,7 +902,7 @@ impl<'v> Object<'v> for Nfs4AceObject {
                 Ok(())
             })
             .get("principal", move |this, strand, out| {
-                let value = match this.annex().qualifier {
+                let value = match this.annex().qualifier() {
                     VfsNfs4AceQualifier::Owner => owner,
                     VfsNfs4AceQualifier::OwningGroup => owning_group,
                     VfsNfs4AceQualifier::Everyone => everyone,
@@ -937,7 +913,7 @@ impl<'v> Object<'v> for Nfs4AceObject {
                 Ok(())
             })
             .get("id", move |this, strand, out| {
-                let id = match this.annex().qualifier {
+                let id = match this.annex().qualifier() {
                     VfsNfs4AceQualifier::User(id) | VfsNfs4AceQualifier::Group(id) => id,
                     _ => return Err(Error::field(strand, id_field)),
                 };
@@ -946,12 +922,12 @@ impl<'v> Object<'v> for Nfs4AceObject {
             })
             .get("mask", |this, strand, out| {
                 let mask = strand.state::<Global<'v>>().types.nfs4_ace_mask;
-                mask.create_flags(strand, Nfs4AceMask(this.annex().mask), out);
+                mask.create_flags(strand, Nfs4AceMask(this.annex().mask()), out);
                 Ok(())
             })
             .get("flags", |this, strand, out| {
                 let flags = strand.state::<Global<'v>>().types.nfs4_ace_flags;
-                flags.create_flags(strand, Nfs4AceFlags(this.annex().flags), out);
+                flags.create_flags(strand, Nfs4AceFlags(this.annex().flags()), out);
                 Ok(())
             })
     }
@@ -1157,12 +1133,7 @@ impl<'v> Object<'v> for MacosAceObject {
                     this.create_with_annex(
                         strand,
                         MacosAceObject,
-                        VfsMacosAce {
-                            ace_type: $ace_type,
-                            qualifier,
-                            mask,
-                            flags,
-                        },
+                        VfsMacosAce::new($ace_type, qualifier, mask, flags),
                         out,
                     );
                     Ok(())
@@ -1175,7 +1146,7 @@ impl<'v> Object<'v> for MacosAceObject {
 
         builder
             .get("type", move |this, strand, out| {
-                let value = match this.annex().ace_type {
+                let value = match this.annex().ace_type() {
                     VfsMacosAceType::Allow => allow,
                     VfsMacosAceType::Deny => deny,
                 };
@@ -1183,17 +1154,17 @@ impl<'v> Object<'v> for MacosAceObject {
                 Ok(())
             })
             .get("principal", move |this, strand, out| {
-                dolang_ext_uuid::create_uuid(strand, this.annex().qualifier, out);
+                dolang_ext_uuid::create_uuid(strand, this.annex().qualifier(), out);
                 Ok(())
             })
             .get("mask", |this, strand, out| {
                 let mask = strand.state::<Global<'v>>().types.macos_ace_mask;
-                mask.create_flags(strand, MacosAceMask(this.annex().mask), out);
+                mask.create_flags(strand, MacosAceMask(this.annex().mask()), out);
                 Ok(())
             })
             .get("flags", |this, strand, out| {
                 let flags = strand.state::<Global<'v>>().types.macos_ace_flags;
-                flags.create_flags(strand, MacosAceFlags(this.annex().flags), out);
+                flags.create_flags(strand, MacosAceFlags(this.annex().flags()), out);
                 Ok(())
             })
     }
@@ -1213,6 +1184,7 @@ pub(crate) fn create_any_acl<'v>(
         Some(VfsAnyAcl::Posix(acl)) => create_posix_acl(strand, global, Some(acl), out),
         Some(VfsAnyAcl::Nfs4(acl)) => create_nfs4_acl(strand, global, Some(acl), out),
         Some(VfsAnyAcl::Macos(acl)) => create_macos_acl(strand, global, Some(acl), out),
+        Some(_) => Output::set(strand, out, Nil),
     }
 }
 
@@ -1413,8 +1385,7 @@ impl<'v> Object<'v> for Sid {
                 let ([], []) = unpack!(strand, args, 0, 0)?;
                 let sid = this.annex().clone();
                 let global = strand.state::<Global<'v>>();
-                if global.local.get(strand).target().operating_system.family()
-                    != OperatingSystemFamily::Windows
+                if global.local.get(strand).target().os().family() != OperatingSystemFamily::Windows
                 {
                     return Err(Error::not_supported(strand));
                 }
@@ -2758,28 +2729,28 @@ impl<'v> Object<'v> for SidName {
         builder
             .get("sid", |this, strand, mut out| {
                 let global = strand.state::<Global<'v>>();
-                create_sid(strand, global, this.annex().sid.clone(), &mut out);
+                create_sid(strand, global, this.annex().sid().clone(), &mut out);
                 Ok(())
             })
             .get("name", |this, strand, out| {
-                Output::set(strand, out, this.annex().name.as_str());
+                Output::set(strand, out, this.annex().name());
                 Ok(())
             })
             .get("domain", |this, strand, out| {
-                Output::set(strand, out, this.annex().domain.as_str());
+                Output::set(strand, out, this.annex().domain());
                 Ok(())
             })
             .get("qualified_name", |this, strand, out| {
-                if this.annex().domain.is_empty() {
-                    Output::set(strand, out, this.annex().name.as_str());
+                if this.annex().domain().is_empty() {
+                    Output::set(strand, out, this.annex().name());
                 } else {
-                    let name = format!("{}\\{}", this.annex().domain, this.annex().name);
+                    let name = format!("{}\\{}", this.annex().domain(), this.annex().name());
                     Output::set(strand, out, name.as_str());
                 }
                 Ok(())
             })
             .get("kind", move |this, strand, out| {
-                let kind = match this.annex().kind {
+                let kind = match this.annex().kind() {
                     SidNameUse::User => user,
                     SidNameUse::Group => group,
                     SidNameUse::Domain => domain,
@@ -2791,6 +2762,7 @@ impl<'v> Object<'v> for SidName {
                     SidNameUse::Computer => computer,
                     SidNameUse::Label => label,
                     SidNameUse::LogonSession => logon_session,
+                    _ => unknown,
                 };
                 Output::set(strand, out, kind);
                 Ok(())
@@ -2798,8 +2770,7 @@ impl<'v> Object<'v> for SidName {
             .type_method("lookup", async move |_this, strand, args, mut out| {
                 let ([value], []) = unpack!(strand, args, 1, 0)?;
                 let global = strand.state::<Global<'v>>();
-                if global.local.get(strand).target().operating_system.family()
-                    != OperatingSystemFamily::Windows
+                if global.local.get(strand).target().os().family() != OperatingSystemFamily::Windows
                 {
                     return Err(Error::not_supported(strand));
                 }
@@ -2839,7 +2810,7 @@ impl<'v> Object<'v> for TokenGroup {
             out: impl Output<'v>,
             mask: WinTokenGroupAttributes,
         ) -> Result<'v, 's, ()> {
-            Output::set(strand, out, this.annex().attributes.contains(mask));
+            Output::set(strand, out, this.annex().attributes().contains(mask));
             Ok(())
         }
 
@@ -2853,7 +2824,7 @@ impl<'v> Object<'v> for TokenGroup {
                 let global = strand.state::<Global<'v>>();
                 global.types.token_group_attributes.create_flags(
                     strand,
-                    TokenGroupAttributes(this.annex().attributes),
+                    TokenGroupAttributes(this.annex().attributes()),
                     out,
                 );
                 Ok(())
@@ -2902,7 +2873,7 @@ impl<'v> Object<'v> for TokenGroup {
                     strand,
                     out,
                     this.annex()
-                        .attributes
+                        .attributes()
                         .contains(WinTokenGroupAttributes::LOGON_ID),
                 );
                 Ok(())
@@ -2921,7 +2892,7 @@ impl<'v> ArrayLike<'v> for TokenGroups {
     const NAME: &'v str = "TokenGroups";
 
     fn len(&self, this: Instance<'v, '_, Self::Object>, _strand: &mut Strand<'v, '_>) -> usize {
-        this.annex().groups.len()
+        this.annex().groups().len()
     }
 
     fn get<'a, 's>(
@@ -2933,13 +2904,13 @@ impl<'v> ArrayLike<'v> for TokenGroups {
     ) -> Result<'v, 's, ()> {
         let token_group = this
             .annex()
-            .groups
+            .groups()
             .get(index)
             .expect("array view index was normalized")
             .clone();
         let global = strand.state::<Global<'v>>();
         strand.with_slots_sync(|strand, [mut sid]| {
-            create_sid(strand, global, token_group.sid.clone(), &mut sid);
+            create_sid(strand, global, token_group.sid().clone(), &mut sid);
             global
                 .types
                 .token_group
@@ -2972,7 +2943,7 @@ impl<'v> Object<'v> for TokenInfo {
     fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
         builder
             .get("is_elevated", |this, strand, out| {
-                Output::set(strand, out, this.annex().is_elevated);
+                Output::set(strand, out, this.annex().is_elevated());
                 Ok(())
             })
             .get("user_sid", |this, strand, out| {
@@ -3025,7 +2996,7 @@ async fn resolve_uid_or_gid_arg<'v, 's>(
     let Some(uuid) = dolang_ext_uuid::cast_uuid(strand, value) else {
         return value.to_u32(strand);
     };
-    if global.local.get(strand).target().operating_system != OperatingSystem::Macos {
+    if global.local.get(strand).target().os() != OperatingSystem::Macos {
         return Err(Error::not_supported(strand));
     }
     let vfs = global.local.get(strand).vfs();
@@ -3040,6 +3011,7 @@ async fn resolve_uid_or_gid_arg<'v, 's>(
         VfsPrincipalId::Uuid(_) => {
             unreachable!("resolve_principal_id(Uuid, Uid|Gid) returned a Uuid")
         }
+        _ => return Err(Error::not_supported(strand)),
     })
 }
 
@@ -3048,20 +3020,24 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         .module("security")
         .function("user_name", async move |strand, args, out| {
             let ([], []) = unpack!(strand, args, 0, 0)?;
-            let family = global.local.get(strand).target().operating_system.family();
+            let family = global.local.get(strand).target().os().family();
             let vfs = global.local.get(strand).vfs();
             let name = match family {
                 OperatingSystemFamily::Unix => {
-                    let SecurityInfo::Unix(info) = security_info(strand, global)? else {
+                    let security = security_info(strand, global)?;
+                    let Some(info) = security.unix() else {
                         unreachable!("Unix target returned Windows security information")
                     };
-                    error::io_result(strand, vfs.user_name(info.uid).await)?
+                    error::io_result(strand, vfs.user_name(info.uid()).await)?
                 }
                 OperatingSystemFamily::Windows => {
-                    let SecurityInfo::Windows(info) = security_info(strand, global)? else {
+                    let security = security_info(strand, global)?;
+                    let Some(info) = security.windows() else {
                         unreachable!("Windows target returned Unix security information")
                     };
-                    error::io_result(strand, vfs.sid_name(&info.user_sid).await)?.name
+                    error::io_result(strand, vfs.sid_name(info.user_sid()).await)?
+                        .name()
+                        .to_owned()
                 }
             };
             Output::set(strand, out, name.as_str());
@@ -3077,20 +3053,21 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         .value("Permission", global.types.permission)
         .function_with_slots("id", async move |strand, args, mut out, [mut group_ids]| {
             let ([], []) = unpack!(strand, args, 0, 0)?;
-            let SecurityInfo::Unix(info) = security_info(strand, global)? else {
+            let security = security_info(strand, global)?;
+            let Some(info) = security.unix() else {
                 return Err(Error::not_supported(strand));
             };
 
             Output::set(
                 strand,
                 &mut group_ids,
-                AsTuple::new(info.group_ids.iter().copied()),
+                AsTuple::new(info.group_ids().iter().copied()),
             );
 
             global
                 .types
                 .unix_identity
-                .create_with_annex(strand, Identity, info, &mut out);
+                .create_with_annex(strand, Identity, info.clone(), &mut out);
             global
                 .types
                 .unix_identity
@@ -3107,9 +3084,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         })
         .function("user_name", async move |strand, args, out| {
             let ([uid], []) = unpack!(strand, args, 1, 0)?;
-            if global.local.get(strand).target().operating_system.family()
-                != OperatingSystemFamily::Unix
-            {
+            if global.local.get(strand).target().os().family() != OperatingSystemFamily::Unix {
                 return Err(Error::not_supported(strand));
             }
             let vfs = global.local.get(strand).vfs();
@@ -3120,9 +3095,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         })
         .function("user_id", async move |strand, args, out| {
             let ([name], []) = unpack!(strand, args, 1, 0)?;
-            if global.local.get(strand).target().operating_system.family()
-                != OperatingSystemFamily::Unix
-            {
+            if global.local.get(strand).target().os().family() != OperatingSystemFamily::Unix {
                 return Err(Error::not_supported(strand));
             }
             let name = name
@@ -3136,9 +3109,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         })
         .function("group_name", async move |strand, args, out| {
             let ([gid], []) = unpack!(strand, args, 1, 0)?;
-            if global.local.get(strand).target().operating_system.family()
-                != OperatingSystemFamily::Unix
-            {
+            if global.local.get(strand).target().os().family() != OperatingSystemFamily::Unix {
                 return Err(Error::not_supported(strand));
             }
             let vfs = global.local.get(strand).vfs();
@@ -3149,9 +3120,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         })
         .function("group_id", async move |strand, args, out| {
             let ([name], []) = unpack!(strand, args, 1, 0)?;
-            if global.local.get(strand).target().operating_system.family()
-                != OperatingSystemFamily::Unix
-            {
+            if global.local.get(strand).target().os().family() != OperatingSystemFamily::Unix {
                 return Err(Error::not_supported(strand));
             }
             let name = name
@@ -3183,7 +3152,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         .value("Flags", global.types.macos_ace_flags)
         .function("uuid_for_uid", async move |strand, args, out| {
             let ([uid], []) = unpack!(strand, args, 1, 0)?;
-            if global.local.get(strand).target().operating_system != OperatingSystem::Macos {
+            if global.local.get(strand).target().os() != OperatingSystem::Macos {
                 return Err(Error::not_supported(strand));
             }
             let uid = uid.to_u32(strand)?;
@@ -3201,7 +3170,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         })
         .function("uuid_for_gid", async move |strand, args, out| {
             let ([gid], []) = unpack!(strand, args, 1, 0)?;
-            if global.local.get(strand).target().operating_system != OperatingSystem::Macos {
+            if global.local.get(strand).target().os() != OperatingSystem::Macos {
                 return Err(Error::not_supported(strand));
             }
             let gid = gid.to_u32(strand)?;
@@ -3219,7 +3188,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         })
         .function("id_for_uuid", async move |strand, args, out| {
             let ([uuid], []) = unpack!(strand, args, 1, 0)?;
-            if global.local.get(strand).target().operating_system != OperatingSystem::Macos {
+            if global.local.get(strand).target().os() != OperatingSystem::Macos {
                 return Err(Error::not_supported(strand));
             }
             let uuid = dolang_ext_uuid::value_to_uuid(strand, &uuid)?;
@@ -3235,6 +3204,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 VfsPrincipalId::Uuid(_) => {
                     unreachable!("resolve_principal_id(_, Uid|Gid) returned a Uuid")
                 }
+                _ => return Err(Error::not_supported(strand)),
             };
             Output::set(strand, out, (kind, id));
             Ok(())
@@ -3258,7 +3228,8 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             "token_info",
             async move |strand, args, mut out, [mut sid]| {
                 let ([], []) = unpack!(strand, args, 0, 0)?;
-                let SecurityInfo::Windows(info) = security_info(strand, global)? else {
+                let security = security_info(strand, global)?;
+                let Some(info) = security.windows() else {
                     return Err(Error::not_supported(strand));
                 };
 
@@ -3275,9 +3246,9 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                     .unwrap()
                     .enter_sync(strand, |strand, this| {
                         for (slot, value) in [
-                            (0, info.user_sid.clone()),
-                            (1, info.owner_sid.clone()),
-                            (2, info.primary_group_sid.clone()),
+                            (0, info.user_sid().clone()),
+                            (1, info.owner_sid().clone()),
+                            (2, info.primary_group_sid().clone()),
                         ] {
                             create_sid(strand, global, value, &mut sid);
                             let mut borrow = this.borrow_mut_unwrap();

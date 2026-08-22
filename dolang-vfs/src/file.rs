@@ -20,20 +20,81 @@ use crate::{
     metadata::{FsMetadata, Metadata},
     process::{StdioRecv, StdioSend},
     security::{Acl, AclKind},
-    xattr::{XattrEntry, XattrNamespace},
 };
+
+/// Selects an extended-attribute namespace when listing attributes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XattrNamespace<'a> {
+    /// The target's default namespace.
+    Default,
+    /// One named target-specific namespace.
+    Named(&'a str),
+    /// Every namespace supported by the target.
+    Any,
+}
+
+/// Describes one extended attribute without reading its value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XattrEntry {
+    /// Attribute name within its namespace.
+    pub(crate) name: String,
+    /// Namespace, when the target reports one separately.
+    pub(crate) namespace: Option<String>,
+    /// Value size, when available without reading it.
+    pub(crate) size: Option<u64>,
+    /// Target-specific attribute flags.
+    pub(crate) flags: Option<u8>,
+}
+
+impl XattrEntry {
+    /// Returns the attribute name without its namespace prefix.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    /// Returns the attribute namespace, if one was reported separately.
+    pub fn namespace(&self) -> Option<&str> {
+        self.namespace.as_deref()
+    }
+    /// Returns the attribute value size in bytes, if available.
+    pub const fn size(&self) -> Option<u64> {
+        self.size
+    }
+    /// Returns the platform-specific attribute flags, if available.
+    pub const fn flags(&self) -> Option<u8> {
+        self.flags
+    }
+}
 
 /// Describes one alternate data stream associated with a file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamEntry {
     /// Stream name.
-    pub name: String,
+    pub(crate) name: String,
     /// Stream type reported by the target.
-    pub r#type: String,
+    pub(crate) r#type: String,
     /// Logical stream length in bytes.
-    pub size: u64,
+    pub(crate) size: u64,
     /// Allocated stream size in bytes.
-    pub alloc_size: u64,
+    pub(crate) alloc_size: u64,
+}
+
+impl StreamEntry {
+    /// Returns the stream name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    /// Returns the stream type reported by the target.
+    pub fn stream_type(&self) -> &str {
+        &self.r#type
+    }
+    /// Returns the logical stream length in bytes.
+    pub const fn size(&self) -> u64 {
+        self.size
+    }
+    /// Returns the allocated stream size in bytes.
+    pub const fn alloc_size(&self) -> u64 {
+        self.alloc_size
+    }
 }
 
 bitflags::bitflags! {
@@ -73,12 +134,37 @@ pub enum FileLockBehavior {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct FileLockRange {
     /// Inclusive byte offset at which the range starts.
-    pub start: u64,
+    pub(crate) start: u64,
     /// Exclusive byte offset at which the range ends, or no end for EOF.
-    pub end: Option<u64>,
+    pub(crate) end: Option<u64>,
 }
 
 impl FileLockRange {
+    /// Creates a range from `start` to the exclusive `end`, or to EOF.
+    ///
+    /// Returns an error if `end` precedes `start`.
+    pub fn new(start: u64, end: Option<u64>) -> Result<Self> {
+        if end.is_some_and(|end| end < start) {
+            return Err(crate::error::Error::new(
+                crate::error::ErrorKind::InvalidInput,
+                "lock range end precedes its start",
+            ));
+        }
+        Ok(Self { start, end })
+    }
+
+    /// Creates a range extending from `start` to EOF.
+    pub const fn to_eof(start: u64) -> Self {
+        Self { start, end: None }
+    }
+    /// Returns the inclusive starting offset.
+    pub const fn start(self) -> u64 {
+        self.start
+    }
+    /// Returns the exclusive ending offset, or `None` for EOF.
+    pub const fn end(self) -> Option<u64> {
+        self.end
+    }
     /// Returns whether this range contains no bytes.
     pub fn is_empty(self) -> bool {
         self.end == Some(self.start)
@@ -101,13 +187,27 @@ impl FileLockRange {
 
 /// A complete request to acquire a file lock.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct FileLockRequest {
+pub(crate) struct FileLockRequest {
     /// Byte range to lock.
-    pub range: FileLockRange,
+    pub(crate) range: FileLockRange,
     /// Access mode to acquire.
-    pub mode: FileLockMode,
+    pub(crate) mode: FileLockMode,
     /// Whether acquisition may block.
-    pub behavior: FileLockBehavior,
+    pub(crate) behavior: FileLockBehavior,
+}
+
+impl FileLockRequest {
+    pub(crate) const fn new(
+        range: FileLockRange,
+        mode: FileLockMode,
+        behavior: FileLockBehavior,
+    ) -> Self {
+        Self {
+            range,
+            mode,
+            behavior,
+        }
+    }
 }
 
 /// A held file lock released explicitly or when dropped.
@@ -116,18 +216,18 @@ pub struct FileLock {
 }
 
 enum FileLockInner {
-    Direct(crate::direct::DirectFileLock),
-    Remote(crate::client::RemoteFileLock),
+    Direct(direct::FileLock),
+    Remote(client::FileLock),
 }
 
 impl FileLock {
-    pub(crate) fn direct(lock: crate::direct::DirectFileLock) -> Self {
+    pub(crate) fn direct(lock: direct::FileLock) -> Self {
         Self {
             inner: Some(FileLockInner::Direct(lock)),
         }
     }
 
-    pub(crate) fn remote(lock: crate::client::RemoteFileLock) -> Self {
+    pub(crate) fn remote(lock: client::FileLock) -> Self {
         Self {
             inner: Some(FileLockInner::Remote(lock)),
         }
@@ -222,6 +322,12 @@ macro_rules! dispatch_file_mut {
 }
 
 macro_rules! match_file {
+    (move $self:expr, $file:ident => $body:expr) => {{
+        match $self.inner {
+            FileInner::Client($file) => $body,
+            FileInner::Direct($file) => $body,
+        }
+    }};
     ($self:expr, $file:ident => $body:expr) => {{
         match &$self.inner {
             FileInner::Client($file) => $body,
@@ -329,27 +435,9 @@ impl File {
         }
     }
 
-    /// Commits anything this handle is holding back from the target.
-    ///
-    /// The `&self` counterpart of [`AsyncWriteExt::flush`], which the
-    /// positional operations need because they never take the handle
-    /// exclusively. It is deliberately *not* called `flush`: a `&self` method
-    /// of that name would win method resolution over `AsyncWriteExt`'s
-    /// `&mut self` one at every existing call site, silently changing what
-    /// `file.flush()` means. This does not settle work started through the
-    /// poll surface; `poll_flush` owns that.
-    ///
-    /// [`AsyncWriteExt::flush`]: tokio::io::AsyncWriteExt::flush
-    pub async fn commit(&self) -> Result<()> {
-        match_file!(self, file => file.commit().await)
-    }
-
     /// Closes this handle.
     pub async fn close(self) -> Result<()> {
-        match self.inner {
-            FileInner::Client(file) => file.close().await,
-            FileInner::Direct(file) => file.close().await,
-        }
+        match_file!(move self, file => file.close().await)
     }
 
     /// Reads into `buf`'s spare capacity starting at `offset`, returning the
@@ -357,20 +445,8 @@ impl File {
     ///
     /// Cancelling the read may leave `buf` empty.
     ///
-    /// Bytes are *appended* into the spare capacity rather than replacing the
-    /// contents, so buffers recycle; pass a cleared buffer to read from the
-    /// start.
-    ///
-    /// The transfer is capped by the spare capacity available, and may be
-    /// shorter than that for reasons other than end of file — a partial page
-    /// cache hit, a signal, a chunk boundary on the wire. A remote file caps
-    /// every read at [`crate::MAX_FILE_READ`], because the peer must hold the whole
-    /// reply before it can report a failure structurally. Zero means end of
-    /// file; callers that need a specific count must loop.
-    ///
-    /// The returned future borrows the buffer but not the handle, so it may
-    /// outlive the handle it came from and any number may be in flight on one
-    /// handle at once.
+    /// Fewer bytes than the spare capacity available may be read. `0` indicates
+    /// either end-of-file or that `buf` had no spare capacity.
     pub fn read_at<'b>(
         &self,
         buf: &'b mut BytesMut,
@@ -384,9 +460,8 @@ impl File {
 
     /// Writes `data` at `offset`, returning the byte count.
     ///
-    /// May write less than all of `data`; callers that need it all must loop.
-    /// Rejected on an append-mode handle, where the offset would be ignored
-    /// and the data appended regardless; use [`append`](Self::append) there.
+    /// May write less than all of `data` on success, but at least 1 byte unless `data` is empty.
+    /// Use on an append-mode handle is an error; use [`append`](Self::append) there.
     pub fn write_at(
         &self,
         data: Bytes,
@@ -399,10 +474,8 @@ impl File {
     }
 
     /// Appends `data`, returning the byte count and the position just past
-    /// what was written.
-    ///
-    /// The resulting position is reported because the caller cannot compute
-    /// it: an append lands wherever the end happened to be when it ran.
+    /// what was written.  Less data may be written than requested on success,
+    /// but at least 1 byte will be written unless `data` was empty.
     pub fn append(&self, data: Bytes) -> impl Future<Output = Result<(usize, u64)>> + Send + use<> {
         match &self.inner {
             FileInner::Client(file) => EitherFuture::Left(file.append(data)),
@@ -410,23 +483,8 @@ impl File {
         }
     }
 
-    // Forwarded explicitly rather than left to the trait's copying default,
-    // which at a dispatch point would copy before reaching the backend that
-    // wanted the borrow.
-    /// Reads into the uninitialized `buf` starting at `offset`, returning how
+    /// Reads into the possibly uninitialized `buf``, returning how
     /// many bytes at its front were filled.
-    ///
-    /// The destination-borrowing counterpart of [`read_at`](Self::read_at),
-    /// for callers whose buffer is not a [`BytesMut`].
-    ///
-    /// Only the returned count is initialized, and only on success. An error
-    /// says nothing about how much of `buf` was written, but writing into
-    /// uninitialized memory harms nothing: the caller has no count to act on,
-    /// so the bytes are unreachable either way.
-    ///
-    /// Short transfers are contractual for the same reasons as `read_at`'s,
-    /// with the copying route bounded additionally by the size of temporary it
-    /// is willing to allocate. Zero means end of file.
     pub fn read_at_into<'b>(
         &self,
         buf: &'b mut [MaybeUninit<u8>],
@@ -441,13 +499,8 @@ impl File {
     /// Writes `data` at `offset` from borrowed storage, returning the byte
     /// count.
     ///
-    /// The source-borrowing counterpart of [`write_at`](Self::write_at), for
-    /// callers holding bytes they cannot cheaply turn into a [`Bytes`] —
-    /// memory belonging to a garbage collector, say. A backend that can send
-    /// from borrowed storage does; the default copies, which is exactly what
-    /// such a caller would have done itself.
-    ///
-    /// Same short-write and append-mode rules as `write_at`.
+    /// Less data may be written than requested on success, but always at least 1
+    /// byte unless `data` is empty.
     pub fn write_at_from<'b>(
         &self,
         data: &'b [u8],
@@ -523,12 +576,15 @@ impl File {
         match_file!(self, file => file.remove_xattr(name, namespace).await)
     }
 
-    /// Acquires a byte-range lock according to `request`.
-    pub async fn lock(&self, request: FileLockRequest) -> Result<Option<FileLock>> {
-        match &self.inner {
-            FileInner::Client(file) => file.lock(request).await,
-            FileInner::Direct(file) => file.lock(request).await,
-        }
+    /// Acquires a byte-range lock with the requested mode and behavior.
+    pub async fn lock(
+        &self,
+        range: FileLockRange,
+        mode: FileLockMode,
+        behavior: FileLockBehavior,
+    ) -> Result<Option<FileLock>> {
+        let request = FileLockRequest::new(range, mode, behavior);
+        match_file!(self, file => file.lock(request).await)
     }
 
     /// Converts this handle into a local standard-library file when possible.
@@ -664,5 +720,24 @@ impl OpenOptions<'_> {
                 .await
                 .map(File::direct),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FileLockRange;
+    use crate::error::ErrorKind;
+
+    #[test]
+    fn lock_range_construction_validates_order() {
+        let range = FileLockRange::new(4, Some(8)).unwrap();
+        assert_eq!(range.start(), 4);
+        assert_eq!(range.end(), Some(8));
+        assert!(!range.is_empty());
+        assert!(
+            FileLockRange::new(8, Some(4))
+                .is_err_and(|error| error.kind() == ErrorKind::InvalidInput)
+        );
+        assert_eq!(FileLockRange::to_eof(4).end(), None);
     }
 }
