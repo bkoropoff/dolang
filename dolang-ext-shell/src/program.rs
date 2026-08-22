@@ -627,7 +627,7 @@ async fn run<'v, 's>(
             local.termination_policy(),
         )
     };
-    let operating_system = target.operating_system;
+    let operating_system = target.os();
     let program = match operating_system.path_type() {
         PathType::Unix => Utf8TypedPath::Unix(Utf8UnixPath::new(name)),
         PathType::Windows => Utf8TypedPath::Windows(Utf8WindowsPath::new(name)),

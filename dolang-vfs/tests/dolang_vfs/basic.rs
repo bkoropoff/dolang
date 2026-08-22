@@ -4,7 +4,7 @@ use dolang_vfs::{
     Vfs,
     file::AccessFlags,
     metadata::{FileType, MetadataPatch, Mode},
-    security::{OwnershipIdentity, SecurityInfo},
+    security::OwnershipIdentity,
     target::TargetInfo,
 };
 #[cfg(not(target_os = "macos"))]
@@ -49,16 +49,16 @@ async fn direct_query_reports_host_target() {
     assert!(direct.cwd().is_absolute());
     assert!(direct.current_exe().is_absolute());
     assert_eq!(direct.target(), &TargetInfo::current());
-    let SecurityInfo::Unix(security) = direct.security() else {
+    let Some(security) = direct.security().unix() else {
         panic!("Unix query returned Windows security information");
     };
-    assert_eq!(security.uid, getuid().as_raw());
-    assert_eq!(security.gid, getgid().as_raw());
-    assert_eq!(security.euid, geteuid().as_raw());
-    assert_eq!(security.egid, getegid().as_raw());
+    assert_eq!(security.uid(), getuid().as_raw());
+    assert_eq!(security.gid(), getgid().as_raw());
+    assert_eq!(security.effective_uid(), geteuid().as_raw());
+    assert_eq!(security.effective_gid(), getegid().as_raw());
     #[cfg(not(target_os = "macos"))]
     assert_eq!(
-        security.group_ids,
+        security.group_ids(),
         getgroups()
             .unwrap()
             .into_iter()
@@ -66,7 +66,7 @@ async fn direct_query_reports_host_target() {
             .collect::<Vec<_>>()
     );
     #[cfg(target_os = "macos")]
-    assert!(security.group_ids.contains(&getegid().as_raw()));
+    assert!(security.group_ids().contains(&getegid().as_raw()));
 }
 
 #[tokio::test]
@@ -567,12 +567,12 @@ async fn file_metadata() {
     let client = connect_client(&socket_path).await;
     let metadata = client.metadata(typed(&test_file)).await.unwrap();
 
-    assert_eq!(metadata.len, 11);
-    assert_eq!(metadata.file_type, FileType::File);
+    assert_eq!(metadata.len(), 11);
+    assert_eq!(metadata.file_type(), FileType::File);
     let unix = metadata.unix().unwrap();
-    assert!(!unix.mode.is_empty());
-    assert!(unix.ino != 0);
-    assert!(unix.nlink > 0);
+    assert!(!unix.mode().is_empty());
+    assert!(unix.ino() != 0);
+    assert!(unix.nlink() > 0);
 
     server_task.abort();
     let _ = server_task.await;
@@ -591,9 +591,9 @@ async fn dir_metadata() {
     let client = connect_client(&socket_path).await;
     let metadata = client.metadata(typed(&subdir)).await.unwrap();
 
-    assert_eq!(metadata.file_type, FileType::Dir);
+    assert_eq!(metadata.file_type(), FileType::Dir);
     let unix = metadata.unix().unwrap();
-    assert!(!unix.mode.is_empty());
+    assert!(!unix.mode().is_empty());
 
     server_task.abort();
     let _ = server_task.await;
@@ -612,9 +612,9 @@ async fn fs_metadata_basic() {
     let client = connect_client(&socket_path).await;
     let metadata = client.fs_metadata(typed(&test_file), true).await.unwrap();
 
-    assert!(metadata.capacity > 0);
-    assert!(metadata.free > 0);
-    assert!(metadata.available > 0);
+    assert!(metadata.capacity() > 0);
+    assert!(metadata.free() > 0);
+    assert!(metadata.available() > 0);
 
     server_task.abort();
     let _ = server_task.await;
@@ -673,21 +673,19 @@ async fn set_metadata_by_numeric_id() {
     client
         .set_metadata(
             &[typed(&test_file).to_path_buf()],
-            MetadataPatch {
-                mode: Some(Mode::from_bits_retain(0o600)),
-                user: Some(OwnershipIdentity::Id(getuid().as_raw())),
-                group: Some(OwnershipIdentity::Id(getgid().as_raw())),
-                ..MetadataPatch::default()
-            },
+            MetadataPatch::new()
+                .with_mode(Mode::from_bits_retain(0o600))
+                .with_user(OwnershipIdentity::Id(getuid().as_raw()))
+                .with_group(OwnershipIdentity::Id(getgid().as_raw())),
         )
         .await
         .unwrap();
 
     let metadata = client.metadata(typed(&test_file)).await.unwrap();
     let unix = metadata.unix().unwrap();
-    assert_eq!(unix.uid, getuid().as_raw());
-    assert_eq!(unix.gid, getgid().as_raw());
-    assert_eq!(unix.mode.bits() & 0o777, 0o600);
+    assert_eq!(unix.uid(), getuid().as_raw());
+    assert_eq!(unix.gid(), getgid().as_raw());
+    assert_eq!(unix.mode().bits() & 0o777, 0o600);
 
     server_task.abort();
     let _ = server_task.await;
@@ -710,19 +708,17 @@ async fn set_metadata_by_name() {
     client
         .set_metadata(
             &[typed(&test_file).to_path_buf()],
-            MetadataPatch {
-                user: Some(OwnershipIdentity::Name(user.name)),
-                group: Some(OwnershipIdentity::Name(group.name)),
-                ..MetadataPatch::default()
-            },
+            MetadataPatch::new()
+                .with_user(OwnershipIdentity::Name(user.name))
+                .with_group(OwnershipIdentity::Name(group.name)),
         )
         .await
         .unwrap();
 
     let metadata = client.metadata(typed(&test_file)).await.unwrap();
     let unix = metadata.unix().unwrap();
-    assert_eq!(unix.uid, getuid().as_raw());
-    assert_eq!(unix.gid, getgid().as_raw());
+    assert_eq!(unix.uid(), getuid().as_raw());
+    assert_eq!(unix.gid(), getgid().as_raw());
 
     server_task.abort();
     let _ = server_task.await;
@@ -742,11 +738,9 @@ async fn set_metadata_follow_false_on_dangling_symlink() {
     client
         .set_metadata(
             &[typed(&link_path).to_path_buf()],
-            MetadataPatch {
-                group: Some(OwnershipIdentity::Id(getgid().as_raw())),
-                follow: false,
-                ..MetadataPatch::default()
-            },
+            MetadataPatch::new()
+                .with_group(OwnershipIdentity::Id(getgid().as_raw()))
+                .with_follow_links(false),
         )
         .await
         .unwrap();
@@ -754,10 +748,7 @@ async fn set_metadata_follow_false_on_dangling_symlink() {
     let result = client
         .set_metadata(
             &[typed(&link_path).to_path_buf()],
-            MetadataPatch {
-                group: Some(OwnershipIdentity::Id(getgid().as_raw())),
-                ..MetadataPatch::default()
-            },
+            MetadataPatch::new().with_group(OwnershipIdentity::Id(getgid().as_raw())),
         )
         .await;
     assert!(result.is_err());
@@ -780,12 +771,9 @@ async fn set_metadata_unknown_user_errors() {
     let result = client
         .set_metadata(
             &[typed(&test_file).to_path_buf()],
-            MetadataPatch {
-                user: Some(OwnershipIdentity::Name(
-                    "__dolang_missing_user__".to_string(),
-                )),
-                ..MetadataPatch::default()
-            },
+            MetadataPatch::new().with_user(OwnershipIdentity::Name(
+                "__dolang_missing_user__".to_string(),
+            )),
         )
         .await;
     assert!(result.is_err());

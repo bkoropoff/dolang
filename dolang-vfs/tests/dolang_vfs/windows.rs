@@ -65,10 +65,11 @@ async fn stop_pair(client: Vfs, server: JoinHandle<VfsResult<()>>) {
 
 #[test]
 fn direct_security_info_reports_token_elevation() {
-    let SecurityInfo::Windows(info) = SecurityInfo::current().unwrap() else {
+    let security = SecurityInfo::current().unwrap();
+    let Some(info) = security.windows() else {
         panic!("Windows query returned Unix security information");
     };
-    assert_eq!(info.is_elevated, is_elevated());
+    assert_eq!(info.is_elevated(), is_elevated());
 }
 
 fn typed(path: &Path) -> Utf8TypedPath<'_> {
@@ -123,7 +124,7 @@ async fn query_reports_server_target_including_wine() {
     let (client, server_task) = connected_pair().await;
 
     assert_eq!(client.target(), &TargetInfo::current());
-    assert_eq!(client.target().is_wine, Some(dolang_winterop::is_wine()));
+    assert_eq!(client.target().is_wine(), Some(dolang_winterop::is_wine()));
     assert_eq!(client.security(), &SecurityInfo::current().unwrap());
 
     stop_pair(client, server_task).await;
@@ -131,19 +132,20 @@ async fn query_reports_server_target_including_wine() {
 
 #[tokio::test]
 async fn windows_account_lookup_round_trips_over_rpc() {
-    let SecurityInfo::Windows(info) = SecurityInfo::current().unwrap() else {
+    let security = SecurityInfo::current().unwrap();
+    let Some(info) = security.windows() else {
         unreachable!()
     };
     let (client, server_task) = connected_pair().await;
-    let name = client.sid_name(&info.user_sid).await.unwrap();
-    let qualified = if name.domain.is_empty() {
-        name.name.clone()
+    let name = client.sid_name(info.user_sid()).await.unwrap();
+    let qualified = if name.domain().is_empty() {
+        name.name().to_owned()
     } else {
-        format!("{}\\{}", name.domain, name.name)
+        format!("{}\\{}", name.domain(), name.name())
     };
     assert_eq!(
-        client.account_name(&qualified).await.unwrap().sid,
-        info.user_sid
+        client.account_name(&qualified).await.unwrap().sid(),
+        info.user_sid()
     );
     assert_eq!(
         client
@@ -168,16 +170,16 @@ async fn windows_metadata_and_ownership_round_trip_over_rpc() {
 
     let metadata = client.metadata(typed(&path)).await.unwrap();
     let windows = metadata.windows().unwrap();
-    let user = windows.user.clone().expect("owner SID was not fetched");
-    let group = windows.group.clone().expect("group SID was not fetched");
+    let user = windows.user().cloned().expect("owner SID was not fetched");
+    let group = windows.group().cloned().expect("group SID was not fetched");
 
     let mut options = client.open_options();
     options.read(true);
     let file = options.open(typed(&path)).await.unwrap();
     let file_metadata = file.metadata().await.unwrap();
     let file_windows = file_metadata.windows().unwrap();
-    assert_eq!(file_windows.user.as_ref(), Some(&user));
-    assert_eq!(file_windows.group.as_ref(), Some(&group));
+    assert_eq!(file_windows.user(), Some(&user));
+    assert_eq!(file_windows.group(), Some(&group));
 
     if is_elevated() {
         client
@@ -186,19 +188,16 @@ async fn windows_metadata_and_ownership_round_trip_over_rpc() {
                     typed(&path).to_path_buf(),
                     typed(&second_path).to_path_buf(),
                 ],
-                MetadataPatch {
-                    user: Some(OwnershipIdentity::Sid(user.clone())),
-                    ..MetadataPatch::default()
-                },
+                MetadataPatch::new().with_user(OwnershipIdentity::Sid(user.clone())),
             )
             .await
             .unwrap();
 
         let name = client.sid_name(&group).await.unwrap();
-        let qualified = if name.domain.is_empty() {
-            name.name
+        let qualified = if name.domain().is_empty() {
+            name.name().to_owned()
         } else {
-            format!("{}\\{}", name.domain, name.name)
+            format!("{}\\{}", name.domain(), name.name())
         };
         client
             .set_metadata(
@@ -206,10 +205,7 @@ async fn windows_metadata_and_ownership_round_trip_over_rpc() {
                     typed(&path).to_path_buf(),
                     typed(&second_path).to_path_buf(),
                 ],
-                MetadataPatch {
-                    group: Some(OwnershipIdentity::Name(qualified)),
-                    ..MetadataPatch::default()
-                },
+                MetadataPatch::new().with_group(OwnershipIdentity::Name(qualified)),
             )
             .await
             .unwrap();
@@ -239,7 +235,7 @@ async fn client_or_direct_routes_path_and_open_operations() {
     assert_eq!(std::fs::read(&path).unwrap(), b"transferred handle");
 
     let metadata = vfs.metadata(typed(&path)).await.unwrap();
-    assert_eq!(metadata.len, 18);
+    assert_eq!(metadata.len(), 18);
 
     let mut entries = vfs.read_dir(typed(&subdir)).await.unwrap();
     let entry = entries.next_entry().await.unwrap().unwrap();
@@ -349,7 +345,7 @@ async fn streams_run_in_the_server_namespace() {
 
     let (client, server_task) = connected_pair().await;
     let streams = client.streams(typed(&path), true).await.unwrap();
-    assert!(streams.iter().any(|entry| entry.name == "zone"));
+    assert!(streams.iter().any(|entry| entry.name() == "zone"));
 
     stop_pair(client, server_task).await;
 }

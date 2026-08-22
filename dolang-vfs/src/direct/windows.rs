@@ -3,12 +3,12 @@ use crate::{
     directory::{DirEntry, DirEntryFamily},
     error::{Error, ErrorKind, Result},
     file::{AccessFlags, StreamEntry},
+    file::{XattrEntry, XattrNamespace},
     metadata::{
         AttrFlags, AttrsPatch, FileType, FsMetadata, FsMetadataFamily, Metadata, MetadataPatch,
         WindowsFsMetadata, metadata_from_std, metadata_with_sids,
     },
     security::{Acl, AclKind, OwnershipIdentity, SidName, SidNameUse},
-    xattr::{XattrEntry, XattrNamespace},
 };
 use dolang_winterop::security::{SecDesc, SecDescControl, SecInfo, Sid};
 use std::{

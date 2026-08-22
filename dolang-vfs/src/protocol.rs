@@ -1,6 +1,4 @@
-use std::any::Any;
-use std::collections::HashMap;
-use std::{fmt, path::PathBuf};
+use std::{any::Any, collections::HashMap, fmt, path::PathBuf};
 
 use dolang_rpc::{
     AuthKey, Protocol,
@@ -14,42 +12,30 @@ use serde::{
 };
 use typed_path::{Utf8TypedPath, Utf8TypedPathBuf, Utf8UnixPath, Utf8WindowsPath};
 
-use crate::directory::DirEntry;
-use crate::error::Error;
-use crate::extension::ErasedVfsExtension;
-use crate::metadata::{FsMetadata, Metadata, MetadataPatch};
-use crate::process::{ProcessControl, ProcessStatus, TerminationPolicy};
-use crate::security::{SecurityInfo, SidName};
-use crate::target::TargetInfo;
-use crate::xattr::{XattrEntry, XattrNamespace};
 use crate::{
-    file::StreamEntry,
-    path::WellKnownPath,
-    security::{Acl, AclKind, PrincipalId, PrincipalIdKind},
+    directory::DirEntry,
+    error::Error,
+    extension::ExtensionSet,
+    extension::{self, ErasedVfsExtension},
+    file::{FileLockRequest, StreamEntry},
+    file::{XattrEntry, XattrNamespace},
+    metadata::{FsMetadata, Metadata, MetadataPatch},
+    path::{self, WellKnownPath},
+    process::{ProcessControl, ProcessStatus, TerminationPolicy},
+    security::{Acl, AclKind, PrincipalId, PrincipalIdKind, SecurityInfo, SidName},
+    session::{
+        ChildMarker, FileLockMarker, FileMarker, ReadDirMarker, StdioRecvMarker, StdioSendMarker,
+        VfsMarker,
+    },
+    target::TargetInfo,
 };
 use dolang_winterop::security::{SecDesc, SecInfo, Sid};
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(transparent)]
-pub(crate) struct WireError(Error);
-
-impl From<Error> for WireError {
-    fn from(error: Error) -> Self {
-        Self(error)
-    }
-}
-
-impl From<WireError> for Error {
-    fn from(error: WireError) -> Self {
-        error.0
-    }
-}
 
 pub(crate) struct VfsProtocol;
 
 impl Protocol for VfsProtocol {
     type Request = Request;
-    type Response = ResponseKind;
+    type Response = Result<ResponseKind, Error>;
 }
 
 /// Application-protocol name/version advertised during the RPC handshake.
@@ -74,7 +60,7 @@ pub(crate) fn rpc_builder(key: Option<AuthKey>) -> dolang_rpc::Builder {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct Request {
-    pub(crate) vfs: Option<Cite<crate::session::VfsMarker>>,
+    pub(crate) vfs: Option<Cite<VfsMarker>>,
     pub(crate) kind: RequestKind,
 }
 
@@ -85,7 +71,7 @@ pub(crate) struct QueryResponse {
     pub(crate) current_exe: WirePath,
     pub(crate) target: TargetInfo,
     pub(crate) security: SecurityInfo,
-    pub(crate) extensions: crate::session::ExtensionSet,
+    pub(crate) extensions: ExtensionSet,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,7 +141,7 @@ impl TryFrom<PathBuf> for WirePath {
     type Error = Error;
 
     fn try_from(path: PathBuf) -> Result<Self, Self::Error> {
-        crate::path::typed_path(path).map(Into::into)
+        path::typed_path(path).map(Into::into)
     }
 }
 
@@ -163,7 +149,7 @@ impl TryFrom<WirePath> for PathBuf {
     type Error = Error;
 
     fn try_from(path: WirePath) -> Result<Self, Self::Error> {
-        crate::path::native_path(Utf8TypedPathBuf::from(path).to_path())
+        path::native_path(Utf8TypedPathBuf::from(path).to_path())
     }
 }
 
@@ -173,7 +159,7 @@ mod tests {
 
     use typed_path::{Utf8TypedPath, Utf8TypedPathBuf, Utf8UnixPath, Utf8WindowsPath};
 
-    use super::{WireError, WirePath, WirePathKind};
+    use super::{WirePath, WirePathKind};
     use crate::{
         error::{Error, ErrorKind},
         target::OperatingSystem,
@@ -228,7 +214,6 @@ mod tests {
             5,
         );
 
-        let error = Error::from(WireError::from(error));
         let system = error.system_code().unwrap();
         assert_eq!(system.operating_system(), OperatingSystem::Windows);
         assert_eq!(system.raw(), 5);
@@ -240,7 +225,6 @@ mod tests {
     fn wire_error_preserves_incidental_io_error() {
         let error = Error::new(ErrorKind::InvalidData, "bad reply");
 
-        let error = Error::from(WireError::from(error));
         assert!(error.system_code().is_none());
         assert_eq!(error.kind(), ErrorKind::InvalidData);
         assert_eq!(error.to_string(), "bad reply");
@@ -289,15 +273,15 @@ pub(crate) struct SpawnRequest {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct PipeResponse {
-    pub(crate) send: Gift<crate::session::StdioSendMarker>,
-    pub(crate) recv: Gift<crate::session::StdioRecvMarker>,
+    pub(crate) send: Gift<StdioSendMarker>,
+    pub(crate) recv: Gift<StdioRecvMarker>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) enum StdioRecvTarget {
     Null,
     Native(OsHandle),
-    Opaque(Cite<crate::session::StdioRecvMarker>),
+    Opaque(Cite<StdioRecvMarker>),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -305,20 +289,26 @@ pub(crate) enum StdioSendTarget {
     Null,
     Stdout,
     Native(OsHandle),
-    Opaque(Cite<crate::session::StdioSendMarker>),
+    Opaque(Cite<StdioSendMarker>),
+}
+
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+    pub(crate) struct OpenFlags: u8 {
+        const READ = 1 << 0;
+        const WRITE = 1 << 1;
+        const APPEND = 1 << 2;
+        const CREATE = 1 << 3;
+        const CREATE_NEW = 1 << 4;
+        const TRUNCATE = 1 << 5;
+        const NO_FOLLOW = 1 << 6;
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct OpenRequest {
     pub(crate) path: WirePath,
-    pub(crate) read: bool,
-    pub(crate) write: bool,
-    pub(crate) append: bool,
-    pub(crate) create: bool,
-    pub(crate) create_new: bool,
-    pub(crate) truncate: bool,
-    pub(crate) no_follow: bool,
-    pub(crate) handle_preference: OpenHandlePreference,
+    pub(crate) flags: OpenFlags,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -327,16 +317,10 @@ pub(crate) struct ReadDirPage {
     pub(crate) done: bool,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
-pub(crate) enum OpenHandlePreference {
-    NativePreferred,
-    Opaque,
-}
-
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) enum OpenHandle {
     Native(OsHandle),
-    Opaque(Gift<crate::session::FileMarker>),
+    Opaque(Gift<FileMarker>),
 }
 
 /// `Debug` is manual so a request cannot print the key it carries.
@@ -369,7 +353,7 @@ pub(crate) struct WindowsAdminRequest {
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) enum OpenVfsHandle {
     Native(OsHandle),
-    Opaque(Gift<crate::session::VfsMarker>),
+    Opaque(Gift<VfsMarker>),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -559,8 +543,8 @@ pub(crate) struct ExtensionRequest {
     pub(crate) payload: Box<dyn Any + Send>,
 }
 
-impl std::fmt::Debug for ExtensionRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for ExtensionRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ExtensionRequest")
             .field("name", &self.name)
             .field("version", &self.version)
@@ -570,7 +554,7 @@ impl std::fmt::Debug for ExtensionRequest {
 
 impl Serialize for ExtensionRequest {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let ext = crate::extension::lookup(&self.name, self.version)
+        let ext = extension::lookup(&self.name, self.version)
             .ok_or_else(|| serde::ser::Error::custom("unknown VFS extension"))?;
         let mut tup = serializer.serialize_tuple(3)?;
         tup.serialize_element(&self.name)?;
@@ -598,7 +582,7 @@ impl<'de> Deserialize<'de> for ExtensionRequest {
         impl<'de> Visitor<'de> for V {
             type Value = ExtensionRequest;
 
-            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 f.write_str("a VFS extension request")
             }
 
@@ -609,7 +593,7 @@ impl<'de> Deserialize<'de> for ExtensionRequest {
                 let version: u16 = seq
                     .next_element()?
                     .ok_or_else(|| A::Error::invalid_length(1, &self))?;
-                let ext = crate::extension::lookup(&name, version)
+                let ext = extension::lookup(&name, version)
                     .ok_or_else(|| A::Error::custom("unknown VFS extension"))?;
                 let payload = seq
                     .next_element_seed(ExtensionRequestSeed(ext))?
@@ -637,8 +621,8 @@ pub(crate) struct ExtensionResponse {
     pub(crate) payload: Box<dyn Any + Send>,
 }
 
-impl std::fmt::Debug for ExtensionResponse {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for ExtensionResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ExtensionResponse")
             .field("name", &self.name)
             .field("version", &self.version)
@@ -648,7 +632,7 @@ impl std::fmt::Debug for ExtensionResponse {
 
 impl Serialize for ExtensionResponse {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let ext = crate::extension::lookup(&self.name, self.version)
+        let ext = extension::lookup(&self.name, self.version)
             .ok_or_else(|| serde::ser::Error::custom("unknown VFS extension"))?;
         let mut tup = serializer.serialize_tuple(3)?;
         tup.serialize_element(&self.name)?;
@@ -676,7 +660,7 @@ impl<'de> Deserialize<'de> for ExtensionResponse {
         impl<'de> Visitor<'de> for V {
             type Value = ExtensionResponse;
 
-            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 f.write_str("a VFS extension response")
             }
 
@@ -687,7 +671,7 @@ impl<'de> Deserialize<'de> for ExtensionResponse {
                 let version: u16 = seq
                     .next_element()?
                     .ok_or_else(|| A::Error::invalid_length(1, &self))?;
-                let ext = crate::extension::lookup(&name, version)
+                let ext = extension::lookup(&name, version)
                     .ok_or_else(|| A::Error::custom("unknown VFS extension"))?;
                 let payload = seq
                     .next_element_seed(ExtensionResponseSeed(ext))?
@@ -707,13 +691,13 @@ impl<'de> Deserialize<'de> for ExtensionResponse {
 pub(crate) enum RequestKind {
     Spawn(SpawnRequest),
     ChildWait {
-        child: Cite<crate::session::ChildMarker>,
+        child: Cite<ChildMarker>,
     },
     ChildTerminate {
-        child: Cite<crate::session::ChildMarker>,
+        child: Cite<ChildMarker>,
     },
     ChildClose {
-        child: Cite<crate::session::ChildMarker>,
+        child: Cite<ChildMarker>,
     },
     Query,
     UserName {
@@ -751,111 +735,108 @@ pub(crate) enum RequestKind {
     },
     Open(OpenRequest),
     FileRead {
-        file: Cite<crate::session::FileMarker>,
+        file: Cite<FileMarker>,
         offset: u64,
         len: usize,
     },
     FileWrite {
-        file: Cite<crate::session::FileMarker>,
+        file: Cite<FileMarker>,
         offset: u64,
     },
     FileAppend {
-        file: Cite<crate::session::FileMarker>,
+        file: Cite<FileMarker>,
     },
     FileSize {
-        file: Cite<crate::session::FileMarker>,
-    },
-    FileFlush {
-        file: Cite<crate::session::FileMarker>,
+        file: Cite<FileMarker>,
     },
     FileSetSize {
-        file: Cite<crate::session::FileMarker>,
+        file: Cite<FileMarker>,
         size: u64,
     },
     FileLock {
-        file: Cite<crate::session::FileMarker>,
-        request: crate::file::FileLockRequest,
+        file: Cite<FileMarker>,
+        request: FileLockRequest,
     },
     FileUnlock {
-        lock: Cite<crate::session::FileLockMarker>,
+        lock: Cite<FileLockMarker>,
     },
     FileToStdioSend {
-        file: Cite<crate::session::FileMarker>,
+        file: Cite<FileMarker>,
         offset: u64,
     },
     FileToStdioRecv {
-        file: Cite<crate::session::FileMarker>,
+        file: Cite<FileMarker>,
         offset: u64,
     },
     StdioSendClose {
-        stdio: Cite<crate::session::StdioSendMarker>,
+        stdio: Cite<StdioSendMarker>,
     },
     StdioSendWrite {
-        stdio: Cite<crate::session::StdioSendMarker>,
+        stdio: Cite<StdioSendMarker>,
     },
     StdioSendClone {
-        stdio: Cite<crate::session::StdioSendMarker>,
+        stdio: Cite<StdioSendMarker>,
     },
     StdioRecvClose {
-        stdio: Cite<crate::session::StdioRecvMarker>,
+        stdio: Cite<StdioRecvMarker>,
     },
     StdioRecvRead {
-        stdio: Cite<crate::session::StdioRecvMarker>,
+        stdio: Cite<StdioRecvMarker>,
         len: usize,
     },
     StdioRecvClone {
-        stdio: Cite<crate::session::StdioRecvMarker>,
+        stdio: Cite<StdioRecvMarker>,
     },
     FileMetadata {
-        file: Cite<crate::session::FileMarker>,
+        file: Cite<FileMarker>,
     },
     FileFsMetadata {
-        file: Cite<crate::session::FileMarker>,
+        file: Cite<FileMarker>,
     },
     FileAcl {
-        file: Cite<crate::session::FileMarker>,
+        file: Cite<FileMarker>,
         kind: AclKind,
         default: bool,
     },
     FileSetAcl {
-        file: Cite<crate::session::FileMarker>,
+        file: Cite<FileMarker>,
         kind: AclKind,
         acl: Option<Acl>,
         default: bool,
     },
     FileSecDesc {
-        file: Cite<crate::session::FileMarker>,
+        file: Cite<FileMarker>,
         mask: SecInfo,
     },
     FileSetSecDesc {
-        file: Cite<crate::session::FileMarker>,
+        file: Cite<FileMarker>,
         sec_desc: SecDesc,
     },
     FileXattrs {
-        file: Cite<crate::session::FileMarker>,
+        file: Cite<FileMarker>,
         namespace: XattrNamespaceRequest,
     },
     FileXattr {
-        file: Cite<crate::session::FileMarker>,
+        file: Cite<FileMarker>,
         name: String,
         namespace: Option<String>,
     },
     FileStreams {
-        file: Cite<crate::session::FileMarker>,
+        file: Cite<FileMarker>,
     },
     FileSetXattr {
-        file: Cite<crate::session::FileMarker>,
+        file: Cite<FileMarker>,
         name: String,
         namespace: Option<String>,
         value: Vec<u8>,
     },
     FileRemoveXattr {
-        file: Cite<crate::session::FileMarker>,
+        file: Cite<FileMarker>,
         name: String,
         namespace: Option<String>,
     },
     FileClose {
-        file: Cite<crate::session::FileMarker>,
+        file: Cite<FileMarker>,
     },
     UnixVfs(UnixVfsRequest),
     WindowsAdmin(WindowsAdminRequest),
@@ -863,10 +844,10 @@ pub(crate) enum RequestKind {
         path: WirePath,
     },
     ReadDirNext {
-        read_dir: Cite<crate::session::ReadDirMarker>,
+        read_dir: Cite<ReadDirMarker>,
     },
     ReadDirClose {
-        read_dir: Cite<crate::session::ReadDirMarker>,
+        read_dir: Cite<ReadDirMarker>,
     },
     Remove(RemoveRequest),
     Metadata(MetadataRequest),
@@ -898,82 +879,80 @@ pub(crate) enum RequestKind {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) enum ResponseKind {
-    Error(WireError),
-    Spawn(Result<Gift<crate::session::ChildMarker>, WireError>),
-    ChildWait(Result<ProcessStatus, WireError>),
-    ChildTerminate(Result<Option<ProcessStatus>, WireError>),
-    ChildClose(Result<(), WireError>),
-    Query(Result<QueryResponse, WireError>),
-    UserName(Result<String, WireError>),
-    UserId(Result<u32, WireError>),
-    GroupName(Result<String, WireError>),
-    GroupId(Result<u32, WireError>),
-    SidName(Result<SidName, WireError>),
-    AccountName(Result<SidName, WireError>),
-    ResolvePrincipalId(Result<PrincipalId, WireError>),
-    Which(Result<Option<WirePath>, WireError>),
-    WellKnownPath(Result<WirePath, WireError>),
+    Spawn(Gift<ChildMarker>),
+    ChildWait(ProcessStatus),
+    ChildTerminate(Option<ProcessStatus>),
+    ChildClose,
+    Query(QueryResponse),
+    UserName(String),
+    UserId(u32),
+    GroupName(String),
+    GroupId(u32),
+    SidName(SidName),
+    AccountName(SidName),
+    ResolvePrincipalId(PrincipalId),
+    Which(Option<WirePath>),
+    WellKnownPath(WirePath),
     Stop,
-    ClearCache(Result<(), WireError>),
-    Pipe(Result<PipeResponse, WireError>),
-    Open(Result<OpenHandle, WireError>),
-    FileRead(Result<(), WireError>),
-    FileWrite(Result<usize, WireError>),
-    FileAppend(Result<(usize, u64), WireError>),
-    FileSize(Result<u64, WireError>),
-    FileFlush(Result<(), WireError>),
-    FileSetSize(Result<(), WireError>),
-    FileLock(Result<Option<Gift<crate::session::FileLockMarker>>, WireError>),
-    FileUnlock(Result<(), WireError>),
-    FileToStdioSend(Result<Gift<crate::session::StdioSendMarker>, WireError>),
-    FileToStdioRecv(Result<Gift<crate::session::StdioRecvMarker>, WireError>),
-    StdioSendClose(Result<(), WireError>),
-    StdioSendWrite(Result<usize, WireError>),
-    StdioSendClone(Result<Gift<crate::session::StdioSendMarker>, WireError>),
-    StdioRecvClose(Result<(), WireError>),
-    StdioRecvRead(Result<(), WireError>),
-    StdioRecvClone(Result<Gift<crate::session::StdioRecvMarker>, WireError>),
-    FileMetadata(Result<Metadata, WireError>),
-    FileFsMetadata(Result<FsMetadata, WireError>),
-    FileAcl(Result<Option<Acl>, WireError>),
-    FileSetAcl(Result<(), WireError>),
-    FileSecDesc(Result<SecDesc, WireError>),
-    FileSetSecDesc(Result<(), WireError>),
-    FileXattrs(Result<Vec<XattrEntry>, WireError>),
-    FileXattr(Result<Vec<u8>, WireError>),
-    FileStreams(Result<Vec<StreamEntry>, WireError>),
-    FileSetXattr(Result<(), WireError>),
-    FileRemoveXattr(Result<(), WireError>),
-    FileClose(Result<(), WireError>),
-    UnixVfs(Result<OpenVfsHandle, WireError>),
-    WindowsAdmin(Result<Gift<crate::session::VfsMarker>, WireError>),
-    ReadDir(Result<Gift<crate::session::ReadDirMarker>, WireError>),
-    ReadDirNext(Result<ReadDirPage, WireError>),
-    ReadDirClose(Result<(), WireError>),
-    Remove(Result<(), WireError>),
-    Metadata(Result<Metadata, WireError>),
-    FsMetadata(Result<FsMetadata, WireError>),
-    Acl(Result<Option<Acl>, WireError>),
-    SetAcl(Result<(), WireError>),
-    SecDesc(Result<SecDesc, WireError>),
-    SetSecDesc(Result<(), WireError>),
-    CreateDir(Result<(), WireError>),
-    RemoveDir(Result<(), WireError>),
-    Copy(Result<(), WireError>),
-    Rename(Result<(), WireError>),
-    Move(Result<(), WireError>),
-    Symlink(Result<(), WireError>),
-    HardLink(Result<(), WireError>),
-    SymlinkMetadata(Result<Metadata, WireError>),
-    SetMetadata(Result<(), WireError>),
-    Canonicalize(Result<WirePath, WireError>),
-    ReadLink(Result<WirePath, WireError>),
-    Access(Result<(), WireError>),
-    Glob(Result<Vec<WirePath>, WireError>),
-    Xattrs(Result<Vec<XattrEntry>, WireError>),
-    Xattr(Result<Vec<u8>, WireError>),
-    SetXattr(Result<(), WireError>),
-    RemoveXattr(Result<(), WireError>),
-    Streams(Result<Vec<StreamEntry>, WireError>),
-    Extension(Result<ExtensionResponse, WireError>),
+    ClearCache,
+    Pipe(PipeResponse),
+    Open(OpenHandle),
+    FileRead,
+    FileWrite(usize),
+    FileAppend((usize, u64)),
+    FileSize(u64),
+    FileSetSize,
+    FileLock(Option<Gift<FileLockMarker>>),
+    FileUnlock,
+    FileToStdioSend(Gift<StdioSendMarker>),
+    FileToStdioRecv(Gift<StdioRecvMarker>),
+    StdioSendClose,
+    StdioSendWrite(usize),
+    StdioSendClone(Gift<StdioSendMarker>),
+    StdioRecvClose,
+    StdioRecvRead,
+    StdioRecvClone(Gift<StdioRecvMarker>),
+    FileMetadata(Metadata),
+    FileFsMetadata(FsMetadata),
+    FileAcl(Option<Acl>),
+    FileSetAcl,
+    FileSecDesc(SecDesc),
+    FileSetSecDesc,
+    FileXattrs(Vec<XattrEntry>),
+    FileXattr(Vec<u8>),
+    FileStreams(Vec<StreamEntry>),
+    FileSetXattr,
+    FileRemoveXattr,
+    FileClose,
+    UnixVfs(OpenVfsHandle),
+    WindowsAdmin(Gift<VfsMarker>),
+    ReadDir(Gift<ReadDirMarker>),
+    ReadDirNext(ReadDirPage),
+    ReadDirClose,
+    Remove,
+    Metadata(Metadata),
+    FsMetadata(FsMetadata),
+    Acl(Option<Acl>),
+    SetAcl,
+    SecDesc(SecDesc),
+    SetSecDesc,
+    CreateDir,
+    RemoveDir,
+    Copy,
+    Rename,
+    Move,
+    Symlink,
+    HardLink,
+    SymlinkMetadata(Metadata),
+    SetMetadata,
+    Canonicalize(WirePath),
+    ReadLink(WirePath),
+    Access,
+    Glob(Vec<WirePath>),
+    Xattrs(Vec<XattrEntry>),
+    Xattr(Vec<u8>),
+    SetXattr,
+    RemoveXattr,
+    Streams(Vec<StreamEntry>),
+    Extension(ExtensionResponse),
 }

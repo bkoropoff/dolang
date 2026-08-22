@@ -8,6 +8,7 @@ use crate::error::{Error, ErrorKind, Result};
 
 /// A standard location resolved by a VFS target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum WellKnownPath {
     /// User's home directory.
     HomeDir,

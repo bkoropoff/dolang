@@ -65,19 +65,19 @@ impl<'v> Object<'v> for FsMetadata {
 
         builder
             .get("capacity", |this, strand, out| {
-                Output::set(strand, out, this.annex().inner.capacity);
+                Output::set(strand, out, this.annex().inner.capacity());
                 Ok(())
             })
             .get("free", |this, strand, out| {
-                Output::set(strand, out, this.annex().inner.free);
+                Output::set(strand, out, this.annex().inner.free());
                 Ok(())
             })
             .get("available", |this, strand, out| {
-                Output::set(strand, out, this.annex().inner.available);
+                Output::set(strand, out, this.annex().inner.available());
                 Ok(())
             })
             .get("block_size", |this, strand, out| {
-                Output::set(strand, out, this.annex().inner.block_size);
+                Output::set(strand, out, this.annex().inner.block_size());
                 Ok(())
             })
             .get("read_only", |this, strand, out| {
@@ -87,7 +87,7 @@ impl<'v> Object<'v> for FsMetadata {
             .get("blocks", move |this, strand, out| {
                 option_field(
                     strand,
-                    this.annex().inner.unix().map(|v| v.blocks),
+                    this.annex().inner.unix().map(|v| v.blocks()),
                     blocks,
                     out,
                 )
@@ -95,7 +95,7 @@ impl<'v> Object<'v> for FsMetadata {
             .get("blocks_free", move |this, strand, out| {
                 option_field(
                     strand,
-                    this.annex().inner.unix().map(|v| v.blocks_free),
+                    this.annex().inner.unix().map(|v| v.blocks_free()),
                     blocks_free,
                     out,
                 )
@@ -103,7 +103,7 @@ impl<'v> Object<'v> for FsMetadata {
             .get("blocks_available", move |this, strand, out| {
                 option_field(
                     strand,
-                    this.annex().inner.unix().map(|v| v.blocks_available),
+                    this.annex().inner.unix().map(|v| v.blocks_available()),
                     blocks_available,
                     out,
                 )
@@ -111,7 +111,7 @@ impl<'v> Object<'v> for FsMetadata {
             .get("files", move |this, strand, out| {
                 option_field(
                     strand,
-                    this.annex().inner.unix().map(|v| v.files),
+                    this.annex().inner.unix().map(|v| v.files()),
                     files,
                     out,
                 )
@@ -119,7 +119,7 @@ impl<'v> Object<'v> for FsMetadata {
             .get("files_free", move |this, strand, out| {
                 option_field(
                     strand,
-                    this.annex().inner.unix().map(|v| v.files_free),
+                    this.annex().inner.unix().map(|v| v.files_free()),
                     files_free,
                     out,
                 )
@@ -127,7 +127,7 @@ impl<'v> Object<'v> for FsMetadata {
             .get("files_available", move |this, strand, out| {
                 option_field(
                     strand,
-                    this.annex().inner.unix().map(|v| v.files_available),
+                    this.annex().inner.unix().map(|v| v.files_available()),
                     files_available,
                     out,
                 )
@@ -135,39 +135,27 @@ impl<'v> Object<'v> for FsMetadata {
             .get("fragment_size", move |this, strand, out| {
                 option_field(
                     strand,
-                    this.annex().inner.unix().map(|v| v.fragment_size),
+                    this.annex().inner.unix().map(|v| v.fragment_size()),
                     fragment_size,
                     out,
                 )
             })
             .get("linux_attrs", move |this, strand, out| {
-                let value = this.annex().inner.unix().and_then(|v| match v.platform {
-                    dolang_vfs::metadata::UnixFsMetadataPlatform::Linux { flags } => Some(flags),
-                    dolang_vfs::metadata::UnixFsMetadataPlatform::FreeBsd { .. }
-                    | dolang_vfs::metadata::UnixFsMetadataPlatform::Macos { .. } => None,
-                });
+                let value = this.annex().inner.unix().and_then(|v| v.linux_flags());
                 option_field(strand, value, linux_attrs, out)
             })
             .get("freebsd_attrs", move |this, strand, out| {
-                let value = this.annex().inner.unix().and_then(|v| match v.platform {
-                    dolang_vfs::metadata::UnixFsMetadataPlatform::FreeBsd { flags } => Some(flags),
-                    dolang_vfs::metadata::UnixFsMetadataPlatform::Linux { .. }
-                    | dolang_vfs::metadata::UnixFsMetadataPlatform::Macos { .. } => None,
-                });
+                let value = this.annex().inner.unix().and_then(|v| v.freebsd_flags());
                 option_field(strand, value, freebsd_attrs, out)
             })
             .get("macos_attrs", move |this, strand, out| {
-                let value = this.annex().inner.unix().and_then(|v| match v.platform {
-                    dolang_vfs::metadata::UnixFsMetadataPlatform::FreeBsd { .. }
-                    | dolang_vfs::metadata::UnixFsMetadataPlatform::Linux { .. } => None,
-                    dolang_vfs::metadata::UnixFsMetadataPlatform::Macos { flags } => Some(flags),
-                });
+                let value = this.annex().inner.unix().and_then(|v| v.macos_flags());
                 option_field(strand, value, macos_attrs, out)
             })
             .get("fsid", move |this, strand, out| {
                 option_field(
                     strand,
-                    this.annex().inner.unix().and_then(|v| v.fsid),
+                    this.annex().inner.unix().and_then(|v| v.fsid()),
                     fsid,
                     out,
                 )
@@ -175,7 +163,7 @@ impl<'v> Object<'v> for FsMetadata {
             .get("name_max", move |this, strand, out| {
                 option_field(
                     strand,
-                    this.annex().inner.unix().map(|v| v.name_max),
+                    this.annex().inner.unix().map(|v| v.name_max()),
                     name_max,
                     out,
                 )
@@ -204,7 +192,7 @@ impl<'v> Object<'v> for FsMetadata {
             .get("win_flags", move |this, strand, out| {
                 option_field(
                     strand,
-                    this.annex().inner.windows().map(|v| v.flags),
+                    this.annex().inner.windows().map(|v| v.flags()),
                     win_flags,
                     out,
                 )
@@ -212,7 +200,10 @@ impl<'v> Object<'v> for FsMetadata {
             .get("volume_serial_number", move |this, strand, out| {
                 option_field(
                     strand,
-                    this.annex().inner.windows().map(|v| v.volume_serial_number),
+                    this.annex()
+                        .inner
+                        .windows()
+                        .map(|v| v.volume_serial_number()),
                     volume_serial_number,
                     out,
                 )
@@ -220,7 +211,10 @@ impl<'v> Object<'v> for FsMetadata {
             .get("component_length_max", move |this, strand, out| {
                 option_field(
                     strand,
-                    this.annex().inner.windows().map(|v| v.component_length_max),
+                    this.annex()
+                        .inner
+                        .windows()
+                        .map(|v| v.component_length_max()),
                     component_length_max,
                     out,
                 )

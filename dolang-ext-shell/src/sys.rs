@@ -85,13 +85,14 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         .function("os_info", async move |strand, args, out| {
             let ([], []) = unpack!(strand, args, 0, 0)?;
             let target = global.local.get(strand).target();
-            let os = match &target.operating_system {
+            let os = match target.os() {
                 OperatingSystem::FreeBsd => freebsd,
                 OperatingSystem::Linux => linux,
                 OperatingSystem::Macos => macos,
                 OperatingSystem::Windows => windows,
+                _ => return Err(Error::not_supported(strand)),
             };
-            let family = match target.operating_system.family() {
+            let family = match target.os().family() {
                 OperatingSystemFamily::Unix => unix,
                 OperatingSystemFamily::Windows => windows,
             };
@@ -101,7 +102,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 OsInfoAnnex {
                     os,
                     family,
-                    is_wine: target.is_wine,
+                    is_wine: target.is_wine(),
                 },
                 out,
             );
@@ -110,16 +111,17 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         .function("cpu_info", async move |strand, args, out| {
             let ([], []) = unpack!(strand, args, 0, 0)?;
             let target = global.local.get(strand).target();
-            let arch = match target.architecture {
+            let arch = match target.arch() {
                 Architecture::X86_64 => x86_64,
                 Architecture::Aarch64 => aarch64,
+                _ => return Err(Error::not_supported(strand)),
             };
             global.types.cpu_info.create_with_annex(
                 strand,
                 CpuInfo,
                 CpuInfoAnnex {
                     arch,
-                    logical_count: target.logical_cpu_count,
+                    logical_count: target.logical_cpus(),
                 },
                 out,
             );

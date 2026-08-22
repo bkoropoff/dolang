@@ -3,7 +3,7 @@
 use dolang_winterop::security::Sid;
 use serde::{Deserialize, Serialize};
 
-use crate::security::OwnershipIdentity;
+use crate::security::{OwnershipIdentity, Permission};
 
 /// The kind of filesystem object described by [`Metadata`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,17 +24,6 @@ pub enum FileType {
     Socket,
     /// Unrecognized file type.
     Unknown,
-}
-
-bitflags::bitflags! {
-    /// Unix read/write/execute permission bits, as granted by one class of a
-    /// [`Mode`] or one entry of a POSIX ACL.
-    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-    pub struct Permission: u8 {
-        const READ = 0o4;
-        const WRITE = 0o2;
-        const EXECUTE = 0o1;
-    }
 }
 
 bitflags::bitflags! {
@@ -88,28 +77,28 @@ impl Mode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Metadata {
     /// File length in bytes.
-    pub len: u64,
+    pub(crate) len: u64,
     /// File kind.
-    pub file_type: FileType,
+    pub(crate) file_type: FileType,
     /// Last-access time in seconds since the Unix epoch.
-    pub atime: i64,
+    pub(crate) atime: i64,
     /// Nanosecond component of [`atime`](Self::atime).
-    pub atime_nsec: i64,
+    pub(crate) atime_nsec: i64,
     /// Last-modification time in seconds since the Unix epoch.
-    pub mtime: i64,
+    pub(crate) mtime: i64,
     /// Nanosecond component of [`mtime`](Self::mtime).
-    pub mtime_nsec: i64,
+    pub(crate) mtime_nsec: i64,
     /// Metadata-change time in seconds since the Unix epoch.
-    pub ctime: i64,
+    pub(crate) ctime: i64,
     /// Nanosecond component of [`ctime`](Self::ctime).
-    pub ctime_nsec: i64,
+    pub(crate) ctime_nsec: i64,
     /// Platform-specific metadata.
-    pub family: MetadataFamily,
+    pub(crate) family: MetadataFamily,
 }
 
 /// Platform-specific metadata payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum MetadataFamily {
+pub(crate) enum MetadataFamily {
     /// Unix metadata.
     Unix(UnixMetadata),
     /// Windows metadata.
@@ -120,41 +109,79 @@ pub enum MetadataFamily {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnixMetadata {
     /// File mode bits.
-    pub mode: Mode,
+    pub(crate) mode: Mode,
     /// Device ID containing the file.
-    pub dev: u64,
+    pub(crate) dev: u64,
     /// File inode number.
-    pub ino: u64,
+    pub(crate) ino: u64,
     /// Number of hard links.
-    pub nlink: u64,
+    pub(crate) nlink: u64,
     /// Owning user ID.
-    pub uid: u32,
+    pub(crate) uid: u32,
     /// Owning group ID.
-    pub gid: u32,
+    pub(crate) gid: u32,
     /// Device ID for special files.
-    pub rdev: u64,
+    pub(crate) rdev: u64,
     /// Preferred I/O block size.
-    pub blksize: u64,
+    pub(crate) blksize: u64,
     /// Number of allocated blocks.
-    pub blocks: u64,
-    pub platform: UnixMetadataPlatform,
+    pub(crate) blocks: u64,
+    pub(crate) platform: UnixMetadataPlatform,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum UnixMetadataPlatform {
+pub(crate) enum UnixMetadataPlatform {
     FreeBsd { attrs: u32 },
     Linux { attrs: Option<u32> },
     Macos { attrs: u32 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Windows-specific file metadata.
 pub struct WindowsMetadata {
-    pub attrs: u32,
-    pub user: Option<Sid>,
-    pub group: Option<Sid>,
+    pub(crate) attrs: u32,
+    pub(crate) user: Option<Sid>,
+    pub(crate) group: Option<Sid>,
 }
 
 impl Metadata {
+    /// Returns the file length in bytes.
+    pub const fn len(&self) -> u64 {
+        self.len
+    }
+    /// Returns whether the file is empty.
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+    /// Returns the type of the filesystem object.
+    pub const fn file_type(&self) -> FileType {
+        self.file_type
+    }
+    /// Returns the access time in seconds since the Unix epoch.
+    pub const fn atime(&self) -> i64 {
+        self.atime
+    }
+    /// Returns the nanosecond component of the access time.
+    pub const fn atime_nsec(&self) -> i64 {
+        self.atime_nsec
+    }
+    /// Returns the modification time in seconds since the Unix epoch.
+    pub const fn mtime(&self) -> i64 {
+        self.mtime
+    }
+    /// Returns the nanosecond component of the modification time.
+    pub const fn mtime_nsec(&self) -> i64 {
+        self.mtime_nsec
+    }
+    /// Returns the metadata-change time in seconds since the Unix epoch.
+    pub const fn ctime(&self) -> i64 {
+        self.ctime
+    }
+    /// Returns the nanosecond component of the metadata-change time.
+    pub const fn ctime_nsec(&self) -> i64 {
+        self.ctime_nsec
+    }
+    /// Returns the Unix-specific metadata, if present.
     pub fn unix(&self) -> Option<&UnixMetadata> {
         if let MetadataFamily::Unix(metadata) = &self.family {
             Some(metadata)
@@ -162,6 +189,7 @@ impl Metadata {
             None
         }
     }
+    /// Returns the Windows-specific metadata, if present.
     pub fn windows(&self) -> Option<&WindowsMetadata> {
         if let MetadataFamily::Windows(metadata) = &self.family {
             Some(metadata)
@@ -169,6 +197,7 @@ impl Metadata {
             None
         }
     }
+    /// Returns the Linux inode attributes, if present and available.
     pub const fn linux_attrs(&self) -> Option<u32> {
         match &self.family {
             MetadataFamily::Unix(UnixMetadata {
@@ -178,6 +207,7 @@ impl Metadata {
             _ => None,
         }
     }
+    /// Returns the FreeBSD file flags, if present.
     pub const fn freebsd_attrs(&self) -> Option<u32> {
         match &self.family {
             MetadataFamily::Unix(UnixMetadata {
@@ -187,6 +217,7 @@ impl Metadata {
             _ => None,
         }
     }
+    /// Returns the macOS file flags, if present.
     pub const fn macos_attrs(&self) -> Option<u32> {
         match &self.family {
             MetadataFamily::Unix(UnixMetadata {
@@ -196,6 +227,7 @@ impl Metadata {
             _ => None,
         }
     }
+    /// Returns the Windows file attributes, if present.
     pub const fn win_attrs(&self) -> Option<u32> {
         match &self.family {
             MetadataFamily::Windows(metadata) => Some(metadata.attrs),
@@ -204,47 +236,141 @@ impl Metadata {
     }
 }
 
+impl UnixMetadata {
+    /// Returns the Unix mode bits.
+    pub const fn mode(&self) -> Mode {
+        self.mode
+    }
+    /// Returns the device ID.
+    pub const fn dev(&self) -> u64 {
+        self.dev
+    }
+    /// Returns the inode number.
+    pub const fn ino(&self) -> u64 {
+        self.ino
+    }
+    /// Returns the number of hard links.
+    pub const fn nlink(&self) -> u64 {
+        self.nlink
+    }
+    /// Returns the owning user ID.
+    pub const fn uid(&self) -> u32 {
+        self.uid
+    }
+    /// Returns the owning group ID.
+    pub const fn gid(&self) -> u32 {
+        self.gid
+    }
+    /// Returns the device ID for a special file.
+    pub const fn rdev(&self) -> u64 {
+        self.rdev
+    }
+    /// Returns the preferred I/O block size.
+    pub const fn block_size(&self) -> u64 {
+        self.blksize
+    }
+    /// Returns the number of allocated blocks.
+    pub const fn blocks(&self) -> u64 {
+        self.blocks
+    }
+    /// Returns the Linux inode attributes, if present and available.
+    pub const fn linux_attrs(&self) -> Option<u32> {
+        match self.platform {
+            UnixMetadataPlatform::Linux { attrs } => attrs,
+            _ => None,
+        }
+    }
+    /// Returns the FreeBSD file flags, if present.
+    pub const fn freebsd_attrs(&self) -> Option<u32> {
+        match self.platform {
+            UnixMetadataPlatform::FreeBsd { attrs } => Some(attrs),
+            _ => None,
+        }
+    }
+    /// Returns the macOS file flags, if present.
+    pub const fn macos_attrs(&self) -> Option<u32> {
+        match self.platform {
+            UnixMetadataPlatform::Macos { attrs } => Some(attrs),
+            _ => None,
+        }
+    }
+}
+
+impl WindowsMetadata {
+    /// Returns the Windows file attributes.
+    pub const fn attrs(&self) -> u32 {
+        self.attrs
+    }
+    /// Returns the owner SID, if it was requested and available.
+    pub fn user(&self) -> Option<&Sid> {
+        self.user.as_ref()
+    }
+    /// Returns the group SID, if it was requested and available.
+    pub fn group(&self) -> Option<&Sid> {
+        self.group.as_ref()
+    }
+}
+
 /// Capacity and allocation information for a filesystem.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FsMetadata {
-    pub capacity: u64,
-    pub free: u64,
-    pub available: u64,
-    pub block_size: u32,
-    pub family: FsMetadataFamily,
+    pub(crate) capacity: u64,
+    pub(crate) free: u64,
+    pub(crate) available: u64,
+    pub(crate) block_size: u32,
+    pub(crate) family: FsMetadataFamily,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum FsMetadataFamily {
+pub(crate) enum FsMetadataFamily {
     Unix(UnixFsMetadata),
     Windows(WindowsFsMetadata),
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Unix-specific filesystem metadata.
 pub struct UnixFsMetadata {
-    pub blocks: u64,
-    pub blocks_free: u64,
-    pub blocks_available: u64,
-    pub files: u64,
-    pub files_free: u64,
-    pub files_available: u64,
-    pub fragment_size: u32,
-    pub fsid: Option<u64>,
-    pub name_max: u32,
-    pub platform: UnixFsMetadataPlatform,
+    pub(crate) blocks: u64,
+    pub(crate) blocks_free: u64,
+    pub(crate) blocks_available: u64,
+    pub(crate) files: u64,
+    pub(crate) files_free: u64,
+    pub(crate) files_available: u64,
+    pub(crate) fragment_size: u32,
+    pub(crate) fsid: Option<u64>,
+    pub(crate) name_max: u32,
+    pub(crate) platform: UnixFsMetadataPlatform,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum UnixFsMetadataPlatform {
+pub(crate) enum UnixFsMetadataPlatform {
     Linux { flags: u64 },
     Macos { flags: u64 },
     FreeBsd { flags: u64 },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Windows-specific filesystem metadata.
 pub struct WindowsFsMetadata {
-    pub flags: u32,
-    pub volume_serial_number: u32,
-    pub component_length_max: u32,
+    pub(crate) flags: u32,
+    pub(crate) volume_serial_number: u32,
+    pub(crate) component_length_max: u32,
 }
 
 impl FsMetadata {
+    /// Returns the total filesystem capacity in bytes.
+    pub const fn capacity(&self) -> u64 {
+        self.capacity
+    }
+    /// Returns the total free space in bytes.
+    pub const fn free(&self) -> u64 {
+        self.free
+    }
+    /// Returns the space available to an unprivileged caller in bytes.
+    pub const fn available(&self) -> u64 {
+        self.available
+    }
+    /// Returns the fundamental filesystem block size in bytes.
+    pub const fn block_size(&self) -> u32 {
+        self.block_size
+    }
+    /// Returns the Unix-specific filesystem metadata, if present.
     pub fn unix(&self) -> Option<&UnixFsMetadata> {
         if let FsMetadataFamily::Unix(metadata) = &self.family {
             Some(metadata)
@@ -252,6 +378,7 @@ impl FsMetadata {
             None
         }
     }
+    /// Returns the Windows-specific filesystem metadata, if present.
     pub fn windows(&self) -> Option<&WindowsFsMetadata> {
         if let FsMetadataFamily::Windows(metadata) = &self.family {
             Some(metadata)
@@ -259,6 +386,7 @@ impl FsMetadata {
             None
         }
     }
+    /// Returns whether the filesystem is read-only.
     #[allow(clippy::unnecessary_cast)]
     pub fn read_only(&self) -> bool {
         match &self.family {
@@ -266,6 +394,7 @@ impl FsMetadata {
             FsMetadataFamily::Windows(metadata) => metadata.flags & 0x0008_0000 != 0,
         }
     }
+    /// Returns whether set-user-ID and set-group-ID bits are disabled, if known.
     #[allow(clippy::unnecessary_cast)]
     pub fn no_suid(&self) -> Option<bool> {
         match &self.family {
@@ -273,26 +402,32 @@ impl FsMetadata {
             FsMetadataFamily::Windows(_) => None,
         }
     }
+    /// Returns whether execution is disabled, if known.
     #[allow(clippy::unnecessary_cast)]
     pub fn no_exec(&self) -> Option<bool> {
         self.linux_flag(8)
     }
+    /// Returns whether writes are synchronous, if known.
     #[allow(clippy::unnecessary_cast)]
     pub fn synchronous(&self) -> Option<bool> {
         self.linux_flag(16)
     }
+    /// Returns whether device files are disabled, if known.
     #[allow(clippy::unnecessary_cast)]
     pub fn no_dev(&self) -> Option<bool> {
         self.linux_flag(4)
     }
+    /// Returns whether access-time updates are disabled, if known.
     #[allow(clippy::unnecessary_cast)]
     pub fn no_atime(&self) -> Option<bool> {
         self.linux_flag(1024)
     }
+    /// Returns whether directory access-time updates are disabled, if known.
     #[allow(clippy::unnecessary_cast)]
     pub fn no_dir_atime(&self) -> Option<bool> {
         self.linux_flag(2048)
     }
+    /// Returns whether relative access-time updates are enabled, if known.
     #[allow(clippy::unnecessary_cast)]
     pub fn relatime(&self) -> Option<bool> {
         self.linux_flag(1 << 21)
@@ -305,6 +440,79 @@ impl FsMetadata {
             }) => Some(flags & flag != 0),
             _ => None,
         }
+    }
+}
+impl UnixFsMetadata {
+    /// Returns the total number of filesystem blocks.
+    pub const fn blocks(&self) -> u64 {
+        self.blocks
+    }
+    /// Returns the number of free filesystem blocks.
+    pub const fn blocks_free(&self) -> u64 {
+        self.blocks_free
+    }
+    /// Returns the number of blocks available to an unprivileged caller.
+    pub const fn blocks_available(&self) -> u64 {
+        self.blocks_available
+    }
+    /// Returns the total number of file nodes.
+    pub const fn files(&self) -> u64 {
+        self.files
+    }
+    /// Returns the number of free file nodes.
+    pub const fn files_free(&self) -> u64 {
+        self.files_free
+    }
+    /// Returns the number of file nodes available to an unprivileged caller.
+    pub const fn files_available(&self) -> u64 {
+        self.files_available
+    }
+    /// Returns the fragment size in bytes.
+    pub const fn fragment_size(&self) -> u32 {
+        self.fragment_size
+    }
+    /// Returns the filesystem ID, if available.
+    pub const fn fsid(&self) -> Option<u64> {
+        self.fsid
+    }
+    /// Returns the maximum filename length.
+    pub const fn name_max(&self) -> u32 {
+        self.name_max
+    }
+    /// Returns the Linux mount flags, if present.
+    pub const fn linux_flags(&self) -> Option<u64> {
+        match self.platform {
+            UnixFsMetadataPlatform::Linux { flags } => Some(flags),
+            _ => None,
+        }
+    }
+    /// Returns the FreeBSD mount flags, if present.
+    pub const fn freebsd_flags(&self) -> Option<u64> {
+        match self.platform {
+            UnixFsMetadataPlatform::FreeBsd { flags } => Some(flags),
+            _ => None,
+        }
+    }
+    /// Returns the macOS mount flags, if present.
+    pub const fn macos_flags(&self) -> Option<u64> {
+        match self.platform {
+            UnixFsMetadataPlatform::Macos { flags } => Some(flags),
+            _ => None,
+        }
+    }
+}
+impl WindowsFsMetadata {
+    /// Returns the filesystem flags reported by Windows.
+    pub const fn flags(&self) -> u32 {
+        self.flags
+    }
+    /// Returns the volume serial number.
+    pub const fn volume_serial_number(&self) -> u32 {
+        self.volume_serial_number
+    }
+    /// Returns the maximum filesystem path-component length.
+    pub const fn component_length_max(&self) -> u32 {
+        self.component_length_max
     }
 }
 impl UnixFsMetadataPlatform {
@@ -320,55 +528,87 @@ impl UnixFsMetadataPlatform {
 #[serde(transparent)]
 pub struct AttrFlags(u64);
 impl AttrFlags {
+    /// Read-only.
     pub const READONLY: Self = Self(1 << 0);
+    /// Hidden from ordinary directory listings.
     pub const HIDDEN: Self = Self(1 << 1);
+    /// Used by the operating system.
     pub const SYSTEM: Self = Self(1 << 2);
+    /// Marked for archival.
     pub const ARCHIVE: Self = Self(1 << 3);
+    /// Stored in compressed form.
     pub const COMPRESSED: Self = Self(1 << 4);
+    /// Intended for temporary storage.
     pub const TEMPORARY: Self = Self(1 << 5);
+    /// Data is not immediately available.
     pub const OFFLINE: Self = Self(1 << 6);
+    /// Excluded from content indexing.
     pub const NOT_CONTENT_INDEXED: Self = Self(1 << 7);
+    /// Cannot be modified.
     pub const IMMUTABLE: Self = Self(1 << 8);
+    /// May only be appended to.
     pub const APPEND_ONLY: Self = Self(1 << 9);
+    /// Excluded from dump-style backups.
     pub const NO_DUMP: Self = Self(1 << 10);
+    /// Does not update access time.
     pub const NO_ATIME: Self = Self(1 << 11);
+    /// Disables copy-on-write behavior.
     pub const NO_COPY_ON_WRITE: Self = Self(1 << 12);
+    /// Directory changes are written synchronously.
     pub const DIR_SYNC: Self = Self(1 << 13);
+    /// Directory uses case-insensitive lookup.
     pub const CASEFOLD: Self = Self(1 << 14);
+    /// File data is journaled.
     pub const DATA_JOURNALING: Self = Self(1 << 15);
+    /// File must not be compressed.
     pub const NO_COMPRESS: Self = Self(1 << 16);
+    /// New children inherit the project ID.
     pub const PROJECT_INHERIT: Self = Self(1 << 17);
+    /// Requests secure deletion.
     pub const SECURE_DELETE: Self = Self(1 << 18);
+    /// Changes are written synchronously.
     pub const SYNC: Self = Self(1 << 19);
+    /// Disables tail merging.
     pub const NO_TAIL_MERGE: Self = Self(1 << 20);
+    /// Directory is the top of a hierarchy.
     pub const TOP_DIR: Self = Self(1 << 21);
+    /// File can be recovered after deletion.
     pub const UNDELETE: Self = Self(1 << 22);
+    /// Supports direct-access storage.
     pub const DIRECT_ACCESS: Self = Self(1 << 23);
+    /// Uses extent-based storage.
     pub const EXTENT_FORMAT: Self = Self(1 << 24);
+    /// Directory is opaque to union mounts.
     pub const OPAQUE: Self = Self(1 << 25);
+    /// Returns an empty set of flags.
     pub const fn empty() -> Self {
         Self(0)
     }
+    /// Returns whether all bits in `flag` are set.
     pub const fn contains(self, flag: Self) -> bool {
         self.0 & flag.0 != 0
     }
+    /// Returns whether any bits in `other` are set.
     pub const fn intersects(self, other: Self) -> bool {
         self.0 & other.0 != 0
     }
+    /// Returns the union of two flag sets.
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
     }
+    /// Returns these flags with the bits in `other` removed.
     pub const fn difference(self, other: Self) -> Self {
         Self(self.0 & !other.0)
     }
+    /// Returns whether no flags are set.
     pub const fn is_empty(self) -> bool {
         self.0 == 0
     }
 }
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AttrsPatch {
-    pub set: AttrFlags,
-    pub clear: AttrFlags,
+pub(crate) struct AttrsPatch {
+    pub(crate) set: AttrFlags,
+    pub(crate) clear: AttrFlags,
 }
 impl AttrsPatch {
     pub fn update(&mut self, flag: AttrFlags, value: Option<bool>) {
@@ -395,14 +635,14 @@ impl AttrsPatch {
 /// Requested changes to a filesystem object's metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataPatch {
-    pub mode: Option<Mode>,
-    pub user: Option<OwnershipIdentity>,
-    pub group: Option<OwnershipIdentity>,
-    pub accessed: Option<i128>,
-    pub modified: Option<i128>,
-    pub created: Option<i128>,
-    pub attrs: AttrsPatch,
-    pub follow: bool,
+    pub(crate) mode: Option<Mode>,
+    pub(crate) user: Option<OwnershipIdentity>,
+    pub(crate) group: Option<OwnershipIdentity>,
+    pub(crate) accessed: Option<i128>,
+    pub(crate) modified: Option<i128>,
+    pub(crate) created: Option<i128>,
+    pub(crate) attrs: AttrsPatch,
+    pub(crate) follow: bool,
 }
 impl Default for MetadataPatch {
     fn default() -> Self {
@@ -419,6 +659,91 @@ impl Default for MetadataPatch {
     }
 }
 impl MetadataPatch {
+    /// Creates an empty metadata patch that follows symbolic links.
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Sets the replacement Unix mode.
+    pub fn mode(&mut self, mode: Mode) -> &mut Self {
+        self.mode = Some(mode);
+        self
+    }
+    /// Sets the replacement owner.
+    pub fn user(&mut self, user: OwnershipIdentity) -> &mut Self {
+        self.user = Some(user);
+        self
+    }
+    /// Sets the replacement group.
+    pub fn group(&mut self, group: OwnershipIdentity) -> &mut Self {
+        self.group = Some(group);
+        self
+    }
+    /// Sets the access time in nanoseconds since the Unix epoch.
+    pub fn accessed(&mut self, accessed: i128) -> &mut Self {
+        self.accessed = Some(accessed);
+        self
+    }
+    /// Sets the modification time in nanoseconds since the Unix epoch.
+    pub fn modified(&mut self, modified: i128) -> &mut Self {
+        self.modified = Some(modified);
+        self
+    }
+    /// Sets the creation time in nanoseconds since the Unix epoch.
+    pub fn created(&mut self, created: i128) -> &mut Self {
+        self.created = Some(created);
+        self
+    }
+    /// Requests that an attribute be set, cleared, or left unchanged.
+    pub fn attribute(&mut self, flag: AttrFlags, value: Option<bool>) -> &mut Self {
+        self.attrs.update(flag, value);
+        self
+    }
+    /// Selects whether the operation follows symbolic links.
+    pub fn follow_links(&mut self, follow: bool) -> &mut Self {
+        self.follow = follow;
+        self
+    }
+    /// Sets the replacement Unix mode and returns the patch.
+    pub fn with_mode(mut self, mode: Mode) -> Self {
+        self.mode(mode);
+        self
+    }
+    /// Sets the replacement owner and returns the patch.
+    pub fn with_user(mut self, user: OwnershipIdentity) -> Self {
+        self.user(user);
+        self
+    }
+    /// Sets the replacement group and returns the patch.
+    pub fn with_group(mut self, group: OwnershipIdentity) -> Self {
+        self.group(group);
+        self
+    }
+    /// Sets the access time and returns the patch.
+    pub fn with_accessed(mut self, accessed: i128) -> Self {
+        self.accessed(accessed);
+        self
+    }
+    /// Sets the modification time and returns the patch.
+    pub fn with_modified(mut self, modified: i128) -> Self {
+        self.modified(modified);
+        self
+    }
+    /// Sets the creation time and returns the patch.
+    pub fn with_created(mut self, created: i128) -> Self {
+        self.created(created);
+        self
+    }
+    /// Requests an attribute change and returns the patch.
+    pub fn with_attribute(mut self, flag: AttrFlags, value: Option<bool>) -> Self {
+        self.attribute(flag, value);
+        self
+    }
+    /// Selects symbolic-link following and returns the patch.
+    pub fn with_follow_links(mut self, follow: bool) -> Self {
+        self.follow_links(follow);
+        self
+    }
+    /// Returns whether the patch requests no metadata changes.
     pub fn is_empty(&self) -> bool {
         self.mode.is_none()
             && self.user.is_none()
@@ -542,5 +867,42 @@ fn system_time_to_parts(time: Option<std::time::SystemTime>) -> (i64, u32) {
                 (-secs - 1, 1_000_000_000 - duration.subsec_nanos())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AttrFlags, MetadataPatch, Mode};
+    use crate::security::OwnershipIdentity;
+
+    #[test]
+    fn metadata_patch_builder_tracks_requested_changes() {
+        let patch = MetadataPatch::new()
+            .with_mode(Mode::OWNER_READ)
+            .with_user(OwnershipIdentity::Id(1))
+            .with_group(OwnershipIdentity::Name("staff".to_owned()))
+            .with_accessed(10)
+            .with_modified(20)
+            .with_created(30)
+            .with_attribute(AttrFlags::HIDDEN, Some(true))
+            .with_follow_links(false);
+
+        assert!(!patch.is_empty());
+        assert_eq!(patch.mode, Some(Mode::OWNER_READ));
+        assert!(patch.attrs.set.contains(AttrFlags::HIDDEN));
+        assert!(!patch.follow);
+        assert_eq!(
+            postcard::from_bytes::<MetadataPatch>(&postcard::to_stdvec(&patch).unwrap()).unwrap(),
+            patch
+        );
+    }
+
+    #[test]
+    fn metadata_patch_attribute_updates_are_disjoint() {
+        let mut patch = MetadataPatch::new();
+        patch.attribute(AttrFlags::READONLY, Some(true));
+        patch.attribute(AttrFlags::READONLY, Some(false));
+        assert!(!patch.attrs.set.contains(AttrFlags::READONLY));
+        assert!(patch.attrs.clear.contains(AttrFlags::READONLY));
     }
 }

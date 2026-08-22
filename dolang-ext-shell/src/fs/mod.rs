@@ -7,7 +7,7 @@ use dolang::runtime::{
     vm::Builder,
 };
 use dolang_vfs::{
-    metadata::{AttrFlags, AttrsPatch, FileType, Mode as VfsMode},
+    metadata::{AttrFlags, FileType, Mode as VfsMode},
     path::WellKnownPath,
     security::{Acl as VfsAnyAcl, AclKind as VfsAclKind},
 };
@@ -282,13 +282,13 @@ fn parse_attr_bool<'v, 's>(
 fn attrs_patch<'v, 's, 'a>(
     strand: &mut Strand<'v, 's>,
     values: impl IntoIterator<Item = (AttrFlags, Option<Slot<'v, 'a>>)>,
-) -> Result<'v, 's, AttrsPatch>
+) -> Result<'v, 's, Vec<(AttrFlags, Option<bool>)>>
 where
     'v: 'a,
 {
-    let mut patch = AttrsPatch::default();
+    let mut patch = Vec::new();
     for (flag, value) in values {
-        patch.update(flag, parse_attr_bool(strand, value)?);
+        patch.push((flag, parse_attr_bool(strand, value)?));
     }
     Ok(patch)
 }
@@ -333,7 +333,7 @@ fn metadata_patch<'v, 's>(
     [mode, user, group]: [Option<Slot<'v, '_>>; 3],
     [modified, accessed, created]: [Option<Slot<'v, '_>>; 3],
     resolve: Option<Slot<'v, '_>>,
-    attrs: AttrsPatch,
+    attrs: Vec<(AttrFlags, Option<bool>)>,
 ) -> Result<'v, 's, dolang_vfs::metadata::MetadataPatch> {
     let mode = mode
         .map(|mode| parse_mode(strand, global, mode))
@@ -348,16 +348,30 @@ fn metadata_patch<'v, 's>(
     let accessed = parse_timestamp_arg(strand, global, accessed, "accessed")?;
     let created = parse_timestamp_arg(strand, global, created, "created")?;
     let follow = resolve_sym(strand, global, resolve, true)?;
-    Ok(dolang_vfs::metadata::MetadataPatch {
-        mode,
-        user,
-        group,
-        accessed,
-        modified,
-        created,
-        attrs,
-        follow,
-    })
+    let mut patch = dolang_vfs::metadata::MetadataPatch::new();
+    if let Some(mode) = mode {
+        patch.mode(mode);
+    }
+    if let Some(user) = user {
+        patch.user(user);
+    }
+    if let Some(group) = group {
+        patch.group(group);
+    }
+    if let Some(accessed) = accessed {
+        patch.accessed(accessed);
+    }
+    if let Some(modified) = modified {
+        patch.modified(modified);
+    }
+    if let Some(created) = created {
+        patch.created(created);
+    }
+    for (flag, value) in attrs {
+        patch.attribute(flag, value);
+    }
+    patch.follow_links(follow);
+    Ok(patch)
 }
 
 async fn set_metadata<'v, 's>(
@@ -389,7 +403,7 @@ async fn remove<'v, 's>(
 
     let result = if all {
         match vfs.symlink_metadata(path.to_path()).await {
-            Ok(metadata) if metadata.file_type == FileType::Dir => {
+            Ok(metadata) if metadata.file_type() == FileType::Dir => {
                 vfs.remove(path.to_path(), true, ignore).await
             }
             Ok(_) => vfs.remove(path.to_path(), false, ignore).await.map(|_| ()),
@@ -616,12 +630,7 @@ async fn symlink<'v, 's>(
     dst: Utf8TypedPath<'_>,
 ) -> Result<'v, 's, ()> {
     let cwd = global.local.get(strand).cwd().clone();
-    let target = global
-        .local
-        .get(strand)
-        .target()
-        .operating_system
-        .path_type();
+    let target = global.local.get(strand).target().os().path_type();
     let src = convert_path_type(strand, src.to_path_buf(), &target)?;
     let dst = safe_concat(strand, cwd.to_path(), dst)?;
     let local = global.local.get(strand);
@@ -654,12 +663,7 @@ async fn symlink_dir<'v, 's>(
     src: Utf8TypedPath<'_>,
     dst: Utf8TypedPath<'_>,
 ) -> Result<'v, 's, ()> {
-    let target = global
-        .local
-        .get(strand)
-        .target()
-        .operating_system
-        .path_type();
+    let target = global.local.get(strand).target().os().path_type();
     let src = convert_path_type(strand, src.to_path_buf(), &target)?;
     let dst = prepend_cwd(strand, global, dst)?;
     let local = global.local.get(strand);
@@ -676,12 +680,7 @@ async fn symlink_file<'v, 's>(
     src: Utf8TypedPath<'_>,
     dst: Utf8TypedPath<'_>,
 ) -> Result<'v, 's, ()> {
-    let target = global
-        .local
-        .get(strand)
-        .target()
-        .operating_system
-        .path_type();
+    let target = global.local.get(strand).target().os().path_type();
     let src = convert_path_type(strand, src.to_path_buf(), &target)?;
     let dst = prepend_cwd(strand, global, dst)?;
     let local = global.local.get(strand);
@@ -854,20 +853,14 @@ async fn glob<'v, 's>(
     };
     let follow = resolve_sym(strand, global, resolve, false)?;
 
-    let root = root.unwrap_or_else(|| {
-        match global
-            .local
-            .get(strand)
-            .target()
-            .operating_system
-            .path_type()
-        {
+    let root = root.unwrap_or_else(
+        || match global.local.get(strand).target().os().path_type() {
             typed_path::PathType::Unix => Utf8TypedPath::Unix(typed_path::Utf8UnixPath::new("")),
             typed_path::PathType::Windows => {
                 Utf8TypedPath::Windows(typed_path::Utf8WindowsPath::new(""))
             }
-        }
-    });
+        },
+    );
     let abs_root = prepend_cwd(strand, global, root)?;
     let vfs = global.local.get(strand).vfs();
 

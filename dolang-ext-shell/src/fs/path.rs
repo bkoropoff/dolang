@@ -36,12 +36,7 @@ fn target_path_type<'v>(
     strand: &Strand<'v, '_>,
     global: State<'v, Global<'v>>,
 ) -> typed_path::PathType {
-    global
-        .local
-        .get(strand)
-        .target()
-        .operating_system
-        .path_type()
+    global.local.get(strand).target().os().path_type()
 }
 
 pub(crate) fn path_from_value<'v, 's>(

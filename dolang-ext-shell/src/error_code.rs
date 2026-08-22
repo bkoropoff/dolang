@@ -81,6 +81,7 @@ pub(crate) fn system_code_name(
         OperatingSystem::Linux => generated::LINUX_ERRNO_BY_CODE.get(&raw).copied(),
         OperatingSystem::Macos => generated::MACOS_ERRNO_BY_CODE.get(&raw).copied(),
         OperatingSystem::Windows => dolang_winterop::error::win_error_name(raw as u32),
+        _ => None,
     }
 }
 
@@ -139,6 +140,7 @@ impl<'v, T: CodeType<'v>> Object<'v> for CodeObject<T> {
                     Some(OperatingSystem::Linux) => linux,
                     Some(OperatingSystem::Macos) => macos,
                     Some(OperatingSystem::Windows) | None => unreachable!("invalid errno OS"),
+                    Some(_) => return Err(Error::not_supported(strand)),
                 };
                 Output::set(strand, out, os);
                 Ok(())
@@ -298,6 +300,7 @@ pub(crate) fn create_system_code<'v, 's>(
         OperatingSystem::Windows => {
             create(strand, global.types.win_error, operating_system, raw, out)
         }
+        _ => {}
     }
 }
 

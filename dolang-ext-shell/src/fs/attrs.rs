@@ -1,4 +1,4 @@
-use dolang_vfs::metadata::{Metadata, MetadataFamily, UnixMetadataPlatform};
+use dolang_vfs::metadata::Metadata;
 
 pub(crate) mod windows {
     pub(crate) const READONLY: u32 = 0x0000_0001;
@@ -70,13 +70,18 @@ pub(crate) fn flag(
     macos: u32,
     freebsd: u32,
 ) -> Flag {
-    let (value, mask) = match &metadata.family {
-        MetadataFamily::Windows(metadata) => (Some(metadata.attrs), windows),
-        MetadataFamily::Unix(metadata) => match metadata.platform {
-            UnixMetadataPlatform::FreeBsd { attrs } => (Some(attrs), freebsd),
-            UnixMetadataPlatform::Linux { attrs } => (attrs, linux),
-            UnixMetadataPlatform::Macos { attrs } => (Some(attrs), macos),
-        },
+    let (value, mask) = if let Some(metadata) = metadata.windows() {
+        (Some(metadata.attrs()), windows)
+    } else if let Some(metadata) = metadata.unix() {
+        if let Some(attrs) = metadata.freebsd_attrs() {
+            (Some(attrs), freebsd)
+        } else if let Some(attrs) = metadata.macos_attrs() {
+            (Some(attrs), macos)
+        } else {
+            (metadata.linux_attrs(), linux)
+        }
+    } else {
+        unreachable!("metadata has an unknown platform family")
     };
     if mask == 0 {
         Flag::Inapplicable

@@ -1,9 +1,6 @@
-use std::{
-    result,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 
 #[cfg(unix)]
@@ -36,30 +33,30 @@ use tokio::{
 };
 
 use crate::{
-    MAX_FILE_READ, STREAM_CHUNK_SIZE, SessionMode, Vfs, client,
+    MAX_FILE_READ, STREAM_CHUNK_SIZE, SessionMode, Vfs,
     directory::ReadDir,
-    error::{Error, ErrorKind, HandoffError, Result as VfsResult},
+    error::{Error, ErrorKind, HandoffError, Result},
     extension::{self, ExtContext},
+    file::XattrEntry,
     file::{AccessFlags, File, FileLock, FileLockRequest, StreamEntry},
     metadata::{FsMetadata, Metadata},
     process::{Child, Command, StdioRecv, StdioSend},
     protocol::{
         AccessRequest, AclRequest, CanonicalizeRequest, CopyRequest, CreateDirRequest,
         ExtensionRequest, ExtensionResponse, FsMetadataRequest, GlobRequest, HardLinkRequest,
-        MetadataRequest, MoveRequest, OpenHandle, OpenHandlePreference, OpenRequest, OpenVfsHandle,
+        MetadataRequest, MoveRequest, OpenFlags, OpenHandle, OpenRequest, OpenVfsHandle,
         PipeResponse, QueryResponse, ReadDirPage, ReadLinkRequest, RemoveDirRequest, RemoveRequest,
         RenameRequest, Request, RequestKind, ResponseKind, SecDescRequest, SetAclRequest,
         SetMetadataRequest, SetSecDescRequest, SetXattrRequest, SpawnRequest, StdioRecvTarget,
         StdioSendTarget, StreamsRequest, SymlinkKind, SymlinkRequest, UnixVfsRequest, VfsProtocol,
-        WellKnownPathRequest, WindowsAdminRequest, WireError, WirePath, XattrNamespaceRequest,
-        XattrRequest, XattrsRequest, rpc_builder,
+        WellKnownPathRequest, WindowsAdminRequest, WirePath, XattrNamespaceRequest, XattrRequest,
+        XattrsRequest, rpc_builder,
     },
     security::{Acl, AclKind},
     session::{
         ChildMarker, FileLockMarker, FileMarker, ReadDirMarker, StdioRecvMarker, StdioSendMarker,
         VfsMarker,
     },
-    xattr::XattrEntry,
 };
 
 #[derive(Clone)]
@@ -169,16 +166,11 @@ impl OpaqueResource for RetainedVfs {
 /// of the file — a nested remote file clamps at one chunk, and a positional read
 /// is permitted to be short in general — so this loops rather than treating the
 /// first short read as the end.
-async fn read_file_range(file: &File, offset: u64, len: usize) -> io::Result<BytesMut> {
+async fn read_file_range(file: &File, offset: u64, len: usize) -> Result<BytesMut> {
     let mut buf = BytesMut::with_capacity(len);
     while buf.len() < len {
         let at = offset + buf.len() as u64;
-        if file
-            .read_at(&mut buf, at)
-            .await
-            .map_err(crate::error::Error::into_io_error)?
-            == 0
-        {
+        if file.read_at(&mut buf, at).await? == 0 {
             break;
         }
     }
@@ -196,7 +188,7 @@ async fn read_file_range(file: &File, offset: u64, len: usize) -> io::Result<Byt
 /// owned buffer.
 async fn next_trailer_chunk(
     trailer: &mut dolang_rpc::trailer::TrailerRecv,
-) -> io::Result<Option<BytesMut>> {
+) -> Result<Option<BytesMut>> {
     let mut buf = BytesMut::with_capacity(STREAM_CHUNK_SIZE);
     // Spare capacity is never zero while this loop runs, so `read_buf` fills
     // the buffer rather than growing it.
@@ -301,15 +293,11 @@ pub struct Server {
 
 impl Server {
     /// Creates an opaque-only VFS server over a bidirectional byte stream.
-    pub async fn new<T>(stream: T) -> crate::error::Result<Self>
+    pub async fn new<T>(stream: T) -> Result<Self>
     where
         T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let rpc = rpc_builder(None)
-            .server(stream)
-            .await
-            .map_err(client::rpc_error)?
-            .bind();
+        let rpc = rpc_builder(None).server(stream).await?.bind();
         Ok(Self {
             #[cfg(unix)]
             listener: None,
@@ -322,16 +310,12 @@ impl Server {
     }
 
     /// Creates an opaque-only VFS server on separate reader and writer streams.
-    pub async fn new_split<R, W>(reader: R, writer: W) -> crate::error::Result<Self>
+    pub async fn new_split<R, W>(reader: R, writer: W) -> Result<Self>
     where
         R: AsyncRead + Send + 'static,
         W: AsyncWrite + Send + 'static,
     {
-        let rpc = rpc_builder(None)
-            .server_split(reader, writer)
-            .await
-            .map_err(client::rpc_error)?
-            .bind();
+        let rpc = rpc_builder(None).server_split(reader, writer).await?.bind();
         Ok(Self {
             #[cfg(unix)]
             listener: None,
@@ -343,7 +327,7 @@ impl Server {
         })
     }
 
-    fn state() -> crate::error::Result<Arc<ServerState>> {
+    fn state() -> Result<Arc<ServerState>> {
         #[cfg(unix)]
         let (shutdown_tx, _) = watch::channel(());
         Ok(Arc::new(ServerState {
@@ -355,8 +339,8 @@ impl Server {
 
     /// Binds a Unix-domain listener for VFS agent connections.
     #[cfg(unix)]
-    pub async fn bind(path: impl AsRef<Path>) -> VfsResult<Self> {
-        Ok(Self::from_listener(UnixListener::bind(path)?, None)?)
+    pub async fn bind(path: impl AsRef<Path>) -> Result<Self> {
+        Self::from_listener(UnixListener::bind(path)?, None)
     }
 
     /// Binds a Unix-domain listener that requires mutual proof of a pre-shared
@@ -367,18 +351,18 @@ impl Server {
     /// connection that fails the check is dropped during negotiation, before
     /// it can issue any request.
     #[cfg(unix)]
-    pub async fn bind_with_key(path: impl AsRef<Path>, key: Option<AuthKey>) -> VfsResult<Self> {
-        Ok(Self::from_listener(UnixListener::bind(path)?, key)?)
+    pub async fn bind_with_key(path: impl AsRef<Path>, key: Option<AuthKey>) -> Result<Self> {
+        Self::from_listener(UnixListener::bind(path)?, key)
     }
 
     /// Create a server from an existing `UnixListener`.
     #[cfg(unix)]
-    fn from_listener(listener: UnixListener, key: Option<AuthKey>) -> Result<Self, io::Error> {
+    fn from_listener(listener: UnixListener, key: Option<AuthKey>) -> Result<Self> {
         Ok(Self {
             listener: Some(listener),
             rpc: None,
             mode: SessionMode::Native,
-            shared: Self::state().map_err(crate::error::Error::into_io_error)?,
+            shared: Self::state()?,
             key,
         })
     }
@@ -387,13 +371,12 @@ impl Server {
     #[cfg(any(windows, docsrs))]
     #[cfg_attr(docsrs, doc(cfg(windows)))]
     #[cfg_attr(all(docsrs, not(windows)), allow(private_interfaces))]
-    pub async fn from_named_pipe_client(pipe: NamedPipeClient) -> VfsResult<Self> {
+    pub async fn from_named_pipe_client(pipe: NamedPipeClient) -> Result<Self> {
         #[cfg(windows)]
         {
             let rpc = rpc_builder(None)
                 .server_named_pipe_client(pipe)
-                .await
-                .map_err(client::rpc_error)?
+                .await?
                 .bind();
             Ok(Self {
                 #[cfg(unix)]
@@ -414,8 +397,8 @@ impl Server {
     fn handle_accept(
         &self,
         res: io::Result<(UnixStream, SocketAddr)>,
-        handlers: &mut JoinSet<Result<(), dolang_rpc::Error>>,
-    ) -> Result<(), io::Error> {
+        handlers: &mut JoinSet<Result<()>>,
+    ) -> Result<()> {
         let (stream, _) = res?;
         let stream = stream.into_std()?;
         let connection = Arc::new(Connection {
@@ -443,7 +426,7 @@ impl Server {
     /// disconnects are ignored; unexpected handler failures are reported to
     /// standard error.
     #[cfg(unix)]
-    pub async fn accept(mut self) -> VfsResult<()> {
+    pub async fn accept(mut self) -> Result<()> {
         let mut shutdown_rx = self.shared.shutdown_tx.subscribe();
         let mut handlers = JoinSet::new();
 
@@ -484,7 +467,7 @@ impl Server {
     /// limit on in-flight attempts, so a peer that connects and then says
     /// nothing cannot stall or crowd out the real one either.
     #[cfg(unix)]
-    pub async fn accept_one<F>(mut self, established: F) -> VfsResult<()>
+    pub async fn accept_one<F>(mut self, established: F) -> Result<()>
     where
         F: FnOnce(),
     {
@@ -528,7 +511,7 @@ impl Server {
         match serve_connection(rpc, connection).await {
             Ok(()) => Ok(()),
             Err(error) if orderly_disconnect(&error) => Ok(()),
-            Err(error) => Err(Error::new(ErrorKind::Other, error.to_string())),
+            Err(error) => Err(error),
         }
     }
 
@@ -542,9 +525,9 @@ impl Server {
     fn handle_accept_one(
         &self,
         res: io::Result<(UnixStream, SocketAddr)>,
-        handlers: &mut JoinSet<Result<(), dolang_rpc::Error>>,
+        handlers: &mut JoinSet<Result<()>>,
         session_tx: &mpsc::Sender<Negotiated>,
-    ) -> Result<(), io::Error> {
+    ) -> Result<()> {
         let (stream, _) = res?;
         let stream = stream.into_std()?;
         let connection = Arc::new(Connection {
@@ -573,7 +556,7 @@ impl Server {
     }
 
     /// Serves one connected VFS session until it closes or fails.
-    pub async fn serve(mut self) -> VfsResult<()> {
+    pub async fn serve(mut self) -> Result<()> {
         let connection = Arc::new(Connection {
             server: self.shared,
             mode: self.mode,
@@ -586,13 +569,13 @@ impl Server {
         match serve_connection(rpc, connection).await {
             Ok(()) => Ok(()),
             Err(error) if orderly_disconnect(&error) => Ok(()),
-            Err(error) => Err(Error::new(ErrorKind::Other, error.to_string())),
+            Err(error) => Err(error),
         }
     }
 }
 
 #[cfg(unix)]
-fn report_handler_exit(result: Result<Result<(), dolang_rpc::Error>, JoinError>) {
+fn report_handler_exit(result: std::result::Result<Result<()>, JoinError>) {
     match result {
         Ok(Ok(())) => {}
         Ok(Err(error)) if orderly_disconnect(&error) => {}
@@ -602,28 +585,25 @@ fn report_handler_exit(result: Result<Result<(), dolang_rpc::Error>, JoinError>)
     }
 }
 
-fn orderly_disconnect(error: &dolang_rpc::Error) -> bool {
-    match error {
-        dolang_rpc::Error::ConnectionClosed => true,
-        dolang_rpc::Error::Io(error) => matches!(
-            error.kind(),
-            io::ErrorKind::UnexpectedEof
-                | io::ErrorKind::BrokenPipe
-                | io::ErrorKind::ConnectionReset
-        ),
-        _ => false,
-    }
+fn orderly_disconnect(error: &Error) -> bool {
+    matches!(
+        error.kind(),
+        ErrorKind::UnexpectedEof
+            | ErrorKind::BrokenPipe
+            | ErrorKind::ConnectionReset
+            | ErrorKind::NotConnected
+    )
 }
 
 async fn serve_connection(
     rpc: dolang_rpc::server::Server<VfsProtocol>,
     connection: Arc<Connection>,
-) -> Result<(), dolang_rpc::Error> {
+) -> Result<()> {
     rpc.serve(async move |mut context, Request { vfs, kind }| {
         let response = if matches!(kind, RequestKind::Stop) {
             connection.handle_stop(&mut context, vfs).await
         } else if let Err(error) = connection.select(&context, vfs.clone()) {
-            ResponseKind::Error(error)
+            Err(error)
         } else {
             let connection = connection.select(&context, vfs).unwrap();
             match kind {
@@ -653,7 +633,8 @@ async fn serve_connection(
         };
         context.respond(response);
     })
-    .await
+    .await?;
+    Ok(())
 }
 
 impl Connection {
@@ -661,7 +642,7 @@ impl Connection {
         &self,
         context: &CallContext<VfsProtocol>,
         vfs: Option<Cite<VfsMarker>>,
-    ) -> Result<Self, WireError> {
+    ) -> Result<Self> {
         let Some(vfs) = vfs else {
             return Ok(self.clone());
         };
@@ -683,7 +664,7 @@ impl Connection {
         &self,
         context: &mut CallContext<VfsProtocol>,
         vfs: Option<Cite<VfsMarker>>,
-    ) -> ResponseKind {
+    ) -> Result<ResponseKind> {
         let Some(vfs) = vfs else {
             // Stop accepting immediately. Existing sessions have their own
             // connection tasks and continue draining independently.
@@ -696,75 +677,62 @@ impl Connection {
             self.drain.begin_stop();
             self.drain.wait().await;
             context.shutdown();
-            return ResponseKind::Stop;
+            return Ok(ResponseKind::Stop);
         };
         let retained = match context.unregister::<RetainedVfs>(vfs) {
             Ok(Some(retained)) => retained,
             Ok(None) => {
-                return ResponseKind::Error(wire_error(io::Error::new(
-                    io::ErrorKind::ResourceBusy,
-                    "opaque VFS is in use",
-                )));
+                return Err(Error::new(ErrorKind::ResourceBusy, "opaque VFS is in use"));
             }
-            Err(_) => return ResponseKind::Error(Self::invalid_opaque("VFS")),
+            Err(_) => return Err(Self::invalid_opaque("VFS")),
         };
         match retained.vfs.stop().await {
-            Ok(()) => ResponseKind::Stop,
-            Err(error) => ResponseKind::Error(wire_error(error)),
+            Ok(()) => Ok(ResponseKind::Stop),
+            Err(error) => Err(error),
         }
     }
 
-    fn unsupported(operation: &str) -> WireError {
-        crate::error::Error::new(
-            crate::error::ErrorKind::Unsupported,
+    fn unsupported(operation: &str) -> Error {
+        Error::new(
+            ErrorKind::Unsupported,
             format!("{operation} is not supported by a remote VFS session"),
         )
-        .into()
     }
 
-    fn invalid_opaque(kind: &str) -> WireError {
-        crate::error::Error::new(
-            crate::error::ErrorKind::InvalidInput,
-            format!("invalid opaque {kind}"),
-        )
-        .into()
-    }
-
-    fn wire_result<T, E>(result: result::Result<T, E>) -> result::Result<T, WireError>
-    where
-        E: Into<crate::error::Error>,
-    {
-        result.map_err(wire_error)
+    fn invalid_opaque(kind: &str) -> Error {
+        Error::new(ErrorKind::InvalidInput, format!("invalid opaque {kind}"))
     }
 
     async fn handle(
         &self,
         context: &mut CallContext<VfsProtocol>,
         kind: RequestKind,
-    ) -> ResponseKind {
+    ) -> Result<ResponseKind> {
         match kind {
             RequestKind::Query => self.handle_query().await,
-            RequestKind::UserName { uid } => {
-                ResponseKind::UserName(Self::wire_result(self.server.vfs.user_name(uid).await))
-            }
-            RequestKind::UserId { name } => {
-                ResponseKind::UserId(Self::wire_result(self.server.vfs.user_id(&name).await))
-            }
-            RequestKind::GroupName { gid } => {
-                ResponseKind::GroupName(Self::wire_result(self.server.vfs.group_name(gid).await))
-            }
-            RequestKind::GroupId { name } => {
-                ResponseKind::GroupId(Self::wire_result(self.server.vfs.group_id(&name).await))
-            }
-            RequestKind::SidName { sid } => {
-                ResponseKind::SidName(Self::wire_result(self.server.vfs.sid_name(&sid).await))
-            }
-            RequestKind::AccountName { name } => ResponseKind::AccountName(Self::wire_result(
-                self.server.vfs.account_name(&name).await,
+            RequestKind::UserName { uid } => Ok(ResponseKind::UserName(
+                self.server.vfs.user_name(uid).await?,
             )),
-            RequestKind::ResolvePrincipalId { input, want } => ResponseKind::ResolvePrincipalId(
-                Self::wire_result(self.server.vfs.resolve_principal_id(input, want).await),
-            ),
+            RequestKind::UserId { name } => {
+                Ok(ResponseKind::UserId(self.server.vfs.user_id(&name).await?))
+            }
+            RequestKind::GroupName { gid } => Ok(ResponseKind::GroupName(
+                self.server.vfs.group_name(gid).await?,
+            )),
+            RequestKind::GroupId { name } => Ok(ResponseKind::GroupId(
+                self.server.vfs.group_id(&name).await?,
+            )),
+            RequestKind::SidName { sid } => {
+                Ok(ResponseKind::SidName(self.server.vfs.sid_name(&sid).await?))
+            }
+            RequestKind::AccountName { name } => Ok(ResponseKind::AccountName(
+                self.server.vfs.account_name(&name).await?,
+            )),
+            RequestKind::ResolvePrincipalId { input, want } => {
+                Ok(ResponseKind::ResolvePrincipalId(
+                    self.server.vfs.resolve_principal_id(input, want).await?,
+                ))
+            }
             RequestKind::Which { program, path, cwd } => {
                 self.handle_which(program, path, cwd).await
             }
@@ -775,110 +743,121 @@ impl Connection {
             | RequestKind::ChildTerminate { .. }
             | RequestKind::ChildClose { .. } => unreachable!(),
             RequestKind::ClearCache => {
-                ResponseKind::ClearCache(Self::wire_result(self.server.vfs.clear_cache().await))
+                self.server.vfs.clear_cache().await?;
+                Ok(ResponseKind::ClearCache)
             }
-            RequestKind::Pipe { buf_size } => {
-                ResponseKind::Pipe(self.handle_pipe(context, buf_size).await)
-            }
+            RequestKind::Pipe { buf_size } => Ok(ResponseKind::Pipe(
+                self.handle_pipe(context, buf_size).await?,
+            )),
             RequestKind::Open(request) => self.handle_open(context, request).await,
             RequestKind::FileRead { .. } => unreachable!(),
-            RequestKind::FileWrite { file, offset } => {
-                ResponseKind::FileWrite(self.handle_file_write(context, file, offset).await)
-            }
-            RequestKind::FileAppend { file } => {
-                ResponseKind::FileAppend(self.handle_file_append(context, file).await)
-            }
-            RequestKind::FileSize { file } => {
-                ResponseKind::FileSize(self.handle_file_size(context, file).await)
-            }
-            RequestKind::FileFlush { file } => {
-                ResponseKind::FileFlush(self.handle_file_flush(context, file).await)
-            }
+            RequestKind::FileWrite { file, offset } => Ok(ResponseKind::FileWrite(
+                self.handle_file_write(context, file, offset).await?,
+            )),
+            RequestKind::FileAppend { file } => Ok(ResponseKind::FileAppend(
+                self.handle_file_append(context, file).await?,
+            )),
+            RequestKind::FileSize { file } => Ok(ResponseKind::FileSize(
+                self.handle_file_size(context, file).await?,
+            )),
             RequestKind::FileSetSize { file, size } => {
-                ResponseKind::FileSetSize(self.handle_file_set_size(context, file, size).await)
+                self.handle_file_set_size(context, file, size).await?;
+                Ok(ResponseKind::FileSetSize)
             }
             RequestKind::FileLock { file, request } => {
                 self.handle_file_lock(context, file, request).await
             }
             RequestKind::FileUnlock { lock } => self.handle_file_unlock(context, lock).await,
-            RequestKind::FileToStdioSend { file, offset } => ResponseKind::FileToStdioSend(
-                self.handle_file_to_stdio_send(context, file, offset).await,
-            ),
-            RequestKind::FileToStdioRecv { file, offset } => ResponseKind::FileToStdioRecv(
-                self.handle_file_to_stdio_recv(context, file, offset).await,
-            ),
+            RequestKind::FileToStdioSend { file, offset } => Ok(ResponseKind::FileToStdioSend(
+                self.handle_file_to_stdio_send(context, file, offset)
+                    .await?,
+            )),
+            RequestKind::FileToStdioRecv { file, offset } => Ok(ResponseKind::FileToStdioRecv(
+                self.handle_file_to_stdio_recv(context, file, offset)
+                    .await?,
+            )),
             RequestKind::StdioSendClose { stdio } => {
-                ResponseKind::StdioSendClose(self.close_stdio_send(context, stdio))
+                self.close_stdio_send(context, stdio)?;
+                Ok(ResponseKind::StdioSendClose)
             }
-            RequestKind::StdioSendWrite { stdio } => {
-                ResponseKind::StdioSendWrite(self.handle_stdio_send_write(context, stdio).await)
-            }
-            RequestKind::StdioSendClone { stdio } => {
-                ResponseKind::StdioSendClone(self.handle_stdio_send_clone(context, stdio).await)
-            }
+            RequestKind::StdioSendWrite { stdio } => Ok(ResponseKind::StdioSendWrite(
+                self.handle_stdio_send_write(context, stdio).await?,
+            )),
+            RequestKind::StdioSendClone { stdio } => Ok(ResponseKind::StdioSendClone(
+                self.handle_stdio_send_clone(context, stdio).await?,
+            )),
             RequestKind::StdioRecvClose { stdio } => {
-                ResponseKind::StdioRecvClose(self.close_stdio_recv(context, stdio))
+                self.close_stdio_recv(context, stdio)?;
+                Ok(ResponseKind::StdioRecvClose)
             }
             RequestKind::StdioRecvRead { .. } => unreachable!(),
-            RequestKind::StdioRecvClone { stdio } => {
-                ResponseKind::StdioRecvClone(self.handle_stdio_recv_clone(context, stdio).await)
-            }
-            RequestKind::FileMetadata { file } => {
-                ResponseKind::FileMetadata(self.handle_file_metadata(context, file).await)
-            }
-            RequestKind::FileFsMetadata { file } => {
-                ResponseKind::FileFsMetadata(self.handle_file_fs_metadata(context, file).await)
-            }
+            RequestKind::StdioRecvClone { stdio } => Ok(ResponseKind::StdioRecvClone(
+                self.handle_stdio_recv_clone(context, stdio).await?,
+            )),
+            RequestKind::FileMetadata { file } => Ok(ResponseKind::FileMetadata(
+                self.handle_file_metadata(context, file).await?,
+            )),
+            RequestKind::FileFsMetadata { file } => Ok(ResponseKind::FileFsMetadata(
+                self.handle_file_fs_metadata(context, file).await?,
+            )),
             RequestKind::FileAcl {
                 file,
                 kind,
                 default,
-            } => ResponseKind::FileAcl(self.handle_file_acl(context, file, kind, default).await),
+            } => Ok(ResponseKind::FileAcl(
+                self.handle_file_acl(context, file, kind, default).await?,
+            )),
             RequestKind::FileSetAcl {
                 file,
                 kind,
                 acl,
                 default,
-            } => ResponseKind::FileSetAcl(
+            } => {
                 self.handle_file_set_acl(context, file, kind, acl, default)
-                    .await,
-            ),
-            RequestKind::FileSecDesc { file, mask } => {
-                ResponseKind::FileSecDesc(self.handle_file_sec_desc(context, file, mask).await)
+                    .await?;
+                Ok(ResponseKind::FileSetAcl)
             }
-            RequestKind::FileSetSecDesc { file, sec_desc } => ResponseKind::FileSetSecDesc(
-                self.handle_file_set_sec_desc(context, file, sec_desc).await,
-            ),
-            RequestKind::FileXattrs { file, namespace } => {
-                ResponseKind::FileXattrs(self.handle_file_xattrs(context, file, namespace).await)
+            RequestKind::FileSecDesc { file, mask } => Ok(ResponseKind::FileSecDesc(
+                self.handle_file_sec_desc(context, file, mask).await?,
+            )),
+            RequestKind::FileSetSecDesc { file, sec_desc } => {
+                self.handle_file_set_sec_desc(context, file, sec_desc)
+                    .await?;
+                Ok(ResponseKind::FileSetSecDesc)
             }
+            RequestKind::FileXattrs { file, namespace } => Ok(ResponseKind::FileXattrs(
+                self.handle_file_xattrs(context, file, namespace).await?,
+            )),
             RequestKind::FileXattr {
                 file,
                 name,
                 namespace,
-            } => ResponseKind::FileXattr(
-                self.handle_file_xattr(context, file, name, namespace).await,
-            ),
-            RequestKind::FileStreams { file } => {
-                ResponseKind::FileStreams(self.handle_file_streams(context, file).await)
-            }
+            } => Ok(ResponseKind::FileXattr(
+                self.handle_file_xattr(context, file, name, namespace)
+                    .await?,
+            )),
+            RequestKind::FileStreams { file } => Ok(ResponseKind::FileStreams(
+                self.handle_file_streams(context, file).await?,
+            )),
             RequestKind::FileSetXattr {
                 file,
                 name,
                 namespace,
                 value,
-            } => ResponseKind::FileSetXattr(
+            } => {
                 self.handle_file_set_xattr(context, file, name, namespace, value)
-                    .await,
-            ),
+                    .await?;
+                Ok(ResponseKind::FileSetXattr)
+            }
             RequestKind::FileRemoveXattr {
                 file,
                 name,
                 namespace,
-            } => ResponseKind::FileRemoveXattr(
+            } => {
                 self.handle_file_remove_xattr(context, file, name, namespace)
-                    .await,
-            ),
+                    .await?;
+                Ok(ResponseKind::FileRemoveXattr)
+            }
             RequestKind::FileClose { file } => self.handle_file_close(context, file).await,
             RequestKind::UnixVfs(request) => self.handle_unix_vfs(context, request).await,
             RequestKind::WindowsAdmin(request) => self.handle_windows_admin(context, request).await,
@@ -920,7 +899,7 @@ impl Connection {
         &self,
         context: &mut CallContext<VfsProtocol>,
         request: ExtensionRequest,
-    ) -> ResponseKind {
+    ) -> Result<ResponseKind> {
         let ExtensionRequest {
             name,
             version,
@@ -928,13 +907,13 @@ impl Connection {
         } = request;
         let Some(ext) = extension::lookup(&name, version).filter(|extension| extension.available())
         else {
-            return ResponseKind::Extension(Err(Self::unsupported(&format!(
+            return Err(Self::unsupported(&format!(
                 "VFS extension {name} v{version}"
-            ))));
+            )));
         };
         let mut ctx = ExtContext::remote(context, self.mode == SessionMode::Native);
         let payload = ext.dispatch(&mut ctx, payload).await;
-        ResponseKind::Extension(Ok(ExtensionResponse {
+        Ok(ResponseKind::Extension(ExtensionResponse {
             name,
             version,
             payload,
@@ -946,7 +925,7 @@ impl Connection {
         program: WirePath,
         path: Option<String>,
         cwd: Option<WirePath>,
-    ) -> ResponseKind {
+    ) -> Result<ResponseKind> {
         let resolved = self
             .server
             .vfs
@@ -955,29 +934,26 @@ impl Connection {
                 path.as_deref(),
                 cwd.as_ref().map(Into::into),
             )
-            .await;
-
-        ResponseKind::Which(
-            resolved
-                .map(|path| path.map(Into::into))
-                .map_err(wire_error),
-        )
+            .await?
+            .map(Into::into);
+        Ok(ResponseKind::Which(resolved))
     }
 
-    async fn handle_well_known_path(&self, req: WellKnownPathRequest) -> ResponseKind {
-        let result = self
+    async fn handle_well_known_path(&self, req: WellKnownPathRequest) -> Result<ResponseKind> {
+        let path = self
             .server
             .vfs
             .well_known_path(req.key, req.app.as_deref(), &req.env)
-            .await;
-        ResponseKind::WellKnownPath(result.map(Into::into).map_err(wire_error))
+            .await?
+            .into();
+        Ok(ResponseKind::WellKnownPath(path))
     }
 
     async fn handle_spawn_rpc(
         &self,
         context: &mut CallContext<VfsProtocol>,
         req: SpawnRequest,
-    ) -> ResponseKind {
+    ) -> Result<ResponseKind> {
         let mut cmd = self.server.vfs.command(Into::into(&req.program));
         for arg in &req.args {
             cmd.arg(arg);
@@ -1000,27 +976,20 @@ impl Connection {
         cmd.process_control(req.process_control);
         cmd.termination_policy(req.termination_policy);
 
-        if let Err(error) = self
-            .configure_spawn_stdio(context, &mut cmd, req.stdin, req.stdout, req.stderr)
-            .await
-        {
-            return ResponseKind::Spawn(Err(error));
-        }
+        self.configure_spawn_stdio(context, &mut cmd, req.stdin, req.stdout, req.stderr)
+            .await?;
 
-        let child = match cmd.spawn().await {
-            Ok(child) => child,
-            Err(e) => {
-                return ResponseKind::Spawn(Err(wire_error(e)));
-            }
-        };
-        ResponseKind::Spawn(Ok(context.register(RetainedChild(Mutex::new(child)))))
+        let child = cmd.spawn().await?;
+        Ok(ResponseKind::Spawn(
+            context.register(RetainedChild(Mutex::new(child))),
+        ))
     }
 
     fn spawn_stdio_recv(
         &self,
         context: &CallContext<VfsProtocol>,
         target: StdioRecvTarget,
-    ) -> Result<Option<StdioRecv>, WireError> {
+    ) -> Result<Option<StdioRecv>> {
         match target {
             StdioRecvTarget::Null => Ok(None),
             StdioRecvTarget::Native(handle) => {
@@ -1040,10 +1009,10 @@ impl Connection {
                     .unregister::<RetainedStdioRecv>(stdio)
                     .map_err(|_| Self::invalid_opaque("stdio receive"))?;
                 let Some(stdio) = stdio else {
-                    return Err(wire_error(io::Error::new(
-                        io::ErrorKind::ResourceBusy,
+                    return Err(Error::new(
+                        ErrorKind::ResourceBusy,
                         "opaque stdio receive is in use",
-                    )));
+                    ));
                 };
                 Ok(Some(stdio.stdio.into_inner()))
             }
@@ -1054,7 +1023,7 @@ impl Connection {
         &self,
         context: &CallContext<VfsProtocol>,
         target: StdioSendTarget,
-    ) -> Result<Option<StdioSend>, WireError> {
+    ) -> Result<Option<StdioSend>> {
         match target {
             StdioSendTarget::Null | StdioSendTarget::Stdout => Ok(None),
             StdioSendTarget::Native(handle) => {
@@ -1074,10 +1043,10 @@ impl Connection {
                     .unregister::<RetainedStdioSend>(stdio)
                     .map_err(|_| Self::invalid_opaque("stdio send"))?;
                 let Some(stdio) = stdio else {
-                    return Err(wire_error(io::Error::new(
-                        io::ErrorKind::ResourceBusy,
+                    return Err(Error::new(
+                        ErrorKind::ResourceBusy,
                         "opaque stdio send is in use",
-                    )));
+                    ));
                 };
                 Ok(Some(stdio.stdio.into_inner()))
             }
@@ -1091,7 +1060,7 @@ impl Connection {
         stdin: StdioRecvTarget,
         stdout: StdioSendTarget,
         stderr: StdioSendTarget,
-    ) -> Result<(), WireError> {
+    ) -> Result<()> {
         let stdin = self.spawn_stdio_recv(context, stdin);
         let stdout = self.spawn_stdio_send(context, stdout);
         let stderr_to_stdout = matches!(stderr, StdioSendTarget::Stdout);
@@ -1099,19 +1068,19 @@ impl Connection {
         let (stdin, stdout, stderr) = (stdin?, stdout?, stderr?);
 
         if let Some(stdio) = stdin {
-            command.stdin(stdio).map_err(wire_error)?;
+            command.stdin(stdio)?;
         } else {
             command.stdin_null();
         }
         if let Some(stdio) = stdout {
-            command.stdout(stdio).map_err(wire_error)?;
+            command.stdout(stdio)?;
         } else {
             command.stdout_null();
         }
         if stderr_to_stdout {
-            command.stderr_to_stdout().map_err(wire_error)?;
+            command.stderr_to_stdout()?;
         } else if let Some(stdio) = stderr {
-            command.stderr(stdio).map_err(wire_error)?;
+            command.stderr(stdio)?;
         } else {
             command.stderr_null();
         }
@@ -1122,78 +1091,54 @@ impl Connection {
         &self,
         context: &CallContext<VfsProtocol>,
         child: Cite<ChildMarker>,
-    ) -> Result<RetainedChild, WireError> {
+    ) -> Result<RetainedChild> {
         context
             .unregister::<RetainedChild>(child)
-            .map_err(|_| {
-                wire_error(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "invalid opaque child",
-                ))
-            })?
-            .ok_or_else(|| {
-                wire_error(io::Error::new(
-                    io::ErrorKind::ResourceBusy,
-                    "opaque child is in use",
-                ))
-            })
+            .map_err(|_| Error::new(ErrorKind::InvalidInput, "invalid opaque child"))?
+            .ok_or_else(|| Error::new(ErrorKind::ResourceBusy, "opaque child is in use"))
     }
 
     async fn handle_child_wait(
         &self,
         context: &mut CallContext<VfsProtocol>,
         child: Cite<ChildMarker>,
-    ) -> ResponseKind {
-        let result = match self.take_child(context, child) {
-            Ok(child) => {
-                let mut child = child.0.into_inner();
-                match context.cancel_guard(async |_| child.wait().await).await {
-                    Ok(result) => result,
-                    Err(_) => child.terminate().await.and_then(|status| {
-                        status.ok_or_else(|| {
-                            io::Error::other("process was orphaned during cancelled wait").into()
-                        })
-                    }),
-                }
-                .map_err(wire_error)
-            }
-            Err(error) => Err(error),
+    ) -> Result<ResponseKind> {
+        let child = self.take_child(context, child)?;
+        let mut child = child.0.into_inner();
+        let status = match context.cancel_guard(async |_| child.wait().await).await {
+            Ok(result) => result?,
+            Err(_) => child
+                .terminate()
+                .await?
+                .ok_or_else(|| Error::other("process was orphaned during cancelled wait"))?,
         };
-        ResponseKind::ChildWait(result)
+        Ok(ResponseKind::ChildWait(status))
     }
 
     async fn handle_child_terminate(
         &self,
         context: &CallContext<VfsProtocol>,
         child: Cite<ChildMarker>,
-    ) -> ResponseKind {
-        let result = match self.take_child(context, child) {
-            Ok(child) => child.0.into_inner().terminate().await.map_err(wire_error),
-            Err(error) => Err(error),
-        };
-        ResponseKind::ChildTerminate(result)
+    ) -> Result<ResponseKind> {
+        let child = self.take_child(context, child)?;
+        let status = child.0.into_inner().terminate().await?;
+        Ok(ResponseKind::ChildTerminate(status))
     }
 
     fn handle_child_close(
         &self,
         context: &CallContext<VfsProtocol>,
         child: Cite<ChildMarker>,
-    ) -> ResponseKind {
-        let result = context
+    ) -> Result<ResponseKind> {
+        context
             .unregister::<RetainedChild>(child)
-            .map(|_| ())
-            .map_err(|_| {
-                wire_error(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "invalid opaque child",
-                ))
-            });
-        ResponseKind::ChildClose(result)
+            .map_err(|_| Error::new(ErrorKind::InvalidInput, "invalid opaque child"))?;
+        Ok(ResponseKind::ChildClose)
     }
 
-    async fn handle_query(&self) -> ResponseKind {
+    async fn handle_query(&self) -> Result<ResponseKind> {
         let vfs = &self.server.vfs;
-        ResponseKind::Query(Ok(QueryResponse {
+        Ok(ResponseKind::Query(QueryResponse {
             env: vfs.env().collect(),
             cwd: vfs.cwd().into(),
             current_exe: vfs.current_exe().into(),
@@ -1209,14 +1154,14 @@ impl Connection {
     /// available while stopping: they create no stdio endpoint of their own,
     /// and refusing a spawn could break the very in-flight pipeline stage the
     /// drain exists to protect.
-    fn reserve_stdio(&self) -> Result<DrainSlot, WireError> {
+    fn reserve_stdio(&self) -> Result<DrainSlot> {
         if self.drain.try_acquire(1) {
             Ok(DrainSlot(self.drain.clone()))
         } else {
-            Err(wire_error(io::Error::new(
-                io::ErrorKind::NotConnected,
+            Err(Error::new(
+                ErrorKind::NotConnected,
                 "VFS session is stopping",
-            )))
+            ))
         }
     }
 
@@ -1224,8 +1169,8 @@ impl Connection {
         &self,
         context: &CallContext<VfsProtocol>,
         buf_size: Option<usize>,
-    ) -> Result<PipeResponse, WireError> {
-        let (send, recv) = self.server.vfs.pipe(buf_size).await.map_err(wire_error)?;
+    ) -> Result<PipeResponse> {
+        let (send, recv) = self.server.vfs.pipe(buf_size).await?;
         let send_slot = self.reserve_stdio()?;
         let recv_slot = self.reserve_stdio()?;
         Ok(PipeResponse {
@@ -1244,7 +1189,7 @@ impl Connection {
         &self,
         context: &CallContext<VfsProtocol>,
         stdio: Cite<StdioSendMarker>,
-    ) -> Result<OpaqueGuard<RetainedStdioSend>, WireError> {
+    ) -> Result<OpaqueGuard<RetainedStdioSend>> {
         context
             .acquire::<RetainedStdioSend>(stdio)
             .map_err(|_| Self::invalid_opaque("stdio send"))
@@ -1254,7 +1199,7 @@ impl Connection {
         &self,
         context: &CallContext<VfsProtocol>,
         stdio: Cite<StdioRecvMarker>,
-    ) -> Result<OpaqueGuard<RetainedStdioRecv>, WireError> {
+    ) -> Result<OpaqueGuard<RetainedStdioRecv>> {
         context
             .acquire::<RetainedStdioRecv>(stdio)
             .map_err(|_| Self::invalid_opaque("stdio receive"))
@@ -1273,7 +1218,7 @@ impl Connection {
         &self,
         context: &CallContext<VfsProtocol>,
         stdio: Cite<StdioSendMarker>,
-    ) -> Result<(), WireError> {
+    ) -> Result<()> {
         context
             .unregister::<RetainedStdioSend>(stdio)
             .map_err(|_| Self::invalid_opaque("stdio send"))?;
@@ -1284,7 +1229,7 @@ impl Connection {
         &self,
         context: &CallContext<VfsProtocol>,
         stdio: Cite<StdioRecvMarker>,
-    ) -> Result<(), WireError> {
+    ) -> Result<()> {
         context
             .unregister::<RetainedStdioRecv>(stdio)
             .map_err(|_| Self::invalid_opaque("stdio receive"))?;
@@ -1295,23 +1240,21 @@ impl Connection {
         &self,
         context: &mut CallContext<VfsProtocol>,
         stdio: Cite<StdioSendMarker>,
-    ) -> Result<usize, WireError> {
+    ) -> Result<usize> {
         let stdio = self.retained_stdio_send(context, stdio)?;
         let trailer = context.trailer().ok_or_else(|| {
-            wire_error(io::Error::new(
-                io::ErrorKind::InvalidInput,
+            Error::new(
+                ErrorKind::InvalidInput,
                 "stdio write request is missing its data trailer",
-            ))
+            )
         })?;
         let mut trailer = io::BufReader::with_capacity(STREAM_CHUNK_SIZE, trailer);
-        let len = io::copy_buf(&mut trailer, &mut *stdio.stdio.lock().await)
-            .await
-            .map_err(wire_error)?;
+        let len = io::copy_buf(&mut trailer, &mut *stdio.stdio.lock().await).await?;
         usize::try_from(len).map_err(|_| {
-            wire_error(io::Error::new(
-                io::ErrorKind::InvalidData,
+            Error::new(
+                ErrorKind::InvalidData,
                 "stdio trailer length does not fit in usize",
-            ))
+            )
         })
     }
 
@@ -1319,15 +1262,9 @@ impl Connection {
         &self,
         context: &CallContext<VfsProtocol>,
         stdio: Cite<StdioSendMarker>,
-    ) -> Result<Gift<StdioSendMarker>, WireError> {
+    ) -> Result<Gift<StdioSendMarker>> {
         let stdio = self.retained_stdio_send(context, stdio)?;
-        let clone = stdio
-            .stdio
-            .lock()
-            .await
-            .try_clone()
-            .await
-            .map_err(wire_error)?;
+        let clone = stdio.stdio.lock().await.try_clone().await?;
         let slot = self.reserve_stdio()?;
         Ok(context.register(RetainedStdioSend {
             stdio: Mutex::new(clone),
@@ -1344,7 +1281,7 @@ impl Connection {
         let stdio = match self.retained_stdio_recv(&context, stdio) {
             Ok(stdio) => stdio,
             Err(error) => {
-                context.respond(ResponseKind::StdioRecvRead(Err(error)));
+                context.respond(Err(error));
                 return;
             }
         };
@@ -1354,7 +1291,7 @@ impl Connection {
         // report itself by abandoning the trailer, which for a byte stream is
         // the right shape anyway — it is a teardown, not an operation that
         // failed with a particular errno the peer could act on.
-        let mut send = context.respond_with_trailer(ResponseKind::StdioRecvRead(Ok(())));
+        let mut send = context.respond_with_trailer(Ok(ResponseKind::StdioRecvRead));
         let copied = {
             let mut guard = stdio.stdio.lock().await;
             let mut source = io::BufReader::with_capacity(
@@ -1376,15 +1313,9 @@ impl Connection {
         &self,
         context: &CallContext<VfsProtocol>,
         stdio: Cite<StdioRecvMarker>,
-    ) -> Result<Gift<StdioRecvMarker>, WireError> {
+    ) -> Result<Gift<StdioRecvMarker>> {
         let stdio = self.retained_stdio_recv(context, stdio)?;
-        let clone = stdio
-            .stdio
-            .lock()
-            .await
-            .try_clone()
-            .await
-            .map_err(wire_error)?;
+        let clone = stdio.stdio.lock().await.try_clone().await?;
         let slot = self.reserve_stdio()?;
         Ok(context.register(RetainedStdioRecv {
             stdio: Mutex::new(clone),
@@ -1396,43 +1327,34 @@ impl Connection {
         &self,
         context: &CallContext<VfsProtocol>,
         req: OpenRequest,
-    ) -> ResponseKind {
+    ) -> Result<ResponseKind> {
         let mut opts = self.server.vfs.open_options();
-        opts.read(req.read)
-            .write(req.write)
-            .append(req.append)
-            .create(req.create)
-            .create_new(req.create_new)
-            .truncate(req.truncate)
-            .no_follow(req.no_follow);
+        opts.read(req.flags.contains(OpenFlags::READ))
+            .write(req.flags.contains(OpenFlags::WRITE))
+            .append(req.flags.contains(OpenFlags::APPEND))
+            .create(req.flags.contains(OpenFlags::CREATE))
+            .create_new(req.flags.contains(OpenFlags::CREATE_NEW))
+            .truncate(req.flags.contains(OpenFlags::TRUNCATE))
+            .no_follow(req.flags.contains(OpenFlags::NO_FOLLOW));
 
-        match opts.open(Into::into(&req.path)).await {
-            Ok(file) => {
-                if self.mode == SessionMode::Remote
-                    || matches!(req.handle_preference, OpenHandlePreference::Opaque)
-                {
-                    let file = context.register(RetainedFile(file));
-                    ResponseKind::Open(Ok(OpenHandle::Opaque(file)))
-                } else {
-                    let handle: DefaultHandle = file.try_into_std().await.unwrap().into();
-                    ResponseKind::Open(Ok(OpenHandle::Native(OsHandle::new(handle))))
-                }
-            }
-            Err(e) => ResponseKind::Open(Err(wire_error(e))),
-        }
+        let file = opts.open(Into::into(&req.path)).await?;
+        let handle = if self.mode == SessionMode::Remote {
+            OpenHandle::Opaque(context.register(RetainedFile(file)))
+        } else {
+            let handle: DefaultHandle = file.try_into_std().await.unwrap().into();
+            OpenHandle::Native(OsHandle::new(handle))
+        };
+        Ok(ResponseKind::Open(handle))
     }
 
     fn retained_file(
         &self,
         context: &CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
-    ) -> Result<OpaqueGuard<RetainedFile>, WireError> {
-        context.acquire::<RetainedFile>(file).map_err(|_| {
-            wire_error(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid opaque file",
-            ))
-        })
+    ) -> Result<OpaqueGuard<RetainedFile>> {
+        context
+            .acquire::<RetainedFile>(file)
+            .map_err(|_| Error::new(ErrorKind::InvalidInput, "invalid opaque file"))
     }
 
     /// Takes a file out of the session's registry, for an operation that
@@ -1448,17 +1370,11 @@ impl Connection {
         &self,
         context: &CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
-    ) -> Result<RetainedFile, WireError> {
+    ) -> Result<RetainedFile> {
         match context.try_unregister::<RetainedFile>(file) {
             Ok(Some(file)) => Ok(file),
-            Ok(None) => Err(wire_error(io::Error::new(
-                io::ErrorKind::ResourceBusy,
-                "opaque file is in use",
-            ))),
-            Err(_) => Err(wire_error(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid opaque file",
-            ))),
+            Ok(None) => Err(Error::new(ErrorKind::ResourceBusy, "opaque file is in use")),
+            Err(_) => Err(Error::new(ErrorKind::InvalidInput, "invalid opaque file")),
         }
     }
 
@@ -1472,7 +1388,7 @@ impl Connection {
         let file = match self.retained_file(&context, file) {
             Ok(file) => file,
             Err(error) => {
-                context.respond(ResponseKind::FileRead(Err(error)));
+                context.respond(Err(error));
                 return;
             }
         };
@@ -1493,11 +1409,11 @@ impl Connection {
         let data = match data {
             Ok(data) => data,
             Err(error) => {
-                context.respond(ResponseKind::FileRead(Err(wire_error(error))));
+                context.respond(Err(error));
                 return;
             }
         };
-        let mut send = context.respond_with_trailer(ResponseKind::FileRead(Ok(())));
+        let mut send = context.respond_with_trailer(Ok(ResponseKind::FileRead));
         if send.write_all(&data).await.is_ok() {
             send.finish();
         }
@@ -1508,23 +1424,22 @@ impl Connection {
         context: &mut CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
         offset: u64,
-    ) -> Result<usize, WireError> {
+    ) -> Result<usize> {
         let file = self.retained_file(context, file)?;
         let mut trailer = Self::write_trailer(context)?;
         let mut written = 0usize;
-        while let Some(chunk) = next_trailer_chunk(&mut trailer).await.map_err(wire_error)? {
+        while let Some(chunk) = next_trailer_chunk(&mut trailer).await? {
             let mut chunk = chunk.freeze();
             while !chunk.is_empty() {
                 let n = file
                     .0
                     .write_at(chunk.clone(), offset + written as u64)
-                    .await
-                    .map_err(wire_error)?;
+                    .await?;
                 if n == 0 {
-                    return Err(wire_error(io::Error::new(
-                        io::ErrorKind::WriteZero,
+                    return Err(Error::new(
+                        ErrorKind::WriteZero,
                         "file write made no progress",
-                    )));
+                    ));
                 }
                 chunk.advance(n);
                 written += n;
@@ -1537,23 +1452,23 @@ impl Connection {
         &self,
         context: &mut CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
-    ) -> Result<(usize, u64), WireError> {
+    ) -> Result<(usize, u64)> {
         let file = self.retained_file(context, file)?;
         let mut trailer = Self::write_trailer(context)?;
         // The offset of an append is the description's business, not ours. The
         // peer cannot know where the data landed either, so report the
         // resulting position along with the count.
         let mut written = 0usize;
-        let mut end = file.0.metadata().await.map_err(wire_error)?.len;
-        while let Some(chunk) = next_trailer_chunk(&mut trailer).await.map_err(wire_error)? {
+        let mut end = file.0.metadata().await?.len;
+        while let Some(chunk) = next_trailer_chunk(&mut trailer).await? {
             let mut chunk = chunk.freeze();
             while !chunk.is_empty() {
-                let (n, position) = file.0.append(chunk.clone()).await.map_err(wire_error)?;
+                let (n, position) = file.0.append(chunk.clone()).await?;
                 if n == 0 {
-                    return Err(wire_error(io::Error::new(
-                        io::ErrorKind::WriteZero,
+                    return Err(Error::new(
+                        ErrorKind::WriteZero,
                         "file append made no progress",
-                    )));
+                    ));
                 }
                 chunk.advance(n);
                 written += n;
@@ -1565,12 +1480,12 @@ impl Connection {
 
     fn write_trailer(
         context: &mut CallContext<VfsProtocol>,
-    ) -> Result<dolang_rpc::trailer::TrailerRecv, WireError> {
+    ) -> Result<dolang_rpc::trailer::TrailerRecv> {
         context.trailer().ok_or_else(|| {
-            wire_error(io::Error::new(
-                io::ErrorKind::InvalidInput,
+            Error::new(
+                ErrorKind::InvalidInput,
                 "file write request is missing its data trailer",
-            ))
+            )
         })
     }
 
@@ -1578,18 +1493,9 @@ impl Connection {
         &self,
         context: &CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
-    ) -> Result<u64, WireError> {
+    ) -> Result<u64> {
         let file = self.retained_file(context, file)?;
-        Ok(file.0.metadata().await.map_err(wire_error)?.len)
-    }
-
-    async fn handle_file_flush(
-        &self,
-        context: &CallContext<VfsProtocol>,
-        file: Cite<FileMarker>,
-    ) -> Result<(), WireError> {
-        let file = self.retained_file(context, file)?;
-        file.0.commit().await.map_err(wire_error)
+        Ok(file.0.metadata().await?.len)
     }
 
     async fn handle_file_set_size(
@@ -1597,9 +1503,9 @@ impl Connection {
         context: &CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
         size: u64,
-    ) -> Result<(), WireError> {
+    ) -> Result<()> {
         let file = self.retained_file(context, file)?;
-        file.0.set_size(size).await.map_err(wire_error)
+        file.0.set_size(size).await
     }
 
     async fn handle_file_to_stdio_send(
@@ -1607,7 +1513,7 @@ impl Connection {
         context: &CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
         offset: u64,
-    ) -> Result<Gift<StdioSendMarker>, WireError> {
+    ) -> Result<Gift<StdioSendMarker>> {
         // Before the file is taken, so that running out of endpoint slots
         // leaves the peer's handle alone.
         let slot = self.reserve_stdio()?;
@@ -1631,7 +1537,7 @@ impl Connection {
         context: &CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
         offset: u64,
-    ) -> Result<Gift<StdioRecvMarker>, WireError> {
+    ) -> Result<Gift<StdioRecvMarker>> {
         let slot = self.reserve_stdio()?;
         let file = self.take_file(context, file)?;
         // The peer's cursor is the one that matters, and the descriptor the
@@ -1652,18 +1558,18 @@ impl Connection {
         &self,
         context: &CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
-    ) -> Result<Metadata, WireError> {
+    ) -> Result<Metadata> {
         let file = self.retained_file(context, file)?;
-        file.0.metadata().await.map_err(wire_error)
+        file.0.metadata().await
     }
 
     async fn handle_file_fs_metadata(
         &self,
         context: &CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
-    ) -> Result<FsMetadata, WireError> {
+    ) -> Result<FsMetadata> {
         let file = self.retained_file(context, file)?;
-        file.0.fs_metadata().await.map_err(wire_error)
+        file.0.fs_metadata().await
     }
 
     async fn handle_file_sec_desc(
@@ -1671,9 +1577,9 @@ impl Connection {
         context: &CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
         mask: dolang_winterop::security::SecInfo,
-    ) -> Result<SecDesc, WireError> {
+    ) -> Result<SecDesc> {
         let file = self.retained_file(context, file)?;
-        file.0.sec_desc(mask).await.map_err(wire_error)
+        file.0.sec_desc(mask).await
     }
 
     async fn handle_file_acl(
@@ -1682,9 +1588,9 @@ impl Connection {
         file: Cite<FileMarker>,
         kind: AclKind,
         default: bool,
-    ) -> Result<Option<Acl>, WireError> {
+    ) -> Result<Option<Acl>> {
         let file = self.retained_file(context, file)?;
-        file.0.acl(kind, default).await.map_err(wire_error)
+        file.0.acl(kind, default).await
     }
 
     async fn handle_file_set_acl(
@@ -1694,12 +1600,9 @@ impl Connection {
         kind: AclKind,
         acl: Option<Acl>,
         default: bool,
-    ) -> Result<(), WireError> {
+    ) -> Result<()> {
         let file = self.retained_file(context, file)?;
-        file.0
-            .set_acl(kind, acl.as_ref(), default)
-            .await
-            .map_err(wire_error)
+        file.0.set_acl(kind, acl.as_ref(), default).await
     }
 
     async fn handle_file_set_sec_desc(
@@ -1707,9 +1610,9 @@ impl Connection {
         context: &CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
         sec_desc: SecDesc,
-    ) -> Result<(), WireError> {
+    ) -> Result<()> {
         let file = self.retained_file(context, file)?;
-        file.0.set_sec_desc(&sec_desc).await.map_err(wire_error)
+        file.0.set_sec_desc(&sec_desc).await
     }
 
     async fn handle_file_xattrs(
@@ -1717,12 +1620,9 @@ impl Connection {
         context: &CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
         namespace: XattrNamespaceRequest,
-    ) -> Result<Vec<XattrEntry>, WireError> {
+    ) -> Result<Vec<XattrEntry>> {
         let file = self.retained_file(context, file)?;
-        file.0
-            .xattrs(namespace.as_borrowed())
-            .await
-            .map_err(wire_error)
+        file.0.xattrs(namespace.as_borrowed()).await
     }
 
     async fn handle_file_xattr(
@@ -1731,21 +1631,18 @@ impl Connection {
         file: Cite<FileMarker>,
         name: String,
         namespace: Option<String>,
-    ) -> Result<Vec<u8>, WireError> {
+    ) -> Result<Vec<u8>> {
         let file = self.retained_file(context, file)?;
-        file.0
-            .xattr(&name, namespace.as_deref())
-            .await
-            .map_err(wire_error)
+        file.0.xattr(&name, namespace.as_deref()).await
     }
 
     async fn handle_file_streams(
         &self,
         context: &CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
-    ) -> Result<Vec<StreamEntry>, WireError> {
+    ) -> Result<Vec<StreamEntry>> {
         let file = self.retained_file(context, file)?;
-        file.0.streams().await.map_err(wire_error)
+        file.0.streams().await
     }
 
     async fn handle_file_set_xattr(
@@ -1755,12 +1652,9 @@ impl Connection {
         name: String,
         namespace: Option<String>,
         value: Vec<u8>,
-    ) -> Result<(), WireError> {
+    ) -> Result<()> {
         let file = self.retained_file(context, file)?;
-        file.0
-            .set_xattr(&name, namespace.as_deref(), &value)
-            .await
-            .map_err(wire_error)
+        file.0.set_xattr(&name, namespace.as_deref(), &value).await
     }
 
     async fn handle_file_remove_xattr(
@@ -1769,12 +1663,9 @@ impl Connection {
         file: Cite<FileMarker>,
         name: String,
         namespace: Option<String>,
-    ) -> Result<(), WireError> {
+    ) -> Result<()> {
         let file = self.retained_file(context, file)?;
-        file.0
-            .remove_xattr(&name, namespace.as_deref())
-            .await
-            .map_err(wire_error)
+        file.0.remove_xattr(&name, namespace.as_deref()).await
     }
 
     async fn handle_file_lock(
@@ -1782,33 +1673,29 @@ impl Connection {
         context: &mut CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
         request: FileLockRequest,
-    ) -> ResponseKind {
-        let retained = match self.retained_file(context, file) {
-            Ok(retained) => retained,
-            Err(error) => return ResponseKind::FileLock(Err(error)),
-        };
+    ) -> Result<ResponseKind> {
+        let retained = self.retained_file(context, file)?;
         let acquired = context
-            .cancel_guard(async |_context| retained.0.lock(request).await)
+            .cancel_guard(async |_context| {
+                retained
+                    .0
+                    .lock(request.range, request.mode, request.behavior)
+                    .await
+            })
             .await;
-        let acquired = match acquired {
-            Ok(result) => match result {
-                Ok(acquired) => acquired,
-                Err(error) => return ResponseKind::FileLock(Err(wire_error(error))),
-            },
-            Err(_) => {
-                return ResponseKind::FileLock(Err(wire_error(io::Error::new(
-                    io::ErrorKind::Interrupted,
-                    "file lock acquisition was cancelled",
-                ))));
-            }
-        };
+        let acquired = acquired.map_err(|_| {
+            Error::new(
+                ErrorKind::Interrupted,
+                "file lock acquisition was cancelled",
+            )
+        })??;
         drop(retained);
         // The lock gets an opaque handle of its own rather than an id in a
         // table hanging off the file. Nothing needs it to be reachable from the
         // file: closing a file releases every lock held on it in band, and a
         // lock dropped without an explicit release still releases itself.
-        ResponseKind::FileLock(Ok(
-            acquired.map(|lock| context.register(RetainedFileLock(lock)))
+        Ok(ResponseKind::FileLock(
+            acquired.map(|lock| context.register(RetainedFileLock(lock))),
         ))
     }
 
@@ -1816,260 +1703,231 @@ impl Connection {
         &self,
         context: &CallContext<VfsProtocol>,
         lock: Cite<FileLockMarker>,
-    ) -> ResponseKind {
+    ) -> Result<ResponseKind> {
         // Releasing consumes the lock, so a handle that is unknown or already
         // released is a no-op rather than an error, as it was when the peer
         // named locks by id.
         let Ok(Some(mut lock)) = context.unregister::<RetainedFileLock>(lock) else {
-            return ResponseKind::FileUnlock(Ok(()));
+            return Ok(ResponseKind::FileUnlock);
         };
-        ResponseKind::FileUnlock(lock.0.release().await.map_err(wire_error))
+        lock.0.release().await?;
+        Ok(ResponseKind::FileUnlock)
     }
 
     async fn handle_file_close(
         &self,
         context: &CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
-    ) -> ResponseKind {
-        let retained = match self.retained_file(context, file.clone()) {
-            Ok(retained) => retained,
-            Err(error) => return ResponseKind::FileClose(Err(error)),
-        };
+    ) -> Result<ResponseKind> {
+        let retained = self.retained_file(context, file.clone())?;
         drop(retained);
-        let result = match context.unregister::<RetainedFile>(file) {
+        match context.unregister::<RetainedFile>(file) {
             // `close` releases every lock still held on the file in band, so
             // there is nothing to unwind here first.
-            Ok(Some(file)) => file.0.close().await.map_err(wire_error),
-            Ok(None) => Err(wire_error(io::Error::new(
-                io::ErrorKind::ResourceBusy,
-                "opaque file is in use",
-            ))),
-            Err(_) => Err(wire_error(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid opaque file",
-            ))),
-        };
-        ResponseKind::FileClose(result)
+            Ok(Some(file)) => file.0.close().await,
+            Ok(None) => Err(Error::new(ErrorKind::ResourceBusy, "opaque file is in use")),
+            Err(_) => Err(Error::new(ErrorKind::InvalidInput, "invalid opaque file")),
+        }?;
+        Ok(ResponseKind::FileClose)
     }
 
     async fn handle_read_dir(
         &self,
         context: &CallContext<VfsProtocol>,
         path: WirePath,
-    ) -> ResponseKind {
-        let result = self
-            .server
-            .vfs
-            .read_dir(Into::into(&path))
-            .await
-            .map(|read_dir| context.register(RetainedReadDir(Mutex::new(read_dir))));
-        ResponseKind::ReadDir(Self::wire_result(result))
+    ) -> Result<ResponseKind> {
+        let read_dir = self.server.vfs.read_dir(Into::into(&path)).await?;
+        Ok(ResponseKind::ReadDir(
+            context.register(RetainedReadDir(Mutex::new(read_dir))),
+        ))
     }
 
     async fn handle_read_dir_next(
         &self,
         context: &CallContext<VfsProtocol>,
         read_dir: Cite<ReadDirMarker>,
-    ) -> ResponseKind {
-        let result: crate::error::Result<ReadDirPage> = async {
-            let retained = context
-                .acquire::<RetainedReadDir>(read_dir.clone())
-                .map_err(|_| {
-                    crate::error::Error::new(ErrorKind::InvalidInput, "invalid opaque directory")
-                })?;
-            let mut read_dir_guard = retained.0.lock().await;
-            let mut entries = Vec::with_capacity(64);
-            let mut done = false;
-            while entries.len() < 64 {
-                match read_dir_guard.next_entry().await? {
-                    Some(entry) => entries.push(entry),
-                    None => {
-                        done = true;
-                        break;
-                    }
+    ) -> Result<ResponseKind> {
+        let retained = context
+            .acquire::<RetainedReadDir>(read_dir.clone())
+            .map_err(|_| Error::new(ErrorKind::InvalidInput, "invalid opaque directory"))?;
+        let mut read_dir_guard = retained.0.lock().await;
+        let mut entries = Vec::with_capacity(64);
+        let mut done = false;
+        while entries.len() < 64 {
+            match read_dir_guard.next_entry().await? {
+                Some(entry) => entries.push(entry),
+                None => {
+                    done = true;
+                    break;
                 }
             }
-            drop(read_dir_guard);
-            drop(retained);
-            if done {
-                let _ = context.unregister::<RetainedReadDir>(read_dir);
-            }
-            Ok(ReadDirPage { entries, done })
         }
-        .await;
-        ResponseKind::ReadDirNext(Self::wire_result(result))
+        drop(read_dir_guard);
+        drop(retained);
+        if done {
+            let _ = context.unregister::<RetainedReadDir>(read_dir);
+        }
+        Ok(ResponseKind::ReadDirNext(ReadDirPage { entries, done }))
     }
 
     fn handle_read_dir_close(
         &self,
         context: &CallContext<VfsProtocol>,
         read_dir: Cite<ReadDirMarker>,
-    ) -> ResponseKind {
-        let result = context
+    ) -> Result<ResponseKind> {
+        context
             .unregister::<RetainedReadDir>(read_dir)
-            .map(|_| ())
-            .map_err(|_| Self::invalid_opaque("directory"));
-        ResponseKind::ReadDirClose(result)
+            .map_err(|_| Self::invalid_opaque("directory"))?;
+        Ok(ResponseKind::ReadDirClose)
     }
 
     async fn handle_unix_vfs(
         &self,
         context: &CallContext<VfsProtocol>,
         req: UnixVfsRequest,
-    ) -> ResponseKind {
+    ) -> Result<ResponseKind> {
         #[cfg(unix)]
         if self.mode == SessionMode::Native && self.server.vfs.is_direct() {
-            let result: crate::error::Result<OwnedFd> = async {
+            let handle: OwnedFd = async {
                 let path = crate::path::native_path(Into::into(&req.path))?;
                 let stream = UnixStream::connect(path).await?;
-                Ok(stream.into_std()?.into())
+                Ok::<OwnedFd, Error>(stream.into_std()?.into())
             }
-            .await;
-            return ResponseKind::UnixVfs(
-                result
-                    .map(|handle| OpenVfsHandle::Native(OsHandle::new(handle)))
-                    .map_err(wire_error),
-            );
+            .await?;
+            return Ok(ResponseKind::UnixVfs(OpenVfsHandle::Native(OsHandle::new(
+                handle,
+            ))));
         }
 
-        ResponseKind::UnixVfs(
-            self.server
-                .vfs
-                .unix_socket(Into::into(&req.path), req.key.as_deref())
-                .await
-                .map(|vfs| OpenVfsHandle::Opaque(context.register(RetainedVfs::plain(vfs))))
-                .map_err(wire_error),
-        )
+        let vfs = self
+            .server
+            .vfs
+            .unix_socket(Into::into(&req.path), req.key.as_deref())
+            .await?;
+        Ok(ResponseKind::UnixVfs(OpenVfsHandle::Opaque(
+            context.register(RetainedVfs::plain(vfs)),
+        )))
     }
 
     async fn handle_windows_admin(
         &self,
         context: &CallContext<VfsProtocol>,
         req: WindowsAdminRequest,
-    ) -> ResponseKind {
-        ResponseKind::WindowsAdmin(
-            self.server
-                .vfs
-                .windows_admin(Into::into(&req.cwd), req.env, req.elevate)
-                .await
-                .map(|vfs| context.register(RetainedVfs::plain(vfs)))
-                .map_err(wire_error),
-        )
-    }
-
-    async fn handle_remove(&self, req: RemoveRequest) -> ResponseKind {
-        ResponseKind::Remove(Self::wire_result(
-            self.server
-                .vfs
-                .remove(Into::into(&req.path), req.all, req.ignore)
-                .await,
+    ) -> Result<ResponseKind> {
+        let vfs = self
+            .server
+            .vfs
+            .windows_admin(Into::into(&req.cwd), req.env, req.elevate)
+            .await?;
+        Ok(ResponseKind::WindowsAdmin(
+            context.register(RetainedVfs::plain(vfs)),
         ))
     }
 
-    async fn handle_metadata(&self, req: MetadataRequest) -> ResponseKind {
-        ResponseKind::Metadata(Self::wire_result(
-            self.server.vfs.metadata(Into::into(&req.path)).await,
-        ))
+    async fn handle_remove(&self, req: RemoveRequest) -> Result<ResponseKind> {
+        self.server
+            .vfs
+            .remove(Into::into(&req.path), req.all, req.ignore)
+            .await?;
+        Ok(ResponseKind::Remove)
     }
 
-    async fn handle_fs_metadata(&self, req: FsMetadataRequest) -> ResponseKind {
-        ResponseKind::FsMetadata(Self::wire_result(
-            self.server
-                .vfs
-                .fs_metadata(Into::into(&req.path), req.follow)
-                .await,
-        ))
+    async fn handle_metadata(&self, req: MetadataRequest) -> Result<ResponseKind> {
+        let metadata = self.server.vfs.metadata(Into::into(&req.path)).await?;
+        Ok(ResponseKind::Metadata(metadata))
     }
 
-    async fn handle_sec_desc(&self, req: SecDescRequest) -> ResponseKind {
-        ResponseKind::SecDesc(Self::wire_result(
-            self.server
-                .vfs
-                .sec_desc(Into::into(&req.path), req.mask, req.follow)
-                .await,
-        ))
+    async fn handle_fs_metadata(&self, req: FsMetadataRequest) -> Result<ResponseKind> {
+        let metadata = self
+            .server
+            .vfs
+            .fs_metadata(Into::into(&req.path), req.follow)
+            .await?;
+        Ok(ResponseKind::FsMetadata(metadata))
     }
 
-    async fn handle_acl(&self, req: AclRequest) -> ResponseKind {
-        ResponseKind::Acl(Self::wire_result(
-            self.server
-                .vfs
-                .acl(Into::into(&req.path), req.kind, req.default, req.follow)
-                .await,
-        ))
+    async fn handle_sec_desc(&self, req: SecDescRequest) -> Result<ResponseKind> {
+        let sec_desc = self
+            .server
+            .vfs
+            .sec_desc(Into::into(&req.path), req.mask, req.follow)
+            .await?;
+        Ok(ResponseKind::SecDesc(sec_desc))
     }
 
-    async fn handle_set_acl(&self, req: SetAclRequest) -> ResponseKind {
-        ResponseKind::SetAcl(Self::wire_result(
-            self.server
-                .vfs
-                .set_acl(
-                    Into::into(&req.path),
-                    req.kind,
-                    req.acl.as_ref(),
-                    req.default,
-                    req.follow,
-                )
-                .await,
-        ))
+    async fn handle_acl(&self, req: AclRequest) -> Result<ResponseKind> {
+        let acl = self
+            .server
+            .vfs
+            .acl(Into::into(&req.path), req.kind, req.default, req.follow)
+            .await?;
+        Ok(ResponseKind::Acl(acl))
     }
 
-    async fn handle_set_sec_desc(&self, req: SetSecDescRequest) -> ResponseKind {
-        ResponseKind::SetSecDesc(Self::wire_result(
-            self.server
-                .vfs
-                .set_sec_desc(Into::into(&req.path), &req.sec_desc, req.follow)
-                .await,
-        ))
+    async fn handle_set_acl(&self, req: SetAclRequest) -> Result<ResponseKind> {
+        self.server
+            .vfs
+            .set_acl(
+                Into::into(&req.path),
+                req.kind,
+                req.acl.as_ref(),
+                req.default,
+                req.follow,
+            )
+            .await?;
+        Ok(ResponseKind::SetAcl)
     }
 
-    async fn handle_create_dir(&self, req: CreateDirRequest) -> ResponseKind {
-        ResponseKind::CreateDir(Self::wire_result(
-            self.server
-                .vfs
-                .create_dir(Into::into(&req.path), req.all)
-                .await,
-        ))
+    async fn handle_set_sec_desc(&self, req: SetSecDescRequest) -> Result<ResponseKind> {
+        self.server
+            .vfs
+            .set_sec_desc(Into::into(&req.path), &req.sec_desc, req.follow)
+            .await?;
+        Ok(ResponseKind::SetSecDesc)
     }
 
-    async fn handle_remove_dir(&self, req: RemoveDirRequest) -> ResponseKind {
-        ResponseKind::RemoveDir(Self::wire_result(
-            self.server
-                .vfs
-                .remove_dir(Into::into(&req.path), req.all, req.ignore)
-                .await,
-        ))
+    async fn handle_create_dir(&self, req: CreateDirRequest) -> Result<ResponseKind> {
+        self.server
+            .vfs
+            .create_dir(Into::into(&req.path), req.all)
+            .await?;
+        Ok(ResponseKind::CreateDir)
     }
 
-    async fn handle_copy(&self, req: CopyRequest) -> ResponseKind {
-        ResponseKind::Copy(Self::wire_result(
-            self.server
-                .vfs
-                .copy(Into::into(&req.from), Into::into(&req.to), req.all)
-                .await,
-        ))
+    async fn handle_remove_dir(&self, req: RemoveDirRequest) -> Result<ResponseKind> {
+        self.server
+            .vfs
+            .remove_dir(Into::into(&req.path), req.all, req.ignore)
+            .await?;
+        Ok(ResponseKind::RemoveDir)
     }
 
-    async fn handle_rename(&self, req: RenameRequest) -> ResponseKind {
-        ResponseKind::Rename(Self::wire_result(
-            self.server
-                .vfs
-                .rename(Into::into(&req.from), Into::into(&req.to), req.replace)
-                .await,
-        ))
+    async fn handle_copy(&self, req: CopyRequest) -> Result<ResponseKind> {
+        self.server
+            .vfs
+            .copy(Into::into(&req.from), Into::into(&req.to), req.all)
+            .await?;
+        Ok(ResponseKind::Copy)
     }
 
-    async fn handle_move(&self, req: MoveRequest) -> ResponseKind {
-        ResponseKind::Move(Self::wire_result(
-            self.server
-                .vfs
-                .move_(Into::into(&req.from), Into::into(&req.to), req.all)
-                .await,
-        ))
+    async fn handle_rename(&self, req: RenameRequest) -> Result<ResponseKind> {
+        self.server
+            .vfs
+            .rename(Into::into(&req.from), Into::into(&req.to), req.replace)
+            .await?;
+        Ok(ResponseKind::Rename)
     }
 
-    async fn handle_symlink(&self, req: SymlinkRequest) -> ResponseKind {
-        let result = match req.kind {
+    async fn handle_move(&self, req: MoveRequest) -> Result<ResponseKind> {
+        self.server
+            .vfs
+            .move_(Into::into(&req.from), Into::into(&req.to), req.all)
+            .await?;
+        Ok(ResponseKind::Move)
+    }
+
+    async fn handle_symlink(&self, req: SymlinkRequest) -> Result<ResponseKind> {
+        match req.kind {
             SymlinkKind::Infer => {
                 self.server
                     .vfs
@@ -2092,143 +1950,140 @@ impl Connection {
                     .symlink_file(Into::into(&req.src), Into::into(&req.dst))
                     .await
             }
-        };
-        ResponseKind::Symlink(Self::wire_result(result))
+        }?;
+        Ok(ResponseKind::Symlink)
     }
 
-    async fn handle_hard_link(&self, req: HardLinkRequest) -> ResponseKind {
-        ResponseKind::HardLink(Self::wire_result(
-            self.server
-                .vfs
-                .hard_link(Into::into(&req.src), Into::into(&req.dst))
-                .await,
-        ))
+    async fn handle_hard_link(&self, req: HardLinkRequest) -> Result<ResponseKind> {
+        self.server
+            .vfs
+            .hard_link(Into::into(&req.src), Into::into(&req.dst))
+            .await?;
+        Ok(ResponseKind::HardLink)
     }
 
-    async fn handle_symlink_metadata(&self, req: MetadataRequest) -> ResponseKind {
-        ResponseKind::SymlinkMetadata(Self::wire_result(
-            self.server
-                .vfs
-                .symlink_metadata(Into::into(&req.path))
-                .await,
-        ))
+    async fn handle_symlink_metadata(&self, req: MetadataRequest) -> Result<ResponseKind> {
+        let metadata = self
+            .server
+            .vfs
+            .symlink_metadata(Into::into(&req.path))
+            .await?;
+        Ok(ResponseKind::SymlinkMetadata(metadata))
     }
 
-    async fn handle_set_metadata(&self, req: SetMetadataRequest) -> ResponseKind {
+    async fn handle_set_metadata(&self, req: SetMetadataRequest) -> Result<ResponseKind> {
         let paths: Vec<_> = req
             .paths
             .iter()
             .map(|path| Utf8TypedPath::from(path).to_path_buf())
             .collect();
-        ResponseKind::SetMetadata(Self::wire_result(
-            self.server.vfs.set_metadata(&paths, req.patch).await,
-        ))
+        self.server.vfs.set_metadata(&paths, req.patch).await?;
+        Ok(ResponseKind::SetMetadata)
     }
 
-    async fn handle_canonicalize(&self, req: CanonicalizeRequest) -> ResponseKind {
-        let result = self
+    async fn handle_canonicalize(&self, req: CanonicalizeRequest) -> Result<ResponseKind> {
+        let path = self
             .server
             .vfs
             .canonicalize(Into::into(&req.path))
-            .await
-            .map(Into::into);
-        ResponseKind::Canonicalize(Self::wire_result(result))
+            .await?
+            .into();
+        Ok(ResponseKind::Canonicalize(path))
     }
 
-    async fn handle_read_link(&self, req: ReadLinkRequest) -> ResponseKind {
-        let result = self
+    async fn handle_read_link(&self, req: ReadLinkRequest) -> Result<ResponseKind> {
+        let path = self
             .server
             .vfs
             .read_link(Into::into(&req.path))
-            .await
-            .map(Into::into);
-        ResponseKind::ReadLink(Self::wire_result(result))
+            .await?
+            .into();
+        Ok(ResponseKind::ReadLink(path))
     }
 
-    async fn handle_access(&self, req: AccessRequest) -> ResponseKind {
+    async fn handle_access(&self, req: AccessRequest) -> Result<ResponseKind> {
         let mode = AccessFlags::from_bits(req.mode).unwrap_or(AccessFlags::empty());
-        ResponseKind::Access(Self::wire_result(
-            self.server.vfs.access(Into::into(&req.path), mode).await,
-        ))
+        self.server.vfs.access(Into::into(&req.path), mode).await?;
+        Ok(ResponseKind::Access)
     }
 
-    async fn handle_glob(&self, req: GlobRequest) -> ResponseKind {
-        ResponseKind::Glob(Self::wire_result(
-            self.server
-                .vfs
-                .glob(
-                    req.pattern,
-                    Into::into(&req.root),
-                    req.follow_symlinks,
-                    req.max_depth,
-                )
-                .await
-                .map(|paths| paths.into_iter().map(Into::into).collect()),
-        ))
+    async fn handle_glob(&self, req: GlobRequest) -> Result<ResponseKind> {
+        let paths = self
+            .server
+            .vfs
+            .glob(
+                req.pattern,
+                Into::into(&req.root),
+                req.follow_symlinks,
+                req.max_depth,
+            )
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        Ok(ResponseKind::Glob(paths))
     }
 
-    async fn handle_xattrs(&self, req: XattrsRequest) -> ResponseKind {
-        ResponseKind::Xattrs(Self::wire_result(
-            self.server
-                .vfs
-                .xattrs(
-                    Into::into(&req.path),
-                    req.namespace.as_borrowed(),
-                    req.follow,
-                )
-                .await,
-        ))
+    async fn handle_xattrs(&self, req: XattrsRequest) -> Result<ResponseKind> {
+        let xattrs = self
+            .server
+            .vfs
+            .xattrs(
+                Into::into(&req.path),
+                req.namespace.as_borrowed(),
+                req.follow,
+            )
+            .await?;
+        Ok(ResponseKind::Xattrs(xattrs))
     }
 
-    async fn handle_xattr(&self, req: XattrRequest) -> ResponseKind {
-        ResponseKind::Xattr(Self::wire_result(
-            self.server
-                .vfs
-                .xattr(
-                    Into::into(&req.path),
-                    &req.name,
-                    req.namespace.as_deref(),
-                    req.follow,
-                )
-                .await,
-        ))
+    async fn handle_xattr(&self, req: XattrRequest) -> Result<ResponseKind> {
+        let xattr = self
+            .server
+            .vfs
+            .xattr(
+                Into::into(&req.path),
+                &req.name,
+                req.namespace.as_deref(),
+                req.follow,
+            )
+            .await?;
+        Ok(ResponseKind::Xattr(xattr))
     }
 
-    async fn handle_set_xattr(&self, req: SetXattrRequest) -> ResponseKind {
-        ResponseKind::SetXattr(Self::wire_result(
-            self.server
-                .vfs
-                .set_xattr(
-                    Into::into(&req.path),
-                    &req.name,
-                    req.namespace.as_deref(),
-                    &req.value,
-                    req.follow,
-                )
-                .await,
-        ))
+    async fn handle_set_xattr(&self, req: SetXattrRequest) -> Result<ResponseKind> {
+        self.server
+            .vfs
+            .set_xattr(
+                Into::into(&req.path),
+                &req.name,
+                req.namespace.as_deref(),
+                &req.value,
+                req.follow,
+            )
+            .await?;
+        Ok(ResponseKind::SetXattr)
     }
 
-    async fn handle_remove_xattr(&self, req: XattrRequest) -> ResponseKind {
-        ResponseKind::RemoveXattr(Self::wire_result(
-            self.server
-                .vfs
-                .remove_xattr(
-                    Into::into(&req.path),
-                    &req.name,
-                    req.namespace.as_deref(),
-                    req.follow,
-                )
-                .await,
-        ))
+    async fn handle_remove_xattr(&self, req: XattrRequest) -> Result<ResponseKind> {
+        self.server
+            .vfs
+            .remove_xattr(
+                Into::into(&req.path),
+                &req.name,
+                req.namespace.as_deref(),
+                req.follow,
+            )
+            .await?;
+        Ok(ResponseKind::RemoveXattr)
     }
 
-    async fn handle_streams(&self, req: StreamsRequest) -> ResponseKind {
-        ResponseKind::Streams(Self::wire_result(
+    async fn handle_streams(&self, req: StreamsRequest) -> Result<ResponseKind> {
+        Ok(ResponseKind::Streams(
             self.server
                 .vfs
                 .streams(Into::into(&req.path), req.follow)
-                .await,
+                .await?,
         ))
     }
 }
@@ -2241,12 +2096,8 @@ impl Connection {
 /// file is closed instead of leaked. The one failure this side *can* recover
 /// from — a busy file — is caught before the file is taken at all, in
 /// [`take_file`](Session::take_file).
-fn handoff_error<H>(error: HandoffError<H>) -> WireError {
-    wire_error(error.into_error())
-}
-
-fn wire_error(error: impl Into<crate::error::Error>) -> WireError {
-    error.into().into()
+fn handoff_error<H>(error: HandoffError<H>) -> Error {
+    Into::into(error.into_error())
 }
 
 #[cfg(test)]
@@ -2255,10 +2106,11 @@ mod tests {
     use super::report_handler_exit;
     use super::{Server, orderly_disconnect};
     use crate::{
+        error::{Error, ErrorKind},
         path,
         protocol::{
-            self, OpenHandle, OpenHandlePreference, OpenRequest, Request, RequestKind,
-            ResponseKind, VfsProtocol,
+            self, OpenFlags, OpenHandle, OpenRequest, Request, RequestKind, ResponseKind,
+            VfsProtocol,
         },
     };
 
@@ -2274,19 +2126,24 @@ mod tests {
         handlers.spawn(async {
             panic!("connection handler panic");
             #[allow(unreachable_code)]
-            Ok::<(), dolang_rpc::Error>(())
+            Ok::<(), Error>(())
         });
         report_handler_exit(handlers.join_next().await.unwrap());
     }
 
     #[test]
     fn orderly_connection_close_is_expected() {
-        assert!(orderly_disconnect(&dolang_rpc::Error::ConnectionClosed));
-        assert!(orderly_disconnect(&dolang_rpc::Error::Io(
-            std::io::Error::from(std::io::ErrorKind::ConnectionReset)
+        assert!(orderly_disconnect(&Error::new(
+            ErrorKind::ConnectionReset,
+            "closed"
         )));
-        assert!(!orderly_disconnect(&dolang_rpc::Error::Protocol(
-            "bad frame".into()
+        assert!(orderly_disconnect(&Error::new(
+            ErrorKind::BrokenPipe,
+            "closed"
+        )));
+        assert!(!orderly_disconnect(&Error::new(
+            ErrorKind::InvalidData,
+            "bad frame"
         )));
     }
 
@@ -2308,42 +2165,31 @@ mod tests {
                     .unwrap()
                     .to_path()
                     .into(),
-                read: true,
-                write: false,
-                append: false,
-                create: false,
-                create_new: false,
-                truncate: false,
-                no_follow: false,
-                handle_preference: OpenHandlePreference::NativePreferred,
+                flags: OpenFlags::READ,
             })))
             .await
             .unwrap()
-            .into_response();
-        let ResponseKind::Open(Ok(OpenHandle::Opaque(file))) = response else {
+            .into_response()
+            .unwrap();
+        let ResponseKind::Open(OpenHandle::Opaque(file)) = response else {
             panic!("remote open did not return an opaque file");
         };
-        let ResponseKind::FileClose(result) = client
+        let ResponseKind::FileClose = client
             .call(request(RequestKind::FileClose { file: file.cite() }))
             .await
             .unwrap()
             .into_response()
+            .unwrap()
         else {
             panic!("file close returned the wrong response");
         };
-        result.unwrap();
-        let ResponseKind::FileClose(result) = client
+        let error = client
             .call(request(RequestKind::FileClose { file: file.cite() }))
             .await
             .unwrap()
             .into_response()
-        else {
-            panic!("duplicate file close returned the wrong response");
-        };
-        assert_eq!(
-            crate::error::Error::from(result.unwrap_err()).kind(),
-            std::io::ErrorKind::InvalidInput
-        );
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
 
         let _ = client.call(request(RequestKind::Stop)).await.unwrap();
         client.close().await;

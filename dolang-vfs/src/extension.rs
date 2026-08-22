@@ -36,11 +36,59 @@ use dolang_rpc::{
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::session::ExtensionSet;
 use crate::{
     error::{Error, ErrorKind, Result},
     protocol::VfsProtocol,
 };
+
+/// VFS extension protocol versions supported by a backend.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtensionSet {
+    versions: HashMap<String, Vec<u16>>,
+}
+
+impl ExtensionSet {
+    pub(crate) fn from_pairs(pairs: impl IntoIterator<Item = (String, u16)>) -> Result<Self> {
+        let mut versions: HashMap<String, Vec<u16>> = HashMap::new();
+        for (name, version) in pairs {
+            versions.entry(name).or_default().push(version);
+        }
+        for (name, versions) in &mut versions {
+            versions.sort_unstable();
+            if let Some(version) = versions
+                .windows(2)
+                .find_map(|pair| (pair[0] == pair[1]).then_some(pair[0]))
+            {
+                return Err(Error::new(
+                    ErrorKind::AlreadyExists,
+                    format!("duplicate VFS extension registration: {name} version {version}"),
+                ));
+            }
+        }
+        Ok(Self { versions })
+    }
+
+    /// Returns all supported versions for `name`, in ascending order.
+    pub fn versions(&self, name: &str) -> Option<&[u16]> {
+        self.versions.get(name).map(Vec::as_slice)
+    }
+
+    /// Returns whether the exact extension version is supported.
+    pub fn supports(&self, name: &str, version: u16) -> bool {
+        self.versions(name)
+            .is_some_and(|versions| versions.binary_search(&version).is_ok())
+    }
+
+    /// Returns the highest version supported by both the backend and caller.
+    pub fn maximum_common_version(&self, name: &str, supported: &[u16]) -> Option<u16> {
+        let versions = self.versions(name)?;
+        supported
+            .iter()
+            .copied()
+            .filter(|version| versions.binary_search(version).is_ok())
+            .max()
+    }
+}
 
 #[doc(hidden)]
 pub mod __private {

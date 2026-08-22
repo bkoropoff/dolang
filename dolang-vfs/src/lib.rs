@@ -1,32 +1,13 @@
 #![deny(warnings)]
-#![allow(clippy::result_large_err)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 //! Filesystem and process operations over either a local or remote target.
 //!
 //! [`Vfs`] performs operations in either the current process's environment
 //! or through a `dolang-vfs` agent.
 //!
-//! Paths passed through [`Vfs`] are [`typed_path::Utf8TypedPath`] values. Their syntax
+//! Paths passed through [`Vfs`] are `typed_path::Utf8TypedPath` values. Their syntax
 //! belongs to the target VFS rather than necessarily to the host running this
 //! code, which lets a Unix host describe Windows paths and vice versa.
-//!
-//! ```no_run
-//! use dolang_vfs::Vfs;
-//! use typed_path::{Utf8TypedPath, Utf8UnixPath, Utf8WindowsPath};
-//!
-//! async fn read_a_file() -> dolang_vfs::error::Result<()> {
-//!     let vfs = Vfs::direct()?;
-//!     let path = if cfg!(windows) {
-//!         typed_path::Utf8TypedPath::Windows(Utf8WindowsPath::new(r"C:\\example.txt"))
-//!     } else {
-//!         typed_path::Utf8TypedPath::Unix(Utf8UnixPath::new("/tmp/example.txt"))
-//!     };
-//!     let mut options = vfs.open_options();
-//!     options.read(true);
-//!     let _file = options.open(path).await?;
-//!     Ok(())
-//! }
-//! ```
 
 use dolang_winterop::security::{SecDesc, Sid};
 use extension::VfsExtension;
@@ -47,20 +28,16 @@ pub mod metadata;
 mod nfs4_acl;
 pub mod path;
 mod posix_acl;
-mod probe;
 /// Process status, control, and standard-I/O types.
 pub mod process;
 mod protocol;
 pub mod security;
 /// RPC server implementation.
 pub mod server;
-/// VFS service executable support.
-pub mod service;
-pub mod session;
+mod session;
 pub mod target;
 #[cfg(windows)]
 mod windows;
-pub mod xattr;
 
 /// Buffer size used when pumping bulk byte streams (stdio relays, file and
 /// stdio trailer transfers).
@@ -72,7 +49,7 @@ pub mod xattr;
 /// `dolang-rpc` maximum fragment size and the runtime's
 /// `BYTE_STREAM_CHUNK_SIZE`, so a full buffer maps onto a single wire
 /// fragment, and it also amortizes syscalls on purely local transfers.
-pub const STREAM_CHUNK_SIZE: usize = 512 * 1024;
+const STREAM_CHUNK_SIZE: usize = 512 * 1024;
 
 /// Largest range one `FileRead` request may ask for.
 ///
@@ -87,7 +64,7 @@ pub const STREAM_CHUNK_SIZE: usize = 512 * 1024;
 /// reply are clamped, and the caller sees an ordinary short read. Callers that
 /// must have every byte loop, exactly as they already must around a short read
 /// at any other layer.
-pub const MAX_FILE_READ: usize = STREAM_CHUNK_SIZE;
+const MAX_FILE_READ: usize = STREAM_CHUNK_SIZE;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SessionMode {
@@ -300,7 +277,7 @@ impl Vfs {
     }
 
     /// Returns supported VFS extension protocol versions.
-    pub fn extensions(&self) -> &session::ExtensionSet {
+    pub fn extensions(&self) -> &extension::ExtensionSet {
         match &self.inner {
             VfsInner::Client(vfs) => vfs.extensions(),
             VfsInner::Direct(vfs) => vfs.extensions(),
@@ -474,9 +451,9 @@ impl Vfs {
     pub async fn xattrs(
         &self,
         path: typed_path::Utf8TypedPath<'_>,
-        namespace: xattr::XattrNamespace<'_>,
+        namespace: file::XattrNamespace<'_>,
         follow: bool,
-    ) -> error::Result<Vec<xattr::XattrEntry>> {
+    ) -> error::Result<Vec<file::XattrEntry>> {
         match &self.inner {
             VfsInner::Client(client) => client.xattrs(path, namespace, follow).await,
             VfsInner::Direct(direct) => direct.xattrs(path, namespace, follow).await,

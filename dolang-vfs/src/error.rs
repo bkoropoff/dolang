@@ -8,6 +8,7 @@ use crate::target::OperatingSystem;
 ///
 /// Most variants correspond directly to [`io::ErrorKind`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum ErrorKind {
     NotFound,
     PermissionDenied,
@@ -282,6 +283,21 @@ impl From<io::Error> for Error {
         match error.raw_os_error() {
             Some(raw) => Self::from_system_code(kind, message, OperatingSystem::current(), raw),
             None => Self::new(kind, message),
+        }
+    }
+}
+
+impl From<dolang_rpc::Error> for Error {
+    fn from(error: dolang_rpc::Error) -> Self {
+        match error {
+            dolang_rpc::Error::Io(error) => error.into(),
+            dolang_rpc::Error::Serialize(_)
+            | dolang_rpc::Error::Deserialize(_)
+            | dolang_rpc::Error::Protocol(_) => Self::new(ErrorKind::InvalidData, error),
+            dolang_rpc::Error::Auth(_) => Self::new(ErrorKind::PermissionDenied, error),
+            dolang_rpc::Error::ConnectionClosed => Self::new(ErrorKind::ConnectionReset, error),
+            dolang_rpc::Error::Cancelled => Self::new(ErrorKind::Interrupted, error),
+            dolang_rpc::Error::UnsupportedCapability => Self::new(ErrorKind::Unsupported, error),
         }
     }
 }

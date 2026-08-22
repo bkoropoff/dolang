@@ -11,7 +11,7 @@ pub struct DirEntry {
 
 /// Platform-specific fields carried by a directory entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DirEntryFamily {
+pub(crate) enum DirEntryFamily {
     /// Unix-specific entry information.
     Unix { ino: u64 },
     /// Windows entry information.

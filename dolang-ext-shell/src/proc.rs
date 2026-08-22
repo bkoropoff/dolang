@@ -167,11 +167,7 @@ pub(crate) fn parse_policy_dict<'v, 's>(
 }
 
 pub(crate) fn vfs_policy(policy: &TerminationPolicy) -> dolang_vfs::process::TerminationPolicy {
-    dolang_vfs::process::TerminationPolicy {
-        signal: policy.signal,
-        grace: policy.grace,
-        force: policy.force,
-    }
+    dolang_vfs::process::TerminationPolicy::new(policy.signal, policy.grace, policy.force)
 }
 
 /// Capture output from a subprocess.

@@ -4,7 +4,7 @@ use dolang::runtime::{
     Error, Instance, Object, Output, Result, Slot, State, Strand, Value, object::TypeBuilder,
     value::TypeObject,
 };
-use dolang_vfs::xattr::{XattrEntry as VfsXattrEntry, XattrNamespace};
+use dolang_vfs::file::{XattrEntry as VfsXattrEntry, XattrNamespace};
 use typed_path::Utf8TypedPath;
 
 use crate::{error::ResultExt as _, global::Global, util};
@@ -66,7 +66,10 @@ pub(crate) fn parse_name<'v, 's>(
         }
         let (name, namespace) = entry.enter_sync(strand, |_strand, entry| {
             let entry = &entry.annex().inner;
-            (entry.name.clone(), entry.namespace.clone())
+            (
+                entry.name().to_owned(),
+                entry.namespace().map(str::to_owned),
+            )
         });
         return Ok((name, namespace));
     }
@@ -219,22 +222,17 @@ impl<'v> Object<'v> for XattrEntry {
 
         builder
             .get("name", |this, strand, out| {
-                Output::set(strand, out, this.annex().inner.name.as_str());
+                Output::set(strand, out, this.annex().inner.name());
                 Ok(())
             })
             .get("namespace", move |this, strand, out| {
-                util::option_field(
-                    strand,
-                    this.annex().inner.namespace.as_deref(),
-                    namespace,
-                    out,
-                )
+                util::option_field(strand, this.annex().inner.namespace(), namespace, out)
             })
             .get("size", move |this, strand, out| {
-                util::option_field(strand, this.annex().inner.size, size, out)
+                util::option_field(strand, this.annex().inner.size(), size, out)
             })
             .get("flags", move |this, strand, out| {
-                util::option_field(strand, this.annex().inner.flags, flags, out)
+                util::option_field(strand, this.annex().inner.flags(), flags, out)
             })
     }
 }
