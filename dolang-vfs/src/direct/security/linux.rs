@@ -1,9 +1,10 @@
-use std::{ffi::CStr, io, os::fd::AsFd, path::Path};
+use std::{ffi::CStr, os::fd::AsFd, path::Path};
 
 use std::fs::File;
 
 use crate::{
     direct::{Direct, unix::UnixXattrTarget},
+    error::{Error, ErrorKind, Result},
     security::{Acl, AclKind, Permission, PosixAce, PosixAcl, PosixAclQualifier},
 };
 
@@ -16,21 +17,21 @@ fn xattr_name(default: bool) -> &'static CStr {
     CStr::from_bytes_with_nul(if default { DEFAULT_XATTR } else { ACCESS_XATTR }).unwrap()
 }
 
-fn missing_xattr(error: &io::Error) -> bool {
+fn missing_xattr(error: &Error) -> bool {
     error.raw_os_error() == Some(libc::ENODATA)
 }
 
-fn decode(bytes: &[u8]) -> io::Result<PosixAcl> {
+fn decode(bytes: &[u8]) -> Result<PosixAcl> {
     if bytes.len() < 4 || !(bytes.len() - 4).is_multiple_of(8) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
+        return Err(Error::new(
+            ErrorKind::InvalidData,
             "POSIX ACL xattr has invalid length",
         ));
     }
     let version = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
     if version != 2 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
+        return Err(Error::new(
+            ErrorKind::InvalidData,
             format!("unsupported POSIX ACL xattr version {version}"),
         ));
     }
@@ -40,8 +41,8 @@ fn decode(bytes: &[u8]) -> io::Result<PosixAcl> {
         let perm = u16::from_le_bytes(raw[2..4].try_into().unwrap());
         let id = u32::from_le_bytes(raw[4..8].try_into().unwrap());
         if perm & !7 != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
+            return Err(Error::new(
+                ErrorKind::InvalidData,
                 "POSIX ACL entry has invalid permissions",
             ));
         }
@@ -53,8 +54,8 @@ fn decode(bytes: &[u8]) -> io::Result<PosixAcl> {
             0x10 if id == u32::MAX => PosixAclQualifier::Mask,
             0x20 if id == u32::MAX => PosixAclQualifier::Other,
             _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
                     "POSIX ACL entry has invalid tag or qualifier",
                 ));
             }
@@ -64,7 +65,7 @@ fn decode(bytes: &[u8]) -> io::Result<PosixAcl> {
             permissions: Permission::from_bits_truncate(perm as u8),
         });
     }
-    PosixAcl::new(entries).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    PosixAcl::new(entries).map_err(|error| Error::new(ErrorKind::InvalidData, error))
 }
 
 fn encode(acl: &PosixAcl) -> Vec<u8> {
@@ -87,7 +88,7 @@ fn encode(acl: &PosixAcl) -> Vec<u8> {
     bytes
 }
 
-fn get_xattr(target: UnixXattrTarget<'_>, default: bool) -> io::Result<Option<PosixAcl>> {
+fn get_xattr(target: UnixXattrTarget<'_>, default: bool) -> Result<Option<PosixAcl>> {
     match Direct::unix_get_xattr(target, xattr_name(default)) {
         Ok(bytes) => decode(&bytes).map(Some),
         Err(error) if missing_xattr(&error) => Ok(None),
@@ -95,7 +96,7 @@ fn get_xattr(target: UnixXattrTarget<'_>, default: bool) -> io::Result<Option<Po
     }
 }
 
-fn set_xattr(target: UnixXattrTarget<'_>, acl: Option<&PosixAcl>, default: bool) -> io::Result<()> {
+fn set_xattr(target: UnixXattrTarget<'_>, acl: Option<&PosixAcl>, default: bool) -> Result<()> {
     match acl {
         Some(acl) => Direct::unix_set_xattr(target, xattr_name(default), &encode(acl)),
         None => match Direct::unix_remove_xattr(target, xattr_name(default)) {
@@ -105,12 +106,7 @@ fn set_xattr(target: UnixXattrTarget<'_>, acl: Option<&PosixAcl>, default: bool)
     }
 }
 
-pub(super) fn get(
-    path: &Path,
-    kind: AclKind,
-    default: bool,
-    follow: bool,
-) -> io::Result<Option<Acl>> {
+pub(super) fn get(path: &Path, kind: AclKind, default: bool, follow: bool) -> Result<Option<Acl>> {
     match kind {
         AclKind::Posix => {
             let cpath = cpath(path)?;
@@ -126,7 +122,7 @@ pub(super) fn set(
     acl: Option<&Acl>,
     default: bool,
     follow: bool,
-) -> io::Result<()> {
+) -> Result<()> {
     match kind {
         AclKind::Posix => {
             let acl = super::split_posix(kind, acl)?;
@@ -137,7 +133,7 @@ pub(super) fn set(
     }
 }
 
-pub(super) fn get_fd(file: &File, kind: AclKind, default: bool) -> io::Result<Option<Acl>> {
+pub(super) fn get_fd(file: &File, kind: AclKind, default: bool) -> Result<Option<Acl>> {
     match kind {
         AclKind::Posix => {
             Ok(get_xattr(UnixXattrTarget::Fd(file.as_fd()), default)?.map(Acl::Posix))
@@ -146,12 +142,7 @@ pub(super) fn get_fd(file: &File, kind: AclKind, default: bool) -> io::Result<Op
     }
 }
 
-pub(super) fn set_fd(
-    file: &File,
-    kind: AclKind,
-    acl: Option<&Acl>,
-    default: bool,
-) -> io::Result<()> {
+pub(super) fn set_fd(file: &File, kind: AclKind, acl: Option<&Acl>, default: bool) -> Result<()> {
     match kind {
         AclKind::Posix => {
             let acl = super::split_posix(kind, acl)?;

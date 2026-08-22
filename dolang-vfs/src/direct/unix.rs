@@ -1,31 +1,117 @@
-use super::{Direct, DirectChild, DirectCommand, DirectFile};
-use crate::metadata::{FsMetadataFamily, Mode, UnixFsMetadata, UnixFsMetadataPlatform};
+use super::{Child, Command, Direct, File};
+#[cfg(any(target_os = "freebsd", target_os = "linux", target_os = "macos"))]
+use crate::metadata::{AttrFlags, AttrsPatch, Metadata};
 #[cfg(target_os = "linux")]
 use crate::metadata::{MetadataFamily, UnixMetadata, UnixMetadataPlatform};
-#[cfg(any(target_os = "freebsd", target_os = "linux", target_os = "macos"))]
-use crate::{AttrFlags, Metadata};
 use crate::{
-    AttrsPatch, FsMetadata, MetadataPatch, OwnershipIdentity, StreamEntry, XattrEntry,
-    XattrNamespace,
+    error::{Error, ErrorKind, Result},
+    file::StreamEntry,
+    metadata::{
+        FileType, FsMetadata, FsMetadataFamily, MetadataPatch, Mode, UnixFsMetadata,
+        UnixFsMetadataPlatform,
+    },
+    process::ProcessControl,
+    security::OwnershipIdentity,
+    xattr::{XattrEntry, XattrNamespace},
 };
 use dolang_winterop::security::SecDesc;
 #[cfg(target_os = "linux")]
 use std::os::fd::RawFd;
-use std::sync::Arc;
 use std::{
     collections::HashMap,
     ffi::{CStr, CString, OsString},
-    io,
     mem::MaybeUninit,
-    os::unix::process::CommandExt,
     os::{
         fd::{AsFd, AsRawFd, BorrowedFd},
-        unix::ffi::OsStrExt,
+        unix::{ffi::OsStrExt, process::CommandExt},
     },
     path::{Path, PathBuf},
+    sync::Arc,
 };
-use tokio::fs::{self, OpenOptions};
-use tokio::time::{Duration, timeout};
+use tokio::{
+    fs::{self, OpenOptions},
+    time::{Duration, timeout},
+};
+
+use nix::{
+    dir::{Dir as NixDir, OwningIter, Type},
+    fcntl::OFlag,
+    sys::stat::Mode as NixMode,
+};
+
+#[derive(Debug)]
+pub(crate) struct ReadDir {
+    iter: Option<OwningIter>,
+}
+
+impl ReadDir {
+    pub(super) async fn open(path: &Path) -> Result<Self> {
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let dir =
+                NixDir::open(&path, OFlag::O_DIRECTORY, NixMode::empty()).map_err(Error::other)?;
+            Ok(Self {
+                iter: Some(dir.into_iter()),
+            })
+        })
+        .await
+        .map_err(Error::other)?
+    }
+
+    pub(crate) async fn next_entry(&mut self) -> Result<Option<crate::directory::DirEntry>> {
+        let mut iter = match self.iter.take() {
+            Some(iter) => iter,
+            None => return Ok(None),
+        };
+        let (result, next_iter) = tokio::task::spawn_blocking(move || {
+            loop {
+                match iter.next() {
+                    Some(Ok(entry)) => {
+                        let name = entry.file_name().to_bytes();
+                        if name == b"." || name == b".." {
+                            continue;
+                        }
+                        let file_name = match String::from_utf8(name.to_vec()) {
+                            Ok(name) => name,
+                            Err(error) => {
+                                return (
+                                    Err(Error::new(ErrorKind::InvalidData, error)),
+                                    Some(iter),
+                                );
+                            }
+                        };
+                        let file_type = entry
+                            .file_type()
+                            .map(|ty| match ty {
+                                Type::File => FileType::File,
+                                Type::Directory => FileType::Dir,
+                                Type::Symlink => FileType::Symlink,
+                                Type::Fifo => FileType::Fifo,
+                                Type::CharacterDevice => FileType::CharacterDevice,
+                                Type::BlockDevice => FileType::BlockDevice,
+                                Type::Socket => FileType::Socket,
+                            })
+                            .unwrap_or(FileType::Unknown);
+                        return (
+                            Ok(Some(crate::directory::DirEntry::new(
+                                file_name,
+                                file_type,
+                                crate::directory::DirEntryFamily::Unix { ino: entry.ino() },
+                            ))),
+                            Some(iter),
+                        );
+                    }
+                    Some(Err(error)) => return (Err(Error::other(error)), Some(iter)),
+                    None => return (Ok(None), None),
+                }
+            }
+        })
+        .await
+        .map_err(Error::other)?;
+        self.iter = next_iter;
+        result
+    }
+}
 
 #[cfg(target_os = "linux")]
 mod linux_attrs {
@@ -55,43 +141,40 @@ pub(super) enum UnixXattrTarget<'a> {
     Path(&'a CStr, bool),
 }
 
-impl DirectFile {
-    pub(super) fn pread(file: &std::fs::File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
-        std::os::unix::fs::FileExt::read_at(file, buf, offset)
+impl File {
+    pub(super) fn pread(file: &std::fs::File, buf: &mut [u8], offset: u64) -> Result<usize> {
+        Ok(std::os::unix::fs::FileExt::read_at(file, buf, offset)?)
     }
 
-    pub(super) fn pwrite(file: &std::fs::File, buf: &[u8], offset: u64) -> io::Result<usize> {
-        std::os::unix::fs::FileExt::write_at(file, buf, offset)
+    pub(super) fn pwrite(file: &std::fs::File, buf: &[u8], offset: u64) -> Result<usize> {
+        Ok(std::os::unix::fs::FileExt::write_at(file, buf, offset)?)
     }
 }
 
 impl Direct {
-    pub(super) async fn impl_access(
-        path: PathBuf,
-        mode: crate::file::AccessFlags,
-    ) -> io::Result<()> {
+    pub(super) async fn impl_access(path: PathBuf, mode: crate::file::AccessFlags) -> Result<()> {
         let mode = nix::unistd::AccessFlags::from_bits(mode.bits())
             .unwrap_or(nix::unistd::AccessFlags::empty());
         tokio::task::spawn_blocking(move || nix::unistd::access(&path, mode))
             .await
-            .map_err(io::Error::other)?
-            .map_err(|error| io::Error::from_raw_os_error(error as i32))
+            .map_err(Error::other)?
+            .map_err(|error| Error::from_raw_os_error(error as i32))
     }
 
-    pub(super) async fn impl_rename(from: PathBuf, to: PathBuf, replace: bool) -> io::Result<()> {
+    pub(super) async fn impl_rename(from: PathBuf, to: PathBuf, replace: bool) -> Result<()> {
         if replace {
-            return fs::rename(from, to).await;
+            return Ok(fs::rename(from, to).await?);
         }
 
         let from = CString::new(from.as_os_str().as_bytes())?;
         let to = CString::new(to.as_os_str().as_bytes())?;
         tokio::task::spawn_blocking(move || Self::rename_no_replace(&from, &to))
             .await
-            .unwrap_or_else(|_| Err(io::Error::other("rename task failed")))
+            .unwrap_or_else(|_| Err(Error::other("rename task failed")))
     }
 
     #[cfg(target_os = "linux")]
-    fn rename_no_replace(from: &CStr, to: &CStr) -> io::Result<()> {
+    fn rename_no_replace(from: &CStr, to: &CStr) -> Result<()> {
         let result = unsafe {
             libc::syscall(
                 libc::SYS_renameat2,
@@ -105,13 +188,13 @@ impl Direct {
         if result == 0 {
             return Ok(());
         }
-        let error = io::Error::last_os_error();
+        let error = Error::last_os_error();
         if matches!(
             error.raw_os_error(),
             Some(libc::ENOSYS | libc::EINVAL | libc::EOPNOTSUPP)
         ) {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
+            return Err(Error::new(
+                ErrorKind::Unsupported,
                 "atomic rename without replacement is not supported",
             ));
         }
@@ -119,14 +202,14 @@ impl Direct {
     }
 
     #[cfg(target_os = "macos")]
-    fn rename_no_replace(from: &CStr, to: &CStr) -> io::Result<()> {
+    fn rename_no_replace(from: &CStr, to: &CStr) -> Result<()> {
         if unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) } == 0 {
             return Ok(());
         }
-        let error = io::Error::last_os_error();
+        let error = Error::last_os_error();
         if matches!(error.raw_os_error(), Some(libc::ENOTSUP | libc::EINVAL)) {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
+            return Err(Error::new(
+                ErrorKind::Unsupported,
                 "atomic rename without replacement is not supported",
             ));
         }
@@ -134,9 +217,9 @@ impl Direct {
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    fn rename_no_replace(_from: &CStr, _to: &CStr) -> io::Result<()> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
+    fn rename_no_replace(_from: &CStr, _to: &CStr) -> Result<()> {
+        Err(Error::new(
+            ErrorKind::Unsupported,
             "atomic rename without replacement is not supported",
         ))
     }
@@ -145,9 +228,9 @@ impl Direct {
         _path: &Path,
         _mask: dolang_winterop::security::SecInfo,
         _follow: bool,
-    ) -> io::Result<SecDesc> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
+    ) -> Result<SecDesc> {
+        Err(Error::new(
+            ErrorKind::Unsupported,
             "security descriptors are only supported on Windows",
         ))
     }
@@ -156,9 +239,9 @@ impl Direct {
         _path: &Path,
         _descriptor: &SecDesc,
         _follow: bool,
-    ) -> io::Result<()> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
+    ) -> Result<()> {
+        Err(Error::new(
+            ErrorKind::Unsupported,
             "security descriptors are only supported on Windows",
         ))
     }
@@ -166,107 +249,96 @@ impl Direct {
     pub(super) fn sec_desc_from_file(
         _file: &std::fs::File,
         _mask: dolang_winterop::security::SecInfo,
-    ) -> io::Result<SecDesc> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
+    ) -> Result<SecDesc> {
+        Err(Error::new(
+            ErrorKind::Unsupported,
             "security descriptors are only supported on Windows",
         ))
     }
 
-    pub(super) fn set_sec_desc_file(
-        _file: &std::fs::File,
-        _descriptor: &SecDesc,
-    ) -> io::Result<()> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
+    pub(super) fn set_sec_desc_file(_file: &std::fs::File, _descriptor: &SecDesc) -> Result<()> {
+        Err(Error::new(
+            ErrorKind::Unsupported,
             "security descriptors are only supported on Windows",
         ))
     }
 
-    pub(super) async fn impl_user_name(&self, uid: u32) -> crate::Result<String> {
+    pub(super) async fn impl_user_name(&self, uid: u32) -> Result<String> {
         tokio::task::spawn_blocking(move || {
-            nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid))
-                .map_err(io::Error::from)?
+            nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid))?
                 .map(|user| user.name)
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "user ID not found"))
+                .ok_or_else(|| Error::new(ErrorKind::NotFound, "user ID not found"))
         })
         .await
-        .unwrap_or_else(|_| Err(io::Error::other("user lookup task failed")))
-        .map_err(Into::into)
+        .unwrap_or_else(|_| Err(Error::other("user lookup task failed")))
     }
 
-    pub(super) async fn impl_user_id(&self, name: &str) -> crate::Result<u32> {
+    pub(super) async fn impl_user_id(&self, name: &str) -> Result<u32> {
         let name = name.to_owned();
         tokio::task::spawn_blocking(move || {
-            nix::unistd::User::from_name(&name)
-                .map_err(io::Error::from)?
+            nix::unistd::User::from_name(&name)?
                 .map(|user| user.uid.as_raw())
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "user name not found"))
+                .ok_or_else(|| Error::new(ErrorKind::NotFound, "user name not found"))
         })
         .await
-        .unwrap_or_else(|_| Err(io::Error::other("user lookup task failed")))
-        .map_err(Into::into)
+        .unwrap_or_else(|_| Err(Error::other("user lookup task failed")))
     }
 
-    pub(super) async fn impl_group_name(&self, gid: u32) -> crate::Result<String> {
+    pub(super) async fn impl_group_name(&self, gid: u32) -> Result<String> {
         tokio::task::spawn_blocking(move || {
-            nix::unistd::Group::from_gid(nix::unistd::Gid::from_raw(gid))
-                .map_err(io::Error::from)?
+            nix::unistd::Group::from_gid(nix::unistd::Gid::from_raw(gid))?
                 .map(|group| group.name)
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "group ID not found"))
+                .ok_or_else(|| Error::new(ErrorKind::NotFound, "group ID not found"))
         })
         .await
-        .unwrap_or_else(|_| Err(io::Error::other("group lookup task failed")))
-        .map_err(Into::into)
+        .unwrap_or_else(|_| Err(Error::other("group lookup task failed")))
     }
 
-    pub(super) async fn impl_group_id(&self, name: &str) -> crate::Result<u32> {
+    pub(super) async fn impl_group_id(&self, name: &str) -> Result<u32> {
         let name = name.to_owned();
         tokio::task::spawn_blocking(move || {
-            nix::unistd::Group::from_name(&name)
-                .map_err(io::Error::from)?
+            nix::unistd::Group::from_name(&name)?
                 .map(|group| group.gid.as_raw())
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "group name not found"))
+                .ok_or_else(|| Error::new(ErrorKind::NotFound, "group name not found"))
         })
         .await
-        .unwrap_or_else(|_| Err(io::Error::other("group lookup task failed")))
-        .map_err(Into::into)
+        .unwrap_or_else(|_| Err(Error::other("group lookup task failed")))
     }
 
-    pub(super) fn program_not_found_error() -> io::Error {
-        io::Error::from_raw_os_error(libc::ENOENT)
+    pub(super) fn program_not_found_error() -> Error {
+        Error::from_raw_os_error(libc::ENOENT)
     }
 
-    pub(super) fn directory_requires_all_error() -> io::Error {
-        io::Error::from_raw_os_error(libc::EISDIR)
+    pub(super) fn directory_requires_all_error() -> Error {
+        Error::from_raw_os_error(libc::EISDIR)
     }
 
-    pub(super) fn directory_not_empty_error() -> io::Error {
-        io::Error::from_raw_os_error(libc::ENOTEMPTY)
+    pub(super) fn directory_not_empty_error() -> Error {
+        Error::from_raw_os_error(libc::ENOTEMPTY)
     }
 
-    pub(super) fn not_a_directory_error() -> io::Error {
-        io::Error::from_raw_os_error(libc::ENOTDIR)
+    pub(super) fn not_a_directory_error() -> Error {
+        Error::from_raw_os_error(libc::ENOTDIR)
     }
 
-    fn statvfs_from_fd(fd: BorrowedFd<'_>) -> io::Result<libc::statvfs> {
+    fn statvfs_from_fd(fd: BorrowedFd<'_>) -> Result<libc::statvfs> {
         let mut stat = MaybeUninit::<libc::statvfs>::uninit();
         let rc = unsafe { libc::fstatvfs(fd.as_raw_fd(), stat.as_mut_ptr()) };
         if rc == 0 {
             Ok(unsafe { stat.assume_init() })
         } else {
-            Err(io::Error::last_os_error())
+            Err(Error::last_os_error())
         }
     }
 
-    fn statvfs_from_path(path: &Path) -> io::Result<libc::statvfs> {
+    fn statvfs_from_path(path: &Path) -> Result<libc::statvfs> {
         let path = CString::new(path.as_os_str().as_bytes())?;
         let mut stat = MaybeUninit::<libc::statvfs>::uninit();
         let rc = unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) };
         if rc == 0 {
             Ok(unsafe { stat.assume_init() })
         } else {
-            Err(io::Error::last_os_error())
+            Err(Error::last_os_error())
         }
     }
 
@@ -311,14 +383,14 @@ impl Direct {
         }
     }
 
-    pub(super) fn fs_metadata_from_file(file: &std::fs::File) -> io::Result<FsMetadata> {
+    pub(super) fn fs_metadata_from_file(file: &std::fs::File) -> Result<FsMetadata> {
         Self::statvfs_from_fd(file.as_fd()).map(Self::fs_metadata_from_statvfs)
     }
 
-    pub(super) fn fs_metadata_from_path(path: &Path, follow: bool) -> io::Result<FsMetadata> {
+    pub(super) fn fs_metadata_from_path(path: &Path, follow: bool) -> Result<FsMetadata> {
         if !follow {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
+            return Err(Error::new(
+                ErrorKind::Unsupported,
                 "fs_metadata follow: false is not implemented on this platform",
             ));
         }
@@ -331,24 +403,24 @@ impl Direct {
     }
 
     #[cfg(target_os = "linux")]
-    unsafe fn get_linux_flags(fd: RawFd) -> io::Result<libc::c_long> {
+    unsafe fn get_linux_flags(fd: RawFd) -> Result<libc::c_long> {
         nix::ioctl_read!(fs_ioc_getflags, b'f', 1, libc::c_long);
 
         let mut flags = 0;
-        unsafe { fs_ioc_getflags(fd, &mut flags) }.map_err(io::Error::from)?;
+        unsafe { fs_ioc_getflags(fd, &mut flags) }?;
         Ok(flags)
     }
 
     #[cfg(target_os = "linux")]
-    unsafe fn set_linux_flags(fd: RawFd, flags: libc::c_long) -> io::Result<()> {
+    unsafe fn set_linux_flags(fd: RawFd, flags: libc::c_long) -> Result<()> {
         nix::ioctl_write_ptr!(fs_ioc_setflags, b'f', 2, libc::c_long);
 
-        unsafe { fs_ioc_setflags(fd, &flags) }.map_err(io::Error::from)?;
+        unsafe { fs_ioc_setflags(fd, &flags) }?;
         Ok(())
     }
 
     #[cfg(target_os = "linux")]
-    pub(super) fn attrs_from_path(path: PathBuf, _follow: bool) -> io::Result<u32> {
+    pub(super) fn attrs_from_path(path: PathBuf, _follow: bool) -> Result<u32> {
         let file = std::fs::File::open(path)?;
         unsafe { Self::get_linux_flags(file.as_raw_fd()) }.map(Self::attrs_from_flags)
     }
@@ -357,7 +429,7 @@ impl Direct {
     pub(super) fn metadata_with_attrs(
         metadata: std::fs::Metadata,
         file: &std::fs::File,
-    ) -> io::Result<Metadata> {
+    ) -> Result<Metadata> {
         let mut metadata = crate::metadata::metadata_from_std(metadata);
         if !matches!(
             metadata.file_type,
@@ -389,7 +461,7 @@ impl Direct {
     }
 
     #[cfg(target_os = "linux")]
-    pub(super) fn metadata_from_path(path: &Path, follow: bool) -> io::Result<Metadata> {
+    pub(super) fn metadata_from_path(path: &Path, follow: bool) -> Result<Metadata> {
         let std_metadata = if follow {
             std::fs::metadata(path)?
         } else {
@@ -428,7 +500,7 @@ impl Direct {
     }
 
     #[cfg(target_os = "linux")]
-    fn validate_attrs_patch(patch: AttrsPatch) -> io::Result<()> {
+    fn validate_attrs_patch(patch: AttrsPatch) -> Result<()> {
         let supported = AttrFlags::COMPRESSED
             .union(AttrFlags::IMMUTABLE)
             .union(AttrFlags::APPEND_ONLY)
@@ -448,8 +520,8 @@ impl Direct {
             .union(AttrFlags::DIRECT_ACCESS)
             .union(AttrFlags::EXTENT_FORMAT);
         if !patch.requested().difference(supported).is_empty() {
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
+            Err(Error::new(
+                ErrorKind::Unsupported,
                 "one or more attributes cannot be set on this platform",
             ))
         } else {
@@ -458,7 +530,7 @@ impl Direct {
     }
 
     #[cfg(target_os = "linux")]
-    pub(super) fn set_attrs_path(path: PathBuf, patch: AttrsPatch) -> io::Result<()> {
+    pub(super) fn set_attrs_path(path: PathBuf, patch: AttrsPatch) -> Result<()> {
         Self::validate_attrs_patch(patch)?;
 
         if patch.is_empty() {
@@ -500,12 +572,12 @@ impl Direct {
     pub(super) fn metadata_with_attrs(
         metadata: std::fs::Metadata,
         _file: &std::fs::File,
-    ) -> io::Result<Metadata> {
+    ) -> Result<Metadata> {
         Ok(crate::metadata::metadata_from_std(metadata))
     }
 
     #[cfg(any(target_os = "freebsd", target_os = "macos"))]
-    pub(super) fn metadata_from_path(path: &Path, follow: bool) -> io::Result<Metadata> {
+    pub(super) fn metadata_from_path(path: &Path, follow: bool) -> Result<Metadata> {
         let metadata = if follow {
             std::fs::metadata(path)?
         } else {
@@ -515,15 +587,15 @@ impl Direct {
     }
 
     #[cfg(target_os = "macos")]
-    fn validate_attrs_patch(patch: AttrsPatch) -> io::Result<()> {
+    fn validate_attrs_patch(patch: AttrsPatch) -> Result<()> {
         let supported = AttrFlags::HIDDEN
             .union(AttrFlags::IMMUTABLE)
             .union(AttrFlags::APPEND_ONLY)
             .union(AttrFlags::NO_DUMP)
             .union(AttrFlags::OPAQUE);
         if !patch.requested().difference(supported).is_empty() {
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
+            Err(Error::new(
+                ErrorKind::Unsupported,
                 "one or more attributes cannot be set on this platform",
             ))
         } else {
@@ -532,7 +604,7 @@ impl Direct {
     }
 
     #[cfg(target_os = "macos")]
-    pub(super) fn set_attrs_path(path: PathBuf, patch: AttrsPatch) -> io::Result<()> {
+    pub(super) fn set_attrs_path(path: PathBuf, patch: AttrsPatch) -> Result<()> {
         use nix::sys::stat::{self, FileFlag};
 
         Self::validate_attrs_patch(patch)?;
@@ -541,7 +613,7 @@ impl Direct {
             return Ok(());
         }
 
-        let stat = stat::stat(&path).map_err(io::Error::from)?;
+        let stat = stat::stat(&path)?;
         let mut flags = FileFlag::from_bits_retain(stat.st_flags);
         for (semantic, native) in [
             (AttrFlags::HIDDEN, FileFlag::UF_HIDDEN),
@@ -556,11 +628,11 @@ impl Direct {
                 flags.remove(native);
             }
         }
-        nix::unistd::chflags(&path, flags).map_err(io::Error::from)
+        Ok(nix::unistd::chflags(&path, flags)?)
     }
 
     #[cfg(target_os = "freebsd")]
-    fn validate_attrs_patch(patch: AttrsPatch) -> io::Result<()> {
+    fn validate_attrs_patch(patch: AttrsPatch) -> Result<()> {
         let supported = AttrFlags::READONLY
             .union(AttrFlags::HIDDEN)
             .union(AttrFlags::SYSTEM)
@@ -572,8 +644,8 @@ impl Direct {
             .union(AttrFlags::NO_DUMP)
             .union(AttrFlags::OPAQUE);
         if !patch.requested().difference(supported).is_empty() {
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
+            Err(Error::new(
+                ErrorKind::Unsupported,
                 "one or more attributes cannot be set on this platform",
             ))
         } else {
@@ -582,7 +654,7 @@ impl Direct {
     }
 
     #[cfg(target_os = "freebsd")]
-    pub(super) fn set_attrs_path(path: PathBuf, patch: AttrsPatch) -> io::Result<()> {
+    pub(super) fn set_attrs_path(path: PathBuf, patch: AttrsPatch) -> Result<()> {
         use nix::sys::stat::FileFlag;
 
         const UF_COMPRESSED: libc::c_ulong = 0x0000_0020;
@@ -593,7 +665,7 @@ impl Direct {
             return Ok(());
         }
 
-        let stat = nix::sys::stat::stat(&path).map_err(io::Error::from)?;
+        let stat = nix::sys::stat::stat(&path)?;
         let mut flags = FileFlag::from_bits_retain(stat.st_flags.into());
         for (semantic, native) in [
             (
@@ -631,7 +703,7 @@ impl Direct {
                 flags.remove(native);
             }
         }
-        nix::unistd::chflags(&path, flags).map_err(io::Error::from)
+        Ok(nix::unistd::chflags(&path, flags)?)
     }
 
     fn override_or_env(env: &HashMap<String, Option<String>>, key: &str) -> Option<OsString> {
@@ -645,15 +717,15 @@ impl Direct {
     pub(super) fn absolute_env_path(
         env: &HashMap<String, Option<String>>,
         key: &str,
-    ) -> Result<Option<PathBuf>, io::Error> {
+    ) -> Result<Option<PathBuf>> {
         match Self::override_or_env(env, key) {
             Some(value) => {
                 let path = PathBuf::from(value);
                 if path.is_absolute() {
                     Ok(Some(path))
                 } else {
-                    Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
+                    Err(Error::new(
+                        ErrorKind::InvalidInput,
                         format!("{key} must be an absolute path"),
                     ))
                 }
@@ -662,25 +734,21 @@ impl Direct {
         }
     }
 
-    pub(super) fn home_dir_platform(
-        env: &HashMap<String, Option<String>>,
-    ) -> Result<PathBuf, io::Error> {
+    pub(super) fn home_dir_platform(env: &HashMap<String, Option<String>>) -> Result<PathBuf> {
         if let Some(home) = Self::absolute_env_path(env, "HOME")? {
             return Ok(home);
         }
 
         let uid = nix::unistd::getuid();
         let user = nix::unistd::User::from_uid(uid)
-            .map_err(io::Error::other)?
-            .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::NotFound, "could not resolve home directory")
-            })?;
+            .map_err(Error::other)?
+            .ok_or_else(|| Error::new(ErrorKind::NotFound, "could not resolve home directory"))?;
         let home = user.dir;
         if home.is_absolute() {
             Ok(home)
         } else {
-            Err(io::Error::new(
-                io::ErrorKind::InvalidData,
+            Err(Error::new(
+                ErrorKind::InvalidData,
                 "resolved home directory is not absolute",
             ))
         }
@@ -689,7 +757,7 @@ impl Direct {
     pub(super) fn cache_dir_platform(
         app: Option<&str>,
         env: &HashMap<String, Option<String>>,
-    ) -> Result<PathBuf, io::Error> {
+    ) -> Result<PathBuf> {
         #[cfg(target_os = "macos")]
         {
             let path = Self::home_dir_platform(env)?.join("Library").join("Caches");
@@ -712,20 +780,16 @@ impl Direct {
         }
     }
 
-    pub(super) fn temp_dir_platform(
-        env: &HashMap<String, Option<String>>,
-    ) -> Result<PathBuf, io::Error> {
+    pub(super) fn temp_dir_platform(env: &HashMap<String, Option<String>>) -> Result<PathBuf> {
         Ok(Self::absolute_env_path(env, "TMPDIR")?.unwrap_or_else(|| PathBuf::from("/tmp")))
     }
 
-    pub(super) fn unix_xattr_namespace(
-        namespace: XattrNamespace<'_>,
-    ) -> io::Result<Option<Vec<u8>>> {
+    pub(super) fn unix_xattr_namespace(namespace: XattrNamespace<'_>) -> Result<Option<Vec<u8>>> {
         #[cfg(target_os = "macos")]
         {
             if !matches!(namespace, XattrNamespace::Default) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
                     "xattr namespaces not supported on this platform",
                 ));
             }
@@ -752,12 +816,12 @@ impl Direct {
         }
     }
 
-    pub(super) fn xattr_path(path: &Path) -> io::Result<CString> {
+    pub(super) fn xattr_path(path: &Path) -> Result<CString> {
         CString::new(path.as_os_str().as_bytes())
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))
+            .map_err(|_| Error::new(ErrorKind::InvalidInput, "path contains NUL"))
     }
 
-    pub(super) fn xattr_name(name: &str, namespace: Option<&str>) -> io::Result<CString> {
+    pub(super) fn xattr_name(name: &str, namespace: Option<&str>) -> Result<CString> {
         #[cfg(target_os = "linux")]
         let full_name = match namespace {
             Some(namespace) => format!("{namespace}.{name}"),
@@ -766,8 +830,8 @@ impl Direct {
         #[cfg(target_os = "macos")]
         let full_name = match namespace {
             Some(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
                     "xattr namespaces are not supported on this platform",
                 ));
             }
@@ -780,13 +844,13 @@ impl Direct {
             format!("{namespace}.{name}")
         };
         CString::new(full_name)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "xattr name contains NUL"))
+            .map_err(|_| Error::new(ErrorKind::InvalidInput, "xattr name contains NUL"))
     }
 
     #[cfg(not(target_os = "freebsd"))]
-    fn xattr_entry(raw_name: Vec<u8>) -> io::Result<XattrEntry> {
+    fn xattr_entry(raw_name: Vec<u8>) -> Result<XattrEntry> {
         let name = String::from_utf8(raw_name)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "xattr name is not UTF-8"))?;
+            .map_err(|_| Error::new(ErrorKind::InvalidData, "xattr name is not UTF-8"))?;
         #[cfg(target_os = "linux")]
         {
             let (namespace, name) = name
@@ -812,28 +876,28 @@ impl Direct {
     }
 
     #[cfg(target_os = "freebsd")]
-    fn freebsd_xattr_namespace(namespace: &str) -> io::Result<libc::c_int> {
+    fn freebsd_xattr_namespace(namespace: &str) -> Result<libc::c_int> {
         match namespace {
             "user" => Ok(libc::EXTATTR_NAMESPACE_USER),
             "system" => Ok(libc::EXTATTR_NAMESPACE_SYSTEM),
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
+            _ => Err(Error::new(
+                ErrorKind::InvalidInput,
                 "FreeBSD xattr namespace must be user or system",
             )),
         }
     }
 
     #[cfg(target_os = "freebsd")]
-    fn freebsd_xattr_name(name: &CStr) -> io::Result<(libc::c_int, &CStr)> {
+    fn freebsd_xattr_name(name: &CStr) -> Result<(libc::c_int, &CStr)> {
         let bytes = name.to_bytes_with_nul();
         let separator = bytes
             .iter()
             .position(|byte| *byte == b'.')
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing namespace"))?;
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "missing namespace"))?;
         let namespace = std::str::from_utf8(&bytes[..separator])
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid namespace"))?;
+            .map_err(|_| Error::new(ErrorKind::InvalidInput, "invalid namespace"))?;
         let name = CStr::from_bytes_with_nul(&bytes[separator + 1..])
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid xattr name"))?;
+            .map_err(|_| Error::new(ErrorKind::InvalidInput, "invalid xattr name"))?;
         Ok((Self::freebsd_xattr_namespace(namespace)?, name))
     }
 
@@ -841,7 +905,7 @@ impl Direct {
     pub(super) fn unix_list_xattrs(
         target: UnixXattrTarget<'_>,
         namespace: Option<Vec<u8>>,
-    ) -> io::Result<Vec<XattrEntry>> {
+    ) -> Result<Vec<XattrEntry>> {
         #[cfg(not(target_os = "macos"))]
         let mut size = unsafe {
             match target {
@@ -873,7 +937,7 @@ impl Direct {
             }
         };
         if size < 0 {
-            return Err(io::Error::last_os_error());
+            return Err(Error::last_os_error());
         }
 
         loop {
@@ -907,7 +971,7 @@ impl Direct {
                 }
             };
             if read < 0 {
-                let err = io::Error::last_os_error();
+                let err = Error::last_os_error();
                 if err.raw_os_error() == Some(libc::ERANGE) {
                     #[cfg(not(target_os = "macos"))]
                     {
@@ -942,7 +1006,7 @@ impl Direct {
                         };
                     }
                     if size < 0 {
-                        return Err(io::Error::last_os_error());
+                        return Err(Error::last_os_error());
                     }
                     continue;
                 }
@@ -971,12 +1035,11 @@ impl Direct {
     pub(super) fn unix_list_xattrs(
         target: UnixXattrTarget<'_>,
         namespace: Option<Vec<u8>>,
-    ) -> io::Result<Vec<XattrEntry>> {
+    ) -> Result<Vec<XattrEntry>> {
         let mut entries = Vec::new();
         if let Some(namespace) = namespace {
-            let namespace = std::str::from_utf8(&namespace).map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidInput, "invalid xattr namespace")
-            })?;
+            let namespace = std::str::from_utf8(&namespace)
+                .map_err(|_| Error::new(ErrorKind::InvalidInput, "invalid xattr namespace"))?;
             Self::freebsd_list_xattrs_in_namespace(
                 target,
                 namespace,
@@ -1009,7 +1072,7 @@ impl Direct {
         namespace: &str,
         native: libc::c_int,
         entries: &mut Vec<XattrEntry>,
-    ) -> io::Result<()> {
+    ) -> Result<()> {
         fn list(
             target: UnixXattrTarget<'_>,
             namespace: libc::c_int,
@@ -1033,17 +1096,17 @@ impl Direct {
 
         let mut size = list(target, native, std::ptr::null_mut(), 0);
         if size < 0 {
-            return Err(io::Error::last_os_error());
+            return Err(Error::last_os_error());
         }
         loop {
             let mut buf = vec![0u8; size as usize];
             let read = list(target, native, buf.as_mut_ptr().cast(), buf.len());
             if read < 0 {
-                let error = io::Error::last_os_error();
+                let error = Error::last_os_error();
                 if error.raw_os_error() == Some(libc::ERANGE) {
                     size = list(target, native, std::ptr::null_mut(), 0);
                     if size < 0 {
-                        return Err(io::Error::last_os_error());
+                        return Err(Error::last_os_error());
                     }
                     continue;
                 }
@@ -1054,15 +1117,14 @@ impl Direct {
             while let Some((&name_len, rest)) = remaining.split_first() {
                 let name_len = usize::from(name_len);
                 if rest.len() < name_len {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
+                    return Err(Error::new(
+                        ErrorKind::InvalidData,
                         "malformed FreeBSD xattr list",
                     ));
                 }
                 let (name, tail) = rest.split_at(name_len);
-                let name = std::str::from_utf8(name).map_err(|_| {
-                    io::Error::new(io::ErrorKind::InvalidData, "xattr name is not UTF-8")
-                })?;
+                let name = std::str::from_utf8(name)
+                    .map_err(|_| Error::new(ErrorKind::InvalidData, "xattr name is not UTF-8"))?;
                 entries.push(XattrEntry {
                     name: name.to_owned(),
                     namespace: Some(namespace.to_owned()),
@@ -1076,7 +1138,7 @@ impl Direct {
     }
 
     #[cfg(not(target_os = "freebsd"))]
-    pub(super) fn unix_get_xattr(target: UnixXattrTarget<'_>, name: &CStr) -> io::Result<Vec<u8>> {
+    pub(super) fn unix_get_xattr(target: UnixXattrTarget<'_>, name: &CStr) -> Result<Vec<u8>> {
         #[cfg(not(target_os = "macos"))]
         let mut size = unsafe {
             match target {
@@ -1108,7 +1170,7 @@ impl Direct {
             }
         };
         if size < 0 {
-            return Err(io::Error::last_os_error());
+            return Err(Error::last_os_error());
         }
 
         loop {
@@ -1158,7 +1220,7 @@ impl Direct {
                 }
             };
             if read < 0 {
-                let err = io::Error::last_os_error();
+                let err = Error::last_os_error();
                 if err.raw_os_error() == Some(libc::ERANGE) {
                     #[cfg(not(target_os = "macos"))]
                     {
@@ -1209,7 +1271,7 @@ impl Direct {
                         };
                     }
                     if size < 0 {
-                        return Err(io::Error::last_os_error());
+                        return Err(Error::last_os_error());
                     }
                     continue;
                 }
@@ -1221,7 +1283,7 @@ impl Direct {
     }
 
     #[cfg(target_os = "freebsd")]
-    pub(super) fn unix_get_xattr(target: UnixXattrTarget<'_>, name: &CStr) -> io::Result<Vec<u8>> {
+    pub(super) fn unix_get_xattr(target: UnixXattrTarget<'_>, name: &CStr) -> Result<Vec<u8>> {
         fn get(
             target: UnixXattrTarget<'_>,
             namespace: libc::c_int,
@@ -1247,17 +1309,17 @@ impl Direct {
         let (namespace, name) = Self::freebsd_xattr_name(name)?;
         let mut size = get(target, namespace, name, std::ptr::null_mut(), 0);
         if size < 0 {
-            return Err(io::Error::last_os_error());
+            return Err(Error::last_os_error());
         }
         loop {
             let mut buf = vec![0u8; size as usize];
             let read = get(target, namespace, name, buf.as_mut_ptr().cast(), buf.len());
             if read < 0 {
-                let error = io::Error::last_os_error();
+                let error = Error::last_os_error();
                 if error.raw_os_error() == Some(libc::ERANGE) {
                     size = get(target, namespace, name, std::ptr::null_mut(), 0);
                     if size < 0 {
-                        return Err(io::Error::last_os_error());
+                        return Err(Error::last_os_error());
                     }
                     continue;
                 }
@@ -1273,7 +1335,7 @@ impl Direct {
         target: UnixXattrTarget<'_>,
         name: &CStr,
         value: &[u8],
-    ) -> io::Result<()> {
+    ) -> Result<()> {
         #[cfg(not(target_os = "macos"))]
         let res = unsafe {
             match target {
@@ -1322,7 +1384,7 @@ impl Direct {
             }
         };
         if res < 0 {
-            Err(io::Error::last_os_error())
+            Err(Error::last_os_error())
         } else {
             Ok(())
         }
@@ -1333,7 +1395,7 @@ impl Direct {
         target: UnixXattrTarget<'_>,
         name: &CStr,
         value: &[u8],
-    ) -> io::Result<()> {
+    ) -> Result<()> {
         let (namespace, name) = Self::freebsd_xattr_name(name)?;
         let result = unsafe {
             match target {
@@ -1361,14 +1423,14 @@ impl Direct {
             }
         };
         if result < 0 {
-            Err(io::Error::last_os_error())
+            Err(Error::last_os_error())
         } else {
             Ok(())
         }
     }
 
     #[cfg(not(target_os = "freebsd"))]
-    pub(super) fn unix_remove_xattr(target: UnixXattrTarget<'_>, name: &CStr) -> io::Result<()> {
+    pub(super) fn unix_remove_xattr(target: UnixXattrTarget<'_>, name: &CStr) -> Result<()> {
         #[cfg(not(target_os = "macos"))]
         let res = unsafe {
             match target {
@@ -1393,14 +1455,14 @@ impl Direct {
             }
         };
         if res < 0 {
-            Err(io::Error::last_os_error())
+            Err(Error::last_os_error())
         } else {
             Ok(())
         }
     }
 
     #[cfg(target_os = "freebsd")]
-    pub(super) fn unix_remove_xattr(target: UnixXattrTarget<'_>, name: &CStr) -> io::Result<()> {
+    pub(super) fn unix_remove_xattr(target: UnixXattrTarget<'_>, name: &CStr) -> Result<()> {
         let (namespace, name) = Self::freebsd_xattr_name(name)?;
         let result = unsafe {
             match target {
@@ -1416,7 +1478,7 @@ impl Direct {
             }
         };
         if result < 0 {
-            Err(io::Error::last_os_error())
+            Err(Error::last_os_error())
         } else {
             Ok(())
         }
@@ -1427,54 +1489,54 @@ impl Direct {
         user: Option<OwnershipIdentity>,
         group: Option<OwnershipIdentity>,
         follow: bool,
-    ) -> io::Result<()> {
+    ) -> Result<()> {
         use nix::{
             errno::Errno,
             unistd::{Gid, Group, Uid, User, chown},
         };
         use std::{ffi::CString, os::unix::ffi::OsStrExt};
 
-        fn resolve_user(user: Option<OwnershipIdentity>) -> io::Result<Option<Uid>> {
+        fn resolve_user(user: Option<OwnershipIdentity>) -> Result<Option<Uid>> {
             match user {
                 None => Ok(None),
                 Some(OwnershipIdentity::Id(id)) => Ok(Some(Uid::from_raw(id))),
-                Some(OwnershipIdentity::Name(name)) => {
-                    match User::from_name(&name).map_err(io::Error::from)? {
-                        Some(user) => Ok(Some(user.uid)),
-                        None => Err(io::Error::new(
-                            io::ErrorKind::NotFound,
-                            format!("user not found: {name}"),
-                        )),
-                    }
-                }
-                Some(OwnershipIdentity::Sid(_)) => Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
+                Some(OwnershipIdentity::Name(name)) => match User::from_name(&name)? {
+                    Some(user) => Ok(Some(user.uid)),
+                    None => Err(Error::new(
+                        ErrorKind::NotFound,
+                        format!("user not found: {name}"),
+                    )),
+                },
+                Some(OwnershipIdentity::Sid(_)) => Err(Error::new(
+                    ErrorKind::InvalidInput,
                     "SID ownership identities are not supported on Unix",
                 )),
             }
         }
 
-        fn resolve_group(group: Option<OwnershipIdentity>) -> io::Result<Option<Gid>> {
+        fn resolve_group(group: Option<OwnershipIdentity>) -> Result<Option<Gid>> {
             match group {
                 None => Ok(None),
                 Some(OwnershipIdentity::Id(id)) => Ok(Some(Gid::from_raw(id))),
-                Some(OwnershipIdentity::Name(name)) => {
-                    match Group::from_name(&name).map_err(io::Error::from)? {
-                        Some(group) => Ok(Some(group.gid)),
-                        None => Err(io::Error::new(
-                            io::ErrorKind::NotFound,
-                            format!("group not found: {name}"),
-                        )),
-                    }
-                }
-                Some(OwnershipIdentity::Sid(_)) => Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
+                Some(OwnershipIdentity::Name(name)) => match Group::from_name(&name)? {
+                    Some(group) => Ok(Some(group.gid)),
+                    None => Err(Error::new(
+                        ErrorKind::NotFound,
+                        format!("group not found: {name}"),
+                    )),
+                },
+                Some(OwnershipIdentity::Sid(_)) => Err(Error::new(
+                    ErrorKind::InvalidInput,
                     "SID ownership identities are not supported on Unix",
                 )),
             }
         }
 
-        fn lchown_path(path: &Path, user: Option<Uid>, group: Option<Gid>) -> Result<(), Errno> {
+        fn lchown_path(
+            path: &Path,
+            user: Option<Uid>,
+            group: Option<Gid>,
+        ) -> std::result::Result<(), Errno> {
             let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| Errno::EINVAL)?;
             Errno::result(unsafe {
                 libc::lchown(
@@ -1494,27 +1556,27 @@ impl Direct {
             } else {
                 lchown_path(&path, user, group)
             };
-            result.map_err(|err| io::Error::from_raw_os_error(err as i32))
+            result.map_err(|err| Error::from_raw_os_error(err as i32))
         })
         .await
-        .unwrap_or_else(|_| Err(io::Error::other("failed to join ownership update task")))
+        .unwrap_or_else(|_| Err(Error::other("failed to join ownership update task")))
     }
 
-    pub(super) async fn impl_copy_symlink(src: &Path, dst: &Path) -> io::Result<()> {
+    pub(super) async fn impl_copy_symlink(src: &Path, dst: &Path) -> Result<()> {
         let target = fs::read_link(src).await?;
         Self::impl_symlink(Path::new(""), &target, dst).await
     }
 
-    pub(super) async fn impl_symlink(_cwd: &Path, src: &Path, dst: &Path) -> io::Result<()> {
-        fs::symlink(src, dst).await
+    pub(super) async fn impl_symlink(_cwd: &Path, src: &Path, dst: &Path) -> Result<()> {
+        Ok(fs::symlink(src, dst).await?)
     }
 
-    pub(super) async fn impl_symlink_dir(src: &Path, dst: &Path) -> io::Result<()> {
-        fs::symlink(src, dst).await
+    pub(super) async fn impl_symlink_dir(src: &Path, dst: &Path) -> Result<()> {
+        Ok(fs::symlink(src, dst).await?)
     }
 
-    pub(super) async fn impl_symlink_file(src: &Path, dst: &Path) -> io::Result<()> {
-        fs::symlink(src, dst).await
+    pub(super) async fn impl_symlink_file(src: &Path, dst: &Path) -> Result<()> {
+        Ok(fs::symlink(src, dst).await?)
     }
 
     pub(super) async fn impl_xattrs(
@@ -1522,23 +1584,23 @@ impl Direct {
         path: &Path,
         namespace: XattrNamespace<'_>,
         follow: bool,
-    ) -> Result<Vec<XattrEntry>, io::Error> {
+    ) -> Result<Vec<XattrEntry>> {
         let path = Self::xattr_path(path)?;
         let namespace = Self::unix_xattr_namespace(namespace)?;
         tokio::task::spawn_blocking(move || {
             Self::unix_list_xattrs(UnixXattrTarget::Path(&path, follow), namespace)
         })
         .await
-        .unwrap_or_else(|_| Err(io::Error::from_raw_os_error(libc::EIO)))
+        .unwrap_or_else(|_| Err(Error::from_raw_os_error(libc::EIO)))
     }
 
     pub(super) async fn impl_streams(
         &self,
         _path: &Path,
         _follow: bool,
-    ) -> Result<Vec<StreamEntry>, io::Error> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
+    ) -> Result<Vec<StreamEntry>> {
+        Err(Error::new(
+            ErrorKind::Unsupported,
             "streams are not supported on this platform",
         ))
     }
@@ -1549,14 +1611,14 @@ impl Direct {
         name: &str,
         namespace: Option<&str>,
         follow: bool,
-    ) -> Result<Vec<u8>, io::Error> {
+    ) -> Result<Vec<u8>> {
         let path = Self::xattr_path(path)?;
         let name = Self::xattr_name(name, namespace)?;
         tokio::task::spawn_blocking(move || {
             Self::unix_get_xattr(UnixXattrTarget::Path(&path, follow), &name)
         })
         .await
-        .unwrap_or_else(|_| Err(io::Error::from_raw_os_error(libc::EIO)))
+        .unwrap_or_else(|_| Err(Error::from_raw_os_error(libc::EIO)))
     }
 
     pub(super) async fn impl_set_xattr(
@@ -1566,7 +1628,7 @@ impl Direct {
         namespace: Option<&str>,
         value: &[u8],
         follow: bool,
-    ) -> Result<(), io::Error> {
+    ) -> Result<()> {
         let path = Self::xattr_path(path)?;
         let name = Self::xattr_name(name, namespace)?;
         let value = value.to_vec();
@@ -1574,7 +1636,7 @@ impl Direct {
             Self::unix_set_xattr(UnixXattrTarget::Path(&path, follow), &name, &value)
         })
         .await
-        .unwrap_or_else(|_| Err(io::Error::from_raw_os_error(libc::EIO)))
+        .unwrap_or_else(|_| Err(Error::from_raw_os_error(libc::EIO)))
     }
 
     pub(super) async fn impl_remove_xattr(
@@ -1583,48 +1645,46 @@ impl Direct {
         name: &str,
         namespace: Option<&str>,
         follow: bool,
-    ) -> Result<(), io::Error> {
+    ) -> Result<()> {
         let path = Self::xattr_path(path)?;
         let name = Self::xattr_name(name, namespace)?;
         tokio::task::spawn_blocking(move || {
             Self::unix_remove_xattr(UnixXattrTarget::Path(&path, follow), &name)
         })
         .await
-        .unwrap_or_else(|_| Err(io::Error::from_raw_os_error(libc::EIO)))
+        .unwrap_or_else(|_| Err(Error::from_raw_os_error(libc::EIO)))
     }
 
     pub(super) async fn impl_file_xattrs(
         file: &Arc<std::fs::File>,
         namespace: XattrNamespace<'_>,
-    ) -> Result<Vec<XattrEntry>, io::Error> {
+    ) -> Result<Vec<XattrEntry>> {
         let file = Arc::clone(file);
         let namespace = Self::unix_xattr_namespace(namespace)?;
         tokio::task::spawn_blocking(move || {
             Self::unix_list_xattrs(UnixXattrTarget::Fd(file.as_fd()), namespace)
         })
         .await
-        .unwrap_or_else(|_| Err(io::Error::from_raw_os_error(libc::EIO)))
+        .unwrap_or_else(|_| Err(Error::from_raw_os_error(libc::EIO)))
     }
 
     pub(super) async fn impl_file_xattr(
         file: &Arc<std::fs::File>,
         name: &str,
         namespace: Option<&str>,
-    ) -> Result<Vec<u8>, io::Error> {
+    ) -> Result<Vec<u8>> {
         let file = Arc::clone(file);
         let name = Self::xattr_name(name, namespace)?;
         tokio::task::spawn_blocking(move || {
             Self::unix_get_xattr(UnixXattrTarget::Fd(file.as_fd()), &name)
         })
         .await
-        .unwrap_or_else(|_| Err(io::Error::from_raw_os_error(libc::EIO)))
+        .unwrap_or_else(|_| Err(Error::from_raw_os_error(libc::EIO)))
     }
 
-    pub(super) async fn impl_file_streams(
-        _file: &Arc<std::fs::File>,
-    ) -> Result<Vec<StreamEntry>, io::Error> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
+    pub(super) async fn impl_file_streams(_file: &Arc<std::fs::File>) -> Result<Vec<StreamEntry>> {
+        Err(Error::new(
+            ErrorKind::Unsupported,
             "streams are not supported on this platform",
         ))
     }
@@ -1634,7 +1694,7 @@ impl Direct {
         name: &str,
         namespace: Option<&str>,
         value: &[u8],
-    ) -> Result<(), io::Error> {
+    ) -> Result<()> {
         let file = Arc::clone(file);
         let name = Self::xattr_name(name, namespace)?;
         let value = value.to_vec();
@@ -1642,51 +1702,47 @@ impl Direct {
             Self::unix_set_xattr(UnixXattrTarget::Fd(file.as_fd()), &name, &value)
         })
         .await
-        .unwrap_or_else(|_| Err(io::Error::from_raw_os_error(libc::EIO)))
+        .unwrap_or_else(|_| Err(Error::from_raw_os_error(libc::EIO)))
     }
 
     pub(super) async fn impl_file_remove_xattr(
         file: &Arc<std::fs::File>,
         name: &str,
         namespace: Option<&str>,
-    ) -> Result<(), io::Error> {
+    ) -> Result<()> {
         let file = Arc::clone(file);
         let name = Self::xattr_name(name, namespace)?;
         tokio::task::spawn_blocking(move || {
             Self::unix_remove_xattr(UnixXattrTarget::Fd(file.as_fd()), &name)
         })
         .await
-        .unwrap_or_else(|_| Err(io::Error::from_raw_os_error(libc::EIO)))
+        .unwrap_or_else(|_| Err(Error::from_raw_os_error(libc::EIO)))
     }
 
-    pub(super) async fn impl_set_attrs(
-        &self,
-        path: &Path,
-        attrs: AttrsPatch,
-    ) -> Result<(), io::Error> {
+    pub(super) async fn impl_set_attrs(&self, path: &Path, attrs: AttrsPatch) -> Result<()> {
         let path = path.to_path_buf();
         tokio::task::spawn_blocking(move || Self::set_attrs_path(path, attrs))
             .await
-            .unwrap_or_else(|_| Err(io::Error::other("failed to join attrs update task")))
+            .unwrap_or_else(|_| Err(Error::other("failed to join attrs update task")))
     }
 
     pub(super) async fn impl_set_metadata(
         &self,
         paths: &[PathBuf],
         mut patch: MetadataPatch,
-    ) -> Result<(), io::Error> {
+    ) -> Result<()> {
         if patch.is_empty() {
             return Ok(());
         }
         if !patch.follow && (patch.mode.is_some() || !patch.attrs.is_empty()) {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
+            return Err(Error::new(
+                ErrorKind::Unsupported,
                 "mode and attributes cannot be set without following symlinks on this platform",
             ));
         }
         if patch.created.is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
+            return Err(Error::new(
+                ErrorKind::Unsupported,
                 "created timestamp is not supported on this platform",
             ));
         }
@@ -1699,36 +1755,28 @@ impl Direct {
                 use nix::unistd::{Group, User};
 
                 let user = match user {
-                    Some(OwnershipIdentity::Name(name)) => User::from_name(&name)
-                        .map_err(io::Error::from)?
+                    Some(OwnershipIdentity::Name(name)) => User::from_name(&name)?
                         .map(|user| Some(OwnershipIdentity::Id(user.uid.as_raw())))
                         .ok_or_else(|| {
-                            io::Error::new(
-                                io::ErrorKind::NotFound,
-                                format!("user not found: {name}"),
-                            )
+                            Error::new(ErrorKind::NotFound, format!("user not found: {name}"))
                         })?,
                     Some(OwnershipIdentity::Sid(_)) => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
+                        return Err(Error::new(
+                            ErrorKind::InvalidInput,
                             "SID ownership identities are not supported on Unix",
                         ));
                     }
                     value => value,
                 };
                 let group = match group {
-                    Some(OwnershipIdentity::Name(name)) => Group::from_name(&name)
-                        .map_err(io::Error::from)?
+                    Some(OwnershipIdentity::Name(name)) => Group::from_name(&name)?
                         .map(|group| Some(OwnershipIdentity::Id(group.gid.as_raw())))
                         .ok_or_else(|| {
-                            io::Error::new(
-                                io::ErrorKind::NotFound,
-                                format!("group not found: {name}"),
-                            )
+                            Error::new(ErrorKind::NotFound, format!("group not found: {name}"))
                         })?,
                     Some(OwnershipIdentity::Sid(_)) => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
+                        return Err(Error::new(
+                            ErrorKind::InvalidInput,
                             "SID ownership identities are not supported on Unix",
                         ));
                     }
@@ -1737,7 +1785,7 @@ impl Direct {
                 Ok((user, group))
             })
             .await
-            .unwrap_or_else(|_| Err(io::Error::other("failed to join ownership lookup task")))?;
+            .unwrap_or_else(|_| Err(Error::other("failed to join ownership lookup task")))?;
         }
 
         for path in paths {
@@ -1765,18 +1813,14 @@ impl Direct {
         Ok(())
     }
 
-    pub(super) async fn impl_canonicalize(&self, path: &Path) -> Result<PathBuf, io::Error> {
-        fs::canonicalize(path).await
+    pub(super) async fn impl_canonicalize(&self, path: &Path) -> Result<PathBuf> {
+        Ok(fs::canonicalize(path).await?)
     }
 
-    pub(super) async fn impl_set_permissions(
-        &self,
-        path: &Path,
-        mode: Mode,
-    ) -> Result<(), io::Error> {
+    pub(super) async fn impl_set_permissions(&self, path: &Path, mode: Mode) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
 
-        fs::set_permissions(path, std::fs::Permissions::from_mode(mode.bits())).await
+        Ok(fs::set_permissions(path, std::fs::Permissions::from_mode(mode.bits())).await?)
     }
 
     async fn impl_set_file_times(
@@ -1786,7 +1830,7 @@ impl Direct {
         modified: Option<i128>,
         created: Option<i128>,
         follow: bool,
-    ) -> Result<(), io::Error> {
+    ) -> Result<()> {
         use nix::{
             fcntl::AT_FDCWD,
             sys::{
@@ -1795,26 +1839,26 @@ impl Direct {
             },
         };
 
-        fn unix_timespec(time: Option<i128>) -> io::Result<TimeSpec> {
+        fn unix_timespec(time: Option<i128>) -> Result<TimeSpec> {
             let Some(time) = time else {
                 return Ok(TimeSpec::UTIME_OMIT);
             };
             let secs = i64::try_from(time.div_euclid(1_000_000_000))
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid timestamp"))?;
+                .map_err(|_| Error::new(ErrorKind::InvalidInput, "invalid timestamp"))?;
             let nanos = i64::try_from(time.rem_euclid(1_000_000_000))
                 .expect("nanosecond remainder is in i64 range");
             Ok(TimeSpec::new(secs, nanos))
         }
 
         if created.is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
+            return Err(Error::new(
+                ErrorKind::Unsupported,
                 "created timestamp is not supported on this platform",
             ));
         }
 
         let path = path.to_path_buf();
-        tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || -> Result<()> {
             let atime = unix_timespec(accessed)?;
             let mtime = unix_timespec(modified)?;
             let flags = if follow {
@@ -1822,10 +1866,10 @@ impl Direct {
             } else {
                 UtimensatFlags::NoFollowSymlink
             };
-            utimensat(AT_FDCWD, &path, &atime, &mtime, flags).map_err(io::Error::from)
+            Ok(utimensat(AT_FDCWD, &path, &atime, &mtime, flags)?)
         })
         .await
-        .unwrap_or_else(|_| Err(io::Error::from_raw_os_error(libc::EIO)))
+        .unwrap_or_else(|_| Err(Error::from_raw_os_error(libc::EIO)))
     }
 
     pub(super) async fn impl_chown(
@@ -1834,20 +1878,20 @@ impl Direct {
         user: Option<OwnershipIdentity>,
         group: Option<OwnershipIdentity>,
         follow: bool,
-    ) -> Result<(), io::Error> {
+    ) -> Result<()> {
         Self::chown_local(path.to_path_buf(), user, group, follow).await
     }
 }
 
-impl DirectChild {
-    pub(super) async fn impl_terminate(self) -> io::Result<Option<std::process::ExitStatus>> {
+impl Child {
+    pub(super) async fn impl_terminate(self) -> Result<Option<std::process::ExitStatus>> {
         let mut child = self.inner;
         let Some(pid) = child.id() else {
-            return child.wait().await.map(Some);
+            return Ok(child.wait().await.map(Some)?);
         };
         let target = match self.process_control {
-            crate::ProcessControl::Foreground => pid as libc::pid_t,
-            crate::ProcessControl::Background => -(pid as libc::pid_t),
+            ProcessControl::Foreground => pid as libc::pid_t,
+            ProcessControl::Background => -(pid as libc::pid_t),
         };
         let signal = signal_to_raw(self.termination_policy.signal)?;
 
@@ -1856,7 +1900,7 @@ impl DirectChild {
             if result == 0 {
                 Ok(())
             } else {
-                let error = io::Error::last_os_error();
+                let error = Error::last_os_error();
                 if error.raw_os_error() == Some(libc::ESRCH) {
                     Ok(())
                 } else {
@@ -1867,16 +1911,16 @@ impl DirectChild {
         send(signal)?;
 
         let wait = async {
-            match self.process_control {
-                crate::ProcessControl::Foreground => child.wait().await,
-                crate::ProcessControl::Background => {
+            Ok(match self.process_control {
+                ProcessControl::Foreground => child.wait().await,
+                ProcessControl::Background => {
                     let mut root_status = None;
                     loop {
                         if root_status.is_none() {
                             root_status = child.try_wait()?;
                         }
                         if unsafe { libc::kill(target, 0) } != 0 {
-                            let error = io::Error::last_os_error();
+                            let error = Error::last_os_error();
                             if error.raw_os_error() == Some(libc::ESRCH) {
                                 break match root_status {
                                     Some(status) => Ok(status),
@@ -1890,7 +1934,7 @@ impl DirectChild {
                         tokio::time::sleep(Duration::from_millis(20)).await;
                     }
                 }
-            }
+            }?)
         };
         if let Ok(status) = timeout(self.termination_policy.grace, wait).await {
             return status.map(Some);
@@ -1903,38 +1947,35 @@ impl DirectChild {
         // Remaining group members are not necessarily our children. In
         // particular, an orphaned zombie can keep kill(-pgid, 0) succeeding
         // indefinitely when PID 1 does not reap it.
-        child.wait().await.map(Some)
+        Ok(child.wait().await.map(Some)?)
     }
 }
 
-impl DirectCommand<'_> {
-    pub(super) fn configure_process(
-        &self,
-        command: &mut tokio::process::Command,
-    ) -> io::Result<()> {
+impl Command<'_> {
+    pub(super) fn configure_process(&self, command: &mut tokio::process::Command) -> Result<()> {
         signal_to_raw(self.termination_policy.signal)?;
-        if self.process_control == crate::ProcessControl::Background {
+        if self.process_control == ProcessControl::Background {
             command.as_std_mut().process_group(0);
         }
         Ok(())
     }
 
-    pub(super) fn finish_spawn(&self, child: tokio::process::Child) -> io::Result<DirectChild> {
-        Ok(DirectChild::new(
+    pub(super) fn finish_spawn(&self, child: tokio::process::Child) -> Result<Child> {
+        Ok(Child::new(
             child,
             self.process_control,
             self.termination_policy,
         ))
     }
 
-    pub(super) fn impl_stdout_inherit_stderr(&mut self) -> io::Result<&mut Self> {
+    pub(super) fn impl_stdout_inherit_stderr(&mut self) -> Result<&mut Self> {
         self.stdout = Some(std::process::Stdio::from(
             std::io::stderr().as_fd().try_clone_to_owned()?,
         ));
         Ok(self)
     }
 
-    pub(super) fn impl_stderr_inherit_stdout(&mut self) -> io::Result<&mut Self> {
+    pub(super) fn impl_stderr_inherit_stdout(&mut self) -> Result<&mut Self> {
         self.stderr = Some(std::process::Stdio::from(
             std::io::stdout().as_fd().try_clone_to_owned()?,
         ));
@@ -1942,7 +1983,7 @@ impl DirectCommand<'_> {
     }
 }
 
-fn signal_to_raw(signal: crate::process::Signal) -> io::Result<libc::c_int> {
+fn signal_to_raw(signal: crate::process::Signal) -> Result<libc::c_int> {
     use crate::process::Signal;
     let signal = match signal {
         Signal::Hup => libc::SIGHUP,
@@ -1988,14 +2029,14 @@ fn signal_to_raw(signal: crate::process::Signal) -> io::Result<libc::c_int> {
         Signal::Librt => libc::SIGLIBRT,
         Signal::Number(signal) if signal > 0 => signal,
         Signal::Number(_) => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
                 "termination signal must be positive",
             ));
         }
         _ => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
                 format!("{signal:?} is not supported on this platform"),
             ));
         }
@@ -2003,7 +2044,7 @@ fn signal_to_raw(signal: crate::process::Signal) -> io::Result<libc::c_int> {
     Ok(signal)
 }
 
-impl super::DirectOpenOptions {
+impl super::OpenOptions {
     pub(super) fn apply_no_follow_flags(&self, opts: &mut OpenOptions) {
         if self.no_follow {
             opts.custom_flags(libc::O_NOFOLLOW);

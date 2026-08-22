@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use dolang_vfs::{Vfs, client::Client, security::SecurityInfo, target::TargetInfo};
+use dolang_vfs::{Vfs, security::SecurityInfo, target::TargetInfo};
 use std::collections::HashMap;
 use tempfile::tempdir;
 use tokio::time::timeout;
@@ -23,7 +23,7 @@ const AGENT_BIN: &str = env!("CARGO_BIN_EXE_dolang-vfs");
 async fn spawn_stdio(
     args: &[std::ffi::OsString],
     without_env: &[&str],
-) -> (Client, tokio::process::Child) {
+) -> (Vfs, tokio::process::Child) {
     let mut command = tokio::process::Command::new(AGENT_BIN);
     command
         .args(args)
@@ -36,13 +36,13 @@ async fn spawn_stdio(
     let mut child = command.spawn().expect("failed to spawn agent");
     let stdout = child.stdout.take().expect("stdout not captured");
     let stdin = child.stdin.take().expect("stdin not captured");
-    let client = Client::new_split(stdout, stdin)
+    let client = Vfs::new_split(stdout, stdin)
         .await
         .expect("negotiation should succeed");
     (client, child)
 }
 
-/// Spawns the helper, runs [`Client::query`], then stops it and waits for
+/// Spawns the helper, reads its initial snapshot, then stops it and waits for
 /// exit. Used by tests that only care about the resulting initial snapshot. A
 /// single stray byte of profile or startup chatter on the helper's stdout
 /// would desynchronize the frame stream and fail the query, so this also
@@ -234,12 +234,11 @@ async fn base64_option_forms_reject_undecodable_values() {
 #[cfg(all(feature = "winreg", feature = "winscm"))]
 #[tokio::test]
 async fn stock_binary_registers_vfs_extensions() {
-    use dolang_vfs::AnyVfs;
     use dolang_vfs_winreg::{Access, Key, PredefinedRoot, View};
     use dolang_vfs_winscm::{ScManager, ServiceAccess};
 
     let (client, mut child) = spawn_stdio(&[], &[]).await;
-    let vfs = AnyVfs::Client(client.clone());
+    let vfs = client.clone();
 
     #[cfg(unix)]
     {
@@ -284,7 +283,7 @@ async fn stock_binary_registers_vfs_extensions() {
     }
 
     client.stop().await.unwrap();
-    // `AnyVfs::Client` owns another client clone, including the child's piped
+    // `vfs` owns another client clone, including the child's piped
     // stdin/stdout handles. Drop it, then explicitly close the shared client
     // before waiting so the server observes transport EOF.
     drop(vfs);
@@ -308,7 +307,7 @@ mod listen_mode {
         time::Duration,
     };
 
-    use dolang_vfs::{Child, Command, Vfs};
+    use dolang_vfs::Vfs;
     use tempfile::tempdir;
     use tokio::time::timeout;
     use typed_path::{Utf8TypedPath, Utf8UnixPath};
@@ -336,13 +335,10 @@ mod listen_mode {
     }
 
     async fn stop_daemon(socket_path: &Path) {
-        let client = timeout(
-            Duration::from_secs(5),
-            dolang_vfs::client::Client::connect(socket_path),
-        )
-        .await
-        .expect("timeout connecting to daemon")
-        .expect("failed to connect");
+        let client = timeout(Duration::from_secs(5), Vfs::connect(socket_path))
+            .await
+            .expect("timeout connecting to daemon")
+            .expect("failed to connect");
         client.stop().await.expect("stop should succeed");
         client.close().await;
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -378,13 +374,10 @@ mod listen_mode {
 
         wait_for_ready_from_stdout(&mut child).expect("failed to read READY");
 
-        let client = timeout(
-            Duration::from_secs(5),
-            dolang_vfs::client::Client::connect(&socket_path),
-        )
-        .await
-        .expect("timeout connecting to agent")
-        .expect("failed to connect");
+        let client = timeout(Duration::from_secs(5), Vfs::connect(&socket_path))
+            .await
+            .expect("timeout connecting to agent")
+            .expect("failed to connect");
 
         assert!(client.env().next().is_some(), "should have environment");
 
@@ -489,7 +482,7 @@ mod listen_mode {
             futures.push(async move {
                 let client = timeout(
                     Duration::from_secs(5),
-                    dolang_vfs::client::Client::connect(&socket_path),
+                    dolang_vfs::Vfs::connect(&socket_path),
                 )
                 .await
                 .expect("timeout connecting")
@@ -529,14 +522,14 @@ mod listen_mode {
 
         let client = timeout(
             Duration::from_secs(5),
-            dolang_vfs::client::Client::connect(&socket_path),
+            dolang_vfs::Vfs::connect(&socket_path),
         )
         .await
         .expect("timeout connecting")
         .expect("failed to connect");
 
         let ls_path = client
-            .which("ls", None, None)
+            .which(typed_str("ls"), None, None)
             .await
             .expect("which should succeed");
 
@@ -561,7 +554,7 @@ mod listen_mode {
 
         let client = timeout(
             Duration::from_secs(5),
-            dolang_vfs::client::Client::connect(&socket_path),
+            dolang_vfs::Vfs::connect(&socket_path),
         )
         .await
         .expect("timeout connecting")
@@ -576,7 +569,7 @@ mod listen_mode {
             .await
             .expect("well-known path should succeed");
 
-        assert_eq!(path, std::path::Path::new("/tmp/test-home"));
+        assert_eq!(path, "/tmp/test-home");
 
         stop_daemon(&socket_path).await;
     }
@@ -596,7 +589,7 @@ mod listen_mode {
 
         let client = timeout(
             Duration::from_secs(5),
-            dolang_vfs::client::Client::connect(&socket_path),
+            dolang_vfs::Vfs::connect(&socket_path),
         )
         .await
         .expect("timeout connecting")
@@ -632,7 +625,7 @@ mod listen_mode {
 
         let client = timeout(
             Duration::from_secs(5),
-            dolang_vfs::client::Client::connect(&socket_path),
+            dolang_vfs::Vfs::connect(&socket_path),
         )
         .await
         .expect("timeout connecting")
@@ -925,7 +918,7 @@ mod accept_mode {
     use std::{os::unix::fs::PermissionsExt, path::Path, process::Stdio, time::Duration};
 
     use dolang_rpc::AuthKey;
-    use dolang_vfs::client::Client;
+    use dolang_vfs::Vfs;
     use tempfile::tempdir;
     use tokio::time::timeout;
     use tokio::{
@@ -996,10 +989,10 @@ mod accept_mode {
             .expect("wait")
     }
 
-    async fn connect(socket_path: &Path, key: &[u8]) -> Result<Client, dolang_vfs::error::Error> {
+    async fn connect(socket_path: &Path, key: &[u8]) -> Result<Vfs, dolang_vfs::error::Error> {
         timeout(
             Duration::from_secs(5),
-            Client::connect_with_key(socket_path, Some(AuthKey::new(key).unwrap())),
+            Vfs::connect_with_key(socket_path, Some(AuthKey::new(key).unwrap())),
         )
         .await
         .expect("timeout connecting to agent")

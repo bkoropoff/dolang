@@ -13,8 +13,10 @@ use dolang::runtime::{
     value::{BinEmbryo, PinBin, PinStr, TypeObject, View},
 };
 use dolang_vfs::{
-    AnyFile, FileHandle, OpenOptions, Vfs,
-    file::{FileLockBehavior, FileLockMode, FileLockRange, FileLockRequest},
+    file::{
+        File as VfsFile, FileLockBehavior, FileLockMode, FileLockRange, FileLockRequest,
+        OpenOptions,
+    },
     process::{StdioRecv, StdioSend},
 };
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
@@ -80,7 +82,7 @@ fn lock_range<'v, 's>(
 }
 
 /// Configure OpenOptions based on mode string (supports 'b' suffix for binary mode).
-fn configure_options(opts: &mut impl OpenOptions, mode: &str) {
+fn configure_options(opts: &mut OpenOptions, mode: &str) {
     // Strip 'b' suffix for binary mode - it doesn't affect file opening
     match mode.strip_suffix('b').unwrap_or(mode) {
         "r" => {
@@ -155,7 +157,7 @@ fn maximal_utf8_prefix(bytes: &[u8]) -> result::Result<&str, ()> {
 /// straight in.
 async fn read_at_looping<'v, 's>(
     strand: &mut Strand<'v, 's>,
-    file: &AnyFile,
+    file: &VfsFile,
     embryo: &mut BinEmbryo<'v>,
     offset: u64,
     size: Option<usize>,
@@ -193,7 +195,7 @@ async fn read_at_looping<'v, 's>(
 ///
 /// Short for the same reasons as [`read_at_looping`], and looped for the same
 /// reason: a script asking to write a buffer means all of it.
-async fn write_at_looping(file: &AnyFile, data: &[u8], offset: u64) -> io::Result<usize> {
+async fn write_at_looping(file: &VfsFile, data: &[u8], offset: u64) -> io::Result<usize> {
     let total = data.len();
     let mut written = 0usize;
     while written < total {
@@ -229,7 +231,7 @@ impl<'v, 'a> Pinned<'v, 'a> {
 
 /// A handle to an open file.
 pub(crate) struct File<'v> {
-    file: Option<AnyFile>,
+    file: Option<VfsFile>,
     buf: BinEmbryo<'v>,
 }
 
@@ -246,7 +248,7 @@ pub(crate) async fn open<'v, 's>(
     global: State<'v, Global<'v>>,
     path: Utf8TypedPath<'_>,
     mode: &str,
-) -> Result<'v, 's, AnyFile> {
+) -> Result<'v, 's, VfsFile> {
     let path = super::prepend_cwd(strand, global, path)?;
     let local = global.local.get(strand);
     let vfs = local.vfs();
@@ -260,7 +262,7 @@ pub(crate) async fn open_native<'v>(
     global: State<'v, Global<'v>>,
     path: Utf8TypedPath<'_>,
     mode: &str,
-) -> io::Result<AnyFile> {
+) -> io::Result<VfsFile> {
     let local = global.local.get(strand);
     let path = local.cwd().join(path.as_str());
     let vfs = local.vfs();
@@ -275,7 +277,7 @@ impl<'v> File<'v> {
     pub(crate) fn create(
         _strand: &Strand<'v, '_>,
         global: State<'v, Global<'v>>,
-        file: AnyFile,
+        file: VfsFile,
         mode: &str,
     ) -> (Self, FileAnnex<'v>) {
         (

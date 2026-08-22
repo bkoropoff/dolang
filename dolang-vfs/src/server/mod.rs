@@ -7,9 +7,7 @@ use std::{
 };
 
 #[cfg(unix)]
-use std::path::Path;
-#[cfg(unix)]
-use std::time::Duration;
+use std::{path::Path, time::Duration};
 
 use bytes::{Buf, BytesMut};
 #[cfg(unix)]
@@ -25,24 +23,26 @@ use std::os::unix::io::OwnedFd;
 use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::NamedPipeClient;
+use typed_path::Utf8TypedPath;
 #[cfg(all(docsrs, not(windows)))]
 struct NamedPipeClient;
-#[cfg(unix)]
-use tokio::net::{UnixListener, UnixStream, unix::SocketAddr};
 use tokio::sync::{Mutex, watch};
 #[cfg(unix)]
-use tokio::task::{JoinError, JoinSet};
-#[cfg(unix)]
-use tokio::{sync::mpsc, time::timeout};
+use tokio::{
+    net::{UnixListener, UnixStream, unix::SocketAddr},
+    sync::mpsc,
+    task::{JoinError, JoinSet},
+    time::timeout,
+};
 
-use crate::direct::Direct;
-use crate::extension::ExtContext;
-use crate::file::{FileLock, FileLockRequest};
-use crate::security::{Acl, AclKind};
 use crate::{
-    AnyFile, AnyVfs, Child as _, Command as _, Error, FileHandle as _, FsMetadata, MAX_FILE_READ,
-    Metadata, OpenOptions as _, STREAM_CHUNK_SIZE, SessionMode, StdioRecv, StdioSend, StreamEntry,
-    Utf8TypedPath, Vfs, XattrEntry,
+    MAX_FILE_READ, STREAM_CHUNK_SIZE, SessionMode, Vfs, client,
+    directory::ReadDir,
+    error::{Error, ErrorKind, HandoffError, Result as VfsResult},
+    extension::{self, ExtContext},
+    file::{AccessFlags, File, FileLock, FileLockRequest, StreamEntry},
+    metadata::{FsMetadata, Metadata},
+    process::{Child, Command, StdioRecv, StdioSend},
     protocol::{
         AccessRequest, AclRequest, CanonicalizeRequest, CopyRequest, CreateDirRequest,
         ExtensionRequest, ExtensionResponse, FsMetadataRequest, GlobRequest, HardLinkRequest,
@@ -54,14 +54,13 @@ use crate::{
         WellKnownPathRequest, WindowsAdminRequest, WireError, WirePath, XattrNamespaceRequest,
         XattrRequest, XattrsRequest, rpc_builder,
     },
-    session::FileMarker,
-    session::StdioRecvMarker,
-    session::StdioSendMarker,
+    security::{Acl, AclKind},
+    session::{
+        ChildMarker, FileLockMarker, FileMarker, ReadDirMarker, StdioRecvMarker, StdioSendMarker,
+        VfsMarker,
+    },
+    xattr::XattrEntry,
 };
-
-fn request_path(path: &WirePath) -> Utf8TypedPath<'_> {
-    path.into()
-}
 
 #[derive(Clone)]
 struct Connection {
@@ -145,25 +144,17 @@ impl Drop for DrainSlot {
 }
 
 struct RetainedVfs {
-    vfs: AnyVfs,
-    session: Option<crate::session::VfsSession>,
+    vfs: Vfs,
 }
 
 impl RetainedVfs {
-    fn plain(vfs: AnyVfs) -> Self {
-        Self { vfs, session: None }
-    }
-
-    fn session(session: crate::session::VfsSession) -> Self {
-        Self {
-            vfs: session.client().clone().into(),
-            session: Some(session),
-        }
+    fn plain(vfs: Vfs) -> Self {
+        Self { vfs }
     }
 }
 
 impl OpaqueResource for RetainedVfs {
-    type Marker = crate::session::VfsMarker;
+    type Marker = VfsMarker;
 }
 
 /// Reads the whole of `len` bytes at `offset`, or as much as exists.
@@ -174,15 +165,20 @@ impl OpaqueResource for RetainedVfs {
 /// `len` is bounded by [`MAX_FILE_READ`] at the call site, which is what makes
 /// buffering it whole affordable.
 ///
-/// One [`FileHandle::read_at`] may come up short for reasons other than the end
+/// One [`File::read_at`] may come up short for reasons other than the end
 /// of the file — a nested remote file clamps at one chunk, and a positional read
 /// is permitted to be short in general — so this loops rather than treating the
 /// first short read as the end.
-async fn read_file_range(file: &AnyFile, offset: u64, len: usize) -> io::Result<BytesMut> {
+async fn read_file_range(file: &File, offset: u64, len: usize) -> io::Result<BytesMut> {
     let mut buf = BytesMut::with_capacity(len);
     while buf.len() < len {
         let at = offset + buf.len() as u64;
-        if file.read_at(&mut buf, at).await? == 0 {
+        if file
+            .read_at(&mut buf, at)
+            .await
+            .map_err(crate::error::Error::into_io_error)?
+            == 0
+        {
             break;
         }
     }
@@ -208,7 +204,7 @@ async fn next_trailer_chunk(
     Ok((!buf.is_empty()).then_some(buf))
 }
 
-struct RetainedFile(AnyFile);
+struct RetainedFile(File);
 
 /// A lock the peer still holds, addressed by its own opaque handle.
 ///
@@ -218,13 +214,13 @@ struct RetainedFile(AnyFile);
 struct RetainedFileLock(FileLock);
 
 impl OpaqueResource for RetainedFileLock {
-    type Marker = crate::session::FileLockMarker;
+    type Marker = FileLockMarker;
 }
 
-struct RetainedReadDir(Mutex<crate::ReadDir>);
+struct RetainedReadDir(Mutex<ReadDir>);
 
 impl OpaqueResource for RetainedReadDir {
-    type Marker = crate::session::ReadDirMarker;
+    type Marker = ReadDirMarker;
 }
 
 impl OpaqueResource for RetainedFile {
@@ -251,14 +247,14 @@ impl OpaqueResource for RetainedStdioRecv {
     type Marker = StdioRecvMarker;
 }
 
-struct RetainedChild(Mutex<crate::AnyChild>);
+struct RetainedChild(Mutex<Child>);
 
 impl OpaqueResource for RetainedChild {
-    type Marker = crate::session::ChildMarker;
+    type Marker = ChildMarker;
 }
 
 struct ServerState {
-    vfs: AnyVfs,
+    vfs: Vfs,
     #[cfg(unix)]
     shutdown_tx: watch::Sender<()>,
 }
@@ -305,14 +301,14 @@ pub struct Server {
 
 impl Server {
     /// Creates an opaque-only VFS server over a bidirectional byte stream.
-    pub async fn new<T>(stream: T) -> crate::Result<Self>
+    pub async fn new<T>(stream: T) -> crate::error::Result<Self>
     where
         T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let rpc = rpc_builder(None)
             .server(stream)
             .await
-            .map_err(crate::client::rpc_error)?
+            .map_err(client::rpc_error)?
             .bind();
         Ok(Self {
             #[cfg(unix)]
@@ -326,7 +322,7 @@ impl Server {
     }
 
     /// Creates an opaque-only VFS server on separate reader and writer streams.
-    pub async fn new_split<R, W>(reader: R, writer: W) -> crate::Result<Self>
+    pub async fn new_split<R, W>(reader: R, writer: W) -> crate::error::Result<Self>
     where
         R: AsyncRead + Send + 'static,
         W: AsyncWrite + Send + 'static,
@@ -334,7 +330,7 @@ impl Server {
         let rpc = rpc_builder(None)
             .server_split(reader, writer)
             .await
-            .map_err(crate::client::rpc_error)?
+            .map_err(client::rpc_error)?
             .bind();
         Ok(Self {
             #[cfg(unix)]
@@ -347,11 +343,11 @@ impl Server {
         })
     }
 
-    fn state() -> crate::Result<Arc<ServerState>> {
+    fn state() -> crate::error::Result<Arc<ServerState>> {
         #[cfg(unix)]
         let (shutdown_tx, _) = watch::channel(());
         Ok(Arc::new(ServerState {
-            vfs: AnyVfs::from(Direct::new()?),
+            vfs: Vfs::direct()?,
             #[cfg(unix)]
             shutdown_tx,
         }))
@@ -359,8 +355,8 @@ impl Server {
 
     /// Binds a Unix-domain listener for VFS agent connections.
     #[cfg(unix)]
-    pub async fn bind(path: impl AsRef<Path>) -> Result<Self, io::Error> {
-        Self::from_listener(UnixListener::bind(path)?, None)
+    pub async fn bind(path: impl AsRef<Path>) -> VfsResult<Self> {
+        Ok(Self::from_listener(UnixListener::bind(path)?, None)?)
     }
 
     /// Binds a Unix-domain listener that requires mutual proof of a pre-shared
@@ -371,11 +367,8 @@ impl Server {
     /// connection that fails the check is dropped during negotiation, before
     /// it can issue any request.
     #[cfg(unix)]
-    pub async fn bind_with_key(
-        path: impl AsRef<Path>,
-        key: Option<AuthKey>,
-    ) -> Result<Self, io::Error> {
-        Self::from_listener(UnixListener::bind(path)?, key)
+    pub async fn bind_with_key(path: impl AsRef<Path>, key: Option<AuthKey>) -> VfsResult<Self> {
+        Ok(Self::from_listener(UnixListener::bind(path)?, key)?)
     }
 
     /// Create a server from an existing `UnixListener`.
@@ -385,7 +378,7 @@ impl Server {
             listener: Some(listener),
             rpc: None,
             mode: SessionMode::Native,
-            shared: Self::state().map_err(crate::Error::into_io_error)?,
+            shared: Self::state().map_err(crate::error::Error::into_io_error)?,
             key,
         })
     }
@@ -394,20 +387,20 @@ impl Server {
     #[cfg(any(windows, docsrs))]
     #[cfg_attr(docsrs, doc(cfg(windows)))]
     #[cfg_attr(all(docsrs, not(windows)), allow(private_interfaces))]
-    pub async fn from_named_pipe_client(pipe: NamedPipeClient) -> Result<Self, io::Error> {
+    pub async fn from_named_pipe_client(pipe: NamedPipeClient) -> VfsResult<Self> {
         #[cfg(windows)]
         {
             let rpc = rpc_builder(None)
                 .server_named_pipe_client(pipe)
                 .await
-                .map_err(crate::client::rpc_error)?
+                .map_err(client::rpc_error)?
                 .bind();
             Ok(Self {
                 #[cfg(unix)]
                 listener: None,
                 rpc: Some(rpc),
                 mode: SessionMode::Native,
-                shared: Self::state().map_err(crate::Error::into_io_error)?,
+                shared: Self::state()?,
             })
         }
         #[cfg(all(docsrs, not(windows)))]
@@ -450,7 +443,7 @@ impl Server {
     /// disconnects are ignored; unexpected handler failures are reported to
     /// standard error.
     #[cfg(unix)]
-    pub async fn accept(mut self) -> Result<(), io::Error> {
+    pub async fn accept(mut self) -> VfsResult<()> {
         let mut shutdown_rx = self.shared.shutdown_tx.subscribe();
         let mut handlers = JoinSet::new();
 
@@ -491,7 +484,7 @@ impl Server {
     /// limit on in-flight attempts, so a peer that connects and then says
     /// nothing cannot stall or crowd out the real one either.
     #[cfg(unix)]
-    pub async fn accept_one<F>(mut self, established: F) -> Result<(), io::Error>
+    pub async fn accept_one<F>(mut self, established: F) -> VfsResult<()>
     where
         F: FnOnce(),
     {
@@ -535,7 +528,7 @@ impl Server {
         match serve_connection(rpc, connection).await {
             Ok(()) => Ok(()),
             Err(error) if orderly_disconnect(&error) => Ok(()),
-            Err(error) => Err(io::Error::other(error)),
+            Err(error) => Err(Error::new(ErrorKind::Other, error.to_string())),
         }
     }
 
@@ -580,7 +573,7 @@ impl Server {
     }
 
     /// Serves one connected VFS session until it closes or fails.
-    pub async fn serve(mut self) -> Result<(), io::Error> {
+    pub async fn serve(mut self) -> VfsResult<()> {
         let connection = Arc::new(Connection {
             server: self.shared,
             mode: self.mode,
@@ -593,7 +586,7 @@ impl Server {
         match serve_connection(rpc, connection).await {
             Ok(()) => Ok(()),
             Err(error) if orderly_disconnect(&error) => Ok(()),
-            Err(error) => Err(io::Error::other(error)),
+            Err(error) => Err(Error::new(ErrorKind::Other, error.to_string())),
         }
     }
 }
@@ -667,7 +660,7 @@ impl Connection {
     fn select(
         &self,
         context: &CallContext<VfsProtocol>,
-        vfs: Option<Cite<crate::session::VfsMarker>>,
+        vfs: Option<Cite<VfsMarker>>,
     ) -> Result<Self, WireError> {
         let Some(vfs) = vfs else {
             return Ok(self.clone());
@@ -689,7 +682,7 @@ impl Connection {
     async fn handle_stop(
         &self,
         context: &mut CallContext<VfsProtocol>,
-        vfs: Option<Cite<crate::session::VfsMarker>>,
+        vfs: Option<Cite<VfsMarker>>,
     ) -> ResponseKind {
         let Some(vfs) = vfs else {
             // Stop accepting immediately. Existing sessions have their own
@@ -705,36 +698,33 @@ impl Connection {
             context.shutdown();
             return ResponseKind::Stop;
         };
-        let retained = match context.acquire::<RetainedVfs>(vfs.clone()) {
-            Ok(retained) => retained,
+        let retained = match context.unregister::<RetainedVfs>(vfs) {
+            Ok(Some(retained)) => retained,
+            Ok(None) => {
+                return ResponseKind::Error(wire_error(io::Error::new(
+                    io::ErrorKind::ResourceBusy,
+                    "opaque VFS is in use",
+                )));
+            }
             Err(_) => return ResponseKind::Error(Self::invalid_opaque("VFS")),
         };
-        let retained_vfs = retained.vfs.clone();
-        drop(retained);
-        let retained = context.unregister::<RetainedVfs>(vfs).ok().flatten();
-        if let Some(session) = retained.and_then(|retained| retained.session) {
-            return match session.stop().await {
-                Ok(()) => ResponseKind::Stop,
-                Err(error) => ResponseKind::Error(wire_error(error)),
-            };
-        }
-        match retained_vfs.stop().await {
+        match retained.vfs.stop().await {
             Ok(()) => ResponseKind::Stop,
             Err(error) => ResponseKind::Error(wire_error(error)),
         }
     }
 
     fn unsupported(operation: &str) -> WireError {
-        Error::new(
-            crate::ErrorKind::Unsupported,
+        crate::error::Error::new(
+            crate::error::ErrorKind::Unsupported,
             format!("{operation} is not supported by a remote VFS session"),
         )
         .into()
     }
 
     fn invalid_opaque(kind: &str) -> WireError {
-        Error::new(
-            crate::ErrorKind::InvalidInput,
+        crate::error::Error::new(
+            crate::error::ErrorKind::InvalidInput,
             format!("invalid opaque {kind}"),
         )
         .into()
@@ -742,7 +732,7 @@ impl Connection {
 
     fn wire_result<T, E>(result: result::Result<T, E>) -> result::Result<T, WireError>
     where
-        E: Into<Error>,
+        E: Into<crate::error::Error>,
     {
         result.map_err(wire_error)
     }
@@ -787,7 +777,9 @@ impl Connection {
             RequestKind::ClearCache => {
                 ResponseKind::ClearCache(Self::wire_result(self.server.vfs.clear_cache().await))
             }
-            RequestKind::Pipe => ResponseKind::Pipe(self.handle_pipe(context).await),
+            RequestKind::Pipe { buf_size } => {
+                ResponseKind::Pipe(self.handle_pipe(context, buf_size).await)
+            }
             RequestKind::Open(request) => self.handle_open(context, request).await,
             RequestKind::FileRead { .. } => unreachable!(),
             RequestKind::FileWrite { file, offset } => {
@@ -934,8 +926,7 @@ impl Connection {
             version,
             payload,
         } = request;
-        let Some(ext) =
-            crate::extension::lookup(&name, version).filter(|extension| extension.available())
+        let Some(ext) = extension::lookup(&name, version).filter(|extension| extension.available())
         else {
             return ResponseKind::Extension(Err(Self::unsupported(&format!(
                 "VFS extension {name} v{version}"
@@ -960,9 +951,9 @@ impl Connection {
             .server
             .vfs
             .which(
-                request_path(&program),
+                Into::into(&program),
                 path.as_deref(),
-                cwd.as_ref().map(request_path),
+                cwd.as_ref().map(Into::into),
             )
             .await;
 
@@ -987,13 +978,13 @@ impl Connection {
         context: &mut CallContext<VfsProtocol>,
         req: SpawnRequest,
     ) -> ResponseKind {
-        let mut cmd = self.server.vfs.command(request_path(&req.program));
+        let mut cmd = self.server.vfs.command(Into::into(&req.program));
         for arg in &req.args {
             cmd.arg(arg);
         }
 
         if let Some(cwd) = &req.cwd {
-            cmd.current_dir(request_path(cwd));
+            cmd.current_dir(Into::into(cwd));
         }
 
         for (k, v) in &req.env {
@@ -1096,7 +1087,7 @@ impl Connection {
     async fn configure_spawn_stdio(
         &self,
         context: &CallContext<VfsProtocol>,
-        command: &mut crate::AnyCommand<'_>,
+        command: &mut Command<'_>,
         stdin: StdioRecvTarget,
         stdout: StdioSendTarget,
         stderr: StdioSendTarget,
@@ -1130,7 +1121,7 @@ impl Connection {
     fn take_child(
         &self,
         context: &CallContext<VfsProtocol>,
-        child: Cite<crate::session::ChildMarker>,
+        child: Cite<ChildMarker>,
     ) -> Result<RetainedChild, WireError> {
         context
             .unregister::<RetainedChild>(child)
@@ -1151,7 +1142,7 @@ impl Connection {
     async fn handle_child_wait(
         &self,
         context: &mut CallContext<VfsProtocol>,
-        child: Cite<crate::session::ChildMarker>,
+        child: Cite<ChildMarker>,
     ) -> ResponseKind {
         let result = match self.take_child(context, child) {
             Ok(child) => {
@@ -1174,7 +1165,7 @@ impl Connection {
     async fn handle_child_terminate(
         &self,
         context: &CallContext<VfsProtocol>,
-        child: Cite<crate::session::ChildMarker>,
+        child: Cite<ChildMarker>,
     ) -> ResponseKind {
         let result = match self.take_child(context, child) {
             Ok(child) => child.0.into_inner().terminate().await.map_err(wire_error),
@@ -1186,7 +1177,7 @@ impl Connection {
     fn handle_child_close(
         &self,
         context: &CallContext<VfsProtocol>,
-        child: Cite<crate::session::ChildMarker>,
+        child: Cite<ChildMarker>,
     ) -> ResponseKind {
         let result = context
             .unregister::<RetainedChild>(child)
@@ -1232,8 +1223,9 @@ impl Connection {
     async fn handle_pipe(
         &self,
         context: &CallContext<VfsProtocol>,
+        buf_size: Option<usize>,
     ) -> Result<PipeResponse, WireError> {
-        let (send, recv) = self.server.vfs.pipe().await.map_err(wire_error)?;
+        let (send, recv) = self.server.vfs.pipe(buf_size).await.map_err(wire_error)?;
         let send_slot = self.reserve_stdio()?;
         let recv_slot = self.reserve_stdio()?;
         Ok(PipeResponse {
@@ -1327,7 +1319,7 @@ impl Connection {
         &self,
         context: &CallContext<VfsProtocol>,
         stdio: Cite<StdioSendMarker>,
-    ) -> Result<Gift<crate::session::StdioSendMarker>, WireError> {
+    ) -> Result<Gift<StdioSendMarker>, WireError> {
         let stdio = self.retained_stdio_send(context, stdio)?;
         let clone = stdio
             .stdio
@@ -1384,7 +1376,7 @@ impl Connection {
         &self,
         context: &CallContext<VfsProtocol>,
         stdio: Cite<StdioRecvMarker>,
-    ) -> Result<Gift<crate::session::StdioRecvMarker>, WireError> {
+    ) -> Result<Gift<StdioRecvMarker>, WireError> {
         let stdio = self.retained_stdio_recv(context, stdio)?;
         let clone = stdio
             .stdio
@@ -1414,7 +1406,7 @@ impl Connection {
             .truncate(req.truncate)
             .no_follow(req.no_follow);
 
-        match opts.open(request_path(&req.path)).await {
+        match opts.open(Into::into(&req.path)).await {
             Ok(file) => {
                 if self.mode == SessionMode::Remote
                     || matches!(req.handle_preference, OpenHandlePreference::Opaque)
@@ -1615,7 +1607,7 @@ impl Connection {
         context: &CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
         offset: u64,
-    ) -> Result<Gift<crate::session::StdioSendMarker>, WireError> {
+    ) -> Result<Gift<StdioSendMarker>, WireError> {
         // Before the file is taken, so that running out of endpoint slots
         // leaves the peer's handle alone.
         let slot = self.reserve_stdio()?;
@@ -1639,7 +1631,7 @@ impl Connection {
         context: &CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
         offset: u64,
-    ) -> Result<Gift<crate::session::StdioRecvMarker>, WireError> {
+    ) -> Result<Gift<StdioRecvMarker>, WireError> {
         let slot = self.reserve_stdio()?;
         let file = self.take_file(context, file)?;
         // The peer's cursor is the one that matters, and the descriptor the
@@ -1823,7 +1815,7 @@ impl Connection {
     async fn handle_file_unlock(
         &self,
         context: &CallContext<VfsProtocol>,
-        lock: Cite<crate::session::FileLockMarker>,
+        lock: Cite<FileLockMarker>,
     ) -> ResponseKind {
         // Releasing consumes the lock, so a handle that is unknown or already
         // released is a no-op rather than an error, as it was when the peer
@@ -1868,7 +1860,7 @@ impl Connection {
         let result = self
             .server
             .vfs
-            .read_dir(request_path(&path))
+            .read_dir(Into::into(&path))
             .await
             .map(|read_dir| context.register(RetainedReadDir(Mutex::new(read_dir))));
         ResponseKind::ReadDir(Self::wire_result(result))
@@ -1877,13 +1869,13 @@ impl Connection {
     async fn handle_read_dir_next(
         &self,
         context: &CallContext<VfsProtocol>,
-        read_dir: Cite<crate::session::ReadDirMarker>,
+        read_dir: Cite<ReadDirMarker>,
     ) -> ResponseKind {
-        let result: crate::Result<ReadDirPage> = async {
+        let result: crate::error::Result<ReadDirPage> = async {
             let retained = context
                 .acquire::<RetainedReadDir>(read_dir.clone())
                 .map_err(|_| {
-                    Error::new(crate::ErrorKind::InvalidInput, "invalid opaque directory")
+                    crate::error::Error::new(ErrorKind::InvalidInput, "invalid opaque directory")
                 })?;
             let mut read_dir_guard = retained.0.lock().await;
             let mut entries = Vec::with_capacity(64);
@@ -1911,7 +1903,7 @@ impl Connection {
     fn handle_read_dir_close(
         &self,
         context: &CallContext<VfsProtocol>,
-        read_dir: Cite<crate::session::ReadDirMarker>,
+        read_dir: Cite<ReadDirMarker>,
     ) -> ResponseKind {
         let result = context
             .unregister::<RetainedReadDir>(read_dir)
@@ -1926,9 +1918,9 @@ impl Connection {
         req: UnixVfsRequest,
     ) -> ResponseKind {
         #[cfg(unix)]
-        if self.mode == SessionMode::Native && matches!(self.server.vfs, AnyVfs::Direct(_)) {
-            let result: crate::Result<OwnedFd> = async {
-                let path = crate::path::native_path(request_path(&req.path))?;
+        if self.mode == SessionMode::Native && self.server.vfs.is_direct() {
+            let result: crate::error::Result<OwnedFd> = async {
+                let path = crate::path::native_path(Into::into(&req.path))?;
                 let stream = UnixStream::connect(path).await?;
                 Ok(stream.into_std()?.into())
             }
@@ -1943,7 +1935,7 @@ impl Connection {
         ResponseKind::UnixVfs(
             self.server
                 .vfs
-                .unix_socket(request_path(&req.path), req.key.as_deref())
+                .unix_socket(Into::into(&req.path), req.key.as_deref())
                 .await
                 .map(|vfs| OpenVfsHandle::Opaque(context.register(RetainedVfs::plain(vfs))))
                 .map_err(wire_error),
@@ -1958,9 +1950,9 @@ impl Connection {
         ResponseKind::WindowsAdmin(
             self.server
                 .vfs
-                .windows_admin(request_path(&req.cwd), req.env, req.elevate)
+                .windows_admin(Into::into(&req.cwd), req.env, req.elevate)
                 .await
-                .map(|session| context.register(RetainedVfs::session(session)))
+                .map(|vfs| context.register(RetainedVfs::plain(vfs)))
                 .map_err(wire_error),
         )
     }
@@ -1969,14 +1961,14 @@ impl Connection {
         ResponseKind::Remove(Self::wire_result(
             self.server
                 .vfs
-                .remove(request_path(&req.path), req.all, req.ignore)
+                .remove(Into::into(&req.path), req.all, req.ignore)
                 .await,
         ))
     }
 
     async fn handle_metadata(&self, req: MetadataRequest) -> ResponseKind {
         ResponseKind::Metadata(Self::wire_result(
-            self.server.vfs.metadata(request_path(&req.path)).await,
+            self.server.vfs.metadata(Into::into(&req.path)).await,
         ))
     }
 
@@ -1984,7 +1976,7 @@ impl Connection {
         ResponseKind::FsMetadata(Self::wire_result(
             self.server
                 .vfs
-                .fs_metadata(request_path(&req.path), req.follow)
+                .fs_metadata(Into::into(&req.path), req.follow)
                 .await,
         ))
     }
@@ -1993,7 +1985,7 @@ impl Connection {
         ResponseKind::SecDesc(Self::wire_result(
             self.server
                 .vfs
-                .sec_desc(request_path(&req.path), req.mask, req.follow)
+                .sec_desc(Into::into(&req.path), req.mask, req.follow)
                 .await,
         ))
     }
@@ -2002,7 +1994,7 @@ impl Connection {
         ResponseKind::Acl(Self::wire_result(
             self.server
                 .vfs
-                .acl(request_path(&req.path), req.kind, req.default, req.follow)
+                .acl(Into::into(&req.path), req.kind, req.default, req.follow)
                 .await,
         ))
     }
@@ -2012,7 +2004,7 @@ impl Connection {
             self.server
                 .vfs
                 .set_acl(
-                    request_path(&req.path),
+                    Into::into(&req.path),
                     req.kind,
                     req.acl.as_ref(),
                     req.default,
@@ -2026,7 +2018,7 @@ impl Connection {
         ResponseKind::SetSecDesc(Self::wire_result(
             self.server
                 .vfs
-                .set_sec_desc(request_path(&req.path), &req.sec_desc, req.follow)
+                .set_sec_desc(Into::into(&req.path), &req.sec_desc, req.follow)
                 .await,
         ))
     }
@@ -2035,7 +2027,7 @@ impl Connection {
         ResponseKind::CreateDir(Self::wire_result(
             self.server
                 .vfs
-                .create_dir(request_path(&req.path), req.all)
+                .create_dir(Into::into(&req.path), req.all)
                 .await,
         ))
     }
@@ -2044,7 +2036,7 @@ impl Connection {
         ResponseKind::RemoveDir(Self::wire_result(
             self.server
                 .vfs
-                .remove_dir(request_path(&req.path), req.all, req.ignore)
+                .remove_dir(Into::into(&req.path), req.all, req.ignore)
                 .await,
         ))
     }
@@ -2053,7 +2045,7 @@ impl Connection {
         ResponseKind::Copy(Self::wire_result(
             self.server
                 .vfs
-                .copy(request_path(&req.from), request_path(&req.to), req.all)
+                .copy(Into::into(&req.from), Into::into(&req.to), req.all)
                 .await,
         ))
     }
@@ -2062,7 +2054,7 @@ impl Connection {
         ResponseKind::Rename(Self::wire_result(
             self.server
                 .vfs
-                .rename(request_path(&req.from), request_path(&req.to), req.replace)
+                .rename(Into::into(&req.from), Into::into(&req.to), req.replace)
                 .await,
         ))
     }
@@ -2071,7 +2063,7 @@ impl Connection {
         ResponseKind::Move(Self::wire_result(
             self.server
                 .vfs
-                .move_(request_path(&req.from), request_path(&req.to), req.all)
+                .move_(Into::into(&req.from), Into::into(&req.to), req.all)
                 .await,
         ))
     }
@@ -2082,22 +2074,22 @@ impl Connection {
                 self.server
                     .vfs
                     .symlink(
-                        request_path(&req.cwd),
-                        request_path(&req.src),
-                        request_path(&req.dst),
+                        Into::into(&req.cwd),
+                        Into::into(&req.src),
+                        Into::into(&req.dst),
                     )
                     .await
             }
             SymlinkKind::Dir => {
                 self.server
                     .vfs
-                    .symlink_dir(request_path(&req.src), request_path(&req.dst))
+                    .symlink_dir(Into::into(&req.src), Into::into(&req.dst))
                     .await
             }
             SymlinkKind::File => {
                 self.server
                     .vfs
-                    .symlink_file(request_path(&req.src), request_path(&req.dst))
+                    .symlink_file(Into::into(&req.src), Into::into(&req.dst))
                     .await
             }
         };
@@ -2108,7 +2100,7 @@ impl Connection {
         ResponseKind::HardLink(Self::wire_result(
             self.server
                 .vfs
-                .hard_link(request_path(&req.src), request_path(&req.dst))
+                .hard_link(Into::into(&req.src), Into::into(&req.dst))
                 .await,
         ))
     }
@@ -2117,7 +2109,7 @@ impl Connection {
         ResponseKind::SymlinkMetadata(Self::wire_result(
             self.server
                 .vfs
-                .symlink_metadata(request_path(&req.path))
+                .symlink_metadata(Into::into(&req.path))
                 .await,
         ))
     }
@@ -2126,7 +2118,7 @@ impl Connection {
         let paths: Vec<_> = req
             .paths
             .iter()
-            .map(|path| request_path(path).to_path_buf())
+            .map(|path| Utf8TypedPath::from(path).to_path_buf())
             .collect();
         ResponseKind::SetMetadata(Self::wire_result(
             self.server.vfs.set_metadata(&paths, req.patch).await,
@@ -2137,7 +2129,7 @@ impl Connection {
         let result = self
             .server
             .vfs
-            .canonicalize(request_path(&req.path))
+            .canonicalize(Into::into(&req.path))
             .await
             .map(Into::into);
         ResponseKind::Canonicalize(Self::wire_result(result))
@@ -2147,17 +2139,16 @@ impl Connection {
         let result = self
             .server
             .vfs
-            .read_link(request_path(&req.path))
+            .read_link(Into::into(&req.path))
             .await
             .map(Into::into);
         ResponseKind::ReadLink(Self::wire_result(result))
     }
 
     async fn handle_access(&self, req: AccessRequest) -> ResponseKind {
-        let mode = crate::file::AccessFlags::from_bits(req.mode)
-            .unwrap_or(crate::file::AccessFlags::empty());
+        let mode = AccessFlags::from_bits(req.mode).unwrap_or(AccessFlags::empty());
         ResponseKind::Access(Self::wire_result(
-            self.server.vfs.access(request_path(&req.path), mode).await,
+            self.server.vfs.access(Into::into(&req.path), mode).await,
         ))
     }
 
@@ -2167,7 +2158,7 @@ impl Connection {
                 .vfs
                 .glob(
                     req.pattern,
-                    request_path(&req.root),
+                    Into::into(&req.root),
                     req.follow_symlinks,
                     req.max_depth,
                 )
@@ -2181,7 +2172,7 @@ impl Connection {
             self.server
                 .vfs
                 .xattrs(
-                    request_path(&req.path),
+                    Into::into(&req.path),
                     req.namespace.as_borrowed(),
                     req.follow,
                 )
@@ -2194,7 +2185,7 @@ impl Connection {
             self.server
                 .vfs
                 .xattr(
-                    request_path(&req.path),
+                    Into::into(&req.path),
                     &req.name,
                     req.namespace.as_deref(),
                     req.follow,
@@ -2208,7 +2199,7 @@ impl Connection {
             self.server
                 .vfs
                 .set_xattr(
-                    request_path(&req.path),
+                    Into::into(&req.path),
                     &req.name,
                     req.namespace.as_deref(),
                     &req.value,
@@ -2223,7 +2214,7 @@ impl Connection {
             self.server
                 .vfs
                 .remove_xattr(
-                    request_path(&req.path),
+                    Into::into(&req.path),
                     &req.name,
                     req.namespace.as_deref(),
                     req.follow,
@@ -2236,7 +2227,7 @@ impl Connection {
         ResponseKind::Streams(Self::wire_result(
             self.server
                 .vfs
-                .streams(request_path(&req.path), req.follow)
+                .streams(Into::into(&req.path), req.follow)
                 .await,
         ))
     }
@@ -2250,11 +2241,11 @@ impl Connection {
 /// file is closed instead of leaked. The one failure this side *can* recover
 /// from — a busy file — is caught before the file is taken at all, in
 /// [`take_file`](Session::take_file).
-fn handoff_error<H>(error: crate::HandoffError<H>) -> WireError {
+fn handoff_error<H>(error: HandoffError<H>) -> WireError {
     wire_error(error.into_error())
 }
 
-fn wire_error(error: impl Into<Error>) -> WireError {
+fn wire_error(error: impl Into<crate::error::Error>) -> WireError {
     error.into().into()
 }
 
@@ -2263,9 +2254,12 @@ mod tests {
     #[cfg(unix)]
     use super::report_handler_exit;
     use super::{Server, orderly_disconnect};
-    use crate::protocol::{
-        OpenHandle, OpenHandlePreference, OpenRequest, Request, RequestKind, ResponseKind,
-        VfsProtocol,
+    use crate::{
+        path,
+        protocol::{
+            self, OpenHandle, OpenHandlePreference, OpenRequest, Request, RequestKind,
+            ResponseKind, VfsProtocol,
+        },
     };
 
     fn request(kind: RequestKind) -> Request {
@@ -2301,7 +2295,7 @@ mod tests {
         let (client_stream, server_stream) = tokio::io::duplex(4096);
         let server =
             tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
-        let client = crate::protocol::rpc_builder(None)
+        let client = protocol::rpc_builder(None)
             .client(client_stream)
             .await
             .unwrap()
@@ -2310,7 +2304,7 @@ mod tests {
         let temp = tempfile::NamedTempFile::new().unwrap();
         let response = client
             .call(request(RequestKind::Open(OpenRequest {
-                path: crate::path::typed_path(temp.path().to_path_buf())
+                path: path::typed_path(temp.path().to_path_buf())
                     .unwrap()
                     .to_path()
                     .into(),
@@ -2347,7 +2341,7 @@ mod tests {
             panic!("duplicate file close returned the wrong response");
         };
         assert_eq!(
-            crate::Error::from(result.unwrap_err()).kind(),
+            crate::error::Error::from(result.unwrap_err()).kind(),
             std::io::ErrorKind::InvalidInput
         );
 

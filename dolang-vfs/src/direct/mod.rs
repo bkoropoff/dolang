@@ -8,6 +8,7 @@ use std::{
 };
 
 use bytes::{Bytes, BytesMut};
+use typed_path::{Utf8TypedPath, Utf8TypedPathBuf};
 
 #[cfg(unix)]
 use std::os::fd::AsFd;
@@ -15,7 +16,7 @@ use std::os::fd::AsFd;
 use std::os::windows::io::AsHandle;
 
 use tokio::{
-    fs::{self, File as TokioFile, OpenOptions},
+    fs::{self, File as TokioFile},
     io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf},
     process::Command as TokioCommand,
     sync::Mutex,
@@ -26,12 +27,16 @@ use wax::{
     walk::{DepthBehavior, DepthMax, Entry, LinkBehavior, WalkBehavior},
 };
 
-use crate::session::Query;
 use crate::{
-    Acl, AclKind, Child, Command, FileHandle, FsMetadata, HandoffError, Metadata, MetadataPatch,
-    ProcessStatus, ReadDir, SidName, StdioRecv, StdioSend, StreamEntry, Utf8TypedPath,
-    Utf8TypedPathBuf, Vfs, XattrEntry, XattrNamespace,
+    error::{Error, ErrorKind, HandoffError, Result},
+    file::StreamEntry,
+    metadata::{FsMetadata, Metadata, MetadataPatch},
     path::{WellKnownPath, native_path, typed_path},
+    process::{ProcessControl, ProcessStatus, StdioRecv, StdioSend, TerminationPolicy},
+    security::{Acl, AclKind, SecurityInfo, SidName},
+    session::{ExtensionSet, Query},
+    target::TargetInfo,
+    xattr::{XattrEntry, XattrNamespace},
 };
 use dolang_winterop::security::{SecDesc, Sid};
 
@@ -48,6 +53,11 @@ mod unix;
 #[cfg(windows)]
 mod windows;
 
+#[cfg(unix)]
+pub(crate) use unix::ReadDir;
+#[cfg(windows)]
+pub(crate) use windows::ReadDir;
+
 pub(crate) use lock::{DirectFileLock, DirectFileLocks};
 
 /// A [`Vfs`] that operates in the local process environment.
@@ -59,7 +69,7 @@ pub struct Direct {
 
 /// Local file-open options returned by [`Direct::open_options`](crate::Vfs::open_options).
 #[derive(Debug, Default)]
-pub struct DirectOpenOptions {
+pub struct OpenOptions {
     read: bool,
     write: bool,
     append: bool,
@@ -70,7 +80,7 @@ pub struct DirectOpenOptions {
 }
 
 /// Local process-spawn options returned by [`Direct::command`](crate::Vfs::command).
-pub struct DirectCommand<'a> {
+pub struct Command<'a> {
     direct: &'a Direct,
     program: PathBuf,
     args: Vec<String>,
@@ -83,16 +93,16 @@ pub struct DirectCommand<'a> {
     stdout_resource: Option<StdioSend>,
     stderr_resource: Option<StdioSend>,
     stderr_to_stdout: bool,
-    process_control: crate::ProcessControl,
-    termination_policy: crate::TerminationPolicy,
-    error: Option<io::Error>,
+    process_control: ProcessControl,
+    termination_policy: TerminationPolicy,
+    error: Option<Error>,
 }
 
 /// A process spawned by [`Direct`].
-pub struct DirectChild {
+pub struct Child {
     inner: tokio::process::Child,
-    process_control: crate::ProcessControl,
-    termination_policy: crate::TerminationPolicy,
+    process_control: ProcessControl,
+    termination_policy: TerminationPolicy,
     #[cfg(windows)]
     job: Option<std::os::windows::io::OwnedHandle>,
 }
@@ -109,7 +119,7 @@ pub struct DirectChild {
 /// Their state is allocated lazily and reachable for mutation only through
 /// `&mut self`.
 #[derive(Debug)]
-pub struct DirectFile {
+pub struct File {
     file: Arc<std::fs::File>,
     flags: DirectFileFlags,
     locks: DirectFileLocks,
@@ -182,12 +192,12 @@ enum CursorOp {
     Idle,
     /// A read is in flight. The buffer is returned by the worker rather than
     /// borrowed from the caller, because the task cannot be cancelled.
-    Reading(tokio::task::JoinHandle<(io::Result<usize>, BytesMut)>),
+    Reading(tokio::task::JoinHandle<(Result<usize>, BytesMut)>),
     /// A write is in flight, carrying the byte count, resulting position, and
     /// the buffer to recycle.
-    Writing(tokio::task::JoinHandle<(io::Result<(usize, u64)>, BytesMut)>),
+    Writing(tokio::task::JoinHandle<(Result<(usize, u64)>, BytesMut)>),
     /// An end-relative seek is resolving the file's current length.
-    Sizing(tokio::task::JoinHandle<io::Result<u64>>, i64),
+    Sizing(tokio::task::JoinHandle<Result<u64>>, i64),
 }
 
 /// Applies `delta` to `base`, rejecting a negative result as `lseek` does.
@@ -211,7 +221,7 @@ fn read_blocking(
     mut buf: BytesMut,
     offset: u64,
     seekable: bool,
-) -> (io::Result<usize>, BytesMut) {
+) -> (Result<usize>, BytesMut) {
     let spare = buf.spare_capacity_mut();
     if spare.is_empty() {
         return (Ok(0), buf);
@@ -221,12 +231,15 @@ fn read_blocking(
     // This mirrors what `tokio::fs` does for the same reason.
     let dst = unsafe { &mut *(spare as *mut [std::mem::MaybeUninit<u8>] as *mut [u8]) };
     let result = if seekable {
-        DirectFile::pread(file, dst, offset)
+        File::pread(file, dst, offset)
     } else {
         // A stream has no offset to name; the kernel's own position is the
         // only one it has.
         use std::io::Read as _;
-        (&*file).read(dst)
+        match (&*file).read(dst) {
+            Ok(read) => Ok(read),
+            Err(error) => Err(error.into()),
+        }
     };
     // The buffer goes back to the caller either way: on the error path there
     // is nothing wrong with the allocation, only with the read.
@@ -250,7 +263,7 @@ fn write_blocking(
     offset: u64,
     append: bool,
     seekable: bool,
-) -> io::Result<(usize, u64)> {
+) -> Result<(usize, u64)> {
     if append || !seekable {
         use std::io::Write as _;
         let written = (&*file).write(data)?;
@@ -265,7 +278,7 @@ fn write_blocking(
         };
         Ok((written, end))
     } else {
-        let written = DirectFile::pwrite(file, data, offset)?;
+        let written = File::pwrite(file, data, offset)?;
         Ok((written, offset + written as u64))
     }
 }
@@ -278,12 +291,12 @@ fn write_blocking_owned(
     offset: u64,
     append: bool,
     seekable: bool,
-) -> (io::Result<(usize, u64)>, BytesMut) {
+) -> (Result<(usize, u64)>, BytesMut) {
     let result = write_blocking(file, &buf, offset, append, seekable);
     (result, buf)
 }
 
-impl DirectFile {
+impl File {
     pub(crate) fn from_std(file: std::fs::File, read: bool, write: bool, append: bool) -> Self {
         // One `fstat` on an already-open descriptor, to know up front whether
         // offsets mean anything for this file.
@@ -314,118 +327,6 @@ impl DirectFile {
         self.cursor.get().map_or(0, |state| state.cursor)
     }
 
-    /// Reads into `buf`'s spare capacity starting at `offset`, returning the
-    /// transfer count.
-    ///
-    /// Cancelling the read may leave `buf` empty. Bytes are appended into its
-    /// spare capacity on success rather than replacing the existing contents;
-    /// pass a cleared buffer to read into it from the start.
-    ///
-    /// The transfer is capped by the spare capacity available and may be
-    /// shorter for arbitrary I/O reasons, including buffering and internal
-    /// transfer-size limits. Callers that need a specific count must loop.
-    ///
-    /// The returned future borrows the buffer but not the handle, so it may
-    /// outlive the handle it came from and several may be in flight at once.
-    pub fn read_at<'b>(
-        &self,
-        buf: &'b mut BytesMut,
-        offset: u64,
-    ) -> impl Future<Output = io::Result<usize>> + Send + use<'b> {
-        let file = Arc::clone(&self.file);
-        let seekable = self.flags.contains(DirectFileFlags::SEEKABLE);
-        async move {
-            let taken = mem::take(buf);
-            let (result, taken) = match tokio::task::spawn_blocking(move || {
-                read_blocking(&file, taken, offset, seekable)
-            })
-            .await
-            {
-                Ok(outcome) => outcome,
-                // The worker owned the buffer, so a panic there loses it;
-                // the caller is left with the same empty buffer that
-                // cancelling would have left.
-                Err(_) => (
-                    Err(io::Error::other("file read worker failed")),
-                    BytesMut::new(),
-                ),
-            };
-            *buf = taken;
-            result
-        }
-    }
-
-    /// Reads into the uninitialized `buf` starting at `offset`, returning how
-    /// many bytes at its front were filled.
-    /// The transfer may be shorter than `buf` for arbitrary I/O reasons,
-    /// including buffering and internal transfer-size limits. Callers that
-    /// need a specific count must loop.
-    pub fn read_at_into<'b>(
-        &self,
-        buf: &'b mut [std::mem::MaybeUninit<u8>],
-        offset: u64,
-    ) -> impl Future<Output = io::Result<usize>> + Send + use<'b> {
-        let file = Arc::clone(&self.file);
-        let seekable = self.flags.contains(DirectFileFlags::SEEKABLE);
-        let want = buf.len().min(MAX_BLOCKING_IO);
-        async move {
-            let owned = BytesMut::with_capacity(want);
-            let (result, owned) = match tokio::task::spawn_blocking(move || {
-                read_blocking(&file, owned, offset, seekable)
-            })
-            .await
-            {
-                Ok(outcome) => outcome,
-                Err(_) => (
-                    Err(io::Error::other("file read worker failed")),
-                    BytesMut::new(),
-                ),
-            };
-            let read = result?;
-            buf[..read].write_copy_of_slice(&owned[..read]);
-            Ok(read)
-        }
-    }
-
-    /// Writes `data` at `offset`, returning the byte count.
-    ///
-    /// Rejected on an append-mode handle, where the kernel would ignore
-    /// `offset` and append regardless; use [`DirectFile::append`] there.
-    pub fn write_at(
-        &self,
-        data: Bytes,
-        offset: u64,
-    ) -> impl Future<Output = io::Result<usize>> + Send + use<> {
-        let file = Arc::clone(&self.file);
-        let append = self.flags.contains(DirectFileFlags::APPEND);
-        async move {
-            if append {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "cannot write at an offset on a file opened for append",
-                ));
-            }
-            tokio::task::spawn_blocking(move || DirectFile::pwrite(&file, &data, offset))
-                .await
-                .unwrap_or_else(|_| Err(io::Error::other("file write worker failed")))
-        }
-    }
-
-    /// Appends `data` atomically, returning the byte count and the position
-    /// just past what was written.
-    pub fn append(
-        &self,
-        data: Bytes,
-    ) -> impl Future<Output = io::Result<(usize, u64)>> + Send + use<> {
-        let file = Arc::clone(&self.file);
-        let seekable = self.flags.contains(DirectFileFlags::SEEKABLE);
-        async move {
-            tokio::task::spawn_blocking(move || write_blocking(&file, &data, 0, true, seekable))
-                .await
-                .unwrap_or_else(|_| Err(io::Error::other("file write worker failed")))
-        }
-    }
-
     /// Writes `offset` into the kernel's file offset.
     ///
     /// Required before a descriptor reaches another process or another API:
@@ -451,7 +352,7 @@ impl DirectFile {
         send: bool,
         offset: u64,
     ) -> std::result::Result<std::fs::File, HandoffError<Self>> {
-        let DirectFile {
+        let File {
             file,
             locks,
             flags,
@@ -461,7 +362,7 @@ impl DirectFile {
         // they have to be released between the two failure points below.
         let restore = move |file: Arc<std::fs::File>, locks, error: io::Error| {
             HandoffError::new(
-                DirectFile {
+                File {
                     file,
                     locks,
                     flags,
@@ -582,7 +483,7 @@ fn reopen_for_stdio(
     }
 }
 
-impl DirectFile {
+impl File {
     /// Drives an in-flight cursor operation to completion.
     fn poll_settle(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let state = self.cursor_state();
@@ -591,7 +492,7 @@ impl DirectFile {
             CursorOp::Reading(handle) => {
                 let (result, buf) = ready!(Pin::new(handle).poll(cx)).unwrap_or_else(|_| {
                     (
-                        Err(io::Error::other("file read worker failed")),
+                        Err(Error::other("file read worker failed")),
                         BytesMut::new(),
                     )
                 });
@@ -607,7 +508,7 @@ impl DirectFile {
             CursorOp::Writing(handle) => {
                 let (result, buf) = ready!(Pin::new(handle).poll(cx)).unwrap_or_else(|_| {
                     (
-                        Err(io::Error::other("file write worker failed")),
+                        Err(Error::other("file write worker failed")),
                         BytesMut::new(),
                     )
                 });
@@ -620,7 +521,7 @@ impl DirectFile {
             CursorOp::Sizing(handle, delta) => {
                 let delta = *delta;
                 let len = ready!(Pin::new(handle).poll(cx))
-                    .unwrap_or_else(|_| Err(io::Error::other("file size worker failed")))?;
+                    .unwrap_or_else(|_| Err(Error::other("file size worker failed")))?;
                 state.op = CursorOp::Idle;
                 let position = offset_delta(len, delta)?;
                 state.cursor = position;
@@ -631,7 +532,7 @@ impl DirectFile {
     }
 }
 
-impl AsyncRead for DirectFile {
+impl AsyncRead for File {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -685,7 +586,7 @@ impl AsyncRead for DirectFile {
     }
 }
 
-impl AsyncWrite for DirectFile {
+impl AsyncWrite for File {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -702,7 +603,7 @@ impl AsyncWrite for DirectFile {
                     let (result, scratch) =
                         ready!(Pin::new(handle).poll(cx)).unwrap_or_else(|_| {
                             (
-                                Err(io::Error::other("file write worker failed")),
+                                Err(Error::other("file write worker failed")),
                                 BytesMut::new(),
                             )
                         });
@@ -753,7 +654,7 @@ impl AsyncWrite for DirectFile {
     }
 }
 
-impl AsyncSeek for DirectFile {
+impl AsyncSeek for File {
     fn start_seek(self: Pin<&mut Self>, position: io::SeekFrom) -> io::Result<()> {
         let this = self.get_mut();
         let file = Arc::clone(&this.file);
@@ -782,7 +683,9 @@ impl AsyncSeek for DirectFile {
             // `lseek(SEEK_END)` too.
             io::SeekFrom::End(delta) => {
                 state.op = CursorOp::Sizing(
-                    tokio::task::spawn_blocking(move || file.metadata().map(|meta| meta.len())),
+                    tokio::task::spawn_blocking(move || -> Result<u64> {
+                        Ok(file.metadata()?.len())
+                    }),
                     delta,
                 );
             }
@@ -801,39 +704,106 @@ impl AsyncSeek for DirectFile {
     }
 }
 
-impl FileHandle for DirectFile {
-    // The trait methods are the inherent ones; unambiguous paths keep this
-    // forwarding from becoming infinite recursion if the inherent versions are
-    // ever removed.
-    fn read_at<'b>(
+impl File {
+    pub(crate) fn read_at<'b>(
         &self,
         buf: &'b mut BytesMut,
         offset: u64,
-    ) -> impl Future<Output = io::Result<usize>> + Send + use<'b> {
-        DirectFile::read_at(self, buf, offset)
+    ) -> impl Future<Output = Result<usize>> + Send + use<'b> {
+        let file = Arc::clone(&self.file);
+        let seekable = self.flags.contains(DirectFileFlags::SEEKABLE);
+        async move {
+            let taken = mem::take(buf);
+            let (result, taken) = match tokio::task::spawn_blocking(move || {
+                read_blocking(&file, taken, offset, seekable)
+            })
+            .await
+            {
+                Ok(outcome) => outcome,
+                // The worker owned the buffer, so a panic there loses it;
+                // the caller is left with the same empty buffer that
+                // cancelling would have left.
+                Err(_) => (
+                    Err(Error::other("file read worker failed")),
+                    BytesMut::new(),
+                ),
+            };
+            *buf = taken;
+            result
+        }
     }
 
-    fn write_at(
-        &self,
-        data: Bytes,
-        offset: u64,
-    ) -> impl Future<Output = io::Result<usize>> + Send + use<> {
-        DirectFile::write_at(self, data, offset)
-    }
-
-    fn append(&self, data: Bytes) -> impl Future<Output = io::Result<(usize, u64)>> + Send + use<> {
-        DirectFile::append(self, data)
-    }
-
-    fn read_at_into<'b>(
+    pub(crate) fn read_at_into<'b>(
         &self,
         buf: &'b mut [std::mem::MaybeUninit<u8>],
         offset: u64,
-    ) -> impl Future<Output = io::Result<usize>> + Send + use<'b> {
-        DirectFile::read_at_into(self, buf, offset)
+    ) -> impl Future<Output = Result<usize>> + Send + use<'b> {
+        let file = Arc::clone(&self.file);
+        let seekable = self.flags.contains(DirectFileFlags::SEEKABLE);
+        let want = buf.len().min(MAX_BLOCKING_IO);
+        async move {
+            let owned = BytesMut::with_capacity(want);
+            let (result, owned) = match tokio::task::spawn_blocking(move || {
+                read_blocking(&file, owned, offset, seekable)
+            })
+            .await
+            {
+                Ok(outcome) => outcome,
+                Err(_) => (
+                    Err(Error::other("file read worker failed")),
+                    BytesMut::new(),
+                ),
+            };
+            let read = result?;
+            buf[..read].write_copy_of_slice(&owned[..read]);
+            Ok(read)
+        }
     }
 
-    async fn into_stdio_send(
+    pub(crate) fn write_at(
+        &self,
+        data: Bytes,
+        offset: u64,
+    ) -> impl Future<Output = Result<usize>> + Send + use<> {
+        let file = Arc::clone(&self.file);
+        let append = self.flags.contains(DirectFileFlags::APPEND);
+        async move {
+            if append {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "cannot write at an offset on a file opened for append",
+                ));
+            }
+            tokio::task::spawn_blocking(move || File::pwrite(&file, &data, offset))
+                .await
+                .unwrap_or_else(|_| Err(Error::other("file write worker failed")))
+        }
+    }
+
+    pub(crate) fn write_at_from<'b>(
+        &self,
+        data: &'b [u8],
+        offset: u64,
+    ) -> impl Future<Output = Result<usize>> + Send + use<'b> {
+        // Eagerly, outside any async block: the copy is what this default
+        // exists to perform, and `write_at`'s future does not borrow the
+        // handle, which is the property the signature promises onward.
+        self.write_at(Bytes::copy_from_slice(data), offset)
+    }
+
+    /// Appends `data` atomically, returning the byte count and the position
+    /// just past what was written.
+    pub fn append(&self, data: Bytes) -> impl Future<Output = Result<(usize, u64)>> + Send + use<> {
+        let file = Arc::clone(&self.file);
+        let seekable = self.flags.contains(DirectFileFlags::SEEKABLE);
+        async move {
+            tokio::task::spawn_blocking(move || write_blocking(&file, &data, 0, true, seekable))
+                .await
+                .unwrap_or_else(|_| Err(Error::other("file write worker failed")))
+        }
+    }
+
+    pub(crate) async fn into_stdio_send(
         self,
         offset: u64,
     ) -> std::result::Result<StdioSend, HandoffError<Self>> {
@@ -841,7 +811,7 @@ impl FileHandle for DirectFile {
         Ok(StdioSend::from_file(TokioFile::from_std(file)))
     }
 
-    async fn into_stdio_recv(
+    pub(crate) async fn into_stdio_recv(
         self,
         offset: u64,
     ) -> std::result::Result<StdioRecv, HandoffError<Self>> {
@@ -849,7 +819,7 @@ impl FileHandle for DirectFile {
         Ok(StdioRecv::from_file(TokioFile::from_std(file)))
     }
 
-    async fn commit(&self) -> crate::Result<()> {
+    pub(crate) async fn commit(&self) -> Result<()> {
         // Nothing to do: a positional write reaches the OS as it is issued,
         // and this handle keeps no write buffer of its own. `poll_flush`
         // settles the poll surface's in-flight operation, which is state this
@@ -857,15 +827,15 @@ impl FileHandle for DirectFile {
         Ok(())
     }
 
-    async fn close(self) -> crate::Result<()> {
+    pub(crate) async fn close(self) -> Result<()> {
         // Unlock in band rather than leaving it to the handles being closed:
         // duplicates of this open file description may still be alive
         // elsewhere, which would keep the locks in force past this point.
         // Now that outstanding operations hold their own reference to the
         // file, this is the *only* reliable release — the descriptor itself
         // may outlive this call.
-        let released = self.locks.release_all().await.map_err(crate::Error::from);
-        let DirectFile { file, .. } = self;
+        let released = self.locks.release_all().await.map_err(Error::from);
+        let File { file, .. } = self;
         // Match what the remote backend reports for the same situation: the
         // handle is consumed and cleanup finishes as the outstanding
         // operations drop their references, but the caller is told the
@@ -885,15 +855,14 @@ impl FileHandle for DirectFile {
         Ok(())
     }
 
-    async fn set_size(&self, size: u64) -> crate::Result<()> {
+    pub(crate) async fn set_size(&self, size: u64) -> Result<()> {
         let file = Arc::clone(&self.file);
-        tokio::task::spawn_blocking(move || file.set_len(size))
+        Ok(tokio::task::spawn_blocking(move || file.set_len(size))
             .await
-            .unwrap_or_else(|_| Err(io::Error::other("failed to join file resize task")))
-            .map_err(Into::into)
+            .unwrap_or_else(|_| Err(io::Error::other("failed to join file resize task")))?)
     }
 
-    async fn metadata(&self) -> crate::Result<Metadata> {
+    pub(crate) async fn metadata(&self) -> Result<Metadata> {
         let file = Arc::clone(&self.file);
         #[cfg(unix)]
         {
@@ -902,8 +871,7 @@ impl FileHandle for DirectFile {
                 Direct::metadata_with_attrs(metadata, &file)
             })
             .await
-            .unwrap_or_else(|_| Err(io::Error::other("failed to join metadata query task")))
-            .map_err(Into::into)
+            .unwrap_or_else(|_| Err(Error::other("failed to join metadata query task")))
         }
         #[cfg(windows)]
         {
@@ -912,94 +880,86 @@ impl FileHandle for DirectFile {
                 Direct::metadata_with_security(metadata, &file)
             })
             .await
-            .unwrap_or_else(|_| Err(io::Error::other("failed to join metadata query task")))
-            .map_err(Into::into)
+            .unwrap_or_else(|_| Err(Error::other("failed to join metadata query task")))
         }
     }
 
-    async fn fs_metadata(&self) -> crate::Result<FsMetadata> {
+    pub(crate) async fn fs_metadata(&self) -> Result<FsMetadata> {
         let file = Arc::clone(&self.file);
         tokio::task::spawn_blocking(move || Direct::fs_metadata_from_file(&file))
             .await
-            .unwrap_or_else(|_| Err(io::Error::other("failed to join fs metadata query task")))
-            .map_err(Into::into)
+            .unwrap_or_else(|_| Err(Error::other("failed to join fs metadata query task")))
     }
 
-    async fn acl(&self, kind: AclKind, default: bool) -> crate::Result<Option<Acl>> {
+    pub(crate) async fn acl(&self, kind: AclKind, default: bool) -> Result<Option<Acl>> {
         let file = Arc::clone(&self.file);
         tokio::task::spawn_blocking(move || Direct::acl_from_file(&file, kind, default))
             .await
-            .unwrap_or_else(|_| Err(io::Error::other("failed to join ACL query task")))
-            .map_err(Into::into)
+            .unwrap_or_else(|_| Err(Error::other("failed to join ACL query task")))
     }
 
-    async fn set_acl(&self, kind: AclKind, acl: Option<&Acl>, default: bool) -> crate::Result<()> {
+    pub(crate) async fn set_acl(
+        &self,
+        kind: AclKind,
+        acl: Option<&Acl>,
+        default: bool,
+    ) -> Result<()> {
         let file = Arc::clone(&self.file);
         let acl = acl.cloned();
         tokio::task::spawn_blocking(move || {
             Direct::set_acl_file(&file, kind, acl.as_ref(), default)
         })
         .await
-        .unwrap_or_else(|_| Err(io::Error::other("failed to join ACL update task")))
-        .map_err(Into::into)
+        .unwrap_or_else(|_| Err(Error::other("failed to join ACL update task")))
     }
 
-    async fn sec_desc(&self, mask: dolang_winterop::security::SecInfo) -> crate::Result<SecDesc> {
+    pub(crate) async fn sec_desc(
+        &self,
+        mask: dolang_winterop::security::SecInfo,
+    ) -> Result<SecDesc> {
         let file = Arc::clone(&self.file);
         tokio::task::spawn_blocking(move || Direct::sec_desc_from_file(&file, mask))
             .await
-            .unwrap_or_else(|_| Err(io::Error::other("failed to join security descriptor task")))
-            .map_err(Into::into)
+            .unwrap_or_else(|_| Err(Error::other("failed to join security descriptor task")))
     }
 
-    async fn set_sec_desc(&self, sec_desc: &SecDesc) -> crate::Result<()> {
+    pub(crate) async fn set_sec_desc(&self, sec_desc: &SecDesc) -> Result<()> {
         let file = Arc::clone(&self.file);
         let sec_desc = sec_desc.clone();
         tokio::task::spawn_blocking(move || Direct::set_sec_desc_file(&file, &sec_desc))
             .await
-            .unwrap_or_else(|_| Err(io::Error::other("failed to join security descriptor task")))
-            .map_err(Into::into)
+            .unwrap_or_else(|_| Err(Error::other("failed to join security descriptor task")))
     }
 
-    async fn xattrs(&self, namespace: XattrNamespace<'_>) -> crate::Result<Vec<XattrEntry>> {
-        Direct::impl_file_xattrs(&self.file, namespace)
-            .await
-            .map_err(Into::into)
+    pub(crate) async fn xattrs(&self, namespace: XattrNamespace<'_>) -> Result<Vec<XattrEntry>> {
+        Direct::impl_file_xattrs(&self.file, namespace).await
     }
 
-    async fn xattr(&self, name: &str, namespace: Option<&str>) -> crate::Result<Vec<u8>> {
-        Direct::impl_file_xattr(&self.file, name, namespace)
-            .await
-            .map_err(Into::into)
+    pub(crate) async fn xattr(&self, name: &str, namespace: Option<&str>) -> Result<Vec<u8>> {
+        Direct::impl_file_xattr(&self.file, name, namespace).await
     }
 
-    async fn streams(&self) -> crate::Result<Vec<StreamEntry>> {
-        Direct::impl_file_streams(&self.file)
-            .await
-            .map_err(Into::into)
+    pub(crate) async fn streams(&self) -> Result<Vec<StreamEntry>> {
+        Direct::impl_file_streams(&self.file).await
     }
 
-    async fn set_xattr(
+    pub(crate) async fn set_xattr(
         &self,
         name: &str,
         namespace: Option<&str>,
         value: &[u8],
-    ) -> crate::Result<()> {
-        Direct::impl_file_set_xattr(&self.file, name, namespace, value)
-            .await
-            .map_err(Into::into)
+    ) -> Result<()> {
+        Direct::impl_file_set_xattr(&self.file, name, namespace, value).await
     }
 
-    async fn remove_xattr(&self, name: &str, namespace: Option<&str>) -> crate::Result<()> {
-        Direct::impl_file_remove_xattr(&self.file, name, namespace)
-            .await
-            .map_err(Into::into)
+    pub(crate) async fn remove_xattr(&self, name: &str, namespace: Option<&str>) -> Result<()> {
+        Direct::impl_file_remove_xattr(&self.file, name, namespace).await
     }
 
-    async fn lock(
+    pub(crate) async fn lock(
         &self,
         request: crate::file::FileLockRequest,
-    ) -> crate::Result<Option<crate::file::FileLock>> {
+    ) -> Result<Option<crate::file::FileLock>> {
         // A duplicate would be a second descriptor on the same open file
         // description, which is what the lock is keyed on anyway; sharing the
         // original avoids the `dup` and, on Windows, keeps `LockFileEx`
@@ -1008,20 +968,20 @@ impl FileHandle for DirectFile {
         let handle = self.file.as_fd().try_clone_to_owned()?;
         #[cfg(windows)]
         let handle = self.file.as_handle().try_clone_to_owned()?;
-        self.locks
+        Ok(self
+            .locks
             .acquire(handle, request)
             .await
-            .map(|lock| lock.map(crate::file::FileLock::direct))
-            .map_err(Into::into)
+            .map(|lock| lock.map(crate::file::FileLock::direct))?)
     }
 
-    async fn try_into_std(self) -> std::result::Result<std::fs::File, Self> {
+    pub(crate) async fn try_into_std(self) -> std::result::Result<std::fs::File, Self> {
         // Surrendering the descriptor means surrendering the cursor with it,
         // so hand over one positioned where this handle believes it is.
         if self.materialize(self.cursor_offset()).is_err() {
             return Err(self);
         }
-        let DirectFile {
+        let File {
             file,
             locks,
             flags,
@@ -1031,7 +991,7 @@ impl FileHandle for DirectFile {
             Ok(file) => Ok(file),
             // Operations are still in flight against the shared descriptor,
             // so it cannot be given away exclusively.
-            Err(file) => Err(DirectFile {
+            Err(file) => Err(File {
                 file,
                 locks,
                 flags,
@@ -1115,7 +1075,7 @@ impl PathCache {
 
 impl Direct {
     /// Captures the process context used by this direct backend.
-    pub fn new() -> crate::Result<Self> {
+    pub fn new() -> Result<Self> {
         Ok(Self {
             path_cache: Arc::new(PathCache::new()),
             initial: Arc::new(Query::current()?),
@@ -1123,7 +1083,7 @@ impl Direct {
     }
 }
 
-impl<'a> DirectCommand<'a> {
+impl<'a> Command<'a> {
     fn new(direct: &'a Direct, program: Utf8TypedPath<'_>) -> Self {
         let program = native_path(program);
         Self {
@@ -1139,18 +1099,18 @@ impl<'a> DirectCommand<'a> {
             stdout_resource: None,
             stderr_resource: None,
             stderr_to_stdout: false,
-            process_control: crate::ProcessControl::Foreground,
-            termination_policy: crate::TerminationPolicy::default(),
+            process_control: ProcessControl::Foreground,
+            termination_policy: TerminationPolicy::default(),
             error: program.err(),
         }
     }
 }
 
-impl DirectChild {
+impl Child {
     fn new(
         child: tokio::process::Child,
-        process_control: crate::ProcessControl,
-        termination_policy: crate::TerminationPolicy,
+        process_control: ProcessControl,
+        termination_policy: TerminationPolicy,
         #[cfg(windows)] job: Option<std::os::windows::io::OwnedHandle>,
     ) -> Self {
         Self {
@@ -1163,41 +1123,37 @@ impl DirectChild {
     }
 }
 
-impl Child for DirectChild {
-    async fn wait(&mut self) -> crate::Result<ProcessStatus> {
-        ProcessStatus::from_native(self.inner.wait().await?).map_err(Into::into)
+impl Child {
+    pub(crate) async fn wait(&mut self) -> Result<ProcessStatus> {
+        Ok(ProcessStatus::from_native(self.inner.wait().await?)?)
     }
 
-    async fn terminate(self) -> crate::Result<Option<ProcessStatus>> {
-        self.impl_terminate()
+    pub(crate) async fn terminate(self) -> Result<Option<ProcessStatus>> {
+        Ok(self
+            .impl_terminate()
             .await?
             .map(ProcessStatus::from_native)
-            .transpose()
-            .map_err(Into::into)
+            .transpose()?)
     }
 }
 
-impl Command for DirectCommand<'_> {
-    type Child = DirectChild;
-    type StdioSend = StdioSend;
-    type StdioRecv = StdioRecv;
-
-    fn arg(&mut self, arg: &str) -> &mut Self {
+impl Command<'_> {
+    pub(crate) fn arg(&mut self, arg: &str) -> &mut Self {
         self.args.push(arg.to_owned());
         self
     }
 
-    fn env(&mut self, key: &str, val: &str) -> &mut Self {
+    pub(crate) fn env(&mut self, key: &str, val: &str) -> &mut Self {
         self.env.insert(key.to_owned(), Some(val.to_owned()));
         self
     }
 
-    fn env_remove(&mut self, key: &str) -> &mut Self {
+    pub(crate) fn env_remove(&mut self, key: &str) -> &mut Self {
         self.env.insert(key.to_owned(), None);
         self
     }
 
-    fn current_dir(&mut self, dir: Utf8TypedPath<'_>) -> &mut Self {
+    pub(crate) fn current_dir(&mut self, dir: Utf8TypedPath<'_>) -> &mut Self {
         match native_path(dir) {
             Ok(dir) => self.cwd = Some(dir),
             Err(error) => self.error = Some(error),
@@ -1205,94 +1161,94 @@ impl Command for DirectCommand<'_> {
         self
     }
 
-    fn stdin(&mut self, stdio: StdioRecv) -> io::Result<&mut Self> {
+    pub(crate) fn stdin(&mut self, stdio: StdioRecv) -> Result<&mut Self> {
         self.stdin = None;
         self.stdin_resource = Some(stdio);
         Ok(self)
     }
 
-    fn stdout(&mut self, stdio: StdioSend) -> io::Result<&mut Self> {
+    pub(crate) fn stdout(&mut self, stdio: StdioSend) -> Result<&mut Self> {
         self.stdout = None;
         self.stdout_resource = Some(stdio);
         Ok(self)
     }
 
-    fn stdin_inherit(&mut self) -> io::Result<&mut Self> {
+    pub(crate) fn stdin_inherit(&mut self) -> Result<&mut Self> {
         self.stdin_resource = None;
         self.stdin = Some(Stdio::inherit());
         Ok(self)
     }
 
-    fn stdout_inherit(&mut self) -> io::Result<&mut Self> {
+    pub(crate) fn stdout_inherit(&mut self) -> Result<&mut Self> {
         self.stdout_resource = None;
         self.stdout = Some(Stdio::inherit());
         Ok(self)
     }
 
-    fn stdout_inherit_stderr(&mut self) -> io::Result<&mut Self> {
+    pub(crate) fn stdout_inherit_stderr(&mut self) -> Result<&mut Self> {
         self.stdout_resource = None;
         self.impl_stdout_inherit_stderr()
     }
 
-    fn stdin_null(&mut self) -> &mut Self {
+    pub(crate) fn stdin_null(&mut self) -> &mut Self {
         self.stdin = None;
         self.stdin_resource = None;
         self
     }
 
-    fn stdout_null(&mut self) -> &mut Self {
+    pub(crate) fn stdout_null(&mut self) -> &mut Self {
         self.stdout = None;
         self.stdout_resource = None;
         self
     }
 
-    fn stderr(&mut self, stdio: StdioSend) -> io::Result<&mut Self> {
+    pub(crate) fn stderr(&mut self, stdio: StdioSend) -> Result<&mut Self> {
         self.stderr = None;
         self.stderr_resource = Some(stdio);
         self.stderr_to_stdout = false;
         Ok(self)
     }
 
-    fn stderr_inherit(&mut self) -> io::Result<&mut Self> {
+    pub(crate) fn stderr_inherit(&mut self) -> Result<&mut Self> {
         self.stderr_resource = None;
         self.stderr = Some(Stdio::inherit());
         self.stderr_to_stdout = false;
         Ok(self)
     }
 
-    fn stderr_to_stdout(&mut self) -> io::Result<&mut Self> {
+    pub(crate) fn stderr_to_stdout(&mut self) -> Result<&mut Self> {
         self.stderr = None;
         self.stderr_resource = None;
         self.stderr_to_stdout = true;
         Ok(self)
     }
 
-    fn stderr_inherit_stdout(&mut self) -> io::Result<&mut Self> {
+    pub(crate) fn stderr_inherit_stdout(&mut self) -> Result<&mut Self> {
         self.stderr_resource = None;
         self.stderr_to_stdout = false;
         self.impl_stderr_inherit_stdout()
     }
 
-    fn stderr_null(&mut self) -> &mut Self {
+    pub(crate) fn stderr_null(&mut self) -> &mut Self {
         self.stderr = None;
         self.stderr_resource = None;
         self.stderr_to_stdout = false;
         self
     }
 
-    fn process_control(&mut self, control: crate::ProcessControl) -> &mut Self {
+    pub(crate) fn process_control(&mut self, control: ProcessControl) -> &mut Self {
         self.process_control = control;
         self
     }
 
-    fn termination_policy(&mut self, policy: crate::TerminationPolicy) -> &mut Self {
+    pub(crate) fn termination_policy(&mut self, policy: TerminationPolicy) -> &mut Self {
         self.termination_policy = policy;
         self
     }
 
-    async fn spawn(mut self) -> crate::Result<Self::Child> {
+    pub(crate) async fn spawn(mut self) -> Result<Child> {
         if let Some(error) = self.error {
-            return Err(error.into());
+            return Err(error);
         }
         let path_override = self
             .env
@@ -1359,13 +1315,13 @@ impl Command for DirectCommand<'_> {
 
         self.configure_process(&mut command)?;
         let child = command.spawn()?;
-        self.finish_spawn(child).map_err(Into::into)
+        self.finish_spawn(child)
     }
 }
 
-impl DirectOpenOptions {
-    fn as_tokio(&self) -> OpenOptions {
-        let mut opts = OpenOptions::new();
+impl OpenOptions {
+    fn as_tokio(&self) -> fs::OpenOptions {
+        let mut opts = fs::OpenOptions::new();
         opts.read(self.read)
             .write(self.write)
             .append(self.append)
@@ -1377,45 +1333,43 @@ impl DirectOpenOptions {
     }
 }
 
-impl crate::OpenOptions for DirectOpenOptions {
-    type File = DirectFile;
-
-    fn read(&mut self, read: bool) -> &mut Self {
+impl OpenOptions {
+    pub(crate) fn read(&mut self, read: bool) -> &mut Self {
         self.read = read;
         self
     }
 
-    fn write(&mut self, write: bool) -> &mut Self {
+    pub(crate) fn write(&mut self, write: bool) -> &mut Self {
         self.write = write;
         self
     }
 
-    fn append(&mut self, append: bool) -> &mut Self {
+    pub(crate) fn append(&mut self, append: bool) -> &mut Self {
         self.append = append;
         self
     }
 
-    fn create(&mut self, create: bool) -> &mut Self {
+    pub(crate) fn create(&mut self, create: bool) -> &mut Self {
         self.create = create;
         self
     }
 
-    fn create_new(&mut self, create_new: bool) -> &mut Self {
+    pub(crate) fn create_new(&mut self, create_new: bool) -> &mut Self {
         self.create_new = create_new;
         self
     }
 
-    fn truncate(&mut self, truncate: bool) -> &mut Self {
+    pub(crate) fn truncate(&mut self, truncate: bool) -> &mut Self {
         self.truncate = truncate;
         self
     }
 
-    fn no_follow(&mut self, no_follow: bool) -> &mut Self {
+    pub(crate) fn no_follow(&mut self, no_follow: bool) -> &mut Self {
         self.no_follow = no_follow;
         self
     }
 
-    async fn open(&self, path: Utf8TypedPath<'_>) -> crate::Result<DirectFile> {
+    pub(crate) async fn open(&self, path: Utf8TypedPath<'_>) -> Result<File> {
         // `as_tokio` carries the platform-specific open flags, so go through
         // it and then unwrap: the handle is driven positionally from here on
         // and has no use for tokio's cursor bookkeeping.
@@ -1425,12 +1379,7 @@ impl crate::OpenOptions for DirectOpenOptions {
             .await?
             .into_std()
             .await;
-        Ok(DirectFile::from_std(
-            file,
-            self.read,
-            self.write,
-            self.append,
-        ))
+        Ok(File::from_std(file, self.read, self.write, self.append))
     }
 }
 
@@ -1440,12 +1389,12 @@ impl Direct {
     pub async fn call_extension<T: crate::extension::VfsExtension>(
         &self,
         request: T::Request,
-    ) -> crate::Result<T::Response> {
+    ) -> Result<T::Response> {
         let ext = crate::extension::lookup(T::NAME, T::VERSION)
             .filter(|extension| extension.available())
             .ok_or_else(|| {
-                crate::Error::new(
-                    crate::ErrorKind::Unsupported,
+                Error::new(
+                    ErrorKind::Unsupported,
                     format!("VFS extension {} v{} is not available", T::NAME, T::VERSION),
                 )
             })?;
@@ -1457,11 +1406,11 @@ impl Direct {
             .expect("response type matches the extension that produced it"))
     }
 
-    async fn copy_symlink(src: &Path, dst: &Path) -> io::Result<()> {
+    async fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
         Self::impl_copy_symlink(src, dst).await
     }
 
-    async fn copy_local(from: &Path, to: &Path, all: bool) -> io::Result<()> {
+    async fn copy_local(from: &Path, to: &Path, all: bool) -> Result<()> {
         let metadata = fs::symlink_metadata(from).await?;
 
         if metadata.is_dir() {
@@ -1485,7 +1434,7 @@ impl Direct {
                     } else if metadata.file_type().is_symlink() {
                         Self::copy_symlink(&src_path, &dst_path).await?;
                     } else {
-                        return Err(io::Error::other("unsupported file type"));
+                        return Err(Error::other("unsupported file type"));
                     }
                 }
             }
@@ -1494,13 +1443,13 @@ impl Direct {
         } else if metadata.file_type().is_symlink() {
             Self::copy_symlink(from, to).await?;
         } else {
-            return Err(io::Error::other("unsupported file type"));
+            return Err(Error::other("unsupported file type"));
         }
 
         Ok(())
     }
 
-    async fn move_local(from: &Path, to: &Path, all: bool) -> io::Result<()> {
+    async fn move_local(from: &Path, to: &Path, all: bool) -> Result<()> {
         let metadata = fs::symlink_metadata(from).await?;
         let is_dir = metadata.is_dir();
 
@@ -1513,16 +1462,16 @@ impl Direct {
             Err(err) if err.kind() == io::ErrorKind::CrossesDevices => {
                 Self::copy_local(from, to, all).await?;
                 if is_dir {
-                    fs::remove_dir_all(from).await
+                    Ok(fs::remove_dir_all(from).await?)
                 } else {
-                    fs::remove_file(from).await
+                    Ok(fs::remove_file(from).await?)
                 }
             }
-            Err(err) => Err(err),
+            Err(err) => Err(err.into()),
         }
     }
 
-    async fn read_dir_paths(path: &Path) -> io::Result<Vec<PathBuf>> {
+    async fn read_dir_paths(path: &Path) -> Result<Vec<PathBuf>> {
         let mut read_dir = fs::read_dir(path).await?;
         let mut paths = Vec::new();
         while let Some(entry) = read_dir.next_entry().await? {
@@ -1531,7 +1480,7 @@ impl Direct {
         Ok(paths)
     }
 
-    async fn remove_dir_empty_tree_local(path: &Path, ignore: bool) -> io::Result<bool> {
+    async fn remove_dir_empty_tree_local(path: &Path, ignore: bool) -> Result<bool> {
         let metadata = fs::symlink_metadata(path).await?;
         if !metadata.is_dir() {
             return Err(Self::not_a_directory_error());
@@ -1589,65 +1538,53 @@ impl Direct {
     }
 }
 
-impl Vfs for Direct {
-    type File = DirectFile;
-    type StdioSend = StdioSend;
-    type StdioRecv = StdioRecv;
-    type OpenOptions<'a>
-        = DirectOpenOptions
-    where
-        Self: 'a;
-    type Command<'a>
-        = DirectCommand<'a>
-    where
-        Self: 'a;
-
-    fn env(&self) -> Box<dyn Iterator<Item = (String, String)> + '_> {
+impl Direct {
+    pub(crate) fn env(&self) -> Box<dyn Iterator<Item = (String, String)> + '_> {
         Box::new(crate::session::current_environment())
     }
 
-    fn cwd(&self) -> Utf8TypedPath<'_> {
+    pub(crate) fn cwd(&self) -> Utf8TypedPath<'_> {
         self.initial.cwd.to_path()
     }
 
-    fn current_exe(&self) -> Utf8TypedPath<'_> {
+    pub(crate) fn current_exe(&self) -> Utf8TypedPath<'_> {
         self.initial.current_exe.to_path()
     }
 
-    fn target(&self) -> &crate::TargetInfo {
+    pub(crate) fn target(&self) -> &TargetInfo {
         &self.initial.target
     }
 
-    fn security(&self) -> &crate::SecurityInfo {
+    pub(crate) fn security(&self) -> &SecurityInfo {
         &self.initial.security
     }
 
-    fn extensions(&self) -> &crate::session::ExtensionSet {
+    pub(crate) fn extensions(&self) -> &ExtensionSet {
         &self.initial.extensions
     }
 
-    fn open_options(&self) -> Self::OpenOptions<'_> {
-        DirectOpenOptions::default()
+    pub(crate) fn open_options(&self) -> OpenOptions {
+        OpenOptions::default()
     }
 
-    fn command(&self, program: Utf8TypedPath<'_>) -> Self::Command<'_> {
-        DirectCommand::new(self, program)
+    pub(crate) fn command(&self, program: Utf8TypedPath<'_>) -> Command<'_> {
+        Command::new(self, program)
     }
 
-    async fn unix_socket(
+    pub(crate) async fn unix_socket(
         &self,
         path: Utf8TypedPath<'_>,
         key: Option<&[u8]>,
-    ) -> crate::Result<crate::AnyVfs> {
+    ) -> Result<crate::Vfs> {
         #[cfg(unix)]
         {
             let key = key
                 .map(dolang_rpc::AuthKey::new)
                 .transpose()
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
-            crate::Client::connect_with_key(native_path(path)?, key)
-                .await
-                .map(Into::into)
+            Ok(crate::Vfs::from_client(
+                crate::client::Client::connect_with_key(native_path(path)?, key).await?,
+            ))
         }
         #[cfg(not(unix))]
         {
@@ -1660,21 +1597,21 @@ impl Vfs for Direct {
         }
     }
 
-    async fn windows_admin(
+    pub(crate) async fn windows_admin(
         &self,
         cwd: Utf8TypedPath<'_>,
         env: HashMap<String, Option<String>>,
         elevate: bool,
-    ) -> crate::Result<crate::session::VfsSession> {
+    ) -> Result<crate::Vfs> {
         #[cfg(windows)]
         {
             let cwd = native_path(cwd)?;
-            let session = if elevate {
-                crate::windows::AdminSession::launch(cwd, env).await
+            let client = if elevate {
+                crate::windows::launch_admin(cwd, env).await
             } else {
-                crate::windows::AdminSession::launch_unelevated(cwd, env).await
+                crate::windows::launch_unelevated(cwd, env).await
             }?;
-            Ok(crate::session::VfsSession::from_windows(session))
+            Ok(crate::Vfs::from_client(client))
         }
         #[cfg(not(windows))]
         {
@@ -1687,15 +1624,11 @@ impl Vfs for Direct {
         }
     }
 
-    async fn pipe(&self) -> crate::Result<(StdioSend, StdioRecv)> {
-        crate::process::pipe(None).map_err(Into::into)
+    pub(crate) async fn pipe(&self, buf_size: Option<usize>) -> Result<(StdioSend, StdioRecv)> {
+        Ok(crate::process::pipe(buf_size)?)
     }
 
-    async fn pipe_sized(&self, buf_size: Option<usize>) -> crate::Result<(StdioSend, StdioRecv)> {
-        crate::process::pipe(buf_size).map_err(Into::into)
-    }
-
-    async fn user_name(&self, uid: u32) -> crate::Result<String> {
+    pub(crate) async fn user_name(&self, uid: u32) -> Result<String> {
         #[cfg(unix)]
         return self.impl_user_name(uid).await;
         #[cfg(windows)]
@@ -1705,7 +1638,7 @@ impl Vfs for Direct {
         }
     }
 
-    async fn user_id(&self, name: &str) -> crate::Result<u32> {
+    pub(crate) async fn user_id(&self, name: &str) -> Result<u32> {
         #[cfg(unix)]
         return self.impl_user_id(name).await;
         #[cfg(windows)]
@@ -1715,7 +1648,7 @@ impl Vfs for Direct {
         }
     }
 
-    async fn group_name(&self, gid: u32) -> crate::Result<String> {
+    pub(crate) async fn group_name(&self, gid: u32) -> Result<String> {
         #[cfg(unix)]
         return self.impl_group_name(gid).await;
         #[cfg(windows)]
@@ -1725,7 +1658,7 @@ impl Vfs for Direct {
         }
     }
 
-    async fn group_id(&self, name: &str) -> crate::Result<u32> {
+    pub(crate) async fn group_id(&self, name: &str) -> Result<u32> {
         #[cfg(unix)]
         return self.impl_group_id(name).await;
         #[cfg(windows)]
@@ -1735,7 +1668,7 @@ impl Vfs for Direct {
         }
     }
 
-    async fn sid_name(&self, sid: &Sid) -> crate::Result<SidName> {
+    pub(crate) async fn sid_name(&self, sid: &Sid) -> Result<SidName> {
         #[cfg(windows)]
         return self.impl_sid_name(sid).await;
         #[cfg(unix)]
@@ -1745,7 +1678,7 @@ impl Vfs for Direct {
         }
     }
 
-    async fn account_name(&self, name: &str) -> crate::Result<SidName> {
+    pub(crate) async fn account_name(&self, name: &str) -> Result<SidName> {
         #[cfg(windows)]
         return self.impl_account_name(name).await;
         #[cfg(unix)]
@@ -1759,13 +1692,13 @@ impl Vfs for Direct {
         }
     }
 
-    async fn resolve_principal_id(
+    pub(crate) async fn resolve_principal_id(
         &self,
         input: crate::security::PrincipalId,
         want: crate::security::PrincipalIdKind,
-    ) -> crate::Result<crate::security::PrincipalId> {
+    ) -> Result<crate::security::PrincipalId> {
         #[cfg(unix)]
-        return Self::resolve_principal_id(input, want).map_err(Into::into);
+        return Self::impl_resolve_principal_id(input, want);
         #[cfg(windows)]
         {
             let _ = (input, want);
@@ -1777,16 +1710,21 @@ impl Vfs for Direct {
         }
     }
 
-    async fn read_dir(&self, path: Utf8TypedPath<'_>) -> crate::Result<ReadDir> {
-        ReadDir::open(&native_path(path)?).await.map_err(Into::into)
+    pub(crate) async fn read_dir(
+        &self,
+        path: Utf8TypedPath<'_>,
+    ) -> Result<crate::directory::ReadDir> {
+        ReadDir::open(&native_path(path)?)
+            .await
+            .map(crate::directory::ReadDir::direct)
     }
 
-    async fn which(
+    pub(crate) async fn which(
         &self,
         program: Utf8TypedPath<'_>,
         path: Option<&str>,
         cwd: Option<Utf8TypedPath<'_>>,
-    ) -> crate::Result<Option<Utf8TypedPathBuf>> {
+    ) -> Result<Option<Utf8TypedPathBuf>> {
         let program = native_path(program)?;
         let cwd = cwd.map(native_path).transpose()?;
         self.path_cache
@@ -1794,87 +1732,85 @@ impl Vfs for Direct {
             .await
             .map(typed_path)
             .transpose()
-            .map_err(Into::into)
     }
 
-    async fn well_known_path(
+    pub(crate) async fn well_known_path(
         &self,
         key: WellKnownPath,
         app: Option<&str>,
         env: &HashMap<String, Option<String>>,
-    ) -> crate::Result<Utf8TypedPathBuf> {
+    ) -> Result<Utf8TypedPathBuf> {
         let path = match key {
             WellKnownPath::HomeDir => Self::home_dir_platform(env),
             WellKnownPath::CacheDir => Self::cache_dir_platform(app, env),
             WellKnownPath::TempDir => Self::temp_dir_platform(env),
         }?;
-        Ok(typed_path(path)?)
+        typed_path(path)
     }
 
-    async fn clear_cache(&self) -> crate::Result<()> {
+    pub(crate) async fn clear_cache(&self) -> Result<()> {
         self.path_cache.clear().await;
         Ok(())
     }
 
-    async fn xattrs(
+    pub(crate) async fn xattrs(
         &self,
         path: Utf8TypedPath<'_>,
         namespace: XattrNamespace<'_>,
         follow: bool,
-    ) -> crate::Result<Vec<XattrEntry>> {
+    ) -> Result<Vec<XattrEntry>> {
         self.impl_xattrs(&native_path(path)?, namespace, follow)
             .await
-            .map_err(Into::into)
     }
 
-    async fn streams(
+    pub(crate) async fn streams(
         &self,
         path: Utf8TypedPath<'_>,
         follow: bool,
-    ) -> crate::Result<Vec<StreamEntry>> {
-        self.impl_streams(&native_path(path)?, follow)
-            .await
-            .map_err(Into::into)
+    ) -> Result<Vec<StreamEntry>> {
+        self.impl_streams(&native_path(path)?, follow).await
     }
 
-    async fn xattr(
+    pub(crate) async fn xattr(
         &self,
         path: Utf8TypedPath<'_>,
         name: &str,
         namespace: Option<&str>,
         follow: bool,
-    ) -> crate::Result<Vec<u8>> {
+    ) -> Result<Vec<u8>> {
         self.impl_xattr(&native_path(path)?, name, namespace, follow)
             .await
-            .map_err(Into::into)
     }
 
-    async fn set_xattr(
+    pub(crate) async fn set_xattr(
         &self,
         path: Utf8TypedPath<'_>,
         name: &str,
         namespace: Option<&str>,
         value: &[u8],
         follow: bool,
-    ) -> crate::Result<()> {
+    ) -> Result<()> {
         self.impl_set_xattr(&native_path(path)?, name, namespace, value, follow)
             .await
-            .map_err(Into::into)
     }
 
-    async fn remove_xattr(
+    pub(crate) async fn remove_xattr(
         &self,
         path: Utf8TypedPath<'_>,
         name: &str,
         namespace: Option<&str>,
         follow: bool,
-    ) -> crate::Result<()> {
+    ) -> Result<()> {
         self.impl_remove_xattr(&native_path(path)?, name, namespace, follow)
             .await
-            .map_err(Into::into)
     }
 
-    async fn remove(&self, path: Utf8TypedPath<'_>, all: bool, ignore: bool) -> crate::Result<()> {
+    pub(crate) async fn remove(
+        &self,
+        path: Utf8TypedPath<'_>,
+        all: bool,
+        ignore: bool,
+    ) -> Result<()> {
         let path = native_path(path)?;
         let path = path.as_path();
         let result = if all {
@@ -1893,256 +1829,231 @@ impl Vfs for Direct {
         }
     }
 
-    async fn metadata(&self, path: Utf8TypedPath<'_>) -> crate::Result<Metadata> {
+    pub(crate) async fn metadata(&self, path: Utf8TypedPath<'_>) -> Result<Metadata> {
         #[cfg(unix)]
         {
             let path = native_path(path)?;
             tokio::task::spawn_blocking(move || Self::metadata_from_path(&path, true))
                 .await
-                .unwrap_or_else(|_| Err(io::Error::other("failed to join metadata query task")))
-                .map_err(Into::into)
+                .unwrap_or_else(|_| Err(Error::other("failed to join metadata query task")))
         }
         #[cfg(windows)]
         {
             let path = native_path(path)?;
             tokio::task::spawn_blocking(move || Self::metadata_from_path(&path, true))
                 .await
-                .unwrap_or_else(|_| Err(io::Error::other("failed to join metadata query task")))
-                .map_err(Into::into)
+                .unwrap_or_else(|_| Err(Error::other("failed to join metadata query task")))
         }
     }
 
-    async fn fs_metadata(
+    pub(crate) async fn fs_metadata(
         &self,
         path: Utf8TypedPath<'_>,
         follow: bool,
-    ) -> crate::Result<FsMetadata> {
+    ) -> Result<FsMetadata> {
         let path = native_path(path)?;
         tokio::task::spawn_blocking(move || Self::fs_metadata_from_path(&path, follow))
             .await
-            .unwrap_or_else(|_| Err(io::Error::other("failed to join fs metadata query task")))
-            .map_err(Into::into)
+            .unwrap_or_else(|_| Err(Error::other("failed to join fs metadata query task")))
     }
 
-    async fn acl(
+    pub(crate) async fn acl(
         &self,
         path: Utf8TypedPath<'_>,
         kind: AclKind,
         default: bool,
         follow: bool,
-    ) -> crate::Result<Option<Acl>> {
+    ) -> Result<Option<Acl>> {
         let path = native_path(path)?;
         tokio::task::spawn_blocking(move || Self::acl_from_path(&path, kind, default, follow))
             .await
-            .unwrap_or_else(|_| Err(io::Error::other("failed to join ACL query task")))
-            .map_err(Into::into)
+            .unwrap_or_else(|_| Err(Error::other("failed to join ACL query task")))
     }
 
-    async fn set_acl(
+    pub(crate) async fn set_acl(
         &self,
         path: Utf8TypedPath<'_>,
         kind: AclKind,
         acl: Option<&Acl>,
         default: bool,
         follow: bool,
-    ) -> crate::Result<()> {
+    ) -> Result<()> {
         let path = native_path(path)?;
         let acl = acl.cloned();
         tokio::task::spawn_blocking(move || {
             Self::set_acl_path(&path, kind, acl.as_ref(), default, follow)
         })
         .await
-        .unwrap_or_else(|_| Err(io::Error::other("failed to join ACL update task")))
-        .map_err(Into::into)
+        .unwrap_or_else(|_| Err(Error::other("failed to join ACL update task")))
     }
 
-    async fn sec_desc(
+    pub(crate) async fn sec_desc(
         &self,
         path: Utf8TypedPath<'_>,
         mask: dolang_winterop::security::SecInfo,
         follow: bool,
-    ) -> crate::Result<SecDesc> {
+    ) -> Result<SecDesc> {
         let path = native_path(path)?;
         tokio::task::spawn_blocking(move || Self::sec_desc_from_path(&path, mask, follow))
             .await
-            .unwrap_or_else(|_| Err(io::Error::other("failed to join security descriptor task")))
-            .map_err(Into::into)
+            .unwrap_or_else(|_| Err(Error::other("failed to join security descriptor task")))
     }
 
-    async fn set_sec_desc(
+    pub(crate) async fn set_sec_desc(
         &self,
         path: Utf8TypedPath<'_>,
         sec_desc: &SecDesc,
         follow: bool,
-    ) -> crate::Result<()> {
+    ) -> Result<()> {
         let path = native_path(path)?;
         let sec_desc = sec_desc.clone();
         tokio::task::spawn_blocking(move || Self::set_sec_desc_path(&path, &sec_desc, follow))
             .await
-            .unwrap_or_else(|_| Err(io::Error::other("failed to join security descriptor task")))
-            .map_err(Into::into)
+            .unwrap_or_else(|_| Err(Error::other("failed to join security descriptor task")))
     }
 
-    async fn create_dir(&self, path: Utf8TypedPath<'_>, all: bool) -> crate::Result<()> {
+    pub(crate) async fn create_dir(&self, path: Utf8TypedPath<'_>, all: bool) -> Result<()> {
         let path = native_path(path)?;
         if all {
-            fs::create_dir_all(path).await.map_err(Into::into)
+            Ok(fs::create_dir_all(path).await?)
         } else {
-            fs::create_dir(path).await.map_err(Into::into)
+            Ok(fs::create_dir(path).await?)
         }
     }
 
-    async fn remove_dir(
+    pub(crate) async fn remove_dir(
         &self,
         path: Utf8TypedPath<'_>,
         all: bool,
         ignore: bool,
-    ) -> crate::Result<()> {
+    ) -> Result<()> {
         let path = native_path(path)?;
         let result = if all {
             Self::remove_dir_empty_tree_local(&path, ignore)
                 .await
                 .map(|_| ())
         } else {
-            fs::remove_dir(path).await
+            Ok(fs::remove_dir(path).await?)
         };
         match result {
             Ok(()) => Ok(()),
             Err(e) if ignore && e.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e.into()),
+            Err(e) => Err(e),
         }
     }
 
-    async fn copy(
+    pub(crate) async fn copy(
         &self,
         from: Utf8TypedPath<'_>,
         to: Utf8TypedPath<'_>,
         all: bool,
-    ) -> crate::Result<()> {
-        Self::copy_local(&native_path(from)?, &native_path(to)?, all)
-            .await
-            .map_err(Into::into)
+    ) -> Result<()> {
+        Self::copy_local(&native_path(from)?, &native_path(to)?, all).await
     }
 
-    async fn rename(
+    pub(crate) async fn rename(
         &self,
         from: Utf8TypedPath<'_>,
         to: Utf8TypedPath<'_>,
         replace: bool,
-    ) -> crate::Result<()> {
-        Self::impl_rename(native_path(from)?, native_path(to)?, replace)
-            .await
-            .map_err(Into::into)
+    ) -> Result<()> {
+        Self::impl_rename(native_path(from)?, native_path(to)?, replace).await
     }
 
-    async fn move_(
+    pub(crate) async fn move_(
         &self,
         from: Utf8TypedPath<'_>,
         to: Utf8TypedPath<'_>,
         all: bool,
-    ) -> crate::Result<()> {
-        Self::move_local(&native_path(from)?, &native_path(to)?, all)
-            .await
-            .map_err(Into::into)
+    ) -> Result<()> {
+        Self::move_local(&native_path(from)?, &native_path(to)?, all).await
     }
 
-    async fn symlink(
+    pub(crate) async fn symlink(
         &self,
         cwd: Utf8TypedPath<'_>,
         src: Utf8TypedPath<'_>,
         dst: Utf8TypedPath<'_>,
-    ) -> crate::Result<()> {
-        Self::impl_symlink(&native_path(cwd)?, &native_path(src)?, &native_path(dst)?)
-            .await
-            .map_err(Into::into)
+    ) -> Result<()> {
+        Self::impl_symlink(&native_path(cwd)?, &native_path(src)?, &native_path(dst)?).await
     }
 
-    async fn hard_link(&self, src: Utf8TypedPath<'_>, dst: Utf8TypedPath<'_>) -> crate::Result<()> {
-        fs::hard_link(native_path(src)?, native_path(dst)?)
-            .await
-            .map_err(Into::into)
-    }
-
-    async fn symlink_dir(
+    pub(crate) async fn hard_link(
         &self,
         src: Utf8TypedPath<'_>,
         dst: Utf8TypedPath<'_>,
-    ) -> crate::Result<()> {
-        Self::impl_symlink_dir(&native_path(src)?, &native_path(dst)?)
-            .await
-            .map_err(Into::into)
+    ) -> Result<()> {
+        Ok(fs::hard_link(native_path(src)?, native_path(dst)?).await?)
     }
 
-    async fn symlink_file(
+    pub(crate) async fn symlink_dir(
         &self,
         src: Utf8TypedPath<'_>,
         dst: Utf8TypedPath<'_>,
-    ) -> crate::Result<()> {
-        Self::impl_symlink_file(&native_path(src)?, &native_path(dst)?)
-            .await
-            .map_err(Into::into)
+    ) -> Result<()> {
+        Self::impl_symlink_dir(&native_path(src)?, &native_path(dst)?).await
     }
 
-    async fn symlink_metadata(&self, path: Utf8TypedPath<'_>) -> crate::Result<Metadata> {
+    pub(crate) async fn symlink_file(
+        &self,
+        src: Utf8TypedPath<'_>,
+        dst: Utf8TypedPath<'_>,
+    ) -> Result<()> {
+        Self::impl_symlink_file(&native_path(src)?, &native_path(dst)?).await
+    }
+
+    pub(crate) async fn symlink_metadata(&self, path: Utf8TypedPath<'_>) -> Result<Metadata> {
         #[cfg(unix)]
         {
             let path = native_path(path)?;
             tokio::task::spawn_blocking(move || Self::metadata_from_path(&path, false))
                 .await
-                .unwrap_or_else(|_| Err(io::Error::other("failed to join metadata query task")))
-                .map_err(Into::into)
+                .unwrap_or_else(|_| Err(Error::other("failed to join metadata query task")))
         }
         #[cfg(windows)]
         {
             let path = native_path(path)?;
             tokio::task::spawn_blocking(move || Self::metadata_from_path(&path, false))
                 .await
-                .unwrap_or_else(|_| Err(io::Error::other("failed to join metadata query task")))
-                .map_err(Into::into)
+                .unwrap_or_else(|_| Err(Error::other("failed to join metadata query task")))
         }
     }
 
-    async fn set_metadata(
+    pub(crate) async fn set_metadata(
         &self,
         paths: &[Utf8TypedPathBuf],
         patch: MetadataPatch,
-    ) -> crate::Result<()> {
+    ) -> Result<()> {
         let paths = paths
             .iter()
             .map(|path| native_path(path.to_path()))
-            .collect::<io::Result<Vec<_>>>()?;
-        self.impl_set_metadata(&paths, patch)
-            .await
-            .map_err(Into::into)
+            .collect::<crate::error::Result<Vec<_>>>()?;
+        self.impl_set_metadata(&paths, patch).await
     }
 
-    async fn canonicalize(&self, path: Utf8TypedPath<'_>) -> crate::Result<Utf8TypedPathBuf> {
-        Ok(typed_path(
-            self.impl_canonicalize(&native_path(path)?).await?,
-        )?)
+    pub(crate) async fn canonicalize(&self, path: Utf8TypedPath<'_>) -> Result<Utf8TypedPathBuf> {
+        typed_path(self.impl_canonicalize(&native_path(path)?).await?)
     }
 
-    async fn read_link(&self, path: Utf8TypedPath<'_>) -> crate::Result<Utf8TypedPathBuf> {
-        Ok(typed_path(fs::read_link(native_path(path)?).await?)?)
+    pub(crate) async fn read_link(&self, path: Utf8TypedPath<'_>) -> Result<Utf8TypedPathBuf> {
+        typed_path(fs::read_link(native_path(path)?).await?)
     }
 
-    async fn access(
+    pub(crate) async fn access(
         &self,
         path: Utf8TypedPath<'_>,
         mode: crate::file::AccessFlags,
-    ) -> crate::Result<()> {
-        Self::impl_access(native_path(path)?, mode)
-            .await
-            .map_err(Into::into)
+    ) -> Result<()> {
+        Self::impl_access(native_path(path)?, mode).await
     }
 
-    async fn glob(
+    pub(crate) async fn glob(
         &self,
         pattern: impl Into<String>,
         root: Utf8TypedPath<'_>,
         follow_symlinks: bool,
         max_depth: Option<usize>,
-    ) -> crate::Result<Vec<Utf8TypedPathBuf>> {
+    ) -> Result<Vec<Utf8TypedPathBuf>> {
         let pattern = pattern.into();
         let root = native_path(root)?;
         tokio::task::spawn_blocking(move || {
@@ -2167,14 +2078,17 @@ impl Vfs for Direct {
             };
 
             for entry in walk {
-                paths.push(prefix.join(entry?.root_relative_paths().1));
+                let entry = entry.map_err(io::Error::other)?;
+                paths.push(prefix.join(entry.root_relative_paths().1));
             }
 
             paths.sort();
-            paths.into_iter().map(typed_path).collect()
+            paths
+                .into_iter()
+                .map(typed_path)
+                .collect::<crate::error::Result<_>>()
         })
         .await
-        .unwrap_or_else(|e| Err(io::Error::other(e)))
-        .map_err(Into::into)
+        .unwrap_or_else(|e| Err(Error::new(ErrorKind::Other, e.to_string())))
     }
 }

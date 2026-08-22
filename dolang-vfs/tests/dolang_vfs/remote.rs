@@ -5,13 +5,13 @@ use bytes::{Bytes, BytesMut};
 #[cfg(target_os = "linux")]
 use dolang_vfs::xattr::XattrNamespace;
 use dolang_vfs::{
-    AnyCommand, AnyVfs, Child, Command, FileHandle, MAX_FILE_READ, OpenOptions, Vfs,
-    client::{Client, CommandBuilder},
-    direct::Direct,
+    MAX_FILE_READ, Vfs,
     directory::{DirEntry, ReadDir},
+    error::Result as VfsResult,
     file::{FileLockBehavior, FileLockMode, FileLockRange, FileLockRequest},
     metadata::FileType,
     path::typed_path,
+    process::Command,
     server::Server,
     target::TargetInfo,
 };
@@ -23,16 +23,16 @@ use typed_path::{Utf8TypedPath, Utf8UnixPath, Utf8WindowsPath};
 
 use crate::support;
 
-async fn connected_pair() -> (Client, tokio::task::JoinHandle<io::Result<()>>) {
+async fn connected_pair() -> (Vfs, tokio::task::JoinHandle<VfsResult<()>>) {
     let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
     // `Server::new` itself now runs the RPC handshake, so it must be driven
     // concurrently with the client's own construction below rather than
     // completed first — otherwise each side blocks waiting for the other.
     let task = tokio::spawn(async move { Server::new(server_stream).await.unwrap().serve().await });
-    (Client::new(client_stream).await.unwrap(), task)
+    (Vfs::new(client_stream).await.unwrap(), task)
 }
 
-async fn connected_split_pair() -> (Client, tokio::task::JoinHandle<io::Result<()>>) {
+async fn connected_split_pair() -> (Vfs, tokio::task::JoinHandle<VfsResult<()>>) {
     let (client_stream, server_stream) = tokio::io::duplex(1024 * 1024);
     let (client_reader, client_writer) = tokio::io::split(client_stream);
     let (server_reader, server_writer) = tokio::io::split(server_stream);
@@ -44,16 +44,14 @@ async fn connected_split_pair() -> (Client, tokio::task::JoinHandle<io::Result<(
             .await
     });
     (
-        Client::new_split(client_reader, client_writer)
-            .await
-            .unwrap(),
+        Vfs::new_split(client_reader, client_writer).await.unwrap(),
         task,
     )
 }
 
-async fn stop_pair(client: Client, server: tokio::task::JoinHandle<io::Result<()>>) {
-    client.stop().await.unwrap();
-    client.close().await;
+async fn stop_pair(vfs: Vfs, server: tokio::task::JoinHandle<VfsResult<()>>) {
+    vfs.stop().await.unwrap();
+    vfs.close().await;
     server.await.unwrap().unwrap();
 }
 
@@ -73,7 +71,7 @@ async fn windows_admin_reports_unsupported_from_non_windows_backend() {
 }
 
 #[cfg(unix)]
-async fn socket_server(path: &std::path::Path) -> tokio::task::JoinHandle<io::Result<()>> {
+async fn socket_server(path: &std::path::Path) -> tokio::task::JoinHandle<VfsResult<()>> {
     let server = Server::bind(path).await.unwrap();
     tokio::spawn(server.accept())
 }
@@ -166,14 +164,7 @@ fn stdout_reader_command() -> (&'static str, [&'static str; 2]) {
     ("cmd", ["/C", "findstr remote-stdout"])
 }
 
-fn command_with_args<'a>(client: &'a Client, command: (&str, [&str; 2])) -> CommandBuilder<'a> {
-    let (program, args) = command;
-    let mut command = client.command(typed_str(program));
-    command.arg(args[0]).arg(args[1]);
-    command
-}
-
-fn command_with_args_any<'a>(vfs: &'a AnyVfs, command: (&str, [&str; 2])) -> AnyCommand<'a> {
+fn command_with_args<'a>(vfs: &'a Vfs, command: (&str, [&str; 2])) -> Command<'a> {
     let (program, args) = command;
     let mut command = vfs.command(typed_str(program));
     command.arg(args[0]).arg(args[1]);
@@ -197,9 +188,7 @@ async fn opaque_session_chains_to_unix_vfs() {
     let file_path = dir.join("file");
     let mut options = inner.open_options();
     options.write(true).create_new(true);
-    let mut file = OpenOptions::open(&options, file_path.to_path())
-        .await
-        .unwrap();
+    let mut file = options.open(file_path.to_path()).await.unwrap();
     file.write_all(b"chained").await.unwrap();
     file.close().await.unwrap();
     let mut entries = inner.read_dir(dir.to_path()).await.unwrap();
@@ -268,7 +257,7 @@ async fn outer_teardown_does_not_stop_retained_vfs_daemon() {
     drop(inner);
     stop_pair(outer, outer_task).await;
 
-    let direct = Client::connect(&socket).await.unwrap();
+    let direct = Vfs::connect(&socket).await.unwrap();
     assert!(direct.cwd().is_absolute());
     stop_pair(direct, inner_task).await;
 }
@@ -397,7 +386,7 @@ async fn null_stdio_processes_work_over_generic_stream() {
 #[tokio::test]
 async fn opaque_pipe_transfers_bytes_and_reports_eof() {
     let (client, server_task) = connected_pair().await;
-    let (mut send, mut recv) = client.pipe().await.unwrap();
+    let (mut send, mut recv) = client.pipe(None).await.unwrap();
 
     send.write_all(b"remote pipe").await.unwrap();
     send.shutdown().await.unwrap();
@@ -415,7 +404,7 @@ async fn opaque_pipe_transfers_bytes_and_reports_eof() {
 #[tokio::test]
 async fn opaque_pipe_clones_have_independent_ownership() {
     let (client, server_task) = connected_pair().await;
-    let (mut send, mut recv) = client.pipe().await.unwrap();
+    let (mut send, mut recv) = client.pipe(None).await.unwrap();
     let mut clone = send.try_clone().await.unwrap();
 
     send.shutdown().await.unwrap();
@@ -434,7 +423,7 @@ async fn opaque_pipe_clones_have_independent_ownership() {
 #[tokio::test]
 async fn opaque_pipe_reports_broken_pipe_after_receiver_drop() {
     let (client, server_task) = connected_pair().await;
-    let (mut send, recv) = client.pipe().await.unwrap();
+    let (mut send, recv) = client.pipe(None).await.unwrap();
     drop(recv);
 
     let error = tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -457,7 +446,7 @@ async fn opaque_pipe_reports_broken_pipe_after_receiver_drop() {
 #[tokio::test]
 async fn opaque_pipe_connects_remote_children_without_client_relay() {
     let (client, server_task) = connected_pair().await;
-    let (send, recv) = client.pipe().await.unwrap();
+    let (send, recv) = client.pipe(None).await.unwrap();
 
     let mut producer = command_with_args(&client, stdout_command());
     producer.stdout(send).unwrap();
@@ -489,9 +478,7 @@ async fn retained_files_can_be_used_for_remote_stdio() {
 
     let mut options = client.open_options();
     options.read(true).write(true).create(true).truncate(true);
-    let mut stdin = OpenOptions::open(&options, stdin_path.to_path())
-        .await
-        .unwrap();
+    let mut stdin = options.open(stdin_path.to_path()).await.unwrap();
     stdin.write_all(b"remote-input\n").await.unwrap();
     stdin.seek(SeekFrom::Start(0)).await.unwrap();
     let mut command = command_with_args(&client, stdin_command());
@@ -501,9 +488,7 @@ async fn retained_files_can_be_used_for_remote_stdio() {
 
     let mut options = client.open_options();
     options.read(true).write(true).create(true).truncate(true);
-    let stdout = OpenOptions::open(&options, stdout_path.to_path())
-        .await
-        .unwrap();
+    let stdout = options.open(stdout_path.to_path()).await.unwrap();
     let mut command = command_with_args(&client, stdout_command());
     command.stdout(support::stdio_send(stdout).await).unwrap();
     let mut child = command.spawn().await.unwrap();
@@ -511,9 +496,7 @@ async fn retained_files_can_be_used_for_remote_stdio() {
 
     let mut options = client.open_options();
     options.read(true).write(true).create(true).truncate(true);
-    let stderr = OpenOptions::open(&options, stderr_path.to_path())
-        .await
-        .unwrap();
+    let stderr = options.open(stderr_path.to_path()).await.unwrap();
     let mut command = command_with_args(&client, stderr_command());
     command.stderr(support::stdio_send(stderr).await).unwrap();
     let mut child = command.spawn().await.unwrap();
@@ -521,12 +504,8 @@ async fn retained_files_can_be_used_for_remote_stdio() {
 
     let mut options = client.open_options();
     options.read(true);
-    let mut stdout = OpenOptions::open(&options, stdout_path.to_path())
-        .await
-        .unwrap();
-    let mut stderr = OpenOptions::open(&options, stderr_path.to_path())
-        .await
-        .unwrap();
+    let mut stdout = options.open(stdout_path.to_path()).await.unwrap();
+    let mut stderr = options.open(stderr_path.to_path()).await.unwrap();
     let mut stdout_data = String::new();
     let mut stderr_data = String::new();
     stdout.read_to_string(&mut stdout_data).await.unwrap();
@@ -569,44 +548,20 @@ async fn inherited_stdio_is_relayed_over_generic_stream() {
 }
 
 #[tokio::test]
-async fn opaque_stdio_is_rejected_by_a_different_client_session() {
-    let (first, first_server) = connected_pair().await;
-    let (second, second_server) = connected_pair().await;
-    let (send, recv) = first.pipe().await.unwrap();
-
-    let mut command = command_with_args(&second, successful_command());
-    let error = command.stdout(send).err().unwrap();
-    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-
-    let mut command = command_with_args(&second, successful_command());
-    let error = command.stdin(recv).err().unwrap();
-    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-
-    first.stop().await.unwrap();
-    second.stop().await.unwrap();
-    first.close().await;
-    second.close().await;
-    first_server.await.unwrap().unwrap();
-    second_server.await.unwrap().unwrap();
-}
-
-#[tokio::test]
 async fn direct_file_relays_as_remote_process_stdin() {
     let (client, server_task) = connected_pair().await;
-    let remote_vfs = AnyVfs::from(client.clone());
-    let direct = Direct::new().unwrap();
+    let remote_vfs = client.clone();
+    let direct = Vfs::direct().unwrap();
     let temp = tempdir().unwrap();
     let stdin_path = typed_path(temp.path().join("stdin")).unwrap();
 
     let mut options = direct.open_options();
     options.read(true).write(true).create(true).truncate(true);
-    let mut stdin = OpenOptions::open(&options, stdin_path.to_path())
-        .await
-        .unwrap();
+    let mut stdin = options.open(stdin_path.to_path()).await.unwrap();
     stdin.write_all(b"remote-input\n").await.unwrap();
     stdin.seek(SeekFrom::Start(0)).await.unwrap();
 
-    let mut command = command_with_args_any(&remote_vfs, stdin_command());
+    let mut command = command_with_args(&remote_vfs, stdin_command());
     command.stdin(support::stdio_recv(stdin).await).unwrap();
     let mut child = command.spawn().await.unwrap();
     assert!(child.wait().await.unwrap().success());
@@ -617,19 +572,17 @@ async fn direct_file_relays_as_remote_process_stdin() {
 #[tokio::test]
 async fn remote_file_relays_as_direct_process_stdin() {
     let (client, server_task) = connected_pair().await;
-    let direct_vfs = AnyVfs::from(Direct::new().unwrap());
+    let direct_vfs = Vfs::direct().unwrap();
     let temp = tempdir().unwrap();
     let stdin_path = typed_path(temp.path().join("stdin")).unwrap();
 
     let mut options = client.open_options();
     options.read(true).write(true).create(true).truncate(true);
-    let mut stdin = OpenOptions::open(&options, stdin_path.to_path())
-        .await
-        .unwrap();
+    let mut stdin = options.open(stdin_path.to_path()).await.unwrap();
     stdin.write_all(b"remote-input\n").await.unwrap();
     stdin.seek(SeekFrom::Start(0)).await.unwrap();
 
-    let mut command = command_with_args_any(&direct_vfs, stdin_command());
+    let mut command = command_with_args(&direct_vfs, stdin_command());
     command.stdin(support::stdio_recv(stdin).await).unwrap();
     let mut child = command.spawn().await.unwrap();
     assert!(child.wait().await.unwrap().success());
@@ -640,27 +593,23 @@ async fn remote_file_relays_as_direct_process_stdin() {
 #[tokio::test]
 async fn remote_process_stdout_relays_into_direct_file() {
     let (client, server_task) = connected_pair().await;
-    let remote_vfs = AnyVfs::from(client.clone());
-    let direct = Direct::new().unwrap();
+    let remote_vfs = client.clone();
+    let direct = Vfs::direct().unwrap();
     let temp = tempdir().unwrap();
     let stdout_path = typed_path(temp.path().join("stdout")).unwrap();
 
     let mut options = direct.open_options();
     options.read(true).write(true).create(true).truncate(true);
-    let stdout = OpenOptions::open(&options, stdout_path.to_path())
-        .await
-        .unwrap();
+    let stdout = options.open(stdout_path.to_path()).await.unwrap();
 
-    let mut command = command_with_args_any(&remote_vfs, stdout_command());
+    let mut command = command_with_args(&remote_vfs, stdout_command());
     command.stdout(support::stdio_send(stdout).await).unwrap();
     let mut child = command.spawn().await.unwrap();
     assert!(child.wait().await.unwrap().success());
 
     let mut options = direct.open_options();
     options.read(true);
-    let mut stdout = OpenOptions::open(&options, stdout_path.to_path())
-        .await
-        .unwrap();
+    let mut stdout = options.open(stdout_path.to_path()).await.unwrap();
     let mut stdout_data = String::new();
     stdout.read_to_string(&mut stdout_data).await.unwrap();
     assert_eq!(stdout_data.trim_end(), "remote-stdout");
@@ -672,13 +621,13 @@ async fn remote_process_stdout_relays_into_direct_file() {
 async fn pipe_relays_between_two_remote_sessions() {
     let (first, first_server) = connected_pair().await;
     let (second, second_server) = connected_pair().await;
-    let first_vfs = AnyVfs::from(first.clone());
-    let second_vfs = AnyVfs::from(second.clone());
-    let (send, recv) = first.pipe().await.unwrap();
+    let first_vfs = first.clone();
+    let second_vfs = second.clone();
+    let (send, recv) = first.pipe(None).await.unwrap();
 
-    let mut producer = command_with_args_any(&first_vfs, stdout_command());
+    let mut producer = command_with_args(&first_vfs, stdout_command());
     producer.stdout(send).unwrap();
-    let mut consumer = command_with_args_any(&second_vfs, stdout_reader_command());
+    let mut consumer = command_with_args(&second_vfs, stdout_reader_command());
     consumer.stdin(recv).unwrap();
 
     let mut consumer = consumer.spawn().await.unwrap();
@@ -698,38 +647,32 @@ async fn pipe_relays_between_two_remote_sessions() {
 async fn file_relays_between_two_remote_sessions() {
     let (first, first_server) = connected_pair().await;
     let (second, second_server) = connected_pair().await;
-    let second_vfs = AnyVfs::from(second.clone());
+    let second_vfs = second.clone();
     let temp = tempdir().unwrap();
     let stdin_path = typed_path(temp.path().join("stdin")).unwrap();
     let stdout_path = typed_path(temp.path().join("stdout")).unwrap();
 
     let mut options = first.open_options();
     options.read(true).write(true).create(true).truncate(true);
-    let mut stdin = OpenOptions::open(&options, stdin_path.to_path())
-        .await
-        .unwrap();
+    let mut stdin = options.open(stdin_path.to_path()).await.unwrap();
     stdin.write_all(b"remote-input\n").await.unwrap();
     stdin.seek(SeekFrom::Start(0)).await.unwrap();
-    let mut command = command_with_args_any(&second_vfs, stdin_command());
+    let mut command = command_with_args(&second_vfs, stdin_command());
     command.stdin(support::stdio_recv(stdin).await).unwrap();
     let mut child = command.spawn().await.unwrap();
     assert!(child.wait().await.unwrap().success());
 
     let mut options = first.open_options();
     options.read(true).write(true).create(true).truncate(true);
-    let stdout = OpenOptions::open(&options, stdout_path.to_path())
-        .await
-        .unwrap();
-    let mut command = command_with_args_any(&second_vfs, stdout_command());
+    let stdout = options.open(stdout_path.to_path()).await.unwrap();
+    let mut command = command_with_args(&second_vfs, stdout_command());
     command.stdout(support::stdio_send(stdout).await).unwrap();
     let mut child = command.spawn().await.unwrap();
     assert!(child.wait().await.unwrap().success());
 
     let mut options = first.open_options();
     options.read(true);
-    let mut stdout = OpenOptions::open(&options, stdout_path.to_path())
-        .await
-        .unwrap();
+    let mut stdout = options.open(stdout_path.to_path()).await.unwrap();
     let mut stdout_data = String::new();
     stdout.read_to_string(&mut stdout_data).await.unwrap();
     assert_eq!(stdout_data.trim_end(), "remote-stdout");
@@ -746,36 +689,32 @@ async fn file_relays_between_two_remote_sessions() {
 async fn pipeline_relays_across_three_domains() {
     let (a, a_server) = connected_pair().await;
     let (b, b_server) = connected_pair().await;
-    let a_vfs = AnyVfs::from(a.clone());
-    let b_vfs = AnyVfs::from(b.clone());
-    let direct = Direct::new().unwrap();
+    let a_vfs = a.clone();
+    let b_vfs = b.clone();
+    let direct = Vfs::direct().unwrap();
     let temp = tempdir().unwrap();
     let stdin_path = typed_path(temp.path().join("stdin")).unwrap();
     let stdout_path = typed_path(temp.path().join("stdout")).unwrap();
 
     let mut options = direct.open_options();
     options.read(true).write(true).create(true).truncate(true);
-    let mut stdin_file = OpenOptions::open(&options, stdin_path.to_path())
-        .await
-        .unwrap();
+    let mut stdin_file = options.open(stdin_path.to_path()).await.unwrap();
     stdin_file.write_all(b"remote-stdout\n").await.unwrap();
     stdin_file.seek(SeekFrom::Start(0)).await.unwrap();
 
     let mut options = direct.open_options();
     options.read(true).write(true).create(true).truncate(true);
-    let stdout_file = OpenOptions::open(&options, stdout_path.to_path())
-        .await
-        .unwrap();
+    let stdout_file = options.open(stdout_path.to_path()).await.unwrap();
 
-    let (mid_send, mid_recv) = a.pipe().await.unwrap();
+    let (mid_send, mid_recv) = a.pipe(None).await.unwrap();
 
-    let mut stage_a = command_with_args_any(&a_vfs, cat_command());
+    let mut stage_a = command_with_args(&a_vfs, cat_command());
     stage_a
         .stdin(support::stdio_recv(stdin_file).await)
         .unwrap();
     stage_a.stdout(mid_send).unwrap();
 
-    let mut stage_b = command_with_args_any(&b_vfs, cat_command());
+    let mut stage_b = command_with_args(&b_vfs, cat_command());
     stage_b.stdin(mid_recv).unwrap();
     stage_b
         .stdout(support::stdio_send(stdout_file).await)
@@ -793,9 +732,7 @@ async fn pipeline_relays_across_three_domains() {
 
     let mut options = direct.open_options();
     options.read(true);
-    let mut stdout_read = OpenOptions::open(&options, stdout_path.to_path())
-        .await
-        .unwrap();
+    let mut stdout_read = options.open(stdout_path.to_path()).await.unwrap();
     let mut data = String::new();
     stdout_read.read_to_string(&mut data).await.unwrap();
     assert_eq!(data.trim_end(), "remote-stdout");
@@ -811,12 +748,12 @@ async fn pipeline_relays_across_three_domains() {
 #[tokio::test]
 async fn same_domain_pipe_stays_direct_through_any_vfs() {
     let (client, server_task) = connected_pair().await;
-    let vfs = AnyVfs::from(client.clone());
-    let (send, recv) = vfs.pipe().await.unwrap();
+    let vfs = client.clone();
+    let (send, recv) = vfs.pipe(None).await.unwrap();
 
-    let mut producer = command_with_args_any(&vfs, stdout_command());
+    let mut producer = command_with_args(&vfs, stdout_command());
     producer.stdout(send).unwrap();
-    let mut consumer = command_with_args_any(&vfs, stdout_reader_command());
+    let mut consumer = command_with_args(&vfs, stdout_reader_command());
     consumer.stdin(recv).unwrap();
 
     let mut consumer = consumer.spawn().await.unwrap();
@@ -830,11 +767,11 @@ async fn same_domain_pipe_stays_direct_through_any_vfs() {
 #[tokio::test]
 async fn cross_domain_stdin_relay_is_aborted_on_terminate() {
     let (client, server_task) = connected_pair().await;
-    let remote_vfs = AnyVfs::from(client.clone());
-    let direct = Direct::new().unwrap();
-    let (mut send, recv) = direct.pipe().await.unwrap();
+    let remote_vfs = client.clone();
+    let direct = Vfs::direct().unwrap();
+    let (mut send, recv) = direct.pipe(None).await.unwrap();
 
-    let mut command = command_with_args_any(&remote_vfs, long_running_command());
+    let mut command = command_with_args(&remote_vfs, long_running_command());
     command.stdin(recv).unwrap();
     let child = command.spawn().await.unwrap();
 
@@ -864,9 +801,9 @@ async fn cross_domain_stdin_relay_is_aborted_on_terminate() {
 #[tokio::test]
 async fn cross_domain_stdio_cleans_up_after_launch_failure() {
     let (client, server_task) = connected_pair().await;
-    let remote_vfs = AnyVfs::from(client.clone());
-    let direct = Direct::new().unwrap();
-    let (_send, recv) = direct.pipe().await.unwrap();
+    let remote_vfs = client.clone();
+    let direct = Vfs::direct().unwrap();
+    let (_send, recv) = direct.pipe(None).await.unwrap();
 
     let mut command = remote_vfs.command(typed_str("nonexistent_command_12345"));
     command.stdin(recv).unwrap();
@@ -878,11 +815,11 @@ async fn cross_domain_stdio_cleans_up_after_launch_failure() {
 #[tokio::test]
 async fn dropping_any_child_aborts_cross_domain_relay() {
     let (client, server_task) = connected_pair().await;
-    let remote_vfs = AnyVfs::from(client.clone());
-    let direct = Direct::new().unwrap();
-    let (mut send, recv) = direct.pipe().await.unwrap();
+    let remote_vfs = client.clone();
+    let direct = Vfs::direct().unwrap();
+    let (mut send, recv) = direct.pipe(None).await.unwrap();
 
-    let mut command = command_with_args_any(&remote_vfs, long_running_command());
+    let mut command = command_with_args(&remote_vfs, long_running_command());
     command.stdin(recv).unwrap();
     let child = command.spawn().await.unwrap();
     drop(child);
@@ -932,7 +869,7 @@ async fn collect_entries(mut read_dir: ReadDir) -> Vec<DirEntry> {
 #[tokio::test]
 async fn directory_enumeration_round_trip_over_generic_stream() {
     let (client, server_task) = connected_pair().await;
-    let direct = Direct::new().unwrap();
+    let direct = Vfs::direct().unwrap();
     let temp = tempdir().unwrap();
 
     let empty = temp.path().join("empty");
@@ -973,7 +910,7 @@ async fn regular_file_round_trip_over_generic_stream() {
 
     let mut options = client.open_options();
     options.read(true).write(true).create(true).truncate(true);
-    let mut file = OpenOptions::open(&options, path.to_path()).await.unwrap();
+    let mut file = options.open(path.to_path()).await.unwrap();
 
     file.write_all(b"abcdef").await.unwrap();
     file.flush().await.unwrap();
@@ -1008,7 +945,7 @@ async fn regular_file_round_trip_over_generic_stream() {
     // one it is given.
     let mut options = client.open_options();
     options.read(true);
-    let handoff = OpenOptions::open(&options, path.to_path()).await.unwrap();
+    let handoff = options.open(path.to_path()).await.unwrap();
     drop(support::stdio_recv(handoff).await);
 
     stop_pair(client, server_task).await;
@@ -1032,7 +969,7 @@ async fn remote_file_closes_with_a_read_trailer_outstanding() {
 
     let mut options = client.open_options();
     options.read(true).write(true).create(true).truncate(true);
-    let mut file = OpenOptions::open(&options, path.to_path()).await.unwrap();
+    let mut file = options.open(path.to_path()).await.unwrap();
 
     // Large enough that one `poll_read` is unlikely to consume the whole
     // trailer, so the close path has something left to reconcile.
@@ -1064,14 +1001,14 @@ async fn remote_append_writes_ignore_the_cursor() {
 
     let mut options = client.open_options();
     options.read(true).write(true).create(true).truncate(true);
-    let mut file = OpenOptions::open(&options, path.to_path()).await.unwrap();
+    let mut file = options.open(path.to_path()).await.unwrap();
     file.write_all(b"first").await.unwrap();
     file.flush().await.unwrap();
     file.close().await.unwrap();
 
     let mut options = client.open_options();
     options.read(true).append(true);
-    let mut file = OpenOptions::open(&options, path.to_path()).await.unwrap();
+    let mut file = options.open(path.to_path()).await.unwrap();
     // Rewinding must not make the write overwrite "first".
     file.seek(SeekFrom::Start(0)).await.unwrap();
     file.write_all(b"second").await.unwrap();
@@ -1098,7 +1035,7 @@ async fn remote_try_into_std_fails_immediately_after_open() {
 
     let mut options = client.open_options();
     options.read(true).write(true).create(true).truncate(true);
-    let file = OpenOptions::open(&options, path.to_path()).await.unwrap();
+    let file = options.open(path.to_path()).await.unwrap();
 
     let file = file.try_into_std().await.unwrap_err();
     // The handle is still usable after the refusal.
@@ -1114,8 +1051,8 @@ async fn remote_file_locks_round_trip() {
     let path = typed_path(temp.path().join("locks")).unwrap();
     let mut options = client.open_options();
     options.read(true).write(true).create(true);
-    let first = OpenOptions::open(&options, path.to_path()).await.unwrap();
-    let second = OpenOptions::open(&options, path.to_path()).await.unwrap();
+    let first = options.open(path.to_path()).await.unwrap();
+    let second = options.open(path.to_path()).await.unwrap();
     let request = FileLockRequest {
         range: FileLockRange {
             start: 0,
@@ -1180,7 +1117,7 @@ async fn security_descriptor_round_trip_over_generic_stream() {
 
     let mut options = client.open_options();
     options.read(true);
-    let file = OpenOptions::open(&options, path.to_path()).await.unwrap();
+    let file = options.open(path.to_path()).await.unwrap();
     assert!(
         file.sec_desc(SecInfo::OWNER)
             .await
@@ -1202,7 +1139,7 @@ async fn regular_file_xattrs_round_trip_over_generic_stream() {
 
     let mut options = client.open_options();
     options.read(true).write(true).create(true).truncate(true);
-    let file = OpenOptions::open(&options, path.to_path()).await.unwrap();
+    let file = options.open(path.to_path()).await.unwrap();
 
     file.set_xattr("remote", Some("user"), b"value")
         .await
@@ -1228,7 +1165,7 @@ async fn stop_drains_outstanding_pipe_endpoints() {
 
     let (client, server_task) = connected_pair().await;
 
-    let (mut send, mut recv) = client.pipe().await.unwrap();
+    let (mut send, mut recv) = client.pipe(None).await.unwrap();
 
     let stopping = client.clone();
     let mut stop = tokio::spawn(async move { stopping.stop().await });
@@ -1247,7 +1184,7 @@ async fn stop_drains_outstanding_pipe_endpoints() {
     assert_eq!(&buf, b"drained");
 
     // New endpoints are refused, though.
-    let error = client.pipe().await.unwrap_err();
+    let error = client.pipe(None).await.unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::NotConnected);
 
     drop(send);
@@ -1276,7 +1213,7 @@ async fn remote_relative_seeks_track_the_client_cursor() {
 
     let mut options = client.open_options();
     options.read(true).write(true).create(true).truncate(true);
-    let mut file = OpenOptions::open(&options, path.to_path()).await.unwrap();
+    let mut file = options.open(path.to_path()).await.unwrap();
 
     file.write_all(b"0123456789").await.unwrap();
     file.flush().await.unwrap();
@@ -1333,7 +1270,7 @@ async fn remote_positional_io_is_independent_of_the_cursor() {
 
     let mut options = client.open_options();
     options.read(true).write(true).create(true).truncate(true);
-    let mut file = OpenOptions::open(&options, path.to_path()).await.unwrap();
+    let mut file = options.open(path.to_path()).await.unwrap();
 
     assert_eq!(
         file.write_at(Bytes::from_static(b"abcdefghij"), 0)
@@ -1384,7 +1321,7 @@ async fn remote_positional_io_is_independent_of_the_cursor() {
     // than silently landing somewhere else.
     let mut options = client.open_options();
     options.read(true).append(true);
-    let file = OpenOptions::open(&options, path.to_path()).await.unwrap();
+    let file = options.open(path.to_path()).await.unwrap();
     let error = file
         .write_at(Bytes::from_static(b"nope"), 0)
         .await
@@ -1411,7 +1348,7 @@ async fn remote_reads_are_capped_at_one_chunk() {
 
     let mut options = client.open_options();
     options.read(true).write(true).create(true).truncate(true);
-    let mut file = OpenOptions::open(&options, path.to_path()).await.unwrap();
+    let mut file = options.open(path.to_path()).await.unwrap();
     file.write_all(&source).await.unwrap();
     file.seek(SeekFrom::Start(0)).await.unwrap();
 
@@ -1453,7 +1390,7 @@ async fn remote_read_at_into_lands_the_trailer_in_the_destination() {
 
     let mut options = client.open_options();
     options.read(true).write(true).create(true).truncate(true);
-    let file = OpenOptions::open(&options, path.to_path()).await.unwrap();
+    let file = options.open(path.to_path()).await.unwrap();
     // Written from borrowed storage rather than an owned `Bytes`: the trailer
     // only ever needed a slice.
     let mut written = 0;
@@ -1508,7 +1445,7 @@ async fn remote_read_failure_reports_its_error_kind() {
 
     let mut options = client.open_options();
     options.read(true);
-    let mut file = OpenOptions::open(&options, path.to_path()).await.unwrap();
+    let mut file = options.open(path.to_path()).await.unwrap();
 
     let mut buf = BytesMut::with_capacity(64);
     let error = file.read_at(&mut buf, 0).await.unwrap_err();

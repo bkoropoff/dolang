@@ -1,4 +1,5 @@
 use dolang::runtime::strand::InterruptMask;
+use dolang_vfs::process::Command;
 use futures::future::MaybeDone;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
@@ -11,9 +12,7 @@ use dolang::runtime::{
     value::{Nil, Singleton},
     vm::Builder,
 };
-use dolang_vfs::{
-    AnyVfs, Child as _, Command, Vfs, process::ProcessControl, target::OperatingSystem,
-};
+use dolang_vfs::{process::ProcessControl, target::OperatingSystem};
 use typed_path::{PathType, Utf8TypedPath, Utf8UnixPath, Utf8WindowsPath};
 
 use crate::{
@@ -29,9 +28,6 @@ use crate::{
 };
 
 pub(crate) struct Program;
-
-type StdioSend = <AnyVfs as Vfs>::StdioSend;
-type StdioRecv = <AnyVfs as Vfs>::StdioRecv;
 
 pub(crate) struct ProgramAnnex<'v> {
     name: String,
@@ -227,7 +223,7 @@ async fn cleanup_io<'v, 's>(
 async fn configure_negotiated_input<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    command: &mut impl Command<StdioRecv = StdioRecv>,
+    command: &mut Command<'_>,
     input: &Value<'v>,
 ) -> Result<'v, 's, Option<RecvGuard>> {
     let recv_result = pipe_channel::negotiate_recv(input, strand, global).await?;
@@ -243,7 +239,7 @@ async fn configure_negotiated_input<'v, 's>(
 async fn configure_negotiated_output<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    command: &mut impl Command<StdioSend = StdioSend>,
+    command: &mut Command<'_>,
     output: &Value<'v>,
 ) -> Result<'v, 's, Option<SendGuard>> {
     let send_result = pipe_channel::negotiate_send(output, strand, global).await?;
@@ -259,7 +255,7 @@ async fn configure_negotiated_output<'v, 's>(
 async fn configure_direct_input<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    command: &mut impl Command<StdioRecv = StdioRecv>,
+    command: &mut Command<'_>,
     input: &Value<'v>,
 ) -> Result<'v, 's, bool> {
     if input.is_nil() || input.eq(strand, Singleton::Null) {
@@ -296,7 +292,7 @@ fn is_default_stdout<'v>(global: State<'v, Global<'v>>, value: &Value<'v>) -> bo
 async fn configure_direct_output<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    command: &mut impl Command<StdioSend = StdioSend>,
+    command: &mut Command<'_>,
     output: &Value<'v>,
 ) -> Result<'v, 's, bool> {
     if output.is_nil() || output.eq(strand, Singleton::Null) {
@@ -324,7 +320,7 @@ async fn configure_direct_output<'v, 's>(
 async fn configure_direct_stderr<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    command: &mut impl Command<StdioSend = StdioSend>,
+    command: &mut Command<'_>,
     stderr: &Value<'v>,
 ) -> Result<'v, 's, bool> {
     if stderr.is_nil() || stderr.eq(strand, Singleton::Null) {
@@ -356,7 +352,7 @@ async fn configure_direct_stderr<'v, 's>(
 fn apply_env_and_cwd<'v, 's>(
     global: State<'v, Global<'v>>,
     strand: &Strand<'v, 's>,
-    command: &mut impl Command,
+    command: &mut Command<'_>,
 ) {
     let local = global.local.get(strand);
     local.env().visit(&mut |k, v| {
@@ -372,7 +368,7 @@ fn apply_env_and_cwd<'v, 's>(
 fn apply_args<'v, 's, 'a>(
     strand: &mut Strand<'v, 's>,
     args: Args<'v, 'a>,
-    command: &mut impl Command,
+    command: &mut Command<'_>,
 ) -> Result<'v, 's, ()> {
     for arg in args {
         match arg {
@@ -503,7 +499,7 @@ struct PumpTargets<'v, 'a> {
 /// Runs input/output pumps and waits for process completion with unified error handling.
 async fn run_monitor<'v, 's>(
     strand: &mut Strand<'v, 's>,
-    process: &mut impl dolang_vfs::Child,
+    process: &mut dolang_vfs::process::Child,
     name: &str,
     target: PumpTargets<'v, '_>,
     pipes: Pipes,
@@ -712,7 +708,7 @@ async fn run<'v, 's>(
     if !negotiated.stdin
         && !configure_direct_input(strand, global, &mut command, io.value.stdin).await?
     {
-        let (parent_stdin, child_stdin) = vfs.pipe().await.into_sys(strand)?;
+        let (parent_stdin, child_stdin) = vfs.pipe(None).await.into_sys(strand)?;
         command.stdin(child_stdin).into_sys(strand)?;
         stdin_pipe = Some(parent_stdin);
     }
@@ -721,7 +717,7 @@ async fn run<'v, 's>(
         || (!stdout_to_console
             && configure_direct_output(strand, global, &mut command, io.value.stdout).await?);
     if !stdout_direct {
-        let (child_stdout, parent_stdout) = vfs.pipe().await.into_sys(strand)?;
+        let (child_stdout, parent_stdout) = vfs.pipe(None).await.into_sys(strand)?;
         command.stdout(child_stdout).into_sys(strand)?;
         stdout_pipe = Some(parent_stdout);
     }
@@ -735,7 +731,7 @@ async fn run<'v, 's>(
         && (stderr_to_console
             || !configure_direct_stderr(strand, global, &mut command, io.value.stderr).await?)
     {
-        let (child_stderr, parent_stderr) = vfs.pipe().await.into_sys(strand)?;
+        let (child_stderr, parent_stderr) = vfs.pipe(None).await.into_sys(strand)?;
         command.stderr(child_stderr).into_sys(strand)?;
         stderr_pipe = Some(parent_stderr);
     }

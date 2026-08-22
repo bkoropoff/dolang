@@ -9,8 +9,8 @@ use std::{
 };
 
 use dolang_vfs::{
-    AnyVfs, Child, Command, FileHandle, OpenOptions, Vfs,
-    client::Client,
+    Vfs,
+    error::Result as VfsResult,
     metadata::MetadataPatch,
     security::{OwnershipIdentity, SecurityInfo},
     server::Server,
@@ -57,7 +57,7 @@ fn is_elevated() -> bool {
 
 static NEXT_PIPE: AtomicU64 = AtomicU64::new(0);
 
-async fn stop_pair(client: Client, server: JoinHandle<std::io::Result<()>>) {
+async fn stop_pair(client: Vfs, server: JoinHandle<VfsResult<()>>) {
     client.stop().await.unwrap();
     client.close().await;
     server.await.unwrap().unwrap();
@@ -91,7 +91,7 @@ fn current_process_handle() -> OwnedHandle {
     unsafe { OwnedHandle::from_raw_handle(handle as _) }
 }
 
-async fn connected_pair() -> (Client, JoinHandle<std::io::Result<()>>) {
+async fn connected_pair() -> (Vfs, JoinHandle<VfsResult<()>>) {
     let id = NEXT_PIPE.fetch_add(1, Ordering::Relaxed);
     let name = format!(r"\\.\pipe\dolang-vfs-{}-{id}", std::process::id());
     let client_pipe = ServerOptions::new()
@@ -112,7 +112,7 @@ async fn connected_pair() -> (Client, JoinHandle<std::io::Result<()>>) {
             .serve()
             .await
     });
-    let client = unsafe { Client::from_named_pipe_server(client_pipe, current_process_handle()) }
+    let client = unsafe { Vfs::from_named_pipe_server(client_pipe, current_process_handle()) }
         .await
         .unwrap();
     (client, server_task)
@@ -173,7 +173,7 @@ async fn windows_metadata_and_ownership_round_trip_over_rpc() {
 
     let mut options = client.open_options();
     options.read(true);
-    let file = OpenOptions::open(&options, typed(&path)).await.unwrap();
+    let file = options.open(typed(&path)).await.unwrap();
     let file_metadata = file.metadata().await.unwrap();
     let file_windows = file_metadata.windows().unwrap();
     assert_eq!(file_windows.user.as_ref(), Some(&user));
@@ -227,7 +227,7 @@ async fn client_or_direct_routes_path_and_open_operations() {
     std::fs::write(subdir.join("one.txt"), "one").unwrap();
 
     let (client, server_task) = connected_pair().await;
-    let vfs = AnyVfs::from(client.clone());
+    let vfs = client.clone();
     assert!(!vfs.is_direct());
 
     let mut options = vfs.open_options();
@@ -252,9 +252,9 @@ async fn client_or_direct_routes_path_and_open_operations() {
 #[tokio::test]
 async fn spawn_transfers_standard_stream_handles() {
     let (client, server_task) = connected_pair().await;
-    let (mut stdin_send, stdin_recv) = client.pipe().await.unwrap();
-    let (stdout_send, mut stdout_recv) = client.pipe().await.unwrap();
-    let (stderr_send, mut stderr_recv) = client.pipe().await.unwrap();
+    let (mut stdin_send, stdin_recv) = client.pipe(None).await.unwrap();
+    let (stdout_send, mut stdout_recv) = client.pipe(None).await.unwrap();
+    let (stderr_send, mut stderr_recv) = client.pipe(None).await.unwrap();
 
     let mut command = client.command(typed_str("cmd.exe"));
     command
@@ -291,7 +291,7 @@ async fn file_stdio_is_reopened_without_overlapped() {
 
     let mut options = client.open_options();
     options.write(true).create(true).truncate(true);
-    let output = OpenOptions::open(&options, typed(&path)).await.unwrap();
+    let output = options.open(typed(&path)).await.unwrap();
     let mut command = client.command(typed_str("cmd.exe"));
     command
         .arg("/d")
@@ -305,7 +305,7 @@ async fn file_stdio_is_reopened_without_overlapped() {
 
     let mut options = client.open_options();
     options.append(true);
-    let output = OpenOptions::open(&options, typed(&path)).await.unwrap();
+    let output = options.open(typed(&path)).await.unwrap();
     let mut command = client.command(typed_str("cmd.exe"));
     command
         .arg("/d")

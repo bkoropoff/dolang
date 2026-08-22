@@ -4,7 +4,12 @@ use std::collections::HashMap;
 
 use typed_path::Utf8TypedPathBuf;
 
-use crate::{Client, Result, path::typed_path, security::SecurityInfo, target::TargetInfo};
+use crate::{
+    error::{Error, ErrorKind, Result},
+    path::typed_path,
+    security::SecurityInfo,
+    target::TargetInfo,
+};
 
 /// VFS extension protocol versions supported by a backend.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -24,8 +29,8 @@ impl ExtensionSet {
                 .windows(2)
                 .find_map(|pair| (pair[0] == pair[1]).then_some(pair[0]))
             {
-                return Err(crate::Error::new(
-                    crate::ErrorKind::AlreadyExists,
+                return Err(Error::new(
+                    ErrorKind::AlreadyExists,
                     format!("duplicate VFS extension registration: {name} version {version}"),
                 ));
             }
@@ -150,41 +155,3 @@ pub(crate) struct StdioRecvMarker;
 /// Marker for a child process retained by a VFS RPC session.
 #[derive(Debug)]
 pub(crate) struct ChildMarker;
-
-/// An owned connection to a VFS process whose lifetime is tied to the connection.
-pub struct VfsSession {
-    client: Client,
-    #[cfg(windows)]
-    windows: Option<crate::windows::AdminSession>,
-}
-
-impl VfsSession {
-    pub(crate) fn from_client(client: Client) -> Self {
-        Self {
-            client,
-            #[cfg(windows)]
-            windows: None,
-        }
-    }
-    #[cfg(windows)]
-    pub(crate) fn from_windows(session: crate::windows::AdminSession) -> Self {
-        Self {
-            client: session.client().clone(),
-            windows: Some(session),
-        }
-    }
-    /// Returns the client for the owned VFS connection.
-    pub fn client(&self) -> &Client {
-        &self.client
-    }
-    /// Stops the VFS server and waits for an owned process to exit.
-    pub async fn stop(&self) -> Result<()> {
-        #[cfg(windows)]
-        if let Some(session) = &self.windows {
-            return session.stop().await.map_err(Into::into);
-        }
-        self.client.stop().await?;
-        self.client.clone().close().await;
-        Ok(())
-    }
-}

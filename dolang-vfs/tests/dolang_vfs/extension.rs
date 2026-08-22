@@ -1,9 +1,9 @@
 #![cfg(unix)]
 
+use dolang_vfs::Vfs;
 use dolang_vfs::extension::{
     ExtCite, ExtContext, ExtGift, ExtResource, VfsExtension, vfs_extension,
 };
-use dolang_vfs::{AnyVfs, client::Client, direct::Direct};
 use serde::{Deserialize, Serialize};
 use tempfile::tempdir;
 use tokio::task::JoinHandle;
@@ -67,7 +67,7 @@ impl VfsExtension for CounterExt {
 
 vfs_extension!(CounterExt);
 
-async fn open(vfs: &AnyVfs, initial: i64) -> ExtGift<CounterMarker> {
+async fn open(vfs: &Vfs, initial: i64) -> ExtGift<CounterMarker> {
     match vfs
         .call_extension::<CounterExt>(CounterRequest::Open(initial))
         .await
@@ -78,7 +78,7 @@ async fn open(vfs: &AnyVfs, initial: i64) -> ExtGift<CounterMarker> {
     }
 }
 
-async fn add(vfs: &AnyVfs, handle: &ExtGift<CounterMarker>, delta: i64) -> i64 {
+async fn add(vfs: &Vfs, handle: &ExtGift<CounterMarker>, delta: i64) -> i64 {
     match vfs
         .call_extension::<CounterExt>(CounterRequest::Add(handle.cite(), delta))
         .await
@@ -89,7 +89,7 @@ async fn add(vfs: &AnyVfs, handle: &ExtGift<CounterMarker>, delta: i64) -> i64 {
     }
 }
 
-async fn close(vfs: &AnyVfs, handle: ExtGift<CounterMarker>) {
+async fn close(vfs: &Vfs, handle: ExtGift<CounterMarker>) {
     match vfs
         .call_extension::<CounterExt>(CounterRequest::Close(handle.cite()))
         .await
@@ -100,7 +100,7 @@ async fn close(vfs: &AnyVfs, handle: ExtGift<CounterMarker>) {
     }
 }
 
-async fn exercise_counter(vfs: &AnyVfs) {
+async fn exercise_counter(vfs: &Vfs) {
     let handle = open(vfs, 10).await;
     assert_eq!(add(vfs, &handle, 5).await, 15);
     assert_eq!(add(vfs, &handle, -3).await, 12);
@@ -109,7 +109,7 @@ async fn exercise_counter(vfs: &AnyVfs) {
 
 #[tokio::test]
 async fn direct_dispatch_round_trips_through_opaque_handle() {
-    exercise_counter(&AnyVfs::Direct(Direct::new().unwrap())).await;
+    exercise_counter(&Vfs::direct().unwrap()).await;
 }
 
 async fn start_server(socket_path: &std::path::Path) -> JoinHandle<()> {
@@ -125,8 +125,8 @@ async fn remote_dispatch_round_trips_through_opaque_handle() {
     let dir = tempdir().unwrap();
     let socket_path = dir.path().join("vfs.sock");
     let _server = start_server(&socket_path).await;
-    let client = Client::connect(&socket_path).await.unwrap();
-    exercise_counter(&AnyVfs::Client(client)).await;
+    let vfs = Vfs::connect(&socket_path).await.unwrap();
+    exercise_counter(&vfs).await;
 }
 
 #[tokio::test]
@@ -134,7 +134,7 @@ async fn remote_dispatch_rejects_unknown_extension_version() {
     let dir = tempdir().unwrap();
     let socket_path = dir.path().join("vfs.sock");
     let _server = start_server(&socket_path).await;
-    let client = Client::connect(&socket_path).await.unwrap();
+    let vfs = Vfs::connect(&socket_path).await.unwrap();
     // A version this test never registered should surface as a clean error,
     // not a panic or hang, whether the failure is caught client-side (no
     // registered extension to encode the request against) or server-side
@@ -153,7 +153,7 @@ async fn remote_dispatch_rejects_unknown_extension_version() {
             unreachable!("never registered, so never dispatched")
         }
     }
-    let result = client
+    let result = vfs
         .call_extension::<UnknownVersionExt>(CounterRequest::Open(0))
         .await;
     assert!(result.is_err());

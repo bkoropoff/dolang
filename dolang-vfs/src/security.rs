@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use std::io;
 
+use crate::error::Result;
 pub use crate::macos_acl::{MacosAce, MacosAceFlags, MacosAceMask, MacosAceType, MacosAcl};
 pub use crate::metadata::{Mode, Permission};
 pub use crate::nfs4_acl::{
@@ -176,7 +177,7 @@ pub struct SidName {
 
 impl SecurityInfo {
     /// Captures the security context of the current process.
-    pub fn current() -> crate::Result<Self> {
+    pub fn current() -> Result<Self> {
         #[cfg(unix)]
         return Ok(Self::Unix(UnixSecurityInfo::current()?));
         #[cfg(windows)]
@@ -186,7 +187,7 @@ impl SecurityInfo {
 
 #[cfg(unix)]
 impl UnixSecurityInfo {
-    fn current() -> crate::Result<Self> {
+    fn current() -> Result<Self> {
         use nix::unistd::{getegid, geteuid, getgid, getuid};
 
         let euid = geteuid();
@@ -203,7 +204,7 @@ impl UnixSecurityInfo {
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn current_group_ids(_euid: nix::unistd::Uid, _egid: nix::unistd::Gid) -> crate::Result<Vec<u32>> {
+fn current_group_ids(_euid: nix::unistd::Uid, _egid: nix::unistd::Gid) -> Result<Vec<u32>> {
     Ok(nix::unistd::getgroups()
         .map_err(io::Error::from)?
         .into_iter()
@@ -212,7 +213,7 @@ fn current_group_ids(_euid: nix::unistd::Uid, _egid: nix::unistd::Gid) -> crate:
 }
 
 #[cfg(target_os = "macos")]
-fn current_group_ids(euid: nix::unistd::Uid, egid: nix::unistd::Gid) -> crate::Result<Vec<u32>> {
+fn current_group_ids(euid: nix::unistd::Uid, egid: nix::unistd::Gid) -> Result<Vec<u32>> {
     use std::{ffi::CString, ptr, slice};
 
     // macOS limits the public getgroups/getgrouplist interfaces and resolves
@@ -269,7 +270,7 @@ impl WindowsTokenInfo {
 
 #[cfg(windows)]
 impl WindowsTokenInfo {
-    fn current() -> crate::Result<Self> {
+    fn current() -> Result<Self> {
         use std::{
             io, mem,
             os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},

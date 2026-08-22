@@ -17,7 +17,7 @@
 use tokio::io::{AsyncRead, AsyncWrite};
 
 #[cfg(unix)]
-use std::os::unix::net::UnixStream;
+use std::{os::unix::net::UnixStream, result};
 
 #[cfg(windows)]
 use std::os::windows::io::OwnedHandle;
@@ -445,7 +445,10 @@ impl Builder {
     ///
     /// Unlike [`server`](Self::server), this transport supports direct
     /// [`OsHandle`](crate::handle::OsHandle) attachments.
-    pub async fn server_unix(self, stream: UnixStream) -> Result<crate::server::Unbound, Error> {
+    pub async fn server_unix(
+        self,
+        stream: UnixStream,
+    ) -> result::Result<crate::server::Unbound, Error> {
         let (sender, receiver) = transport::unix::unix(stream)?;
         negotiate_server(
             transport::AnySender::Unix(sender),

@@ -186,7 +186,7 @@ pub(crate) enum WinRegRequest {
     /// Producing an `ExtGift` requires an [`ExtContext`], which only
     /// exists inside a `VfsExtension::handle` call — so a client that
     /// receives `KeyHandle::Native` self-dispatches this request against a
-    /// local, direct [`dolang_vfs::AnyVfs::Direct`] purely to reach
+    /// local, direct [`dolang_vfs::AnyVfs`] purely to reach
     /// one. Not exposed outside this crate; used internally by
     /// [`crate::api`].
     AdoptNative {

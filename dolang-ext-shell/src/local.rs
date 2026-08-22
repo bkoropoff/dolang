@@ -9,7 +9,7 @@ use std::{
 
 use dolang::runtime::{State, Strand, strand};
 use dolang_vfs::{
-    AnyVfs, Vfs as _,
+    Vfs,
     process::Signal,
     security::SecurityInfo,
     target::{OperatingSystem, OperatingSystemFamily, TargetInfo},
@@ -187,7 +187,7 @@ pub(crate) struct InvocationOverride {
 pub(crate) struct Local {
     cwd: RefCell<Utf8TypedPathBuf>,
     env: RefCell<Rc<Env>>,
-    vfs: RefCell<AnyVfs>,
+    vfs: RefCell<Vfs>,
     background: Cell<bool>,
     /// Set while dispatching a write into the ambient console.
     ///
@@ -227,9 +227,7 @@ pub(crate) struct Local {
 
 impl<'v> strand::Local<'v> for Local {
     fn init() -> Self {
-        let vfs = AnyVfs::from(
-            dolang_vfs::direct::Direct::new().expect("failed to initialize direct VFS"),
-        );
+        let vfs = Vfs::direct().expect("failed to initialize direct VFS");
         Self {
             cwd: RefCell::new(vfs.cwd().to_path_buf()),
             env: RefCell::new(Rc::new(Env::derived(
@@ -290,20 +288,17 @@ impl Local {
         mem::replace(&mut *self.env.borrow_mut(), env)
     }
 
-    pub(crate) fn replace_vfs(&self, vfs: AnyVfs) -> AnyVfs {
+    pub(crate) fn replace_vfs(&self, vfs: Vfs) -> Vfs {
         mem::replace(&mut *self.vfs.borrow_mut(), vfs)
     }
 
-    pub(crate) fn vfs(&self) -> AnyVfs {
+    pub(crate) fn vfs(&self) -> Vfs {
         self.vfs.borrow().clone()
     }
 
     pub(crate) fn vfs_exe(&self) -> Option<Utf8TypedPathBuf> {
         let vfs = self.vfs.borrow();
-        match &*vfs {
-            AnyVfs::Client(_) => Some(vfs.current_exe().to_path_buf()),
-            AnyVfs::Direct(_) => None,
-        }
+        (!vfs.is_direct()).then(|| vfs.current_exe().to_path_buf())
     }
 
     pub(crate) fn target(&self) -> TargetInfo {
@@ -317,7 +312,7 @@ impl Local {
     pub(crate) async fn with_vfs<'v, 's, R>(
         strand: &mut Strand<'v, 's>,
         global: State<'v, Global<'v>>,
-        vfs: AnyVfs,
+        vfs: Vfs,
         f: impl AsyncFnOnce(&mut Strand<'v, 's>) -> R,
     ) -> R {
         let cwd = vfs.cwd().to_path_buf();

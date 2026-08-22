@@ -11,9 +11,15 @@ use serde::{Deserialize, Serialize};
 use tokio::{
     fs::File,
     io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf},
+    task::JoinHandle,
 };
+use typed_path::Utf8TypedPath;
 
-use crate::{STREAM_CHUNK_SIZE, target::OperatingSystem};
+use crate::{
+    STREAM_CHUNK_SIZE, SessionMode, Vfs, VfsInner, client, direct,
+    error::{Error, ErrorKind, Result},
+    target::OperatingSystem,
+};
 
 /// Terminal status of a spawned process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,6 +131,483 @@ impl Signal {
         }
     }
 }
+enum CommandInner<'a> {
+    Client(client::Command<'a>),
+    Direct(direct::Command<'a>),
+}
+
+/// Builds a process to spawn, relaying stdio across VFS domains when a
+/// given endpoint cannot be consumed directly by the spawn target.
+pub struct Command<'a> {
+    inner: CommandInner<'a>,
+    vfs: Vfs,
+    stdin: Option<StdioRecv>,
+    stdout: Option<StdioSend>,
+    stderr: Option<StdioSend>,
+}
+
+impl<'a> Command<'a> {
+    pub(crate) fn new(vfs: &'a Vfs, program: Utf8TypedPath<'_>) -> Self {
+        let inner = match &vfs.inner {
+            VfsInner::Client(client) => CommandInner::Client(client.command(program)),
+            VfsInner::Direct(direct) => CommandInner::Direct(direct.command(program)),
+        };
+        Self {
+            inner,
+            vfs: vfs.clone(),
+            stdin: None,
+            stdout: None,
+            stderr: None,
+        }
+    }
+}
+
+enum ChildInner {
+    Client(client::Child),
+    Direct(Box<direct::Child>),
+}
+
+/// Tasks pumping bytes between a foreign-domain stdio endpoint and a pipe
+/// created in the spawn target's own domain, not yet started.
+///
+/// Relay tasks are only started once the underlying process has actually
+/// been spawned, so a failure setting up the spawn itself just drops the
+/// held endpoints (triggering their own best-effort cleanup) instead of
+/// leaking a running task.
+#[derive(Default)]
+struct PendingRelays {
+    inputs: Vec<(StdioRecv, StdioSend)>,
+    outputs: Vec<(StdioRecv, StdioSend)>,
+}
+
+impl PendingRelays {
+    fn start(self) -> ActiveRelays {
+        let spawn_all = |pairs: Vec<(StdioRecv, StdioSend)>| {
+            pairs
+                .into_iter()
+                .map(|(src, dst)| tokio::spawn(relay(src, dst)))
+                .collect()
+        };
+        ActiveRelays {
+            inputs: spawn_all(self.inputs),
+            outputs: spawn_all(self.outputs),
+        }
+    }
+}
+
+#[derive(Default)]
+struct ActiveRelays {
+    inputs: Vec<JoinHandle<()>>,
+    outputs: Vec<JoinHandle<()>>,
+}
+
+impl ActiveRelays {
+    fn abort_inputs(&mut self) {
+        for handle in self.inputs.drain(..) {
+            handle.abort();
+        }
+    }
+
+    /// Waits for output relays to finish flushing everything the child
+    /// already produced before it exited. Input relays are aborted instead
+    /// of awaited, since no further input can matter once the child is gone.
+    ///
+    /// Once the child has exited, its end of each output pipe is closed, so
+    /// the relay's copy loop reaches EOF and returns on its own; this just
+    /// ensures the caller can't observe a partially-relayed destination.
+    async fn finish(&mut self) {
+        self.abort_inputs();
+        for handle in self.outputs.drain(..) {
+            let _ = handle.await;
+        }
+    }
+
+    /// Aborts every relay task without waiting, for use when giving up on
+    /// the child without having confirmed it actually exited (e.g. `Drop`).
+    fn abandon(&mut self) {
+        self.abort_inputs();
+        for handle in self.outputs.drain(..) {
+            handle.abort();
+        }
+    }
+}
+
+impl Drop for ActiveRelays {
+    fn drop(&mut self) {
+        self.abandon();
+    }
+}
+
+/// A spawned process, possibly relaying stdio across VFS domains.
+pub struct Child {
+    inner: ChildInner,
+    relays: ActiveRelays,
+}
+
+impl Child {
+    /// Waits for the process to exit.
+    pub async fn wait(&mut self) -> Result<ProcessStatus> {
+        let status = match &mut self.inner {
+            ChildInner::Client(child) => child.wait().await,
+            ChildInner::Direct(child) => child.wait().await,
+        }?;
+        self.relays.finish().await;
+        Ok(status)
+    }
+
+    /// Terminates the process and returns its status when it has exited.
+    pub async fn terminate(mut self) -> Result<Option<ProcessStatus>> {
+        self.relays.abort_inputs();
+        let result = match self.inner {
+            ChildInner::Client(child) => child.terminate().await,
+            ChildInner::Direct(child) => child.terminate().await,
+        };
+        if result.as_ref().is_ok_and(Option::is_some) {
+            self.relays.finish().await;
+        } else {
+            self.relays.abandon();
+        }
+        result
+    }
+}
+
+/// Returns whether `stdio` can be handed directly to a process spawned in
+/// `target`'s domain without relaying.
+fn is_direct_recv(target: &Vfs, stdio: &StdioRecv) -> bool {
+    match (&target.inner, stdio) {
+        (VfsInner::Direct(_), StdioRecv::Native(_)) => true,
+        (VfsInner::Client(client), StdioRecv::Remote(remote)) => {
+            client.is_same_vfs(remote.client())
+        }
+        (VfsInner::Client(client), StdioRecv::Native(_)) => client.mode() == SessionMode::Native,
+        _ => false,
+    }
+}
+
+/// Returns whether `stdio` can be handed directly to a process spawned in
+/// `target`'s domain without relaying.
+fn is_direct_send(target: &Vfs, stdio: &StdioSend) -> bool {
+    match (&target.inner, stdio) {
+        (VfsInner::Direct(_), StdioSend::Native(_)) => true,
+        (VfsInner::Client(client), StdioSend::Remote(remote)) => {
+            client.is_same_vfs(remote.client())
+        }
+        (VfsInner::Client(client), StdioSend::Native(_)) => client.mode() == SessionMode::Native,
+        _ => false,
+    }
+}
+
+/// Classifies a stdin endpoint for a process about to be spawned in
+/// `target`'s domain, creating a relay pipe and queuing a pump task in
+/// `relays` if the endpoint cannot be consumed directly.
+async fn classify_recv(
+    target: &Vfs,
+    stdio: StdioRecv,
+    relays: &mut PendingRelays,
+) -> Result<StdioRecv> {
+    if is_direct_recv(target, &stdio) {
+        return Ok(stdio);
+    }
+    let (send, recv) = target.pipe(None).await?;
+    relays.inputs.push((stdio, send));
+    Ok(recv)
+}
+
+/// Classifies a stdout/stderr endpoint for a process about to be spawned in
+/// `target`'s domain, creating a relay pipe and queuing a pump task in
+/// `relays` if the endpoint cannot be consumed directly.
+async fn classify_send(
+    target: &Vfs,
+    stdio: StdioSend,
+    relays: &mut PendingRelays,
+) -> Result<StdioSend> {
+    if is_direct_send(target, &stdio) {
+        return Ok(stdio);
+    }
+    let (send, recv) = target.pipe(None).await?;
+    relays.outputs.push((recv, stdio));
+    Ok(send)
+}
+
+impl<'a> Command<'a> {
+    /// Appends an argument to the program invocation.
+    pub fn arg(&mut self, arg: &str) -> &mut Self {
+        match &mut self.inner {
+            CommandInner::Client(builder) => {
+                builder.arg(arg);
+            }
+            CommandInner::Direct(builder) => {
+                builder.arg(arg);
+            }
+        }
+        self
+    }
+
+    /// Sets an environment variable for the child.
+    pub fn env(&mut self, key: &str, val: &str) -> &mut Self {
+        match &mut self.inner {
+            CommandInner::Client(builder) => {
+                builder.env(key, val);
+            }
+            CommandInner::Direct(builder) => {
+                builder.env(key, val);
+            }
+        }
+        self
+    }
+
+    /// Removes an environment variable from the child.
+    pub fn env_remove(&mut self, key: &str) -> &mut Self {
+        match &mut self.inner {
+            CommandInner::Client(builder) => {
+                builder.env_remove(key);
+            }
+            CommandInner::Direct(builder) => {
+                builder.env_remove(key);
+            }
+        }
+        self
+    }
+
+    /// Sets the child's working directory.
+    pub fn current_dir(&mut self, dir: Utf8TypedPath<'_>) -> &mut Self {
+        match &mut self.inner {
+            CommandInner::Client(builder) => {
+                builder.current_dir(dir);
+            }
+            CommandInner::Direct(builder) => {
+                builder.current_dir(dir);
+            }
+        }
+        self
+    }
+
+    /// Sets the child's standard input.
+    pub fn stdin(&mut self, stdio: StdioRecv) -> Result<&mut Self> {
+        self.stdin = Some(stdio);
+        Ok(self)
+    }
+
+    /// Sets the child's standard output.
+    pub fn stdout(&mut self, stdio: StdioSend) -> Result<&mut Self> {
+        self.stdout = Some(stdio);
+        Ok(self)
+    }
+
+    /// Inherit the host process's standard input.
+    ///
+    /// Opaque remote clients treat terminal input as null because Tokio cannot
+    /// cancel an outstanding terminal read. Redirected input is relayed to the
+    /// remote process.
+    pub fn stdin_inherit(&mut self) -> Result<&mut Self> {
+        self.stdin = None;
+        match &mut self.inner {
+            CommandInner::Client(builder) => {
+                builder.stdin_inherit()?;
+            }
+            CommandInner::Direct(builder) => {
+                builder.stdin_inherit()?;
+            }
+        }
+        Ok(self)
+    }
+
+    /// Inherits the host process's standard output.
+    pub fn stdout_inherit(&mut self) -> Result<&mut Self> {
+        self.stdout = None;
+        match &mut self.inner {
+            CommandInner::Client(builder) => {
+                builder.stdout_inherit()?;
+            }
+            CommandInner::Direct(builder) => {
+                builder.stdout_inherit()?;
+            }
+        }
+        Ok(self)
+    }
+
+    /// Connects the child's standard output to the parent process's standard
+    /// error.
+    pub fn stdout_inherit_stderr(&mut self) -> Result<&mut Self> {
+        self.stdout = None;
+        match &mut self.inner {
+            CommandInner::Client(builder) => {
+                builder.stdout_inherit_stderr()?;
+            }
+            CommandInner::Direct(builder) => {
+                builder.stdout_inherit_stderr()?;
+            }
+        }
+        Ok(self)
+    }
+
+    /// Connects the child's standard input to the null device.
+    pub fn stdin_null(&mut self) -> &mut Self {
+        self.stdin = None;
+        match &mut self.inner {
+            CommandInner::Client(builder) => {
+                builder.stdin_null();
+            }
+            CommandInner::Direct(builder) => {
+                builder.stdin_null();
+            }
+        }
+        self
+    }
+
+    /// Connects the child's standard output to the null device.
+    pub fn stdout_null(&mut self) -> &mut Self {
+        self.stdout = None;
+        match &mut self.inner {
+            CommandInner::Client(builder) => {
+                builder.stdout_null();
+            }
+            CommandInner::Direct(builder) => {
+                builder.stdout_null();
+            }
+        }
+        self
+    }
+
+    /// Sets the child's standard error.
+    pub fn stderr(&mut self, stdio: StdioSend) -> Result<&mut Self> {
+        self.stderr = Some(stdio);
+        Ok(self)
+    }
+
+    /// Inherits the host process's standard error.
+    pub fn stderr_inherit(&mut self) -> Result<&mut Self> {
+        self.stderr = None;
+        match &mut self.inner {
+            CommandInner::Client(builder) => {
+                builder.stderr_inherit()?;
+            }
+            CommandInner::Direct(builder) => {
+                builder.stderr_inherit()?;
+            }
+        }
+        Ok(self)
+    }
+
+    /// Connects the child's standard error to the same destination as its
+    /// configured standard output.
+    pub fn stderr_to_stdout(&mut self) -> Result<&mut Self> {
+        self.stderr = None;
+        match &mut self.inner {
+            CommandInner::Client(builder) => {
+                builder.stderr_to_stdout()?;
+            }
+            CommandInner::Direct(builder) => {
+                builder.stderr_to_stdout()?;
+            }
+        }
+        Ok(self)
+    }
+
+    /// Connects the child's standard error to the parent process's standard
+    /// output.
+    pub fn stderr_inherit_stdout(&mut self) -> Result<&mut Self> {
+        self.stderr = None;
+        match &mut self.inner {
+            CommandInner::Client(builder) => {
+                builder.stderr_inherit_stdout()?;
+            }
+            CommandInner::Direct(builder) => {
+                builder.stderr_inherit_stdout()?;
+            }
+        }
+        Ok(self)
+    }
+
+    /// Connects the child's standard error to the null device.
+    pub fn stderr_null(&mut self) -> &mut Self {
+        self.stderr = None;
+        match &mut self.inner {
+            CommandInner::Client(builder) => {
+                builder.stderr_null();
+            }
+            CommandInner::Direct(builder) => {
+                builder.stderr_null();
+            }
+        }
+        self
+    }
+
+    /// Sets foreground or background process control behavior.
+    pub fn process_control(&mut self, control: ProcessControl) -> &mut Self {
+        match &mut self.inner {
+            CommandInner::Client(builder) => {
+                builder.process_control(control);
+            }
+            CommandInner::Direct(builder) => {
+                builder.process_control(control);
+            }
+        }
+        self
+    }
+
+    /// Sets the policy used to terminate the child.
+    pub fn termination_policy(&mut self, policy: TerminationPolicy) -> &mut Self {
+        match &mut self.inner {
+            CommandInner::Client(builder) => {
+                builder.termination_policy(policy);
+            }
+            CommandInner::Direct(builder) => {
+                builder.termination_policy(policy);
+            }
+        }
+        self
+    }
+
+    /// Spawns the configured process.
+    pub async fn spawn(mut self) -> Result<Child> {
+        let mut relays = PendingRelays::default();
+        if let Some(stdio) = self.stdin.take() {
+            let stdio = classify_recv(&self.vfs, stdio, &mut relays).await?;
+            match &mut self.inner {
+                CommandInner::Client(builder) => {
+                    builder.stdin(stdio)?;
+                }
+                CommandInner::Direct(builder) => {
+                    builder.stdin(stdio)?;
+                }
+            }
+        }
+        if let Some(stdio) = self.stdout.take() {
+            let stdio = classify_send(&self.vfs, stdio, &mut relays).await?;
+            match &mut self.inner {
+                CommandInner::Client(builder) => {
+                    builder.stdout(stdio)?;
+                }
+                CommandInner::Direct(builder) => {
+                    builder.stdout(stdio)?;
+                }
+            }
+        }
+        if let Some(stdio) = self.stderr.take() {
+            let stdio = classify_send(&self.vfs, stdio, &mut relays).await?;
+            match &mut self.inner {
+                CommandInner::Client(builder) => {
+                    builder.stderr(stdio)?;
+                }
+                CommandInner::Direct(builder) => {
+                    builder.stderr(stdio)?;
+                }
+            }
+        }
+        let inner = match self.inner {
+            CommandInner::Client(builder) => builder.spawn().await.map(ChildInner::Client),
+            CommandInner::Direct(builder) => builder
+                .spawn()
+                .await
+                .map(|x| ChildInner::Direct(Box::new(x))),
+        }?;
+        Ok(Child {
+            inner,
+            relays: relays.start(),
+        })
+    }
+}
 
 /// Policy used to terminate a spawned process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,9 +638,6 @@ use std::{
     os::windows::io::OwnedHandle,
     sync::Arc,
 };
-#[cfg(windows)]
-use tokio::task::JoinHandle;
-
 /// A writable standard-I/O endpoint from either a local or remote VFS.
 #[derive(Debug)]
 pub enum StdioSend {
@@ -321,7 +801,7 @@ impl StdioSend {
         Self::Native(NativeStdioSend::File(file))
     }
 
-    pub async fn try_clone(&self) -> io::Result<Self> {
+    pub async fn try_clone(&self) -> Result<Self> {
         match self {
             #[cfg(unix)]
             Self::Native(NativeStdioSend::Pipe(pipe)) => {
@@ -340,11 +820,11 @@ impl StdioSend {
             Self::Native(NativeStdioSend::File(file)) => {
                 Ok(Self::Native(NativeStdioSend::File(file.try_clone().await?)))
             }
-            Self::Remote(remote) => remote.try_clone().await.map(Self::Remote),
+            Self::Remote(remote) => Ok(Self::Remote(remote.try_clone().await?)),
         }
     }
 
-    pub async fn into_stdio(self) -> io::Result<Stdio> {
+    pub async fn into_stdio(self) -> Result<Stdio> {
         match self {
             Self::Native(NativeStdioSend::File(file)) => Ok(Stdio::from(file.into_std().await)),
             #[cfg(unix)]
@@ -355,16 +835,17 @@ impl StdioSend {
             #[cfg(windows)]
             Self::Native(NativeStdioSend::Pipe { inner, pending }) => {
                 if pending.is_some() {
-                    return Err(io::Error::other(
+                    return Err(Error::new(
+                        ErrorKind::ResourceBusy,
                         "cannot convert StdioSend while an async write is in flight",
                     ));
                 }
-                Arc::try_unwrap(inner)
+                Ok(Arc::try_unwrap(inner)
                     .or_else(|inner| inner.try_clone())
-                    .map(Stdio::from)
+                    .map(Stdio::from)?)
             }
-            Self::Remote(_) => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
+            Self::Remote(_) => Err(Error::new(
+                ErrorKind::InvalidInput,
                 "remote stdio cannot be converted to a native handle",
             )),
         }
@@ -398,7 +879,7 @@ impl StdioRecv {
         Self::Native(NativeStdioRecv::File(file))
     }
 
-    pub async fn try_clone(&self) -> io::Result<Self> {
+    pub async fn try_clone(&self) -> Result<Self> {
         match self {
             #[cfg(unix)]
             Self::Native(NativeStdioRecv::Pipe(pipe)) => {
@@ -418,11 +899,11 @@ impl StdioRecv {
             Self::Native(NativeStdioRecv::File(file)) => {
                 Ok(Self::Native(NativeStdioRecv::File(file.try_clone().await?)))
             }
-            Self::Remote(remote) => remote.try_clone().await.map(Self::Remote),
+            Self::Remote(remote) => Ok(Self::Remote(remote.try_clone().await?)),
         }
     }
 
-    pub async fn into_stdio(self) -> io::Result<Stdio> {
+    pub async fn into_stdio(self) -> Result<Stdio> {
         match self {
             Self::Native(NativeStdioRecv::File(file)) => Ok(Stdio::from(file.into_std().await)),
             #[cfg(unix)]
@@ -433,16 +914,17 @@ impl StdioRecv {
             #[cfg(windows)]
             Self::Native(NativeStdioRecv::Pipe { inner, pending, .. }) => {
                 if pending.is_some() {
-                    return Err(io::Error::other(
+                    return Err(Error::new(
+                        ErrorKind::ResourceBusy,
                         "cannot convert StdioRecv while an async read is in flight",
                     ));
                 }
-                Arc::try_unwrap(inner)
+                Ok(Arc::try_unwrap(inner)
                     .or_else(|inner| inner.try_clone())
-                    .map(Stdio::from)
+                    .map(Stdio::from)?)
             }
-            Self::Remote(_) => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
+            Self::Remote(_) => Err(Error::new(
+                ErrorKind::InvalidInput,
                 "remote stdio cannot be converted to a native handle",
             )),
         }

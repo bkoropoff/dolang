@@ -32,7 +32,7 @@ mod bench {
     use std::os::fd::{AsRawFd, OwnedFd};
 
     use criterion::{BenchmarkId, Criterion, Throughput};
-    use dolang_vfs::{OpenOptions, Vfs, client::Client, server::Server};
+    use dolang_vfs::{Vfs, server::Server};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::unix::pipe,
@@ -79,7 +79,7 @@ mod bench {
     /// Connects a client to a server over two pipes (one per direction, like
     /// stdin/stdout), with the server running its own current-thread runtime
     /// on its own thread — one runtime per endpoint, as in a real session.
-    fn build_client(rt: &Runtime) -> Client {
+    fn build_client(rt: &Runtime) -> Vfs {
         let (client_recv, server_send) = raw_pipe();
         let (server_recv, client_send) = raw_pipe();
 
@@ -98,11 +98,11 @@ mod bench {
         rt.block_on(async move {
             let recv = pipe::Receiver::from_owned_fd(client_recv).unwrap();
             let send = pipe::Sender::from_owned_fd(client_send).unwrap();
-            Client::new_split(recv, send).await.unwrap()
+            Vfs::new_split(recv, send).await.unwrap()
         })
     }
 
-    async fn write_chunks(client: &Client, chunk: &[u8], total: usize) {
+    async fn write_chunks(client: &Vfs, chunk: &[u8], total: usize) {
         let mut options = client.open_options();
         options.write(true);
         let mut file = options.open(typed("/dev/null")).await.unwrap();
@@ -114,7 +114,7 @@ mod bench {
         file.flush().await.unwrap();
     }
 
-    async fn read_chunks(client: &Client, chunk_len: usize, total: usize) {
+    async fn read_chunks(client: &Vfs, chunk_len: usize, total: usize) {
         let mut buf = vec![0u8; chunk_len];
         let mut options = client.open_options();
         options.read(true);

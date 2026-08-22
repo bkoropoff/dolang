@@ -7,6 +7,7 @@ use std::{
     task::{Poll, Waker},
 };
 
+use dolang_vfs::process::{StdioRecv, StdioSend};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 
 use dolang::runtime::{
@@ -15,16 +16,12 @@ use dolang::runtime::{
     unpack,
     value::{Nil, TypeObject},
 };
-use dolang_vfs::{AnyVfs, Vfs};
 
 use crate::{
     error::{ErrorExt as _, ResultExt as _},
     global::Global,
     io_mode::{IoMode, encode_value, read_value},
 };
-
-type StdioSend = <AnyVfs as Vfs>::StdioSend;
-type StdioRecv = <AnyVfs as Vfs>::StdioRecv;
 
 // ---------------------------------------------------------------------------
 // State machine
@@ -421,7 +418,7 @@ impl RecvGuard {
     pub(crate) async fn recv_pipe(&self) -> io::Result<StdioRecv> {
         let reader = RecvEndGuard::take(&self.shared)
             .map_err(|_| io::Error::other("pipe: consumer end closed"))?;
-        reader.get_ref().try_clone().await
+        Ok(reader.get_ref().try_clone().await?)
     }
 }
 
@@ -439,7 +436,7 @@ impl SendGuard {
     pub(crate) async fn send_pipe(&self) -> io::Result<StdioSend> {
         let sender = SendEndGuard::take(&self.shared)
             .map_err(|_| io::Error::other("pipe: producer end closed"))?;
-        sender.try_clone().await
+        Ok(sender.try_clone().await?)
     }
 }
 
@@ -511,7 +508,7 @@ pub(crate) async fn negotiate_recv<'v, 's>(
                 fresh_pipe = Some(
                     local
                         .vfs()
-                        .pipe_sized(local.pending_pipe_buffer_size())
+                        .pipe(local.pending_pipe_buffer_size())
                         .await
                         .into_sys(strand)?,
                 );
@@ -620,7 +617,7 @@ pub(crate) async fn negotiate_send<'v, 's>(
                 fresh_pipe = Some(
                     local
                         .vfs()
-                        .pipe_sized(local.pending_pipe_buffer_size())
+                        .pipe(local.pending_pipe_buffer_size())
                         .await
                         .into_sys(strand)?,
                 );

@@ -1,8 +1,9 @@
-use std::{ffi::CString, io, os::unix::ffi::OsStrExt, path::Path};
+use std::{ffi::CString, os::unix::ffi::OsStrExt, path::Path};
 
 use std::fs::File;
 
 use super::Direct;
+use crate::error::{Error, ErrorKind, Result};
 #[cfg(target_os = "macos")]
 use crate::security::MacosAcl;
 #[cfg(target_os = "freebsd")]
@@ -34,27 +35,26 @@ fn canonical_entries(acl: &PosixAcl) -> Vec<crate::security::PosixAce> {
     entries
 }
 
-fn cpath(path: &Path) -> io::Result<CString> {
-    CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))
+fn cpath(path: &Path) -> Result<CString> {
+    Ok(CString::new(path.as_os_str().as_bytes())?)
 }
 
-fn unsupported_kind(kind: AclKind) -> io::Error {
+fn unsupported_kind(kind: AclKind) -> Error {
     let what = match kind {
         AclKind::Posix => "POSIX ACLs",
         AclKind::Nfs4 => "NFSv4 ACLs",
         AclKind::Macos => "macOS ACLs",
     };
-    io::Error::new(
-        io::ErrorKind::Unsupported,
+    Error::new(
+        ErrorKind::Unsupported,
         format!("{what} are not supported on this platform"),
     )
 }
 
-fn check_default(kind: AclKind, default: bool) -> io::Result<()> {
+fn check_default(kind: AclKind, default: bool) -> Result<()> {
     if default && kind != AclKind::Posix {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
             "default: is only meaningful for POSIX ACLs",
         ));
     }
@@ -62,12 +62,12 @@ fn check_default(kind: AclKind, default: bool) -> io::Result<()> {
 }
 
 #[cfg(any(target_os = "freebsd", target_os = "linux"))]
-fn split_posix(kind: AclKind, acl: Option<&Acl>) -> io::Result<Option<&PosixAcl>> {
+fn split_posix(kind: AclKind, acl: Option<&Acl>) -> Result<Option<&PosixAcl>> {
     match (kind, acl) {
         (AclKind::Posix, None) => Ok(None),
         (AclKind::Posix, Some(Acl::Posix(posix))) => Ok(Some(posix)),
-        (AclKind::Posix, Some(_)) => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
+        (AclKind::Posix, Some(_)) => Err(Error::new(
+            ErrorKind::InvalidInput,
             "kind: POSIX but value is not a POSIX ACL",
         )),
         (AclKind::Nfs4 | AclKind::Macos, _) => {
@@ -77,12 +77,12 @@ fn split_posix(kind: AclKind, acl: Option<&Acl>) -> io::Result<Option<&PosixAcl>
 }
 
 #[cfg(target_os = "freebsd")]
-fn split_nfs4(kind: AclKind, acl: Option<&Acl>) -> io::Result<Option<&Nfs4Acl>> {
+fn split_nfs4(kind: AclKind, acl: Option<&Acl>) -> Result<Option<&Nfs4Acl>> {
     match (kind, acl) {
         (AclKind::Nfs4, None) => Ok(None),
         (AclKind::Nfs4, Some(Acl::Nfs4(nfs4))) => Ok(Some(nfs4)),
-        (AclKind::Nfs4, Some(_)) => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
+        (AclKind::Nfs4, Some(_)) => Err(Error::new(
+            ErrorKind::InvalidInput,
             "kind: NFS4 but value is not an NFSv4 ACL",
         )),
         (AclKind::Posix | AclKind::Macos, _) => {
@@ -92,12 +92,12 @@ fn split_nfs4(kind: AclKind, acl: Option<&Acl>) -> io::Result<Option<&Nfs4Acl>> 
 }
 
 #[cfg(target_os = "macos")]
-fn split_macos(kind: AclKind, acl: Option<&Acl>) -> io::Result<Option<&MacosAcl>> {
+fn split_macos(kind: AclKind, acl: Option<&Acl>) -> Result<Option<&MacosAcl>> {
     match (kind, acl) {
         (AclKind::Macos, None) => Ok(None),
         (AclKind::Macos, Some(Acl::Macos(macos))) => Ok(Some(macos)),
-        (AclKind::Macos, Some(_)) => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
+        (AclKind::Macos, Some(_)) => Err(Error::new(
+            ErrorKind::InvalidInput,
             "kind: MACOS but value is not a macOS ACL",
         )),
         (AclKind::Posix | AclKind::Nfs4, _) => {
@@ -112,7 +112,7 @@ impl Direct {
         kind: AclKind,
         default: bool,
         follow: bool,
-    ) -> io::Result<Option<Acl>> {
+    ) -> Result<Option<Acl>> {
         check_default(kind, default)?;
         #[cfg(target_os = "linux")]
         return linux::get(path, kind, default, follow);
@@ -128,7 +128,7 @@ impl Direct {
         acl: Option<&Acl>,
         default: bool,
         follow: bool,
-    ) -> io::Result<()> {
+    ) -> Result<()> {
         check_default(kind, default)?;
         #[cfg(target_os = "linux")]
         return linux::set(path, kind, acl, default, follow);
@@ -138,11 +138,7 @@ impl Direct {
         return macos::set(path, kind, acl, follow);
     }
 
-    pub(super) fn acl_from_file(
-        file: &File,
-        kind: AclKind,
-        default: bool,
-    ) -> io::Result<Option<Acl>> {
+    pub(super) fn acl_from_file(file: &File, kind: AclKind, default: bool) -> Result<Option<Acl>> {
         check_default(kind, default)?;
         #[cfg(target_os = "linux")]
         return linux::get_fd(file, kind, default);
@@ -157,7 +153,7 @@ impl Direct {
         kind: AclKind,
         acl: Option<&Acl>,
         default: bool,
-    ) -> io::Result<()> {
+    ) -> Result<()> {
         check_default(kind, default)?;
         #[cfg(target_os = "linux")]
         return linux::set_fd(file, kind, acl, default);
@@ -167,17 +163,17 @@ impl Direct {
         return macos::set_fd(file, kind, acl);
     }
 
-    pub(super) fn resolve_principal_id(
+    pub(super) fn impl_resolve_principal_id(
         input: crate::security::PrincipalId,
         want: crate::security::PrincipalIdKind,
-    ) -> io::Result<crate::security::PrincipalId> {
+    ) -> Result<crate::security::PrincipalId> {
         #[cfg(target_os = "macos")]
         return macos::resolve_principal_id(input, want);
         #[cfg(not(target_os = "macos"))]
         {
             let _ = (input, want);
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
+            Err(Error::new(
+                ErrorKind::Unsupported,
                 "principal ID resolution is not supported on this platform",
             ))
         }

@@ -20,18 +20,17 @@ use dolang::runtime::{
     value::View,
     vm::Builder,
 };
-use dolang_ext_shell::FileHandle as _;
-use dolang_vfs::AnyFile;
+use dolang_vfs::file::File as VfsFile;
 use futures_lite::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::io::BufReader;
 use tokio_util::compat::Compat;
 
 use crate::global::Global;
 
-type ZipReader = ZipFileReader<Compat<BufReader<AnyFile>>>;
-type ZipReadEntry = ZipEntryReader<'static, Compat<BufReader<AnyFile>>, WithEntry<'static>>;
-type ZipWriter = ZipFileWriter<Compat<AnyFile>>;
-type ZipWriteEntry = EntrySeekableWriter<'static, Compat<AnyFile>>;
+type ZipReader = ZipFileReader<Compat<BufReader<VfsFile>>>;
+type ZipReadEntry = ZipEntryReader<'static, Compat<BufReader<VfsFile>>, WithEntry<'static>>;
+type ZipWriter = ZipFileWriter<Compat<VfsFile>>;
+type ZipWriteEntry = EntrySeekableWriter<'static, Compat<VfsFile>>;
 
 enum ArchiveInner {
     Read(ZipReader),
@@ -130,7 +129,7 @@ async fn open_read_entry_by_index<'v, 's>(
     let entry = unsafe {
         // SAFETY: the entry borrows `archive`, which remains in the annex until
         // the entry is closed. The File object roots this Archive in slot 0.
-        transmute::<ZipEntryReader<'_, Compat<BufReader<AnyFile>>, WithEntry<'_>>, ZipReadEntry>(
+        transmute::<ZipEntryReader<'_, Compat<BufReader<VfsFile>>, WithEntry<'_>>, ZipReadEntry>(
             entry,
         )
     };
@@ -268,7 +267,7 @@ impl<'v> Object<'v> for Archive {
                                     // SAFETY: the entry borrows `writer`, which remains in the annex until
                                     // the entry is closed. The File object roots this Archive in slot 0.
                                     transmute::<
-                                        EntrySeekableWriter<'_, Compat<AnyFile>>,
+                                        EntrySeekableWriter<'_, Compat<VfsFile>>,
                                         ZipWriteEntry,
                                     >(entry)
                                 };

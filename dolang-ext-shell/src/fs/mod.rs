@@ -7,7 +7,6 @@ use dolang::runtime::{
     vm::Builder,
 };
 use dolang_vfs::{
-    FileHandle, OpenOptions, Vfs,
     metadata::{AttrFlags, AttrsPatch, FileType, Mode as VfsMode},
     path::WellKnownPath,
     security::{Acl as VfsAnyAcl, AclKind as VfsAclKind},

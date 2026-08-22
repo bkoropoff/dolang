@@ -7,7 +7,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use dolang_vfs::{Vfs as _, client::Client};
+use dolang_vfs::Vfs;
 use tokio::net::windows::named_pipe::ServerOptions;
 use tokio::process::Command as TokioCommand;
 use typed_path::{Utf8TypedPath, Utf8WindowsPath};
@@ -33,7 +33,7 @@ async fn embedded_vfs_mode_serves_and_stops() {
     let process = child.as_handle().try_clone_to_owned().unwrap();
     pipe.connect().await.unwrap();
 
-    let client = unsafe { Client::from_named_pipe_server(pipe, process) }
+    let client = unsafe { Vfs::from_named_pipe_server(pipe, process) }
         .await
         .unwrap();
     assert_eq!(
@@ -67,7 +67,7 @@ async fn embedded_vfs_stdio_mode_serves_and_stops() {
         .unwrap();
     let stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
-    let client = Client::new_split(stdout, stdin).await.unwrap();
+    let client = Vfs::new_split(stdout, stdin).await.unwrap();
 
     assert_eq!(
         client.cwd(),
