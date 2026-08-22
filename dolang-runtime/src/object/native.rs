@@ -611,7 +611,7 @@ impl<'v, 'a, T: Object<'v>> Instance<'v, 'a, T> {
     /// — e.g. [`Object::eq`], [`Object::band`]) obtain its own type in order
     /// to [`Type::cast`] another value into the same type, or construct a
     /// new instance of it.
-    pub fn ty(&self, vm: &'v Vm<'v>) -> Type<'v, T> {
+    pub fn ty(&self, vm: &Vm<'v>) -> Type<'v, T> {
         // SAFETY: `self.receiver` is a live `ObjectWrap<'v,T>` receiver.
         let vtbl = unsafe {
             self.receiver
@@ -2244,10 +2244,14 @@ pub struct Type<'v, T: Object<'v>> {
     pub(crate) type_vtbl: TypeHandle<'v, TypeObjectWrap<'v, T>>,
     /// Index into `Vm::type_singletons` for `Input` and `op_type` dispatch.
     pub(crate) singleton_idx: usize,
-    /// The VM this type belongs to, so that [`Type::cast`] can reach
-    /// [`BuiltinTypes::class_instance`](crate::object::BuiltinTypes) to look through the
-    /// native slots of a Do subclass.
-    pub(crate) vm: &'v Vm<'v>,
+    /// Handle for [`ClassInstance`](super::class::ClassInstance), so that [`Type::cast`] can
+    /// look through the native slots of a Do subclass.
+    ///
+    /// A handle rather than a `&Vm` deliberately: it is a plain vtable pointer, so it needs
+    /// no VM borrow to carry around (which would be unsound to mint from `&mut Builder` at
+    /// registration time) and stays usable where no [`Vm`] reference exists at all, such as
+    /// [`Object::finalize`].
+    pub(crate) class_instance: TypeHandle<'v, super::class::ClassInstance<'v>>,
 }
 
 impl<'v, T: Object<'v>> Copy for Type<'v, T> {}
@@ -2329,7 +2333,7 @@ impl<'v, T: Object<'v>> Type<'v, T> {
             });
         }
         value
-            .downcast_native(self.vm, self.vtbl)
+            .downcast_native_with(self.class_instance, self.vtbl)
             .map(|receiver| Cast {
                 receiver,
                 delegator: Some(value),
@@ -2341,13 +2345,13 @@ impl<'v, T: Object<'v>> Type<'v, T> {
     /// # Safety
     /// `header` must point to a GC-allocated `TypeObjectWrap<'v,T>` whose vtable is
     /// `TypeVtbl<'v>`.
-    pub(crate) unsafe fn from_type_header(header: NonNull<arena::Header>, vm: &'v Vm<'v>) -> Self {
+    pub(crate) unsafe fn from_type_header(header: NonNull<arena::Header>, vm: &Vm<'v>) -> Self {
         let vtbl = unsafe { header.as_ref().vtbl().cast::<TypeVtbl<'v>>() };
         Type {
             vtbl: unsafe { TypeHandle::new(vtbl.as_ref().inst_vtbl.cast()) },
             type_vtbl: unsafe { TypeHandle::new(vtbl.cast()) },
             singleton_idx: unsafe { vtbl.as_ref().inst_vtbl.as_ref().singleton_idx },
-            vm,
+            class_instance: vm.builtin_types().class_instance,
         }
     }
 
@@ -3000,7 +3004,7 @@ impl<'v, 'a, T: Object<'v>> TypeBuilder<'v, 'a, T> {
             vtbl: unsafe { TypeHandle::new(result.inst_vtbl.cast()) },
             type_vtbl: unsafe { TypeHandle::new(result.type_vtbl.cast()) },
             singleton_idx: result.singleton_idx,
-            vm: result.vm.vm_ref(),
+            class_instance: result.vm.inner.builtin_types().class_instance,
         };
 
         let singleton = Value::from_object(protocol::GcObj::new_annex(
@@ -3182,7 +3186,7 @@ impl<'v, 'a, T: Object<'v>> Recv<'v, 'a, TypeObjectWrap<'v, T>> {
         &vm.type_singletons[self.inst_vtbl().singleton_idx]
     }
 
-    fn ty(&self, vm: &'v Vm<'v>) -> Type<'v, T> {
+    fn ty(&self, vm: &Vm<'v>) -> Type<'v, T> {
         // SAFETY: `self` is a live `TypeObjectWrap<'v, T>` receiver.
         unsafe { Type::<T>::from_type_header(self.as_header().cast(), vm) }
     }

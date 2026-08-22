@@ -238,7 +238,7 @@ return $
       collect: true
     do |args|
       env MIRIFLAGS: -Zmiri-disable-isolation do
-        dodo.show cargo +nightly miri test
+        run_cargo +nightly miri test
           for crate = MIRI_CRATES
             -p $crate
           ...args.args

@@ -802,16 +802,6 @@ impl Builder<'static> {
 }
 
 impl<'v> Builder<'v> {
-    /// A `'v`-lifetime reference to the VM under construction, for storing in handles that
-    /// outlive registration (such as [`Type`](crate::object::Type)).
-    ///
-    /// Safety rationale is the same promise [`Builder::enter`] relies on: [`Builder::build`]
-    /// constructs the `Builder` in place and thereafter only lends it out as `&mut`, so the
-    /// `Vm` it owns is never moved and is not dropped until every `'v` lifetime has ended.
-    pub(crate) fn vm_ref(&self) -> &'v Vm<'v> {
-        unsafe { mem::transmute::<&Vm<'v>, &'v Vm<'v>>(&self.inner) }
-    }
-
     /// Resolve a name to a symbol. The returned symbol will live for the life of the VM.
     #[inline(never)]
     pub fn sym(&mut self, name: &str) -> Sym<'v, 'v> {
