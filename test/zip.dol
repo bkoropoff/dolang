@@ -1,11 +1,15 @@
-import agent zip
+import zip
+  testlib.vfs:
+    - vfs
   test:
     - assert_eq
     - assert_throws
+    - test
   std:
     - ConcurrencyError
 
-#[agent.test]
+#[test]
+#[vfs]
 def write_read()
   zip.open "test.zip" "w" do |archive|
     archive.open "hello.txt" mode: 0o640 do |file|
@@ -49,7 +53,8 @@ def write_read()
       let target = file.read 1024
       assert_eq (str target) "hello.txt"
 
-#[agent.test]
+#[test]
+#[vfs]
 def nested_file_is_rejected()
   zip.open "nested.zip" "w" do |archive|
     archive.open "first.txt" do |_|

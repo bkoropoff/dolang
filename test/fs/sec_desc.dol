@@ -1,8 +1,11 @@
-import sys std agent
+import sys std
+  testlib.vfs:
+    - vfs
   test:
     - assert_eq
     - assert_throws
     - assert_type
+    - test
   fs:
     - Path
     - open
@@ -14,7 +17,8 @@ import sys std agent
     - SecDesc
     - SecInfo
 
-#[agent.test]
+#[test]
+#[vfs]
 def query_security_descriptors()
   let path = Path test_sec_desc.txt
   open $path w do |file|

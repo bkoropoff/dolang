@@ -1,4 +1,6 @@
-import agent http http.mock tar transfer zip
+import http http.mock tar transfer zip
+  testlib.vfs:
+    - vfs
   fs:
     - Path
     - symlink_file
@@ -11,22 +13,26 @@ import agent http http.mock tar transfer zip
     - assert_eq
     - assert_throws
     - skip
+    - test
 
 import fs.unix: unix_fs
 
-#[agent.test]
+#[test]
+#[vfs]
 def local_get_and_put()
   Path("source.bin").write b"hello"
   assert_eq (transfer.get "source.bin") (Path "source.bin")
   transfer.put "source.bin" "output.bin"
   assert_eq (Path("output.bin").read "b") b"hello"
 
-#[agent.test]
+#[test]
+#[vfs]
 def policy_is_reserved()
   assert_throws $ValueError do
     transfer.get "source.bin" policy: :OFFLINE:
 
-#[agent.test]
+#[test]
+#[vfs]
 def http_get_downloads_and_caches()
   http.mock.Server do |server|
     server.mock
@@ -39,7 +45,8 @@ def http_get_downloads_and_caches()
         let result = transfer.get (server.url / "/file.bin") cache: (Path "cache")
         assert_eq $result.read() hello
 
-#[agent.test]
+#[test]
+#[vfs]
 def http_get_revalidates_with_etag()
   http.mock.Server do |server|
     server.mock
@@ -69,7 +76,8 @@ def http_get_revalidates_with_etag()
         # `.received()` orders most-recent-first (wiremock's own convention).
         assert_eq (requests[0].headers.get "if-none-match") "v1"
 
-#[agent.test]
+#[test]
+#[vfs]
 def http_get_verifies_digest()
   http.mock.Server do |server|
     server.mock
@@ -87,7 +95,8 @@ def http_get_verifies_digest()
         assert_throws $ValueError do
           transfer.get (server.url / "/digest.bin") cache: (Path "cache2") digest: $bad
 
-#[agent.test]
+#[test]
+#[vfs]
 def http_put_uploads_local_file()
   Path("upload.bin").write b"payload-bytes"
   http.mock.Server do |server|
@@ -103,7 +112,8 @@ def http_put_uploads_local_file()
         assert_eq $requests[0].method "PUT"
         assert_eq (str requests[0].body) "payload-bytes"
 
-#[agent.test]
+#[test]
+#[vfs]
 def http_put_propagates_error_on_failure_status()
   Path("upload.bin").write b"payload-bytes"
   http.mock.Server do |server|
@@ -116,7 +126,8 @@ def http_put_propagates_error_on_failure_status()
         assert_throws $http.Error do
           transfer.put "upload.bin" (server.url / "/upload")
 
-#[agent.test]
+#[test]
+#[vfs]
 def archive_round_trips()
   let source = Path "source"
   (source / "nested").create_dir all: true
@@ -145,7 +156,8 @@ def archive_round_trips()
       assert_eq [...(destination / "nested/link").read_link().components] ["..", "hello.txt"]
       assert_eq $(destination / "nested/link").read() hello
 
-#[agent.test]
+#[test]
+#[vfs]
 def pack_omits_source_directory()
   let source = Path "source"
   (source / "nested").create_dir all: true
@@ -172,7 +184,8 @@ def compress_raw source destination format
     else
       run xz -c -- $source stdout: $file
 
-#[agent.test]
+#[test]
+#[vfs]
 def raw_compression_round_trips()
   if (os_info().family == :WINDOWS:)
     skip "requires gzip, zstd, and xz"
@@ -194,7 +207,8 @@ def raw_compression_round_trips()
   transfer.unpack payload.data explicit-output format: :XZ:
   assert_eq (Path("explicit-output").read "b") $source.read("b")
 
-#[agent.test]
+#[test]
+#[vfs]
 def raw_decompression_validates_destination_and_strip()
   if (os_info().family == :WINDOWS:)
     skip "requires gzip"
@@ -208,7 +222,8 @@ def raw_decompression_validates_destination_and_strip()
   assert_throws $ValueError do transfer.unpack payload.gz stripped strip: 1
   assert !(Path("stripped").exists())
 
-#[agent.test]
+#[test]
+#[vfs]
 def corrupt_raw_input_is_not_published()
   if (os_info().family == :WINDOWS:)
     skip "requires xz"
@@ -219,35 +234,40 @@ def corrupt_raw_input_is_not_published()
   assert e.detail
   assert !(Path("output").exists())
 
-#[agent.test]
+#[test]
+#[vfs]
 def extraction_rejects_existing_destination()
   tar.write archive.tar do |archive|
     archive.entry file size: 1 do |entry| entry.write x
   Path("out").create_dir()
   assert_throws $ValueError do transfer.unpack archive.tar out
 
-#[agent.test]
+#[test]
+#[vfs]
 def extraction_rejects_unsafe_zip_paths()
   zip.open unsafe.zip w do |archive|
     archive.open "../escape" do |file| file.write nope
   assert_throws $ValueError do transfer.unpack unsafe.zip out
   assert !(Path("escape").exists())
 
-#[agent.test]
+#[test]
+#[vfs]
 def extraction_rejects_escaping_symlink_targets()
   tar.write unsafe-link.tar do |archive|
     archive.symlink (unix_fs.Path "../../escape") (unix_fs.Path "dir/link")
   assert_throws $ValueError do transfer.unpack unsafe-link.tar out
   assert !(Path("escape").exists())
 
-#[agent.test]
+#[test]
+#[vfs]
 def root_strip_requires_one_root()
   tar.write roots.tar do |archive|
     archive.entry (unix_fs.Path "one/a") size: 1 do |entry| entry.write a
     archive.entry (unix_fs.Path "two/b") size: 1 do |entry| entry.write b
   assert_throws $ValueError do transfer.unpack roots.tar out strip: :ROOT:
 
-#[agent.test]
+#[test]
+#[vfs]
 def hard_links_are_created_after_files()
   tar.write links.tar do |archive|
     archive.create_dir root
@@ -256,7 +276,8 @@ def hard_links_are_created_after_files()
   transfer.unpack links.tar out strip: :ROOT:
   assert_eq (Path("out/link").read()) hello
 
-#[agent.test]
+#[test]
+#[vfs]
 def extraction_rejects_duplicates()
   tar.write duplicate.tar do |archive|
     archive.entry item size: 1 do |entry| entry.write a

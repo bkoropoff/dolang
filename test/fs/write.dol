@@ -2,6 +2,7 @@ import test:
   - assert
   - assert_eq
   - assert_throws
+  - test
 
 import fs:
   - create_dir
@@ -12,14 +13,16 @@ import fs:
   - remove
   - Path
 
-import agent
+import testlib.vfs:
+  - vfs
 import sys
 import shell
 import std:
   - RuntimeError
   - StateError
 
-#[agent.test]
+#[test]
+#[vfs]
 def write_and_read_back_text()
     # Test writing text and reading it back
     let test_path = "test_write_text.txt"
@@ -37,7 +40,8 @@ def write_and_read_back_text()
     # Cleanup
     remove $test_path
 
-#[agent.test]
+#[test]
+#[vfs]
 def write_binary_data()
     # Test writing binary data using binary string literals
     let test_path = "test_write_binary.bin"
@@ -58,7 +62,8 @@ def write_binary_data()
 
 # `put` writes a value's own bytes and invents nothing -- no terminator, and
 # no type-dependent carve-out for `Bin`. What goes in is what lands on disk.
-#[agent.test]
+#[test]
+#[vfs]
 def sink_put_is_verbatim_for_every_value_type()
     let test_path = "test_sink_put.txt"
     open $test_path w do |file|
@@ -71,7 +76,8 @@ def sink_put_is_verbatim_for_every_value_type()
 
 # Terminators are opt-in, and come out identical on every platform unless the
 # script asks for the target's own ending.
-#[agent.test]
+#[test]
+#[vfs]
 def sink_put_terminates_only_when_asked()
     let test_path = "test_sink_crimp.txt"
     open $test_path w do |file|
@@ -93,7 +99,8 @@ def sink_put_terminates_only_when_asked()
     open $test_path rb do |file|
       assert_eq $file.read() $expected
 
-#[agent.test]
+#[test]
+#[vfs]
 def write_at_offset()
     let test_path = "test_write_offset.txt"
     write $test_path "abcdefghij"
@@ -111,7 +118,8 @@ def write_at_offset()
     assert_eq (read test_path) "abXYefghij\0Z"
     remove $test_path
 
-#[agent.test]
+#[test]
+#[vfs]
 def write_at_offset_transfers_the_whole_count()
     # One positional write may transfer less than asked, so `offset:` loops
     # internally; without that this leaves a truncated file on some backends.
@@ -123,7 +131,8 @@ def write_at_offset_transfers_the_whole_count()
     assert_eq (read test_path) $data
     remove $test_path
 
-#[agent.test]
+#[test]
+#[vfs]
 def write_at_offset_is_refused_in_append_mode()
     # Every write on an append handle lands at the end regardless of the
     # offset the platform is handed, so an offset cannot be honored at all.
@@ -139,7 +148,8 @@ def write_at_offset_is_refused_in_append_mode()
     assert_eq (read test_path) "abcd"
     remove $test_path
 
-#[agent.test]
+#[test]
+#[vfs]
 def write_to_file_opened_in_append_mode()
     # Test appending to a file
     let test_path = "test_append.txt"
@@ -162,7 +172,8 @@ def write_to_file_opened_in_append_mode()
     # Cleanup
     remove $test_path
 
-#[agent.test]
+#[test]
+#[vfs]
 def write_after_close_fails()
     # Test that writing to a closed file fails
     let test_path = "test_write_closed.txt"
@@ -175,7 +186,8 @@ def write_after_close_fails()
     # Cleanup
     remove $test_path
 
-#[agent.test]
+#[test]
+#[vfs]
 def remove_file()
     # Test removing a file
     let test_path = "test_remove.txt"
@@ -192,7 +204,8 @@ def remove_file()
       open $test_path "r" do |_f|
         false  # Should not reach here
 
-#[agent.test]
+#[test]
+#[vfs]
 def remove_non_existent_file_fails()
     # Test that removing a non-existent file fails
     let test_path = "test_remove_nonexistent.txt"
@@ -201,11 +214,13 @@ def remove_non_existent_file_fails()
     assert_throws $RuntimeError do
       remove $test_path
 
-#[agent.test]
+#[test]
+#[vfs]
 def remove_ignores_missing_path_when_requested()
     remove "test_remove_ignore.txt" ignore: true
 
-#[agent.test]
+#[test]
+#[vfs]
 def remove_free_function_is_variadic()
     write "test_remove_first.txt" "a"
     write "test_remove_second.txt" "b"
@@ -213,14 +228,16 @@ def remove_free_function_is_variadic()
     assert (!(Path "test_remove_first.txt").exists())
     assert (!(Path "test_remove_second.txt").exists())
 
-#[agent.test]
+#[test]
+#[vfs]
 def remove_all_removes_directory_trees()
     create_dir "test_remove_all/subdir" all: true
     write "test_remove_all/subdir/file.txt" "hello"
     remove "test_remove_all" all: true
     assert (!(Path "test_remove_all").exists())
 
-#[agent.test]
+#[test]
+#[vfs]
 def fs_write_writes_and_truncates_text_file()
     let test_path = "test_fs_write_text.txt"
     assert_eq (write test_path "Hello from fs.write") 19
@@ -229,14 +246,16 @@ def fs_write_writes_and_truncates_text_file()
     assert_eq ((Path test_path).read()) "short"
     remove $test_path
 
-#[agent.test]
+#[test]
+#[vfs]
 def fs_write_writes_binary_data()
     let test_path = "test_fs_write_binary.bin"
     assert_eq (write test_path b"Hello") 5
     assert_eq ((Path test_path).read "b") b"Hello"
     remove $test_path
 
-#[agent.test]
+#[test]
+#[vfs]
 def fs_append_appends_and_creates_text_files()
     let test_path = "test_fs_append_text.txt"
     remove $test_path ignore: true
@@ -245,7 +264,8 @@ def fs_append_appends_and_creates_text_files()
     assert_eq (read test_path) "first second"
     remove $test_path
 
-#[agent.test]
+#[test]
+#[vfs]
 def path_append_appends_binary_data()
     let test_path = Path "test_path_append_binary.bin"
     test_path.write b"one"
@@ -253,7 +273,8 @@ def path_append_appends_binary_data()
     assert_eq (test_path.read "b") b"onetwo"
     test_path.remove()
 
-#[agent.test]
+#[test]
+#[vfs]
 def path_remove_supports_all_and_ignore()
     let dir = Path "test_path_remove"
     (dir / "nested").create_dir all: true

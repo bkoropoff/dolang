@@ -1,0 +1,88 @@
+import test: unittest _vfs
+  shell:
+    - Vfs
+  strand:
+    - pipeline
+  - sys
+  - fs
+
+let vfs_bin = _vfs.bin()
+
+def with_vfs remote block
+  if remote
+    let vfs = Vfs do run $vfs_bin --stdio
+    try
+      vfs.with $block
+    finally
+      vfs.stop()
+  else if (sys.os_info().family == :WINDOWS:)
+    let vfs = Vfs.windows_admin elevate: false
+    try
+      vfs.with $block
+    finally
+      vfs.stop()
+  else
+    fs.with_temp_dir do |dir|
+      dir.set_metadata mode: 0o700
+      let socket = (dir / "socket")
+      let input = strand.input()
+
+      pipeline
+        do run $vfs_bin --listen $socket
+        do
+          strand.next()
+          let vfs = Vfs.unix_socket $socket
+          try
+            return strand.redirect input: $input do vfs.with $block
+          finally
+            vfs.stop()
+
+# Runs `block` inside a fresh temp directory since a test will likely create
+# files.
+def in_temp_dir block ...rest
+  fs.with_temp_dir do |dir|
+    cd $dir do block(...rest)
+
+# Dispatches on the `vfs` axis registered by `vfs` below: runs the test
+# directly, or through a local/remote VFS connection, skipping variants that
+# aren't available on the current platform or weren't requested.
+def vfs_dispatch windows remote
+  do |block :vfs ...remainder|
+    if (sys.os_info().family == :WINDOWS: && !windows && vfs != "direct")
+      unittest.skip "Windows functionality not ready"
+    else if (vfs == "remote" && !remote)
+      unittest.skip "remote functionality not ready"
+    else if (vfs == "local")
+      with_vfs false do block(...remainder)
+    else if (vfs == "remote")
+      with_vfs true do block(...remainder)
+    else
+      block(...remainder)
+
+# Composes with `#[test]` to parametrize a test over three variants: run
+# directly, through a local VFS connection, and through a remote (piped) VFS
+# connection, each in its own fresh temp directory. Stack `#[test]` above
+# `#[vfs]` — `vfs` only sets up parametrization and fixturing, it does not
+# register the test itself.
+#
+# # Example
+#
+# ```
+# #[test]
+# #[vfs]
+# def creates_a_file()
+#   ...
+# ```
+pub def vfs
+  :windows = true
+  :remote = true
+  func = nil
+do
+  if (func == nil)
+    return do |func| vfs :windows :remote $func
+  let with_temp_dir_fixture = unittest.fixture $in_temp_dir
+  let wrapped = with_temp_dir_fixture $func
+  let dispatch = vfs_dispatch $windows $remote
+  let with_vfs_fixture = unittest.fixture $dispatch
+  wrapped = with_vfs_fixture $wrapped
+  unittest.parametrize $wrapped vfs: ["local", "remote", "direct"]

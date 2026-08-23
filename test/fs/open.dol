@@ -1,10 +1,14 @@
-import agent
+import
+  testlib.vfs:
+    - vfs
   test:
     - assert_eq
+    - test
   fs:
     - open
 
-#[agent.test]
+#[test]
+#[vfs]
 def basic_open()
   let path = "open_basic.txt"
   open $path w do |file|
@@ -17,7 +21,8 @@ def basic_open()
   f.close()
   f.close()
 
-#[agent.test]
+#[test]
+#[vfs]
 def block_scope()
   let path = "open_block.txt"
   open $path w do |file|

@@ -1,8 +1,11 @@
-import agent sys
+import sys
+  testlib.vfs:
+    - vfs
   test:
     - assert
     - assert_eq
     - assert_throws
+    - test
   std:
     - RuntimeError
   fs:
@@ -10,7 +13,8 @@ import agent sys
     - open
     - Path
 
-#[agent.test]
+#[test]
+#[vfs]
 def fs_hard_link_creates_linked_file()
   let target = Path "target.txt"
   let link = Path "link.txt"
@@ -27,7 +31,8 @@ def fs_hard_link_creates_linked_file()
     assert (target.metadata().nlink >= 2)
     assert (link.metadata().nlink >= 2)
 
-#[agent.test]
+#[test]
+#[vfs]
 def path_hard_link_creates_linked_file()
   let target = Path "target.txt"
   let link = Path "link.txt"
@@ -40,7 +45,8 @@ def path_hard_link_creates_linked_file()
   open $link r do |f|
     assert_eq (f.read()) "hello"
 
-#[agent.test]
+#[test]
+#[vfs]
 def hard_link_missing_source_fails()
   let target = Path "missing.txt"
   let link = Path "link.txt"

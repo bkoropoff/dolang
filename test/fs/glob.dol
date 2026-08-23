@@ -1,7 +1,10 @@
-import agent
+import
+  testlib.vfs:
+    - vfs
   test:
     - assert_eq
     - fixture
+    - test
   fs:
     - glob
     - Path
@@ -14,17 +17,20 @@ def populate block ...rest
   Path("build.rs").write ""
   block(...rest)
 
-#[agent.test]
+#[test]
+#[vfs]
 #[populate]
 def basic()
   assert_eq [...glob "*.rs"] [Path "build.rs"]
 
-#[agent.test]
+#[test]
+#[vfs]
 #[populate]
 def max_depth()
   assert_eq [...glob "**/*.rs" max_depth: 1] [Path "build.rs"]
 
-#[agent.test]
+#[test]
+#[vfs]
 #[populate]
 def path()
   assert_eq [...Path("src").glob("*.rs")] [Path "src/foo.rs", Path "src/lib.rs"]

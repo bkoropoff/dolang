@@ -1,8 +1,11 @@
-import sys agent
+import sys
+  testlib.vfs:
+    - vfs
   test:
     - assert
     - assert_eq
     - assert_throws
+    - test
   std:
     - RuntimeError
     - UnsupportedError
@@ -12,7 +15,8 @@ import sys agent
     - create_dir
     - Path
 
-#[agent.test]
+#[test]
+#[vfs]
 def rename_file()
   let old_path = Path "old_name.txt"
   let new_path = Path "new_name.txt"
@@ -28,7 +32,8 @@ def rename_file()
     let contents = f.read()
     assert_eq $contents "test content"
 
-#[agent.test]
+#[test]
+#[vfs]
 def rename_to_different_directory()
   let subdir = Path "subdir"
   create_dir $subdir
@@ -46,7 +51,8 @@ def rename_to_different_directory()
     let contents = f.read()
     assert_eq $contents "moved content"
 
-#[agent.test]
+#[test]
+#[vfs]
 def rename_over_existing_file()
   let path1 = Path "file1.txt"
   let path2 = Path "file2.txt"
@@ -64,7 +70,8 @@ def rename_over_existing_file()
     let contents = f.read()
     assert_eq $contents "content1"
 
-#[agent.test]
+#[test]
+#[vfs]
 def rename_non_existent_file_fails()
   let src = Path "nonexistent.txt"
   let dst = Path "dest.txt"
@@ -72,7 +79,8 @@ def rename_non_existent_file_fails()
   assert_throws $RuntimeError do
     rename $src $dst
 
-#[agent.test]
+#[test]
+#[vfs]
 def path_rename_method()
   let src = Path "source.txt"
   let dst = Path "dest.txt"
@@ -86,7 +94,8 @@ def path_rename_method()
   open $dst r do |f|
     assert_eq (f.read()) "rename method"
 
-#[agent.test]
+#[test]
+#[vfs]
 def rename_without_replacing_existing_file()
   let src = Path "no_replace_source.txt"
   let dst = Path "no_replace_destination.txt"
@@ -101,7 +110,8 @@ def rename_without_replacing_existing_file()
   assert_eq (src.read()) source
   assert_eq (dst.read()) destination
 
-#[agent.test]
+#[test]
+#[vfs]
 def path_rename_without_replacement()
   let src = Path "path_no_replace_source.txt"
   let dst = Path "path_no_replace_destination.txt"

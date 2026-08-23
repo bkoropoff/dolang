@@ -1,6 +1,9 @@
-import agent
+import
+  testlib.vfs:
+    - vfs
   test:
     - assert_eq
+    - test
   fs:
     - open
     - read
@@ -8,7 +11,8 @@ import agent
     - write
     - Path
 
-#[agent.test]
+#[test]
+#[vfs]
 def file_set_size_preserves_buffered_cursor()
   let path = "test_set_size_file.txt"
   write $path "alpha\nbeta\n"
@@ -19,7 +23,8 @@ def file_set_size_preserves_buffered_cursor()
     assert_eq (file.tell()) 6
     assert_eq (file.read()) ""
 
-#[agent.test]
+#[test]
+#[vfs]
 def path_set_size_and_fs_set_size_adjust_file_length()
   let path = "test_set_size_path.bin"
   write $path b"abc"

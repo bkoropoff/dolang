@@ -1,7 +1,10 @@
-import agent
+import
+  testlib.vfs:
+    - vfs
   test:
     - assert_eq
     - assert_throws
+    - test
   std:
     - RuntimeError
   fs:
@@ -11,7 +14,8 @@ import agent
     - symlink
     - Path
 
-#[agent.test]
+#[test]
+#[vfs]
 def copy_file()
   let src = Path "source.txt"
   let dst = Path "dest.txt"
@@ -25,7 +29,8 @@ def copy_file()
     let contents = f.read()
     assert_eq $contents "hello world"
 
-#[agent.test]
+#[test]
+#[vfs]
 def copy_over_existing_file()
   let src = Path "source.txt"
   let dst = Path "dest.txt"
@@ -42,7 +47,8 @@ def copy_over_existing_file()
     let contents = f.read()
     assert_eq $contents "new content"
 
-#[agent.test]
+#[test]
+#[vfs]
 def copy_non_existent_file_fails()
   let src = Path "nonexistent.txt"
   let dst = Path "dest.txt"
@@ -50,7 +56,8 @@ def copy_non_existent_file_fails()
   assert_throws $RuntimeError do
     copy $src $dst
 
-#[agent.test]
+#[test]
+#[vfs]
 def copy_directory_requires_all()
   let src = Path "src"
   create_dir $src
@@ -60,7 +67,8 @@ def copy_directory_requires_all()
   assert_throws $RuntimeError do
     copy $src $dst
 
-#[agent.test]
+#[test]
+#[vfs]
 def copy_directory_with_all()
   let src = Path "src"
   let nested = (src / "nested")
@@ -76,7 +84,8 @@ def copy_directory_with_all()
     let contents = f.read()
     assert_eq $contents "nested content"
 
-#[agent.test]
+#[test]
+#[vfs]
 def path_copy_method()
   let src = Path "source.txt"
   let dst = Path "dest.txt"
@@ -90,7 +99,8 @@ def path_copy_method()
     let contents = f.read()
     assert_eq $contents "copied with method"
 
-#[agent.test]
+#[test]
+#[vfs]
 def copy_preserves_symlink()
   let target = Path "target.txt"
   let link = Path "link.txt"
@@ -106,7 +116,8 @@ def copy_preserves_symlink()
   assert_eq $meta.type :SYMLINK:
   assert_eq $copied.read_link() $target
 
-#[agent.test]
+#[test]
+#[vfs]
 def copy_to_non_existent_directory_fails()
   let src = Path "source.txt"
   let dst = (Path "nonexistent" / "dest.txt")

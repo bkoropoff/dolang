@@ -1,9 +1,12 @@
-import agent strand sys sys.unix sys.freebsd sys.linux sys.macos sys.windows
+import strand sys sys.unix sys.freebsd sys.linux sys.macos sys.windows
+  testlib.vfs:
+    - vfs
   test:
     - assert
     - assert_eq
     - assert_type
     - assert_throws
+    - test
   fs:
     - open
     - read
@@ -15,7 +18,8 @@ import agent strand sys sys.unix sys.freebsd sys.linux sys.macos sys.windows
 
 let is_windows = (sys.os_info().family == :WINDOWS:)
 
-#[agent.test]
+#[test]
+#[vfs]
 def read_entire_file()
   let path = "test_fs_read_source.txt"
   write $path "[package]\nname = \"dolang-ext-shell\"\n"
@@ -29,7 +33,8 @@ def read_entire_file()
     assert (contents.starts_with("[package]"))
     assert (contents.contains("dolang-ext-shell"))
 
-#[agent.test]
+#[test]
+#[vfs]
 def read_partial()
   let path = "test_fs_read_partial.txt"
   write $path "[package]\nname = \"dolang-ext-shell\"\n"
@@ -43,7 +48,8 @@ def read_partial()
     # Should be valid UTF-8 string
     assert (first_10.starts_with "[package]" )
 
-#[agent.test]
+#[test]
+#[vfs]
 def read_binary_mode()
   let path = "test_fs_read_binary.bin"
   write $path b"[package]\n"
@@ -57,7 +63,8 @@ def read_binary_mode()
     # Binary mode returns bytes, check that we got a string representation
     assert (contents.contains "[" )
 
-#[agent.test]
+#[test]
+#[vfs]
 def read_at_offset()
   let path = "test_fs_read_offset.txt"
   write $path "abcdefghij"
@@ -78,7 +85,8 @@ def read_at_offset()
     assert_eq (file.read 4 offset: 100) ""
   remove $path
 
-#[agent.test]
+#[test]
+#[vfs]
 def read_at_offset_binary()
   let path = "test_fs_read_offset.bin"
   write $path b"\x00\x01\x02\x03\xff"
@@ -90,7 +98,8 @@ def read_at_offset_binary()
     assert_eq (file.read offset: 4) b"\xff"
   remove $path
 
-#[agent.test]
+#[test]
+#[vfs]
 def read_at_offset_transfers_the_whole_count()
   # A single positional read is allowed to come up short — over the remote VFS
   # every one is capped at 512 KiB — so `offset:` has to loop internally.
@@ -107,7 +116,8 @@ def read_at_offset_transfers_the_whole_count()
     assert_eq $file.tell() 0
   remove $path
 
-#[agent.test]
+#[test]
+#[vfs]
 def concurrent_offset_reads_share_the_handle()
   # Positional reads neither consult nor move the cursor, so several are
   # allowed to be in flight on one handle at once. Taking the handle
@@ -129,7 +139,8 @@ def concurrent_offset_reads_share_the_handle()
     assert_eq $file.tell() 0
   remove $path
 
-#[agent.test]
+#[test]
+#[vfs]
 def read_after_close_fails()
   let path = "test_fs_read_closed.txt"
   write $path "content"
@@ -141,7 +152,8 @@ def read_after_close_fails()
     f.read()
   remove $path
 
-#[agent.test]
+#[test]
+#[vfs]
 def fs_read_reads_entire_text_file()
   let test_path = "test_fs_read.txt"
   write $test_path "alpha\nbeta\n"
@@ -150,7 +162,8 @@ def fs_read_reads_entire_text_file()
   assert_eq (read (Path test_path)) "alpha\nbeta\n"
   remove $test_path
 
-#[agent.test]
+#[test]
+#[vfs]
 def fs_read_reads_entire_binary_file()
   let test_path = "test_fs_read.bin"
   let data = b"\x00\x01\x02\xff"
@@ -159,7 +172,8 @@ def fs_read_reads_entire_binary_file()
   assert_eq ((Path test_path).read "b") $data
   remove $test_path
 
-#[agent.test]
+#[test]
+#[vfs]
 def fs_read_grows_for_large_full_reads()
   let test_path = "test_fs_read_large.txt"
   let data = ("abcdefghij".repeat 2000)
@@ -168,7 +182,8 @@ def fs_read_grows_for_large_full_reads()
   assert_eq ((Path test_path).read()) $data
   remove $test_path
 
-#[agent.test]
+#[test]
+#[vfs]
 def fs_read_rejects_invalid_utf_8_data()
   let test_path = "test_fs_read_invalid.bin"
   write $test_path b"\xff\xfe"
@@ -177,7 +192,8 @@ def fs_read_rejects_invalid_utf_8_data()
   assert_eq (str err) "invalid UTF-8 data"
   remove $test_path
 
-#[agent.test]
+#[test]
+#[vfs]
 def fs_read_rejects_invalid_mode()
   let path = "test_fs_read_invalid_mode.txt"
   write $path "hello"
@@ -186,7 +202,8 @@ def fs_read_rejects_invalid_mode()
   assert_eq (str err) "type error: fs.read: mode must be `b`"
   remove $path
 
-#[agent.test]
+#[test]
+#[vfs]
 def missing_file_yields_sys_error()
   let missing = Path "missing.txt"
   let err = assert_throws $sys.NotFoundError do
@@ -212,7 +229,8 @@ def missing_file_yields_sys_error()
     assert_eq (str code) ENOENT
     assert (str(err).ends_with("(ENOENT)"))
 
-#[agent.test]
+#[test]
+#[vfs]
 def sys_error_is_caught_by_runtime_error()
   let missing = Path "missing.txt"
   assert_throws $RuntimeError do

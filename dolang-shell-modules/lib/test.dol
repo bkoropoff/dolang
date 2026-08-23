@@ -51,9 +51,8 @@ class TestDef
     self.func = func
 
   # Transparently forwards to `func`, so a `TestDef` remains a drop-in
-  # callable/stringifiable value for decorators (e.g. `agent.test`) that
-  # aren't `TestDef`-aware and just treat their input as an opaque test
-  # callable.
+  # callable/stringifiable value wherever the decorated function itself
+  # would be.
   def (call) self ...rest
     self.func(...rest)
 

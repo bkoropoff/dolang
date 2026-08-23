@@ -1,9 +1,12 @@
-import agent strand sys
+import strand sys
+  testlib.vfs:
+    - vfs
   test:
     - assert
     - assert_eq
     - assert_throws
     - skip
+    - test
   fs:
     - open
   std:
@@ -12,7 +15,8 @@ import agent strand sys
   time:
     - sleep
 
-#[agent.test]
+#[test]
+#[vfs]
 def scoped_file_locks()
   if (sys.os_info().os == :FREEBSD:)
     skip "requires byte-range locks"
@@ -34,7 +38,8 @@ def scoped_file_locks()
         assert $!guard.held
         guard.release()
 
-#[agent.test]
+#[test]
+#[vfs]
 def shared_file_locks()
   let path = "shared_file_lock.bin"
   open $path w+ do |first|
@@ -47,7 +52,8 @@ def shared_file_locks()
             third.try_lock (..) do |exclusive|
               assert $!exclusive.held
 
-#[agent.test]
+#[test]
+#[vfs]
 def finite_empty_range_behavior()
   let path = "empty_file_lock.bin"
   open $path w+ do |first|
@@ -71,7 +77,8 @@ def finite_empty_range_behavior()
         first.lock (4..4) do |_|
           nil
 
-#[agent.test]
+#[test]
+#[vfs]
 def cancellation_awaits_unlock()
   let path = "canceled_file_lock.bin"
   open $path w+ do |first|
@@ -87,7 +94,8 @@ def cancellation_awaits_unlock()
       second.try_lock (..) do |guard|
         assert $guard.held
 
-#[agent.test]
+#[test]
+#[vfs]
 def closing_file_releases_scoped_locks()
   let path = "closed_file_lock.bin"
   open $path w+ do |first|
