@@ -882,16 +882,33 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
                 async move |strand, arg, out| call!(strand, arg, out).await,
             )?;
 
-            let stream_type = strand.vm().builtin_types().stream;
-            stream_type.create(
-                strand,
-                strand_object::Stream {
-                    handle,
-                    input: input_sender,
-                    output: output_receiver,
-                },
-                &mut out,
-            );
+            // Wrap the endpoints up front so they keep `handle` GC-reachable
+            // for as long as they're reachable themselves, even once the
+            // `Stream` returned below is not.
+            strand
+                .with_slots(async move |strand, [mut input, mut output]| {
+                    let builtin_types = strand.builtin_types();
+                    builtin_types.stream_sink.create(
+                        strand,
+                        strand_object::StreamSink::new(input_sender, handle.clone()),
+                        &mut input,
+                    );
+                    builtin_types.stream_iter.create(
+                        strand,
+                        strand_object::StreamIter::new(output_receiver, handle.clone()),
+                        &mut output,
+                    );
+                    builtin_types.stream.create(
+                        strand,
+                        strand_object::Stream {
+                            handle,
+                            input: input.take(),
+                            output: output.take(),
+                        },
+                        &mut out,
+                    );
+                })
+                .await;
             Ok(())
         })
         .function_with_slots(
