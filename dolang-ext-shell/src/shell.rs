@@ -13,6 +13,7 @@ use dolang::{
     runtime::{
         Arg, Error, Instance, Object, Output, Result, Slot, State, Strand, Value, call, method,
         object::{Mut, Ref, TypeBuilder},
+        strand::Redirect,
         unpack,
         value::{AsTuple, Nil, TypeObject},
         vm::Builder,
@@ -448,35 +449,78 @@ impl<'v> Object<'v> for Vfs {
         let global = strand.state::<Global<'v>>();
         strand
             .with_slots(
-                async move |strand, [mut module, mut stream, mut input, mut output]| {
-                    strand.import("strand", &mut module).await?;
-                    // The remote VFS connection's RPC framing runs over
-                    // this pipe pair, so it wants a generous kernel buffer
-                    // to make short reads/writes (and the fragment-size
-                    // backoff they trigger) rare rather than routine. Read
-                    // and cleared by `pipe_channel`'s factory closure; not
-                    // threaded through `stream`'s public signature, since
-                    // the pipe factory override is already internal-only.
-                    global
-                        .local
-                        .get(strand)
-                        .set_pending_pipe_buffer_size(Some(REMOTE_VFS_PIPE_BUFFER_SIZE));
-                    method!(strand, &module, global.syms.stream, &mut stream, callable).await?;
-                    stream.iter(strand, &mut input).await?;
-                    stream.sink(strand, &mut output).await?;
+                async move |strand,
+                            [mut to_bg_send, mut to_bg_recv, mut from_bg_send, mut from_bg_recv, mut handle, mut tmp]| {
+                    // The remote VFS connection's RPC framing runs over these
+                    // pipes, so they want a generous kernel buffer to make
+                    // short reads/writes (and the fragment-size backoff they
+                    // trigger) rare rather than routine. Fixed at
+                    // construction time so it can't be forgotten when the
+                    // channel is later negotiated into a real OS pipe.
+                    pipe_channel::make_pair(
+                        strand,
+                        Slot::reborrow(&mut to_bg_send),
+                        Slot::reborrow(&mut to_bg_recv),
+                        Some(REMOTE_VFS_PIPE_BUFFER_SIZE),
+                    );
+                    pipe_channel::make_pair(
+                        strand,
+                        Slot::reborrow(&mut from_bg_send),
+                        Slot::reborrow(&mut from_bg_recv),
+                        Some(REMOTE_VFS_PIPE_BUFFER_SIZE),
+                    );
 
-                    // However this comes out, the pending buffer size hint
-                    // must not leak into unrelated later pipe creation on
-                    // this strand.
-                    let negotiated = negotiate_stream_pipes(strand, global, &input, &output).await;
-                    global.local.get(strand).set_pending_pipe_buffer_size(None);
-                    let (recv_guard, recv, send_guard, send) = negotiated?;
+                    // Bundled into a plain tuple so `callable`/the background
+                    // strand's input/output stay rooted together as the
+                    // single `arg` value `spawn_background` keeps alive until
+                    // the background strand starts running.
+                    let close_sym = global.syms.close;
+                    strand.spawn_background(
+                        AsTuple::new([&callable, &to_bg_recv, &from_bg_send]),
+                        None,
+                        &mut handle,
+                        async move |strand, arg, out| {
+                            let Some(tuple) = arg.as_tuple(strand) else {
+                                unreachable!("spawn_background arg is not a tuple")
+                            };
+                            strand
+                                .with_slots(
+                                    async move |strand, [mut callable, mut input, mut output, mut tmp]| {
+                                        tuple.get(strand, 0, &mut callable)?;
+                                        tuple.get(strand, 1, &mut input)?;
+                                        tuple.get(strand, 2, &mut output)?;
+                                        let res = Redirect::new(strand)
+                                            .input(&input)
+                                            .output(&output)
+                                            .enter(async move |strand| {
+                                                call!(strand, &callable, out).await
+                                            })
+                                            .await;
+                                        // Plain close, no poisoning: these pipe
+                                        // ends get negotiated into a raw OS
+                                        // pipe before any RPC framing runs
+                                        // over them, which loses Do object-
+                                        // passing semantics anyway. `Vfs.stop`
+                                        // always joins and checks status, and a
+                                        // dead server surfaces its own errors
+                                        // on the next VFS operation.
+                                        let _ = method!(strand, &input, close_sym, &mut tmp).await;
+                                        let _ = method!(strand, &output, close_sym, &mut tmp).await;
+                                        res
+                                    },
+                                )
+                                .await
+                        },
+                    )?;
+
+                    let (recv_guard, recv, send_guard, send) =
+                        negotiate_stream_pipes(strand, global, &from_bg_recv, &to_bg_send).await?;
 
                     let vfs = match VfsVfs::new_split(recv, send).await {
                         Ok(client) => client,
                         Err(negotiate_error) => {
                             let join = global.syms.join;
-                            return match method!(strand, &stream, join, &mut module).await {
+                            return match method!(strand, &handle, join, &mut tmp).await {
                                 Ok(()) => Err(negotiate_error.into_sys(strand)),
                                 Err(launcher_error) => Err(launcher_error),
                             };
@@ -502,7 +546,7 @@ impl<'v> Object<'v> for Vfs {
                             Output::set(
                                 strand,
                                 Mut::slot_mut::<0>(&mut this.borrow_mut_unwrap()),
-                                &stream,
+                                &handle,
                             );
                         });
                     Ok(())

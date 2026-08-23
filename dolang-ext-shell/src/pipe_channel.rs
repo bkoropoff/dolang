@@ -98,10 +98,14 @@ struct PipeChannelShared {
     send_wakers: VecDeque<Waker>,
     recv_wakers: VecDeque<Waker>,
     negotiate_wakers: VecDeque<Waker>,
+    /// Kernel buffer size requested when this channel is negotiated into a
+    /// real OS pipe, or `None` for the default. Fixed at pair-construction
+    /// time so negotiation can't forget to apply it.
+    buffer_size: Option<usize>,
 }
 
 impl PipeChannelShared {
-    fn new() -> Self {
+    fn new(buffer_size: Option<usize>) -> Self {
         Self {
             buffered: false,
             state: PipeState::Value,
@@ -112,6 +116,7 @@ impl PipeChannelShared {
             send_wakers: VecDeque::new(),
             recv_wakers: VecDeque::new(),
             negotiate_wakers: VecDeque::new(),
+            buffer_size,
         }
     }
 
@@ -504,14 +509,9 @@ pub(crate) async fn negotiate_recv<'v, 's>(
                     || matches!(inner.state, PipeState::Draining) && !inner.send_closed
             };
             if needs_pipe && fresh_pipe.is_none() {
+                let buffer_size = shared.borrow().buffer_size;
                 let local = global.local.get(strand);
-                fresh_pipe = Some(
-                    local
-                        .vfs()
-                        .pipe(local.pending_pipe_buffer_size())
-                        .await
-                        .into_sys(strand)?,
-                );
+                fresh_pipe = Some(local.vfs().pipe(buffer_size).await.into_sys(strand)?);
                 continue;
             }
 
@@ -613,14 +613,9 @@ pub(crate) async fn negotiate_send<'v, 's>(
                 PipeState::Value | PipeState::Draining
             );
             if needs_pipe && fresh_pipe.is_none() {
+                let buffer_size = shared.borrow().buffer_size;
                 let local = global.local.get(strand);
-                fresh_pipe = Some(
-                    local
-                        .vfs()
-                        .pipe(local.pending_pipe_buffer_size())
-                        .await
-                        .into_sys(strand)?,
-                );
+                fresh_pipe = Some(local.vfs().pipe(buffer_size).await.into_sys(strand)?);
                 continue;
             }
 
@@ -688,7 +683,7 @@ pub(crate) async fn negotiate_send<'v, 's>(
 
 pub(crate) fn install<'v>(builder: &mut dolang::runtime::vm::Builder<'v>) {
     builder.pipe_handler(move |strand, out_send, out_recv| {
-        make_pair(strand, out_send, out_recv);
+        make_pair(strand, out_send, out_recv, None);
     });
 }
 
@@ -700,9 +695,10 @@ pub(crate) fn make_pair<'v, 's>(
     strand: &mut Strand<'v, 's>,
     mut out_send: Slot<'v, '_>,
     mut out_recv: Slot<'v, '_>,
+    buffer_size: Option<usize>,
 ) {
     let vm = strand.vm();
-    let inner = Rc::new(RefCell::new(PipeChannelShared::new()));
+    let inner = Rc::new(RefCell::new(PipeChannelShared::new(buffer_size)));
     let global = vm.state::<Global<'v>>();
     let recv_annex = PipeAnnex {
         shared: inner.clone(),
