@@ -1,7 +1,7 @@
 # Do Language
 
 Do is a scripting language for cross-platform CI/CD, DevOps, and automation. It
-combines shell-like commands and indentation-oriented data declartion with
+combines shell-like commands and indentation-oriented data declaration with
 ordinary functions, structured concurrency, and remote-capable system APIs.
 
 [Documentation](https://dolang-org.github.io/dolang/) ·
