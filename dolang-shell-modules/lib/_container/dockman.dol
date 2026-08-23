@@ -1,4 +1,4 @@
-import progress json patch rand strand proc sys term transfer _vfs
+import progress json patch rand strand proc sys transfer _vfs
   std:
     - RuntimeError
     - TypeError
@@ -186,6 +186,23 @@ pub class ContainerExitError: RuntimeError
 
   pub def (dbg) self
     "<ContainerExitError rc: $(self.rc)>"
+
+# Podman's short-name resolution (containers-registries.conf(5)) prompts
+# interactively -- or, with no TTY attached, just fails -- when a reference
+# has no registry component and more than one (or zero) unqualified search
+# registries are configured. Docker has no equivalent step: it always
+# defaults bare names to Docker Hub. Fully qualifying the reference up front
+# sidesteps short-name resolution entirely, so callers don't need a
+# registries.conf tuned for non-interactive use.
+def qualify_ref ref
+  if !(ref.contains "/")
+    "docker.io/library/$ref"
+  else
+    let host _ = ref.split "/" limit: 1
+    if (host.contains "." || host.contains ":" || host == "localhost")
+      ref
+    else
+      "docker.io/$ref"
 
 # Applies a pull policy ("always" / "missing" / "never") up front, as a step
 # separate from starting a container. Docker/Podman's own inline
@@ -464,9 +481,16 @@ def parse_container_mounts mounts
       :name
   mapped
 
-def parse_image_tags repo_tags
+# Podman qualifies a locally built/tagged reference with a synthetic
+# `localhost/` registry that Docker never adds for the equivalent
+# unqualified name, so it is stripped for Podman to keep `repo` consistent
+# across backends.
+def parse_image_tags runtime repo_tags
+  let strip_localhost = (runtime.id == :PODMAN:)
   Array $ repo_tags.map do |tag|
     let repo tag = tag.split ":" limit: 1
+    if (strip_localhost && repo.starts_with "localhost/")
+      repo = repo.without_prefix "localhost/"
     record :repo :tag
 
 def inspect_image runtime ref
@@ -523,6 +547,19 @@ pub class Runtime
   pub def cli self ...args
     let _ = [self, args]
     throw "Runtime.cli not implemented"
+
+  # `term.mute` drops stderr unconditionally, so a routine cleanup/tagging
+  # command that starts failing leaves no trace of why. This captures stderr
+  # into a buffer instead -- silent on success, same as `term.mute` -- and
+  # prints it before rethrowing on failure.
+  pub def quiet_cli self ...args
+    let output = StrBuf()
+    try
+      self.cli ...args stderr: $output
+    catch proc.Error: e
+      if output.len
+        print $output.freeze()
+      throw e
 
   pub def mount_uopt self
     if (self.id == :PODMAN:)
@@ -747,6 +784,8 @@ pub class Runtime
     loaded
 
   pub def pull self ref :platform = nil
+    if (self.id == :PODMAN:)
+      ref = qualify_ref $ref
     let platform = normalize_platform $platform
     let out = []
     let lines = []
@@ -939,11 +978,12 @@ pub class Builder
 
   # Runs the container in the foreground under a background strand. The name
   # is generated because a foreground `run` prints no container ID, and the
-  # commit steps need something to name the live container by.
-  def connect self img :pull = :NEVER:
+  # commit steps need something to name the live container by. Callers are
+  # responsible for ensuring `img` is present first (see `build`'s dedicated
+  # pull step) -- `connect` never pulls.
+  def connect self img
     if self.#socket.exists()
       self.#socket.remove()
-    ensure_image $self.#runtime $img $pull
     let name = "dolang-vfs-$(rand.string 16)"
     # The socket's mode cannot identify the client: the container maps uids
     # however it likes, so it is bound 0666 and anything that can traverse the
@@ -992,7 +1032,7 @@ pub class Builder
       self.#agent = nil
     else if self.#ctr_name
       try
-        term.mute do self.#runtime.cli rm -f $self.#ctr_name
+        self.#runtime.quiet_cli rm -f $self.#ctr_name
       catch proc.Error: _
         nil
     if self.#handle
@@ -1112,7 +1152,7 @@ pub class Builder
       sub do self.#runtime.cli commit $self.#ctr_name
     progress.show message: tag do |_|
       for tag = tags
-        term.mute do self.#runtime.cli tag $img_id $tag
+        self.#runtime.quiet_cli tag $img_id $tag
     self.#runtime.image $img_id
 
   pub def build self from :pull = :MISSING: ...args
@@ -1133,8 +1173,10 @@ pub class Builder
     try
       progress.steps :message icon: 🔨
         do prefetch_add_urls $spec
+        do progress.show message: "pulling image" do |_|
+          ensure_image $self.#runtime $from $pull
         do progress.show message: "starting container" do |_|
-          self.#connect $from :pull
+          self.#connect $from
         for key value = spec
           do
             let step = steps.get $key else: do throw "unrecognized step: $key: $value"
@@ -1187,7 +1229,13 @@ pub class Image
       "RootFS": root_fs
       ...
 
-    self.id = id
+    # Podman's inspect reports a bare hex digest; Docker's is always
+    # `sha256:`-prefixed. Normalized here so `id` has one consistent format
+    # regardless of backend.
+    self.id = if (id.starts_with "sha256:")
+      id
+    else
+      "sha256:$id"
 
     self.created = created
     self.size = size
@@ -1217,7 +1265,7 @@ pub class Image
   # Current tags, or an empty array for untagged images.
   pub def tags self
     let data = inspect_image $self.#runtime $self.id
-    parse_image_tags (data.get "RepoTags"  default: [])
+    parse_image_tags $self.#runtime (data.get "RepoTags"  default: [])
 
   # Tag the image with a new name.
   #
@@ -1226,7 +1274,7 @@ pub class Image
   # ```
   pub def tag self new_tag
     let ref = str $self
-    term.mute do self.#runtime.cli tag $ref $new_tag
+    self.#runtime.quiet_cli tag $ref $new_tag
 
   # Remove the image.
   #
@@ -1237,7 +1285,20 @@ pub class Image
   # img.remove force: true
   # ```
   pub def remove self :force = false
-    term.mute do self.#runtime.cli rmi
+    if force
+      # `rmi --force` removes containers using the image as part of the same
+      # operation, but one can be self-removing at the same time (e.g. a
+      # build container run with `--rm`), and podman treats that race as a
+      # hard failure instead of the no-op it actually is. Removing them
+      # ourselves first leaves nothing for `rmi` to race against; a
+      # container that vanishes underneath this loop is exactly that race,
+      # not a real failure.
+      for ctr = self.#runtime.containers all: true filter: "ancestor=$(self.id)"
+        try
+          ctr.remove force: true
+        catch NoContainerError: _
+          nil
+    self.#runtime.quiet_cli rmi
       if force
         --force
       $self.id
@@ -1338,13 +1399,13 @@ pub class Container
       mounts: $parse_container_mounts(mounts)
 
   pub def stop self :timeout = nil
-    term.mute do self.#runtime.cli stop
+    self.#runtime.quiet_cli stop
       if (timeout != nil)
         --time $timeout
       $self.id
 
   pub def start self
-    term.mute do self.#runtime.cli start $self.id
+    self.#runtime.quiet_cli start $self.id
 
   # Waits for the container to stop.
   #
@@ -1363,18 +1424,25 @@ pub class Container
       throw ContainerExitError $rc
 
   pub def kill self
-    term.mute do self.#runtime.cli kill $self.id
+    self.#runtime.quiet_cli kill $self.id
 
   pub def restart self :timeout = nil
-    term.mute do self.#runtime.cli restart
+    self.#runtime.quiet_cli restart
       if (timeout != nil)
         --time $timeout
       $self.id
 
   pub def remove self :force = false :volumes = false
-    term.mute do self.#runtime.cli rm
-      if force
-        --force
-      if volumes
-        --volumes
-      $self.id
+    let lines = []
+    try
+      sub do self.#runtime.cli rm
+        if force
+          --force
+        if volumes
+          --volumes
+        $self.id
+        stderr: $lines.prechomp()
+    catch proc.Error: e
+      classify_container_error $self.id $lines
+      report_unknown $lines
+      throw e
