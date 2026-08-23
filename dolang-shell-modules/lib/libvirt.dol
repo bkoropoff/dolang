@@ -212,6 +212,10 @@ def copy_chunks total input output indicator
 def payload_directory user
   "/home/$(user)/.dolang-libvirt-guest"
 
+let RESERVED_SSH_OPTIONS = Set $
+  :user: :port: :identity: :known_hosts: :command:
+  :host_key: :batch: :identities_only:
+
 # How to reach a managed domain's guest over SSH.
 #
 # These are exactly the facts `create` records in the domain's `<dolang:vm>`
@@ -243,17 +247,11 @@ class Guest
   # Host key checking is `accept-new` rather than `no` so that a key change
   # after first contact is still an error.
   def options self :connect_timeout = nil
-    let values = $
-      - IdentitiesOnly=yes
-      - BatchMode=yes
-      - StrictHostKeyChecking=accept-new
-      - "UserKnownHostsFile=$(self.#known_hosts)"
-    if (connect_timeout != nil)
-      values.push "ConnectTimeout=$connect_timeout"
-    let flags = []
-    for value = values
-      flags.push -o $value
-    flags
+    $
+      -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new
+      -o UserKnownHostsFile=$self.#known_hosts
+      if (connect_timeout != nil)
+       -o ConnectTimeout=$connect_timeout
 
   # Runs `command` in the guest over `ssh`. Trailing keyword arguments are
   # passed through to `run`.
@@ -284,17 +282,11 @@ class Guest
     self.#wait "test -f $(shlex.quote READY_PATH)"
 
   # Copies one local file into the guest with `scp`.
-  #
-  # The bulk counterpart to `Domain.upload`: no VFS session, so no `chmod:` and
-  # no progress reporting, but the transfer runs at the speed of the SSH
-  # connection rather than of the VFS protocol. For anything large the
-  # difference is the difference between seconds and tens of minutes.
   pub def send self source destination
     let flags = self.#options()
     run scp -q ...flags
       -P $self.port -i $self.#identity
       -- $source "$(self.#user)@127.0.0.1:$destination"
-    nil
 
   # Copies one file out of the guest with `scp`. The counterpart to `send`.
   pub def fetch self source destination
@@ -302,7 +294,6 @@ class Guest
     run scp -q ...flags
       -P $self.port -i $self.#identity
       -- "$(self.#user)@127.0.0.1:$source" $destination
-    nil
 
   # Copies `payload` into the guest and unpacks it.
   pub def install_payload self payload
@@ -313,12 +304,9 @@ class Guest
 
   # Runs `block` through the guest's SSH VFS connection.
   pub def with self block ...options
-    let reserved = Set $
-      :user: :port: :identity: :known_hosts: :command:
-      :host_key: :batch: :identities_only:
     for key _ = options
-      if reserved.contains $key
-        throw std.ValueError "Domain.with cannot override metadata option: $key"
+      if RESERVED_SSH_OPTIONS.contains $key
+        throw std.ValueError "Domain.with cannot override ssh option: $key"
 
     ssh.with 127.0.0.1 $block
       user: $self.#user
@@ -335,11 +323,11 @@ class Guest
   # `guest_from_metadata` reads back.
   pub def to_metadata self
     $
-      - $ xml.Node ssh_port (str self.port)
-      - $ xml.Node ssh_user $self.#user
-      - $ xml.Node ssh_identity (str self.#identity)
-      - $ xml.Node ssh_known_hosts (str self.#known_hosts)
-      - $ xml.Node vfs_command $self.#command
+      $ xml.Node ssh_port (str self.port)
+      $ xml.Node ssh_user $self.#user
+      $ xml.Node ssh_identity (str self.#identity)
+      $ xml.Node ssh_known_hosts (str self.#known_hosts)
+      $ xml.Node vfs_command $self.#command
 
 # Reads a `Guest` out of a domain's `<dolang:vm>` metadata subtree, which is
 # where `create` recorded it.
@@ -364,19 +352,11 @@ def guest_from_metadata metadata
 # the emitter. It also makes the port-retry loop a mutate-and-re-emit rather
 # than a re-derivation of the whole document.
 class DomainConfig
-  pub field name = nil
+  pub field name
   # The `Guest` this domain will be reachable as, whose `port` `create`
   # reassigns between definition attempts.
-  pub field guest = nil
-  field arch = nil
-  field memory = nil
-  field vcpus = nil
-  field overlay = nil
-  field seed = nil
-  field app = nil
-  field workdir = nil
-  field cache = nil
-  field io = nil
+  pub field guest
+  field arch memory vcpus overlay seed app workdir cache io
 
   def (init)
     self
@@ -411,55 +391,54 @@ class DomainConfig
 
     # Only the overlay carries the tuning options: the seed is a read-only ISO
     # read once at boot, so its driver has nothing to gain from them.
-    let overlay_driver = {name: "qemu", type: "qcow2"}
-    if (self.#cache != nil)
-      overlay_driver[:cache:] = self.#cache
-    if (self.#io != nil)
-      overlay_driver[:io:] = self.#io
-
-    let vm = Node vm namespace: $VM_NAMESPACE prefix: dolang
-      - $ Node managed "true"
-      - $ Node app $self.#app
-      - $ Node workdir (str self.#workdir)
-    for element = self.guest.to_metadata()
-      vm.push $element
-    let metadata = Node metadata $vm
+    let overlay_driver = $
+      name: "qemu"
+      type: "qcow2"
+      if (self.#cache != nil)
+        cache: $self.#cache
+      if (self.#io != nil)
+        io: $self.#io
 
     Node domain attrs: {type: "kvm"}
-      - $ Node name $self.name
-      - $ Node memory (str self.#memory) attrs: {unit: "MiB"}
-      - $ Node vcpu (str self.#vcpus)
-      - $ Node os
-          - $ Node type hvm attrs: {arch: str(self.#arch).lower()}
-          - $ Node boot attrs: {dev: "hd"}
-      - $ Node features
-          - $ Node acpi
-          - $ Node apic
-      - $ Node cpu attrs: {mode: "host-passthrough"}
-      - $ Node clock attrs: {offset: "utc"}
-      - $ Node on_poweroff destroy
-      - $ Node on_reboot restart
-      - $ Node on_crash destroy
-      - $ Node devices
-          - $ Node disk attrs: {type: "file", device: "disk"}
-              - $ Node driver attrs: $overlay_driver
-              - $ Node source attrs: {file: str(self.#overlay)}
-              - $ Node target attrs: {dev: "vda", bus: "virtio"}
-          - $ Node disk attrs: {type: "file", device: "cdrom"}
-              - $ Node driver attrs: {name: "qemu", type: "raw"}
-              - $ Node source attrs: {file: str(self.#seed)}
-              - $ Node target attrs: {dev: "sda", bus: "sata"}
-              - $ Node readonly
-          - $ Node interface attrs: {type: "user"}
-              - $ Node backend attrs: {type: "passt"}
-              - $ Node model attrs: {type: "virtio"}
-              - $ Node portForward attrs: {proto: "tcp", address: "127.0.0.1"}
-                  - $ Node range attrs: {start: str(self.guest.port), to: "22"}
-          - $ Node serial attrs: {type: "pty"}
-              - $ Node target attrs: {port: "0"}
-          - $ Node console attrs: {type: "pty"}
-              - $ Node target attrs: {type: "serial", port: "0"}
-      $metadata
+      $ Node name $self.name
+      $ Node memory (str self.#memory) attrs: {unit: "MiB"}
+      $ Node vcpu (str self.#vcpus)
+      $ Node os
+        $ Node type hvm attrs: {arch: str(self.#arch).lower()}
+        $ Node boot attrs: {dev: "hd"}
+      $ Node features
+        $ Node acpi
+        $ Node apic
+      $ Node cpu attrs: {mode: "host-passthrough"}
+      $ Node clock attrs: {offset: "utc"}
+      $ Node on_poweroff destroy
+      $ Node on_reboot restart
+      $ Node on_crash destroy
+      $ Node devices
+        $ Node disk attrs: {type: "file", device: "disk"}
+          $ Node driver attrs: $overlay_driver
+          $ Node source attrs: {file: str(self.#overlay)}
+          $ Node target attrs: {dev: "vda", bus: "virtio"}
+        $ Node disk attrs: {type: "file", device: "cdrom"}
+          $ Node driver attrs: {name: "qemu", type: "raw"}
+          $ Node source attrs: {file: str(self.#seed)}
+          $ Node target attrs: {dev: "sda", bus: "sata"}
+          $ Node readonly
+        $ Node interface attrs: {type: "user"}
+          $ Node backend attrs: {type: "passt"}
+          $ Node model attrs: {type: "virtio"}
+          $ Node portForward attrs: {proto: "tcp", address: "127.0.0.1"}
+            $ Node range attrs: {start: str(self.guest.port), to: "22"}
+        $ Node serial attrs: {type: "pty"}
+          $ Node target attrs: {port: "0"}
+        $ Node console attrs: {type: "pty"}
+          $ Node target attrs: {type: "serial", port: "0"}
+      $ Node metadata
+        $ Node vm namespace: $VM_NAMESPACE prefix: dolang
+          $ Node managed "true"
+          $ Node app $self.#app
+          $ Node workdir (str self.#workdir)
+          ...self.guest.to_metadata()
 
 # A read-only view over a libvirt domain document.
 #
@@ -654,20 +633,6 @@ pub class Domain
           throw std.ValueError "export destination appeared during conversion: $destination"
         temporary.rename $destination
     destination
-
-  # Copies one local file into the domain with `scp`.
-  #
-  # `upload` and `download` move their bytes through the VFS, which buys a
-  # `chmod:` in the same session, byte-level progress, and any path the VFS can
-  # reach — at a small fraction of the throughput the SSH connection itself
-  # sustains. `send` and `fetch` trade all of that away for speed, and are what
-  # a multi-hundred-megabyte transfer wants.
-  pub def send self source destination
-    self.#xml().guest().send $source $destination
-
-  # Copies one file out of the domain with `scp`. The counterpart to `send`.
-  pub def fetch self source destination
-    self.#xml().guest().fetch $source $destination
 
   # Copies one local file into the domain. `chmod:` sets the destination's
   # mode within the same VFS session as the copy, if given.
