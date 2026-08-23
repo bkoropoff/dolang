@@ -88,6 +88,115 @@ def rejects_non_string_tags()
 
     assert_eq (run_tests jobs: 1 module_jobs: 1 capture: true path) 1
 
+#[test]
+def parametrize_expands_cartesian_product()
+  with_temp_dir do |dir|
+    let path = (dir / "parametrize.dol")
+    path.write r|
+      import test:
+        - assert
+        - parametrize
+        - test
+
+      #[test]
+      #[parametrize color: ["red", "blue"] size: [1, 2]]
+      def combo :color :size
+        assert (color == "red" || color == "blue")
+        assert (size == 1 || size == 2)
+
+      #[test]
+      def plain()
+        nil
+
+    let seen = []
+    let filter = do |info|
+      seen.push $info.name
+      true
+    assert_eq (run_tests jobs: 1 module_jobs: 1 filter: filter capture: true path) 0
+    assert_eq $seen $
+      - "combo[color=red,size=1]"
+      - "combo[color=red,size=2]"
+      - "combo[color=blue,size=1]"
+      - "combo[color=blue,size=2]"
+      - "plain"
+
+#[test]
+def parametrize_sanitizes_slashes_in_case_names()
+  with_temp_dir do |dir|
+    let path = (dir / "parametrize_slash.dol")
+    path.write r|
+      import test:
+        - assert_eq
+        - parametrize
+        - test
+
+      #[test]
+      #[parametrize path: ["a/b/c"]]
+      def combo :path
+        assert_eq $path "a/b/c"
+
+    let seen = []
+    let filter = do |info|
+      seen.push $info.name
+      true
+    assert_eq (run_tests jobs: 1 module_jobs: 1 filter: filter capture: true path) 0
+    assert_eq $seen ["combo[path=a_b_c]"]
+
+#[test]
+def parametrize_composes_with_fixture()
+  with_temp_dir do |dir|
+    let path = (dir / "fixture_parametrize.dol")
+    path.write r|
+      import test:
+        - assert
+        - assert_eq
+        - fixture
+        - parametrize
+        - test
+
+      #[fixture]
+      def inject block ...rest
+        block(...rest, extra: "injected")
+
+      #[test]
+      #[inject]
+      #[parametrize kind: ["a", "b"]]
+      def combo :kind :extra
+        assert_eq $extra "injected"
+        assert (kind == "a" || kind == "b")
+
+    let seen = []
+    let filter = do |info|
+      seen.push $info.name
+      true
+    assert_eq (run_tests jobs: 1 module_jobs: 1 filter: filter capture: true path) 0
+    assert_eq $seen ["combo[kind=a]", "combo[kind=b]"]
+
+#[test]
+def parametrize_per_value_tags_are_honored()
+  with_temp_dir do |dir|
+    let path = (dir / "tagged_params.dol")
+    path.write r|
+      import test:
+        - assert
+        - parametrize
+        - tagged
+        - test
+
+      #[test tags: ["base"]]
+      #[parametrize backend: ["sqlite", tagged("postgres", "slow")]]
+      def connects :backend
+        assert (backend == "sqlite" || backend == "postgres")
+
+    let seen = []
+    let filter = do |info|
+      seen.push [info.name, info.tags]
+      true
+    assert_eq (run_tests jobs: 1 module_jobs: 1 filter: filter capture: true path) 0
+    assert_eq $seen.len 2
+    assert_eq $seen[0] ["connects[backend=sqlite]", Tuple(["base"])]
+    assert_eq $seen[1] ["connects[backend=postgres]", Tuple(["base", "slow"])]
+
 def tagged_module dir
   let path = (dir / "tagged.dol")
   path.write r|

@@ -1,4 +1,6 @@
-import agent proc sys sys.unix sys.windows _vfs
+import proc sys sys.unix sys.windows _vfs
+  testlib.vfs:
+    - vfs
   test:
     - assert
     - assert_eq
@@ -15,7 +17,7 @@ import agent proc sys sys.unix sys.windows _vfs
     - each
     - collect
     - spawn
-  polyfill:
+  testlib.polyfill:
     - echo
     - cat
     - grep
@@ -67,7 +69,8 @@ def windows_process_arguments()
   assert_eq (shlex.quote "two words") "'two words'"
   assert_eq [...(shlex.split "'two words'")] ["two words"]
 
-#[agent.test]
+#[test]
+#[vfs]
 def termination_policy_options()
   with_policy signal: :INT: grace: 0.01 force: false do
     assert true
@@ -94,7 +97,8 @@ def termination_policy_options()
     assert_throws $ValueError do
       run sh -c "exit 0" policy: {signal: :PWR:}
 
-#[agent.test]
+#[test]
+#[vfs]
 def background_strand_process_groups()
   if is_windows
     skip "Unix process-group assertion"
@@ -124,19 +128,22 @@ def background_strand_process_groups()
         break
       sleep 0.1
 
-#[agent.test]
+#[test]
+#[vfs]
 def echo_sub()
   let res = sub $echo hello world
   assert_eq $res "hello world"
 
-#[agent.test]
+#[test]
+#[vfs]
 def cat_file()
   let path = Path "fixture.txt"
   path.write "[package]\nname = fixture\n"
   let content = sub $cat $path
   assert (content.starts_with "[package]")
 
-#[agent.test]
+#[test]
+#[vfs]
 def grep_file()
   let path = Path "fixture.toml"
   path.write |
@@ -153,7 +160,8 @@ def grep_file()
     - "[dependencies.dolang]"
     - "[dependencies.dolang-vfs]"
 
-#[agent.test]
+#[test]
+#[vfs]
 def pipeline_grep()
   let path = Path "fixture.toml"
   path.write |
@@ -175,7 +183,8 @@ def pipeline_grep()
     - "[dependencies.dolang]"
     - "[dependencies.dolang-vfs]"
 
-#[agent.test]
+#[test]
+#[vfs]
 def path_selector()
   let name = if is_windows
     "cmd.exe"
@@ -191,7 +200,8 @@ def path_selector()
       prog ok
       run $path ok
 
-#[agent.test]
+#[test]
+#[vfs]
 def pipe_deferred_recv_transition()
   let res = sub do pipeline
     do echo "foo"
@@ -200,7 +210,8 @@ def pipe_deferred_recv_transition()
       cat()
   assert_eq $res foo
 
-#[agent.test]
+#[test]
+#[vfs]
 def pipe_receive_side_value_flush()
   let res = sub do pipeline
     do strand.put "foo"
@@ -212,7 +223,8 @@ def pipe_receive_side_value_flush()
 # A value buffered on the send side is flushed into the pipe as its own bytes
 # when the channel degrades, so it lands exactly as it was put -- no separator
 # appears that the script did not write.
-#[agent.test]
+#[test]
+#[vfs]
 def pipe_send_side_value_flush()
   let res = sub do pipeline
     do
@@ -223,7 +235,8 @@ def pipe_send_side_value_flush()
       cat()
   assert_eq $res "foo\nfoo"
 
-#[agent.test]
+#[test]
+#[vfs]
 def formatted_values_stream_to_capture_and_pipe()
   let res = sub do strand.put (Rendered())
   assert_eq $res rendered
@@ -235,7 +248,8 @@ def formatted_values_stream_to_capture_and_pipe()
 
 # Framing is chosen per redirect and never changes content, so what a stage
 # writes is what the next stage reads back -- whichever way either one frames.
-#[agent.test]
+#[test]
+#[vfs]
 def redirect_framing_is_lossless_in_both_modes()
   # Values are written verbatim, so unterminated ones run together and the
   # single line that results is what comes back.
@@ -288,7 +302,8 @@ def redirect_framing_is_lossless_in_both_modes()
 
 # Framing across a process boundary is decided independently on each side and
 # neither side's choice is visible in the bytes.
-#[agent.test]
+#[test]
+#[vfs]
 def stdio_adapters_frame_without_transforming()
   let script = Path "stdio-child.dol"
   script.write r|
@@ -334,7 +349,8 @@ def stdio_adapters_frame_without_transforming()
   captured = sub chomp: false do run $exe $script raw
   assert_eq $captured "first\r\nsecond\n\n"
 
-#[agent.test]
+#[test]
+#[vfs]
 def missing_program_yields_sys_error()
   let err = assert_throws $sys.NotFoundError do
     run __dolang_missing_program__
@@ -350,7 +366,8 @@ def missing_program_yields_sys_error()
     assert_eq $code.os $sys.os_info().os
     assert_eq (str code) ENOENT
 
-#[agent.test]
+#[test]
+#[vfs]
 def non_zero_exit_yields_proc_error()
   let err = if is_windows
     assert_throws $proc.Error do
@@ -369,7 +386,8 @@ def non_zero_exit_yields_proc_error()
     "sh exited with status: 42"
   assert_eq (str err) $expected
 
-#[agent.test]
+#[test]
+#[vfs]
 def signaled_process_yields_proc_error()
   if is_windows
     skip "requires Unix"
@@ -379,7 +397,8 @@ def signaled_process_yields_proc_error()
   assert_eq $err.signal 15
   assert_eq (str err) "sh terminated by signal: 15"
 
-#[agent.test]
+#[test]
+#[vfs]
 def proc_error_is_caught_by_runtime_error()
   if is_windows
     assert_throws $RuntimeError do
@@ -390,8 +409,8 @@ def proc_error_is_caught_by_runtime_error()
 
 # The tests below exercise process stdio crossing VFS domains (host/direct
 # vs. one or more independent remote VFS sessions). They manage domains
-# explicitly with `Vfs`, so they cannot be `agent.test` (which parameterizes
-# a single domain per run) and instead register directly with `test`.
+# explicitly with `Vfs`, so they cannot use `#[vfs]` (which parameterizes
+# a single domain per run) and instead register directly with `#[test]`.
 
 def with_remote_vfs block
   let vfs = Vfs do run $vfs_bin --stdio

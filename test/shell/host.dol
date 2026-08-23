@@ -1,4 +1,6 @@
-import sys agent _vfs
+import sys _vfs
+  testlib.vfs:
+    - vfs
   strand:
     - stream
   test:
@@ -21,7 +23,8 @@ import sys agent _vfs
 let launch_cwd = cd()
 let vfs_bin = _vfs.bin()
 
-#[agent.test]
+#[test]
+#[vfs]
 def resets_context_to_defaults()
   # Change directory, re-enter host context
   with_temp_dir do |dir| cd $dir do with_host do

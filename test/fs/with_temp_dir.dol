@@ -1,8 +1,11 @@
-import agent
+import
+  testlib.vfs:
+    - vfs
   test:
     - assert
     - assert_eq
     - assert_throws
+    - test
   std:
     - RuntimeError
   fs:
@@ -13,7 +16,8 @@ import agent
     - remove_dir
     - Path
 
-#[agent.test]
+#[test]
+#[vfs]
 def with_temp_dir_creates_temp_directory()
   let temp_path = nil
 
@@ -33,7 +37,8 @@ def with_temp_dir_creates_temp_directory()
   # After block, directory should be cleaned up
   assert $!temp_path.exists()
 
-#[agent.test]
+#[test]
+#[vfs]
 def with_temp_dir_cleans_up_files()
   let temp_path = nil
 
@@ -54,7 +59,8 @@ def with_temp_dir_cleans_up_files()
   # Everything should be cleaned up
   assert $!temp_path.exists()
 
-#[agent.test]
+#[test]
+#[vfs]
 def with_temp_dir_cleans_up_nested_directories()
   let temp_path = nil
 
@@ -73,14 +79,16 @@ def with_temp_dir_cleans_up_nested_directories()
   # All cleaned up including nested dirs
   assert $!temp_path.exists()
 
-#[agent.test]
+#[test]
+#[vfs]
 def with_temp_dir_returns_block_result()
   let result = with_temp_dir do |_|
     "success"
 
   assert_eq $result "success"
 
-#[agent.test]
+#[test]
+#[vfs]
 def with_temp_dir_cleans_up_on_error()
   let temp_path = nil
 
@@ -96,7 +104,8 @@ def with_temp_dir_cleans_up_on_error()
   # Directory should still be cleaned up despite error
   assert $!temp_path.exists()
 
-#[agent.test]
+#[test]
+#[vfs]
 def each_with_temp_dir_gets_unique_directory()
   let paths = []
 
@@ -110,7 +119,8 @@ def each_with_temp_dir_gets_unique_directory()
     unique[p] = nil
   assert_eq $unique.len 5
 
-#[agent.test]
+#[test]
+#[vfs]
 def with_temp_dir_with_parent_creates_temp_in_custom_location()
   let parent = Path "test_temp_parent"
   let temp_path = nil
@@ -143,7 +153,8 @@ def with_temp_dir_with_parent_creates_temp_in_custom_location()
   # Clean up the parent we created
   parent.remove_dir()
 
-#[agent.test]
+#[test]
+#[vfs]
 def with_temp_dir_parent_cleans_up_on_error()
   let custom_parent = "./test_error_parent"
   let temp_path = nil
@@ -164,7 +175,8 @@ def with_temp_dir_parent_cleans_up_on_error()
   # Clean up
   remove_dir $custom_parent
 
-#[agent.test]
+#[test]
+#[vfs]
 def create_temp_dir_creates_directory_without_cleanup()
   let dir = create_temp_dir()
 
@@ -177,7 +189,8 @@ def create_temp_dir_creates_directory_without_cleanup()
   # No automatic cleanup: still gone only because we removed it above
   assert $!dir.exists()
 
-#[agent.test]
+#[test]
+#[vfs]
 def create_temp_dir_with_parent_creates_temp_in_custom_location()
   let parent = Path "test_create_temp_dir_parent"
   create_dir $parent all: true
@@ -190,7 +203,8 @@ def create_temp_dir_with_parent_creates_temp_in_custom_location()
     remove_dir $dir
     parent.remove_dir()
 
-#[agent.test]
+#[test]
+#[vfs]
 def each_create_temp_dir_gets_unique_directory()
   let paths = []
 

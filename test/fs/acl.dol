@@ -1,4 +1,6 @@
-import sys agent admin
+import sys admin
+  testlib.vfs:
+    - vfs
   fs:
     - Path
     - acl
@@ -24,6 +26,7 @@ import sys agent admin
     - assert_type
     - fixture
     - skip
+    - test
 
 def extended_posix_acl id
   let rw = unix.Permission :READ: :WRITE:
@@ -73,14 +76,14 @@ def acl_kind_supported kind
 # directly in the harness's own temp dir.
 #
 # `mdconfig` is left to auto-assign the unit (captured via `sub`) rather than
-# requesting a fixed one: `#[agent.test]` runs this same code concurrently
-# for its `/local`, `/remote`, and `/direct` variants, and a fixed unit
+# requesting a fixed one: `#[vfs]` runs this same code concurrently
+# for its `local`, `remote`, and `direct` variants, and a fixed unit
 # collides across them.
-def scratch_ufs_wrap kind block
+def scratch_ufs_wrap kind block ...rest
   if !(acl_kind_supported kind)
     skip "$kind ACLs are not supported on this platform"
   if (sys.os_info().os != :FREEBSD:)
-    return block()
+    return block(...rest)
 
   # Resolved before elevating: inside `admin.with`, the current-user context
   # is root's, not the unprivileged account the mountpoint needs to end up
@@ -100,7 +103,7 @@ def scratch_ufs_wrap kind block
     run chown $owner $mnt
     [device, mnt]
   try
-    cd $mnt $block
+    cd $mnt do block(...rest)
   finally
     admin.with do
       run umount $mnt
@@ -110,36 +113,37 @@ def scratch_ufs_wrap kind block
 # not-supported-here path: runs `block` unmodified (no scratch filesystem
 # needed to observe an `UnsupportedError`), but skips the test on a platform
 # where `kind` ACLs actually are supported.
-def unsupported_wrap kind block
+def unsupported_wrap kind block ...rest
   if (acl_kind_supported kind)
     skip "$kind ACLs are supported on this platform"
-  block()
+  block(...rest)
 
 #[fixture]
-def posix_supp block
-  scratch_ufs_wrap :POSIX: $block
+def posix_supp block ...rest
+  scratch_ufs_wrap :POSIX: $block ...rest
 
 #[fixture]
-def nfs4_supp block
-  scratch_ufs_wrap :NFS4: $block
+def nfs4_supp block ...rest
+  scratch_ufs_wrap :NFS4: $block ...rest
 
 #[fixture]
-def posix_fail block
-  unsupported_wrap :POSIX: $block
+def posix_fail block ...rest
+  unsupported_wrap :POSIX: $block ...rest
 
 #[fixture]
-def nfs4_fail block
-  unsupported_wrap :NFS4: $block
+def nfs4_fail block ...rest
+  unsupported_wrap :NFS4: $block ...rest
 
 #[fixture]
-def macos_supp block
-  scratch_ufs_wrap :MACOS: $block
+def macos_supp block ...rest
+  scratch_ufs_wrap :MACOS: $block ...rest
 
 #[fixture]
-def macos_fail block
-  unsupported_wrap :MACOS: $block
+def macos_fail block ...rest
+  unsupported_wrap :MACOS: $block ...rest
 
-#[agent.test]
+#[test]
+#[vfs]
 #[posix_supp]
 def accesses_posix_acl_metadata()
   let path = Path test_posix_acl.txt
@@ -169,7 +173,8 @@ def accesses_posix_acl_metadata()
   remove $path
   remove $dir all: true
 
-#[agent.test]
+#[test]
+#[vfs]
 #[nfs4_supp]
 def accesses_nfs4_acl_metadata()
   let path = Path test_nfs4_acl.txt
@@ -199,7 +204,8 @@ def accesses_nfs4_acl_metadata()
 
   remove $path
 
-#[agent.test]
+#[test]
+#[vfs]
 #[posix_fail]
 def rejects_posix_acl_metadata_when_unsupported()
   let path = Path test_posix_acl.txt
@@ -213,7 +219,8 @@ def rejects_posix_acl_metadata_when_unsupported()
     assert_throws $UnsupportedError do file.set_acl $value
   remove $path
 
-#[agent.test]
+#[test]
+#[vfs]
 #[nfs4_fail]
 def rejects_nfs4_acl_metadata_when_unsupported()
   let path = Path test_nfs4_acl.txt
@@ -227,7 +234,8 @@ def rejects_nfs4_acl_metadata_when_unsupported()
     assert_throws $UnsupportedError do file.set_acl $value
   remove $path
 
-#[agent.test]
+#[test]
+#[vfs]
 #[macos_supp]
 def accesses_macos_acl_metadata()
   let path = Path test_macos_acl.txt
@@ -254,7 +262,8 @@ def accesses_macos_acl_metadata()
 
   remove $path
 
-#[agent.test]
+#[test]
+#[vfs]
 #[macos_fail]
 def rejects_macos_acl_metadata_when_unsupported()
   let path = Path test_macos_acl.txt

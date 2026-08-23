@@ -38,6 +38,64 @@ class TestCollection
   pub def take self
     self.#tests
 
+# Accumulates parametrize axes around a composed test callable. Any
+# decorator that needs to attach metadata beyond "a callable" (currently
+# only `parametrize`) normalizes its input into a `TestDef` via
+# `to_test_def`; `fixture` reaches through (or creates) one transparently,
+# so `#[fixture]`-only tests register the same callable as before.
+class TestDef
+  pub field func
+  pub field params = []
+
+  def (init) self func
+    self.func = func
+
+  # Transparently forwards to `func`, so a `TestDef` remains a drop-in
+  # callable/stringifiable value wherever the decorated function itself
+  # would be.
+  def (call) self ...rest
+    self.func(...rest)
+
+  def (str) self
+    str $self.func
+
+def to_test_def x
+  if (type x TestDef)
+    x
+  else
+    TestDef $x
+
+# A parametrize value paired with tags contributed only when that value is
+# selected. Not constructed directly; use `tagged`.
+class TaggedValue
+  pub field value tags
+
+  def (init) self value tags = []
+    self.value = value
+    self.tags = tags
+
+def normalize_param_value v
+  if (type v TaggedValue)
+    v
+  else
+    TaggedValue $v []
+
+# Attaches tags to a single `parametrize` value, honored only in cases that
+# select it.
+#
+# # Example
+#
+# ```
+# #[parametrize backend: [sqlite_conn, tagged(postgres_conn, "slow")]]
+# ```
+pub def tagged value ...values
+  let tag_values = []
+  for tag = values.pos_only()
+    if !(type tag Str)
+      throw std.TypeError "tagged: expected strings"
+    tag_values.push $tag
+  TaggedValue $value $tag_values
+
 # Read-only metadata for a discovered test.
 pub class TestInfo
   field case
@@ -212,14 +270,19 @@ class Fixture
     self.#wrap = wrap
     self.#func = func
 
-  def (call) self
-    self.#wrap $self.#func
+  def (call) self ...rest
+    self.#wrap $self.#func ...rest
 
   def (str) self
     str $self.#func
 
 # Defines a test fixture.  `wrap` should be a function which accepts a block
-# and invokes it with surrounding setup and teardown logic.
+# and invokes it with surrounding setup and teardown logic. `wrap` receives
+# any trailing keyword parameters supplied by `parametrize` (or by an outer
+# fixture) after `block` and should forward them to `block` — typically via
+# a variadic `...rest` parameter — so they reach the test function. `wrap`
+# may also pass its own additional keyword parameters to `block` to inject
+# values into the test.
 #
 # # Returns
 #
@@ -229,10 +292,10 @@ class Fixture
 #
 # ```
 # #[fixture]
-# def example_fixture block
+# def example_fixture block ...rest
 #   setup()
 #   try
-#     block()
+#     block(...rest)
 #   finally
 #     teardown()
 #
@@ -242,7 +305,10 @@ class Fixture
 #   do_something()
 # ```
 pub def fixture wrap
-  do |func| Fixture $wrap $func
+  do |value|
+    let test_def = to_test_def $value
+    test_def.func = Fixture $wrap $test_def.func
+    test_def
 
 # Registers a zero-argument test callable.
 #
@@ -275,8 +341,73 @@ do
     if !(type tag Str)
       throw std.TypeError "test tags: expected strings"
     tag_values.push $tag
-  collect_key.value.add (name || str(func)) $tag_values $func
+
+  let test_def = to_test_def $func
+  let base_name = (name || str(test_def.func))
+
+  if (test_def.params.len == 0)
+    collect_key.value.add $base_name $tag_values $test_def.func
+    return func
+
+  let combos = [[{}, [], []]]
+  for axis_name axis_values = test_def.params
+    let next = []
+    for combo = combos
+      let kwargs extra_tags name_parts = combo
+      for pv = axis_values
+        let new_kwargs = {...kwargs}
+        new_kwargs[axis_name] = pv.value
+        # `/` is stripped so a stringified value can't split the registered
+        # name across what `--filter` treats as path segments.
+        let value_part = str(pv.value).replace("/", "_")
+        next.push [new_kwargs, [...extra_tags, ...pv.tags], [...name_parts, "$axis_name=$value_part"]]
+    combos = next
+
+  for combo = combos
+    let kwargs extra_tags name_parts = combo
+    let case_name = "$base_name[$(",".join(name_parts))]"
+    let case_tags = [...tag_values, ...extra_tags]
+    let case_func = do test_def.func(...kwargs)
+    collect_key.value.add $case_name $case_tags $case_func
+
   func
+
+# Registers one or more parametrize axes on a test. Each keyword argument
+# names an axis under which its value is passed to the decorated test
+# function (and to any fixture that declares it). Stacks with other
+# `parametrize` decorators, and composes freely with `#[fixture]`
+# decorators; the cartesian product is taken over every axis registered by
+# any application.
+#
+# Because decorators apply bottom-to-top, axes accumulate in
+# closest-to-`def`-first order (axes from one decorator are ordered as
+# written); this only affects generated case names
+# (`$base_name[$axis1=$v,$axis2=$v,...]`), not correctness.
+#
+# # Parameters
+#
+# Each keyword argument's value is an iterable of raw values and/or
+# `tagged(value, ...tags)` wrappers for that axis.
+#
+# # Example
+#
+# ```
+# #[test]
+# #[parametrize backend: [sqlite_conn, tagged(postgres_conn, "slow")]]
+# def connects :backend
+#   backend.ping()
+# ```
+pub def parametrize func = nil ...axes
+  if (func == nil)
+    return do |func| parametrize $func ...axes
+  let test_def = to_test_def $func
+  for name values = axes
+    if !(type name Sym)
+      throw std.UnexpectedPos $name
+    if (values.len == 0)
+      throw std.ValueError "parametrize: '$name' has no values"
+    test_def.params.push [name, [...values.map(normalize_param_value)]]
+  test_def
 
 # Adds tags to tests subsequently registered in the current module.
 #

@@ -1,10 +1,13 @@
-import agent
+import
+  testlib.vfs:
+    - vfs
   std:
     - UnexpectedPosError
   test:
     - assert
     - assert_eq
     - assert_throws
+    - test
   fs:
     - metadata
     - open
@@ -14,7 +17,8 @@ import agent
     - create_dir
     - Path
 
-#[agent.test]
+#[test]
+#[vfs]
 def symlink_file_basic()
   let target = Path "target.txt"
   let link = Path "link.txt"
@@ -33,7 +37,8 @@ def symlink_file_basic()
   let resolved = link.read_link()
   assert_eq $resolved $target
 
-#[agent.test]
+#[test]
+#[vfs]
 def symlink_dir_creates_directory_symlink()
   let target = Path "target_dir"
   let link = Path "link_dir"
@@ -50,7 +55,8 @@ def symlink_dir_creates_directory_symlink()
     let contents = f.read()
     assert_eq $contents "in target dir"
 
-#[agent.test]
+#[test]
+#[vfs]
 def symlink_file_creates_file_symlink()
   let target = Path "target.txt"
   let link = Path "link.txt"
@@ -65,7 +71,8 @@ def symlink_file_creates_file_symlink()
     let contents = f.read()
     assert_eq $contents "file target"
 
-#[agent.test]
+#[test]
+#[vfs]
 def symlink_metadata_follows_by_default()
   let target = Path "target.txt"
   let link = Path "link.txt"
@@ -78,7 +85,8 @@ def symlink_metadata_follows_by_default()
   let meta = link.metadata()
   assert_eq $meta.type :FILE:
 
-#[agent.test]
+#[test]
+#[vfs]
 def symlink_metadata_nofollow()
   let target = Path "target.txt"
   let link = Path "link.txt"
@@ -93,7 +101,8 @@ def symlink_metadata_nofollow()
   assert_throws $UnexpectedPosError do link.metadata false
   assert_throws $UnexpectedPosError do metadata $link false
 
-#[agent.test]
+#[test]
+#[vfs]
 def broken_symlink()
   let target = Path "nonexistent.txt"
   let link = Path "broken_link.txt"

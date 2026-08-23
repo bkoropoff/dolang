@@ -1,7 +1,10 @@
-import agent sys
+import sys
+  testlib.vfs:
+    - vfs
   test:
     - assert_eq
     - assert_throws
+    - test
   std:
     - RuntimeError
   fs:
@@ -13,7 +16,8 @@ import agent sys
   time:
     - DateTime
 
-#[agent.test]
+#[test]
+#[vfs]
 def set_metadata_updates_timestamps()
   let test_path = "test_utime.txt"
   let first_modified = DateTime.from_unix(1234)
@@ -57,7 +61,8 @@ def set_metadata_updates_timestamps()
 
   remove $test_path
 
-#[agent.test]
+#[test]
+#[vfs]
 def set_metadata_updates_directory_timestamps()
   let path = Path "test_utime_dir"
   let modified = DateTime.from_unix 5678

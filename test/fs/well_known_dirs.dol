@@ -1,26 +1,32 @@
-import agent fs sys
+import fs sys
+  testlib.vfs:
+    - vfs
   test:
     - assert
     - assert_eq
     - assert_throws
     - skip
+    - test
   fs:
     - Path
 
-#[agent.test]
+#[test]
+#[vfs]
 def absolute_paths()
   assert $fs.home_dir().is_absolute
   assert $fs.cache_dir().is_absolute
   assert $fs.temp_dir().is_absolute
 
-#[agent.test]
+#[test]
+#[vfs]
 def scoped_home_on_unix()
   if (sys.os_info().family != :UNIX:)
     skip "requires Unix"
   env HOME: /tmp/dolang-home do
     assert_eq (fs.home_dir()) (Path "/tmp/dolang-home")
 
-#[agent.test]
+#[test]
+#[vfs]
 def relative_home_rejected_on_unix()
   if (sys.os_info().family != :UNIX:)
     skip "requires Unix"
@@ -28,28 +34,32 @@ def relative_home_rejected_on_unix()
     env HOME: relative-home do
       fs.home_dir()
 
-#[agent.test]
+#[test]
+#[vfs]
 def cache_dir_on_macos()
   if (sys.os_info().os != :MACOS:)
     skip "requires macOS"
   env HOME: /tmp/dolang-home XDG_CACHE_HOME: /tmp/dolang-cache do
     assert_eq (fs.cache_dir()) (Path "/tmp/dolang-home/Library/Caches")
 
-#[agent.test]
+#[test]
+#[vfs]
 def cache_dir_on_unix_non_macos()
   if !(sys.os_info().family == :UNIX: && sys.os_info().os != :MACOS:)
     skip "requires Unix outside macOS"
   env HOME: /tmp/dolang-home XDG_CACHE_HOME: /tmp/dolang-cache do
     assert_eq (fs.cache_dir()) (Path "/tmp/dolang-cache")
 
-#[agent.test]
+#[test]
+#[vfs]
 def temp_dir_on_unix()
   if (sys.os_info().family != :UNIX:)
     skip "requires Unix"
   env TMPDIR: nil do
     assert_eq (fs.temp_dir()) (Path "/tmp")
 
-#[agent.test]
+#[test]
+#[vfs]
 def temp_dir_honors_tmpdir_on_unix()
   if (sys.os_info().family != :UNIX:)
     skip "requires Unix"

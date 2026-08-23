@@ -1,4 +1,4 @@
-import proc sys sqlite systemd
+import sys sqlite systemd strand progress docker podman
   fs:
     - with_temp_dir
     - Path
@@ -7,6 +7,8 @@ import proc sys sqlite systemd
     - skip
     - assert
     - assert_eq
+    - fixture
+    - parametrize
     - test
     - tags
 
@@ -16,43 +18,61 @@ if (sys.os_info().os != :LINUX:)
 tags
   - slow
 
-let runtime = if run.docker.which()
-  import docker
-  docker
-else if run.podman.which()
-  import podman
-  podman
-else
-  skip "no container runtime available"
+let runtime_key = strand.Key()
+
+def runtime()
+  runtime_key.value
+
+def backend_dispatch block :backend ...remainder
+  if !run[backend].which()
+    skip "$backend is not installed"
+  runtime_key.value = if (backend == "docker")
+    docker
+  else
+    podman
+  block(...remainder)
+
+# Runs the decorated test once per container backend (`docker`, `podman`),
+# skipping a backend that isn't installed. Stack above `#[test]`.
+def backend func = nil
+  if (func == nil)
+    return do |func| backend $func
+  let with_backend_fixture = fixture $backend_dispatch
+  let wrapped = with_backend_fixture $func
+  parametrize $wrapped backend: ["docker", "podman"]
 
 def remove_image tag
   try
-    let img = runtime.image $tag
+    let img = runtime().image $tag
     img.remove force: true
-  catch runtime.NoImageError: _
+  catch runtime().NoImageError: _
     nil
 
 def remove_container name
   try
-    let ctr = runtime.container $name
+    let ctr = runtime().container $name
     ctr.remove force: true
-  catch runtime.NoContainerError: _
+  catch runtime().NoContainerError: _
     nil
 
 def clean_image tag block
   try
     block()
   finally
-    remove_image $tag
+    progress.show message: "removing image" icon: 🧹 do |_|
+      remove_image $tag
 
 def clean_container name block
   try
     block()
   finally
-    remove_container $name
+    progress.show message: "removing container" icon: 🧹 do |_|
+      remove_container $name
 
 #[test]
+#[backend]
 def read_ubuntu_release()
+  let runtime = runtime()
   let overrides = $
     TEST_DOLANG_CONTAINER_SET: "value"
     TEST_DOLANG_CONTAINER_UNSET: nil
@@ -69,7 +89,9 @@ def read_ubuntu_release()
   assert_eq $ver "24.04"
 
 #[test]
+#[backend]
 def read_fedora_packages()
+  let runtime = runtime()
   let pkgs = runtime.with fedora:43 do
     sqlite.open /var/lib/rpm/rpmdb.sqlite do |conn|
       conn.prepare "SELECT key from Name" do |stmt|
@@ -78,7 +100,9 @@ def read_fedora_packages()
   assert $ pkgs.contains sudo
 
 #[test]
+#[backend]
 def run_direct_command()
+  let runtime = runtime()
   let overrides = $
     TEST_DOLANG_CONTAINER_SET: value
     TEST_DOLANG_CONTAINER_UNSET: nil
@@ -89,7 +113,9 @@ def run_direct_command()
   assert $ release.contains "VERSION_ID=\"24.04\""
 
 #[test]
+#[backend]
 def run_structured_options()
+  let runtime = runtime()
   let name = "dolang-test-run-structured-options"
   remove_container $name
   let script = r#"printf "%s\n%s\n%s\n" "$PWD" "$TEST_DOLANG_CREATE" "$(id -u)"; test -r /mnt/host-release"#
@@ -113,13 +139,10 @@ def run_structured_options()
     user: "65534:65534"
   assert_eq $output "/tmp\nvalue\n65534"
 
-let container_cli = if run.docker.which()
-  run.docker
-else
-  run.podman
-
 #[test]
+#[backend]
 def image_build_inspect_remove()
+  let runtime = runtime()
   let image_tag = "dolang-test-image-inspect-remove:latest"
   let overrides = {TEST_DOLANG_CONTAINER_BUILD: "value"}
   let build_step = do
@@ -164,7 +187,9 @@ def image_build_inspect_remove()
   assert $gone
 
 #[test]
+#[backend]
 def image_build_multi_tag()
+  let runtime = runtime()
   let image_tag = "dolang-test-image-multi-tag:latest"
   let image_tag_alt = "dolang-test-image-multi-tag:alt"
   let img = runtime.build
@@ -181,7 +206,9 @@ def image_build_multi_tag()
   latest.remove force: true
 
 #[test]
+#[backend]
 def image_build_patch_step()
+  let runtime = runtime()
   let tag = "dolang-test-image-patch-step:latest"
   let path = Path /tmp/dolang-patch-test.txt
 
@@ -205,7 +232,9 @@ def image_build_patch_step()
     assert_eq $contents "beta\n"
 
 #[test]
+#[backend]
 def image_build_untagged()
+  let runtime = runtime()
   let img = runtime.build
     from: ubuntu:24.04
     run: do run touch /untagged-marker
@@ -217,7 +246,9 @@ def image_build_untagged()
   img.remove()
 
 #[test]
+#[backend]
 def image_save_load()
+  let runtime = runtime()
   let image_archive_tag = "dolang-test-image-save-load:latest"
   runtime.build
     from: ubuntu:24.04
@@ -248,7 +279,9 @@ def image_save_load()
   restored.remove()
 
 #[test]
+#[backend]
 def push_missing_image()
+  let runtime = runtime()
   let missing = try
     runtime.push "dolang-definitely-missing-image:latest"
     false
@@ -257,136 +290,147 @@ def push_missing_image()
   assert $missing
 
 #[test]
+#[backend]
 def container_inspect_lifecycle()
+  let runtime = runtime()
   let name = "dolang-test-container-inspect-lifecycle"
   remove_container $name
 
   clean_container $name do
-    # Deliberately bypasses the container module to make a container it did not
-    # create. That means the runtime's own quieting doesn't apply: an inline
-    # pull would spray "Unable to find image locally" plus layer progress over
-    # the real stderr, so capture it and only surface it if the run fails.
-    let lines = []
-    try
-      sub do container_cli run --init -d --name $name ubuntu:24.04 sleep infinity
-        stderr: $lines.prechomp()
-    catch proc.Error: e
-      echo $"\n".join(lines)
-      throw e
-
-    let ctr = runtime.container $name
-    let state = ctr.state()
-    assert_eq $state.name $name
-    assert_eq $ctr.image ubuntu:24.04
-    assert_eq $state.state :RUNNING:
-    assert_eq $state.status running
-    assert $ctr.created
-    assert_eq $state.ports []
-
-    let listed = [...runtime.containers filter: "name=$name"]
-    assert_eq $listed.len 1
-    assert_eq $listed[0].id $ctr.id
-
-    let overrides = $
-      TEST_DOLANG_CONTAINER_WITH_SET: value
-      TEST_DOLANG_CONTAINER_WITH_UNSET: nil
-    let result = ctr.with cd: /tmp env: $overrides do
-      assert_eq $cd() (unix.Path "/tmp")
-      assert_eq $env["TEST_DOLANG_CONTAINER_WITH_SET"] value
-      assert_eq $env.get("TEST_DOLANG_CONTAINER_WITH_UNSET", default: nil) nil
-      assert $Path("/etc/os-release").exists()
-      for entry = Path("/tmp").entries()
-        assert (!entry.name.starts_with("dolang-vfs-"))
-      sub do run printf container-with
-    assert_eq $result container-with
-    assert_eq $ctr.state().state :RUNNING:
-
-    let unwound = try
-      ctr.with do throw "container with unwind"
-      false
-    catch e
-      assert_eq (str e) "container with unwind"
-      true
-    assert $unwound
-    let reentered = ctr.with do sub do run printf reentered
-    assert_eq $reentered reentered
-
-    ctr.stop()
-    assert_eq $ctr.state().state :EXITED:
-
-    let listed_all = [...runtime.containers all: true filter: "name=$name"]
-    assert_eq $listed_all.len 1
-    assert_eq $listed_all[0].id $ctr.id
-
-    ctr.start()
-    assert_eq $ctr.state().state :RUNNING:
-
-    ctr.restart()
-    assert_eq $ctr.state().state :RUNNING:
-
-    ctr.remove force: true
-
-    let gone = try
-      runtime.container $name
-      false
-    catch runtime.NoContainerError: _
-      true
-    assert $gone
+    let ctr = nil
+    progress.steps
+      - name: create and inspect
+        do
+          ctr = runtime.create ubuntu:24.04 sleep infinity name: $name
+          ctr.start()
+          let state = ctr.state()
+          assert_eq $state.name $name
+          # Podman fully qualifies the reference (`docker.io/library/ubuntu:24.04`)
+          # when recording what a container was created from; Docker records it
+          # exactly as given. Both are correct, so match on the suffix.
+          assert $ctr.image.ends_with "ubuntu:24.04"
+          assert_eq $state.state :RUNNING:
+          assert_eq $state.status running
+          assert $ctr.created
+          assert_eq $state.ports []
+      - name: list containers
+        do
+          let listed = [...runtime.containers filter: "name=$name"]
+          assert_eq $listed.len 1
+          assert_eq $listed[0].id $ctr.id
+      - name: connect via vfs
+        do
+          let overrides = $
+            TEST_DOLANG_CONTAINER_WITH_SET: value
+            TEST_DOLANG_CONTAINER_WITH_UNSET: nil
+          let result = ctr.with cd: /tmp env: $overrides do
+            assert_eq $cd() (unix.Path "/tmp")
+            assert_eq $env["TEST_DOLANG_CONTAINER_WITH_SET"] value
+            assert_eq $env.get("TEST_DOLANG_CONTAINER_WITH_UNSET", default: nil) nil
+            assert $Path("/etc/os-release").exists()
+            for entry = Path("/tmp").entries()
+              assert (!entry.name.starts_with("dolang-vfs-"))
+            sub do run printf container-with
+          assert_eq $result container-with
+          assert_eq $ctr.state().state :RUNNING:
+      - name: unwind and reenter vfs session
+        do
+          let unwound = try
+            ctr.with do throw "container with unwind"
+            false
+          catch e
+            assert_eq (str e) "container with unwind"
+            true
+          assert $unwound
+          let reentered = ctr.with do sub do run printf reentered
+          assert_eq $reentered reentered
+      - name: stop and list stopped
+        do
+          ctr.stop()
+          assert_eq $ctr.state().state :EXITED:
+          let listed_all = [...runtime.containers all: true filter: "name=$name"]
+          assert_eq $listed_all.len 1
+          assert_eq $listed_all[0].id $ctr.id
+      - name: start and restart
+        do
+          ctr.start()
+          assert_eq $ctr.state().state :RUNNING:
+          ctr.restart()
+          assert_eq $ctr.state().state :RUNNING:
+      - name: remove and verify gone
+        do
+          ctr.remove force: true
+          let gone = try
+            runtime.container $name
+            false
+          catch runtime.NoContainerError: _
+            true
+          assert $gone
 
 #[test]
+#[backend]
 def container_create_structured_lifecycle()
+  let runtime = runtime()
   let name = "dolang-test-container-create-structured"
   remove_container $name
 
   clean_container $name do
-    let ctr = runtime.create ubuntu:24.04 -c "sleep infinity"
-      name: $name
-      entrypoint: /bin/sh
-      cd: /tmp
-      env: {TEST_DOLANG_CREATE: "value"}
-      mounts:
-        - type: :BIND:
-          source: /etc/os-release
-          target: /mnt/host-release
-          readonly: true
-      labels: {dolang_test: "structured-create"}
-      ports:
-        - container_port: 8080
-          host_ip: "127.0.0.1"
-          protocol: :TCP:
-      networks:
-        - bridge
-      user: "65534:65534"
-      restart:
-        policy: :ON_FAILURE:
-        max_retries: 3
+    let ctr = nil
+    progress.steps
+      - name: create with structured options
+        do
+          ctr = runtime.create ubuntu:24.04 -c "sleep infinity"
+            :name
+            entrypoint: /bin/sh
+            cd: /tmp
+            env: {TEST_DOLANG_CREATE: "value"}
+            mounts:
+              - type: :BIND:
+                source: /etc/os-release
+                target: /mnt/host-release
+                readonly: true
+            labels: {dolang_test: "structured-create"}
+            ports:
+              - container_port: 8080
+                host_ip: "127.0.0.1"
+                protocol: :TCP:
+            networks:
+              - bridge
+            user: "65534:65534"
+            restart:
+              policy: :ON_FAILURE:
+              max_retries: 3
 
-    assert_eq $ctr.state().state :CREATED:
-    assert_eq $ctr.labels["dolang_test"] structured-create
-    assert_eq $ctr.entrypoint ["/bin/sh"]
-    assert_eq $ctr.cmd ["-c", "sleep infinity"]
-
-    ctr.start()
-    let configured = ctr.with do
-      let uid = sub do run id -u
-      record
-        cd: $cd()
-        env: $env["TEST_DOLANG_CREATE"]
-        uid: $uid
-        mounted: $Path("/mnt/host-release").exists()
-    assert_eq $configured.cd (unix.Path "/tmp")
-    assert_eq $configured.env value
-    assert_eq $configured.uid "65534"
-    assert $configured.mounted
-
-    let state = ctr.state()
-    assert_eq $state.state :RUNNING:
-    assert_eq $state.ports.len 1
-    assert_eq $state.ports[0].container_port 8080
-    assert_eq $state.ports[0].protocol :TCP:
+          assert_eq $ctr.state().state :CREATED:
+          assert_eq $ctr.labels["dolang_test"] structured-create
+          assert_eq $ctr.entrypoint ["/bin/sh"]
+          assert_eq $ctr.cmd ["-c", "sleep infinity"]
+      - name: start and verify config via vfs
+        do
+          ctr.start()
+          let configured = ctr.with do
+            let uid = sub do run id -u
+            record
+              cd: $cd()
+              env: $env["TEST_DOLANG_CREATE"]
+              uid: $uid
+              mounted: $Path("/mnt/host-release").exists()
+          assert_eq $configured.cd (unix.Path "/tmp")
+          assert_eq $configured.env value
+          assert_eq $configured.uid "65534"
+          assert $configured.mounted
+      - name: inspect running state
+        do
+          let state = ctr.state()
+          assert_eq $state.state :RUNNING:
+          assert_eq $state.ports.len 1
+          assert_eq $state.ports[0].container_port 8080
+          assert_eq $state.ports[0].protocol :TCP:
 
 #[test]
+#[backend]
 def container_wait_status()
+  let runtime = runtime()
   let success_name = "dolang-test-container-wait-success"
   let failure_name = "dolang-test-container-wait-failure"
   remove_container $success_name
@@ -409,21 +453,15 @@ def container_wait_status()
     assert $failed
 
 #[test]
+#[backend]
 def container_with_non_root_user()
+  let runtime = runtime()
   let name = "dolang-test-container-with-non-root"
   remove_container $name
 
   clean_container $name do
-    let lines = []
-    try
-      sub do container_cli run -d --name $name --user 65534:65534
-        "ubuntu:24.04" sleep infinity
-        stderr: $lines.prechomp()
-    catch proc.Error: e
-      echo $"\n".join(lines)
-      throw e
-
-    let ctr = runtime.container $name
+    let ctr = runtime.create ubuntu:24.04 sleep infinity name: $name user: "65534:65534"
+    ctr.start()
     let uid = ctr.with do sub do run id -u
     assert_eq $uid "65534"
     assert_eq $ctr.state().state :RUNNING:

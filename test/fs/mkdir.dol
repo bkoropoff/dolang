@@ -1,9 +1,12 @@
-import agent sys
+import sys
+  testlib.vfs:
+    - vfs
   test:
     - assert
     - assert_eq
     - assert_type
     - assert_throws
+    - test
   std:
     - RuntimeError
   fs:
@@ -11,7 +14,8 @@ import agent sys
     - Path
     - metadata
 
-#[agent.test]
+#[test]
+#[vfs]
 def create_dir_creates_single_directory()
   let new_dir = Path "new_directory"
 
@@ -23,7 +27,8 @@ def create_dir_creates_single_directory()
   let meta = metadata $new_dir
   assert_eq $meta.type :DIR:
 
-#[agent.test]
+#[test]
+#[vfs]
 def create_dir_fails_if_exists()
   let new_dir = Path "existing"
 
@@ -32,7 +37,8 @@ def create_dir_fails_if_exists()
   assert_throws $RuntimeError do
     create_dir $new_dir
 
-#[agent.test]
+#[test]
+#[vfs]
 def create_dir_all_creates_nested_directories()
   let nested = (Path "a" / "b" / "c")
 
@@ -42,7 +48,8 @@ def create_dir_all_creates_nested_directories()
   assert $((Path "a" / "b")).exists()
   assert $nested.exists()
 
-#[agent.test]
+#[test]
+#[vfs]
 def path_create_dir_method()
   let path = Path "method_test"
 
@@ -52,7 +59,8 @@ def path_create_dir_method()
   let meta = path.metadata()
   assert_eq $meta.type :DIR:
 
-#[agent.test]
+#[test]
+#[vfs]
 def path_create_dir_all()
   let nested = (Path "x" / "y" / "z")
 
@@ -60,7 +68,8 @@ def path_create_dir_all()
 
   assert nested.exists()
 
-#[agent.test]
+#[test]
+#[vfs]
 def create_dir_all_is_idempotent()
   let path = Path "idempotent"
 
@@ -70,7 +79,8 @@ def create_dir_all_is_idempotent()
   create_dir $path all: true
   assert $path.exists()
 
-#[agent.test]
+#[test]
+#[vfs]
 def existing_path_yields_already_exists_error()
   let path = Path "existing"
   path.create_dir()

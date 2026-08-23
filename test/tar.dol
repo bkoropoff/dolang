@@ -1,9 +1,12 @@
-import agent tar
+import tar
+  testlib.vfs:
+    - vfs
   test:
     - assert
     - assert_eq
     - assert_throws
     - assert_type
+    - test
   std:
     - ConcurrencyError
     - RuntimeError
@@ -61,7 +64,8 @@ def check_archive path compression
     assert_type $unix_fs.Path $hardlink.link_name
     assert_eq [...hardlink.link_name.components] ["hello.txt"]
 
-#[agent.test]
+#[test]
+#[vfs]
 def round_trip_compression_formats()
   let formats = $
     - [:NONE:, "tar"]
@@ -72,7 +76,8 @@ def round_trip_compression_formats()
     write_archive $path $compression
     check_archive $path $compression
 
-#[agent.test]
+#[test]
+#[vfs]
 def compression_is_inferred_from_extension()
   let formats = $
     - [:NONE:, "tar"]
@@ -96,7 +101,8 @@ def compression_is_inferred_from_extension()
   tar.read forced.tar.gz do |archive|
     assert_eq $archive.compression :NONE:
 
-#[agent.test]
+#[test]
+#[vfs]
 def advancing_invalidates_entry_and_skips_payload()
   let path = "archive.tar"
   tar.write $path do |archive|
@@ -111,7 +117,8 @@ def advancing_invalidates_entry_and_skips_payload()
     assert_eq (second.read 10) b"xyz"
     assert_throws $StateError do first.read 1
 
-#[agent.test]
+#[test]
+#[vfs]
 def entry_size_is_enforced()
   let overflow = assert_throws $ValueError do
     tar.write too-large.tar do |archive|
@@ -123,14 +130,16 @@ def entry_size_is_enforced()
       archive.entry item size: 3 do |entry| entry.write ab
   assert ((str underflow).contains "declared 3 bytes")
 
-#[agent.test]
+#[test]
+#[vfs]
 def nested_entry_is_rejected()
   tar.write nested.tar do |archive|
     archive.entry first size: 0 do |_|
       assert_throws $ConcurrencyError do
         archive.entry second size: 0 do |_| nil
 
-#[agent.test]
+#[test]
+#[vfs]
 def scoped_handles_are_invalid_after_return()
   let escaped_writer = nil
   tar.write scoped.tar do |archive|
@@ -143,7 +152,8 @@ def scoped_handles_are_invalid_after_return()
     escaped_entry = archive.next()
   assert_throws $StateError do escaped_entry.read 1
 
-#[agent.test]
+#[test]
+#[vfs]
 def errors_still_close_entry_and_archive_scopes()
   tar.write entry-error.tar do |archive|
     assert_throws $RuntimeError do

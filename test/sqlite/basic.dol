@@ -1,4 +1,6 @@
-import agent sqlite
+import sqlite
+  testlib.vfs:
+    - vfs
   test:
     - assert_eq
     - assert_type
@@ -9,7 +11,8 @@ import agent sqlite
   std:
     - UnexpectedKeyError
 
-#[agent.test windows_vfs: false remote: false]
+#[test]
+#[vfs windows: false remote: false]
 def basic()
   sqlite.open (Path "test.db") do |conn|
     conn.execute "CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)"
@@ -20,7 +23,8 @@ def basic()
       assert_eq $rows.len 1
       assert_eq $rows[0]["name"] "Alice"
 
-#[agent.test windows_vfs: false remote: false]
+#[test]
+#[vfs windows: false remote: false]
 def transaction()
   sqlite.open "test.db" do |conn|
     conn.transaction do |tx|

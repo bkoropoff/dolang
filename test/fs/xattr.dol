@@ -1,10 +1,13 @@
-import agent sys
+import sys
+  testlib.vfs:
+    - vfs
   test:
     - assert
     - assert_eq
     - assert_type
     - assert_throws
     - skip
+    - test
   std:
     - RuntimeError
     - TypeError
@@ -17,7 +20,8 @@ import agent sys
     - xattrs
     - write
 
-#[agent.test]
+#[test]
+#[vfs]
 def module_path_and_file_operations()
   if (sys.os_info().os == :WINDOWS: && sys.os_info().is_wine)
     skip "skipping Windows EA xattr operations under wine"
@@ -48,7 +52,8 @@ def module_path_and_file_operations()
   assert_throws $RuntimeError do
     xattr $path "text"
 
-#[agent.test]
+#[test]
+#[vfs]
 def unix_namespace_handling()
   if !(sys.os_info().os == :LINUX: || sys.os_info().os == :FREEBSD:)
     skip "requires Linux or FreeBSD"
@@ -79,14 +84,16 @@ def unix_namespace_handling()
       break
   assert $saw_explicit
 
-#[agent.test]
+#[test]
+#[vfs]
 def rejects_invalid_argument_types()
   let path = Path "file.txt"
   write $path "payload"
 
   assert_throws $TypeError do set_xattr $path bad 1
 
-#[agent.test]
+#[test]
+#[vfs]
 def rejects_invalid_namespace_argument()
   if ((sys.os_info().os == :WINDOWS:) && sys.os_info().is_wine)
     skip "skipping Windows EA xattr validation setup under wine"

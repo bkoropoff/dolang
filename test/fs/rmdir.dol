@@ -1,7 +1,10 @@
-import agent
+import
+  testlib.vfs:
+    - vfs
   test:
     - assert
     - assert_throws
+    - test
   std:
     - RuntimeError
   fs:
@@ -10,7 +13,8 @@ import agent
     - open
     - Path
 
-#[agent.test]
+#[test]
+#[vfs]
 def remove_dir_removes_empty_directory()
   let to_remove = Path "to_remove"
 
@@ -20,7 +24,8 @@ def remove_dir_removes_empty_directory()
   remove_dir $to_remove
   assert $!to_remove.exists()
 
-#[agent.test]
+#[test]
+#[vfs]
 def remove_dir_fails_on_non_empty_directory()
   let parent = Path "parent"
   let child = (parent / "file.txt")
@@ -34,7 +39,8 @@ def remove_dir_fails_on_non_empty_directory()
 
   assert $parent.exists()
 
-#[agent.test]
+#[test]
+#[vfs]
 def remove_dir_all_removes_empty_directory_tree()
   let parent = Path "parent"
   let child_dir = (parent / "child" / "grandchild")
@@ -48,12 +54,14 @@ def remove_dir_all_removes_empty_directory_tree()
 
   assert $!parent.exists()
 
-#[agent.test]
+#[test]
+#[vfs]
 def remove_dir_ignores_missing_directory_when_requested()
   let nonexistent = Path "does_not_exist"
   remove_dir $nonexistent ignore: true
 
-#[agent.test]
+#[test]
+#[vfs]
 def remove_dir_free_function_is_variadic()
   let first = Path "first"
   let second = Path "second"
@@ -63,7 +71,8 @@ def remove_dir_free_function_is_variadic()
   assert $!first.exists()
   assert $!second.exists()
 
-#[agent.test]
+#[test]
+#[vfs]
 def path_remove_dir_method()
   let path = Path "method_remove"
 
@@ -73,7 +82,8 @@ def path_remove_dir_method()
   path.remove_dir()
   assert $!path.exists()
 
-#[agent.test]
+#[test]
+#[vfs]
 def remove_dir_all_fails_when_tree_contains_files()
   let parent = Path "parent"
   let child = (parent / "child")
@@ -88,7 +98,8 @@ def remove_dir_all_fails_when_tree_contains_files()
   assert $parent.exists()
   assert $file.exists()
 
-#[agent.test]
+#[test]
+#[vfs]
 def remove_dir_all_ignore_prunes_only_empty_branches()
   let parent = Path "parent"
   let keep = (parent / "keep")
@@ -108,7 +119,8 @@ def remove_dir_all_ignore_prunes_only_empty_branches()
   assert $!keep_child.exists()
   assert $!prune.exists()
 
-#[agent.test]
+#[test]
+#[vfs]
 def path_remove_dir_all()
   let parent = Path "rmdir_all_test"
   let child = (parent / "child")
@@ -121,19 +133,22 @@ def path_remove_dir_all()
 
   assert $!parent.exists()
 
-#[agent.test]
+#[test]
+#[vfs]
 def path_remove_dir_ignore()
   let path = Path "missing"
   path.remove_dir ignore: true
 
-#[agent.test]
+#[test]
+#[vfs]
 def remove_dir_fails_on_non_existent_directory()
   let nonexistent = Path "does_not_exist"
 
   assert_throws $RuntimeError do
     remove_dir $nonexistent
 
-#[agent.test]
+#[test]
+#[vfs]
 def remove_dir_fails_on_file()
   let file_path = Path "a_file.txt"
 

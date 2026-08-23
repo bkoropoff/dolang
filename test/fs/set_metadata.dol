@@ -3,11 +3,14 @@ import sys
     - skip
     - assert_eq
     - assert_throws
+    - test
 
 if (sys.os_info().family == :WINDOWS:)
   skip "requires Unix"
 
-import agent
+import
+  testlib.vfs:
+    - vfs
   fs:
     - Path
     - set_metadata
@@ -21,7 +24,8 @@ import agent
 import std:
   - RuntimeError
 
-#[agent.test]
+#[test]
+#[vfs]
 def numeric_id()
   let test_path = "test_chown_ids.txt"
 
@@ -39,7 +43,8 @@ def numeric_id()
 
   remove $test_path
 
-#[agent.test]
+#[test]
+#[vfs]
 def multiple_paths()
   let first = "test_set_metadata_first.txt"
   let second = "test_set_metadata_second.txt"
@@ -55,7 +60,8 @@ def multiple_paths()
 
   remove $first $second
 
-#[agent.test]
+#[test]
+#[vfs]
 def user_and_group_name()
   let test_path = "test_chown_names.txt"
 
@@ -73,7 +79,8 @@ def user_and_group_name()
 
   remove $test_path
 
-#[agent.test]
+#[test]
+#[vfs]
 def group_only()
   let test_path = "test_chown_group.txt"
 
@@ -88,7 +95,8 @@ def group_only()
 
   remove $test_path
 
-#[agent.test]
+#[test]
+#[vfs]
 def empty_patch_is_noop()
   let test_path = "test_chown_missing.txt"
 
@@ -99,7 +107,8 @@ def empty_patch_is_noop()
 
   remove $test_path
 
-#[agent.test]
+#[test]
+#[vfs]
 def unknown_user_fails()
   let test_path = "test_chown_unknown.txt"
 
@@ -111,7 +120,8 @@ def unknown_user_fails()
 
   remove $test_path
 
-#[agent.test]
+#[test]
+#[vfs]
 def follow_controls_symlink_handling()
   let link_path = "test_chown_link"
   let missing_target = "test_chown_missing_target"

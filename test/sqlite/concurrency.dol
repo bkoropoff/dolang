@@ -1,7 +1,10 @@
-import agent sqlite
+import sqlite
+  testlib.vfs:
+    - vfs
   test:
     - assert
     - assert_eq
+    - test
   fs:
     - Path
   strand:
@@ -12,7 +15,8 @@ let INSERTS_PER_STRAND = 4
 let WAL_STRAND_COUNT = 16
 let WAL_INSERTS_PER_STRAND = 8
 
-#[agent.test windows_vfs: false remote: false]
+#[test]
+#[vfs windows: false remote: false]
 def concurrent_writers()
   let db = Path "test.db"
   sqlite.open $db do |conn|
@@ -29,7 +33,8 @@ def concurrent_writers()
       let rows = [...stmt.query()]
       assert_eq $rows.len (STRAND_COUNT * INSERTS_PER_STRAND)
 
-#[agent.test windows_vfs: false remote: false]
+#[test]
+#[vfs windows: false remote: false]
 def wal()
   let retries = 30
   let min_wait = 2
