@@ -4,8 +4,7 @@ Do is a scripting language for cross-platform CI/CD, DevOps, and automation. It
 combines shell-like commands and indentation-oriented data declaration with
 ordinary functions, structured concurrency, and remote-capable system APIs.
 
-[Documentation](https://dolang-org.github.io/dolang/) ·
-[Source](https://github.com/dolang-org/dolang)
+[Documentation](https://dolang-org.github.io/dolang/)
 
 > **⚠️ Experimental:** Do is early and still taking shape — syntax, the
 > standard library, and APIs are all subject to change, and it's not ready
