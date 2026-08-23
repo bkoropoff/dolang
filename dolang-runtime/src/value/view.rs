@@ -572,7 +572,7 @@ impl<'v, 'a> Record<'v, 'a> {
 }
 
 /// Tuple view
-pub struct Tuple<'v, 'a>(gc::Borrow<'v, 'a, Header, [Value<'v>]>);
+pub struct Tuple<'v, 'a>(pub(super) gc::Borrow<'v, 'a, Header, [Value<'v>]>);
 
 impl<'v, 'a> Tuple<'v, 'a> {
     pub(crate) fn from_borrow(borrow: gc::Borrow<'v, 'a, Header, [Value<'v>]>) -> Self {

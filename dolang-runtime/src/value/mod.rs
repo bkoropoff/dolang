@@ -36,7 +36,7 @@ use crate::{
 
 use prim::Prim;
 use repr::{Decode, Repr};
-use view::{Array, Bin, Dict, ObjectView, Range, Record, Str, Tuple as TupleView, View};
+use view::{Array, Bin, Dict, ObjectView, Range, Record, Str, Tuple, View};
 
 pub(crate) enum Case<'v, 'a> {
     Prim(Prim),
@@ -1536,6 +1536,12 @@ impl<'v> Value<'v> {
         Some(Array(self.downcast_ref(vm.builtin_types().array)?))
     }
 
+    /// Downcast value to tuple
+    #[inline]
+    pub fn as_tuple(&self, vm: &Vm<'v>) -> Option<Tuple<'v, '_>> {
+        Some(Tuple(self.downcast_ref(vm.builtin_types().tuple)?))
+    }
+
     /// Downcast value to dict
     #[inline]
     pub fn as_dict(&self, vm: &Vm<'v>) -> Option<Dict<'v, '_>> {
@@ -1608,7 +1614,7 @@ impl<'v> Value<'v> {
                 }
                 // Tuple
                 if let Some(tuple) = self.downcast_native(vm, bt.tuple) {
-                    return View::Tuple(TupleView::from_borrow(tuple));
+                    return View::Tuple(Tuple::from_borrow(tuple));
                 }
                 // Fallback: unknown GC object
                 View::Object(unsafe { ObjectView::from_ptr(obj.into_raw()) })
