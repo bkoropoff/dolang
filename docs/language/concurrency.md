@@ -35,15 +35,9 @@ manage it manually through the returned [Strand](../api/strand/strand.md)
 handle using [`join`](../api/strand/strand.md#join) to wait for completion
 and possibly [`cancel`](../api/strand/strand.md#cancel) to terminate it.
 
-Both forms snapshot the spawning strand's working directory, environment, and
-VFS context. Held [`Resource`](../api/strand/resource.md)s are inherited by
-scoped strand but *not* by background strand. Later scoped changes in one
+Held [`Resource`](../api/strand/resource.md)s are inherited by
+scoped strand but *not* by background strand. Later scoped state changes in one
 strand do not impact other strands.
-
-A background strand may outlive the `ssh.with`, `docker.with`, `podman.with`,
-`wsl.with_*`, `sudo.with`, or `admin.with` block that created it. When the
-original block exits, its VFS session is stopped, causing subsequent errors on
-any background strands still using it.
 
 ## Spawning Strands
 
