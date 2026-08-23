@@ -71,10 +71,11 @@ unsafe impl<'v> Collect for Handle<'v> {
     }
 
     fn clear(&mut self) {
-        // Cancel the strand
-        self.interrupt.cancel();
         // Drop our reference to StrandInner (the Future's Rc clone keeps it alive during unwind)
-        self.inner = None;
+        if self.inner.take().is_some() {
+            // Cancel the strand
+            self.interrupt.cancel();
+        }
     }
 }
 
@@ -194,6 +195,15 @@ impl<'v> Protocol<'v> for Handle<'v> {
 }
 
 /// A background strand together with its caller-facing stream endpoints.
+///
+/// `input`/`output` are already [`StreamIter`]/[`StreamSink`]-wrapped (built
+/// alongside the channels themselves, at construction time) rather than the
+/// raw channel values, so that anything extracted from a `Stream` via
+/// `op_iter`/`op_sink` keeps [`Handle`] GC-reachable even once the `Stream`
+/// itself is no longer referenced (e.g. a `for` loop that discards the
+/// original expression once it has extracted an iterator from it). A bare
+/// channel value holds no reference back to the strand, so handing one out
+/// directly used to let the strand get collected and canceled mid-iteration.
 pub(crate) struct Stream<'v> {
     pub(crate) handle: GcObj<'v, Handle<'v>>,
     pub(crate) input: Value<'v>,
@@ -214,6 +224,199 @@ unsafe impl<'v> Collect for Stream<'v> {
     fn clear(&mut self) {
         self.input = Value::NIL;
         self.output = Value::NIL;
+    }
+}
+
+/// Wraps the channel `Value` returned by `Stream::iter()`, additionally
+/// keeping the background strand's [`Handle`] GC-reachable for as long as
+/// the wrapper itself is reachable. See [`Stream`] for why this exists.
+pub(crate) struct StreamIter<'v> {
+    value: Value<'v>,
+    root: GcObj<'v, Handle<'v>>,
+}
+
+impl<'v> StreamIter<'v> {
+    pub(crate) fn new(value: Value<'v>, root: GcObj<'v, Handle<'v>>) -> Self {
+        Self { value, root }
+    }
+}
+
+unsafe impl<'v> Collect for StreamIter<'v> {
+    const CYCLIC: bool = true;
+    const IMMUTABLE: bool = false;
+    type Annex = ();
+
+    fn accept(&self, visit: &mut dyn Visit) -> ControlFlow<()> {
+        self.value.accept(visit)?;
+        self.root.accept(visit)
+    }
+
+    fn clear(&mut self) {
+        self.value.clear();
+    }
+}
+
+impl<'v> Protocol<'v> for StreamIter<'v> {
+    fn op_type<'a, 's>(
+        _this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        out: Slot<'v, 'a>,
+    ) {
+        Output::set(strand, out, &strand.singletons().input_iter);
+    }
+
+    fn op_debug<'a, 's>(
+        _this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        w: &mut dyn crate::value::Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        crate::fmt!(strand, w, "<strand.Stream.iter>")
+    }
+
+    async fn op_iter<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        Output::set(strand, out, &this);
+        Ok(())
+    }
+
+    async fn op_next<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, bool> {
+        let value = this.borrow(strand)?.value.dup();
+        value.next(strand, out).await
+    }
+
+    // `close` isn't part of the `Iter` surface (`iter::classify`), but the
+    // channel underneath it has one, and `Stream::JOIN` (below) relies on
+    // being able to call it on whatever it gets back from `iter`/`sink` to
+    // release the channel promptly rather than waiting on the GC.
+    fn op_get<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        field: Sym<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        if field.tag() == sym::CLOSE {
+            let value = this.borrow(strand)?.value.dup();
+            value.op_get(strand, field, out)
+        } else {
+            iter::iter_get(strand, &this, field, out)
+        }
+    }
+
+    async fn op_mcall<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        method: Sym<'v, 'a>,
+        args: Args<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        if method.tag() == sym::CLOSE {
+            let value = this.borrow(strand)?.value.dup();
+            value.op_mcall(strand, method, args, out).await
+        } else {
+            iter::iter_mcall(strand, &this, method, args, out).await
+        }
+    }
+}
+
+/// Wraps the channel `Value` returned by `Stream::sink()`. See [`StreamIter`]
+/// for why this exists rather than handing back the raw channel `Value`
+/// directly.
+pub(crate) struct StreamSink<'v> {
+    value: Value<'v>,
+    root: GcObj<'v, Handle<'v>>,
+}
+
+impl<'v> StreamSink<'v> {
+    pub(crate) fn new(value: Value<'v>, root: GcObj<'v, Handle<'v>>) -> Self {
+        Self { value, root }
+    }
+}
+
+unsafe impl<'v> Collect for StreamSink<'v> {
+    const CYCLIC: bool = true;
+    const IMMUTABLE: bool = false;
+    type Annex = ();
+
+    fn accept(&self, visit: &mut dyn Visit) -> ControlFlow<()> {
+        self.value.accept(visit)?;
+        self.root.accept(visit)
+    }
+
+    fn clear(&mut self) {
+        self.value.clear();
+    }
+}
+
+impl<'v> Protocol<'v> for StreamSink<'v> {
+    fn op_type<'a, 's>(
+        _this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        out: Slot<'v, 'a>,
+    ) {
+        Output::set(strand, out, &strand.singletons().output_iter);
+    }
+
+    fn op_debug<'a, 's>(
+        _this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        w: &mut dyn crate::value::Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        crate::fmt!(strand, w, "<strand.Stream.sink>")
+    }
+
+    async fn op_sink<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        Output::set(strand, out, &this);
+        Ok(())
+    }
+
+    async fn op_put<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        item: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        let value = this.borrow(strand)?.value.dup();
+        value.put(strand, item).await
+    }
+
+    // See the matching comment on `StreamIter::op_get`.
+    fn op_get<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        field: Sym<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        if field.tag() == sym::CLOSE {
+            let value = this.borrow(strand)?.value.dup();
+            value.op_get(strand, field, out)
+        } else {
+            iter::sink_get(strand, &this, field, out)
+        }
+    }
+
+    async fn op_mcall<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        method: Sym<'v, 'a>,
+        args: Args<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        if method.tag() == sym::CLOSE {
+            let value = this.borrow(strand)?.value.dup();
+            value.op_mcall(strand, method, args, out).await
+        } else {
+            iter::sink_mcall(strand, &this, method, args, out).await
+        }
     }
 }
 
