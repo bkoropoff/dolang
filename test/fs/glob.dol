@@ -7,12 +7,12 @@ import agent
     - Path
 
 #[fixture]
-def populate block
+def populate block ...rest
   Path("src").create_dir all: true
   Path("src/lib.rs").write ""
   Path("src/foo.rs").write ""
   Path("build.rs").write ""
-  block()
+  block(...rest)
 
 #[agent.test]
 #[populate]
