@@ -46,7 +46,7 @@ import strand:
 # Deliberately not `.profile`: provisioning writes it, so a cached copy would
 # only risk restoring a stale one over the current version. What makes the
 # restored toolchain reachable is that profile, since `dolang-vfs` rebuilds the
-# login environment by running the account's login shell — see `ci.PROFILE`.
+# login environment by running the account's login shell — see `gold.PROFILE`.
 #
 # `target` is absent as well: only the reusable slices of it are packed, which
 # `profile_paths` locates.

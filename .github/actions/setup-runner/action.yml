@@ -36,6 +36,7 @@ runs:
   using: composite
   steps:
     - name: Install Dolang
+      id: dolang
       uses: ./.github/actions/setup-dolang
       with:
         version: ${{ inputs.dolang-version }}
@@ -50,32 +51,44 @@ runs:
       with:
         save-if: ${{ inputs.save-cache == 'true' }}
 
-    # Paths follow the VM application name in lib/ci.dol. Restore and save are
-    # explicit steps rather than one `actions/cache@v5`: the assets are ready
-    # by the end of this action's own "Set up runner" step, so the save can
-    # run immediately after it instead of waiting for a post-job hook, and
+    # The gold image bundle, plus the SSH key the guest trusts. Restore and
+    # save are explicit steps rather than one `actions/cache@v5`: the bundle is
+    # ready by the end of this action's own "Set up runner" step, so the save
+    # can run immediately after it instead of waiting for a post-job hook, and
     # `save-cache` keeps the save from running at all on a branch whose cache
     # nothing but its own later runs could restore (see the input's
     # description).
-    - name: Restore CI VM assets
-      id: vm-assets-cache
+    #
+    # The two paths are one entry because they are a matched pair: the guest
+    # trusts only the key generated for this `app`, so a bundle restored beside
+    # a missing or regenerated key produces a domain that refuses the
+    # connection — which surfaces as an SSH timeout, not an error naming the
+    # cause. Independent entries could be evicted independently.
+    #
+    # The base image download cache is deliberately *not* carried any more.
+    # Only the minting pass fetches it, which now happens on a recipe change
+    # rather than on every cold run, and at 1.2 GB it was the largest thing
+    # this repository kept in a 10 GB budget shared by every workflow.
+    #
+    # The interpreter's own digest is part of the key because the bundle has a
+    # `dolang-vfs` baked into it, installed at mint time, and every later job
+    # drives that guest binary from the runner's `dolang`. Provisioning used to
+    # reinstall the payload on every run, so the two could not drift; now they
+    # can. `.github/dolang-version` cannot stand in for it — it names a rolling
+    # `bootstrap` tag, so its contents are the same string across every release.
+    #
+    # No restore-keys, and not just as a nicety: a prefix fallback would hand
+    # back a bundle minted from a *different* recipe, and nothing downstream
+    # would notice — the job would build against the wrong guest.
+    - name: Restore CI gold image
+      id: vm-gold-cache
       if: inputs.target == 'x86_64-freebsd'
       uses: actions/cache/restore@v5
       with:
         path: |
+          ${{ runner.temp }}/dolang-freebsd-gold.dolvm
           ~/.local/share/dolang-freebsd-ci/libvirt/ssh
-          ~/.local/share/dolang-freebsd-ci/libvirt/seeds
-          ~/.cache/dolang-freebsd-ci
-        # Bump when VM_IMAGE changes: the download cache is keyed by URL, and
-        # a cache hit on the primary key suppresses the save, so a stale entry
-        # would make the new image re-download on every run.
-        #
-        # No restore-keys on purpose. This key is static and only ever bumped by
-        # hand, so a prefix fallback cannot help — it can only inherit the
-        # previous image. That is what doubled this cache to 1.2 GB when the
-        # image moved from qcow2 to raw: the old download came back via the
-        # fallback, the new one landed beside it, and the save kept both.
-        key: freebsd-libvirt-v3
+        key: freebsd-gold-v1-${{ steps.dolang.outputs.digest }}-${{ hashFiles('.github/actions/setup-runner/lib/gold.dol') }}
 
     # The guest's cargo/rustup/target caches, tarred out of the VM at the end
     # of the job by the workflow's own save step (see test.yml) rather than
@@ -116,24 +129,23 @@ runs:
           rust: (env["CI_RUST"] == "true")
           virt: (env["CI_VIRT"] == "true")
 
-    # The counterpart to "Restore CI VM assets" above. Placed here, right
-    # after the assets are created, rather than left to run automatically at
-    # the end of the job: this is a plain `actions/cache/save@v5` rather than
-    # the combined action's post-job hook, so it needs an explicit spot to run
-    # from. Skipped on an exact restore hit for the same reason the guest
-    # build cache is: nothing changed, so saving would only re-upload what is
-    # already there.
+    # The counterpart to "Restore CI gold image" above. Placed here, right
+    # after the bundle is minted, rather than left to run automatically at the
+    # end of the job: this is a plain `actions/cache/save@v5` rather than the
+    # combined action's post-job hook, so it needs an explicit spot to run
+    # from. Skipped on an exact restore hit for the same reason the guest build
+    # cache is: nothing changed, so saving would only re-upload what is already
+    # there.
     #
-    # `path`/`key` are repeated from "Restore CI VM assets" rather than
-    # shared via a YAML anchor: GitHub's workflow parser doesn't resolve them.
-    - name: Save CI VM assets
+    # `path`/`key` are repeated from "Restore CI gold image" rather than shared
+    # via a YAML anchor: GitHub's workflow parser doesn't resolve them.
+    - name: Save CI gold image
       if: >
         inputs.target == 'x86_64-freebsd' && inputs.save-cache == 'true' &&
-        steps.vm-assets-cache.outputs.cache-hit != 'true'
+        steps.vm-gold-cache.outputs.cache-hit != 'true'
       uses: actions/cache/save@v5
       with:
         path: |
+          ${{ runner.temp }}/dolang-freebsd-gold.dolvm
           ~/.local/share/dolang-freebsd-ci/libvirt/ssh
-          ~/.local/share/dolang-freebsd-ci/libvirt/seeds
-          ~/.cache/dolang-freebsd-ci
-        key: freebsd-libvirt-v3
+        key: freebsd-gold-v1-${{ steps.dolang.outputs.digest }}-${{ hashFiles('.github/actions/setup-runner/lib/gold.dol') }}

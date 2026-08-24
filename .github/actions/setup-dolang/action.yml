@@ -6,6 +6,15 @@ inputs:
     description: Dolang release tag to install (defaults to .github/dolang-version)
     default: ""
 
+outputs:
+  digest:
+    description: >
+      Short SHA-256 of the installed release artifact. `.github/dolang-version`
+      names a rolling `bootstrap` tag, so its contents identify nothing — this
+      is what distinguishes one bootstrap build from the next, for cache keys
+      that have to invalidate when the interpreter changes.
+    value: ${{ steps.setup.outputs.digest }}
+
 runs:
   using: composite
   steps:
@@ -65,6 +74,8 @@ runs:
             --dir .
           tar -xzf "$artifact"
         )
+        digest=$(sha256sum "$shell_install_dir/$artifact" | cut -c1-16)
+        echo "digest=$digest" >> "$GITHUB_OUTPUT"
         if [[ "$RUNNER_OS" != Windows ]]; then
           chmod +x "$install_dir/$executable"
         fi
