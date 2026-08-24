@@ -6,7 +6,7 @@ foo = $
   bar: 42
   baz: false
 assert_eq $foo {bar: 42, baz: false}
-def return_data
+def return_data()
   return $
     - 1
     - 2

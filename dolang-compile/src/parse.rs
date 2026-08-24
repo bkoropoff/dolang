@@ -46,46 +46,24 @@ macro_rules! decay {
 
 macro_rules! decay_ident {
     ($token: expr) => {
-        decay!($token, TokenInfo::Keyword(
-                self::Keyword::Catch
-                | self::Keyword::Def
-                | self::Keyword::Bind
-                | self::Keyword::Do
-                | self::Keyword::Else
-                | self::Keyword::Field
-                | self::Keyword::Finally
-                | self::Keyword::For
-                | self::Keyword::If
-                | self::Keyword::Let
-                | self::Keyword::Throw
-                | self::Keyword::Try
-                | self::Keyword::While) => TokenInfo::Ident)
+        decay!($token,
+            TokenInfo::Keyword(self::Keyword::Do) => TokenInfo::Keyword(self::Keyword::Do),
+            TokenInfo::Keyword(self::Keyword::Nil) => TokenInfo::Keyword(self::Keyword::Nil),
+            TokenInfo::Keyword(_) => TokenInfo::Ident)
     }
 }
 
 macro_rules! decay_field {
     ($token: expr) => {
-        decay!($token, TokenInfo::Bool(_) | TokenInfo::Keyword(
-                self::Keyword::Catch
-                | self::Keyword::Def
-                | self::Keyword::Bind
-                | self::Keyword::Do
-                | self::Keyword::Else
-                | self::Keyword::Field
-                | self::Keyword::Finally
-                | self::Keyword::For
-                | self::Keyword::If
-                | self::Keyword::Let
-                | self::Keyword::Nil
-                | self::Keyword::Throw
-                | self::Keyword::Try
-                | self::Keyword::While) => TokenInfo::Ident)
+        decay!($token, TokenInfo::Bool(_) | TokenInfo::Keyword(_) => TokenInfo::Ident)
     }
 }
 
-macro_rules! decay_literal {
+macro_rules! decay_shell {
     ($token: expr) => {
         decay!($token,
+            TokenInfo::Keyword(self::Keyword::Do) => TokenInfo::Keyword(self::Keyword::Do),
+            TokenInfo::Keyword(self::Keyword::Nil) => TokenInfo::Keyword(self::Keyword::Nil),
             TokenInfo::Equal
             | TokenInfo::Ident
             | TokenInfo::LeftBracket
@@ -95,24 +73,10 @@ macro_rules! decay_literal {
             | TokenInfo::Comma
             | TokenInfo::DotDot
             | TokenInfo::Ellipsis
-            | TokenInfo::Keyword(
-                self::Keyword::Catch
-                | self::Keyword::Def
-                | self::Keyword::Bind
-                | self::Keyword::Do
-                | self::Keyword::Else
-                | self::Keyword::Field
-                | self::Keyword::Finally
-                | self::Keyword::For
-                | self::Keyword::If
-                | self::Keyword::Let
-                | self::Keyword::Throw
-                | self::Keyword::Try
-                | self::Keyword::While)
+            | TokenInfo::Keyword(_)
             | TokenInfo::Op(_)
             | TokenInfo::RBar
-            | TokenInfo::DecoratorOpen
-                => TokenInfo::Literal)
+            | TokenInfo::DecoratorOpen => TokenInfo::Literal)
     }
 }
 
@@ -1408,7 +1372,7 @@ impl<'a> Parser<'a> {
                 }
             }
             token => match if matches!(mode, ExprMode::Shell) {
-                decay_literal!(token)
+                decay_shell!(token)
             } else {
                 decay_ident!(token)
             } {
@@ -1777,7 +1741,7 @@ impl<'a> Parser<'a> {
         };
 
         loop {
-            match self.peek()? {
+            match decay_ident!(self.peek()?) {
                 Some(token!(TokenInfo::DotDot, span)) if !matches!(mode, ExprMode::Shell) => {
                     let prec = Prec::RANGE;
                     if prec.terminate(&min_prec) {
