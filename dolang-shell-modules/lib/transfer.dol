@@ -498,7 +498,9 @@ def pack_zip source destination prefix metadata indicator
         archive.symlink (str target) (str name) mode: $values[:mode:]
       else if (file_metadata.type == :FILE:)
         let values = (filesystem_metadata path :FILE: metadata)
-        archive.open (str name) mode: $values[:mode:] do |entry|
+        # The size hint reserves the ZIP64 fields in the local file header,
+        # without which an entry over 4 GiB cannot be written at all.
+        archive.open (str name) mode: $values[:mode:] size: $file_metadata.size do |entry|
           path.open rb do |file|
             for chunk = file
               entry.write $chunk

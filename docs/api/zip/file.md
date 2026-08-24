@@ -1,7 +1,7 @@
 # File
 
 File objects are returned by
-[`Archive.open()`](./archive.md#open-name-mode-func) and
+[`Archive.open()`](./archive.md#open-name-mode-size-compression-func) and
 [`Entry.open()`](./entry.md#open-block) and provide methods for reading from
 or writing to files within a ZIP archive. Entry metadata such as size and
 Unix mode is available on [`Entry`](./entry.md) rather than `File`.

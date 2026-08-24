@@ -7,6 +7,8 @@ import zip
     - test
   std:
     - ConcurrencyError
+    - TypeError
+    - ValueError
 
 #[test]
 #[vfs]
@@ -77,3 +79,64 @@ def nested_file_is_rejected()
         entries[1].open do |_| nil
       assert_throws $ConcurrencyError do
         archive.open (str entries[1].name) do |_| nil
+
+#[test]
+#[vfs]
+def stored_compression()
+  zip.open "stored.zip" "w" do |archive|
+    archive.open "stored.txt" compression: :STORED: do |file|
+      file.write "Hello, World!"
+    archive.open "deflated.txt" compression: :DEFLATE: do |file|
+      file.write "Hello, World!"
+    archive.open "default.txt" do |file|
+      file.write "Hello, World!"
+
+  zip.open "stored.zip" do |archive|
+    let entries = [...archive.entries]
+    assert_eq $entries[0].compression :STORED:
+    assert_eq $entries[0].compressed_size 13
+    assert_eq $entries[1].compression :DEFLATE:
+    assert_eq $entries[2].compression :DEFLATE:
+    for entry = entries
+      entry.open do |file|
+        assert_eq (str (file.read 1024)) "Hello, World!"
+
+#[test]
+#[vfs]
+def invalid_compression_is_rejected()
+  zip.open "invalid.zip" "w" do |archive|
+    assert_throws $ValueError do
+      archive.open "bogus.txt" compression: :BOGUS: do |_| nil
+
+# `size:` reserves the ZIP64 size fields in the local file header. Without the
+# reservation an entry over 4 GiB cannot be written at all, since the seekable
+# writer patches the header in place on close and cannot grow it. Passing a
+# reserving hint for a tiny entry exercises that path — reserve, then patch
+# back a size that fits — without writing 4 GiB.
+#[test]
+#[vfs]
+def zip64_size_hint()
+  let hint = (5 * 1024 * 1024 * 1024)
+  zip.open "zip64.zip" "w" do |archive|
+    archive.open "big.bin" compression: :STORED: size: $hint do |file|
+      file.write "Hello, World!"
+
+  zip.open "zip64.zip" do |archive|
+    let entries = [...archive.entries]
+    assert_eq $entries.len 1
+    assert_eq $entries[0].size 13
+    entries[0].open do |file|
+      assert_eq (str (file.read 1024)) "Hello, World!"
+
+#[test]
+#[vfs]
+def write_options_are_rejected_in_read_mode()
+  zip.open "options.zip" "w" do |archive|
+    archive.open "hello.txt" do |file|
+      file.write "Hello, World!"
+
+  zip.open "options.zip" do |archive|
+    assert_throws $TypeError do
+      archive.open "hello.txt" size: 13 do |_| nil
+    assert_throws $TypeError do
+      archive.open "hello.txt" compression: :STORED: do |_| nil
