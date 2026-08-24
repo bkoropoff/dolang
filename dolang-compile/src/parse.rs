@@ -36,14 +36,10 @@ macro_rules! token {
 macro_rules! decay {
     ($token: expr, $($pat: pat => $expr: expr),+) => {
         {
-            let mut token = $token;
-            match &mut token {
-                $(Some(token@token!($pat)) => {
-                    token.info = $expr;
-                })+
-                _ => (),
+            match $token {
+                $(Some(token!($pat, span)) => Some(Token { info: $expr, span }),)+
+                other => other,
             }
-            token
         }
     }
 }
@@ -741,7 +737,7 @@ impl<'a> Peek<'a> {
         self.lexer.set_error()
     }
 
-    fn peek(&mut self) -> Result<Option<&mut Token>> {
+    fn peek(&mut self) -> Result<Option<Token>> {
         Ok(loop {
             break match self.peek {
                 Inner::Empty => match self.lexer.next() {
@@ -754,7 +750,7 @@ impl<'a> Peek<'a> {
                         continue;
                     }
                 },
-                Inner::Full(Ok(ref mut t)) => Some(t),
+                Inner::Full(Ok(ref t)) => Some(t.clone()),
                 Inner::Full(Err(e)) => {
                     self.peek = Inner::Empty;
                     return Err(e.into());
@@ -993,7 +989,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn peek(&mut self) -> Result<Option<&mut Token>> {
+    fn peek(&mut self) -> Result<Option<Token>> {
         let res = self.lex.peek();
         if res.is_err() {
             self.fail = true;
@@ -1115,7 +1111,6 @@ impl<'a> Parser<'a> {
             let close = loop {
                 let expr = match this.peek()? {
                     token @ (None | Some(token!(StmtSep | Indent | Dedent))) => {
-                        let token = token.cloned();
                         this.syntax_error(scope, token, "expected closing `\"`");
                         // Try to recover by considering string ended here
                         break open;
@@ -1327,7 +1322,6 @@ impl<'a> Parser<'a> {
             let arg = match self.peek()? {
                 Some(token!(RightParen)) => break,
                 Some(token!(Key, span)) => {
-                    let span = *span;
                     self.advance();
                     Arg::Key(Key {
                         key_span: span,
@@ -1341,7 +1335,6 @@ impl<'a> Parser<'a> {
                     })
                 }
                 Some(token!(Ellipsis, span)) => {
-                    let span = *span;
                     self.advance();
                     Arg::Expand(Expand {
                         expr: self.parse_expr(scope, ExprMode::Full)?,
@@ -1481,8 +1474,7 @@ impl<'a> Parser<'a> {
             let right = loop {
                 let (key, colon_span) = match this.peek()? {
                     Some(token!(RightBrace)) => break this.advance(),
-                    Some(token!(Key, span)) => {
-                        let key_span = *span;
+                    Some(token!(Key, key_span)) => {
                         this.advance();
                         elems.push(DictElem::Key(Key {
                             key_span,
@@ -1754,7 +1746,6 @@ impl<'a> Parser<'a> {
         let mut lhs = {
             match self.peek()? {
                 Some(token!(TokenInfo::Op(op))) => {
-                    let op = *op;
                     let token = self.consume();
                     let prec = match op.unary_prec() {
                         None => {
@@ -1792,7 +1783,6 @@ impl<'a> Parser<'a> {
                     if prec.terminate(&min_prec) {
                         break;
                     }
-                    let span = *span;
                     self.advance();
                     lhs = Expr::Range {
                         exprs: Box::new([Some(lhs), self.parse_range_tail(scope, mode)?]),
@@ -1803,8 +1793,6 @@ impl<'a> Parser<'a> {
                     if mode == ExprMode::Compact && !op.is_compact_binary() {
                         break;
                     }
-                    let op = *op;
-                    let span = *span;
                     let prec = op.binary_prec().unwrap();
                     if prec.terminate(&min_prec) {
                         break;
@@ -2731,7 +2719,6 @@ impl<'a> Parser<'a> {
                         if bin_pack {
                             return Ok(true);
                         } else {
-                            let token = token.cloned();
                             return Err(self.syntax_error(
                                 scope,
                                 token,
@@ -3397,7 +3384,6 @@ impl<'a> Parser<'a> {
                         "key arguments must head a line in vertical contexts",
                     ));
                 }
-                let span = *span;
                 self.advance();
                 let (expr, consumed) = match self.peek()? {
                     Some(token!(Indent)) if allow_trailing => {
@@ -3583,7 +3569,6 @@ impl<'a> Parser<'a> {
                 }
                 token @ Some(token!(TokenInfo::Dedent)) if mode.is_vertical() => {
                     if params.is_empty() {
-                        let token = token.cloned();
                         return Err(self.syntax_error(
                             scope,
                             token,
@@ -3663,10 +3648,13 @@ impl<'a> Parser<'a> {
                         default,
                     })
                 }
-                Some(token!(TokenInfo::Ellipsis)) => {
+                Some(token @ token!(TokenInfo::Ellipsis)) => {
                     if variadic {
-                        let token = self.peek()?.cloned();
-                        return Err(self.syntax_error(scope, token, "duplicate rest parameter"));
+                        return Err(self.syntax_error(
+                            scope,
+                            Some(token),
+                            "duplicate rest parameter",
+                        ));
                     }
                     let ellipsis_span = self.advance();
 
@@ -3690,10 +3678,9 @@ impl<'a> Parser<'a> {
                         None => None,
                         // Error case - require whitespace before other delimiters
                         _ => {
-                            let token = next_token.cloned();
                             return Err(self.syntax_error(
                                 scope,
-                                token,
+                                next_token,
                                 "expected identifier or whitespace after '...'",
                             ));
                         }
@@ -4005,7 +3992,6 @@ impl<'a> Parser<'a> {
         match self.peek()? {
             Some(token @ token!(Keyword(Field))) => {
                 if !decorators.is_empty() {
-                    let token = token.clone();
                     return Err(self.syntax_error(
                         scope,
                         Some(token),
@@ -4020,14 +4006,11 @@ impl<'a> Parser<'a> {
             Some(token!(Dedent)) | None => {
                 Err(self.syntax_error(scope, None, "expected statement"))
             }
-            other => {
-                let token = other.cloned();
-                Err(self.syntax_error(
-                    scope,
-                    token,
-                    "class body only supports `field` and `def` declarations",
-                ))
-            }
+            other => Err(self.syntax_error(
+                scope,
+                other,
+                "class body only supports `field` and `def` declarations",
+            )),
         }
     }
 
@@ -4421,12 +4404,14 @@ impl<'a> Parser<'a> {
             self.expect(scope, &[ExpectKind::ArgSep])?;
             match self.peek()? {
                 Some(token!(Keyword(Let | Def | Class))) => (),
-                Some(token!(DecoratorOpen)) => {
-                    let token = self.peek()?.cloned();
-                    return Err(self.syntax_error(scope, token, "`pub` must follow decorators"));
+                Some(token @ token!(DecoratorOpen)) => {
+                    return Err(self.syntax_error(
+                        scope,
+                        Some(token),
+                        "`pub` must follow decorators",
+                    ));
                 }
                 other => {
-                    let other = other.cloned();
                     let _ = self.syntax_error(
                         scope,
                         other,
@@ -4440,7 +4425,7 @@ impl<'a> Parser<'a> {
         };
 
         if !decorators.is_empty() && !matches!(self.peek()?, Some(token!(Keyword(Def | Class)))) {
-            let token = self.peek()?.cloned();
+            let token = self.peek()?;
             return Err(self.syntax_error(
                 scope,
                 token,
@@ -4463,7 +4448,6 @@ impl<'a> Parser<'a> {
             Some(token!(Keyword(Bind))) => Ok(Stmt::Bind(self.parse_bind(scope)?)),
             Some(token!(Keyword(Import))) => Ok(Stmt::Import(self.parse_import(scope)?)),
             Some(token!(Keyword(Return), span)) => {
-                let span = *span;
                 self.advance();
                 let expr = match self.peek()? {
                     Some(token!(ArgSep)) => {
