@@ -96,15 +96,11 @@ def run_loaded bytecode synthetic inject
     load.run $bytecode
   else
     let module = injected_module $inject
-    let handle = load.import_handler do |name|
+    load.run $bytecode importer: do |name|
       if (name == synthetic)
         module
       else
-        throw std.ImportError(name)
-    try
-      load.run $bytecode
-    finally
-      handle.unregister()
+        load.import $name
 
 def compile_cached path mode name cache prelude synthetic inject
   let compiled = if (mode == "script")
