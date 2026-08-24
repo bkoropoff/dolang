@@ -34,7 +34,7 @@ afterward rather than erroring, since `len` cannot itself raise an error.
 
 ## Methods
 
-### `open name :mode? func?`
+### `open name :mode? :size? :compression? func?`
 
 Opens a file within the archive. Always creates a regular file entry in
 write mode — use [`create_dir`](#create_dir-name-mode) or
@@ -43,16 +43,30 @@ which carry no content and so have no use for a write handle.
 
 #### Parameters
 
-| Name   | Type                    | Description                                          |
-| ------ | ----------------------- | ---------------------------------------------------- |
-| `name` | [`Str`](../std/str.md)  | Name/path of the file within the archive             |
-| `mode` | [`Int`](../std/int.md)? | Unix permission bits in write mode (default: `0`)    |
-| `func` | func                    | Callable to run with the file; auto-closes when done |
+| Name          | Type                    | Description                                          |
+| ------------- | ----------------------- | ---------------------------------------------------- |
+| `name`        | [`Str`](../std/str.md)  | Name/path of the file within the archive             |
+| `mode`        | [`Int`](../std/int.md)? | Unix permission bits in write mode (default: `0`)    |
+| `size`        | [`Int`](../std/int.md)? | Expected uncompressed size — see below               |
+| `compression` | [`Sym`](../std/sym.md)? | `:STORED:`, `:DEFLATE:` (default), or `:ZSTD:`       |
+| `func`        | func                    | Callable to run with the file; auto-closes when done |
+
+`mode`, `size`, and `compression` apply to entries being created; passing
+any of them in read mode is an error.
 
 ##### Mode-specific behavior
 
 - **Read mode:** Opens an existing file for reading
 - **Write mode:** Creates a new file entry for writing
+
+##### `size` and entries over 4 GiB
+
+The writer reserves space for an entry's ZIP64 size fields in its local file
+header before any data is written, and patches the real sizes in afterward. A
+field that was not reserved cannot appear later, so an entry that turns out to
+exceed 4 GiB fails when it is closed unless `size` announced it up front. Pass
+the uncompressed size whenever it is known; it is a hint, and the actual sizes
+are what end up recorded.
 
 #### Returns
 
@@ -72,6 +86,14 @@ open "archive.zip" do |archive|
 open "output.zip" "w" do |archive|
   archive.open "data.txt" mode: 0o644 do |file|
     file.write "Hello, World!"
+
+# Store an already-compressed payload without deflating it again
+open "bundle.zip" "w" do |archive|
+  let total = payload.metadata().size
+  archive.open "disk.qcow2" compression: :STORED: size: $total do |file|
+    payload.open rb do |source|
+      for chunk = source
+        file.write $chunk
 ```
 
 ### `create_dir name :mode?`

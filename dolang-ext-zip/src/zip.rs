@@ -117,6 +117,45 @@ fn parse_mode_bits<'v, 's>(
         .ok_or_else(|| Error::value(strand, "mode: expected permission bits in range 0..=0o7777"))
 }
 
+/// Parses an entry's expected uncompressed size, which reserves the ZIP64 size
+/// fields in the local file header when it crosses the legacy 4 GiB limit.
+fn parse_size<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    size: Option<Slot<'v, '_>>,
+) -> Result<'v, 's, Option<u64>> {
+    let Some(size) = size else {
+        return Ok(None);
+    };
+    let size = size
+        .to_i64(strand)
+        .map_err(|_| Error::type_error(strand, "size: expected non-negative Int"))?;
+    u64::try_from(size)
+        .map(Some)
+        .map_err(|_| Error::value(strand, "size: expected non-negative Int"))
+}
+
+/// Parses an entry's compression method, defaulting to `Deflate`.
+fn parse_compression<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    compression: Option<Slot<'v, '_>>,
+    stored: Sym<'v, 'v>,
+    deflate: Sym<'v, 'v>,
+    zstd: Sym<'v, 'v>,
+) -> Result<'v, 's, Compression> {
+    let Some(compression) = compression else {
+        return Ok(Compression::Deflate);
+    };
+    match compression.as_sym(strand) {
+        Some(sym) if sym == stored => Ok(Compression::Stored),
+        Some(sym) if sym == deflate => Ok(Compression::Deflate),
+        Some(sym) if sym == zstd => Ok(Compression::Zstd),
+        _ => Err(Error::value(
+            strand,
+            "compression: expected :STORED:, :DEFLATE:, or :ZSTD:",
+        )),
+    }
+}
+
 /// Opens the entry at `index` for reading. Shared by `Archive::open` (after
 /// resolving a name to an index via linear scan) and `Entry::open` (which
 /// already knows its index).
@@ -204,6 +243,11 @@ impl<'v> Object<'v> for Archive {
     fn build<'a>(mut builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
         let close = builder.sym("close");
         let mode_sym = builder.sym("mode");
+        let size_sym = builder.sym("size");
+        let compression_sym = builder.sym("compression");
+        let stored = builder.sym("STORED");
+        let deflate = builder.sym("DEFLATE");
+        let zstd = builder.sym("ZSTD");
         builder
             .get("entries", |this, strand, out| {
                 let annex = this.annex();
@@ -222,7 +266,15 @@ impl<'v> Object<'v> for Archive {
                 async move |this, strand, args, out, [mut file, mut tmp]| {
                     let annex = this.annex();
                     let global = annex.global;
-                    let ([name], [block, mode]) = unpack!(strand, args, 1, 1, mode_sym = None)?;
+                    let ([name], [block, mode, size, compression]) = unpack!(
+                        strand,
+                        args,
+                        1,
+                        1,
+                        mode_sym = None,
+                        size_sym = None,
+                        compression_sym = None
+                    )?;
                     let name = name.to_string(strand)?;
 
                     if annex.is_file_open() {
@@ -238,11 +290,20 @@ impl<'v> Object<'v> for Archive {
                         };
                         match inner {
                             ArchiveInner::Read(archive) => {
-                                if mode.is_some() {
-                                    return Err(Error::type_error(
-                                        strand,
-                                        "mode is only valid when creating entries in write mode",
-                                    ));
+                                for (option, given) in [
+                                    ("mode", mode.is_some()),
+                                    ("size", size.is_some()),
+                                    ("compression", compression.is_some()),
+                                ] {
+                                    if given {
+                                        return Err(Error::type_error(
+                                            strand,
+                                            format!(
+                                                "{option} is only valid when creating entries in \
+                                                 write mode"
+                                            ),
+                                        ));
+                                    }
                                 }
                                 let mut index = None;
                                 for (i, entry) in archive.file().entries().iter().enumerate() {
@@ -258,8 +319,18 @@ impl<'v> Object<'v> for Archive {
                             }
                             ArchiveInner::Write(writer) => {
                                 let mode_bits = parse_mode_bits(strand, mode)?;
-                                let mut entry =
-                                    ZipEntryBuilder::new(name.into(), Compression::Deflate);
+                                let size = parse_size(strand, size)?;
+                                let compression =
+                                    parse_compression(strand, compression, stored, deflate, zstd)?;
+                                let mut entry = ZipEntryBuilder::new(name.into(), compression);
+                                // Reserving the ZIP64 size fields up front is what
+                                // makes an entry larger than 4 GiB writable at all:
+                                // the seekable writer patches the header in place on
+                                // close, so a slot that was not reserved cannot
+                                // appear later.
+                                if let Some(size) = size {
+                                    entry = entry.size(size, size);
+                                }
                                 entry = entry.unix_permissions(FILE_TYPE | mode_bits);
                                 let entry =
                                     writer.write_entry_seekable(entry).await.into_do(strand)?;
