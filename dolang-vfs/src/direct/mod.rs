@@ -2053,14 +2053,28 @@ impl Direct {
             }
 
             let mut paths = Vec::new();
-            let walk = match glob {
-                Some(g) => g.walk_with_behavior(&walk_root, behavior),
-                None => Glob::tree().walk_with_behavior(&walk_root, behavior),
+
+            // A pattern with no wildcards is partitioned entirely into
+            // `prefix`, leaving no glob; it matches if it exists, or else not
+            let Some(glob) = glob else {
+                if std::fs::symlink_metadata(&walk_root).is_ok() {
+                    paths.push(prefix.clone());
+                }
+                return paths.into_iter().map(typed_path).collect::<Result<_>>();
             };
 
-            for entry in walk {
+            for entry in glob.walk_with_behavior(&walk_root, behavior) {
                 let entry = entry.map_err(io::Error::other)?;
-                paths.push(prefix.join(entry.root_relative_paths().1));
+                let relative = entry.root_relative_paths().1;
+                // The walk root reports itself with an empty root-relative
+                // path, and `PathBuf::join("")` appends a trailing separator,
+                // producing a path every later `stat` of a non-directory
+                // rejects with ENOTDIR.
+                paths.push(if relative.as_os_str().is_empty() {
+                    prefix.clone()
+                } else {
+                    prefix.join(relative)
+                });
             }
 
             paths.sort();
