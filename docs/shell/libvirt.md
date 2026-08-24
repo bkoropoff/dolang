@@ -75,6 +75,124 @@ domain.undefine()
 that the domain have exactly one file-backed disk and refuses to overwrite its
 destination.
 
+`compress: true` uses qcow2's zstd compression, which needs QEMU 5.1+ to read
+the result — the same kind of floor `io:`'s `:IO_URING:` default already sets at
+QEMU 6.0+. Pass `compress: :ZLIB:` for an image an older QEMU must open; it is
+around nine times slower to write for the same size.
+
+## Gold Images
+
+A disk alone does not describe a guest: the user to log in as, where
+`dolang-vfs` lives, which `app` namespace owns the SSH key, and the OS and
+architecture are all configuration this module recorded when it created the
+domain. `export` writes the disk and that configuration together as a bundle,
+and `create bundle:` reconstitutes both.
+
+`build` is the whole minting pass — it provisions a domain exactly as `create`
+does, shuts it down cleanly, exports it, and tears it down:
+
+```
+libvirt.build ./freebsd-gold.dolvm
+  image: freebsd.qcow2.xz
+  os: :FREEBSD:
+  packages:
+    - git
+```
+
+```
+let domain = libvirt.create
+  bundle: ./freebsd-gold.dolvm
+  app: dolang-libvirt-test
+```
+
+Mint in a pass of its own and always start real work from the bundle, including
+on the run that just built it. A caller that provisions when the bundle is
+missing and restores when it is present is running its work against two
+different guests — one of them freshly cloud-inited, with first-boot services
+and a grown filesystem still settling. The divergence lives on the rarer path,
+which is where it will be found last.
+
+`Domain.export` is the same operation without the orchestration, for a domain
+you already have in hand:
+
+```
+domain.shutdown()
+domain.export ./freebsd-gold.dolvm
+domain.undefine()
+```
+
+Restoring runs no provisioning at all — no seed, no cloud-init, no payload
+install — so the domain is usable as soon as it accepts SSH. That is the point:
+provisioning is what costs minutes on a FreeBSD guest and half an hour on a
+Windows one. The `add:` and `run:` actions still run.
+
+Because the bundle already answers them, `os:`, `arch:`, `user:`, `dolang:`,
+`packages:`, `init:`, and `image_digest:` are errors alongside `bundle:` rather
+than arguments that quietly do nothing. `app:` must match the one the bundle was
+exported under: the guest trusts the SSH key generated for that app, and any
+other one leaves it refusing connections. `memory:`, `vcpus:`, and `disk_size:`
+default to what the exported domain used, and may be overridden.
+
+A bundle may be a local path or an HTTP(S) URL — it is fetched and cached like
+any other download, and `bundle_digest:` pins it.
+
+### The Bundle Format
+
+A bundle is a ZIP holding two members, conventionally named with a `.dolvm`
+extension so nothing mistakes it for something `qemu-img` or VirtualBox can
+open:
+
+| Member          | Contents                                                                                                                         |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `manifest.json` | Format version, `app`, `os`, `arch`, guest user, VFS command path, memory, vCPUs, and the disk's format, size, and BLAKE3 digest |
+| `disk.qcow2`    | The flattened qcow2, compressed by `qemu-img` and `STORE`d as a ZIP member                                                       |
+
+The disk is `STORE`d because `qemu-img convert -c` has already compressed it —
+with zstd by default, and in parallel, which takes a ninth of the time zlib does
+for the same size. Compressing the qcow2 rather than the ZIP entry keeps the
+image compressed in the store it is extracted into, where it backs however many
+domains are laid over it; storing it in the ZIP also leaves it a contiguous byte
+range that extraction copies out directly. Its BLAKE3 digest is recorded because
+a ZIP entry's CRC32 is a corruption check rather than an integrity property, and
+the disk is verified again when it is extracted into the image store, where the
+bundle's own digest no longer covers it. The manifest also embeds the domain XML
+this module generated, as an informational escape hatch; the structured fields
+are what reconstitution actually uses.
+
+### Reclaiming Freed Space
+
+A bundle is as large as the disk's *allocated* clusters, not its live data.
+Blocks a provisioning run wrote and then deleted are still allocated, still hold
+their old contents, and still compress like real data — so a gold image that
+installed a toolchain and cleaned up after itself carries the debris.
+
+The domain disk is defined with `discard="unmap"` and `detect_zeroes="unmap"`,
+so a guest that trims its filesystem before shutdown actually shrinks the
+export, and so does a guest that can only overwrite its free space with zeroes.
+Neither reaches qcow2 otherwise: without `discard`, QEMU advertises no discard
+feature to the guest and drops the request. Unmapping cannot expose the base
+image beneath the overlay — qcow2 records a zero cluster and frees the host
+cluster, so the guest still reads zeros.
+
+Issuing the trim is the guest's job, and how depends on it: `fstrim -a` on
+Linux, `zpool trim -w` on ZFS, `defrag /L` on Windows. FreeBSD's UFS has no
+online batch trim — `tunefs -t enable` only affects later deletions and
+`fsck_ffs -E` needs the filesystem unmounted — so there the fallback is to write
+zeroes over the free space and delete them.
+
+Neither `export` nor `build` does any of this on its own: what the operation
+costs, and whether it can elevate to run it at all, are the caller's to know.
+Add it as a `run:` action, which happens before the shutdown `build` performs.
+
+### Clean Shutdown
+
+`export` refuses a domain that did not reach `:SHUTOFF:` through a guest
+shutdown — one that was destroyed or that crashed has a disk in an arbitrary
+state, spectacularly so under `cache: :UNSAFE:`, where guest flushes are
+discarded outright. libvirt reports the reason as `unknown` once it has
+restarted, so `force: true` exists for a domain that did shut down cleanly but
+can no longer prove it.
+
 ## Running a Script in a Domain
 
 The bundled `libvirt` entrypoint compiles a local script and runs it through an

@@ -1,9 +1,16 @@
-import digest libvirt sys test
+import digest libvirt rand sys xml
   fs:
     - Path
     - with_temp_dir
+  test:
+    - tags
+    - skip
+    - fixture
+    - test
+    - assert
+    - assert_eq
 
-test.tags slow release
+tags slow release
 
 let FREEBSD_IMAGE = "https://download.freebsd.org/releases/VM-IMAGES/15.1-RELEASE/amd64/Latest/FreeBSD-15.1-RELEASE-amd64-BASIC-CLOUDINIT-ufs.raw.xz"
 let CACHE_DIR = Path(".cache").absolute()
@@ -13,19 +20,19 @@ else
   "bootstrap"
 
 if (sys.os_info().os != :LINUX:)
-  test.skip "libvirt provisioning requires Linux"
+  skip "libvirt provisioning requires Linux"
 if (sys.cpu_info().arch != :X86_64:)
-  test.skip "the FreeBSD CI image requires x86-64"
+  skip "the FreeBSD CI image requires x86-64"
 for program = ["virsh", "libvirtd", "qemu-img", "cloud-localds", "genisoimage", "ssh", "scp", "ssh-keygen"]
   if !run[program].which()
-    test.skip "$program is not installed"
+    skip "$program is not installed"
 
-#[test.fixture]
+#[fixture]
 def cached block ...rest
   CACHE_DIR.create_dir all: true
   env XDG_CACHE_HOME: $CACHE_DIR XDG_DATA_HOME: (CACHE_DIR / "local") do block(...rest)
 
-#[test.test]
+#[test]
 #[cached]
 def provision_freebsd_and_run_command()
   with_temp_dir do |dir|
@@ -70,13 +77,58 @@ def provision_freebsd_and_run_command()
 
     try
       let output = domain.with do sub do run printf "hello world"
-      test.assert_eq $output "hello world"
+      assert_eq $output "hello world"
 
       domain.upload $source /tmp/dolang-libvirt-transfer.bin
       domain.download /tmp/dolang-libvirt-transfer.bin $downloaded
       let downloaded_data = downloaded.read b
-      test.assert_eq (digest.blake3 downloaded_data) $expected
+      assert_eq (digest.blake3 downloaded_data) $expected
+
+      export_and_restore $domain
     finally
       if (domain.state() != :SHUTOFF:)
         domain.destroy()
       domain.undefine()
+
+# Mints a bundle from the provisioned domain and brings a second domain up from
+# it, which is the whole point of the format: no seed, no cloud-init, no payload
+# install — the guest comes back as it was left.
+#
+# The bundle goes under `CACHE_DIR` rather than a temp directory: it is
+# gigabytes, and `/tmp` is commonly a tmpfs.
+def export_and_restore domain
+  let sentinel = "/var/tmp/dolang-libvirt-gold"
+  let token = (rand.string 16)
+  domain.with do
+    Path(sentinel).write $token
+
+  domain.shutdown()
+  assert_eq $domain.state() :SHUTOFF:
+
+  let bundle = (CACHE_DIR / "gold.dolvm")
+  bundle.remove ignore: true
+  domain.export $bundle
+  try
+    let restored = libvirt.create
+      bundle: $bundle
+      app: dolang-libvirt-test
+      memory: 4096
+      vcpus: 2
+      cache: :UNSAFE:
+    try
+      # The guest is the one that was exported: its VFS command path came back
+      # from the manifest, and the file written before shutdown is still there.
+      let output = restored.with do sub do run printf "hello world"
+      assert_eq $output "hello world"
+      let restored_token = restored.with do Path(sentinel).read().trim()
+      assert_eq $restored_token $token
+
+      # No seed means nothing was re-provisioned.
+      let document = xml.encode $restored.dumpxml()
+      assert (!document.contains("cdrom"))
+    finally
+      if (restored.state() != :SHUTOFF:)
+        restored.destroy()
+      restored.undefine()
+  finally
+    bundle.remove ignore: true
