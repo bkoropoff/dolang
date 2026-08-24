@@ -5,54 +5,68 @@
 # VM created for the job. Runner logs are not a terminal, so its progress
 # indicators render as plain step lines.
 
-import cache fs http libvirt proc progress sudo sys
+import cache fs gold http libvirt proc progress sudo sys
 
 # Libvirt domain name for the CI VM.
 pub let VM_NAME = "dolang-ci"
 
-# Application name scoping the VM's cached assets. The runner cache paths in
-# ../action.yml are derived from it.
-let VM_APP = "dolang-freebsd-ci"
-
-# The raw image rather than the qcow2 one: the domain disk is a qcow2 overlay
-# either way, and a raw backing file spares every overlay read miss a second
-# layer of qcow2 cluster translation. The two downloads are within 0.2% of the
-# same size, though the raw one decompresses to the image's full virtual size.
-let VM_IMAGE = "https://download.freebsd.org/releases/VM-IMAGES/15.1-RELEASE/amd64/Latest/FreeBSD-15.1-RELEASE-amd64-BASIC-CLOUDINIT-ufs.raw.xz"
-
-# Directories worth reclaiming on the runner before staging a VM image.
+# Runner directories jettisoned to make room for the VM image and its overlay,
+# in the order they are taken.
+#
+# Ordered by bytes freed per file removed rather than by size. The removal
+# bottoms out in one `unlink` per file, so what a tree costs is its file count,
+# not its bytes — and `/usr/local/lib/android`, the largest single win on a
+# runner, is also several hundred thousand files of it. That is most of why this
+# step took two to three minutes when it was the first thing on the list; here it
+# is last, so a run that reaches its target earlier never pays for it.
 let RUNNER_BALLAST = $
-  - /usr/local/lib/android
+  - /usr/share/swift
+  - /opt/hostedtoolcache/CodeQL
   - /usr/share/dotnet
+  - /usr/local/.ghcup
+  - /opt/ghc
+  - /usr/local/lib/android
 
-# Pinned bootstrap release, shared with the setup-dolang action.
-let VERSION_FILE = ".github/dolang-version"
+# Free space to stop reclaiming at, for a run that brings the VM up from the
+# gold bundle and one that has to mint it first.
+#
+# The minting figure is larger by roughly the base image: `create` decompresses
+# it to its full virtual size, and it stays on disk for the rest of the job
+# alongside the overlay the build then grows. Restoring from a bundle never
+# fetches it at all, which is the case worth being cheap in — it is every run
+# but the rare one.
+#
+# Both are estimates. Overshooting costs a directory removal that was not
+# needed; undershooting costs a build that runs the disk out halfway through, so
+# they are set high. An unreachable target just means the whole list goes, which
+# is what this step did unconditionally before — the failure mode is the old
+# behavior rather than a broken job. Tune against what `reclaim` reports.
+let RESTORE_FREE = (40 * 1024 * 1024 * 1024)
+let MINT_FREE = (64 * 1024 * 1024 * 1024)
 
 let PROGRESS_STYLE = $
   message:
     width: 120
 
-# The guest's `~/.profile`, which is what puts the Rust toolchain on `PATH`.
-#
-# `dolang-vfs` reconstructs a login environment by running the account's login
-# shell (see `ssh.with`), so this file — not the environment of any one
-# command — is what every later build step inherits.
-#
-# Written during provisioning rather than left to rustup's own `PATH` edit, so
-# that it is a fact about the guest either way: a run whose toolchain came from
-# a restored cache never executes the installer at all, and would otherwise
-# have a `cargo` on disk that nothing could resolve.
-# Spelled out in full rather than prepending to whatever `PATH` arrives,
-# because writing this file replaces the base image's own `.profile`: the
-# `pkg`-installed build prerequisites live in `/usr/local/bin`, which an
-# inherited `PATH` from `sshd` is not guaranteed to include.
-pub let PROFILE = r|
-  PATH="$HOME/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-  export PATH
+# Bytes free on the runner's root filesystem.
+def free_space()
+  fs.fs_metadata("/").available
 
-# Reads the pinned Dolang release tag from the checked out workspace.
-def dolang_version()
-  fs.read(VERSION_FILE).trim()
+# Removes runner ballast until `required` bytes are free, or until the list runs
+# out.
+#
+# Elevates once around the whole loop rather than per directory: `sudo.with`
+# spawns an agent, and the free-space probe between removals runs through the
+# same one.
+def reclaim required
+  let before = free_space()
+  sudo.with do
+    for path = RUNNER_BALLAST
+      if (free_space() >= required)
+        break
+      fs.remove all: true ignore: true $path
+  let after = free_space()
+  echo "reclaimed $((after - before) // 1048576) MiB; $(after // 1048576) MiB free"
 
 # Exports `name=value` to subsequent steps of the job.
 def export name value
@@ -121,51 +135,27 @@ def unconfine()
     catch proc.Error: _
       nil
 
-# Creates the CI VM and returns a handle to it.
+# Brings the CI VM up from the gold bundle.
+#
+# No provisioning happens here at all: no seed, no cloud-init, no `pkg`, no
+# payload install. Everything the guest needs was baked in by `gold.build`, and
+# what is left is the domain sizing, which the job — not the image — decides.
 def create_vm()
   libvirt.create
-    image: $VM_IMAGE
-    os: :FREEBSD:
-    dolang: (dolang_version())
+    bundle: (gold.path())
     name: $VM_NAME
-    app: $VM_APP
+    app: $gold.VM_APP
     memory: 12288
     vcpus: 4
-    disk_size: 50G
     # The domain is destroyed with the runner at the end of the job, so there
     # is nothing to lose by dropping guest flushes — and a great deal of the
     # build's write traffic is temporaries that then never need to reach the
     # host's storage at all. Anything worth keeping is tarred out of the guest
     # while it is still running.
+    #
+    # Safe here in a way it is not for the minting pass, whose whole output is
+    # a disk meant to outlive the run; see `gold.build`.
     cache: :UNSAFE:
-    packages:
-      - sqlite3
-      - pkgconf
-      - curl
-      - llvm19
-      - sudo
-    init:
-      add:
-        target: /etc/rc.conf.d/firstboot_pkg_upgrade
-        content: |
-          firstboot_pkg_upgrade_enable="NO"
-      # Grants the `ci` user passwordless sudo, so shell tests can provision
-      # and tear down scratch `md(4)` filesystems (for ACL coverage that
-      # needs a POSIX- or NFSv4-ACL-enabled mount) via the `sudo`/`admin`
-      # bundled modules instead of mutating the guest's root filesystem.
-      add:
-        target: /usr/local/etc/sudoers.d/ci
-        content: |
-          ci ALL=(ALL) NOPASSWD: ALL
-        chmod: 0o440
-        owner: "root:wheel"
-    # A top-level `add:` rather than an `init:` one: this runs once SSH is up,
-    # so the user exists and the file is written through the guest's VFS with
-    # the right ownership
-    add:
-      target: /home/ci/.profile
-      content: $PROFILE
-      chmod: 0o644
 
 # Installs the Rust toolchain into the guest.
 #
@@ -176,9 +166,9 @@ def create_vm()
 # `http.get` runs on the runner and its chunks are piped into the guest's
 # `sh`, so the download uses the runner's network rather than the domain's
 # comparatively slow user-mode networking.
-# `--no-modify-path` because `PROFILE` already puts the toolchain on `PATH`;
-# letting rustup append its own line as well would leave two sources of truth
-# for the same thing, only one of which survives into a cached run.
+# `--no-modify-path` because `gold.PROFILE` already puts the toolchain on
+# `PATH`; letting rustup append its own line as well would leave two sources of
+# truth for the same thing, only one of which survives into a cached run.
 #
 # `--profile minimal` drops rust-docs, clippy, and rustfmt — several hundred
 # megabytes that this job does not use, off both the download and the cached
@@ -230,6 +220,9 @@ pub def setup
 do
   # Filled in by "create CI VM" below when `target` needs one.
   let vm = nil
+  # Decided before any step runs, because it also sizes how much runner disk
+  # the reclaim step has to free.
+  let minting = (target == "x86_64-freebsd" && !gold.path().exists())
 
   progress.with style: $PROGRESS_STYLE do
     progress.steps message: "set up runner" icon: 🚀
@@ -253,7 +246,15 @@ do
         # run, pointing the `dolang-ci` wrapper at it for the rest of the job.
         - name: "reclaim runner disk space"
           icon: 🧹
-          do sudo.with do fs.remove all: true ignore: true ...RUNNER_BALLAST
+          do reclaim (minting && MINT_FREE || RESTORE_FREE)
+        # Usually a no-op: the bundle arrives from the runner cache, and only a
+        # change to the recipe in gold.dol (which is what keys that cache) sends
+        # this down the minting path. Doing it here rather than in the workflow
+        # keeps the decision next to the thing that answers it.
+        - name: "mint gold image"
+          icon: 🏗️
+          do if minting
+            gold.build()
         - name: "create CI VM"
           icon: 🖥️
           do 

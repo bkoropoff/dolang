@@ -1,0 +1,305 @@
+# The FreeBSD gold image: what goes into it, and the pass that mints it.
+#
+# Provisioning a FreeBSD guest from the upstream cloud image costs minutes of
+# every job — a cloud-init boot, a `pkg` install of the build prerequisites, and
+# a `dolang-vfs` payload install. None of it depends on the commit under test,
+# so it is done once and carried between runs as a `.dolvm` bundle, which
+# `libvirt.create bundle:` brings back up with no provisioning at all.
+#
+# Minting is a pass of its own (`build`), and the job always starts its real
+# work from the bundle — including on the run that just minted it. A job that
+# provisioned on a cache miss and restored on a hit would be running against two
+# different guests, and the divergence would live on the rarer path.
+#
+# Everything a bundle's contents depend on lives in this module, so hashing this
+# file is what keys the cache entry in ../action.yml. Adding a package or
+# changing the image here mints a new gold image on the next run; changing how
+# the *job* uses the guest (ci.dol next door) does not.
+
+import fs libvirt proc progress sudo
+
+# Application name scoping the VM's cached assets. The runner cache paths in
+# ../action.yml are derived from it.
+pub let VM_APP = "dolang-freebsd-ci"
+
+# The raw image rather than the qcow2 one: the domain disk is a qcow2 overlay
+# either way, and a raw backing file spares every overlay read miss a second
+# layer of qcow2 cluster translation. The two downloads are within 0.2% of the
+# same size, though the raw one decompresses to the image's full virtual size.
+#
+# Only the minting pass ever fetches it, which is why the download cache is no
+# longer carried between runs — see ../action.yml.
+let VM_IMAGE = "https://download.freebsd.org/releases/VM-IMAGES/15.1-RELEASE/amd64/Latest/FreeBSD-15.1-RELEASE-amd64-BASIC-CLOUDINIT-ufs.raw.xz"
+
+# Bundle file name on the runner. ../action.yml names this path as its
+# `actions/cache` path, so the two have to agree exactly; a mismatch fails
+# silently as "Path(s) specified in the action for caching do(es) not exist".
+let BUNDLE = "dolang-freebsd-gold.dolvm"
+
+# Pinned bootstrap release, shared with the setup-dolang action. The guest's
+# `dolang-vfs` is installed at mint time, so this is part of what the bundle's
+# cache key covers.
+let VERSION_FILE = ".github/dolang-version"
+
+# Guest packages the build needs.
+let PACKAGES = $
+  - sqlite3
+  - pkgconf
+  - curl
+  - llvm19
+  - sudo
+
+# Scratch the mint leaves behind, which would otherwise be baked into every
+# guest restored from the bundle.
+#
+# `/var/cache/pkg` is deliberately absent: it is live data until `pkg clean`
+# runs, so neither a trim nor the zero-fill below can reclaim it. Removing the
+# packages is what turns it into free space, and `clean` does that first.
+#
+# `/tmp/*` is absent for a sharper reason: it is where the elevated agent
+# running this very removal keeps its socket. `_vfs.with_socket_dir` puts the
+# socket under `xdg.runtime_dir()`, which is nil when `XDG_RUNTIME_DIR` is unset
+# — as it is for an SSH login on this guest — and falls back to `with_temp_dir`,
+# so the directory lands in `/tmp` and a `/tmp/*` glob returns it. There is
+# nothing in a freshly provisioned guest's `/tmp` worth the hazard.
+let SCRATCH_PATHS = $
+  - "/var/tmp/*"
+
+# Per-machine identity that must not be shared by every guest restored from the
+# bundle.
+#
+# Both are regenerated at boot — `/etc/rc.d/hostid` mints a fresh UUID and
+# `/etc/rc.d/sshd` generates host keys when it finds none — and regenerated host
+# keys cost the restore side nothing: `known_hosts` is per domain and lives in
+# that domain's working directory, and the module connects with
+# `StrictHostKeyChecking=accept-new`.
+let IDENTITY_PATHS = $
+  - "/etc/hostid"
+  - "/etc/ssh/ssh_host_*"
+
+# The guest's `~/.profile`, which is what puts the Rust toolchain on `PATH`.
+#
+# `dolang-vfs` reconstructs a login environment by running the account's login
+# shell (see `ssh.with`), so this file — not the environment of any one
+# command — is what every later build step inherits.
+#
+# Written at mint time rather than left to rustup's own `PATH` edit, so that it
+# is a fact about the guest either way: a run whose toolchain came from a
+# restored cache never executes the installer at all, and would otherwise have a
+# `cargo` on disk that nothing could resolve.
+#
+# Spelled out in full rather than prepending to whatever `PATH` arrives, because
+# writing this file replaces the base image's own `.profile`: the
+# `pkg`-installed build prerequisites live in `/usr/local/bin`, which an
+# inherited `PATH` from `sshd` is not guaranteed to include.
+pub let PROFILE = r|
+  PATH="$HOME/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  export PATH
+
+# `llvm19` is installed for one reason: `bindgen`, which `dolang-ext-sqlite`
+# pins with `clang-sys` in `runtime` mode. That makes it *dlopen* `libclang`
+# rather than link it, and it never execs a compiler or reads a C++ header — so
+# of the package's 1.7 GB the build can reach only three things:
+#
+# | Kept                        | Size   | Why |
+# | --------------------------- | ------ | ---------------------------------------- |
+# | `lib/libclang.so*`          | 36 MB  | What `clang-sys` dlopens |
+# | `lib/libLLVM.so*`           | 118 MB | The only non-base library `ldd` shows it needing |
+# | `lib/clang`                 | 58 MB  | Compiler builtin headers, found relative to the library |
+#
+# The rest — 859 MB of static archives, 413 MB of `bin`, 122 MB of `include`,
+# and the `libclang-cpp`/`libMLIR`/`liblldb` shared libraries — is unreachable.
+#
+# A keep-list rather than a list of things to delete, because the deny side is a
+# dozen globs that quietly stop matching when the port bumps a version: its
+# failure mode is a silently fatter image, discovered months later. Here an
+# unrecognized new file is removed instead, and the failure mode is a build that
+# breaks loudly on the run that introduced it.
+#
+# Unlike the base debug symbols this cannot go through `pkg`: `llvm19` is a
+# single package with no subpackage split, so the files do come out from under
+# the package database. `pkg check -s` would report it altered, and a
+# `pkg upgrade` would restore the files wholesale. Neither happens: nothing in
+# the job runs `pkg check`, and the only `pkg upgrade` in play is the firstboot
+# one, which has already run by the time `clean` does and never runs again on a
+# domain restored from the bundle.
+let LLVM_ROOT = "/usr/local/llvm19"
+
+# Whether a `$LLVM_ROOT/lib` entry is one of the three kept above. The `.so`,
+# `.so.19.1` and `.so.19.1.7` spellings are the same library and its symlinks,
+# which is why these are prefixes rather than exact names.
+def llvm_keep name
+  (name == "clang"
+    || name.starts_with("libclang.so")
+    || name.starts_with("libLLVM.so")
+    || name.starts_with("libLLVM-"))
+
+# Reads the pinned Dolang release tag from the checked out workspace.
+pub def dolang_version()
+  fs.read(VERSION_FILE).trim()
+
+# Where the bundle sits on the runner, between `build` and `actions/cache`.
+pub def path()
+  (fs.Path(env["RUNNER_TEMP"]) / BUNDLE).absolute()
+
+# Overwrites the root filesystem's free space with zeroes, so that the export
+# does not carry it.
+#
+# A bundle is as large as the disk's *allocated* clusters, and a block that
+# provisioning wrote and then deleted is still allocated and still holds its old
+# contents. The domain disk is defined with `discard="unmap"` and
+# `detect_zeroes="unmap"`, so writing zeroes over that space frees the backing
+# clusters rather than merely filling them with bytes that compress well —
+# which matters here because FreeBSD's UFS has no online batch trim to issue
+# instead (`tunefs -t enable` only affects later deletions, and `fsck_ffs -E`
+# needs the filesystem unmounted).
+#
+# Zeroes the swap partition, which `zero_fill` cannot reach.
+#
+# The image's disk is five partitions, only one of which is a filesystem: a
+# 1 GiB swap partition sits beside the UFS root, and filling the root's free
+# space says nothing about it. Anything the guest paged out during provisioning
+# is allocated in the overlay and copied into the bundle verbatim.
+#
+# Defensive rather than corrective — at 12 GiB of RAM this guest has not been
+# observed to page meaningfully, and the bundle's size says it is not paying for
+# this today. It is a bounded one-time write that stops a future recipe (a
+# heavier package set, a smaller domain) from quietly costing a gigabyte.
+#
+# The device comes from `swapinfo` rather than a hardcoded path, since whether
+# it is `/dev/gpt/swapfs` or `/dev/vtbd0p3` depends on labelling and bus. It has
+# to be read *before* `swapoff`, which is what makes `swapinfo` stop reporting
+# it.
+def zero_swap()
+  let report = sub do run swapinfo
+  let devices = $
+    for line = report.split("\n").skip(1)
+      $line.trim().split(" ").next()
+  if devices.len
+    run swapoff -a
+    for device = devices
+      try
+        # Running off the end of the device is the success condition, exactly as
+        # in `zero_fill`, and reported the same way.
+        run dd if=/dev/zero of=$device bs=1m status=none
+      catch proc.Error: _
+        nil
+
+# The image is a single UFS root partition, so one pass covers it.
+#
+# The `fsync` before the removal is the whole point of the exercise, not a
+# nicety. `detect_zeroes` acts on the write as qemu sees it, so a zero that
+# never leaves the guest's buffer cache frees nothing — and UFS soft updates
+# will happily *cancel* the pending writes for a file that is unlinked before
+# they are issued, which is exactly what filling and immediately deleting looks
+# like. Removing first and syncing after can therefore discard the entire pass:
+# every block is still allocated in the overlay, still holding its old contents.
+def zero_fill()
+  let fill = "/var/tmp/dolang-zerofill"
+  try
+    # Running out of space is the success condition, and `dd` reports it as a
+    # non-zero exit. A real failure is indistinguishable from it here, which
+    # is acceptable: nothing downstream depends on this having worked, only on
+    # the file being gone.
+    run dd if=/dev/zero of=$fill bs=1m status=none
+  catch proc.Error: _
+    nil
+  # `fsync(1)` rather than `sync(1)`: FreeBSD's `sync(2)` walks the mounts
+  # with `MNT_NOWAIT` and returns without waiting for the I/O to land, while
+  # `fsync` names the one file that matters and blocks until it has.
+  #
+  # `fs.sync` does the same thing without leaving the VFS, but this module
+  # runs under the pinned bootstrap release, which predates it. Worth
+  # switching once .github/dolang-version moves past it.
+  run fsync $fill
+  fs.remove $fill ignore: true
+  # The data is already down; this is for the removal's own metadata.
+  run sync
+
+# Prepares the guest for export. Runs through the VM's VFS as the last `run:`
+# action, so `build` performs its shutdown immediately afterwards.
+# Both phases get an indicator: the zero-fill writes the disk's whole free
+# space, tens of gigabytes of it, and a step that long with no output is
+# indistinguishable from a hung one in a runner log.
+#
+# One `sudo.with` around both rather than one apiece, which would spawn a
+# second elevated agent to no purpose.
+def clean()
+  sudo.with do
+    progress.show icon: 🧹 message: "clean up guest" do |_|
+      # 1.3 GB of separated DWARF for the base system, none of which CI can
+      # reach: nothing links or execs a `.debug` file, and only lldb/kgdb ever
+      # opens one. Split roughly 590 MB of kernel and modules against 760 MB of
+      # userland.
+      #
+      # FreeBSD 15 installs the base system with pkgbase, so these are packages
+      # rather than loose files (499 `FreeBSD-*` packages in this image), and
+      # `pkg delete` takes them out of the database too — where an
+      # `rm -rf /usr/lib/debug` would leave the database claiming files that are
+      # gone, and a later `pkg upgrade` free to restore all 1.3 GB of them.
+      #
+      # The `FreeBSD-set-*` grouping metapackages are marked vital and depend on
+      # the `-dbg` packages, so a bare `pkg delete '*-dbg'` cannot satisfy the
+      # request as written and goes looking for a plan of its own instead. It
+      # finds a good one — the removal list is all `-dbg` — but it silently
+      # leaves `FreeBSD-tests-dbg` behind, and a recipe should not depend on
+      # which plan a SAT solver happens to prefer. Clearing the vital flag first
+      # removes the conflict rather than working around it; the sets carry no
+      # files, and what their removal costs is a `pkg upgrade` that no longer
+      # knows which base sets were installed, which this guest never does.
+      run pkg set -y -v 0 -g "FreeBSD-set-*"
+      # `FreeBSD-tests` joins them for its own sake: 131 MB of `/usr/tests`,
+      # which is the FreeBSD test suite, not ours.
+      run pkg delete -yg "*-dbg" "FreeBSD-tests"
+      run pkg clean -ay
+      # Everything outside `lib` goes wholesale; inside it, only what
+      # `llvm_keep` names survives. See its comment for what and why.
+      for path = fs.glob("$LLVM_ROOT/*")
+        if (path.name != "lib")
+          fs.remove all: true ignore: true $path
+      for path = fs.glob("$LLVM_ROOT/lib/*")
+        if (!llvm_keep(path.name))
+          fs.remove all: true ignore: true $path
+      for pattern = [...SCRATCH_PATHS, ...IDENTITY_PATHS]
+        fs.remove all: true ignore: true ...fs.glob(pattern)
+    progress.show icon: 🕳️ message: "zero free space" do |_|
+      zero_swap()
+      zero_fill()
+
+# Mints the gold image, leaving the bundle at `path()`.
+#
+# Deliberately not `cache: :UNSAFE:`, which the job's own domain uses: that
+# discards guest flushes, and the disk this produces is the one thing here meant
+# to outlive the run. `export` refuses a domain that cannot prove it shut down
+# cleanly for the same reason.
+pub def build()
+  let destination = (path())
+  destination.remove ignore: true
+  libvirt.build $destination
+    image: $VM_IMAGE
+    os: :FREEBSD:
+    dolang: (dolang_version())
+    app: $VM_APP
+    memory: 12288
+    vcpus: 4
+    disk_size: 50G
+    packages: $PACKAGES
+    init:
+      # Grants the `ci` user passwordless sudo, so shell tests can provision
+      # and tear down scratch `md(4)` filesystems (for ACL coverage that needs
+      # a POSIX- or NFSv4-ACL-enabled mount) via the `sudo`/`admin` bundled
+      # modules instead of mutating the guest's root filesystem.
+      add:
+        target: /usr/local/etc/sudoers.d/ci
+        content: |
+          ci ALL=(ALL) NOPASSWD: ALL
+        chmod: 0o440
+        owner: "root:wheel"
+    # A top-level `add:` rather than an `init:` one: this runs once SSH is up,
+    # so the user exists and the file is written through the guest's VFS with
+    # the right ownership
+    add:
+      target: /home/ci/.profile
+      content: $PROFILE
+      chmod: 0o644
+    run: do clean()
