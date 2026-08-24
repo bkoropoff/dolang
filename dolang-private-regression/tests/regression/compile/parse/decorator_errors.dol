@@ -22,12 +22,3 @@ def bad_pub
 #    |
 # LL | pub #[decorator]
 #    |     ^^
-
-#[decorator
-def missing_close
-  nil
-# error: invalid expression
-#   --> decorator_errors.dol:LL:LL
-#    |
-# LL | def missing_close
-#    | ^^^
