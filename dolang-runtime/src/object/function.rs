@@ -1,4 +1,4 @@
-use std::{borrow::Cow, marker::PhantomData, ops::ControlFlow, ptr::NonNull};
+use std::{borrow::Cow, cell::UnsafeCell, marker::PhantomData, ops::ControlFlow, ptr::NonNull};
 
 use dolang_util::alias;
 
@@ -7,11 +7,11 @@ use crate::{
     arg::Args,
     error::{Error, Result},
     frame::{CallFrame, Upvars},
-    gc::{Collect, Gc, arena::Visit},
+    gc::{Annex, Collect, Gc, arena::Visit},
     strand::{Pinned, Strand},
     sym::{self, Sym},
     unpack,
-    value::{Output, Slot},
+    value::{Output, Slot, Value},
     vm::Vm,
 };
 
@@ -26,6 +26,7 @@ use super::{
 pub(crate) struct NativeFunction<'v> {
     call: for<'a, 's> unsafe fn(
         closure: NonNull<()>,
+        bound: &'a Value<'v>,
         strand: &'a mut Strand<'v, 's>,
         args: Args<'v, 'a>,
         out: Slot<'v, 'a>,
@@ -38,17 +39,39 @@ pub(crate) struct NativeFunction<'v> {
     phantom: PhantomData<&'v mut &'v ()>,
 }
 
+pub(crate) struct NativeFunctionAnnex<'v> {
+    pub(crate) bound: UnsafeCell<Value<'v>>,
+}
+
+impl Default for NativeFunctionAnnex<'_> {
+    fn default() -> Self {
+        Self {
+            bound: UnsafeCell::new(Value::NIL),
+        }
+    }
+}
+
+impl Annex for NativeFunctionAnnex<'_> {
+    fn accept(&self, visit: &mut dyn Visit) -> ControlFlow<()> {
+        unsafe { (&*self.bound.get()).accept(visit) }
+    }
+
+    fn clear(&self) {
+        unsafe { *self.bound.get() = Value::NIL }
+    }
+}
+
 unsafe impl<'v> Collect for NativeFunction<'v> {
-    const CYCLIC: bool = false;
+    const CYCLIC: bool = true;
     const IMMUTABLE: bool = true;
-    type Annex = ();
+    type Annex = NativeFunctionAnnex<'v>;
 
     fn accept(&self, _visit: &mut dyn Visit) -> ControlFlow<()> {
         ControlFlow::Continue(())
     }
 
     fn clear(&mut self) {
-        unreachable!()
+        // GC-managed state is held in the annex.
     }
 }
 
@@ -67,6 +90,7 @@ unsafe fn free_glue<F>(ptr: NonNull<()>) {
 /// wrapping the result in a pinned future.
 unsafe fn native_call_glue<'v, 'a, 's, F>(
     closure: NonNull<()>,
+    _bound: &Value<'v>,
     strand: &'a mut Strand<'v, 's>,
     args: Args<'v, 'a>,
     out: Slot<'v, 'a>,
@@ -77,6 +101,26 @@ where
 {
     let f = unsafe { closure.cast::<F>().as_ref() };
     strand.pin_future_call(async move |strand| f(strand, args, out).await)
+}
+
+unsafe fn bound_native_call_glue<'v, 'a, 's, F>(
+    closure: NonNull<()>,
+    bound: &'a Value<'v>,
+    strand: &'a mut Strand<'v, 's>,
+    args: Args<'v, 'a>,
+    out: Slot<'v, 'a>,
+) -> Pinned<'v, 's, 'a, ()>
+where
+    F: for<'b, 'r> AsyncFn(
+            &mut Strand<'v, 'r>,
+            &Value<'v>,
+            Args<'v, 'b>,
+            Slot<'v, 'b>,
+        ) -> Result<'v, 'r, ()>
+        + 'v,
+{
+    let f = unsafe { closure.cast::<F>().as_ref() };
+    strand.pin_future_call(async move |strand| f(strand, bound, args, out).await)
 }
 
 impl<'v> NativeFunction<'v> {
@@ -124,8 +168,30 @@ impl<'v> NativeFunction<'v> {
         }
     }
 
+    pub(crate) fn bound<F>(func: F) -> Self
+    where
+        F: for<'a, 's> AsyncFn(
+                &mut Strand<'v, 's>,
+                &Value<'v>,
+                Args<'v, 'a>,
+                Slot<'v, 'a>,
+            ) -> Result<'v, 's, ()>
+            + 'v,
+    {
+        Self {
+            closure: alias::Box::into_non_null(alias::Box::new(func)).cast(),
+            call: bound_native_call_glue::<F>,
+            free: free_glue::<F>,
+            module: "<native>",
+            name: "<bound>",
+            with_frame: true,
+            phantom: PhantomData,
+        }
+    }
+
     async fn call_with_frame<'a, 's>(
         &'a self,
+        bound: &'a Value<'v>,
         strand: &mut Strand<'v, 's>,
         args: Args<'v, 'a>,
         out: Slot<'v, 'a>,
@@ -136,11 +202,13 @@ impl<'v> NativeFunction<'v> {
                 Cow::Borrowed(self.module),
                 Cow::Borrowed(self.name),
                 None,
-                async move |strand| unsafe { (self.call)(self.closure, strand, args, out) }.await,
+                async move |strand| {
+                    unsafe { (self.call)(self.closure, bound, strand, args, out) }.await
+                },
             )
             .await
         } else {
-            unsafe { (self.call)(self.closure, strand, args, out) }.await
+            unsafe { (self.call)(self.closure, bound, strand, args, out) }.await
         }
     }
 }
@@ -178,7 +246,9 @@ impl<'v> Protocol<'v> for NativeFunction<'v> {
         args: Args<'v, 'a>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        this.get().call_with_frame(strand, args, out).await
+        this.get()
+            .call_with_frame(unsafe { &*this.annex().bound.get() }, strand, args, out)
+            .await
     }
 }
 
@@ -258,16 +328,15 @@ impl<'v> Protocol<'v> for Function<'v> {
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
         let borrow = this.get();
-        let module = borrow
-            .module
+        let program = borrow.module.annex();
+        let module = program
             .module_name
             .as_ref()
-            .map(|d| &borrow.module.debug_strtab()[d.clone()]);
-        let name = borrow
-            .module
+            .map(|d| &program.debug_strtab()[d.clone()]);
+        let name = program
             .funcdebugs
             .get(borrow.id)
-            .map(|d| &borrow.module.debug_strtab()[d.name.clone()]);
+            .map(|d| &program.debug_strtab()[d.name.clone()]);
         match (module, name) {
             (None, None) => crate::fmt!(strand, w, "?.?"),
             (None, Some(name)) => crate::fmt!(strand, w, "{name}"),

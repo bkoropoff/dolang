@@ -129,6 +129,7 @@ impl<'v> UnwindEntry<'v> {
                 function_index,
                 pc,
             } => {
+                let program = program.annex();
                 if let Some(debug) = program.funcdebugs.get(*function_index as usize) {
                     let pc = *pc as usize - 1;
                     let sourcemap = &debug.sourcemap;
@@ -155,9 +156,10 @@ impl<'v> UnwindEntry<'v> {
                 ..
             } => Cow::Owned(
                 program
+                    .annex()
                     .funcdebugs
                     .get(*function_index as usize)
-                    .map(|debug| &program.debug_strtab()[debug.name.clone()])
+                    .map(|debug| &program.annex().debug_strtab()[debug.name.clone()])
                     .unwrap_or(if *function_index == 0 { "<main>" } else { "?" })
                     .to_owned(),
             ),
@@ -174,8 +176,8 @@ impl<'v> UnwindEntry<'v> {
 
     pub(crate) fn module(&self) -> Cow<'_, str> {
         match self {
-            UnwindEntry::Do { program, .. } => match &program.module_name {
-                Some(range) => Cow::Owned(program.debug_strtab()[range.clone()].to_owned()),
+            UnwindEntry::Do { program, .. } => match &program.annex().module_name {
+                Some(range) => Cow::Owned(program.annex().debug_strtab()[range.clone()].to_owned()),
                 None => Cow::Borrowed("<program>"),
             },
             UnwindEntry::Native { module, .. } => Cow::Borrowed(module.as_ref()),

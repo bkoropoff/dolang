@@ -6,6 +6,8 @@ import compile load
   std:
     - ImportError
     - TypeError
+import load:
+  import: global_import
 
 #[test]
 def synthetic_module()
@@ -84,3 +86,45 @@ def unregister()
 #[test]
 def execute()
   assert_eq 2 $ load.run $ (compile.compile "test.dol" "(1 + 1)").bytecode
+
+#[test]
+def program_importer()
+  let seen = []
+  let importer = do |name|
+    seen.push $name
+    record answer: $seen.len
+  let source = |
+    import std: first
+    import std: second
+    [first.answer, second.answer]
+  let bytecode = (compile.compile "test.dol" source).bytecode
+
+  let result = load.run $bytecode importer: $importer
+  assert_eq $result [1, 2]
+  assert_eq $seen ["std", "std"]
+
+#[test]
+def retained_function_uses_program_importer()
+  let seen = []
+  let importer = do |name|
+    seen.push $name
+    record answer: 42
+  let source = |
+    pub def later()
+      import retained_dependency: dependency
+      dependency.answer
+  let bytecode = (compile.compile "retained.dol" source module: "retained").bytecode
+  let module = load.run $bytecode importer: $importer
+
+  assert_eq $module.later() 42
+  assert_eq $seen ["retained_dependency"]
+
+#[test]
+def program_importer_explicit_fallback()
+  let importer = do |name| global_import $name
+  let source = |
+    import std
+    (type(std) == std.Module)
+  let bytecode = (compile.compile "fallback.dol" source).bytecode
+
+  assert_eq true $ load.run $bytecode importer: $importer

@@ -86,8 +86,9 @@ impl<'v> CallFrame<'v> {
         args: Args<'v, '_>,
     ) -> Result<'v, 's, ()> {
         unsafe {
-            let (func, slot_max) = &self.program.funcs.get_unchecked(self.func);
-            let unpack = self.program.unpacktab.get_unchecked(func.sig);
+            let program = self.program.annex();
+            let (func, slot_max) = &program.funcs.get_unchecked(self.func);
+            let unpack = program.unpacktab.get_unchecked(func.sig);
             let slots = &self.slots;
             let mut pos = 0;
             let offset = func.locals;
@@ -240,7 +241,7 @@ impl<'v> CallFrame<'v> {
         upvars: Option<Gc<'v, Upvars<'v>>>,
         parent: Option<Ptr<'v>>,
     ) -> Self {
-        let info = &loaded.funcs[func];
+        let info = &loaded.annex().funcs[func];
         let locals = info.0.locals;
         let slots = info.1;
         CallFrame {
@@ -414,7 +415,7 @@ impl<'v, 'a> FrameInfo<'v, 'a> {
         match self.0 {
             Ptr::Do(head) => {
                 let head = unsafe { head.as_ref() };
-                let loaded = &head.program;
+                let loaded = head.program.annex();
                 if let Some(debug) = loaded.funcdebugs.get(head.func) {
                     let pc = head.pc - 1;
                     let sourcemap = &debug.sourcemap;
@@ -446,7 +447,7 @@ impl<'v, 'a> FrameInfo<'v, 'a> {
         match self.0 {
             Ptr::Do(head) => {
                 let head = unsafe { head.as_ref() };
-                let loaded = &head.program;
+                let loaded = head.program.annex();
                 loaded
                     .funcdebugs
                     .get(head.func)
@@ -480,7 +481,7 @@ impl<'v, 'a> FrameInfo<'v, 'a> {
         match self.0 {
             Ptr::Do(head) => {
                 let head = unsafe { head.as_ref() };
-                let loaded = &head.program;
+                let loaded = head.program.annex();
                 match &loaded.module_name {
                     Some(range) => &loaded.debug_strtab()[range.clone()],
                     None => "<program>",

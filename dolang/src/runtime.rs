@@ -9,8 +9,8 @@ pub use dolang_runtime::{
 /// Value manipulation
 pub mod value {
     pub use dolang_runtime::value::{
-        AsTuple, BinEmbryo, Empty, Format, Input, Nil, Output, Root, Singleton, Slot, StrEmbryo,
-        TypeObject, Value,
+        AsBoundFunction, AsFunction, AsTuple, BinEmbryo, Empty, Format, Input, Nil, Output, Root,
+        Singleton, Slot, StrEmbryo, TypeObject, Value,
         view::{
             Array, Bin, Dict, DictPairs, ObjectId, ObjectView, PinBin, PinStr, Record, RecordPairs,
             Str, Tuple, View,

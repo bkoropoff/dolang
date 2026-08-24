@@ -97,9 +97,10 @@ impl<'v> Protocol<'v> for Module<'v> {
         let borrow = this.get();
         let name = borrow
             .loaded
+            .annex()
             .module_name
             .as_ref()
-            .map(|r| &borrow.loaded.debug_strtab()[r.clone()])
+            .map(|r| &borrow.loaded.annex().debug_strtab()[r.clone()])
             .unwrap_or("?");
         crate::fmt!(strand, w, "{name}")
     }
@@ -482,9 +483,10 @@ impl<'v> Protocol<'v> for Namespace<'v> {
             NamespaceInner::Normal(module) => {
                 let name = module
                     .loaded
+                    .annex()
                     .module_name
                     .as_ref()
-                    .map(|r| &module.loaded.debug_strtab()[r.clone()])
+                    .map(|r| &module.loaded.annex().debug_strtab()[r.clone()])
                     .unwrap_or("?");
                 crate::fmt!(strand, w, "{name}")
             }
