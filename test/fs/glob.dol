@@ -1,7 +1,8 @@
-import
+import fs
   testlib.vfs:
     - vfs
   test:
+    - assert
     - assert_eq
     - fixture
     - test
@@ -34,3 +35,32 @@ def max_depth()
 #[populate]
 def path()
   assert_eq [...Path("src").glob("*.rs")] [Path "src/foo.rs", Path "src/lib.rs"]
+
+# A pattern with no wildcards names one path, so it matches that path and
+# nothing else.
+#
+# It is partitioned entirely into the walk prefix, leaving no glob behind, and
+# that used to be walked as a tree: a literal directory reported its whole
+# subtree, and a literal file came back with a trailing separator (the walk root
+# reports itself with an empty root-relative path, and joining that appends
+# one) — `build.rs/`, which every later `stat` rejects with ENOTDIR.
+#[test]
+#[vfs]
+#[populate]
+def literal_file()
+  assert_eq [...glob "build.rs"] [Path "build.rs"]
+  # The consequence, not just the spelling: the result has to be usable.
+  fs.remove all: true ...glob("build.rs")
+  assert (!Path("build.rs").exists())
+
+#[test]
+#[vfs]
+#[populate]
+def literal_dir()
+  assert_eq [...glob "src"] [Path "src"]
+
+#[test]
+#[vfs]
+#[populate]
+def literal_missing()
+  assert_eq [...glob "nonexistent.rs"] []
