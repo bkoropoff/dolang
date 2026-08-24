@@ -24,7 +24,7 @@ use crate::{
         self, BoundMethod, array, backtrace,
         class::{self, iter_natives},
         dict,
-        function::Function,
+        function::{Function, NativeFunction, NativeFunctionAnnex},
         protocol::{Dispatch, GcObj, Header, Inspect, Protocol, Spread, SpreadContext, TypeHandle},
         tuple,
     },
@@ -2096,6 +2096,79 @@ pub trait Input<'v> {
     #[allow(private_interfaces)]
     #[doc(hidden)]
     fn input_take<'a>(&'a mut self, vm: &'a Vm<'v>, _: private::Sealed) -> InputBy<'v, 'a>;
+}
+
+/// Adapts an async Rust function into a Do callable value.
+pub struct AsFunction<F> {
+    func: Option<F>,
+}
+
+impl<F> AsFunction<F> {
+    pub fn new(func: F) -> Self {
+        Self { func: Some(func) }
+    }
+}
+
+impl<'v, F> Input<'v> for AsFunction<F>
+where
+    F: for<'a, 's> AsyncFn(&mut Strand<'v, 's>, Args<'v, 'a>, Slot<'v, 'a>) -> Result<'v, 's, ()>
+        + 'v,
+{
+    #[allow(private_interfaces)]
+    fn input_take<'a>(&'a mut self, vm: &'a Vm<'v>, _: private::Sealed) -> InputBy<'v, 'a> {
+        let func = self.func.take().expect("native function adapter reused");
+        let object = GcObj::new_annex(
+            vm.arena(),
+            vm.builtin_types().native_function,
+            NativeFunction::new(func, "<native>", "<function>"),
+            NativeFunctionAnnex::default(),
+        );
+        InputBy::Value(Value::from_object(object), None)
+    }
+}
+
+/// Adapts an async Rust function into a Do function with bound argument.
+///
+/// A closure cannot ordinarily capture a `Value`; this permits one to be
+/// captured and passed through to the underlying closure.
+pub struct AsBoundFunction<B, F> {
+    value: Option<B>,
+    func: Option<F>,
+}
+
+impl<B, F> AsBoundFunction<B, F> {
+    pub fn new(func: F, value: B) -> Self {
+        Self {
+            value: Some(value),
+            func: Some(func),
+        }
+    }
+}
+
+impl<'v, B: Input<'v>, F> Input<'v> for AsBoundFunction<B, F>
+where
+    F: for<'a, 's> AsyncFn(
+            &mut Strand<'v, 's>,
+            &Value<'v>,
+            Args<'v, 'a>,
+            Slot<'v, 'a>,
+        ) -> Result<'v, 's, ()>
+        + 'v,
+{
+    #[allow(private_interfaces)]
+    fn input_take<'a>(&'a mut self, vm: &'a Vm<'v>, _: private::Sealed) -> InputBy<'v, 'a> {
+        let bound = Value::from_input(vm, self.value.take().expect("bound adapter reused"));
+        let func = self.func.take().expect("bound adapter reused");
+        let object = GcObj::new_annex(
+            vm.arena(),
+            vm.builtin_types().native_function,
+            NativeFunction::bound(func),
+            NativeFunctionAnnex {
+                bound: UnsafeCell::new(bound),
+            },
+        );
+        InputBy::Value(Value::from_object(object), None)
+    }
 }
 
 /// Call output parameter.

@@ -19,7 +19,7 @@ use futures::{
 };
 
 use crate::{
-    Func, FuncDebug, Program,
+    Func, FuncDebug, Program, ProgramAnnex,
     arg::Args,
     bytecode::file,
     error::{Error, Result},
@@ -289,7 +289,11 @@ impl<'v> Vm<'v> {
     /// - `packtab`: Argument patterns → sig::Pack specifications
     /// - `unpacktab`: Function signatures → sig::Unpack with default values
     /// - `sourcemap`: Delta-encoded offsets → (offset, line, file) tuples
-    fn load_bytecode(&self, bytecode: Bytecode) -> dolang_bytecode::Result<Gc<'v, Program<'v>>> {
+    fn load_bytecode(
+        &self,
+        bytecode: Bytecode,
+        importer: Value<'v>,
+    ) -> dolang_bytecode::Result<Gc<'v, Program<'v>>> {
         let verified = file::deserialize(&bytecode.0)?;
 
         let funcs: alias::Box<_> = verified
@@ -456,9 +460,10 @@ impl<'v> Vm<'v> {
             })
             .collect();
 
-        let loaded = Gc::new(
+        let loaded = Gc::new_with_annex(
             self.arena(),
-            Program {
+            Program { importer },
+            ProgramAnnex {
                 bytecode: bytecode.0,
                 funcs,
                 symroots,
@@ -1119,10 +1124,30 @@ impl Bytecode {
     pub async fn run<'v, 's>(
         self,
         strand: &mut Strand<'v, 's>,
+        out: impl Output<'v>,
+    ) -> Result<'v, 's, ()> {
+        self.run_inner(strand, Value::NIL, out).await
+    }
+
+    /// Run bytecode with a program-bound import handler.
+    pub async fn run_with_importer<'v, 's>(
+        self,
+        strand: &mut Strand<'v, 's>,
+        importer: impl Input<'v>,
+        out: impl Output<'v>,
+    ) -> Result<'v, 's, ()> {
+        let importer = Value::from_input(strand.vm(), importer);
+        self.run_inner(strand, importer, out).await
+    }
+
+    async fn run_inner<'v, 's>(
+        self,
+        strand: &mut Strand<'v, 's>,
+        importer: Value<'v>,
         mut out: impl Output<'v>,
     ) -> Result<'v, 's, ()> {
         let loaded = strand
-            .load_bytecode(self)
+            .load_bytecode(self, importer)
             .map_err(|e| Error::bytecode(strand, e))?;
         let mut frame = unsafe { CallFrame::new(loaded, 0, None, None) };
         strand

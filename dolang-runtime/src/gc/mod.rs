@@ -1007,6 +1007,21 @@ impl<'v, T: Collect + Boxable<Header>> Gc<'v, T> {
             )
         }
     }
+
+    pub(crate) fn new_with_annex(arena: &Arena<'v>, value: T, annex: T::Annex) -> Self {
+        unsafe {
+            Gc::from_parts_annex(
+                arena,
+                Header::new(arena, NonNull::from_ref(<T as Boxable<Header>>::VTBL)),
+                value,
+                annex,
+            )
+        }
+    }
+
+    pub(crate) fn annex(&self) -> &T::Annex {
+        unsafe { &self.ptr.cast::<BoxedSized<Header, T>>().as_ref().annex }
+    }
 }
 
 pub(crate) type Weak<'v, T> = BoxWeak<'v, Header, T>;

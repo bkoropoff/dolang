@@ -66,6 +66,10 @@ pub(crate) struct FuncDebug {
 
 // Loaded bytecode program
 pub(crate) struct Program<'v> {
+    pub(crate) importer: Value<'v>,
+}
+
+pub(crate) struct ProgramAnnex<'v> {
     pub(crate) bytecode: Cow<'static, [u8]>,
     pub(crate) funcs: alias::Box<[(Func, usize)]>,
     pub(crate) symtab: Vec<Sym<'v, 'v>>,
@@ -80,7 +84,7 @@ pub(crate) struct Program<'v> {
     pub(crate) symroots: Vec<GcObj<'v, SymObj>>,
 }
 
-impl<'v> Program<'v> {
+impl<'v> ProgramAnnex<'v> {
     /// Returns the debug string table as `&str` directly from the owned bytecode.
     ///
     /// Sound because `verify_debugbintab` validates the entire table as UTF-8
@@ -93,15 +97,23 @@ impl<'v> Program<'v> {
 }
 
 unsafe impl<'v> gc::Collect for Program<'v> {
-    const CYCLIC: bool = false;
-    const IMMUTABLE: bool = true;
-    type Annex = ();
+    const CYCLIC: bool = true;
+    const IMMUTABLE: bool = false;
+    type Annex = ProgramAnnex<'v>;
 
+    fn accept(&self, visit: &mut dyn gc::arena::Visit) -> ControlFlow<()> {
+        self.importer.accept(visit)
+    }
+
+    fn clear(&mut self) {
+        self.importer = Value::NIL;
+    }
+}
+
+impl gc::Annex for ProgramAnnex<'_> {
     fn accept(&self, _visit: &mut dyn gc::arena::Visit) -> ControlFlow<()> {
         ControlFlow::Continue(())
     }
 
-    fn clear(&mut self) {
-        unreachable!()
-    }
+    fn clear(&self) {}
 }

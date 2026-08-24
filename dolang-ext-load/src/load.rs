@@ -7,6 +7,7 @@ use dolang::runtime::{
 use crate::global::Global;
 
 pub(crate) fn configure<'v>(builder: &mut Builder<'v>, global: State<'v, Global<'v>>) {
+    let importer_sym = builder.sym("importer");
     builder.importer(async move |strand, name, mut out| {
         let dict = global
             .handlers
@@ -49,7 +50,7 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>, global: State<'v, Global<
     builder
         .module("load")
         .function("run", async move |strand, args, out| {
-            let ([bytecode], []) = unpack!(strand, args, 1, 0)?;
+            let ([bytecode], [importer]) = unpack!(strand, args, 1, 0, importer_sym = None)?;
 
             let bytecode = dolang::runtime::Bytecode::new(
                 bytecode
@@ -57,7 +58,18 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>, global: State<'v, Global<
                     .ok_or_else(|| Error::type_error(strand, "bytecode: expected Bin"))?
                     .to_vec(),
             );
-            bytecode.run(strand, out).await
+            match importer {
+                Some(importer) => bytecode.run_with_importer(strand, importer, out).await,
+                None => bytecode.run(strand, out).await,
+            }
+        })
+        .function("import", async move |strand, args, out| {
+            let ([name], []) = unpack!(strand, args, 1, 0)?;
+            let name = name
+                .as_str(strand)
+                .ok_or_else(|| Error::type_error(strand, "name: expected Str"))?;
+            let name = strand.access(|access| name.as_str(access).to_owned());
+            strand.import(&name, out).await
         })
         .function("import_handler", async move |strand, args, mut out| {
             let ([callback], []) = unpack!(strand, args, 1, 0)?;

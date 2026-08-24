@@ -41,27 +41,10 @@ def inject_keys inject
     throw std.TypeError "inject key: expected `Sym`"
   keys
 
-def cache_key path mode name prelude inject
-  let state = digest.Blake3()
-  state.update $ str $ path.absolute().normalize()
-  state.update "\0"
-  state.update $mode
-  state.update "\0"
-  state.update (name || "")
-  state.update "\0"
-  state.update (str prelude)
-  state.update "\0"
-  state.update (str $ inject_keys inject)
-  state.digest().hex()
-
 def cache_root app
   let path = (fs.cache_dir() / normalize_app app  / "bytecode")
   path.create_dir all: true
   path
-
-def cache_path path mode name app prelude inject
-  let key = cache_key $path $mode $name $prelude $inject
-  (cache_root app / "$key.dolc")
 
 def synthetic_module_name key
   "\$$key\$"
@@ -69,68 +52,88 @@ def synthetic_module_name key
 def cache_usable cache path
   (cache.exists() && path.metadata().modified < cache.metadata().modified)
 
-def compile_prelude prelude synthetic inject
-  {...prelude, $synthetic: inject_keys inject}
-
-def compile_script path prelude synthetic inject
-  let source = path.read()
-  let prelude = compile_prelude $prelude $synthetic $inject
-  if (prelude == nil)
-    compile.compile $path $source
-  else
-    compile.compile $path $source prelude: $prelude
-
-def compile_module path name prelude synthetic inject
-  let source = path.read()
-  let prelude = compile_prelude $prelude $synthetic $inject
-  if (prelude == nil)
-    compile.compile $path $source module: $name
-  else
-    compile.compile $path $source module: $name prelude: $prelude
-
 def injected_module inject
   record ...inject
 
-def run_loaded bytecode synthetic inject
-  if (synthetic == nil)
-    load.run $bytecode
-  else
-    let module = injected_module $inject
-    let handle = load.import_handler do |name|
+def normalize_imports imports
+  let normalized = {}
+  for name value = imports
+    value = if (type value Dict)
+      record ...value
+    else
+      value
+    name = if (type name Sym)
+      str $name
+    else
+      name
+    normalized[name] = value
+  normalized
+
+class Operation
+  field path mode name prelude inject import key cache synthetic
+
+  def (init) self path :mode :name :app :prelude :inject :import
+    if !(type inject Dict)
+      throw std.TypeError "inject: expected `Dict`"
+    if !(type import Dict)
+      throw std.TypeError "import: expected `Dict`"
+    self.#path = fs.Path $path
+    self.#mode = mode
+    self.#name = name
+    self.#prelude = prelude
+    self.#inject = inject
+    self.#import = normalize_imports $import
+    self.#key = self.#cache_key()
+    self.#cache = (cache_root app / "$(self.#key).dolc")
+    self.#synthetic = synthetic_module_name $self.#key
+
+  def cache_key self
+    let state = digest.Blake3()
+    state.update $ str $ self.#path.absolute().normalize()
+    state.update "\0"
+    state.update $self.#mode
+    state.update "\0"
+    state.update (self.#name || "")
+    state.update "\0"
+    state.update (str self.#prelude)
+    state.update "\0"
+    state.update (str $ inject_keys self.#inject)
+    state.digest().hex()
+
+  def compile self
+    let source = self.#path.read()
+    let prelude = {...self.#prelude, $self.#synthetic: inject_keys self.#inject}
+    if (self.#mode == "script")
+      compile.compile $self.#path $source prelude: $prelude
+    else
+      compile.compile $self.#path $source module: $self.#name prelude: $prelude
+
+  def run_loaded self bytecode
+    let module = injected_module $self.#inject
+    let synthetic = self.#synthetic
+    let imports = self.#import
+    load.run $bytecode importer: do |name|
       if (name == synthetic)
         module
       else
-        throw std.ImportError(name)
-    try
-      load.run $bytecode
-    finally
-      handle.unregister()
+        imports.get $name else: do load.import $name
 
-def compile_cached path mode name cache prelude synthetic inject
-  let compiled = if (mode == "script")
-    compile_script $path $prelude $synthetic $inject
-  else
-    compile_module $path $name $prelude $synthetic $inject
-  for diag = compiled.diagnostics
-    echo $diag.render()
-  if !compiled.ok
-    throw std.CompileError "failed to compile $(path.relative())"
-  cache.write $compiled.bytecode
-  run_loaded $compiled.bytecode $synthetic $inject
+  def compile_cached self
+    let compiled = self.#compile()
+    for diag = compiled.diagnostics
+      echo $diag.render()
+    if !compiled.ok
+      throw std.CompileError "failed to compile $(self.#path.relative())"
+    self.#cache.write $compiled.bytecode
+    self.#run_loaded $compiled.bytecode
 
-def exec_cached path mode name app prelude inject
-  if !(type inject Dict)
-    throw std.TypeError "inject: expected `Dict`"
-  path = fs.Path $path
-  let key = cache_key $path $mode $name $prelude $inject
-  let cache = cache_path $path $mode $name $app $prelude $inject
-  let synthetic = synthetic_module_name $key
-  if cache_usable $cache $path
-    try
-      return run_loaded (cache.read "b") $synthetic $inject
-    catch std.BytecodeError: _
-      nil
-  compile_cached $path $mode $name $cache $prelude $synthetic $inject
+  pub def run self
+    if cache_usable $self.#cache $self.#path
+      try
+        return self.#run_loaded $ self.#cache.read "b"
+      catch std.BytecodeError: _
+        nil
+    self.#compile_cached()
 
 # Compile `path` in script mode if needed, cache the bytecode, and execute it.
 #
@@ -142,6 +145,9 @@ def exec_cached path mode name app prelude inject
 # `inject` supplies globally scoped symbol/value bindings during compilation
 # and execution.
 #
+# `import` supplies modules by name during execution. Dictionary values are
+# exposed as records.
+#
 # # Example
 #
 # ```
@@ -150,9 +156,16 @@ def exec_cached path mode name app prelude inject
 # exec.run "./tool.dol"
 # exec.run "./tool.dol" app: "my-tool"
 # exec.run "./tool.dol" inject: {answer: 42}
+# exec.run "./tool.dol" import: {config: {answer: 42}}
 # ```
-pub def run path :app = nil :prelude = {} :inject = {}
-  exec_cached $path script nil $app $prelude $inject
+pub def run
+  path
+  :app = nil
+  :prelude = {}
+  :inject = {}
+  :import = {}
+do
+  (Operation path mode: "script" name: nil :app :prelude :inject :import).run()
 
 # Compile `path` in module mode if needed, cache the bytecode, and return the
 # loaded module object.
@@ -167,6 +180,9 @@ pub def run path :app = nil :prelude = {} :inject = {}
 # `inject` supplies globally scoped symbol/value bindings during compilation
 # and execution.
 #
+# `import` supplies modules by name during execution. Dictionary values are
+# exposed as records.
+#
 # # Example
 #
 # ```
@@ -178,5 +194,13 @@ pub def run path :app = nil :prelude = {} :inject = {}
 # let plugin = exec.module "./plugin.dol" name: "plugins.build"
 # let injected = exec.module "./plugin.dol" inject: {answer: 42}
 # ```
-pub def module path :name = nil :app = nil :prelude = {} :inject = {}
-  exec_cached $path module (module_name (fs.Path path) name) $app $prelude $inject
+pub def module
+  path
+  :name = nil
+  :app = nil
+  :prelude = {}
+  :inject = {}
+  :import = {}
+do
+  let name = module_name (fs.Path path) $name
+  (Operation path mode: "module" :name :app :prelude :inject :import).run()
