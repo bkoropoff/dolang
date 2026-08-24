@@ -30,6 +30,25 @@ def module_injects_globals_during_init()
     assert_eq $m.answer 42
 
 #[test]
+def run_injects_imports()
+  fs.with_temp_dir do |dir|
+    let script = (dir / "script.dol")
+    script.write |
+      import config
+      config.answer
+    assert_eq (exec.run script import: {"config": {answer: 42}}) 42
+
+#[test]
+def run_injects_import_items()
+  fs.with_temp_dir do |dir|
+    let script = (dir / "script.dol")
+    script.write |
+      import config:
+        - answer
+      answer
+    assert_eq (exec.run script import: {config: {answer: 42}}) 42
+
+#[test]
 def run_merges_dict_prelude_with_inject()
   fs.with_temp_dir do |dir|
     let script = (dir / "script.dol")
@@ -52,6 +71,19 @@ def run_rejects_non_dict_inject()
       false
     catch TypeError: err
       assert_eq (str err) "type error: inject: expected `Dict`"
+      true
+    assert $ok
+
+#[test]
+def run_rejects_non_dict_import()
+  fs.with_temp_dir do |dir|
+    let script = (dir / "script.dol")
+    script.write "0\n"
+    let ok = try
+      exec.run $script import: 1
+      false
+    catch TypeError: err
+      assert_eq (str err) "type error: import: expected `Dict`"
       true
     assert $ok
 
