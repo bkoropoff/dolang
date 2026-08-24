@@ -689,8 +689,11 @@ enum Inner<T> {
 
 struct Peek<'a> {
     lexer: Lexer<'a>,
+    count: usize,
     peek: Inner<<Self as Iterator>::Item>,
 }
+
+const PEEK_INTERNAL_ERROR_COUNT: usize = 10;
 
 impl<'a> Peek<'a> {
     fn set_mode(&mut self, mode: Mode) -> Mode {
@@ -714,7 +717,13 @@ impl<'a> Peek<'a> {
                         continue;
                     }
                 },
-                Inner::Full(Ok(ref t)) => Some(t.clone()),
+                Inner::Full(Ok(ref t)) => {
+                    if self.count >= PEEK_INTERNAL_ERROR_COUNT {
+                        panic!("internal parser error: failed to make progress")
+                    }
+                    self.count += 1;
+                    Some(t.clone())
+                }
                 Inner::Full(Err(e)) => {
                     self.peek = Inner::Empty;
                     return Err(e.into());
@@ -767,6 +776,7 @@ impl<'a> From<Lexer<'a>> for Peek<'a> {
         Self {
             lexer: value,
             peek: Default::default(),
+            count: 0,
         }
     }
 }
@@ -775,6 +785,7 @@ impl<'a> Iterator for Peek<'a> {
     type Item = <Lexer<'a> as Iterator>::Item;
 
     fn next(&mut self) -> Option<Self::Item> {
+        self.count = 0;
         match mem::take(&mut self.peek) {
             Inner::End => {
                 self.peek = Inner::End;
