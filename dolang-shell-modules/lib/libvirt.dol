@@ -1,4 +1,4 @@
-import _vfs base64 digest json proc progress rand shell shlex ssh std sys time transfer xdg xml yaml
+import _vfs base64 digest json proc progress rand shell shlex ssh std sys time transfer xdg xml yaml zip
   fs:
     - Path
     - with_temp_dir
@@ -41,21 +41,43 @@ let READY_PATH = "/var/tmp/dolang-cloud-init-ready"
 let PAYLOAD_PATH = "/var/tmp/dolang-payload.tar.gz"
 let DOLANG_REPO = "dolang-org/dolang"
 
+# A bundle is a ZIP holding these two members: a JSON manifest describing the
+# domain, and the flattened qcow2 disk. `version` is the manifest's first key
+# because this format will change.
+let BUNDLE_VERSION = 1
+let MANIFEST_MEMBER = "manifest.json"
+let DISK_MEMBER = "disk.qcow2"
+let BUNDLE_CHUNK = (1024 * 1024)
+# The manifest is the one member read whole, and a bundle behind a URL is an
+# untrusted input, so its size is bounded.
+let MANIFEST_LIMIT = (1024 * 1024)
+let DIGEST_ALGORITHM = "blake3"
+
 let DOLANG_PLATFORMS = Set $
   - x86_64-linux
   - x86_64-windows
   - aarch64-macos
   - x86_64-freebsd
 
+# `virsh domstate` spells this state `shut off`, with the space, so the
+# unspelled `shutoff` never matches it — but it is what a caller would write,
+# and mapping both costs nothing.
 let DOMAIN_STATES = $
   "running": :RUNNING:
   "idle": :IDLE:
   "paused": :PAUSED:
   "in shutdown": :IN_SHUTDOWN:
+  "shut off": :SHUTOFF:
   "shutoff": :SHUTOFF:
   "crashed": :CRASHED:
   "pmsuspended": :PMSUSPENDED:
   "blocked": :BLOCKED:
+
+# Normalizes one of libvirt's state or state-reason words into a symbol.
+def normalized_state text
+  let value = text.trim().lower()
+  DOMAIN_STATES.get $value else: do
+    sym $value.upper().replace(" ", "_").replace("-", "_")
 
 # Raised when a requested libvirt domain does not exist.
 pub class NoDomainError: std.RuntimeError
@@ -116,6 +138,39 @@ def require_arch arch
   if (arch != host)
     throw std.ValueError "arch: must be the host architecture $host, got $arch"
   arch
+
+# qcow2 compression algorithms, spelled as `qemu-img`'s `compression_type`
+# spells them.
+#
+# `zstd` compresses an image about nine times faster than `zlib` for the same
+# size, and decompresses fast enough that a compressed image stays practical as
+# a backing file, where every guest read pays for it. It needs QEMU 5.1+ to
+# write *and to read*, so `zlib` remains available for an image destined for an
+# older reader — the same tradeoff `io:`'s `:IO_URING:` default already makes
+# for QEMU 6.0+.
+let DISK_COMPRESSION = Set $
+  - zstd
+  - zlib
+
+let DEFAULT_COMPRESSION = :ZSTD:
+
+# Converting with several coroutines and unordered writes is what makes
+# compression bearable: it cuts a compressed conversion to a ninth of the time
+# a serial one takes, and the destination is always a file this module is
+# creating fresh, which is the case unordered writes are safe for.
+let CONVERT_PARALLEL = ["-m", "16", "-W"]
+
+# Normalizes a `compress:` option to a `qemu-img compression_type`, or `nil`
+# for an uncompressed conversion. `true` selects the default algorithm.
+def require_compression compress
+  if (compress == nil || compress == false)
+    return nil
+  if (compress == true)
+    compress = DEFAULT_COMPRESSION
+  let text = str(compress).lower()
+  if !DISK_COMPRESSION.contains(text)
+    throw std.ValueError "compress: unsupported value: $compress"
+  text
 
 # Normalizes a disk `cache:`/`io:` option to its libvirt attribute spelling.
 #
@@ -356,17 +411,18 @@ class DomainConfig
   # The `Guest` this domain will be reachable as, whose `port` `create`
   # reassigns between definition attempts.
   pub field guest
-  field arch memory vcpus overlay seed app workdir cache io
+  field os arch memory vcpus overlay seed app workdir cache io
 
   def (init)
     self
     :name
+    :os
     :arch
     :guest
     :overlay
-    :seed
     :app
     :workdir
+    :seed = nil
     :memory = DEFAULT_MEMORY
     :vcpus = DEFAULT_VCPUS
     :cache = nil
@@ -374,11 +430,15 @@ class DomainConfig
   do
     self.name = require_name $name
     self.guest = guest
+    self.#os = os
     self.#arch = arch
     self.#memory = int $memory
     self.#vcpus = int $vcpus
     self.#overlay = Path $overlay
-    self.#seed = Path $seed
+    # A domain reconstituted from a bundle has no seed: it was provisioned
+    # once, before it was exported, so there is nothing for cloud-init to do
+    # and no seed cdrom to attach.
+    self.#seed = (seed != nil && Path(seed) || nil)
     self.#app = str $app
     self.#workdir = Path $workdir
     self.#cache = require_disk_mode $cache $DISK_CACHE_MODES cache
@@ -394,6 +454,18 @@ class DomainConfig
     let overlay_driver = $
       name: "qemu"
       type: "qcow2"
+      # Without `discard`, qemu advertises no discard feature to the guest at
+      # all, so a guest that does trim its filesystem has the request dropped
+      # before qcow2 ever sees it. `detect_zeroes` (which requires `discard`)
+      # additionally turns a written run of zeroes into the same unmap, so the
+      # zero-fill fallback guests without a batch trim need actually frees
+      # clusters rather than merely writing bytes that compress well.
+      #
+      # Unmapping a cluster in an overlay cannot expose the backing image
+      # underneath: qcow2 records a zero cluster and frees the host cluster, so
+      # the guest still reads zeros and `export` still flattens correctly.
+      discard: "unmap"
+      detect_zeroes: "unmap"
       if (self.#cache != nil)
         cache: $self.#cache
       if (self.#io != nil)
@@ -419,11 +491,12 @@ class DomainConfig
           $ Node driver attrs: $overlay_driver
           $ Node source attrs: {file: str(self.#overlay)}
           $ Node target attrs: {dev: "vda", bus: "virtio"}
-        $ Node disk attrs: {type: "file", device: "cdrom"}
-          $ Node driver attrs: {name: "qemu", type: "raw"}
-          $ Node source attrs: {file: str(self.#seed)}
-          $ Node target attrs: {dev: "sda", bus: "sata"}
-          $ Node readonly
+        if (self.#seed != nil)
+          $ Node disk attrs: {type: "file", device: "cdrom"}
+            $ Node driver attrs: {name: "qemu", type: "raw"}
+            $ Node source attrs: {file: str(self.#seed)}
+            $ Node target attrs: {dev: "sda", bus: "sata"}
+            $ Node readonly
         $ Node interface attrs: {type: "user"}
           $ Node backend attrs: {type: "passt"}
           $ Node model attrs: {type: "virtio"}
@@ -438,6 +511,13 @@ class DomainConfig
           $ Node managed "true"
           $ Node app $self.#app
           $ Node workdir (str self.#workdir)
+          # `os` is not recoverable from the document libvirt hands back and
+          # `arch` only as an attribute of `<os><type>`, so both are recorded
+          # here for `Domain.export` to put in a bundle manifest.
+          $ Node os (str(self.#os).lower())
+          $ Node arch (str(self.#arch).lower())
+          $ Node memory (str self.#memory)
+          $ Node vcpus (str self.#vcpus)
           ...self.guest.to_metadata()
 
 # A read-only view over a libvirt domain document.
@@ -512,6 +592,32 @@ class DomainXml
             sources.push $path
     sources
 
+  # The `<dolang:vm>` facts a bundle manifest records: everything about the
+  # guest that the disk image itself does not carry.
+  #
+  # `os`, `arch`, `memory`, and `vcpus` were only written from the version of
+  # this module that grew `Domain.export`, so a domain defined by an older one
+  # is reported as unexportable rather than silently exported with holes in its
+  # manifest.
+  pub def bundle_info self
+    let metadata = self.#vm()
+    if !metadata
+      throw std.ValueError "domain has no dolang:vm metadata"
+    let app = metadata_value $metadata app
+    let os = metadata_value $metadata os
+    let arch = metadata_value $metadata arch
+    let memory = metadata_value $metadata memory
+    let vcpus = metadata_value $metadata vcpus
+    let user = metadata_value $metadata ssh_user
+    let command = metadata_value $metadata vfs_command
+    if (app == nil || os == nil || arch == nil || memory == nil ||
+        vcpus == nil || user == nil || command == nil)
+      let message = "domain metadata predates bundle export; recreate the domain to export it"
+      throw std.ValueError $message
+    record :app :os :arch :user :command
+      memory: (int memory)
+      vcpus: (int vcpus)
+
   # The work directory and overlay of a domain this module manages, or `nil`
   # if the domain is not ours or its recorded paths fail validation.
   #
@@ -535,6 +641,29 @@ class DomainXml
     if !path_within(workdir, xdg.data_home().absolute())
       return nil
     record :workdir :source
+
+# The domain's single file-backed disk, which is what any export flattens.
+def export_source document
+  let sources = document.disk_sources()
+  if (sources.len != 1)
+    throw std.ValueError "expected exactly one file-backed domain disk; found $(sources.len)"
+  Path(sources[0]).absolute()
+
+# Validates an export destination against the domain's own files: it must not
+# be the disk being exported, must not sit inside the managed work directory
+# (which `undefine` removes wholesale), and must not already exist.
+def export_destination document destination source
+  let destination = Path(destination).absolute()
+  if (source == destination)
+    throw std.ValueError "export destination is the domain disk"
+  let cleanup = document.cleanup_info()
+  if (cleanup && path_within(destination, cleanup.workdir))
+    throw std.ValueError "export destination is inside the managed domain work directory"
+  if destination.exists()
+    throw std.ValueError "export destination already exists: $destination"
+  let parent = (destination.parent || Path ".")
+  parent.create_dir all: true
+  destination
 
 # References a libvirt domain by name and connection URI.
 #
@@ -567,18 +696,35 @@ pub class Domain
   pub def metadata self
     self.#xml().metadata()
 
-  # Returns the normalized libvirt state as a symbol.
-  pub def state self
+  # Runs `virsh domstate`, mapping a missing domain onto `NoDomainError`.
+  def domstate self ...options
     let stderr = []
-    let value = try
-      capture_virsh $self.connect_uri $stderr domstate $self.name
+    try
+      capture_virsh $self.connect_uri $stderr domstate ...options $self.name
     catch proc.Error: e
       if missing_domain_error $stderr
         throw NoDomainError $self.name
       throw e
-    let value = value.trim().lower()
-    DOMAIN_STATES.get $value else: do
-      sym $value.upper().replace(" ", "_").replace("-", "_")
+
+  # Returns the normalized libvirt state as a symbol.
+  pub def state self
+    normalized_state $self.#domstate()
+
+  # The domain's state together with libvirt's reason for it, as
+  # `virsh domstate --reason` reports the pair — for example
+  # `shut off (destroyed)` becomes `:SHUTOFF:` and `:DESTROYED:`.
+  #
+  # The reason is runtime state rather than a property of the definition, so it
+  # reads back as `:UNKNOWN:` after libvirtd restarts.
+  def state_reason self
+    let text = self.#domstate("--reason").trim()
+    let parts = [...text.split "(" limit: 1]
+    let state = normalized_state $parts[0]
+    let reason = if (parts.len > 1)
+      normalized_state (parts[1].replace(")", ""))
+    else
+      :UNKNOWN:
+    record :state :reason
 
   # Starts the domain.
   pub def start self
@@ -603,35 +749,105 @@ pub class Domain
           time.sleep $STATE_SLEEP
     nil
 
+  # Refuses a domain that is not shut off, or that reached `SHUTOFF` any way
+  # other than a guest shutdown.
+  #
+  # A killed domain's disk is arbitrarily stale — spectacularly so under
+  # `cache: :UNSAFE:`, where guest flushes are discarded outright — so an image
+  # taken from one is not a gold image but a corrupted one. `force` exists
+  # because libvirt forgets the reason when it restarts, reporting `:UNKNOWN:`
+  # for a domain that did shut down cleanly.
+  def require_clean_shutoff self force
+    let info = self.#state_reason()
+    if (info.state != :SHUTOFF:)
+      throw std.StateError "domain must be shut off before exporting its disk"
+    if (!force && info.reason != :SHUTDOWN:)
+      let reason = str(info.reason).lower()
+      let message = "domain did not shut down cleanly (reason: $reason); pass force: true to export anyway"
+      throw std.StateError $message
+
   # Flattens the shut-off domain's file-backed disk into a standalone qcow2.
+  #
+  # `compress:` selects the qcow2 compression — see [`compress:`](#compress).
   pub def export_disk self destination :compress = false
+    let compression = require_compression $compress
     if (self.state() != :SHUTOFF:)
       throw std.StateError "domain must be shut off before exporting its disk"
     let document = self.#xml()
-    let sources = document.disk_sources()
-    if (sources.len != 1)
-      throw std.ValueError "expected exactly one file-backed domain disk; found $(sources.len)"
-    let source = Path(sources[0]).absolute()
-    let destination = Path(destination).absolute()
-    if (source == destination)
-      throw std.ValueError "export destination is the domain disk"
-    let cleanup = document.cleanup_info()
-    if (cleanup && path_within(destination, cleanup.workdir))
-      throw std.ValueError "export destination is inside the managed domain work directory"
-    if destination.exists()
-      throw std.ValueError "export destination already exists: $destination"
-    let parent = (destination.parent || Path ".")
-    parent.create_dir all: true
+    let source = export_source $document
+    let destination = export_destination $document $destination $source
     progress.show message: "export disk" icon: 💿 do |_|
-      with_temp_dir parent: $parent do |staging|
+      with_temp_dir parent: $destination.parent do |staging|
         let temporary = (staging / "disk.qcow2")
-        if compress
-          cli qemu-img convert -q -c -O qcow2 -- $source $temporary
+        if compression
+          cli qemu-img convert -q -c -o compression_type=$compression
+            ...CONVERT_PARALLEL -O qcow2 -- $source $temporary
         else
-          cli qemu-img convert -q -O qcow2 -- $source $temporary
+          cli qemu-img convert -q ...CONVERT_PARALLEL -O qcow2 -- $source $temporary
         if destination.exists()
           throw std.ValueError "export destination appeared during conversion: $destination"
         temporary.rename $destination
+    destination
+
+  # Exports the shut-off domain as a bundle: its flattened disk plus the
+  # configuration needed to define an equivalent domain again, which the disk
+  # image alone does not carry.
+  #
+  # # Parameters
+  #
+  # | Name        | type            | Description |
+  # | ----------- | --------------- | ----------------------------------------------------- |
+  # | `destination` | `Str`\|`Path` | Bundle to write, conventionally named `.dolvm` |
+  # | `compress`? | `Bool`\|`Sym`   | qcow2 compression — see [`compress:`](#compress) |
+  # | `force`?    | `Bool`          | Export even though the domain did not shut down cleanly |
+  #
+  # # `compress:`
+  #
+  # | Value              | Behavior |
+  # | ------------------ | -------- |
+  # | `true` (default)   | Compress with the default algorithm, currently `:ZSTD:` |
+  # | `:ZSTD:`           | zstd; needs QEMU 5.1+ to read the result |
+  # | `:ZLIB:`           | zlib; readable by any QEMU, and around nine times slower to write |
+  # | `false`            | No compression |
+  #
+  # The disk is compressed here rather than in the bundle's ZIP, which stores
+  # it: a compressed qcow2 stays compressed in the image store it is extracted
+  # into, where it is a backing file for however many domains are laid over it.
+  #
+  # # Returns
+  #
+  # The `Path` written.
+  #
+  # # Errors
+  #
+  # | Error        | Condition |
+  # | ------------ | -------------------------------------------------------- |
+  # | `StateError` | The domain is not shut off, or did not shut down cleanly and `force:` was not given |
+  # | `ValueError` | The domain has no `dolang:vm` metadata, does not have exactly one file-backed disk, or the destination is unusable |
+  #
+  # # Example
+  #
+  # ```
+  # domain.shutdown()
+  # domain.export ./freebsd-gold.dolvm
+  # domain.undefine()
+  # ```
+  pub def export self destination :compress = true :force = false
+    self.#require_clean_shutoff $force
+    let document = self.#xml()
+    let info = document.bundle_info()
+    let source = export_source $document
+    let destination = export_destination $document $destination $source
+    progress.show message: "export $(self.name)" icon: 📦 do |_|
+      with_temp_dir parent: $destination.parent do |staging|
+        let disk = (staging / DISK_MEMBER)
+        self.export_disk $disk :compress
+        let manifest = bundle_manifest $info $disk (generated_domain_xml document)
+        let bundle = (staging / "bundle")
+        write_bundle $bundle $manifest $disk
+        if destination.exists()
+          throw std.ValueError "export destination appeared during export: $destination"
+        bundle.rename $destination
     destination
 
   # Copies one local file into the domain. `chmod:` sets the destination's
@@ -739,6 +955,191 @@ def image_format image
   if (format == nil)
     throw std.ValueError "qemu-img did not report an image format"
   str $format
+
+# The document `create` emitted for this domain, which `raw_define` left in its
+# work directory, or `nil` if it is not there to read.
+#
+# A manifest records it as an escape hatch for anything the structured fields
+# do not model yet. `virsh dumpxml` output is deliberately not used in its
+# place: that is libvirt's expansion of the definition — a generated uuid,
+# filled-in defaults, rewritten devices — rather than what this module wrote.
+def generated_domain_xml document
+  let cleanup = document.cleanup_info()
+  if !cleanup
+    return nil
+  let path = (cleanup.workdir / "domain.xml")
+  if !path.exists()
+    return nil
+  path.read()
+
+# Builds the manifest for a bundle, with `version` first because this format
+# will change.
+#
+# The disk carries its own blake3 digest: a ZIP entry's CRC32 is a corruption
+# check rather than an integrity property, and the disk is extracted and cached
+# on its own, where the bundle's digest no longer covers it.
+def bundle_manifest info disk domain_xml
+  let manifest = $
+    version: $BUNDLE_VERSION
+    app: $info.app
+    os: $(str(info.os).lower())
+    arch: $(str(info.arch).lower())
+    user: $info.user
+    vfs_command: $info.command
+    memory: $info.memory
+    vcpus: $info.vcpus
+    disk:
+      name: $DISK_MEMBER
+      format: $(image_format disk)
+      size: $disk.metadata().size
+      digest: "$DIGEST_ALGORITHM:$(file_digest disk)"
+  if (domain_xml != nil)
+    manifest[:domain_xml:] = domain_xml
+  json.encode $manifest
+
+# Writes the bundle itself: the manifest, then the disk.
+#
+# The disk is `STORE`d because `qemu-img convert -c` has already done any
+# compressing, and storing it leaves it a contiguous byte range that extraction
+# can copy straight out. `size:` reserves the ZIP64 fields in the entry's local
+# header, without which a disk over 4 GiB could not be written at all.
+def write_bundle path manifest disk
+  let total = disk.metadata().size
+  zip.open $path w do |archive|
+    archive.open $MANIFEST_MEMBER mode: 0o644 do |entry|
+      entry.write $manifest
+    progress.show message: "pack disk" icon: 🗜️ total: $total units: :BYTES: do |indicator|
+      archive.open $DISK_MEMBER mode: 0o644 compression: :STORED: size: $total do |entry|
+        disk.open rb do |file|
+          for chunk = file
+            entry.write $chunk
+            indicator.delta $chunk.len
+
+# Finds a bundle member by name, or `nil`.
+def find_member archive name
+  for entry = archive.entries
+    if (str(entry.name) == name)
+      return entry
+  nil
+
+# Reads a whole bundle member, refusing one that is implausibly large. Only the
+# manifest is read this way; the disk is streamed.
+def read_member entry
+  let chunks = []
+  let total = 0
+  entry.open do |file|
+    while true
+      let chunk = (file.read BUNDLE_CHUNK)
+      if (chunk.len == 0)
+        break
+      total = (total + chunk.len)
+      if (total > MANIFEST_LIMIT)
+        throw std.ValueError "bundle manifest is too large"
+      chunks.push $chunk
+  b"".join $chunks
+
+def manifest_field manifest key source
+  let value = manifest.get $key
+  if !(type value Str)
+    throw std.ValueError "bundle manifest is missing $key: $source"
+  value
+
+def manifest_count manifest key source
+  let value = manifest.get $key
+  if !(type value Int)
+    throw std.ValueError "bundle manifest is missing $key: $source"
+  value
+
+# Splits a manifest digest into its algorithm and hex digits. Only blake3 is
+# written, and only blake3 is accepted: the field is spelled `algorithm:hex` so
+# that a later format version can add one, not so that a bundle can choose.
+def manifest_hex value source
+  let parts = [...value.split ":" limit: 1]
+  let algorithm = (parts.len == 2 && parts[0] || nil)
+  let hex = (parts.len == 2 && parts[1].lower() || nil)
+  if (algorithm != DIGEST_ALGORITHM || hex == nil || hex.len == 0)
+    throw std.ValueError "unsupported bundle disk digest: $value ($source)"
+  hex
+
+# Reads and validates a bundle's manifest, as the record the rest of the import
+# path consumes.
+def read_manifest bundle
+  let manifest = zip.open $bundle do |archive|
+    let entry = find_member $archive $MANIFEST_MEMBER
+    if !entry
+      throw std.ValueError "not a Do VM bundle (no $MANIFEST_MEMBER): $bundle"
+    json.decode $ str $ read_member $entry
+  if !(type manifest Dict)
+    throw std.ValueError "bundle manifest is not an object: $bundle"
+  let version = manifest.get "version"
+  if (version != BUNDLE_VERSION)
+    let message = "unsupported bundle version $version, expected $BUNDLE_VERSION: $bundle"
+    throw std.ValueError $message
+  let disk = manifest.get "disk"
+  if !(type disk Dict)
+    throw std.ValueError "bundle manifest is missing disk: $bundle"
+  let os = manifest_field $manifest os $bundle
+  let arch = manifest_field $manifest arch $bundle
+  let digest_spec = manifest_field $disk digest $bundle
+  record
+    app: $(manifest_field manifest "app" bundle)
+    os: $(sym(os.upper()))
+    arch: $(sym(arch.upper()))
+    user: $(manifest_field manifest "user" bundle)
+    command: $(manifest_field manifest "vfs_command" bundle)
+    memory: $(manifest_count manifest "memory" bundle)
+    vcpus: $(manifest_count manifest "vcpus" bundle)
+    disk: $ record
+      name: $(manifest_field disk "name" bundle)
+      format: $(manifest_field disk "format" bundle)
+      size: $(manifest_count disk "size" bundle)
+      hex: $(manifest_hex digest_spec bundle)
+
+# Extracts a bundle's disk, verifying it against the manifest digest as it
+# streams.
+def extract_disk bundle manifest destination
+  zip.open $bundle do |archive|
+    let entry = find_member $archive $manifest.disk.name
+    if !entry
+      throw std.ValueError "bundle is missing $(manifest.disk.name): $bundle"
+    let state = digest.Blake3()
+    progress.show
+      message: "extract disk"
+      icon: 💿
+      total: $manifest.disk.size
+      units: :BYTES:
+      do |indicator|
+        destination.open wb do |output|
+          entry.open do |file|
+            while true
+              let chunk = (file.read BUNDLE_CHUNK)
+              if (chunk.len == 0)
+                break
+              state.update $chunk
+              output.write $chunk
+              indicator.delta $chunk.len
+    let actual = state.digest().hex()
+    if (actual != manifest.disk.hex)
+      let expected = manifest.disk.hex
+      let message = "bundle disk digest mismatch: expected $expected, got $actual"
+      throw std.ValueError $message
+
+# Extracts a bundle's disk into the shared image store, the same durable store
+# `prepared_image` fills. Keyed on the manifest digest rather than a digest of
+# the bundle, so two bundles minted from one disk share an entry — and so the
+# key is known before anything is extracted.
+def bundle_image bundle manifest root
+  let entry = (root / "images" / manifest.disk.hex)
+  entry.create_dir all: true
+  let destination = (entry / "image")
+  let lock_path = (entry / "lock")
+  lock_path.open a+ do |lock| lock.lock (..) do |_|
+    if !destination.exists()
+      with_temp_dir parent: $entry do |staging|
+        let temporary = (staging / "image")
+        extract_disk $bundle $manifest $temporary
+        temporary.rename $destination
+  destination.absolute()
 
 def ensure_key root app
   let directory = (root / "ssh")
@@ -1046,30 +1447,150 @@ def remove_partial name connect_uri workdir
     nil
   workdir.remove all: true ignore: true
 
-# Creates and starts a cloud-init domain.
+# Resolves the `image:` provisioning source: a base image to lay an overlay
+# over, plus the cloud-init seed that provisions the guest on first boot.
+def image_source
+  :image
+  :image_digest
+  :os
+  :arch
+  :app
+  :user
+  :packages
+  :staged
+  :dolang
+  :keys
+  :root
+do
+  let resolved = progress.show message: "resolve image" do |_|
+    resolve_source $image $app $image_digest
+  let prepared = progress.show message: "prepare image" icon: 💿 do |_|
+    let stored = prepared_image $resolved $root
+    record image: $stored format: $(image_format stored)
+  let payload = progress.show message: "resolve dolang" do |_|
+    resolve_dolang $dolang $os $arch $app
+  let seed = progress.show message: "prepare cloud-init" icon: ☁️ do |_|
+    let public_key = keys.public.read().trim()
+    let user_data = cloud_config $user $public_key $packages $staged.boot $staged.write
+    build_seed $root $user_data
+  let command = if payload
+    "$(payload_directory user)/dolang-vfs"
+  else
+    "dolang-vfs"
+  record :os :arch :user :command :payload :seed
+    image: $prepared.image
+    format: $prepared.format
+    memory: nil
+    vcpus: nil
+
+# Resolves the `bundle:` provisioning source: a disk that was provisioned once,
+# before it was exported, and the configuration recorded alongside it.
+#
+# There is no seed and no payload — both were already applied to the disk being
+# restored — so the domain is ready as soon as it accepts SSH.
+def bundle_source :bundle :bundle_digest :app :root
+  let resolved = progress.show message: "resolve bundle" do |_|
+    resolve_source $bundle $app $bundle_digest
+  let manifest = read_manifest $resolved
+  # The key a bundle's guest trusts is the one generated for the app it was
+  # minted under, and that key lives under that app's data directory. Restoring
+  # under a different app would hand the guest a key it has never seen, which
+  # surfaces as `wait_available` never returning rather than as an error.
+  if (manifest.app != app)
+    throw std.ValueError "bundle was exported from app $(manifest.app), not $app"
+  let image = progress.show message: "prepare image" icon: 💿 do |_|
+    bundle_image $resolved $manifest $root
+  record :image
+    os: $manifest.os
+    arch: $(require_arch manifest.arch)
+    user: $(require_name manifest.user)
+    command: $manifest.command
+    format: $manifest.disk.format
+    memory: $manifest.memory
+    vcpus: $manifest.vcpus
+    payload: nil
+    seed: nil
+
+# Defines and starts the domain, hunting for a forwarded SSH port libvirt will
+# accept.
+def start_domain config connect_uri workdir name
+  let domain = Domain $name $connect_uri
+  let started = false
+  for attempt = 0..PORT_ATTEMPTS
+    # A forwarded port is only known to be free once libvirt has bound
+    # it, so a collision means re-emitting with a fresh one.
+    if (attempt > 0)
+      config.guest.port = rand.int $PORT_START $PORT_END
+    let document = config.to_xml()
+    raw_define $document $connect_uri $workdir
+    let stderr = []
+    try
+      virsh $connect_uri start $name stderr: $stderr.prechomp()
+      started = true
+    catch proc.Error: e
+      try
+        raw_undefine $name $connect_uri
+      catch _
+        nil
+      if (!address_in_use_error(stderr) || attempt == PORT_ATTEMPTS - 1)
+        echo $"\n".join(stderr)
+        throw e
+    if started
+      break
+  if !started
+    throw std.RuntimeError "could not allocate a forwarded SSH port"
+  domain
+
+# Rejects an argument a `bundle:` already answers, or that only the cloud-init
+# path could act on.
+def reject_with_bundle name value
+  if (value != nil)
+    throw std.ValueError "$name: is not valid together with bundle:"
+
+# Creates and starts a domain, either provisioning it with cloud-init from a
+# base `image:` or restoring it from an already-provisioned `bundle:`.
 #
 # # Parameters
 #
-# | Name            | type                 | Description |
-# | --------------- | -------------------- | ------------------------------------------------------ |
-# | `image`         | `Str`\|`Path`\|`Url` | Base disk image (may be `.gz`/`.xz`/`.zstd` compressed) |
-# | `name`          | `Str`                | Domain name; auto-generated if omitted |
-# | `os`            | `Sym`                | Guest OS, using `sys`'s symbol vocabulary            |
-# | `arch`?         | `Sym`                | Guest CPU architecture, `sys` symbol; must be the host's, which is the default |
-# | `app`?          | `Str`                | Cache/data namespace; derived from `shell.program` by default |
-# | `user`?         | `Str`                | Guest user to create (default `"ci"`) |
-# | `dolang`?       | See below            | Installs Do into the guest — see [`dolang:`](#dolang) |
-# | `image_digest`? | `Str`                | `algorithm:hex` digest to verify a downloaded `image` |
-# | `packages`?     | `Array`              | Guest packages to install |
-# | `memory`?       | `Int`                | Guest memory in MiB (default `2048`) |
-# | `vcpus`?        | `Int`                | Guest vCPU count (default `2`) |
-# | `disk_size`?    | `Str`                | Disk size (default `"20G"`)               |
-# | `cache`?        | `Sym`                | Disk host cache mode — see [`cache:`](#cache) |
-# | `io`?           | `Sym`                | Disk I/O submission mode — see [`io:`](#io) |
-# | `connect_uri`?  | `Str`                | libvirt connection URI (default `"qemu:///session"`) |
-# | `init`?         | `Dict`               | Early boot provisioning — see [`init:`](#init) |
-# | `add`*          | `Dict`               | Uploads a file — see [`add:`](#add)         |
-# | `run`*          | `func`               | Runs a block in VFS context |
+# Exactly one of `image:` and `bundle:` is required. A bundle already answers
+# `os:`, `arch:`, `user:`, `dolang:`, `packages:`, `init:`, and
+# `image_digest:`, so passing any of them with `bundle:` is an error rather
+# than a silently ignored argument — see [`bundle:`](#bundle).
+#
+# | Name             | type                 | Description |
+# | ---------------- | -------------------- | ------------------------------------------------------ |
+# | `image`?         | `Str`\|`Path`\|`Url` | Base disk image (may be `.gz`/`.xz`/`.zstd` compressed) |
+# | `bundle`?        | `Str`\|`Path`\|`Url` | Bundle written by `Domain.export` — see [`bundle:`](#bundle) |
+# | `name`           | `Str`                | Domain name; auto-generated if omitted |
+# | `os`             | `Sym`                | Guest OS, using `sys`'s symbol vocabulary            |
+# | `arch`?          | `Sym`                | Guest CPU architecture, `sys` symbol; must be the host's, which is the default |
+# | `app`?           | `Str`                | Cache/data namespace; derived from `shell.program` by default |
+# | `user`?          | `Str`                | Guest user to create (default `"ci"`) |
+# | `dolang`?        | See below            | Installs Do into the guest — see [`dolang:`](#dolang) |
+# | `image_digest`?  | `Str`                | `algorithm:hex` digest to verify a downloaded `image` |
+# | `bundle_digest`? | `Str`                | `algorithm:hex` digest to verify a downloaded `bundle` |
+# | `packages`?      | `Array`              | Guest packages to install |
+# | `memory`?        | `Int`                | Guest memory in MiB (default `2048`, or the bundle's) |
+# | `vcpus`?         | `Int`                | Guest vCPU count (default `2`, or the bundle's) |
+# | `disk_size`?     | `Str`                | Disk size (default `"20G"`; a bundle's disk keeps its own size) |
+# | `cache`?         | `Sym`                | Disk host cache mode — see [`cache:`](#cache) |
+# | `io`?            | `Sym`                | Disk I/O submission mode — see [`io:`](#io) |
+# | `connect_uri`?   | `Str`                | libvirt connection URI (default `"qemu:///session"`) |
+# | `init`?          | `Dict`               | Early boot provisioning — see [`init:`](#init) |
+# | `add`*           | `Dict`               | Uploads a file — see [`add:`](#add)         |
+# | `run`*           | `func`               | Runs a block in VFS context |
+#
+# # `bundle:`
+#
+# A bundle produced by [`Domain.export`](./domain.md#libvirt--Domain--export):
+# a ZIP holding the domain's flattened disk and a manifest of the configuration
+# that goes with it. Restoring one skips provisioning entirely — no seed, no
+# cloud-init, no payload install — so the domain is ready as soon as it accepts
+# SSH, and the `add:`/`run:` actions then run as usual.
+#
+# The SSH key a bundle's guest trusts is the one generated for the `app:` it was
+# exported under, so `app:` must match; a mismatch is an error rather than a
+# guest that never accepts a connection.
 #
 # # `dolang:`
 #
@@ -1150,7 +1671,7 @@ def remove_partial name connect_uri workdir
 #
 # | Error          | Condition                                                            |
 # | -------------- | ----------------------------------------------------------------------- |
-# | `ValueError`   | `image` or `os` is omitted, `arch` is not the host's, or a domain named `name` already exists |
+# | `ValueError`   | Neither or both of `image` and `bundle` are given, `os` is omitted with `image`, an argument is given that `bundle` already answers, `arch` is not the host's, the bundle was exported from another `app`, or a domain named `name` already exists |
 # | `RuntimeError` | No forwarded SSH port could be allocated                                |
 # | `TypeError`    | Invalid argument type |
 #
@@ -1173,35 +1694,77 @@ def remove_partial name connect_uri workdir
 #
 # echo $domain.name
 # ```
+#
+# Restoring a bundle instead, which runs no provisioning:
+#
+# ```
+# let domain = libvirt.create
+#   bundle: ./freebsd-gold.dolvm
+#   app: dolang-libvirt-test
+#   name: freebsd-build
+#   run: do
+#     run uname -a
+# ```
 pub def create
   :image = nil
+  :bundle = nil
   :name = nil
   :os = nil
   :arch = nil
   :app = nil
-  :user = "ci"
-  :dolang = true
+  :user = nil
+  :dolang = nil
   :image_digest = nil
-  :packages = []
-  :memory = DEFAULT_MEMORY
-  :vcpus = DEFAULT_VCPUS
-  :disk_size = DEFAULT_DISK_SIZE
+  :bundle_digest = nil
+  :packages = nil
+  :memory = nil
+  :vcpus = nil
+  :disk_size = nil
   :cache = nil
   :io = DEFAULT_DISK_IO
   :connect_uri = DEFAULT_CONNECT_URI
   :init = nil
   ...options
 do
-  if (image == nil)
-    throw std.ValueError "image: is required"
-  os = require_os $os
-  arch = require_arch $arch
+  if (image == nil && bundle == nil)
+    throw std.ValueError "image: or bundle: is required"
+  if (image != nil && bundle != nil)
+    throw std.ValueError "image: is not valid together with bundle:"
+  if (bundle == nil && bundle_digest != nil)
+    throw std.ValueError "bundle_digest: is not valid without bundle:"
   app = normalized_app $app
   let post = parse_post_options $options
   name = require_name(name || "$app-$(rand.string 8)")
-  user = require_name $user
   let root = data_root $app
-  let staged = parse_init $init $app
+
+  # Validated up front, before anything is defined or written, so a bad
+  # argument is reported without leaving a domain behind.
+  let user_name = nil
+  let staged = nil
+  let dolang_spec = nil
+  if (bundle != nil)
+    reject_with_bundle os $os
+    reject_with_bundle arch $arch
+    reject_with_bundle user $user
+    reject_with_bundle dolang $dolang
+    reject_with_bundle packages $packages
+    reject_with_bundle init $init
+    reject_with_bundle image_digest $image_digest
+  else
+    os = require_os $os
+    arch = require_arch $arch
+    user_name = require_name (user || "ci")
+    packages = (packages || [])
+    staged = parse_init $init $app
+    dolang_spec = if (dolang == nil)
+      true
+    else
+      dolang
+    # A bundle's disk is already sized for the guest built around it, so an
+    # overlay over one inherits that size unless `disk_size:` says otherwise.
+    if (disk_size == nil)
+      disk_size = DEFAULT_DISK_SIZE
+
   let workdir = (root / "domains" / name).absolute()
   try
     attach $name :connect_uri
@@ -1214,68 +1777,55 @@ do
   progress.show message: "create $name" icon: 🖥️ do |_|
     let succeeded = false
     try
-      let image = progress.show message: "resolve image" do |_|
-        resolve_source $image $app $image_digest
-      let prepared = progress.show message: "prepare image" icon: 💿 do |_|
-        let stored = prepared_image $image $root
-        record image: $stored format: $(image_format stored)
-      let payload = progress.show message: "resolve dolang" do |_|
-        resolve_dolang $dolang $os $arch $app
-      let setup = progress.show message: "prepare cloud-init" icon: ☁️ do |_|
-        let keys = ensure_key $root $app
-        let public_key = keys.public.read().trim()
-        let user_data = cloud_config $user $public_key $packages $staged.boot $staged.write
-        let seed = build_seed $root $user_data
-        record :keys :seed
+      let keys = ensure_key $root $app
+      let source = if (bundle != nil)
+        bundle_source
+          bundle: $bundle
+          bundle_digest: $bundle_digest
+          app: $app
+          root: $root
+      else
+        image_source
+          image: $image
+          image_digest: $image_digest
+          os: $os
+          arch: $arch
+          app: $app
+          user: $user_name
+          packages: $packages
+          staged: $staged
+          dolang: $dolang_spec
+          keys: $keys
+          root: $root
+      let memory_mib = (memory || source.memory || DEFAULT_MEMORY)
+      let vcpu_count = (vcpus || source.vcpus || DEFAULT_VCPUS)
 
       let overlay = progress.show message: "create disk" icon: 💾 do |_|
         let overlay = (workdir / "disk.qcow2").absolute()
-        cli qemu-img create -q -f qcow2 -F $prepared.format -b $prepared.image $overlay $disk_size
+        if (disk_size != nil)
+          cli qemu-img create -q -f qcow2 -F $source.format -b $source.image $overlay $disk_size
+        else
+          cli qemu-img create -q -f qcow2 -F $source.format -b $source.image $overlay
         overlay
       let known_hosts = (workdir / "known_hosts").absolute()
-      let command = if payload
-        "$(payload_directory user)/dolang-vfs"
-      else
-        "dolang-vfs"
 
       let config = DomainConfig
-        :name :arch :app :workdir :memory :vcpus :cache :io
+        :name :app :workdir :cache :io
+        os: $source.os
+        arch: $source.arch
+        memory: $memory_mib
+        vcpus: $vcpu_count
         overlay: $overlay
-        seed: $setup.seed
+        seed: $source.seed
         guest: $ Guest
           port: (rand.int PORT_START PORT_END)
-          user: $user
-          identity: $setup.keys.key.absolute()
+          user: $source.user
+          identity: $keys.key.absolute()
           known_hosts: $known_hosts
-          command: $command
+          command: $source.command
 
       let domain = progress.show message: "start domain" do |_|
-        let domain = Domain $name $connect_uri
-        let started = false
-        for attempt = 0..PORT_ATTEMPTS
-          # A forwarded port is only known to be free once libvirt has bound
-          # it, so a collision means re-emitting with a fresh one.
-          if (attempt > 0)
-            config.guest.port = rand.int $PORT_START $PORT_END
-          let document = config.to_xml()
-          raw_define $document $connect_uri $workdir
-          let stderr = []
-          try
-            virsh $connect_uri start $name stderr: $stderr.prechomp()
-            started = true
-          catch proc.Error: e
-            try
-              raw_undefine $name $connect_uri
-            catch _
-              nil
-            if (!address_in_use_error(stderr) || attempt == PORT_ATTEMPTS - 1)
-              echo $"\n".join(stderr)
-              throw e
-          if started
-            break
-        if !started
-          throw std.RuntimeError "could not allocate a forwarded SSH port"
-        domain
+        start_domain $config $connect_uri $workdir $name
 
       # Read the guest back out of the defined domain rather than reusing the
       # local one: if libvirt failed to record the `<dolang:vm>` metadata, that
@@ -1284,11 +1834,14 @@ do
       let guest = DomainXml(dumped).guest()
       progress.show message: "wait for SSH" icon: 🔑 do |_|
         guest.wait_available()
-      if payload
+      if source.payload
         progress.show message: "copy payload" icon: 📦 do |_|
-          guest.install_payload $payload
-      progress.show message: "wait for provisioning" do |_|
-        guest.wait_ready()
+          guest.install_payload $source.payload
+      # A bundle's guest was provisioned before it was exported: with no seed
+      # there is no cloud-init run to wait for.
+      if source.seed
+        progress.show message: "wait for provisioning" do |_|
+          guest.wait_ready()
       for action = post
         if (action.kind == :add:)
           perform_add $domain $action.spec $app
@@ -1302,8 +1855,8 @@ do
         progress.show message: "clean up" icon: 🧹 do |_|
           remove_partial $name $connect_uri $workdir
 
-# Creates a domain, runs `block` through its VFS, and tears it down — even
-# if `block` throws.
+# Creates a domain from an `image:` or a `bundle:`, runs `block` through its
+# VFS, and tears it down — even if `block` throws.
 #
 # # Parameters
 #
@@ -1326,32 +1879,60 @@ do
 #   do
 #     run uname -a
 # ```
-pub def with
-  block
-  :image = nil
-  :name = nil
-  :os = nil
-  :arch = nil
-  :app = nil
-  :user = "ci"
-  :dolang = true
-  :image_digest = nil
-  :packages = []
-  :memory = DEFAULT_MEMORY
-  :vcpus = DEFAULT_VCPUS
-  :disk_size = DEFAULT_DISK_SIZE
-  :cache = nil
-  :io = DEFAULT_DISK_IO
-  :connect_uri = DEFAULT_CONNECT_URI
-  :init = nil
-  ...options
-do
-  let domain = create
-    :image :name :os :arch :app :user :dolang :image_digest :packages
-    :memory :vcpus :disk_size :cache :io :connect_uri :init ...options
+pub def with block ...options
+  let domain = create ...options
   try
     domain.with $block
   finally
     if (domain.state() != :SHUTOFF:)
       domain.destroy()
     domain.undefine()
+
+# Provisions a domain, shuts it down cleanly, exports it as a bundle, and
+# tears it down.
+#
+# This is the minting half of the gold-image workflow: `build` produces the
+# bundle, and `create bundle:` consumes it. Keeping the two passes separate is
+# the point — a caller that provisions on a cache miss and restores on a hit
+# would otherwise run its real work against two different guests, one of them
+# freshly cloud-inited, and only discover the divergence on the rarer path.
+# Build the bundle in its own pass and always start from it.
+#
+# Preparation is the caller's to specify through the same `packages:`, `init:`,
+# `add:`, and `run:` arguments `create` takes; `run:` in particular is where
+# anything the guest must do for itself belongs, such as reclaiming free space
+# before the disk is flattened.
+#
+# # Parameters
+#
+# Takes the same keyword arguments as `create`, plus:
+#
+# | Name          | type            | Description |
+# | ------------- | --------------- | ------------------------------------------------ |
+# | `destination` | `Str`\|`Path`   | Bundle to write, conventionally named `.dolvm` |
+# | `compress`?   | `Bool`\|`Sym`   | qcow2 compression, as on [`Domain.export`](./domain.md#libvirt--Domain--export) |
+#
+# # Returns
+#
+# The `Path` written.
+#
+# # Example
+#
+# ```
+# libvirt.build (CACHE_DIR / "freebsd-gold.dolvm")
+#   image: freebsd.qcow2.xz
+#   os: :FREEBSD:
+#   packages:
+#     - git
+# ```
+pub def build destination :compress = true ...options
+  let domain = create ...options
+  let result = nil
+  try
+    domain.shutdown()
+    result = domain.export $destination :compress
+  finally
+    if (domain.state() != :SHUTOFF:)
+      domain.destroy()
+    domain.undefine()
+  result
