@@ -1,0 +1,51 @@
+import sys
+import
+  testlib.vfs:
+    - vfs
+  test:
+    - assert
+    - assert_eq
+    - assert_throws
+    - test
+  fs:
+    - open
+    - read
+    - sync
+    - write
+    - Path
+
+# `sync` has no observable effect on a filesystem that is not losing power, so
+# what these check is the plumbing: that each spelling reaches the backend, and
+# that the data is intact afterwards. A durability test would need a crash.
+
+#[test]
+#[vfs]
+def file_sync_flushes_an_open_handle()
+  let path = "test_sync_file.txt"
+  open $path w do |file|
+    file.write "alpha\n"
+    file.sync()
+    file.sync data: true
+  assert_eq (read path) "alpha\n"
+
+#[test]
+#[vfs]
+def path_sync_and_fs_sync_flush_by_name()
+  let path = "test_sync_path.bin"
+  write $path b"abc"
+
+  (Path path).sync()
+  (Path path).sync data: true
+  sync $path
+  sync $path data: true
+
+  assert_eq (read path "b") b"abc"
+
+#[test]
+#[vfs]
+def sync_rejects_a_missing_file()
+  # Opened rather than created: syncing a file into existence would be a
+  # strange thing to have asked for, so a missing path is an error.
+  assert (!Path("test_sync_missing.txt").exists())
+  assert_throws $sys.NotFoundError do
+    sync test_sync_missing.txt

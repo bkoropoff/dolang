@@ -754,6 +754,10 @@ pub(crate) enum RequestKind {
         file: Cite<FileMarker>,
         size: u64,
     },
+    FileSync {
+        file: Cite<FileMarker>,
+        data: bool,
+    },
     FileLock {
         file: Cite<FileMarker>,
         request: FileLockRequest,
@@ -903,6 +907,7 @@ pub(crate) enum ResponseKind {
     FileAppend((usize, u64)),
     FileSize(u64),
     FileSetSize,
+    FileSync,
     FileLock(Option<Gift<FileLockMarker>>),
     FileUnlock,
     FileToStdioSend(Gift<StdioSendMarker>),

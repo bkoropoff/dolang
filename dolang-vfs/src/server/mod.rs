@@ -764,6 +764,10 @@ impl Connection {
                 self.handle_file_set_size(context, file, size).await?;
                 Ok(ResponseKind::FileSetSize)
             }
+            RequestKind::FileSync { file, data } => {
+                self.handle_file_sync(context, file, data).await?;
+                Ok(ResponseKind::FileSync)
+            }
             RequestKind::FileLock { file, request } => {
                 self.handle_file_lock(context, file, request).await
             }
@@ -1506,6 +1510,16 @@ impl Connection {
     ) -> Result<()> {
         let file = self.retained_file(context, file)?;
         file.0.set_size(size).await
+    }
+
+    async fn handle_file_sync(
+        &self,
+        context: &CallContext<VfsProtocol>,
+        file: Cite<FileMarker>,
+        data: bool,
+    ) -> Result<()> {
+        let file = self.retained_file(context, file)?;
+        file.0.sync(data).await
     }
 
     async fn handle_file_to_stdio_send(

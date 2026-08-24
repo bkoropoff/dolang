@@ -84,6 +84,28 @@ open data.bin r+ do |file|
   file.set_size 8
 ```
 
+### `sync :data?`
+
+Flushes the file to durable storage, returning once the device reports it
+committed.
+
+#### Parameters
+
+| Name   | Type                       | Description                                 |
+| ------ | -------------------------- | ------------------------------------------- |
+| `data` | [`Bool`](../std/index.md)? | Flush data only, skipping unneeded metadata |
+
+See [`fs.sync`](index.md#sync-path-data) for what `data:` selects and what a
+flush does and does not guarantee.
+
+#### Example
+
+```
+open journal.bin w do |file|
+  file.write $entry
+  file.sync()
+```
+
 ### `lock range :shared? func`
 
 Acquires a byte-range lock while `func` runs.

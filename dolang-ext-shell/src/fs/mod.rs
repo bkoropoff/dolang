@@ -572,6 +572,36 @@ async fn set_size<'v, 's>(
     Ok(())
 }
 
+/// Opens `path` only to flush it, which is what a path-level sync can do:
+/// durability is a property of an open handle, so there is no syscall that
+/// takes a path.
+///
+/// Opened for writing because that is what Windows requires —
+/// `FlushFileBuffers` fails on a read-only handle — even though a read-only
+/// descriptor is enough for `fsync` on Unix. Not `create`, unlike `set_size`:
+/// syncing a file into existence would be a strange thing to have asked for.
+async fn sync_file<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    path: Utf8TypedPath<'_>,
+    data: bool,
+) -> Result<'v, 's, ()> {
+    let path = prepend_cwd(strand, global, path)?;
+    let local = global.local.get(strand);
+    let vfs = local.vfs();
+    let file = vfs
+        .open_options()
+        .write(true)
+        .open(path.to_path())
+        .await
+        .into_sys(strand)?;
+    let sync_result = file.sync(data).await;
+    let close_result = file.close().await;
+    sync_result.into_sys(strand)?;
+    close_result.into_sys(strand)?;
+    Ok(())
+}
+
 async fn copy<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
@@ -942,6 +972,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
     let max_depth = builder.sym("max_depth");
     let resolve = builder.sym("resolve");
     let mode = builder.sym("mode");
+    let data_kw = builder.sym("data");
     let user = builder.sym("user");
     let owner = builder.sym("owner");
     let group = builder.sym("group");
@@ -1147,6 +1178,15 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             let size = u64::try_from(size)
                 .map_err(|_| Error::type_error(strand, "size must be a non-negative integer"))?;
             set_size(strand, global, path.to_path(), size).await
+        })
+        .function("sync", async move |strand, args, _out| {
+            let ([path], [data]) = unpack!(strand, args, 1, 0, data_kw = None)?;
+            let path = path_from_value(strand, global, &path)?;
+            let data = data
+                .map(|data| util::bool(strand, data, "data"))
+                .transpose()?
+                .unwrap_or(false);
+            sync_file(strand, global, path.to_path(), data).await
         })
         .function("set_metadata", async move |strand, args, _out| {
             let (

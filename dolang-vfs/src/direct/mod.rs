@@ -853,6 +853,16 @@ impl File {
             .unwrap_or_else(|_| Err(io::Error::other("failed to join file resize task")))?)
     }
 
+    pub(crate) async fn sync(&self, data: bool) -> Result<()> {
+        let file = Arc::clone(&self.file);
+        Ok(tokio::task::spawn_blocking(move || match data {
+            true => file.sync_data(),
+            false => file.sync_all(),
+        })
+        .await
+        .unwrap_or_else(|_| Err(io::Error::other("failed to join file sync task")))?)
+    }
+
     pub(crate) async fn metadata(&self) -> Result<Metadata> {
         let file = Arc::clone(&self.file);
         #[cfg(unix)]

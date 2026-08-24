@@ -156,6 +156,10 @@ Equivalent to [`fs.append`](index.md#append-path-content).
 
 Equivalent to [`fs.set_size`](index.md#set_size-path-size).
 
+### `sync :data?`
+
+Equivalent to [`fs.sync`](index.md#sync-path-data).
+
 ### `set_metadata :resolve? ...`
 
 Equivalent to [`fs.set_metadata`](index.md#set_metadata-resolve-paths).

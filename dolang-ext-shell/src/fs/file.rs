@@ -803,6 +803,7 @@ impl<'v> Object<'v> for File<'v> {
         let kind_acl = builder.sym("kind");
         let shared = builder.sym("shared");
         let offset_sym = builder.sym("offset");
+        let data_sym = builder.sym("data");
         builder
             .supertype(TypeObject::Iter)
             .supertype(TypeObject::Sink)
@@ -992,6 +993,23 @@ impl<'v> Object<'v> for File<'v> {
                     file.set_size(size).await.into_sys(strand)?;
                 }
                 borrow.seek_to(strand, SeekFrom::Start(pos)).await?;
+                Ok(())
+            })
+            // No flush of our own beforehand: `buf` is read-ahead only, and
+            // every write path here goes straight to the file, so there is
+            // never buffered data on this side for a sync to miss.
+            .method("sync", async move |this, strand, args, _out| {
+                let ([], [data]) = unpack!(strand, args, 0, 0, data_sym = None)?;
+                let data = data
+                    .map(|data| crate::util::bool(strand, data, "data"))
+                    .transpose()?
+                    .unwrap_or(false);
+                let borrow = this.borrow(strand)?;
+                let file = borrow
+                    .file
+                    .as_ref()
+                    .ok_or_else(|| Error::state_error(strand, "file is closed"))?;
+                file.sync(data).await.into_sys(strand)?;
                 Ok(())
             })
             .method("metadata", async move |this, strand, _args, out| {
