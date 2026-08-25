@@ -1304,6 +1304,14 @@ impl Client {
         self.shared.rpc.clone().close().await;
     }
 
+    /// Aborts this client's RPC session and releases its transport handles.
+    ///
+    /// Aborting any clone closes the shared session without waiting for the
+    /// peer to close its outgoing transport.
+    pub async fn abort(self) {
+        self.shared.rpc.clone().abort().await;
+    }
+
     /// Connects to an agent daemon at a Unix-domain socket path.
     ///
     /// This transport supports native file-descriptor transfer.

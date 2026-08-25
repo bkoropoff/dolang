@@ -49,6 +49,14 @@ pub(crate) trait Sender: Send + 'static {
     async fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
+
+    /// Closes the outgoing direction after all writes have drained.
+    ///
+    /// The default is a no-op for transports whose sender drop already closes
+    /// an independent write handle.
+    async fn shutdown(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 pub(crate) trait Receiver: Send + 'static {
@@ -203,6 +211,20 @@ impl AnyReceiver {
     }
 }
 
+impl AnySender {
+    /// Whether ending the sender cannot signal EOF until the paired receiver
+    /// is also dropped.
+    pub(crate) fn requires_full_close(&self) -> bool {
+        match self {
+            Self::Generic(_) => false,
+            #[cfg(unix)]
+            Self::Unix(_) => false,
+            #[cfg(windows)]
+            Self::Windows(_) => true,
+        }
+    }
+}
+
 #[cfg(windows)]
 impl AnySender {
     pub(crate) fn attachments(&self) -> AnyAttachments {
@@ -232,6 +254,16 @@ impl Sender for AnySender {
             Self::Unix(sender) => sender.flush().await,
             #[cfg(windows)]
             Self::Windows(sender) => sender.flush().await,
+        }
+    }
+
+    async fn shutdown(&mut self) -> io::Result<()> {
+        match self {
+            Self::Generic(sender) => sender.shutdown().await,
+            #[cfg(unix)]
+            Self::Unix(sender) => sender.shutdown().await,
+            #[cfg(windows)]
+            Self::Windows(sender) => sender.shutdown().await,
         }
     }
 }
@@ -338,6 +370,10 @@ impl Sender for GenericSender {
 
     async fn flush(&mut self) -> io::Result<()> {
         self.0.as_mut().flush().await
+    }
+
+    async fn shutdown(&mut self) -> io::Result<()> {
+        self.0.as_mut().shutdown().await
     }
 }
 

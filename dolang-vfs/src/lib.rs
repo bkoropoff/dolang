@@ -216,10 +216,23 @@ impl Vfs {
         }
     }
 
-    /// Closes a remote backend. Direct backends require no shutdown.
+    /// Gracefully closes a remote backend. Direct backends require no shutdown.
+    ///
+    /// This waits for the peer to close its outgoing transport and has no
+    /// built-in timeout. Windows named pipes instead close the shared pipe
+    /// after outgoing writes drain because they cannot half-close. Use
+    /// [`Vfs::abort`] when the peer is uncooperative.
     pub async fn close(self) {
         match self.inner {
             VfsInner::Client(client) => client.close().await,
+            VfsInner::Direct(_) => {}
+        }
+    }
+
+    /// Abruptly closes a remote backend. Direct backends require no shutdown.
+    pub async fn abort(self) {
+        match self.inner {
+            VfsInner::Client(client) => client.abort().await,
             VfsInner::Direct(_) => {}
         }
     }

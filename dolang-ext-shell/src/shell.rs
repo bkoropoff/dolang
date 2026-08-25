@@ -613,14 +613,19 @@ impl<'v> Object<'v> for Vfs {
         };
         let builder = builder.method("stop", async move |this, strand, _args, _out| {
             if matches!(&this.annex().source, VfsSource::Stream) {
-                // Closing the RPC session drops its reader and writer tasks,
-                // which own the stdio pipe handles after negotiation. Joining
-                // then closes the stream endpoints and waits for the launcher
-                // to observe the helper's exit.
+                // Closing the RPC session releases the stdio pipe handles
+                // after a successful Stop response. A failed request may mean
+                // the peer will never close its output, so abort in that case.
+                // Joining always waits for the launcher to observe the
+                // helper's exit.
                 let vfs = this.annex().vfs.clone();
                 let global = this.annex().global;
                 let stop_result = vfs.stop().await;
-                vfs.close().await;
+                if stop_result.is_ok() {
+                    vfs.close().await;
+                } else {
+                    vfs.abort().await;
+                }
                 let join_result = strand
                     .with_slots(async move |strand, [mut stream, mut output]| {
                         let borrow = this.borrow(strand)?;

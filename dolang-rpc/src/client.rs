@@ -365,7 +365,9 @@ struct Inner<P: Protocol> {
     outgoing: Mutex<Option<mpsc::UnboundedSender<Outgoing<P::Request>>>>,
     pending: Mutex<Pending<P::Response>>,
     next_id: Mutex<u64>,
+    reader_shutdown: Mutex<Option<oneshot::Sender<()>>>,
     tasks: Mutex<Option<Tasks>>,
+    requires_full_close: bool,
     shared: Arc<Shared>,
     #[cfg(windows)]
     _peer_process: Option<OwnedHandle>,
@@ -395,22 +397,29 @@ struct RecvDriver<P: Protocol> {
     shared: Arc<Shared>,
 }
 
+#[derive(Clone)]
 struct Tasks {
-    reader_shutdown: Option<oneshot::Sender<()>>,
-    writer: tokio::task::JoinHandle<Result<(), Error>>,
-    reader: tokio::task::JoinHandle<()>,
+    writer_done: tokio::sync::watch::Receiver<bool>,
+    reader_done: tokio::sync::watch::Receiver<bool>,
 }
 
 impl Tasks {
-    fn shutdown(&mut self) {
-        if let Some(shutdown) = self.reader_shutdown.take() {
-            let _ = shutdown.send(());
+    async fn wait(mut done: tokio::sync::watch::Receiver<bool>) {
+        if !*done.borrow() {
+            let _ = done.changed().await;
         }
     }
 
-    async fn join(mut self) {
-        self.shutdown();
-        let _ = tokio::join!(self.writer, self.reader);
+    async fn writer(&self) {
+        Self::wait(self.writer_done.clone()).await;
+    }
+
+    async fn reader(&self) {
+        Self::wait(self.reader_done.clone()).await;
+    }
+
+    async fn join(&self) {
+        tokio::join!(self.writer(), self.reader());
     }
 }
 
@@ -418,8 +427,8 @@ impl<P: Protocol> Drop for Inner<P> {
     fn drop(&mut self) {
         // Close the writer's channel first — see the comment on `outgoing`.
         self.outgoing.lock().unwrap().take();
-        if let Some(tasks) = self.tasks.get_mut().unwrap().as_mut() {
-            tasks.shutdown();
+        if let Some(shutdown) = self.reader_shutdown.get_mut().unwrap().take() {
+            let _ = shutdown.send(());
         }
         self.fail(Error::ConnectionClosed);
     }
@@ -476,6 +485,7 @@ impl<P: Protocol> Client<P> {
         limits: Limits,
         #[cfg(windows)] peer_process: Option<OwnedHandle>,
     ) -> Self {
+        let requires_full_close = sender.requires_full_close();
         let (outgoing, outgoing_rx) = mpsc::unbounded_channel();
         let session = Session::new(Box::new(outgoing.downgrade()));
         let shared = Arc::new(Shared {
@@ -494,7 +504,9 @@ impl<P: Protocol> Client<P> {
             outgoing: Mutex::new(Some(outgoing)),
             pending: Mutex::new(HashMap::new()),
             next_id: Mutex::new(0),
+            reader_shutdown: Mutex::new(None),
             tasks: Mutex::new(None),
+            requires_full_close,
             shared: shared.clone(),
             #[cfg(windows)]
             _peer_process: peer_process,
@@ -519,24 +531,80 @@ impl<P: Protocol> Client<P> {
             }
             .run(reader_stop),
         );
+        let (writer_done_tx, writer_done) = tokio::sync::watch::channel(false);
+        let (reader_done_tx, reader_done) = tokio::sync::watch::channel(false);
+        tokio::spawn(async move {
+            let _ = writer.await;
+            let _ = writer_done_tx.send(true);
+            let _ = reader.await;
+            let _ = reader_done_tx.send(true);
+        });
+        *inner.reader_shutdown.lock().unwrap() = Some(reader_shutdown);
         *inner.tasks.lock().unwrap() = Some(Tasks {
-            reader_shutdown: Some(reader_shutdown),
-            writer,
-            reader,
+            writer_done,
+            reader_done,
         });
         Self { inner }
     }
 
-    /// Closes the session.
+    /// Gracefully closes the session.
     ///
     /// This prevents new calls from being sent and completes all pending calls
-    /// with [`Error::ConnectionClosed`]. It affects every clone of this
-    /// client handle.
+    /// with [`Error::ConnectionClosed`]. It then drains committed writes,
+    /// closes the outgoing transport, and waits for the peer to close its
+    /// outgoing transport. It affects every clone of this client handle.
+    ///
+    /// This operation has no timeout. A peer that does not close its transport
+    /// can make it wait indefinitely; callers that need a bound should apply a
+    /// timeout and use [`Client::abort`] if the peer does not cooperate.
+    /// Windows named pipes do not support half-close, so after draining the
+    /// writer this closes the shared pipe instead of waiting for peer EOF.
     pub async fn close(self) {
-        let tasks = self.inner.tasks.lock().unwrap().take();
+        let tasks = self.inner.tasks.lock().unwrap().clone();
         // Close the writer's channel first — see the comment on `outgoing`.
         self.inner.outgoing.lock().unwrap().take();
         self.inner.fail(Error::ConnectionClosed);
+        if let Some(tasks) = tasks {
+            // The reader must remain alive while the writer drains because it
+            // may still deliver the credit needed by a committed write. Once
+            // the writer exits, dropping its transport tells the peer that no
+            // more input is coming; natural EOF from the peer then ends the
+            // reader when the transport supports half-close.
+            tasks.writer().await;
+            if self.inner.requires_full_close
+                && let Some(shutdown) = self.inner.reader_shutdown.lock().unwrap().take()
+            {
+                // Windows named pipes have no write-side half-close. Both
+                // drivers share one pipe handle, so after the writer drains
+                // the reader must release its half to make the peer observe
+                // EOF. Keeping it alive through the drain still preserves
+                // flow-control progress and committed writes.
+                let _ = shutdown.send(());
+            }
+            tasks.reader().await;
+        }
+        // Keep the sender alive until after natural EOF. Besides documenting
+        // that intent in the ownership, this lets `abort` on another clone
+        // interrupt a `close` that is waiting for an uncooperative peer.
+        self.inner.reader_shutdown.lock().unwrap().take();
+    }
+
+    /// Abruptly closes the session.
+    ///
+    /// This prevents new calls from being sent, completes all pending calls
+    /// with [`Error::ConnectionClosed`], and stops the reader without waiting
+    /// for the peer to close its transport. Committed writes are allowed to
+    /// finish their current fragments before the writer exits. It affects
+    /// every clone of this client handle.
+    pub async fn abort(self) {
+        let tasks = self.inner.tasks.lock().unwrap().clone();
+        // Close the writer's channel before the reader, matching `Drop` and
+        // preserving the writer's committed-fragment drain.
+        self.inner.outgoing.lock().unwrap().take();
+        self.inner.fail(Error::ConnectionClosed);
+        if let Some(shutdown) = self.inner.reader_shutdown.lock().unwrap().take() {
+            let _ = shutdown.send(());
+        }
         if let Some(tasks) = tasks {
             tasks.join().await;
         }
@@ -921,17 +989,13 @@ impl<P: Protocol> SendDriver<P> {
         // scheduler until it's fully drained before exiting, never
         // abandoning a write already committed to it.
         //
-        // "Fully drained" here means `has_work`, not `has_pending`: this is
-        // the client's equivalent of the server's `Drain::Abrupt` (see
-        // `crate::driver`), and deliberately so. Both ways the channel can
-        // close — `Client::close` and dropping the last handle — also stop
-        // the reader and fail every pending call with `ConnectionClosed`, so
-        // no credit can arrive to release a quota-blocked send and no promise
-        // is broken by abandoning one. The client has no graceful close to
-        // drain for; if it ever gains one, it needs the server's treatment —
-        // a drain signal, and a reader kept alive past the writer — rather
-        // than a widening of this condition, which would only convert the
-        // abandonment into a hang.
+        // "Fully drained" here means `has_work`, not `has_pending`: shutdown
+        // finishes writes already committed to the wire, but abandons work
+        // still parked on quota or concurrency admission. `Client::close`
+        // keeps the reader alive while this happens, so credit can still
+        // arrive for committed writes; `Client::abort` and dropping the last
+        // handle stop it. Widening this condition would make abrupt shutdown
+        // wait for credit that can no longer arrive.
         let mut closed = false;
         while !closed || self.scheduler.has_work() {
             tokio::select! {
@@ -1013,6 +1077,7 @@ impl<P: Protocol> SendDriver<P> {
                 }
             }
         }
+        self.transport.shutdown().await?;
         Ok(())
     }
 }
@@ -1298,7 +1363,9 @@ mod tests {
             outgoing: Mutex::new(Some(outgoing.clone())),
             pending: Mutex::new(HashMap::new()),
             next_id: Mutex::new(1),
+            reader_shutdown: Mutex::new(None),
             tasks: Mutex::new(None),
+            requires_full_close: false,
             shared: test_shared(&outgoing),
             #[cfg(windows)]
             _peer_process: None,
@@ -1355,7 +1422,9 @@ mod tests {
             outgoing: Mutex::new(Some(outgoing.clone())),
             pending: Mutex::new(HashMap::new()),
             next_id: Mutex::new(1),
+            reader_shutdown: Mutex::new(None),
             tasks: Mutex::new(None),
+            requires_full_close: true,
             shared: shared.clone(),
             _peer_process: None,
         });
