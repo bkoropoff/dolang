@@ -32,6 +32,13 @@ def query_security_descriptors()
     assert_eq $shallow.mask (SecInfo())
     assert_type $SecDesc (sec_desc "test_sec_desc.txt")
     set_sec_desc test_sec_desc.txt $shallow
+    # A descriptor whose mask is empty never reaches Windows — the backend
+    # returns early — so the call above proves nothing about writing one.
+    # Replaying the file's own DACL is the smallest write that does, and it
+    # needs READ_CONTROL as well as WRITE_DAC on the handle.
+    set_sec_desc $path (SecDesc dacl: descriptor.dacl)
+    let replayed = path.sec_desc()
+    assert_eq $replayed.dacl.aces.len $descriptor.dacl.aces.len
     open $path r do |file|
       assert_type $SecDesc $file.sec_desc()
   else

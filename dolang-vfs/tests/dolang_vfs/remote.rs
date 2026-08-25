@@ -1114,9 +1114,17 @@ async fn security_descriptor_round_trip_over_generic_stream() {
         .sec_desc(path.to_path(), SecInfo::DACL, true)
         .await
         .unwrap();
-    if let Err(error) = client.set_sec_desc(path.to_path(), &dacl, true).await {
-        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
-    }
+    // Must succeed rather than be tolerated — see the note in `direct.rs`'s
+    // `direct_security_descriptor_path_and_file`.
+    client
+        .set_sec_desc(path.to_path(), &dacl, true)
+        .await
+        .unwrap();
+    let round_trip = client
+        .sec_desc(path.to_path(), SecInfo::DACL, true)
+        .await
+        .unwrap();
+    assert_eq!(round_trip.dacl(), dacl.dacl());
 
     let mut options = client.open_options();
     options.read(true);
