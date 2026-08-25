@@ -962,6 +962,22 @@ impl File {
         }
     }
 
+    pub(crate) async fn sync(&self, data: bool) -> Result<()> {
+        let file = self;
+        file.idle()?;
+        match file
+            .client
+            .request(RequestKind::FileSync {
+                file: file.cite(),
+                data,
+            })
+            .await?
+        {
+            ResponseKind::FileSync => Ok(()),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
     pub(crate) async fn metadata(&self) -> Result<Metadata> {
         let file = self;
         file.idle()?;

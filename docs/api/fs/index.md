@@ -241,6 +241,40 @@ set_size "output.txt" 0
 set_size (Path "archive.bin") 1024
 ```
 
+### `sync path :data?`
+
+Flushes the file at the given path to durable storage, returning once the
+device reports it committed.
+
+The file must already exist — unlike [`set_size`](#set_size-path-size), this
+does not create it.
+
+Flushing the contents says nothing about the directory entry naming the file,
+which is a separate inode with its own flush. Nor is it a substitute for the
+guarantee on a filesystem with delayed allocation or write cancellation, where
+data written to a file that is removed before it is flushed may never be
+written at all.
+
+#### Parameters
+
+| Name   | Type                                      | Description                                 |
+| ------ | ----------------------------------------- | ------------------------------------------- |
+| `path` | [`Str`](../std/str.md)\|[`Path`](path.md) | Path to the file                            |
+| `data` | [`Bool`](../std/index.md)?                | Flush data only, skipping unneeded metadata |
+
+##### `data:`
+
+A data-only flush (`fdatasync`) omits metadata a reader does not need to find
+the contents — notably the modification time — and so can avoid a second write
+to the inode. A size change is still flushed either way. Defaults to `false`.
+
+#### Example
+
+```
+write scratch.bin $payload
+sync scratch.bin
+```
+
 ### `is_absolute path`
 
 Checks whether a path is absolute.

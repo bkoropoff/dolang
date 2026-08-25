@@ -525,6 +525,7 @@ macro_rules! impl_concrete_path {
                 let resolve = builder.sym("resolve");
                 let replace = builder.sym("replace");
                 let mode = builder.sym("mode");
+                let data_kw = builder.sym("data");
                 let user = builder.sym("user");
                 let owner = builder.sym("owner");
                 let group = builder.sym("group");
@@ -807,6 +808,15 @@ macro_rules! impl_concrete_path {
                         })?;
                         let annex = this.annex();
                         super::set_size(strand, annex.global, annex.as_path(), size).await
+                    })
+                    .method("sync", async move |this, strand, args, _out| {
+                        let ([], [data]) = unpack!(strand, args, 0, 0, data_kw = None)?;
+                        let data = data
+                            .map(|data| crate::util::bool(strand, data, "data"))
+                            .transpose()?
+                            .unwrap_or(false);
+                        let annex = this.annex();
+                        super::sync_file(strand, annex.global, annex.as_path(), data).await
                     })
                     .method("copy", async move |this, strand, args, _out| {
                         let ([to], [all]) = unpack!(strand, args, 1, 0, all = None)?;

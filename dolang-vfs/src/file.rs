@@ -517,6 +517,21 @@ impl File {
         match_file!(self, file => file.set_size(size).await)
     }
 
+    /// Flushes the file's written data to durable storage, returning once the
+    /// device reports it committed.
+    ///
+    /// `data` selects a data-only flush (`fdatasync`), which may skip metadata
+    /// the caller does not need — notably the modification time — and so can
+    /// avoid a second write to the inode. Size changes are still flushed,
+    /// since a reader could not find the data without them.
+    ///
+    /// This durably places the *contents*. It says nothing about the
+    /// directory entry naming the file, which is a separate inode and needs
+    /// its own flush to survive a crash.
+    pub async fn sync(&self, data: bool) -> Result<()> {
+        match_file!(self, file => file.sync(data).await)
+    }
+
     /// Returns metadata for the open file.
     pub async fn metadata(&self) -> Result<Metadata> {
         match_file!(self, file => file.metadata().await)
