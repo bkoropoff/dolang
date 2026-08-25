@@ -1,4 +1,4 @@
-import shell term strand progress
+import shell term strand
   fs:
     - with_temp_dir
   test:
@@ -367,18 +367,30 @@ def mute_leaves_named_strand_output_alone()
     assert_eq $out ["visible"]
 
 #[test]
-def progress_lines_are_captured()
-  # Covers the other funnelled writer, `write_terminal_line`. Only plain-mode
-  # progress goes through it — on a real terminal indicatif takes the terminal
-  # over and draws directly, bypassing ordinary console output entirely.
+def progress_lines_use_context_capture()
+  # The output active when `progress.with` starts remains the destination for
+  # nested indicators, even when work installs another capture underneath it.
   if term.console.is_tty
     skip "requires no terminal (progress draws directly on one)"
 
-  let out = []
-  term.capture $out do
-    progress.show message: working do |_|
-      nil
-  assert (out.len > 0)
+  with_temp_dir do |dir|
+    let src = r|
+      import fs progress shell term
+      let outer = []
+      let inner = []
+      term.capture $outer do
+        progress.with do
+          term.capture $inner do
+            progress.show message: working do |_| nil
+      (fs.Path shell.args[0]).write (str outer)
+
+    let path = script $dir progress.dol $src
+    let seen = (dir / "seen.txt")
+    let err = (dir / "err.txt")
+    run $shell.exe --no-cache $path $seen stderr: $err
+
+    assert $seen.read().contains "working"
+    assert_eq (err.read()) ""
 
 #[test]
 def do_subclass_console()

@@ -319,18 +319,29 @@ pub fn stderr_cols<'v>(strand: &Strand<'v, '_>) -> Option<u16> {
         .or_else(|| ::console::Term::stderr().size_checked().map(|(_, c)| c))
 }
 
-/// Write a line (newline appended) through the shared terminal writer,
-/// serialized with `term.echo`/`term.print`/diagnostic output.
+/// Stores the ambient terminal output in `out`.
 ///
-/// Unlike [`with_terminal`], this does not require stderr to be a terminal
-/// or take exclusive ownership of the writer — it just locks the same mutex
-/// used by every other terminal writer, so callers may use it freely
-/// alongside concurrent `echo`/`print` calls from other strands.
+/// The caller is responsible for keeping that value rooted for as long as it
+/// needs to keep using this output.
+pub fn terminal_output<'v, 's>(strand: &mut Strand<'v, 's>, out: impl Output<'v>) {
+    let global = strand.state::<Global<'v>>();
+    let capture = global.capture.slot(strand);
+    Output::set(strand, out, &capture);
+}
+
+/// Returns the line ending of the ambient terminal output.
+pub fn terminal_line_ending<'v, 's>(strand: &mut Strand<'v, 's>) -> Result<'v, 's, Vec<u8>> {
+    console::ambient_line_ending(strand)
+}
+
+/// Write a line (newline appended) through a snapshotted terminal output.
 pub async fn write_terminal_line<'v, 's>(
     strand: &mut Strand<'v, 's>,
+    output: &Value<'v>,
+    line_ending: &[u8],
     line: &str,
 ) -> Result<'v, 's, ()> {
-    crate::console::writeln(strand, line.as_bytes()).await
+    crate::console::write_line_to(strand, output, line_ending, line.as_bytes()).await
 }
 
 /// Redirect terminal output (`term.echo`/`term.print` and default child stderr)

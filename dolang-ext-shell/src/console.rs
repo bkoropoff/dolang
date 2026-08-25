@@ -354,7 +354,7 @@ const HOST_LINE_ENDING: &str = "\n";
 /// than snapshotted at install: unlike `can_style`/`is_tty` it is not part of
 /// the contract that it stays fixed, and it is only consulted on the `echo`
 /// path, which is already dispatching a method.
-fn ambient_line_ending<'v, 's>(strand: &mut Strand<'v, 's>) -> Result<'v, 's, Vec<u8>> {
+pub(crate) fn ambient_line_ending<'v, 's>(strand: &mut Strand<'v, 's>) -> Result<'v, 's, Vec<u8>> {
     if !captured(strand) {
         return Ok(HOST_LINE_ENDING.as_bytes().to_vec());
     }
@@ -874,16 +874,44 @@ async fn write_host<'v, 's>(
     Ok(())
 }
 
+/// Writes a line to `target`, using the line ending that was active when the
+/// target was captured. A nil target denotes the host console.
+pub(crate) async fn write_line_to<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    target: &Value<'v>,
+    line_ending: &[u8],
+    bytes: &[u8],
+) -> Result<'v, 's, ()> {
+    if target.is_nil() {
+        return write_host(strand, bytes, true).await;
+    }
+    let mut line = Vec::with_capacity(bytes.len() + line_ending.len());
+    line.extend_from_slice(bytes);
+    line.extend_from_slice(line_ending);
+    let write = strand.state::<Global<'v>>().syms.write;
+    dispatch_to(strand, target, write, &line[..]).await
+}
+
 async fn dispatch<'v, 's>(
     strand: &mut Strand<'v, 's>,
     method: Sym<'v, 'v>,
     arg: impl Input<'v>,
 ) -> Result<'v, 's, ()> {
     let global = strand.state::<Global<'v>>();
+    let root = global.capture.slot(strand);
+    dispatch_to(strand, &root, method, arg).await
+}
+
+async fn dispatch_to<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    target: &Value<'v>,
+    method: Sym<'v, 'v>,
+    arg: impl Input<'v>,
+) -> Result<'v, 's, ()> {
+    let global = strand.state::<Global<'v>>();
     strand
         .with_slots(async move |strand, [mut rcvr, mut out]| {
-            let root = global.capture.slot(strand);
-            Output::set(strand, &mut rcvr, &root);
+            Output::set(strand, &mut rcvr, target);
             let prev = global.local.get(strand).set_capturing(true);
             let result = method!(strand, &rcvr, method, &mut out, arg).await;
             global.local.get(strand).set_capturing(prev);

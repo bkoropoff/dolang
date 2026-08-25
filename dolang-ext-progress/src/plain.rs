@@ -26,14 +26,18 @@ pub(crate) const DEFAULT_INTERVAL: Duration = Duration::from_secs(5);
 pub(crate) struct PlainConfig {
     pub(crate) style: Style,
     pub(crate) interval: Duration,
+    pub(crate) line_ending: Vec<u8>,
+    pub(crate) ansi: bool,
     next_id: Cell<u64>,
 }
 
 impl PlainConfig {
-    pub(crate) fn new(style: Style, interval: Duration) -> Self {
+    pub(crate) fn new(style: Style, interval: Duration, line_ending: Vec<u8>, ansi: bool) -> Self {
         Self {
             style,
             interval,
+            line_ending,
+            ansi,
             next_id: Cell::new(1),
         }
     }
@@ -104,6 +108,10 @@ impl PlainInfo {
     /// pick it up as their parent.
     pub(crate) fn id(&self) -> u64 {
         self.id
+    }
+
+    pub(crate) fn line_ending(&self) -> &[u8] {
+        &self.config.line_ending
     }
 
     /// Half-life (in seconds) of the throughput EWA — a fresh sample and the
