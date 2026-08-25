@@ -461,7 +461,13 @@ impl<'a, I: Iterator<Item = u8>> RawLexer<'a, I> {
             end_adj += 1;
         }
         let res = self.token_adj(token, state, start_adj, end_adj);
-        if token == RawToken::Key {
+        // `token_adj` starts the next token where this one's span ended, which
+        // is right only when the byte the span excludes is the lookahead. For
+        // `Key` (`name:`) and `Sym` (`:name:`) the excluded trailing `:` was
+        // consumed by this token, so the next one starts a byte later.
+        // Otherwise the closing `:` stays pending and is replayed as part of
+        // whatever token follows.
+        if matches!(token, RawToken::Key | RawToken::Sym) {
             self.start += 1;
         }
         res
