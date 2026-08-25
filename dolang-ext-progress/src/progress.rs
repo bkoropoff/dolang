@@ -14,7 +14,7 @@ use dolang::runtime::{
     object::TypeBuilder,
     strand::{self, Local},
     unpack,
-    value::{Empty, Slot, View},
+    value::{Empty, Singleton, Slot, View},
     vm::Builder,
 };
 use dolang_ext_shell::with_terminal;
@@ -477,11 +477,10 @@ async fn install_indicator<'v, 's>(
             let local = global.local.get(strand);
             let depth = local.depth.get();
             let parent_id = local.parent_id.get();
-            let ansi = dolang_ext_shell::ansi_enabled(strand);
             let info = Rc::new(plain::PlainInfo::new(
                 depth,
                 options.units,
-                ansi,
+                config.ansi,
                 config,
                 parent_id,
             ));
@@ -511,6 +510,7 @@ async fn install_indicator<'v, 's>(
         _ => None,
     };
     let annex = IndicatorAnnex {
+        global,
         bar: pb.clone(),
         state_rc: match &kind {
             ShowKind::Interactive(ms) => Some(ms.state_rc.clone()),
@@ -531,7 +531,7 @@ async fn install_indicator<'v, 's>(
     if let ShowKind::Plain { info, .. } = &kind
         && let Some(line) = plain::maybe_format(&pb, info, true, plain::LineEvent::Start)
     {
-        dolang_ext_shell::write_terminal_line(strand, &line).await?;
+        write_plain_line(strand, global, info, &line).await?;
     }
 
     Ok(ActiveIndicator { bar: pb, kind })
@@ -576,11 +576,28 @@ async fn finish_indicator<'v, 's>(
             local.parent_id.set(prev_parent_id);
 
             match plain::maybe_format(&active.bar, &info, true, plain::LineEvent::End) {
-                Some(line) => dolang_ext_shell::write_terminal_line(strand, &line).await,
+                Some(line) => write_plain_line(strand, global, &info, &line).await,
                 None => Ok(()),
             }
         }
     }
+}
+
+async fn write_plain_line<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    info: &plain::PlainInfo,
+    line: &str,
+) -> Result<'v, 's, ()> {
+    strand
+        .with_slots(async move |strand, [mut output]| {
+            {
+                let root = global.output.borrow();
+                Output::set(strand, &mut output, &*root);
+            }
+            dolang_ext_shell::write_terminal_line(strand, &output, info.line_ending(), line).await
+        })
+        .await
 }
 
 struct StepMetadata {
@@ -730,7 +747,19 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                     interval_val.as_deref(),
                     plain::DEFAULT_INTERVAL,
                 )?;
-                let config = plain::PlainConfig::new(style, interval);
+                if global.plain_active.replace(true) {
+                    return Err(Error::state_error(
+                        strand,
+                        "progress context already active",
+                    ));
+                }
+                let line_ending = dolang_ext_shell::terminal_line_ending(strand)?;
+                let ansi = dolang_ext_shell::ansi_enabled(strand);
+                {
+                    let mut output = global.output.borrow_mut();
+                    dolang_ext_shell::terminal_output(strand, &mut *output);
+                }
+                let config = plain::PlainConfig::new(style, interval, line_ending, ansi);
 
                 let local = global.local.get(strand);
                 let prev_depth = local.depth.replace(0);
@@ -745,6 +774,8 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 local.depth.replace(prev_depth);
                 local.parent_id.replace(prev_parent_id);
                 local.state.replace(prev_state);
+                Output::set(strand, &mut *global.output.borrow_mut(), Singleton::Null);
+                global.plain_active.set(false);
 
                 return result;
             }
@@ -916,7 +947,8 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
 
 pub(crate) struct Indicator;
 
-pub(crate) struct IndicatorAnnex {
+pub(crate) struct IndicatorAnnex<'v> {
+    global: State<'v, Global<'v>>,
     bar: ix::ProgressBar,
     state_rc: Option<Rc<RefCell<ProgressState>>>,
     widget_id: u64,
@@ -929,6 +961,7 @@ pub(crate) struct IndicatorAnnex {
 /// indicator belongs to a non-interactive `progress.with` scope.
 async fn maybe_emit_plain<'v, 's>(
     strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
     bar: &ix::ProgressBar,
     plain_info: &Option<Rc<plain::PlainInfo>>,
     force: bool,
@@ -946,7 +979,7 @@ async fn maybe_emit_plain<'v, 's>(
         return Ok(());
     }
     if let Some(line) = plain::maybe_format(bar, info, force, plain::LineEvent::Update) {
-        dolang_ext_shell::write_terminal_line(strand, &line).await?;
+        write_plain_line(strand, global, info, &line).await?;
     }
     Ok(())
 }
@@ -954,7 +987,7 @@ async fn maybe_emit_plain<'v, 's>(
 impl<'v> Object<'v> for Indicator {
     const NAME: &'v str = "Indicator";
     const MODULE: &'v str = "progress";
-    type Annex = IndicatorAnnex;
+    type Annex = IndicatorAnnex<'v>;
     type Type = ();
     type TypeAnnex = ();
 
@@ -1012,7 +1045,7 @@ impl<'v> Object<'v> for Indicator {
                     this.annex().bar.dec(n.unsigned_abs());
                 }
                 let annex = this.annex();
-                maybe_emit_plain(strand, &annex.bar, &annex.plain, false).await
+                maybe_emit_plain(strand, annex.global, &annex.bar, &annex.plain, false).await
             })
             .method("update", async move |this, strand, args, _out| {
                 check_closed(strand, &this.annex().closed)?;
@@ -1113,7 +1146,7 @@ impl<'v> Object<'v> for Indicator {
                 }
 
                 let annex = this.annex();
-                maybe_emit_plain(strand, &annex.bar, &annex.plain, force).await
+                maybe_emit_plain(strand, annex.global, &annex.bar, &annex.plain, force).await
             })
     }
 }
