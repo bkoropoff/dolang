@@ -480,11 +480,16 @@ impl Direct {
         if mask.intersects(SecInfo::OWNER | SecInfo::GROUP) {
             access |= WRITE_OWNER;
         }
+        // An ACL write also needs READ_CONTROL: `SetSecurityInfo` reads the
+        // object's current descriptor back in order to recompute inheritance,
+        // and without it every DACL write fails with ERROR_ACCESS_DENIED no
+        // matter what the ACL says. Owner and group writes need no such read,
+        // which is why they succeed on a handle that cannot write an ACL.
         if mask.contains(SecInfo::DACL) {
-            access |= WRITE_DAC;
+            access |= WRITE_DAC | READ_CONTROL;
         }
         if mask.contains(SecInfo::SACL) {
-            access |= ACCESS_SYSTEM_SECURITY;
+            access |= ACCESS_SYSTEM_SECURITY | READ_CONTROL;
         }
         let handle = Self::security_handle(path, access, follow)?;
         Self::set_sec_desc_on_handle(handle.as_handle(), descriptor)

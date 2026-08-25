@@ -117,3 +117,15 @@ doc = key_id
   key: r|
     $value
 assert_eq $doc "\$value\n"
+
+# A symbol-shaped token at the very end of a here-doc line. `Sym` reports a
+# span that excludes its closing `:`, and the next token used to resume from
+# there — harmless anywhere the following token's start is reset, but a
+# here-doc newline extends the pending token instead of emitting one, so the
+# colon came back doubled.
+doc = r|
+  x :FOO:
+  key: :BAR:
+  y :BAZ: z
+  bare:
+assert_eq $doc "x :FOO:\nkey: :BAR:\ny :BAZ: z\nbare:\n"

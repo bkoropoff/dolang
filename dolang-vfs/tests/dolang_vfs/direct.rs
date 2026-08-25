@@ -1096,16 +1096,20 @@ async fn direct_security_descriptor_path_and_file() {
         .sec_desc(typed(&path), SecInfo::DACL, true)
         .await
         .unwrap();
-    match direct.set_sec_desc(typed(&path), &dacl, true).await {
-        Ok(()) => {
-            let round_trip = direct
-                .sec_desc(typed(&path), SecInfo::DACL, true)
-                .await
-                .unwrap();
-            assert_eq!(round_trip.dacl(), dacl.dacl());
-        }
-        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied),
-    }
+    // Writing the file's own DACL back must succeed: the handle is opened with
+    // exactly the rights that write needs, and the ACEs are the ones Windows
+    // just handed us. Tolerating PermissionDenied here is what let a missing
+    // READ_CONTROL on the handle go unnoticed — the assertion below was never
+    // reached, because every DACL write took the error branch.
+    direct
+        .set_sec_desc(typed(&path), &dacl, true)
+        .await
+        .unwrap();
+    let round_trip = direct
+        .sec_desc(typed(&path), SecInfo::DACL, true)
+        .await
+        .unwrap();
+    assert_eq!(round_trip.dacl(), dacl.dacl());
 
     let file = direct
         .open_options()
