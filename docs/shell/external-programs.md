@@ -150,6 +150,15 @@ When two external program stages are adjacent, the pipeline connects their
 stdio streams directly. Bytes pass from the first program's stdout to the
 second program's stdin without becoming Do values.
 
+Connections between stages use a
+[`proc.PipeReceiver`](../api/proc/pipe-receiver.md) and
+[`proc.PipeSender`](../api/proc/pipe-sender.md). The same pipe endpoints are the
+implicit input and output of a
+[`strand.stream`](../api/strand/index.md#stream-func) strand; its `Stream`
+handle exposes wrappers around them through `iter()` and `sink()`. Use
+`PipeReceiver.lines()` or `PipeReceiver.chunks()` to choose how a Do stage
+receives bytes from an external program.
+
 A Do stage adjacent to an external program receives discrete values. In this
 example, `each` receives `Str` values for each line from `cat`, and `collect`
 returns an array:
