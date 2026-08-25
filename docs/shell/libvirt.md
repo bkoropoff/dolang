@@ -127,14 +127,14 @@ provisioning is what costs minutes on a FreeBSD guest and half an hour on a
 Windows one. The `add:` and `run:` actions still run.
 
 Because the bundle already answers them, `os:`, `arch:`, `user:`, `dolang:`,
-`packages:`, `init:`, and `image_digest:` are errors alongside `bundle:` rather
-than arguments that quietly do nothing. `app:` must match the one the bundle was
-exported under: the guest trusts the SSH key generated for that app, and any
-other one leaves it refusing connections. `memory:`, `vcpus:`, and `disk_size:`
-default to what the exported domain used, and may be overridden.
+`packages:`, and `init:` are errors alongside `bundle:` rather than arguments
+that quietly do nothing. `app:` must match the one the bundle was exported
+under: the guest trusts the SSH key generated for that app, and any other one
+leaves it refusing connections. `memory:`, `vcpus:`, and `disk_size:` default
+to what the exported domain used, and may be overridden.
 
 A bundle may be a local path or an HTTP(S) URL — it is fetched and cached like
-any other download, and `bundle_digest:` pins it.
+any other download, and the artifact spec's `digest:` pins it.
 
 ### The Bundle Format
 
@@ -230,19 +230,52 @@ same symbol vocabulary as
 The domain is defined for KVM with a `host-passthrough` CPU, so `arch:` must be
 the host architecture; a foreign one is rejected rather than emulated.
 
+## Artifact Specs
+
+Everything this module fetches — `image:`, `bundle:`, `dolang:`, and an `add:`
+`source:` — is spelled the same two ways. Either a bare path or URL:
+
+```
+libvirt.create
+  image: https://example.com/disk.qcow2
+  os: :LINUX:
+```
+
+or a block carrying the source as its one dash item, with metadata alongside
+it:
+
+```
+libvirt.create
+  image:
+    - https://example.com/disk.qcow2
+    digest: blake3:0123...
+  os: :LINUX:
+```
+
+| Key       | Type                                                                                  | Description                              |
+| --------- | ------------------------------------------------------------------------------------- | ---------------------------------------- |
+| `0`       | [`Str`](../api/std/str.md)\|[`Path`](../api/fs/path.md)\|[`Url`](../api/url/index.md) | The source, as the block's one dash item |
+| `digest`? | [`Str`](../api/std/str.md)                                                            | `algorithm:hex` digest to verify against |
+
+A local path is verified in place. A URL is downloaded, verified, and cached,
+and a digest-pinned entry that has already been verified is reused without
+contacting the server. This one shape is why there is no `image_digest:`
+beside `image:` and no `bundle_digest:` beside `bundle:`.
+
 ## Installing Do
 
 `dolang:` controls whether and how Do (particularly `dolang-vfs`) gets
 installed into the guest before it's considered ready:
 
-| Value                              | Behavior                                                                                                                                                                                    |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `false`                            | Skip installation. The domain won't support `with`, `upload`, or `download`.                                                                                                                |
-| `true` (default)                   | Best-effort: fetch the release matching the running interpreter's version ([`shell.VERSION`](../api/shell/index.md)) for `os:`/`arch:`, silently skipping if none exists for that platform. |
-| a version tag, e.g. `"v0.1.1"`     | Fetch that release's artifact for `os:`/`arch:`. Throws an error if unavailable.                                                                                                            |
-| a [`Path`](../api/fs/path.md)      | Use a local archive directly.                                                                                                                                                               |
-| a [`Url`](../api/url/index.md)     | Fetch that archive directly, bypassing release resolution.                                                                                                                                  |
-| `{archive: path_or_url, :digest?}` | Explicit form that allows pinning a digest.                                                                                                                                                 |
+| Value                          | Behavior                                                                                                                                                                                    |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `false`                        | Skip installation. The domain won't support `with`, `upload`, or `download`.                                                                                                                |
+| `true` (default)               | Best-effort: fetch the release matching the running interpreter's version ([`shell.VERSION`](../api/shell/index.md)) for `os:`/`arch:`, silently skipping if none exists for that platform. |
+| a version tag, e.g. `"v0.1.1"` | Fetch that release's artifact for `os:`/`arch:`. Throws an error if unavailable.                                                                                                            |
+| a [`Path`](../api/fs/path.md)  | Use a local archive directly.                                                                                                                                                               |
+| a [`Url`](../api/url/index.md) | Fetch that archive directly, bypassing release resolution.                                                                                                                                  |
+| an artifact spec               | An archive with a pinned digest — see [Artifact Specs](#artifact-specs).                                                                                                                    |
+| `{version: tag}`               | Explicit form of the version tag.                                                                                                                                                           |
 
 Except for the implicit `true` default, a failed fetch always throws an error.
 
