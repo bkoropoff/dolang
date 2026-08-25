@@ -108,7 +108,13 @@ jobs:
   release-tests:
     name: Release Integration
     needs: dist
-    runs-on: ubuntu-latest
+    # Not `ubuntu-latest`, which is still 24.04 and so libvirt 10.0: the vTPM
+    # state directory is chosen with `<tpm><backend><source>`, which libvirt
+    # only understands from 10.10.0 on. An older one ignores the element and
+    # keeps the state somewhere of its own choosing, so a Windows guest
+    # installs fine and then exports a bundle with no vTPM in it. 26.04 has
+    # libvirt 12.0. Revert to `ubuntu-latest` once that points at 26.04.
+    runs-on: ubuntu-26.04
 
     steps:
       - uses: actions/checkout@v5
@@ -126,6 +132,49 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      # Windows media is not redistributable, so the unattended-install test
+      # runs only against media someone points it at. Nothing about those URLs
+      # is stable: the Evaluation Center hands out `go.microsoft.com` fwlinks
+      # whose `linkid` changes with every media refresh, and the virtio ISO's
+      # "stable" URL is a redirector whose target moves with each driver
+      # release. So both are scraped and resolved here, at the start of the
+      # job, rather than pinned in the repository where they would rot
+      # silently into a 404 months after anyone last looked.
+      #
+      # Resolving the redirects rather than handing the redirector to
+      # `transfer.get` is load-bearing twice over: the download cache is keyed
+      # on the URL, so an unresolved fwlink would cache one build of the media
+      # under a name that later means a different one, and the fwlink has no
+      # path leaf for the cache to name the payload after in the first place.
+      - name: Resolve Windows install media
+        id: windows-media
+        run: |
+          import http regex std
+
+          let page_url = "https://www.microsoft.com/en-us/evalcenter/download-windows-11-enterprise"
+          # The anchor's `aria-label` is the link's visible text, and the only
+          # durable handle on the page — the `linkid`, the surrounding markup
+          # and the marketing tags all move around. The LTSC link's label
+          # reads "... Enterprise ISO LTSC 64-bit (en-US)", so it does not
+          # match this and the plain Enterprise evaluation media wins.
+          let link = regex.Regex r#"<a[^>]*aria-label="[^"]*Windows 11 Enterprise ISO 64-bit \(en-US\)"[^>]*href="(https://go\.microsoft\.com/fwlink/[^"]+)""#
+          let page = http.get $page_url do |resp| resp.text()
+          let found = link.match $page
+          if !found
+            throw std.ValueError "no Windows 11 Enterprise en-US 64-bit ISO link on $page_url"
+
+          def resolve url
+            http.head $url do |resp| resp.url
+
+          let installer = resolve $ str $found[1]
+          let drivers = resolve
+            "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso"
+          echo "installer: $installer"
+          echo "drivers:   $drivers"
+          fs.append $env["GITHUB_ENV"] |
+            DOLANG_LIBVIRT_TEST_WINDOWS_INSTALLER=$installer
+            DOLANG_LIBVIRT_TEST_WINDOWS_DRIVERS=$drivers
+
       - name: Run release integration tests
         run: |
           import fs:
@@ -135,9 +184,12 @@ jobs:
           bin.create_dir all: true
           run tar -xzf artifacts/dolang-x86_64-linux.tar.gz -C $bin
           let archive = Path("artifacts/dolang-x86_64-freebsd.tar.gz").absolute()
-          env DOLANG_LIBVIRT_TEST_ARCHIVE: $archive do
-            run $bin/dolang --module-path testlib -m test
-              --tags release test
+          # The Windows guest runs the Windows build, not the host's own.
+          let windows = Path("artifacts/dolang-x86_64-windows.tar.gz").absolute()
+          env DOLANG_LIBVIRT_TEST_ARCHIVE: $archive
+            DOLANG_LIBVIRT_TEST_WINDOWS_ARCHIVE: $windows
+            do
+              run $bin/dolang --module-path testlib -m test --tags release --timeout 3600 test
 
   create-release:
     name: Create Release

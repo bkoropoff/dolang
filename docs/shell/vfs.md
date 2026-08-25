@@ -2,7 +2,7 @@
 
 Do can perform operations indirectly through the `dolang-vfs` companion program.
 VFS[^vfs] contexts power [containers](./containers.md),
-[SSH remoting](./ssh.md), [libvirt guests](./libvirt.md),
+[SSH remoting](./ssh.md), [libvirt guests](../vm/index.md),
 [WSL transitions](./wsl.md), and [privilege elevation](./admin.md).
 
 [^vfs]: Versatile Familiar Spirit

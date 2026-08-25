@@ -68,9 +68,15 @@ nav:
     - shell/vfs.md
     - shell/containers.md
     - shell/ssh.md
-    - shell/libvirt.md
     - shell/wsl.md
     - shell/admin.md
+  - VM Guide:
+    - vm/index.md
+    - vm/provisioning.md
+    - vm/cloud-init.md
+    - vm/windows.md
+    - vm/gold-images.md
+    - vm/caching.md
   - lsp.md
   - Reference:
     - admin: api/admin.md

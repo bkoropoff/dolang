@@ -1,4 +1,4 @@
-import digest libvirt rand sys xml
+import digest libvirt proc progress rand sys xml
   fs:
     - Path
     - with_temp_dir
@@ -15,6 +15,21 @@ tags slow release
 let FREEBSD_IMAGE = "https://download.freebsd.org/releases/VM-IMAGES/15.1-RELEASE/amd64/Latest/FreeBSD-15.1-RELEASE-amd64-BASIC-CLOUDINIT-ufs.raw.xz"
 let CACHE_DIR = Path(".cache").absolute()
 let DOLANG = if let archive = env.get "DOLANG_LIBVIRT_TEST_ARCHIVE"
+  Path $archive
+else
+  "bootstrap"
+
+# Windows media is not redistributable, so the unattended-install test runs
+# only where someone has pointed it at an installer ISO and the virtio driver
+# ISO Setup needs to see the disk at all. Both unset is the normal case,
+# including in CI, and skips rather than fails.
+let WINDOWS_INSTALLER = env.get "DOLANG_LIBVIRT_TEST_WINDOWS_INSTALLER"
+let WINDOWS_DRIVERS = env.get "DOLANG_LIBVIRT_TEST_WINDOWS_DRIVERS"
+# Only needed for multi-edition media, which stops to ask otherwise.
+let WINDOWS_EDITION = env.get "DOLANG_LIBVIRT_TEST_WINDOWS_EDITION"
+# The guest payload is a Windows archive, so it cannot come from
+# `DOLANG_LIBVIRT_TEST_ARCHIVE`, which is the host's own platform.
+let WINDOWS_DOLANG = if let archive = env.get "DOLANG_LIBVIRT_TEST_WINDOWS_ARCHIVE"
   Path $archive
 else
   "bootstrap"
@@ -51,13 +66,13 @@ def provision_freebsd_and_run_command()
       vcpus: 4
       disk_size: 50G
       cache: :UNSAFE:
-      packages:
-        - sqlite3
-        - pkgconf
-        - curl
-        - llvm19
-        - sudo
       init:
+        packages:
+          - sqlite3
+          - pkgconf
+          - curl
+          - llvm19
+          - sudo
         add:
           target: /etc/rc.conf.d/firstboot_pkg_upgrade
           content: |
@@ -76,28 +91,147 @@ def provision_freebsd_and_run_command()
         chmod: 0o644
 
     try
-      let output = domain.with do sub do run printf "hello world"
+      let output = progress.show message: "run command" icon: ▶️ do |_|
+        domain.with do sub do run printf "hello world"
       assert_eq $output "hello world"
 
-      domain.upload $source /tmp/dolang-libvirt-transfer.bin
-      domain.download /tmp/dolang-libvirt-transfer.bin $downloaded
+      progress.show message: "transfer round trip" icon: 🔁 do |_|
+        domain.upload $source /tmp/dolang-libvirt-transfer.bin
+        domain.download /tmp/dolang-libvirt-transfer.bin $downloaded
       let downloaded_data = downloaded.read b
       assert_eq (digest.blake3 downloaded_data) $expected
 
       export_and_restore $domain
+        sentinel: /var/tmp/dolang-libvirt-gold
+        bundle_name: freebsd-gold.dolvm
+        command: ["printf", "hello world"]
+        expect: hello world
+        memory: 4096
+        vcpus: 2
     finally
       if (domain.state() != :SHUTOFF:)
         domain.destroy()
       domain.undefine()
 
+#[test]
+#[cached]
+def install_windows_and_run_command()
+  if (WINDOWS_INSTALLER == nil || WINDOWS_DRIVERS == nil)
+    skip "DOLANG_LIBVIRT_TEST_WINDOWS_INSTALLER and _DRIVERS are not set"
+  # Neither is needed by the cloud-init path the module-level probe checks, so
+  # they are checked here instead of skipping the whole file for their sake.
+  for program = ["swtpm", "swtpm_setup"]
+    if !run[program].which()
+      skip "$program is not installed"
+  let iso_program = false
+  for program = ["xorrisofs", "mkisofs"]
+    if run[program].which()
+      iso_program = true
+  if !iso_program
+    skip "neither xorrisofs nor mkisofs is installed"
+
+  with_temp_dir do |dir|
+    let source = (dir / "upload.bin")
+    let downloaded = (dir / "download.bin")
+    run dd if=/dev/urandom of=$source bs=1M count=16 status=none
+    let source_data = source.read b
+    let expected = digest.blake3 $source_data
+
+    let domain = libvirt.create
+      installer: $windows_installer()
+      drivers: $WINDOWS_DRIVERS
+      os: :WINDOWS:
+      dolang: $WINDOWS_DOLANG
+      app: dolang-libvirt-test
+      memory: 8192
+      vcpus: 4
+      cache: :UNSAFE:
+      add:
+        target: r"C:\Windows\Temp\dolang-libvirt-add.txt"
+        content: added by the test
+      # The module does neither of these any more: both are commit-time policy
+      # and belong to whoever mints the image. Without `powercfg /h off` a
+      # Windows shutdown is a partial hibernation, and the disk `export`
+      # flattens was never quiesced.
+      # A step is the caller's code, so its progress is the caller's to show:
+      # the module has no idea what a step is doing and cannot label it. This
+      # one needs the labels — `defrag` in particular prints nothing at all
+      # until it finishes, so an unannotated step is several silent minutes
+      # with no way to tell work from a hang.
+      run: do
+        progress.show message: "disable hibernation" icon: 💤 do |_|
+          run powercfg /h off
+        # The overlay is opened with `discard=unmap`, so a guest-side trim is
+        # what returns the freed space to the qcow2. `defrag` reports its own
+        # failure on a volume that does not support retrim, and nothing here
+        # depends on it having worked.
+        progress.show message: "retrim disk" icon: 🧹 do |_|
+          try
+            run defrag "C:" /L
+          catch proc.Error: _
+            nil
+      # Exercises the step vocabulary, and proves the guest comes back from a
+      # reboot the host asked for.
+      reboot
+
+    try
+      # `cmd` rather than a Do builtin: what is being tested is that the guest
+      # runs a program at all, over a VFS that reached it through Windows
+      # OpenSSH and the machine `PATH` the provisioning script wrote.
+      let output = progress.show message: "run command" icon: ▶️ do |_|
+        domain.with do sub do run cmd /c echo hello world
+      assert_eq $output.trim() "hello world"
+
+      let added = progress.show message: "check add: step" icon: 📄 do |_|
+        domain.with do Path(r"C:\Windows\Temp\dolang-libvirt-add.txt").read().trim()
+      assert_eq $added "added by the test"
+
+      progress.show message: "transfer round trip" icon: 🔁 do |_|
+        domain.upload $source r"C:\Windows\Temp\dolang-libvirt-transfer.bin"
+        domain.download r"C:\Windows\Temp\dolang-libvirt-transfer.bin" $downloaded
+      let downloaded_data = downloaded.read b
+      assert_eq (digest.blake3 downloaded_data) $expected
+
+      # The round trip that carries the firmware variable store and the vTPM
+      # state as well as the disk: without them the restored domain has no boot
+      # entry to boot and no TPM to satisfy the guest.
+      export_and_restore $domain
+        sentinel: r"C:\Windows\Temp\dolang-libvirt-gold"
+        bundle_name: windows-gold.dolvm
+        command: ["cmd", "/c", "echo hello world"]
+        expect: hello world
+    finally
+      if (domain.state() != :SHUTOFF:)
+        domain.destroy()
+      domain.undefine()
+
+# The installer spec, which carries `edition:` alongside the source when the
+# media holds more than one and Setup would otherwise stop to ask.
+#
+# The source stays a `Str` rather than being wrapped in a `Path`: the module
+# resolves either a local path or a URL out of one, and CI points this at a
+# URL scraped from the Evaluation Center, whose media is not redistributable
+# and so cannot be checked in or mirrored.
+def windows_installer()
+  if (WINDOWS_EDITION == nil)
+    return WINDOWS_INSTALLER
+  let spec = $
+    source: $WINDOWS_INSTALLER
+    edition: $WINDOWS_EDITION
+  spec
+
 # Mints a bundle from the provisioned domain and brings a second domain up from
 # it, which is the whole point of the format: no seed, no cloud-init, no payload
 # install — the guest comes back as it was left.
 #
+# `command:` is what proves the restored guest runs anything at all, so it is
+# the caller's: there is no one program both a FreeBSD and a Windows guest have.
+# `memory:`/`vcpus:` override what the manifest recorded, for a restored domain
+# that need not be as large as the one that built it.
+#
 # The bundle goes under `CACHE_DIR` rather than a temp directory: it is
 # gigabytes, and `/tmp` is commonly a tmpfs.
-def export_and_restore domain
-  let sentinel = "/var/tmp/dolang-libvirt-gold"
+def export_and_restore domain :sentinel :bundle_name :command :expect :memory = nil :vcpus = nil
   let token = (rand.string 16)
   domain.with do
     Path(sentinel).write $token
@@ -105,22 +239,24 @@ def export_and_restore domain
   domain.shutdown()
   assert_eq $domain.state() :SHUTOFF:
 
-  let bundle = (CACHE_DIR / "gold.dolvm")
+  let bundle = (CACHE_DIR / bundle_name)
   bundle.remove ignore: true
   domain.export $bundle
   try
     let restored = libvirt.create
       bundle: $bundle
       app: dolang-libvirt-test
-      memory: 4096
-      vcpus: 2
+      memory: $memory
+      vcpus: $vcpus
       cache: :UNSAFE:
     try
       # The guest is the one that was exported: its VFS command path came back
       # from the manifest, and the file written before shutdown is still there.
-      let output = restored.with do sub do run printf "hello world"
-      assert_eq $output "hello world"
-      let restored_token = restored.with do Path(sentinel).read().trim()
+      let output = progress.show message: "run command" icon: ▶️ do |_|
+        restored.with do sub do run ...command
+      assert_eq $output.trim() $expect
+      let restored_token = progress.show message: "check sentinel" icon: 🔖 do |_|
+        restored.with do Path(sentinel).read().trim()
       assert_eq $restored_token $token
 
       # No seed means nothing was re-provisioned.
