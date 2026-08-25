@@ -302,6 +302,12 @@ impl SendEndGuard {
             end: Some(end),
         })
     }
+
+    /// Takes the end out of the guard so that `Drop` does not restore it,
+    /// leaving the channel's slot `Taken`.
+    fn steal(mut self) -> StdioSend {
+        self.end.take().expect("send end taken twice")
+    }
 }
 
 impl AsRef<StdioSend> for SendEndGuard {
@@ -358,6 +364,12 @@ impl RecvEndGuard {
 
     fn discard(mut self) {
         let _ = self.end.take();
+    }
+
+    /// Takes the end out of the guard so that `Drop` does not restore it,
+    /// leaving the channel's slot `Taken`.
+    fn steal(mut self) -> BufReader<StdioRecv> {
+        self.end.take().expect("recv end taken twice")
     }
 }
 
@@ -425,6 +437,26 @@ impl RecvGuard {
             .map_err(|_| io::Error::other("pipe: consumer end closed"))?;
         Ok(reader.get_ref().try_clone().await?)
     }
+
+    /// Hands the read end to the caller outright, leaving the channel without
+    /// a descriptor of its own.
+    ///
+    /// See [`SendGuard::steal_send_pipe`] for why a long-lived consumer takes
+    /// its ends rather than duplicating them.
+    ///
+    /// Any bytes sitting in the reader's buffer are dropped along with it,
+    /// exactly as [`Self::recv_pipe`] drops them by duplicating the descriptor
+    /// out from under the same buffer. Negotiation hands buffered bytes back
+    /// to the channel before either is reached, so there are none.
+    pub(crate) fn steal_recv_pipe(&self) -> io::Result<StdioRecv> {
+        let reader = RecvEndGuard::take(&self.shared)
+            .map_err(|_| io::Error::other("pipe: consumer end closed"))?;
+        debug_assert!(
+            reader.buffer().is_empty(),
+            "stealing a read end would discard buffered bytes"
+        );
+        Ok(reader.steal().into_inner())
+    }
 }
 
 impl Drop for RecvGuard {
@@ -442,6 +474,28 @@ impl SendGuard {
         let sender = SendEndGuard::take(&self.shared)
             .map_err(|_| io::Error::other("pipe: producer end closed"))?;
         Ok(sender.try_clone().await?)
+    }
+
+    /// Hands the write end to the caller outright, leaving the channel without
+    /// a descriptor of its own.
+    ///
+    /// Duplicating, as [`Self::send_pipe`] does, is right for a pipeline
+    /// stage: the channel keeps a descriptor so the stage can renegotiate
+    /// between value and byte framing, and the duplicate the stage holds is
+    /// released when the stage exits — which happens once the external program
+    /// it feeds has exited, so the pipeline never stalls on it.
+    ///
+    /// A remote `shell.Vfs` session is not a pipeline stage. It outlives every
+    /// such exit, so a descriptor left behind in the channel is one that
+    /// nothing closes for as long as the session runs. On the write side that
+    /// holds the pipe open after the peer is gone, so the reader on the far
+    /// end never sees EOF and a disconnected server is indistinguishable from
+    /// a hung one. Taking the ends outright is what makes the disconnect
+    /// observable.
+    pub(crate) fn steal_send_pipe(&self) -> io::Result<StdioSend> {
+        let sender = SendEndGuard::take(&self.shared)
+            .map_err(|_| io::Error::other("pipe: producer end closed"))?;
+        Ok(sender.steal())
     }
 }
 
