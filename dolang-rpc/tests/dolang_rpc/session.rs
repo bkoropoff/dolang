@@ -68,6 +68,31 @@ struct ShortWriter<W> {
     max_write: usize,
 }
 
+struct HoldEof<R> {
+    inner: R,
+    eof: bool,
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for HoldEof<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if self.eof {
+            return Poll::Pending;
+        }
+        let filled = buf.filled().len();
+        match Pin::new(&mut self.inner).poll_read(cx, buf) {
+            Poll::Ready(Ok(())) if buf.filled().len() == filled => {
+                self.eof = true;
+                Poll::Pending
+            }
+            result => result,
+        }
+    }
+}
+
 impl<W: AsyncWrite + Unpin> AsyncWrite for ShortWriter<W> {
     fn poll_write(
         mut self: Pin<&mut Self>,
@@ -419,10 +444,10 @@ async fn disconnect_fails_pending_calls() {
 }
 
 #[tokio::test]
-async fn close_stops_tasks_and_fails_pending_calls() {
+async fn abort_stops_tasks_and_fails_pending_calls() {
     let (client_io, peer_io) = tokio::io::duplex(64);
-    // Kept running (not aborted) for the whole test: this test exercises
-    // `Client::close`, not peer disconnection.
+    // Kept running (not aborted) for the whole test: its output remains open,
+    // proving that `Client::abort` does not wait for peer EOF.
     let _server = tokio::spawn(async move {
         builder()
             .server(peer_io)
@@ -436,8 +461,137 @@ async fn close_stops_tasks_and_fails_pending_calls() {
     });
     let client = unbound_client::<_, Test>(client_io).await;
     let call = client.call(Request::Echo(1));
-    client.close().await;
+    tokio::time::timeout(Duration::from_secs(5), client.abort())
+        .await
+        .expect("abort waited for the peer to close its output");
     assert!(matches!(call.await, Err(Error::ConnectionClosed)));
+}
+
+#[tokio::test]
+async fn close_drains_output_then_waits_for_peer_eof() {
+    let (client_reader, mut proxy_output) = tokio::io::duplex(4096);
+    let (mut proxy_input, client_writer) = tokio::io::duplex(4096);
+    let (server_reader, mut proxy_to_server) = tokio::io::duplex(4096);
+    let (mut proxy_from_server, server_writer) = tokio::io::duplex(4096);
+
+    let (input_eof_tx, input_eof_rx) = tokio::sync::oneshot::channel();
+    let input_relay = tokio::spawn(async move {
+        tokio::io::copy(&mut proxy_input, &mut proxy_to_server).await?;
+        proxy_to_server.shutdown().await?;
+        let _ = input_eof_tx.send(());
+        io::Result::Ok(())
+    });
+
+    let (output_eof_tx, output_eof_rx) = tokio::sync::oneshot::channel();
+    let (release_output_tx, release_output_rx) = tokio::sync::oneshot::channel();
+    let output_relay = tokio::spawn(async move {
+        tokio::io::copy(&mut proxy_from_server, &mut proxy_output).await?;
+        let _ = output_eof_tx.send(());
+        let _ = release_output_rx.await;
+        proxy_output.shutdown().await?;
+        io::Result::Ok(())
+    });
+
+    let server = tokio::spawn(async move {
+        builder()
+            .server_split(server_reader, server_writer)
+            .await
+            .unwrap()
+            .bind::<Test>()
+            .serve(async |mut context, request| match request {
+                Request::Shutdown => {
+                    context.shutdown();
+                    context.respond(Response(0));
+                }
+                _ => unreachable!(),
+            })
+            .await
+    });
+    let client = unbound_client_split::<_, _, Test>(client_reader, client_writer).await;
+    assert_eq!(
+        client
+            .call(Request::Shutdown)
+            .await
+            .unwrap()
+            .into_response(),
+        Response(0)
+    );
+
+    let mut close = tokio::spawn(client.close());
+    tokio::time::timeout(Duration::from_secs(5), input_eof_rx)
+        .await
+        .expect("close did not close the client-to-server transport")
+        .expect("input relay exited before reporting EOF");
+    tokio::time::timeout(Duration::from_secs(5), output_eof_rx)
+        .await
+        .expect("server did not close its output after client EOF")
+        .expect("output relay exited before reporting EOF");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut close)
+            .await
+            .is_err(),
+        "close completed while the peer-facing output remained open",
+    );
+
+    let _ = release_output_tx.send(());
+    tokio::time::timeout(Duration::from_secs(5), &mut close)
+        .await
+        .expect("close did not finish after peer EOF was released")
+        .unwrap();
+    input_relay.await.unwrap().unwrap();
+    output_relay.await.unwrap().unwrap();
+    assert!(server.await.unwrap().is_ok());
+}
+
+#[tokio::test]
+async fn abort_from_another_clone_interrupts_close_waiting_for_eof() {
+    let (client_reader, server_writer) = tokio::io::duplex(4096);
+    let (server_reader, client_writer) = tokio::io::duplex(4096);
+    let server = tokio::spawn(async move {
+        builder()
+            .server_split(server_reader, server_writer)
+            .await
+            .unwrap()
+            .bind::<Test>()
+            .serve(async |mut context, request| match request {
+                Request::Shutdown => {
+                    context.shutdown();
+                    context.respond(Response(0));
+                }
+                _ => unreachable!(),
+            })
+            .await
+    });
+    let client = unbound_client_split::<_, _, Test>(
+        HoldEof {
+            inner: client_reader,
+            eof: false,
+        },
+        client_writer,
+    )
+    .await;
+    assert_eq!(
+        client
+            .call(Request::Shutdown)
+            .await
+            .unwrap()
+            .into_response(),
+        Response(0)
+    );
+
+    let mut close = tokio::spawn(client.clone().close());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut close)
+            .await
+            .is_err(),
+        "close completed despite withheld peer EOF",
+    );
+    client.abort().await;
+    tokio::time::timeout(Duration::from_secs(5), &mut close)
+        .await
+        .expect("abort did not interrupt close")
+        .unwrap();
+    assert!(server.await.unwrap().is_ok());
 }
 
 #[tokio::test]
@@ -2286,7 +2440,7 @@ async fn a_lost_peer_does_not_hang_a_send_blocked_on_payload_quota() {
             .map(|_| client.call(DrainRequest::Big))
             .collect();
         // Drops the transport with responses still parked on quota.
-        client.close().await;
+        client.abort().await;
         for call in calls {
             assert!(call.await.is_err());
         }

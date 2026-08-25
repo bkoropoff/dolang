@@ -249,6 +249,11 @@ impl Sender for UnixSender {
             attached: false,
         }
     }
+
+    async fn shutdown(&mut self) -> io::Result<()> {
+        shutdown(self.common.socket.as_raw_fd(), Shutdown::Write)?;
+        Ok(())
+    }
 }
 
 impl Receiver for UnixReceiver {

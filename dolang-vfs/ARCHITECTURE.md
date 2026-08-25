@@ -47,6 +47,14 @@ client and returns an opaque VFS selector instead. Stopping a selected VFS
 stops and releases only that backend. Outer-session teardown drops retained
 clients without stopping their independent daemons.
 
+`Vfs::close` gracefully tears down a remote session: it closes the RPC input
+after draining committed writes, then waits for the server to close its output.
+That wait is intentionally unbounded; callers provide a timeout when needed.
+`Vfs::abort` stops both transport tasks without waiting for a failed or
+uncooperative peer. Direct backends require neither operation.
+Windows named pipes cannot half-close, so their graceful path keeps reading
+through the write drain and then closes the shared duplex pipe.
+
 A Unix-socket connection may carry a pre-shared key, which both ends prove
 knowledge of during the RPC handshake (see dolang-rpc's architecture notes).
 This matters because the agent widens its socket to `0666`: the uid that will

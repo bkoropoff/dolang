@@ -899,14 +899,27 @@ policy of its own.
 
 ### The Client
 
-The client's writer drains on `has_work`, which is `Abrupt` by another name,
-and deliberately. Both ways its channel can close — `Client::close` and
-dropping the last handle — also stop the reader and fail every pending call, so
-no credit can arrive and no promise is broken by abandoning a parked send. The
-client has no graceful close to drain for. If it gains one it needs the
-server's treatment, a drain signal and a reader kept alive past the writer;
-widening the condition on its own would only convert the abandonment into a
-hang.
+`Client::close` rejects new calls and fails pending calls with
+`ConnectionClosed`, then closes the writer's work channel. The writer drains
+writes already committed to the wire and exits, closing the client-to-server
+transport. The reader remains alive throughout that drain so it can deliver
+credit, then continues until the peer closes the server-to-client transport.
+Only after that natural EOF does `close` release the reader's shutdown sender.
+Windows named pipes cannot half-close: both drivers own one duplex pipe handle.
+For that transport, `close` keeps the reader alive through the writer drain,
+then stops it so releasing the shared handle delivers EOF to the peer.
+
+Like graceful server termination, client close is unbounded. Callers that need
+a deadline apply their own timeout and call `Client::abort` if the peer does
+not cooperate. `abort` performs the former abrupt behavior: it closes outgoing
+work, fails pending calls, and signals the reader immediately. The writer still
+finishes fragments already committed to the transport, but abandons sends
+parked on credit that can no longer arrive. Dropping the last client handle is
+also abrupt and remains non-blocking.
+
+The reader shutdown sender is owned independently of the task join handles.
+Consequently, an `abort` through one clone can interrupt another clone's
+`close` while it waits for peer EOF.
 
 ## Cancellation
 
