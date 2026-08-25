@@ -391,12 +391,16 @@ async fn negotiate_stream_pipes<'v, 's>(
     let recv_guard = pipe_channel::negotiate_recv(input, strand, global)
         .await?
         .ok_or_else(|| Error::type_error(strand, "Vfs: stream iterator is not a pipe channel"))?;
-    let recv = recv_guard.recv_pipe().await.into_sys(strand)?;
+    // Stolen, not duplicated: the session outlives the pipeline stage that
+    // would otherwise close the channel's own descriptors, so a copy left in
+    // the channel would keep the pipe open past the server's exit and turn a
+    // disconnect into a hang. See `SendGuard::steal_send_pipe`.
+    let recv = recv_guard.steal_recv_pipe().into_sys(strand)?;
 
     let send_guard = pipe_channel::negotiate_send(output, strand, global)
         .await?
         .ok_or_else(|| Error::type_error(strand, "Vfs: stream sink is not a pipe channel"))?;
-    let send = send_guard.send_pipe().await.into_sys(strand)?;
+    let send = send_guard.steal_send_pipe().into_sys(strand)?;
 
     Ok((recv_guard, recv, send_guard, send))
 }

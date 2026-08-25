@@ -1,0 +1,10 @@
+import sys testlib.polyfill: polyfill
+  test:
+    - test
+    - assert_throws
+
+#[test]
+def prompt_connection_close()
+  assert_throws $sys.ConnectionResetError do shell.Vfs do
+    strand.output().close()
+    polyfill.cat stdout: $std.null
