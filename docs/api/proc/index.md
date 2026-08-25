@@ -23,9 +23,11 @@ run["clang++"] --version
 let :git :cargo "clang++": clang ... = run
 ```
 
-Index `run` with a [`str`](../std/str.md) or [`fs.Path`](../fs/path.md) to
-create a proxy. Destructuring requires a trailing `...`; symbol and string keys
-create proxies with the corresponding program names. See
+Calling `run` takes the program name or path as its first argument, followed by
+the [launch arguments accepted by `Program`](./program.md). Index `run` with a
+[`str`](../std/str.md) or [`fs.Path`](../fs/path.md) to create a proxy.
+Destructuring requires a trailing `...`; symbol and string keys create proxies
+with the corresponding program names. See
 [External Programs](../../shell/external-programs.md) for lookup, redirection,
 capture, and pipeline behavior.
 
