@@ -1,6 +1,3 @@
-[prelude]
-"proc.run" = "run"
-
 [prelude.shell]
 mod = true
 echo = true
@@ -13,3 +10,4 @@ host = true
 [prelude.proc]
 mod = true
 sub = true
+run = true

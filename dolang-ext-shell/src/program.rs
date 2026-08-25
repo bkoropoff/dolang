@@ -6,8 +6,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use dolang::runtime::object::fmt;
 
 use dolang::runtime::{
-    Arg, Args, Error, Instance, Object, Output, Result, Slot, State, Strand, Sym, Value, method,
-    object::TypeBuilder,
+    Arg, Args, Error, Instance, Object, Output, Result, Slot, State, Strand, Type, Value, method,
+    object::{TypeBuilder, Unpack, UnpackItem},
     unpack,
     value::{Nil, Singleton},
     vm::Builder,
@@ -51,10 +51,12 @@ fn program_name_from_value<'v, 's>(
         Ok(path.as_str().to_owned())
     } else if let Some(name) = value.as_str(strand) {
         Ok(name.to_string())
+    } else if let Some(name) = value.as_sym(strand) {
+        Ok(name.as_str(strand.vm()).to_string())
     } else {
         Err(Error::type_error(
             strand,
-            "program must be a string or Path",
+            "program must be a string, symbol, or Path",
         ))
     }
 }
@@ -827,6 +829,19 @@ impl<'v> Object<'v> for Program {
     type Type = ();
     type TypeAnnex = ();
 
+    async fn new<'a, 's>(
+        this: Type<'v, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        args: Args<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        let ([name], []) = unpack!(strand, args, 1, 0)?;
+        let global = strand.state::<Global<'v>>();
+        let name = program_name_from_value(strand, global, &name)?;
+        this.create_with_annex(strand, Program, ProgramAnnex { name, global }, out);
+        Ok(())
+    }
+
     async fn call<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
@@ -887,11 +902,15 @@ impl<'v> Object<'v> for Program {
     }
 }
 
-struct Run<'v> {
+pub(crate) struct Run<'v> {
     global: State<'v, Global<'v>>,
 }
 
 impl<'v> Run<'v> {
+    pub(crate) fn new(global: State<'v, Global<'v>>) -> Self {
+        Self { global }
+    }
+
     fn get(&self, strand: &mut Strand<'v, '_>, name: String, out: Slot<'v, '_>) {
         self.global.types.program.create_with_annex(
             strand,
@@ -912,17 +931,6 @@ impl<'v> Object<'v> for Run<'v> {
     type Type = ();
     type TypeAnnex = ();
 
-    fn get<'a, 's>(
-        this: Instance<'v, 'a, Self>,
-        strand: &'a mut Strand<'v, 's>,
-        field: Sym<'v, 'a>,
-        out: Slot<'v, 'a>,
-    ) -> Result<'v, 's, ()> {
-        this.borrow(strand)?
-            .get(strand, field.as_str(strand).into(), out);
-        Ok(())
-    }
-
     fn index<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
@@ -933,18 +941,6 @@ impl<'v> Object<'v> for Run<'v> {
         let name = program_name_from_value(strand, global, index)?;
         this.borrow(strand)?.get(strand, name, out);
         Ok(())
-    }
-
-    async fn method<'a, 's>(
-        this: Instance<'v, 'a, Self>,
-        strand: &'a mut Strand<'v, 's>,
-        method: Sym<'v, 'a>,
-        args: Args<'v, 'a>,
-        _: Slot<'v, 'a>,
-    ) -> Result<'v, 's, ()> {
-        let name = method.as_str(strand.vm());
-        let global = this.borrow(strand)?.global;
-        dispatch_run(strand, name, args, global).await
     }
 
     async fn call<'a, 's>(
@@ -958,10 +954,46 @@ impl<'v> Object<'v> for Run<'v> {
         let name = program_name_from_value(strand, global, &name)?;
         dispatch_run(strand, &name, args, global).await
     }
+
+    async fn unpack<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        mut unpack: Unpack<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        if unpack.exhaustive() {
+            return Err(Error::value(
+                strand,
+                "proc.run unpacking requires a trailing `...`",
+            ));
+        }
+
+        let global = this.borrow(strand)?.global;
+        for item in unpack.iter() {
+            match item {
+                UnpackItem::SymKey { key, slot, .. } => {
+                    Run { global }.get(strand, key.as_str(strand.vm()).to_string(), slot);
+                }
+                UnpackItem::ConstKey { key, slot, .. } => {
+                    let name = key.as_str(strand).ok_or_else(|| {
+                        Error::type_error(strand, "proc.run unpack keys must be strings or symbols")
+                    })?;
+                    Run { global }.get(strand, name.to_string(), slot);
+                }
+                UnpackItem::Rest { slot } => Output::set(strand, slot, this),
+                UnpackItem::Pos { .. } => {
+                    return Err(Error::value(
+                        strand,
+                        "proc.run supports only keyed unpack patterns",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
-pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Global<'v>>) {
-    let factory_ty = builder.register_type::<Run>();
-
-    builder.module_object("proc.run", &factory_ty, Run { global });
+pub(crate) fn register_run_type<'v>(
+    builder: &mut Builder<'v>,
+) -> dolang::runtime::Type<'v, Run<'v>> {
+    builder.register_type()
 }

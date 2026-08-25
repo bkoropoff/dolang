@@ -1,7 +1,8 @@
 import
-  proc.run:
-    docker: docker_cli
+  proc
   _container.dockman: dockman
+
+let docker_cli = proc.run[:docker:]
 
 pub let Image = dockman.Image
 pub let Container = dockman.Container

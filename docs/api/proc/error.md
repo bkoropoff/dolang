@@ -4,7 +4,7 @@
 
 ```
 try
-  run.sh -c "exit 42"
+  run sh -c "exit 42"
 catch Error: err
   assert_eq $err.rc 42
 ```
@@ -20,7 +20,7 @@ On Unix, a signaled process reports `signal` instead of `rc`:
 
 ```
 try
-  run.sh -c r"kill -TERM $$"
+  run sh -c r"kill -TERM $$"
 catch Error: err
   assert_eq $err.rc nil
   assert_eq $err.signal 15

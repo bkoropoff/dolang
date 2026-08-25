@@ -318,13 +318,13 @@ assigned value's boundaries must land on UTF-8 code point boundaries.
 
 `StrBuf` is a [sink](./sink.md), so it can be the target of a pipeline, of
 [`strand.put`](../strand/index.md), or of a
-[`run`](../proc-run.md#io-redirection) redirect. `put` is
+[`run`](../../shell/external-programs.md#redirecting-io) redirect. `put` is
 [`append`](#append-value): the value's string form goes in verbatim, with no
 line terminator added.
 
 ```
 let buf = StrBuf()
-run.uname -r stdout: $buf
+run uname -r stdout: $buf
 ```
 
 Line termination is the caller's to choose, so a `StrBuf` can stand in for any

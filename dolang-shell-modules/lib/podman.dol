@@ -1,7 +1,8 @@
 import
-  proc.run:
-    podman: podman_cli
+  proc
   _container.dockman: dockman
+
+let podman_cli = proc.run[:podman:]
 
 pub let Image = dockman.Image
 pub let Container = dockman.Container

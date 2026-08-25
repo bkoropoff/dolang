@@ -1,8 +1,8 @@
-import _vfs shell
-  proc.run:
-    - sudo
+import _vfs shell proc
   strand:
     - pipeline
+
+let :sudo ... = proc.run
 
 def run_agent
   thunk

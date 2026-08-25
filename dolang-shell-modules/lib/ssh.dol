@@ -63,7 +63,7 @@ import _ssh
 # # Example
 #
 # ```
-# import proc.run:
+# import proc:
 #   - git
 #   - cargo
 #

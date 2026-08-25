@@ -1,13 +1,11 @@
 # External Programs
 
-External programs are available through the [`proc.run`](../api/proc-run.md)
-module. Programs inherit the current strand's shell context, including its
+External programs are available through [`proc.run`](../api/proc/index.md#run).
+Programs inherit the current strand's shell context, including its
 working directory, environment, and standard streams.
 
 ```
-import proc.run:
-  - git
-  - sort
+let :git :sort ... = run
 
 git status --short
 sort stdin: $["c", "a", "b"].crimp()
@@ -15,15 +13,15 @@ sort stdin: $["c", "a", "b"].crimp()
 
 ## Program Lookup
 
-Access a program by field through `run`, import its name directly, or index
-`run` with a name or path. The resulting proxy object is callable:
+Call `run` directly, index it with a name or path, or destructure it to bind
+identifier-safe program names. The resulting [`Program`](../api/proc/program.md)
+proxy is callable:
 
 ```
-run.git status
+run git status
 run["/usr/local/bin/tool"] --version
 
-import proc.run:
-  - make
+let :make ... = run
 
 make -j4
 ```
@@ -34,12 +32,12 @@ Alternatively, call `run` directly with a path or name:
 run gcc -o main -O2 main.c
 ```
 
-Calling a program resolves its executable using the current VFS and `PATH`.
-Use [`.which()`](../api/proc-run.md#which) to resolve it without running it. It
+Calling a program resolves its executable using the current VFS and `PATH`. Use
+[`.which()`](../api/proc/program.md#which) to resolve it without running it. It
 returns the executable's path, or `nil` if the program is not found:
 
 ```
-let git = run.git.which()
+let git = run["git"].which()
 if git
   echo "using $git"
 else
@@ -86,8 +84,7 @@ run tool stdout: combined.log stderr: :STDOUT:
 
 An [`fs.File`](../api/fs/file.md) can be used directly as an input or output.
 
-See [I/O Redirection](../api/proc-run.md#io-redirection) for all accepted
-values and [Terminal Output](./terminal-output.md) for the distinction between
+See [Terminal Output](./terminal-output.md) for the distinction between
 the output stream and the console.
 
 ## Capturing Output
@@ -97,8 +94,8 @@ string. By default, it removes one trailing line ending from the completed
 capture:
 
 ```
-let revision = sub do run.git rev-parse HEAD
-let exact = sub chomp: false do run.tool
+let revision = sub do run git rev-parse HEAD
+let exact = sub chomp: false do run tool
 ```
 
 `sub` captures the strand output stream, not the console. A program's stderr
@@ -106,7 +103,7 @@ still goes to the console unless it is redirected. Merge stderr into stdout to
 capture both:
 
 ```
-let transcript = sub do run.tool stderr: :STDOUT:
+let transcript = sub do run tool stderr: :STDOUT:
 ```
 
 Redirect stdout or stderr to a sink when the caller needs individual values,
@@ -141,10 +138,7 @@ External programs integrate with
 import 
   strand:
     - pipeline
-  proc.run:
-    - cat
-    - grep
-    - sort
+let :cat :grep :sort ... = run
 
 pipeline
   do cat messages.log
@@ -166,8 +160,7 @@ import
     - pipeline
     - each
     - collect
-  proc.run:
-    - cat
+let :cat ... = run
 
 let lines = pipeline
   do cat messages.log

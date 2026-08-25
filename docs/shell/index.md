@@ -119,9 +119,4 @@ and objects.
 | Name                                         | Description                       |
 | -------------------------------------------- | --------------------------------- |
 | [`sub`](../api/proc/index.md#sub-func-chomp) | Capture func's output as a string |
-
-### `proc.run`
-
-| Name                                  | Description              |
-| ------------------------------------- | ------------------------ |
-| Module as [`run`](../api/proc-run.md) | Access external programs |
+| [`run`](../api/proc/index.md#run)            | Run external programs             |

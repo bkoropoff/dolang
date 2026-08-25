@@ -48,7 +48,6 @@ Supported forms:
 ```toml
 [prelude]
 sys = true
-"proc.run" = "run"
 regression = ["assert", "log"]
 
 [prelude.shell]
@@ -58,6 +57,7 @@ env = true
 [prelude.proc]
 mod = true
 sub = true
+run = true
 ```
 
 ### Default Prelude

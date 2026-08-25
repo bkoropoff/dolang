@@ -202,6 +202,20 @@ def path_selector()
 
 #[test]
 #[vfs]
+def program_proxies()
+  let :echo ... = run
+  let "clang++": clang ... = run
+  let ...rest_run = run
+  let constructed = proc.Program :echo:
+
+  assert_type $proc.Program $echo
+  assert_type $proc.Program $clang
+  assert_type $proc.Program $run[:echo:]
+  assert_type $proc.Program $constructed
+  assert_type $proc.Program $rest_run[:echo:]
+
+#[test]
+#[vfs]
 def pipe_deferred_recv_transition()
   let res = sub do pipeline
     do echo "foo"

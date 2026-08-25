@@ -155,7 +155,7 @@ nav:
     - proc:
       - api/proc/index.md
       - api/proc/error.md
-    - proc.run: api/proc-run.md
+      - api/proc/program.md
     - proc.windows: api/proc.windows.md
     - progress:
       - api/progress/index.md

@@ -15,6 +15,7 @@ use crate::{
     global::Global,
     io_mode::{encode_value, strip_line_ending},
     local::TerminationPolicy,
+    program,
     time::coerce_duration,
 };
 
@@ -277,15 +278,15 @@ pub(crate) fn configure_compiler<'a>(compiler: &mut Compiler<'a>) {
     compiler
         .prelude()
         .import_items("proc")
-        .items(["sub"])
-        .commit()
-        .import_module_with_name("proc.run", "run");
+        .items(["sub", "run"])
+        .commit();
 }
 
 pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Global<'v>>) {
     let capture_ty = global.types.capture;
     let windows_arguments_ty = builder.register_type::<WindowsArguments>();
     let chomp_sym = builder.sym("chomp");
+    let run_ty = program::register_run_type(builder);
 
     builder
         .module("proc")
@@ -342,6 +343,8 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 })
         })
         .value("Error", global.types.proc_error)
+        .object("run", run_ty, program::Run::new(global))
+        .value("Program", global.types.program)
         .commit();
 
     builder

@@ -15,6 +15,6 @@ if (sys.os_info().family == :WINDOWS:)
   echo = do |...args| helper echo ...args
   grep = do |...args| helper grep ...args
 else
-  cat = run.cat
-  echo = run.echo
-  grep = run.grep
+  cat = run[:cat:]
+  echo = run[:echo:]
+  grep = run[:grep:]

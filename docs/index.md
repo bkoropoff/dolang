@@ -106,15 +106,14 @@ value is a callable executed inside the build container's VFS context.
 ## Included Features
 
 **Automation and system integration** — external programs
-([`proc.run`](./api/proc-run.md)), filesystems ([`fs`](./api/fs/index.md)),
-containers ([`docker`](./api/docker/index.md),
+([`proc.run`](./api/proc/index.md#run)), filesystems
+([`fs`](./api/fs/index.md)), containers ([`docker`](./api/docker/index.md),
 [`podman`](./api/podman/index.md), [`toolbx`](./api/toolbx.md)),
 [SSH](./api/ssh.md), [WSL](./api/wsl.md), privilege elevation
 ([`admin`](./api/admin.md), [`sudo`](./api/sudo.md)), argument parsing
-([`Args`](./api/args.md)), system integration
-([`sys`](./api/sys/index.md), [`systemd`](./api/systemd.md),
-[`xdg`](./api/xdg.md)), identity and Windows access control
-([`security`](./api/security/index.md)), and safe terminal output
+([`Args`](./api/args.md)), system integration ([`sys`](./api/sys/index.md),
+[`systemd`](./api/systemd.md), [`xdg`](./api/xdg.md)), identity and Windows
+access control ([`security`](./api/security/index.md)), and safe terminal output
 ([`term`](./api/term/index.md), [`progress`](./api/progress/index.md)).
 
 **Data and protocols** — artifact [transfers](./api/transfer.md),

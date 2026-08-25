@@ -363,7 +363,7 @@ impl Backend {
     fn default_settings(_path: &Path) -> Settings {
         let prelude = vec![
             Import::Module("shell".into()),
-            Import::ModuleAs("proc.run".into(), "run".into()),
+            Import::Item("proc".into(), "run".into()),
             Import::Item("proc".into(), "sub".into()),
             Import::Item("shell".into(), "cd".into()),
             Import::Item("shell".into(), "env".into()),
@@ -1020,14 +1020,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_module_alias() {
+    fn parse_item_alias() {
         let settings =
-            Backend::parse_settings_toml(&parse_toml("[prelude]\n\"proc.run\" = \"run\"\n"))
-                .unwrap();
+            Backend::parse_settings_toml(&parse_toml("[prelude.proc]\nrun = true\n")).unwrap();
 
         assert_eq!(
             settings.prelude,
-            vec![Import::ModuleAs("proc.run".to_owned(), "run".to_owned())]
+            vec![Import::Item("proc".to_owned(), "run".to_owned())]
         );
     }
 

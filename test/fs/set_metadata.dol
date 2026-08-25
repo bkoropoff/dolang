@@ -17,12 +17,12 @@ import
     - open
     - remove
     - symlink
-  proc.run:
-    - id
   security.unix:
     - Permission
 import std:
   - RuntimeError
+
+let :id ... = run
 
 #[test]
 #[vfs]
