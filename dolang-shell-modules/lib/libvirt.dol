@@ -925,8 +925,58 @@ pub def list :connect_uri = DEFAULT_CONNECT_URI
       domains.push (Domain name connect_uri)
   domains
 
-def resolve_source source app digest_spec
-  transfer.get $source app: $app digest: $digest_spec
+# The metadata keys an artifact spec accepts by default.
+let ARTIFACT_KEYS = Set [:digest:]
+
+# Normalizes an artifact spec into `{source, metadata}`.
+#
+# Every provisioning artifact this module fetches — `image:`, `bundle:`,
+# `dolang:`, an `add:` `source:` — is spelled one of two ways: a bare
+# `Str`/`Path`/`Url`, or a dict carrying the source at positional key `0`
+# alongside metadata keys. The second form is what a vertical block mixing a
+# dash item with key items produces, which is the point:
+#
+# ```
+# image:
+#   - https://example.com/disk.qcow2
+#   digest: blake3:...
+# ```
+#
+# One shape for all of them is why there is no `image_digest:` beside `image:`
+# and no `bundle_digest:` beside `bundle:`. `keys:` is the metadata vocabulary
+# the caller accepts, so an unknown key is reported against `name` rather than
+# silently ignored.
+def normalize_artifact spec name :keys = ARTIFACT_KEYS
+  if (type spec Dict)
+    let source = spec.get 0 else: do
+      throw std.MissingPosError 0
+    if (spec.get(1) != nil)
+      throw std.UnexpectedPosError 1
+    let metadata = {}
+    for key value = spec
+      if (key == 0)
+        continue
+      if !keys.contains(key)
+        throw std.UnexpectedKeyError $key
+      # A dict is a multimap, so a key written twice arrives twice. Keeping
+      # either one silently is the wrong answer for a digest.
+      if (metadata.get(key) != nil)
+        throw std.ValueError "$name: $key given more than once"
+      metadata[key] = value
+    return record :source :metadata
+  if (type spec Str || type spec Path || type spec Url)
+    return record source: $spec metadata: {}
+  throw std.TypeError "$name: expected Str, Path, Url, or Dict"
+
+# Resolves a normalized artifact to a local path, downloading and caching a
+# URL and verifying `digest:` against whatever it resolved to.
+def resolve_artifact artifact app
+  transfer.get $artifact.source app: $app digest: (artifact.metadata.get :digest:)
+
+# Normalizes and resolves in one step, for a spec that has no earlier
+# validation point to be checked at.
+def resolve_source spec app name
+  resolve_artifact (normalize_artifact spec name) $app
 
 let COMPRESSED_IMAGE_EXTS = Set ["gz", "xz", "zst"]
 
@@ -1161,7 +1211,7 @@ def resolved_add_content spec app
     throw std.ValueError "add: expected exactly one of source or content"
   if (content != nil)
     return content
-  let resolved = resolve_source $source $app nil
+  let resolved = resolve_source $source $app "add source"
   resolved.open rb do |file| file.read()
 
 # `chmod:` accepts an `Int` mode or a `fs.unix.Mode`, normalized to a
@@ -1195,6 +1245,8 @@ def validate_add_spec spec
     throw std.ValueError "add: expected exactly one of source or content"
   if (content != nil && !(type content Str || type content Bin))
     throw std.TypeError "add content: expected Str or Bin"
+  if (source != nil)
+    normalize_artifact $source "add source"
   require_chmod (spec.get :chmod:)
   spec
 
@@ -1207,7 +1259,7 @@ def perform_add domain spec app
   let chmod = require_chmod (spec.get :chmod:)
   let source = spec.get :source:
   if (source != nil)
-    let resolved = resolve_source $source $app nil
+    let resolved = resolve_source $source $app "add source"
     domain.upload $resolved $target chmod: $chmod
   else
     with_temp_dir do |dir|
@@ -1351,29 +1403,33 @@ def build_seed root user_data
         temporary.rename $destination
   destination.absolute()
 
-# Normalizes `dolang:` into `nil` (skip) or `{version:|archive:, digest:?}`.
+# Normalizes `dolang:` into `nil` (skip) or `{version, artifact}`, exactly one
+# of which is set unless both are `nil`, which selects the default release.
+#
+# A bare `Str` is a version tag rather than a source, which is why this is not
+# just `normalize_artifact`: everything else is an artifact spec and goes
+# through it.
 def normalize_dolang_spec spec
   if (spec == false)
     return nil
   if (spec == true)
-    return {}
-  if (type spec Dict)
-    let allowed = [:version:, :archive:, :digest:]
-    for key _ = spec
-      if !allowed.contains(key)
-        throw std.UnexpectedKeyError $key
-    if ((spec.get(:version:) == nil) == (spec.get(:archive:) == nil))
-      throw std.ValueError "dolang: expected exactly one of version or archive"
-    if (spec.get(:digest:) != nil && spec.get(:version:) != nil)
-      throw std.ValueError "dolang: digest is not yet supported together with version"
-    return spec
-  if (type spec Path)
-    return {archive: spec}
-  if (type spec Url)
-    return {archive: spec}
+    return record version: nil artifact: nil
   if (type spec Str)
-    return {version: spec}
-  throw std.TypeError "dolang: expected Bool, Str, Path, Url, or Dict"
+    return record version: $spec artifact: nil
+  if (type spec Dict && spec.get(:version:) != nil)
+    if (spec.get(:digest:) != nil)
+      throw std.ValueError "dolang: digest is not yet supported together with version"
+    for key _ = spec
+      if (key != :version:)
+        throw std.UnexpectedKeyError $key
+    return record version: (spec.get :version:) artifact: nil
+  # `archive:` was this dict's key for the source before every artifact grew
+  # one spelling; say so, rather than reporting an unexpected key.
+  if (type spec Dict && spec.get(:archive:) != nil)
+    throw std.ValueError "dolang: archive: is spelled as a positional item now"
+  if !(type spec Path || type spec Url || type spec Dict)
+    throw std.TypeError "dolang: expected Bool, Str, Path, Url, or Dict"
+  record version: nil artifact: (normalize_artifact spec "dolang")
 
 def dolang_platform_key os arch
   "$(str(arch).lower())-$(str(os).lower())"
@@ -1401,13 +1457,12 @@ def resolve_dolang spec os arch app
   if (spec == nil)
     return nil
 
-  let archive = spec.get :archive:
-  if (archive != nil)
-    return resolve_source $archive $app (spec.get :digest:)
+  if (spec.artifact != nil)
+    return resolve_artifact $spec.artifact $app
 
-  let explicit = (spec.get(:version:) != nil)
+  let explicit = (spec.version != nil)
   let tag = if explicit
-    spec.get(:version:)
+    spec.version
   else
     dolang_current_tag()
   let artifact = dolang_artifact_name $os $arch
@@ -1418,7 +1473,7 @@ def resolve_dolang spec os arch app
 
   let url = dolang_release_url $tag $artifact
   try
-    resolve_source (Url url) $app nil
+    resolve_source (Url url) $app "dolang"
   catch std.Error: e
     if explicit
       throw e
@@ -1451,7 +1506,6 @@ def remove_partial name connect_uri workdir
 # over, plus the cloud-init seed that provisions the guest on first boot.
 def image_source
   :image
-  :image_digest
   :os
   :arch
   :app
@@ -1463,7 +1517,7 @@ def image_source
   :root
 do
   let resolved = progress.show message: "resolve image" do |_|
-    resolve_source $image $app $image_digest
+    resolve_artifact $image $app
   let prepared = progress.show message: "prepare image" icon: 💿 do |_|
     let stored = prepared_image $resolved $root
     record image: $stored format: $(image_format stored)
@@ -1488,9 +1542,9 @@ do
 #
 # There is no seed and no payload — both were already applied to the disk being
 # restored — so the domain is ready as soon as it accepts SSH.
-def bundle_source :bundle :bundle_digest :app :root
+def bundle_source :bundle :app :root
   let resolved = progress.show message: "resolve bundle" do |_|
-    resolve_source $bundle $app $bundle_digest
+    resolve_artifact $bundle $app
   let manifest = read_manifest $resolved
   # The key a bundle's guest trusts is the one generated for the app it was
   # minted under, and that key lives under that app's data directory. Restoring
@@ -1553,22 +1607,23 @@ def reject_with_bundle name value
 # # Parameters
 #
 # Exactly one of `image:` and `bundle:` is required. A bundle already answers
-# `os:`, `arch:`, `user:`, `dolang:`, `packages:`, `init:`, and
-# `image_digest:`, so passing any of them with `bundle:` is an error rather
-# than a silently ignored argument — see [`bundle:`](#bundle).
+# `os:`, `arch:`, `user:`, `dolang:`, `packages:`, and `init:`, so passing any
+# of them with `bundle:` is an error rather than a silently ignored argument —
+# see [`bundle:`](#bundle).
+#
+# `image:`, `bundle:`, and an `add:` `source:` are all artifact specs — see
+# [Artifact Specs](#artifact-specs).
 #
 # | Name             | type                 | Description |
 # | ---------------- | -------------------- | ------------------------------------------------------ |
-# | `image`?         | `Str`\|`Path`\|`Url` | Base disk image (may be `.gz`/`.xz`/`.zstd` compressed) |
-# | `bundle`?        | `Str`\|`Path`\|`Url` | Bundle written by `Domain.export` — see [`bundle:`](#bundle) |
+# | `image`?         | Artifact             | Base disk image (may be `.gz`/`.xz`/`.zstd` compressed) |
+# | `bundle`?        | Artifact             | Bundle written by `Domain.export` — see [`bundle:`](#bundle) |
 # | `name`           | `Str`                | Domain name; auto-generated if omitted |
 # | `os`             | `Sym`                | Guest OS, using `sys`'s symbol vocabulary            |
 # | `arch`?          | `Sym`                | Guest CPU architecture, `sys` symbol; must be the host's, which is the default |
 # | `app`?           | `Str`                | Cache/data namespace; derived from `shell.program` by default |
 # | `user`?          | `Str`                | Guest user to create (default `"ci"`) |
 # | `dolang`?        | See below            | Installs Do into the guest — see [`dolang:`](#dolang) |
-# | `image_digest`?  | `Str`                | `algorithm:hex` digest to verify a downloaded `image` |
-# | `bundle_digest`? | `Str`                | `algorithm:hex` digest to verify a downloaded `bundle` |
 # | `packages`?      | `Array`              | Guest packages to install |
 # | `memory`?        | `Int`                | Guest memory in MiB (default `2048`, or the bundle's) |
 # | `vcpus`?         | `Int`                | Guest vCPU count (default `2`, or the bundle's) |
@@ -1579,6 +1634,30 @@ def reject_with_bundle name value
 # | `init`?          | `Dict`               | Early boot provisioning — see [`init:`](#init) |
 # | `add`*           | `Dict`               | Uploads a file — see [`add:`](#add)         |
 # | `run`*           | `func`               | Runs a block in VFS context |
+#
+# # Artifact Specs
+#
+# Every artifact this module fetches is spelled one of two ways: a bare
+# `Str`, `Path`, or `Url`, or a dict carrying the source as its one positional
+# item alongside metadata keys. The second form is what a vertical block
+# mixing a dash item with key items produces:
+#
+# ```
+# libvirt.create
+#   image:
+#     - https://example.com/disk.qcow2
+#     digest: blake3:0123...
+#   os: :LINUX:
+# ```
+#
+# | Key       | type                 | Description                              |
+# | --------- | -------------------- | ---------------------------------------- |
+# | `0`       | `Str`\|`Path`\|`Url` | The source, as the block's one dash item |
+# | `digest`? | `Str`                | `algorithm:hex` digest to verify against |
+#
+# A `Path` source is verified in place; a `Url` is downloaded, verified, and
+# cached, and a previously verified digest-pinned entry is returned without
+# contacting the server.
 #
 # # `bundle:`
 #
@@ -1600,15 +1679,8 @@ def reject_with_bundle name value
 # | `true` (default)                 | Install matching release for target platform if available. |
 # | a version tag, e.g. `"v0.1.1"`   | Install specific release version |
 # | a `Path` or `Url`                | Install provided release archive |
-# | a `Dict`                         | Explicit form of the above — see below. |
-#
-# `dolang:`'s dict form:
-#
-# | Key       | type          | Description                          |
-# | --------- | --------------| -------------------------------------|
-# | `version`? | `Str`         | Version tag; excludes `archive`     |
-# | `archive`? | `Path`\|`Url` | Release archive; excludes `version` |
-# | `digest`?  | `Str`        | `algorithm:hex` digest for `archive` |
+# | an artifact spec                 | Release archive with a pinned digest — see [Artifact Specs](#artifact-specs) |
+# | `{version: tag}`                 | Explicit form of the version tag |
 #
 # # `cache:`
 #
@@ -1659,7 +1731,7 @@ def reject_with_bundle name value
 # | Key        | type                 | Description                            |
 # | ---------- | -------------------- | ------------------------------------- |
 # | `target`   | `Str`                | Guest file path to write              |
-# | `source`?  | `Str`\|`Path`\|`Url` | Resolved and read; excludes `content` |
+# | `source`?  | Artifact             | Resolved and read; excludes `content` |
 # | `content`? | `Str`\|`Bin`         | Embedded directly; excludes `source` |
 # | `chmod`?   | `Int`                | File mode, e.g. `0o644`               |
 #
@@ -1714,8 +1786,6 @@ pub def create
   :app = nil
   :user = nil
   :dolang = nil
-  :image_digest = nil
-  :bundle_digest = nil
   :packages = nil
   :memory = nil
   :vcpus = nil
@@ -1730,8 +1800,6 @@ do
     throw std.ValueError "image: or bundle: is required"
   if (image != nil && bundle != nil)
     throw std.ValueError "image: is not valid together with bundle:"
-  if (bundle == nil && bundle_digest != nil)
-    throw std.ValueError "bundle_digest: is not valid without bundle:"
   app = normalized_app $app
   let post = parse_post_options $options
   name = require_name(name || "$app-$(rand.string 8)")
@@ -1749,8 +1817,9 @@ do
     reject_with_bundle dolang $dolang
     reject_with_bundle packages $packages
     reject_with_bundle init $init
-    reject_with_bundle image_digest $image_digest
+    bundle = normalize_artifact $bundle bundle
   else
+    image = normalize_artifact $image image
     os = require_os $os
     arch = require_arch $arch
     user_name = require_name (user || "ci")
@@ -1781,13 +1850,11 @@ do
       let source = if (bundle != nil)
         bundle_source
           bundle: $bundle
-          bundle_digest: $bundle_digest
           app: $app
           root: $root
       else
         image_source
           image: $image
-          image_digest: $image_digest
           os: $os
           arch: $arch
           app: $app
