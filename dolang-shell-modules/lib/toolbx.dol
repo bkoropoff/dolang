@@ -1,12 +1,12 @@
-import _vfs
+import _vfs proc
   shell:
     - Vfs
   _container.common:
     - runtime_dir
-  proc.run:
-    - toolbox
   strand:
     - pipeline
+
+let :toolbox ... = proc.run
 
 def run_command
   :name = nil

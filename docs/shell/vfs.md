@@ -58,7 +58,7 @@ The following operations use the active context:
 | Operation                              | Target behavior                                               |
 | -------------------------------------- | ------------------------------------------------------------- |
 | [`fs`](../api/fs/index.md)             | Reads and writes the target filesystem                        |
-| [`proc.run`](../api/proc-run.md)       | Resolves and launches programs on the target                  |
+| [`proc.run`](../api/proc/index.md#run) | Resolves and launches programs on the target                  |
 | `shell.env` and `shell.cd`             | Use target environment and path conventions                   |
 | [`sys`](../api/sys/index.md)           | Reports the target OS and CPU                                 |
 | [`security`](../api/security/index.md) | Reports and resolves the target identity                      |

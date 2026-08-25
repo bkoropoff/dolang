@@ -5,9 +5,29 @@ output capture.
 
 ## Types
 
-| Name                  | Description                                      |
-| --------------------- | ------------------------------------------------ |
-| [`Error`](./error.md) | Error raised when a process exits unsuccessfully |
+| Name                      | Description                                      |
+| ------------------------- | ------------------------------------------------ |
+| [`Error`](./error.md)     | Error raised when a process exits unsuccessfully |
+| [`Program`](./program.md) | Callable proxy for an external program           |
+
+## Values
+
+### `run`
+
+Runs an external program or creates a [`Program`](./program.md) proxy.
+
+```
+run git status
+run["clang++"] --version
+
+let :git :cargo "clang++": clang ... = run
+```
+
+Index `run` with a [`str`](../std/str.md) or [`fs.Path`](../fs/path.md) to
+create a proxy. Destructuring requires a trailing `...`; symbol and string keys
+create proxies with the corresponding program names. See
+[External Programs](../../shell/external-programs.md) for lookup, redirection,
+capture, and pipeline behavior.
 
 ## Functions
 

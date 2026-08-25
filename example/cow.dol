@@ -1,7 +1,6 @@
 #!/usr/bin/env -S dolang --strict
 import xml progress docker
-import proc.run:
-  - zypper
+let :zypper ... = run
 
 def search name
   let doc = xml.decode $ sub do zypper --xmlout search $name

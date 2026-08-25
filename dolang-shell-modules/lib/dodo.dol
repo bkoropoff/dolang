@@ -1,4 +1,4 @@
-import args exec strand term proc.run: proc_run
+import args exec strand term
 
 let rules_key = strand.Key()
 let special_rules = Set ["common", "default"]
@@ -63,7 +63,7 @@ pub def show ...cmd
     for arg = args
       " " (highlight_arg arg)
     "\n"
-  proc_run ...cmd
+  run ...cmd
 
 # Runs a dodo task from `dodo.dol` in the current directory,
 # equivalnent to running `dolang -m dodo ...argv`, but correctly

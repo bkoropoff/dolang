@@ -1,9 +1,9 @@
 import 
   fs:
    - Path
-  proc.run:
-   - id
   xdg
+
+let :id ... = run
 
 pub def runtime_dir()
   (xdg.runtime_dir() || Path "/run/user/$(sub id "-u")")

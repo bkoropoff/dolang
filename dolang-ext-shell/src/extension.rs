@@ -11,8 +11,7 @@ use dolang::{
 };
 
 use crate::{
-    fs, global::Global, pipe_channel, platform, proc, program, security, shell, shlex, sys, term,
-    time,
+    fs, global::Global, pipe_channel, platform, proc, security, shell, shlex, sys, term, time,
 };
 
 /// Shell extension
@@ -56,7 +55,6 @@ impl Extension for Shell {
         sys::configure_vm(builder, global);
         platform::configure_vm(builder, global);
         proc::configure_vm(builder, global);
-        program::configure_vm(builder, global);
         fs::configure_vm(builder, global);
         shlex::configure_vm(builder);
         time::configure_vm(builder, global);

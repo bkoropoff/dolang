@@ -354,7 +354,7 @@ to be the same length as the range it replaces.
 
 `BinBuf` is a [sink](./sink.md), so it can be the target of a pipeline, of
 [`strand.put`](../strand/index.md), or of a
-[`run`](../proc-run.md#io-redirection) redirect. `put` is
+[`run`](../../shell/external-programs.md#redirecting-io) redirect. `put` is
 [`append`](#append-value): the value's bytes go in verbatim, with no line
 terminator added.
 

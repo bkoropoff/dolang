@@ -62,9 +62,7 @@ run gcc -o main main.c -Wall -Werror
 **External programs as functions:**
 
 ```
-import proc.run:
-  - uname
-  - git
+let :uname :git ... = run
 
 let kernel = sub do uname -r
 let branch = sub do git rev-parse --abbrev-ref HEAD

@@ -140,8 +140,8 @@ Executes a callable in the `Vfs` context:
 a.with do
   # Commands here use the VFS context
   # env and cd also use that context
-  run.ls /
-  run.cat /etc/os-release
+  run ls /
+  run cat /etc/os-release
 ```
 
 Each entry starts from the context's initial working directory. This value is
