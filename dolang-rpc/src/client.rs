@@ -17,6 +17,7 @@ use std::{
 #[cfg(windows)]
 use std::{any::TypeId, io};
 
+use futures::{FutureExt, future::BoxFuture};
 use tokio::sync::{mpsc, oneshot};
 
 #[cfg(windows)]
@@ -397,25 +398,33 @@ struct RecvDriver<P: Protocol> {
     shared: Arc<Shared>,
 }
 
+/// A driver task's completion, awaitable any number of times.
+///
+/// A `JoinHandle` can only be awaited once, and it is not `Clone`: `close`,
+/// `abort` and `Drop` all need to observe the same task ending, possibly from
+/// several client clones at once. `Shared` gives every awaiter its own handle
+/// on one join, and hands the polling on to another awaiter if the one
+/// currently driving it is dropped — which is exactly what happens when
+/// `abort` on one clone interrupts a `close` waiting on another.
+type Done = futures::future::Shared<BoxFuture<'static, ()>>;
+
+fn done(handle: tokio::task::JoinHandle<impl Send + 'static>) -> Done {
+    handle.map(|_| ()).boxed().shared()
+}
+
 #[derive(Clone)]
 struct Tasks {
-    writer_done: tokio::sync::watch::Receiver<bool>,
-    reader_done: tokio::sync::watch::Receiver<bool>,
+    writer_done: Done,
+    reader_done: Done,
 }
 
 impl Tasks {
-    async fn wait(mut done: tokio::sync::watch::Receiver<bool>) {
-        if !*done.borrow() {
-            let _ = done.changed().await;
-        }
-    }
-
     async fn writer(&self) {
-        Self::wait(self.writer_done.clone()).await;
+        self.writer_done.clone().await;
     }
 
     async fn reader(&self) {
-        Self::wait(self.reader_done.clone()).await;
+        self.reader_done.clone().await;
     }
 
     async fn join(&self) {
@@ -531,18 +540,10 @@ impl<P: Protocol> Client<P> {
             }
             .run(reader_stop),
         );
-        let (writer_done_tx, writer_done) = tokio::sync::watch::channel(false);
-        let (reader_done_tx, reader_done) = tokio::sync::watch::channel(false);
-        tokio::spawn(async move {
-            let _ = writer.await;
-            let _ = writer_done_tx.send(true);
-            let _ = reader.await;
-            let _ = reader_done_tx.send(true);
-        });
         *inner.reader_shutdown.lock().unwrap() = Some(reader_shutdown);
         *inner.tasks.lock().unwrap() = Some(Tasks {
-            writer_done,
-            reader_done,
+            writer_done: done(writer),
+            reader_done: done(reader),
         });
         Self { inner }
     }
