@@ -586,6 +586,9 @@ impl<'a> Compiler<'a> {
             .import_module("strand")
             .import_items("std")
             .items(STD_PRELUDE.iter().copied())
+            .commit()
+            .import_items("strand")
+            .items(["fork", "pipeline", "stream", "put", "spawn"])
             .commit();
         this
     }

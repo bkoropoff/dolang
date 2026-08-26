@@ -47,9 +47,7 @@ The [`strand.spawn`](../api/strand/index.md#spawn-func) function creates a new
 background strand:
 
 ```
-import strand
-
-let worker = strand.spawn do
+let worker = spawn do
   echo "Running in background"
   42
 
@@ -75,7 +73,7 @@ multiple blocks concurrently and returns their results as an array:
 ```
 import strand
 
-let results = strand.fork
+let results = fork
   - do 42
   - do "hello"
   - do (1 + 2)
@@ -89,7 +87,7 @@ complete. Results are returned in the same order as the input blocks.
 For small homogeneous fan-out, a `for` comprehension can construct the blocks:
 
 ```
-let results = strand.fork
+let results = fork
   for server = build_servers
     do build_on $server
 ```
@@ -145,7 +143,7 @@ function connects multiple stages into a data processing pipeline:
 ```
 import strand
 
-let result = strand.pipeline
+let result = pipeline
   do strand.from [1, 2, 3, 4, 5]
   do strand.where do |x| (x > 2)
   do strand.each do |x| (x * 2)
@@ -197,7 +195,7 @@ and threading channels.
 ```
 import strand
 
-let s = strand.stream do strand.each do |x| (x * 2)
+let s = stream do strand.each do |x| (x * 2)
 let input = s.sink()
 let output = s.iter()
 
@@ -207,7 +205,7 @@ s.join()
 ```
 
 Inside the callable, the strand reads from input with `strand.next()` and writes
-to output with `strand.put` — the same as any pipeline stage. Pipeline stage
+to output with `put` — the same as any pipeline stage. Pipeline stage
 functions like `each` and `where` work unchanged.
 
 ## Built-in Pipeline Stages

@@ -75,17 +75,17 @@ let results = pipeline
   do collect()
 ```
 
-### `pool count input func`
+### `pool count input? func`
 
 Executes `func` over an iterator with a fixed number of scoped worker strands.
 
 #### Parameters
 
-| Name    | Type                   | Description                           |
-| ------- | ---------------------- | ------------------------------------- |
-| `count` | [`Int`](../std/int.md) | number of worker strands              |
-| `input` | input                  | source consumed lazily by the workers |
-| `func`  | func                   | callable applied to each input value  |
+| Name    | Type                   | Description                                   |
+| ------- | ---------------------- | --------------------------------------------- |
+| `count` | [`Int`](../std/int.md) | number of worker strands                      |
+| `input` | input?                 | source; defaults to the strand-local iterator |
+| `func`  | func                   | callable applied to each input value          |
 
 Block results are discarded. The function returns `nil` after the input is
 exhausted and every worker has finished.
@@ -95,6 +95,14 @@ exhausted and every worker has finished.
 ```
 pool 4 $urls do |url|
   download $url
+```
+
+As a pipeline stage, omit `input` to use the stage's input:
+
+```
+pipeline
+  do from $urls
+  do pool 4 do |url| download $url
 ```
 
 ### `pipeline stage ...stages :input? :output?`
@@ -245,6 +253,30 @@ let send recv = channel 10 # buffered with capacity 10
 ```
 
 See [Sender](sender.md) and [Receiver](receiver.md) for the types returned.
+
+### `put value`
+
+Writes `value` to the strand-local output.
+
+#### Parameters
+
+| Name    | Type  | Description      |
+| ------- | ----- | ---------------- |
+| `value` | input | value to write   |
+
+#### Returns
+
+`nil`
+
+#### Example
+
+```
+let values = pipeline
+  do put 42
+  do collect()
+
+assert_eq $values [42]
+```
 
 ### `from value`
 
