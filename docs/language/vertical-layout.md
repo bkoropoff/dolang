@@ -33,6 +33,8 @@ copy_file
   dest: bar.txt
 ```
 
+A key's colon must be followed by whitespace or an indented block.
+
 ## Bin-packing
 
 A line starting with neither a dash item nor a key item may contain additional
