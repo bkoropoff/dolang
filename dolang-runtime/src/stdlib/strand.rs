@@ -937,12 +937,18 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
         .function_with_slots(
             "pool",
             async move |strand, args, _, [mut input, mut output]| {
-                let ([count, arg_input, block], []) = unpack!(strand, args, 3, 0)?;
+                let ([count, input_or_block], [block]) = unpack!(strand, args, 2, 1)?;
+                let block = if let Some(block) = block {
+                    input_or_block.iter(strand, &mut input).await?;
+                    block
+                } else {
+                    strand.input(&mut input);
+                    input_or_block
+                };
                 let count = count.to_index(strand)?;
                 if count == 0 {
                     return Err(Error::value(strand, "strand.pool: count must be positive"));
                 }
-                arg_input.iter(strand, &mut input).await?;
                 Output::set(strand, &mut output, Singleton::Null);
                 map_workers(strand, count, input, output, block).await
             },

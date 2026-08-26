@@ -97,7 +97,7 @@ its own bytes — no terminator is added. Use
 [`precrimp`](../std/sink.md#precrimp-terminator) to get one:
 
 ```
-strand.pipeline output: (term.console.precrimp())
+pipeline output: (term.console.precrimp())
   do strand.from ["building", "linking"]
 ```
 

@@ -67,9 +67,7 @@ let config = $
 streams, and scoped resource limits.
 
 ```
-import strand
-
-let results = strand.fork
+let results = fork
   do build linux
   do build windows
   do build macos

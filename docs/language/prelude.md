@@ -41,4 +41,12 @@ Embedded runtimes may provide a different additional prelude.
 
 ## `strand`
 
-The module itself is imported.
+The module itself is imported, along with these functions:
+
+| Name                                                                    | Description                         |
+| ----------------------------------------------------------------------- | ----------------------------------- |
+| [`fork`](../api/strand/index.md#fork-blocks)                            | Executes blocks concurrently        |
+| [`pipeline`](../api/strand/index.md#pipeline-stage-stages-input-output) | Connects concurrent pipeline stages |
+| [`stream`](../api/strand/index.md#stream-func)                          | Creates a background stream strand  |
+| [`put`](../api/strand/index.md#put-value)                               | Writes to the strand-local output   |
+| [`spawn`](../api/strand/index.md#spawn-func)                            | Creates a background strand         |
