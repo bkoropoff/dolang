@@ -2405,32 +2405,51 @@ impl<'a> Parser<'a> {
             }
             Some(token!(Key)) => {
                 let span = self.advance();
-                if let Some(token!(Indent)) = self.peek()? {
-                    self.advance();
-                    args.push(Arg::Key(Key {
-                        key_span: span,
-                        colon_span: span.after_right_char(),
-                        expr: self.parse_data(scope, vec![])?,
-                        delim_span: None,
-                    }));
-                } else {
-                    self.expect(scope, &[ExpectKind::ArgSep])?;
-                    if let Some(token!(Keyword(Keyword::Do))) = self.peek()? {
+                match self.peek()? {
+                    Some(token!(Indent)) => {
+                        self.advance();
                         args.push(Arg::Key(Key {
                             key_span: span,
                             colon_span: span.after_right_char(),
-                            expr: self.parse_do_block(scope, true)?,
+                            expr: self.parse_data(scope, vec![])?,
                             delim_span: None,
                         }));
-                    } else {
+                    }
+                    Some(token!(ArgSep)) => {
+                        self.advance();
+                        let expr = if let Some(token!(Keyword(Keyword::Do))) = self.peek()? {
+                            self.parse_do_block(scope, true)?
+                        } else {
+                            self.parse_cmd_vert_line_expr(scope)?
+                        };
                         args.push(Arg::Key(Key {
                             key_span: span,
                             colon_span: span.after_right_char(),
+                            expr,
                             delim_span: None,
-                            expr: self.parse_cmd_vert_line_expr(scope)?,
-                        }))
+                        }));
                     }
-                };
+                    // Not a key item after all: nothing separates the colon
+                    // from what follows it, so this is one token that happens
+                    // to contain a colon, as in a `https://...` URL. The same
+                    // fallback the non-vertical argument parser makes, and the
+                    // same one the `-` case above makes for a bare `-`.
+                    _ => {
+                        args.push(Arg::Pos(Single {
+                            expr: self.parse_implicit_concat(
+                                scope,
+                                Some(Expr::Concat {
+                                    exprs: vec![Expr::Literal(span | span.after_right_char())],
+                                    delim_span: None,
+                                    verbatim: true,
+                                }),
+                                UnquotedMode::Shell,
+                            )?,
+                            delim_span: None,
+                        }));
+                        self.parse_cmd_args(scope, false, false, args)?;
+                    }
+                }
                 Ok(())
             }
             Some(token!(DittoKey)) => {

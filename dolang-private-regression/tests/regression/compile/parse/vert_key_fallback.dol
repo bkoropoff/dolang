@@ -1,0 +1,51 @@
+# A colon with nothing after it is a key item; a colon with something joined
+# straight onto it is just a character in a token, exactly as at statement
+# level, where `echo https://example.com` is one argument rather than a key.
+
+let one = $
+  https://example.com/disk.qcow2
+
+assert_eq $one ["https://example.com/disk.qcow2"]
+
+# The fallback does not stop the rest of the block being read as key items.
+let mixed = $
+  https://example.com/disk.qcow2
+  digest: blake3:0123
+
+assert_eq $mixed {0: "https://example.com/disk.qcow2", digest: "blake3:0123"}
+
+# Bin-packing continues past the token that ends the fallback, as it does for
+# any other positional item.
+let packed = $
+  foo:bar baz
+
+assert_eq $packed ["foo:bar", "baz"]
+
+# Key items themselves are unaffected, in each of their forms.
+let keys = $
+  plain: value
+  nested:
+    inner: 1
+  block: do
+    2
+
+assert_eq $keys[:plain:] "value"
+assert_eq $keys[:nested:] {inner: 1}
+assert_eq $keys[:block:]() 2
+
+# As are dash items, whose own fallback this mirrors.
+let dashes = $
+  - one item, with spaces
+  - https://example.com/x
+
+assert_eq $dashes ["one item, with spaces", "https://example.com/x"]
+
+# The same line in vertical *argument* position, rather than vertical data.
+def collect source :digest
+  [source, digest]
+
+let args = collect
+  https://example.com/disk.qcow2
+  digest: blake3:0123
+
+assert_eq $args ["https://example.com/disk.qcow2", "blake3:0123"]
