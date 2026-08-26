@@ -49,7 +49,56 @@ use crate::{handle::TakeHandle, session::Inner as OpaqueInner};
 /// [`bind`](Unbound::bind) to obtain a [`Client`].
 pub use crate::unbound::UnboundClient as Unbound;
 
-type Pending<R> = HashMap<u64, oneshot::Sender<Result<CallResult<R>, Error>>>;
+type Responder<R> = oneshot::Sender<Result<CallResult<R>, Error>>;
+
+/// The registry of calls awaiting a response, which is poisoned once the
+/// session has authoritatively failed.
+///
+/// The reader task is the only thing that can ever deliver a response, so a
+/// call registered after it has gone would wait forever. Poisoning is what
+/// makes that impossible: the same lock that fails the calls already waiting
+/// records why, and every later registration is refused with that error
+/// instead of being parked on a response nobody will send.
+enum Pending<R> {
+    Live(HashMap<u64, Responder<R>>),
+    Failed(Error),
+}
+
+impl<R> Pending<R> {
+    fn new() -> Self {
+        Self::Live(HashMap::new())
+    }
+
+    /// Registers a call, or settles it immediately with the error the session
+    /// failed with. Returns whether it was registered.
+    #[must_use]
+    fn register(&mut self, id: u64, tx: Responder<R>) -> bool {
+        match self {
+            Self::Live(calls) => {
+                calls.insert(id, tx);
+                true
+            }
+            Self::Failed(error) => {
+                let _ = tx.send(Err(error.copy()));
+                false
+            }
+        }
+    }
+
+    fn remove(&mut self, id: u64) -> Option<Responder<R>> {
+        match self {
+            Self::Live(calls) => calls.remove(&id),
+            Self::Failed(_) => None,
+        }
+    }
+
+    fn contains(&self, id: u64) -> bool {
+        match self {
+            Self::Live(calls) => calls.contains_key(&id),
+            Self::Failed(_) => false,
+        }
+    }
+}
 
 /// State the reader and writer tasks share.
 ///
@@ -453,13 +502,27 @@ impl<P: Protocol> Inner<P> {
     }
 
     fn complete(&self, id: u64, result: Result<CallResult<P::Response>, Error>) {
-        if let Some(tx) = self.pending.lock().unwrap().remove(&id) {
+        if let Some(tx) = self.pending.lock().unwrap().remove(id) {
             let _ = tx.send(result);
         }
     }
 
+    /// Fails every waiting call and poisons the registry against later ones.
+    ///
+    /// The first error wins: it is the one that says why the session actually
+    /// ended, where anything after it is the teardown that followed.
     fn fail(&self, error: Error) {
-        for (_, tx) in mem::take(&mut *self.pending.lock().unwrap()) {
+        let waiting = {
+            let mut pending = self.pending.lock().unwrap();
+            match mem::replace(&mut *pending, Pending::Failed(error.copy())) {
+                Pending::Live(calls) => calls,
+                already @ Pending::Failed(_) => {
+                    *pending = already;
+                    return;
+                }
+            }
+        };
+        for (_, tx) in waiting {
             let _ = tx.send(Err(error.copy()));
         }
     }
@@ -511,7 +574,7 @@ impl<P: Protocol> Client<P> {
         });
         let inner = Arc::new(Inner {
             outgoing: Mutex::new(Some(outgoing)),
-            pending: Mutex::new(HashMap::new()),
+            pending: Mutex::new(Pending::new()),
             next_id: Mutex::new(0),
             reader_shutdown: Mutex::new(None),
             tasks: Mutex::new(None),
@@ -684,15 +747,20 @@ impl<P: Protocol> Client<P> {
             id
         };
         let (message, value) = build(id);
-        self.inner.pending.lock().unwrap().insert(id, tx);
-        let queued = self
-            .inner
-            .outgoing
-            .lock()
-            .unwrap()
-            .as_ref()
-            .is_some_and(|sender| sender.send(message).is_ok());
-        if !queued {
+        // Registration first, and under the lock that poisoning takes: a
+        // session that has already failed refuses the call here rather than
+        // letting it queue a request that no surviving reader will ever
+        // answer.
+        let registered = self.inner.pending.lock().unwrap().register(id, tx);
+        let queued = registered
+            && self
+                .inner
+                .outgoing
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|sender| sender.send(message).is_ok());
+        if registered && !queued {
             self.inner.complete(id, Err(Error::ConnectionClosed));
         }
         ((id, rx, !queued), value)
@@ -822,14 +890,7 @@ impl<P: Protocol> Future for Call<P> {
 
 impl<P: Protocol> Drop for Call<P> {
     fn drop(&mut self) {
-        if self
-            .inner
-            .pending
-            .lock()
-            .unwrap()
-            .remove(&self.id)
-            .is_some()
-        {
+        if self.inner.pending.lock().unwrap().remove(self.id).is_some() {
             self.cancel();
         }
     }
@@ -973,7 +1034,7 @@ impl<P: Protocol> SendDriver<P> {
             let Some(inner) = self.inner.upgrade() else {
                 break;
             };
-            if !inner.pending.lock().unwrap().contains_key(&id) {
+            if !inner.pending.lock().unwrap().contains(id) {
                 continue;
             }
             self.admit(message).await?;
@@ -1362,7 +1423,7 @@ mod tests {
         let (outgoing, outgoing_rx) = mpsc::unbounded_channel();
         let inner = Arc::new(Inner {
             outgoing: Mutex::new(Some(outgoing.clone())),
-            pending: Mutex::new(HashMap::new()),
+            pending: Mutex::new(Pending::new()),
             next_id: Mutex::new(1),
             reader_shutdown: Mutex::new(None),
             tasks: Mutex::new(None),
@@ -1372,7 +1433,7 @@ mod tests {
             _peer_process: None,
         });
         let (tx, rx) = oneshot::channel();
-        inner.pending.lock().unwrap().insert(0, tx);
+        assert!(inner.pending.lock().unwrap().register(0, tx));
         (
             Call {
                 id: 0,
@@ -1421,7 +1482,7 @@ mod tests {
         let shared = test_shared(&outgoing);
         let inner = Arc::new(Inner {
             outgoing: Mutex::new(Some(outgoing.clone())),
-            pending: Mutex::new(HashMap::new()),
+            pending: Mutex::new(Pending::new()),
             next_id: Mutex::new(1),
             reader_shutdown: Mutex::new(None),
             tasks: Mutex::new(None),
@@ -1430,7 +1491,7 @@ mod tests {
             _peer_process: None,
         });
         let (tx, _rx) = oneshot::channel();
-        inner.pending.lock().unwrap().insert(0, tx);
+        assert!(inner.pending.lock().unwrap().register(0, tx));
         shared.handle_escrow.lock().unwrap().insert(0, Vec::new());
         shared.handle_escrow.lock().unwrap().insert(1, Vec::new());
 

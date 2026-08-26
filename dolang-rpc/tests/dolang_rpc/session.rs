@@ -444,6 +444,40 @@ async fn disconnect_fails_pending_calls() {
 }
 
 #[tokio::test]
+async fn calls_issued_after_disconnect_fail_immediately() {
+    let (client_io, server_io) = tokio::io::duplex(64);
+    let server = tokio::spawn(async move {
+        builder()
+            .server(server_io)
+            .await
+            .unwrap()
+            .bind::<Test>()
+            .serve(async |_context, _request| {
+                std::future::pending::<()>().await;
+            })
+            .await
+    });
+    let client = unbound_client::<_, Test>(client_io).await;
+    let call = client.call(Request::Echo(1));
+    server.abort();
+    assert!(matches!(
+        call.await,
+        Err(Error::Io(_)) | Err(Error::ConnectionClosed)
+    ));
+    // The reader has exited, so nothing can ever answer a request issued from
+    // here on. The writer's channel is still open and would happily queue one,
+    // so without a poisoned pending map this call waits forever.
+    let late = client.call(Request::Echo(2));
+    let result = tokio::time::timeout(Duration::from_secs(5), late)
+        .await
+        .expect("a call issued after disconnect hung instead of failing");
+    assert!(matches!(
+        result,
+        Err(Error::Io(_)) | Err(Error::ConnectionClosed)
+    ));
+}
+
+#[tokio::test]
 async fn abort_stops_tasks_and_fails_pending_calls() {
     let (client_io, peer_io) = tokio::io::duplex(64);
     // Kept running (not aborted) for the whole test: its output remains open,
