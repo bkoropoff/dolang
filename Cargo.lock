@@ -150,8 +150,9 @@ dependencies = [
 
 [[package]]
 name = "astral_async_zip"
-version = "0.0.20"
-source = "git+https://github.com/bkoropoff/rs-async-zip.git?branch=short-read-fixes#f7f931ec61d01e3fa17f829bb49cfe0a807835a8"
+version = "0.0.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13f4a9bc6289d907c8e883d25026a54751d686da9926af271d0fc4cbe58a7f4d"
 dependencies = [
  "async-compression",
  "crc32fast",
