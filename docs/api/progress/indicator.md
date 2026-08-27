@@ -12,49 +12,52 @@ modes.
 ### `message`
 
 The indicator message text (`Str`). Read-only — see
-[`update`](#update-icon-message-total-position-delta).
+[`update`](#update-icon-message-total-position-delta-units).
 
 ### `icon`
 
 The prefix icon (`Str`). Read-only — see
-[`update`](#update-icon-message-total-position-delta).
+[`update`](#update-icon-message-total-position-delta-units).
 
 ### `total`
 
 The total value for bar mode (`Int`), or `nil` for spinner mode. Read-only —
-see [`update`](#update-icon-message-total-position-delta).
+see [`update`](#update-icon-message-total-position-delta-units).
 
 ### `position`
 
 The current position (`Int`). Read-only — see
-[`update`](#update-icon-message-total-position-delta).
+[`update`](#update-icon-message-total-position-delta-units).
 
 ## Methods
 
-### `update :icon? :message? :total? :position? :delta?`
+### `update :icon? :message? :total? :position? :delta? :units?`
 
 Applies one or more changes atomically in a single call — one redraw instead
 of one per field.
 
-| Name       | Type                    | Description                                |
-| ---------- | ----------------------- | ------------------------------------------ |
-| `icon`     | [`Str`](../std/str.md)? | New prefix icon                            |
-| `message`  | [`Str`](../std/str.md)? | New message text                           |
-| `total`    | [`Int`](../std/int.md)? | New total; `nil` switches to spinner mode  |
-| `position` | [`Int`](../std/int.md)? | Absolute position                          |
-| `delta`    | [`Int`](../std/int.md)? | Relative adjustment (positive or negative) |
+| Name       | Type                    | Description                                      |
+| ---------- | ----------------------- | ------------------------------------------------ |
+| `icon`     | [`Str`](../std/str.md)? | New prefix icon                                  |
+| `message`  | [`Str`](../std/str.md)? | New message text                                 |
+| `total`    | [`Int`](../std/int.md)? | New total; `nil` switches to spinner mode        |
+| `position` | [`Int`](../std/int.md)? | Absolute position                                |
+| `delta`    | [`Int`](../std/int.md)? | Relative adjustment (positive or negative)       |
+| `units`    | [`Sym`](../std/sym.md)? | New `COUNT`, `BYTES`, or `PERCENT` display units |
 
 `position` and `delta` are exclusive — passing both raises an error. Omitted
 keys are left unchanged.
 
 In non-terminal (plain-text) output, `total`/`position`/`delta` changes are
 rate-limited (see `progress.with`'s `interval:`), but `icon`/`message`
-changes always print immediately.
+and `units` changes always print immediately.
 
 ```
 w.update icon: 📦 message: "installing $pkg"
 w.update total: 100
 w.update delta: 1
+w.update units: :BYTES:
+w.update units: :PERCENT: # 40% when position is 4 and total is 10
 ```
 
 ### `delta n?`

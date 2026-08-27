@@ -66,6 +66,16 @@ def nested_indicator()
   assert_eq $results [42]
 
 #[test]
+def indicator_update_units()
+  progress.show total: 10 do |indicator|
+    indicator.update position: 4 units: :BYTES:
+    assert_eq $indicator.position 4
+    indicator.update units: :COUNT:
+    indicator.update units: :PERCENT:
+    assert_throws $ValueError do indicator.update units: :SECONDS:
+    assert_throws $TypeError do indicator.update units: BYTES
+
+#[test]
 def invalid_step_specs()
   assert_throws $TypeError do progress.steps message: 1
   assert_throws $TypeError do progress.steps icon: 1

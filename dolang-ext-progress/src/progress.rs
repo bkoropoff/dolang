@@ -276,26 +276,25 @@ fn check_closed<'v, 's>(strand: &mut Strand<'v, 's>, closed: &Cell<bool>) -> Res
 fn parse_units<'v, 's>(
     strand: &mut Strand<'v, 's>,
     units_val: Option<&Value<'v>>,
+    global: State<'v, Global<'v>>,
 ) -> Result<'v, 's, Option<Units>> {
     match units_val {
         Some(v) => {
             if let Some(sym) = v.as_sym(strand) {
-                match sym.as_str(strand) {
-                    "COUNT" => Ok(Some(Units::Count)),
-                    "BYTES" => Ok(Some(Units::Bytes)),
-                    _ => Err(Error::value(strand, "units: expected :COUNT: or :BYTES:")),
-                }
-            } else if let Some(s) = v.as_str(strand).map(|m| m.to_string()) {
-                match s.as_str() {
-                    "COUNT" => Ok(Some(Units::Count)),
-                    "BYTES" => Ok(Some(Units::Bytes)),
-                    _ => Err(Error::value(
+                if sym == global.units.count {
+                    Ok(Some(Units::Count))
+                } else if sym == global.units.bytes {
+                    Ok(Some(Units::Bytes))
+                } else if sym == global.units.percent {
+                    Ok(Some(Units::Percent))
+                } else {
+                    Err(Error::value(
                         strand,
-                        "units: expected \"COUNT\" or \"BYTES\"",
-                    )),
+                        "units: expected :COUNT:, :BYTES:, or :PERCENT:",
+                    ))
                 }
             } else {
-                Err(Error::type_error(strand, "units: expected `Sym` or `Str`"))
+                Err(Error::type_error(strand, "units: expected `Sym`"))
             }
         }
         None => Ok(None),
@@ -843,7 +842,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                     .transpose()?,
                 message: parse_message(strand, msg_val.as_deref())?,
                 icon: parse_icon(strand, icon_val.as_deref())?,
-                units: parse_units(strand, units_val.as_deref())?,
+                units: parse_units(strand, units_val.as_deref(), global)?,
                 tick: parse_duration_secs(
                     strand,
                     "tick",
@@ -1005,6 +1004,7 @@ impl<'v> Object<'v> for Indicator {
         let total_kw = builder.sym("total");
         let position_kw = builder.sym("position");
         let delta_kw = builder.sym("delta");
+        let units_kw = builder.sym("units");
         builder
             // --- Getters (read-only; see `update` for writes) ---
             .get("message", |this, strand, out| {
@@ -1049,7 +1049,7 @@ impl<'v> Object<'v> for Indicator {
             })
             .method("update", async move |this, strand, args, _out| {
                 check_closed(strand, &this.annex().closed)?;
-                let ([], [icon, message, total, position, delta]) = unpack!(
+                let ([], [icon, message, total, position, delta, units]) = unpack!(
                     strand,
                     args,
                     0,
@@ -1058,7 +1058,8 @@ impl<'v> Object<'v> for Indicator {
                     message_kw = None,
                     total_kw = None,
                     position_kw = None,
-                    delta_kw = None
+                    delta_kw = None,
+                    units_kw = None
                 )?;
 
                 if position.is_some() && delta.is_some() {
@@ -1068,11 +1069,11 @@ impl<'v> Object<'v> for Indicator {
                     ));
                 }
 
-                // Message/icon changes always go through immediately in
-                // plain mode, even mid-debounce — they're identity changes
-                // ("what is this indicator doing now"), not progress noise.
-                // Position/delta/total stay rate-limited.
-                let force = icon.is_some() || message.is_some();
+                // Message/icon/units changes always go through immediately
+                // in plain mode, even mid-debounce — they change what is
+                // being displayed, not just its progress. Position/delta/
+                // total stay rate-limited.
+                let force = icon.is_some() || message.is_some() || units.is_some();
 
                 if let Some(v) = icon {
                     let icon = v
@@ -1142,6 +1143,40 @@ impl<'v> Object<'v> for Indicator {
                         this.annex().bar.inc(n as u64); // safe: n >= 0
                     } else {
                         this.annex().bar.dec(n.unsigned_abs());
+                    }
+                }
+                if let Some(v) = units {
+                    let units = parse_units(strand, Some(&v), this.annex().global)?;
+                    let annex = this.annex();
+                    if let Some(state_rc) = &annex.state_rc {
+                        let mut state = state_rc.borrow_mut();
+                        if let Some(idx) = state.find_widget_idx(annex.widget_id) {
+                            let leaf = is_leaf(&state.widgets, idx);
+                            let style = state.style.clone();
+                            let ansi = state.ansi;
+                            let widget = &mut state.widgets[idx];
+                            widget.units = units;
+                            match widget.mode {
+                                Mode::Bar => style::apply_bar_style(
+                                    &widget.bar,
+                                    &style,
+                                    widget.depth - 1,
+                                    units,
+                                    ansi,
+                                ),
+                                Mode::Spinner => style::apply_spinner_style(
+                                    &widget.bar,
+                                    &style,
+                                    widget.depth - 1,
+                                    units,
+                                    leaf,
+                                    ansi,
+                                ),
+                            }
+                        }
+                    }
+                    if let Some(info) = &annex.plain {
+                        info.set_units(units);
                     }
                 }
 
