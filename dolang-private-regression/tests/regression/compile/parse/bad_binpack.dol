@@ -1,0 +1,18 @@
+echo
+  - foo: bar
+    one two
+# error: expected `-` item, key item, or `do` block
+#   --> bad_binpack.dol:LL:LL
+#    |
+# LL |     one two
+#    |     ^^^
+
+echo
+  foo: 
+    foo: bar
+    one two
+# error: expected `-` item, key item, or `do` block
+#   --> bad_binpack.dol:LL:LL
+#    |
+# LL |     one two
+#    |     ^^^

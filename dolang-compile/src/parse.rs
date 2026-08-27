@@ -2226,7 +2226,7 @@ impl<'a> Parser<'a> {
                         delim_span: None,
                     });
                     // Parse any trailer
-                    self.parse_data(scope, vec![arg])
+                    self.parse_data(scope, vec![arg], false)
                 } else {
                     match self.peek()? {
                         Some(token!(ArgSep)) => {
@@ -2255,7 +2255,7 @@ impl<'a> Parser<'a> {
                     Some(token!(Indent)) => {
                         self.advance();
                         Ok(Expr::Group {
-                            expr: Box::new(self.parse_data(scope, vec![])?),
+                            expr: Box::new(self.parse_data(scope, vec![], true)?),
                             delim: Some(GroupDelim::Dollar(span)),
                         })
                     }
@@ -2307,7 +2307,7 @@ impl<'a> Parser<'a> {
     /// Parse an indented run of vertical arguments through its closing `Dedent`.
     ///
     /// The opening `Indent` has already been consumed by the caller.
-    fn parse_cmd_vert_body(&mut self, scope: &mut Scope) -> Result<ExprBody<Arg>> {
+    fn parse_cmd_vert_body(&mut self, scope: &mut Scope, bin_pack: bool) -> Result<ExprBody<Arg>> {
         use TokenInfo::*;
 
         let mut elems = Vec::new();
@@ -2317,7 +2317,7 @@ impl<'a> Parser<'a> {
                 Some(token!(StmtSep)) => {
                     self.advance();
                 }
-                _ => self.parse_cmd_vert_arg(scope, &mut elems)?,
+                _ => self.parse_cmd_vert_arg(scope, &mut elems, bin_pack)?,
             }
         }
         self.expect(scope, &[ExpectKind::Dedent])?;
@@ -2327,7 +2327,11 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_cmd_vert_if(&mut self, scope: &mut Scope) -> Result<If<ExprBody<Arg>>> {
+    fn parse_cmd_vert_if(
+        &mut self,
+        scope: &mut Scope,
+        bin_pack: bool,
+    ) -> Result<If<ExprBody<Arg>>> {
         use self::If;
         use self::IfBranch;
         use self::Keyword;
@@ -2336,7 +2340,7 @@ impl<'a> Parser<'a> {
         let if_span = self.expect(scope, &[ExpectKind::Keyword(Keyword::If)])?;
         self.expect(scope, &[ExpectKind::ArgSep])?;
         let (cond, bind) = self.parse_cond(scope)?;
-        let tbranch = self.parse_cmd_vert_body(scope)?;
+        let tbranch = self.parse_cmd_vert_body(scope, bin_pack)?;
 
         let mut elif_branches = Vec::new();
         let mut else_branch = None;
@@ -2350,7 +2354,7 @@ impl<'a> Parser<'a> {
                 let elif_if_span = self.expect(scope, &[ExpectKind::Keyword(Keyword::If)])?;
                 self.expect(scope, &[ExpectKind::ArgSep])?;
                 let (elif_cond, elif_bind) = self.parse_cond(scope)?;
-                let elif_body = self.parse_cmd_vert_body(scope)?;
+                let elif_body = self.parse_cmd_vert_body(scope, bin_pack)?;
 
                 elif_branches.push((
                     IfBranch {
@@ -2364,7 +2368,7 @@ impl<'a> Parser<'a> {
             } else {
                 // This is final "else"
                 self.expect(scope, &[ExpectKind::Indent])?;
-                else_branch = Some((self.parse_cmd_vert_body(scope)?, else_span));
+                else_branch = Some((self.parse_cmd_vert_body(scope, bin_pack)?, else_span));
                 break;
             }
         }
@@ -2381,7 +2385,12 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_cmd_vert_arg(&mut self, scope: &mut Scope, args: &mut Vec<Arg>) -> Result<()> {
+    fn parse_cmd_vert_arg(
+        &mut self,
+        scope: &mut Scope,
+        args: &mut Vec<Arg>,
+        bin_pack: bool,
+    ) -> Result<()> {
         use self::{Ident, Key, Keyword, Op};
         use TokenInfo::*;
 
@@ -2411,7 +2420,7 @@ impl<'a> Parser<'a> {
                         args.push(Arg::Key(Key {
                             key_span: span,
                             colon_span: span.after_right_char(),
-                            expr: self.parse_data(scope, vec![])?,
+                            expr: self.parse_data(scope, vec![], false)?,
                             delim_span: None,
                         }));
                     }
@@ -2473,7 +2482,7 @@ impl<'a> Parser<'a> {
                 Ok(())
             }
             Some(token!(Keyword(Keyword::If))) => {
-                args.push(Arg::If(self.parse_cmd_vert_if(scope)?));
+                args.push(Arg::If(self.parse_cmd_vert_if(scope, bin_pack)?));
                 Ok(())
             }
             Some(token!(Keyword(Keyword::For))) => {
@@ -2501,7 +2510,7 @@ impl<'a> Parser<'a> {
                         Some(token!(StmtSep)) => {
                             self.advance();
                         }
-                        _ => self.parse_cmd_vert_arg(scope, &mut body)?,
+                        _ => self.parse_cmd_vert_arg(scope, &mut body, bin_pack)?,
                     }
                 }
                 self.expect(scope, &[ExpectKind::Dedent])?;
@@ -2524,7 +2533,7 @@ impl<'a> Parser<'a> {
                     let colon_span = self.advance();
                     let value = if let Some(token!(Indent)) = self.peek()? {
                         self.advance();
-                        self.parse_data(scope, vec![])?
+                        self.parse_data(scope, vec![], false)?
                     } else {
                         self.expect(scope, &[ExpectKind::ArgSep])?;
                         self.parse_cmd_vert_line_expr(scope)?
@@ -2563,7 +2572,7 @@ impl<'a> Parser<'a> {
                         self.advance();
                         args.push(Arg::Pos(Single {
                             expr: Expr::Group {
-                                expr: Box::new(self.parse_data(scope, vec![])?),
+                                expr: Box::new(self.parse_data(scope, vec![], true)?),
                                 delim: Some(GroupDelim::Dollar(span)),
                             },
                             delim_span: None,
@@ -2580,7 +2589,7 @@ impl<'a> Parser<'a> {
                     let colon_span = self.advance();
                     let value = if let Some(token!(Indent)) = self.peek()? {
                         self.advance();
-                        self.parse_data(scope, vec![])?
+                        self.parse_data(scope, vec![], false)?
                     } else {
                         self.expect(scope, &[ExpectKind::ArgSep])?;
                         self.parse_cmd_vert_line_expr(scope)?
@@ -2607,7 +2616,17 @@ impl<'a> Parser<'a> {
                 }));
                 Ok(())
             }
-            _ => self.parse_cmd_args(scope, false, false, args),
+            other => {
+                if bin_pack {
+                    self.parse_cmd_args(scope, false, false, args)
+                } else {
+                    Err(self.syntax_error(
+                        scope,
+                        other,
+                        "expected `-` item, key item, or `do` block",
+                    ))
+                }
+            }
         }
     }
 
@@ -2624,7 +2643,7 @@ impl<'a> Parser<'a> {
                     Some(token!(ArgSep)) => {
                         // Yep
                         let args = vec![self.parse_cmd_vert_dash_arg(scope, minus_span)?];
-                        let expr = self.parse_data(scope, args)?;
+                        let expr = self.parse_data(scope, args, false)?;
                         // This consumed remainder of this indentation scope, so exit early
                         return Ok(Arg::Pos(Single {
                             expr,
@@ -2651,11 +2670,11 @@ impl<'a> Parser<'a> {
                         let arg = Arg::Key(Key {
                             key_span: span,
                             colon_span: span.after_right_char(),
-                            expr: self.parse_data(scope, vec![])?,
+                            expr: self.parse_data(scope, vec![], false)?,
                             delim_span: None,
                         });
                         // Parse any trailer
-                        let expr = self.parse_data(scope, vec![arg])?;
+                        let expr = self.parse_data(scope, vec![arg], false)?;
                         // This consumed remainder of this indentation scope, so exit early
                         return Ok(Arg::Pos(Single {
                             expr,
@@ -2672,7 +2691,7 @@ impl<'a> Parser<'a> {
                             delim_span: None,
                         });
                         // Parse any trailer
-                        let expr = self.parse_data(scope, vec![arg])?;
+                        let expr = self.parse_data(scope, vec![arg], false)?;
                         // This consumed remainder of this indentation scope, so exit early
                         return Ok(Arg::Pos(Single {
                             expr,
@@ -2723,7 +2742,7 @@ impl<'a> Parser<'a> {
                     Some(token!(StmtSep)) => {
                         self.advance();
                     }
-                    _ => self.parse_cmd_vert_arg(scope, args)?,
+                    _ => self.parse_cmd_vert_arg(scope, args, bin_pack)?,
                 }
                 Ok(false)
             })();
@@ -2749,8 +2768,13 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn parse_data(&mut self, scope: &mut Scope, mut args: Vec<Arg>) -> Result<Expr> {
-        self.parse_cmd_vert_args(scope, &mut args, false)?;
+    fn parse_data(
+        &mut self,
+        scope: &mut Scope,
+        mut args: Vec<Arg>,
+        bin_pack: bool,
+    ) -> Result<Expr> {
+        self.parse_cmd_vert_args(scope, &mut args, bin_pack)?;
 
         // Decide what to emit by recursively analyzing the args
         if self.args_have_key(&args) {
@@ -3266,7 +3290,7 @@ impl<'a> Parser<'a> {
                         self.advance();
                         return Ok((
                             Expr::Group {
-                                expr: Box::new(self.parse_data(scope, vec![])?),
+                                expr: Box::new(self.parse_data(scope, vec![], true)?),
                                 delim: Some(GroupDelim::Dollar(span)),
                             },
                             // This consumed the rest of the statement
@@ -3382,7 +3406,7 @@ impl<'a> Parser<'a> {
                 let (expr, consumed) = match self.peek()? {
                     Some(token!(Indent)) if allow_trailing => {
                         self.advance();
-                        (self.parse_data(scope, vec![])?, true)
+                        (self.parse_data(scope, vec![], false)?, true)
                     }
                     Some(token!(ArgSep)) => {
                         self.advance();
@@ -3513,7 +3537,7 @@ impl<'a> Parser<'a> {
                 let dollar_span = self.advance();
                 self.expect(scope, &[ExpectKind::Indent])?;
                 return Ok(Expr::Group {
-                    expr: Box::new(self.parse_data(scope, vec![])?),
+                    expr: Box::new(self.parse_data(scope, vec![], true)?),
                     delim: Some(GroupDelim::Dollar(dollar_span)),
                 });
             }
@@ -4479,7 +4503,7 @@ impl<'a> Parser<'a> {
                 let dollar_span = self.advance();
                 self.expect(scope, &[ExpectKind::Indent])?;
                 Ok(Stmt::Prim(PrimStmt::Expr(Expr::Group {
-                    expr: Box::new(self.parse_data(scope, vec![])?),
+                    expr: Box::new(self.parse_data(scope, vec![], true)?),
                     delim: Some(GroupDelim::Dollar(dollar_span)),
                 })))
             }
