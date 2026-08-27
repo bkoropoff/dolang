@@ -53,7 +53,7 @@ impl PlainConfig {
 /// lines.
 pub(crate) struct PlainInfo {
     pub(crate) depth: u16,
-    pub(crate) units: Option<Units>,
+    units: Cell<Option<Units>>,
     pub(crate) ansi: bool,
     id: u64,
     parent_id: Option<u64>,
@@ -92,7 +92,7 @@ impl PlainInfo {
         let id = config.alloc_id();
         Self {
             depth,
-            units,
+            units: Cell::new(units),
             ansi,
             id,
             parent_id: (parent_id != 0).then_some(parent_id),
@@ -108,6 +108,15 @@ impl PlainInfo {
     /// pick it up as their parent.
     pub(crate) fn id(&self) -> u64 {
         self.id
+    }
+
+    /// Change the display units and discard rate samples from the previous
+    /// unit system.
+    pub(crate) fn set_units(&self, units: Option<Units>) {
+        if self.units.replace(units) != units {
+            self.rate_sample.set(None);
+            self.rate_smoothed.set(None);
+        }
     }
 
     pub(crate) fn line_ending(&self) -> &[u8] {
@@ -139,7 +148,7 @@ impl PlainInfo {
     /// accurately) — showing `0 B/s` in either case would be misleading,
     /// not just empty.
     fn sample_rate(&self, pos: u64, now: Instant) -> Option<f64> {
-        if !matches!(self.units, Some(Units::Bytes)) {
+        if !matches!(self.units.get(), Some(Units::Bytes)) {
             return None;
         }
         let Some((last_time, last_pos)) = self.rate_sample.get() else {
@@ -293,7 +302,7 @@ fn format_line(bar: &ix::ProgressBar, info: &PlainInfo, event: LineEvent) -> Str
         line.push(' ');
         let rate = info.sample_rate(bar.position(), Instant::now());
         line.push_str(&cap_status(
-            info.units,
+            info.units.get(),
             bar.position(),
             Some(total),
             rate,
@@ -302,10 +311,10 @@ fn format_line(bar: &ix::ProgressBar, info: &PlainInfo, event: LineEvent) -> Str
             &info.config.style,
         ));
         line.push(' ');
-    } else if info.units.is_some() {
+    } else if info.units.get().is_some() {
         let rate = info.sample_rate(bar.position(), Instant::now());
         line.push_str(&cap_status(
-            info.units,
+            info.units.get(),
             bar.position(),
             None,
             rate,

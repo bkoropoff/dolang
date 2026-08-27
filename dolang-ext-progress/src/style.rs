@@ -408,7 +408,7 @@ impl Style {
 
 // --- Units ---
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Units {
     Count,
     Bytes,
