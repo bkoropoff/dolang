@@ -171,16 +171,19 @@ class Cache
     else
       {}
 
-    progress.show message: (payload.name || identity) units: :BYTES: do |indicator|
+    let message = (payload.name || identity)
+    progress.show :message icon: ⬇️ do |indicator|
       self.#client.get $identity headers: $headers status: :IGNORE: do |response|
         if (response.status == 304 && intact_payload(payload, metadata))
           metadata["checked_at"] = DateTime.now().rfc3339()
           write_metadata (entry / "metadata.json") $metadata
+          let total = metadata["size"]
+          indicator.update message: "$message (cached)" :total position: $total units: :BYTES:
           return payload
 
         response.throw_for_status()
         let total = (response.headers.get "content-length")
-        indicator.update total: (total && int total)
+        indicator.update total: (total && int total) units: :BYTES:
         let tmp = payload.add_ext tmp
         let state = (digest_info && digest_info.constructor())
         try
@@ -265,7 +268,7 @@ def put_path source destination
 def put_url source destination headers
   let total = source.metadata().size
   let message = (destination.name || str destination)
-  progress.show :message :total units: :BYTES: do |indicator|
+  progress.show :message :total icon: ⬆️ units: :BYTES: do |indicator|
     source.open rb do |file|
       let track = do |chunk|
         indicator.delta $chunk.len
