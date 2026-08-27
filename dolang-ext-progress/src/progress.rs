@@ -276,22 +276,31 @@ fn check_closed<'v, 's>(strand: &mut Strand<'v, 's>, closed: &Cell<bool>) -> Res
 fn parse_units<'v, 's>(
     strand: &mut Strand<'v, 's>,
     units_val: Option<&Value<'v>>,
+    global: State<'v, Global<'v>>,
 ) -> Result<'v, 's, Option<Units>> {
     match units_val {
         Some(v) => {
             if let Some(sym) = v.as_sym(strand) {
-                match sym.as_str(strand) {
-                    "COUNT" => Ok(Some(Units::Count)),
-                    "BYTES" => Ok(Some(Units::Bytes)),
-                    _ => Err(Error::value(strand, "units: expected :COUNT: or :BYTES:")),
+                if sym == global.units.count {
+                    Ok(Some(Units::Count))
+                } else if sym == global.units.bytes {
+                    Ok(Some(Units::Bytes))
+                } else if sym == global.units.percent {
+                    Ok(Some(Units::Percent))
+                } else {
+                    Err(Error::value(
+                        strand,
+                        "units: expected :COUNT:, :BYTES:, or :PERCENT:",
+                    ))
                 }
             } else if let Some(s) = v.as_str(strand).map(|m| m.to_string()) {
                 match s.as_str() {
                     "COUNT" => Ok(Some(Units::Count)),
                     "BYTES" => Ok(Some(Units::Bytes)),
+                    "PERCENT" => Ok(Some(Units::Percent)),
                     _ => Err(Error::value(
                         strand,
-                        "units: expected \"COUNT\" or \"BYTES\"",
+                        "units: expected \"COUNT\", \"BYTES\", or \"PERCENT\"",
                     )),
                 }
             } else {
@@ -843,7 +852,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                     .transpose()?,
                 message: parse_message(strand, msg_val.as_deref())?,
                 icon: parse_icon(strand, icon_val.as_deref())?,
-                units: parse_units(strand, units_val.as_deref())?,
+                units: parse_units(strand, units_val.as_deref(), global)?,
                 tick: parse_duration_secs(
                     strand,
                     "tick",
@@ -1147,7 +1156,7 @@ impl<'v> Object<'v> for Indicator {
                     }
                 }
                 if let Some(v) = units {
-                    let units = parse_units(strand, Some(&v))?;
+                    let units = parse_units(strand, Some(&v), this.annex().global)?;
                     let annex = this.annex();
                     if let Some(state_rc) = &annex.state_rc {
                         let mut state = state_rc.borrow_mut();

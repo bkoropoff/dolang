@@ -71,6 +71,7 @@ def indicator_update_units()
     indicator.update position: 4 units: :BYTES:
     assert_eq $indicator.position 4
     indicator.update units: COUNT
+    indicator.update units: :PERCENT:
     assert_throws $ValueError do indicator.update units: :SECONDS:
 
 #[test]

@@ -154,10 +154,11 @@ whose methods are silent no-ops.
 
 ##### Units
 
-| Value     | Description                     |
-| --------- | ------------------------------- |
-| `:COUNT:` | Display as `pos/len` or `pos`   |
-| `:BYTES:` | Display as human-readable bytes |
+| Value       | Description                         |
+| ----------- | ----------------------------------- |
+| `:COUNT:`   | Display as `pos/len` or `pos`       |
+| `:BYTES:`   | Display as human-readable bytes     |
+| `:PERCENT:` | Display `pos / len` as a percentage |
 
 When `total` is provided and `units` is omitted, units default to `:COUNT:`.
 When neither `total` nor `units` is provided, spinner mode shows only elapsed

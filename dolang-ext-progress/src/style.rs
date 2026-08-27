@@ -412,6 +412,7 @@ impl Style {
 pub(crate) enum Units {
     Count,
     Bytes,
+    Percent,
 }
 
 // --- Mode ---
@@ -424,8 +425,8 @@ pub(crate) enum Mode {
 
 // --- Status text rendering ---
 //
-// The "status" template field (position/total, plus throughput for `BYTES`
-// indicators) is rendered by hand rather than through indicatif's own
+// The "status" template field (position/total, percentage, plus throughput
+// for `BYTES` indicators) is rendered by hand rather than through indicatif's own
 // `{pos}`/`{bytes}`/`{bytes_per_sec}` keys, so that both units share one
 // fixed-width, ANSI-aware field — the same text this module hands to
 // indicatif via a custom template key is also what `plain.rs` prints
@@ -548,6 +549,18 @@ pub(crate) fn write_status_text(
     let total_style = style.total();
     let mut s = String::new();
     match (units, total) {
+        (Some(Units::Percent), Some(total)) => {
+            let percent = if total == 0 {
+                0
+            } else {
+                u64::try_from((u128::from(pos) * 100) / u128::from(total))
+                    .expect("percentage fits in u64")
+            };
+            write_styled(&mut s, ansi, position_style, &format!("{percent}%"));
+        }
+        (Some(Units::Percent), None) => {
+            write_styled(&mut s, ansi, position_style, &format!("{pos}%"));
+        }
         (Some(Units::Bytes), Some(total)) => {
             let exp = binary_exponent(total);
             write_styled(&mut s, ansi, position_style, &scaled_bytes_number(pos, exp));
@@ -602,6 +615,26 @@ pub(crate) fn write_status_text(
         s.push(')');
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Style, Units, write_status_text};
+
+    #[test]
+    fn percent_status_uses_total() {
+        assert_eq!(
+            write_status_text(
+                Some(Units::Percent),
+                4,
+                Some(10),
+                None,
+                false,
+                &Style::default()
+            ),
+            "40%"
+        );
+    }
 }
 
 /// [`write_status_text`], capped to `width` if it would exceed it —
