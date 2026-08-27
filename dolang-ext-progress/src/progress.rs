@@ -293,18 +293,8 @@ fn parse_units<'v, 's>(
                         "units: expected :COUNT:, :BYTES:, or :PERCENT:",
                     ))
                 }
-            } else if let Some(s) = v.as_str(strand).map(|m| m.to_string()) {
-                match s.as_str() {
-                    "COUNT" => Ok(Some(Units::Count)),
-                    "BYTES" => Ok(Some(Units::Bytes)),
-                    "PERCENT" => Ok(Some(Units::Percent)),
-                    _ => Err(Error::value(
-                        strand,
-                        "units: expected \"COUNT\", \"BYTES\", or \"PERCENT\"",
-                    )),
-                }
             } else {
-                Err(Error::type_error(strand, "units: expected `Sym` or `Str`"))
+                Err(Error::type_error(strand, "units: expected `Sym`"))
             }
         }
         None => Ok(None),

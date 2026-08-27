@@ -36,14 +36,14 @@ The current position (`Int`). Read-only — see
 Applies one or more changes atomically in a single call — one redraw instead
 of one per field.
 
-| Name       | Type                                            | Description                                      |
-| ---------- | ----------------------------------------------- | ------------------------------------------------ |
-| `icon`     | [`Str`](../std/str.md)?                         | New prefix icon                                  |
-| `message`  | [`Str`](../std/str.md)?                         | New message text                                 |
-| `total`    | [`Int`](../std/int.md)?                         | New total; `nil` switches to spinner mode        |
-| `position` | [`Int`](../std/int.md)?                         | Absolute position                                |
-| `delta`    | [`Int`](../std/int.md)?                         | Relative adjustment (positive or negative)       |
-| `units`    | [`Sym`](../std/sym.md)\|[`Str`](../std/str.md)? | New `COUNT`, `BYTES`, or `PERCENT` display units |
+| Name       | Type                    | Description                                      |
+| ---------- | ----------------------- | ------------------------------------------------ |
+| `icon`     | [`Str`](../std/str.md)? | New prefix icon                                  |
+| `message`  | [`Str`](../std/str.md)? | New message text                                 |
+| `total`    | [`Int`](../std/int.md)? | New total; `nil` switches to spinner mode        |
+| `position` | [`Int`](../std/int.md)? | Absolute position                                |
+| `delta`    | [`Int`](../std/int.md)? | Relative adjustment (positive or negative)       |
+| `units`    | [`Sym`](../std/sym.md)? | New `COUNT`, `BYTES`, or `PERCENT` display units |
 
 `position` and `delta` are exclusive — passing both raises an error. Omitted
 keys are left unchanged.

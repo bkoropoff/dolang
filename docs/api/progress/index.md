@@ -143,14 +143,14 @@ whose methods are silent no-ops.
 
 #### Parameters
 
-| Name      | Type                                            | Description                                         |
-| --------- | ----------------------------------------------- | --------------------------------------------------- |
-| `func`    | func                                            | Callback receiving an [`Indicator`](./indicator.md) |
-| `total`   | [`Int`](../std/int.md)?                         | Total value for bar mode                            |
-| `message` | [`Str`](../std/str.md)?                         | Initial message                                     |
-| `icon`    | [`Str`](../std/str.md)?                         | Prefix icon, e.g. "📦"                              |
-| `units`   | [`Sym`](../std/sym.md)\|[`Str`](../std/str.md)? | Unit format                                         |
-| `tick`    | [`Float`](../std/float.md)?                     | Tick interval in seconds (default 0.08)             |
+| Name      | Type                        | Description                                         |
+| --------- | --------------------------- | --------------------------------------------------- |
+| `func`    | func                        | Callback receiving an [`Indicator`](./indicator.md) |
+| `total`   | [`Int`](../std/int.md)?     | Total value for bar mode                            |
+| `message` | [`Str`](../std/str.md)?     | Initial message                                     |
+| `icon`    | [`Str`](../std/str.md)?     | Prefix icon, e.g. "📦"                              |
+| `units`   | [`Sym`](../std/sym.md)?     | Unit format                                         |
+| `tick`    | [`Float`](../std/float.md)? | Tick interval in seconds (default 0.08)             |
 
 ##### Units
 
