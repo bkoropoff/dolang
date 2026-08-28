@@ -1,0 +1,66 @@
+# Synthesis of the cloud-init configuration a Linux or BSD guest is
+# provisioned by on its first boot, and of the seed ISO that carries it.
+
+import digest shlex yaml
+  fs:
+    - with_temp_dir
+  _vm.common:
+    - cli
+
+# Written by the last `runcmd` entry and polled for over SSH once the guest
+# answers: the signal that cloud-init has finished with the guest.
+pub let READY_PATH = "/var/tmp/dolang-cloud-init-ready"
+
+# Renders the `#cloud-config` user data provisioning the guest.
+pub def cloud_config user public_key packages boot write_files
+  let run = ["set -e"]
+  for entry = boot
+    run.push (shlex.join entry)
+  run.push "touch $(shlex.quote READY_PATH)"
+
+  let user_config = $
+    name: $user
+    groups:
+      - wheel
+    shell: /bin/sh
+    ssh_authorized_keys:
+      - $public_key
+  if packages.contains "sudo"
+    user_config[:sudo:] = "ALL=(ALL) NOPASSWD:ALL"
+
+  let config = $
+    hostname: dolang-ci
+    manage_etc_hosts: true
+    ssh_pwauth: false
+    users:
+      - $user_config
+    runcmd: $run
+    if (packages.len > 0)
+      package_update: false
+      package_upgrade: false
+      :packages
+    if (write_files.len > 0)
+      :write_files
+  "#cloud-config\n$(yaml.encode config)"
+
+# Builds the cloud-init seed ISO, cached under a digest of its contents so
+# identical configurations share one.
+pub def build_seed root user_data
+  let key = digest.blake3(user_data).hex()
+  let entry = (root / "seeds" / key)
+  entry.create_dir all: true
+  let destination = (entry / "seed.iso")
+  let lock_path = destination.add_ext lock
+  lock_path.open a+ do |lock| lock.lock (..) do |_|
+    if !destination.exists()
+      with_temp_dir parent: $destination.parent do |dir|
+        let user_data_path = (dir / "user-data")
+        let metadata_path = (dir / "meta-data")
+        let temporary = (dir / "seed.iso")
+        user_data_path.write $user_data
+        metadata_path.write $ yaml.encode $
+          "instance-id": "dolang-$key"
+          "local-hostname": dolang-ci
+        cli cloud-localds $temporary $user_data_path $metadata_path
+        temporary.rename $destination
+  destination.absolute()

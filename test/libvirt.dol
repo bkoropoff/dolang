@@ -1,4 +1,4 @@
-import digest libvirt proc progress rand sys xml
+import digest libvirt proc progress rand sys
   fs:
     - Path
     - with_temp_dir
@@ -259,8 +259,11 @@ def export_and_restore domain :sentinel :bundle_name :command :expect :memory = 
         restored.with do Path(sentinel).read().trim()
       assert_eq $restored_token $token
 
-      # No seed means nothing was re-provisioned.
-      let document = xml.encode $restored.dumpxml()
+      # No seed means nothing was re-provisioned. Read straight out of libvirt
+      # rather than through the domain: what the definition holds is the
+      # module's business, not part of `Domain`'s API.
+      let document = sub do
+        run virsh --quiet --connect $restored.connect_uri dumpxml $restored.name
       assert (!document.contains("cdrom"))
     finally
       if (restored.state() != :SHUTOFF:)
