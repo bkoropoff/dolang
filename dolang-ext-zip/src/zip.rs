@@ -1,6 +1,9 @@
 use std::{
     cell::{Cell, UnsafeCell},
+    future::poll_fn,
+    io,
     mem::transmute,
+    pin::Pin,
 };
 
 use async_zip::{
@@ -17,13 +20,13 @@ use dolang::runtime::{
     object::{ArrayLike, ArrayView, Mut, Ref, TypeBuilder},
     strand::InterruptMask,
     unpack,
-    value::View,
+    value::{BinEmbryo, View},
     vm::Builder,
 };
 use dolang_vfs::file::File as VfsFile;
-use futures_lite::io::{AsyncReadExt as _, AsyncWriteExt as _};
-use tokio::io::BufReader;
-use tokio_util::compat::Compat;
+use futures_lite::io::AsyncWriteExt as _;
+use tokio::io::{AsyncRead as _, BufReader, ReadBuf};
+use tokio_util::compat::{Compat, FuturesAsyncReadCompatExt as _};
 
 use crate::global::Global;
 
@@ -31,6 +34,21 @@ type ZipReader = ZipFileReader<Compat<BufReader<VfsFile>>>;
 type ZipReadEntry = ZipEntryReader<'static, Compat<BufReader<VfsFile>>, WithEntry<'static>>;
 type ZipWriter = ZipFileWriter<Compat<VfsFile>>;
 type ZipWriteEntry = EntrySeekableWriter<'static, Compat<VfsFile>>;
+
+async fn read_into_embryo(
+    reader: &mut (impl futures_lite::io::AsyncRead + Unpin),
+    embryo: &mut BinEmbryo<'_>,
+    limit: usize,
+) -> io::Result<usize> {
+    let mut reader = reader.compat();
+    let spare = embryo.spare_capacity_mut();
+    let len = limit.min(spare.len());
+    let mut buf = ReadBuf::uninit(&mut spare[..len]);
+    poll_fn(|cx| Pin::new(&mut reader).poll_read(cx, &mut buf)).await?;
+    let read = buf.filled().len();
+    unsafe { embryo.advance(read) };
+    Ok(read)
+}
 
 enum ArchiveInner {
     Read(ZipReader),
@@ -816,6 +834,7 @@ impl<'v> Object<'v> for File {
                     .try_into()
                     .map_err(|_| Error::overflow(strand))?;
 
+                let mut data = BinEmbryo::new_with_capacity(strand, size);
                 let mut borrow = this.borrow_mut(strand)?;
                 let inner = borrow
                     .inner
@@ -825,10 +844,16 @@ impl<'v> Object<'v> for File {
                     return Err(Error::state_error(strand, "cannot read in write mode"));
                 };
 
-                let mut data = vec![0; size];
-                let read = entry.read(&mut data).await.into_do(strand)?;
-                data.truncate(read);
-                if read == 0 && !*validated {
+                while data.len() < size {
+                    let remaining = size - data.len();
+                    let n = read_into_embryo(entry, &mut data, remaining)
+                        .await
+                        .into_do(strand)?;
+                    if n == 0 {
+                        break;
+                    }
+                }
+                if data.len() < size && !*validated {
                     if entry.compute_hash() != entry.entry().crc32() {
                         return Err(Error::runtime(strand, "CRC32 checksum mismatch"));
                     }
@@ -836,7 +861,7 @@ impl<'v> Object<'v> for File {
                 }
 
                 drop(borrow);
-                Output::set(strand, out, data.as_slice());
+                data.finish(strand, out);
                 Ok(())
             })
             .method("write", async move |this, strand, args, _out| {

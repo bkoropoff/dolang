@@ -543,7 +543,24 @@ impl<'v> File<'v> {
         strand: &mut Strand<'v, 's>,
         out: Slot<'v, '_>,
     ) -> Result<'v, 's, ()> {
-        self.fill_buf(strand, n).await?;
+        while self.buf.len() < n {
+            let remaining = n - self.buf.len();
+            if self.buf.spare_capacity_mut().len() < remaining {
+                self.buf.reserve(strand, remaining);
+            }
+            let file = self
+                .file
+                .as_mut()
+                .ok_or_else(|| Error::state_error(strand, "file is closed"))?;
+            let spare = self.buf.spare_capacity_mut();
+            let read = read_into_spare(file, &mut spare[..remaining])
+                .await
+                .into_sys(strand)?;
+            if read == 0 {
+                break;
+            }
+            unsafe { self.buf.advance(read) };
+        }
         let buf = mem::take(&mut self.buf);
         buf.finish(strand, out);
         Ok(())

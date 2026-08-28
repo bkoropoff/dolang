@@ -65,6 +65,19 @@ def read_binary_mode()
 
 #[test]
 #[vfs]
+def read_binary_transfers_the_whole_count()
+  let path = "test_fs_read_binary_large.bin"
+  let data = ("abcdefghij".repeat 200000)
+  write $path $data
+
+  open $path "rb" do |file|
+    let whole = file.read $data.len
+    assert_eq $whole.len $data.len
+    assert_eq (str whole) $data
+  remove $path
+
+#[test]
+#[vfs]
 def read_at_offset()
   let path = "test_fs_read_offset.txt"
   write $path "abcdefghij"
