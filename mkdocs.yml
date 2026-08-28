@@ -367,8 +367,11 @@ nav:
       - api/test/test-info.md
     - time:
       - api/time/index.md
+      - api/time/date.md
       - api/time/datetime.md
       - api/time/duration.md
+      - api/time/month.md
+      - api/time/weekday.md
     - toml: api/toml.md
     - toolbx: api/toolbx.md
     - transfer: api/transfer.md
