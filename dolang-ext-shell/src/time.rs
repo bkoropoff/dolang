@@ -1,4 +1,8 @@
-use std::{io, time::SystemTime};
+use std::{
+    hash::{Hash, Hasher},
+    io,
+    time::SystemTime,
+};
 
 use dolang::runtime::object::fmt;
 
@@ -6,17 +10,78 @@ use dolang::runtime::strand::InterruptMask;
 use dolang::{
     compile::Compiler,
     runtime::{
-        Error, Instance, Object, Output, Result, Slot, State, Strand, call, error::ResultExt,
-        object::TypeBuilder, unpack, vm::Builder,
+        Error, Instance, Object, Output, Result, Slot, State, Strand, Type, call, error::ResultExt,
+        object::TypeBuilder, unpack, value::Root, vm::Builder,
     },
 };
 use futures::future::{AbortHandle, Abortable};
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use time::{
+    Date as TimeDate, Duration as TimeDuration, Month as TimeMonth, OffsetDateTime,
+    Time as TimeOfDay, Weekday as TimeWeekday, format_description::well_known::Rfc3339,
+};
 
 use crate::global::Global;
 
 const NANOS_PER_SEC_I128: i128 = 1_000_000_000;
 const NANOS_PER_SEC_F64: f64 = 1_000_000_000.0;
+const NANOS_PER_DAY_I128: i128 = 86_400 * NANOS_PER_SEC_I128;
+
+pub(crate) struct Calendar<'v> {
+    pub(crate) date: Type<'v, Date>,
+    pub(crate) month: Type<'v, Month>,
+    pub(crate) weekday: Type<'v, Weekday>,
+    pub(crate) months: [Root<'v>; 12],
+    pub(crate) weekdays: [Root<'v>; 7],
+}
+
+impl<'v> Calendar<'v> {
+    pub(crate) fn new(builder: &mut Builder<'v>) -> Self {
+        let date = builder.register_type();
+        let month = builder.register_type();
+        let weekday = builder.register_type();
+        let months = std::array::from_fn(|i| {
+            let mut root = Root::new(builder);
+            month.create_with_annex(
+                builder,
+                Month,
+                TimeMonth::try_from((i + 1) as u8).unwrap(),
+                &mut root,
+            );
+            root
+        });
+        let weekdays = std::array::from_fn(|i| {
+            let mut root = Root::new(builder);
+            weekday.create_with_annex(
+                builder,
+                Weekday,
+                [
+                    TimeWeekday::Monday,
+                    TimeWeekday::Tuesday,
+                    TimeWeekday::Wednesday,
+                    TimeWeekday::Thursday,
+                    TimeWeekday::Friday,
+                    TimeWeekday::Saturday,
+                    TimeWeekday::Sunday,
+                ][i],
+                &mut root,
+            );
+            root
+        });
+        Self {
+            date,
+            month,
+            weekday,
+            months,
+            weekdays,
+        }
+    }
+}
+
+pub(crate) struct Date;
+
+pub(crate) struct Month;
+
+pub(crate) struct Weekday;
 
 pub(crate) struct DateTime;
 
@@ -28,6 +93,51 @@ pub(crate) struct Duration;
 
 pub(crate) struct DurationAnnex {
     total_nanos: i128,
+}
+
+fn month_index(month: TimeMonth) -> usize {
+    usize::from(u8::from(month) - 1)
+}
+
+fn weekday_index(weekday: TimeWeekday) -> usize {
+    match weekday {
+        TimeWeekday::Monday => 0,
+        TimeWeekday::Tuesday => 1,
+        TimeWeekday::Wednesday => 2,
+        TimeWeekday::Thursday => 3,
+        TimeWeekday::Friday => 4,
+        TimeWeekday::Saturday => 5,
+        TimeWeekday::Sunday => 6,
+    }
+}
+
+fn month_name(month: TimeMonth) -> &'static str {
+    match month {
+        TimeMonth::January => "JANUARY",
+        TimeMonth::February => "FEBRUARY",
+        TimeMonth::March => "MARCH",
+        TimeMonth::April => "APRIL",
+        TimeMonth::May => "MAY",
+        TimeMonth::June => "JUNE",
+        TimeMonth::July => "JULY",
+        TimeMonth::August => "AUGUST",
+        TimeMonth::September => "SEPTEMBER",
+        TimeMonth::October => "OCTOBER",
+        TimeMonth::November => "NOVEMBER",
+        TimeMonth::December => "DECEMBER",
+    }
+}
+
+fn weekday_name(weekday: TimeWeekday) -> &'static str {
+    match weekday {
+        TimeWeekday::Monday => "MONDAY",
+        TimeWeekday::Tuesday => "TUESDAY",
+        TimeWeekday::Wednesday => "WEDNESDAY",
+        TimeWeekday::Thursday => "THURSDAY",
+        TimeWeekday::Friday => "FRIDAY",
+        TimeWeekday::Saturday => "SATURDAY",
+        TimeWeekday::Sunday => "SUNDAY",
+    }
 }
 
 impl DateTimeAnnex {
@@ -260,6 +370,463 @@ pub(crate) fn create_datetime<'v, 's>(
     Ok(())
 }
 
+fn create_date<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    date: TimeDate,
+    out: impl Output<'v>,
+) {
+    global.types.date.create_with_annex(strand, Date, date, out);
+}
+
+fn date_from_rfc<'v, 's>(strand: &mut Strand<'v, 's>, text: &str) -> Result<'v, 's, TimeDate> {
+    let bytes = text.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return Err(Error::value(strand, "expected RFC full-date (YYYY-MM-DD)"));
+    }
+    let year = text[..4]
+        .parse::<i32>()
+        .map_err(|_| Error::value(strand, "expected RFC full-date (YYYY-MM-DD)"))?;
+    let month = text[5..7]
+        .parse::<u8>()
+        .ok()
+        .and_then(|month| TimeMonth::try_from(month).ok())
+        .ok_or_else(|| Error::value(strand, "expected RFC full-date (YYYY-MM-DD)"))?;
+    let day = text[8..10]
+        .parse::<u8>()
+        .map_err(|_| Error::value(strand, "expected RFC full-date (YYYY-MM-DD)"))?;
+    TimeDate::from_calendar_date(year, month, day)
+        .map_err(|_| Error::value(strand, "invalid calendar date"))
+}
+
+fn format_date_rfc(date: TimeDate) -> String {
+    format!(
+        "{:04}-{:02}-{:02}",
+        date.year(),
+        u8::from(date.month()),
+        date.day()
+    )
+}
+
+impl<'v> Object<'v> for Date {
+    const NAME: &'v str = "Date";
+    const MODULE: &'v str = "time";
+    type Annex = TimeDate;
+    type Type = ();
+    type TypeAnnex = ();
+
+    fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
+        builder
+            .get("year", |this, strand, out| {
+                Output::set(strand, out, this.annex().year());
+                Ok(())
+            })
+            .get("month", |this, strand, out| {
+                let global = strand.state::<Global<'v>>();
+                Output::set(
+                    strand,
+                    out,
+                    &global.calendar.months[month_index(this.annex().month())],
+                );
+                Ok(())
+            })
+            .get("day", |this, strand, out| {
+                Output::set(strand, out, this.annex().day());
+                Ok(())
+            })
+            .get("weekday", |this, strand, out| {
+                let global = strand.state::<Global<'v>>();
+                Output::set(
+                    strand,
+                    out,
+                    &global.calendar.weekdays[weekday_index(this.annex().weekday())],
+                );
+                Ok(())
+            })
+            .type_method("today", async move |this, strand, args, out| {
+                let ([], []) = unpack!(strand, args, 0, 0)?;
+                this.create_with_annex(strand, Date, OffsetDateTime::now_utc().date(), out);
+                Ok(())
+            })
+            .type_method("from_ymd", async move |this, strand, args, out| {
+                let ([year, month, day], []) = unpack!(strand, args, 3, 0)?;
+                let year = year
+                    .as_int(strand)
+                    .and_then(|year| i32::try_from(year).ok())
+                    .ok_or_else(|| Error::type_error(strand, "from_ymd: expected Int year"))?;
+                let global = strand.state::<Global<'v>>();
+                let month = if let Some(month) = global.types.month.cast(&month) {
+                    month.enter_sync(strand, |_strand, month| *month.annex())
+                } else {
+                    let month = month
+                        .as_int(strand)
+                        .and_then(|month| u8::try_from(month).ok())
+                        .ok_or_else(|| {
+                            Error::type_error(strand, "from_ymd: expected Month or Int month")
+                        })?;
+                    TimeMonth::try_from(month)
+                        .map_err(|_| Error::value(strand, "month must be in 1..12"))?
+                };
+                let day = day
+                    .as_int(strand)
+                    .and_then(|day| u8::try_from(day).ok())
+                    .ok_or_else(|| Error::type_error(strand, "from_ymd: expected Int day"))?;
+                let date = TimeDate::from_calendar_date(year, month, day)
+                    .map_err(|_| Error::value(strand, "invalid calendar date"))?;
+                this.create_with_annex(strand, Date, date, out);
+                Ok(())
+            })
+            .type_method("parse_rfc", async move |this, strand, args, out| {
+                let ([text], []) = unpack!(strand, args, 1, 0)?;
+                let text = text
+                    .as_str(strand)
+                    .ok_or_else(|| Error::type_error(strand, "parse_rfc: expected string"))?
+                    .to_string();
+                let date = date_from_rfc(strand, &text)?;
+                this.create_with_annex(strand, Date, date, out);
+                Ok(())
+            })
+            .method("rfc", async move |this, strand, args, out| {
+                let ([], []) = unpack!(strand, args, 0, 0)?;
+                let text = format_date_rfc(*this.annex());
+                Output::set(strand, out, text.as_str());
+                Ok(())
+            })
+            .method("datetime", async move |this, strand, args, out| {
+                let ([], []) = unpack!(strand, args, 0, 0)?;
+                let global = strand.state::<Global<'v>>();
+                create_datetime(
+                    strand,
+                    global,
+                    this.annex()
+                        .with_time(TimeOfDay::MIDNIGHT)
+                        .assume_utc()
+                        .unix_timestamp_nanos(),
+                    out,
+                )
+            })
+            .method("add_days", async move |this, strand, args, out| {
+                let ([days], []) = unpack!(strand, args, 1, 0)?;
+                let days = days
+                    .as_int(strand)
+                    .and_then(|days| i64::try_from(days).ok())
+                    .ok_or_else(|| Error::type_error(strand, "add_days: expected Int days"))?;
+                let date = this
+                    .annex()
+                    .checked_add(TimeDuration::days(days))
+                    .ok_or_else(|| Error::overflow(strand))?;
+                let global = strand.state::<Global<'v>>();
+                create_date(strand, global, date, out);
+                Ok(())
+            })
+            .method("sub_days", async move |this, strand, args, out| {
+                let ([days], []) = unpack!(strand, args, 1, 0)?;
+                let days = days
+                    .as_int(strand)
+                    .and_then(|days| i64::try_from(days).ok())
+                    .ok_or_else(|| Error::type_error(strand, "sub_days: expected Int days"))?;
+                let date = this
+                    .annex()
+                    .checked_sub(TimeDuration::days(days))
+                    .ok_or_else(|| Error::overflow(strand))?;
+                let global = strand.state::<Global<'v>>();
+                create_date(strand, global, date, out);
+                Ok(())
+            })
+    }
+
+    fn display<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        w: &mut dyn dolang::runtime::Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        fmt!(strand, w, "{}", format_date_rfc(*this.annex()))
+    }
+    fn debug<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        w: &mut dyn dolang::runtime::Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        fmt!(strand, w, "<Date {}>", format_date_rfc(*this.annex()))
+    }
+    fn hash<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        _strand: &'a mut Strand<'v, 's>,
+        hasher: &mut impl Hasher,
+    ) -> Result<'v, 's, ()> {
+        this.annex().hash(hasher);
+        Ok(())
+    }
+    fn eq<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        other: &dolang::runtime::Value<'v>,
+    ) -> Result<'v, 's, bool> {
+        let global = strand.state::<Global<'v>>();
+        if let Some(other) = global.types.date.cast(other) {
+            Ok(other.enter_sync(strand, |_strand, other| *this.annex() == *other.annex()))
+        } else {
+            Err(Error::not_supported(strand))
+        }
+    }
+    fn lt<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        other: &dolang::runtime::Value<'v>,
+    ) -> Result<'v, 's, bool> {
+        let global = strand.state::<Global<'v>>();
+        if let Some(other) = global.types.date.cast(other) {
+            Ok(other.enter_sync(strand, |_strand, other| *this.annex() < *other.annex()))
+        } else {
+            Err(Error::not_supported(strand))
+        }
+    }
+    fn sub<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        other: &dolang::runtime::Value<'v>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        let global = strand.state::<Global<'v>>();
+        if let Some(other) = global.types.date.cast(other) {
+            other.enter_sync(strand, |strand, other| {
+                global.types.duration.create_with_annex(
+                    strand,
+                    Duration,
+                    DurationAnnex::from_total_nanos(
+                        i128::from(((*this.annex()) - (*other.annex())).whole_days())
+                            * NANOS_PER_DAY_I128,
+                    ),
+                    out,
+                );
+                Ok(())
+            })
+        } else {
+            Err(Error::not_supported(strand))
+        }
+    }
+}
+
+macro_rules! calendar_enum {
+    ($name:ident, $time:ty, $field:ident, $roots:ident, $index:ident, $name_fn:ident) => {
+        impl<'v> Object<'v> for $name {
+            const NAME: &'v str = stringify!($name);
+            const MODULE: &'v str = "time";
+            type Annex = $time;
+            type Type = ();
+            type TypeAnnex = ();
+            fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
+                builder
+                    .method("next", async move |this, strand, args, out| {
+                        let ([], []) = unpack!(strand, args, 0, 0)?;
+                        let global = strand.state::<Global<'v>>();
+                        Output::set(
+                            strand,
+                            out,
+                            &global.calendar.$roots
+                                [($index(*this.annex()) + 1) % global.calendar.$roots.len()],
+                        );
+                        Ok(())
+                    })
+                    .method("previous", async move |this, strand, args, out| {
+                        let ([], []) = unpack!(strand, args, 0, 0)?;
+                        let global = strand.state::<Global<'v>>();
+                        let len = global.calendar.$roots.len();
+                        Output::set(
+                            strand,
+                            out,
+                            &global.calendar.$roots[($index(*this.annex()) + len - 1) % len],
+                        );
+                        Ok(())
+                    })
+            }
+            fn type_get<'a, 's>(
+                _this: Type<'v, Self>,
+                strand: &'a mut Strand<'v, 's>,
+                field: dolang::runtime::Sym<'v, 'a>,
+                out: Slot<'v, 'a>,
+            ) -> Result<'v, 's, ()> {
+                let field_name = field.as_str(strand).to_owned();
+                let global = strand.state::<Global<'v>>();
+                let index = global.calendar.$roots.iter().position(|value| {
+                    let value = global.types.$field.cast(value).unwrap();
+                    value.enter_sync(strand, |_strand, value| {
+                        $name_fn(*value.annex()) == field_name
+                    })
+                });
+                if let Some(index) = index {
+                    Output::set(strand, out, &global.calendar.$roots[index]);
+                    Ok(())
+                } else {
+                    Err(Error::field(strand, field))
+                }
+            }
+            fn display<'a, 's>(
+                this: Instance<'v, 'a, Self>,
+                strand: &'a mut Strand<'v, 's>,
+                w: &mut dyn dolang::runtime::Format<'v>,
+            ) -> Result<'v, 's, ()> {
+                fmt!(strand, w, "{}", $name_fn(*this.annex()))
+            }
+            fn debug<'a, 's>(
+                this: Instance<'v, 'a, Self>,
+                strand: &'a mut Strand<'v, 's>,
+                w: &mut dyn dolang::runtime::Format<'v>,
+            ) -> Result<'v, 's, ()> {
+                fmt!(
+                    strand,
+                    w,
+                    "<{} {}>",
+                    stringify!($name),
+                    $name_fn(*this.annex())
+                )
+            }
+            fn hash<'a, 's>(
+                this: Instance<'v, 'a, Self>,
+                _strand: &'a mut Strand<'v, 's>,
+                hasher: &mut impl Hasher,
+            ) -> Result<'v, 's, ()> {
+                this.annex().hash(hasher);
+                Ok(())
+            }
+            fn eq<'a, 's>(
+                this: Instance<'v, 'a, Self>,
+                strand: &'a mut Strand<'v, 's>,
+                other: &dolang::runtime::Value<'v>,
+            ) -> Result<'v, 's, bool> {
+                let global = strand.state::<Global<'v>>();
+                if let Some(other) = global.types.$field.cast(other) {
+                    Ok(other.enter_sync(strand, |_strand, other| *this.annex() == *other.annex()))
+                } else {
+                    Err(Error::not_supported(strand))
+                }
+            }
+        }
+    };
+}
+
+calendar_enum!(
+    Weekday,
+    TimeWeekday,
+    weekday,
+    weekdays,
+    weekday_index,
+    weekday_name
+);
+
+impl<'v> Object<'v> for Month {
+    const NAME: &'v str = "Month";
+    const MODULE: &'v str = "time";
+    type Annex = TimeMonth;
+    type Type = ();
+    type TypeAnnex = ();
+    fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
+        builder
+            .method("next", async move |this, strand, args, out| {
+                let ([], []) = unpack!(strand, args, 0, 0)?;
+                let global = strand.state::<Global<'v>>();
+                Output::set(
+                    strand,
+                    out,
+                    &global.calendar.months[(month_index(*this.annex()) + 1) % 12],
+                );
+                Ok(())
+            })
+            .method("previous", async move |this, strand, args, out| {
+                let ([], []) = unpack!(strand, args, 0, 0)?;
+                let global = strand.state::<Global<'v>>();
+                Output::set(
+                    strand,
+                    out,
+                    &global.calendar.months[(month_index(*this.annex()) + 11) % 12],
+                );
+                Ok(())
+            })
+    }
+    fn type_get<'a, 's>(
+        _this: Type<'v, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        field: dolang::runtime::Sym<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        let field_name = field.as_str(strand).to_owned();
+        let global = strand.state::<Global<'v>>();
+        let index = global.calendar.months.iter().position(|value| {
+            let value = global.types.month.cast(value).unwrap();
+            value.enter_sync(strand, |_strand, value| {
+                month_name(*value.annex()) == field_name
+            })
+        });
+        if let Some(index) = index {
+            Output::set(strand, out, &global.calendar.months[index]);
+            Ok(())
+        } else {
+            Err(Error::field(strand, field))
+        }
+    }
+    fn type_index<'a, 's>(
+        _this: Type<'v, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        index: &dolang::runtime::Value<'v>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        let index = index
+            .as_int(strand)
+            .and_then(|index| usize::try_from(index).ok())
+            .filter(|index| (1..=12).contains(index))
+            .ok_or_else(|| Error::value(strand, "month index must be in 1..12"))?;
+        let global = strand.state::<Global<'v>>();
+        Output::set(strand, out, &global.calendar.months[index - 1]);
+        Ok(())
+    }
+    fn display<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        w: &mut dyn dolang::runtime::Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        fmt!(strand, w, "{}", month_name(*this.annex()))
+    }
+    fn debug<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        w: &mut dyn dolang::runtime::Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        fmt!(strand, w, "<Month {}>", month_name(*this.annex()))
+    }
+    fn hash<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        _strand: &'a mut Strand<'v, 's>,
+        hasher: &mut impl Hasher,
+    ) -> Result<'v, 's, ()> {
+        this.annex().hash(hasher);
+        Ok(())
+    }
+    fn eq<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        other: &dolang::runtime::Value<'v>,
+    ) -> Result<'v, 's, bool> {
+        let global = strand.state::<Global<'v>>();
+        if let Some(other) = global.types.month.cast(other) {
+            Ok(other.enter_sync(strand, |_strand, other| *this.annex() == *other.annex()))
+        } else {
+            Err(Error::not_supported(strand))
+        }
+    }
+    fn lt<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        other: &dolang::runtime::Value<'v>,
+    ) -> Result<'v, 's, bool> {
+        let global = strand.state::<Global<'v>>();
+        if let Some(other) = global.types.month.cast(other) {
+            Ok(other.enter_sync(strand, |_strand, other| *this.annex() < *other.annex()))
+        } else {
+            Err(Error::not_supported(strand))
+        }
+    }
+}
+
 impl<'v> Object<'v> for DateTime {
     const NAME: &'v str = "DateTime";
     const MODULE: &'v str = "time";
@@ -280,6 +847,15 @@ impl<'v> Object<'v> for DateTime {
             })
             .get("unix_nanos", |this, strand, out| {
                 Output::set(strand, out, this.annex().total_nanos());
+                Ok(())
+            })
+            .method("date", async move |this, strand, args, out| {
+                let ([], []) = unpack!(strand, args, 0, 0)?;
+                let datetime =
+                    OffsetDateTime::from_unix_timestamp_nanos(this.annex().total_nanos())
+                        .map_err(|_| Error::runtime(strand, "invalid DateTime"))?;
+                let global = strand.state::<Global<'v>>();
+                create_date(strand, global, datetime.date(), out);
                 Ok(())
             })
             .type_method("now", async move |this, strand, args, out| {
@@ -317,11 +893,11 @@ impl<'v> Object<'v> for DateTime {
                 );
                 Ok(())
             })
-            .type_method("parse_rfc3339", async move |this, strand, args, out| {
+            .type_method("parse_rfc", async move |this, strand, args, out| {
                 let ([text], []) = unpack!(strand, args, 1, 0)?;
                 let text = text
                     .as_str(strand)
-                    .ok_or_else(|| Error::type_error(strand, "parse_rfc3339: expected string"))?
+                    .ok_or_else(|| Error::type_error(strand, "parse_rfc: expected string"))?
                     .to_string();
                 let datetime = OffsetDateTime::parse(&text, &Rfc3339)
                     .map_err(|err| Error::runtime(strand, err))?;
@@ -329,7 +905,7 @@ impl<'v> Object<'v> for DateTime {
                 this.create_with_annex(strand, DateTime, annex, out);
                 Ok(())
             })
-            .method("rfc3339", async move |this, strand, args, out| {
+            .method("rfc", async move |this, strand, args, out| {
                 let ([], []) = unpack!(strand, args, 0, 0)?;
                 let formatted = format_datetime_rfc3339(strand, &this.annex())?;
                 Output::set(strand, out, formatted.as_str());
@@ -522,5 +1098,8 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         })
         .value("DateTime", global.types.date_time)
         .value("Duration", global.types.duration)
+        .value("Date", global.types.date)
+        .value("Month", global.types.month)
+        .value("Weekday", global.types.weekday)
         .commit();
 }

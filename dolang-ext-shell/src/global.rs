@@ -58,7 +58,7 @@ use crate::{
     shell_args::ArgsData,
     sys::{CpuInfo, OsInfo},
     term::{StyleObject, Text},
-    time::{DateTime, Duration},
+    time::{Calendar, Date, DateTime, Duration, Month, Weekday},
 };
 
 pub(crate) struct Types<'v> {
@@ -89,6 +89,9 @@ pub(crate) struct Types<'v> {
     pub(crate) host_geometry: Type<'v, HostGeometry>,
     pub(crate) date_time: Type<'v, DateTime>,
     pub(crate) duration: Type<'v, Duration>,
+    pub(crate) date: Type<'v, Date>,
+    pub(crate) month: Type<'v, Month>,
+    pub(crate) weekday: Type<'v, Weekday>,
     pub(crate) os_info: Type<'v, OsInfo>,
     pub(crate) cpu_info: Type<'v, CpuInfo>,
     pub(crate) unix_identity: Type<'v, Identity>,
@@ -238,6 +241,7 @@ pub(crate) struct Global<'v> {
     pub(crate) terminal: Terminal,
     pub(crate) stdio: Stdio,
     pub(crate) types: Types<'v>,
+    pub(crate) calendar: Calendar<'v>,
     pub(crate) syms: Syms<'v>,
     pub(crate) local: LocalKey<'v, Local>,
     /// The console installed by an enclosing `term.capture`, or `nil` for none.
@@ -424,6 +428,7 @@ impl<'v> Global<'v> {
                 std::env::var_os("NO_COLOR").as_deref(),
             ),
         };
+        let calendar = Calendar::new(builder);
         Self {
             stdio: Stdio {
                 stdin: Mutex::new(tio::BufReader::new(tio::stdin())),
@@ -466,6 +471,9 @@ impl<'v> Global<'v> {
                 host_geometry,
                 date_time: builder.register_type::<DateTime>(),
                 duration: builder.register_type::<Duration>(),
+                date: calendar.date,
+                month: calendar.month,
+                weekday: calendar.weekday,
                 os_info: builder.register_type(),
                 cpu_info: builder.register_type(),
                 unix_identity: builder.register_type(),
@@ -674,6 +682,7 @@ impl<'v> Global<'v> {
                 mode: Mode::register_type(builder),
                 permission: Permission::register_type(builder),
             },
+            calendar,
             syms: Syms {
                 any: builder.sym("ANY"),
                 code: builder.sym("code"),

@@ -772,6 +772,23 @@ pub trait Object<'v>: Sized + 'v {
         Err(Error::field(strand, field))
     }
 
+    /// Implements Do indexing (`Type[index]`) operations on the type object.
+    ///
+    /// # Default
+    /// Returns a type error.
+    #[allow(unused_variables)]
+    fn type_index<'a, 's>(
+        this: Type<'v, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        index: &Value<'v>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        Err(Error::type_error(
+            strand,
+            format!("indexing not supported: {}", Self::NAME),
+        ))
+    }
+
     /// Implements Do method call (`func.meth arg...`) operations
     /// # Default
     /// Returns a field error
@@ -3503,6 +3520,21 @@ impl<'v, T: Object<'v>> Protocol<'v> for TypeObjectWrap<'v, T> {
                 |strand| T::type_set(this.ty(strand.vm()), strand, field, value),
             )
         }
+    }
+
+    fn op_index<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        index: &Value<'v>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        Strand::for_native_frame(
+            strand,
+            Cow::Borrowed(T::MODULE),
+            Cow::Borrowed(T::NAME),
+            Some(Cow::Borrowed("(index)")),
+            |strand| T::type_index(this.ty(strand.vm()), strand, index, out),
+        )
     }
 
     fn op_hash<'a, 's>(

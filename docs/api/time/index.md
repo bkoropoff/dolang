@@ -1,7 +1,7 @@
 # time
 
-The `time` module provides UTC date/time instants, signed durations, sleeping,
-and scoped timeouts.
+The `time` module provides UTC date/time instants, calendar dates, signed
+durations, sleeping, and scoped timeouts.
 
 ## Functions
 
@@ -58,4 +58,7 @@ timeout 1 do
 ## Types
 
 - [DateTime](./datetime.md)
+- [Date](./date.md)
+- [Month](./month.md)
+- [Weekday](./weekday.md)
 - [Duration](./duration.md)
