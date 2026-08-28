@@ -520,7 +520,9 @@ async fn install_indicator<'v, 's>(
             _ => 0,
         },
         plain: plain_info,
+        tick: options.tick,
         closed: Cell::new(false),
+        progressed: Cell::new(false),
     };
     global
         .types
@@ -952,7 +954,67 @@ pub(crate) struct IndicatorAnnex<'v> {
     state_rc: Option<Rc<RefCell<ProgressState>>>,
     widget_id: u64,
     plain: Option<Rc<plain::PlainInfo>>,
+    /// Steady-tick interval this indicator's bar was installed with, so
+    /// [`set_position`](IndicatorAnnex::set_position) can put the ticker
+    /// back after re-baselining. Zero means none was installed, which
+    /// `enable_steady_tick` treats as a no-op.
+    tick: Duration,
     closed: Cell<bool>,
+    /// Whether this indicator has been given any progress yet — see
+    /// [`set_position`](IndicatorAnnex::set_position).
+    progressed: Cell<bool>,
+}
+
+impl IndicatorAnnex<'_> {
+    /// Moves the indicator to an absolute position.
+    ///
+    /// The first position an indicator is given is where it *starts*, not
+    /// ground it just covered: a resumed download that opens at 5 MB did
+    /// not transfer those 5 MB in the millisecond since its bar appeared.
+    /// indicatif cannot tell the two apart — every forward jump goes into
+    /// its throughput estimator as `delta_steps / delta_t`, and against a
+    /// `delta_t` of microseconds that reads as an enormous rate, which then
+    /// decays away over the following seconds instead of being simply
+    /// absent. Re-baselining the estimator here drops the jump while
+    /// leaving the position, elapsed time, and total alone.
+    ///
+    /// Taking the steady ticker down around the reset is what makes it
+    /// stick. `set_position` only stores the position — the estimator is
+    /// fed from a tick, and `ProgressBar::tick` is ignored outright while a
+    /// steady ticker is installed. So the jump would be recorded by the
+    /// ticker thread on its own schedule, *after* the reset here and
+    /// against a stale baseline, which is the artifact all over again.
+    /// With the ticker off, the explicit tick records it now, the reset
+    /// discards that sample, and the estimator's reference point is left at
+    /// `pos` for the ticker to resume from.
+    ///
+    /// Later position changes are recorded normally: by then the indicator
+    /// has a history, and a caller driving one with absolute positions
+    /// rather than `delta` is reporting real progress.
+    fn set_position(&self, pos: u64) {
+        self.bar.set_position(pos);
+        if !self.progressed.replace(true) {
+            self.bar.disable_steady_tick();
+            self.bar.tick();
+            self.bar.reset_eta();
+            self.bar.enable_steady_tick(self.tick);
+            if let Some(info) = &self.plain {
+                info.reset_rate();
+            }
+        }
+    }
+
+    /// Advances the indicator by `n` steps, which may be negative. Unlike
+    /// [`set_position`](Self::set_position), this is always real observed
+    /// progress.
+    fn advance(&self, n: i64) {
+        if n >= 0 {
+            self.bar.inc(n as u64); // safe: n >= 0
+        } else {
+            self.bar.dec(n.unsigned_abs());
+        }
+        self.progressed.set(true);
+    }
 }
 
 /// Plain-mode emit checkpoint shared by `update` and `delta`: writes a
@@ -1039,12 +1101,8 @@ impl<'v> Object<'v> for Indicator {
                         .map_err(|_| Error::type_error(strand, "expected `Int`"))?,
                     None => 1,
                 };
-                if n >= 0 {
-                    this.annex().bar.inc(n as u64); // safe: n >= 0
-                } else {
-                    this.annex().bar.dec(n.unsigned_abs());
-                }
                 let annex = this.annex();
+                annex.advance(n);
                 maybe_emit_plain(strand, annex.global, &annex.bar, &annex.plain, false).await
             })
             .method("update", async move |this, strand, args, _out| {
@@ -1133,17 +1191,14 @@ impl<'v> Object<'v> for Indicator {
                     }
                 }
                 if let Some(v) = position {
-                    this.annex().bar.set_position(v.to_u64(strand)?);
+                    let pos = v.to_u64(strand)?;
+                    this.annex().set_position(pos);
                 }
                 if let Some(v) = delta {
                     let n = v
                         .to_i64(strand)
                         .map_err(|_| Error::type_error(strand, "delta: expected `Int`"))?;
-                    if n >= 0 {
-                        this.annex().bar.inc(n as u64); // safe: n >= 0
-                    } else {
-                        this.annex().bar.dec(n.unsigned_abs());
-                    }
+                    this.annex().advance(n);
                 }
                 if let Some(v) = units {
                     let units = parse_units(strand, Some(&v), this.annex().global)?;
