@@ -126,7 +126,7 @@ def conditional_headers metadata
   if etag
     headers["if-none-match"] = etag
   if modified
-    headers["if-modified-since"] = DateTime.parse_rfc3339 $modified
+    headers["if-modified-since"] = DateTime.parse_rfc $modified
   headers
 
 def response_metadata identity response payload digest_info old
@@ -134,7 +134,7 @@ def response_metadata identity response payload digest_info old
   let verified = (old && old.get "verified" || {})
   if digest_info
     verified[digest_info.algorithm] = digest_info.expected
-  let now = DateTime.now().rfc3339()
+  let now = DateTime.now().rfc()
   let modified = (headers.get "last-modified")
   return $
     version: 1
@@ -142,7 +142,7 @@ def response_metadata identity response payload digest_info old
     final_url: (str response.url)
     payload: $payload.name
     etag: (headers.get "etag")
-    last_modified: (modified && modified.rfc3339())
+    last_modified: (modified && modified.rfc())
     size: $payload.metadata().size
     fetched_at: $now
     checked_at: $now
@@ -175,7 +175,7 @@ class Cache
     progress.show :message icon: ⬇️ do |indicator|
       self.#client.get $identity headers: $headers status: :IGNORE: do |response|
         if (response.status == 304 && intact_payload(payload, metadata))
-          metadata["checked_at"] = DateTime.now().rfc3339()
+          metadata["checked_at"] = DateTime.now().rfc()
           write_metadata (entry / "metadata.json") $metadata
           let total = metadata["size"]
           indicator.update message: "$message (cached)" :total position: $total units: :BYTES:

@@ -32,15 +32,15 @@ echo $ DateTime.from_unix nanos: 1700000000123000000
 echo $ DateTime.from_unix 1700000000 nanos: 123000000
 ```
 
-### `parse_rfc3339 text`
+### `parse_rfc text`
 
-Parses an RFC3339 timestamp.
+Parses an unannotated RFC 9557 date-time with an offset.
 
 #### Parameters
 
-| Name   | Type                   | Description         |
-| ------ | ---------------------- | ------------------- |
-| `text` | [`Str`](../std/str.md) | RFC3339 input text  |
+| Name   | Type                   | Description          |
+| ------ | ---------------------- | -------------------- |
+| `text` | [`Str`](../std/str.md) | Date-time input text |
 
 #### Returns
 
@@ -48,15 +48,15 @@ Parses an RFC3339 timestamp.
 
 #### Errors
 
-| Exception    | Condition                                  |
-| ------------ | ------------------------------------------ |
-| `ValueError` | The input is not a valid RFC3339 timestamp |
+| Exception    | Condition                                      |
+| ------------ | ---------------------------------------------- |
+| `ValueError` | The input is not a valid unannotated date-time |
 
 #### Example
 
 ```
-let dt = DateTime.parse_rfc3339("2024-01-02T03:04:05Z")
-echo $dt.rfc3339()
+let dt = DateTime.parse_rfc("2024-01-02T03:04:05Z")
+echo $dt.rfc()
 ```
 
 ## Fields
@@ -72,9 +72,9 @@ echo $dt.rfc3339()
 
 ## Methods
 
-### `rfc3339()`
+### `rfc()`
 
-Returns the RFC3339 representation.
+Returns the canonical UTC RFC representation.
 
 #### Returns
 
@@ -84,9 +84,17 @@ Returns the RFC3339 representation.
 
 ```
 let dt = DateTime.from_unix(1700000000)
-echo $dt.rfc3339()
+echo $dt.rfc()
 ```
+
+### `date()`
+
+Returns the UTC calendar date.
+
+#### Returns
+
+[`Date`](./date.md)
 
 ## String Form
 
-`str(datetime)` renders the same UTC RFC3339 timestamp as `datetime.rfc3339()`.
+`str(datetime)` renders the same UTC RFC timestamp as `datetime.rfc()`.

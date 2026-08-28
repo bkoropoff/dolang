@@ -10,8 +10,11 @@ import strand
     - RuntimeError
     - TimedOutError
   time:
+    - Date
     - DateTime
     - Duration
+    - Month
+    - Weekday
     - sleep
     - timeout
 
@@ -23,7 +26,7 @@ def datetime_conversions()
   assert_type $Int $now.unix_nanos
 
   assert $str(now).contains(":")
-  assert_eq (str now) (now.rfc3339())
+  assert_eq (str now) (now.rfc())
 
   let zero = (now - now)
   assert_type $Duration $zero
@@ -31,29 +34,67 @@ def datetime_conversions()
   assert_eq $zero.nanos 0
   assert_eq (str zero) "0s"
 
-  let parsed = DateTime.parse_rfc3339("2024-01-02T03:04:05.123456789Z")
+  let parsed = DateTime.parse_rfc("2024-01-02T03:04:05.123456789Z")
   assert_type $DateTime $parsed
-  assert_eq (parsed.rfc3339()) "2024-01-02T03:04:05.123456789Z"
+  assert_eq (parsed.rfc()) "2024-01-02T03:04:05.123456789Z"
   assert_eq $parsed.unix_nanos 1704164645123456789
-  assert_eq (str parsed) (parsed.rfc3339())
+  assert_eq (str parsed) (parsed.rfc())
 
-  let offset = DateTime.parse_rfc3339("2024-01-02T03:04:05+02:30")
-  assert_eq (offset.rfc3339()) "2024-01-02T00:34:05Z"
+  let offset = DateTime.parse_rfc("2024-01-02T03:04:05+02:30")
+  assert_eq (offset.rfc()) "2024-01-02T00:34:05Z"
 
   let from_secs = DateTime.from_unix(1.25)
-  assert_eq (from_secs.rfc3339()) "1970-01-01T00:00:01.25Z"
+  assert_eq (from_secs.rfc()) "1970-01-01T00:00:01.25Z"
   assert_eq $from_secs.unix_nanos 1250000000
 
   let from_nanos = DateTime.from_unix(nanos: -1)
-  assert_eq (from_nanos.rfc3339()) "1969-12-31T23:59:59.999999999Z"
+  assert_eq (from_nanos.rfc()) "1969-12-31T23:59:59.999999999Z"
   assert_eq $from_nanos.unix_nanos -1
 
   let combined = DateTime.from_unix(1, nanos: 250000000)
-  assert_eq (combined.rfc3339()) "1970-01-01T00:00:01.25Z"
+  assert_eq (combined.rfc()) "1970-01-01T00:00:01.25Z"
   assert_eq $combined.unix_nanos 1250000000
 
   assert_throws $RuntimeError do
-    DateTime.parse_rfc3339("not-a-timestamp")
+    DateTime.parse_rfc("not-a-timestamp")
+  assert_throws $RuntimeError do
+    DateTime.parse_rfc("2024-01-02T03:04:05Z[UTC]")
+
+#[test]
+def dates_and_calendar_enums()
+  let date = Date.from_ymd 2024 $Month.FEBRUARY 28
+  assert_type $Date $date
+  assert_eq $date.year 2024
+  assert_eq $date.month $Month.FEBRUARY
+  assert_eq $date.day 28
+  assert_eq $date.weekday $Weekday.WEDNESDAY
+  assert_eq (str date) "2024-02-28"
+  assert_eq (date.rfc()) "2024-02-28"
+  assert_eq (Date.parse_rfc "2024-02-28") $date
+  assert_eq $(date.add_days 1).rfc() "2024-02-29"
+  assert_eq $(date.add_days -1).rfc() "2024-02-27"
+  assert_eq $(date.sub_days 1).rfc() "2024-02-27"
+  let difference = (Date.from_ymd 2024 3 1 - date)
+  assert_eq $difference.nanos 172800000000000
+  assert_eq (date.datetime().date()) $date
+
+  assert_eq $Month[1] $Month.JANUARY
+  assert_eq $Month[12] $Month.DECEMBER
+  assert_eq (Month.DECEMBER.next()) $Month.JANUARY
+  assert_eq (Month.JANUARY.previous()) $Month.DECEMBER
+  assert_eq (Weekday.SUNDAY.next()) $Weekday.MONDAY
+  assert_eq (Weekday.MONDAY.previous()) $Weekday.SUNDAY
+  assert_eq (str Month.JANUARY) "JANUARY"
+  assert_eq (str Weekday.MONDAY) "MONDAY"
+
+  assert_throws $RuntimeError do
+    Date.from_ymd 2023 2 29
+  assert_throws $RuntimeError do
+    Date.parse_rfc("2024-02-30")
+  assert_throws $RuntimeError do
+    Date.parse_rfc("2024-02-28[UTC]")
+  assert_throws $RuntimeError do
+    Month[0]
 
 #[test]
 def sleep_accepts_zero_and_rejects_negative()
