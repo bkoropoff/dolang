@@ -1,0 +1,7 @@
+# Helpers shared by more than one of the `_vm` modules.
+
+# Runs a host program in a locale-independent environment, so that output this
+# module parses back is not translated.
+pub def cli program ...args
+  env LC_ALL: C LANG: C do
+    run $program ...args
