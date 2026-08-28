@@ -150,11 +150,15 @@ class Spec
     self.cargo build --bin dolang-vfs --bin dolang-private-polyfill
     self.cargo ...rest
 
-def default_shell_tests full
+def default_shell_tests slow release
   $
     test
-    if !full
+    if !slow
       --tags !slow
+    if !release
+      --tags !release
+    else
+      --timeout 3600
 
 def mkdocs_build_tools spec
   spec.cargo build
@@ -179,11 +183,11 @@ def cargo_test spec rest
 
 def shell_test spec args
   spec.cargo_vfs run --bin dolang -- --module-path testlib -m test
-    ...(args.args || default_shell_tests args.full)
+    ...(args.args || default_shell_tests args.slow args.release)
 
 def both_test spec args
   cargo_test $spec []
-  shell_test $spec $ record args: nil full: $args.full
+  shell_test $spec $ record args: nil slow: $args.slow release: $args.release
 
 def can_write_dir path
   try
@@ -309,17 +313,21 @@ return $
   "shell-test":
     help: run shell integration tests
     - arg: args
-      help: arguments to `dolang -m test` (default: $(default_shell_tests false))
+      help: arguments to `dolang -m test` (default: $(default_shell_tests false false))
       collect: true
-    - flag: full
-      help: run all tests by default (superseded by `args`)
+    - flag: slow
+      help: run slow tests (superseded by `args`)
+    - flag: release
+      help: run release tests (superseded by `args`)
     do |args|
       shell_test (Spec args) $args
 
   "test":
     help: run all tests
-    - flag: full
-      help: run all tests by default
+    - flag: slow
+      help: run slow tests
+    - flag: release
+      help: run release tests
     do |args|
       both_test (Spec args) $args
 
@@ -355,7 +363,7 @@ return $
         do
           spec.cargo llvm-cov test --no-report
           spec.cargo llvm-cov run --no-report --bin dolang --
-            --module-path testlib -m test ...default_shell_tests()
+            --module-path testlib -m test ...default_shell_tests true true
 
   "cov-dump":
     help: write coverage summaries to disk
