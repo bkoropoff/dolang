@@ -1,4 +1,4 @@
-import http http.mock tar transfer zip
+import digest http http.mock json tar transfer zip
   testlib.vfs:
     - vfs
   fs:
@@ -42,8 +42,11 @@ def http_get_downloads_and_caches()
           status: 200
           body: hello
       do |_handle|
-        let result = transfer.get (server.url / "/file.bin") cache: (Path "cache")
+        # The directory name deliberately isn't `cache`, so that a `cache:`
+        # that silently falls back to a default root fails here.
+        let result = transfer.get (server.url / "/file.bin") cache: (Path "artifacts")
         assert_eq $result.read() hello
+        assert_eq $result.parent.parent (Path "artifacts")
 
 #[test]
 #[vfs]
@@ -94,6 +97,277 @@ def http_get_verifies_digest()
         let bad = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
         assert_throws $ValueError do
           transfer.get (server.url / "/digest.bin") cache: (Path "cache2") digest: $bad
+
+let HELLO_SHA256 = "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+
+# The cache lays an entry out under the BLAKE3 of the normalized URL, so tests
+# can plant one directly. That is the only way to produce a partial download:
+# the mock server cannot cut a response short mid-body.
+def cache_entry cache url
+  let entry = (cache / digest.blake3(str url).hex())
+  entry.create_dir all: true
+  entry
+
+def write_cache_metadata entry metadata
+  (entry / "metadata.json").write $ json.encode $metadata
+
+def read_cache_metadata entry
+  json.decode((entry / "metadata.json").read())
+
+def seed_partial cache url name bytes :etag = nil :total = nil
+  let entry = (cache_entry cache url)
+  (entry / "$name.part").write $bytes
+  let identity = (str url)
+  let metadata = $
+    version: 1
+    url: $identity
+    payload: $name
+    state: "partial"
+    etag: $etag
+    total: $total
+  write_cache_metadata $entry $metadata
+  entry
+
+#[test]
+#[vfs]
+def http_get_resumes_partial_download()
+  http.mock.Server do |server|
+    let cache = Path "cache"
+    let url = (server.url / "/file.bin")
+    let entry = seed_partial $cache $url file.bin b"hel" etag: v1 total: 5
+    server.mock
+      - method: GET
+        path: /file.bin
+        headers:
+          range: "bytes=3-"
+        respond:
+          status: 206
+          headers:
+            "content-range": "bytes 3-4/5"
+          body: lo
+      do |handle|
+        let result = transfer.get $url cache: $cache
+        assert_eq $result.read() hello
+        assert_eq $handle.received().len 1
+        assert_eq (handle.received()[0].headers.get "if-range") "v1"
+        assert (!(entry / "file.bin.part").exists())
+        let metadata = (read_cache_metadata entry)
+        assert_eq (metadata.get "state") nil
+        assert_eq (metadata.get "size") 5
+
+#[test]
+#[vfs]
+def http_get_restarts_when_range_is_ignored()
+  http.mock.Server do |server|
+    let cache = Path "cache"
+    let url = (server.url / "/file.bin")
+    let entry = seed_partial $cache $url file.bin b"hel" etag: v1 total: 5
+    server.mock
+      - method: GET
+        path: /file.bin
+        respond:
+          status: 200
+          body: hello
+      do |handle|
+        let result = transfer.get $url cache: $cache
+        assert_eq $result.read() hello
+        assert_eq $handle.received().len 1
+        assert (!(entry / "file.bin.part").exists())
+
+#[test]
+#[vfs]
+def http_get_restarts_on_invalid_content_range()
+  http.mock.Server do |server|
+    let cache = Path "cache"
+    let url = (server.url / "/file.bin")
+    let entry = seed_partial $cache $url file.bin b"hel" etag: v1 total: 5
+    # The ranged request gets a range that doesn't start where it was asked to;
+    # the retry carries no `range` header and so falls through to the second
+    # item.
+    server.mock
+      - method: GET
+        path: /file.bin
+        headers:
+          range: "bytes=3-"
+        respond:
+          status: 206
+          headers:
+            "content-range": "bytes 0-4/5"
+          body: hello
+      - method: GET
+        path: /file.bin
+        respond:
+          status: 200
+          body: hello
+      do |handle|
+        let result = transfer.get $url cache: $cache
+        assert_eq $result.read() hello
+        assert_eq $handle.received().len 2
+        assert (!(entry / "file.bin.part").exists())
+
+#[test]
+#[vfs]
+def http_get_restarts_on_unsatisfiable_range()
+  http.mock.Server do |server|
+    let cache = Path "cache"
+    let url = (server.url / "/file.bin")
+    let entry = seed_partial $cache $url file.bin b"hel" etag: v1 total: 5
+    server.mock
+      - method: GET
+        path: /file.bin
+        headers:
+          range: "bytes=3-"
+        respond:
+          status: 416
+      - method: GET
+        path: /file.bin
+        respond:
+          status: 200
+          body: hello
+      do |handle|
+        let result = transfer.get $url cache: $cache
+        assert_eq $result.read() hello
+        assert_eq $handle.received().len 2
+        assert (!(entry / "file.bin.part").exists())
+
+#[test]
+#[vfs]
+def http_get_verifies_digest_across_resumed_data()
+  http.mock.Server do |server|
+    let url = (server.url / "/file.bin")
+    let good_cache = Path "cache"
+    let bad_cache = Path "cache2"
+    seed_partial $good_cache $url file.bin b"hel" etag: v1 total: 5
+    let bad_entry = seed_partial $bad_cache $url file.bin b"hel" etag: v1 total: 5
+    server.mock
+      - method: GET
+        path: /file.bin
+        headers:
+          range: "bytes=3-"
+        respond:
+          status: 206
+          headers:
+            "content-range": "bytes 3-4/5"
+          body: lo
+      do |_handle|
+        let result = transfer.get $url cache: $good_cache digest: $HELLO_SHA256
+        assert_eq $result.read() hello
+
+        let bad = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        assert_throws $ValueError do
+          transfer.get $url cache: $bad_cache digest: $bad
+        assert (!(bad_entry / "file.bin.part").exists())
+        assert (!(bad_entry / "file.bin").exists())
+        assert (!(bad_entry / "metadata.json").exists())
+
+#[test]
+#[vfs]
+def http_get_retains_partial_on_short_body()
+  http.mock.Server do |server|
+    let cache = Path "cache"
+    let url = (server.url / "/file.bin")
+    let entry = seed_partial $cache $url file.bin b"hel" etag: v1
+    server.mock
+      - method: GET
+        path: /file.bin
+        headers:
+          range: "bytes=3-"
+        respond:
+          status: 206
+          headers:
+            "content-range": "bytes 3-9/10"
+          body: lo
+      - method: GET
+        path: /file.bin
+        headers:
+          range: "bytes=5-"
+        respond:
+          status: 206
+          headers:
+            "content-range": "bytes 5-9/10"
+          body: world
+      do |_handle|
+        # The body stops five bytes short of the range it promised, so the
+        # download is incomplete rather than done.
+        assert_throws $ValueError do
+          transfer.get $url cache: $cache
+        assert_eq $(entry / "file.bin.part").read() hello
+        let metadata = (read_cache_metadata entry)
+        assert_eq (metadata.get "state") "partial"
+        assert_eq (metadata.get "total") 10
+
+        # The retained bytes are picked up where they left off.
+        let result = transfer.get $url cache: $cache
+        assert_eq $result.read() helloworld
+        assert (!(entry / "file.bin.part").exists())
+
+#[test]
+#[vfs]
+def http_get_treats_metadata_without_state_as_complete()
+  http.mock.Server do |server|
+    let cache = Path "cache"
+    let url = (server.url / "/file.bin")
+    let entry = (cache_entry cache url)
+    (entry / "file.bin").write b"hello"
+    let identity = (str url)
+    let metadata = $
+      version: 1
+      url: $identity
+      payload: file.bin
+      etag: v1
+      size: 5
+    write_cache_metadata $entry $metadata
+    server.mock
+      - method: GET
+        path: /file.bin
+        headers:
+          "if-none-match": v1
+        respond:
+          status: 304
+      do |handle|
+        let result = transfer.get $url cache: $cache
+        assert_eq $result.read() hello
+        assert_eq $handle.received().len 1
+
+#[test]
+#[vfs]
+def http_get_refetches_when_cached_payload_is_gone()
+  http.mock.Server do |server|
+    let cache = Path "cache"
+    let url = (server.url / "/file.bin")
+    let entry = (cache_entry cache url)
+    # Metadata describing a payload that is no longer there, as pruning the
+    # cache directory by hand leaves behind.
+    let identity = (str url)
+    let metadata = $
+      version: 1
+      url: $identity
+      payload: file.bin
+      etag: v1
+      size: 5
+    write_cache_metadata $entry $metadata
+    server.mock
+      - method: GET
+        path: /file.bin
+        headers:
+          "if-none-match": v1
+        respond:
+          status: 304
+      - method: GET
+        path: /file.bin
+        respond:
+          status: 200
+          headers:
+            etag: v1
+          body: hello
+      do |handle|
+        # The `304` can't be honored, so the request goes out again without
+        # the validator instead of publishing the empty response as the
+        # payload.
+        let result = transfer.get $url cache: $cache
+        assert_eq $result.read() hello
+        assert_eq $handle.received().len 2
+        assert_eq (read_cache_metadata(entry).get "size") 5
 
 #[test]
 #[vfs]
