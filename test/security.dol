@@ -438,8 +438,20 @@ def reports_security_information_for_target()
     assert_eq (user_name()) $sid_name.name
     let by_sid = SidName.lookup $info.user_sid
     let by_name = SidName.lookup $sid_name.qualified_name
+    let by_bin = SidName.lookup(info.user_sid.to_bin())
     assert_eq (str by_sid.sid) (str info.user_sid)
     assert_eq (str by_name.sid) (str info.user_sid)
+    assert_eq (str by_bin.sid) (str info.user_sid)
+    # A symbol names a well-known SID; a string is always an account name.
+    let by_sym = SidName.lookup :BUILTIN_ADMINISTRATORS:
+    assert_eq (str by_sym.sid) S-1-5-32-544
+    assert_throws $ValueError do SidName.lookup :NOT_A_WELL_KNOWN_SID:
+    # Resolving a well-known SID built from its symbol: what VM provisioning
+    # does to find the local Administrators group.
+    let admins = Sid(:BUILTIN_ADMINISTRATORS:).lookup()
+    assert_type $SidName $admins
+    assert_eq (str admins.sid) S-1-5-32-544
+    assert_eq $admins.name $by_sym.name
     assert_eq $sid_name.kind :USER:
     assert_throws $NotFoundError do SidName.lookup dolang-account-that-does-not-exist
     assert_throws $UnsupportedError do unix_user_name 0

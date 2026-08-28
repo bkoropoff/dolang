@@ -91,7 +91,8 @@ pub(crate) use unix::{Identity, Permission, PosixAceObject, PosixAclObject, crea
 pub use windows::AccessMask;
 pub(crate) use windows::{
     Ace, AceFlags, Acl, SecDesc, SecDescControl, SecInfo, Sid, SidName, SpecPath, TokenGroup,
-    TokenGroupAttributes, TokenInfo, create_sec_desc, create_sid, sec_desc_from_args,
+    TokenGroupAttributes, TokenInfo, WellKnownSids, create_sec_desc, create_sid,
+    sec_desc_from_args,
 };
 
 /// Converts a portable [`dolang_vfs::security::Acl`] into the appropriate

@@ -385,23 +385,56 @@ const WELL_KNOWN_SIDS: &[(&str, WellKnownSid)] = &[
     ("SYSTEM_LABEL", WellKnownSid::SystemLabel),
 ];
 
+/// [`WELL_KNOWN_SIDS`] with its names interned, so a symbol is matched by
+/// identity rather than by spelling.
+pub(crate) struct WellKnownSids<'v>(Box<[(Sym<'v, 'v>, WellKnownSid)]>);
+
+impl<'v> WellKnownSids<'v> {
+    pub(crate) fn new(builder: &mut Builder<'v>) -> Self {
+        let mut entries: Box<[_]> = WELL_KNOWN_SIDS
+            .iter()
+            .map(|(name, well_known)| (builder.sym(name), *well_known))
+            .collect();
+        entries.sort_unstable_by_key(|(sym, _)| *sym);
+        Self(entries)
+    }
+
+    /// The SID `sym` names, or `None` if it names no well-known SID.
+    pub(crate) fn get(&self, sym: Sym<'v, '_>) -> Option<VfsSid> {
+        let index = self
+            .0
+            .binary_search_by(|(candidate, _)| Sym::cmp(candidate, &sym))
+            .ok()?;
+        Some(VfsSid::from(self.0[index].1))
+    }
+}
+
+/// Resolves the well-known SID a symbol names.
+fn sid_from_sym<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    sym: Sym<'v, '_>,
+    path: &SpecPath<'_>,
+) -> Result<'v, 's, VfsSid> {
+    let global = strand.state::<Global<'v>>();
+    match global.syms.well_known_sids.get(sym) {
+        Some(sid) => Ok(sid),
+        None => {
+            let name = sym.as_str(strand.vm());
+            Err(Error::value(
+                strand,
+                format!("{path}: `{name}` does not name a well-known SID"),
+            ))
+        }
+    }
+}
+
 fn sid_from_value<'v, 's>(
     strand: &mut Strand<'v, 's>,
     value: &Value<'v>,
     path: &SpecPath<'_>,
 ) -> Result<'v, 's, VfsSid> {
     if let Some(sym) = value.as_sym(strand.vm()) {
-        let name = sym.as_str(strand.vm());
-        let Some((_, well_known)) = WELL_KNOWN_SIDS
-            .iter()
-            .find(|(candidate, _)| *candidate == name)
-        else {
-            return Err(Error::value(
-                strand,
-                format!("{path}: `{name}` does not name a well-known SID"),
-            ));
-        };
-        Ok(VfsSid::from(*well_known))
+        sid_from_sym(strand, sym, path)
     } else if let Some(value) = value.as_str(strand) {
         value
             .to_string()
@@ -1522,7 +1555,7 @@ impl std::fmt::Display for SpecPath<'_> {
     }
 }
 
-/// Coerces a trustee: a [`Sid`], its canonical string or native packet, or a
+/// Coerces a SID: a [`Sid`], its canonical string or native packet, or a
 /// symbol naming a well-known SID.
 fn coerce_sid<'v, 's>(
     strand: &mut Strand<'v, 's>,
@@ -1534,6 +1567,34 @@ fn coerce_sid<'v, 's>(
         return Ok(sid.enter_sync(strand, |_strand, sid| (*sid.annex()).clone()));
     }
     sid_from_value(strand, value, path)
+}
+
+/// Coerces the SID spellings that cannot mean anything else: a [`Sid`], its
+/// native packet, or a symbol naming a well-known SID.
+///
+/// Yields `Ok(None)` for everything else, including a `Str`. Callers that give
+/// a string its own meaning — an account name to look up, say — use this
+/// instead of [`coerce_sid`] and handle the string themselves.
+fn coerce_sid_non_str<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    value: &Value<'v>,
+    path: &SpecPath<'_>,
+) -> Result<'v, 's, Option<VfsSid>> {
+    if let Some(sid) = global.types.sid.cast(value) {
+        Ok(Some(
+            sid.enter_sync(strand, |_strand, sid| (*sid.annex()).clone()),
+        ))
+    } else if let Some(sym) = value.as_sym(strand.vm()) {
+        sid_from_sym(strand, sym, path).map(Some)
+    } else if let Some(value) = value.as_bin(strand) {
+        let bytes = value.to_vec();
+        VfsSid::from_bytes(&bytes)
+            .map(Some)
+            .map_err(|error| Error::value(strand, format!("{path}: {error}")))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Coerces an [`Ace`] or a declarative ACE spec into a native ACE.
@@ -3000,8 +3061,11 @@ impl<'v> Object<'v> for SidName {
                     return Err(Error::not_supported(strand));
                 }
                 let vfs = global.local.get(strand).vfs();
-                let name = if let Some(sid) = global.types.sid.cast(&value) {
-                    let sid = sid.enter_sync(strand, |_strand, sid| sid.annex().clone());
+                // A `Str` is the account name to resolve, so only the
+                // unambiguous SID spellings are coerced here.
+                let path = SpecPath::root("SidName.lookup");
+                let sid = coerce_sid_non_str(strand, global, &value, &path)?;
+                let name = if let Some(sid) = sid {
                     error::io_result(strand, vfs.sid_name(&sid).await)?
                 } else if let Some(value) = value.as_str(strand) {
                     let value = value.to_string();
@@ -3009,7 +3073,7 @@ impl<'v> Object<'v> for SidName {
                 } else {
                     return Err(Error::type_error(
                         strand,
-                        "SidName.lookup: expected Sid or Str",
+                        "SidName.lookup: expected Sid, Str, Sym, or Bin",
                     ));
                 };
                 create_sid_name(strand, global, name, &mut out);

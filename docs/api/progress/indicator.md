@@ -48,6 +48,11 @@ of one per field.
 `position` and `delta` are exclusive — passing both raises an error. Omitted
 keys are left unchanged.
 
+The first `position` an indicator is given sets where it starts rather than
+counting as progress it just made, so an indicator that opens partway
+through — a resumed download, say — doesn't report the opening jump as a
+burst of throughput. Positions after that are measured normally.
+
 In non-terminal (plain-text) output, `total`/`position`/`delta` changes are
 rate-limited (see `progress.with`'s `interval:`), but `icon`/`message`
 and `units` changes always print immediately.

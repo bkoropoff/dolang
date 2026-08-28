@@ -114,9 +114,17 @@ impl PlainInfo {
     /// unit system.
     pub(crate) fn set_units(&self, units: Option<Units>) {
         if self.units.replace(units) != units {
-            self.rate_sample.set(None);
-            self.rate_smoothed.set(None);
+            self.reset_rate();
         }
+    }
+
+    /// Discard the throughput estimate and the reference point it was
+    /// measured from, so the next sample starts over from wherever the
+    /// indicator is then. Used when the position moves for a reason that
+    /// isn't throughput — see `set_position` in `progress.rs`.
+    pub(crate) fn reset_rate(&self) {
+        self.rate_sample.set(None);
+        self.rate_smoothed.set(None);
     }
 
     pub(crate) fn line_ending(&self) -> &[u8] {
