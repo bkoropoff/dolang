@@ -120,16 +120,35 @@ Gets selected parts of the Windows security descriptor.
 
 SACL access requires `SeSecurityPrivilege`.
 
-### `set_sec_desc desc :resolve?`
+### `set_sec_desc desc? :resolve? ...options`
 
 Applies the components selected by a `SecDesc`'s `mask`.
 
 #### Parameters
 
-| Name      | Type                                                            | Description                                                                   |
-| --------- | --------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| `desc`    | [`security.windows.SecDesc`](../../security/windows/secdesc.md) | Security descriptor to apply                                                  |
-| `resolve` | `:TARGET:`\|`:LINK:`?                                           | Resolution mode (default: `:TARGET:`; see [fs](../index.md#resolution-modes)) |
+| Name      | Type                                                                                                                     | Description                                                                   |
+| --------- | ------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------- |
+| `desc`    | [`security.windows.SecDesc`](../../security/windows/secdesc.md)\|[`Bin`](../../std/bin.md)\|[`Dict`](../../std/dict.md)? | Descriptor, packet, or spec                                                   |
+| `resolve` | `:TARGET:`\|`:LINK:`?                                                                                                    | Resolution mode (default: `:TARGET:`; see [fs](../index.md#resolution-modes)) |
+
+The descriptor's
+[component options](../../security/windows/secdesc.md#component-options) may be
+passed as keyword arguments instead of, or alongside, `desc`, exactly as
+[`sec_desc`](../../security/windows/index.md#sec_desc-desc-options) accepts
+them.
+
+#### Example
+
+```
+path.set_sec_desc
+  owner: :BUILTIN_ADMINISTRATORS:
+  dacl_protected: true
+  dacl:
+    - allow: :LOCAL_SYSTEM:
+      mask: :GENERIC_ALL:
+    - allow: :BUILTIN_ADMINISTRATORS:
+      mask: :GENERIC_ALL:
+```
 
 Windows may normalize the descriptor when associating it with the
 filesystem object.

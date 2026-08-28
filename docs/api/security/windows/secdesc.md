@@ -2,6 +2,13 @@
 
 Windows security descriptor.
 
+A descriptor can also be written as a [descriptor
+spec](./index.md#descriptor-specs) wherever one is accepted, including
+[`sec_desc`](./index.md#sec_desc-desc-options) and every `set_sec_desc`
+method. The constructor and [`with`](#with-options) below stay strict: `dacl`
+and `sacl` must already be [`Acl`](./acl.md) values, `owner` and `group`
+[`Sid`](./sid.md) values.
+
 ## Constructor
 
 ### `SecDesc value`

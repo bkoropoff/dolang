@@ -31,6 +31,7 @@ impl Extension for WinscmExt {
     const NAME: &str = "dolang-winscm";
     const VERSION: Version = dolang::package_version!();
     const DESCRIPTION: &str = "Do Windows Service Control Manager Extension";
+    const DEPENDS: &'static [&'static str] = &[<dolang_ext_shell::Shell as Extension>::NAME];
 
     fn apply_compiler(&self, _compiler: &mut Compiler) -> Result<(), Infallible> {
         Ok(())

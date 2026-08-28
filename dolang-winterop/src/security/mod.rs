@@ -12,7 +12,7 @@ pub use sec_desc::{
     AclBuildError, AclError, AclKind, AclRevision, ObjectAceFlags, SecDesc, SecDescComponent,
     SecDescControl, SecDescError, SecDescRevision, SecDescUpdate, SecInfo,
 };
-pub use sid::{Sid, SidError, SidIdentifierAuthority, SidRevision};
+pub use sid::{Sid, SidError, SidIdentifierAuthority, SidRevision, WellKnownSid};
 #[cfg(any(windows, docsrs))]
 #[cfg_attr(docsrs, doc(cfg(windows)))]
 pub use win32_security::with_security_privilege;

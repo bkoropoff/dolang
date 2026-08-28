@@ -36,6 +36,19 @@ pub fn create_guid<'v, 'a>(
     create_guid_with_global(global, strand, id, out);
 }
 
+/// Downcasts a Do `uuid.Guid` value into an owned native GUID.
+pub fn downcast_guid<'v>(
+    strand: &mut Strand<'v, '_>,
+    value: &Value<'v>,
+) -> Option<dolang_winterop::guid::Guid> {
+    let global = strand.state::<Global<'v>>();
+    global
+        .types
+        .guid
+        .cast(value)
+        .map(|inst| inst.enter_sync(strand, |_strand, inst| inst.annex().inner))
+}
+
 /// Converts a Do `uuid.Guid`, `Str`, or `Bin` value into an owned
 /// `dolang_winterop::guid::Guid`.
 ///
@@ -45,9 +58,8 @@ pub fn value_to_guid<'v, 's>(
     strand: &mut Strand<'v, 's>,
     value: &Value<'v>,
 ) -> Result<'v, 's, dolang_winterop::guid::Guid> {
-    let global = strand.state::<Global<'v>>();
-    if let Some(inst) = global.types.guid.cast(value) {
-        return Ok(inst.enter_sync(strand, |_strand, inst| inst.annex().inner));
+    if let Some(guid) = downcast_guid(strand, value) {
+        return Ok(guid);
     }
     if let Some(str) = value.as_str(strand) {
         return strand

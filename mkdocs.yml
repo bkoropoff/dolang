@@ -199,6 +199,7 @@ nav:
       - api/security/windows/index.md
       - api/security/windows/access-mask.md
       - api/security/windows/ace.md
+      - api/security/windows/ace-flags.md
       - api/security/windows/acl.md
       - api/security/windows/secdesc.md
       - api/security/windows/secdesc-control.md

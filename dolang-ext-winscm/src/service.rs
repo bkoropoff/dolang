@@ -329,8 +329,8 @@ impl<'v> Object<'v> for Service {
                 Ok(())
             })
             .method("set_sec_desc", async move |this, strand, args, _out| {
-                let ([descriptor], []) = unpack!(strand, args, 1, 0)?;
-                let descriptor = dolang_ext_shell::sec_desc_from_value(strand, &descriptor)?;
+                let descriptor =
+                    dolang_ext_shell::sec_desc_from_args(strand, args, "set_sec_desc").await?;
                 let borrow = this.borrow(strand)?;
                 let service = borrow
                     .0

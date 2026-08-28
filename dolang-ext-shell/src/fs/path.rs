@@ -690,14 +690,16 @@ macro_rules! impl_concrete_path {
                         .await
                     })
                     .method("set_sec_desc", async move |this, strand, args, _out| {
-                        let ([descriptor], [resolve]) =
-                            unpack!(strand, args, 1, 0, resolve = None)?;
+                        let ([], [resolve], rest) =
+                            unpack!(strand, args, 0, 0, resolve = None, ...)?;
                         let annex = this.annex();
-                        let descriptor = crate::security::sec_desc_from_value(
+                        let descriptor = crate::security::sec_desc_from_args(
                             strand,
                             annex.global,
-                            &descriptor,
-                        )?;
+                            rest,
+                            &crate::security::SpecPath::root("set_sec_desc"),
+                        )
+                        .await?;
                         let follow = super::resolve_sym(strand, annex.global, resolve, true)?;
                         super::set_sec_desc(
                             strand,

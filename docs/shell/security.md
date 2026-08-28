@@ -247,7 +247,7 @@ the caller has the required Windows access rights and privileges.
 
 `SecDesc.with` creates a modified descriptor while preserving other components.
 Apply a modified descriptor with
-[`fs.windows.set_sec_desc`](../api/fs/windows/index.md#set_sec_desc-path-desc-resolve):
+[`fs.windows.set_sec_desc`](../api/fs/windows/index.md#set_sec_desc-path-desc-resolve-options):
 
 ```
 import fs.windows:

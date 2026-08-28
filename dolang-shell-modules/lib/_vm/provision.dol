@@ -53,10 +53,6 @@ pub let BOOTSTRAP_CMD = r|
 pub let PROVISION_SOURCE = r|
   import fs json proc std sys term winreg winscm
     security.windows:
-      - AccessMask
-      - Ace
-      - Acl
-      - SecDesc
       - Sid
 
   # The Feature-on-Demand package holding the Windows OpenSSH server, and the
@@ -67,12 +63,11 @@ pub let PROVISION_SOURCE = r|
   # Where Windows keeps the machine-wide environment.
   let ENV_KEY = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
 
-  # Well-known SIDs, looked up rather than named. Every account and group name
-  # Windows ships is localized — `BUILTIN\Administrators` is `VORDEFINIERT\
-  # Administratoren` on German media — and only the SID is the same everywhere,
-  # so anything that has to name one resolves it from its SID first.
-  let SYSTEM_SID = "S-1-5-18"
-  let ADMINISTRATORS_SID = "S-1-5-32-544"
+  # Accounts and groups are named by SID, never by name. Every account and
+  # group name Windows ships is localized — `BUILTIN\Administrators` is
+  # `VORDEFINIERT\Administratoren` on German media — and only the SID is the
+  # same everywhere, so anything that has to name one resolves it from its SID
+  # first.
 
   def log message
     echo "[provision] $message"
@@ -119,7 +114,7 @@ pub let PROVISION_SOURCE = r|
     else
       log "creating $user"
       run net user $user $password /add /y
-    let admins = Sid(ADMINISTRATORS_SID).lookup()
+    let admins = Sid(:BUILTIN_ADMINISTRATORS:).lookup()
     log "adding $user to $(admins.qualified_name)"
     # Already a member is an error here too, and an uninteresting one.
     probe do
@@ -143,17 +138,15 @@ pub let PROVISION_SOURCE = r|
     log "writing $path"
     path.write "$(key.trim())\n"
 
-    let system = Sid $SYSTEM_SID
-    let admins = Sid $ADMINISTRATORS_SID
-    let full = AccessMask :GENERIC_ALL:
     # Protected, so the inherited entries granting the containing directory to
     # everyone do not come back and disqualify the file.
-    path.set_sec_desc $ SecDesc
-      owner: $admins
-      dacl: $ Acl $
-        for sid = [system, admins]
-          $Ace.allow(sid, full)
+    path.set_sec_desc
+      owner: :BUILTIN_ADMINISTRATORS:
       dacl_protected: true
+      dacl:
+        for sid = [:LOCAL_SYSTEM:, :BUILTIN_ADMINISTRATORS:]
+          - allow: $sid
+            mask: :GENERIC_ALL:
 
   # DISM adds this rule itself on the builds seen so far, but a build where it
   # does not looks exactly like a guest that never finished booting.
