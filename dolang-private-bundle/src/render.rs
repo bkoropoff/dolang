@@ -9,9 +9,10 @@ fn render_report<'a>(file: &'a str, source: &'a str, diag: &'a Diag) -> Vec<Grou
         compile::Severity::Warning => Level::WARNING,
         other => Level::INFO.with_name(other.to_string()),
     };
-    let mut snippet = Snippet::source(source)
-        .path(file)
-        .line_start(diag.span().start().line_number() as usize);
+    // The whole source is handed over, so it starts at line 1. `line_start` is
+    // for a fragment cut out of a larger file; setting it to the diagnostic's
+    // own line makes every reported number come back as roughly double.
+    let mut snippet = Snippet::source(source).path(file).line_start(1);
     let mut have_primary = false;
     for ann in diag.annotations() {
         snippet = snippet.annotation(

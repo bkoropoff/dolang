@@ -18,6 +18,24 @@ def compile_diagnostic()
   assert ((str rendered).contains "bad.dol")
   assert (!(str(rendered).ends_with("\n")))
 
+# The rendered line number has to be the line the diagnostic is actually on.
+# A diagnostic on the first line renders correctly under any off-by-a-multiple
+# error, so this puts one further down where a scaled number is visible.
+#[test]
+def compile_diagnostic_line_number()
+  let source = |
+    # one
+    # two
+    # three
+    let =
+  let result = compile.compile "bad.dol" $source
+  let diag = result.diagnostics[0]
+  # Zero-based, so the fourth line.
+  assert_eq $diag.span.start.line 3
+
+  # One-based in the rendered location, so one more than the span reports.
+  assert (str(diag.render()).contains("bad.dol:4:5"))
+
 #[test]
 def error()
   let plain = try
