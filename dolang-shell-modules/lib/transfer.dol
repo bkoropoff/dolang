@@ -21,6 +21,8 @@ let DIGESTS = $
 
 let HEX_DIGEST = Regex r"^[0-9a-f]+$"
 
+let CONTENT_RANGE = Regex r"^bytes (\d+)-(\d+)/(\d+|\*)$"
+
 def parse_location value
   if (type value Url || type value Path)
     value
@@ -79,12 +81,15 @@ def digest_spec spec
     throw std.ValueError "digest: invalid $algorithm hex value"
   record :algorithm :expected :constructor
 
-def file_digest path constructor
+def digest_state path constructor
   let state = constructor()
   path.open rb do |file|
     for chunk = file
       state.update $chunk
-  state.digest().hex()
+  state
+
+def file_digest path constructor
+  digest_state(path, constructor).digest().hex()
 
 def read_metadata path identity
   if !path.exists()
@@ -111,13 +116,41 @@ def metadata_payload entry metadata fallback
   (entry / (name || fallback))
 
 def intact_payload payload metadata
-  if (metadata == nil || !payload.exists())
+  # An absent `state` means complete, so metadata written before resumable
+  # downloads existed still reads as a usable payload.
+  if (metadata == nil || metadata.get("state") != nil || !payload.exists())
     return false
   try
     (payload.metadata().type == :FILE: &&
       payload.metadata().size == metadata.get("size"))
   catch _
     false
+
+def file_size path
+  try
+    let info = path.metadata()
+    if (info.type == :FILE:)
+      info.size
+    else
+      nil
+  catch _
+    nil
+
+# The resume offset for a retained partial, or `nil` to start over. The actual
+# size of the sidecar is authoritative; metadata only says whether the bytes
+# can be trusted and what the whole representation is expected to look like.
+def partial_offset part metadata
+  if (metadata == nil || metadata.get("state") != "partial")
+    return nil
+  let size = (file_size part)
+  if (size == nil || size == 0)
+    return nil
+  let total = metadata.get "total"
+  # At or past the recorded total there is nothing left to ask for, and no way
+  # to tell a complete download from a corrupt one without a validator.
+  if (total != nil && size >= total)
+    return nil
+  size
 
 def conditional_headers metadata
   let headers = {}
@@ -129,9 +162,52 @@ def conditional_headers metadata
     headers["if-modified-since"] = DateTime.parse_rfc $modified
   headers
 
-def response_metadata identity response payload digest_info old
+def range_headers metadata offset
+  let headers = {}
+  headers["range"] = "bytes=$offset-"
+  let etag = metadata.get "etag"
+  let modified = metadata.get "last_modified"
+  # `If-Range` needs a strong validator: a weak ETag says two representations
+  # are equivalent, not byte-identical, which is not enough to splice ranges.
+  if (etag && !etag.starts_with "W/")
+    headers["if-range"] = etag
+  else if modified
+    headers["if-range"] = DateTime.parse_rfc $modified
+  headers
+
+def parse_content_range value
+  if (value == nil)
+    return nil
+  let captures = CONTENT_RANGE.match(str value)
+  if (captures == nil)
+    return nil
+  let raw = (str captures[3])
+  let total = if (raw == "*")
+    nil
+  else
+    int $raw
+  record start: (int (str captures[1])) :total
+
+def partial_metadata identity response payload total
   let headers = response.headers
-  let verified = (old && old.get "verified" || {})
+  let modified = (headers.get "last-modified")
+  let now = DateTime.now().rfc()
+  return $
+    version: 1
+    url: $identity
+    final_url: (str response.url)
+    payload: $payload.name
+    state: "partial"
+    etag: (headers.get "etag")
+    last_modified: (modified && modified.rfc())
+    total: $total
+    fetched_at: $now
+
+def response_metadata identity response payload digest_info
+  let headers = response.headers
+  # Digests verified against a previous representation say nothing about the
+  # bytes just downloaded, so `verified` starts empty on every fresh body.
+  let verified = {}
   if digest_info
     verified[digest_info.algorithm] = digest_info.expected
   let now = DateTime.now().rfc()
@@ -154,7 +230,7 @@ class Cache
 
   def (init) self app cache
     self.#root = if (cache != nil)
-      Path cache
+      Path $cache
     else
       (fs.cache_dir app: (normalize_app app) / "transfer")
 
@@ -165,43 +241,116 @@ class Cache
     entry.create_dir all: true
     [identity, entry]
 
-  def download self identity entry payload metadata digest_info
-    let headers = if (metadata && digest_info == nil)
+  # Streams the body into the `.part` sidecar, appending to it when resuming.
+  # Returns the payload, or `:RETRY:` when the request has to be reissued
+  # without the range and validators it was conditioned on.
+  def fetch self identity entry payload part metadata digest_info offset indicator
+    let metadata_path = (entry / "metadata.json")
+    let headers = if (offset != nil)
+      range_headers $metadata $offset
+    else if (metadata && metadata.get("state") == nil && digest_info == nil)
       conditional_headers $metadata
     else
       {}
+    let message = (payload.name || identity)
 
+    self.#client.get $identity headers: $headers status: :IGNORE: do |response|
+      if (response.status == 304 && intact_payload(payload, metadata))
+        metadata["checked_at"] = DateTime.now().rfc()
+        write_metadata $metadata_path $metadata
+        let total = metadata["size"]
+        indicator.update message: "$message (cached)" :total position: $total units: :BYTES:
+        return payload
+
+      if (response.status == 304)
+        # The validators still match, but the payload they stand for is gone or
+        # the wrong size, so there is nothing to serve and no body to fall back
+        # on. Ask again without them rather than publishing the empty response.
+        return :RETRY:
+
+      let append = false
+      let total = nil
+
+      if (offset != nil)
+        if (response.status == 416)
+          # The partial no longer lines up with the representation at all.
+          part.remove ignore: true
+          return :RETRY:
+        if (response.status == 206)
+          let range = (parse_content_range (response.headers.get "content-range"))
+          if (range == nil || range.start != offset)
+            part.remove ignore: true
+            return :RETRY:
+          append = true
+          total = range.total
+        else
+          # A `200` means the range was ignored (or `If-Range` failed), so the
+          # body is the whole representation: start over without another
+          # request.
+          response.throw_for_status()
+          offset = nil
+      else
+        response.throw_for_status()
+
+      if !append
+        let length = (response.headers.get "content-length")
+        total = (length && int length)
+
+      if append
+        indicator.update total: $total position: $offset units: :BYTES:
+      else
+        indicator.update total: $total units: :BYTES:
+
+      # Recorded before the first byte lands so an abrupt exit still leaves an
+      # entry that says what the sidecar holds and how to resume it.
+      let pending = (partial_metadata identity response payload total)
+      write_metadata $metadata_path $pending
+
+      let state = if (digest_info == nil)
+        nil
+      else if append
+        digest_state $part $digest_info.constructor
+      else
+        digest_info.constructor()
+
+      let mode = if append
+        "ab"
+      else
+        "wb"
+      part.open $mode do |file|
+        for chunk = response.chunks()
+          file.write $chunk
+          if state
+            state.update $chunk
+          indicator.delta $chunk.len
+
+      let size = part.metadata().size
+      if (total != nil && size != total)
+        # The sidecar and its metadata stay put: the next `get` resumes here.
+        throw std.ValueError "incomplete download for $identity: got $size of $total bytes"
+      if (state && state.digest().hex() != digest_info.expected)
+        part.remove ignore: true
+        metadata_path.remove ignore: true
+        throw std.ValueError "digest mismatch for $identity"
+
+      part.rename $payload
+      let updated = (response_metadata identity response payload digest_info)
+      write_metadata $metadata_path $updated
+      payload
+
+  def download self identity entry payload metadata digest_info
+    let part = payload.add_ext part
+    let offset = (partial_offset part metadata)
     let message = (payload.name || identity)
     progress.show :message icon: ⬇️ do |indicator|
-      self.#client.get $identity headers: $headers status: :IGNORE: do |response|
-        if (response.status == 304 && intact_payload(payload, metadata))
-          metadata["checked_at"] = DateTime.now().rfc()
-          write_metadata (entry / "metadata.json") $metadata
-          let total = metadata["size"]
-          indicator.update message: "$message (cached)" :total position: $total units: :BYTES:
-          return payload
-
-        response.throw_for_status()
-        let total = (response.headers.get "content-length")
-        indicator.update total: (total && int total) units: :BYTES:
-        let tmp = payload.add_ext tmp
-        let state = (digest_info && digest_info.constructor())
-        try
-          tmp.open wb do |file|
-            for chunk = response.chunks()
-              file.write $chunk
-              if state
-                state.update $chunk
-              indicator.delta $chunk.len
-          if (state && state.digest().hex() != digest_info.expected)
-            throw std.ValueError "digest mismatch for $identity"
-          tmp.rename $payload
-        finally
-          tmp.remove ignore: true
-
-        let updated = (response_metadata(identity, response, payload, digest_info, metadata))
-        write_metadata (entry / "metadata.json") $updated
-        payload
+      let result = self.#fetch $identity $entry $payload $part $metadata $digest_info $offset $indicator
+      if (result == :RETRY:)
+        # Retry with no metadata as well as no offset: what we knew about the
+        # entry is exactly what the server just refused to honor, so sending
+        # its validators again would only repeat the same answer.
+        self.#fetch $identity $entry $payload $part nil $digest_info nil $indicator
+      else
+        result
 
   pub def get self url digest
     url = (normalized_url url)
@@ -226,6 +375,9 @@ class Cache
             write_metadata $metadata_path $metadata
             return payload
         self.#download $identity $entry $payload $metadata $digest_info
+      else if (metadata && metadata.get("state") == "partial")
+        # Resume against the name the interrupted download was using.
+        self.#download $identity $entry $payload $metadata $digest_info
       else
         self.#download $identity $entry (entry / payload_name) $metadata $digest_info
 
@@ -234,6 +386,10 @@ class Cache
 # `digest` uses `algorithm:hex` syntax. Supported algorithms are BLAKE3, MD5,
 # SHA-1, SHA-256, and SHA-512. A previously verified digest-pinned entry is
 # returned without contacting the server.
+#
+# An interrupted download is kept and resumed with a range request on the next
+# call, falling back to a full download when the server ignores the range or
+# the representation has changed.
 #
 # `cache` overrides the cache location with an explicit directory, bypassing
 # `app`/`fs.cache_dir` entirely. Mainly useful for tests that want an

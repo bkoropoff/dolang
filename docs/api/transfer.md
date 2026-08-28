@@ -7,6 +7,11 @@ the application cache directory and revalidated with HTTP validators when
 available. Pass `digest:` as `algorithm:hex` to verify an artifact; a cache
 entry already verified against that digest can be reused without a request.
 
+An interrupted download is retained in the cache entry and resumed on the next
+`get` with a `Range` request guarded by `If-Range`. A server that ignores the
+range, reports an unusable one, or serves a changed representation simply
+causes a full download instead.
+
 `pack` supports TAR, gzip-compressed TAR, Zstandard-compressed TAR, and ZIP.
 `unpack` additionally decompresses raw gzip, Zstandard, and XZ streams into a
 file. It distinguishes compressed TAR archives from raw streams by filename:
