@@ -2,7 +2,7 @@
 //!
 //! Allows enumerating and applying extensions from linked crates when configuring a Do compiler or VM.
 
-use std::{error, ptr::NonNull};
+use std::{collections::HashMap, error, ptr::NonNull, sync::OnceLock};
 
 #[doc(hidden)]
 pub mod __private {
@@ -76,6 +76,18 @@ pub trait Extension: Send + Sync + 'static {
     const DESCRIPTION: &str;
     /// Extension version
     const VERSION: Version;
+    /// Names of extensions that must be applied before this one.
+    ///
+    /// An extension that reads another's registered state or type objects
+    /// while applying itself must name it here, since the order extensions
+    /// appear in the link-time slice is otherwise arbitrary. Name the
+    /// dependency's [`NAME`](Extension::NAME) constant rather than a string
+    /// literal.
+    ///
+    /// A dependency that isn't linked in, a cycle, or two extensions sharing
+    /// a name are all link-time configuration errors and panic when
+    /// extensions are enumerated.
+    const DEPENDS: &'static [&'static str] = &[];
 
     /// Apply extension to compiler, such as by registering prelude imports.
     fn apply_compiler<'a>(&self, compiler: &mut Compiler<'a>) -> Result<(), Self::Error>;
@@ -88,6 +100,7 @@ pub struct Vtbl {
     name: &'static str,
     description: &'static str,
     version: Version,
+    depends: &'static [&'static str],
 
     apply_compiler: unsafe fn(this: NonNull<()>, compiler: &mut Compiler) -> Result<(), Error>,
     apply_vm: for<'v> unsafe fn(this: NonNull<()>, builder: &mut Builder<'v>) -> Result<(), Error>,
@@ -110,6 +123,7 @@ impl Vtbl {
                 name: T::NAME,
                 description: T::DESCRIPTION,
                 version: T::VERSION,
+                depends: T::DEPENDS,
                 apply_compiler: |this, compiler| unsafe {
                     this.cast::<T>()
                         .as_ref()
@@ -162,10 +176,87 @@ static ANCHOR: Anchor = Anchor;
 #[distributed_slice(EXTENSIONS)]
 static EXTENSIONS_ANCHOR: Erased = Vtbl::erase(&ANCHOR);
 
+/// Orders extensions so every extension follows the ones it depends on.
+///
+/// Each item is a name and the names it depends on. Ties among extensions
+/// that are ready at the same time are broken by original position, so the
+/// order only changes when a dependency does.
+///
+/// # Panics
+///
+/// Panics on a duplicate name, a dependency that isn't present, or a cycle.
+fn order(items: &[(&'static str, &'static [&'static str])]) -> Vec<usize> {
+    let mut index_of = HashMap::with_capacity(items.len());
+    for (index, (name, _)) in items.iter().enumerate() {
+        if let Some(previous) = index_of.insert(*name, index) {
+            panic!(
+                "extensions {previous} and {index} share the name `{name}`; extension names must \
+                 be unique"
+            );
+        }
+    }
+
+    // Edges point from a dependency to the extension that requires it.
+    let mut dependents = vec![Vec::new(); items.len()];
+    let mut remaining = vec![0_usize; items.len()];
+    for (index, (name, depends)) in items.iter().enumerate() {
+        for dependency in *depends {
+            let Some(&dependency_index) = index_of.get(dependency) else {
+                panic!("extension `{name}` depends on `{dependency}`, which is not linked in");
+            };
+            if dependency_index == index {
+                panic!("extension `{name}` depends on itself");
+            }
+            dependents[dependency_index].push(index);
+            remaining[index] += 1;
+        }
+    }
+
+    let mut ordered = Vec::with_capacity(items.len());
+    let mut emitted = vec![false; items.len()];
+    while ordered.len() < items.len() {
+        // Lowest ready index first; `items.len()` is small enough that
+        // scanning beats maintaining a heap, and it keeps ties stable.
+        let Some(next) = (0..items.len()).find(|&index| !emitted[index] && remaining[index] == 0)
+        else {
+            let cycle = items
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !emitted[*index])
+                .map(|(_, (name, _))| *name)
+                .collect::<Vec<_>>()
+                .join(", ");
+            panic!("cycle among extension dependencies: {cycle}");
+        };
+        emitted[next] = true;
+        ordered.push(next);
+        for &dependent in &dependents[next] {
+            remaining[dependent] -= 1;
+        }
+    }
+    ordered
+}
+
 fn extensions() -> impl Iterator<Item = &'static Erased> {
-    EXTENSIONS
+    static ORDERED: OnceLock<Vec<&'static Erased>> = OnceLock::new();
+
+    ORDERED
+        .get_or_init(|| {
+            let linked = EXTENSIONS
+                .iter()
+                .filter(|extension| !std::ptr::eq(*extension, &EXTENSIONS_ANCHOR))
+                .collect::<Vec<_>>();
+            let items = linked
+                .iter()
+                .map(|extension| (extension.vtbl.name, extension.vtbl.depends))
+                .collect::<Vec<_>>();
+            order(&items)
+                .into_iter()
+                .map(|index| linked[index])
+                .collect()
+        })
         .iter()
-        .filter(|extension| !std::ptr::eq(*extension, &EXTENSIONS_ANCHOR))
+        .copied()
 }
 
 /// Register extension.
@@ -259,5 +350,68 @@ pub trait VmExt {
 impl<'a> VmExt for Builder<'a> {
     fn extensions(&self) -> impl Iterator<Item = VmExtension> + 'static {
         extensions().map(|Erased { vtbl, ext }| VmExtension { vtbl, ext: *ext })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::order;
+
+    fn names(items: &[(&'static str, &'static [&'static str])]) -> Vec<&'static str> {
+        order(items)
+            .into_iter()
+            .map(|index| items[index].0)
+            .collect()
+    }
+
+    #[test]
+    fn dependencies_precede_dependents() {
+        let items: &[(&str, &[&str])] = &[
+            ("winreg", &["shell"]),
+            ("shell", &[]),
+            ("winscm", &["shell"]),
+        ];
+        assert_eq!(names(items), ["shell", "winreg", "winscm"]);
+    }
+
+    #[test]
+    fn transitive_and_diamond_dependencies_are_ordered() {
+        let items: &[(&str, &[&str])] = &[
+            ("top", &["left", "right"]),
+            ("left", &["base"]),
+            ("right", &["base"]),
+            ("base", &[]),
+        ];
+        assert_eq!(names(items), ["base", "left", "right", "top"]);
+    }
+
+    #[test]
+    fn independent_extensions_keep_their_original_order() {
+        let items: &[(&str, &[&str])] = &[("c", &[]), ("a", &[]), ("b", &[])];
+        assert_eq!(names(items), ["c", "a", "b"]);
+    }
+
+    #[test]
+    #[should_panic(expected = "which is not linked in")]
+    fn missing_dependency_panics() {
+        order(&[("winreg", &["shell"])]);
+    }
+
+    #[test]
+    #[should_panic(expected = "cycle among extension dependencies")]
+    fn cycle_panics() {
+        order(&[("a", &["b"]), ("b", &["a"])]);
+    }
+
+    #[test]
+    #[should_panic(expected = "depends on itself")]
+    fn self_dependency_panics() {
+        order(&[("a", &["a"])]);
+    }
+
+    #[test]
+    #[should_panic(expected = "share the name")]
+    fn duplicate_name_panics() {
+        order(&[("a", &[]), ("a", &[])]);
     }
 }
