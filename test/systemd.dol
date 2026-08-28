@@ -1,0 +1,72 @@
+import systemd
+  fs:
+    - with_temp_dir
+  test:
+    - assert_eq
+    - test
+
+let ESC = str b"\x1b"
+
+#[test]
+def os_release_projections()
+  with_temp_dir do |dir|
+    let path = (dir / "os-release")
+    path.write |
+      # comments and blank lines are ignored
+      NAME="Example OS"
+      ID=example
+      ID_LIKE="debian ubuntu"
+      PRETTY_NAME="Example OS 1"
+      RELEASE_TYPE=lts
+      PORTABLE_SCOPE=user
+              
+      SYSEXT_SCOPE="system future portable"
+      PORTABLE_PREFIXES="app- app2-"
+      SUPPORT_END=2030-01-02
+      HOME_URL=https://example.com/
+
+      VENDOR_URL=not-a-url
+      ANSI_COLOR="1;38;2;1;2;3"
+      ANSI_COLOR_REVERSE="0;97;44"
+      FANCY_NAME="Fancy $ESC[31mOS$ESC[0m"
+      malformed line
+      UNKNOWN=value
+      NAME="Last name wins"
+
+    let rel = systemd.os_release path: $path
+    assert_eq $rel["NAME"] "Last name wins"
+    assert_eq $rel["UNKNOWN"] value
+    assert_eq $rel.name "Last name wins"
+    assert_eq $rel.id example
+    assert_eq $rel.pretty_name "Example OS 1"
+    assert_eq [...rel.id_like] ["debian", "ubuntu"]
+    assert_eq $rel.release_type :LTS:
+    assert_eq $rel.portable_scope :USER:
+    assert_eq [...rel.sysext_scope] [:SYSTEM:, "future", :PORTABLE:]
+    assert_eq [...rel.portable_prefixes] ["app-", "app2-"]
+    assert_eq $rel.support_end.rfc() "2030-01-02"
+    assert_eq (str rel.home_url) "https://example.com/"
+    assert_eq $rel.vendor_url nil
+    let color = rel.ansi_color
+    let reverse = rel.ansi_color_reverse
+    assert_eq (str(color "x")) "$ESC[1;38;2;1;2;3mx$ESC[0m"
+    assert_eq (str(reverse "x")) "$ESC[97;44mx$ESC[0m"
+    assert_eq (str rel.fancy_name) "Fancy $ESC[31mOS$ESC[0m"
+    assert_eq (str rel.display_name) "Fancy $ESC[31mOS$ESC[0m"
+
+#[test]
+def os_release_defaults()
+  with_temp_dir do |dir|
+    let path = (dir / "os-release")
+    path.write "UNKNOWN=value\n"
+    let rel = systemd.os_release path: $path
+    assert_eq $rel.name Linux
+    assert_eq $rel.id linux
+    assert_eq $rel.pretty_name Linux
+    assert_eq [...rel.id_like] []
+    assert_eq $rel.release_type :STABLE:
+    assert_eq $rel.portable_scope :SYSTEM:
+    assert_eq [...rel.sysext_scope] [:SYSTEM:, :PORTABLE:]
+    assert_eq [...rel.confext_scope] [:SYSTEM:, :PORTABLE:]
+    assert_eq $rel.support_end nil
+    assert_eq $rel.ansi_color nil

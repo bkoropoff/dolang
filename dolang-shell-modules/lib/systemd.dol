@@ -1,25 +1,378 @@
-import shlex
+import shlex term
   fs:
     - open
+    - Path
+  time:
+    - Date
+  url:
+    - Url
+  std:
+    - Args
+
+let ESC = str b"\x1b"
+
+let RELEASE_TYPES = $
+  "stable": :STABLE:
+  "lts": :LTS:
+  "development": :DEVELOPMENT:
+  "experiment": :EXPERIMENT:
+
+let PORTABLE_SCOPES = $
+  "system": :SYSTEM:
+  "user": :USER:
+  "any": :ANY:
+
+let EXTENSION_SCOPES = $
+  "system": :SYSTEM:
+  "initrd": :INITRD:
+  "portable": :PORTABLE:
+
+let SGR_OPTIONS = $
+  1: {bold: true}
+  2: {dim: true}
+  3: {italic: true}
+  4: {underline: true}
+  5: {blink: true}
+  6: {blink: true}
+  7: {reverse: true}
+  8: {hidden: true}
+  9: {strikethrough: true}
+  22: {bold: :INHERIT:, dim: :INHERIT:}
+  23: {italic: :INHERIT:}
+  24: {underline: :INHERIT:}
+  25: {blink: :INHERIT:}
+  27: {reverse: :INHERIT:}
+  28: {hidden: :INHERIT:}
+  29: {strikethrough: :INHERIT:}
 
 def read_keys path
   open $path do |file|
     let res = {}
     for line = file.chomp()
-      let k v = line.split = limit: 1
-      res[k] = (shlex.split v).next()
+      # Ignore comments and empty lines
+      if (line.starts_with "#" || !line.trim())
+        continue
+      try
+        let k v = shlex.split(line).next().split "=" limit: 1
+        res[k] = v
+      catch std.RuntimeError: _
+        # Ignore lines that are malformed
+        continue
     res
 
-# Returns a dict of key/value pairs from `/etc/os-release`.
+def words value
+  (value || "").split(" ").map(Str.trim).filter do |x| x
+
+def url_value value
+  if (value == nil)
+    return nil
+  try
+    Url $value
+  catch _
+    nil
+
+def support_end value
+  if (value == nil)
+    return nil
+  try
+    Date.parse_rfc $value
+  catch _
+    nil
+
+def scopes value
+  words(value).map do |item| EXTENSION_SCOPES.get $item default: $item
+
+def sgr_color code :bright = false
+  let names = [:BLACK:, :RED:, :GREEN:, :YELLOW:, :BLUE:, :MAGENTA:, :CYAN:, :WHITE:]
+  let bright_names = [
+    :BRIGHT_BLACK:, :BRIGHT_RED:, :BRIGHT_GREEN:, :BRIGHT_YELLOW:,
+    :BRIGHT_BLUE:, :BRIGHT_MAGENTA:, :BRIGHT_CYAN:, :BRIGHT_WHITE:
+  ]
+  if (code < 0 || code > 7)
+    return nil
+  if bright
+    bright_names[code]
+  else
+    names[code]
+
+def ansi_style value
+  if (value == nil)
+    return nil
+
+  let parts = value.split(";").map do |x|
+    try
+      int $x
+    catch std.ValueError: _
+      return nil
+
+  let args = Args()
+  while true
+    let code = parts.next else: do break
+    if (code == nil)
+      continue
+    if (code == 0)
+      args = Args()
+      continue
+    else if (code >= 30 && code <= 37)
+      args.push fg: $sgr_color(code - 30)
+    else if (code >= 90 && code <= 97)
+      args.push fg: $sgr_color(code - 90, bright: true)
+    else if (code >= 40 && code <= 47)
+      args.push bg: $sgr_color(code - 40)
+    else if (code >= 100 && code <= 107)
+      args.push bg: $sgr_color(code - 100, bright: true)
+    else if (code == 38 || code == 48)
+      let mode = parts.next default: nil
+      if (mode == 5)
+        let color = parts.next default: nil
+        if (color != nil && color >= 0 && color <= 255)
+          if (code == 38)
+            args.push fg: $color
+          else
+            args.push bg: $color
+      else if (mode == 2)
+        let red = parts.next default: nil
+        let green = parts.next default: nil
+        let blue = parts.next default: nil
+        if (red != nil && green != nil && blue != nil &&
+            red >= 0 && red <= 255 && green >= 0 && green <= 255 &&
+            blue >= 0 && blue <= 255)
+          if (code == 38)
+            args.push fg: $[red, green, blue]
+          else
+            args.push bg: $[red, green, blue]
+    else
+      let options = SGR_OPTIONS.get $code else: do return nil
+      args.push ...options
+  term.style ...args
+
+def fancy_value value
+  if (value == nil)
+    return nil
+  # FANCY_NAME specifies C-style escapes for terminal presentation.
+  let value = value.replace r"\033" $ESC
+  term.preformat $value
+
+# Parsed operating-system identification data with standard-aware projections.
 #
-# Keys and values follow the [os-release](https://www.freedesktop.org/software/systemd/man/os-release.html)
-# specification. Values are unquoted (shell quoting is stripped).
+# Indexing, iteration, and destructuring expose the parsed `os-release`
+# assignments. Named fields apply the defaults and conversions prescribed by
+# the os-release specification.
+pub class OsRelease
+  field values = nil
+
+  def (init) self values
+    self.#values = values
+
+  def (index) self key
+    self.#values[key]
+
+  def (iter) self
+    self.#values.iter()
+
+  def (unpack) self
+    self.#values
+
+  # The operating system name, defaulting to `Linux`.
+  #[getter]
+  pub def name self
+    self.#values.get "NAME" default: "Linux"
+
+  # The operating-system identifier, defaulting to `linux`.
+  #[getter]
+  pub def id self
+    self.#values.get "ID" default: "linux"
+
+  # The presentation name, defaulting to `Linux`.
+  #[getter]
+  pub def pretty_name self
+    self.#values.get "PRETTY_NAME" default: "Linux"
+
+  # The preformatted fancy presentation name, if defined.
+  #[getter]
+  pub def fancy_name self
+    fancy_value $ self.#values.get "FANCY_NAME" default: nil
+
+  # The fancy name when available, otherwise the ANSI-colored presentation name.
+  #[getter]
+  pub def display_name self
+    let fancy = fancy_value $ self.#values.get "FANCY_NAME" default: nil
+    if (fancy != nil)
+      return fancy
+    let color = ansi_style $ self.#values.get "ANSI_COLOR" default: nil
+    if (color == nil)
+      term.preformat $ self.#values.get "PRETTY_NAME" default: "Linux"
+    else
+      color $ self.#values.get "PRETTY_NAME" default: "Linux"
+
+  # An ordered set of compatible operating-system identifiers.
+  #[getter]
+  pub def id_like self
+    Set $ words $ self.#values.get "ID_LIKE" default: nil
+
+  # The release channel symbol, defaulting to `:STABLE:`.
+  #[getter]
+  pub def release_type self
+    let value = self.#values.get "RELEASE_TYPE" default: "stable"
+    RELEASE_TYPES.get $value default: :STABLE:
+
+  # The portable-service scope, defaulting to `:SYSTEM:`.
+  #[getter]
+  pub def portable_scope self
+    let value = self.#values.get "PORTABLE_SCOPE" default: nil
+    if (value == nil)
+      return :SYSTEM:
+    PORTABLE_SCOPES.get $value default: $value
+
+  # An ordered set of system-extension scopes.
+  #[getter]
+  pub def sysext_scope self
+    Set $ scopes $ self.#values.get "SYSEXT_SCOPE" default: "system portable"
+
+  # An ordered set of configuration-extension scopes.
+  #[getter]
+  pub def confext_scope self
+    Set $ scopes $ self.#values.get "CONFEXT_SCOPE" default: "system portable"
+
+  # An ordered set of portable-service unit-name prefixes.
+  #[getter]
+  pub def portable_prefixes self
+    Set $ words $ self.#values.get "PORTABLE_PREFIXES" default: nil
+
+  # The support end date as a UTC `Date`, if valid and defined.
+  #[getter]
+  pub def support_end self
+    support_end $ self.#values.get "SUPPORT_END" default: nil
+
+  # The terminal style specified by `ANSI_COLOR`, if defined.
+  #[getter]
+  pub def ansi_color self
+    ansi_style $ self.#values.get "ANSI_COLOR" default: nil
+
+  # The terminal style specified by `ANSI_COLOR_REVERSE`, if defined.
+  #[getter]
+  pub def ansi_color_reverse self
+    ansi_style $ self.#values.get "ANSI_COLOR_REVERSE" default: nil
+
+  # The project's home page as a `Url`, if valid and defined.
+  #[getter]
+  pub def home_url self
+    url_value $ self.#values.get "HOME_URL" default: nil
+
+  # The documentation URL as a `Url`, if valid and defined.
+  #[getter]
+  pub def documentation_url self
+    url_value $ self.#values.get "DOCUMENTATION_URL" default: nil
+
+  # The support URL as a `Url`, if valid and defined.
+  #[getter]
+  pub def support_url self
+    url_value $ self.#values.get "SUPPORT_URL" default: nil
+
+  # The bug-report URL as a `Url`, if valid and defined.
+  #[getter]
+  pub def bug_report_url self
+    url_value $ self.#values.get "BUG_REPORT_URL" default: nil
+
+  # The privacy-policy URL as a `Url`, if valid and defined.
+  #[getter]
+  pub def privacy_policy_url self
+    url_value $ self.#values.get "PRIVACY_POLICY_URL" default: nil
+
+  # The vendor's URL as a `Url`, if valid and defined.
+  #[getter]
+  pub def vendor_url self
+    url_value $ self.#values.get "VENDOR_URL" default: nil
+
+  # The experiment URL as a `Url`, if valid and defined.
+  #[getter]
+  pub def experiment_url self
+    url_value $ self.#values.get "EXPERIMENT_URL" default: nil
+
+  # The human-readable operating-system version, if defined.
+  #[getter]
+  pub def version self
+    self.#values.get "VERSION" default: nil
+
+  # The operating-system version identifier, if defined.
+  #[getter]
+  pub def version_id self
+    self.#values.get "VERSION_ID" default: nil
+
+  # The operating-system version codename, if defined.
+  #[getter]
+  pub def version_codename self
+    self.#values.get "VERSION_CODENAME" default: nil
+
+  # The human-readable operating-system variant, if defined.
+  #[getter]
+  pub def variant self
+    self.#values.get "VARIANT" default: nil
+
+  # The operating-system variant identifier, if defined.
+  #[getter]
+  pub def variant_id self
+    self.#values.get "VARIANT_ID" default: nil
+
+  # The build identifier, if defined.
+  #[getter]
+  pub def build_id self
+    self.#values.get "BUILD_ID" default: nil
+
+  # The image identifier, if defined.
+  #[getter]
+  pub def image_id self
+    self.#values.get "IMAGE_ID" default: nil
+
+  # The image version, if defined.
+  #[getter]
+  pub def image_version self
+    self.#values.get "IMAGE_VERSION" default: nil
+
+  # The CPE name, if defined.
+  #[getter]
+  pub def cpe_name self
+    self.#values.get "CPE_NAME" default: nil
+
+  # The icon name for the operating system, if defined.
+  #[getter]
+  pub def logo self
+    self.#values.get "LOGO" default: nil
+
+  # The vendor name, if defined.
+  #[getter]
+  pub def vendor_name self
+    self.#values.get "VENDOR_NAME" default: nil
+
+  # The experiment identifier, if defined.
+  #[getter]
+  pub def experiment self
+    self.#values.get "EXPERIMENT" default: nil
+
+  # The default hostname, if defined.
+  #[getter]
+  pub def default_hostname self
+    self.#values.get "DEFAULT_HOSTNAME" default: nil
+
+  # The system-extension compatibility level, if defined.
+  #[getter]
+  pub def sysext_level self
+    self.#values.get "SYSEXT_LEVEL" default: nil
+
+  # The configuration-extension compatibility level, if defined.
+  #[getter]
+  pub def confext_level self
+    self.#values.get "CONFEXT_LEVEL" default: nil
+
+# Returns parsed OS-identification data from an `os-release` file.
 #
-# **Example:**
-# ```
-# import systemd
-# let rel = systemd.os_release()
-# echo $rel["NAME"]   # e.g. "Fedora Linux"
-# ```
-pub def os_release()
-  read_keys /etc/os-release
+# When `path:` is omitted, reads `/etc/os-release`, falling back to
+# `/usr/lib/os-release` as required by the os-release specification.
+pub def os_release :path = nil
+  if (path == nil)
+    let etc = Path /etc/os-release
+    path = if etc.exists()
+      etc
+    else
+      Path /usr/lib/os-release
+  OsRelease (read_keys path)
