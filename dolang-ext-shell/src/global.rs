@@ -52,7 +52,7 @@ use crate::{
         AccessMask, Ace, AceFlags, Acl, Identity, MacosAceFlags, MacosAceMask, MacosAceObject,
         MacosAclObject, Nfs4AceFlags, Nfs4AceMask, Nfs4AceObject, Nfs4AclObject, Permission,
         PosixAceObject, PosixAclObject, SecDesc, SecDescControl, SecInfo, Sid, SidName, TokenGroup,
-        TokenGroupAttributes, TokenInfo,
+        TokenGroupAttributes, TokenInfo, WellKnownSids,
     },
     shell::{Stderr, Stdin, Stdout, Vfs},
     shell_args::ArgsData,
@@ -246,6 +246,8 @@ pub(crate) struct Syms<'v> {
     pub(crate) sacl_auto_inherited: Sym<'v, 'v>,
     pub(crate) sacl_protected: Sym<'v, 'v>,
     pub(crate) rm_control: Sym<'v, 'v>,
+    /// The symbols naming well-known Windows SIDs.
+    pub(crate) well_known_sids: WellKnownSids<'v>,
 }
 
 #[derive(Clone)]
@@ -772,6 +774,7 @@ impl<'v> Global<'v> {
                 sacl_auto_inherited: builder.sym("sacl_auto_inherited"),
                 sacl_protected: builder.sym("sacl_protected"),
                 rm_control: builder.sym("rm_control"),
+                well_known_sids: WellKnownSids::new(builder),
             },
             local: builder.local(),
             capture: builder.local_root(),
