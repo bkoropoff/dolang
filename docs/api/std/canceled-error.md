@@ -7,3 +7,15 @@ masked so cleanup can complete. See
 ## Inherits
 
 - [`Error`](./error.md)
+
+## Constructor
+
+### `CanceledError`
+
+Builds an error reporting that a strand was canceled.
+
+#### Example
+
+```
+throw CanceledError()
+```

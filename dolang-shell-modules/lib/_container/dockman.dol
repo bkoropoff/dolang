@@ -115,28 +115,22 @@ pub class InvalidImageReferenceError: RuntimeError
   pub field ref = nil
 
   def (init) self ref
+    RuntimeError.(init) $self "invalid image reference: $ref"
     self.ref = ref
-
-  pub def (str) self
-    "invalid image reference: $(self.ref)"
 
 pub class RegistryAuthError: RuntimeError
   pub field ref = nil
 
   def (init) self ref
+    RuntimeError.(init) $self "registry authentication failed: $ref"
     self.ref = ref
-
-  pub def (str) self
-    "registry authentication failed: $(self.ref)"
 
 pub class ArchiveError: RuntimeError
   pub field source = nil
 
   def (init) self source
+    RuntimeError.(init) $self "archive operation failed: $source"
     self.source = source
-
-  pub def (str) self
-    "archive operation failed: $(self.source)"
 
 # Raised when an image reference cannot be found.
 #
@@ -153,10 +147,8 @@ pub class NoImageError: RuntimeError
   pub field ref = nil
 
   def (init) self ref
+    RuntimeError.(init) $self "image not found: $ref"
     self.ref = ref
-
-  pub def (str) self
-    "image not found: $(self.ref)"
 
   pub def (dbg) self
     "<NoImageError ref: $(dbg self.ref)>"
@@ -165,10 +157,8 @@ pub class NoContainerError: RuntimeError
   pub field ref = nil
 
   def (init) self ref
+    RuntimeError.(init) $self "container not found: $ref"
     self.ref = ref
-
-  pub def (str) self
-    "container not found: $(self.ref)"
 
   pub def (dbg) self
     "<NoContainerError ref: $(dbg self.ref)>"
@@ -179,10 +169,8 @@ pub class ContainerExitError: RuntimeError
   pub field rc = nil
 
   def (init) self rc
+    RuntimeError.(init) $self "container exited with status: $rc"
     self.rc = rc
-
-  pub def (str) self
-    "container exited with status: $(self.rc)"
 
   pub def (dbg) self
     "<ContainerExitError rc: $(self.rc)>"

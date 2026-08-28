@@ -2,6 +2,9 @@
 
 Raised on bytecode verification errors.
 
+`BytecodeError` is sealed: it is raised only by bytecode verification, and can
+be neither constructed nor subclassed.
+
 ## Inherits
 
-- [`Error`](./error.md)
+- [`RuntimeError`](./runtime-error.md)
