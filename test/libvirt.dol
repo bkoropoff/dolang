@@ -1,4 +1,4 @@
-import digest libvirt proc progress rand sys
+import digest http libvirt proc progress rand regex std sys transfer
   fs:
     - Path
     - with_temp_dir
@@ -19,14 +19,6 @@ let DOLANG = if let archive = env.get "DOLANG_LIBVIRT_TEST_ARCHIVE"
 else
   "bootstrap"
 
-# Windows media is not redistributable, so the unattended-install test runs
-# only where someone has pointed it at an installer ISO and the virtio driver
-# ISO Setup needs to see the disk at all. Both unset is the normal case,
-# including in CI, and skips rather than fails.
-let WINDOWS_INSTALLER = env.get "DOLANG_LIBVIRT_TEST_WINDOWS_INSTALLER"
-let WINDOWS_DRIVERS = env.get "DOLANG_LIBVIRT_TEST_WINDOWS_DRIVERS"
-# Only needed for multi-edition media, which stops to ask otherwise.
-let WINDOWS_EDITION = env.get "DOLANG_LIBVIRT_TEST_WINDOWS_EDITION"
 # The guest payload is a Windows archive, so it cannot come from
 # `DOLANG_LIBVIRT_TEST_ARCHIVE`, which is the host's own platform.
 let WINDOWS_DOLANG = if let archive = env.get "DOLANG_LIBVIRT_TEST_WINDOWS_ARCHIVE"
@@ -116,8 +108,6 @@ def provision_freebsd_and_run_command()
 #[test]
 #[cached]
 def install_windows_and_run_command()
-  if (WINDOWS_INSTALLER == nil || WINDOWS_DRIVERS == nil)
-    skip "DOLANG_LIBVIRT_TEST_WINDOWS_INSTALLER and _DRIVERS are not set"
   # Neither is needed by the cloud-init path the module-level probe checks, so
   # they are checked here instead of skipping the whole file for their sake.
   for program = ["swtpm", "swtpm_setup"]
@@ -130,6 +120,7 @@ def install_windows_and_run_command()
   if !iso_program
     skip "neither xorrisofs nor mkisofs is installed"
 
+  let installer drivers = windows_media()
   with_temp_dir do |dir|
     let source = (dir / "upload.bin")
     let downloaded = (dir / "download.bin")
@@ -138,8 +129,8 @@ def install_windows_and_run_command()
     let expected = digest.blake3 $source_data
 
     let domain = libvirt.create
-      installer: $windows_installer()
-      drivers: $WINDOWS_DRIVERS
+      installer: $installer
+      drivers: $drivers
       os: :WINDOWS:
       dolang: $WINDOWS_DOLANG
       app: dolang-libvirt-test
@@ -205,20 +196,28 @@ def install_windows_and_run_command()
         domain.destroy()
       domain.undefine()
 
-# The installer spec, which carries `edition:` alongside the source when the
-# media holds more than one and Setup would otherwise stop to ask.
-#
-# The source stays a `Str` rather than being wrapped in a `Path`: the module
-# resolves either a local path or a URL out of one, and CI points this at a
-# URL scraped from the Evaluation Center, whose media is not redistributable
-# and so cannot be checked in or mirrored.
-def windows_installer()
-  if (WINDOWS_EDITION == nil)
-    return WINDOWS_INSTALLER
-  let spec = $
-    source: $WINDOWS_INSTALLER
-    edition: $WINDOWS_EDITION
-  spec
+# Windows media is not redistributable, and neither source has a stable URL:
+# the Evaluation Center changes its fwlink with each media refresh and the
+# virtio "stable" URL redirects to each new driver release. Resolve both
+# redirectors so the transfer cache keys each ISO by its actual version.
+def windows_media()
+  let page_url = "https://www.microsoft.com/en-us/evalcenter/download-windows-11-enterprise"
+  # The anchor's `aria-label` is the link's visible text, and the only durable
+  # handle on the page. This excludes the LTSC link, whose label puts `LTSC`
+  # between `ISO` and `64-bit`.
+  let link = regex.Regex r#"<a[^>]*aria-label="[^"]*Windows 11 Enterprise ISO 64-bit \(en-US\)"[^>]*href="(https://go\.microsoft\.com/fwlink/[^"]+)""#
+  let page = (transfer.get page_url app: "dolang-libvirt-test").read()
+  let found = link.match $page
+  if !found
+    throw std.ValueError "no Windows 11 Enterprise en-US 64-bit ISO link on $page_url"
+
+  def resolve url
+    http.head $url do |resp| resp.url
+
+  let installer = resolve $ str $found[1]
+  let drivers = resolve
+    "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso"
+  [installer, drivers]
 
 # Mints a bundle from the provisioned domain and brings a second domain up from
 # it, which is the whole point of the format: no seed, no cloud-init, no payload
