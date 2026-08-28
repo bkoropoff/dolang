@@ -108,12 +108,21 @@ def configure_cargo()
   export CARGO_PROFILE_TEST_DEBUG line-tables-only
 
 # Installs the virtualization packages a session-mode libvirt domain needs.
+#
+# The last line is what a Windows guest needs beyond a cloud-init one: `ovmf`
+# for the UEFI firmware and its secure-boot variable template, `swtpm-tools`
+# for the vTPM 2.0 the installer refuses to run without, and `xorriso` for the
+# provisioning disc (`cloud-localds` covers only the cloud-init path). None of
+# it is optional for that test — the test *skips* when they are missing rather
+# than failing, so leaving them out is how the whole thing quietly does
+# nothing.
 def install_virt()
   sudo.with do
     run apt-get update
     run apt-get install -y
       libvirt-daemon-system libvirt-clients qemu-system-x86 qemu-utils
       passt cloud-image-utils openssh-client apparmor-utils
+      ovmf swtpm swtpm-tools xorriso
 
 # Grants KVM access and unconfines user namespaces enough for session-mode
 # libvirt to start a domain.

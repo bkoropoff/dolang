@@ -283,6 +283,11 @@ pub def build()
     memory: 12288
     vcpus: 4
     disk_size: 50G
+    # This runs under the bootstrap release, not the build this workflow
+    # produces, so it is still the top-level `packages:` that release's
+    # `libvirt` module takes. It moves under `init:`, where the rest of
+    # cloud-init's provisioning lives, once a bootstrap cycle has carried the
+    # relocation into the release that runs this.
     packages: $PACKAGES
     init:
       # Grants the `ci` user passwordless sudo, so shell tests can provision

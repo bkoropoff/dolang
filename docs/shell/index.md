@@ -61,15 +61,10 @@ The executed script path is available as `shell.program`.
 ```
 dolang -m dodo --list
 dolang -m test -- test
-dolang -m ssh build.example.com build.dol
-dolang -m libvirt freebsd-build build.dol
 ```
 
 Symlink aliases such as `dodo` and `dolang-test` select the corresponding
-entrypoint implicitly when available. The [`ssh` entrypoint](./ssh.md)
-compiles a local script and executes it through a remote VFS context. The
-[`libvirt` entrypoint](./libvirt.md#running-a-script-in-a-domain) does the
-same through an existing domain created by the `libvirt` module.
+entrypoint implicitly when available.
 
 ### Companion Programs
 
