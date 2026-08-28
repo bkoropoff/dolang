@@ -1,0 +1,88 @@
+import
+  std:
+    - AbortError
+    - RuntimeError
+    - TimedOutError
+    - ValueError
+
+# A subclass chains to the variant constructor and inherits its display.
+class ParseError: ValueError
+  pub field line = nil
+
+  def (init) self line
+    ValueError.(init) $self "bad syntax on line $line"
+    self.line = line
+
+let parse = ParseError 12
+assert_eq (type parse) $ParseError
+assert_eq (str parse) "value error: bad syntax on line 12"
+assert_eq $parse.line 12
+assert (type parse ValueError)
+assert (type parse RuntimeError)
+
+# A locally defined `(str)` wins over the inherited one.
+class Quiet: ValueError
+  pub field tag = nil
+
+  def (init) self tag
+    ValueError.(init) $self "loud"
+    self.tag = tag
+
+  pub def (str) self
+    "quiet: $(self.tag)"
+
+assert_eq (str (Quiet "x")) "quiet: x"
+
+# A zero-argument variant is subclassable the same way.
+class GuestTimeout: TimedOutError
+  pub field guest = nil
+
+  def (init) self guest
+    TimedOutError.(init) $self
+    self.guest = guest
+
+let timeout = GuestTimeout "builder"
+assert_eq (str timeout) "strand timed out"
+assert_eq $timeout.guest "builder"
+assert (type timeout TimedOutError)
+assert (type timeout RuntimeError)
+
+# Typed `catch` filters on both the variant and its supertypes.
+def caught_as ty
+  try
+    throw ParseError 7
+  catch ty: _
+    return true
+  catch _
+    return false
+
+assert (caught_as ParseError)
+assert (caught_as ValueError)
+assert (caught_as RuntimeError)
+assert (!(caught_as TimedOutError))
+
+# A subclass that never chains leaves the inherited representation empty.
+class Unchained: ValueError
+  pub field ready = false
+
+  def (init) self
+    self.ready = true
+
+let unchained = try
+  Unchained()
+  nil
+catch e
+  str $e
+assert_eq $unchained "native supertypes not initialized"
+
+# `AbortError` is sealed: it has no constructor to chain to.
+class SubAbort: AbortError
+  def (init) self
+    AbortError.(init) $self "stop"
+
+let sealed = try
+  SubAbort()
+  nil
+catch e
+  str $e
+assert_eq $sealed "type error: Abort cannot be subclassed"

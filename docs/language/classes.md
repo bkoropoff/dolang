@@ -301,6 +301,45 @@ class Cat: Animal
     self.indoor = indoor
 ```
 
+### Inheriting from a Built-in Type
+
+A class may also inherit from a built-in type such as
+[`Str`](../api/std/str.md), [`RuntimeError`](../api/std/runtime-error.md), or
+[`term.Geometry`](../api/term/geometry.md). Such a supertype brings a
+representation of its own, which `(init)` must initialize by chaining:
+
+```
+class Tagged: Str
+  pub field tag = nil
+
+  def (init) self value tag
+    Str.(init) $self $value
+    self.tag = tag
+
+let t = Tagged "hello" :greeting:
+assert_eq (str t) "hello"
+assert_eq $t.len 5
+```
+
+The chained call gives the instance its inherited behavior: `Tagged` above gets
+`str`, `len`, comparison, and the rest from the `Str` it was initialized with.
+Skipping the call leaves that representation empty, and the constructor fails
+with `native supertypes not initialized` rather than producing a half-built
+object. A few types — [`AbortError`](../api/std/abort-error.md) among them —
+are sealed and have no constructor to chain to.
+
+Overriding a special method takes precedence over the inherited one, so a
+subclass can keep the representation and still present itself differently:
+
+```
+class Quiet: Str
+  def (init) self value
+    Str.(init) $self $value
+
+  pub def (dbg) self
+    "<Quiet $(Str.(dbg) self)>"
+```
+
 ## Type Inspection
 
 The `type` builtin works with classes:

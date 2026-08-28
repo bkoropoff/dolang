@@ -4,4 +4,16 @@ Raised on integer division or modulo by zero.
 
 ## Inherits
 
-- [`Error`](./error.md)
+- [`RuntimeError`](./runtime-error.md)
+
+## Constructor
+
+### `ZeroDivError`
+
+Builds an error reporting division by an integer zero.
+
+#### Example
+
+```
+throw ZeroDivError()
+```

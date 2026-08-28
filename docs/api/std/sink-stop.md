@@ -2,8 +2,18 @@
 
 Error raised to signal that a sink has been closed.
 
-`SinkStop` is not constructible directly.
-
 ## Inherits
 
 - [`Error`](./error.md)
+
+## Constructor
+
+### `SinkStop`
+
+Builds the signal that a sink has been closed.
+
+#### Example
+
+```
+throw SinkStop()
+```

@@ -11,7 +11,7 @@ use std::{
 
 use crate::{
     arg::Args,
-    error::{Error, Result},
+    error::{Error, ErrorKind, Result},
     gc::{
         self, Base, Collect,
         arena::{self, Upcast, Visit},
@@ -2531,6 +2531,12 @@ pub(crate) struct ObjectVtbl<'v> {
     pub(crate) entries: alias::Box<[(Sym<'v, 'v>, Entry<'v>)]>,
     /// Index into `Vm::type_singletons` for the type object singleton for this type.
     pub(crate) singleton_idx: usize,
+    /// The [`ErrorKind`] instances of this type report, derived at registration
+    /// time from the first `std` error variant among its nominal supertypes.
+    ///
+    /// A native type cannot hold a boxed error's representation, so it declares
+    /// its kind here instead; see [`crate::error::Error::kind`].
+    pub(crate) error_kind: Option<ErrorKind>,
 }
 
 impl<'v> ObjectVtbl<'v> {
@@ -2628,7 +2634,11 @@ impl<'v, 'a> TypeBuilderInner<'v, 'a> {
             panic!("native object supertype must support inspect");
         };
         if !inspect.is_abstract {
-            panic!("native object supertype must be abstract");
+            panic!(
+                "native object supertype must be abstract; a concrete supertype's representation \
+                 cannot be inherited by a native type, so use `nominal_supertype` and implement \
+                 its interface directly"
+            );
         }
         self.supertypes.push(supertype);
     }
@@ -2684,6 +2694,19 @@ impl<'v, 'a> TypeBuilderInner<'v, 'a> {
             }
         }
 
+        // Derive the reported error kind from the nominal supertypes rather than
+        // taking it as a separate builder setting, so it cannot drift from the
+        // subtype relation the same declaration establishes.
+        let error_kind = self.nominal_supertypes.iter().find_map(|supertype| {
+            let variant = supertype.downcast_ref(self.vm.builtin_types().error_variant_type)?;
+            let kind = variant.get().0;
+            assert!(
+                kind != ErrorKind::Abort,
+                "std.AbortError cannot be a nominal supertype"
+            );
+            Some(kind)
+        });
+
         let entries = merge_entries(self.entries);
         let type_entries = merge_entries(self.type_entries);
 
@@ -2693,7 +2716,12 @@ impl<'v, 'a> TypeBuilderInner<'v, 'a> {
             base: inst_vtbl_base,
             entries: entries.into(),
             singleton_idx: idx,
+            error_kind,
         });
+
+        if error_kind.is_some() {
+            self.vm.inner.error_kind_vtbls.push(inst_vtbl);
+        }
 
         let type_vtbl = self.vm.inner.types.register(TypeVtbl {
             base: type_vtbl_base,
@@ -3806,8 +3834,27 @@ mod tests {
         }
     }
 
+    /// A native object type that claims an `std` error kind by nominal
+    /// supertype, the way an extension's error type does. Used to check that
+    /// `Error::kind` classifies its instances by the declared kind rather than
+    /// falling back to `Runtime`.
+    struct ErrorFixture;
+
+    impl<'v> Object<'v> for ErrorFixture {
+        const MODULE: &'v str = "test";
+        const NAME: &'v str = "ErrorFixture";
+        type Annex = ();
+        type Type = ();
+        type TypeAnnex = ();
+
+        fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
+            builder.nominal_supertype(TypeObject::ValueError)
+        }
+    }
+
     struct FixtureState<'v> {
         fixture_ty: Type<'v, Fixture>,
+        error_ty: Type<'v, ErrorFixture>,
         slot_ty: Type<'v, SlotFixture>,
         bump_sym: Sym<'v, 'v>,
         counter_sym: Sym<'v, 'v>,
@@ -3827,6 +3874,7 @@ mod tests {
 
     fn configure(vm: &mut Builder<'_>) {
         let fixture_ty = vm.register_type::<Fixture>();
+        let error_ty = vm.register_type::<ErrorFixture>();
         let slot_ty = vm.register_type::<SlotFixture>();
         let bump_sym = vm.sym("bump");
         let counter_sym = vm.sym("counter");
@@ -3838,6 +3886,7 @@ mod tests {
         let readonly_sym = vm.sym("readonly");
         vm.register_state(FixtureState {
             fixture_ty,
+            error_ty,
             slot_ty,
             bump_sym,
             counter_sym,
@@ -4950,6 +4999,27 @@ mod tests {
             }
             assert_eq!(*state.slot_ty.borrow(strand).unwrap(), 6);
             assert_eq!(*state.slot_ty.annex(strand.vm()), 0);
+        });
+    }
+
+    #[test]
+    fn error_kind_follows_the_declared_nominal_supertype() {
+        with_fixture_vm(async |strand, [mut declared, mut plain]| {
+            let state = strand.vm().state::<FixtureState>();
+            state
+                .error_ty
+                .create(strand, ErrorFixture, Slot::reborrow(&mut declared));
+            state
+                .fixture_ty
+                .create(strand, Fixture, Slot::reborrow(&mut plain));
+
+            let err = Error::from_value(strand, &declared);
+            assert_eq!(err.kind(), ErrorKind::Value);
+            assert!(err.catchable());
+
+            // A type that declares no error supertype is still just a runtime error.
+            let err = Error::from_value(strand, &plain);
+            assert_eq!(err.kind(), ErrorKind::Runtime);
         });
     }
 

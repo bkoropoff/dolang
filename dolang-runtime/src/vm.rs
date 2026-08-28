@@ -29,7 +29,7 @@ use crate::{
         BuiltinTypes, Singletons, TypeTable,
         function::NativeFunction,
         module::{Native as NativeModule, NativeField},
-        native::{Object, Type, TypeBuilder},
+        native::{Object, ObjectVtbl, Type, TypeBuilder},
         protocol::{GcObj, Header},
         sym::SymObj,
     },
@@ -143,6 +143,14 @@ pub struct Vm<'v> {
     pub(crate) types: TypeTable<'v>,
     /// Class object singletons for user-registered [`Object`] types.
     pub(crate) type_singletons: Vec<Value<'v>>,
+    /// Instance vtbls of user-registered [`Object`] types that declared an error
+    /// kind via a nominal supertype.
+    ///
+    /// A native error type carries its own representation rather than a boxed
+    /// error, so [`crate::error::Error::kind`] classifies its instances by
+    /// looking their vtbl up here. Only types that declared a kind appear, which
+    /// in practice is a handful per VM.
+    pub(crate) error_kind_vtbls: Vec<NonNull<ObjectVtbl<'v>>>,
     pub(crate) locals: Vec<LocalVtbl<'v>>,
     pub(crate) local_root_count: usize,
     pub(crate) spawn_tx: RefCell<Option<mpsc::UnboundedSender<SpawnedFuture<'v>>>>,
@@ -798,6 +806,7 @@ impl Builder<'static> {
                 spawn_tx: Default::default(),
                 strings: Default::default(),
                 type_singletons: Default::default(),
+                error_kind_vtbls: Default::default(),
             },
         };
 

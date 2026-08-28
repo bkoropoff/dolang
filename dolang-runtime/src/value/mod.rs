@@ -385,6 +385,23 @@ impl<'v> Value<'v> {
         }
     }
 
+    /// The [`ErrorKind`] a native [`object::native::Object`] type declared for
+    /// its instances, via an `std` error variant among its nominal supertypes.
+    ///
+    /// Such a type has its own representation and so cannot carry a boxed error
+    /// the way a Do subclass of an error variant does; this is how it answers
+    /// the classification half of the error interface instead.
+    pub(crate) fn declared_error_kind(&self, vm: &Vm<'v>) -> Option<ErrorKind> {
+        let Case::Object(o) = self.case() else {
+            return None;
+        };
+        let vtbl: *const object::protocol::Vtbl<'v> = unsafe { o.base_get().vtbl() };
+        vm.error_kind_vtbls
+            .iter()
+            .find(|candidate| ptr::eq(candidate.as_ptr().cast_const().cast(), vtbl))
+            .and_then(|candidate| unsafe { candidate.as_ref() }.error_kind)
+    }
+
     pub(crate) fn downcast_ref<T: ?Sized + Protocol<'v>>(
         &self,
         handle: TypeHandle<'v, T>,
@@ -2573,14 +2590,52 @@ pub enum TypeObject {
     Value,
     /// `std.Type`, the type of types
     Type,
-    /// `std.Value`
-    ValueError,
-    /// `std.Runtime`
-    RuntimeError,
-    /// `std.TimedOutError`
-    TimedOutError,
+    /// `std.Error`, the supertype of every error type
+    Error,
     /// `std.UnsupportedError`
     UnsupportedError,
+    /// `std.ImmutableError`
+    ImmutableError,
+    /// `std.ConcurrencyError`
+    ConcurrencyError,
+    /// `std.TypeError`
+    TypeError,
+    /// `std.ValueError`
+    ValueError,
+    /// `std.StateError`
+    StateError,
+    /// `std.IndexError`
+    IndexError,
+    /// `std.FieldError`
+    FieldError,
+    /// `std.UnexpectedPosError`
+    UnexpectedPosError,
+    /// `std.UnexpectedKeyError`
+    UnexpectedKeyError,
+    /// `std.MissingPosError`
+    MissingPosError,
+    /// `std.MissingKeyError`
+    MissingKeyError,
+    /// `std.OverflowError`
+    OverflowError,
+    /// `std.ZeroDivError`
+    ZeroDivError,
+    /// `std.SinkStop`
+    SinkStop,
+    /// `std.IterStop`
+    IterStop,
+    /// `std.CyclicImportError`
+    CyclicImportError,
+    /// `std.ImportError`
+    ImportError,
+    /// `std.CompileError`
+    CompileError,
+    /// `std.RuntimeError`
+    RuntimeError,
+    /// `std.CanceledError`
+    CanceledError,
+    /// `std.TimedOutError`
+    TimedOutError,
     /// `std.Iter`
     Iter,
     /// `std.Iterable`
@@ -2601,10 +2656,29 @@ impl<'v> Input<'v> for TypeObject {
         InputBy::Borrow(match self {
             TypeObject::Value => &builtins.value,
             TypeObject::Type => &builtins.type_obj,
-            TypeObject::ValueError => &builtins.error_value,
-            TypeObject::RuntimeError => &builtins.error_runtime,
-            TypeObject::TimedOutError => &builtins.error_timed_out,
+            TypeObject::Error => &builtins.error,
             TypeObject::UnsupportedError => &builtins.error_unsupported,
+            TypeObject::ImmutableError => &builtins.error_immutable,
+            TypeObject::ConcurrencyError => &builtins.error_concurrency,
+            TypeObject::TypeError => &builtins.error_type,
+            TypeObject::ValueError => &builtins.error_value,
+            TypeObject::StateError => &builtins.error_state,
+            TypeObject::IndexError => &builtins.error_index,
+            TypeObject::FieldError => &builtins.error_field,
+            TypeObject::UnexpectedPosError => &builtins.error_unexpected_pos,
+            TypeObject::UnexpectedKeyError => &builtins.error_unexpected_key,
+            TypeObject::MissingPosError => &builtins.error_missing_pos,
+            TypeObject::MissingKeyError => &builtins.error_missing_key,
+            TypeObject::OverflowError => &builtins.error_overflow,
+            TypeObject::ZeroDivError => &builtins.error_zerodiv,
+            TypeObject::SinkStop => &builtins.error_sink_stop,
+            TypeObject::IterStop => &builtins.error_iter_stop,
+            TypeObject::CyclicImportError => &builtins.error_cyclic_import,
+            TypeObject::ImportError => &builtins.error_import,
+            TypeObject::CompileError => &builtins.error_compile,
+            TypeObject::RuntimeError => &builtins.error_runtime,
+            TypeObject::CanceledError => &builtins.error_canceled,
+            TypeObject::TimedOutError => &builtins.error_timed_out,
             TypeObject::Iter => &builtins.input_iter,
             TypeObject::Iterable => &builtins.iterable,
             TypeObject::Sink => &builtins.output_iter,

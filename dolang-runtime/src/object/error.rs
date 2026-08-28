@@ -12,6 +12,7 @@ use crate::{
     error::{Error, ErrorKind, Result},
     gc::{Collect, arena::Visit},
     strand::Strand,
+    sym::{self, Sym},
     unpack,
     value::{Output, Slot, Value},
     vm::Vm,
@@ -135,34 +136,8 @@ impl<'v> Protocol<'v> for Boxed<'v> {
         strand: &'a mut Strand<'v, 's>,
         mut out: Slot<'v, 'a>,
     ) {
-        let class = strand.singletons();
-        let err = this.get().kind();
-        out.store(match err {
-            ErrorKind::Unsupported => class.error_unsupported.dup(),
-            ErrorKind::Immutable => class.error_immutable.dup(),
-            ErrorKind::Concurrency => class.error_concurrency.dup(),
-            ErrorKind::Type => class.error_type.dup(),
-            ErrorKind::Value => class.error_value.dup(),
-            ErrorKind::State => class.error_state.dup(),
-            ErrorKind::Index => class.error_index.dup(),
-            ErrorKind::Field => class.error_field.dup(),
-            ErrorKind::UnexpectedPos => class.error_unexpected_pos.dup(),
-            ErrorKind::UnexpectedKey => class.error_unexpected_key.dup(),
-            ErrorKind::MissingPos => class.error_missing_pos.dup(),
-            ErrorKind::MissingKey => class.error_missing_key.dup(),
-            ErrorKind::Overflow => class.error_overflow.dup(),
-            ErrorKind::ZeroDiv => class.error_zerodiv.dup(),
-            ErrorKind::SinkStop => class.error_sink_stop.dup(),
-            ErrorKind::IterStop => class.error_iter_stop.dup(),
-            ErrorKind::CyclicImport => class.error_cyclic_import.dup(),
-            ErrorKind::Import => class.error_import.dup(),
-            ErrorKind::Compile => class.error_compile.dup(),
-            ErrorKind::Bytecode => class.error_bytecode.dup(),
-            ErrorKind::Runtime => class.error_runtime.dup(),
-            ErrorKind::Abort => class.error_abort.dup(),
-            ErrorKind::Canceled => class.error_canceled.dup(),
-            ErrorKind::TimedOut => class.error_timed_out.dup(),
-        })
+        let kind = this.get().kind();
+        out.store(variant_singleton(strand, kind).dup())
     }
 
     fn op_display<'a, 's>(
@@ -277,10 +252,13 @@ impl<'v> Protocol<'v> for VariantType {
         crate::fmt!(strand, w, "<type std.{}>", variant_name(this.get().0))
     }
 
-    fn op_inspect<'a>(this: Recv<'v, 'a, Self>, _vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {
+    fn op_inspect<'a>(_this: Recv<'v, 'a, Self>, _vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {
         Some(Inspect {
-            is_abstract: this.get().0 == ErrorKind::Runtime,
-            members: Vec::new(),
+            is_abstract: false,
+            members: vec![
+                Sym::well_known(sym::STR_METHOD),
+                Sym::well_known(sym::DBG_METHOD),
+            ],
         })
     }
 
@@ -290,123 +268,207 @@ impl<'v> Protocol<'v> for VariantType {
         args: Args<'v, 'a>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        let kind = this.get().0;
-        let mut error = match kind {
-            ErrorKind::Unsupported => {
-                let ([], []) = unpack!(strand, args, 0, 0)?;
-                Error::not_supported(strand)
-            }
-            ErrorKind::Immutable => {
-                let ([], []) = unpack!(strand, args, 0, 0)?;
-                Error::immutable(strand)
-            }
-            ErrorKind::Concurrency => {
-                let ([], [msg]) = unpack!(strand, args, 0, 1)?;
-                match msg {
-                    Some(msg) => {
-                        let msg = expect_string(strand, &msg)?;
-                        Error::concurrency_msg(strand, msg)
-                    }
-                    None => Error::concurrency(strand),
-                }
-            }
-            ErrorKind::Type => {
-                let ([msg], []) = unpack!(strand, args, 1, 0)?;
-                let msg = expect_string(strand, &msg)?;
-                Error::type_error(strand, msg)
-            }
-            ErrorKind::Value => {
-                let ([msg], []) = unpack!(strand, args, 1, 0)?;
-                let msg = expect_string(strand, &msg)?;
-                Error::value(strand, msg)
-            }
-            ErrorKind::State => {
-                let ([msg], []) = unpack!(strand, args, 1, 0)?;
-                let msg = expect_string(strand, &msg)?;
-                Error::state_error(strand, msg)
-            }
-            ErrorKind::Index => {
-                let ([], []) = unpack!(strand, args, 0, 0)?;
-                Error::index(strand)
-            }
-            ErrorKind::Field => {
-                let ([name], []) = unpack!(strand, args, 1, 0)?;
-                let name = name
-                    .as_sym(strand)
-                    .ok_or_else(|| Error::type_error(strand, "expected `Sym`"))?;
-                Error::field(strand, name)
-            }
-            ErrorKind::UnexpectedPos => {
-                let ([index], []) = unpack!(strand, args, 1, 0)?;
-                let index = expect_index(strand, &index)?;
-                Error::unexpected_positional(strand, index)
-            }
-            ErrorKind::UnexpectedKey => {
-                let ([key], []) = unpack!(strand, args, 1, 0)?;
-                Error::unexpected_key(strand, key)
-            }
-            ErrorKind::MissingPos => {
-                let ([index], []) = unpack!(strand, args, 1, 0)?;
-                let index = expect_index(strand, &index)?;
-                Error::missing_positional(strand, index)
-            }
-            ErrorKind::MissingKey => {
-                let ([key], []) = unpack!(strand, args, 1, 0)?;
-                Error::missing_key(strand, key)
-            }
-            ErrorKind::Overflow => {
-                let ([], []) = unpack!(strand, args, 0, 0)?;
-                Error::overflow(strand)
-            }
-            ErrorKind::ZeroDiv => {
-                let ([], []) = unpack!(strand, args, 0, 0)?;
-                Error::zero_div(strand)
-            }
-            ErrorKind::SinkStop => {
-                let ([], []) = unpack!(strand, args, 0, 0)?;
-                Error::sink_stop(strand)
-            }
-            ErrorKind::IterStop => {
-                let ([], []) = unpack!(strand, args, 0, 0)?;
-                Error::iter_stop(strand)
-            }
-            ErrorKind::CyclicImport => {
-                let ([name], []) = unpack!(strand, args, 1, 0)?;
-                let name = expect_string(strand, &name)?;
-                Error::cyclic_import(strand, name.as_ref())
-            }
-            ErrorKind::Import => {
-                let ([name], []) = unpack!(strand, args, 1, 0)?;
-                let name = expect_string(strand, &name)?;
-                Error::import(strand, name.as_ref())
-            }
-            ErrorKind::Compile => {
-                let ([msg], []) = unpack!(strand, args, 1, 0)?;
-                let msg = expect_string(strand, &msg)?;
-                Error::compile(strand, msg)
-            }
-            ErrorKind::Bytecode | ErrorKind::Abort => {
-                return Err(Error::type_error(
-                    strand,
-                    format!("{} is not instantiable", variant_name(kind)),
-                ));
-            }
-            ErrorKind::Runtime => {
-                let ([msg], []) = unpack!(strand, args, 1, 0)?;
-                let msg = expect_string(strand, &msg)?;
-                Error::runtime(strand, msg)
-            }
-            ErrorKind::Canceled => {
-                let ([], []) = unpack!(strand, args, 0, 0)?;
-                Error::canceled(strand)
-            }
-            ErrorKind::TimedOut => {
-                let ([], []) = unpack!(strand, args, 0, 0)?;
-                Error::timed_out(strand)
-            }
-        };
+        let mut error = construct(this.get().0, strand, args)?;
         error.get_value(strand, out);
         Ok(())
+    }
+
+    async fn op_mcall<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        method: Sym<'v, 'a>,
+        args: Args<'v, 'a>,
+        mut out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        let kind = this.get().0;
+        match method.tag() {
+            sym::INIT_METHOD => {
+                if !is_constructible(kind) {
+                    return Err(Error::type_error(
+                        strand,
+                        format!("{} cannot be subclassed", variant_name(kind)),
+                    ));
+                }
+                let ([self_val], [], rest) = unpack!(strand, args, 1, 0, ...)?;
+                let mut error = construct(kind, strand, rest)?;
+                error.get_value(strand, Slot::reborrow(&mut out));
+                let native = out.take();
+                self_val.op_fill(strand, variant_singleton(strand, kind), native)
+            }
+            _ => {
+                strand
+                    .with_slots(async move |strand, [mut func]| {
+                        Self::op_get(this, strand, method, Slot::reborrow(&mut func))?;
+                        func.op_call(strand, args, out).await
+                    })
+                    .await
+            }
+        }
+    }
+}
+
+/// Builds the boxed error a variant type's constructor produces.
+///
+/// Shared by [`VariantType::op_call`] and the `(init)` case of
+/// [`VariantType::op_mcall`], so a Do subclass chaining to its supertype gets
+/// exactly the arguments the direct constructor takes.
+fn construct<'v, 's>(
+    kind: ErrorKind,
+    strand: &mut Strand<'v, 's>,
+    args: Args<'v, '_>,
+) -> Result<'v, 's, Error<'v, 's>> {
+    Ok(match kind {
+        ErrorKind::Unsupported => {
+            let ([], []) = unpack!(strand, args, 0, 0)?;
+            Error::not_supported(strand)
+        }
+        ErrorKind::Immutable => {
+            let ([], []) = unpack!(strand, args, 0, 0)?;
+            Error::immutable(strand)
+        }
+        ErrorKind::Concurrency => {
+            let ([], [msg]) = unpack!(strand, args, 0, 1)?;
+            match msg {
+                Some(msg) => {
+                    let msg = expect_string(strand, &msg)?;
+                    Error::concurrency_msg(strand, msg)
+                }
+                None => Error::concurrency(strand),
+            }
+        }
+        ErrorKind::Type => {
+            let ([msg], []) = unpack!(strand, args, 1, 0)?;
+            let msg = expect_string(strand, &msg)?;
+            Error::type_error(strand, msg)
+        }
+        ErrorKind::Value => {
+            let ([msg], []) = unpack!(strand, args, 1, 0)?;
+            let msg = expect_string(strand, &msg)?;
+            Error::value(strand, msg)
+        }
+        ErrorKind::State => {
+            let ([msg], []) = unpack!(strand, args, 1, 0)?;
+            let msg = expect_string(strand, &msg)?;
+            Error::state_error(strand, msg)
+        }
+        ErrorKind::Index => {
+            let ([], []) = unpack!(strand, args, 0, 0)?;
+            Error::index(strand)
+        }
+        ErrorKind::Field => {
+            let ([name], []) = unpack!(strand, args, 1, 0)?;
+            let name = name
+                .as_sym(strand)
+                .ok_or_else(|| Error::type_error(strand, "expected `Sym`"))?;
+            Error::field(strand, name)
+        }
+        ErrorKind::UnexpectedPos => {
+            let ([index], []) = unpack!(strand, args, 1, 0)?;
+            let index = expect_index(strand, &index)?;
+            Error::unexpected_positional(strand, index)
+        }
+        ErrorKind::UnexpectedKey => {
+            let ([key], []) = unpack!(strand, args, 1, 0)?;
+            Error::unexpected_key(strand, key)
+        }
+        ErrorKind::MissingPos => {
+            let ([index], []) = unpack!(strand, args, 1, 0)?;
+            let index = expect_index(strand, &index)?;
+            Error::missing_positional(strand, index)
+        }
+        ErrorKind::MissingKey => {
+            let ([key], []) = unpack!(strand, args, 1, 0)?;
+            Error::missing_key(strand, key)
+        }
+        ErrorKind::Overflow => {
+            let ([], []) = unpack!(strand, args, 0, 0)?;
+            Error::overflow(strand)
+        }
+        ErrorKind::ZeroDiv => {
+            let ([], []) = unpack!(strand, args, 0, 0)?;
+            Error::zero_div(strand)
+        }
+        ErrorKind::SinkStop => {
+            let ([], []) = unpack!(strand, args, 0, 0)?;
+            Error::sink_stop(strand)
+        }
+        ErrorKind::IterStop => {
+            let ([], []) = unpack!(strand, args, 0, 0)?;
+            Error::iter_stop(strand)
+        }
+        ErrorKind::CyclicImport => {
+            let ([name], []) = unpack!(strand, args, 1, 0)?;
+            let name = expect_string(strand, &name)?;
+            Error::cyclic_import(strand, name.as_ref())
+        }
+        ErrorKind::Import => {
+            let ([name], []) = unpack!(strand, args, 1, 0)?;
+            let name = expect_string(strand, &name)?;
+            Error::import(strand, name.as_ref())
+        }
+        ErrorKind::Compile => {
+            let ([msg], []) = unpack!(strand, args, 1, 0)?;
+            let msg = expect_string(strand, &msg)?;
+            Error::compile(strand, msg)
+        }
+        ErrorKind::Bytecode | ErrorKind::Abort => {
+            return Err(Error::type_error(
+                strand,
+                format!("{} is not instantiable", variant_name(kind)),
+            ));
+        }
+        ErrorKind::Runtime => {
+            let ([msg], []) = unpack!(strand, args, 1, 0)?;
+            let msg = expect_string(strand, &msg)?;
+            Error::runtime(strand, msg)
+        }
+        ErrorKind::Canceled => {
+            let ([], []) = unpack!(strand, args, 0, 0)?;
+            Error::canceled(strand)
+        }
+        ErrorKind::TimedOut => {
+            let ([], []) = unpack!(strand, args, 0, 0)?;
+            Error::timed_out(strand)
+        }
+    })
+}
+
+/// Whether a variant type has a constructor, and so can be subclassed.
+///
+/// `Abort` and `Bytecode` are sealed: `Abort` carries native content nothing in
+/// Do can supply, and letting either be subclassed would let a script mint
+/// values that [`Error::catchable`] reports as uncatchable.
+fn is_constructible(kind: ErrorKind) -> bool {
+    !matches!(kind, ErrorKind::Bytecode | ErrorKind::Abort)
+}
+
+fn variant_singleton<'v>(strand: &Strand<'v, '_>, kind: ErrorKind) -> &'v Value<'v> {
+    let class = strand.singletons();
+    match kind {
+        ErrorKind::Unsupported => &class.error_unsupported,
+        ErrorKind::Immutable => &class.error_immutable,
+        ErrorKind::Concurrency => &class.error_concurrency,
+        ErrorKind::Type => &class.error_type,
+        ErrorKind::Value => &class.error_value,
+        ErrorKind::State => &class.error_state,
+        ErrorKind::Index => &class.error_index,
+        ErrorKind::Field => &class.error_field,
+        ErrorKind::UnexpectedPos => &class.error_unexpected_pos,
+        ErrorKind::UnexpectedKey => &class.error_unexpected_key,
+        ErrorKind::MissingPos => &class.error_missing_pos,
+        ErrorKind::MissingKey => &class.error_missing_key,
+        ErrorKind::Overflow => &class.error_overflow,
+        ErrorKind::ZeroDiv => &class.error_zerodiv,
+        ErrorKind::SinkStop => &class.error_sink_stop,
+        ErrorKind::IterStop => &class.error_iter_stop,
+        ErrorKind::CyclicImport => &class.error_cyclic_import,
+        ErrorKind::Import => &class.error_import,
+        ErrorKind::Compile => &class.error_compile,
+        ErrorKind::Bytecode => &class.error_bytecode,
+        ErrorKind::Runtime => &class.error_runtime,
+        ErrorKind::Abort => &class.error_abort,
+        ErrorKind::Canceled => &class.error_canceled,
+        ErrorKind::TimedOut => &class.error_timed_out,
     }
 }
 

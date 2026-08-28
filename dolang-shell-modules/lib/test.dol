@@ -122,6 +122,7 @@ class ModuleCompileError: std.RuntimeError
   pub field path output
 
   def (init) self path output
+    std.RuntimeError.(init) $self "compilation failed: $path"
     self.path = path
     self.output = output
 
@@ -439,13 +440,12 @@ pub class Assert: std.RuntimeError
   pub field message = nil
 
   def (init) self message
+    std.RuntimeError.(init) $self
+      if (message != nil)
+        "assertion failed: $message"
+      else
+        "assertion failed"
     self.message = message
-
-  def (str) self
-    if (self.message != nil)
-      "assertion failed: $(self.message)"
-    else
-      "assertion failed"
 
 # Exception thrown to skip a test case.
 #
@@ -456,6 +456,11 @@ pub class Skip: std.RuntimeError
   pub field message = nil
 
   def (init) self message = nil
+    std.RuntimeError.(init) $self
+      if (message != nil)
+        "test skipped: $message"
+      else
+        "test skipped"
     self.message = message
 
 # Skip the current test with an optional message.

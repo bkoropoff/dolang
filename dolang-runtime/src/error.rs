@@ -822,9 +822,14 @@ impl<'v, 's> Error<'v, 's> {
             Variant::NonLocalJump(..) => ErrorKind::Runtime,
             Variant::Boxed(root, info) => {
                 let val = root.get();
-                match val.downcast_ref(info.vm.builtin_types().error) {
+                // `downcast_native` walks class-instance native slots, so this
+                // covers a Do subclass of an error variant as well as a plain
+                // boxed error. A native type declares its kind instead.
+                match val.downcast_native(info.vm, info.vm.builtin_types().error) {
                     Some(boxed) => boxed.get().kind(),
-                    None => ErrorKind::Runtime,
+                    None => val
+                        .declared_error_kind(info.vm)
+                        .unwrap_or(ErrorKind::Runtime),
                 }
             }
         }

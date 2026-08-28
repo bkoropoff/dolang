@@ -822,14 +822,13 @@ pub class ArchiveError: std.RuntimeError
   pub field detail = nil
 
   def (init) self source detail = nil
+    std.RuntimeError.(init) $self
+      if detail
+        "archive operation failed: $source: $detail"
+      else
+        "archive operation failed: $source"
     self.source = source
     self.detail = detail
-
-  pub def (str) self
-    if self.detail
-      "archive operation failed: $(self.source): $(self.detail)"
-    else
-      "archive operation failed: $(self.source)"
 
 def raw_format format
   (format == :GZIP: || format == :ZSTD: || format == :XZ:)
