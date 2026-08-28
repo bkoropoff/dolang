@@ -308,15 +308,20 @@ existing handle.
 
 The key must have the access rights required for the requested components.
 
-### `set_sec_desc desc`
+### `set_sec_desc desc? ...options`
 
 Applies the components selected by a Windows security descriptor's `mask`
 through the key's existing handle.
 
 #### Parameters
 
-| Name   | Type                                                         | Description                  |
-| ------ | ------------------------------------------------------------ | ---------------------------- |
-| `desc` | [`security.windows.SecDesc`](../security/windows/secdesc.md) | Security descriptor to apply |
+| Name   | Type                                                                                                            | Description                 |
+| ------ | --------------------------------------------------------------------------------------------------------------- | --------------------------- |
+| `desc` | [`security.windows.SecDesc`](../security/windows/secdesc.md)\|[`Bin`](../std/bin.md)\|[`Dict`](../std/dict.md)? | Descriptor, packet, or spec |
+
+The descriptor's
+[component options](../security/windows/secdesc.md#component-options) may be
+passed as keyword arguments instead of, or alongside, `desc`, exactly as
+[`sec_desc`](../security/windows/index.md#sec_desc-desc-options) accepts them.
 
 The key must have the access rights required for the selected components.

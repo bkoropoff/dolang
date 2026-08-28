@@ -2,63 +2,59 @@
 
 Immutable view of a native Windows access-control entry.
 
-## Class Methods
+The constructor takes the same fields as an [ACE spec](./index.md#ace-specs).
+An entry can also be written directly as a spec wherever one is accepted,
+including [`acl`](./index.md#acl-spec) and the `dacl:` and `sacl:` options of
+[`sec_desc`](./index.md#sec_desc-desc-options).
 
-### `allow sid mask ...options`
+## Constructor
 
-Constructs an access-allowed ACE.
+### `Ace :allow? :deny? :audit? :mask ...options`
+
+Constructs an access-allowed, access-denied, or system-audit ACE. Exactly one
+of `allow`, `deny`, or `audit` names the trustee.
 
 #### Parameters
 
-| Name                    | Type                                                        | Description               |
-| ----------------------- | ----------------------------------------------------------- | ------------------------- |
-| `sid`                   | [`Sid`](./sid.md)                                           | Trustee                   |
-| `mask`                  | [`AccessMask`](./access-mask.md)\|[`Int`](../../std/int.md) | Access mask               |
-| `flags`                 | [`Int`](../../std/int.md)?                                  | Native ACE flags          |
-| `object_type`           | [`uuid.Guid`](../../uuid/guid.md)?                          | Object type               |
-| `inherited_object_type` | [`uuid.Guid`](../../uuid/guid.md)?                          | Inherited object type     |
-| `callback`              | [`Bool`](../../std/bool.md)?                                | Build a callback ACE      |
-| `application_data`      | [`Bin`](../../std/bin.md)?                                  | Trailing application data |
+| Name                    | Type                                                        | Description                        |
+| ----------------------- | ----------------------------------------------------------- | ---------------------------------- |
+| `allow`                 | [`Sid`](./sid.md)?                                          | Trustee for an access-allowed ACE  |
+| `deny`                  | [`Sid`](./sid.md)?                                          | Trustee for an access-denied ACE   |
+| `audit`                 | [`Sid`](./sid.md)?                                          | Trustee for a system-audit ACE     |
+| `mask`                  | [`AccessMask`](./access-mask.md)                            | Access mask                        |
+| `flags`                 | [`AceFlags`](./ace-flags.md)?                               | ACE header flags                   |
+| `object_type`           | [`uuid.Guid`](../../uuid/guid.md)?                          | Object type                        |
+| `inherited_object_type` | [`uuid.Guid`](../../uuid/guid.md)?                          | Inherited object type              |
+| `callback`              | [`Bool`](../../std/bool.md)?                                | Build a callback ACE               |
+| `application_data`      | [`Bin`](../../std/bin.md)?                                  | Trailing application data          |
+| `successful`            | [`Bool`](../../std/bool.md)?                                | Audit successful access            |
+| `failed`                | [`Bool`](../../std/bool.md)?                                | Audit failed access                |
 
 #### Returns
 
 `Ace`
 
+The constructor is strict: trustees must already be `Sid` values, `mask` must
+be an `AccessMask`, `flags` must be `AceFlags`, and object types must be
+`uuid.Guid` values. Use the lowercase [`ace`](./index.md#ace-spec) coercion
+function for declarative values such as SID strings and symbolic flags.
 Application data is zero-padded to DWORD (32-bit) alignment.
-
-### `deny sid mask ...options`
-
-Constructs an access-denied ACE. Parameters match
-[`allow`](#allow-sid-mask-options).
-
-#### Returns
-
-`Ace`
-
-### `audit sid mask :successful :failed ...options`
-
-Constructs a system-audit ACE.
-
-#### Parameters
-
-| Name         | Type                                                        | Description             |
-| ------------ | ----------------------------------------------------------- | ----------------------- |
-| `sid`        | [`Sid`](./sid.md)                                           | Trustee                 |
-| `mask`       | [`AccessMask`](./access-mask.md)\|[`Int`](../../std/int.md) | Access mask             |
-| `successful` | [`Bool`](../../std/bool.md)                                 | Audit successful access |
-| `failed`     | [`Bool`](../../std/bool.md)                                 | Audit failed access     |
-
-The remaining optional parameters match
-[`allow`](#allow-sid-mask-options).
-
-#### Returns
-
-`Ace`
 
 #### Errors
 
-- Raises `ValueError` when both outcomes are false or `flags` contains audit
-  outcome bits.
+| Exception    | Condition                                                                |
+| ------------ | ------------------------------------------------------------------------ |
+| `ValueError` | Zero or multiple trustee arguments are present                           |
+| `ValueError` | An audit has no outcome, both outcomes are false, or flags name outcomes |
+| `ValueError` | `successful` or `failed` is supplied for an allow or deny ACE            |
+
+#### Example
+
+```
+let entry = Ace
+  allow: (Sid :EVERYONE:)
+  mask: (AccessMask :GENERIC_READ:)
+```
 
 ## Fields
 
@@ -74,7 +70,7 @@ Native numeric ACE type code.
 
 ### `flags`
 
-Native ACE flags byte.
+[`AceFlags`](./ace-flags.md) from the ACE header.
 
 ### `size`
 

@@ -1556,9 +1556,15 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             sec_desc(strand, global, path.to_path(), mask, follow, out).await
         })
         .function("set_sec_desc", async move |strand, args, _out| {
-            let ([path, descriptor], [resolve]) = unpack!(strand, args, 2, 0, resolve = None)?;
+            let ([path], [resolve], rest) = unpack!(strand, args, 1, 0, resolve = None, ...)?;
             let path = path_from_value(strand, global, &path)?;
-            let descriptor = security::sec_desc_from_value(strand, global, &descriptor)?;
+            let descriptor = security::sec_desc_from_args(
+                strand,
+                global,
+                rest,
+                &security::SpecPath::root("set_sec_desc"),
+            )
+            .await?;
             let follow = resolve_sym(strand, global, resolve, true)?;
             set_sec_desc(strand, global, path.to_path(), &descriptor, follow).await
         })

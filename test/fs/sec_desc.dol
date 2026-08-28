@@ -39,6 +39,13 @@ def query_security_descriptors()
     set_sec_desc $path (SecDesc dacl: descriptor.dacl)
     let replayed = path.sec_desc()
     assert_eq $replayed.dacl.aces.len $descriptor.dacl.aces.len
+    # The same write in declarative form, straight through the method's own
+    # component options.
+    path.set_sec_desc
+      dacl:
+        for entry = descriptor.dacl.aces
+          - $entry
+    assert_eq (path.sec_desc().dacl.aces.len) $descriptor.dacl.aces.len
     open $path r do |file|
       assert_type $SecDesc $file.sec_desc()
   else
@@ -47,6 +54,11 @@ def query_security_descriptors()
     assert_throws $sys.UnsupportedError do sec_desc test_sec_desc.txt
     let empty = SecDesc b"\x01\x00\x00\x80\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
     assert_throws $sys.UnsupportedError do set_sec_desc test_sec_desc.txt $empty
+    assert_throws $sys.UnsupportedError do
+      set_sec_desc test_sec_desc.txt
+        dacl:
+          - allow: :LOCAL_SYSTEM:
+            mask: :GENERIC_ALL:
     open $path r do |file|
       assert_throws $std.UnsupportedError do file.sec_desc()
       assert_throws $sys.UnsupportedError do file.sec_desc()

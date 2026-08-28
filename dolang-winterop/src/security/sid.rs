@@ -251,6 +251,156 @@ impl<'de> Deserialize<'de> for SidIdentifierAuthority {
     }
 }
 
+/// A SID whose full value is a constant.
+///
+/// Every variant names a SID that is identical on every Windows installation,
+/// so converting one to a [`Sid`] never consults the environment. SIDs that
+/// are relative to a domain or a machine — `Domain Admins`
+/// (`S-1-5-21-<domain>-512`), the local `Administrator` account
+/// (`S-1-5-21-<machine>-500`) — are deliberately absent and belong to a name
+/// lookup instead. Keep it that way: the point of this enum is that it cannot
+/// fail.
+///
+/// This crate does not name these; text spellings belong to whatever exposes
+/// them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum WellKnownSid {
+    /// `S-1-0-0`, the null SID.
+    Null,
+    /// `S-1-1-0`, the world (everyone).
+    Everyone,
+    /// `S-1-2-0`, users who log on to local terminals.
+    Local,
+    /// `S-1-2-1`, users who log on to the physical console.
+    ConsoleLogon,
+    /// `S-1-3-0`, a placeholder replaced by the creating user's SID.
+    CreatorOwner,
+    /// `S-1-3-1`, a placeholder replaced by the creating user's primary group.
+    CreatorGroup,
+    /// `S-1-3-4`, the rights granted to an object's current owner.
+    OwnerRights,
+    /// `S-1-5-1`, users logged on through a dial-up connection.
+    Dialup,
+    /// `S-1-5-2`, users logged on through a network connection.
+    Network,
+    /// `S-1-5-3`, users logged on through a batch queue facility.
+    Batch,
+    /// `S-1-5-4`, users logged on interactively.
+    Interactive,
+    /// `S-1-5-6`, accounts logged on as a service.
+    Service,
+    /// `S-1-5-7`, anonymous logon.
+    Anonymous,
+    /// `S-1-5-10`, a placeholder replaced by the SID of the object itself.
+    PrincipalSelf,
+    /// `S-1-5-11`, users authenticated by the system.
+    AuthenticatedUsers,
+    /// `S-1-5-12`, code running in a restricted security context.
+    RestrictedCode,
+    /// `S-1-5-14`, users logged on through a remote interactive session.
+    RemoteInteractiveLogon,
+    /// `S-1-5-15`, users of the same organization as the account.
+    ThisOrganization,
+    /// `S-1-5-18`, the local system account.
+    LocalSystem,
+    /// `S-1-5-19`, the local service account.
+    LocalService,
+    /// `S-1-5-20`, the network service account.
+    NetworkService,
+    /// `S-1-5-113`, any local account.
+    LocalAccount,
+    /// `S-1-5-114`, any local account that is a member of Administrators.
+    LocalAccountAdministrator,
+    /// `S-1-5-32-544`, the builtin Administrators group.
+    BuiltinAdministrators,
+    /// `S-1-5-32-545`, the builtin Users group.
+    BuiltinUsers,
+    /// `S-1-5-32-546`, the builtin Guests group.
+    BuiltinGuests,
+    /// `S-1-5-32-547`, the builtin Power Users group.
+    BuiltinPowerUsers,
+    /// `S-1-5-32-551`, the builtin Backup Operators group.
+    BuiltinBackupOperators,
+    /// `S-1-5-32-555`, the builtin Remote Desktop Users group.
+    BuiltinRemoteDesktopUsers,
+    /// `S-1-5-32-580`, the builtin Remote Management Users group.
+    BuiltinRemoteManagementUsers,
+    /// `S-1-15-2-1`, all application packages.
+    AllApplicationPackages,
+    /// `S-1-15-2-2`, all restricted application packages.
+    AllRestrictedApplicationPackages,
+    /// `S-1-16-0`, the untrusted integrity level.
+    UntrustedLabel,
+    /// `S-1-16-4096`, the low integrity level.
+    LowLabel,
+    /// `S-1-16-8192`, the medium integrity level.
+    MediumLabel,
+    /// `S-1-16-8448`, the medium-plus integrity level.
+    MediumPlusLabel,
+    /// `S-1-16-12288`, the high integrity level.
+    HighLabel,
+    /// `S-1-16-16384`, the system integrity level.
+    SystemLabel,
+}
+
+impl WellKnownSid {
+    /// Identifier authority and sub-authorities of this SID.
+    const fn parts(self) -> (SidIdentifierAuthority, &'static [u32]) {
+        use SidIdentifierAuthority::{AppPackage, Creator, Local, MandatoryLabel, Nt, Null, World};
+        match self {
+            Self::Null => (Null, &[0]),
+            Self::Everyone => (World, &[0]),
+            Self::Local => (Local, &[0]),
+            Self::ConsoleLogon => (Local, &[1]),
+            Self::CreatorOwner => (Creator, &[0]),
+            Self::CreatorGroup => (Creator, &[1]),
+            Self::OwnerRights => (Creator, &[4]),
+            Self::Dialup => (Nt, &[1]),
+            Self::Network => (Nt, &[2]),
+            Self::Batch => (Nt, &[3]),
+            Self::Interactive => (Nt, &[4]),
+            Self::Service => (Nt, &[6]),
+            Self::Anonymous => (Nt, &[7]),
+            Self::PrincipalSelf => (Nt, &[10]),
+            Self::AuthenticatedUsers => (Nt, &[11]),
+            Self::RestrictedCode => (Nt, &[12]),
+            Self::RemoteInteractiveLogon => (Nt, &[14]),
+            Self::ThisOrganization => (Nt, &[15]),
+            Self::LocalSystem => (Nt, &[18]),
+            Self::LocalService => (Nt, &[19]),
+            Self::NetworkService => (Nt, &[20]),
+            Self::LocalAccount => (Nt, &[113]),
+            Self::LocalAccountAdministrator => (Nt, &[114]),
+            Self::BuiltinAdministrators => (Nt, &[32, 544]),
+            Self::BuiltinUsers => (Nt, &[32, 545]),
+            Self::BuiltinGuests => (Nt, &[32, 546]),
+            Self::BuiltinPowerUsers => (Nt, &[32, 547]),
+            Self::BuiltinBackupOperators => (Nt, &[32, 551]),
+            Self::BuiltinRemoteDesktopUsers => (Nt, &[32, 555]),
+            Self::BuiltinRemoteManagementUsers => (Nt, &[32, 580]),
+            Self::AllApplicationPackages => (AppPackage, &[2, 1]),
+            Self::AllRestrictedApplicationPackages => (AppPackage, &[2, 2]),
+            Self::UntrustedLabel => (MandatoryLabel, &[0]),
+            Self::LowLabel => (MandatoryLabel, &[4096]),
+            Self::MediumLabel => (MandatoryLabel, &[8192]),
+            Self::MediumPlusLabel => (MandatoryLabel, &[8448]),
+            Self::HighLabel => (MandatoryLabel, &[12288]),
+            Self::SystemLabel => (MandatoryLabel, &[16384]),
+        }
+    }
+}
+
+impl From<WellKnownSid> for Sid {
+    fn from(value: WellKnownSid) -> Self {
+        let (identifier_authority, sub_authorities) = value.parts();
+        Self {
+            identifier_authority,
+            sub_authorities: sub_authorities.into(),
+        }
+    }
+}
+
 impl FromStr for Sid {
     type Err = SidError;
 
@@ -419,6 +569,103 @@ mod tests {
         assert_eq!(Sid::from_bytes(&bytes).unwrap(), sid);
         assert_eq!(sid.to_string(), "S-1-5-21-287454020-2864434397");
         assert_eq!(Sid::new(5, [32, 544]).unwrap().to_string(), "S-1-5-32-544");
+    }
+
+    #[test]
+    fn well_known_sids_have_their_canonical_values() {
+        // `canonical` is an exhaustive match, so a new variant does not
+        // compile until it is spelled here; add it to `ALL` as well.
+        const ALL: &[WellKnownSid] = &[
+            WellKnownSid::Null,
+            WellKnownSid::Everyone,
+            WellKnownSid::Local,
+            WellKnownSid::ConsoleLogon,
+            WellKnownSid::CreatorOwner,
+            WellKnownSid::CreatorGroup,
+            WellKnownSid::OwnerRights,
+            WellKnownSid::Dialup,
+            WellKnownSid::Network,
+            WellKnownSid::Batch,
+            WellKnownSid::Interactive,
+            WellKnownSid::Service,
+            WellKnownSid::Anonymous,
+            WellKnownSid::PrincipalSelf,
+            WellKnownSid::AuthenticatedUsers,
+            WellKnownSid::RestrictedCode,
+            WellKnownSid::RemoteInteractiveLogon,
+            WellKnownSid::ThisOrganization,
+            WellKnownSid::LocalSystem,
+            WellKnownSid::LocalService,
+            WellKnownSid::NetworkService,
+            WellKnownSid::LocalAccount,
+            WellKnownSid::LocalAccountAdministrator,
+            WellKnownSid::BuiltinAdministrators,
+            WellKnownSid::BuiltinUsers,
+            WellKnownSid::BuiltinGuests,
+            WellKnownSid::BuiltinPowerUsers,
+            WellKnownSid::BuiltinBackupOperators,
+            WellKnownSid::BuiltinRemoteDesktopUsers,
+            WellKnownSid::BuiltinRemoteManagementUsers,
+            WellKnownSid::AllApplicationPackages,
+            WellKnownSid::AllRestrictedApplicationPackages,
+            WellKnownSid::UntrustedLabel,
+            WellKnownSid::LowLabel,
+            WellKnownSid::MediumLabel,
+            WellKnownSid::MediumPlusLabel,
+            WellKnownSid::HighLabel,
+            WellKnownSid::SystemLabel,
+        ];
+
+        fn canonical(sid: WellKnownSid) -> &'static str {
+            match sid {
+                WellKnownSid::Null => "S-1-0-0",
+                WellKnownSid::Everyone => "S-1-1-0",
+                WellKnownSid::Local => "S-1-2-0",
+                WellKnownSid::ConsoleLogon => "S-1-2-1",
+                WellKnownSid::CreatorOwner => "S-1-3-0",
+                WellKnownSid::CreatorGroup => "S-1-3-1",
+                WellKnownSid::OwnerRights => "S-1-3-4",
+                WellKnownSid::Dialup => "S-1-5-1",
+                WellKnownSid::Network => "S-1-5-2",
+                WellKnownSid::Batch => "S-1-5-3",
+                WellKnownSid::Interactive => "S-1-5-4",
+                WellKnownSid::Service => "S-1-5-6",
+                WellKnownSid::Anonymous => "S-1-5-7",
+                WellKnownSid::PrincipalSelf => "S-1-5-10",
+                WellKnownSid::AuthenticatedUsers => "S-1-5-11",
+                WellKnownSid::RestrictedCode => "S-1-5-12",
+                WellKnownSid::RemoteInteractiveLogon => "S-1-5-14",
+                WellKnownSid::ThisOrganization => "S-1-5-15",
+                WellKnownSid::LocalSystem => "S-1-5-18",
+                WellKnownSid::LocalService => "S-1-5-19",
+                WellKnownSid::NetworkService => "S-1-5-20",
+                WellKnownSid::LocalAccount => "S-1-5-113",
+                WellKnownSid::LocalAccountAdministrator => "S-1-5-114",
+                WellKnownSid::BuiltinAdministrators => "S-1-5-32-544",
+                WellKnownSid::BuiltinUsers => "S-1-5-32-545",
+                WellKnownSid::BuiltinGuests => "S-1-5-32-546",
+                WellKnownSid::BuiltinPowerUsers => "S-1-5-32-547",
+                WellKnownSid::BuiltinBackupOperators => "S-1-5-32-551",
+                WellKnownSid::BuiltinRemoteDesktopUsers => "S-1-5-32-555",
+                WellKnownSid::BuiltinRemoteManagementUsers => "S-1-5-32-580",
+                WellKnownSid::AllApplicationPackages => "S-1-15-2-1",
+                WellKnownSid::AllRestrictedApplicationPackages => "S-1-15-2-2",
+                WellKnownSid::UntrustedLabel => "S-1-16-0",
+                WellKnownSid::LowLabel => "S-1-16-4096",
+                WellKnownSid::MediumLabel => "S-1-16-8192",
+                WellKnownSid::MediumPlusLabel => "S-1-16-8448",
+                WellKnownSid::HighLabel => "S-1-16-12288",
+                WellKnownSid::SystemLabel => "S-1-16-16384",
+            }
+        }
+
+        for well_known in ALL {
+            let expected = canonical(*well_known);
+            let sid = Sid::from(*well_known);
+            assert_eq!(sid.to_string(), expected, "{well_known:?}");
+            // Every constant is a SID the parser accepts, unchanged.
+            assert_eq!(expected.parse::<Sid>().unwrap(), sid, "{well_known:?}");
+        }
     }
 
     #[test]

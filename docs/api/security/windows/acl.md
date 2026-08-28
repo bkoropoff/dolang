@@ -2,9 +2,14 @@
 
 Immutable view of a native Windows access-control list.
 
+A list can also be written as an [ACL spec](./index.md#acl-specs) wherever one
+is accepted, including the `dacl:` and `sacl:` options of
+[`sec_desc`](./index.md#sec_desc-desc-options). The constructor below stays
+strict: its entries must already be [`Ace`](./ace.md) values.
+
 ## Constructor
 
-### `Acl aces revision: nil`
+### `Acl aces :revision = nil`
 
 Constructs an ACL from an iterable of [`Ace`](./ace.md) values.
 

@@ -36,7 +36,9 @@ use std::{io::stderr, os::fd::AsFd};
 
 pub use crate::{
     error::{ErrorExt, ResultExt},
+    extension::Shell,
     global::ProgramSource,
+    security::AccessMask as WindowsAccessMask,
 };
 use dolang::runtime::{Error, Output, Result, Strand, Value};
 pub use dolang_vfs::Vfs;
@@ -270,14 +272,37 @@ pub fn create_sec_desc<'v>(
         .create_with_annex(strand, security::SecDesc, sec_desc, out);
 }
 
-/// Extract the raw [`dolang_winterop::SecDesc`] from a Do
-/// `security.windows.SecDesc` value.
-pub fn sec_desc_from_value<'v, 's>(
+/// Read a [`dolang_winterop::SecDesc`] from a `set_sec_desc`-style call's
+/// own arguments.
+///
+/// Accepts a positional descriptor — a `security.windows.SecDesc`, a
+/// self-relative packet, or a declarative spec — and the descriptor's
+/// component options as keyword arguments, which amend a positional
+/// descriptor when both are given. `name` roots the paths in error
+/// messages, and should be the method's own name.
+pub async fn sec_desc_from_args<'v, 's>(
     strand: &mut Strand<'v, 's>,
-    value: &Value<'v>,
+    args: dolang::runtime::Args<'v, '_>,
+    name: &str,
 ) -> Result<'v, 's, dolang_winterop::security::SecDesc> {
     let global = strand.state::<Global<'v>>();
-    security::sec_desc_from_value(strand, global, value)
+    security::sec_desc_from_args(strand, global, args, &security::SpecPath::root(name)).await
+}
+
+/// The `security.windows.AccessMask` type object.
+///
+/// A domain-specific access mask — registry key rights, service rights —
+/// registers this as a nominal supertype so it can be used wherever a
+/// Windows access mask is expected. A type that does so must expose an `int`
+/// field yielding the raw 32-bit rights: that field is how the security APIs
+/// read a subtype's bits.
+///
+/// The extension registering the subtype must name [`Shell`] in its
+/// `DEPENDS`, or this type may not exist yet.
+pub fn windows_access_mask_type<'v>(
+    builder: &dolang::runtime::vm::Builder<'v>,
+) -> dolang::runtime::Type<'v, dolang::runtime::object::Flags<WindowsAccessMask>> {
+    builder.state::<Global<'v>>().types.access_mask
 }
 
 /// Returns the [`AnyVfs`] in scope for the strand (the ambient

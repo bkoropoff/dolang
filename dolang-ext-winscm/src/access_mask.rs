@@ -17,7 +17,12 @@ macro_rules! raw_projection {
         fn build<'v, 'a>(
             builder: TypeBuilder<'v, 'a, Flags<Self>>,
         ) -> TypeBuilder<'v, 'a, Flags<Self>> {
+            // `security.windows.AccessMask` is a nominal supertype so these
+            // rights can be used wherever a Windows access mask is expected;
+            // that contract is what the `int` projection below satisfies.
+            let base = dolang_ext_shell::windows_access_mask_type(&builder);
             builder
+                .nominal_supertype(base)
                 .get("int", |this, strand, out| {
                     Output::set(strand, out, this.flags().0.0.bits());
                     Ok(())

@@ -113,12 +113,17 @@ Gets selected parts of the service's Windows security descriptor.
 
 [`security.windows.SecDesc`](../security/windows/secdesc.md)
 
-### `set_sec_desc desc`
+### `set_sec_desc desc? ...options`
 
 Applies the components selected by a Windows security descriptor's `mask`.
 
 #### Parameters
 
-| Name   | Type                                                         | Description                  |
-| ------ | ------------------------------------------------------------ | ---------------------------- |
-| `desc` | [`security.windows.SecDesc`](../security/windows/secdesc.md) | Security descriptor to apply |
+| Name   | Type                                                                                                            | Description                 |
+| ------ | --------------------------------------------------------------------------------------------------------------- | --------------------------- |
+| `desc` | [`security.windows.SecDesc`](../security/windows/secdesc.md)\|[`Bin`](../std/bin.md)\|[`Dict`](../std/dict.md)? | Descriptor, packet, or spec |
+
+The descriptor's
+[component options](../security/windows/secdesc.md#component-options) may be
+passed as keyword arguments instead of, or alongside, `desc`, exactly as
+[`sec_desc`](../security/windows/index.md#sec_desc-desc-options) accepts them.

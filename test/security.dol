@@ -7,6 +7,7 @@ import sys
   std:
     - FieldError
     - ImmutableError
+    - TypeError
     - UnsupportedError
     - ValueError
     - Bin
@@ -31,8 +32,12 @@ import sys
     id: unix_info
     user_name: unix_user_name
   security.windows:
+    - ace
+    - acl
+    - sec_desc
     - token_info
     - AccessMask
+    - AceFlags
     - Ace
     - Acl
     - SecDesc
@@ -121,7 +126,9 @@ def security_descriptor_exposes_acl_and_ace_views()
   assert_type $Ace $allowed
   assert_eq $allowed.type :ACCESS_ALLOWED:
   assert_eq $allowed.type_code 0
-  assert_eq $allowed.flags 19
+  assert_type $AceFlags $allowed.flags
+  assert_eq $allowed.flags.int 19
+  assert_eq $allowed.flags (AceFlags :OBJECT_INHERIT: :CONTAINER_INHERIT: :INHERITED:)
   assert_eq $allowed.size 28
   assert_type $AccessMask $allowed.mask
   assert_eq $allowed.mask.int 305419896
@@ -146,7 +153,7 @@ def security_descriptor_exposes_acl_and_ace_views()
   let unknown = acl.aces[2]
   assert_eq $unknown.type :UNKNOWN:
   assert_eq $unknown.type_code 127
-  assert_eq $unknown.flags 160
+  assert_eq $unknown.flags.int 160
   assert_eq $unknown.to_bin() b"\x7f\xa0\x08\x00\x11\x22\x33\x44"
   assert_throws $FieldError do unknown.mask
   assert_throws $FieldError do unknown.application_data
@@ -162,29 +169,39 @@ def constructs_aces_and_acls()
   let sid = Sid S-1-1-0
   let guid = Guid 00112233-4455-6677-8899-aabbccddeeff
   let raw_mask = AccessMask.from_int 305419896
+  let header_flags = AceFlags.from_int 3
+  let mask_one = AccessMask.from_int 1
+  let mask_two = AccessMask.from_int 2
   assert_eq $raw_mask.specific_rights 22136
   assert_type $AccessMask $raw_mask.standard_rights
   assert_type $AccessMask $raw_mask.generic_rights
-  let allowed = Ace.allow(sid, raw_mask, flags: 3, application_data: b"\x01\x02\x03")
+  let allowed = Ace(allow: sid, mask: raw_mask, flags: header_flags, application_data: b"\x01\x02\x03")
   assert_type $Ace $allowed
   assert_eq $allowed.type :ACCESS_ALLOWED:
-  assert_eq $allowed.flags 3
+  assert_eq $allowed.flags.int 3
   assert_eq $allowed.mask $raw_mask
   assert_eq $allowed.application_data b"\x01\x02\x03\x00"
 
-  let denied = Ace.deny(sid, 1, object_type: guid, callback: true)
+  let denied = Ace(deny: sid, mask: mask_one, object_type: guid, callback: true)
   assert_eq $denied.type :ACCESS_DENIED_CALLBACK_OBJECT:
   assert_eq $denied.object_flags 1
   assert_eq $denied.object_type $guid
 
-  let audited = Ace.audit(sid, 2, successful: true, failed: false)
+  let audited = Ace(audit: sid, mask: mask_two, successful: true, failed: false)
   assert_eq $audited.type :SYSTEM_AUDIT:
   assert_eq $audited.successful_access true
   assert_eq $audited.failed_access false
   assert_throws $ValueError do
-    Ace.audit $sid 2 successful: false failed: false
+    Ace audit: $sid mask: $mask_two successful: false failed: false
   assert_throws $ValueError do
-    Ace.audit $sid 2 successful: true failed: false flags: 64
+    Ace audit: $sid mask: $mask_two successful: true failed: false flags: (AceFlags.from_int 64)
+  assert_throws $ValueError do Ace mask: $mask_one
+  assert_throws $ValueError do Ace allow: $sid deny: $sid mask: $mask_one
+  assert_throws $ValueError do Ace allow: $sid mask: $mask_one successful: true
+  assert_throws $TypeError do Ace allow: :EVERYONE: mask: $mask_one
+  assert_throws $TypeError do Ace allow: $sid mask: 1
+  assert_throws $TypeError do Ace allow: $sid mask: $mask_one flags: :INHERIT_ONLY:
+  assert_throws $TypeError do Ace deny: $sid mask: $mask_one object_type: 00112233-4455-6677-8899-aabbccddeeff
 
   let acl = Acl [allowed, denied, audited]
   assert_type $Acl $acl
@@ -232,6 +249,129 @@ def functionally_updates_security_descriptors()
   let loaded_absent = SecDesc(dacl_present: false)
   assert_eq $loaded_absent.dacl_present false
   assert_throws $ValueError do SecDesc(empty.to_bin(), dacl: acl)
+
+#[test]
+def coerces_well_known_sid_symbols()
+  assert_eq (str(Sid(:BUILTIN_ADMINISTRATORS:))) S-1-5-32-544
+  assert_eq (str(Sid(:LOCAL_SYSTEM:))) S-1-5-18
+  assert_eq (str(Sid(:EVERYONE:))) S-1-1-0
+  assert_eq (str(Sid(:MEDIUM_LABEL:))) S-1-16-8192
+  assert_eq (str(Sid(:LOCAL_SERVICE:))) (str(Sid("S-1-5-19")))
+  # Domain-relative SIDs need a lookup, so no symbol names one.
+  assert_throws $ValueError do Sid :DOMAIN_ADMINS:
+
+#[test]
+def coerces_masks_and_ace_flags_from_symbols()
+  let sid = Sid :LOCAL_SYSTEM:
+  let generic_all = AccessMask :GENERIC_ALL:
+  assert_eq (Ace(allow: sid, mask: generic_all).mask) $generic_all
+  let several_mask = AccessMask :READ_CONTROL: :WRITE_DAC:
+  let several = Ace allow: $sid mask: $several_mask
+  assert_eq $several.mask $several_mask
+  let inherit_flags = AceFlags :OBJECT_INHERIT: :CONTAINER_INHERIT:
+  let inherited = Ace allow: $sid mask: $generic_all flags: $inherit_flags
+  assert_type $AceFlags $inherited.flags
+  assert_eq $inherited.container_inherit true
+  assert_eq (Ace(allow: sid, mask: generic_all, flags: (AceFlags :INHERIT_ONLY:)).inherit_only) true
+
+#[test]
+def coerces_declarative_ace_specs()
+  let entry = ace $
+    allow: :BUILTIN_ADMINISTRATORS:
+    mask: :GENERIC_ALL:
+  assert_type $Ace $entry
+  assert_eq $entry.type :ACCESS_ALLOWED:
+  assert_eq (str entry.sid) S-1-5-32-544
+  assert_eq $entry.mask (AccessMask :GENERIC_ALL:)
+
+  let denied = ace $
+    deny: S-1-5-18
+    mask: :GENERIC_WRITE:
+    flags: [:OBJECT_INHERIT:]
+  assert_eq $denied.type :ACCESS_DENIED:
+  assert_eq $denied.object_inherit true
+
+  let audited = ace $
+    audit: :EVERYONE:
+    mask: :GENERIC_READ:
+    successful: true
+  assert_eq $audited.type :SYSTEM_AUDIT:
+  assert_eq $audited.successful_access true
+
+  # An already-built ACE passes through.
+  assert_eq (ace(entry).to_bin()) $entry.to_bin()
+
+  # Exactly one of allow/deny/audit, a mask, and nothing unrecognized.
+  assert_throws $ValueError do ace {allow: :EVERYONE:, deny: :EVERYONE:, mask: :GENERIC_ALL:}
+  assert_throws $ValueError do ace {mask: :GENERIC_ALL:}
+  assert_throws $ValueError do ace {allow: :EVERYONE:}
+  assert_throws $ValueError do ace {allow: :EVERYONE:, mask: :GENERIC_ALL:, masc: 1}
+  assert_throws $ValueError do ace {audit: :EVERYONE:, mask: :GENERIC_ALL:}
+  assert_throws $ValueError do ace {allow: :EVERYONE:, mask: :GENERIC_ALL:, successful: true}
+
+#[test]
+def coerces_declarative_acl_specs()
+  let entries = acl $
+    - allow: :LOCAL_SYSTEM:
+      mask: :GENERIC_ALL:
+    - allow: :BUILTIN_ADMINISTRATORS:
+      mask: :GENERIC_ALL:
+  assert_type $Acl $entries
+  assert_eq $entries.aces.len 2
+  assert_eq $entries.revision :BASIC:
+  assert_eq (str entries.aces[1].sid) S-1-5-32-544
+
+  # Entries and named options share one structure.
+  let revised = acl $
+    revision: :DIRECTORY_SERVICE:
+    - allow: :LOCAL_SYSTEM:
+      mask: :GENERIC_ALL:
+  assert_eq $revised.revision :DIRECTORY_SERVICE:
+  assert_eq $revised.aces.len 1
+
+  # Integer keys are entries only in the order they are expected.
+  assert_throws $ValueError do
+    acl {0: {allow: :EVERYONE:, mask: :GENERIC_ALL:}, 2: {allow: :EVERYONE:, mask: :GENERIC_ALL:}}
+  assert_throws $ValueError do
+    acl {1: {allow: :EVERYONE:, mask: :GENERIC_ALL:}, 0: {allow: :EVERYONE:, mask: :GENERIC_ALL:}}
+  assert_throws $ValueError do acl {revision: :BASIC:, aces: []}
+
+  # The rigid constructor keeps its strict signature.
+  assert_throws $TypeError do Acl [{allow: :EVERYONE:, mask: :GENERIC_ALL:}]
+
+#[test]
+def coerces_declarative_security_descriptors()
+  let descriptor = sec_desc
+    owner: :BUILTIN_ADMINISTRATORS:
+    dacl_protected: true
+    dacl:
+      for sid = [:LOCAL_SYSTEM:, :BUILTIN_ADMINISTRATORS:]
+        - allow: $sid
+          mask: :GENERIC_ALL:
+  assert_type $SecDesc $descriptor
+  assert_eq (str descriptor.owner) S-1-5-32-544
+  assert_eq $descriptor.dacl_protected true
+  assert_eq $descriptor.dacl.aces.len 2
+  assert_eq (str descriptor.dacl.aces[0].sid) S-1-5-18
+
+  # Options amend a descriptor given positionally.
+  let amended = sec_desc $descriptor dacl_protected: false
+  assert_eq $amended.dacl_protected false
+  assert_eq (str amended.owner) S-1-5-32-544
+  assert_eq (sec_desc(descriptor).to_bin()) $descriptor.to_bin()
+  assert_eq (sec_desc(descriptor.to_bin()).to_bin()) $descriptor.to_bin()
+
+  # Errors name where in the spec they happened.
+  assert_throws $ValueError do sec_desc()
+  assert_throws $ValueError do sec_desc {dacl_protectd: true}
+  assert_throws $TypeError do
+    sec_desc $
+      dacl:
+        - allow: :EVERYONE:
+          mask: nope
+
+  # The rigid constructor keeps its strict signature.
+  assert_throws $TypeError do SecDesc dacl: [{allow: :EVERYONE:, mask: :GENERIC_ALL:}]
 
 #[test]
 def constructs_posix_acls_on_every_platform()

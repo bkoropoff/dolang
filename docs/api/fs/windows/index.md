@@ -30,14 +30,20 @@ Gets selected parts of a Windows security descriptor.
 
 [`security.windows.SecDesc`](../../security/windows/secdesc.md)
 
-### `set_sec_desc path desc :resolve?`
+### `set_sec_desc path desc? :resolve? ...options`
 
 Applies the components selected by a Windows security descriptor's `mask`.
 
 #### Parameters
 
-| Name      | Type                                                            | Description                                                                 |
-| --------- | --------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| `path`    | [`Str`](../../std/str.md)\|[`Path`](./path.md)                  | Path to update                                                              |
-| `desc`    | [`security.windows.SecDesc`](../../security/windows/secdesc.md) | Security descriptor to apply                                                |
-| `resolve` | `:TARGET:`\|`:LINK:`                                            | Resolution mode (see [fs's resolution modes](../index.md#resolution-modes)) |
+| Name      | Type                                                                                                                     | Description                                                                 |
+| --------- | ------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------- |
+| `path`    | [`Str`](../../std/str.md)\|[`Path`](./path.md)                                                                           | Path to update                                                              |
+| `desc`    | [`security.windows.SecDesc`](../../security/windows/secdesc.md)\|[`Bin`](../../std/bin.md)\|[`Dict`](../../std/dict.md)? | Descriptor, packet, or spec                                                 |
+| `resolve` | `:TARGET:`\|`:LINK:`                                                                                                     | Resolution mode (see [fs's resolution modes](../index.md#resolution-modes)) |
+
+The descriptor's
+[component options](../../security/windows/secdesc.md#component-options) may be
+passed as keyword arguments instead of, or alongside, `desc`, exactly as
+[`sec_desc`](../../security/windows/index.md#sec_desc-desc-options) accepts
+them.

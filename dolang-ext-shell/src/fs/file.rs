@@ -1102,9 +1102,14 @@ impl<'v> Object<'v> for File<'v> {
                     .into_sys(strand)
             })
             .method("set_sec_desc", async move |this, strand, args, _out| {
-                let ([descriptor], []) = unpack!(strand, args, 1, 0)?;
                 let global = this.annex().global;
-                let descriptor = crate::security::sec_desc_from_value(strand, global, &descriptor)?;
+                let descriptor = crate::security::sec_desc_from_args(
+                    strand,
+                    global,
+                    args,
+                    &crate::security::SpecPath::root("set_sec_desc"),
+                )
+                .await?;
                 let borrow = this.borrow(strand)?;
                 let file = borrow
                     .file
