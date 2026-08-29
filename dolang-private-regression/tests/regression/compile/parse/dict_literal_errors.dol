@@ -4,3 +4,11 @@ echo ({a=1})
 #    |
 # LL | echo ({a=1})
 #    |         ^
+
+# EOF recovery should report the dict's closing delimiter, not an array delimiter.
+# error: got <eof>, expected: }
+#   --> dict_literal_errors.dol:LL:LL
+#    |
+# LL | echo {a: 1
+#    |           ^
+echo {a: 1

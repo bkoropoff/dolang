@@ -946,6 +946,57 @@ impl<'a> Parser<'a> {
         self.lex.lexer.add_indent(offset)
     }
 
+    fn consume_comma(&mut self) -> Result<Option<Span>> {
+        Ok(if let Some(token!(TokenInfo::Comma)) = self.peek()? {
+            Some(self.advance())
+        } else {
+            None
+        })
+    }
+
+    fn dollar_group(expr: Expr, span: Span) -> Expr {
+        Expr::Group {
+            expr: Box::new(expr),
+            delim: Some(GroupDelim::Dollar(span)),
+        }
+    }
+
+    fn positional_arg(expr: Expr) -> Arg {
+        Arg::Pos(Single {
+            expr,
+            delim_span: None,
+        })
+    }
+
+    fn ditto_key(span: Span, delim_span: Option<Span>) -> Key {
+        Key {
+            key_span: span,
+            colon_span: span.before_left_char(),
+            expr: Expr::Ident(Ident::new(span)),
+            delim_span,
+        }
+    }
+
+    fn expansion(expr: Expr, ellipsis_span: Span, delim_span: Option<Span>) -> Expand {
+        Expand {
+            expr,
+            ellipsis_span,
+            delim_span,
+        }
+    }
+
+    fn finish_call(arg0: Expr, args: Vec<Arg>) -> Expr {
+        if args.is_empty() {
+            arg0
+        } else {
+            Expr::Call {
+                arg0: Box::new(arg0),
+                args,
+                delim: None,
+            }
+        }
+    }
+
     fn with_mode<R>(
         &mut self,
         mode: Mode,
@@ -1302,33 +1353,19 @@ impl<'a> Parser<'a> {
                         key_span: span,
                         colon_span: span.after_right_char(),
                         expr: self.parse_expr(scope, ExprMode::Full)?,
-                        delim_span: if let Some(token!(Comma)) = self.peek()? {
-                            Some(self.advance())
-                        } else {
-                            None
-                        },
+                        delim_span: self.consume_comma()?,
                     })
                 }
                 Some(token!(Ellipsis, span)) => {
                     self.advance();
-                    Arg::Expand(Expand {
-                        expr: self.parse_expr(scope, ExprMode::Full)?,
-                        ellipsis_span: span,
-                        delim_span: if let Some(token!(Comma)) = self.peek()? {
-                            Some(self.advance())
-                        } else {
-                            None
-                        },
-                    })
+                    let expr = self.parse_expr(scope, ExprMode::Full)?;
+                    let delim_span = self.consume_comma()?;
+                    Arg::Expand(Self::expansion(expr, span, delim_span))
                 }
                 None if fail => break,
                 _ => Arg::Pos(Single {
                     expr: self.parse_expr(scope, ExprMode::Full)?,
-                    delim_span: if let Some(token!(Comma)) = self.peek()? {
-                        Some(self.advance())
-                    } else {
-                        None
-                    },
+                    delim_span: self.consume_comma()?,
                 }),
             };
             args.push(arg)
@@ -1341,10 +1378,9 @@ impl<'a> Parser<'a> {
         use TokenInfo::*;
 
         match self.next()? {
-            Some(token!(Dollar, span)) if matches!(mode, ExprMode::Shell) => Ok(Expr::Group {
-                expr: Box::new(self.parse_expr(scope, ExprMode::Compact)?),
-                delim: Some(GroupDelim::Dollar(span)),
-            }),
+            Some(token!(Dollar, span)) if matches!(mode, ExprMode::Shell) => Ok(
+                Self::dollar_group(self.parse_expr(scope, ExprMode::Compact)?, span),
+            ),
             Some(token!(Sym, span)) => Ok(Expr::Sym(span)),
             Some(token!(DQuote, span)) => self.parse_quoted_string(scope, span, false),
             Some(token!(BQuote, open)) => self.parse_quoted_string(scope, open, true),
@@ -1455,11 +1491,7 @@ impl<'a> Parser<'a> {
                             key_span,
                             colon_span: key_span.after_right_char(),
                             expr: this.parse_expr(scope, ExprMode::Full)?,
-                            delim_span: if let Some(token!(Comma)) = this.peek()? {
-                                Some(this.advance())
-                            } else {
-                                None
-                            },
+                            delim_span: this.consume_comma()?,
                         }));
                         continue;
                     }
@@ -1468,10 +1500,7 @@ impl<'a> Parser<'a> {
                         if let Some(token!(Key)) = this.peek()? {
                             let span = this.advance();
                             (
-                                Expr::Group {
-                                    expr: Box::new(Expr::Ident(Ident::new(span))),
-                                    delim: Some(GroupDelim::Dollar(dollar_span)),
-                                },
+                                Self::dollar_group(Expr::Ident(Ident::new(span)), dollar_span),
                                 span.after_right_char(),
                             )
                         } else {
@@ -1483,33 +1512,21 @@ impl<'a> Parser<'a> {
                     Some(token!(Ellipsis)) => {
                         let ellipsis_span = this.advance();
                         let expr = this.parse_expr(scope, ExprMode::Full)?;
-                        let comma_span = if let Some(token!(Comma)) = this.peek()? {
-                            Some(this.advance())
-                        } else {
-                            None
-                        };
-                        elems.push(DictElem::Expand(Expand {
+                        let comma_span = this.consume_comma()?;
+                        elems.push(DictElem::Expand(Self::expansion(
                             expr,
-                            delim_span: comma_span,
                             ellipsis_span,
-                        }));
+                            comma_span,
+                        )));
                         continue;
                     }
                     Some(token!(DittoKey)) => {
                         let key_span = this.advance();
-                        elems.push(DictElem::Key(Key {
-                            key_span,
-                            expr: Expr::Ident(Ident::new(key_span)),
-                            colon_span: key_span.before_left_char(),
-                            delim_span: if let Some(token!(Comma)) = this.peek()? {
-                                Some(this.advance())
-                            } else {
-                                None
-                            },
-                        }));
+                        let delim_span = this.consume_comma()?;
+                        elems.push(DictElem::Key(Self::ditto_key(key_span, delim_span)));
                         continue;
                     }
-                    None => break this.expect_matching(scope, ExpectKind::RightBracket, left),
+                    None => break this.expect_matching(scope, ExpectKind::RightBrace, left),
                     _ => {
                         let key = this.parse_expr(scope, ExprMode::Full)?;
                         let span = match this.peek()? {
@@ -1534,7 +1551,7 @@ impl<'a> Parser<'a> {
                                     expr: key,
                                     delim_span: None,
                                 }));
-                                break this.expect_matching(scope, ExpectKind::RightBracket, left);
+                                break this.expect_matching(scope, ExpectKind::RightBrace, left);
                             }
                             _ => {
                                 let token = this.next().unwrap();
@@ -1549,11 +1566,7 @@ impl<'a> Parser<'a> {
                     }
                 };
                 let value = this.parse_expr(scope, ExprMode::Full)?;
-                let comma_span = if let Some(token!(Comma)) = this.peek()? {
-                    Some(this.advance())
-                } else {
-                    None
-                };
+                let comma_span = this.consume_comma()?;
                 elems.push(DictElem::Pair(Pair {
                     key,
                     value,
@@ -1588,25 +1601,17 @@ impl<'a> Parser<'a> {
                     Some(token!(TokenInfo::Ellipsis)) => {
                         let ellipsis_span = this.advance();
                         let expr = this.parse_expr(scope, ExprMode::Full)?;
-                        let comma = if let Some(token!(TokenInfo::Comma)) = this.peek()? {
-                            Some(this.advance())
-                        } else {
-                            None
-                        };
-                        elems.push(ArrayElem::Expand(Expand {
+                        let comma = this.consume_comma()?;
+                        elems.push(ArrayElem::Expand(Self::expansion(
                             expr,
-                            delim_span: comma,
                             ellipsis_span,
-                        }));
+                            comma,
+                        )));
                     }
                     None => break this.expect_matching(scope, ExpectKind::RightBracket, left),
                     _ => {
                         let expr = this.parse_expr(scope, ExprMode::Full)?;
-                        let comma = if let Some(token!(TokenInfo::Comma)) = this.peek()? {
-                            Some(this.advance())
-                        } else {
-                            None
-                        };
+                        let comma = this.consume_comma()?;
                         elems.push(ArrayElem::Single(Single {
                             expr,
                             delim_span: comma,
@@ -1836,19 +1841,13 @@ impl<'a> Parser<'a> {
                             delim: ref mut delim @ None,
                             ..
                         } => {
-                            args.push(Arg::Pos(Single {
-                                expr: rhs,
-                                delim_span: None,
-                            }));
+                            args.push(Self::positional_arg(rhs));
                             *delim = Some(GroupDelim::Dollar(span));
                         }
                         _ => {
                             lhs = Expr::Call {
                                 arg0: Box::new(lhs),
-                                args: vec![Arg::Pos(Single {
-                                    expr: rhs,
-                                    delim_span: None,
-                                })],
+                                args: vec![Self::positional_arg(rhs)],
                                 delim: Some(GroupDelim::Dollar(span)),
                             }
                         }
@@ -1889,17 +1888,11 @@ impl<'a> Parser<'a> {
                                     ref mut args,
                                     delim: None,
                                     ..
-                                } => args.push(Arg::Pos(Single {
-                                    expr: rhs,
-                                    delim_span: None,
-                                })),
+                                } => args.push(Self::positional_arg(rhs)),
                                 _ => {
                                     lhs = Expr::Call {
                                         arg0: Box::new(lhs),
-                                        args: vec![Arg::Pos(Single {
-                                            expr: rhs,
-                                            delim_span: None,
-                                        })],
+                                        args: vec![Self::positional_arg(rhs)],
                                         delim: None,
                                     };
                                 }
@@ -1915,17 +1908,11 @@ impl<'a> Parser<'a> {
                                     ref mut args,
                                     delim: None,
                                     ..
-                                } => args.push(Arg::Pos(Single {
-                                    expr: rhs,
-                                    delim_span: None,
-                                })),
+                                } => args.push(Self::positional_arg(rhs)),
                                 _ => {
                                     lhs = Expr::Call {
                                         arg0: Box::new(lhs),
-                                        args: vec![Arg::Pos(Single {
-                                            expr: rhs,
-                                            delim_span: None,
-                                        })],
+                                        args: vec![Self::positional_arg(rhs)],
                                         delim: None,
                                     }
                                 }
@@ -1956,17 +1943,11 @@ impl<'a> Parser<'a> {
                                     ref mut args,
                                     delim: None,
                                     ..
-                                } => args.push(Arg::Pos(Single {
-                                    expr: rhs,
-                                    delim_span: None,
-                                })),
+                                } => args.push(Self::positional_arg(rhs)),
                                 _ => {
                                     lhs = Expr::Call {
                                         arg0: Box::new(lhs),
-                                        args: vec![Arg::Pos(Single {
-                                            expr: rhs,
-                                            delim_span: None,
-                                        })],
+                                        args: vec![Self::positional_arg(rhs)],
                                         delim: None,
                                     }
                                 }
@@ -2065,21 +2046,12 @@ impl<'a> Parser<'a> {
                         }
                         TokenInfo::DittoKey => {
                             let token = self.consume();
-                            Arg::Key(Key {
-                                key_span: token.span,
-                                colon_span: token.span.before_left_char(),
-                                expr: Expr::Ident(Ident::new(token.span)),
-                                delim_span: None,
-                            })
+                            Arg::Key(Self::ditto_key(token.span, None))
                         }
                         TokenInfo::Ellipsis => {
                             let token = self.consume();
                             let expr = self.parse_expr_prec(scope, mode, Some(prec))?;
-                            Arg::Expand(Expand {
-                                expr,
-                                ellipsis_span: token.span,
-                                delim_span: None,
-                            })
+                            Arg::Expand(Self::expansion(expr, token.span, None))
                         }
                         TokenInfo::LeftParen if !matches!(lhs, Expr::Call { .. }) => {
                             let left = self.advance();
@@ -2102,10 +2074,7 @@ impl<'a> Parser<'a> {
                             })?;
                             continue;
                         }
-                        _ => Arg::Pos(Single {
-                            expr: self.parse_expr_prec(scope, mode, Some(prec))?,
-                            delim_span: None,
-                        }),
+                        _ => Self::positional_arg(self.parse_expr_prec(scope, mode, Some(prec))?),
                     };
                     // Join argument to existing call create new one
                     match lhs {
@@ -2247,23 +2216,17 @@ impl<'a> Parser<'a> {
                 match self.peek()? {
                     Some(token!(ArgSep)) => {
                         self.advance();
-                        Ok(Expr::Group {
-                            expr: Box::new(self.parse_cmd_or_expr(scope, true)?),
-                            delim: Some(GroupDelim::Dollar(span)),
-                        })
+                        let expr = self.parse_cmd_or_expr(scope, true)?;
+                        Ok(Self::dollar_group(expr, span))
                     }
                     Some(token!(Indent)) => {
                         self.advance();
-                        Ok(Expr::Group {
-                            expr: Box::new(self.parse_data(scope, vec![], true)?),
-                            delim: Some(GroupDelim::Dollar(span)),
-                        })
+                        let expr = self.parse_data(scope, vec![], true)?;
+                        Ok(Self::dollar_group(expr, span))
                     }
                     _ => {
-                        let expr = Expr::Group {
-                            expr: Box::new(self.parse_expr(scope, ExprMode::Compact)?),
-                            delim: Some(GroupDelim::Dollar(span)),
-                        };
+                        let expr = self.parse_expr(scope, ExprMode::Compact)?;
+                        let expr = Self::dollar_group(expr, span);
                         if matches!(self.peek()?, Some(token!(Dedent | StmtSep)) | None) {
                             Ok(expr)
                         } else {
@@ -2272,26 +2235,13 @@ impl<'a> Parser<'a> {
                     }
                 }
             }
-            Some(token!(TokenInfo::Op(Op::Bar))) => {
-                let pipe_span = self.advance();
-                let (intro_span, strip) = self.parse_heredoc_intro(pipe_span)?;
+            Some(token!(TokenInfo::Op(Op::Bar) | TokenInfo::RBar)) => {
+                let raw = matches!(self.peek()?, Some(token!(RBar)));
+                let open_span = self.advance();
+                let (intro_span, strip) = self.parse_heredoc_intro(open_span)?;
                 if let Some(token!(Indent)) = self.peek()? {
                     self.advance();
-                    self.parse_heredoc(scope, intro_span, strip, false)
-                } else {
-                    self.parse_implicit_concat(
-                        scope,
-                        Some(Expr::Literal(intro_span)),
-                        UnquotedMode::Data,
-                    )
-                }
-            }
-            Some(token!(TokenInfo::RBar)) => {
-                let rbar_span = self.advance();
-                let (intro_span, strip) = self.parse_heredoc_intro(rbar_span)?;
-                if let Some(token!(Indent)) = self.peek()? {
-                    self.advance();
-                    self.parse_heredoc(scope, intro_span, strip, true)
+                    self.parse_heredoc(scope, intro_span, strip, raw)
                 } else {
                     self.parse_implicit_concat(
                         scope,
@@ -2385,13 +2335,42 @@ impl<'a> Parser<'a> {
         })
     }
 
+    fn parse_cmd_vert_dynamic_or_pos(
+        &mut self,
+        scope: &mut Scope,
+        args: &mut Vec<Arg>,
+        key: Expr,
+    ) -> Result<()> {
+        if let Some(token!(TokenInfo::Colon)) = self.peek()? {
+            let colon_span = self.advance();
+            let value = if let Some(token!(TokenInfo::Indent)) = self.peek()? {
+                self.advance();
+                self.parse_data(scope, vec![], false)?
+            } else {
+                self.expect(scope, &[ExpectKind::ArgSep])?;
+                self.parse_cmd_vert_line_expr(scope)?
+            };
+            args.push(Arg::DynamicKey(Pair {
+                key,
+                value,
+                colon_span: Some(colon_span),
+                delim_span: None,
+            }));
+        } else {
+            let expr = self.parse_implicit_concat(scope, Some(key), UnquotedMode::Shell)?;
+            args.push(Self::positional_arg(expr));
+            self.parse_cmd_args(scope, false, false, args)?;
+        }
+        Ok(())
+    }
+
     fn parse_cmd_vert_arg(
         &mut self,
         scope: &mut Scope,
         args: &mut Vec<Arg>,
         bin_pack: bool,
     ) -> Result<()> {
-        use self::{Ident, Key, Keyword, Op};
+        use self::{Key, Keyword, Op};
         use TokenInfo::*;
 
         match self.peek()? {
@@ -2463,22 +2442,13 @@ impl<'a> Parser<'a> {
             }
             Some(token!(DittoKey)) => {
                 let span = self.advance();
-                args.push(Arg::Key(Key {
-                    key_span: span,
-                    colon_span: span.before_left_char(),
-                    expr: Expr::Ident(Ident::new(span)),
-                    delim_span: None,
-                }));
+                args.push(Arg::Key(Self::ditto_key(span, None)));
                 Ok(())
             }
             Some(token!(Ellipsis)) => {
                 let ellipsis_span = self.advance();
                 let expr = self.parse_expr(scope, ExprMode::Compact)?;
-                args.push(Arg::Expand(Expand {
-                    expr,
-                    ellipsis_span,
-                    delim_span: None,
-                }));
+                args.push(Arg::Expand(Self::expansion(expr, ellipsis_span, None)));
                 Ok(())
             }
             Some(token!(Keyword(Keyword::If))) => {
@@ -2503,24 +2473,11 @@ impl<'a> Parser<'a> {
                 };
                 // Expect indentation for body
                 self.expect(scope, &[ExpectKind::Indent])?;
-                let mut body = Vec::new();
-                loop {
-                    match self.peek()? {
-                        None | Some(token!(Dedent)) => break,
-                        Some(token!(StmtSep)) => {
-                            self.advance();
-                        }
-                        _ => self.parse_cmd_vert_arg(scope, &mut body, bin_pack)?,
-                    }
-                }
-                self.expect(scope, &[ExpectKind::Dedent])?;
+                let body = self.parse_cmd_vert_body(scope, bin_pack)?;
                 args.push(Arg::For(For {
                     bind,
                     expr,
-                    body: ExprBody {
-                        elems: body,
-                        vars: Vec::new(),
-                    },
+                    body,
                     iter: None, // Will be filled by resolver
                     for_span,
                     equal_span,
@@ -2529,91 +2486,32 @@ impl<'a> Parser<'a> {
             }
             Some(token!(expr_start!())) => {
                 let key = self.parse_expr(scope, ExprMode::Shell)?;
-                if let Some(token!(Colon)) = self.peek()? {
-                    let colon_span = self.advance();
-                    let value = if let Some(token!(Indent)) = self.peek()? {
-                        self.advance();
-                        self.parse_data(scope, vec![], false)?
-                    } else {
-                        self.expect(scope, &[ExpectKind::ArgSep])?;
-                        self.parse_cmd_vert_line_expr(scope)?
-                    };
-                    args.push(Arg::DynamicKey(Pair {
-                        key,
-                        value,
-                        colon_span: Some(colon_span),
-                        delim_span: None,
-                    }));
-                } else {
-                    args.push(Arg::Pos(Single {
-                        expr: self.parse_implicit_concat(scope, Some(key), UnquotedMode::Shell)?,
-                        delim_span: None,
-                    }));
-                    self.parse_cmd_args(scope, false, false, args)?;
-                    return Ok(());
-                }
-                Ok(())
+                self.parse_cmd_vert_dynamic_or_pos(scope, args, key)
             }
             Some(token!(Dollar)) => {
                 let span = self.advance();
                 match self.peek()? {
                     Some(token!(ArgSep)) => {
                         self.advance();
-                        args.push(Arg::Pos(Single {
-                            expr: Expr::Group {
-                                expr: Box::new(self.parse_cmd_or_expr(scope, true)?),
-                                delim: Some(GroupDelim::Dollar(span)),
-                            },
-                            delim_span: None,
-                        }));
+                        let expr = self.parse_cmd_or_expr(scope, true)?;
+                        args.push(Self::positional_arg(Self::dollar_group(expr, span)));
                         return Ok(());
                     }
                     Some(token!(Indent)) => {
                         self.advance();
-                        args.push(Arg::Pos(Single {
-                            expr: Expr::Group {
-                                expr: Box::new(self.parse_data(scope, vec![], true)?),
-                                delim: Some(GroupDelim::Dollar(span)),
-                            },
-                            delim_span: None,
-                        }));
+                        let expr = self.parse_data(scope, vec![], true)?;
+                        args.push(Self::positional_arg(Self::dollar_group(expr, span)));
                         return Ok(());
                     }
                     _ => (),
                 }
-                let key = Expr::Group {
-                    expr: Box::new(self.parse_expr(scope, ExprMode::Compact)?),
-                    delim: Some(GroupDelim::Dollar(span)),
-                };
-                if let Some(token!(Colon)) = self.peek()? {
-                    let colon_span = self.advance();
-                    let value = if let Some(token!(Indent)) = self.peek()? {
-                        self.advance();
-                        self.parse_data(scope, vec![], false)?
-                    } else {
-                        self.expect(scope, &[ExpectKind::ArgSep])?;
-                        self.parse_cmd_vert_line_expr(scope)?
-                    };
-                    args.push(Arg::DynamicKey(Pair {
-                        key,
-                        value,
-                        colon_span: Some(colon_span),
-                        delim_span: None,
-                    }));
-                } else {
-                    args.push(Arg::Pos(Single {
-                        expr: self.parse_implicit_concat(scope, Some(key), UnquotedMode::Shell)?,
-                        delim_span: None,
-                    }));
-                    self.parse_cmd_args(scope, false, false, args)?;
-                };
-                Ok(())
+                let expr = self.parse_expr(scope, ExprMode::Compact)?;
+                let key = Self::dollar_group(expr, span);
+                self.parse_cmd_vert_dynamic_or_pos(scope, args, key)
             }
             Some(token!(Keyword(Keyword::Do))) => {
-                args.push(Arg::Pos(Single {
-                    expr: self.parse_do_block(scope, true)?,
-                    delim_span: None,
-                }));
+                let expr = self.parse_do_block(scope, true)?;
+                args.push(Self::positional_arg(expr));
                 Ok(())
             }
             other => {
@@ -2976,8 +2874,7 @@ impl<'a> Parser<'a> {
         let if_span = self.expect(scope, &[ExpectKind::Keyword(If)])?;
         self.expect(scope, &[ExpectKind::ArgSep])?;
         let (cond, bind) = self.parse_cond(scope)?;
-        let tbranch = self.parse_block(scope)?;
-        self.expect(scope, &[ExpectKind::Dedent])?;
+        let tbranch = self.parse_block_through_dedent(scope)?;
 
         let mut elif_branches = Vec::new();
         let mut else_branch = None;
@@ -2991,8 +2888,7 @@ impl<'a> Parser<'a> {
                 let elif_if_span = self.expect(scope, &[ExpectKind::Keyword(If)])?;
                 self.expect(scope, &[ExpectKind::ArgSep])?;
                 let (elif_cond, elif_bind) = self.parse_cond(scope)?;
-                let elif_body = self.parse_block(scope)?;
-                self.expect(scope, &[ExpectKind::Dedent])?;
+                let elif_body = self.parse_block_through_dedent(scope)?;
 
                 elif_branches.push((
                     IfBranch {
@@ -3006,8 +2902,7 @@ impl<'a> Parser<'a> {
             } else {
                 // This is final "else"
                 self.expect(scope, &[ExpectKind::Indent])?;
-                let else_body = self.parse_block(scope)?;
-                self.expect(scope, &[ExpectKind::Dedent])?;
+                let else_body = self.parse_block_through_dedent(scope)?;
 
                 else_branch = Some((else_body, else_span));
                 break;
@@ -3033,8 +2928,7 @@ impl<'a> Parser<'a> {
 
         let try_span = self.expect(scope, &[ExpectKind::Keyword(Keyword::Try)])?;
         self.expect(scope, &[ExpectKind::Indent])?;
-        let body_block = self.parse_block(scope)?;
-        self.expect(scope, &[ExpectKind::Dedent])?;
+        let body_block = self.parse_block_through_dedent(scope)?;
 
         let body = Function {
             params: vec![],
@@ -3067,8 +2961,7 @@ impl<'a> Parser<'a> {
                 self.expect(scope, &[ExpectKind::ArgSep])?;
                 let var_span = self.expect(scope, &[ExpectKind::Ident])?;
                 self.expect(scope, &[ExpectKind::Indent])?;
-                let catch_block = self.parse_block(scope)?;
-                self.expect(scope, &[ExpectKind::Dedent])?;
+                let catch_block = self.parse_block_through_dedent(scope)?;
                 handlers.push(CatchHandler {
                     class_expr: Some(expr),
                     func: Function {
@@ -3095,8 +2988,7 @@ impl<'a> Parser<'a> {
                 };
                 has_catch_all = true;
                 self.expect(scope, &[ExpectKind::Indent])?;
-                let catch_block = self.parse_block(scope)?;
-                self.expect(scope, &[ExpectKind::Dedent])?;
+                let catch_block = self.parse_block_through_dedent(scope)?;
                 handlers.push(CatchHandler {
                     class_expr: None,
                     func: Function {
@@ -3115,8 +3007,7 @@ impl<'a> Parser<'a> {
         let finally = if let Some(token!(TokenInfo::Keyword(Keyword::Finally))) = self.peek()? {
             let finally_span = self.advance();
             self.expect(scope, &[ExpectKind::Indent])?;
-            let finally_block = self.parse_block(scope)?;
-            self.expect(scope, &[ExpectKind::Dedent])?;
+            let finally_block = self.parse_block_through_dedent(scope)?;
             Some((
                 Function {
                     params: vec![],
@@ -3140,8 +3031,7 @@ impl<'a> Parser<'a> {
         let while_span = self.advance();
         self.expect(scope, &[ExpectKind::ArgSep])?;
         let (cond, bind) = self.parse_cond(scope)?;
-        let body = self.parse_block(scope)?;
-        self.expect(scope, &[ExpectKind::Dedent])?;
+        let body = self.parse_block_through_dedent(scope)?;
         Ok(Stmt::While(While {
             expr: cond,
             bind,
@@ -3170,8 +3060,7 @@ impl<'a> Parser<'a> {
                 ));
             }
         };
-        let body = self.parse_block(scope)?;
-        self.expect(scope, &[ExpectKind::Dedent])?;
+        let body = self.parse_block_through_dedent(scope)?;
         Ok(Stmt::For(For {
             bind,
             expr,
@@ -3217,9 +3106,8 @@ impl<'a> Parser<'a> {
                 self.advance();
                 let function = Function {
                     params,
-                    body: self.parse_block(scope)?,
+                    body: self.parse_block_through_dedent(scope)?,
                 };
-                self.expect(scope, &[ExpectKind::Dedent])?;
                 Ok(Expr::Lambda {
                     func: function,
                     do_span: Some(do_span),
@@ -3277,22 +3165,18 @@ impl<'a> Parser<'a> {
                 match self.peek()? {
                     Some(token!(ArgSep)) => {
                         self.advance();
+                        let expr = self.parse_cmd_or_expr(scope, allow_trailing)?;
                         return Ok((
-                            Expr::Group {
-                                expr: Box::new(self.parse_cmd_or_expr(scope, allow_trailing)?),
-                                delim: Some(GroupDelim::Dollar(span)),
-                            },
+                            Self::dollar_group(expr, span),
                             // This consumed the rest of the statement
                             true,
                         ));
                     }
                     Some(token!(Indent)) if allow_trailing => {
                         self.advance();
+                        let expr = self.parse_data(scope, vec![], true)?;
                         return Ok((
-                            Expr::Group {
-                                expr: Box::new(self.parse_data(scope, vec![], true)?),
-                                delim: Some(GroupDelim::Dollar(span)),
-                            },
+                            Self::dollar_group(expr, span),
                             // This consumed the rest of the statement
                             true,
                         ));
@@ -3300,43 +3184,19 @@ impl<'a> Parser<'a> {
                     _ => (),
                 };
                 let expr = self.parse_expr(scope, ExprMode::Compact)?;
-                Ok((
-                    Expr::Group {
-                        expr: Box::new(self.parse_implicit_concat(
-                            scope,
-                            Some(expr),
-                            UnquotedMode::Shell,
-                        )?),
-                        delim: Some(GroupDelim::Dollar(span)),
-                    },
-                    false,
-                ))
+                let expr = self.parse_implicit_concat(scope, Some(expr), UnquotedMode::Shell)?;
+                Ok((Self::dollar_group(expr, span), false))
             }
             Some(token!(Keyword(Keyword::Do))) => {
                 Ok((self.parse_do_block(scope, allow_trailing)?, true))
             }
-            Some(token!(Op(Op::Bar))) => {
-                let pipe_span = self.advance();
-                let (intro_span, strip) = self.parse_heredoc_intro(pipe_span)?;
+            Some(token!(Op(Op::Bar) | RBar)) => {
+                let raw = matches!(self.peek()?, Some(token!(RBar)));
+                let open_span = self.advance();
+                let (intro_span, strip) = self.parse_heredoc_intro(open_span)?;
                 if let Some(token!(Indent)) = self.peek()? {
                     self.advance();
-                    return Ok((self.parse_heredoc(scope, intro_span, strip, false)?, true));
-                }
-                Ok((
-                    self.parse_implicit_concat(
-                        scope,
-                        Some(Expr::Literal(intro_span)),
-                        UnquotedMode::Shell,
-                    )?,
-                    false,
-                ))
-            }
-            Some(token!(RBar)) => {
-                let rbar_span = self.advance();
-                let (intro_span, strip) = self.parse_heredoc_intro(rbar_span)?;
-                if let Some(token!(Indent)) = self.peek()? {
-                    self.advance();
-                    return Ok((self.parse_heredoc(scope, intro_span, strip, true)?, true));
+                    return Ok((self.parse_heredoc(scope, intro_span, strip, raw)?, true));
                 }
                 Ok((
                     self.parse_implicit_concat(
@@ -3377,7 +3237,7 @@ impl<'a> Parser<'a> {
         allow_trailing: bool,
         args: &mut Vec<Arg>,
     ) -> Result<bool> {
-        use self::{Ident, Key};
+        use self::Key;
         use TokenInfo::*;
 
         match self.peek()? {
@@ -3438,30 +3298,18 @@ impl<'a> Parser<'a> {
             }
             Some(token!(DittoKey)) => {
                 let span = self.advance();
-                args.push(Arg::Key(Key {
-                    key_span: span,
-                    colon_span: span.before_left_char(),
-                    expr: Expr::Ident(Ident::new(span)),
-                    delim_span: None,
-                }));
+                args.push(Arg::Key(Self::ditto_key(span, None)));
                 Ok(false)
             }
             Some(token!(Ellipsis)) => {
                 let ellipsis_span = self.advance();
                 let expr = self.parse_expr(scope, ExprMode::Compact)?;
-                args.push(Arg::Expand(Expand {
-                    expr,
-                    ellipsis_span,
-                    delim_span: None,
-                }));
+                args.push(Arg::Expand(Self::expansion(expr, ellipsis_span, None)));
                 Ok(false)
             }
             _ => {
                 let (expr, consumed) = self.parse_cmd_arg_expr(scope, allow_trailing)?;
-                args.push(Arg::Pos(Single {
-                    expr,
-                    delim_span: None,
-                }));
+                args.push(Self::positional_arg(expr));
                 Ok(consumed)
             }
         }
@@ -3480,39 +3328,10 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_cmd(&mut self, scope: &mut Scope, allow_trailing: bool) -> Result<PrimStmt> {
-        use TokenInfo::*;
-
         let arg0 = self.parse_cmd_arg0(scope)?;
         let mut args = vec![];
-        Ok(match self.peek()? {
-            Some(token!(Equal)) => {
-                // Assignment is now handled at the statement level
-                // For RHS parsing, just parse the expression
-                self.parse_cmd_args(scope, true, allow_trailing, &mut args)?;
-                PrimStmt::Expr(if args.is_empty() {
-                    arg0
-                } else {
-                    Expr::Call {
-                        arg0: Box::new(arg0),
-                        args,
-                        delim: None,
-                    }
-                })
-            }
-            _ => {
-                self.parse_cmd_args(scope, true, allow_trailing, &mut args)?;
-
-                PrimStmt::Expr(if args.is_empty() {
-                    arg0
-                } else {
-                    Expr::Call {
-                        arg0: Box::new(arg0),
-                        args,
-                        delim: None,
-                    }
-                })
-            }
-        })
+        self.parse_cmd_args(scope, true, allow_trailing, &mut args)?;
+        Ok(PrimStmt::Expr(Self::finish_call(arg0, args)))
     }
 
     fn parse_cmd_or_expr(&mut self, scope: &mut Scope, allow_trailing: bool) -> Result<Expr> {
@@ -3521,25 +3340,18 @@ impl<'a> Parser<'a> {
             Some(token!(TokenInfo::Keyword(Keyword::Do))) => {
                 return self.parse_do_block(scope, allow_trailing);
             }
-            Some(token!(TokenInfo::Op(Op::Bar))) if allow_trailing => {
-                let pipe_span = self.advance();
-                let (intro_span, strip) = self.parse_heredoc_intro(pipe_span)?;
+            Some(token!(TokenInfo::Op(Op::Bar) | TokenInfo::RBar)) if allow_trailing => {
+                let raw = matches!(self.peek()?, Some(token!(TokenInfo::RBar)));
+                let open_span = self.advance();
+                let (intro_span, strip) = self.parse_heredoc_intro(open_span)?;
                 self.expect(scope, &[ExpectKind::Indent])?;
-                return self.parse_heredoc(scope, intro_span, strip, false);
-            }
-            Some(token!(TokenInfo::RBar)) if allow_trailing => {
-                let rbar_span = self.advance();
-                let (intro_span, strip) = self.parse_heredoc_intro(rbar_span)?;
-                self.expect(scope, &[ExpectKind::Indent])?;
-                return self.parse_heredoc(scope, intro_span, strip, true);
+                return self.parse_heredoc(scope, intro_span, strip, raw);
             }
             Some(token!(TokenInfo::Dollar)) if allow_trailing => {
                 let dollar_span = self.advance();
                 self.expect(scope, &[ExpectKind::Indent])?;
-                return Ok(Expr::Group {
-                    expr: Box::new(self.parse_data(scope, vec![], true)?),
-                    delim: Some(GroupDelim::Dollar(dollar_span)),
-                });
+                let expr = self.parse_data(scope, vec![], true)?;
+                return Ok(Self::dollar_group(expr, dollar_span));
             }
             _ => {}
         }
@@ -3548,15 +3360,7 @@ impl<'a> Parser<'a> {
         let mut args = vec![];
         self.parse_cmd_args(scope, true, allow_trailing, &mut args)?;
 
-        Ok(if args.is_empty() {
-            arg0
-        } else {
-            Expr::Call {
-                arg0: Box::new(arg0),
-                args,
-                delim: None,
-            }
-        })
+        Ok(Self::finish_call(arg0, args))
     }
 
     fn parse_params(&mut self, scope: &mut Scope, mode: ParamMode) -> Result<Vec<Param>> {
@@ -3868,8 +3672,7 @@ impl<'a> Parser<'a> {
                 params
             }
         };
-        let body = self.parse_block(scope)?;
-        self.expect(scope, &[ExpectKind::Dedent])?;
+        let body = self.parse_block_through_dedent(scope)?;
         Ok((def_span, name_span, special, Function { params, body }))
     }
 
@@ -4502,10 +4305,11 @@ impl<'a> Parser<'a> {
             Some(token!(TokenInfo::Dollar)) => {
                 let dollar_span = self.advance();
                 self.expect(scope, &[ExpectKind::Indent])?;
-                Ok(Stmt::Prim(PrimStmt::Expr(Expr::Group {
-                    expr: Box::new(self.parse_data(scope, vec![], true)?),
-                    delim: Some(GroupDelim::Dollar(dollar_span)),
-                })))
+                let expr = self.parse_data(scope, vec![], true)?;
+                Ok(Stmt::Prim(PrimStmt::Expr(Self::dollar_group(
+                    expr,
+                    dollar_span,
+                ))))
             }
             Some(..) => {
                 // Parse expression and check for assignment
@@ -4533,21 +4337,19 @@ impl<'a> Parser<'a> {
                         // This is just an expression
                         let mut args = vec![];
                         self.parse_cmd_args(scope, true, true, &mut args)?;
-                        let expr = if args.is_empty() {
-                            arg0
-                        } else {
-                            Expr::Call {
-                                arg0: Box::new(arg0),
-                                args,
-                                delim: None,
-                            }
-                        };
+                        let expr = Self::finish_call(arg0, args);
                         Ok(Stmt::Prim(PrimStmt::Expr(expr)))
                     }
                 }
             }
             None => Err(self.syntax_error(scope, None, "expected statement")),
         }
+    }
+
+    fn parse_block_through_dedent(&mut self, scope: &mut Scope) -> Result<Block> {
+        let block = self.parse_block(scope)?;
+        self.expect(scope, &[ExpectKind::Dedent])?;
+        Ok(block)
     }
 
     fn parse_block(&mut self, scope: &mut Scope) -> Result<Block> {
