@@ -41,14 +41,6 @@ let BUNDLE = "dolang-freebsd-gold.dolvm"
 # cache key covers.
 let VERSION_FILE = ".github/dolang-version"
 
-# Guest packages the build needs.
-let PACKAGES = $
-  - sqlite3
-  - pkgconf
-  - curl
-  - llvm19
-  - sudo
-
 # Scratch the mint leaves behind, which would otherwise be baked into every
 # guest restored from the bundle.
 #
@@ -283,23 +275,13 @@ pub def build()
     memory: 12288
     vcpus: 4
     disk_size: 50G
-    # This runs under the bootstrap release, not the build this workflow
-    # produces, so it is still the top-level `packages:` that release's
-    # `libvirt` module takes. It moves under `init:`, where the rest of
-    # cloud-init's provisioning lives, once a bootstrap cycle has carried the
-    # relocation into the release that runs this.
-    packages: $PACKAGES
     init:
-      # Grants the `ci` user passwordless sudo, so shell tests can provision
-      # and tear down scratch `md(4)` filesystems (for ACL coverage that needs
-      # a POSIX- or NFSv4-ACL-enabled mount) via the `sudo`/`admin` bundled
-      # modules instead of mutating the guest's root filesystem.
-      add:
-        target: /usr/local/etc/sudoers.d/ci
-        content: |
-          ci ALL=(ALL) NOPASSWD: ALL
-        chmod: 0o440
-        owner: "root:wheel"
+      packages:
+        - sqlite3
+        - pkgconf
+        - curl
+        - llvm19
+        - sudo
     # A top-level `add:` rather than an `init:` one: this runs once SSH is up,
     # so the user exists and the file is written through the guest's VFS with
     # the right ownership
