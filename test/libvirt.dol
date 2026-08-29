@@ -1,4 +1,4 @@
-import digest http libvirt proc progress rand regex std sys transfer
+import digest http libvirt progress rand regex std sys transfer
   fs:
     - Path
     - with_temp_dir
@@ -41,7 +41,7 @@ def cached block ...rest
 
 #[test]
 #[cached]
-def provision_freebsd_and_run_command()
+def freebsd()
   with_temp_dir do |dir|
     let source = (dir / "upload.bin")
     let downloaded = (dir / "download.bin")
@@ -107,7 +107,7 @@ def provision_freebsd_and_run_command()
 
 #[test]
 #[cached]
-def install_windows_and_run_command()
+def windows()
   # Neither is needed by the cloud-init path the module-level probe checks, so
   # they are checked here instead of skipping the whole file for their sake.
   for program = ["swtpm", "swtpm_setup"]
@@ -150,17 +150,11 @@ def install_windows_and_run_command()
       # until it finishes, so an unannotated step is several silent minutes
       # with no way to tell work from a hang.
       run: do
-        progress.show message: "disable hibernation" icon: 💤 do |_|
-          run powercfg /h off
         # The overlay is opened with `discard=unmap`, so a guest-side trim is
         # what returns the freed space to the qcow2. `defrag` reports its own
         # failure on a volume that does not support retrim, and nothing here
         # depends on it having worked.
-        progress.show message: "retrim disk" icon: 🧹 do |_|
-          try
-            run defrag "C:" /L
-          catch proc.Error: _
-            nil
+        progress.show message: "retrim disk" icon: 🧹 do |_| run defrag "C:" /L
       # Exercises the step vocabulary, and proves the guest comes back from a
       # reboot the host asked for.
       reboot
@@ -169,12 +163,10 @@ def install_windows_and_run_command()
       # `cmd` rather than a Do builtin: what is being tested is that the guest
       # runs a program at all, over a VFS that reached it through Windows
       # OpenSSH and the machine `PATH` the provisioning script wrote.
-      let output = progress.show message: "run command" icon: ▶️ do |_|
-        domain.with do sub do run cmd /c echo hello world
+      let output = domain.with do sub do run cmd /c echo hello world
       assert_eq $output.trim() "hello world"
 
-      let added = progress.show message: "check add: step" icon: 📄 do |_|
-        domain.with do Path(r"C:\Windows\Temp\dolang-libvirt-add.txt").read().trim()
+      let added = domain.with do Path(r"C:\Windows\Temp\dolang-libvirt-add.txt").read().trim()
       assert_eq $added "added by the test"
 
       progress.show message: "transfer round trip" icon: 🔁 do |_|
@@ -251,11 +243,9 @@ def export_and_restore domain :sentinel :bundle_name :command :expect :memory = 
     try
       # The guest is the one that was exported: its VFS command path came back
       # from the manifest, and the file written before shutdown is still there.
-      let output = progress.show message: "run command" icon: ▶️ do |_|
-        restored.with do sub do run ...command
+      let output = restored.with do sub do run ...command
       assert_eq $output.trim() $expect
-      let restored_token = progress.show message: "check sentinel" icon: 🔖 do |_|
-        restored.with do Path(sentinel).read().trim()
+      let restored_token = restored.with do Path(sentinel).read().trim()
       assert_eq $restored_token $token
 
       # No seed means nothing was re-provisioned. Read straight out of libvirt

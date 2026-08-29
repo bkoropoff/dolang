@@ -630,8 +630,9 @@ class Guest
     let archive = shlex.quote $PAYLOAD_PATH
     self.#exec "mkdir -p $dir && tar -xzf $archive -C $dir && rm -f $archive"
 
-  # Runs `block` through the guest's SSH VFS connection.
-  pub def with self block
+  # Runs `block` in the guest's VFS context, in `cd:` and with `env:` applied
+  # to the environment.
+  pub def with self block :cd = nil :env = {}
     ssh.with 127.0.0.1 $block
       user: $self.#user
       port: $self.port
@@ -641,6 +642,8 @@ class Guest
       host_key: :ACCEPT_NEW:
       batch: true
       identities_only: true
+      :cd
+      :env
 
   # The `<dolang:vm>` elements recording how to reach this guest — the form
   # `guest_from_metadata` reads back.
@@ -1744,12 +1747,12 @@ class DomainImpl
               workdir.remove all: true ignore: true
 
 
-  # Runs `block` through the domain's SSH VFS connection.
-  pub def with self block
+  # Runs `block` in the domain's VFS context.
+  pub def with self block :cd = nil :env = {}
     let guest = self.#guest()
     if (self.state() != :RUNNING:)
       throw std.ValueError "libvirt domain is not running: $(self.name)"
-    guest.with $block
+    guest.with $block :cd :env
 
 # References a libvirt domain by name and connection URI.
 #
@@ -1866,9 +1869,34 @@ pub class Domain
   pub def undefine self
     self.#impl.undefine()
 
-  # Runs `block` through the domain's SSH VFS connection.
-  pub def with self block
-    self.#impl.with $block
+  # Runs `block` in the domain's VFS context.
+  #
+  # # Parameters
+  #
+  # | Name    | type       | Description                          |
+  # | ------- | ---------- | ------------------------------------ |
+  # | `block` | callable   | Block to run in the guest            |
+  # | `cd`?   | `Str`\|`Path` | Initial working directory in the guest |
+  # | `env`?  | `Dict`     | Environment overrides for the block  |
+  #
+  # # Returns
+  #
+  # The result of `block`.
+  #
+  # # Errors
+  #
+  # | Error        | Condition                     |
+  # | ------------ | ----------------------------- |
+  # | `ValueError` | The domain is not running     |
+  #
+  # # Example
+  #
+  # ```
+  # domain.with cd: /usr/src env: {MAKEOBJDIRPREFIX: /tmp/obj} do
+  #   run make buildworld
+  # ```
+  pub def with self block :cd = nil :env = {}
+    self.#impl.with $block :cd :env
 
 
 # Defines a domain from an XML string.
@@ -2745,19 +2773,15 @@ class InstallerSource: Source
       if (boot == 1)
         edition = spec.edition
         index = spec.index
-      let resolved = progress.show message: "resolve installer" icon: 💿 do |_|
-        resolve_artifact $spec $app
+      let resolved = resolve_artifact $spec $app
       media.push (record path: resolved boot: boot)
       boot = (boot + 1)
     for spec = drivers
-      let resolved = progress.show message: "resolve drivers" icon: 💿 do |_|
-        resolve_artifact $spec $app
+      let resolved = resolve_artifact $spec $app
       media.push (record path: resolved boot: nil)
 
-    let archive = progress.show message: "resolve dolang" do |_|
-      resolve_dolang $dolang $os $arch $app
-    let payload = progress.show message: "unpack payload" icon: 📦 do |_|
-      unpack_payload $root $archive
+    let archive = resolve_dolang $dolang $os $arch $app
+    let payload = unpack_payload $root $archive
 
     # Written beside the domain so the console is usable while an install is
     # being watched. It is also what any bundle exported from this domain
@@ -2827,8 +2851,6 @@ class InstallerSource: Source
         # visible.
         for name = UNATTEND_COPIES
           let path = (windows / name)
-          if path.exists()
-            echo "removing $path"
           path.remove ignore: true
 
 # The `bundle:` source: a disk that was provisioned once, before it was
@@ -2864,18 +2886,16 @@ class BundleSource: Source
     # domains must never be pointed at the same copy.
     let nvram_format = nil
     if (manifest.members.nvram != nil)
-      progress.show message: "restore nvram" icon: 🔒 do |_|
-        extract_member $resolved $manifest.members.nvram (workdir / "nvram.bin")
+      extract_member $resolved $manifest.members.nvram (workdir / "nvram.bin")
       nvram_format = manifest.members.nvram.format
     else if (profile.firmware == :EFI_SECURE:)
       let message = "bundle has no firmware variable store, which os: $(manifest.os) requires"
       throw std.ValueError $message
     if (manifest.members.tpm != nil)
-      progress.show message: "restore tpm" icon: 🔒 do |_|
-        with_temp_dir parent: $workdir do |staging|
-          let archive = (staging / TPM_MEMBER)
-          extract_member $resolved $manifest.members.tpm $archive
-          transfer.unpack $archive (workdir / "tpm")
+      with_temp_dir parent: $workdir do |staging|
+        let archive = (staging / TPM_MEMBER)
+        extract_member $resolved $manifest.members.tpm $archive
+        transfer.unpack $archive (workdir / "tpm")
     else if (profile.tpm != nil)
       throw std.ValueError "bundle has no vTPM state, which os: $(manifest.os) requires"
     Source.(init) $self
