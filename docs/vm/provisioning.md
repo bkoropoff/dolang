@@ -142,6 +142,9 @@ A local path is verified in place. A URL is downloaded, verified, and cached,
 and a digest-pinned entry that has already been verified is reused without
 contacting the server.
 
+Every artifact a `create` names is resolved before the domain is defined,
+including those used by actions.
+
 ## Installing Do
 
 Do is installed into every guest before it is considered ready, as `dolang-vfs`

@@ -3,14 +3,12 @@ import digest http libvirt progress rand regex std sys transfer
     - Path
     - with_temp_dir
   test:
-    - tags
     - skip
     - fixture
     - test
     - assert
     - assert_eq
-
-tags slow release
+    - assert_throws
 
 let FREEBSD_IMAGE = "https://download.freebsd.org/releases/VM-IMAGES/15.1-RELEASE/amd64/Latest/FreeBSD-15.1-RELEASE-amd64-BASIC-CLOUDINIT-ufs.raw.xz"
 let CACHE_DIR = Path(".cache").absolute()
@@ -26,22 +24,111 @@ let WINDOWS_DOLANG = if let archive = env.get "DOLANG_LIBVIRT_TEST_WINDOWS_ARCHI
 else
   "bootstrap"
 
+let APP = "dolang-libvirt-test"
+
 if (sys.os_info().os != :LINUX:)
   skip "libvirt provisioning requires Linux"
-if (sys.cpu_info().arch != :X86_64:)
-  skip "the FreeBSD CI image requires x86-64"
-for program = ["virsh", "libvirtd", "qemu-img", "cloud-localds", "genisoimage", "ssh", "scp", "ssh-keygen"]
-  if !run[program].which()
-    skip "$program is not installed"
+
+def require_programs programs
+  for program = programs
+    if !run[program].which()
+      skip "$program is not installed"
+
+# What it takes to bring a guest up, as opposed to what it takes to reach the
+# checks and fetches `create` performs before it defines one.
+def require_guest_host()
+  if (sys.cpu_info().arch != :X86_64:)
+    skip "the CI images require x86-64"
+  require_programs ["virsh", "libvirtd", "qemu-img", "cloud-localds", "genisoimage", "ssh", "scp", "ssh-keygen"]
 
 #[fixture]
 def cached block ...rest
   CACHE_DIR.create_dir all: true
   env XDG_CACHE_HOME: $CACHE_DIR XDG_DATA_HOME: (CACHE_DIR / "local") do block(...rest)
 
+# A digest that nothing hashes to, for asserting that a pin is checked at all.
+let WRONG_DIGEST = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+
+# An `add:` is shape-checked before anything is fetched, defined or connected
+# to, so this needs no host at all.
 #[test]
+def add_spec_is_checked_up_front()
+  assert_throws $std.ValueError do
+    libvirt.create
+      image: /var/empty/image.qcow2
+      os: :LINUX:
+      app: $APP
+      add:
+        target: /tmp/dolang-libvirt-both
+        content: literal
+        source: /var/empty/source
+
+  assert_throws $std.ValueError do
+    libvirt.create
+      image: /var/empty/image.qcow2
+      os: :LINUX:
+      app: $APP
+      add:
+        content: no target
+
+# `create` resolves every artifact a run needs before it defines anything, so
+# one that cannot be fetched is reported with no domain and no work directory
+# left behind.
+#
+# Both cases fail during that pass rather than at the point of use: the `add:`
+# here would otherwise not be looked at until a guest had been installed and
+# booted.
+#[test]
+def artifacts_are_fetched_before_anything_is_created()
+  # `create` looks for a domain of the same name before it fetches anything,
+  # which is the only part of this that touches libvirt.
+  require_programs ["virsh", "libvirtd"]
+  with_temp_dir do |dir|
+    env XDG_CACHE_HOME: (dir / "cache") XDG_DATA_HOME: (dir / "data") do
+      let name = "dolang-libvirt-artifact-$(rand.string 8)"
+      let workdir = (dir / "data" / APP / "libvirt" / "domains" / name)
+      let image = (dir / "image.qcow2")
+      image.write ""
+      let payload = (dir / "payload.txt")
+      payload.write "payload"
+      # A local stand-in, so that the only fetch this test makes over the
+      # network is the one it is asserting about.
+      let dolang = (dir / "dolang.tar.gz")
+      dolang.write ""
+
+      # Nothing answers on port 1, so the fetch fails on connect.
+      assert_throws $std.Error do
+        libvirt.create
+          :name
+          image: $image
+          os: :LINUX:
+          app: $APP
+          dolang: $dolang
+          add:
+            target: /tmp/dolang-libvirt-unreachable
+            source: "http://127.0.0.1:1/absent"
+      assert (!workdir.exists())
+
+      # A digest is verified against whatever the source resolved to, a local
+      # path included.
+      assert_throws $std.ValueError do
+        libvirt.create
+          :name
+          image: $image
+          os: :LINUX:
+          app: $APP
+          dolang: $dolang
+          add:
+            target: /tmp/dolang-libvirt-mismatched
+            source:
+              source: $payload
+              digest: $WRONG_DIGEST
+      assert (!workdir.exists())
+
+#[test tags: ["slow", "release"]]
 #[cached]
 def freebsd()
+  require_guest_host()
   with_temp_dir do |dir|
     let source = (dir / "upload.bin")
     let downloaded = (dir / "download.bin")
@@ -105,14 +192,13 @@ def freebsd()
         domain.destroy()
       domain.undefine()
 
-#[test]
+#[test tags: ["slow", "release"]]
 #[cached]
 def windows()
-  # Neither is needed by the cloud-init path the module-level probe checks, so
-  # they are checked here instead of skipping the whole file for their sake.
-  for program = ["swtpm", "swtpm_setup"]
-    if !run[program].which()
-      skip "$program is not installed"
+  require_guest_host()
+  # Neither is needed by the cloud-init path, so they are checked here rather
+  # than alongside the programs every guest needs.
+  require_programs ["swtpm", "swtpm_setup"]
   let iso_program = false
   for program = ["xorrisofs", "mkisofs"]
     if run[program].which()
