@@ -678,6 +678,136 @@ copy "source.txt" "backup.txt"
 copy "project" "project-backup" all: true
 ```
 
+### `copy_data src dst :range? :size? :offset? :clone?`
+
+Copies data from one open file to another, returning the number of bytes copied.
+
+This attempts to copy data in the most efficient manner possible:
+
+- If both handles are from the same VFS domain, all copying occurs target-side
+  rather than being relayed.
+- Copy-on-write cloning of blocks/extents will be used by default if the
+  platform, filesystem, handle pair, and data size and alignment meet
+  relevant requirements.
+- Sparsity will be preserved if possible: blocks of all zero bytes which are
+    not physically allocated in the source will not be allocated in the
+    destination, so long as platform, filesystem, data size and alignment
+    requirements permit it.
+
+This operation is not remotely atomic. Concurrent modification of either
+source or destination in the relevant range will result in unspecified final
+state in terms of the destination's content in the affect range, and possibly
+file length if the range overlapped the prior end-of-file. A failed operation
+may also leave the destination in an unspecified intermediate state.
+
+Copying between disjoint regions of one file is allowed; overlapping ones are
+rejected if detected. Detection requires recognizing when two handles refer to
+the same file, which is not always possible, in which case an overlapping copy
+has an unspecified result.
+
+#### Parameters
+
+| Name     | Type                        | Description                                    |
+| -------- | --------------------------- | ---------------------------------------------- |
+| `src`    | [`File`](file.md)           | Handle to read from                            |
+| `dst`    | [`File`](file.md)           | Handle to write to                             |
+| `range`  | [`Range`](../std/range.md)? | Absolute byte region of the source             |
+| `size`   | [`Int`](../std/index.md)?   | Number of bytes to take from the source cursor |
+| `offset` | [`Int`](../std/index.md)?   | Absolute byte offset in the destination        |
+| `clone`  | [`Sym`](../std/sym.md)?     | `:AUTO:` (default), `:REQUIRE:`, or `:NEVER:`  |
+
+##### Source Addressing
+
+| `range:` | `size:` | Source                                        |
+| -------- | ------- | --------------------------------------------- |
+| given    | —       | that absolute region                          |
+| —        | given   | that many bytes from the cursor               |
+| —        | —       | the cursor to the end of the file             |
+| given    | given   | an error — a range already carries its length |
+
+`range:` follows the same conventions as
+[`lock`](file.md#lock-range-shared-func): half-open, `..` is the whole file, an
+open end means "to the end of the file", an omitted start is `0`, `step` must
+be `1`, and endpoints counted from the end are rejected.
+
+Using cursor-based source addressing advances the cursor by the amount copied
+on success.
+
+##### Destination Addressing
+
+`offset:` writes at an absolute position and leaves the destination cursor
+where it was; without it the copy lands at the cursor, which advances. A handle
+opened for appending does not supported a specified offset.
+
+As expected, if the destination position would write past the current
+end-of-file, the length of the file is extended.
+
+##### Clone Behavior
+
+`clone:` allows specifying how blocks should be shared between the source and
+destination.
+
+| Value       | Meaning                                                      |
+| ----------- | ------------------------------------------------------------ |
+| `:AUTO:`    | share blocks where possible, copy the data otherwise         |
+| `:REQUIRE:` | fail rather than copy the data outright                      |
+| `:NEVER:`   | copy the data outright even where sharing is available       |
+
+On Linux and FreeBSD, `:AUTO:` opportunistically performs copy-on-write cloning
+for local filesystems and server-side copying for network mounts. `:REQUIRE:`
+explicitly requests a copy-on-write clone and fails if not possible. On
+Windows, `:AUTO:` opportunistically performs ReFS extent duplication or SMB
+server-side copy when possible, while `:REQUIRE:` only attempts the ReFS path
+(which may also work remotely). `:REQUIRE:` fails with
+[`UnsupportedError`](../sys/unsupported-error.md) when the filesystem, file
+pair, or range cannot be cloned. Append destinations cannot guarantee cloning,
+so they also reject `:REQUIRE:`. macOS does not support range clones, nor
+do copies between different VFS domains, and thus `:REQUIRE:` always fails.
+
+##### Sparsity
+
+Positional copies on Linux, FreeBSD, Windows, and macOS targets preserve source
+holes (unallocated data blocks containing only logical zero bytes) when the
+filesystem exposes them, and replace existing destination data in those holes
+with zeroes. Hole deallocation is best effort: when it is unavailable the
+zeroes may consume physical storage. On Windows, a file must be explicity
+marked sparse to permit unallocated zero blocks; this operation will not do so
+automatically.
+
+#### Returns
+
+[`Int`](../std/index.md) (number of bytes copied)
+
+A successful result will be the number of bytes requested unless source
+end-of-file was reached.
+
+#### Errors
+
+| Exception                                            | Condition                                           |
+| ---------------------------------------------------- | --------------------------------------------------- |
+| [`ValueError`](../std/value-error.md)                | `range:` and `size:` together, or a malformed range |
+| [`StateError`](../std/state-error.md)                | `offset:` on a handle opened for appending          |
+| [`StateError`](../std/state-error.md)                | either handle is closed                             |
+| [`StateError`](../std/state-error.md)                | one handle used as both sides through its cursor    |
+| [`InvalidInputError`](../sys/invalid-input-error.md) | the two regions overlap within one file             |
+
+#### Example
+
+```
+open source.bin rb do |src|
+  open dest.bin wb do |dst|
+    # Splice a fixed region of the source onto wherever dst happens to be
+    copy_data $src $dst range: (0..4096)
+
+    # Copy the rest of src, advancing both cursors
+    let count = copy_data $src $dst
+    echo "copied $count bytes"
+
+open archive.bin r+b do |file|
+  # Both sides positional, so one handle can serve as both
+  copy_data $file $file range: (0..64) offset: 8192
+```
+
 ### `rename from to :replace?`
 
 Renames (moves) a file or directory.
@@ -1050,6 +1180,9 @@ that order.
 Backends may use multiple system operations; atomicity and rollback behavior
 are unspecified.
 
+Clearing `sparse` on Windows may allocate storage for every hole. It can be
+expensive, may fail when the volume lacks space, and is not transactional.
+
 #### Parameters
 
 | Name                  | Type                                                                                | Description                                      |
@@ -1067,6 +1200,7 @@ are unspecified.
 | `system`              | [`Bool`](../std/bool.md)                                                            | Optional system attribute value                  |
 | `archive`             | [`Bool`](../std/bool.md)                                                            | Optional archive attribute value                 |
 | `compressed`          | [`Bool`](../std/bool.md)                                                            | Optional compressed flag                         |
+| `sparse`              | [`Bool`](../std/bool.md)                                                            | Optional Windows sparse attribute                |
 | `temporary`           | [`Bool`](../std/bool.md)                                                            | Optional temporary value                         |
 | `offline`             | [`Bool`](../std/bool.md)                                                            | Optional offline value                           |
 | `not_content_indexed` | [`Bool`](../std/bool.md)                                                            | Optional indexing attribute value                |

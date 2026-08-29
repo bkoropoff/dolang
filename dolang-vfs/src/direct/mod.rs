@@ -32,7 +32,7 @@ use crate::{
     error::{Error, ErrorKind, HandoffError, Result},
     extension::ExtensionSet,
     extension::{self, DirectContext, ExtContext, VfsExtension},
-    file::{self, AccessFlags, FileLockRequest, StreamEntry},
+    file::{self, AccessFlags, FileId, FileLockRequest, StreamEntry},
     file::{XattrEntry, XattrNamespace},
     metadata::{FsMetadata, Metadata, MetadataPatch},
     path::{WellKnownPath, native_path, typed_path},
@@ -48,6 +48,13 @@ use std::{
     task::{Context, Poll, ready},
 };
 
+#[cfg(any(
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "macos",
+    windows
+))]
+mod copy;
 mod lock;
 #[cfg(unix)]
 mod security;
@@ -704,6 +711,34 @@ impl AsyncSeek for File {
 }
 
 impl File {
+    /// Whether this descriptor names a regular file suitable for extent and
+    /// range-copy syscalls.
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "macos",
+        windows
+    ))]
+    pub(crate) async fn is_regular(&self) -> Result<bool> {
+        let file = Arc::clone(&self.file);
+        tokio::task::spawn_blocking(move || Ok(file.metadata()?.is_file()))
+            .await
+            .unwrap_or_else(|_| Err(Error::other("file metadata worker failed")))
+    }
+
+    /// Identifies the file behind this handle, when the platform reports one.
+    ///
+    /// `None` is "could not tell", never "different file": a redirector may
+    /// decline to supply an index, and callers must not read a missing
+    /// identity as proof that two handles are distinct.
+    pub(crate) async fn id(&self) -> Option<FileId> {
+        let file = Arc::clone(&self.file);
+        tokio::task::spawn_blocking(move || Self::impl_id(&file))
+            .await
+            .ok()?
+            .ok()
+    }
+
     pub(crate) fn read_at<'b>(
         &self,
         buf: &'b mut BytesMut,
@@ -1745,6 +1780,13 @@ impl Direct {
 
     pub(crate) async fn clear_cache(&self) -> Result<()> {
         self.path_cache.clear().await;
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "freebsd",
+            target_os = "macos",
+            windows
+        ))]
+        copy::clear_cache();
         Ok(())
     }
 

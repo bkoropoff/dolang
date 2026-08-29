@@ -127,6 +127,7 @@ def windows_attrs()
     assert_type $Bool $meta.archive
     assert_type $Bool $meta.reparse_point
     assert_type $Bool $meta.compressed
+    assert_type $Bool $meta.sparse
     assert_type $Bool $meta.encrypted
     assert_type $Bool $meta.temporary
     assert_type $Bool $meta.offline
@@ -149,6 +150,13 @@ def windows_attrs()
     Path(test_path).set_metadata compressed: false
     let uncompressed_meta = Path(test_path).metadata()
     assert_eq $uncompressed_meta.compressed false
+
+    set_metadata $test_path sparse: true
+    let sparse_meta = metadata $test_path
+    assert_eq $sparse_meta.sparse true
+    Path(test_path).set_metadata sparse: false
+    let dense_meta = Path(test_path).metadata()
+    assert_eq $dense_meta.sparse false
 
   remove $test_path
 

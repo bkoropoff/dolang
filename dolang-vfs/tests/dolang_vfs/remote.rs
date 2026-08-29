@@ -1,4 +1,7 @@
-use std::io::{self, SeekFrom};
+use std::{
+    io::{self, SeekFrom},
+    path::Path,
+};
 
 use bytes::{Bytes, BytesMut};
 
@@ -7,8 +10,8 @@ use dolang_vfs::file::XattrNamespace;
 use dolang_vfs::{
     Vfs,
     directory::{DirEntry, ReadDir},
-    error::Result as VfsResult,
-    file::{FileLockBehavior, FileLockMode, FileLockRange},
+    error::{ErrorKind, Result as VfsResult},
+    file::{CopyDest, CopyMode, File, FileLockBehavior, FileLockMode, FileLockRange},
     metadata::FileType,
     path::typed_path,
     process::Command,
@@ -1423,5 +1426,236 @@ async fn remote_read_failure_reports_its_error_kind() {
     assert_eq!(error.kind(), io::ErrorKind::IsADirectory);
 
     file.close().await.unwrap();
+    stop_pair(client, server_task).await;
+}
+
+/// Opens a file on `vfs` for reading and writing, seeded with `content`.
+async fn seeded_remote(vfs: &Vfs, temp: &Path, name: &str, content: &[u8]) -> File {
+    let path = typed_path(temp.join(name)).unwrap();
+    let file = vfs
+        .open_options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path.to_path())
+        .await
+        .unwrap();
+    if !content.is_empty() {
+        assert_eq!(
+            file.write_at(Bytes::copy_from_slice(content), 0)
+                .await
+                .unwrap(),
+            content.len()
+        );
+    }
+    file
+}
+
+/// Two opaque handles on one session take the target-side route: the server
+/// runs the copy between its own files and only the count comes back.
+#[tokio::test]
+async fn remote_copy_data_runs_on_the_far_side() {
+    let (client, server_task) = connected_pair().await;
+    let temp = tempdir().unwrap();
+    let src = seeded_remote(&client, temp.path(), "src", b"0123456789").await;
+    let dst = seeded_remote(&client, temp.path(), "dst", b"XXXXXXXXXX").await;
+
+    assert_eq!(
+        src.copy_data(&dst, 2, CopyDest::At(3), Some(3), CopyMode::Auto)
+            .await
+            .unwrap()
+            .count,
+        3
+    );
+    // Neither cursor is consulted or moved: the server never sees one.
+    assert_eq!(
+        AsyncSeekExt::stream_position(&mut { src }).await.unwrap(),
+        0
+    );
+
+    let mut buf = BytesMut::with_capacity(16);
+    assert_eq!(dst.read_at(&mut buf, 0).await.unwrap(), 10);
+    assert_eq!(&buf[..], b"XXX234XXXX");
+
+    dst.close().await.unwrap();
+    stop_pair(client, server_task).await;
+}
+
+#[tokio::test]
+async fn remote_append_copy_reports_the_actual_end() {
+    let (client, server_task) = connected_pair().await;
+    let temp = tempdir().unwrap();
+    let src = seeded_remote(&client, temp.path(), "append-src", b"0123456789").await;
+    std::fs::write(temp.path().join("append-dst"), b"prefix").unwrap();
+    let dst = client
+        .open_options()
+        .append(true)
+        .open(
+            typed_path(temp.path().join("append-dst"))
+                .unwrap()
+                .to_path(),
+        )
+        .await
+        .unwrap();
+
+    let result = src
+        .copy_data(&dst, 8, CopyDest::Append, Some(2), CopyMode::Auto)
+        .await
+        .unwrap();
+    assert_eq!(result.count, 2);
+    assert_eq!(result.destination_end, Some(8));
+
+    src.close().await.unwrap();
+    dst.close().await.unwrap();
+    assert_eq!(
+        std::fs::read(temp.path().join("append-dst")).unwrap(),
+        b"prefix89"
+    );
+    stop_pair(client, server_task).await;
+}
+
+/// More than one chunk, so the loop the server runs is exercised — and, on
+/// this route, so is the fact that the bytes never cross the wire.
+#[tokio::test]
+async fn remote_copy_data_is_bounded_and_callers_can_loop() {
+    let (client, server_task) = connected_pair().await;
+    let temp = tempdir().unwrap();
+    let content: Vec<u8> = (0..2_500_123u32).map(|i| (i % 251) as u8).collect();
+    let src = seeded_remote(&client, temp.path(), "big-src", &[]).await;
+    for chunk in content.chunks(256 * 1024) {
+        let at = (chunk.as_ptr() as usize - content.as_ptr() as usize) as u64;
+        src.write_at_from(chunk, at).await.unwrap();
+    }
+    let dst = seeded_remote(&client, temp.path(), "big-dst", &[]).await;
+
+    let first = src
+        .copy_data(&dst, 0, CopyDest::At(0), None, CopyMode::Auto)
+        .await
+        .unwrap();
+    assert_eq!(first.count, 2 * 1024 * 1024);
+    let second = src
+        .copy_data(
+            &dst,
+            first.count,
+            CopyDest::At(first.count),
+            None,
+            CopyMode::Auto,
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.count + second.count, content.len() as u64);
+    assert_eq!(dst.metadata().await.unwrap().len(), content.len() as u64);
+
+    src.close().await.unwrap();
+    dst.close().await.unwrap();
+    assert_eq!(std::fs::read(temp.path().join("big-dst")).unwrap(), content);
+    stop_pair(client, server_task).await;
+}
+
+/// Two registrations of one file have different citations, so the client
+/// cannot tell they are the same. The server can, because both are local
+/// there — which is the whole reason the check lives in `File::copy_data`.
+#[tokio::test]
+async fn remote_copy_data_rejects_overlap_the_client_cannot_see() {
+    let (client, server_task) = connected_pair().await;
+    let temp = tempdir().unwrap();
+    let first = seeded_remote(&client, temp.path(), "overlap", b"0123456789").await;
+    // A second registration of the same file, left as it is rather than
+    // truncated: two citations, one inode.
+    let second = client
+        .open_options()
+        .read(true)
+        .write(true)
+        .open(typed_path(temp.path().join("overlap")).unwrap().to_path())
+        .await
+        .unwrap();
+
+    let error = first
+        .copy_data(&second, 0, CopyDest::At(4), Some(8), CopyMode::Auto)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::InvalidInput);
+
+    // Disjoint regions of that same file still copy.
+    assert_eq!(
+        first
+            .copy_data(&second, 0, CopyDest::At(6), Some(3), CopyMode::Auto)
+            .await
+            .unwrap()
+            .count,
+        3
+    );
+
+    // A refusal that arrives as a structured error, not a decode failure: the
+    // session is still usable afterwards.
+    let error = first
+        .copy_data(&second, 0, CopyDest::At(6), Some(3), CopyMode::Require)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unsupported);
+
+    first.close().await.unwrap();
+    second.close().await.unwrap();
+    assert_eq!(
+        std::fs::read(temp.path().join("overlap")).unwrap(),
+        b"0123450129"
+    );
+    stop_pair(client, server_task).await;
+}
+
+/// Handles from two different sessions have nothing shareable, so the copy
+/// relays through this process rather than being refused the way a stdio
+/// handoff is.
+#[tokio::test]
+async fn remote_copy_data_relays_across_sessions() {
+    let (source_client, source_task) = connected_pair().await;
+    let (dest_client, dest_task) = connected_split_pair().await;
+    let temp = tempdir().unwrap();
+    let src = seeded_remote(&source_client, temp.path(), "relay-src", b"0123456789").await;
+    let dst = seeded_remote(&dest_client, temp.path(), "relay-dst", b"").await;
+
+    assert_eq!(
+        src.copy_data(&dst, 2, CopyDest::At(0), Some(5), CopyMode::Auto)
+            .await
+            .unwrap()
+            .count,
+        5
+    );
+
+    src.close().await.unwrap();
+    dst.close().await.unwrap();
+    assert_eq!(
+        std::fs::read(temp.path().join("relay-dst")).unwrap(),
+        b"23456"
+    );
+    stop_pair(source_client, source_task).await;
+    stop_pair(dest_client, dest_task).await;
+}
+
+/// One opaque handle and one local one — a pair a single session can hand out,
+/// since `Open` answers with either — also relays.
+#[tokio::test]
+async fn remote_copy_data_relays_a_mixed_pair() {
+    let (client, server_task) = connected_pair().await;
+    let direct = Vfs::direct().unwrap();
+    let temp = tempdir().unwrap();
+    let src = seeded_remote(&client, temp.path(), "mixed-src", b"0123456789").await;
+    let dst = seeded_remote(&direct, temp.path(), "mixed-dst", b"").await;
+
+    assert_eq!(
+        src.copy_data(&dst, 5, CopyDest::At(0), None, CopyMode::Auto)
+            .await
+            .unwrap()
+            .count,
+        5
+    );
+
+    src.close().await.unwrap();
+    dst.close().await.unwrap();
+    assert_eq!(
+        std::fs::read(temp.path().join("mixed-dst")).unwrap(),
+        b"56789"
+    );
     stop_pair(client, server_task).await;
 }

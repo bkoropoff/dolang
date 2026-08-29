@@ -580,6 +580,8 @@ impl AttrFlags {
     pub const EXTENT_FORMAT: Self = Self(1 << 24);
     /// Directory is opaque to union mounts.
     pub const OPAQUE: Self = Self(1 << 25);
+    /// File uses sparse allocation.
+    pub const SPARSE: Self = Self(1 << 26);
     /// Returns an empty set of flags.
     pub const fn empty() -> Self {
         Self(0)

@@ -8,7 +8,8 @@ use dolang_vfs::metadata::AttrFlags;
 use dolang_vfs::process::{ProcessControl, Signal, TerminationPolicy};
 use dolang_vfs::{
     Vfs,
-    file::{File, FileLockBehavior, FileLockMode, FileLockRange},
+    error::ErrorKind,
+    file::{CopyDest, CopyMode, File, FileLockBehavior, FileLockMode, FileLockRange},
     metadata::{FileType, MetadataPatch},
 };
 #[cfg(windows)]
@@ -1234,6 +1235,36 @@ async fn direct_windows_attrs() {
         .win_attrs()
         .unwrap();
     assert_eq!(attrs & 0x800, 0);
+
+    direct
+        .set_metadata(
+            &[typed(&path).to_path_buf()],
+            attr_patch(AttrFlags::SPARSE, true),
+        )
+        .await
+        .unwrap();
+    let attrs = direct
+        .metadata(typed(&path))
+        .await
+        .unwrap()
+        .win_attrs()
+        .unwrap();
+    assert_ne!(attrs & 0x200, 0);
+
+    direct
+        .set_metadata(
+            &[typed(&path).to_path_buf()],
+            attr_patch(AttrFlags::SPARSE, false),
+        )
+        .await
+        .unwrap();
+    let attrs = direct
+        .metadata(typed(&path))
+        .await
+        .unwrap()
+        .win_attrs()
+        .unwrap();
+    assert_eq!(attrs & 0x200, 0);
 }
 
 #[cfg(windows)]
@@ -1570,4 +1601,342 @@ async fn direct_well_known_cache_dir_uses_macos_convention() {
         .unwrap();
 
     assert_eq!(path.as_str(), "/tmp/test-home/Library/Caches");
+}
+
+/// Opens `path`, creating it with `content`, for reading and writing.
+async fn open_rw(vfs: &Vfs, path: &Path, content: &[u8]) -> File {
+    std::fs::write(path, content).unwrap();
+    vfs.open_options()
+        .read(true)
+        .write(true)
+        .open(typed(path))
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn copy_data_moves_a_range_between_two_files() {
+    let direct = Vfs::direct().unwrap();
+    let dir = tempdir().unwrap();
+    let src_path = dir.path().join("src.bin");
+    let dst_path = dir.path().join("dst.bin");
+    let src = open_rw(&direct, &src_path, b"0123456789").await;
+    let dst = open_rw(&direct, &dst_path, b"XXXXXXXXXX").await;
+
+    assert_eq!(
+        src.copy_data(&dst, 2, CopyDest::At(3), Some(3), CopyMode::Auto)
+            .await
+            .unwrap()
+            .count,
+        3
+    );
+    // A length past the end of the source is short, not an error.
+    assert_eq!(
+        src.copy_data(&dst, 8, CopyDest::At(0), Some(100), CopyMode::Auto)
+            .await
+            .unwrap()
+            .count,
+        2
+    );
+    // An empty request transfers nothing.
+    assert_eq!(
+        src.copy_data(&dst, 0, CopyDest::At(0), Some(0), CopyMode::Auto)
+            .await
+            .unwrap()
+            .count,
+        0
+    );
+    dst.close().await.unwrap();
+
+    // `CopyDest::Append` goes through the handle's append behavior, so it
+    // belongs to a handle opened for appending. No length at all means "to
+    // end of source".
+    let appending = direct
+        .open_options()
+        .append(true)
+        .open(typed(&dst_path))
+        .await
+        .unwrap();
+    let appended = src
+        .copy_data(&appending, 9, CopyDest::Append, None, CopyMode::Auto)
+        .await
+        .unwrap();
+    assert_eq!(appended.count, 1);
+    assert_eq!(appended.destination_end, Some(11));
+
+    src.close().await.unwrap();
+    appending.close().await.unwrap();
+    assert_eq!(std::fs::read(&dst_path).unwrap(), b"89X234XXXX9");
+}
+
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+#[tokio::test]
+async fn positional_copy_replaces_prefilled_bytes_with_sparse_holes() {
+    use std::os::unix::fs::{FileExt as _, MetadataExt as _};
+
+    let direct = Vfs::direct().unwrap();
+    let dir = tempdir().unwrap();
+    let src_path = dir.path().join("sparse-src.bin");
+    let raw_src = std::fs::File::create(&src_path).unwrap();
+    raw_src.write_all_at(&vec![b'A'; 4096], 4096).unwrap();
+    raw_src.write_all_at(&vec![b'B'; 4096], 12 * 1024).unwrap();
+    raw_src.set_len(20 * 1024).unwrap();
+
+    let src = direct
+        .open_options()
+        .read(true)
+        .open(typed(&src_path))
+        .await
+        .unwrap();
+
+    for (name, mode) in [("auto", CopyMode::Auto), ("never", CopyMode::Never)] {
+        let dst_path = dir.path().join(format!("sparse-dst-{name}.bin"));
+        // Shorter than the copied logical end so the trailing source hole must
+        // extend the destination after replacing its existing prefix.
+        std::fs::write(&dst_path, vec![0xaa; 22 * 1024]).unwrap();
+        let dst = direct
+            .open_options()
+            .read(true)
+            .write(true)
+            .open(typed(&dst_path))
+            .await
+            .unwrap();
+        let result = src
+            .copy_data(&dst, 0, CopyDest::At(4096), Some(20 * 1024), mode)
+            .await
+            .unwrap();
+        assert_eq!(result.count, 20 * 1024);
+        dst.close().await.unwrap();
+
+        let copied = std::fs::read(&dst_path).unwrap();
+        assert_eq!(&copied[..4096], &vec![0xaa; 4096]);
+        assert_eq!(&copied[4096..8192], &vec![0; 4096]);
+        assert_eq!(&copied[8192..12_288], &vec![b'A'; 4096]);
+        assert_eq!(&copied[12_288..16_384], &vec![0; 4096]);
+        assert_eq!(&copied[16_384..20_480], &vec![b'B'; 4096]);
+        assert_eq!(&copied[20_480..24_576], &vec![0; 4096]);
+        assert_eq!(copied.len(), 24_576);
+
+        let metadata = std::fs::metadata(&dst_path).unwrap();
+        if raw_src.metadata().unwrap().blocks() * 512 < 20 * 1024 {
+            // Filesystems that expose source extents should leave at least
+            // some of the replaced range unallocated when punching works.
+            assert!(metadata.blocks() * 512 < metadata.len());
+        }
+    }
+    src.close().await.unwrap();
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_positional_copy_preserves_sparse_holes_without_marking_destination() {
+    use std::os::windows::fs::FileExt as _;
+
+    if dolang_winterop::is_wine() {
+        return;
+    }
+    let direct = Vfs::direct().unwrap();
+    let dir = tempdir().unwrap();
+    let src_path = dir.path().join("sparse-src.bin");
+    let dst_path = dir.path().join("dense-dst.bin");
+    std::fs::write(&src_path, []).unwrap();
+    direct
+        .set_metadata(
+            &[typed(&src_path).to_path_buf()],
+            attr_patch(AttrFlags::SPARSE, true),
+        )
+        .await
+        .unwrap();
+    let raw_src = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&src_path)
+        .unwrap();
+    raw_src.seek_write(&vec![b'A'; 4096], 4096).unwrap();
+    raw_src.seek_write(&vec![b'B'; 4096], 12 * 1024).unwrap();
+    raw_src.set_len(20 * 1024).unwrap();
+    std::fs::write(&dst_path, vec![0xaa; 22 * 1024]).unwrap();
+
+    let src = direct
+        .open_options()
+        .read(true)
+        .open(typed(&src_path))
+        .await
+        .unwrap();
+    let dst = direct
+        .open_options()
+        .read(true)
+        .write(true)
+        .open(typed(&dst_path))
+        .await
+        .unwrap();
+    let result = src
+        .copy_data(
+            &dst,
+            0,
+            CopyDest::At(4096),
+            Some(20 * 1024),
+            CopyMode::Never,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.count, 20 * 1024);
+    src.close().await.unwrap();
+    dst.close().await.unwrap();
+
+    let copied = std::fs::read(&dst_path).unwrap();
+    assert_eq!(&copied[..4096], &vec![0xaa; 4096]);
+    assert_eq!(&copied[4096..8192], &vec![0; 4096]);
+    assert_eq!(&copied[8192..12_288], &vec![b'A'; 4096]);
+    assert_eq!(&copied[12_288..16_384], &vec![0; 4096]);
+    assert_eq!(&copied[16_384..20_480], &vec![b'B'; 4096]);
+    assert_eq!(&copied[20_480..24_576], &vec![0; 4096]);
+    assert_eq!(copied.len(), 24_576);
+    let attrs = direct
+        .metadata(typed(&dst_path))
+        .await
+        .unwrap()
+        .win_attrs()
+        .unwrap();
+    assert_eq!(attrs & 0x200, 0);
+}
+
+#[tokio::test]
+async fn copy_data_is_bounded_and_callers_can_loop_short_results() {
+    let direct = Vfs::direct().unwrap();
+    let dir = tempdir().unwrap();
+    let src_path = dir.path().join("big-src.bin");
+    let dst_path = dir.path().join("big-dst.bin");
+    // Deliberately not a multiple of the chunk size, so the final round is a
+    // partial one.
+    let content: Vec<u8> = (0..2_500_123u32).map(|i| (i % 251) as u8).collect();
+    let src = open_rw(&direct, &src_path, &content).await;
+    let dst = open_rw(&direct, &dst_path, b"").await;
+
+    let first = src
+        .copy_data(&dst, 0, CopyDest::At(0), None, CopyMode::Auto)
+        .await
+        .unwrap();
+    assert_eq!(first.count, 2 * 1024 * 1024);
+    let second = src
+        .copy_data(
+            &dst,
+            first.count,
+            CopyDest::At(first.count),
+            None,
+            CopyMode::Auto,
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.count + second.count, content.len() as u64);
+    assert_eq!(
+        src.copy_data(
+            &dst,
+            content.len() as u64,
+            CopyDest::At(content.len() as u64),
+            None,
+            CopyMode::Auto,
+        )
+        .await
+        .unwrap()
+        .count,
+        0
+    );
+
+    src.close().await.unwrap();
+    dst.close().await.unwrap();
+    assert_eq!(std::fs::read(&dst_path).unwrap(), content);
+}
+
+#[tokio::test]
+async fn copy_data_rejects_overlapping_regions_of_one_file() {
+    let direct = Vfs::direct().unwrap();
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("overlap.bin");
+    let first = open_rw(&direct, &path, b"0123456789").await;
+    let second = direct
+        .open_options()
+        .read(true)
+        .write(true)
+        .open(typed(&path))
+        .await
+        .unwrap();
+
+    // Two distinct handles, one file: the identity check is what catches this,
+    // not the handles being the same object.
+    let error = first
+        .copy_data(&second, 0, CopyDest::At(4), Some(8), CopyMode::Auto)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::InvalidInput);
+
+    // Disjoint regions of the same file are fine.
+    assert_eq!(
+        first
+            .copy_data(&second, 0, CopyDest::At(6), Some(3), CopyMode::Auto)
+            .await
+            .unwrap()
+            .count,
+        3
+    );
+
+    first.close().await.unwrap();
+    second.close().await.unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"0123450129");
+}
+
+#[tokio::test]
+async fn copy_data_refuses_to_promise_block_sharing() {
+    let direct = Vfs::direct().unwrap();
+    let dir = tempdir().unwrap();
+    let src_path = dir.path().join("mode-src.bin");
+    let dst_path = dir.path().join("mode-dst.bin");
+    let src = open_rw(&direct, &src_path, b"0123456789").await;
+    let dst = open_rw(&direct, &dst_path, b"").await;
+
+    // Required cloning is conditional on the filesystem. A supported clone
+    // copies the full range; an incapable pair reports `Unsupported`.
+    match src
+        .copy_data(&dst, 0, CopyDest::At(0), Some(10), CopyMode::Require)
+        .await
+    {
+        Ok(result) => assert_eq!(result.count, 10),
+        Err(error) => assert_eq!(error.kind(), ErrorKind::Unsupported),
+    }
+    dst.set_size(0).await.unwrap();
+    // Requiring a clone at EOF is an empty success, and append cannot promise
+    // block sharing even when the filesystem otherwise supports it.
+    assert_eq!(
+        src.copy_data(&dst, 10, CopyDest::At(0), None, CopyMode::Require)
+            .await
+            .unwrap()
+            .count,
+        0
+    );
+    let append = direct
+        .open_options()
+        .append(true)
+        .open(typed(&dst_path))
+        .await
+        .unwrap();
+    assert_eq!(
+        src.copy_data(&append, 0, CopyDest::Append, Some(4), CopyMode::Require)
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Unsupported
+    );
+    for mode in [CopyMode::Auto, CopyMode::Never] {
+        assert_eq!(
+            src.copy_data(&dst, 0, CopyDest::At(0), Some(4), mode)
+                .await
+                .unwrap()
+                .count,
+            4
+        );
+    }
+
+    src.close().await.unwrap();
+    dst.close().await.unwrap();
+    append.close().await.unwrap();
+    assert_eq!(std::fs::read(&dst_path).unwrap(), b"0123");
 }

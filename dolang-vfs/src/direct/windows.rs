@@ -2,7 +2,7 @@ use super::{Child, Command, Direct, File, OpenOptions};
 use crate::{
     directory::{DirEntry, DirEntryFamily},
     error::{Error, ErrorKind, Result},
-    file::{AccessFlags, StreamEntry},
+    file::{AccessFlags, FileId, StreamEntry},
     file::{XattrEntry, XattrNamespace},
     metadata::{
         AttrFlags, AttrsPatch, FileType, FsMetadata, FsMetadataFamily, Metadata, MetadataPatch,
@@ -58,16 +58,18 @@ use windows_sys::{
             UNPROTECTED_DACL_SECURITY_INFORMATION, UNPROTECTED_SACL_SECURITY_INFORMATION,
         },
         Storage::FileSystem::{
-            COMPRESSION_FORMAT_DEFAULT, COMPRESSION_FORMAT_NONE, CreateFileW, DELETE,
-            FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NORMAL,
-            FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_READONLY,
-            FILE_ATTRIBUTE_SYSTEM, FILE_ATTRIBUTE_TEMPORARY, FILE_FLAG_BACKUP_SEMANTICS,
-            FILE_FLAG_OPEN_REPARSE_POINT, FILE_RENAME_INFO, FILE_RENAME_INFO_0, FILE_SHARE_DELETE,
-            FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STREAM_INFO, FileRenameInfo, FileRenameInfoEx,
-            FileStreamInfo, GetDiskFreeSpaceExW, GetFileAttributesW, GetFileInformationByHandleEx,
-            GetFinalPathNameByHandleW, GetVolumeInformationByHandleW, INVALID_FILE_ATTRIBUTES,
-            MAXIMUM_REPARSE_DATA_BUFFER_SIZE, OPEN_EXISTING, READ_CONTROL, SetFileAttributesW,
-            SetFileInformationByHandle, VOLUME_NAME_DOS, WRITE_DAC, WRITE_OWNER,
+            BY_HANDLE_FILE_INFORMATION, COMPRESSION_FORMAT_DEFAULT, COMPRESSION_FORMAT_NONE,
+            CreateFileW, DELETE, FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_HIDDEN,
+            FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, FILE_ATTRIBUTE_OFFLINE,
+            FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_SYSTEM, FILE_ATTRIBUTE_TEMPORARY,
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_RENAME_INFO,
+            FILE_RENAME_INFO_0, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            FILE_STREAM_INFO, FileRenameInfo, FileRenameInfoEx, FileStreamInfo,
+            GetDiskFreeSpaceExW, GetDiskFreeSpaceW, GetFileAttributesW, GetFileInformationByHandle,
+            GetFileInformationByHandleEx, GetFinalPathNameByHandleW, GetVolumeInformationByHandleW,
+            INVALID_FILE_ATTRIBUTES, MAXIMUM_REPARSE_DATA_BUFFER_SIZE, OPEN_EXISTING, READ_CONTROL,
+            SetFileAttributesW, SetFileInformationByHandle, VOLUME_NAME_DOS, WRITE_DAC,
+            WRITE_OWNER,
         },
         System::{
             Com::CoTaskMemFree,
@@ -77,7 +79,10 @@ use windows_sys::{
                 Thread32Next,
             },
             IO::{DeviceIoControl, IO_STATUS_BLOCK},
-            Ioctl::{FSCTL_GET_REPARSE_POINT, FSCTL_SET_COMPRESSION, FSCTL_SET_REPARSE_POINT},
+            Ioctl::{
+                FILE_SET_SPARSE_BUFFER, FSCTL_GET_REPARSE_POINT, FSCTL_SET_COMPRESSION,
+                FSCTL_SET_REPARSE_POINT, FSCTL_SET_SPARSE,
+            },
             JobObjects::{
                 AssignProcessToJobObject, CreateJobObjectW, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
                 JobObjectBasicAccountingInformation, QueryInformationJobObject, TerminateJobObject,
@@ -147,6 +152,26 @@ impl File {
         Ok(std::os::windows::fs::FileExt::seek_write(
             file, buf, offset,
         )?)
+    }
+
+    /// Identifies the file behind an open handle, as
+    /// `(volume serial, file index)`.
+    ///
+    /// `std`'s accessors for these are still unstable, and the crate's own
+    /// `WindowsMetadata` carries neither — its volume serial lives on the
+    /// *filesystem* metadata — so this asks the platform directly.
+    pub(super) fn impl_id(file: &std::fs::File) -> Result<FileId> {
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { mem::zeroed() };
+        // SAFETY: the handle is borrowed from a live `File` and `info` is a
+        // correctly sized, writable output buffer.
+        let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &raw mut info) };
+        if ok == 0 {
+            return Err(Error::last_os_error());
+        }
+        Ok(FileId {
+            volume: u64::from(info.dwVolumeSerialNumber),
+            index: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+        })
     }
 }
 
@@ -779,6 +804,26 @@ impl Direct {
         Self::fs_metadata_from_handle(file.as_handle())
     }
 
+    pub(super) fn allocation_unit_size(file: &std::fs::File) -> Result<u64> {
+        let root = Self::volume_root_path(&Self::final_path_from_handle(file.as_handle())?)?;
+        let root = Self::path_wide(&root);
+        let mut sectors_per_cluster = 0;
+        let mut bytes_per_sector = 0;
+        let ok = unsafe {
+            GetDiskFreeSpaceW(
+                root.as_ptr(),
+                &mut sectors_per_cluster,
+                &mut bytes_per_sector,
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(Error::last_os_error());
+        }
+        Ok(u64::from(sectors_per_cluster) * u64::from(bytes_per_sector))
+    }
+
     pub(super) fn metadata_with_security(
         metadata: std::fs::Metadata,
         file: &std::fs::File,
@@ -873,6 +918,43 @@ impl Direct {
         }
     }
 
+    fn set_windows_sparse(path: &[u16], sparse: bool) -> Result<()> {
+        let handle = unsafe {
+            CreateFileW(
+                path.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(Error::last_os_error());
+        }
+        let _handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+        let input = FILE_SET_SPARSE_BUFFER { SetSparse: sparse };
+        let mut bytes_returned = 0;
+        if unsafe {
+            DeviceIoControl(
+                handle,
+                FSCTL_SET_SPARSE,
+                std::ptr::from_ref(&input).cast(),
+                u32::try_from(std::mem::size_of_val(&input)).unwrap(),
+                std::ptr::null_mut(),
+                0,
+                &mut bytes_returned,
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            Err(Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
     pub(super) fn open_for_metadata(path: &Path, follow: bool) -> Result<Arc<StdFile>> {
         let handle = Self::security_handle(path, 0, follow)?;
         Ok(Arc::new(StdFile::from(handle)))
@@ -883,6 +965,7 @@ impl Direct {
             .union(AttrFlags::HIDDEN)
             .union(AttrFlags::SYSTEM)
             .union(AttrFlags::ARCHIVE)
+            .union(AttrFlags::SPARSE)
             .union(AttrFlags::COMPRESSED)
             .union(AttrFlags::TEMPORARY)
             .union(AttrFlags::OFFLINE)
@@ -947,6 +1030,12 @@ impl Direct {
             Self::set_windows_compression(&path, true)?;
         } else if patch.clear.contains(AttrFlags::COMPRESSED) {
             Self::set_windows_compression(&path, false)?;
+        }
+
+        if patch.set.contains(AttrFlags::SPARSE) {
+            Self::set_windows_sparse(&path, true)?;
+        } else if patch.clear.contains(AttrFlags::SPARSE) {
+            Self::set_windows_sparse(&path, false)?;
         }
 
         Ok(())

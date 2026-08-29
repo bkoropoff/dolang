@@ -8,7 +8,14 @@ import test: unittest _vfs
 
 let vfs_bin = _vfs.bin()
 
-def with_vfs remote block
+# Runs `block` with a VFS connection installed: a piped `dolang-vfs` process
+# when `remote`, otherwise a local one over a socket (or the Windows admin
+# service).
+#
+# Exported so a test can nest a *second* connection inside the one `vfs`
+# parametrized it with, which is the only way to get two handles from two
+# different sessions.
+pub def with_vfs remote block
   if remote
     let vfs = Vfs do run $vfs_bin --stdio
     try

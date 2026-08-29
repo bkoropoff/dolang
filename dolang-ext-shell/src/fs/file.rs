@@ -7,13 +7,16 @@ use bstr::ByteSlice;
 use dolang::runtime::{
     BYTE_STREAM_CHUNK_SIZE, Error, Instance, Object, Output, Result, Slot, State, Strand, call,
     method,
-    object::TypeBuilder,
+    object::{Mut, Ref, TypeBuilder},
     strand::InterruptMask,
     unpack,
     value::{BinEmbryo, PinBin, PinStr, TypeObject, View},
 };
 use dolang_vfs::{
-    file::{File as VfsFile, FileLockBehavior, FileLockMode, FileLockRange, OpenOptions},
+    file::{
+        CopyDest, CopyMode, File as VfsFile, FileLockBehavior, FileLockMode, FileLockRange,
+        OpenOptions,
+    },
     process::{StdioRecv, StdioSend},
 };
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
@@ -48,14 +51,23 @@ fn lock_endpoint<'v, 's>(
         .map_err(|_| Error::value(strand, format!("{name} must be non-negative")))
 }
 
-fn lock_range<'v, 's>(
+/// Decodes a byte range into `(start, end)`, `end` open meaning "to the end of
+/// the file".
+///
+/// Shared by `lock` and `copy_data` so the two cannot drift on what a range
+/// means: half-open, `..` total, a missing start is `0`, `step` must be `1`,
+/// and endpoints counted from the end are rejected — a file's length is racy,
+/// so unlike `Array` and `Str` slicing there is nothing stable to count back
+/// from. `what` names the range in the error messages.
+fn byte_range<'v, 's>(
     strand: &mut Strand<'v, 's>,
     value: &Slot<'v, '_>,
     [mut start, mut end, mut step]: [Slot<'v, '_>; 3],
-) -> Result<'v, 's, FileLockRange> {
+    what: &str,
+) -> Result<'v, 's, (u64, Option<u64>)> {
     let range = value
         .as_range(strand)
-        .ok_or_else(|| Error::type_error(strand, "lock range must be a range"))?;
+        .ok_or_else(|| Error::type_error(strand, format!("{what} must be a range")))?;
     range.parts(
         strand,
         [
@@ -65,16 +77,25 @@ fn lock_range<'v, 's>(
         ],
     );
     if step.as_int(strand) != Some(1) {
-        return Err(Error::value(strand, "lock range step must be 1"));
+        return Err(Error::value(strand, format!("{what} step must be 1")));
     }
-    let start = lock_endpoint(strand, &start, "lock range start")?.unwrap_or(0);
-    let end = lock_endpoint(strand, &end, "lock range end")?;
+    let start = lock_endpoint(strand, &start, &format!("{what} start"))?.unwrap_or(0);
+    let end = lock_endpoint(strand, &end, &format!("{what} end"))?;
     if end.is_some_and(|end| end < start) {
         return Err(Error::value(
             strand,
-            "lock range end must not precede its start",
+            format!("{what} end must not precede its start"),
         ));
     }
+    Ok((start, end))
+}
+
+fn lock_range<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    value: &Slot<'v, '_>,
+    parts: [Slot<'v, '_>; 3],
+) -> Result<'v, 's, FileLockRange> {
+    let (start, end) = byte_range(strand, value, parts, "lock range")?;
     FileLockRange::new(start, end).map_err(|error| Error::value(strand, error.to_string()))
 }
 
@@ -224,6 +245,211 @@ impl<'v, 'a> Pinned<'v, 'a> {
             Self::Bin(value) => value,
         }
     }
+}
+
+/// Parses the `clone:` keyword argument
+/// (`:AUTO:`/`:REQUIRE:`/`:NEVER:`), defaulting to [`CopyMode::Auto`].
+pub(crate) fn copy_mode_sym<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    slot: Option<Slot<'v, '_>>,
+) -> Result<'v, 's, CopyMode> {
+    let Some(slot) = slot else {
+        return Ok(CopyMode::Auto);
+    };
+    let sym = slot.as_sym(strand).ok_or_else(|| {
+        Error::type_error(strand, "clone: expected :AUTO:, :REQUIRE:, or :NEVER:")
+    })?;
+    if sym == global.syms.auto {
+        Ok(CopyMode::Auto)
+    } else if sym == global.syms.require {
+        Ok(CopyMode::Require)
+    } else if sym == global.syms.never {
+        Ok(CopyMode::Never)
+    } else {
+        Err(Error::value(
+            strand,
+            "clone: expected :AUTO:, :REQUIRE:, or :NEVER:",
+        ))
+    }
+}
+
+/// A borrow of one side of a copy.
+///
+/// Which one it is follows the rule `read` and `write` already use: a side
+/// named by an absolute position touches nothing shared and takes a shared
+/// borrow, so several copies and positional reads can be in flight on one
+/// handle at once; a side addressed through its cursor moves that cursor and
+/// takes the handle exclusively.
+enum CopySide<'v, 'a> {
+    Positional(Ref<'v, 'a, File<'v>>),
+    Cursor(Mut<'v, 'a, File<'v>>),
+}
+
+impl<'v> CopySide<'v, '_> {
+    fn file<'b, 's>(&'b self, strand: &mut Strand<'v, 's>) -> Result<'v, 's, &'b VfsFile> {
+        let file = match self {
+            Self::Positional(borrow) => borrow.file.as_ref(),
+            Self::Cursor(borrow) => borrow.file.as_ref(),
+        };
+        file.ok_or_else(|| Error::state_error(strand, "file is closed"))
+    }
+}
+
+/// Implements `fs.copy_data` and `File.copy_data`.
+///
+/// Both entry points funnel here so the two cannot disagree about addressing.
+/// Everything below this point is absolute: ranges and cursors are resolved
+/// into `(offset, destination, length)` before anything reaches the VFS, which
+/// knows nothing of either.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn copy_data<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    src: Instance<'v, '_, File<'v>>,
+    dst: Instance<'v, '_, File<'v>>,
+    range: Option<Slot<'v, '_>>,
+    size: Option<Slot<'v, '_>>,
+    offset: Option<Slot<'v, '_>>,
+    clone: Option<Slot<'v, '_>>,
+    out: Slot<'v, '_>,
+) -> Result<'v, 's, ()> {
+    if range.is_some() && size.is_some() {
+        // A range already carries its length; honoring both would mean
+        // choosing which one to believe.
+        return Err(Error::value(
+            strand,
+            "range: and size: cannot both be given",
+        ));
+    }
+    let mode = copy_mode_sym(strand, global, clone)?;
+    let size = size
+        .map(|size| {
+            size.to_i64(strand)
+                .ok()
+                .and_then(|n| u64::try_from(n).ok())
+                .ok_or_else(|| Error::type_error(strand, "size must be a non-negative integer"))
+        })
+        .transpose()?;
+    let offset = read_offset(strand, offset)?;
+    let dst_is_append = dst.annex().is_append;
+    if offset.is_some() && dst_is_append {
+        // Same impossibility as `write`: an append handle places its bytes at
+        // the end whatever offset the platform is given.
+        return Err(Error::state_error(
+            strand,
+            "cannot copy data at an offset on a file opened for appending",
+        ));
+    }
+    let region = match range {
+        Some(range) => Some(
+            strand
+                .with_slots(async move |strand, [start, end, step]| {
+                    byte_range(strand, &range, [start, end, step], "copy range")
+                })
+                .await?,
+        ),
+        None => None,
+    };
+
+    // Two shared borrows of one instance coexist, so this is safe to ask
+    // before deciding anything, and it keeps `$f.copy_data $f` from surfacing
+    // as a borrow conflict when a cursor is involved — a conflict the script
+    // cannot act on, since it names nothing the script wrote.
+    let same_handle = {
+        let src = src.borrow(strand)?;
+        let dst = dst.borrow(strand)?;
+        std::ptr::eq(&*src as *const File<'v>, &*dst as *const File<'v>)
+    };
+    if same_handle && (region.is_none() || offset.is_none()) {
+        return Err(Error::state_error(
+            strand,
+            "cannot copy data between a file handle and itself through its cursor; \
+             give both a range: and an offset:",
+        ));
+    }
+
+    // Each side is borrowed and resolved together, because resolving a cursor
+    // requires the exclusive borrow that addressing through it implies.
+    // `logical_position` rather than the platform's own: the read-ahead buffer
+    // puts that one ahead of the cursor the script can see.
+    let (mut src_side, src_offset, len) = match region {
+        Some((start, end)) => (
+            CopySide::Positional(src.borrow(strand)?),
+            start,
+            end.map(|end| end - start),
+        ),
+        None => {
+            let mut borrow = src.borrow_mut(strand)?;
+            let position = borrow.logical_position(strand).await?;
+            (CopySide::Cursor(borrow), position, size)
+        }
+    };
+    let (mut dst_side, mut target) = match offset {
+        Some(offset) => (
+            CopySide::Positional(dst.borrow(strand)?),
+            CopyDest::At(offset),
+        ),
+        None if dst_is_append => (CopySide::Cursor(dst.borrow_mut(strand)?), CopyDest::Append),
+        None => {
+            let mut borrow = dst.borrow_mut(strand)?;
+            let position = borrow.logical_position(strand).await?;
+            (CopySide::Cursor(borrow), CopyDest::At(position))
+        }
+    };
+
+    // An open-ended copy is a snapshot, not a subscription to source growth.
+    // Resolve EOF once before the first bounded VFS operation.
+    let len = match len {
+        Some(len) => len,
+        None => src_side
+            .file(strand)?
+            .metadata()
+            .await
+            .into_sys(strand)?
+            .len()
+            .saturating_sub(src_offset),
+    };
+
+    let mut copied = 0u64;
+    while copied < len {
+        let remaining = len - copied;
+        let result = {
+            let src_file = src_side.file(strand)?;
+            let dst_file = dst_side.file(strand)?;
+            src_file
+                .copy_data(dst_file, src_offset + copied, target, Some(remaining), mode)
+                .await
+                .into_sys(strand)?
+        };
+        if result.count == 0 {
+            break;
+        }
+        copied += result.count;
+
+        // Advance cursor-addressed sides after every successful bounded step,
+        // so a later error leaves visible partial progress.
+        if let CopySide::Cursor(borrow) = &mut src_side {
+            borrow
+                .seek_to(strand, SeekFrom::Start(src_offset + copied))
+                .await?;
+        }
+        if let CopyDest::At(base) = &mut target {
+            *base += result.count;
+            if let CopySide::Cursor(borrow) = &mut dst_side {
+                borrow.seek_to(strand, SeekFrom::Start(*base)).await?;
+            }
+        } else if let CopySide::Cursor(borrow) = &mut dst_side
+            && let CopyDest::Append = target
+        {
+            let end = result.destination_end.ok_or_else(|| {
+                Error::state_error(strand, "append copy did not report its destination end")
+            })?;
+            borrow.seek_to(strand, SeekFrom::Start(end)).await?;
+        }
+    }
+    Output::set(strand, out, copied);
+    Ok(())
 }
 
 /// A handle to an open file.
@@ -821,6 +1047,9 @@ impl<'v> Object<'v> for File<'v> {
         let shared = builder.sym("shared");
         let offset_sym = builder.sym("offset");
         let data_sym = builder.sym("data");
+        let range_sym = builder.sym("range");
+        let size_sym = builder.sym("size");
+        let clone_sym = builder.sym("clone");
         builder
             .supertype(TypeObject::Iter)
             .supertype(TypeObject::Sink)
@@ -990,6 +1219,28 @@ impl<'v> Object<'v> for File<'v> {
                         borrow.write(data, strand, out).await
                     }
                 }
+            })
+            .method("copy_data", async move |this, strand, args, out| {
+                let ([dst], [range, size, offset, clone]) = unpack!(
+                    strand,
+                    args,
+                    1,
+                    0,
+                    range_sym = None,
+                    size_sym = None,
+                    offset_sym = None,
+                    clone_sym = None
+                )?;
+                let global = this.annex().global;
+                let dst = global
+                    .types
+                    .file
+                    .cast(&dst)
+                    .ok_or_else(|| Error::type_error(strand, "expected fs.File"))?;
+                dst.enter(strand, async move |strand, dst| {
+                    copy_data(strand, global, this, dst, range, size, offset, clone, out).await
+                })
+                .await
             })
             .method("set_size", async move |this, strand, args, _out| {
                 let ([size], []) = unpack!(strand, args, 1, 0)?;

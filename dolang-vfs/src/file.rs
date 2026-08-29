@@ -16,11 +16,15 @@ use typed_path::Utf8TypedPath;
 
 use crate::{
     client, direct,
-    error::{HandoffError, Result},
+    error::{Error, ErrorKind, HandoffError, Result},
     metadata::{FsMetadata, Metadata},
     process::{StdioRecv, StdioSend},
     security::{Acl, AclKind},
 };
+
+mod copy;
+
+pub(crate) use copy::{COPY_LIMIT, FileId};
 
 /// Selects an extended-attribute namespace when listing attributes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,18 +260,61 @@ impl std::fmt::Debug for FileLock {
             .finish()
     }
 }
+/// Whether a copy may — or must — share blocks with its source rather than
+/// duplicating them.
+///
+/// The distinction is not observable in the byte content either way, which is
+/// why it needs asking for explicitly: a caller copying for deduplication has
+/// no other way to learn whether it got sharing or a full duplicate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CopyMode {
+    /// Share blocks when the platform and both files allow it, and copy the
+    /// data outright when they do not.
+    Auto,
+    /// Fail rather than copy the data outright.
+    Require,
+    /// Copy the data outright even where sharing is available.
+    Never,
+}
+
+/// Where a copy's bytes land in the destination.
+///
+/// Not a bare offset: an append-mode handle has no offset to name — both
+/// backends refuse a positional write on one, and the position is chosen by
+/// the platform at write time — yet copying to the current position of such a
+/// handle is perfectly meaningful.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum CopyDest {
+    /// At an absolute offset.
+    At(u64),
+    /// Through [`File::append`], which places bytes at the end of a handle
+    /// opened for appending. Like `append` itself, this belongs to such a
+    /// handle: on any other one it writes wherever the platform's own position
+    /// happens to be.
+    Append,
+}
+
+/// Result of one bounded [`File::copy_data`] operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopyDataResult {
+    /// Number of logical bytes copied, including preserved holes.
+    pub count: u64,
+    /// Actual destination end for an append copy.
+    pub destination_end: Option<u64>,
+}
+
 /// An asynchronous file handle backed by either a remote [`Client`] or local [`Direct`].
 ///
 /// File handles implement Tokio's asynchronous read, write, and seek traits.
 #[derive(Debug)]
-enum FileInner {
+pub(crate) enum FileInner {
     Client(client::File),
     Direct(direct::File),
 }
 
 #[derive(Debug)]
 pub struct File {
-    inner: FileInner,
+    pub(crate) inner: FileInner,
 }
 
 impl File {
@@ -510,6 +557,119 @@ impl File {
             FileInner::Client(file) => EitherFuture::Left(file.write_at_from(data, offset)),
             FileInner::Direct(file) => EitherFuture::Right(file.write_at_from(data, offset)),
         }
+    }
+
+    /// Copies at most 2 MiB from this file into `dst`.
+    ///
+    /// `len` of `None` copies toward end of source. A positive result may be
+    /// short for any reason; callers that want a complete operation must loop.
+    /// Zero indicates end of source (or an empty request).
+    ///
+    /// Nothing is promised about physical allocation: an accelerated route may
+    /// preserve holes, and the fallback does not.
+    pub async fn copy_data(
+        &self,
+        dst: &File,
+        src_offset: u64,
+        target: CopyDest,
+        len: Option<u64>,
+        mode: CopyMode,
+    ) -> Result<CopyDataResult> {
+        self.check_overlap(dst, src_offset, target, len).await?;
+        let len = len.map(|len| len.min(copy::COPY_LIMIT));
+        match (&self.inner, &dst.inner) {
+            // `Never` still takes this route: it forbids block sharing, not
+            // running the copy on the side that owns both files.
+            (FileInner::Client(src), FileInner::Client(dst)) if src.can_copy_data_with(dst) => {
+                src.copy_data(dst, src_offset, target, len, mode).await
+            }
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "freebsd",
+                target_os = "macos",
+                windows
+            ))]
+            (FileInner::Direct(src_direct), FileInner::Direct(dst_direct))
+                if matches!(target, CopyDest::At(_)) =>
+            {
+                if src_direct.is_regular().await? && dst_direct.is_regular().await? {
+                    src_direct
+                        .copy_data(dst_direct, src_offset, target, len, mode)
+                        .await
+                } else if mode == CopyMode::Require {
+                    Err(Error::new(
+                        ErrorKind::Unsupported,
+                        "block sharing is not supported for this copy",
+                    ))
+                } else {
+                    copy::copy_chunked(self, dst, src_offset, target, len).await
+                }
+            }
+            _ => {
+                // The refusal sits here, immediately above the fallback,
+                // rather than at the top of the function: once a platform
+                // route exists it is inserted above this point and the refusal
+                // becomes "sharing was attempted and could not be had", with
+                // nothing else to re-plumb.
+                if mode == CopyMode::Require {
+                    return Err(Error::new(
+                        ErrorKind::Unsupported,
+                        "block sharing is not supported for this copy",
+                    ));
+                }
+                copy::copy_chunked(self, dst, src_offset, target, len).await
+            }
+        }
+    }
+
+    /// Rejects a copy whose source and destination regions overlap within one
+    /// file.
+    ///
+    /// Best effort by necessity: identity is knowable for two local handles
+    /// and for two citations of one opaque file, but a mixed local/opaque pair
+    /// — which one session can hand out, since `Open` may answer with either —
+    /// has nothing cheap in common to compare. An unknown identity is treated
+    /// as "cannot tell" and lets the copy proceed; a same-session opaque pair
+    /// with distinct citations is checked on the server, where both handles
+    /// are local.
+    async fn check_overlap(
+        &self,
+        dst: &File,
+        src_offset: u64,
+        target: CopyDest,
+        len: Option<u64>,
+    ) -> Result<()> {
+        let same = copy::same_opaque(self, dst)
+            || match (copy::identity(self).await, copy::identity(dst).await) {
+                (Some(src), Some(dst)) => src == dst,
+                _ => false,
+            };
+        if !same {
+            return Ok(());
+        }
+        // Only now, when the regions are known to share a file, is the length
+        // worth a round trip: an open-ended copy runs to end of source, and an
+        // append lands there too.
+        let size = match (len, target) {
+            (Some(_), CopyDest::At(_)) => 0,
+            _ => self.metadata().await?.len(),
+        };
+        let src_end = match len {
+            Some(len) => src_offset.saturating_add(len),
+            None => size.max(src_offset),
+        };
+        let dst_start = match target {
+            CopyDest::At(offset) => offset,
+            CopyDest::Append => size,
+        };
+        let dst_end = dst_start.saturating_add(src_end - src_offset);
+        if dst_start < src_end && src_offset < dst_end {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "source and destination regions of the same file overlap",
+            ));
+        }
+        Ok(())
     }
 
     /// Changes the file length to `size` bytes.

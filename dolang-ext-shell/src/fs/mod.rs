@@ -989,6 +989,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
     let system = builder.sym("system");
     let archive = builder.sym("archive");
     let compressed = builder.sym("compressed");
+    let sparse = builder.sym("sparse");
     let temporary = builder.sym("temporary");
     let offline = builder.sym("offline");
     let not_content_indexed = builder.sym("not_content_indexed");
@@ -1012,6 +1013,10 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
     let opaque = builder.sym("opaque");
     let app = builder.sym("app");
     let replace = builder.sym("replace");
+    let range_kw = builder.sym("range");
+    let size_kw = builder.sym("size");
+    let offset_kw = builder.sym("offset");
+    let clone_kw = builder.sym("clone");
     let module = builder
         .module("fs")
         .function("open", async move |strand, args, out| {
@@ -1207,6 +1212,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                     system,
                     archive,
                     compressed,
+                    sparse,
                     temporary,
                     offline,
                     not_content_indexed,
@@ -1247,6 +1253,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 system = None,
                 archive = None,
                 compressed = None,
+                sparse = None,
                 temporary = None,
                 offline = None,
                 not_content_indexed = None,
@@ -1278,6 +1285,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                     (AttrFlags::SYSTEM, system),
                     (AttrFlags::ARCHIVE, archive),
                     (AttrFlags::COMPRESSED, compressed),
+                    (AttrFlags::SPARSE, sparse),
                     (AttrFlags::TEMPORARY, temporary),
                     (AttrFlags::OFFLINE, offline),
                     (AttrFlags::NOT_CONTENT_INDEXED, not_content_indexed),
@@ -1356,6 +1364,35 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             };
             let _ = out;
             copy(strand, global, from.to_path(), to.to_path(), all).await
+        })
+        .function("copy_data", async move |strand, args, out| {
+            let ([src, dst], [range, size, offset, clone]) = unpack!(
+                strand,
+                args,
+                2,
+                0,
+                range_kw = None,
+                size_kw = None,
+                offset_kw = None,
+                clone_kw = None
+            )?;
+            let src = global
+                .types
+                .file
+                .cast(&src)
+                .ok_or_else(|| Error::type_error(strand, "src must be an fs.File"))?;
+            let dst = global
+                .types
+                .file
+                .cast(&dst)
+                .ok_or_else(|| Error::type_error(strand, "dst must be an fs.File"))?;
+            src.enter(strand, async move |strand, src| {
+                dst.enter(strand, async move |strand, dst| {
+                    file::copy_data(strand, global, src, dst, range, size, offset, clone, out).await
+                })
+                .await
+            })
+            .await
         })
         .function("rename", async move |strand, args, _out| {
             let ([from, to], [replace]) = unpack!(strand, args, 2, 0, replace = None)?;

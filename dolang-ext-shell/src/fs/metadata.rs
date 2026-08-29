@@ -220,6 +220,7 @@ impl<'v> Object<'v> for Metadata {
         let archive = builder.sym("archive");
         let reparse_point = builder.sym("reparse_point");
         let compressed = builder.sym("compressed");
+        let sparse = builder.sym("sparse");
         let encrypted = builder.sym("encrypted");
         let temporary = builder.sym("temporary");
         let offline = builder.sym("offline");
@@ -460,6 +461,9 @@ impl<'v> Object<'v> for Metadata {
                     attrs::macos::COMPRESSED,
                     attrs::freebsd::COMPRESSED,
                 )
+            })
+            .get("sparse", move |this, strand, out| {
+                attr_field(strand, this, out, sparse, attrs::windows::SPARSE, 0, 0, 0)
             })
             .get("encrypted", move |this, strand, out| {
                 attr_field(
