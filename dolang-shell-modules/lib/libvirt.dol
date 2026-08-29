@@ -1,4 +1,4 @@
-import _vfs base64 digest json proc progress rand shell shlex ssh std sys tar term time transfer xdg xml zip
+import _vfs base64 digest json proc progress rand shell shlex ssh std strand sys tar term time transfer xdg xml zip
   fs:
     - Path
     - with_temp_dir
@@ -1453,22 +1453,24 @@ class DomainImpl
   pub def install_payload self archive
     self.#guest().install_payload $archive
 
-  # Performs one validated `add:` step, on the host VFS: resolves `source:`
-  # (or stages `content:` into a host temp file), then `upload`s it.
-  pub def add self spec :app = nil
-    validate_add_spec $spec
-    let app = normalized_app $app
-    let target = spec.get :target:
-    let chmod = require_chmod (spec.get :chmod:)
-    let source = spec.get :source:
-    if (source != nil)
-      let resolved = resolve_source $source $app "add source"
-      self.upload $resolved $target :chmod
-    else
-      with_temp_dir do |dir|
-        let staged = (dir / "content")
-        staged.write (spec.get :content:)
-        self.upload $staged $target :chmod
+  # Performs one `add:` step, on the host VFS: uploads what `source:` resolved
+  # to, or writes `content:` straight into the guest.
+  #
+  # The artifact was resolved before the domain existed, by `prefetch_artifacts`,
+  # so the resolve here is the memo.
+  def add self step app
+    let resolved = step.resolve $app
+    if (type resolved Path)
+      return self.upload $resolved $step.target chmod: $step.chmod
+    # Inline content is a config file or a script, not something a staging file
+    # on the host or a progress indicator would earn their keep on.
+    self.with do
+      # Inside the VFS block, so `Path` builds the guest's flavor — see
+      # `upload`.
+      let target = Path $step.target
+      target.write $resolved
+      if (step.chmod != nil)
+        target.set_metadata mode: $step.chmod
 
   # Copies one local file into the domain.
   # `chmod:` sets `dest`s mode if given
@@ -1554,7 +1556,7 @@ class DomainImpl
       for k v = {:os, :arch, :user, :dolang, :init}
         if (v != nil)
           throw std.ValueError "$k is not valid together with bundle"
-      bundle = normalize_artifact $bundle bundle
+      bundle = parse_artifact $bundle bundle
     else
       os = require_os $os
       arch = require_arch $arch
@@ -1564,9 +1566,7 @@ class DomainImpl
       if (installers.len > 0 && !unattended)
         throw std.ValueError "installer: is not valid for os: $os"
       user = require_name (user || "ci")
-      # Shape-checked here rather than where it is resolved, which happens with
-      # the work directory already created and the image already fetched.
-      normalize_dolang_spec $dolang
+      dolang = dolang_artifact $dolang $os $arch
       if unattended
         # `init:` names cloud-init provisioning semantics, and there is no
         # cloud-init here. The equivalent is the ordered
@@ -1579,12 +1579,12 @@ class DomainImpl
         # the upload itself, which happens with the domain already up and the
         # install already paid for.
         for action = post
-          if (action.kind == :add: && action.spec.get(:chmod:) != nil)
+          if (action.kind == :add: && action.add.chmod != nil)
             throw std.ValueError "add: chmod: is not supported for os: $os"
       else
-        staged = parse_init $init $app
+        staged = parse_init $init
       if (image != nil)
-        image = normalize_artifact $image image
+        image = parse_artifact $image image
       # A bundle's disk is already sized for the guest built around it, so an
       # overlay over one inherits that size unless `disk_size:` says otherwise.
       if (disk_size == nil)
@@ -1596,6 +1596,25 @@ class DomainImpl
       throw std.ValueError "libvirt domain already exists: $name"
     catch NoDomainError: _
       nil
+
+    # Everything this run has to fetch, fetched now: after the checks that cost
+    # nothing, and before the first thing that would have to be cleaned up.
+    let artifacts = []
+    if (bundle != nil)
+      artifacts.push $bundle
+    else
+      if (image != nil)
+        artifacts.push $image
+      artifacts.push $dolang
+      artifacts.push ...installers
+      artifacts.push ...drivers
+      if (staged != nil)
+        artifacts.push ...staged.write
+    for action = post
+      if (action.kind == :add:)
+        artifacts.push $action.add
+    prefetch_artifacts $artifacts $app
+
     workdir.remove all: true ignore: true
     workdir.create_dir all: true
     # Where a wait that runs out dumps the guest console. Under the data root
@@ -1704,7 +1723,7 @@ class DomainImpl
         source.provision $self
         for action = post
           if (action.kind == :add:)
-            self.add $action.spec :app
+            self.#add $action.add $app
           else if (action.kind == :reboot:)
             self.reboot_ready probe: $source.probe timeout: $wait_seconds :screenshot_dir
           else
@@ -1933,12 +1952,12 @@ def bare_source spec name
     throw std.TypeError "$name: expected Str, Path, Url, or Dict"
   spec
 
-# Normalizes an artifact spec into `{source, digest}`.
+# One input this module has to get hold of before it can be used.
 #
-# Every provisioning artifact this module fetches — `image:`, `bundle:`,
-# `installer:`, `drivers:`, `dolang:`, an `add:` `source:` — is spelled one of
-# two ways: a bare `Str`/`Path`/`Url`, or a dict naming the source under
-# `source:` alongside metadata keys:
+# Every provisioning artifact — `image:`, `bundle:`, `installer:`, `drivers:`,
+# `dolang:`, an `add:` `source:` — is spelled one of two ways: a bare
+# `Str`/`Path`/`Url`, or a dict naming the source under `source:` alongside
+# metadata keys:
 #
 # ```
 # image:
@@ -1948,24 +1967,97 @@ def bare_source spec name
 #
 # One shape for all of them is why there is no `image_digest:` beside `image:`
 # and no `bundle_digest:` beside `bundle:`.
-def normalize_artifact spec name
-  if !(type spec Dict)
-    return record source: (bare_source spec name) digest: nil
-  bind spec
-    :source
-    :digest = nil
-  record :source :digest
+#
+# An `add:` may also carry its payload inline as `content:` instead of naming a
+# `source:`, which is why `resolve` answers with either a `Path` to fetched
+# bytes or the bytes themselves.
+#
+# Resolution is memoized on the instance. That is what lets `create` resolve
+# every artifact in a spec up front and in parallel — see `prefetch_artifacts` —
+# while the call sites that actually consume them stay written as if each
+# resolved its own: the second call is the memo, not a second fetch. One that
+# was never prefetched still resolves on demand, so no call site has to know
+# which of the two happened.
+class Artifact
+  # Exactly one of these is set.
+  pub field source = nil
+  pub field content = nil
+  # `algorithm:hex`, verified against whatever `source` resolved to.
+  pub field digest = nil
+  # `:UNSET:` rather than `nil`: `content: ""` is a legal payload and a falsy
+  # one, so there is no in-band value that can mean "not resolved yet".
+  field resolved = :UNSET:
 
-# Normalizes an `installer:` spec, which carries two metadata keys beyond a
-# plain artifact's.
+  def (init) self :source = nil :content = nil :digest = nil
+    self.source = source
+    self.content = content
+    self.digest = digest
+
+  # A `Path` for a `source:`, the payload itself for inline `content:`.
+  #
+  # `app` scopes the download cache. It is a parameter rather than a field
+  # because artifacts are parsed where no `app` is in scope yet; an artifact
+  # belongs to one `create`, so the memo does not key on it.
+  pub def resolve self app
+    if (self.#resolved == :UNSET:)
+      self.#resolved = if (self.content != nil)
+        self.content
+      else
+        transfer.get :app $self.source digest: $self.digest
+    self.#resolved
+
+  # The artifact's bytes, however it is spelled.
+  pub def read self app
+    let resolved = self.resolve $app
+    if (type resolved Path)
+      resolved.read b
+    else
+      resolved
+
+# An `installer:`, which carries two metadata keys beyond a plain artifact's.
 #
 # Install media carries more than one edition, and Setup stops to ask which
 # unless it is told — which on an unattended install means stopping forever.
 # `edition:` names one (`Windows 11 Pro`) and `index:` selects one by position;
 # they are alternatives, not a pair.
-def normalize_installer spec
+class Installer: Artifact
+  pub field edition = nil
+  pub field index = nil
+
+  def (init) self :source :digest = nil :edition = nil :index = nil
+    Artifact.(init) $self :source :digest
+    self.edition = edition
+    self.index = index
+
+# One `add:` step: an artifact plus where it lands in the guest.
+#
+# `extra` carries the cloud-init-only `owner:`/`append:`/`defer:` keys, which
+# are meaningful in an `init:` `add:` and rejected in a top-level one.
+class Add: Artifact
+  pub field target = nil
+  pub field chmod = nil
+  pub field extra = {}
+
+  def (init) self :target :source = nil :content = nil :digest = nil :chmod = nil :extra = {}
+    Artifact.(init) $self :source :content :digest
+    self.target = target
+    self.chmod = chmod
+    self.extra = extra
+
+# Parses an artifact spec. Inline `content:` is not accepted: it is an `add:`
+# spelling, and nothing else here would know what to do with a disk image or an
+# install ISO handed over as a literal.
+def parse_artifact spec name
   if !(type spec Dict)
-    return record source: (bare_source spec "installer") digest: nil edition: nil index: nil
+    return Artifact source: (bare_source spec name)
+  bind spec
+    :source
+    :digest = nil
+  Artifact :source :digest
+
+def parse_installer spec
+  if !(type spec Dict)
+    return Installer source: (bare_source spec "installer")
   bind spec
     :source
     :digest = nil
@@ -1973,17 +2065,70 @@ def normalize_installer spec
     :index = nil
   if (edition != nil && index != nil)
     throw std.ValueError "installer: edition: and index: are alternatives"
-  record :source :digest :edition :index
+  Installer :source :digest :edition :index
 
-# Resolves a normalized artifact to a local path, downloading and caching a
-# URL and verifying `digest:` against whatever it resolved to.
-def resolve_artifact artifact app
-  transfer.get :app $artifact.source digest: $artifact.digest
+# Parses an `add:` step, mirroring `dockman`'s own `add:` build step. No VFS
+# access and no fetching — just shape checking, so it is safe to call eagerly at
+# parse time.
+#
+# `cloud_init` admits the three `write_files` keys that only mean something in
+# an `init:` `add:`, where the entry is rendered into the seed rather than
+# uploaded over a VFS.
+def parse_add spec name :cloud_init = false
+  if !(type spec Dict)
+    throw std.TypeError "$name: expected Dict"
+  let extra_keys = (cloud_init && [:owner:, :append:, :defer:] || [])
+  let allowed = [:target:, :source:, :content:, :chmod:, ...extra_keys]
+  for key _ = spec
+    if !allowed.contains(key)
+      throw std.UnexpectedKeyError $key
 
-# Normalizes and resolves in one step, for a spec that has no earlier
-# validation point to be checked at.
-def resolve_source spec app name
-  resolve_artifact (normalize_artifact spec name) $app
+  let target = spec.get :target: else: do
+    throw std.ValueError "$name: missing target"
+  if !(type target Str)
+    throw std.TypeError "$name target: expected Str"
+
+  let source = spec.get :source:
+  let content = spec.get :content:
+  if ((source == nil) == (content == nil))
+    throw std.ValueError "$name: expected exactly one of source or content"
+  if (content != nil && !(type content Str || type content Bin))
+    throw std.TypeError "$name content: expected Str or Bin"
+
+  let digest = nil
+  if (source != nil)
+    # Pinned the same way as every other artifact, rather than with an
+    # `add:`-specific spelling.
+    let artifact = parse_artifact $source "$name source"
+    source = artifact.source
+    digest = artifact.digest
+
+  let extra = {}
+  for key = extra_keys
+    let value = spec.get $key
+    if (value != nil)
+      extra[key] = value
+
+  Add :target :source :content :digest chmod: (require_chmod (spec.get :chmod:)) :extra
+
+# How many artifacts are fetched at once. Matches `dockman`, which prefetches
+# its own `add:` URLs the same way.
+let FETCH_JOBS = 4
+
+# Resolves every artifact a run needs, in parallel, before it needs any of them.
+#
+# Left to themselves the call sites resolve one at a time at the point of use,
+# which spreads the downloads across image preparation, domain definition, boot
+# and install. Resolving here overlaps them with each other and with everything
+# that follows, and means an unreachable source or a digest mismatch is reported
+# before a domain exists rather than partway through provisioning it.
+#
+# Duplicate sources are not filtered out. `transfer` locks each cache entry, and
+# the lock is both keyed on the open file description — so two strands really do
+# contend rather than both proceeding — and awaited, so the waiter yields to the
+# strand holding it instead of stalling the pool.
+def prefetch_artifacts artifacts app
+  strand.pool $FETCH_JOBS $artifacts do |artifact| artifact.resolve $app
 
 let COMPRESSED_IMAGE_EXTS = Set ["gz", "xz", "zst"]
 
@@ -2355,85 +2500,33 @@ def ensure_key root app
       cli ssh-keygen -q -t ed25519 -N "" -C $app -f $key
   record :key :public
 
-def resolved_add_content spec app
-  let source = spec.get :source:
-  let content = spec.get :content:
-  if ((source == nil) == (content == nil))
-    throw std.ValueError "add: expected exactly one of source or content"
-  if (content != nil)
-    return content
-  let resolved = resolve_source $source $app "add source"
-  resolved.open rb do |file| file.read()
-
 # `chmod:` accepts an `Int` mode or a `fs.unix.Mode`, normalized to a
 # plain `Int` here, whichever `add:` it appears in.
 #
 # cloud-init's `write_files` wants `permissions` as an octal string, but that is
-# its serialization detail, not a second calling convention: `parse_add_spec`
+# its serialization detail, not a second calling convention: `write_files_entry`
 # renders the int with `Int.octal()` instead.
 def require_chmod chmod
   _vfs.parse_mode $chmod
 
-# Validates a top-level `add:` entry (`target`, `source:`|`content:`,
-# `chmod:`, mirroring `dockman`'s own `add:` build step). No VFS access —
-# just shape checking, so it's safe to call eagerly at parse time.
-def validate_add_spec spec
-  if !(type spec Dict)
-    throw std.TypeError "add: expected Dict"
-  let allowed = [:target:, :source:, :content:, :chmod:]
-  for key _ = spec
-    if !allowed.contains(key)
-      throw std.UnexpectedKeyError $key
-
-  let target = spec.get :target: else: do
-    throw std.ValueError "add: missing target"
-  if !(type target Str)
-    throw std.TypeError "add target: expected Str"
-
-  let source = spec.get :source:
-  let content = spec.get :content:
-  if ((source == nil) == (content == nil))
-    throw std.ValueError "add: expected exactly one of source or content"
-  if (content != nil && !(type content Str || type content Bin))
-    throw std.TypeError "add content: expected Str or Bin"
-  if (source != nil)
-    normalize_artifact $source "add source"
-  require_chmod (spec.get :chmod:)
-  spec
-
-# Converts a dockman-style `add:` spec (`target`, `source`-or-`content`,
-# `chmod`, plus cloud-init-specific `owner`/`append`/`defer`) into a
-# cloud-init `write_files` entry.
-def parse_add_spec spec app
-  if !(type spec Dict)
-    throw std.TypeError "add: expected Dict"
-  let allowed = [:target:, :source:, :content:, :chmod:, :owner:, :append:, :defer:]
-  for key _ = spec
-    if !allowed.contains(key)
-      throw std.UnexpectedKeyError $key
-
-  let target = spec.get :target: else: do
-    throw std.ValueError "add: missing target"
-  if !(type target Str)
-    throw std.TypeError "add target: expected Str"
-
-  let content = resolved_add_content $spec $app
-  let file = {path: target}
+# Renders one parsed `init:` `add:` step as a cloud-init `write_files` entry.
+#
+# Separate from `parse_add` so that the parse — which every `add:` in the spec
+# goes through before anything is fetched — stays free of I/O, leaving the read
+# until after `prefetch_artifacts` has the payload in hand.
+def write_files_entry add app
+  let content = add.read $app
+  let file = {path: add.target}
   if (type content Str)
     file[:content:] = content
-  else if (type content Bin)
+  else
     file[:content:] = base64.encode $content
     file[:encoding:] = "b64"
-  else
-    throw std.TypeError "add content: expected Str or Bin"
 
-  let chmod = require_chmod (spec.get :chmod:)
-  if (chmod != nil)
-    file[:permissions:] = chmod.octal()
-  for key = [:owner:, :append:, :defer:]
-    let value = spec.get $key
-    if (value != nil)
-      file[key] = value
+  if (add.chmod != nil)
+    file[:permissions:] = add.chmod.octal()
+  for key value = add.extra
+    file[key] = value
   file
 
 # Parses the `init:` sub-dict into boot-time cloud-init state. Like the
@@ -2441,7 +2534,7 @@ def parse_add_spec spec app
 # are multimaps). `run:` entries here must be a raw string or Array of strings —
 # anything needing a live VFS connection belongs in the top-level repeated
 # `run:` keyword argument instead.
-def parse_init init app
+def parse_init init
   if (init == nil)
     return record boot: [] write: [] packages: []
   if !(type init Dict)
@@ -2452,7 +2545,7 @@ def parse_init init app
   let packages = []
   for key value = init
     if (key == :add:)
-      write.push (parse_add_spec value app)
+      write.push (parse_add value "init.add" cloud_init: true)
     else if (key == :run:)
       if (type value Str)
         boot.push [...(shlex.split value)]
@@ -2498,15 +2591,15 @@ def parse_extra_options options
   let drivers = []
   for key value = options
     if (key == :add:)
-      post.push (record kind: :add: spec: (validate_add_spec value))
+      post.push (record kind: :add: add: (parse_add value "add"))
     else if (key == :run:)
       if (type value Str || type value Array)
         throw std.TypeError "run: expected a func; use init: {run: ...} for boot-time commands"
       post.push (record kind: :run: block: value)
     else if (key == :installer:)
-      installers.push (normalize_installer value)
+      installers.push (parse_installer value)
     else if (key == :drivers:)
-      drivers.push (normalize_artifact value "drivers")
+      drivers.push (parse_artifact value "drivers")
     else if (type key Int)
       if !(type value Str && POSITIONAL_STEPS.contains value)
         let known = ", ".join(POSITIONAL_STEPS)
@@ -2599,8 +2692,8 @@ def build_provision_iso root files
 # unless both are `nil`, which selects the default release.
 #
 # A bare `Str` is a version tag rather than a source, which is why this is not
-# just `normalize_artifact`: everything else is an artifact spec and goes
-# through it.
+# just `parse_artifact`: everything else is an artifact spec and goes through
+# it.
 def normalize_dolang_spec spec
   if (spec == nil)
     return record version: nil artifact: nil
@@ -2615,7 +2708,7 @@ def normalize_dolang_spec spec
     return record version: (spec.get :version:) artifact: nil
   if !(type spec Path || type spec Url || type spec Dict)
     throw std.TypeError "dolang: expected Str, Path, Url, or Dict"
-  record version: nil artifact: (normalize_artifact spec "dolang")
+  record version: nil artifact: (parse_artifact spec "dolang")
 
 def dolang_platform_key os arch
   "$(str(arch).lower())-$(str(os).lower())"
@@ -2634,24 +2727,28 @@ def dolang_current_tag()
 def dolang_release_url tag artifact
   "https://github.com/$DOLANG_REPO/releases/download/$tag/$artifact"
 
-# Resolves `dolang:` to a local archive path (cached via `transfer`).
+# The archive `dolang:` names, as an `Artifact`.
 #
 # There is no "install nothing" answer. A guest without `dolang-vfs` has no
 # `with`, no `upload` and no `download` — which is most of what a domain is
 # for — and an unattended install has no guest at all without one, since the
-# payload is what brings up SSH. So a platform with no release artifact, or a
-# release that cannot be fetched, is an error here rather than a domain that
-# comes up quietly crippled.
-def resolve_dolang spec os arch app
+# payload is what brings up SSH. So a platform with no release artifact is an
+# error, and one whose release cannot be fetched fails the fetch, rather than
+# either producing a domain that comes up quietly crippled.
+#
+# The version form resolves to a release URL rather than to an artifact spec the
+# caller wrote, which is why this needs `os`/`arch` and so cannot be built at
+# the same point as the rest of them.
+def dolang_artifact spec os arch
   spec = normalize_dolang_spec $spec
   if (spec.artifact != nil)
-    return resolve_artifact $spec.artifact $app
+    return spec.artifact
 
   let tag = (spec.version || dolang_current_tag())
   let artifact = dolang_artifact_name $os $arch
   if (artifact == nil)
     throw std.ValueError "dolang: no known release artifact for $(dolang_platform_key os arch)"
-  resolve_source (Url (dolang_release_url tag artifact)) $app "dolang"
+  Artifact source: (Url (dolang_release_url tag artifact))
 
 # Whether a failed `create` should leave what it built behind for inspection.
 def keep_failed()
@@ -2725,13 +2822,19 @@ class ImageSource: Source
   field payload
 
   def (init) self :image :os :arch :app :user :staged :dolang :keys :root
-    let resolved = resolve_artifact $image $app
-    let payload = resolve_dolang $dolang $os $arch $app
+    let resolved = image.resolve $app
+    let payload = dolang.resolve $app
     let stored = prepared_image $resolved $root
     let seed = progress.show message: "prepare cloud-init" icon: ☁️ do |_|
       let public_key = keys.public.read().trim()
+      # Rendered here rather than at parse time: an `init:` `add:` naming a
+      # `source:` is fetched with everything else, and its bytes are only in
+      # hand once that has happened.
+      let write = $
+        for add = staged.write
+          - (write_files_entry add app)
       let user_data = cloud_init.cloud_config $user $public_key
-        $staged.packages $staged.boot $staged.write
+        $staged.packages $staged.boot $write
       cloud_init.build_seed $root $user_data
     self.#payload = payload
     Source.(init) $self
@@ -2773,14 +2876,14 @@ class InstallerSource: Source
       if (boot == 1)
         edition = spec.edition
         index = spec.index
-      let resolved = resolve_artifact $spec $app
+      let resolved = spec.resolve $app
       media.push (record path: resolved boot: boot)
       boot = (boot + 1)
     for spec = drivers
-      let resolved = resolve_artifact $spec $app
+      let resolved = spec.resolve $app
       media.push (record path: resolved boot: nil)
 
-    let archive = resolve_dolang $dolang $os $arch $app
+    let archive = dolang.resolve $app
     let payload = unpack_payload $root $archive
 
     # Written beside the domain so the console is usable while an install is
@@ -2862,7 +2965,7 @@ class InstallerSource: Source
 class BundleSource: Source
   def (init) self :bundle :app :root :workdir
     let resolved = progress.show message: "resolve bundle" do |_|
-      resolve_artifact $bundle $app
+      bundle.resolve $app
     let manifest = read_manifest $resolved
     # The key a bundle's guest trusts is the one generated for the app it was
     # minted under, and that key lives under that app's data directory.
