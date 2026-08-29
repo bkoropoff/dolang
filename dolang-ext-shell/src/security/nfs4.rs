@@ -1,4 +1,4 @@
-use super::unix::posix_id;
+use super::unix::{posix_id, spec_id};
 use super::*;
 
 /// NFSv4 ACE permission mask (`security.nfs4.Mask`), a local newtype over
@@ -164,7 +164,12 @@ async fn nfs4_ace_mask<'v, 's>(
             "mask: expected security.nfs4.Mask",
         ));
     };
-    Ok(global.types.nfs4_ace_mask.coerce(strand, value).await?.0)
+    global
+        .types
+        .nfs4_ace_mask
+        .cast_flags(value)
+        .map(|value| value.0)
+        .ok_or_else(|| Error::type_error(strand, "mask: expected security.nfs4.Mask"))
 }
 
 async fn nfs4_ace_flags<'v, 's>(
@@ -175,7 +180,101 @@ async fn nfs4_ace_flags<'v, 's>(
     let Some(value) = flags else {
         return Ok(VfsNfs4AceFlags::empty());
     };
-    Ok(global.types.nfs4_ace_flags.coerce(strand, value).await?.0)
+    global
+        .types
+        .nfs4_ace_flags
+        .cast_flags(value)
+        .map(|value| value.0)
+        .ok_or_else(|| Error::type_error(strand, "flags: expected security.nfs4.Flags"))
+}
+
+async fn coerce_mask<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    value: &Value<'v>,
+    path: &SpecPath<'_>,
+) -> Result<'v, 's, VfsNfs4AceMask> {
+    global
+        .types
+        .nfs4_ace_mask
+        .coerce(strand, value)
+        .await
+        .map(|v| v.0)
+        .map_err(|_| Error::type_error(strand, format!("{path}: expected security.nfs4.Mask")))
+}
+
+async fn coerce_flags<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    value: Option<&Value<'v>>,
+    path: &SpecPath<'_>,
+) -> Result<'v, 's, VfsNfs4AceFlags> {
+    match value {
+        Some(value) => global
+            .types
+            .nfs4_ace_flags
+            .coerce(strand, value)
+            .await
+            .map(|v| v.0)
+            .map_err(|_| {
+                Error::type_error(strand, format!("{path}: expected security.nfs4.Flags"))
+            }),
+        None => Ok(VfsNfs4AceFlags::empty()),
+    }
+}
+
+async fn coerce_principal<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    value: &Value<'v>,
+    path: &SpecPath<'_>,
+) -> Result<'v, 's, VfsNfs4AceQualifier> {
+    if let Some(sym) = value.as_sym(strand.vm()) {
+        return match sym.as_str(strand.vm()) {
+            "OWNER" => Ok(VfsNfs4AceQualifier::Owner),
+            "OWNING_GROUP" => Ok(VfsNfs4AceQualifier::OwningGroup),
+            "EVERYONE" => Ok(VfsNfs4AceQualifier::Everyone),
+            _ => Err(Error::value(
+                strand,
+                format!("{path}: expected OWNER, OWNING_GROUP, EVERYONE, user, or group"),
+            )),
+        };
+    }
+    let dict = value
+        .as_dict(strand.vm())
+        .ok_or_else(|| Error::type_error(strand, format!("{path}: expected principal")))?;
+    let mut principal = None;
+    let mut pairs = dict.pairs();
+    strand
+        .with_slots(async |strand, [mut key, mut entry]| {
+            while pairs.next(strand, &mut key, &mut entry)? {
+                let sym = key.as_sym(strand.vm()).ok_or_else(|| {
+                    Error::value(strand, format!("{path}: principal keys must be symbols"))
+                })?;
+                if principal.is_some() {
+                    return Err(Error::value(
+                        strand,
+                        format!("{path}: multiple principal keys"),
+                    ));
+                }
+                principal = Some(match sym.as_str(strand.vm()) {
+                    "user" => {
+                        VfsNfs4AceQualifier::User(spec_id(strand, &entry, &path.key("user"))?)
+                    }
+                    "group" => {
+                        VfsNfs4AceQualifier::Group(spec_id(strand, &entry, &path.key("group"))?)
+                    }
+                    name => {
+                        return Err(Error::value(
+                            strand,
+                            format!("{path}: unknown key `{name}`"),
+                        ));
+                    }
+                });
+            }
+            Ok::<_, Error<'v, 's>>(())
+        })
+        .await?;
+    principal.ok_or_else(|| Error::value(strand, format!("{path}: expected user or group")))
 }
 
 fn nfs4_ace_type<'v, 's>(
@@ -359,6 +458,177 @@ impl<'v> Object<'v> for Nfs4AceObject {
     }
 }
 
+async fn coerce_ace<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    value: &Value<'v>,
+    path: &SpecPath<'_>,
+) -> Result<'v, 's, VfsNfs4Ace> {
+    if let Some(ace) = global.types.nfs4_ace.cast(value) {
+        return Ok(ace.enter_sync(strand, |_strand, ace| *ace.annex()));
+    }
+    let dict = value.as_dict(strand.vm()).ok_or_else(|| {
+        Error::type_error(
+            strand,
+            format!("{path}: expected security.nfs4.Ace or Dict"),
+        )
+    })?;
+    let mut ace_type = None;
+    let mut qualifier = None;
+    let mut mask = None;
+    let mut flags = None;
+    let mut pairs = dict.pairs();
+    strand
+        .with_slots(async |strand, [mut key, mut entry]| {
+            while pairs.next(strand, &mut key, &mut entry)? {
+                let sym = key
+                    .as_sym(strand.vm())
+                    .ok_or_else(|| Error::value(strand, format!("{path}: keys must be symbols")))?;
+                match sym.as_str(strand.vm()) {
+                    name @ ("allow" | "deny" | "audit" | "alarm") => {
+                        if ace_type.is_some() {
+                            return Err(Error::value(
+                                strand,
+                                format!("{path}: multiple keys name conflicting ACE types"),
+                            ));
+                        }
+                        ace_type = Some(match name {
+                            "allow" => VfsNfs4AceType::Allow,
+                            "deny" => VfsNfs4AceType::Deny,
+                            "audit" => VfsNfs4AceType::Audit,
+                            _ => VfsNfs4AceType::Alarm,
+                        });
+                        qualifier = Some(coerce_principal(strand, &entry, &path.key(name)).await?);
+                    }
+                    "mask" => {
+                        if mask.is_some() {
+                            return Err(Error::value(
+                                strand,
+                                format!("{path}: duplicate key `mask`"),
+                            ));
+                        }
+                        mask = Some(coerce_mask(strand, global, &entry, &path.key("mask")).await?);
+                    }
+                    "flags" => {
+                        if flags.is_some() {
+                            return Err(Error::value(
+                                strand,
+                                format!("{path}: duplicate key `flags`"),
+                            ));
+                        }
+                        flags = Some(
+                            coerce_flags(strand, global, Some(&entry), &path.key("flags")).await?,
+                        );
+                    }
+                    name => {
+                        return Err(Error::value(
+                            strand,
+                            format!("{path}: unknown key `{name}`"),
+                        ));
+                    }
+                }
+            }
+            Ok::<_, Error<'v, 's>>(())
+        })
+        .await?;
+    let ace_type = ace_type.ok_or_else(|| {
+        Error::value(
+            strand,
+            format!("{path}: expected one of allow, deny, audit, or alarm"),
+        )
+    })?;
+    let qualifier = qualifier.expect("ACE type and qualifier are set together");
+    let mask =
+        mask.ok_or_else(|| Error::value(strand, format!("{}: required", path.key("mask"))))?;
+    Ok(VfsNfs4Ace::new(
+        ace_type,
+        qualifier,
+        mask,
+        flags.unwrap_or_default(),
+    ))
+}
+
+pub(super) async fn coerce_acl<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    value: &Value<'v>,
+    path: &SpecPath<'_>,
+) -> Result<'v, 's, VfsNfs4Acl> {
+    if let Some(acl) = global.types.nfs4_acl.cast(value) {
+        return Ok(acl.enter_sync(strand, |_strand, acl| acl.annex().clone()));
+    }
+    let mut entries = Vec::new();
+    strand
+        .with_slots(async |strand, [mut iter, mut item]| {
+            value.iter(strand, &mut iter).await?;
+            let mut index = 0;
+            while iter.next(strand, &mut item).await? {
+                entries.push(coerce_ace(strand, global, &item, &path.index(index)).await?);
+                index += 1;
+            }
+            Ok::<_, Error<'v, 's>>(())
+        })
+        .await?;
+    Ok(VfsNfs4Acl::new(entries))
+}
+
+async fn ace_from_args<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    args: Args<'v, '_>,
+) -> Result<'v, 's, VfsNfs4Ace> {
+    let mask_sym = global.syms.mask;
+    let allow_sym = global.syms.allow;
+    let deny_sym = global.syms.deny;
+    let audit_sym = global.syms.audit;
+    let alarm_sym = global.syms.alarm;
+    let flags_sym = global.syms.flags;
+    let ([mask], [allow, deny, audit, alarm, flags]) = unpack!(
+        strand,
+        args,
+        0,
+        0,
+        mask_sym,
+        allow_sym = None,
+        deny_sym = None,
+        audit_sym = None,
+        alarm_sym = None,
+        flags_sym = None
+    )?;
+    let mut found = Vec::new();
+    for (ty, value) in [
+        (VfsNfs4AceType::Allow, allow),
+        (VfsNfs4AceType::Deny, deny),
+        (VfsNfs4AceType::Audit, audit),
+        (VfsNfs4AceType::Alarm, alarm),
+    ] {
+        if let Some(value) = value {
+            found.push((ty, value));
+        }
+    }
+    if found.len() != 1 {
+        return Err(Error::value(
+            strand,
+            if found.is_empty() {
+                "ace: expected one of allow, deny, audit, or alarm"
+            } else {
+                "ace: multiple keys name conflicting ACE types"
+            },
+        ));
+    }
+    let (ace_type, principal) = found.pop().unwrap();
+    let qualifier = coerce_principal(strand, &principal, &SpecPath::root("ace.principal")).await?;
+    let mask = coerce_mask(strand, global, &mask, &SpecPath::root("ace.mask")).await?;
+    let flags = coerce_flags(
+        strand,
+        global,
+        flags.as_deref(),
+        &SpecPath::root("ace.flags"),
+    )
+    .await?;
+    Ok(VfsNfs4Ace::new(ace_type, qualifier, mask, flags))
+}
+
 pub(super) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Global<'v>>) {
     builder
         .module("security.nfs4")
@@ -366,5 +636,33 @@ pub(super) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         .value("Ace", global.types.nfs4_ace)
         .value("Mask", global.types.nfs4_ace_mask)
         .value("Flags", global.types.nfs4_ace_flags)
+        .function("ace", async move |strand, args, out| {
+            let ace = ace_from_args(strand, global, args).await?;
+            global
+                .types
+                .nfs4_ace
+                .create_with_annex(strand, Nfs4AceObject, ace, out);
+            Ok(())
+        })
+        .function("acl", async move |strand, args, out| {
+            let ([], [], entries) = unpack!(strand, args, 0, 0, ...)?;
+            let mut aces = Vec::new();
+            for (index, entry) in entries.enumerate() {
+                let value = match entry {
+                    Arg::Pos(value) => value,
+                    Arg::Key(key, _) => return Err(Error::unexpected_key(strand, key)),
+                };
+                aces.push(
+                    coerce_ace(strand, global, &value, &SpecPath::root("acl").index(index)).await?,
+                );
+            }
+            global.types.nfs4_acl.create_with_annex(
+                strand,
+                Nfs4AclObject,
+                VfsNfs4Acl::new(aces),
+                out,
+            );
+            Ok(())
+        })
         .commit();
 }

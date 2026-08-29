@@ -485,50 +485,56 @@ Gets the ACL stored on a path.
 | Name      | Type                                      | Description                                      |
 | --------- | ----------------------------------------- | ------------------------------------------------ |
 | `path`    | [`Str`](../std/str.md)\|[`Path`](path.md) | Path to query                                    |
-| `kind`    | `:POSIX:`\|`:NFS4:`                       | ACL format to query                              |
+| `kind`    | `:POSIX:`\|`:NFS4:`\|`:MACOS:`            | ACL format to query                              |
 | `default` | [`Bool`](../std/bool.md)                  | Query the directory's inheritable default ACL    |
 | `resolve` | `:TARGET:`\|`:LINK:`                      | Resolution mode (see [above](#resolution-modes)) |
 
 #### Returns
 
-[`security.unix.Acl`](../security/unix/acl.md) or
-[`security.nfs4.Acl`](../security/nfs4/acl.md), depending on `kind`, or `nil`
-when no ACL metadata is stored.
+[`security.unix.Acl`](../security/unix/acl.md),
+[`security.nfs4.Acl`](../security/nfs4/acl.md), or
+[`security.macos.Acl`](../security/macos/acl.md), depending on `kind`, or
+`nil` when no ACL metadata is stored.
 
 #### Errors
 
 | Exception              | Condition                                                                                        |
 | ---------------------- | ------------------------------------------------------------------------------------------------ |
-| `ValueError`           | `kind: :NFS4:` is combined with `default: true`; NFSv4 ACLs express inheritance with `Ace` flags |
+| `ValueError`           | `kind: :NFS4:` or `:MACOS:` is combined with `default: true`                                     |
 | `sys.UnsupportedError` | The target and ACL format combination is unsupported                                             |
 
 POSIX ACLs (`kind: :POSIX:`, the default) are supported on Linux and FreeBSD.
-NFSv4 ACLs (`kind: :NFS4:`) are supported on FreeBSD only.
+NFSv4 ACLs (`kind: :NFS4:`) are supported on FreeBSD only. macOS ACLs
+(`kind: :MACOS:`) are supported on macOS only.
 
 ### `set_acl path acl :kind? :default? :resolve?`
 
-Sets or removes an ACL. The format is inferred from `acl`'s type when
-setting a value; `kind` selects the format to remove when `acl` is `nil`.
+Sets or removes an ACL. A built ACL supplies its format; an explicit `kind:`
+must match it. An untyped iterable of declarative ACE dictionaries requires
+an explicit `kind:` and is coerced by that ACL family. With `nil`, `kind:`
+selects the format to remove and defaults to `:POSIX:`.
 
 #### Parameters
 
-| Name      | Type                                                                                                                   | Description                                      |
-| --------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
-| `path`    | [`Str`](../std/str.md)\|[`Path`](path.md)                                                                              | Path to update                                   |
-| `acl`     | [`security.unix.Acl`](../security/unix/acl.md)\|[`security.nfs4.Acl`](../security/nfs4/acl.md)\|[`nil`](../std/nil.md) | ACL to set, or `nil` to remove it                |
-| `kind`    | `:POSIX:`\|`:NFS4:`?                                                                                                   | ACL format to remove, when `acl` is `nil`        |
-| `default` | [`Bool`](../std/bool.md)                                                                                               | Update the directory's inheritable default ACL   |
-| `resolve` | `:TARGET:`\|`:LINK:`                                                                                                   | Resolution mode (see [above](#resolution-modes)) |
+| Name      | Type                                        | Description                                      |
+| --------- | ------------------------------------------- | ------------------------------------------------ |
+| `path`    | [`Str`](../std/str.md)\|[`Path`](path.md)   | Path to update                                   |
+| `acl`     | built ACL\|iterable\|[`nil`](../std/nil.md) | ACL or declarative ACE sequence                  |
+| `kind`    | `:POSIX:`\|`:NFS4:`\|`:MACOS:`?             | Required for an untyped ACL specification        |
+| `default` | [`Bool`](../std/bool.md)                    | Update the directory's inheritable default ACL   |
+| `resolve` | `:TARGET:`\|`:LINK:`                        | Resolution mode (see [above](#resolution-modes)) |
 
 #### Errors
 
 | Exception              | Condition                                                                                                        |
 | ---------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `ValueError`           | An NFSv4 `acl` or `kind: :NFS4:` is combined with `default: true`                                                |
+| `ValueError`           | An NFSv4/macOS ACL is combined with `default: true`                                                              |
+| `ValueError`           | A built ACL conflicts with the explicit `kind:`                                                                  |
+| `TypeError`            | An untyped ACL specification is passed without `kind:`                                                           |
 | `sys.UnsupportedError` | An NFSv4 ACL is removed with `kind: :NFS4:` and `acl: nil`; NFSv4 ACLs can be replaced but not cleared to "none" |
 
-POSIX ACLs are supported on Linux and FreeBSD. NFSv4 ACLs are supported on
-FreeBSD only. Other combinations of target and format raise
+POSIX ACLs are supported on Linux and FreeBSD, NFSv4 ACLs on FreeBSD, and
+macOS ACLs on macOS. Other target and format combinations raise
 `sys.UnsupportedError`.
 
 ### `xattrs path :namespace? :resolve?`

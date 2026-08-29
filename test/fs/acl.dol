@@ -18,6 +18,7 @@ import sys admin
   uuid:
     - Uuid
   std:
+    - TypeError
     - UnsupportedError
     - ValueError
   test:
@@ -50,6 +51,15 @@ def extended_macos_acl principal
   macos.Acl $
     $ macos.Ace.allow $principal mask: $read
     $ macos.Ace.deny (Uuid.generate()) mask: $read flags: $macos.Flags()
+
+def declarative_posix_acl id
+  [
+    {user_obj: [:READ:, :WRITE:]},
+    {user: id, permissions: [:READ:]},
+    {group_obj: [:READ:]},
+    {mask: [:READ:]},
+    {other: []},
+  ]
 
 # Whether `kind` ACLs are expected to work on this platform. POSIX ACLs work
 # on Linux and FreeBSD; NFSv4 and macOS ACLs are FreeBSD-only and macOS-only,
@@ -155,13 +165,22 @@ def accesses_posix_acl_metadata()
   assert_eq (acl path) nil
   let id = unix_info().euid
   let value = extended_posix_acl $id
-  set_acl $path $value
+  set_acl $path $value kind: :POSIX:
   let loaded = acl $path
   assert_type $unix.Acl $loaded
   assert_eq $loaded.aces.len 5
   assert_eq $loaded.aces[1].id $id
+  let spec = declarative_posix_acl $id
+  set_acl $path $spec kind: :POSIX:
+  assert_eq $(acl path).aces[1].id $id
+  path.set_acl $value kind: :POSIX:
+  path.set_acl $spec kind: :POSIX:
+  assert_eq $path.acl().aces[1].id $id
   open $path r do |file|
     assert_type $unix.Acl $file.acl()
+    file.set_acl $value kind: :POSIX:
+    file.set_acl $spec kind: :POSIX:
+    assert_eq $file.acl().aces[1].id $id
     file.set_acl nil
     assert_eq $file.acl() nil
 
@@ -172,6 +191,21 @@ def accesses_posix_acl_metadata()
 
   remove $path
   remove $dir all: true
+
+#[test]
+#[vfs]
+def validates_acl_setter_inputs_before_filesystem_access()
+  let path = Path acl_setter_validation.txt
+  let spec = declarative_posix_acl 1234
+  assert_throws $TypeError do set_acl $path $spec
+  assert_throws $TypeError do path.set_acl $spec
+  let built = extended_nfs4_acl 1234
+  assert_throws $ValueError do set_acl $path $built kind: :POSIX:
+  assert_throws $ValueError do path.set_acl $built kind: :POSIX:
+  open $path w do |file|
+    assert_throws $TypeError do file.set_acl $spec
+    assert_throws $ValueError do file.set_acl $built kind: :POSIX:
+  remove $path
 
 #[test]
 #[vfs]

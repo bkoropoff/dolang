@@ -399,6 +399,26 @@ def constructs_posix_acls_on_every_platform()
   assert_throws $ValueError do unix_security.Acl [owner, named, group, other]
 
 #[test]
+def constructs_declarative_posix_aces_and_acls()
+  let owner = unix_security.ace user_obj: [:READ:, :WRITE:]
+  let named = unix_security.ace user: 1234 permissions: :READ:
+  let group = unix_security.ace group_obj: :READ:
+  let mask = unix_security.ace mask: [:READ:, :WRITE:]
+  let other = unix_security.ace other: []
+  let acl = unix_security.acl $owner $named {user: 2345, permissions: [:READ:]} $group $mask $other
+  assert_type $unix_security.Acl $acl
+  assert_eq $acl.aces.len 6
+  assert_eq $acl.aces[2].id 2345
+  assert_eq $acl.aces[2].permissions (Permission :READ:)
+  assert_throws $ValueError do unix_security.ace user: 1 group: 2
+  assert_throws $ValueError do unix_security.ace user_obj: :READ: permissions: :WRITE:
+  assert_throws $ValueError do unix_security.acl()
+  assert_throws $TypeError do unix_security.acl [owner, named, group, mask, other]
+  assert_throws $TypeError do unix_security.Ace.user_obj :READ:
+  assert_throws $UnexpectedPosError do unix_security.ace 1 user: 1
+  assert_throws $UnexpectedKeyError do unix_security.ace bogus: 1
+
+#[test]
 def reports_security_information_for_target()
   if (sys.os_info().family == :UNIX:)
     let info = unix_info()

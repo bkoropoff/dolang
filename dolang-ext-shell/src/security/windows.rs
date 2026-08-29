@@ -1502,59 +1502,6 @@ fn parse_bool_component<'v, 's>(
         .transpose()
 }
 
-/// A position inside a declarative spec.
-///
-/// Rendered only when something goes wrong, so a nested spec can report
-/// `dacl[2].mask` without any of the walk allocating on the way down.
-#[derive(Clone, Copy)]
-pub(crate) struct SpecPath<'p> {
-    parent: Option<&'p SpecPath<'p>>,
-    step: SpecStep<'p>,
-}
-
-#[derive(Clone, Copy)]
-enum SpecStep<'p> {
-    Root(&'p str),
-    Key(&'p str),
-    Index(usize),
-}
-
-impl<'p> SpecPath<'p> {
-    pub(crate) fn root(name: &'p str) -> Self {
-        Self {
-            parent: None,
-            step: SpecStep::Root(name),
-        }
-    }
-
-    fn key(&'p self, name: &'p str) -> Self {
-        Self {
-            parent: Some(self),
-            step: SpecStep::Key(name),
-        }
-    }
-
-    fn index(&'p self, index: usize) -> Self {
-        Self {
-            parent: Some(self),
-            step: SpecStep::Index(index),
-        }
-    }
-}
-
-impl std::fmt::Display for SpecPath<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Some(parent) = self.parent {
-            write!(f, "{parent}")?;
-        }
-        match self.step {
-            SpecStep::Root(name) => write!(f, "{name}"),
-            SpecStep::Key(name) => write!(f, ".{name}"),
-            SpecStep::Index(index) => write!(f, "[{index}]"),
-        }
-    }
-}
-
 /// Coerces a SID: a [`Sid`], its canonical string or native packet, or a
 /// symbol naming a well-known SID.
 fn coerce_sid<'v, 's>(

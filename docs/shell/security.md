@@ -104,7 +104,8 @@ fs.set_acl config.ini $access
 ```
 
 Pass `kind: :NFS4:` to `fs.acl` to read an NFSv4 ACL instead of the default
-POSIX one; `fs.set_acl` infers the format from the value's type. `default:
+POSIX one; a built ACL supplies its format to `fs.set_acl`. Declarative ACE
+sequences require `kind: :NFS4:`. `default:
 true` is not valid with an NFSv4 ACL — inheritance is expressed through
 [`Ace`](../api/security/nfs4/ace.md) flags instead of a separate default-ACL
 object. Unlike a POSIX ACL, an NFSv4 ACL is a file's native security
@@ -137,7 +138,8 @@ fs.set_acl config.ini $access
 ```
 
 Pass `kind: :MACOS:` to `fs.acl` to read a macOS extended ACL instead of the
-default POSIX one; `fs.set_acl` infers the format from the value's type.
+default POSIX one; a built ACL supplies its format to `fs.set_acl`.
+Declarative ACE sequences require `kind: :MACOS:`.
 `default: true` is not valid with a macOS ACL, the same as with an NFSv4
 one. Unlike an NFSv4 ACL, a macOS extended ACL is an optional overlay on top
 of POSIX permissions, so it can be removed back to "none" with `fs.set_acl

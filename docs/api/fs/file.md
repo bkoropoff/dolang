@@ -359,29 +359,28 @@ Gets the ACL stored on the open file.
 
 #### Parameters
 
-| Name      | Type                      | Description                                   |
-| --------- | ------------------------- | --------------------------------------------- |
-| `kind`    | `:POSIX:`\|`:NFS4:`       | ACL format to query                           |
-| `default` | [`Bool`](../std/bool.md)? | Query the directory's inheritable default ACL |
+| Name      | Type                           | Description                                   |
+| --------- | ------------------------------ | --------------------------------------------- |
+| `kind`    | `:POSIX:`\|`:NFS4:`\|`:MACOS:` | ACL format to query                           |
+| `default` | [`Bool`](../std/bool.md)?      | Query the directory's inheritable default ACL |
 
 #### Returns
 
-[`security.unix.Acl`](../security/unix/acl.md) or
-[`security.nfs4.Acl`](../security/nfs4/acl.md), depending on `kind`, or `nil`
+The matching portable ACL type, depending on `kind`, or `nil`.
 
 ### `set_acl acl :kind? :default?`
 
-Sets or removes an ACL on the open file. The format is inferred from `acl`'s
-type when setting a value; `kind` selects the format to remove when `acl` is
-`nil`.
+Sets or removes an ACL on the open file. A built ACL supplies its format and
+must match an explicit `kind:`. An untyped sequence of declarative ACE
+dictionaries requires `kind:`. With `nil`, the omitted kind remains POSIX.
 
 #### Parameters
 
-| Name      | Type                                                                                                                   | Description                                    |
-| --------- | ---------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
-| `acl`     | [`security.unix.Acl`](../security/unix/acl.md)\|[`security.nfs4.Acl`](../security/nfs4/acl.md)\|[`nil`](../std/nil.md) | ACL to set, or `nil` to remove it              |
-| `kind`    | `:POSIX:`\|`:NFS4:`?                                                                                                   | ACL format to remove, when `acl` is `nil`      |
-| `default` | [`Bool`](../std/bool.md)?                                                                                              | Update the directory's inheritable default ACL |
+| Name      | Type                                        | Description                                    |
+| --------- | ------------------------------------------- | ---------------------------------------------- |
+| `acl`     | built ACL\|iterable\|[`nil`](../std/nil.md) | ACL or declarative ACE sequence                |
+| `kind`    | `:POSIX:`\|`:NFS4:`\|`:MACOS:`?             | Required for an untyped ACL specification      |
+| `default` | [`Bool`](../std/bool.md)?                   | Update the directory's inheritable default ACL |
 
 ### `xattrs :namespace?`
 

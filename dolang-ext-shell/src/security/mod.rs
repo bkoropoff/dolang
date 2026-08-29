@@ -90,10 +90,60 @@ pub(crate) use nfs4::{Nfs4AceFlags, Nfs4AceMask, Nfs4AceObject, Nfs4AclObject, c
 pub(crate) use unix::{Identity, Permission, PosixAceObject, PosixAclObject, create_posix_acl};
 pub use windows::AccessMask;
 pub(crate) use windows::{
-    Ace, AceFlags, Acl, SecDesc, SecDescControl, SecInfo, Sid, SidName, SpecPath, TokenGroup,
+    Ace, AceFlags, Acl, SecDesc, SecDescControl, SecInfo, Sid, SidName, TokenGroup,
     TokenGroupAttributes, TokenInfo, WellKnownSids, create_sec_desc, create_sid,
     sec_desc_from_args,
 };
+
+/// A position inside a declarative specification.
+#[derive(Clone, Copy)]
+pub(crate) struct SpecPath<'p> {
+    parent: Option<&'p SpecPath<'p>>,
+    step: SpecStep<'p>,
+}
+
+#[derive(Clone, Copy)]
+enum SpecStep<'p> {
+    Root(&'p str),
+    Key(&'p str),
+    Index(usize),
+}
+
+impl<'p> SpecPath<'p> {
+    pub(crate) fn root(name: &'p str) -> Self {
+        Self {
+            parent: None,
+            step: SpecStep::Root(name),
+        }
+    }
+
+    pub(crate) fn key(&'p self, name: &'p str) -> Self {
+        Self {
+            parent: Some(self),
+            step: SpecStep::Key(name),
+        }
+    }
+
+    pub(crate) fn index(&'p self, index: usize) -> Self {
+        Self {
+            parent: Some(self),
+            step: SpecStep::Index(index),
+        }
+    }
+}
+
+impl std::fmt::Display for SpecPath<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(parent) = self.parent {
+            write!(f, "{parent}")?;
+        }
+        match self.step {
+            SpecStep::Root(name) => write!(f, "{name}"),
+            SpecStep::Key(name) => write!(f, ".{name}"),
+            SpecStep::Index(index) => write!(f, "[{index}]"),
+        }
+    }
+}
 
 /// Converts a portable [`dolang_vfs::security::Acl`] into the appropriate
 /// Do-facing ACL value (`security.unix.Acl`, `security.nfs4.Acl`, or
@@ -116,35 +166,78 @@ pub(crate) fn create_any_acl<'v>(
 /// Infers the ACL kind from `value`'s dynamic type: a `security.unix.Acl`
 /// yields [`VfsAclKind::Posix`], a `security.nfs4.Acl` yields
 /// [`VfsAclKind::Nfs4`], a `security.macos.Acl` yields [`VfsAclKind::Macos`].
-/// `nil` yields `None`, since there is nothing to infer from; callers fall
-/// back to a `kind:` keyword argument in that case.
-pub(crate) fn acl_from_value<'v, 's>(
+/// Other values yield `None`.
+fn built_acl_from_value<'v>(
+    strand: &mut Strand<'v, '_>,
+    global: State<'v, Global<'v>>,
+    value: &Value<'v>,
+) -> Option<VfsAnyAcl> {
+    if value.is_nil() {
+        return None;
+    }
+    if let Some(acl) = global.types.posix_acl.cast(value) {
+        return Some(VfsAnyAcl::Posix(
+            acl.enter_sync(strand, |_strand, acl| acl.annex().clone()),
+        ));
+    }
+    if let Some(acl) = global.types.nfs4_acl.cast(value) {
+        return Some(VfsAnyAcl::Nfs4(
+            acl.enter_sync(strand, |_strand, acl| acl.annex().clone()),
+        ));
+    }
+    if let Some(acl) = global.types.macos_acl.cast(value) {
+        return Some(VfsAnyAcl::Macos(
+            acl.enter_sync(strand, |_strand, acl| acl.annex().clone()),
+        ));
+    }
+    None
+}
+
+/// Resolves the ACL and kind accepted by the three filesystem setter APIs.
+pub(crate) async fn resolve_acl_input<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
     value: &Value<'v>,
-) -> Result<'v, 's, Option<VfsAnyAcl>> {
+    kind: Option<Slot<'v, '_>>,
+    path: &SpecPath<'_>,
+) -> Result<'v, 's, (VfsAclKind, Option<VfsAnyAcl>)> {
+    let explicit_kind = match kind {
+        Some(kind) => Some(acl_kind_sym(strand, global, Some(kind))?),
+        None => None,
+    };
+
     if value.is_nil() {
-        return Ok(None);
+        return Ok((explicit_kind.unwrap_or(VfsAclKind::Posix), None));
     }
-    if let Some(acl) = global.types.posix_acl.cast(value) {
-        return Ok(Some(VfsAnyAcl::Posix(
-            acl.enter_sync(strand, |_strand, acl| acl.annex().clone()),
-        )));
+
+    if let Some(acl) = built_acl_from_value(strand, global, value) {
+        let actual = acl.kind();
+        if let Some(expected) = explicit_kind
+            && expected != actual
+        {
+            return Err(Error::value(
+                strand,
+                format!("{path}: ACL kind does not match kind:"),
+            ));
+        }
+        return Ok((actual, Some(acl)));
     }
-    if let Some(acl) = global.types.nfs4_acl.cast(value) {
-        return Ok(Some(VfsAnyAcl::Nfs4(
-            acl.enter_sync(strand, |_strand, acl| acl.annex().clone()),
-        )));
-    }
-    if let Some(acl) = global.types.macos_acl.cast(value) {
-        return Ok(Some(VfsAnyAcl::Macos(
-            acl.enter_sync(strand, |_strand, acl| acl.annex().clone()),
-        )));
-    }
-    Err(Error::type_error(
-        strand,
-        "expected security.unix.Acl, security.nfs4.Acl, security.macos.Acl, or nil",
-    ))
+
+    let kind = explicit_kind.ok_or_else(|| {
+        Error::type_error(
+            strand,
+            format!("{path}: kind: is required for an ACL specification"),
+        )
+    })?;
+    let acl = match kind {
+        VfsAclKind::Posix => VfsAnyAcl::Posix(unix::coerce_acl(strand, global, value, path).await?),
+        VfsAclKind::Nfs4 => VfsAnyAcl::Nfs4(nfs4::coerce_acl(strand, global, value, path).await?),
+        VfsAclKind::Macos => {
+            VfsAnyAcl::Macos(macos::coerce_acl(strand, global, value, path).await?)
+        }
+        _ => return Err(Error::not_supported(strand)),
+    };
+    Ok((kind, Some(acl)))
 }
 
 /// Parses the `kind:` keyword argument (`:POSIX:`/`:NFS4:`/`:MACOS:`),

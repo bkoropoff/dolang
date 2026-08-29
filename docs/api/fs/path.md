@@ -179,6 +179,8 @@ Equivalent to [`fs.acl`](index.md#acl-path-kind-posix-default-resolve).
 ### `set_acl acl :kind? :default? :resolve = :TARGET:`
 
 Equivalent to [`fs.set_acl`](index.md#set_acl-path-acl-kind-default-resolve).
+Untyped declarative ACL specifications require an explicit `kind:`; a built
+ACL supplies its kind and must match one when provided.
 
 ### `set_xattr name value :namespace? :resolve = :TARGET:`
 

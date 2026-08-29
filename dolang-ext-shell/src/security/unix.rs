@@ -154,7 +154,29 @@ async fn posix_permissions<'v, 's>(
     let Some(value) = permissions else {
         return Ok(VfsPermission::empty());
     };
-    Ok(global.types.permission.coerce(strand, value).await?.0)
+    global
+        .types
+        .permission
+        .cast_flags(value)
+        .map(|value| value.0)
+        .ok_or_else(|| Error::type_error(strand, "expected security.unix.Permission"))
+}
+
+async fn coerce_permissions<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    value: &Value<'v>,
+    path: &SpecPath<'_>,
+) -> Result<'v, 's, VfsPermission> {
+    global
+        .types
+        .permission
+        .coerce(strand, value)
+        .await
+        .map(|value| value.0)
+        .map_err(|_| {
+            Error::type_error(strand, format!("{path}: expected security.unix.Permission"))
+        })
 }
 
 pub(super) fn posix_id<'v, 's>(
@@ -166,6 +188,17 @@ pub(super) fn posix_id<'v, 's>(
         .to_i64(strand)
         .map_err(|_| Error::type_error(strand, format!("{name}: expected Int")))?;
     u32::try_from(value).map_err(|_| Error::value(strand, format!("{name}: out of range")))
+}
+
+pub(super) fn spec_id<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    value: &Value<'v>,
+    path: &SpecPath<'_>,
+) -> Result<'v, 's, u32> {
+    let value = value
+        .to_i64(strand)
+        .map_err(|_| Error::type_error(strand, format!("{path}: expected Int")))?;
+    u32::try_from(value).map_err(|_| Error::value(strand, format!("{path}: out of range")))
 }
 
 impl<'v> Object<'v> for PosixAceObject {
@@ -262,6 +295,214 @@ impl<'v> Object<'v> for PosixAceObject {
     }
 }
 
+async fn coerce_ace<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    value: &Value<'v>,
+    path: &SpecPath<'_>,
+) -> Result<'v, 's, VfsPosixAce> {
+    if let Some(ace) = global.types.posix_ace.cast(value) {
+        return Ok(ace.enter_sync(strand, |_strand, ace| *ace.annex()));
+    }
+    let dict = value.as_dict(strand.vm()).ok_or_else(|| {
+        Error::type_error(
+            strand,
+            format!("{path}: expected security.unix.Ace or Dict"),
+        )
+    })?;
+    let mut qualifier = None;
+    let mut permissions = None;
+    let mut separate_permissions = false;
+    let mut pairs = dict.pairs();
+    strand
+        .with_slots(async |strand, [mut key, mut entry]| {
+            while pairs.next(strand, &mut key, &mut entry)? {
+                let sym = key
+                    .as_sym(strand.vm())
+                    .ok_or_else(|| Error::value(strand, format!("{path}: keys must be symbols")))?;
+                let name = sym.as_str(strand.vm());
+                match name {
+                    "user_obj" | "group_obj" | "mask" | "other" => {
+                        if qualifier.is_some() {
+                            return Err(Error::value(
+                                strand,
+                                format!("{path}: multiple keys name conflicting qualifiers"),
+                            ));
+                        }
+                        qualifier = Some(match name {
+                            "user_obj" => VfsPosixAclQualifier::UserObj,
+                            "group_obj" => VfsPosixAclQualifier::GroupObj,
+                            "mask" => VfsPosixAclQualifier::Mask,
+                            _ => VfsPosixAclQualifier::Other,
+                        });
+                        if separate_permissions {
+                            return Err(Error::value(
+                                strand,
+                                format!("{path}: permissions conflicts with qualifier value"),
+                            ));
+                        }
+                        permissions = Some(
+                            coerce_permissions(strand, global, &entry, &path.key(name)).await?,
+                        );
+                    }
+                    "user" | "group" => {
+                        if qualifier.is_some() {
+                            return Err(Error::value(
+                                strand,
+                                format!("{path}: multiple keys name conflicting qualifiers"),
+                            ));
+                        }
+                        let id = spec_id(strand, &entry, &path.key(name))?;
+                        qualifier = Some(if name == "user" {
+                            VfsPosixAclQualifier::User(id)
+                        } else {
+                            VfsPosixAclQualifier::Group(id)
+                        });
+                    }
+                    "permissions" => {
+                        if permissions.is_some() {
+                            return Err(Error::value(
+                                strand,
+                                format!("{path}: duplicate key `permissions`"),
+                            ));
+                        }
+                        permissions = Some(
+                            coerce_permissions(strand, global, &entry, &path.key("permissions"))
+                                .await?,
+                        );
+                        separate_permissions = true;
+                    }
+                    _ => {
+                        return Err(Error::value(
+                            strand,
+                            format!("{path}: unknown key `{name}`"),
+                        ));
+                    }
+                }
+            }
+            Ok::<_, Error<'v, 's>>(())
+        })
+        .await?;
+    let qualifier =
+        qualifier.ok_or_else(|| Error::value(strand, format!("{path}: expected one qualifier")))?;
+    if !matches!(
+        qualifier,
+        VfsPosixAclQualifier::User(_) | VfsPosixAclQualifier::Group(_)
+    ) && permissions.is_none()
+    {
+        return Err(Error::value(
+            strand,
+            format!("{path}: qualifier requires permissions"),
+        ));
+    }
+    Ok(VfsPosixAce::new(qualifier, permissions.unwrap_or_default()))
+}
+
+pub(super) async fn coerce_acl<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    value: &Value<'v>,
+    path: &SpecPath<'_>,
+) -> Result<'v, 's, VfsPosixAcl> {
+    if let Some(acl) = global.types.posix_acl.cast(value) {
+        return Ok(acl.enter_sync(strand, |_strand, acl| acl.annex().clone()));
+    }
+    let mut entries = Vec::new();
+    strand
+        .with_slots(async |strand, [mut iter, mut item]| {
+            value.iter(strand, &mut iter).await?;
+            let mut index = 0;
+            while iter.next(strand, &mut item).await? {
+                entries.push(coerce_ace(strand, global, &item, &path.index(index)).await?);
+                index += 1;
+            }
+            Ok::<_, Error<'v, 's>>(())
+        })
+        .await?;
+    VfsPosixAcl::new(entries).map_err(|error| Error::value(strand, format!("{path}: {error}")))
+}
+
+async fn ace_from_args<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    args: Args<'v, '_>,
+) -> Result<'v, 's, VfsPosixAce> {
+    let user_obj = global.syms.user_obj;
+    let group_obj = global.syms.group_obj;
+    let mask = global.syms.mask;
+    let other = global.syms.other;
+    let user = global.syms.user;
+    let group = global.syms.group;
+    let permissions = global.syms.permissions;
+    let ([], [user_obj, group_obj, mask, other, user, group, permissions]) = unpack!(
+        strand,
+        args,
+        0,
+        0,
+        user_obj = None,
+        group_obj = None,
+        mask = None,
+        other = None,
+        user = None,
+        group = None,
+        permissions = None
+    )?;
+    let mut found = Vec::new();
+    for (qualifier, value) in [
+        (VfsPosixAclQualifier::UserObj, user_obj),
+        (VfsPosixAclQualifier::GroupObj, group_obj),
+        (VfsPosixAclQualifier::Mask, mask),
+        (VfsPosixAclQualifier::Other, other),
+    ] {
+        if let Some(value) = value {
+            found.push((
+                qualifier,
+                Some(coerce_permissions(strand, global, &value, &SpecPath::root("ace")).await?),
+            ));
+        }
+    }
+    if let Some(value) = user {
+        found.push((
+            VfsPosixAclQualifier::User(spec_id(strand, &value, &SpecPath::root("ace.user"))?),
+            None,
+        ));
+    }
+    if let Some(value) = group {
+        found.push((
+            VfsPosixAclQualifier::Group(spec_id(strand, &value, &SpecPath::root("ace.group"))?),
+            None,
+        ));
+    }
+    if found.len() != 1 {
+        return Err(Error::value(
+            strand,
+            if found.is_empty() {
+                "ace: expected one qualifier"
+            } else {
+                "ace: multiple keys name conflicting qualifiers"
+            },
+        ));
+    }
+    let (qualifier, inline_permissions) = found.pop().unwrap();
+    if inline_permissions.is_some() && permissions.is_some() {
+        return Err(Error::value(
+            strand,
+            "ace: permissions conflicts with qualifier value",
+        ));
+    }
+    let permissions = match inline_permissions {
+        Some(value) => value,
+        None => match permissions.as_deref() {
+            Some(value) => {
+                coerce_permissions(strand, global, value, &SpecPath::root("ace.permissions"))
+                    .await?
+            }
+            None => VfsPermission::empty(),
+        },
+    };
+    Ok(VfsPosixAce::new(qualifier, permissions))
+}
+
 pub(super) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Global<'v>>) {
     builder
         .module("security.unix")
@@ -269,6 +510,34 @@ pub(super) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         .value("Acl", global.types.posix_acl)
         .value("Ace", global.types.posix_ace)
         .value("Permission", global.types.permission)
+        .function("ace", async move |strand, args, out| {
+            let ace = ace_from_args(strand, global, args).await?;
+            global
+                .types
+                .posix_ace
+                .create_with_annex(strand, PosixAceObject, ace, out);
+            Ok(())
+        })
+        .function("acl", async move |strand, args, out| {
+            let ([], [], entries) = unpack!(strand, args, 0, 0, ...)?;
+            let mut aces = Vec::new();
+            for (index, entry) in entries.enumerate() {
+                let value = match entry {
+                    Arg::Pos(value) => value,
+                    Arg::Key(key, _) => return Err(Error::unexpected_key(strand, key)),
+                };
+                aces.push(
+                    coerce_ace(strand, global, &value, &SpecPath::root("acl").index(index)).await?,
+                );
+            }
+            let acl = VfsPosixAcl::new(aces)
+                .map_err(|error| Error::value(strand, format!("acl: {error}")))?;
+            global
+                .types
+                .posix_acl
+                .create_with_annex(strand, PosixAclObject, acl, out);
+            Ok(())
+        })
         .function_with_slots("id", async move |strand, args, mut out, [mut group_ids]| {
             let ([], []) = unpack!(strand, args, 0, 0)?;
             let security = security_info(strand, global)?;

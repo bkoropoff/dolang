@@ -2,7 +2,11 @@ import security.nfs4: nfs4_security
   std:
     - FieldError
     - ImmutableError
+    - MissingKeyError
     - TypeError
+    - UnexpectedKeyError
+    - UnexpectedPosError
+    - ValueError
   test:
     - assert_eq
     - assert_throws
@@ -62,3 +66,21 @@ def constructs_nfs4_acls_on_every_platform()
 
   assert_throws $TypeError do nfs4_security.Ace.user 1234 type: :ALLOW: mask: 5
   assert_throws $TypeError do nfs4_security.Acl [owner, 5]
+
+#[test]
+def constructs_declarative_nfs4_aces_and_acls()
+  let owner = nfs4_security.ace allow: :OWNER: mask: [:READ_DATA:, :READ_ACL:]
+  let user = nfs4_security.ace deny: {user: 1234} mask: :WRITE_DATA: flags: :FILE_INHERIT:
+  let audit = nfs4_security.ace audit: :EVERYONE: mask: [] flags: [:SUCCESSFUL_ACCESS:]
+  let acl = nfs4_security.acl $owner {allow: {group: 5678}, mask: [:READ_DATA:]} $user $audit
+  assert_type $nfs4_security.Acl $acl
+  assert_eq $acl.aces.len 4
+  assert_eq $acl.aces[1].principal :GROUP:
+  assert_eq $acl.aces[1].id 5678
+  assert_eq $(nfs4_security.acl()).aces.len 0
+  assert_throws $TypeError do nfs4_security.acl [owner, user]
+  assert_throws $ValueError do nfs4_security.ace allow: :OWNER: deny: :EVERYONE: mask: []
+  assert_throws $MissingKeyError do nfs4_security.ace allow: :OWNER:
+  assert_throws $UnexpectedPosError do nfs4_security.ace :OWNER: mask: []
+  assert_throws $UnexpectedKeyError do nfs4_security.ace allow: :OWNER: mask: [] bogus: true
+  assert_throws $TypeError do nfs4_security.Ace.owner type: :ALLOW: mask: [:READ_DATA:]

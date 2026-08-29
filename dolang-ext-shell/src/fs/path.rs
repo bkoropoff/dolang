@@ -668,14 +668,14 @@ macro_rules! impl_concrete_path {
                             resolve = None
                         )?;
                         let annex = this.annex();
-                        let acl =
-                            crate::security::acl_from_value(strand, annex.global, &acl_value)?;
-                        let kind = match (&acl, kind) {
-                            (Some(acl), _) => acl.kind(),
-                            (None, kind) => {
-                                crate::security::acl_kind_sym(strand, annex.global, kind)?
-                            }
-                        };
+                        let (kind, acl) = crate::security::resolve_acl_input(
+                            strand,
+                            annex.global,
+                            &acl_value,
+                            kind,
+                            &crate::security::SpecPath::root("Path.set_acl.acl"),
+                        )
+                        .await?;
                         let default = super::acl_default(strand, default.as_deref())?;
                         let follow = super::resolve_sym(strand, annex.global, resolve, true)?;
                         super::set_acl(

@@ -22,6 +22,11 @@ Every constructor takes `mask:` (a [`Mask`](./mask.md)) as a required
 key argument, and `flags:` (a [`Flags`](./flags.md)) as an optional
 one, defaulting to empty.
 
+Capitalized class methods require a built `uuid.Uuid`, [`Mask`](./mask.md),
+and [`Flags`](./flags.md). Use
+[`security.macos.ace`](./index.md#ace-allow-deny-mask-flags) for UUID string or
+binary values and symbolic mask or flag coercion.
+
 Unlike NFSv4 or POSIX.1e ACL entries, macOS resolves every principal (owning
 user, owning group, well-known accounts, or an arbitrary user/group) to a
 UUID before it reaches the file's ACL, so there is no separate qualifier

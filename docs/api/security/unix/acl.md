@@ -23,6 +23,9 @@ Constructs an ACL from an iterable of [`Ace`](./ace.md) values.
 | `ValueError` | Named user or group entries are present without a mask entry  |
 
 The constructor preserves the supplied mask. It does not calculate one.
+The capitalized constructor accepts only built `Ace` values. Use
+[`security.unix.acl`](./index.md#acl-aces) to mix built entries with
+declarative dictionaries.
 
 ## Fields
 

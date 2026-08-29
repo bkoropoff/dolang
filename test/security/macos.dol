@@ -6,7 +6,10 @@ import sys
   uuid
   std:
     - ImmutableError
+    - MissingKeyError
     - TypeError
+    - UnexpectedKeyError
+    - UnexpectedPosError
     - UnsupportedError
     - ValueError
   test:
@@ -55,7 +58,26 @@ def constructs_macos_acls_on_every_platform()
   assert_throws $TypeError do macos_security.Ace.allow $owner mask: 5
   assert_throws $TypeError do macos_security.Acl [allow, 5]
   assert_throws $TypeError do macos_security.Ace.allow 5 mask: $r
-  assert_throws $ValueError do macos_security.Ace.allow "not-a-uuid" mask: $r
+  assert_throws $TypeError do macos_security.Ace.allow "not-a-uuid" mask: $r
+
+#[test]
+def constructs_declarative_macos_aces_and_acls()
+  let principal = uuid.Uuid.generate()
+  let text = str $principal
+  let allow = macos_security.ace allow: $text mask: [:READ_DATA:, :READ_SECURITY:]
+  let deny = macos_security.ace deny: $principal.bytes mask: :WRITE_DATA: flags: :FILE_INHERIT:
+  let acl = macos_security.acl $allow $deny {deny: text, mask: [:DELETE:]}
+  assert_type $macos_security.Acl $acl
+  assert_eq $acl.aces.len 3
+  assert_eq $acl.aces[0].principal $principal
+  assert_eq $(macos_security.acl()).aces.len 0
+  assert_throws $TypeError do macos_security.acl [allow, deny]
+  assert_throws $ValueError do macos_security.ace allow: $principal deny: $principal mask: []
+  assert_throws $MissingKeyError do macos_security.ace allow: $principal
+  assert_throws $UnexpectedPosError do macos_security.ace $principal mask: []
+  assert_throws $UnexpectedKeyError do macos_security.ace allow: $principal mask: [] bogus: true
+  assert_throws $TypeError do macos_security.Ace.allow $text mask: (macos_security.Mask())
+  assert_throws $TypeError do macos_security.Ace.allow $principal mask: [:READ_DATA:]
 
 #[test]
 def resolves_macos_principal_ids()
