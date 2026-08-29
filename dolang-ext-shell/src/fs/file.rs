@@ -1085,11 +1085,14 @@ impl<'v> Object<'v> for File<'v> {
                 let ([acl_value], [kind, default]) =
                     unpack!(strand, args, 1, 0, kind_acl = None, default_acl = None)?;
                 let global = this.annex().global;
-                let acl = crate::security::acl_from_value(strand, global, &acl_value)?;
-                let kind = match (&acl, kind) {
-                    (Some(acl), _) => acl.kind(),
-                    (None, kind) => crate::security::acl_kind_sym(strand, global, kind)?,
-                };
+                let (kind, acl) = crate::security::resolve_acl_input(
+                    strand,
+                    global,
+                    &acl_value,
+                    kind,
+                    &crate::security::SpecPath::root("File.set_acl.acl"),
+                )
+                .await?;
                 let default = super::acl_default(strand, default.as_deref())?;
                 super::check_acl_default(strand, kind, default)?;
                 let borrow = this.borrow(strand)?;

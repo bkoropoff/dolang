@@ -15,6 +15,24 @@ macOS `guid_t` UUIDs.
 
 ## Functions
 
+### `ace :allow? :deny? mask: :flags?`
+
+Constructs a macOS entry from declarative arguments. Pass exactly one of
+`allow:` or `deny:` with a principal UUID. Declarative principals accept a
+[`uuid.Uuid`](../../uuid/uuid.md), UUID string, or 16-byte UUID binary value.
+`mask:` is required; `flags:` defaults to empty. Masks and flags accept their
+built type, one flag symbol, or an iterable of flag symbols.
+
+```
+ace allow: "00112233-4455-6677-8899-aabbccddeeff" mask: [:READ_DATA:]
+```
+
+### `acl ...aces`
+
+Constructs a macOS ACL from [`Ace`](./ace.md) values and declarative ACE
+dictionaries. Pass collections with `...` to spread their entries. An empty
+ACL is valid.
+
 ### `uuid_for_uid uid`
 
 Resolves a Unix user ID to its macOS principal UUID.

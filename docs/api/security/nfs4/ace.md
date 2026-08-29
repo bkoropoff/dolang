@@ -41,6 +41,11 @@ Every constructor takes `type:` (`:ALLOW:`, `:DENY:`, `:AUDIT:`, or
 arguments, and `flags:` (a [`Flags`](./flags.md)) as an optional one,
 defaulting to empty.
 
+Capitalized class methods require built [`Mask`](./mask.md) and
+[`Flags`](./flags.md) values. Use
+[`security.nfs4.ace`](./index.md#ace-allow-deny-audit-alarm-mask-flags) for
+symbolic mask and flag coercion.
+
 #### Example
 
 ```

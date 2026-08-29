@@ -42,6 +42,9 @@ Constructs the entry for all other users.
 
 Every constructor takes an optional trailing
 [`Permission`](./permission.md) argument, defaulting to empty.
+Capitalized class methods accept only a built `Permission`; use
+[`security.unix.ace`](./index.md#ace-user_obj-user-group_obj-group-mask-other-permissions)
+for symbolic permission coercion.
 
 ## Fields
 

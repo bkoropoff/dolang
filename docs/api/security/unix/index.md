@@ -14,6 +14,38 @@ lookups.
 
 ## Functions
 
+### `ace :user_obj? :user? :group_obj? :group? :mask? :other? :permissions?`
+
+Constructs a POSIX entry from declarative arguments. Pass exactly one
+qualifier. `user_obj:`, `group_obj:`, `mask:`, and `other:` take permissions;
+`user:` and `group:` take a numeric ID and accept a separate optional
+`permissions:` value. Named entries default to empty permissions.
+
+Permissions may be a [`Permission`](./permission.md), a permission symbol, or
+an iterable of permission symbols.
+
+#### Example
+
+```
+let owner = ace user_obj: [:READ:, :WRITE:]
+let named = ace user: 1000 permissions: :READ:
+```
+
+### `acl ...aces`
+
+Constructs a POSIX ACL from [`Ace`](./ace.md) values and declarative ACE
+dictionaries. Pass collections with `...` to spread their entries.
+
+```
+acl
+  $ace(user_obj: [:READ:, :WRITE:])
+  {group_obj: [:READ:]}
+  {other: []}
+```
+
+The resulting ACL must satisfy the POSIX completeness rules documented by
+[`Acl`](./acl.md).
+
 ### `id()`
 
 Returns Unix security information captured for the active VFS context.

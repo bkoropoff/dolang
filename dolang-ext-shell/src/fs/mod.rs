@@ -1084,11 +1084,14 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 resolve = None
             )?;
             let path = path_from_value(strand, global, &path)?;
-            let acl = security::acl_from_value(strand, global, &acl_value)?;
-            let kind = match (&acl, kind) {
-                (Some(acl), _) => acl.kind(),
-                (None, kind) => security::acl_kind_sym(strand, global, kind)?,
-            };
+            let (kind, acl) = security::resolve_acl_input(
+                strand,
+                global,
+                &acl_value,
+                kind,
+                &security::SpecPath::root("set_acl.acl"),
+            )
+            .await?;
             let default = acl_default(strand, default.as_deref())?;
             let follow = resolve_sym(strand, global, resolve, true)?;
             set_acl(

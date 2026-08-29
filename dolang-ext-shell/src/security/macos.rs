@@ -161,7 +161,12 @@ async fn macos_ace_mask<'v, 's>(
             "mask: expected security.macos.Mask",
         ));
     };
-    Ok(global.types.macos_ace_mask.coerce(strand, value).await?.0)
+    global
+        .types
+        .macos_ace_mask
+        .cast_flags(value)
+        .map(|value| value.0)
+        .ok_or_else(|| Error::type_error(strand, "mask: expected security.macos.Mask"))
 }
 
 async fn macos_ace_flags<'v, 's>(
@@ -172,7 +177,12 @@ async fn macos_ace_flags<'v, 's>(
     let Some(value) = flags else {
         return Ok(VfsMacosAceFlags::empty());
     };
-    Ok(global.types.macos_ace_flags.coerce(strand, value).await?.0)
+    global
+        .types
+        .macos_ace_flags
+        .cast_flags(value)
+        .map(|value| value.0)
+        .ok_or_else(|| Error::type_error(strand, "flags: expected security.macos.Flags"))
 }
 
 impl<'v> Object<'v> for MacosAceObject {
@@ -194,7 +204,10 @@ impl<'v> Object<'v> for MacosAceObject {
                     let ([principal], [mask, flags]) =
                         unpack!(strand, args, 1, 0, mask_sym = None, flags_sym = None)?;
                     let global = strand.state::<Global<'v>>();
-                    let qualifier = dolang_ext_uuid::value_to_uuid(strand, &principal)?;
+                    let qualifier =
+                        dolang_ext_uuid::cast_uuid(strand, &principal).ok_or_else(|| {
+                            Error::type_error(strand, "principal: expected uuid.Uuid")
+                        })?;
                     let mask = macos_ace_mask(strand, global, mask.as_deref()).await?;
                     let flags = macos_ace_flags(strand, global, flags.as_deref()).await?;
                     this.create_with_annex(
@@ -237,6 +250,198 @@ impl<'v> Object<'v> for MacosAceObject {
     }
 }
 
+async fn coerce_mask<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    value: &Value<'v>,
+    path: &SpecPath<'_>,
+) -> Result<'v, 's, VfsMacosAceMask> {
+    global
+        .types
+        .macos_ace_mask
+        .coerce(strand, value)
+        .await
+        .map(|v| v.0)
+        .map_err(|_| Error::type_error(strand, format!("{path}: expected security.macos.Mask")))
+}
+
+async fn coerce_flags<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    value: Option<&Value<'v>>,
+    path: &SpecPath<'_>,
+) -> Result<'v, 's, VfsMacosAceFlags> {
+    match value {
+        Some(value) => global
+            .types
+            .macos_ace_flags
+            .coerce(strand, value)
+            .await
+            .map(|v| v.0)
+            .map_err(|_| {
+                Error::type_error(strand, format!("{path}: expected security.macos.Flags"))
+            }),
+        None => Ok(VfsMacosAceFlags::empty()),
+    }
+}
+
+async fn coerce_ace<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    value: &Value<'v>,
+    path: &SpecPath<'_>,
+) -> Result<'v, 's, VfsMacosAce> {
+    if let Some(ace) = global.types.macos_ace.cast(value) {
+        return Ok(ace.enter_sync(strand, |_strand, ace| *ace.annex()));
+    }
+    let dict = value.as_dict(strand.vm()).ok_or_else(|| {
+        Error::type_error(
+            strand,
+            format!("{path}: expected security.macos.Ace or Dict"),
+        )
+    })?;
+    let mut ace_type = None;
+    let mut principal = None;
+    let mut mask = None;
+    let mut flags = None;
+    let mut pairs = dict.pairs();
+    strand
+        .with_slots(async |strand, [mut key, mut entry]| {
+            while pairs.next(strand, &mut key, &mut entry)? {
+                let sym = key
+                    .as_sym(strand.vm())
+                    .ok_or_else(|| Error::value(strand, format!("{path}: keys must be symbols")))?;
+                match sym.as_str(strand.vm()) {
+                    name @ ("allow" | "deny") => {
+                        if ace_type.is_some() {
+                            return Err(Error::value(
+                                strand,
+                                format!("{path}: multiple keys name conflicting ACE types"),
+                            ));
+                        }
+                        ace_type = Some(if name == "allow" {
+                            VfsMacosAceType::Allow
+                        } else {
+                            VfsMacosAceType::Deny
+                        });
+                        principal =
+                            Some(dolang_ext_uuid::value_to_uuid(strand, &entry).map_err(|_| {
+                                Error::type_error(
+                                    strand,
+                                    format!("{}: expected uuid.Uuid, Str, or Bin", path.key(name)),
+                                )
+                            })?);
+                    }
+                    "mask" => {
+                        if mask.is_some() {
+                            return Err(Error::value(
+                                strand,
+                                format!("{path}: duplicate key `mask`"),
+                            ));
+                        }
+                        mask = Some(coerce_mask(strand, global, &entry, &path.key("mask")).await?);
+                    }
+                    "flags" => {
+                        if flags.is_some() {
+                            return Err(Error::value(
+                                strand,
+                                format!("{path}: duplicate key `flags`"),
+                            ));
+                        }
+                        flags = Some(
+                            coerce_flags(strand, global, Some(&entry), &path.key("flags")).await?,
+                        );
+                    }
+                    name => {
+                        return Err(Error::value(
+                            strand,
+                            format!("{path}: unknown key `{name}`"),
+                        ));
+                    }
+                }
+            }
+            Ok::<_, Error<'v, 's>>(())
+        })
+        .await?;
+    let ace_type =
+        ace_type.ok_or_else(|| Error::value(strand, format!("{path}: expected allow or deny")))?;
+    let principal = principal.expect("ACE type and principal are set together");
+    let mask =
+        mask.ok_or_else(|| Error::value(strand, format!("{}: required", path.key("mask"))))?;
+    Ok(VfsMacosAce::new(
+        ace_type,
+        principal,
+        mask,
+        flags.unwrap_or_default(),
+    ))
+}
+
+pub(super) async fn coerce_acl<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    value: &Value<'v>,
+    path: &SpecPath<'_>,
+) -> Result<'v, 's, VfsMacosAcl> {
+    if let Some(acl) = global.types.macos_acl.cast(value) {
+        return Ok(acl.enter_sync(strand, |_strand, acl| acl.annex().clone()));
+    }
+    let mut entries = Vec::new();
+    strand
+        .with_slots(async |strand, [mut iter, mut item]| {
+            value.iter(strand, &mut iter).await?;
+            let mut index = 0;
+            while iter.next(strand, &mut item).await? {
+                entries.push(coerce_ace(strand, global, &item, &path.index(index)).await?);
+                index += 1;
+            }
+            Ok::<_, Error<'v, 's>>(())
+        })
+        .await?;
+    Ok(VfsMacosAcl::new(entries))
+}
+
+async fn ace_from_args<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    args: Args<'v, '_>,
+) -> Result<'v, 's, VfsMacosAce> {
+    let mask_sym = global.syms.mask;
+    let allow_sym = global.syms.allow;
+    let deny_sym = global.syms.deny;
+    let flags_sym = global.syms.flags;
+    let ([mask], [allow, deny, flags]) = unpack!(
+        strand,
+        args,
+        0,
+        0,
+        mask_sym,
+        allow_sym = None,
+        deny_sym = None,
+        flags_sym = None
+    )?;
+    let (ace_type, principal) = match (allow, deny) {
+        (Some(value), None) => (VfsMacosAceType::Allow, value),
+        (None, Some(value)) => (VfsMacosAceType::Deny, value),
+        (None, None) => return Err(Error::value(strand, "ace: expected allow or deny")),
+        _ => {
+            return Err(Error::value(
+                strand,
+                "ace: multiple keys name conflicting ACE types",
+            ));
+        }
+    };
+    let principal = dolang_ext_uuid::value_to_uuid(strand, &principal)?;
+    let mask = coerce_mask(strand, global, &mask, &SpecPath::root("ace.mask")).await?;
+    let flags = coerce_flags(
+        strand,
+        global,
+        flags.as_deref(),
+        &SpecPath::root("ace.flags"),
+    )
+    .await?;
+    Ok(VfsMacosAce::new(ace_type, principal, mask, flags))
+}
+
 /// Resolves a `security.unix.user_name`/`group_name` argument that may be a
 /// `uuid.Uuid` (macOS only) as well as the usual numeric uid/gid.
 pub(super) async fn resolve_uid_or_gid_arg<'v, 's>(
@@ -276,6 +481,34 @@ pub(super) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         .value("Ace", global.types.macos_ace)
         .value("Mask", global.types.macos_ace_mask)
         .value("Flags", global.types.macos_ace_flags)
+        .function("ace", async move |strand, args, out| {
+            let ace = ace_from_args(strand, global, args).await?;
+            global
+                .types
+                .macos_ace
+                .create_with_annex(strand, MacosAceObject, ace, out);
+            Ok(())
+        })
+        .function("acl", async move |strand, args, out| {
+            let ([], [], entries) = unpack!(strand, args, 0, 0, ...)?;
+            let mut aces = Vec::new();
+            for (index, entry) in entries.enumerate() {
+                let value = match entry {
+                    Arg::Pos(value) => value,
+                    Arg::Key(key, _) => return Err(Error::unexpected_key(strand, key)),
+                };
+                aces.push(
+                    coerce_ace(strand, global, &value, &SpecPath::root("acl").index(index)).await?,
+                );
+            }
+            global.types.macos_acl.create_with_annex(
+                strand,
+                MacosAclObject,
+                VfsMacosAcl::new(aces),
+                out,
+            );
+            Ok(())
+        })
         .function("uuid_for_uid", async move |strand, args, out| {
             let ([uid], []) = unpack!(strand, args, 1, 0)?;
             if global.local.get(strand).target().os() != OperatingSystem::Macos {
