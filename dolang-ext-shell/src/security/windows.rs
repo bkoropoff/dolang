@@ -1769,6 +1769,14 @@ async fn coerce_ace<'v, 's>(
     };
     let components = ace_components_from_spec(strand, global, dict, path).await?;
 
+    ace_from_components(strand, components, path)
+}
+
+fn ace_from_components<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    components: AceComponents,
+    path: &SpecPath<'_>,
+) -> Result<'v, 's, VfsAceBuf> {
     enum Trustee {
         Allow(VfsSid),
         Deny(VfsSid),
@@ -1837,6 +1845,112 @@ async fn coerce_ace<'v, 's>(
         ),
     };
     ace.map_err(|error| Error::value(strand, format!("{path}: {error}")))
+}
+
+/// Reads an ACE from the lowercase `ace` function's named arguments.
+async fn ace_from_args<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    args: Args<'v, '_>,
+    path: &SpecPath<'_>,
+) -> Result<'v, 's, VfsAceBuf> {
+    let allow_sym = global.syms.allow;
+    let deny_sym = global.syms.deny;
+    let audit_sym = global.syms.audit;
+    let mask_sym = global.syms.mask;
+    let flags_sym = global.syms.flags;
+    let object_type_sym = global.syms.object_type;
+    let inherited_object_type_sym = global.syms.inherited_object_type;
+    let callback_sym = global.syms.callback;
+    let application_data_sym = global.syms.application_data;
+    let successful_sym = global.syms.successful;
+    let failed_sym = global.syms.failed;
+    let (
+        [mask],
+        [
+            allow,
+            deny,
+            audit,
+            flags,
+            object_type,
+            inherited_object_type,
+            callback,
+            application_data,
+            successful,
+            failed,
+        ],
+    ) = unpack!(
+        strand,
+        args,
+        0,
+        0,
+        mask_sym,
+        allow_sym = None,
+        deny_sym = None,
+        audit_sym = None,
+        flags_sym = None,
+        object_type_sym = None,
+        inherited_object_type_sym = None,
+        callback_sym = None,
+        application_data_sym = None,
+        successful_sym = None,
+        failed_sym = None
+    )?;
+
+    let components = AceComponents {
+        allow: allow
+            .as_deref()
+            .map(|value| coerce_sid(strand, global, value, &path.key("allow")))
+            .transpose()?,
+        deny: deny
+            .as_deref()
+            .map(|value| coerce_sid(strand, global, value, &path.key("deny")))
+            .transpose()?,
+        audit: audit
+            .as_deref()
+            .map(|value| coerce_sid(strand, global, value, &path.key("audit")))
+            .transpose()?,
+        mask: Some(ace_mask(strand, global, &mask, &path.key("mask")).await?),
+        flags: match flags.as_deref() {
+            Some(value) => Some(ace_flags(strand, value, &path.key("flags")).await?),
+            None => None,
+        },
+        object_type: object_type
+            .as_deref()
+            .map(|value| dolang_ext_uuid::value_to_guid(strand, value))
+            .transpose()?,
+        inherited_object_type: inherited_object_type
+            .as_deref()
+            .map(|value| dolang_ext_uuid::value_to_guid(strand, value))
+            .transpose()?,
+        callback: callback
+            .as_deref()
+            .map(|value| ace_bool(strand, value, &path.key("callback")))
+            .transpose()?,
+        application_data: application_data
+            .as_deref()
+            .map(|value| {
+                value
+                    .as_bin(strand)
+                    .map(|value| value.to_vec())
+                    .ok_or_else(|| {
+                        Error::type_error(
+                            strand,
+                            format!("{}: expected Bin", path.key("application_data")),
+                        )
+                    })
+            })
+            .transpose()?,
+        successful: successful
+            .as_deref()
+            .map(|value| ace_bool(strand, value, &path.key("successful")))
+            .transpose()?,
+        failed: failed
+            .as_deref()
+            .map(|value| ace_bool(strand, value, &path.key("failed")))
+            .transpose()?,
+    };
+    ace_from_components(strand, components, path)
 }
 
 /// Coerces an [`Acl`], a sequence of ACE specs, or a dict of ACE entries
@@ -1934,6 +2048,40 @@ async fn coerce_acl<'v, 's>(
         })
         .await?;
     VfsAclBuf::from_aces(&aces, None)
+        .map_err(|error| Error::value(strand, format!("{path}: {error}")))
+}
+
+/// Reads an ACL from the lowercase `acl` function's mixed arguments.
+///
+/// Positional arguments are ACE values or specs, while `revision:` is an
+/// optional keyword argument.
+async fn acl_from_args<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    args: Args<'v, '_>,
+    path: &SpecPath<'_>,
+) -> Result<'v, 's, VfsAclBuf> {
+    let revision_sym = global.syms.revision;
+    let ([], [revision], entries) = unpack!(strand, args, 0, 0, revision_sym = None, ...)?;
+    let revision = revision
+        .as_deref()
+        .map(|value| acl_revision(strand, global, value, &path.key("revision")))
+        .transpose()?;
+
+    let mut aces = Vec::new();
+    for (index, entry) in entries.enumerate() {
+        let entry = match entry {
+            Arg::Pos(entry) => entry,
+            Arg::Key(key, _) => {
+                return Err(Error::value(
+                    strand,
+                    format!("{path}: unknown key `{}`", key.as_str(strand.vm())),
+                ));
+            }
+        };
+        aces.push(coerce_ace(strand, global, &entry, &path.index(index)).await?);
+    }
+    VfsAclBuf::from_aces(&aces, revision)
         .map_err(|error| Error::value(strand, format!("{path}: {error}")))
 }
 
@@ -3283,8 +3431,7 @@ pub(super) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         .value("TokenGroup", global.types.token_group)
         .value("TokenInfo", global.types.token_info)
         .function_with_slots("ace", async move |strand, args, mut out, [mut slot]| {
-            let ([value], []) = unpack!(strand, args, 1, 0)?;
-            let ace = coerce_ace(strand, global, &value, &SpecPath::root("ace")).await?;
+            let ace = ace_from_args(strand, global, args, &SpecPath::root("ace")).await?;
             global
                 .types
                 .ace
@@ -3293,8 +3440,7 @@ pub(super) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             Ok(())
         })
         .function_with_slots("acl", async move |strand, args, mut out, [mut slot]| {
-            let ([value], []) = unpack!(strand, args, 1, 0)?;
-            let acl = coerce_acl(strand, global, &value, &SpecPath::root("acl")).await?;
+            let acl = acl_from_args(strand, global, args, &SpecPath::root("acl")).await?;
             global
                 .types
                 .acl

@@ -6,7 +6,7 @@ use std::{
 use dolang::{
     compile::Compiler,
     runtime::{
-        Args, Error, Format, Instance, Object, Output, Result, Slot, State, Strand, Sym, Type,
+        Arg, Args, Error, Format, Instance, Object, Output, Result, Slot, State, Strand, Sym, Type,
         Value,
         object::{
             ArrayLike, ArrayView, FlagLike, Flags, FlagsInstanceExt, FlagsTypeExt, Mut, Ref,

@@ -2,9 +2,9 @@
 
 Immutable view of a native Windows access-control entry.
 
-The constructor takes the same fields as an [ACE spec](./index.md#ace-specs).
-An entry can also be written directly as a spec wherever one is accepted,
-including [`acl`](./index.md#acl-spec) and the `dacl:` and `sacl:` options of
+The constructor takes the same fields as an [ACE spec](./index.md#ace-specs). An
+entry can also be written directly as a spec wherever one is accepted, including
+[`acl`](./index.md#acl-aces-revision) and the `dacl:` and `sacl:` options of
 [`sec_desc`](./index.md#sec_desc-desc-options).
 
 ## Constructor
@@ -36,8 +36,9 @@ of `allow`, `deny`, or `audit` names the trustee.
 
 The constructor is strict: trustees must already be `Sid` values, `mask` must
 be an `AccessMask`, `flags` must be `AceFlags`, and object types must be
-`uuid.Guid` values. Use the lowercase [`ace`](./index.md#ace-spec) coercion
-function for declarative values such as SID strings and symbolic flags.
+`uuid.Guid` values. Use the lowercase
+[`ace`](./index.md#ace-allow-deny-audit-mask-options) coercion function for
+declarative values such as SID strings and symbolic flags.
 Application data is zero-padded to DWORD (32-bit) alignment.
 
 #### Errors

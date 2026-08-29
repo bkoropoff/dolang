@@ -7,7 +7,10 @@ import sys
   std:
     - FieldError
     - ImmutableError
+    - MissingKeyError
     - TypeError
+    - UnexpectedKeyError
+    - UnexpectedPosError
     - UnsupportedError
     - ValueError
     - Bin
@@ -276,7 +279,7 @@ def coerces_masks_and_ace_flags_from_symbols()
 
 #[test]
 def coerces_declarative_ace_specs()
-  let entry = ace $
+  let entry = ace
     allow: :BUILTIN_ADMINISTRATORS:
     mask: :GENERIC_ALL:
   assert_type $Ace $entry
@@ -284,34 +287,32 @@ def coerces_declarative_ace_specs()
   assert_eq (str entry.sid) S-1-5-32-544
   assert_eq $entry.mask (AccessMask :GENERIC_ALL:)
 
-  let denied = ace $
+  let denied = ace
     deny: S-1-5-18
     mask: :GENERIC_WRITE:
     flags: [:OBJECT_INHERIT:]
   assert_eq $denied.type :ACCESS_DENIED:
   assert_eq $denied.object_inherit true
 
-  let audited = ace $
+  let audited = ace
     audit: :EVERYONE:
     mask: :GENERIC_READ:
     successful: true
   assert_eq $audited.type :SYSTEM_AUDIT:
   assert_eq $audited.successful_access true
 
-  # An already-built ACE passes through.
-  assert_eq (ace(entry).to_bin()) $entry.to_bin()
-
   # Exactly one of allow/deny/audit, a mask, and nothing unrecognized.
-  assert_throws $ValueError do ace {allow: :EVERYONE:, deny: :EVERYONE:, mask: :GENERIC_ALL:}
-  assert_throws $ValueError do ace {mask: :GENERIC_ALL:}
-  assert_throws $ValueError do ace {allow: :EVERYONE:}
-  assert_throws $ValueError do ace {allow: :EVERYONE:, mask: :GENERIC_ALL:, masc: 1}
-  assert_throws $ValueError do ace {audit: :EVERYONE:, mask: :GENERIC_ALL:}
-  assert_throws $ValueError do ace {allow: :EVERYONE:, mask: :GENERIC_ALL:, successful: true}
+  assert_throws $ValueError do ace allow: :EVERYONE: deny: :EVERYONE: mask: :GENERIC_ALL:
+  assert_throws $ValueError do ace mask: :GENERIC_ALL:
+  assert_throws $MissingKeyError do ace allow: :EVERYONE:
+  assert_throws $UnexpectedKeyError do ace allow: :EVERYONE: mask: :GENERIC_ALL: masc: 1
+  assert_throws $ValueError do ace audit: :EVERYONE: mask: :GENERIC_ALL:
+  assert_throws $ValueError do ace allow: :EVERYONE: mask: :GENERIC_ALL: successful: true
+  assert_throws $UnexpectedPosError do ace {allow: :EVERYONE:, mask: :GENERIC_ALL:}
 
 #[test]
 def coerces_declarative_acl_specs()
-  let entries = acl $
+  let entries = acl
     - allow: :LOCAL_SYSTEM:
       mask: :GENERIC_ALL:
     - allow: :BUILTIN_ADMINISTRATORS:
@@ -321,20 +322,18 @@ def coerces_declarative_acl_specs()
   assert_eq $entries.revision :BASIC:
   assert_eq (str entries.aces[1].sid) S-1-5-32-544
 
-  # Entries and named options share one structure.
-  let revised = acl $
+  # Entries and named options share one call.
+  let revised = acl
     revision: :DIRECTORY_SERVICE:
     - allow: :LOCAL_SYSTEM:
       mask: :GENERIC_ALL:
   assert_eq $revised.revision :DIRECTORY_SERVICE:
   assert_eq $revised.aces.len 1
 
-  # Integer keys are entries only in the order they are expected.
-  assert_throws $ValueError do
-    acl {0: {allow: :EVERYONE:, mask: :GENERIC_ALL:}, 2: {allow: :EVERYONE:, mask: :GENERIC_ALL:}}
-  assert_throws $ValueError do
-    acl {1: {allow: :EVERYONE:, mask: :GENERIC_ALL:}, 0: {allow: :EVERYONE:, mask: :GENERIC_ALL:}}
-  assert_throws $ValueError do acl {revision: :BASIC:, aces: []}
+  # Iterables can be spread, and an empty call is an empty ACL.
+  assert_eq $(acl ...entries.aces).aces.len 2
+  assert_eq $(acl()).aces.len 0
+  assert_throws $ValueError do acl revison: :BASIC:
 
   # The rigid constructor keeps its strict signature.
   assert_throws $TypeError do Acl [{allow: :EVERYONE:, mask: :GENERIC_ALL:}]

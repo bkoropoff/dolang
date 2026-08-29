@@ -87,12 +87,13 @@ structural inspection of a value once you have one.
 
 ### ACE specs
 
-An ACE spec is a dictionary naming its trustee under exactly one of `allow:`,
-`deny:`, or `audit:`. The remaining keys are the options the
-[`Ace`](./ace.md) class methods take.
+An ACE spec names its trustee under exactly one of `allow:`, `deny:`, or
+`audit:`. The remaining fields are the options the [`Ace`](./ace.md) class
+methods take. The `ace` function accepts these fields as named arguments; an
+ACE nested in an ACL or descriptor uses a dictionary with the same shape.
 
 ```
-ace $
+ace
   allow: :BUILTIN_ADMINISTRATORS:
   mask: :GENERIC_ALL:
   flags: [:OBJECT_INHERIT:, :CONTAINER_INHERIT:]
@@ -118,12 +119,11 @@ requires at least one of them.
 ### ACL specs
 
 An ACL spec is any iterable of ACE specs or [`Ace`](./ace.md) values, in
-packet order. A dictionary is the same sequence with named options alongside
-it: entries take the implicit integer keys, and `revision` selects the ACL
-revision as it does for the [`Acl`](./acl.md) constructor.
+packet order. The `acl` function also accepts the entries as separate
+positional arguments, with `revision:` as a named option.
 
 ```
-acl $
+acl
   - allow: :LOCAL_SYSTEM:
     mask: :GENERIC_ALL:
   - allow: :BUILTIN_ADMINISTRATORS:
@@ -131,7 +131,7 @@ acl $
 ```
 
 ```
-acl $
+acl
   revision: :DIRECTORY_SERVICE:
   - allow: $group.sid
     mask: :GENERIC_ALL:
@@ -155,15 +155,13 @@ sec_desc
 
 ## Functions
 
-### `ace spec`
+### `ace :allow? :deny? :audit? :mask ...options`
 
-Coerces an ACE spec into an [`Ace`](./ace.md).
+Constructs an [`Ace`](./ace.md) by coercing its declarative fields.
 
 #### Parameters
 
-| Name   | Type                                           | Description                           |
-| ------ | ---------------------------------------------- | ------------------------------------- |
-| `spec` | [`Ace`](./ace.md)\|[`Dict`](../../std/dict.md) | ACE spec, or an entry to pass through |
+See [ACE specs](#ace-specs) for the accepted arguments.
 
 #### Returns
 
@@ -172,20 +170,23 @@ Coerces an ACE spec into an [`Ace`](./ace.md).
 #### Example
 
 ```
-let entry = ace $
+let entry = ace
   deny: :EVERYONE:
   mask: :GENERIC_WRITE:
 ```
 
-### `acl spec`
+### `acl ...aces :revision?`
 
-Coerces an ACL spec into an [`Acl`](./acl.md).
+Constructs an [`Acl`](./acl.md) by coercing each ACE argument.
 
 #### Parameters
 
-| Name   | Type                                                     | Description                         |
-| ------ | -------------------------------------------------------- | ----------------------------------- |
-| `spec` | [`Acl`](./acl.md)\|iterable\|[`Dict`](../../std/dict.md) | ACL spec, or a list to pass through |
+| Name       | Type                              | Description                          |
+| ---------- | --------------------------------- | ------------------------------------ |
+| `aces`     | *                                 | ACE values or specs, in packet order |
+| `revision` | `:BASIC:`\|`:DIRECTORY_SERVICE:`? | Native ACL revision                  |
+
+Spread an iterable to pass its entries to `acl`.
 
 #### Returns
 
@@ -194,7 +195,7 @@ Coerces an ACL spec into an [`Acl`](./acl.md).
 #### Example
 
 ```
-let dacl = acl $
+let dacl = acl
   - allow: :LOCAL_SYSTEM:
     mask: :GENERIC_ALL:
   - allow: :BUILTIN_ADMINISTRATORS:
