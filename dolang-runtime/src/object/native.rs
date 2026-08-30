@@ -27,7 +27,7 @@ use crate::{
 
 use super::{
     BoundMethod,
-    protocol::{self, Inspect, Protocol, TypeHandle, dispatch_native_method},
+    protocol::{self, Inspect, Member, MemberKind, Protocol, TypeHandle, dispatch_native_method},
 };
 use dolang_bytecode::Variadic;
 use dolang_util::alias;
@@ -1485,7 +1485,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
                             .call(this.as_header(), None, strand, args, out)
                             .await
                     },
-                    Entry::Delegate(idx) => {
+                    Entry::Delegate(idx, MemberKind::Method) => {
                         let supertype =
                             instance_supertype::<T>(Recv::new(this.receiver), strand, *idx);
                         strand
@@ -1545,7 +1545,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
                             .call(this.as_header(), Some(delegator), strand, args, out)
                             .await
                     },
-                    Entry::Delegate(idx) => {
+                    Entry::Delegate(idx, MemberKind::Method) => {
                         let supertype =
                             instance_supertype::<T>(Recv::new(this.receiver), strand, *idx);
                         supertype
@@ -1586,11 +1586,11 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
                 Some(Entry::Getter(handler) | Entry::Property(handler, _)) => unsafe {
                     handler.call(this.as_header(), strand, out)
                 },
-                Some(Entry::Method(_) | Entry::Delegate(_)) => {
+                Some(Entry::Method(_) | Entry::Delegate(_, MemberKind::Method)) => {
                     BoundMethod::create(strand, &this, field, out);
                     Ok(())
                 }
-                Some(Entry::Setter(_)) => Err(Error::field(strand, field)),
+                Some(Entry::Setter(_) | Entry::Delegate(_, _)) => Err(Error::field(strand, field)),
                 None => T::get(Instance::new(this.receiver), strand, field, out),
             },
         )
@@ -2513,7 +2513,7 @@ pub(crate) enum Entry<'v> {
     /// A getter + setter pair for the same field name.
     Property(FieldHandler<'v>, FieldHandler<'v>),
     /// Delegate to the supertype at the given index in `TypeAnnexInner::supertypes`.
-    Delegate(usize),
+    Delegate(usize, MemberKind),
 }
 
 /// Extension vtable for `Object` types: protocol vtable + sorted namespace entries.
@@ -2686,10 +2686,11 @@ impl<'v, 'a> TypeBuilderInner<'v, 'a> {
             for member in inspect.members {
                 // Safety: all supertypes available at native type registration time
                 // should have static symbols.
-                let member = unsafe { member.into_static_scope_unchecked() };
+                let sym = unsafe { member.sym.into_static_scope_unchecked() };
                 // Local entries win; first matching supertype wins.
-                if !self.entries.iter().any(|(sym, _)| *sym == member) {
-                    self.entries.push((member, Entry::Delegate(supertype_idx)));
+                if !self.entries.iter().any(|(entry_sym, _)| *entry_sym == sym) {
+                    self.entries
+                        .push((sym, Entry::Delegate(supertype_idx, member.kind)));
                 }
             }
         }
@@ -2710,6 +2711,41 @@ impl<'v, 'a> TypeBuilderInner<'v, 'a> {
         let entries = merge_entries(self.entries);
         let type_entries = merge_entries(self.type_entries);
 
+        let mut members = vec![
+            Member::method(Sym::well_known(sym::INIT_METHOD)),
+            Member::method(Sym::well_known(sym::STR_METHOD)),
+            Member::method(Sym::well_known(sym::DBG_METHOD)),
+            Member::method(Sym::well_known(sym::BOOL_METHOD)),
+            Member::method(Sym::well_known(sym::HASH_METHOD)),
+            Member::method(Sym::well_known(sym::EQ_METHOD)),
+            Member::method(Sym::well_known(sym::LT_METHOD)),
+            Member::method(Sym::well_known(sym::NEG_METHOD)),
+            Member::method(Sym::well_known(sym::BNOT_METHOD)),
+            Member::method(Sym::well_known(sym::ADD_METHOD)),
+            Member::method(Sym::well_known(sym::SUB_METHOD)),
+            Member::method(Sym::well_known(sym::RSUB_METHOD)),
+            Member::method(Sym::well_known(sym::MUL_METHOD)),
+            Member::method(Sym::well_known(sym::DIV_METHOD)),
+            Member::method(Sym::well_known(sym::RDIV_METHOD)),
+            Member::method(Sym::well_known(sym::EDIV_METHOD)),
+            Member::method(Sym::well_known(sym::REDIV_METHOD)),
+            Member::method(Sym::well_known(sym::MOD_METHOD)),
+            Member::method(Sym::well_known(sym::RMOD_METHOD)),
+            Member::method(Sym::well_known(sym::BAND_METHOD)),
+            Member::method(Sym::well_known(sym::BOR_METHOD)),
+            Member::method(Sym::well_known(sym::BXOR_METHOD)),
+        ];
+        members.extend(entries.iter().map(|(sym, entry)| {
+            let kind = match entry {
+                Entry::Method(_) => MemberKind::Method,
+                Entry::Getter(_) => MemberKind::Getter,
+                Entry::Setter(_) => MemberKind::Setter,
+                Entry::Property(_, _) => MemberKind::Property,
+                Entry::Delegate(_, kind) => *kind,
+            };
+            Member::new(*sym, kind)
+        }));
+
         let idx = self.vm.inner.type_singletons.len();
 
         let inst_vtbl = self.vm.inner.types.register(ObjectVtbl {
@@ -2726,6 +2762,7 @@ impl<'v, 'a> TypeBuilderInner<'v, 'a> {
         let type_vtbl = self.vm.inner.types.register(TypeVtbl {
             base: type_vtbl_base,
             entries: type_entries.into(),
+            members: members.into(),
             inst_vtbl,
         });
 
@@ -3078,7 +3115,7 @@ fn merge_entries<'v>(mut entries: Vec<(Sym<'v, 'v>, Entry<'v>)>) -> Vec<(Sym<'v,
             && *last_sym == sym
         {
             // Merge Getter + Setter into Property
-            let prev = std::mem::replace(last_entry, Entry::Delegate(0)); // placeholder
+            let prev = std::mem::replace(last_entry, Entry::Delegate(0, MemberKind::Method)); // placeholder
             *last_entry = match (prev, entry) {
                 (Entry::Getter(g), Entry::Setter(s)) | (Entry::Setter(s), Entry::Getter(g)) => {
                     Entry::Property(g, s)
@@ -3210,19 +3247,19 @@ unsafe impl<'v, T: Object<'v>> Collect for TypeObjectWrap<'v, T> {
 }
 
 impl<'v, 'a, T: Object<'v>> Recv<'v, 'a, TypeObjectWrap<'v, T>> {
-    fn vtbl(&self) -> &TypeVtbl<'v> {
+    fn vtbl(&self) -> &'a TypeVtbl<'v> {
         unsafe { self.vtbl_downcast_unchecked::<TypeVtbl<'v>>() }
     }
 
-    fn inst_vtbl(&self) -> &ObjectVtbl<'v> {
+    fn inst_vtbl(&self) -> &'a ObjectVtbl<'v> {
         unsafe { self.vtbl().inst_vtbl.as_ref() }
     }
 
-    fn entry(&self, sym: Sym<'v, '_>) -> Option<&Entry<'v>> {
+    fn entry(&self, sym: Sym<'v, '_>) -> Option<&'a Entry<'v>> {
         self.vtbl().entry(sym)
     }
 
-    fn inst_entry(&self, sym: Sym<'v, '_>) -> Option<&Entry<'v>> {
+    fn inst_entry(&self, sym: Sym<'v, '_>) -> Option<&'a Entry<'v>> {
         self.inst_vtbl().entry(sym)
     }
 
@@ -3256,48 +3293,9 @@ impl<'v, T: Object<'v>> Protocol<'v> for TypeObjectWrap<'v, T> {
     }
 
     fn op_inspect<'a>(this: Recv<'v, 'a, Self>, _vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {
-        let mut members = vec![
-            Sym::well_known(sym::INIT_METHOD),
-            // All protocol/special methods handled by dispatch_native_method.
-            // Reported unconditionally since we cannot statically know which
-            // the Object impl supports; unsupported ops will error at call time.
-            Sym::well_known(sym::STR_METHOD),
-            Sym::well_known(sym::DBG_METHOD),
-            Sym::well_known(sym::BOOL_METHOD),
-            Sym::well_known(sym::HASH_METHOD),
-            Sym::well_known(sym::EQ_METHOD),
-            Sym::well_known(sym::LT_METHOD),
-            Sym::well_known(sym::NEG_METHOD),
-            Sym::well_known(sym::BNOT_METHOD),
-            Sym::well_known(sym::ADD_METHOD),
-            Sym::well_known(sym::SUB_METHOD),
-            Sym::well_known(sym::RSUB_METHOD),
-            Sym::well_known(sym::MUL_METHOD),
-            Sym::well_known(sym::DIV_METHOD),
-            Sym::well_known(sym::RDIV_METHOD),
-            Sym::well_known(sym::EDIV_METHOD),
-            Sym::well_known(sym::REDIV_METHOD),
-            Sym::well_known(sym::MOD_METHOD),
-            Sym::well_known(sym::RMOD_METHOD),
-            Sym::well_known(sym::BAND_METHOD),
-            Sym::well_known(sym::BOR_METHOD),
-            Sym::well_known(sym::BXOR_METHOD),
-        ];
-        members.extend(
-            this.inst_vtbl()
-                .entries
-                .iter()
-                .filter_map(|(s, e)| match e {
-                    Entry::Method(_)
-                    | Entry::Getter(_)
-                    | Entry::Property(_, _)
-                    | Entry::Delegate(_) => Some(*s),
-                    Entry::Setter(_) => None,
-                }),
-        );
         Some(Inspect {
             is_abstract: false,
-            members,
+            members: &this.vtbl().members,
         })
     }
 
@@ -3466,7 +3464,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for TypeObjectWrap<'v, T> {
                     BoundMethod::create(strand, &this, field, out);
                     Ok(())
                 }
-                Entry::Setter(_) | Entry::Delegate(_) => Err(Error::field(strand, field)),
+                Entry::Setter(_) | Entry::Delegate(_, _) => Err(Error::field(strand, field)),
             };
         }
         // Check instance-level entries (unbound methods/getters).
@@ -3475,7 +3473,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for TypeObjectWrap<'v, T> {
                 Entry::Method(_)
                 | Entry::Getter(_)
                 | Entry::Property(_, _)
-                | Entry::Delegate(_) => {
+                | Entry::Delegate(_, _) => {
                     BoundMethod::create(strand, &this, field, out);
                     Ok(())
                 }
@@ -3611,6 +3609,9 @@ pub(crate) struct TypeVtbl<'v> {
     pub(crate) base: Vtbl<'v>,
     /// Unified namespace entries sorted ascending by `Sym`.
     pub(crate) entries: alias::Box<[(Sym<'v, 'v>, Entry<'v>)]>,
+    /// Stable semantic description of the instance namespace advertised by
+    /// the type object protocol.
+    pub(crate) members: alias::Box<[Member<'v, 'v>]>,
     /// Reference to the instance vtbl for unbound instance method dispatch.
     pub(crate) inst_vtbl: NonNull<ObjectVtbl<'v>>,
 }
@@ -4684,6 +4685,42 @@ mod tests {
         out: impl Output<'v>,
     ) {
         Output::set(strand, out, ty);
+    }
+
+    #[test]
+    fn type_object_inspect_borrows_stable_semantic_members() {
+        with_fixture_vm(async |strand, [mut ty_slot]| {
+            let state = strand.vm().state::<FixtureState>();
+            type_value(strand, state.slot_ty, Slot::reborrow(&mut ty_slot));
+            let ty_value: &Value = &ty_slot;
+
+            state
+                .slot_ty
+                .type_vtbl
+                .cast(ty_value)
+                .unwrap()
+                .enter_sync(strand, |strand, recv| {
+                    let inspect =
+                        TypeObjectWrap::<SlotFixture>::op_inspect(recv.clone(), strand.vm())
+                            .unwrap();
+                    let members = inspect.members;
+                    let kind = |sym| {
+                        members
+                            .iter()
+                            .find(|member| member.sym == sym)
+                            .map(|member| member.kind)
+                    };
+
+                    assert_eq!(kind(state.bump_sym), Some(MemberKind::Method));
+                    assert_eq!(kind(state.counter_sym), Some(MemberKind::Getter));
+                    assert_eq!(kind(state.prop_sym), Some(MemberKind::Property));
+                    assert_eq!(kind(state.write_only_sym), Some(MemberKind::Setter));
+
+                    let again =
+                        TypeObjectWrap::<SlotFixture>::op_inspect(recv, strand.vm()).unwrap();
+                    assert!(std::ptr::eq(members, again.members));
+                });
+        });
     }
 
     #[test]

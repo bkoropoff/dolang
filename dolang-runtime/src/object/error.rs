@@ -11,6 +11,7 @@ use crate::{
     arg::Args,
     error::{Error, ErrorKind, Result},
     gc::{Collect, arena::Visit},
+    object::protocol::members,
     strand::Strand,
     sym::{self, Sym},
     unpack,
@@ -193,7 +194,7 @@ impl<'v> Protocol<'v> for Type {
     fn op_inspect<'a>(_this: Recv<'v, 'a, Self>, _vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {
         Some(Inspect {
             is_abstract: true,
-            members: Vec::new(),
+            members: &[],
         })
     }
 
@@ -255,10 +256,7 @@ impl<'v> Protocol<'v> for VariantType {
     fn op_inspect<'a>(_this: Recv<'v, 'a, Self>, _vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {
         Some(Inspect {
             is_abstract: false,
-            members: vec![
-                Sym::well_known(sym::STR_METHOD),
-                Sym::well_known(sym::DBG_METHOD),
-            ],
+            members: members![Method(sym::STR_METHOD), Method(sym::DBG_METHOD),],
         })
     }
 

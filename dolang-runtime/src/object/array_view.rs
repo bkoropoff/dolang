@@ -937,7 +937,7 @@ impl<'v> Protocol<'v> for Type {
     fn op_inspect<'a>(_this: Recv<'v, 'a, Self>, _vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {
         Some(Inspect {
             is_abstract: true,
-            members: Vec::new(),
+            members: &[],
         })
     }
 }
