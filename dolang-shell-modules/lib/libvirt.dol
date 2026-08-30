@@ -1911,7 +1911,7 @@ pub class Domain
   # # Example
   #
   # ```
-  # domain.with cd: /usr/src env: {MAKEOBJDIRPREFIX: /tmp/obj} do
+  # domain.with cd: /usr/src env: {MAKEOBJDIRPREFIX: "/tmp/obj"} do
   #   run make buildworld
   # ```
   pub def with self block :cd = nil :env = {}
