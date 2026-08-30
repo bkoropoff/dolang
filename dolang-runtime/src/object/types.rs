@@ -9,7 +9,7 @@ use crate::{
     object::{
         BoundMethod,
         arg::ArgPack,
-        protocol::{GcObj, Inspect, Protocol, Recv, dispatch_native_method},
+        protocol::{GcObj, Inspect, Protocol, Recv, dispatch_native_method, members},
     },
     strand::Strand,
     sym::{self, Sym},
@@ -175,16 +175,16 @@ impl<'v> Protocol<'v> for Bool {
     fn op_inspect<'a>(_this: Recv<'v, 'a, Self>, _vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {
         Some(Inspect {
             is_abstract: false,
-            members: vec![
-                Sym::well_known(sym::STR_METHOD),
-                Sym::well_known(sym::DBG_METHOD),
-                Sym::well_known(sym::EQ_METHOD),
-                Sym::well_known(sym::BAND_METHOD),
-                Sym::well_known(sym::BOR_METHOD),
-                Sym::well_known(sym::BXOR_METHOD),
-                Sym::well_known(sym::BNOT_METHOD),
-                Sym::well_known(sym::BOOL_METHOD),
-                Sym::well_known(sym::HASH_METHOD),
+            members: members![
+                Method(sym::STR_METHOD),
+                Method(sym::DBG_METHOD),
+                Method(sym::EQ_METHOD),
+                Method(sym::BAND_METHOD),
+                Method(sym::BOR_METHOD),
+                Method(sym::BXOR_METHOD),
+                Method(sym::BNOT_METHOD),
+                Method(sym::BOOL_METHOD),
+                Method(sym::HASH_METHOD),
             ],
         })
     }

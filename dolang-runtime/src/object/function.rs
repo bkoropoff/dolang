@@ -8,6 +8,7 @@ use crate::{
     error::{Error, Result},
     frame::{CallFrame, Upvars},
     gc::{Annex, Collect, Gc, arena::Visit},
+    object::protocol::members,
     strand::{Pinned, Strand},
     sym::{self, Sym},
     unpack,
@@ -393,7 +394,7 @@ impl<'v> Protocol<'v> for Type {
     fn op_inspect<'a>(_this: Recv<'v, 'a, Self>, _vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {
         Some(Inspect {
             is_abstract: true,
-            members: vec![],
+            members: members![],
         })
     }
 

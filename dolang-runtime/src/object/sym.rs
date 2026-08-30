@@ -18,6 +18,7 @@ use super::protocol::{Protocol, Recv};
 pub(crate) struct SymObj {
     pub(crate) tag: Tag,
     pub(crate) name: String,
+    pub(crate) private: bool,
 }
 
 unsafe impl Collect for SymObj {

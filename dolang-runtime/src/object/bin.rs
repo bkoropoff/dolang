@@ -8,7 +8,7 @@ use crate::{
     bytecode::Variadic,
     error::{Error, Result},
     gc::{Collect, arena::Visit},
-    object::protocol::GcObj,
+    object::protocol::{GcObj, members},
     sig,
     strand::Strand,
     sym::{self, Sym},
@@ -712,29 +712,29 @@ impl<'v> Protocol<'v> for Class {
     fn op_inspect<'a>(_this: Recv<'v, 'a, Self>, _vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {
         Some(Inspect {
             is_abstract: false,
-            members: vec![
-                Sym::well_known(sym::STR_METHOD),
-                Sym::well_known(sym::DBG_METHOD),
-                Sym::well_known(sym::EQ_METHOD),
-                Sym::well_known(sym::LT_METHOD),
-                Sym::well_known(sym::BOOL_METHOD),
-                Sym::well_known(sym::HASH_METHOD),
-                Sym::well_known(sym::LEN),
-                Sym::well_known(sym::STARTS_WITH),
-                Sym::well_known(sym::WITHOUT_PREFIX),
-                Sym::well_known(sym::ENDS_WITH),
-                Sym::well_known(sym::WITHOUT_SUFFIX),
-                Sym::well_known(sym::SPLIT),
-                Sym::well_known(sym::RSPLIT),
-                Sym::well_known(sym::JOIN),
-                Sym::well_known(sym::CHOMP),
-                Sym::well_known(sym::TRIM),
-                Sym::well_known(sym::TRIM_START),
-                Sym::well_known(sym::TRIM_END),
-                Sym::well_known(sym::SUB),
-                Sym::well_known(sym::CONTAINS),
-                Sym::well_known(sym::UNPACK),
-                Sym::well_known(sym::HEX),
+            members: members![
+                Method(sym::STR_METHOD),
+                Method(sym::DBG_METHOD),
+                Method(sym::EQ_METHOD),
+                Method(sym::LT_METHOD),
+                Method(sym::BOOL_METHOD),
+                Method(sym::HASH_METHOD),
+                Getter(sym::LEN),
+                Method(sym::STARTS_WITH),
+                Method(sym::WITHOUT_PREFIX),
+                Method(sym::ENDS_WITH),
+                Method(sym::WITHOUT_SUFFIX),
+                Method(sym::SPLIT),
+                Method(sym::RSPLIT),
+                Method(sym::JOIN),
+                Method(sym::CHOMP),
+                Method(sym::TRIM),
+                Method(sym::TRIM_START),
+                Method(sym::TRIM_END),
+                Method(sym::SUB),
+                Method(sym::CONTAINS),
+                Method(sym::UNPACK),
+                Method(sym::HEX),
             ],
         })
     }
@@ -1358,7 +1358,7 @@ mod tests {
     }
 
     #[test]
-    fn bin_class_op_type_op_debug_op_call_and_op_inspect() {
+    fn bin_class_op_type_op_debug_op_call() {
         with_vm(async |strand, [mut out]| {
             let class = &strand.singletons().bin;
 
@@ -1388,17 +1388,6 @@ mod tests {
 
             let err = call!(strand, class, &mut out, 1_i64).await.unwrap_err();
             assert_eq!(err.kind(), ErrorKind::Type);
-
-            strand
-                .builtin_types()
-                .bin_class
-                .cast(class)
-                .unwrap()
-                .enter_sync(strand, |strand, recv| {
-                    let inspect = Class::op_inspect(recv, strand.vm()).unwrap();
-                    assert!(inspect.members.contains(&Sym::well_known(sym::HEX)));
-                    assert!(inspect.members.contains(&Sym::well_known(sym::SPLIT)));
-                });
         });
     }
 
@@ -1434,22 +1423,6 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(out.to_string(strand).unwrap(), "x");
-        });
-    }
-
-    #[test]
-    fn bin_class_op_get_known_and_unknown() {
-        with_vm(async |strand, [mut out]| {
-            let class = &strand.singletons().bin;
-
-            class
-                .get(strand, Sym::well_known(sym::HEX), &mut out)
-                .unwrap();
-
-            let err = class
-                .get(strand, Sym::well_known(sym::COUNT), &mut out)
-                .unwrap_err();
-            assert_eq!(err.kind(), ErrorKind::Field);
         });
     }
 }

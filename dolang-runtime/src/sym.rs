@@ -300,6 +300,7 @@ impl<'v> Table<'v> {
             SymObj {
                 tag: next,
                 name: name.to_owned(),
+                private: false,
             },
         );
         self.by_name
@@ -345,6 +346,7 @@ impl<'v> Table<'v> {
             SymObj {
                 tag: next,
                 name: name.to_owned(),
+                private: true,
             },
         );
         // Insert into by_id only — NOT by_name — to preserve uniqueness across modules

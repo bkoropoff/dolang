@@ -22,8 +22,54 @@ use crate::{
 
 pub(crate) struct Inspect<'v, 'a> {
     pub(crate) is_abstract: bool,
-    pub(crate) members: Vec<Sym<'v, 'a>>,
+    pub(crate) members: &'a [Member<'v, 'a>],
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MemberKind {
+    Method,
+    Getter,
+    Setter,
+    Property,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Member<'v, 'a> {
+    pub(crate) sym: Sym<'v, 'a>,
+    pub(crate) kind: MemberKind,
+}
+
+impl<'v, 'a> Member<'v, 'a> {
+    pub(crate) const fn new(sym: Sym<'v, 'a>, kind: MemberKind) -> Self {
+        Self { sym, kind }
+    }
+
+    pub(crate) const fn method(sym: Sym<'v, 'a>) -> Self {
+        Self::new(sym, MemberKind::Method)
+    }
+
+    pub(crate) const fn coerce_static_slice<'b>(
+        slice: &'b [Member<'static, 'static>],
+    ) -> &'b [Self] {
+        // SAFETY: a static symbol must be well-known, and well-known symbols
+        // have the same identity in every VM.
+        unsafe { std::mem::transmute(slice) }
+    }
+}
+
+macro_rules! members {
+    ($($kind:ident($tag:expr)),* $(,)?) => {{
+        const MEMBERS: &[$crate::object::protocol::Member<'static, 'static>] = &[
+            $($crate::object::protocol::Member::new(
+                $crate::sym::Sym::well_known($tag),
+                $crate::object::protocol::MemberKind::$kind,
+            )),*
+        ];
+        $crate::object::protocol::Member::coerce_static_slice(MEMBERS)
+    }};
+}
+
+pub(crate) use members;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SpreadContext {
@@ -921,7 +967,7 @@ impl<'v, 'a, T: ?Sized + Boxable<Header>> Recv<'v, 'a, T> {
         self.receiver.as_header()
     }
 
-    pub(crate) unsafe fn vtbl_downcast_unchecked<V: Upcast<arena::Vtbl>>(&self) -> &V {
+    pub(crate) unsafe fn vtbl_downcast_unchecked<V: Upcast<arena::Vtbl>>(&self) -> &'a V {
         unsafe {
             self.receiver
                 .as_header()

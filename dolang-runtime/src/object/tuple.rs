@@ -6,7 +6,7 @@ use crate::{
     call,
     error::{Error, Result},
     gc::{self, Collect, arena::Visit},
-    object::protocol::{Protocol, Recv},
+    object::protocol::{Protocol, Recv, members},
     sig::{Unpack, UnpackKeyKind},
     strand::Strand,
     sym::{self, Sym},
@@ -721,20 +721,20 @@ impl<'v> Protocol<'v> for Type {
     fn op_inspect<'a>(_this: Recv<'v, 'a, Self>, _vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {
         Some(Inspect {
             is_abstract: false,
-            members: vec![
-                Sym::well_known(sym::STR_METHOD),
-                Sym::well_known(sym::DBG_METHOD),
-                Sym::well_known(sym::EQ_METHOD),
-                Sym::well_known(sym::LT_METHOD),
-                Sym::well_known(sym::HASH_METHOD),
-                Sym::well_known(sym::LEN),
-                Sym::well_known(sym::GET),
-                Sym::well_known(sym::PAIRS),
-                Sym::well_known(sym::COPY),
-                Sym::well_known(sym::CONTAINS),
-                Sym::well_known(sym::INDEX_METHOD),
-                Sym::well_known(sym::ITER_METHOD),
-                Sym::well_known(sym::UNPACK_METHOD),
+            members: members![
+                Method(sym::STR_METHOD),
+                Method(sym::DBG_METHOD),
+                Method(sym::EQ_METHOD),
+                Method(sym::LT_METHOD),
+                Method(sym::HASH_METHOD),
+                Getter(sym::LEN),
+                Method(sym::GET),
+                Method(sym::PAIRS),
+                Method(sym::COPY),
+                Method(sym::CONTAINS),
+                Method(sym::INDEX_METHOD),
+                Method(sym::ITER_METHOD),
+                Method(sym::UNPACK_METHOD),
             ],
         })
     }

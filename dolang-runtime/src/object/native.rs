@@ -1,6 +1,7 @@
 use std::{
     borrow::Cow,
     cell::UnsafeCell,
+    collections::VecDeque,
     future,
     hash::Hasher,
     marker::PhantomData,
@@ -8,6 +9,8 @@ use std::{
     ops::{ControlFlow, Deref, DerefMut},
     ptr::NonNull,
 };
+
+use bitvec::{bitbox, boxed::BitBox};
 
 use crate::{
     arg::Args,
@@ -27,7 +30,8 @@ use crate::{
 
 use super::{
     BoundMethod,
-    protocol::{self, Inspect, Protocol, TypeHandle, dispatch_native_method},
+    field_iter::FieldIter,
+    protocol::{self, Inspect, Member, MemberKind, Protocol, TypeHandle, dispatch_native_method},
 };
 use dolang_bytecode::Variadic;
 use dolang_util::alias;
@@ -1326,20 +1330,19 @@ pub trait Object<'v>: Sized + 'v {
     ///
     /// # Default Implementation
     ///
-    /// Returns [`Error::not_supported`], indicating the object does not support unpacking.
+    /// Unpacks registered readable fields.
     ///
     /// # Atomicity
     ///
     /// When practical, implementations should make unpacking **atomic**: if the operation
     /// fails partway through, the object's observable state should remain unchanged.
     /// See [`Unpack`] documentation for patterns and examples.
-    #[allow(unused_variables)]
     fn unpack<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         unpack: Unpack<'v, 'a>,
     ) -> impl Future<Output = Result<'v, 's, ()>> {
-        future::ready(Err(Error::not_supported(strand)))
+        default_object_unpack(this, strand, unpack)
     }
 
     /// Performs any object-specific finalization before the main object state is dropped.
@@ -1354,6 +1357,138 @@ pub trait Object<'v>: Sized + 'v {
     /// Does nothing.
     #[allow(unused_variables)]
     fn finalize<'a>(this: Instance<'v, 'a, Self>) {}
+}
+
+fn readable_entry(entry: &Entry<'_>) -> bool {
+    matches!(
+        entry,
+        Entry::Getter(_)
+            | Entry::Property(_, _)
+            | Entry::Delegate(_, MemberKind::Getter | MemberKind::Property)
+    )
+}
+
+async fn default_object_unpack<'v, 'a, 's, T: Object<'v>>(
+    this: Instance<'v, 'a, T>,
+    strand: &'a mut Strand<'v, 's>,
+    unpack: Unpack<'v, 'a>,
+) -> Result<'v, 's, ()> {
+    let sig = unpack.inner;
+    let mut out = unpack.slots;
+    let pos_count = sig.required + sig.optional.len();
+    if sig.required != 0 {
+        return Err(Error::missing_positional(strand, 0));
+    }
+
+    strand
+        .with_slots_dynamic(sig.len(), async |strand, mut staged| {
+            for (index, default) in sig.optional.iter().enumerate() {
+                staged.at(index).store(default.dup());
+            }
+
+            let recv = Recv::<ObjectWrap<'v, T>>::new(this.receiver);
+            let entries = &recv.vtbl().entries;
+            let track = sig.variadic != Variadic::Discard;
+            let mut matched: Option<BitBox> = track.then(|| bitbox![0; entries.len()]);
+
+            for (key_index, key) in sig.keys.iter().enumerate() {
+                let dest = pos_count + key_index;
+                let found = match &key.kind {
+                    sig::UnpackKeyKind::Sym(sym) => entries
+                        .binary_search_by_key(sym, |(candidate, _)| *candidate)
+                        .ok()
+                        .filter(|index| readable_entry(&entries[*index].1)),
+                    sig::UnpackKeyKind::Const(_) => None,
+                };
+                let present = if let Some(index) = found {
+                    let (sym, entry) = &entries[index];
+                    let result = match entry {
+                        Entry::Getter(handler) | Entry::Property(handler, _) => unsafe {
+                            handler.call(recv.as_header(), strand, staged.at(dest))
+                        },
+                        Entry::Delegate(supertype_index, _) => {
+                            let supertype =
+                                instance_supertype::<T>(recv.clone(), strand, *supertype_index);
+                            supertype.op_get(strand, *sym, staged.at(dest))
+                        }
+                        _ => unreachable!(),
+                    };
+                    match result {
+                        Ok(()) => true,
+                        Err(error) if error.kind() == ErrorKind::Field => false,
+                        Err(error) => return Err(error),
+                    }
+                } else {
+                    false
+                };
+                if !present {
+                    if let Some(default) = &key.default {
+                        staged.at(dest).store(default.dup());
+                    } else {
+                        return Err(match &key.kind {
+                            sig::UnpackKeyKind::Sym(sym) => Error::missing_key(strand, *sym),
+                            sig::UnpackKeyKind::Const(value) => Error::missing_key(strand, value),
+                        });
+                    }
+                }
+                if let (Some(index), Some(matched)) = (found, &mut matched) {
+                    matched.set(index, true);
+                }
+            }
+
+            if sig.variadic == Variadic::None {
+                let matched = matched.as_mut().unwrap();
+                for (index, (sym, entry)) in entries.iter().enumerate() {
+                    if matched[index] || !readable_entry(entry) {
+                        continue;
+                    }
+                    let present = strand.with_slots_sync(|strand, [tmp]| {
+                        let result = match entry {
+                            Entry::Getter(handler) | Entry::Property(handler, _) => unsafe {
+                                handler.call(recv.as_header(), strand, tmp)
+                            },
+                            Entry::Delegate(supertype_index, _) => {
+                                let supertype =
+                                    instance_supertype::<T>(recv.clone(), strand, *supertype_index);
+                                supertype.op_get(strand, *sym, tmp)
+                            }
+                            _ => unreachable!(),
+                        };
+                        match result {
+                            Ok(()) => Ok(true),
+                            Err(error) if error.kind() == ErrorKind::Field => Ok(false),
+                            Err(error) => Err(error),
+                        }
+                    })?;
+                    if present {
+                        return Err(Error::unexpected_key(strand, *sym));
+                    }
+                    matched.set(index, true);
+                }
+            }
+
+            if sig.variadic == Variadic::Capture {
+                let matched = matched.as_ref().unwrap();
+                let symbols = entries
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, (_, entry))| !matched[*index] && readable_entry(entry))
+                    .map(|(_, (sym, _))| strand.sym_obj(*sym))
+                    .collect::<VecDeque<_>>();
+                let receiver = Value::from_object(Base::upcast(this.receiver.to_strong()));
+                strand.builtin_types().field_iter.create(
+                    strand,
+                    FieldIter::new(receiver, symbols),
+                    staged.at(sig.len() - 1),
+                );
+            }
+
+            for index in 0..sig.len() {
+                out.at(index).store(staged.at(index).take());
+            }
+            Ok(())
+        })
+        .await
 }
 
 unsafe impl<'v, T: Object<'v>> Collect for ObjectWrap<'v, T> {
@@ -1485,7 +1620,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
                             .call(this.as_header(), None, strand, args, out)
                             .await
                     },
-                    Entry::Delegate(idx) => {
+                    Entry::Delegate(idx, MemberKind::Method) => {
                         let supertype =
                             instance_supertype::<T>(Recv::new(this.receiver), strand, *idx);
                         strand
@@ -1545,7 +1680,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
                             .call(this.as_header(), Some(delegator), strand, args, out)
                             .await
                     },
-                    Entry::Delegate(idx) => {
+                    Entry::Delegate(idx, MemberKind::Method) => {
                         let supertype =
                             instance_supertype::<T>(Recv::new(this.receiver), strand, *idx);
                         supertype
@@ -1586,11 +1721,11 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
                 Some(Entry::Getter(handler) | Entry::Property(handler, _)) => unsafe {
                     handler.call(this.as_header(), strand, out)
                 },
-                Some(Entry::Method(_) | Entry::Delegate(_)) => {
+                Some(Entry::Method(_) | Entry::Delegate(_, MemberKind::Method)) => {
                     BoundMethod::create(strand, &this, field, out);
                     Ok(())
                 }
-                Some(Entry::Setter(_)) => Err(Error::field(strand, field)),
+                Some(Entry::Setter(_) | Entry::Delegate(_, _)) => Err(Error::field(strand, field)),
                 None => T::get(Instance::new(this.receiver), strand, field, out),
             },
         )
@@ -2513,7 +2648,7 @@ pub(crate) enum Entry<'v> {
     /// A getter + setter pair for the same field name.
     Property(FieldHandler<'v>, FieldHandler<'v>),
     /// Delegate to the supertype at the given index in `TypeAnnexInner::supertypes`.
-    Delegate(usize),
+    Delegate(usize, MemberKind),
 }
 
 /// Extension vtable for `Object` types: protocol vtable + sorted namespace entries.
@@ -2686,10 +2821,11 @@ impl<'v, 'a> TypeBuilderInner<'v, 'a> {
             for member in inspect.members {
                 // Safety: all supertypes available at native type registration time
                 // should have static symbols.
-                let member = unsafe { member.into_static_scope_unchecked() };
+                let sym = unsafe { member.sym.into_static_scope_unchecked() };
                 // Local entries win; first matching supertype wins.
-                if !self.entries.iter().any(|(sym, _)| *sym == member) {
-                    self.entries.push((member, Entry::Delegate(supertype_idx)));
+                if !self.entries.iter().any(|(entry_sym, _)| *entry_sym == sym) {
+                    self.entries
+                        .push((sym, Entry::Delegate(supertype_idx, member.kind)));
                 }
             }
         }
@@ -2710,6 +2846,41 @@ impl<'v, 'a> TypeBuilderInner<'v, 'a> {
         let entries = merge_entries(self.entries);
         let type_entries = merge_entries(self.type_entries);
 
+        let mut members = vec![
+            Member::method(Sym::well_known(sym::INIT_METHOD)),
+            Member::method(Sym::well_known(sym::STR_METHOD)),
+            Member::method(Sym::well_known(sym::DBG_METHOD)),
+            Member::method(Sym::well_known(sym::BOOL_METHOD)),
+            Member::method(Sym::well_known(sym::HASH_METHOD)),
+            Member::method(Sym::well_known(sym::EQ_METHOD)),
+            Member::method(Sym::well_known(sym::LT_METHOD)),
+            Member::method(Sym::well_known(sym::NEG_METHOD)),
+            Member::method(Sym::well_known(sym::BNOT_METHOD)),
+            Member::method(Sym::well_known(sym::ADD_METHOD)),
+            Member::method(Sym::well_known(sym::SUB_METHOD)),
+            Member::method(Sym::well_known(sym::RSUB_METHOD)),
+            Member::method(Sym::well_known(sym::MUL_METHOD)),
+            Member::method(Sym::well_known(sym::DIV_METHOD)),
+            Member::method(Sym::well_known(sym::RDIV_METHOD)),
+            Member::method(Sym::well_known(sym::EDIV_METHOD)),
+            Member::method(Sym::well_known(sym::REDIV_METHOD)),
+            Member::method(Sym::well_known(sym::MOD_METHOD)),
+            Member::method(Sym::well_known(sym::RMOD_METHOD)),
+            Member::method(Sym::well_known(sym::BAND_METHOD)),
+            Member::method(Sym::well_known(sym::BOR_METHOD)),
+            Member::method(Sym::well_known(sym::BXOR_METHOD)),
+        ];
+        members.extend(entries.iter().map(|(sym, entry)| {
+            let kind = match entry {
+                Entry::Method(_) => MemberKind::Method,
+                Entry::Getter(_) => MemberKind::Getter,
+                Entry::Setter(_) => MemberKind::Setter,
+                Entry::Property(_, _) => MemberKind::Property,
+                Entry::Delegate(_, kind) => *kind,
+            };
+            Member::new(*sym, kind)
+        }));
+
         let idx = self.vm.inner.type_singletons.len();
 
         let inst_vtbl = self.vm.inner.types.register(ObjectVtbl {
@@ -2726,6 +2897,7 @@ impl<'v, 'a> TypeBuilderInner<'v, 'a> {
         let type_vtbl = self.vm.inner.types.register(TypeVtbl {
             base: type_vtbl_base,
             entries: type_entries.into(),
+            members: members.into(),
             inst_vtbl,
         });
 
@@ -3078,7 +3250,7 @@ fn merge_entries<'v>(mut entries: Vec<(Sym<'v, 'v>, Entry<'v>)>) -> Vec<(Sym<'v,
             && *last_sym == sym
         {
             // Merge Getter + Setter into Property
-            let prev = std::mem::replace(last_entry, Entry::Delegate(0)); // placeholder
+            let prev = std::mem::replace(last_entry, Entry::Delegate(0, MemberKind::Method)); // placeholder
             *last_entry = match (prev, entry) {
                 (Entry::Getter(g), Entry::Setter(s)) | (Entry::Setter(s), Entry::Getter(g)) => {
                     Entry::Property(g, s)
@@ -3210,19 +3382,19 @@ unsafe impl<'v, T: Object<'v>> Collect for TypeObjectWrap<'v, T> {
 }
 
 impl<'v, 'a, T: Object<'v>> Recv<'v, 'a, TypeObjectWrap<'v, T>> {
-    fn vtbl(&self) -> &TypeVtbl<'v> {
+    fn vtbl(&self) -> &'a TypeVtbl<'v> {
         unsafe { self.vtbl_downcast_unchecked::<TypeVtbl<'v>>() }
     }
 
-    fn inst_vtbl(&self) -> &ObjectVtbl<'v> {
+    fn inst_vtbl(&self) -> &'a ObjectVtbl<'v> {
         unsafe { self.vtbl().inst_vtbl.as_ref() }
     }
 
-    fn entry(&self, sym: Sym<'v, '_>) -> Option<&Entry<'v>> {
+    fn entry(&self, sym: Sym<'v, '_>) -> Option<&'a Entry<'v>> {
         self.vtbl().entry(sym)
     }
 
-    fn inst_entry(&self, sym: Sym<'v, '_>) -> Option<&Entry<'v>> {
+    fn inst_entry(&self, sym: Sym<'v, '_>) -> Option<&'a Entry<'v>> {
         self.inst_vtbl().entry(sym)
     }
 
@@ -3256,48 +3428,9 @@ impl<'v, T: Object<'v>> Protocol<'v> for TypeObjectWrap<'v, T> {
     }
 
     fn op_inspect<'a>(this: Recv<'v, 'a, Self>, _vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {
-        let mut members = vec![
-            Sym::well_known(sym::INIT_METHOD),
-            // All protocol/special methods handled by dispatch_native_method.
-            // Reported unconditionally since we cannot statically know which
-            // the Object impl supports; unsupported ops will error at call time.
-            Sym::well_known(sym::STR_METHOD),
-            Sym::well_known(sym::DBG_METHOD),
-            Sym::well_known(sym::BOOL_METHOD),
-            Sym::well_known(sym::HASH_METHOD),
-            Sym::well_known(sym::EQ_METHOD),
-            Sym::well_known(sym::LT_METHOD),
-            Sym::well_known(sym::NEG_METHOD),
-            Sym::well_known(sym::BNOT_METHOD),
-            Sym::well_known(sym::ADD_METHOD),
-            Sym::well_known(sym::SUB_METHOD),
-            Sym::well_known(sym::RSUB_METHOD),
-            Sym::well_known(sym::MUL_METHOD),
-            Sym::well_known(sym::DIV_METHOD),
-            Sym::well_known(sym::RDIV_METHOD),
-            Sym::well_known(sym::EDIV_METHOD),
-            Sym::well_known(sym::REDIV_METHOD),
-            Sym::well_known(sym::MOD_METHOD),
-            Sym::well_known(sym::RMOD_METHOD),
-            Sym::well_known(sym::BAND_METHOD),
-            Sym::well_known(sym::BOR_METHOD),
-            Sym::well_known(sym::BXOR_METHOD),
-        ];
-        members.extend(
-            this.inst_vtbl()
-                .entries
-                .iter()
-                .filter_map(|(s, e)| match e {
-                    Entry::Method(_)
-                    | Entry::Getter(_)
-                    | Entry::Property(_, _)
-                    | Entry::Delegate(_) => Some(*s),
-                    Entry::Setter(_) => None,
-                }),
-        );
         Some(Inspect {
             is_abstract: false,
-            members,
+            members: &this.vtbl().members,
         })
     }
 
@@ -3466,7 +3599,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for TypeObjectWrap<'v, T> {
                     BoundMethod::create(strand, &this, field, out);
                     Ok(())
                 }
-                Entry::Setter(_) | Entry::Delegate(_) => Err(Error::field(strand, field)),
+                Entry::Setter(_) | Entry::Delegate(_, _) => Err(Error::field(strand, field)),
             };
         }
         // Check instance-level entries (unbound methods/getters).
@@ -3475,7 +3608,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for TypeObjectWrap<'v, T> {
                 Entry::Method(_)
                 | Entry::Getter(_)
                 | Entry::Property(_, _)
-                | Entry::Delegate(_) => {
+                | Entry::Delegate(_, _) => {
                     BoundMethod::create(strand, &this, field, out);
                     Ok(())
                 }
@@ -3611,6 +3744,9 @@ pub(crate) struct TypeVtbl<'v> {
     pub(crate) base: Vtbl<'v>,
     /// Unified namespace entries sorted ascending by `Sym`.
     pub(crate) entries: alias::Box<[(Sym<'v, 'v>, Entry<'v>)]>,
+    /// Stable semantic description of the instance namespace advertised by
+    /// the type object protocol.
+    pub(crate) members: alias::Box<[Member<'v, 'v>]>,
     /// Reference to the instance vtbl for unbound instance method dispatch.
     pub(crate) inst_vtbl: NonNull<ObjectVtbl<'v>>,
 }
@@ -3775,7 +3911,8 @@ mod tests {
         type Type = i64;
         type TypeAnnex = i64;
 
-        fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
+        fn build<'a>(mut builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
+            let absent_sym = builder.sym("absent");
             builder
                 .method("bump", async move |this, strand, args, out| {
                     let ([], []) = unpack!(strand, args, 0, 0)?;
@@ -3798,6 +3935,13 @@ mod tests {
                 })
                 .set("prop", |_this, _strand, _value| Ok(()))
                 .set("write_only", |_this, _strand, _value| Ok(()))
+                .get("absent", move |this, strand, _out| {
+                    this.borrow_mut(strand)?.counter += 1;
+                    Err(Error::field(strand, absent_sym))
+                })
+                .get("bad", |_this, strand, _out| {
+                    Err(Error::value(strand, "bad getter"))
+                })
                 .method_with_slots::<1, _>(
                     "with_slot",
                     async move |_this, strand, args, out, [mut scratch]| {
@@ -3864,6 +4008,8 @@ mod tests {
         make_sym: Sym<'v, 'v>,
         meta_sym: Sym<'v, 'v>,
         readonly_sym: Sym<'v, 'v>,
+        absent_sym: Sym<'v, 'v>,
+        bad_sym: Sym<'v, 'v>,
     }
 
     struct FixtureStateTag;
@@ -3884,6 +4030,8 @@ mod tests {
         let make_sym = vm.sym("make");
         let meta_sym = vm.sym("meta");
         let readonly_sym = vm.sym("readonly");
+        let absent_sym = vm.sym("absent");
+        let bad_sym = vm.sym("bad");
         vm.register_state(FixtureState {
             fixture_ty,
             error_ty,
@@ -3896,6 +4044,8 @@ mod tests {
             make_sym,
             meta_sym,
             readonly_sym,
+            absent_sym,
+            bad_sym,
         });
     }
 
@@ -4180,7 +4330,7 @@ mod tests {
     }
 
     #[test]
-    fn op_unpack_and_op_spread_use_default_errors() {
+    fn op_unpack_empty_fixture_and_op_spread_use_defaults() {
         with_fixture_vm(async |strand, [mut owner, mut out]| {
             make_fixture(strand, Slot::reborrow(&mut owner));
             let value: &Value = &owner;
@@ -4194,11 +4344,9 @@ mod tests {
                 .enter(strand, async |strand, recv| {
                     strand
                         .with_slots_dynamic(0, async |strand, slots| {
-                            let err =
-                                ObjectWrap::<Fixture>::op_unpack(recv.clone(), strand, &sig, slots)
-                                    .await
-                                    .unwrap_err();
-                            assert_eq!(err.kind(), ErrorKind::Unsupported);
+                            ObjectWrap::<Fixture>::op_unpack(recv.clone(), strand, &sig, slots)
+                                .await
+                                .unwrap();
                         })
                         .await;
 
@@ -4245,6 +4393,127 @@ mod tests {
                 })
                 .await;
             let _ = &mut out;
+        });
+    }
+
+    #[test]
+    fn default_native_unpack_reads_registered_fields_and_captures_lazy_tail() {
+        with_fixture_vm(async |strand, [mut owner, mut tail, mut tmp]| {
+            make_slot_fixture(strand, 4, "unpack", Slot::reborrow(&mut owner));
+            let state = strand.vm().state::<FixtureState>();
+            let sig = sig::Unpack::new(
+                0,
+                vec![],
+                vec![sig::UnpackKey {
+                    kind: sig::UnpackKeyKind::Sym(state.counter_sym),
+                    default: None,
+                }],
+                Variadic::Capture,
+            );
+            strand
+                .with_slots_dynamic(2, async |strand, mut out| {
+                    owner
+                        .op_unpack(strand, &sig, unsafe { Slots::new(out.as_inner()) })
+                        .await
+                        .unwrap();
+                    assert_eq!(out.at(0).to_i64(strand).unwrap(), 4);
+                    tail.store(out.at(1).take());
+                })
+                .await;
+
+            owner
+                .op_get(strand, state.counter_sym, Slot::reborrow(&mut tmp))
+                .unwrap();
+            assert_eq!(tmp.to_i64(strand).unwrap(), 4, "capture evaluated a getter");
+
+            let absent_sig = sig::Unpack::new(
+                0,
+                vec![],
+                vec![sig::UnpackKey {
+                    kind: sig::UnpackKeyKind::Sym(state.absent_sym),
+                    default: Some(Value::from_i64(strand, 17)),
+                }],
+                Variadic::Capture,
+            );
+            strand
+                .with_slots_dynamic(2, async |strand, mut out| {
+                    tail.op_unpack(strand, &absent_sig, unsafe { Slots::new(out.as_inner()) })
+                        .await
+                        .unwrap();
+                    assert_eq!(out.at(0).to_i64(strand).unwrap(), 17);
+                    // Recursive capture returns the same stateful iterator.
+                    assert!(out.at(1).repr_eq(strand, &tail));
+                })
+                .await;
+            owner
+                .op_get(strand, state.counter_sym, Slot::reborrow(&mut tmp))
+                .unwrap();
+            assert_eq!(tmp.to_i64(strand).unwrap(), 5);
+
+            let bad_sig = sig::Unpack::new(
+                0,
+                vec![],
+                vec![sig::UnpackKey {
+                    kind: sig::UnpackKeyKind::Sym(state.bad_sym),
+                    default: None,
+                }],
+                Variadic::Capture,
+            );
+            strand
+                .with_slots_dynamic(2, async |strand, mut out| {
+                    out.at(0).store(Value::from_i64(strand, 99));
+                    let err = tail
+                        .op_unpack(strand, &bad_sig, unsafe { Slots::new(out.as_inner()) })
+                        .await
+                        .unwrap_err();
+                    assert_eq!(err.kind(), ErrorKind::Value);
+                    assert_eq!(out.at(0).to_i64(strand).unwrap(), 99);
+                })
+                .await;
+        });
+    }
+
+    #[test]
+    fn default_native_exhaustive_unpack_evaluates_unmatched_getters_atomically() {
+        with_fixture_vm(async |strand, [mut owner]| {
+            make_slot_fixture(strand, 4, "unpack", Slot::reborrow(&mut owner));
+            let state = strand.vm().state::<FixtureState>();
+            let sig = sig::Unpack::new(
+                0,
+                vec![],
+                vec![
+                    sig::UnpackKey {
+                        kind: sig::UnpackKeyKind::Sym(state.counter_sym),
+                        default: None,
+                    },
+                    sig::UnpackKey {
+                        kind: sig::UnpackKeyKind::Sym(state.prop_sym),
+                        default: None,
+                    },
+                ],
+                Variadic::None,
+            );
+            strand
+                .with_slots_dynamic(2, async |strand, mut out| {
+                    out.at(0).store(Value::from_i64(strand, 90));
+                    out.at(1).store(Value::from_i64(strand, 91));
+                    let err = owner
+                        .op_unpack(strand, &sig, unsafe { Slots::new(out.as_inner()) })
+                        .await
+                        .unwrap_err();
+                    assert_eq!(err.kind(), ErrorKind::Value);
+                    assert_eq!(out.at(0).to_i64(strand).unwrap(), 90);
+                    assert_eq!(out.at(1).to_i64(strand).unwrap(), 91);
+                })
+                .await;
+
+            // The absent getter was checked before the failing getter.
+            strand.with_slots_sync(|strand, [mut tmp]| {
+                owner
+                    .op_get(strand, state.counter_sym, Slot::reborrow(&mut tmp))
+                    .unwrap();
+                assert_eq!(tmp.to_i64(strand).unwrap(), 5);
+            });
         });
     }
 
@@ -4684,6 +4953,42 @@ mod tests {
         out: impl Output<'v>,
     ) {
         Output::set(strand, out, ty);
+    }
+
+    #[test]
+    fn type_object_inspect_borrows_stable_semantic_members() {
+        with_fixture_vm(async |strand, [mut ty_slot]| {
+            let state = strand.vm().state::<FixtureState>();
+            type_value(strand, state.slot_ty, Slot::reborrow(&mut ty_slot));
+            let ty_value: &Value = &ty_slot;
+
+            state
+                .slot_ty
+                .type_vtbl
+                .cast(ty_value)
+                .unwrap()
+                .enter_sync(strand, |strand, recv| {
+                    let inspect =
+                        TypeObjectWrap::<SlotFixture>::op_inspect(recv.clone(), strand.vm())
+                            .unwrap();
+                    let members = inspect.members;
+                    let kind = |sym| {
+                        members
+                            .iter()
+                            .find(|member| member.sym == sym)
+                            .map(|member| member.kind)
+                    };
+
+                    assert_eq!(kind(state.bump_sym), Some(MemberKind::Method));
+                    assert_eq!(kind(state.counter_sym), Some(MemberKind::Getter));
+                    assert_eq!(kind(state.prop_sym), Some(MemberKind::Property));
+                    assert_eq!(kind(state.write_only_sym), Some(MemberKind::Setter));
+
+                    let again =
+                        TypeObjectWrap::<SlotFixture>::op_inspect(recv, strand.vm()).unwrap();
+                    assert!(std::ptr::eq(members, again.members));
+                });
+        });
     }
 
     #[test]

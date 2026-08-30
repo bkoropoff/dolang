@@ -8,7 +8,7 @@ use crate::{
     gc::{Collect, arena::Visit},
     object::{
         BoundMethod,
-        protocol::{Inspect, Protocol, Recv, Spread, SpreadContext},
+        protocol::{Inspect, Member, Protocol, Recv, Spread, SpreadContext, members},
         tuple,
     },
     sig,
@@ -86,26 +86,64 @@ pub(crate) fn classify(tag: sym::Tag) -> Option<Surface> {
     }
 }
 
-fn members<'v, 'a>(tags: &[sym::Tag]) -> Vec<Sym<'v, 'a>> {
-    tags.iter().copied().map(Sym::well_known).collect()
+fn iter_members<'v, 'a>() -> &'a [Member<'v, 'a>] {
+    members![
+        Method(sym::ITER),
+        Method(sym::ALL),
+        Method(sym::ANY),
+        Method(sym::FOLD),
+        Method(sym::MAP),
+        Method(sym::FILTER),
+        Method(sym::CHOMP),
+        Method(sym::CRIMP),
+        Method(sym::CHAIN),
+        Method(sym::ZIP),
+        Method(sym::TAKE),
+        Method(sym::SKIP),
+        Method(sym::ENUMERATE),
+        Method(sym::FIND),
+        Method(sym::MIN),
+        Method(sym::MAX),
+        Method(sym::NEXT),
+        Method(sym::COUNT),
+        Method(sym::KV),
+    ]
 }
 
-fn iter_members<'v, 'a>() -> Vec<Sym<'v, 'a>> {
-    let mut syms = members(ITERABLE_METHODS);
-    syms.extend(members(ITER_ONLY_METHODS));
-    syms
+fn iterable_members<'v, 'a>() -> &'a [Member<'v, 'a>] {
+    members![
+        Method(sym::ITER),
+        Method(sym::ALL),
+        Method(sym::ANY),
+        Method(sym::FOLD),
+        Method(sym::MAP),
+        Method(sym::FILTER),
+        Method(sym::CHOMP),
+        Method(sym::CRIMP),
+        Method(sym::CHAIN),
+        Method(sym::ZIP),
+        Method(sym::TAKE),
+        Method(sym::SKIP),
+        Method(sym::ENUMERATE),
+        Method(sym::FIND),
+        Method(sym::MIN),
+        Method(sym::MAX),
+    ]
 }
 
-fn iterable_members<'v, 'a>() -> Vec<Sym<'v, 'a>> {
-    members(ITERABLE_METHODS)
+fn sink_members<'v, 'a>() -> &'a [Member<'v, 'a>] {
+    sinkable_members()
 }
 
-fn sink_members<'v, 'a>() -> Vec<Sym<'v, 'a>> {
-    members(SINKABLE_METHODS)
-}
-
-fn sinkable_members<'v, 'a>() -> Vec<Sym<'v, 'a>> {
-    members(SINKABLE_METHODS)
+fn sinkable_members<'v, 'a>() -> &'a [Member<'v, 'a>] {
+    members![
+        Method(sym::SINK),
+        Method(sym::PUT),
+        Method(sym::PREMAP),
+        Method(sym::PREFILTER),
+        Method(sym::PRECHOMP),
+        Method(sym::PRECRIMP),
+    ]
 }
 
 pub(crate) fn iter_get<'v, 'a, 's>(

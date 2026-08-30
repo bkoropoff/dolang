@@ -1,0 +1,141 @@
+import
+  std:
+    - FieldError
+    - Tuple
+
+def assert_err msg block
+  let caught = false
+  try
+    block()
+  catch error
+    assert_eq (str error) $msg
+    caught = true
+  assert $caught
+
+class Base
+  pub field inherited = 2
+
+  pub def method _self
+    99
+
+class Example: Base
+  field private = 100
+  pub field direct = 1
+  pub field backing = 3
+
+  #[getter]
+  pub def property self
+    self.backing
+
+  #[setter]
+  pub def write_only _self _value
+    nil
+
+let example = Example()
+
+# Direct, inherited, and getter-backed fields unpack by key.
+let :direct :inherited :property :backing = example
+assert_eq $direct 1
+assert_eq $inherited 2
+assert_eq $property 3
+assert_eq $backing 3
+
+# Fields are keyed only. Optional positionals use defaults; required ones fail.
+bind example
+  - positional = 7
+  ..._
+assert_eq $positional 7
+assert_err "missing positional item: 0" do
+  let _positional ..._ = example
+
+# Missing keys use defaults, and missing required keys fail.
+bind example
+  :missing = 8
+  ..._
+assert_eq $missing 8
+assert_err "missing key item: missing" do
+  let missing: _missing ..._ = example
+
+# Methods, setter-only properties, and private fields are not fields for unpack.
+assert_err "missing key item: method" do
+  let method: _method ..._ = example
+assert_err "missing key item: write_only" do
+  let write_only: _write_only ..._ = example
+assert_err "missing key item: private" do
+  let private: _private ..._ = example
+
+# A captured tail contains unmatched names, reads values lazily, and supports
+# iteration, recursive unpack, and keyed spreading.
+let direct: captured_direct ...tail = example
+assert_eq $captured_direct 1
+example.backing = 30
+let property: later_property ...tail2 = tail
+assert_eq $later_property 30
+let inherited: later_inherited ...tail3 = tail2
+assert_eq $later_inherited 2
+
+def take_backing :backing
+  backing
+assert_eq (take_backing ...tail3) 30
+
+let ...pair_tail = example
+example.direct = 10
+let pairs = [...pair_tail]
+assert (pairs.contains (Tuple [:direct:, 10]))
+assert (pairs.contains (Tuple [:property:, 30]))
+
+# Discard and capture do not evaluate unmatched getters. Exhaustive matching
+# evaluates them, treating FieldError as absence and propagating other errors.
+let absent_hits = 0
+class Absent
+  pub field anchor = 0
+
+  #[getter]
+  pub def absent _self
+    absent_hits = (absent_hits + 1)
+    throw FieldError :absent:
+
+let absent = Absent()
+bind absent
+  ..._
+assert_eq $absent_hits 0
+let ...absent_tail = absent
+assert_eq $absent_hits 0
+assert_eq [...absent_tail] [(Tuple [:anchor:, 0])]
+assert_eq $absent_hits 1
+let :anchor = absent
+assert_eq $anchor 0
+assert_eq $absent_hits 2
+
+let present_hits = 0
+class Present
+  pub field anchor = 0
+
+  #[getter]
+  pub def present _self
+    present_hits = (present_hits + 1)
+    1
+
+assert_err "unexpected key item: present" do
+  let anchor: _anchor = Present()
+assert_eq $present_hits 1
+
+class Failure
+  pub field anchor = 0
+
+  #[getter]
+  pub def bad _self
+    throw "boom"
+
+assert_err boom do
+  let anchor: _anchor = Failure()
+
+# Explicit (unpack) still takes precedence over default field unpack.
+class Explicit
+  pub field actual = 1
+
+  def (unpack) _self
+    {proxy: 9}
+
+let :proxy = Explicit()
+assert_eq $proxy 9

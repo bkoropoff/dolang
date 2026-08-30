@@ -11,6 +11,7 @@ use crate::{
     call,
     error::{Error, Result},
     gc::{Collect, arena::Visit},
+    object::protocol::members,
     sig,
     strand::Strand,
     sym::{self, Sym},
@@ -574,19 +575,19 @@ impl<'v> Protocol<'v> for Class {
     fn op_inspect<'a>(_this: Recv<'v, 'a, Self>, _vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {
         Some(Inspect {
             is_abstract: false,
-            members: vec![
-                Sym::well_known(sym::STR_METHOD),
-                Sym::well_known(sym::DBG_METHOD),
-                Sym::well_known(sym::EQ_METHOD),
-                Sym::well_known(sym::LT_METHOD),
-                Sym::well_known(sym::HASH_METHOD),
-                Sym::well_known(sym::INDEX_METHOD),
-                Sym::well_known(sym::ASSIGN_METHOD),
-                Sym::well_known(sym::ITER_METHOD),
-                Sym::well_known(sym::UNPACK_METHOD),
-                Sym::well_known(sym::SPREAD_METHOD),
-                Sym::well_known(sym::GET_METHOD),
-                Sym::well_known(sym::SET_METHOD),
+            members: members![
+                Method(sym::STR_METHOD),
+                Method(sym::DBG_METHOD),
+                Method(sym::EQ_METHOD),
+                Method(sym::LT_METHOD),
+                Method(sym::HASH_METHOD),
+                Method(sym::INDEX_METHOD),
+                Method(sym::ASSIGN_METHOD),
+                Method(sym::ITER_METHOD),
+                Method(sym::UNPACK_METHOD),
+                Method(sym::SPREAD_METHOD),
+                Method(sym::GET_METHOD),
+                Method(sym::SET_METHOD),
             ],
         })
     }

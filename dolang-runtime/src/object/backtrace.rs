@@ -4,7 +4,7 @@ use crate::{
     arg::Args,
     error::{BacktraceIter, Error, Result, UnwindEntry},
     gc::{Collect, arena::Visit},
-    object::iter,
+    object::{iter, protocol::members},
     strand::Strand,
     sym::{self, Sym},
     unpack,
@@ -85,7 +85,7 @@ impl<'v> Protocol<'v> for Backtrace<'v> {
     fn op_inspect<'a>(_this: Recv<'v, 'a, Self>, _vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {
         Some(Inspect {
             is_abstract: false,
-            members: vec![Sym::well_known(sym::LEN), Sym::well_known(sym::ITER_METHOD)],
+            members: members![Getter(sym::LEN), Method(sym::ITER_METHOD)],
         })
     }
 
@@ -359,7 +359,7 @@ impl<'v> Protocol<'v> for Type {
     fn op_inspect<'a>(_this: Recv<'v, 'a, Self>, _vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {
         Some(Inspect {
             is_abstract: true,
-            members: Vec::new(),
+            members: &[],
         })
     }
 }
