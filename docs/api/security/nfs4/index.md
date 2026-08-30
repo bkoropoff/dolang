@@ -6,10 +6,10 @@ The `security.nfs4` module exposes NFSv4 access-control-list types.
 
 | Type                  | Description                       |
 | --------------------- | --------------------------------- |
-| [`Acl`](./acl.md)     | NFSv4 access-control list         |
 | [`Ace`](./ace.md)     | NFSv4 access-control entry        |
-| [`Mask`](./mask.md)   | NFSv4 ACE permission mask         |
+| [`Acl`](./acl.md)     | NFSv4 access-control list         |
 | [`Flags`](./flags.md) | NFSv4 ACE inheritance/audit flags |
+| [`Mask`](./mask.md)   | NFSv4 ACE permission mask         |
 
 ## Functions
 

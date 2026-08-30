@@ -36,21 +36,6 @@ assert_eq ((10).binary()) "1010"
 assert_eq ((-10).binary()) "-1010"
 ```
 
-### `octal()`
-
-Formats the integer in base 8.
-
-#### Returns
-
-[`Str`](./str.md)
-
-#### Example
-
-```
-assert_eq ((10).octal()) "12"
-assert_eq ((-10).octal()) "-12"
-```
-
 ### `hex()`
 
 Formats the integer in lowercase base 16.
@@ -64,6 +49,21 @@ Formats the integer in lowercase base 16.
 ```
 assert_eq ((255).hex()) "ff"
 assert_eq ((-255).hex()) "-ff"
+```
+
+### `octal()`
+
+Formats the integer in base 8.
+
+#### Returns
+
+[`Str`](./str.md)
+
+#### Example
+
+```
+assert_eq ((10).octal()) "12"
+assert_eq ((-10).octal()) "-12"
 ```
 
 ## Operators

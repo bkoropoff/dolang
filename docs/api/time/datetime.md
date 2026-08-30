@@ -4,14 +4,6 @@ A UTC instant represented as Unix nanoseconds.
 
 ## Type Methods
 
-### `now()`
-
-Returns the current UTC time.
-
-```
-echo $DateTime.now()
-```
-
 ### `from_unix seconds? :nanos?`
 
 Creates a `DateTime` from a Unix timestamp.
@@ -30,6 +22,14 @@ echo $ DateTime.from_unix 1700000000
 echo $ DateTime.from_unix 1.25
 echo $ DateTime.from_unix nanos: 1700000000123000000
 echo $ DateTime.from_unix 1700000000 nanos: 123000000
+```
+
+### `now()`
+
+Returns the current UTC time.
+
+```
+echo $DateTime.now()
 ```
 
 ### `parse_rfc text`
@@ -72,6 +72,14 @@ echo $dt.rfc()
 
 ## Methods
 
+### `date()`
+
+Returns the UTC calendar date.
+
+#### Returns
+
+[`Date`](./date.md)
+
 ### `rfc()`
 
 Returns the canonical UTC RFC representation.
@@ -86,14 +94,6 @@ Returns the canonical UTC RFC representation.
 let dt = DateTime.from_unix(1700000000)
 echo $dt.rfc()
 ```
-
-### `date()`
-
-Returns the UTC calendar date.
-
-#### Returns
-
-[`Date`](./date.md)
 
 ## String Form
 

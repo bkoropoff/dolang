@@ -22,7 +22,7 @@ HTTP client for making web requests.
 | `identity`      | [`Str`](../std/str.md)\|[`Bin`](../std/bin.md)              | PKCS#12/PFX client certificate for mutual TLS                |
 | `password`      | [`Str`](../std/str.md)                                      | Password for the PKCS#12 identity (defaults to empty)        |
 | `invalid_certs` | `:DANGER_ACCEPT:`                                           | Pass `:DANGER_ACCEPT:` to disable TLS certificate validation |
-| `func`          | func                                                        | Callable to run with the client; auto-closes when done       |
+| `func`          | `Func`                                                      | Function to run with the client; auto-closes when done       |
 
 #### Returns
 
@@ -128,7 +128,7 @@ Makes an HTTP request using the specified verb.
 | `headers`   | [`Dict`](../std/dict.md)                              | Dictionary of headers; repeated keys are accepted             |
 | `query`     | [`Dict`](../std/dict.md)                              | Dictionary of query parameters; repeated keys are accepted    |
 | `status`    | `:IGNORE:`\|`"IGNORE"`                                | Return the response even when the status is outside 200-299   |
-| `block`     | func                                                  | Called with response; response is closed upon return or error |
+| `block`     | `Func`                                                | Called with response; response is closed upon return or error |
 
 #### Returns
 

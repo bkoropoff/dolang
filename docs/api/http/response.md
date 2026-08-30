@@ -9,30 +9,6 @@ most subsequent methods will return errors.
 
 ## Fields
 
-### `url`
-
-The final response URL after redirects.
-
-#### Type
-
-[`url.Url`](../url/url.md)
-
-### `status`
-
-The HTTP status code of the response.
-
-#### Type
-
-[`Int`](../std/int.md)
-
-#### Example
-
-```
-
-let response = get https://api.example.com/users
-echo $response.status  # 200 for success
-```
-
 ### `headers`
 
 A dict-like view over the response headers.
@@ -62,35 +38,31 @@ get https://api.example.com/archive do |response|
   assert (type modified DateTime)
 ```
 
-## Methods
+### `status`
 
-### `close`
+The HTTP status code of the response.
 
-Closes the response if it hasn't been already.
+#### Type
 
-### `text`
-
-Reads the response body as text. This method consumes the response and leaves it
-in a "closed" state.
-
-#### Returns
-
-[`Str`](../std/str.md) -- The response body as text
-
-#### Errors
-
-| Exception             | Condition                              |
-| --------------------- | -------------------------------------- |
-| `RuntimeError`        | The response has already been closed   |
-| [`Error`](./error.md) | A transport or protocol failure occurs |
+[`Int`](../std/int.md)
 
 #### Example
 
 ```
 
 let response = get https://api.example.com/users
-echo $response.text()
+echo $response.status  # 200 for success
 ```
+
+### `url`
+
+The final response URL after redirects.
+
+#### Type
+
+[`url.Url`](../url/url.md)
+
+## Methods
 
 ### `body`
 
@@ -108,36 +80,6 @@ leaves it in a "closed" state.
 let response = get https://api.example.com/image.png
 let data = response.body()
 echo "Downloaded $data.len bytes"
-```
-
-### `json`
-
-Reads the response body and parses it as JSON. This method consumes the response
-and leaves it in a "closed" state.
-
-#### Returns
-
-The parsed JSON value as a tree of
-[`Int`](../std/int.md),
-[`Float`](../std/float.md), [`Str`](../std/str.md),
-[`Array`](../std/array.md), and [`Dict`](../std/dict.md), as
-appropriate.
-
-#### Errors
-
-| Exception             | Condition                                  |
-| --------------------- | ------------------------------------------ |
-| `RuntimeError`        | The response has already been closed       |
-| [`Error`](./error.md) | An error occurs while reading the response |
-| `ValueError`          | The JSON is invalid                        |
-
-#### Example
-
-```
-
-let response = get https://api.example.com/users
-let data = response.json()
-echo $data["users"][0]["name"]
 ```
 
 ### `chunks`
@@ -161,24 +103,9 @@ get https://api.example.com/large-file do |response|
   echo "Downloaded $total_size bytes"
 ```
 
-### `lines`
+### `close`
 
-Returns an iterator that yields the response body as lines (split on `\n` or
-`\r\n`). Line endings are stripped from the returned values.
-
-#### Returns
-
-An iterator of [`Str`](../std/str.md) values
-
-#### Example
-
-```
-
-get https://api.example.com/logs do |response|
-  for line = response.lines()
-    if (line.contains "ERROR")
-      echo $line
-```
+Closes the response if it hasn't been already.
 
 ### `events`
 
@@ -213,4 +140,77 @@ get https://api.example.com/stream do |response|
   for event = response.events()
     echo "event=$event.type id=$event.id"
     echo $event.data
+```
+
+### `json`
+
+Reads the response body and parses it as JSON. This method consumes the response
+and leaves it in a "closed" state.
+
+#### Returns
+
+The parsed JSON value as a tree of
+[`Int`](../std/int.md),
+[`Float`](../std/float.md), [`Str`](../std/str.md),
+[`Array`](../std/array.md), and [`Dict`](../std/dict.md), as
+appropriate.
+
+#### Errors
+
+| Exception             | Condition                                  |
+| --------------------- | ------------------------------------------ |
+| `RuntimeError`        | The response has already been closed       |
+| [`Error`](./error.md) | An error occurs while reading the response |
+| `ValueError`          | The JSON is invalid                        |
+
+#### Example
+
+```
+
+let response = get https://api.example.com/users
+let data = response.json()
+echo $data["users"][0]["name"]
+```
+
+### `lines`
+
+Returns an iterator that yields the response body as lines (split on `\n` or
+`\r\n`). Line endings are stripped from the returned values.
+
+#### Returns
+
+An iterator of [`Str`](../std/str.md) values
+
+#### Example
+
+```
+
+get https://api.example.com/logs do |response|
+  for line = response.lines()
+    if (line.contains "ERROR")
+      echo $line
+```
+
+### `text`
+
+Reads the response body as text. This method consumes the response and leaves it
+in a "closed" state.
+
+#### Returns
+
+[`Str`](../std/str.md) -- The response body as text
+
+#### Errors
+
+| Exception             | Condition                              |
+| --------------------- | -------------------------------------- |
+| `RuntimeError`        | The response has already been closed   |
+| [`Error`](./error.md) | A transport or protocol failure occurs |
+
+#### Example
+
+```
+
+let response = get https://api.example.com/users
+echo $response.text()
 ```

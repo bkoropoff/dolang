@@ -30,32 +30,13 @@ let copy = Url $base
 
 ## Fields
 
-### `scheme`
+### `fragment`
 
-The URL scheme, such as `"https"` or `"file"`.
-
-### `username`
-
-The decoded username, or `nil` if not present.
-
-### `password`
-
-The decoded password, or `nil` if not present.
+The decoded fragment string, or `nil` if absent.
 
 ### `host`
 
 The host string, or `nil` if the URL has no host.
-
-### `port`
-
-The explicit port number, or `nil` if not present.
-
-### `path`
-
-The serialized path component.
-
-This preserves percent-encoding. Use [`segments`](#segments) for decoded
-path segments.
 
 ### `name`
 
@@ -64,28 +45,20 @@ filename.
 
 This returns `nil` for URLs whose path is empty or ends with `/`.
 
-### `query_raw`
+### `password`
 
-The raw query string without the leading `?`, or `nil` if absent.
+The decoded password, or `nil` if not present.
 
-### `fragment`
+### `path`
 
-The decoded fragment string, or `nil` if absent.
+The serialized path component.
 
-### `segments`
+This preserves percent-encoding. Use [`segments`](#segments) for decoded
+path segments.
 
-Immutable array-like view of decoded path segments.
+### `port`
 
-#### Returns
-
-iterator of [`Str`](../std/str.md)
-
-#### Example
-
-```
-let url = Url "https://example.com/a%20b/c"
-assert_eq [...url.segments] ["a b", "c"]
-```
+The explicit port number, or `nil` if not present.
 
 ### `query`
 
@@ -107,23 +80,34 @@ assert_eq $pairs[0][1] "a b"
 assert_eq $pairs[1][1] "c"
 ```
 
-## Methods
+### `query_raw`
 
-### `with_query_raw query`
+The raw query string without the leading `?`, or `nil` if absent.
 
-Returns a new `Url` with its raw query replaced.
+### `scheme`
 
-Pass `nil` to remove the query.
+The URL scheme, such as `"https"` or `"file"`.
 
-#### Parameters
+### `segments`
 
-| Name    | Type         | Description               |
-| ------- | ------------ | ------------------------- |
-| `query` | `Str`\|`nil` | Raw query string or `nil` |
+Immutable array-like view of decoded path segments.
 
 #### Returns
 
-`Url`
+iterator of [`Str`](../std/str.md)
+
+#### Example
+
+```
+let url = Url "https://example.com/a%20b/c"
+assert_eq [...url.segments] ["a b", "c"]
+```
+
+### `username`
+
+The decoded username, or `nil` if not present.
+
+## Methods
 
 ### `with_fragment fragment`
 
@@ -168,16 +152,23 @@ let url = (Url "https://example.com").with_query_pairs [
 assert_eq $url.query_raw "q=a+b&tag=x%2Fy"
 ```
 
+### `with_query_raw query`
+
+Returns a new `Url` with its raw query replaced.
+
+Pass `nil` to remove the query.
+
+#### Parameters
+
+| Name    | Type         | Description               |
+| ------- | ------------ | ------------------------- |
+| `query` | `Str`\|`nil` | Raw query string or `nil` |
+
+#### Returns
+
+`Url`
+
 ## Operations
-
-### String Conversion
-
-Converting a `Url` to string yields the canonical serialized URL.
-
-```
-let url = Url "https://example.com/a%20b"
-assert_eq (str url) "https://example.com/a%20b"
-```
 
 ### Equality
 
@@ -208,4 +199,13 @@ everything from the path onward.
 let base = Url "https://example.com/old/path?old=1#old"
 let href = (base / "/new/path?x=1#frag")
 assert_eq (str href) "https://example.com/new/path?x=1#frag"
+```
+
+### String Conversion
+
+Converting a `Url` to string yields the canonical serialized URL.
+
+```
+let url = Url "https://example.com/a%20b"
+assert_eq (str url) "https://example.com/a%20b"
 ```

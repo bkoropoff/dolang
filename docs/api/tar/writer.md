@@ -10,6 +10,28 @@ Selected compression as `:NONE:`, `:GZIP:`, or `:ZSTD:`.
 
 ## Methods
 
+### `create_dir path :mode? :uid? :gid? :mtime? :user_name? :group_name?`
+
+Creates a directory entry.
+
+#### Parameters
+
+| Name         | Type                                                         | Description                           |
+| ------------ | ------------------------------------------------------------ | ------------------------------------- |
+| `path`       | [`Str`](../std/str.md)\|[`fs.unix.Path`](../fs/unix/path.md) | Entry path                            |
+| `mode`       | [`Int`](../std/int.md)?                                      | Permission bits; default `0o755`      |
+| `uid`        | [`Int`](../std/int.md)?                                      | Owner ID; default `0`                 |
+| `gid`        | [`Int`](../std/int.md)?                                      | Group ID; default `0`                 |
+| `mtime`      | [`DateTime`](../time/datetime.md)?                           | Modification time; default Unix epoch |
+| `user_name`  | [`Str`](../std/str.md)?                                      | Owner name                            |
+| `group_name` | [`Str`](../std/str.md)?                                      | Group name                            |
+
+#### Example
+
+```
+archive.create_dir "subdir" mode: 0o755
+```
+
 ### `entry path :size ... func`
 
 Adds one regular-file entry and calls `func` with a scoped
@@ -33,7 +55,7 @@ handle.
 | `mtime`      | [`DateTime`](../time/datetime.md)?                           | Modification time; default Unix epoch |
 | `user_name`  | [`Str`](../std/str.md)?                                      | Owner name                            |
 | `group_name` | [`Str`](../std/str.md)?                                      | Group name                            |
-| `func`       | callable                                                     | Entry writer scope                    |
+| `func`       | `Func`                                                       | Entry writer scope                    |
 
 #### Returns
 
@@ -51,52 +73,6 @@ the result of `func`.
 ```
 archive.entry data.bin size: 4 mode: 0o600 do |entry|
   entry.write b"\x00\x01\x02\x03"
-```
-
-### `create_dir path :mode? :uid? :gid? :mtime? :user_name? :group_name?`
-
-Creates a directory entry.
-
-#### Parameters
-
-| Name         | Type                                                         | Description                           |
-| ------------ | ------------------------------------------------------------ | ------------------------------------- |
-| `path`       | [`Str`](../std/str.md)\|[`fs.unix.Path`](../fs/unix/path.md) | Entry path                            |
-| `mode`       | [`Int`](../std/int.md)?                                      | Permission bits; default `0o755`      |
-| `uid`        | [`Int`](../std/int.md)?                                      | Owner ID; default `0`                 |
-| `gid`        | [`Int`](../std/int.md)?                                      | Group ID; default `0`                 |
-| `mtime`      | [`DateTime`](../time/datetime.md)?                           | Modification time; default Unix epoch |
-| `user_name`  | [`Str`](../std/str.md)?                                      | Owner name                            |
-| `group_name` | [`Str`](../std/str.md)?                                      | Group name                            |
-
-#### Example
-
-```
-archive.create_dir "subdir" mode: 0o755
-```
-
-### `symlink target path :mode? :uid? :gid? :mtime? :user_name? :group_name?`
-
-Creates a symbolic link entry pointing to `target`. Argument order matches
-[`fs.symlink_file`](../fs/index.md#symlink_file-src-dst).
-
-#### Parameters
-
-| Name         | Type                                                         | Description                           |
-| ------------ | ------------------------------------------------------------ | ------------------------------------- |
-| `target`     | [`Str`](../std/str.md)\|[`fs.unix.Path`](../fs/unix/path.md) | Path the symlink points to            |
-| `path`       | [`Str`](../std/str.md)\|[`fs.unix.Path`](../fs/unix/path.md) | Entry path                            |
-| `mode`       | [`Int`](../std/int.md)?                                      | Permission bits; default `0o777`      |
-| `uid`        | [`Int`](../std/int.md)?                                      | Owner ID; default `0`                 |
-| `gid`        | [`Int`](../std/int.md)?                                      | Group ID; default `0`                 |
-| `mtime`      | [`DateTime`](../time/datetime.md)?                           | Modification time; default Unix epoch |
-| `user_name`  | [`Str`](../std/str.md)?                                      | Owner name                            |
-| `group_name` | [`Str`](../std/str.md)?                                      | Group name                            |
-
-#### Example
-
-```
-archive.symlink "target.txt" "link.txt"
 ```
 
 ### `hard_link target path :mode? :uid? :gid? :mtime? :user_name? :group_name?`
@@ -121,4 +97,28 @@ Creates a hard-link entry pointing to `target`. Argument order matches
 
 ```
 archive.hard_link "file.txt" "link.txt"
+```
+
+### `symlink target path :mode? :uid? :gid? :mtime? :user_name? :group_name?`
+
+Creates a symbolic link entry pointing to `target`. Argument order matches
+[`fs.symlink_file`](../fs/index.md#symlink_file-src-dst).
+
+#### Parameters
+
+| Name         | Type                                                         | Description                           |
+| ------------ | ------------------------------------------------------------ | ------------------------------------- |
+| `target`     | [`Str`](../std/str.md)\|[`fs.unix.Path`](../fs/unix/path.md) | Path the symlink points to            |
+| `path`       | [`Str`](../std/str.md)\|[`fs.unix.Path`](../fs/unix/path.md) | Entry path                            |
+| `mode`       | [`Int`](../std/int.md)?                                      | Permission bits; default `0o777`      |
+| `uid`        | [`Int`](../std/int.md)?                                      | Owner ID; default `0`                 |
+| `gid`        | [`Int`](../std/int.md)?                                      | Group ID; default `0`                 |
+| `mtime`      | [`DateTime`](../time/datetime.md)?                           | Modification time; default Unix epoch |
+| `user_name`  | [`Str`](../std/str.md)?                                      | Owner name                            |
+| `group_name` | [`Str`](../std/str.md)?                                      | Group name                            |
+
+#### Example
+
+```
+archive.symlink "target.txt" "link.txt"
 ```

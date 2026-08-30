@@ -30,6 +30,11 @@ server.mock
     assert_eq $reqs[0].method "POST"
 ```
 
+### `unmount`
+
+Unmounts every mock this handle registered. They stop matching further
+requests. Has no effect on items already unmounted.
+
 ### `verify`
 
 Re-checks the `expect:` condition of every item registered by this handle
@@ -39,8 +44,3 @@ Re-checks the `expect:` condition of every item registered by this handle
 
 Raises if any item's `expect:` is unsatisfied, same as at scoped-block exit
 — the message lists every unsatisfied item, one per line.
-
-### `unmount`
-
-Unmounts every mock this handle registered. They stop matching further
-requests. Has no effect on items already unmounted.

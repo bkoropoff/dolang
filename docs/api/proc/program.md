@@ -1,6 +1,6 @@
 # `Program`
 
-Callable proxy for an external program.
+Function proxy for an external program.
 
 ## Constructor
 

@@ -7,10 +7,10 @@ patches.
 
 | Type                             | Description                          |
 | -------------------------------- | ------------------------------------ |
+| [`ApplyError`](./applyerror.md)  | Error while applying a patch         |
+| [`ParseError`](./parseerror.md)  | Patch parsing error                  |
 | [`Patch`](./patch.md)            | One file-level patch operation       |
 | [`PatchIter`](./patchiter.md)    | Iterator over a patch stream         |
-| [`ParseError`](./parseerror.md)  | Patch parsing error                  |
-| [`ApplyError`](./applyerror.md)  | Error while applying a patch         |
 
 ## Functions
 

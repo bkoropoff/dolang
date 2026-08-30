@@ -8,10 +8,10 @@ macOS `guid_t` UUIDs.
 
 | Type                  | Description                          |
 | --------------------- | ------------------------------------ |
-| [`Acl`](./acl.md)     | macOS extended access-control list   |
 | [`Ace`](./ace.md)     | macOS extended access-control entry  |
-| [`Mask`](./mask.md)   | macOS extended ACE permission mask   |
+| [`Acl`](./acl.md)     | macOS extended access-control list   |
 | [`Flags`](./flags.md) | macOS extended ACE inheritance flags |
+| [`Mask`](./mask.md)   | macOS extended ACE permission mask   |
 
 ## Functions
 
@@ -32,48 +32,6 @@ ace allow: "00112233-4455-6677-8899-aabbccddeeff" mask: [:READ_DATA:]
 Constructs a macOS ACL from [`Ace`](./ace.md) values and declarative ACE
 dictionaries. Pass collections with `...` to spread their entries. An empty
 ACL is valid.
-
-### `uuid_for_uid uid`
-
-Resolves a Unix user ID to its macOS principal UUID.
-
-#### Parameters
-
-| Name  | Type  | Description  |
-| ----- | ----- | ------------ |
-| `uid` | `Int` | Unix user ID |
-
-#### Returns
-
-[`uuid.Uuid`](../../uuid/uuid.md)
-
-#### Errors
-
-- Raises `UnsupportedError` when the active VFS target is not macOS.
-
-#### Example
-
-```
-let owner = security.macos.uuid_for_uid 501
-```
-
-### `uuid_for_gid gid`
-
-Resolves a Unix group ID to its macOS principal UUID.
-
-#### Parameters
-
-| Name  | Type  | Description   |
-| ----- | ----- | ------------- |
-| `gid` | `Int` | Unix group ID |
-
-#### Returns
-
-[`uuid.Uuid`](../../uuid/uuid.md)
-
-#### Errors
-
-- Raises `UnsupportedError` when the active VFS target is not macOS.
 
 ### `id_for_uuid uuid`
 
@@ -104,4 +62,46 @@ if (kind == :UID:)
   echo "uid: $id"
 else
   echo "gid: $id"
+```
+
+### `uuid_for_gid gid`
+
+Resolves a Unix group ID to its macOS principal UUID.
+
+#### Parameters
+
+| Name  | Type  | Description   |
+| ----- | ----- | ------------- |
+| `gid` | `Int` | Unix group ID |
+
+#### Returns
+
+[`uuid.Uuid`](../../uuid/uuid.md)
+
+#### Errors
+
+- Raises `UnsupportedError` when the active VFS target is not macOS.
+
+### `uuid_for_uid uid`
+
+Resolves a Unix user ID to its macOS principal UUID.
+
+#### Parameters
+
+| Name  | Type  | Description  |
+| ----- | ----- | ------------ |
+| `uid` | `Int` | Unix user ID |
+
+#### Returns
+
+[`uuid.Uuid`](../../uuid/uuid.md)
+
+#### Errors
+
+- Raises `UnsupportedError` when the active VFS target is not macOS.
+
+#### Example
+
+```
+let owner = security.macos.uuid_for_uid 501
 ```

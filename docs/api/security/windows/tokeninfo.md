@@ -4,13 +4,17 @@ Windows access token information.
 
 ## Fields
 
+### `groups`
+
+A lazy array-like view of the token's [`TokenGroup`](./tokengroup.md) objects.
+
 ### `is_elevated`
 
 Whether the token is elevated.
 
-### `user_sid`
+### `logon_sid`
 
-SID of the token's user.
+The group SID marked as the token's logon SID, or `nil` if none is present.
 
 ### `owner_sid`
 
@@ -20,10 +24,6 @@ Default owner SID for objects created by the token.
 
 Primary group SID for objects created by the token.
 
-### `logon_sid`
+### `user_sid`
 
-The group SID marked as the token's logon SID, or `nil` if none is present.
-
-### `groups`
-
-A lazy array-like view of the token's [`TokenGroup`](./tokengroup.md) objects.
+SID of the token's user.

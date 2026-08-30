@@ -4,15 +4,6 @@ Server-Sent Event item yielded by [`Response.events()`](./response.md#events).
 
 ## Fields
 
-### `type`
-
-The event type. When the stream omits `event:`, or provides an empty `event:`
-field, this defaults to `"message"`.
-
-#### Type
-
-[`Str`](../std/str.md)
-
 ### `data`
 
 The event payload text. Multiple `data:` lines are joined with `\n`.
@@ -45,3 +36,12 @@ get https://api.example.com/stream do |response|
   for event = response.events()
     echo "[$event.type] $event.data"
 ```
+
+### `type`
+
+The event type. When the stream omits `event:`, or provides an empty `event:`
+field, this defaults to `"message"`.
+
+#### Type
+
+[`Str`](../std/str.md)

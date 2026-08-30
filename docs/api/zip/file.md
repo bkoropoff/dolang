@@ -8,6 +8,19 @@ Unix mode is available on [`Entry`](./entry.md) rather than `File`.
 
 ## Methods
 
+### `close()`
+
+Closes the file.
+
+#### Example
+
+```
+open "archive.zip" do |archive|
+  let file = archive.open "data.txt"
+  let content = file.read 1024
+  file.close()
+```
+
 ### `read size`
 
 Reads data from the file.
@@ -69,16 +82,3 @@ open "output.zip" "w" do |archive|
 #### Errors
 
 Raises a runtime error if called on a file opened in read mode.
-
-### `close()`
-
-Closes the file.
-
-#### Example
-
-```
-open "archive.zip" do |archive|
-  let file = archive.open "data.txt"
-  let content = file.read 1024
-  file.close()
-```

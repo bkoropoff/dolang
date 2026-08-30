@@ -60,6 +60,95 @@ buf.append 42
 assert_eq $buf.freeze() "foo42"
 ```
 
+### `clear`
+
+Empties the buffer, retaining its allocated capacity.
+
+```
+let buf = StrBuf("foobar")
+buf.clear()
+assert_eq $buf.len 0
+buf.append "x"
+assert_eq $buf.freeze() "x"
+```
+
+### `contains needle`
+
+Tests whether the buffer's contents contain the given substring.
+
+#### Parameters
+
+| Name     | Type              | Description           |
+| -------- | ----------------- | --------------------- |
+| `needle` | [`Str`](./str.md) | the substring to find |
+
+#### Returns
+
+[`Bool`](./index.md)
+
+#### Example
+
+```
+assert (StrBuf("foobar").contains "oob")
+```
+
+### `drain size?`
+
+Returns an iterator that removes and yields up to `size` bytes at a time
+from the front of the buffer as it's consumed.
+
+Each chunk boundary is rounded down to the nearest UTF-8 code point
+boundary, unless that would produce an empty chunk (`size` smaller than the
+first remaining code point), in which case it rounds up instead so every
+chunk yielded is non-empty.
+
+#### Parameters
+
+| Name   | Type                 | Description                                   |
+| ------ | -------------------- | --------------------------------------------- |
+| `size` | [`Int`](./index.md)? | maximum bytes per chunk (defaults to 512 KiB) |
+
+#### Returns
+
+iterator of [`Str`](./str.md)
+
+#### Example
+
+```
+let buf = StrBuf("hello world")
+assert_eq [...buf.drain(4)] ["hell", "o wo", "rld"]
+assert_eq $buf.len 0
+```
+
+Draining never shifts the buffer's remaining contents proportionally to
+their length: consumed bytes are dropped by advancing an internal cursor,
+not by copying the tail down on every chunk. Other mutating methods (and
+`freeze`) settle this cursor transparently before they run, so indices
+passed to them are always relative to the buffer's current (undrained)
+content. Multiple `drain` iterators created from the same buffer share this
+cursor, so they interleave draining the same content rather than each
+redraining it independently.
+
+### `ends_with suffix`
+
+Tests whether the buffer's contents end with the given suffix.
+
+#### Parameters
+
+| Name     | Type              | Description       |
+| -------- | ----------------- | ----------------- |
+| `suffix` | [`Str`](./str.md) | the suffix string |
+
+#### Returns
+
+[`Bool`](./index.md)
+
+#### Example
+
+```
+assert (StrBuf("foobar").ends_with "bar")
+```
+
 ### `extend value`
 
 Appends the raw bytes of `value`, which must be a [`Str`](./str.md).
@@ -76,6 +165,27 @@ Appends the raw bytes of `value`, which must be a [`Str`](./str.md).
 let buf = StrBuf("foo")
 buf.extend "bar"
 assert_eq $buf.freeze() "foobar"
+```
+
+### `freeze`
+
+Converts the buffer's current contents into an immutable [`Str`](./str.md)
+in place, without copying, and empties the buffer. The buffer stays usable
+afterward, and the returned string is unaffected by later mutation.
+
+#### Returns
+
+[`Str`](./str.md)
+
+#### Example
+
+```
+let buf = StrBuf("abc")
+let frozen = buf.freeze()
+assert_eq $frozen "abc"
+assert_eq $buf.len 0
+buf.append "def"
+assert_eq $frozen "abc"
 ```
 
 ### `insert index value`
@@ -124,94 +234,6 @@ assert_eq $buf.freeze() "fbar"
 Unlike `insert`, `remove` only accepts a range — a scalar index would remove
 a single UTF-8 code unit, which is rarely a useful result.
 
-### `truncate len`
-
-Shrinks the buffer to `len` bytes, discarding anything past that point.
-
-#### Parameters
-
-| Name  | Type                | Description                               |
-| ----- | ------------------- | ----------------------------------------- |
-| `len` | [`Int`](./index.md) | new length; must fall on a UTF-8 boundary |
-
-#### Example
-
-```
-let buf = StrBuf("foobar")
-buf.truncate 3
-assert_eq $buf.freeze() "foo"
-```
-
-### `clear`
-
-Empties the buffer, retaining its allocated capacity.
-
-```
-let buf = StrBuf("foobar")
-buf.clear()
-assert_eq $buf.len 0
-buf.append "x"
-assert_eq $buf.freeze() "x"
-```
-
-### `freeze`
-
-Converts the buffer's current contents into an immutable [`Str`](./str.md)
-in place, without copying, and empties the buffer. The buffer stays usable
-afterward, and the returned string is unaffected by later mutation.
-
-#### Returns
-
-[`Str`](./str.md)
-
-#### Example
-
-```
-let buf = StrBuf("abc")
-let frozen = buf.freeze()
-assert_eq $frozen "abc"
-assert_eq $buf.len 0
-buf.append "def"
-assert_eq $frozen "abc"
-```
-
-### `drain size?`
-
-Returns an iterator that removes and yields up to `size` bytes at a time
-from the front of the buffer as it's consumed.
-
-Each chunk boundary is rounded down to the nearest UTF-8 code point
-boundary, unless that would produce an empty chunk (`size` smaller than the
-first remaining code point), in which case it rounds up instead so every
-chunk yielded is non-empty.
-
-#### Parameters
-
-| Name   | Type                 | Description                                   |
-| ------ | -------------------- | --------------------------------------------- |
-| `size` | [`Int`](./index.md)? | maximum bytes per chunk (defaults to 512 KiB) |
-
-#### Returns
-
-iterator of [`Str`](./str.md)
-
-#### Example
-
-```
-let buf = StrBuf("hello world")
-assert_eq [...buf.drain(4)] ["hell", "o wo", "rld"]
-assert_eq $buf.len 0
-```
-
-Draining never shifts the buffer's remaining contents proportionally to
-their length: consumed bytes are dropped by advancing an internal cursor,
-not by copying the tail down on every chunk. Other mutating methods (and
-`freeze`) settle this cursor transparently before they run, so indices
-passed to them are always relative to the buffer's current (undrained)
-content. Multiple `drain` iterators created from the same buffer share this
-cursor, so they interleave draining the same content rather than each
-redraining it independently.
-
 ### `starts_with prefix`
 
 Tests whether the buffer's contents start with the given prefix.
@@ -230,46 +252,6 @@ Tests whether the buffer's contents start with the given prefix.
 
 ```
 assert (StrBuf("foobar").starts_with "foo")
-```
-
-### `ends_with suffix`
-
-Tests whether the buffer's contents end with the given suffix.
-
-#### Parameters
-
-| Name     | Type              | Description       |
-| -------- | ----------------- | ----------------- |
-| `suffix` | [`Str`](./str.md) | the suffix string |
-
-#### Returns
-
-[`Bool`](./index.md)
-
-#### Example
-
-```
-assert (StrBuf("foobar").ends_with "bar")
-```
-
-### `contains needle`
-
-Tests whether the buffer's contents contain the given substring.
-
-#### Parameters
-
-| Name     | Type              | Description           |
-| -------- | ----------------- | --------------------- |
-| `needle` | [`Str`](./str.md) | the substring to find |
-
-#### Returns
-
-[`Bool`](./index.md)
-
-#### Example
-
-```
-assert (StrBuf("foobar").contains "oob")
 ```
 
 ### `sub start end?`
@@ -294,6 +276,24 @@ buffer if omitted), without modifying the buffer.
 let buf = StrBuf("foobar")
 assert_eq (buf.sub 2) "obar"
 assert_eq (buf.sub 2 4) "ob"
+```
+
+### `truncate len`
+
+Shrinks the buffer to `len` bytes, discarding anything past that point.
+
+#### Parameters
+
+| Name  | Type                | Description                               |
+| ----- | ------------------- | ----------------------------------------- |
+| `len` | [`Int`](./index.md) | new length; must fall on a UTF-8 boundary |
+
+#### Example
+
+```
+let buf = StrBuf("foobar")
+buf.truncate 3
+assert_eq $buf.freeze() "foo"
 ```
 
 ## Operations

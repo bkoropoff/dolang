@@ -32,21 +32,9 @@ binary representation, or a symbol naming a
 
 ## Fields
 
-### `sid`
-
-Resolved [`Sid`](./sid.md).
-
-### `name`
-
-Unqualified account name.
-
 ### `domain`
 
 Account domain returned by Windows.
-
-### `qualified_name`
-
-The `domain\name` form, or `name` when the domain is empty.
 
 ### `kind`
 
@@ -61,3 +49,15 @@ For recognized values, see
 let account = SidName.lookup "BUILTIN\\Users"
 echo "$account.qualified_name ($account.kind)"
 ```
+
+### `name`
+
+Unqualified account name.
+
+### `qualified_name`
+
+The `domain\name` form, or `name` when the domain is empty.
+
+### `sid`
+
+Resolved [`Sid`](./sid.md).

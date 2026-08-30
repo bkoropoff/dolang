@@ -6,14 +6,6 @@ Returned by [`geometry()`](./console.md#geometry).
 
 ## Fields
 
-### `rows`
-
-Height in character cells, or `nil` if unknown.
-
-#### Returns
-
-[`Int`](../std/int.md)?
-
 ### `cols`
 
 Width in character cells, or `nil` if unknown.
@@ -34,6 +26,14 @@ let g = term.console.geometry()
 if g.cols
   echo $ term.preformat $ "-" * g.cols
 ```
+
+### `rows`
+
+Height in character cells, or `nil` if unknown.
+
+#### Returns
+
+[`Int`](../std/int.md)?
 
 ## Subclassing
 

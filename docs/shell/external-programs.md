@@ -15,7 +15,7 @@ sort stdin: $["c", "a", "b"].crimp()
 
 Call `run` directly, index it with a name or path, or destructure it to bind
 identifier-safe program names. The resulting [`Program`](../api/proc/program.md)
-proxy is callable:
+proxy is a function:
 
 ```
 run git status

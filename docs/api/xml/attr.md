@@ -29,10 +29,6 @@ let attr = Attr "id" "123" namespace: "urn:inventory" prefix: "inv"
 
 Read-only local attribute name.
 
-### `value`
-
-Mutable attribute value.
-
 ### `namespace`
 
 Read-only namespace URI as a `Str`, or `nil` for no namespace.
@@ -44,3 +40,7 @@ Read-only preferred prefix as a `Str`, or `nil`.
 ### `qname`
 
 Read-only qualified name formed from `prefix` and `name`.
+
+### `value`
+
+Mutable attribute value.

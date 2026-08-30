@@ -42,13 +42,11 @@ for entry = entries .
     echo "Unknown type: $(entry.name)"
 ```
 
-## Platform-Specific Fields
-
-### Unix-Only Fields
+## Unix Fields
 
 The following fields are only available on Unix systems:
 
-#### `ino`
+### `ino`
 
 The inode number of the file system entry.
 

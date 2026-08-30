@@ -7,6 +7,33 @@ parameters.
 
 ## Methods
 
+### `close()`
+
+Closes the statement and releases resources.
+
+### `execute args...`
+
+Executes the statement and returns the number of rows affected.
+
+#### Parameters
+
+| Name  | Type | Description                                           |
+| ----- | ---- | ----------------------------------------------------- |
+| `...` | any  | Key arguments for parameter binding                   |
+
+#### Returns
+
+`Int` - Number of rows affected
+
+#### Example
+
+```
+open "mydb.sqlite" do |conn|
+  conn.prepare "UPDATE users SET status = :status WHERE created < :date" do |stmt|
+    let affected = stmt.execute status: "archived" date: "2023-01-01"
+    echo "Archived $(affected) users"
+```
+
 ### `query args...`
 
 Executes the statement and returns a Rows iterator for reading results.
@@ -34,33 +61,6 @@ open "mydb.sqlite" do |conn|
       count += 1
     echo "Found $(count) adults"
 ```
-
-### `execute args...`
-
-Executes the statement and returns the number of rows affected.
-
-#### Parameters
-
-| Name  | Type | Description                                           |
-| ----- | ---- | ----------------------------------------------------- |
-| `...` | any  | Key arguments for parameter binding                   |
-
-#### Returns
-
-`Int` - Number of rows affected
-
-#### Example
-
-```
-open "mydb.sqlite" do |conn|
-  conn.prepare "UPDATE users SET status = :status WHERE created < :date" do |stmt|
-    let affected = stmt.execute status: "archived" date: "2023-01-01"
-    echo "Archived $(affected) users"
-```
-
-### `close()`
-
-Closes the statement and releases resources.
 
 ## Usage Notes
 

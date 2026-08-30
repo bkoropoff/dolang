@@ -4,29 +4,6 @@ Base64 encoding and decoding.
 
 ## Functions
 
-### `encode data`
-
-Encodes a string or binary value using standard RFC 4648 base64 with padding.
-
-#### Parameters
-
-| Name   | Type                                         | Description      |
-| ------ | -------------------------------------------- | ---------------- |
-| `data` | [`Str`](./std/str.md)\|[`Bin`](./std/bin.md) | data to encode   |
-
-#### Returns
-
-[`Str`](./std/str.md) - Base64 text
-
-#### Example
-
-```
-assert_eq (encode "") ""
-assert_eq (encode "hello") "aGVsbG8="
-assert_eq (encode b"hello") "aGVsbG8="
-assert_eq (encode b"\x00\x01\x02") "AAEC"
-```
-
 ### `decode text`
 
 Decodes standard RFC 4648 base64 text with padding and returns the raw bytes.
@@ -54,4 +31,27 @@ Decodes standard RFC 4648 base64 text with padding and returns the raw bytes.
 assert_eq (decode "aGVsbG8=") b"hello"
 assert_eq (decode $ encode "hello") b"hello"
 assert_eq (decode $ encode b"\x00\x01\x02") b"\x00\x01\x02"
+```
+
+### `encode data`
+
+Encodes a string or binary value using standard RFC 4648 base64 with padding.
+
+#### Parameters
+
+| Name   | Type                                         | Description      |
+| ------ | -------------------------------------------- | ---------------- |
+| `data` | [`Str`](./std/str.md)\|[`Bin`](./std/bin.md) | data to encode   |
+
+#### Returns
+
+[`Str`](./std/str.md) - Base64 text
+
+#### Example
+
+```
+assert_eq (encode "") ""
+assert_eq (encode "hello") "aGVsbG8="
+assert_eq (encode b"hello") "aGVsbG8="
+assert_eq (encode b"\x00\x01\x02") "AAEC"
 ```

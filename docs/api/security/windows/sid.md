@@ -81,10 +81,6 @@ echo $ str $admins
 
 ## Fields
 
-### `revision`
-
-SID revision number.
-
 ### `identifier_authority`
 
 The identifier authority as a symbol when it is well known, or its 48-bit
@@ -105,13 +101,17 @@ integer value otherwise.
 | `:AUTHENTICATION:`   | Authentication      |
 | `:PROCESS_TRUST:`    | Process trust       |
 
-### `sub_authority_count`
+### `revision`
 
-Number of sub-authorities.
+SID revision number.
 
 ### `sub_authorities`
 
 Sub-authorities as an immutable [`Tuple`](../../std/tuple.md).
+
+### `sub_authority_count`
+
+Number of sub-authorities.
 
 ## Methods
 

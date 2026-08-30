@@ -62,111 +62,6 @@ buf.append 42
 assert_eq $buf.freeze() b"foobar42"
 ```
 
-### `push ...bytes`
-
-Appends one or more raw byte values to the buffer.
-
-#### Parameters
-
-| Name       | Type                        | Description           |
-| ---------- | --------------------------- | --------------------- |
-| `...bytes` | [`Int`](./index.md) (0-255) | byte values to append |
-
-#### Example
-
-```
-let buf = BinBuf()
-buf.push 104 105
-assert_eq $buf.freeze() b"hi"
-```
-
-### `extend value`
-
-Appends the raw bytes of `value`, which must be a [`Str`](./str.md) or
-[`Bin`](./bin.md).
-
-#### Parameters
-
-| Name    | Type                                 | Description     |
-| ------- | ------------------------------------ | --------------- |
-| `value` | [`Bin`](./bin.md)\|[`Str`](./str.md) | bytes to append |
-
-#### Example
-
-```
-let buf = BinBuf(b"foo")
-buf.extend b"bar"
-assert_eq $buf.freeze() b"foobar"
-```
-
-### `insert index value`
-
-Inserts `value` at the given byte index, shifting the rest of the buffer
-right in place. `value` may be a single byte value, or a `Str`/`Bin` slice.
-
-#### Parameters
-
-| Name    | Type                                                              | Description             |
-| ------- | ----------------------------------------------------------------- | ----------------------- |
-| `index` | [`Int`](./index.md)                                               | insertion point         |
-| `value` | [`Int`](./index.md) (0-255)\|[`Bin`](./bin.md)\|[`Str`](./str.md) | byte or bytes to insert |
-
-#### Example
-
-```
-let buf = BinBuf(b"foobar")
-buf.insert 3 b"XYZ"
-buf.insert 0 65
-assert_eq $buf.freeze() b"AfooXYZbar"
-```
-
-### `remove index_or_range`
-
-Removes and returns a byte or a range of bytes, shifting the rest of the
-buffer left in place. An [`Int`](./index.md) index removes and returns a
-single byte; a [`Range`](./range.md) removes and returns a [`Bin`](./bin.md)
-of the removed bytes.
-
-#### Parameters
-
-| Name             | Type                                       | Description                   |
-| ---------------- | ------------------------------------------ | ----------------------------- |
-| `index_or_range` | [`Int`](./index.md)\|[`Range`](./range.md) | byte index or range to remove |
-
-#### Returns
-
-[`Int`](./index.md) or [`Bin`](./bin.md), matching the argument's kind
-
-#### Example
-
-```
-let buf = BinBuf(b"foobar")
-assert_eq (buf.remove 0) 102
-assert_eq $buf.freeze() b"oobar"
-
-let buf2 = BinBuf(b"foobar")
-assert_eq (buf2.remove (1..3)) b"oo"
-assert_eq $buf2.freeze() b"fbar"
-```
-
-### `truncate len`
-
-Shrinks the buffer to `len` bytes, discarding anything past that point.
-
-#### Parameters
-
-| Name  | Type                | Description |
-| ----- | ------------------- | ----------- |
-| `len` | [`Int`](./index.md) | new length  |
-
-#### Example
-
-```
-let buf = BinBuf(b"foobar")
-buf.truncate 3
-assert_eq $buf.freeze() b"foo"
-```
-
 ### `clear`
 
 Empties the buffer, retaining its allocated capacity.
@@ -179,25 +74,24 @@ buf.append b"x"
 assert_eq $buf.freeze() b"x"
 ```
 
-### `freeze`
+### `contains needle`
 
-Converts the buffer's current contents into an immutable [`Bin`](./bin.md)
-in place, without copying, and empties the buffer. The buffer stays usable
-afterward, and the returned value is unaffected by later mutation.
+Tests whether the buffer's contents contain the given bytes.
+
+#### Parameters
+
+| Name     | Type              | Description       |
+| -------- | ----------------- | ----------------- |
+| `needle` | [`Bin`](./bin.md) | the bytes to find |
 
 #### Returns
 
-[`Bin`](./bin.md)
+[`Bool`](./index.md)
 
 #### Example
 
 ```
-let buf = BinBuf(b"abc")
-let frozen = buf.freeze()
-assert_eq $frozen b"abc"
-assert_eq $buf.len 0
-buf.append b"def"
-assert_eq $frozen b"abc"
+assert (BinBuf(b"foobar").contains b"oob")
 ```
 
 ### `drain size?`
@@ -232,26 +126,6 @@ content. Multiple `drain` iterators created from the same buffer share this
 cursor, so they interleave draining the same content rather than each
 redraining it independently.
 
-### `starts_with prefix`
-
-Tests whether the buffer's contents start with the given prefix.
-
-#### Parameters
-
-| Name     | Type              | Description      |
-| -------- | ----------------- | ---------------- |
-| `prefix` | [`Bin`](./bin.md) | the prefix bytes |
-
-#### Returns
-
-[`Bool`](./index.md)
-
-#### Example
-
-```
-assert (BinBuf(b"foobar").starts_with b"foo")
-```
-
 ### `ends_with suffix`
 
 Tests whether the buffer's contents end with the given suffix.
@@ -272,15 +146,138 @@ Tests whether the buffer's contents end with the given suffix.
 assert (BinBuf(b"foobar").ends_with b"bar")
 ```
 
-### `contains needle`
+### `extend value`
 
-Tests whether the buffer's contents contain the given bytes.
+Appends the raw bytes of `value`, which must be a [`Str`](./str.md) or
+[`Bin`](./bin.md).
 
 #### Parameters
 
-| Name     | Type              | Description       |
-| -------- | ----------------- | ----------------- |
-| `needle` | [`Bin`](./bin.md) | the bytes to find |
+| Name    | Type                                 | Description     |
+| ------- | ------------------------------------ | --------------- |
+| `value` | [`Bin`](./bin.md)\|[`Str`](./str.md) | bytes to append |
+
+#### Example
+
+```
+let buf = BinBuf(b"foo")
+buf.extend b"bar"
+assert_eq $buf.freeze() b"foobar"
+```
+
+### `freeze`
+
+Converts the buffer's current contents into an immutable [`Bin`](./bin.md)
+in place, without copying, and empties the buffer. The buffer stays usable
+afterward, and the returned value is unaffected by later mutation.
+
+#### Returns
+
+[`Bin`](./bin.md)
+
+#### Example
+
+```
+let buf = BinBuf(b"abc")
+let frozen = buf.freeze()
+assert_eq $frozen b"abc"
+assert_eq $buf.len 0
+buf.append b"def"
+assert_eq $frozen b"abc"
+```
+
+### `hex`
+
+Returns the buffer's contents as a lowercase hexadecimal string, without
+modifying the buffer.
+
+#### Returns
+
+[`Str`](./str.md)
+
+#### Example
+
+```
+assert_eq (BinBuf(b"ABC").hex()) "414243"
+```
+
+### `insert index value`
+
+Inserts `value` at the given byte index, shifting the rest of the buffer
+right in place. `value` may be a single byte value, or a `Str`/`Bin` slice.
+
+#### Parameters
+
+| Name    | Type                                                              | Description             |
+| ------- | ----------------------------------------------------------------- | ----------------------- |
+| `index` | [`Int`](./index.md)                                               | insertion point         |
+| `value` | [`Int`](./index.md) (0-255)\|[`Bin`](./bin.md)\|[`Str`](./str.md) | byte or bytes to insert |
+
+#### Example
+
+```
+let buf = BinBuf(b"foobar")
+buf.insert 3 b"XYZ"
+buf.insert 0 65
+assert_eq $buf.freeze() b"AfooXYZbar"
+```
+
+### `push ...bytes`
+
+Appends one or more raw byte values to the buffer.
+
+#### Parameters
+
+| Name       | Type                        | Description           |
+| ---------- | --------------------------- | --------------------- |
+| `...bytes` | [`Int`](./index.md) (0-255) | byte values to append |
+
+#### Example
+
+```
+let buf = BinBuf()
+buf.push 104 105
+assert_eq $buf.freeze() b"hi"
+```
+
+### `remove index_or_range`
+
+Removes and returns a byte or a range of bytes, shifting the rest of the
+buffer left in place. An [`Int`](./index.md) index removes and returns a
+single byte; a [`Range`](./range.md) removes and returns a [`Bin`](./bin.md)
+of the removed bytes.
+
+#### Parameters
+
+| Name             | Type                                       | Description                   |
+| ---------------- | ------------------------------------------ | ----------------------------- |
+| `index_or_range` | [`Int`](./index.md)\|[`Range`](./range.md) | byte index or range to remove |
+
+#### Returns
+
+[`Int`](./index.md) or [`Bin`](./bin.md), matching the argument's kind
+
+#### Example
+
+```
+let buf = BinBuf(b"foobar")
+assert_eq (buf.remove 0) 102
+assert_eq $buf.freeze() b"oobar"
+
+let buf2 = BinBuf(b"foobar")
+assert_eq (buf2.remove (1..3)) b"oo"
+assert_eq $buf2.freeze() b"fbar"
+```
+
+### `starts_with prefix`
+
+Tests whether the buffer's contents start with the given prefix.
+
+#### Parameters
+
+| Name     | Type              | Description      |
+| -------- | ----------------- | ---------------- |
+| `prefix` | [`Bin`](./bin.md) | the prefix bytes |
 
 #### Returns
 
@@ -289,7 +286,7 @@ Tests whether the buffer's contents contain the given bytes.
 #### Example
 
 ```
-assert (BinBuf(b"foobar").contains b"oob")
+assert (BinBuf(b"foobar").starts_with b"foo")
 ```
 
 ### `sub start end?`
@@ -316,19 +313,22 @@ assert_eq (buf.sub 2) b"obar"
 assert_eq (buf.sub 2 4) b"ob"
 ```
 
-### `hex`
+### `truncate len`
 
-Returns the buffer's contents as a lowercase hexadecimal string, without
-modifying the buffer.
+Shrinks the buffer to `len` bytes, discarding anything past that point.
 
-#### Returns
+#### Parameters
 
-[`Str`](./str.md)
+| Name  | Type                | Description |
+| ----- | ------------------- | ----------- |
+| `len` | [`Int`](./index.md) | new length  |
 
 #### Example
 
 ```
-assert_eq (BinBuf(b"ABC").hex()) "414243"
+let buf = BinBuf(b"foobar")
+buf.truncate 3
+assert_eq $buf.freeze() b"foo"
 ```
 
 ## Operations

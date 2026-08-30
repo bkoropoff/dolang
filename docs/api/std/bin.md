@@ -21,233 +21,6 @@ assert_eq (b"".len) 0
 
 ## Instance Methods
 
-### `starts_with prefix`
-
-Tests whether the binary data starts with the given prefix.
-
-#### Parameters
-
-| Name     | Type              | Description      |
-| -------- | ----------------- | ---------------- |
-| `prefix` | [`Bin`](./bin.md) | the prefix bytes |
-
-#### Returns
-
-[`Bool`](./index.md)
-
-#### Example
-
-```
-assert (b"hello".starts_with b"he")
-assert (!(b"hello".starts_with b"lo"))
-```
-
-### `without_prefix prefix`
-
-Returns the binary data with the prefix removed if it matches, otherwise
-returns the original data.
-
-#### Parameters
-
-| Name     | Type              | Description          |
-| -------- | ----------------- | -------------------- |
-| `prefix` | [`Bin`](./bin.md) | the prefix to remove |
-
-#### Returns
-
-[`Bin`](./bin.md)
-
-#### Example
-
-```
-assert_eq (b"hello".without_prefix b"he") b"llo"
-assert_eq (b"hello".without_prefix b"xx") b"hello"
-```
-
-### `ends_with suffix`
-
-Tests whether the binary data ends with the given suffix.
-
-#### Parameters
-
-| Name     | Type              | Description      |
-| -------- | ----------------- | ---------------- |
-| `suffix` | [`Bin`](./bin.md) | the suffix bytes |
-
-#### Returns
-
-[`Bool`](./index.md)
-
-#### Example
-
-```
-assert (b"hello".ends_with b"lo")
-```
-
-### `without_suffix suffix`
-
-Returns the binary data with the suffix removed if it matches, otherwise returns
-the original data.
-
-#### Parameters
-
-| Name     | Type              | Description          |
-| -------- | ----------------- | -------------------- |
-| `suffix` | [`Bin`](./bin.md) | the suffix to remove |
-
-#### Returns
-
-[`Bin`](./bin.md)
-
-#### Example
-
-```
-assert_eq (b"hello".without_suffix b"lo") b"hel"
-```
-
-### `split delimiter [limit: int]`
-
-Splits the binary data by the delimiter, returning an iterator that yields
-segments in **left-to-right** order.
-
-The optional `limit` works identically to
-[`str.split`](./str.md#split-delimiter-limit-int): positive splits from the
-left, negative splits from the right (but still yields left-to-right).
-
-#### Parameters
-
-| Name        | Type                | Description                                 |
-| ----------- | ------------------- | ------------------------------------------- |
-| `delimiter` | [`Bin`](./bin.md)   | the delimiter bytes                         |
-| `limit`     | [`Int`](./index.md) | max splits; negative means split from right |
-
-#### Returns
-
-iterator of [`Bin`](./bin.md)
-
-#### Example
-
-```
-assert_eq [...b"a,b,c".split b","] [b"a", b"b", b"c"]
-assert_eq [...b"a,b,c".split b"," limit: 1] [b"a", b"b,c"]
-let base ext = b"archive.tar.gz".split b"." limit: -1
-assert_eq $base b"archive.tar"
-assert_eq $ext b"gz"
-```
-
-### `rsplit delimiter [limit: int]`
-
-Like `split`, but yields segments in **right-to-left** order. Mirrors
-[`str.rsplit`](./str.md#rsplit-delimiter-limit-int).
-
-#### Parameters
-
-| Name        | Type                | Description                                |
-| ----------- | ------------------- | ------------------------------------------ |
-| `delimiter` | [`Bin`](./bin.md)   | the delimiter bytes                        |
-| `limit`     | [`Int`](./index.md) | max splits; negative means split from left |
-
-#### Returns
-
-iterator of [`Bin`](./bin.md)
-
-#### Example
-
-```
-assert_eq [...b"a,b,c".rsplit b","] [b"c", b"b", b"a"]
-assert_eq [...b"a,b,c".rsplit b"," limit: 1] [b"c", b"a,b"]
-```
-
-### `join iter?`
-
-Joins values from an input source using this binary data as a separator.
-
-#### Parameters
-
-| Name    | Type | Description                                      |
-| ------- | ---- | ------------------------------------------------ |
-| `input` |      | iterable to join (uses default input if omitted) |
-
-#### Returns
-
-[`Bin`](./bin.md)
-
-#### Example
-
-```
-assert_eq (b",".join [b"a", b"b", b"c"]) b"a,b,c"
-```
-
-### `trim chars?`
-
-Removes bytes (or specified characters) from both ends.
-
-#### Parameters
-
-| Name    | Type                                           | Description                                  |
-| ------- | ---------------------------------------------- | -------------------------------------------- |
-| `chars` | [`Bin`](./bin.md)\|[`Iterable`](./iterable.md) | bytes to trim (defaults to whitespace bytes) |
-
-The pattern is a set of *bytes*, from a [`Bin`](./bin.md) or from each element
-of an iterable of them, so bytes that are not valid UTF-8 are a pattern like
-any other. A [`Str`](./str.md) is not accepted: in a set, a multi-byte
-character would be split into bytes that mean nothing on their own.
-
-#### Returns
-
-[`Bin`](./bin.md)
-
-#### Example
-
-```
-assert_eq (b"  hello  ".trim()) b"hello"
-assert_eq (b"xxhelloxx".trim b"x") b"hello"
-assert_eq (b"xyhelloyx".trim [b"x", b"y"]) b"hello"
-assert_eq (b"\x00\xffdata\xff\x00".trim b"\x00\xff") b"data"
-```
-
-### `trim_start chars?`
-
-Removes bytes (or specified characters) from the start.
-
-#### Parameters
-
-| Name    | Type                                           | Description                                         |
-| ------- | ---------------------------------------------- | --------------------------------------------------- |
-| `chars` | [`Bin`](./bin.md)\|[`Iterable`](./iterable.md) | bytes to trim, as a set (see [`trim`](#trim-chars)) |
-
-#### Returns
-
-[`Bin`](./bin.md)
-
-#### Example
-
-```
-assert_eq (b"  hello  ".trim_start()) b"hello  "
-assert_eq (b"xxhelloxx".trim_start b"x") b"helloxx"
-```
-
-### `trim_end chars?`
-
-Removes bytes (or specified characters) from the end.
-
-#### Parameters
-
-| Name    | Type                                           | Description                                         |
-| ------- | ---------------------------------------------- | --------------------------------------------------- |
-| `chars` | [`Bin`](./bin.md)\|[`Iterable`](./iterable.md) | bytes to trim, as a set (see [`trim`](#trim-chars)) |
-
-#### Returns
-
-[`Bin`](./bin.md)
-
-#### Example
-
-```
-assert_eq (b"  hello  ".trim_end()) b"  hello"
-assert_eq (b"xxhelloxx".trim_end b"x") b"xxhello"
-```
-
 ### `chomp`
 
 Removes one trailing line terminator.
@@ -293,19 +66,24 @@ assert (!(b"hello".contains b"world"))
 assert (b"hello".contains b"")
 ```
 
-### `unpack`
+### `ends_with suffix`
 
-Unpacks binary data into an array of byte values (integers from 0-255).
+Tests whether the binary data ends with the given suffix.
+
+#### Parameters
+
+| Name     | Type              | Description      |
+| -------- | ----------------- | ---------------- |
+| `suffix` | [`Bin`](./bin.md) | the suffix bytes |
 
 #### Returns
 
-[`Array`](./array.md) of [`Int`](./index.md)
+[`Bool`](./index.md)
 
 #### Example
 
 ```
-let bytes = b"hello"
-assert_eq $bytes.unpack() [104, 101, 108, 108, 111]
+assert (b"hello".ends_with b"lo")
 ```
 
 ### `hex`
@@ -321,6 +99,228 @@ Returns the binary data as a lowercase hexadecimal string.
 ```
 assert_eq (b"ABC".hex()) "414243"
 assert_eq (b"\x00\x01\xff".hex()) "0001ff"
+```
+
+### `join iter?`
+
+Joins values from an input source using this binary data as a separator.
+
+#### Parameters
+
+| Name    | Type | Description                                      |
+| ------- | ---- | ------------------------------------------------ |
+| `input` |      | iterable to join (uses default input if omitted) |
+
+#### Returns
+
+[`Bin`](./bin.md)
+
+#### Example
+
+```
+assert_eq (b",".join [b"a", b"b", b"c"]) b"a,b,c"
+```
+
+### `rsplit delimiter [limit: int]`
+
+Like `split`, but yields segments in **right-to-left** order. Mirrors
+[`str.rsplit`](./str.md#rsplit-delimiter-limit-int).
+
+#### Parameters
+
+| Name        | Type                | Description                                |
+| ----------- | ------------------- | ------------------------------------------ |
+| `delimiter` | [`Bin`](./bin.md)   | the delimiter bytes                        |
+| `limit`     | [`Int`](./index.md) | max splits; negative means split from left |
+
+#### Returns
+
+iterator of [`Bin`](./bin.md)
+
+#### Example
+
+```
+assert_eq [...b"a,b,c".rsplit b","] [b"c", b"b", b"a"]
+assert_eq [...b"a,b,c".rsplit b"," limit: 1] [b"c", b"a,b"]
+```
+
+### `split delimiter [limit: int]`
+
+Splits the binary data by the delimiter, returning an iterator that yields
+segments in **left-to-right** order.
+
+The optional `limit` works identically to
+[`str.split`](./str.md#split-delimiter-limit-int): positive splits from the
+left, negative splits from the right (but still yields left-to-right).
+
+#### Parameters
+
+| Name        | Type                | Description                                 |
+| ----------- | ------------------- | ------------------------------------------- |
+| `delimiter` | [`Bin`](./bin.md)   | the delimiter bytes                         |
+| `limit`     | [`Int`](./index.md) | max splits; negative means split from right |
+
+#### Returns
+
+iterator of [`Bin`](./bin.md)
+
+#### Example
+
+```
+assert_eq [...b"a,b,c".split b","] [b"a", b"b", b"c"]
+assert_eq [...b"a,b,c".split b"," limit: 1] [b"a", b"b,c"]
+let base ext = b"archive.tar.gz".split b"." limit: -1
+assert_eq $base b"archive.tar"
+assert_eq $ext b"gz"
+```
+
+### `starts_with prefix`
+
+Tests whether the binary data starts with the given prefix.
+
+#### Parameters
+
+| Name     | Type              | Description      |
+| -------- | ----------------- | ---------------- |
+| `prefix` | [`Bin`](./bin.md) | the prefix bytes |
+
+#### Returns
+
+[`Bool`](./index.md)
+
+#### Example
+
+```
+assert (b"hello".starts_with b"he")
+assert (!(b"hello".starts_with b"lo"))
+```
+
+### `trim chars?`
+
+Removes bytes (or specified characters) from both ends.
+
+#### Parameters
+
+| Name    | Type                                           | Description                                  |
+| ------- | ---------------------------------------------- | -------------------------------------------- |
+| `chars` | [`Bin`](./bin.md)\|[`Iterable`](./iterable.md) | bytes to trim (defaults to whitespace bytes) |
+
+The pattern is a set of *bytes*, from a [`Bin`](./bin.md) or from each element
+of an iterable of them, so bytes that are not valid UTF-8 are a pattern like
+any other. A [`Str`](./str.md) is not accepted: in a set, a multi-byte
+character would be split into bytes that mean nothing on their own.
+
+#### Returns
+
+[`Bin`](./bin.md)
+
+#### Example
+
+```
+assert_eq (b"  hello  ".trim()) b"hello"
+assert_eq (b"xxhelloxx".trim b"x") b"hello"
+assert_eq (b"xyhelloyx".trim [b"x", b"y"]) b"hello"
+assert_eq (b"\x00\xffdata\xff\x00".trim b"\x00\xff") b"data"
+```
+
+### `trim_end chars?`
+
+Removes bytes (or specified characters) from the end.
+
+#### Parameters
+
+| Name    | Type                                           | Description                                         |
+| ------- | ---------------------------------------------- | --------------------------------------------------- |
+| `chars` | [`Bin`](./bin.md)\|[`Iterable`](./iterable.md) | bytes to trim, as a set (see [`trim`](#trim-chars)) |
+
+#### Returns
+
+[`Bin`](./bin.md)
+
+#### Example
+
+```
+assert_eq (b"  hello  ".trim_end()) b"  hello"
+assert_eq (b"xxhelloxx".trim_end b"x") b"xxhello"
+```
+
+### `trim_start chars?`
+
+Removes bytes (or specified characters) from the start.
+
+#### Parameters
+
+| Name    | Type                                           | Description                                         |
+| ------- | ---------------------------------------------- | --------------------------------------------------- |
+| `chars` | [`Bin`](./bin.md)\|[`Iterable`](./iterable.md) | bytes to trim, as a set (see [`trim`](#trim-chars)) |
+
+#### Returns
+
+[`Bin`](./bin.md)
+
+#### Example
+
+```
+assert_eq (b"  hello  ".trim_start()) b"hello  "
+assert_eq (b"xxhelloxx".trim_start b"x") b"helloxx"
+```
+
+### `unpack`
+
+Unpacks binary data into an array of byte values (integers from 0-255).
+
+#### Returns
+
+[`Array`](./array.md) of [`Int`](./index.md)
+
+#### Example
+
+```
+let bytes = b"hello"
+assert_eq $bytes.unpack() [104, 101, 108, 108, 111]
+```
+
+### `without_prefix prefix`
+
+Returns the binary data with the prefix removed if it matches, otherwise
+returns the original data.
+
+#### Parameters
+
+| Name     | Type              | Description          |
+| -------- | ----------------- | -------------------- |
+| `prefix` | [`Bin`](./bin.md) | the prefix to remove |
+
+#### Returns
+
+[`Bin`](./bin.md)
+
+#### Example
+
+```
+assert_eq (b"hello".without_prefix b"he") b"llo"
+assert_eq (b"hello".without_prefix b"xx") b"hello"
+```
+
+### `without_suffix suffix`
+
+Returns the binary data with the suffix removed if it matches, otherwise returns
+the original data.
+
+#### Parameters
+
+| Name     | Type              | Description          |
+| -------- | ----------------- | -------------------- |
+| `suffix` | [`Bin`](./bin.md) | the suffix to remove |
+
+#### Returns
+
+[`Bin`](./bin.md)
+
+#### Example
+
+```
+assert_eq (b"hello".without_suffix b"lo") b"hel"
 ```
 
 ## Operations

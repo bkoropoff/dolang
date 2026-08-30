@@ -4,23 +4,17 @@ An open Windows service handle.
 
 ## Methods
 
-### `delete()`
-
-Marks the service for deletion.
-
 ### `close()`
 
 Closes the service. Closing an already-closed service is a no-op.
 
-### `start ...args`
+### `config()`
 
-Starts the service with optional string arguments.
+Fetches the current service configuration.
 
-#### Parameters
+#### Returns
 
-| Name   | Type                        | Description       |
-| ------ | --------------------------- | ----------------- |
-| `args` | [`Str`](../std/str.md)*     | Service arguments |
+Immutable [`ServiceConfig`](./service-config.md) snapshot
 
 ### `control control`
 
@@ -36,6 +30,10 @@ Sends a control request and returns the resulting status.
 
 [`Status`](./status.md)
 
+### `delete()`
+
+Marks the service for deletion.
+
 ### `query_status()`
 
 Fetches the current service status.
@@ -44,13 +42,22 @@ Fetches the current service status.
 
 [`Status`](./status.md)
 
-### `config()`
+### `sec_desc :owner? :group? :dacl? :sacl?`
 
-Fetches the current service configuration.
+Gets selected parts of the service's Windows security descriptor.
+
+#### Parameters
+
+| Name    | Type                      | Description                                  |
+| ------- | ------------------------- | -------------------------------------------- |
+| `owner` | [`Bool`](../std/bool.md)? | Load the owner SID (default: `true`)         |
+| `group` | [`Bool`](../std/bool.md)? | Load the primary group SID (default: `true`) |
+| `dacl`  | [`Bool`](../std/bool.md)? | Load the discretionary ACL (default: `true`) |
+| `sacl`  | [`Bool`](../std/bool.md)? | Load the system ACL (default: `false`)       |
 
 #### Returns
 
-Immutable [`ServiceConfig`](./service-config.md) snapshot
+[`security.windows.SecDesc`](../security/windows/secdesc.md)
 
 ### `set_config :...options`
 
@@ -82,37 +89,6 @@ service.set_config
   dependencies: (tuple "RpcSs" "EventLog")
 ```
 
-### `wait_for_status_change mask`
-
-Waits until one of the requested service status changes occurs.
-
-#### Parameters
-
-| Name   | Type                                            | Description        |
-| ------ | ----------------------------------------------- | ------------------ |
-| `mask` | [`NotifyMask`](./notify-mask.md)\|sym\|iterable | Changes to observe |
-
-#### Returns
-
-[`Status`](./status.md)
-
-### `sec_desc :owner? :group? :dacl? :sacl?`
-
-Gets selected parts of the service's Windows security descriptor.
-
-#### Parameters
-
-| Name    | Type                      | Description                                  |
-| ------- | ------------------------- | -------------------------------------------- |
-| `owner` | [`Bool`](../std/bool.md)? | Load the owner SID (default: `true`)         |
-| `group` | [`Bool`](../std/bool.md)? | Load the primary group SID (default: `true`) |
-| `dacl`  | [`Bool`](../std/bool.md)? | Load the discretionary ACL (default: `true`) |
-| `sacl`  | [`Bool`](../std/bool.md)? | Load the system ACL (default: `false`)       |
-
-#### Returns
-
-[`security.windows.SecDesc`](../security/windows/secdesc.md)
-
 ### `set_sec_desc desc? ...options`
 
 Applies the components selected by a Windows security descriptor's `mask`.
@@ -127,3 +103,27 @@ The descriptor's
 [component options](../security/windows/secdesc.md#component-options) may be
 passed as keyword arguments instead of, or alongside, `desc`, exactly as
 [`sec_desc`](../security/windows/index.md#sec_desc-desc-options) accepts them.
+
+### `start ...args`
+
+Starts the service with optional string arguments.
+
+#### Parameters
+
+| Name   | Type                        | Description       |
+| ------ | --------------------------- | ----------------- |
+| `args` | [`Str`](../std/str.md)*     | Service arguments |
+
+### `wait_for_status_change mask`
+
+Waits until one of the requested service status changes occurs.
+
+#### Parameters
+
+| Name   | Type                                            | Description        |
+| ------ | ----------------------------------------------- | ------------------ |
+| `mask` | [`NotifyMask`](./notify-mask.md)\|sym\|iterable | Changes to observe |
+
+#### Returns
+
+[`Status`](./status.md)

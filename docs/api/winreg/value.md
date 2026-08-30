@@ -5,12 +5,6 @@ One named entry read from a key, returned by
 
 ## Fields
 
-### `name`
-
-The value's name. **Type:** [`Str`](../std/str.md)
-
-The default value of a key has the name `""`.
-
 ### `kind`
 
 The value's `REG_*` kind. **Type:** sym|[`Int`](../std/int.md)
@@ -19,6 +13,12 @@ For recognized values, see
 [registry value kind values](./index.md#registry-value-kind-values). An
 unrecognized `REG_*` kind is returned as its raw kind number instead, and
 `value` is the raw [`Bin`](../std/bin.md) payload.
+
+### `name`
+
+The value's name. **Type:** [`Str`](../std/str.md)
+
+The default value of a key has the name `""`.
 
 ### `value`
 

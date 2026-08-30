@@ -6,26 +6,6 @@ they do not parse `cmd.exe` or PowerShell syntax.
 
 ## Functions
 
-### `quote arg`
-
-Encodes one argument for a Windows process command line.
-
-#### Parameters
-
-| Name  | Type | Description                                                          |
-| ----- | ---- | -------------------------------------------------------------------- |
-| `arg` |      | Value converted with [`std.verbatim`](./std/index.md#verbatim-value) |
-
-#### Returns
-
-[`str`](./std/str.md)
-
-#### Example
-
-```
-assert_eq (quote "two words") r#""two words""#
-```
-
 ### `join iterable`
 
 Encodes an iterable of arguments as one Windows process command line.
@@ -44,6 +24,26 @@ Encodes an iterable of arguments as one Windows process command line.
 
 ```
 assert_eq (join ["program", "two words"]) r#"program "two words""#
+```
+
+### `quote arg`
+
+Encodes one argument for a Windows process command line.
+
+#### Parameters
+
+| Name  | Type | Description                                                          |
+| ----- | ---- | -------------------------------------------------------------------- |
+| `arg` |      | Value converted with [`std.verbatim`](./std/index.md#verbatim-value) |
+
+#### Returns
+
+[`str`](./std/str.md)
+
+#### Example
+
+```
+assert_eq (quote "two words") r#""two words""#
 ```
 
 ### `split command_line`

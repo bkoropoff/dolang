@@ -46,7 +46,7 @@ A value-consuming named option. Additional settings:
 
 - `long:` — the `--long-option` name (default: same as `name`); set to `nil`
   for short-only options with no long form
-- `parse:` — 1-argument parser callable applied to the raw string value
+- `parse:` — 1-argument parser function applied to the raw string value
 - `short:` — single-character shorthand (e.g. `f` → `-f`)
 - `default:` — default value; omitting `default:` makes the option required
 - `divider: true` — don't interpret subsequent arguments as options or flags
@@ -65,7 +65,7 @@ if you need them to differ.
 
 A positional argument. Additional settings:
 
-- `parse:` — 1-argument parser callable applied to the raw string value
+- `parse:` — 1-argument parser function applied to the raw string value
 - `default:` — default value; omitting `default:` makes the argument required
 - `divider: true` — don't interpret subsequent arguments as options or flags
 - `collect: true` — absorb all remaining positional arguments into an array;

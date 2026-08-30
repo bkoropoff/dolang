@@ -14,7 +14,7 @@ pub def build path
   echo "building $path"
 ```
 
-The decorator expression can be any callable expression, including a call that
+The decorator expression can be any function, including a call that
 configures and returns a decorator:
 
 ```

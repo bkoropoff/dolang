@@ -48,23 +48,6 @@ Returns the number of elements.
 
 ## Methods
 
-### `get index :default? :else?`
-
-Retrieves the value at the given index. Returns `nil` if out of bounds and no
-alternative is provided. Negative indexes count from the end.
-
-#### Parameters
-
-| Name       | Type  | Description                         |
-| ---------- | ----- | ----------------------------------- |
-| `index`    | `Int` | the index to access                 |
-| `default:` |       | value to return if out of bounds    |
-| `else:`    |       | callable to invoke if out of bounds |
-
-#### Returns
-
-The value, or the default/else result.
-
 ### `contains element`
 
 Tests whether the tuple contains the given element (by equality).
@@ -87,6 +70,23 @@ returned copy may be the same object.
 #### Returns
 
 `tuple`
+
+### `get index :default? :else?`
+
+Retrieves the value at the given index. Returns `nil` if out of bounds and no
+alternative is provided. Negative indexes count from the end.
+
+#### Parameters
+
+| Name       | Type  | Description                         |
+| ---------- | ----- | ----------------------------------- |
+| `index`    | `Int` | the index to access                 |
+| `default:` |       | value to return if out of bounds    |
+| `else:`    |       | function to invoke if out of bounds |
+
+#### Returns
+
+The value, or the default/else result.
 
 ### `pairs`
 

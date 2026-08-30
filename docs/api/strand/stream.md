@@ -16,6 +16,11 @@ A read-only boolean indicating whether the strand has completed execution.
 
 ## Methods
 
+### `cancel()`
+
+Requests cancellation of the strand, causing a `Canceled` error to be raised
+at the strand's next suspension point.
+
 ### `join()`
 
 Closes both channels, then waits for the strand to complete. If the strand
@@ -30,11 +35,6 @@ blocked waiting for input or waiting for a consumer to read its output.
 Waits for the strand to complete. Unlike [`join()`](#join), this method does
 not close the channels, does not return the strand's result, and does not
 re-raise any error.
-
-### `cancel()`
-
-Requests cancellation of the strand, causing a `Canceled` error to be raised
-at the strand's next suspension point.
 
 ## Error Propagation
 

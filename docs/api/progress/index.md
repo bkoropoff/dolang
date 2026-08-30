@@ -27,6 +27,95 @@ update.
 
 ## Functions
 
+### `show func`
+
+Creates a progress indicator and runs `func` with it. The indicator is
+automatically removed when `func` returns. When called inside another indicator
+scope, the new indicator appears indented beneath the parent widget.
+
+If `total` is provided, the indicator starts in bar mode (showing a progress
+bar). Otherwise, it starts in spinner mode. The mode can be changed dynamically
+by setting `total` on the indicator.
+
+Outside a `progress.with` scope, the callback is invoked with a dummy indicator
+whose methods are silent no-ops.
+
+#### Parameters
+
+| Name      | Type                        | Description                                         |
+| --------- | --------------------------- | --------------------------------------------------- |
+| `func`    | `Func`                      | Callback receiving an [`Indicator`](./indicator.md) |
+| `total`   | [`Int`](../std/int.md)?     | Total value for bar mode                            |
+| `message` | [`Str`](../std/str.md)?     | Initial message                                     |
+| `icon`    | [`Str`](../std/str.md)?     | Prefix icon, e.g. "📦"                              |
+| `units`   | [`Sym`](../std/sym.md)?     | Unit format                                         |
+| `tick`    | [`Float`](../std/float.md)? | Tick interval in seconds (default 0.08)             |
+
+##### Units
+
+| Value       | Description                         |
+| ----------- | ----------------------------------- |
+| `:COUNT:`   | Display as `pos/len` or `pos`       |
+| `:BYTES:`   | Display as human-readable bytes     |
+| `:PERCENT:` | Display `pos / len` as a percentage |
+
+When `total` is provided and `units` is omitted, units default to `:COUNT:`.
+When neither `total` nor `units` is provided, spinner mode shows only elapsed
+time.
+
+#### Returns
+
+The return value of `func`
+
+#### Example
+
+```
+progress.with do
+  progress.show total: 3 message: "building" do |w|
+    progress.show message: "step 1" do |_|
+      do_step_1()
+    w.delta()
+```
+
+!!! warning
+    The [`Indicator`](./indicator.md) object is only valid inside its callback.
+    Using it after the callback returns raises a runtime error.
+
+### `steps ...steps :message? :icon?`
+
+Runs a sequence of steps under a progress indicator tracking step completion.
+
+A step can be a `Func` or a `dict` containing one positional `Func`
+and optional `name` and `icon` keys.
+
+```
+let results = progress.steps message: building icon: "•"
+  - name: compile
+    icon: "C"
+    do compile()
+  do test()
+  - name: package
+    do package()
+```
+
+Before a named step runs, its name is appended to the overall message with a
+colon, such as `building: compile`. An unnamed step uses the overall message
+unchanged. If no overall message is provided, a named step uses its name by
+itself. A step's `icon` overrides the default icon for that step.
+
+If a step raises an error, remaining steps are skipped and the error is
+propagated.
+
+| Name      | Type                    | Description                       |
+| --------- | ----------------------- | --------------------------------- |
+| `steps`   | `Func`\|dict*           | Functions or annotated step specs |
+| `message` | [`Str`](../std/str.md)? | Overall message prefix            |
+| `icon`    | [`Str`](../std/str.md)? | Default icon (default `"●"`)      |
+
+#### Returns
+
+An `array` containing each step's return value, in order.
+
 ### `with func`
 
 Activates a progress context for the duration of `func`. Terminal output (echo,
@@ -37,7 +126,7 @@ does not interfere with active indicators.
 
 | Name       | Type   | Description                                  |
 | ---------- | ------ | -------------------------------------------- |
-| `func`     | func   | Callback (no arguments)                      |
+| `func`     | `Func` | Callback (no arguments)                      |
 | `style`    | dict?  | Display style overrides                      |
 | `interval` | float? | Plain-mode rate limit in seconds (default 5) |
 
@@ -127,92 +216,3 @@ progress.with
   do progress.show message: "working" do |w|
     # ...
 ```
-
-### `show func`
-
-Creates a progress indicator and runs `func` with it. The indicator is
-automatically removed when `func` returns. When called inside another indicator
-scope, the new indicator appears indented beneath the parent widget.
-
-If `total` is provided, the indicator starts in bar mode (showing a progress
-bar). Otherwise, it starts in spinner mode. The mode can be changed dynamically
-by setting `total` on the indicator.
-
-Outside a `progress.with` scope, the callback is invoked with a dummy indicator
-whose methods are silent no-ops.
-
-#### Parameters
-
-| Name      | Type                        | Description                                         |
-| --------- | --------------------------- | --------------------------------------------------- |
-| `func`    | func                        | Callback receiving an [`Indicator`](./indicator.md) |
-| `total`   | [`Int`](../std/int.md)?     | Total value for bar mode                            |
-| `message` | [`Str`](../std/str.md)?     | Initial message                                     |
-| `icon`    | [`Str`](../std/str.md)?     | Prefix icon, e.g. "📦"                              |
-| `units`   | [`Sym`](../std/sym.md)?     | Unit format                                         |
-| `tick`    | [`Float`](../std/float.md)? | Tick interval in seconds (default 0.08)             |
-
-##### Units
-
-| Value       | Description                         |
-| ----------- | ----------------------------------- |
-| `:COUNT:`   | Display as `pos/len` or `pos`       |
-| `:BYTES:`   | Display as human-readable bytes     |
-| `:PERCENT:` | Display `pos / len` as a percentage |
-
-When `total` is provided and `units` is omitted, units default to `:COUNT:`.
-When neither `total` nor `units` is provided, spinner mode shows only elapsed
-time.
-
-#### Returns
-
-The return value of `func`
-
-#### Example
-
-```
-progress.with do
-  progress.show total: 3 message: "building" do |w|
-    progress.show message: "step 1" do |_|
-      do_step_1()
-    w.delta()
-```
-
-!!! warning
-    The [`Indicator`](./indicator.md) object is only valid inside its callback.
-    Using it after the callback returns raises a runtime error.
-
-### `steps ...steps :message? :icon?`
-
-Runs a sequence of steps under a progress indicator tracking step completion.
-
-A step can be a `func` or a `dict` containing one positional `func`
-and optional `name` and `icon` keys.
-
-```
-let results = progress.steps message: building icon: "•"
-  - name: compile
-    icon: "C"
-    do compile()
-  do test()
-  - name: package
-    do package()
-```
-
-Before a named step runs, its name is appended to the overall message with a
-colon, such as `building: compile`. An unnamed step uses the overall message
-unchanged. If no overall message is provided, a named step uses its name by
-itself. A step's `icon` overrides the default icon for that step.
-
-If a step raises an error, remaining steps are skipped and the error is
-propagated.
-
-| Name      | Type                          | Description                          |
-| --------- | ----------------------------- | ------------------------------------ |
-| `steps`   | func\|dict*                   | Callables or annotated step specs    |
-| `message` | [`Str`](../std/str.md)?       | Overall message prefix               |
-| `icon`    | [`Str`](../std/str.md)?       | Default icon (default `"●"`)         |
-
-#### Returns
-
-An `array` containing each step's return value, in order.

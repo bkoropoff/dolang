@@ -6,28 +6,27 @@ The `std` module provides core language facilities.
 
 | Name                                              | Description                                |
 | ------------------------------------------------- | ------------------------------------------ |
+| [`AbortError`](./abort-error.md)                  | Uncatchable host abort                     |
 | [`Args`](./args.md)                               | Argument pack                              |
 | [`Array`](./array.md)                             | Mutable ordered sequence                   |
 | [`Bin`](./bin.md)                                 | Immutable binary data                      |
 | [`BinBuf`](./binbuf.md)                           | Mutable byte buffer                        |
-| [`BytecodeError`](./bytecode-error.md)            | Bytecode verification error                |
 | [`Bool`](./bool.md)                               | Boolean (`true` / `false`)                 |
+| [`BytecodeError`](./bytecode-error.md)            | Bytecode verification error                |
 | [`CanceledError`](./canceled-error.md)            | Strand cancellation                        |
 | [`CompileError`](./compile-error.md)              | Compilation error                          |
 | [`ConcurrencyError`](./concurrency-error.md)      | Concurrent access violation                |
 | [`CyclicImportError`](./cyclic-import-error.md)   | Cyclic module dependency                   |
 | [`Dict`](./dict.md)                               | Mutable ordered dictionary                 |
-| [`Set`](./set.md)                                 | Mutable ordered set                        |
 | [`Error`](./error.md)                             | Abstract base error type                   |
 | [`FieldError`](./field-error.md)                  | Nonexistent field access                   |
 | [`Float`](./float.md)                             | 64-bit floating point                      |
-| [`Func`](./func.md)                               | Callable value                             |
+| [`Func`](./func.md)                               | Function value                             |
 | [`Getter`](./getter.md)                           | Abstract getter protocol type              |
 | [`ImmutableError`](./immutable-error.md)          | Mutation of an immutable value             |
 | [`ImportError`](./import-error.md)                | Module import failure                      |
 | [`IndexError`](./index-error.md)                  | Out-of-bounds index access                 |
 | [`Int`](./int.md)                                 | 128-bit signed integer                     |
-| [`AbortError`](./abort-error.md)                  | Uncatchable host abort                     |
 | [`Iter`](./iter.md)                               | Abstract iterator type                     |
 | [`Iterable`](./iterable.md)                       | Abstract iterable type                     |
 | [`IterStop`](./iter-stop.md)                      | Error raised when an iterator is exhausted |
@@ -39,11 +38,12 @@ The `std` module provides core language facilities.
 | [`Range`](./range.md)                             | Numeric range for iteration                |
 | [`Record`](./record.md)                           | Record with dot-syntax access              |
 | [`RuntimeError`](./runtime-error.md)              | Ordinary runtime failure supertype         |
+| [`Set`](./set.md)                                 | Mutable ordered set                        |
 | [`Setter`](./setter.md)                           | Abstract setter protocol type              |
-| [`StateError`](./state-error.md)                  | Invalid operation for current state        |
-| [`Sinkable`](./sinkable.md)                       | Abstract sinkable type                     |
 | [`Sink`](./sink.md)                               | Abstract sink type                         |
+| [`Sinkable`](./sinkable.md)                       | Abstract sinkable type                     |
 | [`SinkStop`](./sink-stop.md)                      | Error raised when a sink is closed         |
+| [`StateError`](./state-error.md)                  | Invalid operation for current state        |
 | [`Str`](./str.md)                                 | Immutable UTF-8 string                     |
 | [`StrBuf`](./strbuf.md)                           | Mutable UTF-8 string buffer                |
 | [`Sym`](./sym.md)                                 | Interned symbol                            |
@@ -54,8 +54,8 @@ The `std` module provides core language facilities.
 | [`UnexpectedKeyError`](./unexpected-key-error.md) | Unexpected key argument                    |
 | [`UnexpectedPosError`](./unexpected-pos-error.md) | Unexpected positional argument             |
 | [`UnsupportedError`](./unsupported-error.md)      | Unsupported operation                      |
-| [`ValueError`](./value-error.md)                  | Invalid value for an operation             |
 | [`Value`](./value.md)                             | Abstract supertype of all values           |
+| [`ValueError`](./value-error.md)                  | Invalid value for an operation             |
 | [`ZeroDivError`](./zero-div-error.md)             | Integer division or modulo by zero         |
 
 ## Values
@@ -68,6 +68,14 @@ The singleton [`Null`](./null.md) value.
 - As a sink, `null` silently discards all values.
 
 ## Functions
+
+### `array ...values`
+
+Creates an array from positional arguments.
+
+### `bool value`
+
+Converts a value to [`Bool`](./bool.md) according to its truthiness.
 
 ### `dbg value`
 
@@ -84,15 +92,29 @@ quotes strings, shows type tags).
 
 [`Str`](./str.md)
 
+### `dict ...`
+
+Creates a dictionary from positional and key arguments.
+
+Positional arguments receive incrementing integer keys starting at `0`.
+Key arguments become symbol keys. The function-call syntax cannot specify
+other key types; use a [horizontal dictionary
+literal](../../language/data-structures.md#literals) or [vertical
+data](../../language/vertical-layout.md#vertical-data) instead.
+
+### `float value`
+
+Coerces or parses a value as a [`Float`](./float.md).
+
 ### `getter func`
 
-Builds a getter object from a callable.
+Builds a getter object from a function.
 
 #### Parameters
 
 | Name   | Type   | Description                   |
 | ------ | ------ | ----------------------------- |
-| `func` | `func` | callable used for field reads |
+| `func` | `Func` | function used for field reads |
 
 #### Returns
 
@@ -109,46 +131,29 @@ class Config
     obj.#port
 ```
 
-### `setter func`
+### `hash ...values`
 
-Builds a setter object from a callable.
+Returns a hash code computed over all supplied values in sequence. Passing
+multiple values is useful for combining fields in a `(hash)` implementation:
+
+```
+def (hash) self
+  hash $self.x $self.y $self.z
+```
 
 #### Parameters
 
-| Name   | Type   | Description                    |
-| ------ | ------ | ------------------------------ |
-| `func` | `func` | callable used for field writes |
+| Name        | Type | Description                |
+| ----------- | ---- | -------------------------- |
+| `...values` |      | one or more values to hash |
 
 #### Returns
 
-[`Setter`](./setter.md)
+`Int`
 
-#### Example
+### `int value`
 
-```
-class Config
-  #[setter]
-  pub def port obj value
-    obj.#_port = value
-```
-
-### `array ...values`
-
-Creates an array from positional arguments.
-
-### `dict ...`
-
-Creates a dictionary from positional and key arguments.
-
-Positional arguments receive incrementing integer keys starting at `0`.
-Key arguments become symbol keys. The function-call syntax cannot specify
-other key types; use a [horizontal dictionary
-literal](../../language/data-structures.md#literals) or [vertical
-data](../../language/vertical-layout.md#vertical-data) instead.
-
-### `tuple ...values`
-
-Creates a tuple from positional arguments.
+Coerces or parses a value as an [`Int`](./int.md).
 
 ### `record ...`
 
@@ -175,22 +180,28 @@ let r = record name: Alice age: 30
 echo $r.name  # Alice
 ```
 
-### `type value type?`
+### `setter func`
 
-Returns the value's type, or tests whether the value is an instance of
-`type`. See [`Type`](./type.md).
+Builds a setter object from a function.
 
-### `int value`
+#### Parameters
 
-Coerces or parses a value as an [`Int`](./int.md).
+| Name   | Type   | Description                    |
+| ------ | ------ | ------------------------------ |
+| `func` | `Func` | function used for field writes |
 
-### `float value`
+#### Returns
 
-Coerces or parses a value as a [`Float`](./float.md).
+[`Setter`](./setter.md)
 
-### `bool value`
+#### Example
 
-Converts a value to [`Bool`](./bool.md) according to its truthiness.
+```
+class Config
+  #[setter]
+  pub def port obj value
+    obj.#_port = value
+```
 
 ### `str value`
 
@@ -199,6 +210,15 @@ Returns the general-purpose [`Str`](./str.md) representation of a value.
 ### `sym value`
 
 Interns a string as a [`Sym`](./sym.md).
+
+### `tuple ...values`
+
+Creates a tuple from positional arguments.
+
+### `type value type?`
+
+Returns the value's type, or tests whether the value is an instance of
+`type`. See [`Type`](./type.md).
 
 ### `verbatim value`
 
@@ -215,23 +235,3 @@ command-line arguments to external programs.
 #### Returns
 
 [`Str`](./str.md)
-
-### `hash ...values`
-
-Returns a hash code computed over all supplied values in sequence. Passing
-multiple values is useful for combining fields in a `(hash)` implementation:
-
-```
-def (hash) self
-  hash $self.x $self.y $self.z
-```
-
-#### Parameters
-
-| Name        | Type | Description                |
-| ----------- | ---- | -------------------------- |
-| `...values` |      | one or more values to hash |
-
-#### Returns
-
-`Int`

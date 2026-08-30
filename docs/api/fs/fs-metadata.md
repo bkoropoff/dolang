@@ -9,14 +9,6 @@ file metadata such as `len`, `type`, and timestamps, use
 
 ## Fields
 
-### `capacity`
-
-Total filesystem capacity in bytes.
-
-### `free`
-
-Total free space in bytes, including space reserved from unprivileged users.
-
 ### `available`
 
 Free space available to the current process in bytes.
@@ -24,6 +16,14 @@ Free space available to the current process in bytes.
 ### `block_size`
 
 Filesystem block size in bytes when available.
+
+### `capacity`
+
+Total filesystem capacity in bytes.
+
+### `free`
+
+Total free space in bytes, including space reserved from unprivileged users.
 
 ### `read_only`
 
@@ -35,25 +35,25 @@ Whether the filesystem is mounted read-only.
 
 Total data blocks.
 
-### `blocks_free`
-
-Free data blocks, including reserved blocks.
-
 ### `blocks_available`
 
 Free data blocks available to unprivileged users.
+
+### `blocks_free`
+
+Free data blocks, including reserved blocks.
 
 ### `files`
 
 Total file nodes.
 
-### `files_free`
-
-Free file nodes.
-
 ### `files_available`
 
 Free file nodes available to unprivileged users.
+
+### `files_free`
+
+Free file nodes.
 
 ### `fragment_size`
 
@@ -63,6 +63,10 @@ Filesystem fragment size in bytes.
 
 Raw FreeBSD filesystem mount attribute mask.
 
+### `fsid`
+
+Raw filesystem identifier when the platform reports one.
+
 ### `linux_attrs`
 
 Raw Linux filesystem mount attribute mask.
@@ -71,52 +75,48 @@ Raw Linux filesystem mount attribute mask.
 
 Raw macOS filesystem mount attribute mask.
 
-### `fsid`
-
-Raw filesystem identifier when the platform reports one.
-
 ### `name_max`
 
 Maximum filename length.
-
-### `no_suid`
-
-Whether setuid execution is disabled.
-
-### `no_exec`
-
-Whether execution is disabled.
-
-### `synchronous`
-
-Whether writes are synchronous.
-
-### `no_dev`
-
-Whether device files are disabled.
 
 ### `no_atime`
 
 Whether access time updates are disabled.
 
+### `no_dev`
+
+Whether device files are disabled.
+
 ### `no_dir_atime`
 
 Whether directory access time updates are disabled.
+
+### `no_exec`
+
+Whether execution is disabled.
+
+### `no_suid`
+
+Whether setuid execution is disabled.
 
 ### `relatime`
 
 Whether relative-atime updates are enabled.
 
+### `synchronous`
+
+Whether writes are synchronous.
+
 ## Windows-Only Fields
 
-### `win_flags`
+### `component_length_max`
 
-Raw Windows volume flags.
+Maximum path component length for the volume.
 
 ### `volume_serial_number`
 
 Raw Windows volume serial number.
 
-### `component_length_max`
+### `win_flags`
 
-Maximum path component length for the volume.
+Raw Windows volume flags.

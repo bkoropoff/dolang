@@ -7,14 +7,6 @@ Coercing a `Match` value with `str` produces the matched text.
 
 ## Fields
 
-### `start`
-
-The byte offset of the start of the match within the haystack.
-
-#### Type
-
-[`Int`](../std/int.md)
-
 ### `end`
 
 The byte offset of the end of the match within the haystack.
@@ -34,3 +26,11 @@ echo year          # => 2024
 echo $year.start   # => 7
 echo $year.end     # => 11
 ```
+
+### `start`
+
+The byte offset of the start of the match within the haystack.
+
+#### Type
+
+[`Int`](../std/int.md)

@@ -49,22 +49,6 @@ let disk = Node disk
 
 ## Fields
 
-### `tag`
-
-Mutable local element name.
-
-### `namespace`
-
-Mutable namespace URI as a `Str`, or `nil` for no namespace.
-
-### `prefix`
-
-Mutable preferred prefix as a `Str`, or `nil`.
-
-### `qname`
-
-Read-only qualified name formed from `prefix` and `tag`.
-
 ### `attrs`
 
 Mutable array-like view of [`Attr`](./attr.md) objects in document order.
@@ -89,6 +73,10 @@ mutation methods `push`, `insert`, `pop`, `delete`, and `clear`.
 
 Iterating a node iterates this view directly.
 
+### `namespace`
+
+Mutable namespace URI as a `Str`, or `nil` for no namespace.
+
 ### `namespaces`
 
 Mutable `dict` containing the complete effective namespace snapshot for the
@@ -97,6 +85,18 @@ node. Keys are prefix strings; `""` is the default namespace. The reserved
 
 Parsed descendants retain inherited bindings in their own snapshots, so they
 can be detached and serialized independently.
+
+### `prefix`
+
+Mutable preferred prefix as a `Str`, or `nil`.
+
+### `qname`
+
+Read-only qualified name formed from `prefix` and `tag`.
+
+### `tag`
+
+Mutable local element name.
 
 ## Methods
 
@@ -111,30 +111,13 @@ Gets the first attribute matching an expanded name.
 | `name`      | `Str`  | Local attribute name              |
 | `namespace` | `str?` | Namespace URI                     |
 | `default`   |        | Value returned when absent        |
-| `else`      |        | Callable evaluated when absent    |
+| `else`      |        | Function evaluated when absent    |
 
 #### Example
 
 ```
 let id = node.attr "id" namespace: "urn:inventory"
 ```
-
-### `set_attr name value :namespace? :prefix?`
-
-Updates the first matching attribute or appends one.
-
-An omitted `prefix` mutates the existing attribute's value in place. An
-explicit prefix, including `prefix: nil`, replaces the matching attribute
-because attribute identity fields are immutable.
-
-#### Parameters
-
-| Name        | Type   | Description                         |
-| ----------- | ------ | ----------------------------------- |
-| `name`      | `Str`  | Local attribute name                |
-| `value`     | `Str`  | Attribute value                     |
-| `namespace` | `str?` | Namespace URI                       |
-| `prefix`    | `str?` | Preferred namespace prefix          |
 
 ### `delete_attr name :namespace?`
 
@@ -160,6 +143,23 @@ Appends a child.
 | Name    | Type          | Description |
 | ------- | ------------- | ----------- |
 | `child` | `Node`\|`Str` | Child value |
+
+### `set_attr name value :namespace? :prefix?`
+
+Updates the first matching attribute or appends one.
+
+An omitted `prefix` mutates the existing attribute's value in place. An
+explicit prefix, including `prefix: nil`, replaces the matching attribute
+because attribute identity fields are immutable.
+
+#### Parameters
+
+| Name        | Type   | Description                         |
+| ----------- | ------ | ----------------------------------- |
+| `name`      | `Str`  | Local attribute name                |
+| `value`     | `Str`  | Attribute value                     |
+| `namespace` | `str?` | Namespace URI                       |
+| `prefix`    | `str?` | Preferred namespace prefix          |
 
 ### `traverse`
 

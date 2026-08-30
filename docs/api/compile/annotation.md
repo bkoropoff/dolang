@@ -12,10 +12,10 @@ The annotation kind as a symbol:
 - `:PRIMARY:`
 - `:CONTEXT:`
 
-### `span`
-
-The annotated [`Span`](./span.md).
-
 ### `message`
 
 The annotation label as [`Str`](../std/str.md).
+
+### `span`
+
+The annotated [`Span`](./span.md).

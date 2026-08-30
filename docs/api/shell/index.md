@@ -9,44 +9,41 @@ programs, see [Output mode](../../shell/external-programs.md#output-mode).
 
 | Name                    | Description                              |
 | ----------------------- | ---------------------------------------- |
-| [`Vfs`](./vfs.md)       | Execution context handle                 |
+| [`Stderr`](./stderr.md) | Handle for the process's standard error  |
 | [`Stdin`](./stdin.md)   | Handle for the process's standard input  |
 | [`Stdout`](./stdout.md) | Handle for the process's standard output |
-| [`Stderr`](./stderr.md) | Handle for the process's standard error  |
+| [`Vfs`](./vfs.md)       | Execution context handle                 |
 
 ## Functions
 
-### `line_ending()`
+### `cd path? func?`
 
-Returns the line ending native to the current [VFS](./vfs.md) target: `"\r\n"`
-on Windows, `"\n"` elsewhere.
-
-#### Returns
-
-[`Str`](../std/str.md).
-
-Values are never terminated implicitly, so a script that wants native endings
-asks for them by name:
-
-#### Example
-
-```
-run cmd stdout: (lines.precrimp(shell.line_ending()))
-```
-
-### `exit code?`
-
-Exits the current shell with the given status code.
+With no arguments, returns the current strand's working directory. With a path,
+changes the current strand's working directory. If a function is also provided,
+the directory is changed only for the duration of that call, then restored.
 
 #### Parameters
 
-| Name   | Type                   | Description              |
-| ------ | ---------------------- | ------------------------ |
-| `code` | [`Int`](../std/int.md) | exit status (default: 0) |
+| Name   | Type                                            | Description                          |
+| ------ | ----------------------------------------------- | ------------------------------------ |
+| `path` | [`Str`](../std/str.md)\|[`Path`](../fs/path.md) | directory path                       |
+| `func` |                                                 | function to run in the new directory |
 
 #### Returns
 
-never returns; raises an interrupt error
+Current strand's working directory (no arguments), or result of `func`.
+
+### `env overrides func`
+
+Runs `func` with scoped environment overrides. Keys may be strings or symbols.
+`nil` unsets a variable and `:INHERIT:` captures its current strand value.
+
+#### Parameters
+
+| Name        | Type                     | Description           |
+| ----------- | ------------------------ | --------------------- |
+| `overrides` | [`Dict`](../std/dict.md) | Environment overrides |
+| `func`      | `Func`                   | Block to run          |
 
 ### `exec program ...args`
 
@@ -68,38 +65,62 @@ the host VFS; use [`with_host`](#with_host-func-args) to select it explicitly.
 
 never returns
 
-### `cd path? func?`
+### `exit code?`
 
-With no arguments, returns the current strand's working directory. With a path,
-changes the current strand's working directory. If a callable is also provided,
-the directory is changed only for the duration of that call, then restored.
+Exits the current shell with the given status code.
 
 #### Parameters
 
-| Name   | Type                                            | Description                          |
-| ------ | ----------------------------------------------- | ------------------------------------ |
-| `path` | [`Str`](../std/str.md)\|[`Path`](../fs/path.md) | directory path                       |
-| `func` |                                                 | callable to run in the new directory |
+| Name   | Type                   | Description              |
+| ------ | ---------------------- | ------------------------ |
+| `code` | [`Int`](../std/int.md) | exit status (default: 0) |
 
 #### Returns
 
-Current strand's working directory (no arguments), or result of `func`.
+never returns; raises an interrupt error
+
+### `line_ending()`
+
+Returns the line ending native to the current [VFS](./vfs.md) target: `"\r\n"`
+on Windows, `"\n"` elsewhere.
+
+#### Returns
+
+[`Str`](../std/str.md).
+
+Values are never terminated implicitly, so a script that wants native endings
+asks for them by name:
+
+#### Example
+
+```
+run cmd stdout: (lines.precrimp(shell.line_ending()))
+```
+
+### `vfs_exe()`
+
+Returns the current executable reported by the active VFS context, or `nil`
+when running on the host.
+
+#### Returns
+
+[`fs.Path`](../fs/path.md) or `nil`.
 
 ### `with_host func ...args`
 
-Executes a callable in the interpreter's original host context, regardless of
+Executes a function in the interpreter's original host context, regardless of
 the current or nested VFS contexts.
 
 #### Parameters
 
-| Name   | Type | Description                            |
-| ------ | ---- | -------------------------------------- |
-| `func` | func | Block to execute in fresh host context |
-| `args` |      | Additional arguments to pass to `func` |
+| Name   | Type   | Description                            |
+| ------ | ------ | -------------------------------------- |
+| `func` | `Func` | Block to execute in fresh host context |
+| `args` |        | Additional arguments to pass to `func` |
 
 #### Returns
 
-Return value of the executed callable
+Return value of the executed function
 
 ### `with_override func :args? :program?`
 
@@ -110,7 +131,7 @@ created within the call inherit the overrides.
 
 | Name      | Type                                              | Description                                                        |
 | --------- | ------------------------------------------------- | ------------------------------------------------------------------ |
-| `func`    | callable                                          | Block to execute                                                   |
+| `func`    | `Func`                                            | Block to execute                                                   |
 | `args`    | [`Iterable`](../std/iterable.md)?                 | Values converted with [`verbatim`](../std/index.md#verbatim-value) |
 | `program` | [`Str`](../std/str.md)?\|[`Path`](../fs/path.md)? | Program identity                                                   |
 
@@ -130,51 +151,21 @@ error.
 | [`TypeError`](../std/type-error.md)     | `args` is not iterable            |
 | [`TypeError`](../std/type-error.md)     | `program` is not a string or path |
 
-### `vfs_exe()`
-
-Returns the current executable reported by the active VFS context, or `nil`
-when running on the host.
-
-#### Returns
-
-[`fs.Path`](../fs/path.md) or `nil`.
-
-### `env overrides func`
-
-Runs `func` with scoped environment overrides. Keys may be strings or symbols.
-`nil` unsets a variable and `:INHERIT:` captures its current strand value.
-
-#### Parameters
-
-| Name        | Type                     | Description           |
-| ----------- | ------------------------ | --------------------- |
-| `overrides` | [`Dict`](../std/dict.md) | Environment overrides |
-| `func`      | callable                 | Block to run          |
-
 ## Values
-
-### `stdin`
-
-A [`Stdin`](./stdin.md) handle for the process's standard input, and initial
-input for the main strand.
-
-### `stdout`
-
-A [`Stdout`](./stdout.md) handle for the process's standard output, and initial
-output for the main strand.
-
-### `stderr`
-
-A [`Stderr`](./stderr.md) handle for the process's standard error output.
-
-### `env`
-
-An object for accessing environment variables.
 
 ### `args`
 
 An immutable [`Args`](./args.md) sequence containing the command-line arguments
 for the current invocation.
+
+### `env`
+
+An object for accessing environment variables.
+
+### `exe`
+
+An [`fs.Path`](../fs/path.md) containing the path returned by the host for the
+current `dolang` executable. The path is not automatically canonicalized.
 
 ### `program`
 
@@ -185,10 +176,19 @@ Identifies what `dolang` is executing.
 - For `dolang -m foo.bar`, this is the string `"foo.bar"`.
 - In the REPL, this is `nil`.
 
-### `exe`
+### `stderr`
 
-An [`fs.Path`](../fs/path.md) containing the path returned by the host for the
-current `dolang` executable. The path is not automatically canonicalized.
+A [`Stderr`](./stderr.md) handle for the process's standard error output.
+
+### `stdin`
+
+A [`Stdin`](./stdin.md) handle for the process's standard input, and initial
+input for the main strand.
+
+### `stdout`
+
+A [`Stdout`](./stdout.md) handle for the process's standard output, and initial
+output for the main strand.
 
 ### `VERSION`
 

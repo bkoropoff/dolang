@@ -20,23 +20,6 @@ assert_eq $s :my_symbol:
 
 ## Operations
 
-### Equality
-
-Symbols are compared by identity:
-
-```
-assert_eq :foo: :foo:
-assert (:foo: != :bar:)
-```
-
-### Comparison
-
-Symbols compare lexicographically by name:
-
-```
-assert (:alpha: < :beta:)
-```
-
 ### Common Uses
 
 Enum-like values:
@@ -51,4 +34,21 @@ Dictionary keys:
 ```
 let d = {}
 d[:status:] = "active"
+```
+
+### Comparison
+
+Symbols compare lexicographically by name:
+
+```
+assert (:alpha: < :beta:)
+```
+
+### Equality
+
+Symbols are compared by identity:
+
+```
+assert_eq :foo: :foo:
+assert (:foo: != :bar:)
 ```

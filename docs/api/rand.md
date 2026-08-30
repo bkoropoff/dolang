@@ -64,44 +64,6 @@ assert ((n >= 10) && (n < 20))
 assert_eq (int -4 -5) -5
 ```
 
-### `string len :alphabet?`
-
-Generates a random string by sampling characters from `alphabet`.
-
-#### Parameters
-
-| Name       | Type   | Description                  |
-| ---------- | ------ | ---------------------------- |
-| `len`      | `Int`  | number of characters to emit |
-| `alphabet` | `str?` | characters to sample from    |
-
-#### Returns
-
-[`Str`](./std/str.md) - Randomly generated text
-
-#### Errors
-
-| Exception    | Condition                                             |
-| ------------ | ----------------------------------------------------- |
-| `TypeError`  | `len` is not an integer or `alphabet` is not a string |
-| `ValueError` | `len` is negative                                     |
-| `ValueError` | `alphabet` is empty                                   |
-
-`alphabet` is interpreted as characters, not raw UTF-8 bytes.
-
-If `alphabet:` is omitted, it defaults to the URL-safe NanoID alphabet:
-`_-0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ`.
-
-#### Example
-
-```
-let token = string 12
-assert_eq $token.len 12
-
-let text = string 4 alphabet: "åß"
-assert_eq $text.len 8
-```
-
 ### `pick collection`
 
 Selects one random element from an array.
@@ -154,4 +116,42 @@ shuffle $items
 let sorted = [...items]
 sorted.sort()
 assert_eq $sorted [1, 2, 3, 4]
+```
+
+### `string len :alphabet?`
+
+Generates a random string by sampling characters from `alphabet`.
+
+#### Parameters
+
+| Name       | Type   | Description                  |
+| ---------- | ------ | ---------------------------- |
+| `len`      | `Int`  | number of characters to emit |
+| `alphabet` | `str?` | characters to sample from    |
+
+#### Returns
+
+[`Str`](./std/str.md) - Randomly generated text
+
+#### Errors
+
+| Exception    | Condition                                             |
+| ------------ | ----------------------------------------------------- |
+| `TypeError`  | `len` is not an integer or `alphabet` is not a string |
+| `ValueError` | `len` is negative                                     |
+| `ValueError` | `alphabet` is empty                                   |
+
+`alphabet` is interpreted as characters, not raw UTF-8 bytes.
+
+If `alphabet:` is omitted, it defaults to the URL-safe NanoID alphabet:
+`_-0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ`.
+
+#### Example
+
+```
+let token = string 12
+assert_eq $token.len 12
+
+let text = string 4 alphabet: "åß"
+assert_eq $text.len 8
 ```

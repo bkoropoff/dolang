@@ -10,37 +10,18 @@ remote and elevated Windows VFS contexts. Other targets raise
 
 | Type                                                        | Description                         |
 | ----------------------------------------------------------- | ----------------------------------- |
+| [`ManagerAccessMask`](./manager-access-mask.md)             | Manager access rights               |
+| [`NotifyMask`](./notify-mask.md)                            | Status-change notification flags    |
 | [`ScManager`](./sc-manager.md)                              | Open Service Control Manager handle |
 | [`Service`](./service.md)                                   | Open service handle                 |
-| [`ServiceConfig`](./service-config.md)                      | Immutable configuration snapshot    |
-| [`Status`](./status.md)                                     | Service status snapshot             |
-| [`ServiceInfo`](./service-info.md)                          | Enumerated service entry            |
-| [`ManagerAccessMask`](./manager-access-mask.md)             | Manager access rights               |
 | [`ServiceAccessMask`](./service-access-mask.md)             | Service access rights               |
-| [`ServiceType`](./service-type.md)                          | Service type flags                  |
-| [`NotifyMask`](./notify-mask.md)                            | Status-change notification flags    |
+| [`ServiceConfig`](./service-config.md)                      | Immutable configuration snapshot    |
 | [`ServiceControlsAccepted`](./service-controls-accepted.md) | Accepted service-control flags      |
+| [`ServiceInfo`](./service-info.md)                          | Enumerated service entry            |
+| [`ServiceType`](./service-type.md)                          | Service type flags                  |
+| [`Status`](./status.md)                                     | Service status snapshot             |
 
 ## Enumeration values
-
-### `start_type` values
-
-| Value            | Meaning                                       |
-| ---------------- | --------------------------------------------- |
-| `:BOOT_START:`   | Starts during boot before the driver is ready |
-| `:SYSTEM_START:` | Starts during kernel initialization           |
-| `:AUTO_START:`   | Starts automatically during system startup    |
-| `:DEMAND_START:` | Starts when requested                         |
-| `:DISABLED:`     | Cannot be started                             |
-
-### `error_control` values
-
-| Value        | Meaning                                                     |
-| ------------ | ----------------------------------------------------------- |
-| `:IGNORE:`   | Logs the error and continues startup                        |
-| `:NORMAL:`   | Logs the error, displays a message, and continues startup   |
-| `:SEVERE:`   | Restarts with the last known-good configuration if possible |
-| `:CRITICAL:` | Restarts with it; fails startup if that restart fails       |
 
 ### `control` values
 
@@ -50,6 +31,15 @@ remote and elevated Windows VFS contexts. Other targets raise
 | `:PAUSE:`       | Requests that the service pause         |
 | `:CONTINUE:`    | Requests that a paused service resume   |
 | `:INTERROGATE:` | Requests that the service report status |
+
+### `error_control` values
+
+| Value        | Meaning                                                     |
+| ------------ | ----------------------------------------------------------- |
+| `:IGNORE:`   | Logs the error and continues startup                        |
+| `:NORMAL:`   | Logs the error, displays a message, and continues startup   |
+| `:SEVERE:`   | Restarts with the last known-good configuration if possible |
+| `:CRITICAL:` | Restarts with it; fails startup if that restart fails       |
 
 ### Service state values
 
@@ -63,6 +53,16 @@ remote and elevated Windows VFS contexts. Other targets raise
 | `:PAUSE_PENDING:`   | Pausing                        |
 | `:PAUSED:`          | Paused                         |
 
+### `start_type` values
+
+| Value            | Meaning                                       |
+| ---------------- | --------------------------------------------- |
+| `:BOOT_START:`   | Starts during boot before the driver is ready |
+| `:SYSTEM_START:` | Starts during kernel initialization           |
+| `:AUTO_START:`   | Starts automatically during system startup    |
+| `:DEMAND_START:` | Starts when requested                         |
+| `:DISABLED:`     | Cannot be started                             |
+
 ## Functions
 
 ### `open :access? func?`
@@ -74,7 +74,7 @@ Opens the local Service Control Manager.
 | Name     | Type                                                            | Description                                             |
 | -------- | --------------------------------------------------------------- | ------------------------------------------------------- |
 | `access` | [`ManagerAccessMask`](./manager-access-mask.md)\|sym\|iterable? | Access rights (default: `:SC_MANAGER_CONNECT:`)         |
-| `func`   | func?                                                           | Function to run with the manager; auto-closes when done |
+| `func`   | `Func`?                                                         | Function to run with the manager; auto-closes when done |
 
 #### Returns
 

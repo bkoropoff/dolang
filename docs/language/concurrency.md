@@ -204,7 +204,7 @@ assert_eq (output.next()) 42
 s.join()
 ```
 
-Inside the callable, the strand reads from input with `strand.next()` and writes
+Inside the function, the strand reads from input with `strand.next()` and writes
 to output with `put` — the same as any pipeline stage. Pipeline stage
 functions like `each` and `where` work unchanged.
 

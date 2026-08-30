@@ -34,6 +34,42 @@ afterward rather than erroring, since `len` cannot itself raise an error.
 
 ## Methods
 
+### `close()`
+
+Closes the archive and releases resources.
+
+#### Mode-specific behavior
+
+- **Read mode:** Simply closes the archive
+- **Write mode:** Finalizes the archive (writes central directory) before
+  closing
+
+#### Example
+
+```
+let archive = open "data.zip"
+# ... use archive ...
+archive.close()
+```
+
+### `create_dir name :mode?`
+
+Creates a directory entry. Write mode only.
+
+#### Parameters
+
+| Name   | Type                    | Description                                                                        |
+| ------ | ----------------------- | ---------------------------------------------------------------------------------- |
+| `name` | [`Str`](../std/str.md)  | Name/path of the directory within the archive (a trailing `/` is added if missing) |
+| `mode` | [`Int`](../std/int.md)? | Unix permission bits (default: `0`)                                                |
+
+#### Example
+
+```
+open "output.zip" "w" do |archive|
+  archive.create_dir "subdir" mode: 0o755
+```
+
 ### `open name :mode? :size? :compression? func?`
 
 Opens a file within the archive. Always creates a regular file entry in
@@ -49,7 +85,7 @@ which carry no content and so have no use for a write handle.
 | `mode`        | [`Int`](../std/int.md)? | Unix permission bits in write mode (default: `0`)    |
 | `size`        | [`Int`](../std/int.md)? | Expected uncompressed size — see below               |
 | `compression` | [`Sym`](../std/sym.md)? | `:STORED:`, `:DEFLATE:` (default), or `:ZSTD:`       |
-| `func`        | func                    | Callable to run with the file; auto-closes when done |
+| `func`        | `Func`                  | Function to run with the file; auto-closes when done |
 
 `mode`, `size`, and `compression` apply to entries being created; passing
 any of them in read mode is an error.
@@ -96,24 +132,6 @@ open "bundle.zip" "w" do |archive|
         file.write $chunk
 ```
 
-### `create_dir name :mode?`
-
-Creates a directory entry. Write mode only.
-
-#### Parameters
-
-| Name   | Type                    | Description                                                                        |
-| ------ | ----------------------- | ---------------------------------------------------------------------------------- |
-| `name` | [`Str`](../std/str.md)  | Name/path of the directory within the archive (a trailing `/` is added if missing) |
-| `mode` | [`Int`](../std/int.md)? | Unix permission bits (default: `0`)                                                |
-
-#### Example
-
-```
-open "output.zip" "w" do |archive|
-  archive.create_dir "subdir" mode: 0o755
-```
-
 ### `symlink target name :mode?`
 
 Creates a symbolic link entry pointing to `target`. Write mode only.
@@ -132,24 +150,6 @@ Argument order matches [`fs.symlink_file`](../fs/index.md#symlink_file-src-dst).
 ```
 open "output.zip" "w" do |archive|
   archive.symlink "target.txt" "link.txt" mode: 0o777
-```
-
-### `close()`
-
-Closes the archive and releases resources.
-
-#### Mode-specific behavior
-
-- **Read mode:** Simply closes the archive
-- **Write mode:** Finalizes the archive (writes central directory) before
-  closing
-
-#### Example
-
-```
-let archive = open "data.zip"
-# ... use archive ...
-archive.close()
 ```
 
 ## Usage Notes
