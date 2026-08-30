@@ -25,7 +25,10 @@ use crate::{
         class::{self, iter_natives},
         dict,
         function::{Function, NativeFunction, NativeFunctionAnnex},
-        protocol::{Dispatch, GcObj, Header, Inspect, Protocol, Spread, SpreadContext, TypeHandle},
+        protocol::{
+            Delegated, Dispatch, GcObj, Header, Inspect, Protocol, Spread, SpreadContext,
+            TypeHandle,
+        },
         tuple,
     },
     sig::Unpack,
@@ -329,7 +332,7 @@ impl<'v> Value<'v> {
     }
 
     pub(crate) async fn op_call<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         args: Args<'v, 'a>,
         out: Slot<'v, 'a>,
@@ -344,7 +347,7 @@ impl<'v> Value<'v> {
     }
 
     pub(crate) async fn op_mcall<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         method: Sym<'v, 'a>,
         args: Args<'v, 'a>,
@@ -356,25 +359,8 @@ impl<'v> Value<'v> {
         }
     }
 
-    pub(crate) async fn op_dcall<'a, 's>(
-        &'a self,
-        strand: &'a mut Strand<'v, 's>,
-        delegator: &'a Value<'v>,
-        method: Sym<'v, 'a>,
-        args: Args<'v, 'a>,
-        out: Slot<'v, 'a>,
-    ) -> Result<'v, 's, ()> {
-        match self.case() {
-            Case::Object(o) => o.op_dcall(strand, delegator, method, args, out).await,
-            Case::Prim(prim) => {
-                let _ = delegator;
-                prim.op_mcall(strand, method, args, out).await
-            }
-        }
-    }
-
     pub(crate) fn op_fill<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         type_obj: &Value<'v>,
         native: Value<'v>,
@@ -418,20 +404,6 @@ impl<'v> Value<'v> {
         }
     }
 
-    /// Downcasts an object without checking its vtable.
-    ///
-    /// # Safety
-    ///
-    /// The value must directly contain an object of type `T`.
-    pub(crate) unsafe fn downcast_ref_unchecked<T: ?Sized + Protocol<'v>>(
-        &self,
-    ) -> gc::Borrow<'v, '_, Header, T> {
-        let Case::Object(object) = self.case() else {
-            unsafe { std::hint::unreachable_unchecked() }
-        };
-        unsafe { gc::Borrow::from_raw(object.into_raw().cast()) }
-    }
-
     /// Downcast `self` to the native type `T`, looking through [`ClassInstance`] native
     /// slots when a direct downcast fails.
     ///
@@ -470,7 +442,7 @@ impl<'v> Value<'v> {
     }
 
     pub(crate) fn op_verbatim<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
@@ -481,7 +453,7 @@ impl<'v> Value<'v> {
     }
 
     pub(crate) fn op_display<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
@@ -491,7 +463,7 @@ impl<'v> Value<'v> {
         }
     }
 
-    pub(crate) fn op_type<'a, 's>(&'a self, strand: &'a mut Strand<'v, 's>, mut out: Slot<'v, 'a>) {
+    pub(crate) fn op_type<'a, 's>(&self, strand: &'a mut Strand<'v, 's>, mut out: Slot<'v, 'a>) {
         match self.case() {
             Case::Prim(prim) => {
                 let builtin = strand.singletons();
@@ -507,7 +479,7 @@ impl<'v> Value<'v> {
     }
 
     pub(crate) fn op_subtype<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         supertype: &Value<'v>,
     ) -> bool {
@@ -534,7 +506,7 @@ impl<'v> Value<'v> {
     }
 
     pub(crate) fn op_debug<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
@@ -544,10 +516,7 @@ impl<'v> Value<'v> {
         }
     }
 
-    pub(crate) fn to_prim<'a, 's>(
-        &'a self,
-        strand: &'a mut Strand<'v, 's>,
-    ) -> Result<'v, 's, Prim> {
+    pub(crate) fn to_prim<'a, 's>(&self, strand: &'a mut Strand<'v, 's>) -> Result<'v, 's, Prim> {
         match &self.case() {
             Case::Prim(p) => Ok(*p),
             Case::Object(_) => {
@@ -630,7 +599,7 @@ impl<'v> Value<'v> {
     }
 
     fn binop<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         other: &'a Value<'v>,
         prim: fn(&Prim, &mut Strand<'v, 's>, &Prim) -> Result<'v, 's, Prim>,
@@ -670,7 +639,7 @@ impl<'v> Value<'v> {
 
     // Commutatative binary operation
     fn binop_comm<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         other: &'a Value<'v>,
         prim: fn(&Prim, &mut Strand<'v, 's>, &Prim) -> Result<'v, 's, Prim>,
@@ -685,7 +654,7 @@ impl<'v> Value<'v> {
     }
 
     pub(crate) fn op_band<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         other: &'a Value<'v>,
     ) -> Result<'v, 's, Value<'v>> {
@@ -695,7 +664,7 @@ impl<'v> Value<'v> {
     }
 
     pub(crate) fn op_bor<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         other: &'a Value<'v>,
     ) -> Result<'v, 's, Value<'v>> {
@@ -705,7 +674,7 @@ impl<'v> Value<'v> {
     }
 
     pub(crate) fn op_bxor<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         other: &'a Value<'v>,
     ) -> Result<'v, 's, Value<'v>> {
@@ -715,7 +684,7 @@ impl<'v> Value<'v> {
     }
 
     pub(crate) fn op_shl<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         other: &'a Value<'v>,
     ) -> Result<'v, 's, Value<'v>> {
@@ -725,7 +694,7 @@ impl<'v> Value<'v> {
     }
 
     pub(crate) fn op_shr<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         other: &'a Value<'v>,
     ) -> Result<'v, 's, Value<'v>> {
@@ -735,7 +704,7 @@ impl<'v> Value<'v> {
     }
 
     pub(crate) fn op_add<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         other: &'a Value<'v>,
     ) -> Result<'v, 's, Value<'v>> {
@@ -745,7 +714,7 @@ impl<'v> Value<'v> {
     }
 
     pub(crate) fn op_sub<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         other: &'a Value<'v>,
     ) -> Result<'v, 's, Value<'v>> {
@@ -759,7 +728,7 @@ impl<'v> Value<'v> {
     }
 
     pub(crate) fn op_mul<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         other: &'a Value<'v>,
     ) -> Result<'v, 's, Value<'v>> {
@@ -769,7 +738,7 @@ impl<'v> Value<'v> {
     }
 
     pub(crate) fn op_div<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         other: &'a Value<'v>,
     ) -> Result<'v, 's, Value<'v>> {
@@ -783,7 +752,7 @@ impl<'v> Value<'v> {
     }
 
     pub(crate) fn op_ediv<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         other: &'a Value<'v>,
     ) -> Result<'v, 's, Value<'v>> {
@@ -797,7 +766,7 @@ impl<'v> Value<'v> {
     }
 
     pub(crate) fn op_mod<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         other: &'a Value<'v>,
     ) -> Result<'v, 's, Value<'v>> {
@@ -813,7 +782,7 @@ impl<'v> Value<'v> {
     // Reverse operations: receiver is the right operand, argument is the left operand
 
     pub(crate) fn op_rsub<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         other: &'a Value<'v>,
     ) -> Result<'v, 's, Value<'v>> {
@@ -827,7 +796,7 @@ impl<'v> Value<'v> {
     }
 
     pub(crate) fn op_rdiv<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         other: &'a Value<'v>,
     ) -> Result<'v, 's, Value<'v>> {
@@ -841,7 +810,7 @@ impl<'v> Value<'v> {
     }
 
     pub(crate) fn op_rediv<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         other: &'a Value<'v>,
     ) -> Result<'v, 's, Value<'v>> {
@@ -855,7 +824,7 @@ impl<'v> Value<'v> {
     }
 
     pub(crate) fn op_rmod<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         other: &'a Value<'v>,
     ) -> Result<'v, 's, Value<'v>> {
@@ -869,7 +838,7 @@ impl<'v> Value<'v> {
     }
 
     pub(crate) fn op_eq<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         other: &'a Value<'v>,
     ) -> Value<'v> {
@@ -886,7 +855,7 @@ impl<'v> Value<'v> {
     }
 
     pub(crate) fn op_ne<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         other: &'a Value<'v>,
     ) -> Value<'v> {
@@ -903,7 +872,7 @@ impl<'v> Value<'v> {
     }
 
     pub(crate) fn op_lt<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         other: &'a Value<'v>,
     ) -> Result<'v, 's, Value<'v>> {
@@ -917,7 +886,7 @@ impl<'v> Value<'v> {
     }
 
     pub(crate) fn op_gt<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         other: &'a Value<'v>,
     ) -> Result<'v, 's, Value<'v>> {
@@ -931,7 +900,7 @@ impl<'v> Value<'v> {
     }
 
     pub(crate) fn op_lte<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         other: &'a Value<'v>,
     ) -> Result<'v, 's, Value<'v>> {
@@ -945,7 +914,7 @@ impl<'v> Value<'v> {
     }
 
     pub(crate) fn op_gte<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         other: &'a Value<'v>,
     ) -> Result<'v, 's, Value<'v>> {
@@ -971,7 +940,7 @@ impl<'v> Value<'v> {
         ))
     }
 
-    pub(crate) fn op_bool<'a, 's>(&'a self, strand: &'a mut Strand<'v, 's>) -> bool {
+    pub(crate) fn op_bool<'a, 's>(&self, strand: &'a mut Strand<'v, 's>) -> bool {
         match &self.case() {
             Case::Prim(p) => p.op_bool(strand),
             Case::Object(o) => o.op_bool(strand),
@@ -979,7 +948,7 @@ impl<'v> Value<'v> {
     }
 
     pub(crate) fn op_get<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         field: Sym<'v, 'a>,
         out: Slot<'v, 'a>,
@@ -1003,7 +972,7 @@ impl<'v> Value<'v> {
     }
 
     pub(crate) fn op_index<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         index: &Value<'v>,
         out: Slot<'v, 'a>,
@@ -1111,17 +1080,14 @@ impl<'v> Value<'v> {
         }
     }
 
-    pub(crate) fn to_index<'a, 's>(
-        &'a self,
-        strand: &'a mut Strand<'v, 's>,
-    ) -> Result<'v, 's, usize> {
+    pub(crate) fn to_index<'a, 's>(&self, strand: &'a mut Strand<'v, 's>) -> Result<'v, 's, usize> {
         self.to_prim(strand)?.to_index(strand)
     }
 
     /// Writes the verbatim representation of this value to `format`.
     #[inline]
     pub fn verbatim<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         format: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
@@ -1131,7 +1097,7 @@ impl<'v> Value<'v> {
     /// Writes the human-readable representation of this value to `format`.
     #[inline]
     pub fn display<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         format: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
@@ -1141,7 +1107,7 @@ impl<'v> Value<'v> {
     /// Writes the debug representation of this value to `format`.
     #[inline]
     pub fn debug<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         format: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
@@ -1151,7 +1117,7 @@ impl<'v> Value<'v> {
     /// Converts a value to its verbatim representation.
     /// See the documentation for `std.verbatim` in the language documentation for details.
     #[inline]
-    pub fn to_verbatim<'a, 's>(&'a self, strand: &'a mut Strand<'v, 's>) -> Result<'v, 's, String> {
+    pub fn to_verbatim<'a, 's>(&self, strand: &'a mut Strand<'v, 's>) -> Result<'v, 's, String> {
         let mut out = String::new();
         self.verbatim(strand, &mut out)?;
         Ok(out)
@@ -1159,7 +1125,7 @@ impl<'v> Value<'v> {
 
     /// Returns a human-readable representation of the value
     #[inline]
-    pub fn to_string<'a, 's>(&'a self, strand: &'a mut Strand<'v, 's>) -> Result<'v, 's, String> {
+    pub fn to_string<'a, 's>(&self, strand: &'a mut Strand<'v, 's>) -> Result<'v, 's, String> {
         let mut out = String::new();
         self.display(strand, &mut out)?;
         Ok(out)
@@ -1167,7 +1133,7 @@ impl<'v> Value<'v> {
 
     /// Returns a string representation of the value for debugging purposes
     #[inline]
-    pub fn to_debug<'a, 's>(&'a self, strand: &'a mut Strand<'v, 's>) -> Result<'v, 's, String> {
+    pub fn to_debug<'a, 's>(&self, strand: &'a mut Strand<'v, 's>) -> Result<'v, 's, String> {
         let mut out = String::new();
         self.debug(strand, &mut out)?;
         Ok(out)
@@ -1181,7 +1147,7 @@ impl<'v> Value<'v> {
     /// - Empty strings are false, others are true
     /// - Other objects are usually `true` unless they have special behavior
     #[inline]
-    pub fn to_bool<'a, 's>(&'a self, strand: &'a mut Strand<'v, 's>) -> bool {
+    pub fn to_bool<'a, 's>(&self, strand: &'a mut Strand<'v, 's>) -> bool {
         self.op_bool(strand)
     }
 
@@ -1222,7 +1188,7 @@ impl<'v> Value<'v> {
     /// Unless you are forwarding an existing [`Args`], use the [`call!()`](crate::call)
     /// macro to invoke a callable value with a suitable argument pack
     pub async fn call<'a, 's>(
-        &'a self,
+        &self,
         strand: &mut Strand<'v, 's>,
         args: Args<'v, 'a>,
         mut out: impl Output<'v>,
@@ -1236,7 +1202,7 @@ impl<'v> Value<'v> {
     /// Unless you are forwarding an existing [`Args`], use the [`method!()`](crate::method)
     /// macro to invoke a method with a suitable argument pack
     pub async fn method<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         method: Sym<'v, 'a>,
         args: Args<'v, 'a>,
@@ -1248,7 +1214,7 @@ impl<'v> Value<'v> {
 
     /// Get a field.
     pub fn get<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         field: Sym<'v, 'a>,
         mut out: impl Output<'v>,
@@ -1285,7 +1251,7 @@ impl<'v> Value<'v> {
     /// value.index(strand, "key", &mut out)?;  // Get by key
     /// ```
     pub fn index<'a, 's>(
-        &'a self,
+        &self,
         strand: &'a mut Strand<'v, 's>,
         index: impl Input<'v>,
         mut out: impl Output<'v>,
@@ -1542,7 +1508,7 @@ impl<'v> Value<'v> {
     /// - [`None`]: Not a [`Sym`] value
     /// - [`Some(value)`](Some): The value as a [`Sym`]
     #[inline]
-    pub fn as_sym<'a>(&'a self, vm: &Vm<'v>) -> Option<Sym<'v, 'a>> {
+    pub fn as_sym<'a>(&self, vm: &Vm<'v>) -> Option<Sym<'v, 'a>> {
         self.downcast_ref(vm.builtin_types().sym)
             .map(|s| unsafe { Sym::from_tag(s.get().tag) })
     }
@@ -1636,6 +1602,476 @@ impl<'v> Value<'v> {
                 // Fallback: unknown GC object
                 View::Object(unsafe { ObjectView::from_ptr(obj.into_raw()) })
             }
+        }
+    }
+}
+
+macro_rules! delegated_binop {
+    ($self:expr, $strand:expr, $other:expr, $op:ident, $reverse:ident) => {{
+        let result = match ($self.receiver.case(), $other.case()) {
+            (Case::Prim(_), _) => $self.receiver.$op($strand, $other),
+            (Case::Object(receiver), Case::Prim(_)) => {
+                Delegated::new(receiver, $self.delegator).$op($strand, $other)
+            }
+            (Case::Object(receiver), Case::Object(reverse)) => {
+                match Delegated::new(receiver, $self.delegator).$op($strand, $other) {
+                    Err(error) if error.kind() == ErrorKind::Unsupported => {
+                        reverse.$reverse($strand, $self.receiver)
+                    }
+                    result => result,
+                }
+            }
+        };
+        match result {
+            Err(error) if error.kind() == ErrorKind::Unsupported => {
+                Err(Error::type_error($strand, "no overload available"))
+            }
+            result => result,
+        }
+    }};
+}
+
+impl<'v, 'a> Dispatch<'v, 'a> for Delegated<'v, 'a, &'a Value<'v>> {
+    async fn op_call<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        args: Args<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        match self.receiver.case() {
+            Case::Object(receiver) => {
+                Delegated::new(receiver, self.delegator)
+                    .op_call(strand, args, out)
+                    .await
+            }
+            Case::Prim(_) => self.receiver.op_call(strand, args, out).await,
+        }
+    }
+
+    async fn op_mcall<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        method: Sym<'v, 'a>,
+        args: Args<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        match self.receiver.case() {
+            Case::Object(receiver) => {
+                Delegated::new(receiver, self.delegator)
+                    .op_mcall(strand, method, args, out)
+                    .await
+            }
+            Case::Prim(_) => self.receiver.op_mcall(strand, method, args, out).await,
+        }
+    }
+
+    fn op_fill<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        type_obj: &Value<'v>,
+        native: Value<'v>,
+    ) -> Result<'v, 's, ()> {
+        match self.receiver.case() {
+            Case::Object(receiver) => {
+                Delegated::new(receiver, self.delegator).op_fill(strand, type_obj, native)
+            }
+            Case::Prim(_) => self.receiver.op_fill(strand, type_obj, native),
+        }
+    }
+
+    fn op_type<'s>(&self, strand: &'a mut Strand<'v, 's>, out: Slot<'v, 'a>) {
+        match self.receiver.case() {
+            Case::Object(receiver) => Delegated::new(receiver, self.delegator).op_type(strand, out),
+            Case::Prim(_) => self.receiver.op_type(strand, out),
+        }
+    }
+
+    fn op_subtype<'s>(&self, strand: &'a mut Strand<'v, 's>, supertype: &Value<'v>) -> bool {
+        match self.receiver.case() {
+            Case::Object(receiver) => {
+                Delegated::new(receiver, self.delegator).op_subtype(strand, supertype)
+            }
+            Case::Prim(_) => self.receiver.op_subtype(strand, supertype),
+        }
+    }
+
+    fn op_inspect(&self, vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {
+        match self.receiver.case() {
+            Case::Object(receiver) => Delegated::new(receiver, self.delegator).op_inspect(vm),
+            Case::Prim(_) => None,
+        }
+    }
+
+    fn op_verbatim<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        w: &mut dyn Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        match self.receiver.case() {
+            Case::Object(receiver) => {
+                Delegated::new(receiver, self.delegator).op_verbatim(strand, w)
+            }
+            Case::Prim(_) => self.receiver.op_verbatim(strand, w),
+        }
+    }
+
+    fn op_display<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        w: &mut dyn Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        match self.receiver.case() {
+            Case::Object(receiver) => {
+                Delegated::new(receiver, self.delegator).op_display(strand, w)
+            }
+            Case::Prim(_) => self.receiver.op_display(strand, w),
+        }
+    }
+
+    fn op_debug<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        w: &mut dyn Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        match self.receiver.case() {
+            Case::Object(receiver) => Delegated::new(receiver, self.delegator).op_debug(strand, w),
+            Case::Prim(_) => self.receiver.op_debug(strand, w),
+        }
+    }
+
+    fn op_bool<'s>(&self, strand: &'a mut Strand<'v, 's>) -> bool {
+        match self.receiver.case() {
+            Case::Object(receiver) => Delegated::new(receiver, self.delegator).op_bool(strand),
+            Case::Prim(_) => self.receiver.op_bool(strand),
+        }
+    }
+
+    fn op_bnot<'s>(&self, strand: &'a mut Strand<'v, 's>) -> Result<'v, 's, Value<'v>> {
+        match self.receiver.case() {
+            Case::Object(receiver) => Delegated::new(receiver, self.delegator).op_bnot(strand),
+            Case::Prim(_) => self.receiver.op_bnot(strand),
+        }
+    }
+
+    fn op_neg<'s>(&self, strand: &'a mut Strand<'v, 's>) -> Result<'v, 's, Value<'v>> {
+        match self.receiver.case() {
+            Case::Object(receiver) => Delegated::new(receiver, self.delegator).op_neg(strand),
+            Case::Prim(_) => self.receiver.op_neg(strand),
+        }
+    }
+
+    fn op_band<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        other: &Value<'v>,
+    ) -> Result<'v, 's, Value<'v>> {
+        delegated_binop!(self, strand, other, op_band, op_band)
+    }
+    fn op_bor<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        other: &Value<'v>,
+    ) -> Result<'v, 's, Value<'v>> {
+        delegated_binop!(self, strand, other, op_bor, op_bor)
+    }
+    fn op_bxor<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        other: &Value<'v>,
+    ) -> Result<'v, 's, Value<'v>> {
+        delegated_binop!(self, strand, other, op_bxor, op_bxor)
+    }
+    fn op_shl<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        other: &Value<'v>,
+    ) -> Result<'v, 's, Value<'v>> {
+        delegated_binop!(self, strand, other, op_shl, op_shl)
+    }
+    fn op_shr<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        other: &Value<'v>,
+    ) -> Result<'v, 's, Value<'v>> {
+        delegated_binop!(self, strand, other, op_shr, op_shr)
+    }
+    fn op_add<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        other: &Value<'v>,
+    ) -> Result<'v, 's, Value<'v>> {
+        delegated_binop!(self, strand, other, op_add, op_add)
+    }
+    fn op_sub<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        other: &Value<'v>,
+    ) -> Result<'v, 's, Value<'v>> {
+        delegated_binop!(self, strand, other, op_sub, op_rsub)
+    }
+    fn op_rsub<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        other: &Value<'v>,
+    ) -> Result<'v, 's, Value<'v>> {
+        delegated_binop!(self, strand, other, op_rsub, op_sub)
+    }
+    fn op_mul<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        other: &Value<'v>,
+    ) -> Result<'v, 's, Value<'v>> {
+        delegated_binop!(self, strand, other, op_mul, op_mul)
+    }
+    fn op_div<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        other: &Value<'v>,
+    ) -> Result<'v, 's, Value<'v>> {
+        delegated_binop!(self, strand, other, op_div, op_rdiv)
+    }
+    fn op_rdiv<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        other: &Value<'v>,
+    ) -> Result<'v, 's, Value<'v>> {
+        delegated_binop!(self, strand, other, op_rdiv, op_div)
+    }
+    fn op_ediv<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        other: &Value<'v>,
+    ) -> Result<'v, 's, Value<'v>> {
+        delegated_binop!(self, strand, other, op_ediv, op_rediv)
+    }
+    fn op_rediv<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        other: &Value<'v>,
+    ) -> Result<'v, 's, Value<'v>> {
+        delegated_binop!(self, strand, other, op_rediv, op_ediv)
+    }
+    fn op_mod<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        other: &Value<'v>,
+    ) -> Result<'v, 's, Value<'v>> {
+        delegated_binop!(self, strand, other, op_mod, op_rmod)
+    }
+    fn op_rmod<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        other: &Value<'v>,
+    ) -> Result<'v, 's, Value<'v>> {
+        delegated_binop!(self, strand, other, op_rmod, op_mod)
+    }
+    fn op_eq<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        other: &Value<'v>,
+    ) -> Result<'v, 's, Value<'v>> {
+        match self.receiver.case() {
+            Case::Object(receiver) => Delegated::new(receiver, self.delegator).op_eq(strand, other),
+            Case::Prim(_) => Ok(self.receiver.op_eq(strand, other)),
+        }
+    }
+    fn op_ne<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        other: &Value<'v>,
+    ) -> Result<'v, 's, Value<'v>> {
+        match self.receiver.case() {
+            Case::Object(receiver) => Delegated::new(receiver, self.delegator).op_ne(strand, other),
+            Case::Prim(_) => Ok(self.receiver.op_ne(strand, other)),
+        }
+    }
+    fn op_lt<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        other: &Value<'v>,
+    ) -> Result<'v, 's, Value<'v>> {
+        delegated_binop!(self, strand, other, op_lt, op_gt)
+    }
+    fn op_lte<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        other: &Value<'v>,
+    ) -> Result<'v, 's, Value<'v>> {
+        delegated_binop!(self, strand, other, op_lte, op_gte)
+    }
+    fn op_gt<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        other: &Value<'v>,
+    ) -> Result<'v, 's, Value<'v>> {
+        delegated_binop!(self, strand, other, op_gt, op_lt)
+    }
+    fn op_gte<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        other: &Value<'v>,
+    ) -> Result<'v, 's, Value<'v>> {
+        delegated_binop!(self, strand, other, op_gte, op_lte)
+    }
+
+    fn op_get<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        field: Sym<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        match self.receiver.case() {
+            Case::Object(receiver) => {
+                Delegated::new(receiver, self.delegator).op_get(strand, field, out)
+            }
+            Case::Prim(_) => self.receiver.op_get(strand, field, out),
+        }
+    }
+
+    fn op_set<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        field: Sym<'v, 'a>,
+        value: Slot<'v, '_>,
+    ) -> Result<'v, 's, ()> {
+        match self.receiver.case() {
+            Case::Object(receiver) => {
+                Delegated::new(receiver, self.delegator).op_set(strand, field, value)
+            }
+            Case::Prim(_) => self.receiver.op_set(strand, field, value),
+        }
+    }
+
+    fn op_index<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        index: &Value<'v>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        match self.receiver.case() {
+            Case::Object(receiver) => {
+                Delegated::new(receiver, self.delegator).op_index(strand, index, out)
+            }
+            Case::Prim(_) => self.receiver.op_index(strand, index, out),
+        }
+    }
+
+    fn op_assign<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        index: Slot<'v, 'a>,
+        value: Slot<'v, '_>,
+    ) -> Result<'v, 's, ()> {
+        match self.receiver.case() {
+            Case::Object(receiver) => {
+                Delegated::new(receiver, self.delegator).op_assign(strand, index, value)
+            }
+            Case::Prim(_) => self.receiver.op_assign(strand, index, value),
+        }
+    }
+
+    fn op_hash<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        hasher: &mut DefaultHasher,
+    ) -> Result<'v, 's, ()> {
+        match self.receiver.case() {
+            Case::Object(receiver) => {
+                Delegated::new(receiver, self.delegator).op_hash(strand, hasher)
+            }
+            Case::Prim(_) => self.receiver.op_hash(strand, hasher),
+        }
+    }
+
+    async fn op_next<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        out: Slot<'v, '_>,
+    ) -> Result<'v, 's, bool> {
+        match self.receiver.case() {
+            Case::Object(receiver) => {
+                Delegated::new(receiver, self.delegator)
+                    .op_next(strand, out)
+                    .await
+            }
+            Case::Prim(_) => self.receiver.op_next(strand, out).await,
+        }
+    }
+
+    async fn op_put<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        item: Slot<'v, '_>,
+    ) -> Result<'v, 's, ()> {
+        match self.receiver.case() {
+            Case::Object(receiver) => {
+                Delegated::new(receiver, self.delegator)
+                    .op_put(strand, item)
+                    .await
+            }
+            Case::Prim(_) => self.receiver.op_put(strand, item).await,
+        }
+    }
+
+    async fn op_iter<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        out: Slot<'v, '_>,
+    ) -> Result<'v, 's, ()> {
+        match self.receiver.case() {
+            Case::Object(receiver) => {
+                Delegated::new(receiver, self.delegator)
+                    .op_iter(strand, out)
+                    .await
+            }
+            Case::Prim(_) => self.receiver.op_iter(strand, out).await,
+        }
+    }
+
+    async fn op_sink<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        out: Slot<'v, '_>,
+    ) -> Result<'v, 's, ()> {
+        match self.receiver.case() {
+            Case::Object(receiver) => {
+                Delegated::new(receiver, self.delegator)
+                    .op_sink(strand, out)
+                    .await
+            }
+            Case::Prim(_) => self.receiver.op_sink(strand, out).await,
+        }
+    }
+
+    async fn op_spread<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        context: SpreadContext,
+        sink: &'a mut dyn Spread<'v, 's>,
+    ) -> Result<'v, 's, ()> {
+        match self.receiver.case() {
+            Case::Object(receiver) => {
+                Delegated::new(receiver, self.delegator)
+                    .op_spread(strand, context, sink)
+                    .await
+            }
+            Case::Prim(_) => self.receiver.op_spread(strand, context, sink).await,
+        }
+    }
+
+    async fn op_unpack<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        sig: &'a Unpack<'v, 'a>,
+        out: Slots<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        match self.receiver.case() {
+            Case::Object(receiver) => {
+                Delegated::new(receiver, self.delegator)
+                    .op_unpack(strand, sig, out)
+                    .await
+            }
+            Case::Prim(_) => self.receiver.op_unpack(strand, sig, out).await,
         }
     }
 }

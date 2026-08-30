@@ -8,7 +8,9 @@ use crate::{
     gc::{Collect, arena::Visit},
     object::{
         BoundMethod,
-        protocol::{Inspect, Member, Protocol, Recv, Spread, SpreadContext, members},
+        protocol::{
+            Delegated, Dispatch, Inspect, Member, Protocol, Recv, Spread, SpreadContext, members,
+        },
         tuple,
     },
     sig,
@@ -437,12 +439,14 @@ pub(crate) async fn iter_mcall<'v, 'a, 's>(
     if method.tag() == sym::ITER {
         iterable_mcall(strand, rcvr, method, args, out).await
     } else {
-        let delegator = Value::from_input(strand, rcvr);
         strand
-            .vm()
-            .singletons()
-            .input_iter
-            .op_dcall(strand, &delegator, method, args, out)
+            .with_slots(async move |strand, [mut delegator]| {
+                Output::set(strand, Slot::reborrow(&mut delegator), rcvr);
+                let receiver = &strand.vm().singletons().input_iter;
+                Delegated::new(receiver, &delegator)
+                    .op_mcall(strand, method, args, out)
+                    .await
+            })
             .await
     }
 }
@@ -486,12 +490,15 @@ impl<'v> Protocol<'v> for Iterable {
     }
 
     async fn op_mcall<'a, 's>(
-        _this: Recv<'v, 'a, Self>,
+        this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         method: Sym<'v, 'a>,
-        args: Args<'v, 'a>,
+        mut args: Args<'v, 'a>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
+        if let Some(delegator) = this.delegator() {
+            args.prepend_self(delegator.dup());
+        }
         match method.tag() {
             sym::INIT_METHOD => {
                 let ([_self_val], []) = unpack!(strand, args, 1, 0)?;
@@ -509,18 +516,6 @@ impl<'v> Protocol<'v> for Iterable {
             }
             _ => Err(Error::field(strand, method)),
         }
-    }
-
-    async fn op_dcall<'a, 's>(
-        this: Recv<'v, 'a, Self>,
-        strand: &'a mut Strand<'v, 's>,
-        delegator: &'a Value<'v>,
-        method: Sym<'v, 'a>,
-        mut args: Args<'v, 'a>,
-        out: Slot<'v, 'a>,
-    ) -> Result<'v, 's, ()> {
-        args.prepend_self(delegator.dup());
-        Iterable::op_mcall(this, strand, method, args, out).await
     }
 }
 
@@ -563,12 +558,15 @@ impl<'v> Protocol<'v> for Sinkable {
     }
 
     async fn op_mcall<'a, 's>(
-        _this: Recv<'v, 'a, Self>,
+        this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         method: Sym<'v, 'a>,
-        args: Args<'v, 'a>,
+        mut args: Args<'v, 'a>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
+        if let Some(delegator) = this.delegator() {
+            args.prepend_self(delegator.dup());
+        }
         match method.tag() {
             sym::INIT_METHOD => {
                 let ([_self_val], []) = unpack!(strand, args, 1, 0)?;
@@ -584,18 +582,6 @@ impl<'v> Protocol<'v> for Sinkable {
             }
             _ => Err(Error::field(strand, method)),
         }
-    }
-
-    async fn op_dcall<'a, 's>(
-        this: Recv<'v, 'a, Self>,
-        strand: &'a mut Strand<'v, 's>,
-        delegator: &'a Value<'v>,
-        method: Sym<'v, 'a>,
-        mut args: Args<'v, 'a>,
-        out: Slot<'v, 'a>,
-    ) -> Result<'v, 's, ()> {
-        args.prepend_self(delegator.dup());
-        Sinkable::op_mcall(this, strand, method, args, out).await
     }
 }
 
@@ -623,12 +609,14 @@ pub(crate) async fn sink_mcall<'v, 'a, 's>(
     if method.tag() == sym::SINK {
         sinkable_mcall(strand, rcvr, method, args, out).await
     } else {
-        let delegator = Value::from_input(strand, rcvr);
         strand
-            .vm()
-            .singletons()
-            .output_iter
-            .op_dcall(strand, &delegator, method, args, out)
+            .with_slots(async move |strand, [mut delegator]| {
+                Output::set(strand, Slot::reborrow(&mut delegator), rcvr);
+                let receiver = &strand.vm().singletons().output_iter;
+                Delegated::new(receiver, &delegator)
+                    .op_mcall(strand, method, args, out)
+                    .await
+            })
             .await
     }
 }
@@ -661,12 +649,14 @@ pub(crate) async fn iterable_mcall<'v, 'a, 's>(
     args: Args<'v, 'a>,
     out: Slot<'v, 'a>,
 ) -> Result<'v, 's, ()> {
-    let delegator = Value::from_input(strand, rcvr);
     strand
-        .vm()
-        .singletons()
-        .iterable
-        .op_dcall(strand, &delegator, method, args, out)
+        .with_slots(async move |strand, [mut delegator]| {
+            Output::set(strand, Slot::reborrow(&mut delegator), rcvr);
+            let receiver = &strand.vm().singletons().iterable;
+            Delegated::new(receiver, &delegator)
+                .op_mcall(strand, method, args, out)
+                .await
+        })
         .await
 }
 
@@ -694,19 +684,21 @@ pub(crate) async fn sinkable_mcall<'v, 'a, 's>(
     args: Args<'v, 'a>,
     out: Slot<'v, 'a>,
 ) -> Result<'v, 's, ()> {
-    let delegator = Value::from_input(strand, rcvr);
     strand
-        .vm()
-        .singletons()
-        .sinkable
-        .op_dcall(strand, &delegator, method, args, out)
+        .with_slots(async move |strand, [mut delegator]| {
+            Output::set(strand, Slot::reborrow(&mut delegator), rcvr);
+            let receiver = &strand.vm().singletons().sinkable;
+            Delegated::new(receiver, &delegator)
+                .op_mcall(strand, method, args, out)
+                .await
+        })
         .await
 }
 
 /// Forward an `Iterable`/`Sinkable` method onto a materialized `Iter`/`Sink`.
 ///
 /// `args` arrives with the receiver as the leading positional argument (either
-/// prepended by `op_dcall`, or written explicitly as in `Iterable.map(x, f)`).
+/// prepended for delegated dispatch, or written explicitly as in `Iterable.map(x, f)`).
 /// Popping it leaves exactly the method's own arguments behind, so dispatching
 /// `method` onto the materialized value is literally `x.iter().foo(..)`.
 ///
@@ -1388,12 +1380,15 @@ impl<'v> Protocol<'v> for Iter {
     }
 
     async fn op_mcall<'a, 's>(
-        _this: Recv<'v, 'a, Self>,
+        this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         method: Sym<'v, 'a>,
-        args: Args<'v, 'a>,
+        mut args: Args<'v, 'a>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
+        if let Some(delegator) = this.delegator() {
+            args.prepend_self(delegator.dup());
+        }
         let default = Sym::well_known(sym::DEFAULT);
         let else_key = Sym::well_known(sym::ELSE);
         match method.tag() {
@@ -1481,18 +1476,6 @@ impl<'v> Protocol<'v> for Iter {
             _ => Err(Error::field(strand, method)),
         }
     }
-
-    async fn op_dcall<'a, 's>(
-        this: Recv<'v, 'a, Self>,
-        strand: &'a mut Strand<'v, 's>,
-        delegator: &'a Value<'v>,
-        method: Sym<'v, 'a>,
-        mut args: Args<'v, 'a>,
-        out: Slot<'v, 'a>,
-    ) -> Result<'v, 's, ()> {
-        args.prepend_self(delegator.dup());
-        Iter::op_mcall(this, strand, method, args, out).await
-    }
 }
 
 impl<'v> Protocol<'v> for Sink {
@@ -1544,12 +1527,15 @@ impl<'v> Protocol<'v> for Sink {
     }
 
     async fn op_mcall<'a, 's>(
-        _this: Recv<'v, 'a, Self>,
+        this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
         method: Sym<'v, 'a>,
-        args: Args<'v, 'a>,
+        mut args: Args<'v, 'a>,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
+        if let Some(delegator) = this.delegator() {
+            args.prepend_self(delegator.dup());
+        }
         match method.tag() {
             sym::INIT_METHOD => {
                 let ([_self_val], []) = unpack!(strand, args, 1, 0)?;
@@ -1580,18 +1566,6 @@ impl<'v> Protocol<'v> for Sink {
             }
             _ => Err(Error::field(strand, method)),
         }
-    }
-
-    async fn op_dcall<'a, 's>(
-        this: Recv<'v, 'a, Self>,
-        strand: &'a mut Strand<'v, 's>,
-        delegator: &'a Value<'v>,
-        method: Sym<'v, 'a>,
-        mut args: Args<'v, 'a>,
-        out: Slot<'v, 'a>,
-    ) -> Result<'v, 's, ()> {
-        args.prepend_self(delegator.dup());
-        Sink::op_mcall(this, strand, method, args, out).await
     }
 }
 
@@ -3597,7 +3571,7 @@ mod tests {
             );
 
             // Direct method call: array's own `op_mcall` forwards an unrecognized
-            // `Iterable` method through `iterable_mcall` -> `Iterable::op_dcall`.
+            // `Iterable` method through delegated `iterable_mcall` dispatch.
             {
                 let arr_val: &Value = &arr;
                 method!(strand, arr_val, map_sym, &mut out, &pred)
@@ -3839,7 +3813,7 @@ mod tests {
                 assert_eq!(err.kind(), ErrorKind::Field, "{expected_debug}");
 
                 // `op_mcall`'s own `INIT_METHOD` arm: since these marker types are
-                // reached directly (not via a concrete object's `op_dcall`, which
+                // reached directly (not via a concrete object's delegated dispatch, which
                 // would prepend the receiver), the "self" argument has to be
                 // supplied explicitly.
                 method!(strand, &ty, init_sym, &mut out, &ty).await.unwrap();
@@ -4029,7 +4003,7 @@ mod tests {
             assert!(out.to_debug(strand).unwrap().contains("bound method"));
 
             // `Null::op_mcall`'s `INIT_METHOD` arm is reached directly (there's no
-            // delegating `op_dcall` to prepend a receiver), so it needs an explicit
+            // delegated dispatch to prepend a receiver), so it needs an explicit
             // "self" argument, same as the abstract marker types above.
             method!(strand, &null_val, init_sym, &mut out, &null_val)
                 .await
@@ -4086,7 +4060,7 @@ mod tests {
                 map_val.get(strand, next_sym, &mut out).unwrap();
                 assert!(out.to_debug(strand).unwrap().contains("bound method"));
                 // `Map::op_mcall`'s `INIT_METHOD` arm is reached directly (no
-                // delegating `op_dcall` prepends a receiver), so it needs an
+                // delegated dispatch prepends a receiver), so it needs an
                 // explicit "self" argument.
                 method!(strand, &map_val, init_sym, &mut out, &map_val)
                     .await

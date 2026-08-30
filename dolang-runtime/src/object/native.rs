@@ -19,7 +19,7 @@ use crate::{
         self, Base, Collect,
         arena::{self, Upcast, Visit},
     },
-    object::protocol::{GcObjBorrow, Recv, Vtbl},
+    object::protocol::{Delegated, Dispatch, GcObjBorrow, Recv, Vtbl},
     sig,
     strand::{Pinned, Strand},
     sym::{self, Sym},
@@ -321,7 +321,7 @@ impl<'v, 'a, 'b> Iterator for UnpackIter<'v, 'a, 'b> {
 /// - Is an [`Input`] representing the object as a Do [`Value`].
 pub struct Instance<'v, 'a, T: Object<'v>> {
     pub(crate) receiver: gc::Borrow<'v, 'a, protocol::Header, ObjectWrap<'v, T>>,
-    /// When this call arrived via class delegation (`op_dcall`), the original
+    /// When this operation arrived via class delegation, the original
     /// delegating value (e.g. the `ClassInstance`).  `None` for direct calls.
     pub(crate) delegator: Option<&'a Value<'v>>,
 }
@@ -565,13 +565,21 @@ impl<'v, 'a, T: Object<'v>> Instance<'v, 'a, T> {
         }
     }
 
-    /// Reconstructs an instance from a value without checking its native vtable.
-    ///
-    /// # Safety
-    ///
-    /// `value` must directly contain an `ObjectWrap<T>`.
-    pub(crate) unsafe fn from_value_unchecked(value: &'a Value<'v>) -> Self {
-        Self::new(unsafe { value.downcast_ref_unchecked() })
+    #[inline]
+    pub(crate) fn from_recv(this: &Recv<'v, 'a, ObjectWrap<'v, T>>) -> Self {
+        Self {
+            receiver: this.receiver,
+            delegator: this.delegator(),
+        }
+    }
+
+    pub(crate) fn from_native_value(value: &'a Value<'v>, vm: &Vm<'v>, ty: Type<'v, T>) -> Self {
+        Self {
+            receiver: value
+                .downcast_native(vm, ty.vtbl)
+                .expect("native view owner has wrong type"),
+            delegator: Some(value),
+        }
     }
 
     /// Borrow content immutably
@@ -1386,7 +1394,12 @@ async fn default_object_unpack<'v, 'a, 's, T: Object<'v>>(
                 staged.at(index).store(default.dup());
             }
 
-            let recv = Recv::<ObjectWrap<'v, T>>::new(this.receiver);
+            let recv = match this.delegator {
+                Some(delegator) => {
+                    Recv::<ObjectWrap<'v, T>>::new(this.receiver).with_delegator(delegator)
+                }
+                None => Recv::<ObjectWrap<'v, T>>::new(this.receiver),
+            };
             let entries = &recv.vtbl().entries;
             let track = sig.variadic != Variadic::Discard;
             let mut matched: Option<BitBox> = track.then(|| bitbox![0; entries.len()]);
@@ -1404,12 +1417,24 @@ async fn default_object_unpack<'v, 'a, 's, T: Object<'v>>(
                     let (sym, entry) = &entries[index];
                     let result = match entry {
                         Entry::Getter(handler) | Entry::Property(handler, _) => unsafe {
-                            handler.call(recv.as_header(), strand, staged.at(dest))
+                            handler.call(
+                                recv.as_header(),
+                                recv.delegator(),
+                                strand,
+                                staged.at(dest),
+                            )
                         },
                         Entry::Delegate(supertype_index, _) => {
                             let supertype =
                                 instance_supertype::<T>(recv.clone(), strand, *supertype_index);
-                            supertype.op_get(strand, *sym, staged.at(dest))
+                            strand.with_slots_sync(|strand, [mut delegator]| {
+                                Output::set(strand, Slot::reborrow(&mut delegator), &recv);
+                                Delegated::new(supertype, &delegator).op_get(
+                                    strand,
+                                    *sym,
+                                    staged.at(dest),
+                                )
+                            })
                         }
                         _ => unreachable!(),
                     };
@@ -1445,12 +1470,15 @@ async fn default_object_unpack<'v, 'a, 's, T: Object<'v>>(
                     let present = strand.with_slots_sync(|strand, [tmp]| {
                         let result = match entry {
                             Entry::Getter(handler) | Entry::Property(handler, _) => unsafe {
-                                handler.call(recv.as_header(), strand, tmp)
+                                handler.call(recv.as_header(), recv.delegator(), strand, tmp)
                             },
                             Entry::Delegate(supertype_index, _) => {
                                 let supertype =
                                     instance_supertype::<T>(recv.clone(), strand, *supertype_index);
-                                supertype.op_get(strand, *sym, tmp)
+                                strand.with_slots_sync(|strand, [mut delegator]| {
+                                    Output::set(strand, Slot::reborrow(&mut delegator), &recv);
+                                    Delegated::new(supertype, &delegator).op_get(strand, *sym, tmp)
+                                })
                             }
                             _ => unreachable!(),
                         };
@@ -1548,7 +1576,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Cow::Borrowed(T::MODULE),
             Cow::Borrowed(T::NAME),
             Some(Cow::Borrowed("(str)")),
-            |strand| T::display(Instance::new(this.receiver), strand, w),
+            |strand| T::display(Instance::from_recv(&this), strand, w),
         )
     }
 
@@ -1562,7 +1590,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Cow::Borrowed(T::MODULE),
             Cow::Borrowed(T::NAME),
             Some(Cow::Borrowed("(verbatim)")),
-            |strand| T::verbatim(Instance::new(this.receiver), strand, w),
+            |strand| T::verbatim(Instance::from_recv(&this), strand, w),
         )
     }
 
@@ -1576,12 +1604,12 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Cow::Borrowed(T::MODULE),
             Cow::Borrowed(T::NAME),
             Some(Cow::Borrowed("(dbg)")),
-            |strand| T::debug(Instance::new(this.receiver), strand, w),
+            |strand| T::debug(Instance::from_recv(&this), strand, w),
         )
     }
 
     fn op_bool<'a, 's>(this: Recv<'v, 'a, Self>, strand: &mut Strand<'v, 's>) -> bool {
-        T::bool(Instance::new(this.receiver), strand)
+        T::bool(Instance::from_recv(&this), strand)
     }
 
     async fn op_call<'a, 's>(
@@ -1595,7 +1623,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Cow::Borrowed(T::MODULE),
             Cow::Borrowed(T::NAME),
             None,
-            async |strand| T::call(Instance::new(this.receiver), strand, args, out).await,
+            async |strand| T::call(Instance::from_recv(&this), strand, args, out).await,
         )
         .await
     }
@@ -1617,19 +1645,16 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
                 async |strand| match entry {
                     Entry::Method(handler) => unsafe {
                         handler
-                            .call(this.as_header(), None, strand, args, out)
+                            .call(this.as_header(), this.delegator(), strand, args, out)
                             .await
                     },
                     Entry::Delegate(idx, MemberKind::Method) => {
-                        let supertype =
-                            instance_supertype::<T>(Recv::new(this.receiver), strand, *idx);
+                        let supertype = instance_supertype::<T>(this.clone(), strand, *idx);
                         strand
                             .with_slots(async |strand, [mut delegator]| {
-                                delegator.store(Value::from_object(Base::upcast(
-                                    this.receiver.to_strong(),
-                                )));
-                                supertype
-                                    .op_dcall(strand, &delegator, method, args, out)
+                                Output::set(strand, Slot::reborrow(&mut delegator), &this);
+                                Delegated::new(supertype, &delegator)
+                                    .op_mcall(strand, method, args, out)
                                     .await
                             })
                             .await
@@ -1654,55 +1679,8 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
                         .ok_or_else(|| Error::type_error(strand, "field: expected `Sym`"))?;
                     Self::op_set(this, strand, field, value)
                 }
-                _ => T::method(Instance::new(this.receiver), strand, method, args, out).await,
+                _ => T::method(Instance::from_recv(&this), strand, method, args, out).await,
             }
-        }
-    }
-
-    async fn op_dcall<'a, 's>(
-        this: Recv<'v, 'a, Self>,
-        strand: &'a mut Strand<'v, 's>,
-        delegator: &'a Value<'v>,
-        method: Sym<'v, 'a>,
-        args: Args<'v, 'a>,
-        out: Slot<'v, 'a>,
-    ) -> Result<'v, 's, ()> {
-        if let Some((sym, entry)) = this.vtbl().entry_with_sym(method) {
-            let name = sym.as_str(strand);
-            Strand::async_for_native_frame(
-                strand,
-                Cow::Borrowed(T::MODULE),
-                Cow::Borrowed(T::NAME),
-                Some(Cow::Borrowed(name)),
-                async |strand| match entry {
-                    Entry::Method(handler) => unsafe {
-                        handler
-                            .call(this.as_header(), Some(delegator), strand, args, out)
-                            .await
-                    },
-                    Entry::Delegate(idx, MemberKind::Method) => {
-                        let supertype =
-                            instance_supertype::<T>(Recv::new(this.receiver), strand, *idx);
-                        supertype
-                            .op_dcall(strand, delegator, method, args, out)
-                            .await
-                    }
-                    _ => Err(Error::field(strand, method)),
-                },
-            )
-            .await
-        } else {
-            T::method(
-                Instance {
-                    receiver: this.receiver,
-                    delegator: Some(delegator),
-                },
-                strand,
-                method,
-                args,
-                out,
-            )
-            .await
         }
     }
 
@@ -1719,14 +1697,14 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Some(Cow::Borrowed("(get)")),
             |strand| match this.entry(field) {
                 Some(Entry::Getter(handler) | Entry::Property(handler, _)) => unsafe {
-                    handler.call(this.as_header(), strand, out)
+                    handler.call(this.as_header(), this.delegator(), strand, out)
                 },
                 Some(Entry::Method(_) | Entry::Delegate(_, MemberKind::Method)) => {
                     BoundMethod::create(strand, &this, field, out);
                     Ok(())
                 }
                 Some(Entry::Setter(_) | Entry::Delegate(_, _)) => Err(Error::field(strand, field)),
-                None => T::get(Instance::new(this.receiver), strand, field, out),
+                None => T::get(Instance::from_recv(&this), strand, field, out),
             },
         )
     }
@@ -1744,10 +1722,10 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Some(Cow::Borrowed("(set)")),
             |strand| match this.entry(field) {
                 Some(Entry::Setter(handler) | Entry::Property(_, handler)) => unsafe {
-                    handler.call(this.as_header(), strand, value)
+                    handler.call(this.as_header(), this.delegator(), strand, value)
                 },
                 Some(Entry::Getter(_)) => Err(Error::immutable(strand)),
-                _ => T::set(Instance::new(this.receiver), strand, field, value),
+                _ => T::set(Instance::from_recv(&this), strand, field, value),
             },
         )
     }
@@ -1763,7 +1741,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Cow::Borrowed(T::MODULE),
             Cow::Borrowed(T::NAME),
             Some(Cow::Borrowed("(index)")),
-            |strand| T::index(Instance::new(this.receiver), strand, index, out),
+            |strand| T::index(Instance::from_recv(&this), strand, index, out),
         )
     }
 
@@ -1778,7 +1756,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Cow::Borrowed(T::MODULE),
             Cow::Borrowed(T::NAME),
             Some(Cow::Borrowed("(assign)")),
-            |strand| T::assign(Instance::new(this.receiver), strand, index, value),
+            |strand| T::assign(Instance::from_recv(&this), strand, index, value),
         )
     }
 
@@ -1810,7 +1788,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Cow::Borrowed(T::MODULE),
             Cow::Borrowed(T::NAME),
             Some(Cow::Borrowed("(iter)")),
-            async |strand| T::iter(Instance::new(this.receiver), strand, out).await,
+            async |strand| T::iter(Instance::from_recv(&this), strand, out).await,
         )
         .await
     }
@@ -1825,7 +1803,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Cow::Borrowed(T::MODULE),
             Cow::Borrowed(T::NAME),
             Some(Cow::Borrowed("(next)")),
-            async |strand| T::next(Instance::new(this.receiver), strand, out).await,
+            async |strand| T::next(Instance::from_recv(&this), strand, out).await,
         )
         .await
     }
@@ -1840,7 +1818,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Cow::Borrowed(T::MODULE),
             Cow::Borrowed(T::NAME),
             Some(Cow::Borrowed("(sink)")),
-            async |strand| T::sink(Instance::new(this.receiver), strand, out).await,
+            async |strand| T::sink(Instance::from_recv(&this), strand, out).await,
         )
         .await
     }
@@ -1855,7 +1833,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Cow::Borrowed(T::MODULE),
             Cow::Borrowed(T::NAME),
             Some(Cow::Borrowed("(put)")),
-            async |strand| T::put(Instance::new(this.receiver), strand, value).await,
+            async |strand| T::put(Instance::from_recv(&this), strand, value).await,
         )
         .await
     }
@@ -1865,7 +1843,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
         _strand: &'a mut Strand<'v, 's>,
         hasher: &mut std::collections::hash_map::DefaultHasher,
     ) -> Result<'v, 's, ()> {
-        T::hash(Instance::new(this.receiver), _strand, hasher)
+        T::hash(Instance::from_recv(&this), _strand, hasher)
     }
 
     fn op_eq<'a, 's>(
@@ -1878,7 +1856,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Cow::Borrowed(T::MODULE),
             Cow::Borrowed(T::NAME),
             Some(Cow::Borrowed("(eq)")),
-            |strand| T::eq(Instance::new(this.receiver), strand, other),
+            |strand| T::eq(Instance::from_recv(&this), strand, other),
         )?;
         Ok(Value::from_bool(result))
     }
@@ -1893,7 +1871,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Cow::Borrowed(T::MODULE),
             Cow::Borrowed(T::NAME),
             Some(Cow::Borrowed("(ne)")),
-            |strand| T::ne(Instance::new(this.receiver), strand, other),
+            |strand| T::ne(Instance::from_recv(&this), strand, other),
         )?;
         Ok(Value::from_bool(result))
     }
@@ -1908,7 +1886,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Cow::Borrowed(T::MODULE),
             Cow::Borrowed(T::NAME),
             Some(Cow::Borrowed("(neg)")),
-            |strand| T::neg(Instance::new(this.receiver), strand, Slot::new(&mut out)),
+            |strand| T::neg(Instance::from_recv(&this), strand, Slot::new(&mut out)),
         )?;
         Ok(out)
     }
@@ -1923,7 +1901,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Cow::Borrowed(T::MODULE),
             Cow::Borrowed(T::NAME),
             Some(Cow::Borrowed("(bnot)")),
-            |strand| T::bnot(Instance::new(this.receiver), strand, Slot::new(&mut out)),
+            |strand| T::bnot(Instance::from_recv(&this), strand, Slot::new(&mut out)),
         )?;
         Ok(out)
     }
@@ -1941,7 +1919,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Some(Cow::Borrowed("(band)")),
             |strand| {
                 T::band(
-                    Instance::new(this.receiver),
+                    Instance::from_recv(&this),
                     strand,
                     other,
                     Slot::new(&mut out),
@@ -1964,7 +1942,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Some(Cow::Borrowed("(bor)")),
             |strand| {
                 T::bor(
-                    Instance::new(this.receiver),
+                    Instance::from_recv(&this),
                     strand,
                     other,
                     Slot::new(&mut out),
@@ -1987,7 +1965,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Some(Cow::Borrowed("(bxor)")),
             |strand| {
                 T::bxor(
-                    Instance::new(this.receiver),
+                    Instance::from_recv(&this),
                     strand,
                     other,
                     Slot::new(&mut out),
@@ -2010,7 +1988,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Some(Cow::Borrowed("(shl)")),
             |strand| {
                 T::shl(
-                    Instance::new(this.receiver),
+                    Instance::from_recv(&this),
                     strand,
                     other,
                     Slot::new(&mut out),
@@ -2033,7 +2011,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Some(Cow::Borrowed("(shr)")),
             |strand| {
                 T::shr(
-                    Instance::new(this.receiver),
+                    Instance::from_recv(&this),
                     strand,
                     other,
                     Slot::new(&mut out),
@@ -2056,7 +2034,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Some(Cow::Borrowed("(add)")),
             |strand| {
                 T::add(
-                    Instance::new(this.receiver),
+                    Instance::from_recv(&this),
                     strand,
                     other,
                     Slot::new(&mut out),
@@ -2079,7 +2057,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Some(Cow::Borrowed("(sub)")),
             |strand| {
                 T::sub(
-                    Instance::new(this.receiver),
+                    Instance::from_recv(&this),
                     strand,
                     other,
                     Slot::new(&mut out),
@@ -2102,7 +2080,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Some(Cow::Borrowed("(rsub)")),
             |strand| {
                 T::rsub(
-                    Instance::new(this.receiver),
+                    Instance::from_recv(&this),
                     strand,
                     other,
                     Slot::new(&mut out),
@@ -2125,7 +2103,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Some(Cow::Borrowed("(mul)")),
             |strand| {
                 T::mul(
-                    Instance::new(this.receiver),
+                    Instance::from_recv(&this),
                     strand,
                     other,
                     Slot::new(&mut out),
@@ -2148,7 +2126,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Some(Cow::Borrowed("(div)")),
             |strand| {
                 T::div(
-                    Instance::new(this.receiver),
+                    Instance::from_recv(&this),
                     strand,
                     other,
                     Slot::new(&mut out),
@@ -2171,7 +2149,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Some(Cow::Borrowed("(rdiv)")),
             |strand| {
                 T::rdiv(
-                    Instance::new(this.receiver),
+                    Instance::from_recv(&this),
                     strand,
                     other,
                     Slot::new(&mut out),
@@ -2194,7 +2172,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Some(Cow::Borrowed("(ediv)")),
             |strand| {
                 T::ediv(
-                    Instance::new(this.receiver),
+                    Instance::from_recv(&this),
                     strand,
                     other,
                     Slot::new(&mut out),
@@ -2217,7 +2195,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Some(Cow::Borrowed("(rediv)")),
             |strand| {
                 T::redv(
-                    Instance::new(this.receiver),
+                    Instance::from_recv(&this),
                     strand,
                     other,
                     Slot::new(&mut out),
@@ -2240,7 +2218,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Some(Cow::Borrowed("(mod)")),
             |strand| {
                 T::rem(
-                    Instance::new(this.receiver),
+                    Instance::from_recv(&this),
                     strand,
                     other,
                     Slot::new(&mut out),
@@ -2263,7 +2241,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Some(Cow::Borrowed("(rmod)")),
             |strand| {
                 T::rrem(
-                    Instance::new(this.receiver),
+                    Instance::from_recv(&this),
                     strand,
                     other,
                     Slot::new(&mut out),
@@ -2283,7 +2261,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Cow::Borrowed(T::MODULE),
             Cow::Borrowed(T::NAME),
             Some(Cow::Borrowed("(lt)")),
-            |strand| T::lt(Instance::new(this.receiver), strand, other),
+            |strand| T::lt(Instance::from_recv(&this), strand, other),
         )?;
         Ok(Value::from_bool(result))
     }
@@ -2298,7 +2276,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Cow::Borrowed(T::MODULE),
             Cow::Borrowed(T::NAME),
             Some(Cow::Borrowed("(lte)")),
-            |strand| T::lte(Instance::new(this.receiver), strand, other),
+            |strand| T::lte(Instance::from_recv(&this), strand, other),
         )?;
         Ok(Value::from_bool(result))
     }
@@ -2313,7 +2291,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Cow::Borrowed(T::MODULE),
             Cow::Borrowed(T::NAME),
             Some(Cow::Borrowed("(gt)")),
-            |strand| T::gt(Instance::new(this.receiver), strand, other),
+            |strand| T::gt(Instance::from_recv(&this), strand, other),
         )?;
         Ok(Value::from_bool(result))
     }
@@ -2328,7 +2306,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Cow::Borrowed(T::MODULE),
             Cow::Borrowed(T::NAME),
             Some(Cow::Borrowed("(gte)")),
-            |strand| T::gte(Instance::new(this.receiver), strand, other),
+            |strand| T::gte(Instance::from_recv(&this), strand, other),
         )?;
         Ok(Value::from_bool(result))
     }
@@ -2346,7 +2324,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Some(Cow::Borrowed("(unpack)")),
             async |strand| {
                 T::unpack(
-                    Instance::new(this.receiver),
+                    Instance::from_recv(&this),
                     strand,
                     Unpack {
                         inner: sig,
@@ -2370,7 +2348,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
             Cow::Borrowed(T::MODULE),
             Cow::Borrowed(T::NAME),
             Some(Cow::Borrowed("(spread)")),
-            async |strand| T::spread(Instance::new(this.receiver), strand, context, sink).await,
+            async |strand| T::spread(Instance::from_recv(&this), strand, context, sink).await,
         )
         .await
         {
@@ -2608,9 +2586,11 @@ impl<'v> Drop for MethodHandler<'v> {
 pub(crate) struct FieldHandler<'v> {
     closure: NonNull<()>,
     free: unsafe fn(NonNull<()>),
+    #[expect(clippy::type_complexity)]
     call: for<'a, 's> unsafe fn(
         closure: NonNull<()>,
         header: NonNull<protocol::Header>,
+        delegator: Option<&'a Value<'v>>,
         strand: &'a mut Strand<'v, 's>,
         slot: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()>,
@@ -2624,10 +2604,11 @@ impl<'v> FieldHandler<'v> {
     pub(crate) unsafe fn call<'a, 's>(
         &self,
         header: NonNull<protocol::Header>,
+        delegator: Option<&'a Value<'v>>,
         strand: &'a mut Strand<'v, 's>,
         slot: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        unsafe { (self.call)(self.closure, header, strand, slot) }
+        unsafe { (self.call)(self.closure, header, delegator, strand, slot) }
     }
 }
 
@@ -3318,6 +3299,7 @@ where
 unsafe fn field_glue<'v, 'a, 's, T, F>(
     closure: NonNull<()>,
     header: NonNull<protocol::Header>,
+    delegator: Option<&'a Value<'v>>,
     strand: &'a mut Strand<'v, 's>,
     slot: Slot<'v, 'a>,
 ) -> Result<'v, 's, ()>
@@ -3327,7 +3309,10 @@ where
         + 'v,
 {
     let f = unsafe { closure.cast::<F>().as_ref() };
-    let inst = Instance::new(unsafe { gc::Borrow::from_raw(header.cast()) });
+    let inst = Instance {
+        receiver: unsafe { gc::Borrow::from_raw(header.cast()) },
+        delegator,
+    };
     f(inst, strand, slot)
 }
 
@@ -3593,7 +3578,9 @@ impl<'v, T: Object<'v>> Protocol<'v> for TypeObjectWrap<'v, T> {
                     Cow::Borrowed(T::MODULE),
                     Cow::Borrowed(T::NAME),
                     Some(Cow::Borrowed("(get)")),
-                    |strand| unsafe { handler.call(this.as_header(), strand, out) },
+                    |strand| unsafe {
+                        handler.call(this.as_header(), this.delegator(), strand, out)
+                    },
                 ),
                 Entry::Method(_) => {
                     BoundMethod::create(strand, &this, field, out);
@@ -3667,7 +3654,9 @@ impl<'v, T: Object<'v>> Protocol<'v> for TypeObjectWrap<'v, T> {
                     Cow::Borrowed(T::MODULE),
                     Cow::Borrowed(T::NAME),
                     Some(Cow::Borrowed("(set)")),
-                    |strand| unsafe { handler.call(this.as_header(), strand, value) },
+                    |strand| unsafe {
+                        handler.call(this.as_header(), this.delegator(), strand, value)
+                    },
                 ),
                 Entry::Getter(_) => Err(Error::immutable(strand)),
                 _ => Err(Error::field(strand, field)),
@@ -3847,6 +3836,7 @@ where
 unsafe fn type_field_glue<'v, 'a, 's, T: Object<'v>, F>(
     closure: NonNull<()>,
     header: NonNull<protocol::Header>,
+    _delegator: Option<&'a Value<'v>>,
     strand: &'a mut Strand<'v, 's>,
     slot: Slot<'v, 'a>,
 ) -> Result<'v, 's, ()>
@@ -3887,6 +3877,18 @@ mod tests {
         type Annex = ();
         type Type = ();
         type TypeAnnex = ();
+
+        async fn method<'a, 's>(
+            this: Instance<'v, 'a, Self>,
+            strand: &'a mut Strand<'v, 's>,
+            _method: Sym<'v, 'a>,
+            args: Args<'v, 'a>,
+            out: Slot<'v, 'a>,
+        ) -> Result<'v, 's, ()> {
+            let ([], []) = unpack!(strand, args, 0, 0)?;
+            Output::set(strand, out, this);
+            Ok(())
+        }
     }
 
     /// A native object type with a representative mix of `TypeBuilder`
@@ -3914,6 +3916,11 @@ mod tests {
         fn build<'a>(mut builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
             let absent_sym = builder.sym("absent");
             builder
+                .method("receiver", async move |this, strand, args, out| {
+                    let ([], []) = unpack!(strand, args, 0, 0)?;
+                    Output::set(strand, out, this);
+                    Ok(())
+                })
                 .method("bump", async move |this, strand, args, out| {
                     let ([], []) = unpack!(strand, args, 0, 0)?;
                     let value = {
@@ -4001,6 +4008,7 @@ mod tests {
         error_ty: Type<'v, ErrorFixture>,
         slot_ty: Type<'v, SlotFixture>,
         bump_sym: Sym<'v, 'v>,
+        receiver_sym: Sym<'v, 'v>,
         counter_sym: Sym<'v, 'v>,
         prop_sym: Sym<'v, 'v>,
         write_only_sym: Sym<'v, 'v>,
@@ -4023,6 +4031,7 @@ mod tests {
         let error_ty = vm.register_type::<ErrorFixture>();
         let slot_ty = vm.register_type::<SlotFixture>();
         let bump_sym = vm.sym("bump");
+        let receiver_sym = vm.sym("receiver");
         let counter_sym = vm.sym("counter");
         let prop_sym = vm.sym("prop");
         let write_only_sym = vm.sym("write_only");
@@ -4037,6 +4046,7 @@ mod tests {
             error_ty,
             slot_ty,
             bump_sym,
+            receiver_sym,
             counter_sym,
             prop_sym,
             write_only_sym,
@@ -4670,11 +4680,11 @@ mod tests {
     }
 
     #[test]
-    fn op_dcall_falls_back_to_method_with_delegator_when_no_entry_matches() {
-        with_fixture_vm(async |strand, [mut owner, mut out]| {
+    fn delegated_op_mcall_falls_back_to_method_with_delegator_when_no_entry_matches() {
+        with_fixture_vm(async |strand, [mut owner, mut delegator, mut out]| {
             make_fixture(strand, Slot::reborrow(&mut owner));
+            Output::set(strand, Slot::reborrow(&mut delegator), 42_i64);
             let value: &Value = &owner;
-            let delegator = value.dup();
             let state = strand.vm().state::<FixtureState>();
             state
                 .fixture_ty
@@ -4686,17 +4696,16 @@ mod tests {
                         .with_slots_dynamic(0, async |strand, mut arg_slots| {
                             let sig: [Option<Sym>; 0] = [];
                             let args = args_from_slots(&mut arg_slots, &sig, 0);
-                            let err = ObjectWrap::<Fixture>::op_dcall(
-                                recv,
+                            ObjectWrap::<Fixture>::op_mcall(
+                                recv.with_delegator(&delegator),
                                 strand,
-                                &delegator,
                                 Sym::well_known(sym::LEN),
                                 args,
                                 Slot::reborrow(&mut out),
                             )
                             .await
-                            .unwrap_err();
-                            assert_eq!(err.kind(), ErrorKind::Field);
+                            .unwrap();
+                            assert!(out.repr_eq(strand, &delegator));
                         })
                         .await;
                 })
@@ -4705,11 +4714,11 @@ mod tests {
     }
 
     #[test]
-    fn op_dcall_invokes_registered_method_handler_with_delegator() {
-        with_fixture_vm(async |strand, [mut owner, mut out]| {
+    fn delegated_registered_handler_receives_semantic_receiver() {
+        with_fixture_vm(async |strand, [mut owner, mut delegator, mut out]| {
             make_slot_fixture(strand, 0, "x", Slot::reborrow(&mut owner));
+            Output::set(strand, Slot::reborrow(&mut delegator), 42_i64);
             let value: &Value = &owner;
-            let delegator = value.dup();
             let state = strand.vm().state::<FixtureState>();
             state
                 .slot_ty
@@ -4721,21 +4730,21 @@ mod tests {
                         .with_slots_dynamic(0, async |strand, mut arg_slots| {
                             let sig: [Option<Sym>; 0] = [];
                             let args = args_from_slots(&mut arg_slots, &sig, 0);
-                            ObjectWrap::<SlotFixture>::op_dcall(
-                                recv,
+                            ObjectWrap::<SlotFixture>::op_mcall(
+                                recv.with_delegator(&delegator),
                                 strand,
-                                &delegator,
-                                state.bump_sym,
+                                state.receiver_sym,
                                 args,
                                 Slot::reborrow(&mut out),
                             )
                             .await
                             .unwrap();
+                            assert!(out.repr_eq(strand, &delegator));
                         })
                         .await;
                 })
                 .await;
-            assert_eq!(out.to_i64(strand).unwrap(), 1);
+            assert!(out.repr_eq(strand, &delegator));
         });
     }
 

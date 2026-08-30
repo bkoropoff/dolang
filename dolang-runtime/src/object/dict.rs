@@ -573,6 +573,15 @@ impl<'v> Protocol<'v> for Dict<'v> {
             }
             sym::COPY => {
                 let ([], []) = unpack!(strand, args, 0, 0)?;
+                if this.delegator().is_some() {
+                    return strand
+                        .with_slots(async |strand, [mut receiver, mut ty]| {
+                            Output::set(strand, Slot::reborrow(&mut receiver), &this);
+                            receiver.op_type(strand, Slot::reborrow(&mut ty));
+                            call!(strand, &ty, out, &receiver).await
+                        })
+                        .await;
+                }
                 let borrow = this.borrow(strand)?;
                 let mut dict = Dict::new();
                 for entry in borrow.0.index.iter().flatten() {
@@ -646,27 +655,6 @@ impl<'v> Protocol<'v> for Dict<'v> {
             .dict_iter
             .create(strand, iter, out);
         Ok(())
-    }
-
-    async fn op_dcall<'a, 's>(
-        this: Recv<'v, 'a, Self>,
-        strand: &'a mut Strand<'v, 's>,
-        delegator: &'a Value<'v>,
-        method: Sym<'v, 'a>,
-        args: Args<'v, 'a>,
-        out: Slot<'v, 'a>,
-    ) -> Result<'v, 's, ()> {
-        if method.tag() == sym::COPY {
-            let ([], []) = unpack!(strand, args, 0, 0)?;
-            return strand
-                .with_slots(async |strand, [mut tmp, mut ty]| {
-                    Output::set(strand, Slot::reborrow(&mut tmp), delegator);
-                    tmp.op_type(strand, Slot::reborrow(&mut ty));
-                    call!(strand, &ty, out, delegator).await
-                })
-                .await;
-        }
-        Self::op_mcall(this, strand, method, args, out).await
     }
 
     async fn op_spread<'a, 's>(
