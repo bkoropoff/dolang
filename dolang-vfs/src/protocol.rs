@@ -18,7 +18,7 @@ use crate::{
     error::Error,
     extension::ExtensionSet,
     extension::{self, ErasedVfsExtension},
-    file::{FileLockRequest, StreamEntry},
+    file::{CopyDataResult, CopyDest, CopyMode, FileLockRequest, StreamEntry},
     file::{XattrEntry, XattrNamespace},
     metadata::{FsMetadata, Metadata, MetadataPatch},
     path::{self, WellKnownPath},
@@ -880,6 +880,26 @@ pub(crate) enum RequestKind {
     RemoveXattr(XattrRequest),
     Streams(StreamsRequest),
     Extension(ExtensionRequest),
+    // Appended, and every future variant must be too: these enums are
+    // externally tagged with no explicit discriminants, so the wire form of a
+    // variant is its position. Inserting anywhere else silently renumbers
+    // everything after it.
+    //
+    // There is no version gate on this request, which assumes a peer built
+    // from the same tree: an older server fails to decode it and drops the
+    // session rather than answering `Unsupported`. If mixed versions ever
+    // become possible, advertise `APP_PROTOCOL` version 2, capture
+    // `UnboundClient::version()` before `bind()` at each client construction
+    // site, and have `client::File::can_copy_data_with` fall through to the
+    // relay against a version-1 peer.
+    FileCopyData {
+        src: Cite<FileMarker>,
+        dst: Cite<FileMarker>,
+        src_offset: u64,
+        target: CopyDest,
+        len: Option<u64>,
+        mode: CopyMode,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -961,4 +981,6 @@ pub(crate) enum ResponseKind {
     RemoveXattr,
     Streams(Vec<StreamEntry>),
     Extension(ExtensionResponse),
+    /// Bounded copy result. Appended for the reason given on `RequestKind`.
+    FileCopyData(CopyDataResult),
 }

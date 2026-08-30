@@ -64,6 +64,10 @@ Whether the archive attribute is set.
 
 Whether the reparse-point attribute is set.
 
+### `sparse`
+
+Whether sparse allocation is enabled.
+
 ### `encrypted`
 
 Whether the encrypted attribute is set.

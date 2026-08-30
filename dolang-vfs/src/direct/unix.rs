@@ -5,6 +5,7 @@ use crate::metadata::{AttrFlags, AttrsPatch, Metadata};
 use crate::metadata::{MetadataFamily, UnixMetadata, UnixMetadataPlatform};
 use crate::{
     error::{Error, ErrorKind, Result},
+    file::FileId,
     file::StreamEntry,
     file::{XattrEntry, XattrNamespace},
     metadata::{
@@ -148,6 +149,16 @@ impl File {
 
     pub(super) fn pwrite(file: &std::fs::File, buf: &[u8], offset: u64) -> Result<usize> {
         Ok(std::os::unix::fs::FileExt::write_at(file, buf, offset)?)
+    }
+
+    /// Identifies the file behind an open descriptor, as `(dev, ino)`.
+    pub(super) fn impl_id(file: &std::fs::File) -> Result<FileId> {
+        use std::os::unix::fs::MetadataExt as _;
+        let metadata = file.metadata()?;
+        Ok(FileId {
+            volume: metadata.dev(),
+            index: metadata.ino(),
+        })
     }
 }
 

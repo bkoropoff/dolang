@@ -38,7 +38,7 @@ use crate::{
     error::{Error, ErrorKind, HandoffError, Result},
     extension::{self, ExtContext},
     file::XattrEntry,
-    file::{AccessFlags, File, FileLock, FileLockRequest, StreamEntry},
+    file::{AccessFlags, CopyDest, CopyMode, File, FileLock, FileLockRequest, StreamEntry},
     metadata::{FsMetadata, Metadata},
     process::{Child, Command, StdioRecv, StdioSend},
     protocol::{
@@ -768,6 +768,17 @@ impl Connection {
                 self.handle_file_sync(context, file, data).await?;
                 Ok(ResponseKind::FileSync)
             }
+            RequestKind::FileCopyData {
+                src,
+                dst,
+                src_offset,
+                target,
+                len,
+                mode,
+            } => Ok(ResponseKind::FileCopyData(
+                self.handle_file_copy_data(context, src, dst, src_offset, target, len, mode)
+                    .await?,
+            )),
             RequestKind::FileLock { file, request } => {
                 self.handle_file_lock(context, file, request).await
             }
@@ -1510,6 +1521,36 @@ impl Connection {
     ) -> Result<()> {
         let file = self.retained_file(context, file)?;
         file.0.set_size(size).await
+    }
+
+    /// Copies bytes between two of this session's files.
+    ///
+    /// The only handler that holds two citations at once. Both are acquired
+    /// for the duration, so a concurrent close of either endpoint reports the
+    /// file as busy rather than pulling it out from under the bounded copy.
+    /// Source
+    /// first, always, so which citation a failure names does not depend on
+    /// timing.
+    ///
+    /// Overlap and identity are not re-checked here: `File::copy_data` does
+    /// that, and routing through it is what makes a remote copy behave
+    /// identically to a local one. Cancellation needs no guard either — the
+    /// serve loop drops this future, and the copy loop's every transfer is a
+    /// drop point.
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_file_copy_data(
+        &self,
+        context: &CallContext<VfsProtocol>,
+        src: Cite<FileMarker>,
+        dst: Cite<FileMarker>,
+        src_offset: u64,
+        target: CopyDest,
+        len: Option<u64>,
+        mode: CopyMode,
+    ) -> Result<crate::file::CopyDataResult> {
+        let src = self.retained_file(context, src)?;
+        let dst = self.retained_file(context, dst)?;
+        src.0.copy_data(&dst.0, src_offset, target, len, mode).await
     }
 
     async fn handle_file_sync(

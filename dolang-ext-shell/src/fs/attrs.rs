@@ -6,6 +6,7 @@ pub(crate) mod windows {
     pub(crate) const SYSTEM: u32 = 0x0000_0004;
     pub(crate) const ARCHIVE: u32 = 0x0000_0020;
     pub(crate) const TEMPORARY: u32 = 0x0000_0100;
+    pub(crate) const SPARSE: u32 = 0x0000_0200;
     pub(crate) const REPARSE_POINT: u32 = 0x0000_0400;
     pub(crate) const COMPRESSED: u32 = 0x0000_0800;
     pub(crate) const OFFLINE: u32 = 0x0000_1000;

@@ -542,6 +542,7 @@ macro_rules! impl_concrete_path {
                 let system = builder.sym("system");
                 let archive = builder.sym("archive");
                 let compressed = builder.sym("compressed");
+                let sparse = builder.sym("sparse");
                 let temporary = builder.sym("temporary");
                 let offline = builder.sym("offline");
                 let not_content_indexed = builder.sym("not_content_indexed");
@@ -947,6 +948,7 @@ macro_rules! impl_concrete_path {
                                 system,
                                 archive,
                                 compressed,
+                                sparse,
                                 temporary,
                                 offline,
                                 not_content_indexed,
@@ -986,6 +988,7 @@ macro_rules! impl_concrete_path {
                             system = None,
                             archive = None,
                             compressed = None,
+                            sparse = None,
                             temporary = None,
                             offline = None,
                             not_content_indexed = None,
@@ -1016,6 +1019,7 @@ macro_rules! impl_concrete_path {
                                 (AttrFlags::SYSTEM, system),
                                 (AttrFlags::ARCHIVE, archive),
                                 (AttrFlags::COMPRESSED, compressed),
+                                (AttrFlags::SPARSE, sparse),
                                 (AttrFlags::TEMPORARY, temporary),
                                 (AttrFlags::OFFLINE, offline),
                                 (AttrFlags::NOT_CONTENT_INDEXED, not_content_indexed),

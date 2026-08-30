@@ -47,7 +47,7 @@ use crate::{
     error::{Error, ErrorKind, HandoffError, Result},
     extension::ExtensionSet,
     extension::VfsExtension,
-    file::{self, AccessFlags, File as VfsFile, FileLockRequest, StreamEntry},
+    file::{self, AccessFlags, CopyDest, CopyMode, File as VfsFile, FileLockRequest, StreamEntry},
     file::{XattrEntry, XattrNamespace},
     metadata::{FsMetadata, Metadata, MetadataPatch},
     path::WellKnownPath,
@@ -942,6 +942,56 @@ impl File {
             .await?
         {
             ResponseKind::FileClose => Ok(()),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    /// Whether a copy between these two handles can be asked of the peer in
+    /// one request.
+    ///
+    /// Both citations travel in a single request that names one VFS, so they
+    /// must belong to the same session *and* the same selector; anything else
+    /// has to relay through this process instead.
+    pub(crate) fn can_copy_data_with(&self, other: &Self) -> bool {
+        self.client.is_same_vfs(&other.client)
+    }
+
+    /// Whether both handles are the same registration of the same file.
+    ///
+    /// A `false` here does not mean the files differ: the peer may have handed
+    /// out two registrations for one file. That case is caught server-side,
+    /// where both handles are local.
+    pub(crate) fn is_same_file(&self, other: &Self) -> bool {
+        self.can_copy_data_with(other) && self.file == other.file
+    }
+
+    /// Asks the peer for one bounded copy step between two of its own files,
+    /// so only the result crosses the wire.
+    ///
+    /// Positional throughout, like `read_at`/`write_at`: neither side's cursor
+    /// is consulted or disturbed, so there is no `idle` check and several may
+    /// be outstanding at once.
+    pub(crate) async fn copy_data(
+        &self,
+        dst: &Self,
+        src_offset: u64,
+        target: CopyDest,
+        len: Option<u64>,
+        mode: CopyMode,
+    ) -> Result<crate::file::CopyDataResult> {
+        match self
+            .client
+            .request(RequestKind::FileCopyData {
+                src: self.cite(),
+                dst: dst.cite(),
+                src_offset,
+                target,
+                len,
+                mode,
+            })
+            .await?
+        {
+            ResponseKind::FileCopyData(count) => Ok(count),
             response => Err(unexpected(response).into()),
         }
     }

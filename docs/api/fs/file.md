@@ -64,6 +64,11 @@ open data.bin r+b do |file|
   file.write $record offset: (index * 64)
 ```
 
+### `copy_data dst :range? :size? :offset? :clone?`
+
+The method form of
+[`fs.copy_data`](./index.md#copy_data-src-dst-range-size-offset-clone).
+
 ### `set_size size`
 
 Truncates the file to the given byte length.
