@@ -11,16 +11,16 @@ A read-only boolean indicating whether the strand has completed execution.
 
 ## Methods
 
-### `join()`
-
-Waits until the strand completes and returns its result. If the strand
-terminates normally, returns the value returned by the callable. If the strand
-exited with an error, this method re-raises it.
-
 ### `cancel()`
 
 Requests cancellation of the strand, causing a `Canceled` error to be raised
 if the strand is suspended and on all subsequent suspension attempts.
+
+### `join()`
+
+Waits until the strand completes and returns its result. If the strand
+terminates normally, returns the value returned by the function. If the strand
+exited with an error, this method re-raises it.
 
 ### `wait()`
 

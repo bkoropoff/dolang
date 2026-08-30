@@ -7,9 +7,9 @@ Mock HTTP server for testing code that makes requests through the
 
 | Type                      | Description                                            |
 | ------------------------- | ------------------------------------------------------ |
-| [`Server`](./server.md)   | A running mock HTTP server                             |
 | [`Mock`](./mock.md)       | Handle to the mock(s) registered by one `.mock()` call |
 | [`Request`](./request.md) | A captured request                                     |
+| [`Server`](./server.md)   | A running mock HTTP server                             |
 
 ```
 import http

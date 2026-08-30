@@ -6,6 +6,11 @@ and provide methods for interacting with SQLite databases.
 
 ## Methods
 
+### `close()`
+
+Closes the database connection and releases resources. Connections not
+explicitly closed are closed when garbage collected.
+
 ### `execute sql args...`
 
 Prepares a SQL statement, executes it, and returns the number of rows affected.
@@ -42,7 +47,7 @@ Prepares a SQL statement for repeated execution.
 | Name   | Type                   | Description                                               |
 | ------ | ---------------------- | --------------------------------------------------------- |
 | `sql`  | [`Str`](../std/str.md) | SQL statement to prepare                                  |
-| `func` | func                   | Callable to run with the statement; auto-closes when done |
+| `func` | `Func`                 | Function to run with the statement; auto-closes when done |
 
 #### Returns
 
@@ -71,9 +76,9 @@ object to the provided block.
 
 #### Parameters
 
-| Name   | Type | Description                            |
-| ------ | ---- | -------------------------------------- |
-| `func` | func | Callable to run within the transaction |
+| Name   | Type   | Description                            |
+| ------ | ------ | -------------------------------------- |
+| `func` | `Func` | Function to run within the transaction |
 
 #### Returns
 
@@ -103,11 +108,6 @@ open "mydb.sqlite" do |conn|
     if should_cancel
       tx.rollback()
 ```
-
-### `close()`
-
-Closes the database connection and releases resources. Connections not
-explicitly closed are closed when garbage collected.
 
 ## Usage Notes
 

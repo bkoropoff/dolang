@@ -4,41 +4,6 @@ JSON serialization and deserialization.
 
 ## Functions
 
-### `encode value`
-
-Serializes a Do value to a JSON string.
-
-#### Parameters
-
-| Name    | Type | Description            |
-| ------- | ---- | ---------------------- |
-| `value` |      | the value to serialize |
-
-#### Returns
-
-`Str` -- JSON string
-
-Type mapping:
-
-| Do Type | JSON Type            |
-| ------- | -------------------- |
-| `nil`   | `null`               |
-| `Bool`  | boolean              |
-| `Int`   | number               |
-| `Float` | number               |
-| `Str`   | string               |
-| `Sym`   | string (symbol name) |
-| `array` | array                |
-| `dict`  | object               |
-
-#### Example
-
-```
-assert_eq (encode 42) "42"
-assert_eq (encode "hello") "\"hello\""
-assert_eq (encode nil) "null"
-```
-
 ### `decode json`
 
 Deserializes a JSON string to a Do value.
@@ -81,4 +46,39 @@ assert_eq (decode "[1, 2, 3]") [1, 2, 3]
 let obj = decode "{\"name\": \"Alice\", \"age\": 30}"
 assert_eq $obj["name"] "Alice"
 assert_eq $obj["age"] 30
+```
+
+### `encode value`
+
+Serializes a Do value to a JSON string.
+
+#### Parameters
+
+| Name    | Type | Description            |
+| ------- | ---- | ---------------------- |
+| `value` |      | the value to serialize |
+
+#### Returns
+
+`Str` -- JSON string
+
+Type mapping:
+
+| Do Type | JSON Type            |
+| ------- | -------------------- |
+| `nil`   | `null`               |
+| `Bool`  | boolean              |
+| `Int`   | number               |
+| `Float` | number               |
+| `Str`   | string               |
+| `Sym`   | string (symbol name) |
+| `array` | array                |
+| `dict`  | object               |
+
+#### Example
+
+```
+assert_eq (encode 42) "42"
+assert_eq (encode "hello") "\"hello\""
+assert_eq (encode nil) "null"
 ```

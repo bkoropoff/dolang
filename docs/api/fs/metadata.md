@@ -13,6 +13,18 @@ file attributes.
 
 ## Fields
 
+### `accessed`
+
+Last access time as [`DateTime`](../time/datetime.md).
+
+### `created`
+
+Creation or status-change time as [`DateTime`](../time/datetime.md).
+
+### `modified`
+
+Last modification time as [`DateTime`](../time/datetime.md).
+
 ### `size`
 
 File size in bytes.
@@ -22,43 +34,31 @@ File size in bytes.
 File type as a [`Sym`](../std/sym.md): `:FILE:`, `:DIR:`, `:SYMLINK:`,
 `:FIFO:`, `:CHAR_DEVICE:`, `:BLOCK_DEVICE:`, `:SOCKET:`, or `:UNKNOWN:`.
 
-### `modified`
-
-Last modification time as [`DateTime`](../time/datetime.md).
-
-### `accessed`
-
-Last access time as [`DateTime`](../time/datetime.md).
-
-### `created`
-
-Creation or status-change time as [`DateTime`](../time/datetime.md).
-
 ## Windows-Only Fields
 
-### `user`
+### `archive`
 
-Owner [`Sid`](../security/windows/sid.md).
+Whether the archive attribute is set.
+
+### `encrypted`
+
+Whether the encrypted attribute is set.
 
 ### `group`
 
 Primary group [`Sid`](../security/windows/sid.md).
 
-### `win_attrs`
+### `not_content_indexed`
 
-Raw Windows file attribute bitmask.
+Whether the not-content-indexed attribute is set.
+
+### `offline`
+
+Whether the offline attribute is set.
 
 ### `readonly`
 
 Whether the readonly attribute is set.
-
-### `system`
-
-Whether the system attribute is set.
-
-### `archive`
-
-Whether the archive attribute is set.
 
 ### `reparse_point`
 
@@ -68,39 +68,23 @@ Whether the reparse-point attribute is set.
 
 Whether sparse allocation is enabled.
 
-### `encrypted`
+### `system`
 
-Whether the encrypted attribute is set.
+Whether the system attribute is set.
 
 ### `temporary`
 
 Whether the temporary attribute is set.
 
-### `offline`
+### `user`
 
-Whether the offline attribute is set.
+Owner [`Sid`](../security/windows/sid.md).
 
-### `not_content_indexed`
+### `win_attrs`
 
-Whether the not-content-indexed attribute is set.
+Raw Windows file attribute bitmask.
 
 ## Linux-Only Fields
-
-### `linux_attrs`
-
-Raw Linux attribute flags.
-
-### `no_atime`
-
-Whether the no-atime flag is set.
-
-### `no_copy_on_write`
-
-Whether the no-copy-on-write flag is set.
-
-### `dir_sync`
-
-Whether the synchronous-directory-updates flag is set.
 
 ### `casefold`
 
@@ -110,9 +94,37 @@ Whether the case-insensitive-directory-lookups flag is set.
 
 Whether the data-journaling flag is set.
 
+### `dir_sync`
+
+Whether the synchronous-directory-updates flag is set.
+
+### `direct_access`
+
+Whether the direct-access flag is set.
+
+### `extent_format`
+
+Whether the extent-format flag is set.
+
+### `linux_attrs`
+
+Raw Linux attribute flags.
+
+### `no_atime`
+
+Whether the no-atime flag is set.
+
 ### `no_compress`
 
 Whether the don't-compress flag is set.
+
+### `no_copy_on_write`
+
+Whether the no-copy-on-write flag is set.
+
+### `no_tail_merge`
+
+Whether the no-tail-merging flag is set.
 
 ### `project_inherit`
 
@@ -126,10 +138,6 @@ Whether the secure-deletion flag is set.
 
 Whether the synchronous-updates flag is set.
 
-### `no_tail_merge`
-
-Whether the no-tail-merging flag is set.
-
 ### `top_dir`
 
 Whether the top-of-directory-hierarchy flag is set.
@@ -137,14 +145,6 @@ Whether the top-of-directory-hierarchy flag is set.
 ### `undelete`
 
 Whether the undeletable flag is set.
-
-### `direct_access`
-
-Whether the direct-access flag is set.
-
-### `extent_format`
-
-Whether the extent-format flag is set.
 
 ## macOS-Only Fields
 
@@ -164,55 +164,27 @@ Raw FreeBSD file flags.
 
 ## Platform Attribute Fields
 
-### `hidden`
+### `append_only`
 
-Whether the platform hidden flag is set.
+Whether the platform append-only flag is set.
 
 ### `compressed`
 
 Whether the platform compressed flag is set.
 
+### `hidden`
+
+Whether the platform hidden flag is set.
+
 ### `immutable`
 
 Whether the platform immutable flag is set.
-
-### `append_only`
-
-Whether the platform append-only flag is set.
 
 ### `no_dump`
 
 Whether the platform no-dump flag is set.
 
 ## Unix-Only Fields
-
-### `mode`
-
-Stat mode bits.
-
-### `dev`
-
-Device ID.
-
-### `ino`
-
-Inode number.
-
-### `nlink`
-
-Hard-link count.
-
-### `uid`
-
-Owner user ID.
-
-### `gid`
-
-Owner group ID.
-
-### `rdev`
-
-Special-device ID.
 
 ### `blksize`
 
@@ -221,3 +193,31 @@ Preferred block size for I/O.
 ### `blocks`
 
 Number of allocated 512-byte blocks.
+
+### `dev`
+
+Device ID.
+
+### `gid`
+
+Owner group ID.
+
+### `ino`
+
+Inode number.
+
+### `mode`
+
+Stat mode bits.
+
+### `nlink`
+
+Hard-link count.
+
+### `rdev`
+
+Special-device ID.
+
+### `uid`
+
+Owner user ID.

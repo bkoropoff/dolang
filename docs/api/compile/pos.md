@@ -10,10 +10,10 @@ All coordinates are zero-based.
 
 Byte offset from the start of the source.
 
-### `line`
-
-Line offset from the start of the source.
-
 ### `column`
 
 Column offset within the line.
+
+### `line`
+
+Line offset from the start of the source.

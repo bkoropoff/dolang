@@ -4,33 +4,17 @@ Windows access token group membership.
 
 ## Fields
 
-### `sid`
-
-Group [`Sid`](./sid.md).
-
 ### `attributes`
 
 [`TokenGroupAttributes`](./token-group-attributes.md).
-
-### `mandatory`
-
-Whether the group is mandatory.
-
-### `enabled_by_default`
-
-Whether the group is enabled by default.
 
 ### `enabled`
 
 Whether the group is enabled.
 
-### `owner`
+### `enabled_by_default`
 
-Whether the group can be assigned as an object owner.
-
-### `use_for_deny_only`
-
-Whether the group is used only for deny access checks.
+Whether the group is enabled by default.
 
 ### `integrity`
 
@@ -40,10 +24,26 @@ Whether the SID is an integrity SID.
 
 Whether the integrity SID is enabled.
 
+### `logon_id`
+
+Whether the group identifies the token's logon session.
+
+### `mandatory`
+
+Whether the group is mandatory.
+
+### `owner`
+
+Whether the group can be assigned as an object owner.
+
 ### `resource`
 
 Whether the group is a resource group.
 
-### `logon_id`
+### `sid`
 
-Whether the group identifies the token's logon session.
+Group [`Sid`](./sid.md).
+
+### `use_for_deny_only`
+
+Whether the group is used only for deny access checks.

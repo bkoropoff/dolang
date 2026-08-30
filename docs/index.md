@@ -99,7 +99,7 @@ progress.with do podman.build
 ```
 
 The list, progress call, and loop are ordinary Do values and code. The `run:`
-value is a callable executed inside the build container's VFS context.
+value is a function executed inside the build container's VFS context.
 
 ## Included Features
 

@@ -7,6 +7,10 @@ This is only supported on Windows.
 
 ## Fields
 
+### `alloc_size`
+
+Allocated stream size in bytes.
+
 ### `name`
 
 Stream name. The unnamed default stream is reported as `""`.
@@ -17,6 +21,10 @@ Stream name. The unnamed default stream is reported as `""`.
 for stream = streams "data.txt"
   echo $stream.name
 ```
+
+### `size`
+
+Logical stream size in bytes.
 
 ### `type`
 
@@ -29,15 +37,11 @@ for stream = streams "data.txt"
   echo $stream.type
 ```
 
-### `size`
-
-Logical stream size in bytes.
-
-### `alloc_size`
-
-Allocated stream size in bytes.
-
 ## Operators
+
+### `/`
+
+`path / stream` returns the stream-qualified [`Path`](./path.md) for that entry.
 
 ### Example
 
@@ -45,7 +49,3 @@ Allocated stream size in bytes.
 for stream = streams "data.txt"
   echo (Path "data.txt" / stream)
 ```
-
-### `/`
-
-`path / stream` returns the stream-qualified [`Path`](./path.md) for that entry.

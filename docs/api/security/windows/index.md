@@ -7,35 +7,19 @@ The `security.windows` module exposes Windows security types.
 | Type                                                  | Description                       |
 | ----------------------------------------------------- | --------------------------------- |
 | [`AccessMask`](./access-mask.md)                      | Generic Windows object rights     |
+| [`Ace`](./ace.md)                                     | Windows access-control entry      |
 | [`AceFlags`](./ace-flags.md)                          | ACE header flags                  |
+| [`Acl`](./acl.md)                                     | Windows access-control list       |
+| [`SecDesc`](./secdesc.md)                             | Windows security descriptor       |
 | [`SecDescControl`](./secdesc-control.md)              | Security descriptor control flags |
 | [`SecInfo`](./sec-info.md)                            | Loaded descriptor components      |
-| [`TokenGroupAttributes`](./token-group-attributes.md) | Token group attributes            |
-| [`Acl`](./acl.md)                                     | Windows access-control list       |
-| [`Ace`](./ace.md)                                     | Windows access-control entry      |
-| [`SecDesc`](./secdesc.md)                             | Windows security descriptor       |
 | [`Sid`](./sid.md)                                     | Windows security identifier       |
 | [`SidName`](./sidname.md)                             | Resolved Windows account identity |
 | [`TokenGroup`](./tokengroup.md)                       | Windows token group membership    |
+| [`TokenGroupAttributes`](./token-group-attributes.md) | Token group attributes            |
 | [`TokenInfo`](./tokeninfo.md)                         | Windows access token information  |
 
 ## Enumeration values
-
-### SID name-use values
-
-| Value                 | Meaning                       |
-| --------------------- | ----------------------------- |
-| `:USER:`              | User SID                      |
-| `:GROUP:`             | Group SID                     |
-| `:DOMAIN:`            | Domain SID                    |
-| `:ALIAS:`             | Alias SID                     |
-| `:WELL_KNOWN_GROUP:`  | Well-known group SID          |
-| `:DELETED_ACCOUNT:`   | Deleted account SID           |
-| `:INVALID:`           | Invalid SID                   |
-| `:UNKNOWN:`           | SID of an unknown type        |
-| `:COMPUTER:`          | Computer SID                  |
-| `:LABEL:`             | Mandatory integrity label SID |
-| `:LOGON_SESSION:`     | Logon session SID             |
 
 ### ACE type values
 
@@ -64,28 +48,35 @@ The `security.windows` module exposes Windows security types.
 | 20   | `:SYSTEM_PROCESS_TRUST_LABEL:`     |
 | 21   | `:SYSTEM_ACCESS_FILTER:`           |
 
+### SID name-use values
+
+| Value                 | Meaning                       |
+| --------------------- | ----------------------------- |
+| `:USER:`              | User SID                      |
+| `:GROUP:`             | Group SID                     |
+| `:DOMAIN:`            | Domain SID                    |
+| `:ALIAS:`             | Alias SID                     |
+| `:WELL_KNOWN_GROUP:`  | Well-known group SID          |
+| `:DELETED_ACCOUNT:`   | Deleted account SID           |
+| `:INVALID:`           | Invalid SID                   |
+| `:UNKNOWN:`           | SID of an unknown type        |
+| `:COMPUTER:`          | Computer SID                  |
+| `:LABEL:`             | Mandatory integrity label SID |
+| `:LOGON_SESSION:`     | Logon session SID             |
+
 ## Declarative forms
 
-A descriptor, an ACL, and an ACE can each be written as data rather than built
-by calling constructors. [`SecDesc`](./secdesc.md) and [`Acl`](./acl.md) stay
-strict and accept only built values. [`Ace`](./ace.md) takes the same named
-fields as an ACE spec but requires built `Sid`, `AccessMask`, `AceFlags`, and
-`uuid.Guid` values. The `sec_desc`, `acl`, and `ace` functions below, and every
-parameter that takes a descriptor, ACL, or ACE, also accept the declarative
-forms. This is the [`Int`](../../std/int.md) versus `int` distinction: the
-capitalized form constructs, the lowercase form coerces.
+Security descriptors, ACLs, and ACEs have YAML-like declarative forms as an
+manually constructing type instances. Type constructors are strict and require
+provided components to already be of the correct type (`Ace`, `Acl`, etc.), but
+most other functions and methods will accept a declarative specification in
+their place.
 
-Unrecognized keys, repeated keys, and entries out of order are errors, not
-guesses. Every error names its position in the spec, so a mistake several
-levels down reports as `dacl[2].mask`.
+Symbols or symbol collections are broadly accepted in lieu of dedicated flag
+types. Most parameters taking a [`Sid`](./sid.md) also accept a canonical
+string form or a [well-known SID](./sid.md#well-known-sids) symbol.
 
-Symbols are the declarative surface throughout: any parameter taking a flags
-value also takes a symbol or an iterable of symbols, and any parameter taking
-a [`Sid`](./sid.md) also takes its canonical string or a symbol naming a
-[well-known SID](./sid.md#well-known-sids). The flags types exist for
-structural inspection of a value once you have one.
-
-### ACE specs
+### ACE Specs
 
 An ACE spec names its trustee under exactly one of `allow:`, `deny:`, or
 `audit:`. The remaining fields are the options the [`Ace`](./ace.md) class
@@ -116,11 +107,11 @@ ace
 `mask` is required. `successful` and `failed` apply only to `audit`, which
 requires at least one of them.
 
-### ACL specs
+### ACL Specs
 
-An ACL spec is any iterable of ACE specs or [`Ace`](./ace.md) values, in
-packet order. The `acl` function also accepts the entries as separate
-positional arguments, with `revision:` as a named option.
+An ACL spec is any iterable of ACE specs or [`Ace`](./ace.md) values, in packet
+order. The `acl` function accepts the entries as separate positional
+arguments, with `revision:` as an optional key argument.
 
 ```
 acl
@@ -138,11 +129,12 @@ acl
     object_type: $schema_guid
 ```
 
-### Descriptor specs
+### Descriptor Specs
 
 A descriptor spec is a dictionary of [`SecDesc`'s component
 options](./secdesc.md#component-options), where `dacl` and `sacl` accept ACL
-specs and `owner` and `group` accept any trustee form.
+specs and `owner` and `group` accept any trustee form. The `sec_desc` function
+accepts these components as key arguments.
 
 ```
 sec_desc
@@ -157,7 +149,8 @@ sec_desc
 
 ### `ace :allow? :deny? :audit? :mask ...options`
 
-Constructs an [`Ace`](./ace.md) by coercing its declarative fields.
+Constructs an [`Ace`](./ace.md). This function will implicitly coerce
+arguments that the type constructor would not accept.
 
 #### Parameters
 
@@ -177,7 +170,8 @@ let entry = ace
 
 ### `acl ...aces :revision?`
 
-Constructs an [`Acl`](./acl.md) by coercing each ACE argument.
+Constructs an [`Acl`](./acl.md). This funtion will implicitly coerce
+arguments that the type constructor would not accept.
 
 #### Parameters
 
@@ -185,8 +179,6 @@ Constructs an [`Acl`](./acl.md) by coercing each ACE argument.
 | ---------- | --------------------------------- | ------------------------------------ |
 | `aces`     | *                                 | ACE values or specs, in packet order |
 | `revision` | `:BASIC:`\|`:DIRECTORY_SERVICE:`? | Native ACL revision                  |
-
-Spread an iterable to pass its entries to `acl`.
 
 #### Returns
 
@@ -204,7 +196,8 @@ let dacl = acl
 
 ### `sec_desc desc? ...options`
 
-Coerces a descriptor spec into a [`SecDesc`](./secdesc.md).
+Constructs a [`SecDesc`](./secdesc.md). This function will implicitly coerce
+arguments that the type constructor would not accept.
 
 #### Parameters
 

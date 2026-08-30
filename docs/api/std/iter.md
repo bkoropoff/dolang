@@ -16,22 +16,6 @@ assert_eq (type $ [1, 2, 3].iter()) $Iter
 
 ## Methods
 
-### `next :default? :else?`
-
-Returns the next value from the iterator.
-
-#### Parameters
-
-| Name      | Type | Description                                 |
-| --------- | ---- | ------------------------------------------- |
-| `default` |      | value to return if the iterator is empty    |
-| `else`    |      | callable to invoke if the iterator is empty |
-
-#### Errors
-
-Raises [`IterStop`](./iter-stop.md) when exhausted and no fallback
-is provided.
-
 ### `all pred?`
 
 Returns `true` if every yielded value is truthy.
@@ -48,90 +32,10 @@ When `pred` is provided, it tests `pred(value)` instead.
 
 Empty iterators return `false`.
 
-### `count`
-
-Consumes the iterator and returns the number of yielded values.
-
-### `fold init func`
-
-Consumes the iterator left-to-right, repeatedly applying `func(acc, value)`.
-
-Returns `init` unchanged if the iterator is empty.
-
 ### `chain ...values`
 
 Returns an iterator that yields this iterator followed by each additional
 iterable in sequence.
-
-### `zip ...values`
-
-Returns an iterator that yields one tuple for each step across this iterator
-and the additional iterables.
-The zipped iterator stops as soon as any input is exhausted.
-
-### `take n`
-
-Returns an iterator that yields at most `n` values.
-
-#### Parameters
-
-| Name | Type | Description             |
-| ---- | ---- | ----------------------- |
-| `n`  | int  | maximum values to yield |
-
-#### Errors
-
-| Exception                        | Condition           |
-| -------------------------------- | ------------------- |
-| [`TypeError`](./type-error.md)   | `n` is not an `Int` |
-| [`ValueError`](./value-error.md) | `n` is negative     |
-
-### `skip n`
-
-Returns an iterator that discards the first `n` values, then yields the rest.
-
-#### Parameters
-
-| Name | Type | Description         |
-| ---- | ---- | ------------------- |
-| `n`  | int  | values to discard   |
-
-#### Errors
-
-| Exception                        | Condition           |
-| -------------------------------- | ------------------- |
-| [`TypeError`](./type-error.md)   | `n` is not an `Int` |
-| [`ValueError`](./value-error.md) | `n` is negative     |
-
-### `enumerate`
-
-Returns an iterator that yields `[index, value]` tuples.
-
-The first index is `0`.
-
-### `kv`
-
-Returns an iterator wrapper that preserves normal iteration, but opts into
-key/value spreading.
-
-When spread in a keyed context such as a dict literal or argument spread, each
-yielded item must unpack into exactly two values.
-
-```
-let entries = ["x=1", "y=2"].iter().map do |e| e.split "="
-
-assert_eq {...entries.kv()} {"x": "1", "y": "2"}
-```
-
-### `map func`
-
-Creates a wrapper `Iter` which yields `func(value)` for each `value` yielded by
-the wrapper iterator.
-
-### `filter pred`
-
-Creates a wrapper `Iter` which yields each `value` from the wrapper iterator
-only if `pred(value)` is truthy.
 
 ### `chomp`
 
@@ -155,6 +59,10 @@ for line = shell.stdin.chomp()
 Distinct from [`Str.trim_end`](./str.md), which is about whitespace generally
 and takes an optional character set. `chomp` is about a line terminator
 specifically and takes nothing.
+
+### `count`
+
+Consumes the iterator and returns the number of yielded values.
 
 ### `crimp terminator?`
 
@@ -191,6 +99,17 @@ assert_eq [...["a"].crimp("\r\n")] ["a\r\n"]
 run cmd stdin: (["one", "two"].crimp())
 ```
 
+### `enumerate`
+
+Returns an iterator that yields `[index, value]` tuples.
+
+The first index is `0`.
+
+### `filter pred`
+
+Creates a wrapper `Iter` which yields each `value` from the wrapper iterator
+only if `pred(value)` is truthy.
+
 ### `find pred :default? :else?`
 
 Consumes the iterator and returns the first value where `pred(value)` is truthy.
@@ -199,14 +118,48 @@ Consumes the iterator and returns the first value where `pred(value)` is truthy.
 
 | Name      | Type | Description                              |
 | --------- | ---- | ---------------------------------------- |
-| `pred`    |      | callable used to test values             |
+| `pred`    |      | function used to test values             |
 | `default` |      | value to return if no value matches      |
-| `else`    |      | callable to invoke if no value matches   |
+| `else`    |      | function to invoke if no value matches   |
 
 #### Errors
 
 Raises [`RuntimeError`](./runtime-error.md) if no value matches and
 no fallback is provided.
+
+### `fold init func`
+
+Consumes the iterator left-to-right, repeatedly applying `func(acc, value)`.
+
+Returns `init` unchanged if the iterator is empty.
+
+### `kv`
+
+Returns an iterator wrapper that preserves normal iteration, but opts into
+key/value spreading.
+
+When spread in a keyed context such as a dict literal or argument spread, each
+yielded item must unpack into exactly two values.
+
+```
+let entries = ["x=1", "y=2"].iter().map do |e| e.split "="
+
+assert_eq {...entries.kv()} {"x": "1", "y": "2"}
+```
+
+### `map func`
+
+Creates a wrapper `Iter` which yields `func(value)` for each `value` yielded by
+the wrapper iterator.
+
+### `max :default?`
+
+Consumes the iterator and returns the maximum yielded value.
+
+#### Errors
+
+Raises [`IterStop`](./iter-stop.md) if the iterator is empty and no
+`default:` is provided.
 
 ### `min :default?`
 
@@ -217,11 +170,58 @@ Consumes the iterator and returns the minimum yielded value.
 Raises [`IterStop`](./iter-stop.md) if the iterator is empty and no
 `default:` is provided.
 
-### `max :default?`
+### `next :default? :else?`
 
-Consumes the iterator and returns the maximum yielded value.
+Returns the next value from the iterator.
+
+#### Parameters
+
+| Name      | Type | Description                                 |
+| --------- | ---- | ------------------------------------------- |
+| `default` |      | value to return if the iterator is empty    |
+| `else`    |      | function to invoke if the iterator is empty |
 
 #### Errors
 
-Raises [`IterStop`](./iter-stop.md) if the iterator is empty and no
-`default:` is provided.
+Raises [`IterStop`](./iter-stop.md) when exhausted and no fallback
+is provided.
+
+### `skip n`
+
+Returns an iterator that discards the first `n` values, then yields the rest.
+
+#### Parameters
+
+| Name | Type | Description         |
+| ---- | ---- | ------------------- |
+| `n`  | int  | values to discard   |
+
+#### Errors
+
+| Exception                        | Condition           |
+| -------------------------------- | ------------------- |
+| [`TypeError`](./type-error.md)   | `n` is not an `Int` |
+| [`ValueError`](./value-error.md) | `n` is negative     |
+
+### `take n`
+
+Returns an iterator that yields at most `n` values.
+
+#### Parameters
+
+| Name | Type | Description             |
+| ---- | ---- | ----------------------- |
+| `n`  | int  | maximum values to yield |
+
+#### Errors
+
+| Exception                        | Condition           |
+| -------------------------------- | ------------------- |
+| [`TypeError`](./type-error.md)   | `n` is not an `Int` |
+| [`ValueError`](./value-error.md) | `n` is negative     |
+
+### `zip ...values`
+
+Returns an iterator that yields one tuple for each step across this iterator
+and the additional iterables.
+The zipped iterator stops as soon as any input is exhausted.

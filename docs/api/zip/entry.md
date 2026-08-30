@@ -7,44 +7,44 @@ Entries are only available for archives opened in read mode, via
 
 ## Fields
 
-### `name`
+### `comment`
 
-Entry name as an [`fs.unix.Path`](../fs/unix/path.md).
-
-### `type`
-
-Entry type as `:FILE:`, `:DIR:`, `:SYMLINK:`, `:FIFO:`, `:CHAR_DEVICE:`,
-`:BLOCK_DEVICE:`, or `:UNKNOWN:`.
-
-### `size`
-
-Uncompressed size in bytes.
+Entry comment.
 
 ### `compressed_size`
 
 Compressed size in bytes.
 
+### `compression`
+
+Compression method as `:STORED:`, `:DEFLATE:`, `:ZSTD:`, or `:UNKNOWN:`.
+
 ### `crc32`
 
 CRC-32 checksum of the uncompressed data.
 
-### `compression`
+### `last_modified`
 
-Compression method as `:STORED:`, `:DEFLATE:`, `:ZSTD:`, or `:UNKNOWN:`.
+Last modification time as [`DateTime`](../time/datetime.md), or `nil` when
+the stored timestamp cannot be represented.
 
 ### `mode`
 
 Unix permission bits, or `nil` when the archive does not provide Unix
 metadata.
 
-### `comment`
+### `name`
 
-Entry comment.
+Entry name as an [`fs.unix.Path`](../fs/unix/path.md).
 
-### `last_modified`
+### `size`
 
-Last modification time as [`DateTime`](../time/datetime.md), or `nil` when
-the stored timestamp cannot be represented.
+Uncompressed size in bytes.
+
+### `type`
+
+Entry type as `:FILE:`, `:DIR:`, `:SYMLINK:`, `:FIFO:`, `:CHAR_DEVICE:`,
+`:BLOCK_DEVICE:`, or `:UNKNOWN:`.
 
 ## Methods
 
@@ -54,9 +54,9 @@ Opens the entry for reading.
 
 #### Parameters
 
-| Name    | Type | Description                                          |
-| ------- | ---- | ---------------------------------------------------- |
-| `block` | func | Callable to run with the file; auto-closes when done |
+| Name    | Type   | Description                                          |
+| ------- | ------ | ---------------------------------------------------- |
+| `block` | `Func` | Function to run with the file; auto-closes when done |
 
 #### Returns
 

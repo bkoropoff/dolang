@@ -6,12 +6,12 @@ Digest algorithms.
 
 | Type                      | Description                                 |
 | ------------------------- | ------------------------------------------- |
-| [`State`](./state.md)     | Supertype for digest state handles          |
 | [`Blake3`](./blake3.md)   | BLAKE3 state handle                         |
 | [`Md5`](./md5.md)         | MD5 state handle                            |
 | [`Sha1`](./sha1.md)       | SHA-1 state handle                          |
 | [`Sha256`](./sha256.md)   | SHA-256 state handle                        |
 | [`Sha512`](./sha512.md)   | SHA-512 state handle                        |
+| [`State`](./state.md)     | Supertype for digest state handles          |
 
 ## Functions
 

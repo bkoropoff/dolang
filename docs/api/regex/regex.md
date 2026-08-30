@@ -29,32 +29,6 @@ let date = Regex r"(?<year>\d{4})-(?<month>\d{2})-(?<day>\d{2})"
 
 ## Methods
 
-### `match haystack`
-
-Searches for the first match of this pattern anywhere in `haystack`.
-
-#### Parameters
-
-| Name       | Type                   | Description             |
-| ---------- | ---------------------- | ----------------------- |
-| `haystack` | [`Str`](../std/str.md) | The string to search in |
-
-#### Returns
-
-A [`Captures`](./captures.md) object if the pattern matches,
-or `nil` if there is no match.
-
-#### Example
-
-```
-let pattern = Regex r"\d+"
-let caps = pattern.match "abc 42 def"
-echo $caps  # => 42
-
-let no_match = pattern.match "no digits"
-echo $no_match  # => nil
-```
-
 ### `find haystack`
 
 Returns an iterator over all non-overlapping matches of this pattern in
@@ -81,6 +55,32 @@ for caps = pattern.find "one 1 two 2 three 3"
 # Collect all matches into an array
 let matches = [...pattern.find "1 22 333"]
 echo $matches.len  # => 3
+```
+
+### `match haystack`
+
+Searches for the first match of this pattern anywhere in `haystack`.
+
+#### Parameters
+
+| Name       | Type                   | Description             |
+| ---------- | ---------------------- | ----------------------- |
+| `haystack` | [`Str`](../std/str.md) | The string to search in |
+
+#### Returns
+
+A [`Captures`](./captures.md) object if the pattern matches,
+or `nil` if there is no match.
+
+#### Example
+
+```
+let pattern = Regex r"\d+"
+let caps = pattern.match "abc 42 def"
+echo $caps  # => 42
+
+let no_match = pattern.match "no digits"
+echo $no_match  # => nil
 ```
 
 ### `replace haystack replacement [limit: int]`
@@ -142,6 +142,46 @@ echo $ upper.replace "hello world" do |caps|
 # => HELLO WORLD
 ```
 
+### `rsplit haystack [limit: int]`
+
+Like `split`, but yields segments in **right-to-left** order (rightmost segment
+first).
+
+The optional `limit` controls how many splits are performed and from which end:
+
+- `limit: N` (positive) — split at most N times from the **right**; the last
+  element yielded is the unsplit left remainder.
+- `limit: -N` (negative) — split at most N times from the **left**, but still
+  yield segments right-to-left.
+- Omitted — split fully with no limit.
+
+`rsplit` always buffers all matches internally (the regex engine only scans
+forward).
+
+#### Parameters
+
+| Name       | Type                     | Description                                |
+| ---------- | ------------------------ | ------------------------------------------ |
+| `haystack` | [`Str`](../std/str.md)   | the string to split                        |
+| `limit`    | [`Int`](../std/index.md) | max splits; negative means split from left |
+
+#### Returns
+
+An iterator over the segments in reverse order.
+
+#### Example
+
+```
+let comma = Regex r","
+assert_eq [...comma.rsplit "a,b,c"] ["c", "b", "a"]
+
+# Positive limit: 1 split from the right
+assert_eq [...comma.rsplit "a,b,c" limit: 1] ["c", "a,b"]
+
+# Negative limit: 1 split from the left
+assert_eq [...comma.rsplit "a,b,c" limit: -1] ["b,c", "a"]
+```
+
 ### `split haystack [limit: int]`
 
 Splits `haystack` around matches of this pattern. Returns an iterator that
@@ -187,44 +227,4 @@ assert_eq $tail "c"
 let first ...rest = ws.split "a b c d"
 assert_eq $first "a"
 assert_eq [...rest] ["b", "c", "d"]
-```
-
-### `rsplit haystack [limit: int]`
-
-Like `split`, but yields segments in **right-to-left** order (rightmost segment
-first).
-
-The optional `limit` controls how many splits are performed and from which end:
-
-- `limit: N` (positive) — split at most N times from the **right**; the last
-  element yielded is the unsplit left remainder.
-- `limit: -N` (negative) — split at most N times from the **left**, but still
-  yield segments right-to-left.
-- Omitted — split fully with no limit.
-
-`rsplit` always buffers all matches internally (the regex engine only scans
-forward).
-
-#### Parameters
-
-| Name       | Type                     | Description                                |
-| ---------- | ------------------------ | ------------------------------------------ |
-| `haystack` | [`Str`](../std/str.md)   | the string to split                        |
-| `limit`    | [`Int`](../std/index.md) | max splits; negative means split from left |
-
-#### Returns
-
-An iterator over the segments in reverse order.
-
-#### Example
-
-```
-let comma = Regex r","
-assert_eq [...comma.rsplit "a,b,c"] ["c", "b", "a"]
-
-# Positive limit: 1 split from the right
-assert_eq [...comma.rsplit "a,b,c" limit: 1] ["c", "a,b"]
-
-# Negative limit: 1 split from the left
-assert_eq [...comma.rsplit "a,b,c" limit: -1] ["b,c", "a"]
 ```

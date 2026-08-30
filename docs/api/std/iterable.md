@@ -3,23 +3,7 @@
 Abstract type for iterable values. Values that implement the `(iter)` protocol
 are instances of `Iterable`, which can be used for type testing.
 
-`Iterable` is not constructible directly.
-
-```
-assert (type [1, 2, 3] Iterable)
-```
-
-## Methods
-
-### `iter`
-
-Returns an iterator over the value.
-
-#### Returns
-
-[`Iter`](./iter.md)
-
-### Forwarded methods
+## Forwarded Methods
 
 `x.foo(...)` on an `Iterable` means `x.iter().foo(...)`, so most of
 [`Iter`](./iter.md)'s methods can be called on a container directly:
@@ -64,3 +48,13 @@ Call `iter` explicitly to reach any of them:
 ```
 assert_eq ([1, 2, 3].iter().count()) 3
 ```
+
+## Methods
+
+### `iter()`
+
+Returns an iterator over the value.
+
+#### Returns
+
+[`Iter`](./iter.md)

@@ -22,38 +22,17 @@ The returned path type is chosen according to the current VFS context.
 
 ## Fields
 
-### `name`
+### `components`
 
-The final component of the path, or `nil` if the path is empty.
-
-```
-let path = Path /home/user/file.txt
-echo $path.name  # file.txt
-```
-
-### `stem`
-
-The final component without its last extension, or `nil` if the path is
-empty.
+Immutable array-like view of the lexical path components.
 
 ```
-let path = Path "/home/user/archive.tar.gz"
-echo $path.stem  # archive.tar
-
-let no_ext = Path "/home/user/Makefile"
-echo $no_ext.stem  # Makefile
+let path = Path "alpha/beta/gamma"
+assert_eq [...path.components] ["alpha", "beta", "gamma"]
 ```
 
-### `parent`
-
-The parent directory as a `Path` of the same subtype, or `nil` if the path is
-empty or contains only one component.
-
-```
-let path = Path /home/user/file.txt
-let parent = path.parent
-echo parent  # /home/user
-```
+Windows paths carry the alternate data stream specified in the final
+path component if present.
 
 ### `ext`
 
@@ -80,17 +59,38 @@ let rel = Path "./file.txt"
 echo $rel.is_absolute  # false
 ```
 
-### `components`
+### `name`
 
-Immutable array-like view of the lexical path components.
+The final component of the path, or `nil` if the path is empty.
 
 ```
-let path = Path "alpha/beta/gamma"
-assert_eq [...path.components] ["alpha", "beta", "gamma"]
+let path = Path /home/user/file.txt
+echo $path.name  # file.txt
 ```
 
-Windows paths carry the alternate data stream specified in the final
-path component if present.
+### `parent`
+
+The parent directory as a `Path` of the same subtype, or `nil` if the path is
+empty or contains only one component.
+
+```
+let path = Path /home/user/file.txt
+let parent = path.parent
+echo parent  # /home/user
+```
+
+### `stem`
+
+The final component without its last extension, or `nil` if the path is
+empty.
+
+```
+let path = Path "/home/user/archive.tar.gz"
+echo $path.stem  # archive.tar
+
+let no_ext = Path "/home/user/Makefile"
+echo $no_ext.stem  # Makefile
+```
 
 ## Class Methods
 
@@ -124,91 +124,13 @@ echo $abs  # /etc/config.txt
 
 ## Methods
 
-### `open :mode? :block?`
+### `absolute()`
 
-Equivalent to [`fs.open`](index.md#open-path-mode-func)
-
-### `metadata :resolve = :TARGET:`
-
-Equivalent to [`fs.metadata`](index.md#metadata-path-resolve)
-
-### `fs_metadata :resolve = :TARGET:`
-
-Equivalent to [`fs.fs_metadata`](index.md).
-
-### `exists()`
-
-Equivalent to [`fs.exists`](index.md#exists-path).
-
-### `read mode?`
-
-Equivalent to [`fs.read`](index.md#read-path-mode).
-
-### `write content`
-
-Equivalent to [`fs.write`](index.md#write-path-content).
-
-### `append content`
-
-Equivalent to [`fs.append`](index.md#append-path-content).
-
-### `set_size size`
-
-Equivalent to [`fs.set_size`](index.md#set_size-path-size).
-
-### `sync :data?`
-
-Equivalent to [`fs.sync`](index.md#sync-path-data).
-
-### `set_metadata :resolve? ...`
-
-Equivalent to [`fs.set_metadata`](index.md#set_metadata-resolve-paths).
-
-### `xattrs :namespace? :resolve = :TARGET:`
-
-Equivalent to [`fs.xattrs`](index.md).
-
-### `xattr name :namespace? :resolve = :TARGET:`
-
-Equivalent to [`fs.xattr`](index.md).
+Equivalent to [`absolute`](index.md#absolute-path)
 
 ### `acl :kind = :POSIX: :default? :resolve = :TARGET:`
 
 Equivalent to [`fs.acl`](index.md#acl-path-kind-posix-default-resolve).
-
-### `set_acl acl :kind? :default? :resolve = :TARGET:`
-
-Equivalent to [`fs.set_acl`](index.md#set_acl-path-acl-kind-default-resolve).
-Untyped declarative ACL specifications require an explicit `kind:`; a built
-ACL supplies its kind and must match one when provided.
-
-### `set_xattr name value :namespace? :resolve = :TARGET:`
-
-Equivalent to [`fs.set_xattr`](index.md).
-
-### `remove_xattr name :namespace? :resolve = :TARGET:`
-
-Equivalent to [`fs.remove_xattr`](index.md).
-
-### `copy to :all?`
-
-Equivalent to [`fs.copy`](index.md#copy-from-to-all).
-
-### `rename to :replace?`
-
-Equivalent to [`fs.rename`](index.md#rename-from-to-replace).
-
-### `move to :all?`
-
-Equivalent to [`fs.move`](index.md#move-from-to-all).
-
-### `hard_link to`
-
-Equivalent to [`fs.hard_link`](index.md#hard_link-src-dst).
-
-### `entries()`
-
-Equivalent to [`fs.entries`](index.md#entries-path).
 
 ### `add_ext ext`
 
@@ -234,31 +156,108 @@ let file = Path "report"
 echo file.add_ext "txt"  # report.txt
 ```
 
+### `append content`
+
+Equivalent to [`fs.append`](index.md#append-path-content).
+
 ### `canonical()`
 
 Equivalent to [`fs.canonical`](index.md#canonical-path).
+
+### `copy to :all?`
+
+Equivalent to [`fs.copy`](index.md#copy-from-to-all).
+
+### `create_dir :all?`
+
+Equivalent to [`create_dir`](index.md#create_dir-path-all).
+
+### `entries()`
+
+Equivalent to [`fs.entries`](index.md#entries-path).
+
+### `exists()`
+
+Equivalent to [`fs.exists`](index.md#exists-path).
+
+### `fs_metadata :resolve = :TARGET:`
+
+Equivalent to [`fs.fs_metadata`](index.md).
+
+### `glob pattern :max_depth? :resolve?`
+
+Equivalent to [`glob`](index.md#glob-pattern-max_depth-resolve), but searches
+within this path. Yielded paths will contain this path as a prefix.
+
+### `hard_link to`
+
+Equivalent to [`fs.hard_link`](index.md#hard_link-src-dst).
+
+### `metadata :resolve = :TARGET:`
+
+Equivalent to [`fs.metadata`](index.md#metadata-path-resolve)
+
+### `move to :all?`
+
+Equivalent to [`fs.move`](index.md#move-from-to-all).
+
+### `normalize()`
+
+Equivalent to [`normalize`](index.md#normalize-path)
+
+### `open :mode? :block?`
+
+Equivalent to [`fs.open`](index.md#open-path-mode-func)
+
+### `read mode?`
+
+Equivalent to [`fs.read`](index.md#read-path-mode).
 
 ### `read_link()`
 
 Equivalent to [`fs.read_link`](index.md#read_link-path).
 
-### `without_ext()`
+### `relative base?`
 
-Returns a new path with the final extension removed.
+Equivalent to [`relative`](index.md#relative-path-base)
 
-#### Returns
+### `remove :all? :ignore?`
 
-[Path](path.md)
+Equivalent to [`remove`](index.md#remove-path-all-ignore).
 
-#### Example
+### `remove_dir :all? :ignore?`
 
-```
-let path = Path "archive.tar.gz"
-echo path.without_ext()  # archive.tar
+Equivalent to [`remove_dir`](index.md#remove_dir-path-all-ignore).
 
-let plain = Path "Makefile"
-echo plain.without_ext()  # Makefile
-```
+### `remove_xattr name :namespace? :resolve = :TARGET:`
+
+Equivalent to [`fs.remove_xattr`](index.md).
+
+### `rename to :replace?`
+
+Equivalent to [`fs.rename`](index.md#rename-from-to-replace).
+
+### `set_acl acl :kind? :default? :resolve = :TARGET:`
+
+Equivalent to [`fs.set_acl`](index.md#set_acl-path-acl-kind-default-resolve).
+Untyped declarative ACL specifications require an explicit `kind:`; a built
+ACL supplies its kind and must match one when provided.
+
+### `set_metadata :resolve? ...`
+
+Equivalent to [`fs.set_metadata`](index.md#set_metadata-resolve-paths).
+
+### `set_size size`
+
+Equivalent to [`fs.set_size`](index.md#set_size-path-size).
+
+### `set_xattr name value :namespace? :resolve = :TARGET:`
+
+Equivalent to [`fs.set_xattr`](index.md).
+
+### `sync :data?`
+
+Equivalent to [`fs.sync`](index.md#sync-path-data).
 
 ### `with_ext ext`
 
@@ -330,31 +329,32 @@ let plain = Path "Makefile"
 echo plain.with_stem "Dockerfile"  # Dockerfile
 ```
 
-### `remove :all? :ignore?`
+### `without_ext()`
 
-Equivalent to [`remove`](index.md#remove-path-all-ignore).
+Returns a new path with the final extension removed.
 
-### `create_dir :all?`
+#### Returns
 
-Equivalent to [`create_dir`](index.md#create_dir-path-all).
+[Path](path.md)
 
-### `remove_dir :all? :ignore?`
+#### Example
 
-Equivalent to [`remove_dir`](index.md#remove_dir-path-all-ignore).
+```
+let path = Path "archive.tar.gz"
+echo path.without_ext()  # archive.tar
 
-### `normalize()`
+let plain = Path "Makefile"
+echo plain.without_ext()  # Makefile
+```
 
-Equivalent to [`normalize`](index.md#normalize-path)
+### `write content`
 
-### `absolute()`
+Equivalent to [`fs.write`](index.md#write-path-content).
 
-Equivalent to [`absolute`](index.md#absolute-path)
+### `xattr name :namespace? :resolve = :TARGET:`
 
-### `relative base?`
+Equivalent to [`fs.xattr`](index.md).
 
-Equivalent to [`relative`](index.md#relative-path-base)
+### `xattrs :namespace? :resolve = :TARGET:`
 
-### `glob pattern :max_depth? :resolve?`
-
-Equivalent to [`glob`](index.md#glob-pattern-max_depth-resolve), but searches
-within this path. Yielded paths will contain this path as a prefix.
+Equivalent to [`fs.xattrs`](index.md).

@@ -25,6 +25,11 @@ selected. Supplying revision 2 with an object ACE raises `ValueError`.
 
 ## Fields
 
+### `aces`
+
+Immutable array-like view of [`Ace`](./ace.md) values. Use `.len` for the
+entry count.
+
 ### `revision`
 
 `:BASIC:` or `:DIRECTORY_SERVICE:` for supported revisions, or the native
@@ -33,11 +38,6 @@ integer for an unknown parsed revision.
 ### `size`
 
 Declared ACL packet size.
-
-### `aces`
-
-Immutable array-like view of [`Ace`](./ace.md) values. Use `.len` for the
-entry count.
 
 ## Methods
 

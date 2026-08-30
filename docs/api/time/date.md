@@ -4,10 +4,6 @@ A calendar date without a time or time zone.
 
 ## Type Methods
 
-### `today()`
-
-Returns the current UTC date.
-
 ### `from_ymd year month day`
 
 Creates a date from calendar components.
@@ -24,6 +20,10 @@ Creates a date from calendar components.
 
 Parses an RFC full-date (`YYYY-MM-DD`).
 
+### `today()`
+
+Returns the current UTC date.
+
 ## Fields
 
 | Field     | Type                      | Description    |
@@ -35,17 +35,17 @@ Parses an RFC full-date (`YYYY-MM-DD`).
 
 ## Methods
 
-### `rfc()`
+### `add_days days`
 
-Returns the RFC full-date representation.
+Returns the date offset by a signed number of days.
 
 ### `datetime()`
 
 Returns midnight UTC as a [`DateTime`](./datetime.md).
 
-### `add_days days`
+### `rfc()`
 
-Returns the date offset by a signed number of days.
+Returns the RFC full-date representation.
 
 ### `sub_days days`
 

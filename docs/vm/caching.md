@@ -1,7 +1,7 @@
-# Caching Between Runs
+# Data and Caches
 
-Everything this module persists lives under two directories, scoped by
-`app:` (default: derived from `shell.program`).
+Everything `libvirt` persists lives under two directories, scoped by `app:`
+(default: derived from `shell.program`).
 
 `$XDG_DATA_HOME/<app>/libvirt/`:
 

@@ -5,6 +5,14 @@ Handle for the process's standard output, obtained as
 
 ## Methods
 
+### `flush()`
+
+Flushes buffered output to the stream.
+
+Worth calling when interleaving with unbuffered console output, whose ordering
+relative to buffered stdout is otherwise not guaranteed. The interpreter flushes
+on exit.
+
 ### `write data`
 
 Writes bytes verbatim and reports how many were written.
@@ -32,14 +40,6 @@ shell.stdout.write "no newline"
 shell.stdout.write b"\x00\x01\xff"
 assert_eq (shell.stdout.write "héllo") 6
 ```
-
-### `flush()`
-
-Flushes buffered output to the stream.
-
-Worth calling when interleaving with unbuffered console output, whose ordering
-relative to buffered stdout is otherwise not guaranteed. The interpreter flushes
-on exit.
 
 ## Operators
 

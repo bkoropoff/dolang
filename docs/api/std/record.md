@@ -72,62 +72,9 @@ For programmatic access, the `Record` type object provides methods. These are
 called on the type, not on instances, as the instance field namespace is
 entirely reserved for the user.
 
-### `Record.len rec`
-
-Returns the number of fields.
-
-#### Returns
-
-`Int`
-
 ### `Record.clear rec`
 
 Clears all fields.
-
-### `Record.insert rec key value`
-
-Sets a field. Key must be a symbol or integer.
-
-### `Record.get rec key :instance? :default? :else?`
-
-Gets a field value with optional default. Supports `instance:` for multi-map
-access. Negative `instance:` indexes count from the end.
-
-### `Record.pop rec key :instance? :default? :else?`
-
-Removes and returns a value for a field. Supports `instance:` for multi-map
-access to remove a specific value by its position among values for that field.
-Negative `instance:` indexes count from the end.
-
-### `Record.delete rec key`
-
-Removes all values for a field.
-
-Returns [`Bool`](./index.md) indicating whether any values were removed.
-
-### `Record.keys rec`
-
-Returns an iterator of keys. Each distinct key is yielded exactly once, in the
-order its first pair was inserted.
-
-If duplicate-key iteration is needed, use ordinary record iteration.
-
-### `Record.values rec key?`
-
-Returns an iterator of values. With no `key`, it yields all stored values in
-pair insertion order. With a `key`, it yields only the values associated with
-that key, in that key's insertion order.
-
-Missing keys return an empty iterator.
-
-### `Record.count rec key?`
-
-Returns a count derived from the record's multi-map structure.
-
-With no `key`, it returns the number of distinct keys. With a `key`, it returns
-the number of values associated with that key.
-
-Missing keys return `0`.
 
 ### `Record.contains rec key value?`
 
@@ -161,3 +108,56 @@ assert (!record.contains $r 10)
 assert (record.contains $r :a: "first")
 assert (record.contains $r :a: "second")
 ```
+
+### `Record.count rec key?`
+
+Returns a count derived from the record's multi-map structure.
+
+With no `key`, it returns the number of distinct keys. With a `key`, it returns
+the number of values associated with that key.
+
+Missing keys return `0`.
+
+### `Record.delete rec key`
+
+Removes all values for a field.
+
+Returns [`Bool`](./index.md) indicating whether any values were removed.
+
+### `Record.get rec key :instance? :default? :else?`
+
+Gets a field value with optional default. Supports `instance:` for multi-map
+access. Negative `instance:` indexes count from the end.
+
+### `Record.insert rec key value`
+
+Sets a field. Key must be a symbol or integer.
+
+### `Record.keys rec`
+
+Returns an iterator of keys. Each distinct key is yielded exactly once, in the
+order its first pair was inserted.
+
+If duplicate-key iteration is needed, use ordinary record iteration.
+
+### `Record.len rec`
+
+Returns the number of fields.
+
+#### Returns
+
+`Int`
+
+### `Record.pop rec key :instance? :default? :else?`
+
+Removes and returns a value for a field. Supports `instance:` for multi-map
+access to remove a specific value by its position among values for that field.
+Negative `instance:` indexes count from the end.
+
+### `Record.values rec key?`
+
+Returns an iterator of values. With no `key`, it yields all stored values in
+pair insertion order. With a `key`, it yields only the values associated with
+that key, in that key's insertion order.
+
+Missing keys return an empty iterator.

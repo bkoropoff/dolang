@@ -10,17 +10,7 @@ testing.
 assert (type [] Sinkable)
 ```
 
-## Methods
-
-### `sink`
-
-Returns a sink over the value.
-
-#### Returns
-
-[`Sink`](./sink.md)
-
-### Forwarded methods
+## Forwarded methods
 
 `x.foo(...)` on a `Sinkable` means `x.sink().foo(...)`, so [`Sink`](./sink.md)'s
 methods can be called on the value directly:
@@ -45,3 +35,13 @@ out.put 3
 assert_eq $acc [6]
 assert_eq [...acc.map (do |x| x + 1)] [7]
 ```
+
+## Methods
+
+### `sink()`
+
+Returns a sink over the value.
+
+#### Returns
+
+[`Sink`](./sink.md)

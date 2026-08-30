@@ -4,24 +4,6 @@ Immutable POSIX.1e access-control entry.
 
 ## Class Methods
 
-### `user_obj permissions?`
-
-Constructs the file-owner entry.
-
-### `user id permissions?`
-
-Constructs a named-user entry.
-
-#### Parameters
-
-| Name | Type                      | Description |
-| ---- | ------------------------- | ----------- |
-| `id` | [`Int`](../../std/int.md) | User ID     |
-
-### `group_obj permissions?`
-
-Constructs the file-group entry.
-
 ### `group id permissions?`
 
 Constructs a named-group entry.
@@ -31,6 +13,10 @@ Constructs a named-group entry.
 | Name | Type                      | Description |
 | ---- | ------------------------- | ----------- |
 | `id` | [`Int`](../../std/int.md) | Group ID    |
+
+### `group_obj permissions?`
+
+Constructs the file-group entry.
 
 ### `mask permissions?`
 
@@ -46,12 +32,21 @@ Capitalized class methods accept only a built `Permission`; use
 [`security.unix.ace`](./index.md#ace-user_obj-user-group_obj-group-mask-other-permissions)
 for symbolic permission coercion.
 
+### `user id permissions?`
+
+Constructs a named-user entry.
+
+#### Parameters
+
+| Name | Type                      | Description |
+| ---- | ------------------------- | ----------- |
+| `id` | [`Int`](../../std/int.md) | User ID     |
+
+### `user_obj permissions?`
+
+Constructs the file-owner entry.
+
 ## Fields
-
-### `type`
-
-Entry qualifier: `:USER_OBJ:`, `:USER:`, `:GROUP_OBJ:`, `:GROUP:`, `:MASK:`,
-or `:OTHER:`.
 
 ### `id`
 
@@ -62,3 +57,8 @@ Raises `FieldError` unless `type` is `:USER:` or `:GROUP:`.
 ### `permissions`
 
 The entry's permissions, as a [`Permission`](./permission.md).
+
+### `type`
+
+Entry qualifier: `:USER_OBJ:`, `:USER:`, `:GROUP_OBJ:`, `:GROUP:`, `:MASK:`,
+or `:OTHER:`.

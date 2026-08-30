@@ -5,6 +5,30 @@ Handle for the process's standard input, obtained as
 
 ## Methods
 
+### `chunks()`
+
+Returns a `Stdin` that yields arbitrary-sized [`Bin`](../std/bin.md) chunks.
+
+#### Returns
+
+`Stdin`.
+
+#### Example
+
+```
+for chunk = shell.stdin.chunks()
+  hasher.update $chunk
+```
+
+### `lines()`
+
+Returns a `Stdin` that yields lines. This is the default, so it is only needed
+to undo a previous `chunks()`.
+
+#### Returns
+
+`Stdin`.
+
 ### `read size?`
 
 Reads raw bytes.
@@ -27,30 +51,6 @@ as [`fs.File.read`](../fs/file.md) does. Without one, it reads to end of stream.
 ```
 let rest = shell.stdin.read()
 let head = shell.stdin.read 64
-```
-
-### `lines()`
-
-Returns a `Stdin` that yields lines. This is the default, so it is only needed
-to undo a previous `chunks()`.
-
-#### Returns
-
-`Stdin`.
-
-### `chunks()`
-
-Returns a `Stdin` that yields arbitrary-sized [`Bin`](../std/bin.md) chunks.
-
-#### Returns
-
-`Stdin`.
-
-#### Example
-
-```
-for chunk = shell.stdin.chunks()
-  hasher.update $chunk
 ```
 
 ## Operators

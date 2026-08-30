@@ -30,16 +30,19 @@ assert_eq $pack.len 3
 
 ## Methods
 
-### `push ...`
+### `pos_keys`
 
-Appends positional and keyed arguments to the pack.
+Returns a tuple of positional values and keyed entries.
+
+The first item is an iterator over positional values. The second item is an
+iterator over keyed `[key, value]` pairs.
 
 ```
-let pack = args 1
-pack.push 2 name: Alice
-let items = [...pack]
-assert_eq $items[1][1] 2
-assert_eq $items[2][0] :name:
+let pack = args 1 left: 2 3 right: 4
+let pos keyed = pack.pos_keys()
+assert_eq [...pos] [1, 3]
+assert_eq [...keyed] [[:left:, 2], [:right:, 4]]
+assert_eq [...pack] [[0, 1], [:left:, 2], [1, 3], [:right:, 4]]
 ```
 
 ### `pos_only`
@@ -56,17 +59,14 @@ assert_eq [...pos] [1, 2, 3]
 assert_eq [...pack] [[0, 1], [1, 2], [2, 3]]
 ```
 
-### `pos_keys`
+### `push ...`
 
-Returns a tuple of positional values and keyed entries.
-
-The first item is an iterator over positional values. The second item is an
-iterator over keyed `[key, value]` pairs.
+Appends positional and keyed arguments to the pack.
 
 ```
-let pack = args 1 left: 2 3 right: 4
-let pos keyed = pack.pos_keys()
-assert_eq [...pos] [1, 3]
-assert_eq [...keyed] [[:left:, 2], [:right:, 4]]
-assert_eq [...pack] [[0, 1], [:left:, 2], [1, 3], [:right:, 4]]
+let pack = args 1
+pack.push 2 name: Alice
+let items = [...pack]
+assert_eq $items[1][1] 2
+assert_eq $items[2][0] :name:
 ```

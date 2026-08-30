@@ -6,5 +6,5 @@ UUID and Windows GUID generation, parsing, and field access.
 
 | Type                | Description                      |
 | ------------------- | -------------------------------- |
-| [`Uuid`](./uuid.md) | Parsed or generated UUID         |
 | [`Guid`](./guid.md) | Parsed or generated Windows GUID |
+| [`Uuid`](./uuid.md) | Parsed or generated UUID         |

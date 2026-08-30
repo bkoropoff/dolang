@@ -8,17 +8,6 @@ One file-level patch operation.
 
 ## Fields
 
-### `type`
-
-Operation kind as a symbol.
-
-Possible values are `:CREATE:`, `:DELETE:`, `:MODIFY:`, `:MOVE:`, and `:COPY:`.
-
-```
-let p = patch.diff "alpha\n" "beta\n"
-assert_eq $p.type :MODIFY:
-```
-
 ### `source`
 
 Source path of the patch as a [`Path`](../fs/path.md).
@@ -39,6 +28,17 @@ This field is present for create, modify, move, and copy operations.
 ```
 let p = [...patch.decode diff_text][0]
 echo $p.target
+```
+
+### `type`
+
+Operation kind as a symbol.
+
+Possible values are `:CREATE:`, `:DELETE:`, `:MODIFY:`, `:MOVE:`, and `:COPY:`.
+
+```
+let p = patch.diff "alpha\n" "beta\n"
+assert_eq $p.type :MODIFY:
 ```
 
 ## Methods

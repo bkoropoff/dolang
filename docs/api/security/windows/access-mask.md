@@ -2,14 +2,9 @@
 
 Generic Windows object access rights.
 
-Domain-specific rights — [`winreg.AccessMask`](../../winreg/access-mask.md)
-for registry keys, `winscm`'s manager and service masks — name this type as a
-supertype, so a value of one can be used wherever a Windows access mask is
-expected. A type doing so must expose an `int` field holding the raw 32-bit
-rights, which is how the security APIs read a subtype's bits.
-
-Symbols name generic rights only. A mask built from a domain's own rights has
-to name the domain's type: `winreg.AccessMask(:READ:)`.
+Domain-specific rights such as
+[`winreg.AccessMask`](../../winreg/access-mask.md) are subtypes. This type
+names generically applicable rights only.
 
 ## Constructor
 
@@ -43,6 +38,10 @@ Constructs a mask from a native integer while preserving unknown bits.
 
 ## Fields
 
+### `generic_rights`
+
+Returns the generic-rights portion as an `AccessMask`.
+
 ### `int`
 
 Returns the native integer mask.
@@ -54,10 +53,6 @@ Returns the object-specific low 16 bits.
 ### `standard_rights`
 
 Returns the standard-rights portion as an `AccessMask`.
-
-### `generic_rights`
-
-Returns the generic-rights portion as an `AccessMask`.
 
 ## Methods
 

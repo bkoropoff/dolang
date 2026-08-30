@@ -41,18 +41,18 @@ macos.Ace.allow $owner mask: $read flags: (macos.Flags(:FILE_INHERIT:))
 
 ## Fields
 
-### `type`
+### `flags`
 
-Entry type: `:ALLOW:` or `:DENY:`.
-
-### `principal`
-
-The entry's principal, as a [`uuid.Uuid`](../../uuid/uuid.md).
+The entry's inheritance flags, as a [`Flags`](./flags.md).
 
 ### `mask`
 
 The entry's permission mask, as a [`Mask`](./mask.md).
 
-### `flags`
+### `principal`
 
-The entry's inheritance flags, as a [`Flags`](./flags.md).
+The entry's principal, as a [`uuid.Uuid`](../../uuid/uuid.md).
+
+### `type`
+
+Entry type: `:ALLOW:` or `:DENY:`.

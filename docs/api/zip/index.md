@@ -15,7 +15,7 @@ Opens a ZIP archive and returns an Archive object.
 | ------ | ---------------------- | ------------------------------------------------------- |
 | `path` | [`Str`](../std/str.md) | Path to the ZIP archive file                            |
 | `mode` | `Str`                  | Access mode (default: `"r"`)                            |
-| `func` | func                   | Callable to run with the archive; auto-closes when done |
+| `func` | `Func`                 | Function to run with the archive; auto-closes when done |
 
 ##### Archive modes
 

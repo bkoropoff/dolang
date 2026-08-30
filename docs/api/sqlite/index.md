@@ -21,7 +21,7 @@ Opens a SQLite database connection and returns a Connection object.
 | `retries`  | `Int`                                           | Max retry attempts on busy (default: 10)                   |
 | `min_wait` | `Int`                                           | Initial wait in ms between retries (default: 1)            |
 | `max_wait` | `Int`                                           | Max wait in ms between retries (default: 1000)             |
-| `func`     | func                                            | Callable to run with the connection; auto-closes when done |
+| `func`     | `Func`                                          | Function to run with the connection; auto-closes when done |
 
 #### Returns
 

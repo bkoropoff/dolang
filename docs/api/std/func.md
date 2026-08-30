@@ -1,3 +1,3 @@
-# Func
+# `Func`
 
-`Func` is the abstract supertype of callable values.
+`Func` is the abstract supertype of function values.

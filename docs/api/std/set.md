@@ -42,20 +42,6 @@ s.add 2
 assert_eq [...s] [1, 2, 3]
 ```
 
-### `delete value`
-
-Removes `value` if present.
-
-#### Parameters
-
-| Name    | Type | Description         |
-| ------- | ---- | ------------------- |
-| `value` |      | the value to remove |
-
-#### Returns
-
-[`Bool`](./index.md) indicating whether a value was removed
-
 ### `clear`
 
 Removes all members.
@@ -65,16 +51,6 @@ let s = Set [1, 2]
 s.clear()
 assert_eq $s.len 0
 ```
-
-### `copy`
-
-Returns a shallow copy of the Set.
-
-Insertion order is preserved. Contained values are *not* recursively copied.
-
-#### Returns
-
-[`Set`](./set.md)
 
 ### `contains value`
 
@@ -90,35 +66,29 @@ Tests whether the Set contains `value`.
 
 [`Bool`](./index.md)
 
-### `union other`
+### `copy`
 
-Returns a new Set containing all members from `self`, then first-seen members
-from `other`.
+Returns a shallow copy of the Set.
 
-#### Parameters
-
-| Name    | Type              | Description |
-| ------- | ----------------- | ----------- |
-| `other` | [`Set`](./set.md) | other Set   |
+Insertion order is preserved. Contained values are *not* recursively copied.
 
 #### Returns
 
 [`Set`](./set.md)
 
-### `intersect other`
+### `delete value`
 
-Returns a new Set containing members that are present in both sets, in
-the receiver's insertion order.
+Removes `value` if present.
 
 #### Parameters
 
-| Name    | Type              | Description |
-| ------- | ----------------- | ----------- |
-| `other` | [`Set`](./set.md) | other Set   |
+| Name    | Type | Description         |
+| ------- | ---- | ------------------- |
+| `value` |      | the value to remove |
 
 #### Returns
 
-[`Set`](./set.md)
+[`Bool`](./index.md) indicating whether a value was removed
 
 ### `diff other`
 
@@ -135,10 +105,10 @@ Returns a new Set containing members from the receiver that are not present in
 
 [`Set`](./set.md)
 
-### `sym_diff other`
+### `intersect other`
 
-Returns a new Set containing members present in exactly one of the two
-sets.
+Returns a new Set containing members that are present in both sets, in
+the receiver's insertion order.
 
 #### Parameters
 
@@ -177,6 +147,36 @@ Returns `true` when every member of `other` is present in the receiver.
 #### Returns
 
 [`Bool`](./index.md)
+
+### `sym_diff other`
+
+Returns a new Set containing members present in exactly one of the two
+sets.
+
+#### Parameters
+
+| Name    | Type              | Description |
+| ------- | ----------------- | ----------- |
+| `other` | [`Set`](./set.md) | other Set   |
+
+#### Returns
+
+[`Set`](./set.md)
+
+### `union other`
+
+Returns a new Set containing all members from `self`, then first-seen members
+from `other`.
+
+#### Parameters
+
+| Name    | Type              | Description |
+| ------- | ----------------- | ----------- |
+| `other` | [`Set`](./set.md) | other Set   |
+
+#### Returns
+
+[`Set`](./set.md)
 
 ## Operations
 

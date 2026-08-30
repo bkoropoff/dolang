@@ -64,20 +64,9 @@ takeover for the life of the process — see
 
 ## Functions
 
-### `output()`
-
-Returns the current output console: the one installed by an enclosing
-[`capture`](#capture-console-func-args-mode), or [`console`](#console) if there
-is none. This is where `echo`, `print`, diagnostics, and unredirected child
-process output go.
-
-#### Returns
-
-[`Console`](./console.md)
-
 ### `capture console func ...args :mode?`
 
-Runs a callable with `console` installed as the ambient console, then flushes
+Runs a function with `console` installed as the ambient console, then flushes
 it and restores the previous one.
 
 `console` may be any [`Console`](./console.md), or any
@@ -91,7 +80,7 @@ The override is inherited by all strands spawned inside the call.
 | Name      | Type                            | Description                           |
 | --------- | ------------------------------- | ------------------------------------- |
 | `console` | [`Console`](./console.md)\|sink | Destination to install                |
-| `func`    | callable                        | Block to run                          |
+| `func`    | `Func`                          | Block to run                          |
 | `mode`    | [`sym`](../std/sym.md)?         | `:LINE:` (default) or `:CHUNK:`       |
 | `...`     |                                 | Additional arguments passed to `func` |
 
@@ -134,58 +123,6 @@ term.capture $out do print hi
 assert_eq $out ["hi"]
 ```
 
-### `sub func :chomp? :can_style? ...args`
-
-Runs a callable and returns its console output as a string. The console
-counterpart to [`proc.sub`](../proc/index.md#sub-func-chomp), which captures a
-strand's implicit output stream.
-
-Verbatim output is captured, which must be valid UTF-8. One final line ending
-(LF or CRLF) is removed unless `chomp: false`.
-
-#### Parameters
-
-| Name        | Type                      | Description                                     |
-| ----------- | ------------------------- | ----------------------------------------------- |
-| `func`      | callable                  | Block to run                                    |
-| `chomp`     | [`Bool`](../std/bool.md)? | Strip one trailing line ending (default `true`) |
-| `can_style` | [`Bool`](../std/bool.md)? | Keep ANSI styling (default `false`)             |
-| `...`       |                           | Additional arguments passed to `func`           |
-
-#### Returns
-
-[`Str`](../std/str.md)
-
-#### Example
-
-```
-let greeting = term.sub do greet Alice
-assert_eq $greeting "Hello, Alice!"
-```
-
-### `mute func ...args`
-
-Runs a function with default console-bound output silenced: `echo`, `print`,
-unredirected program `stderr`, etc.
-
-#### Parameters
-
-| Name      | Type     | Description                           |
-| --------- | -------- | ------------------------------------- |
-| `func`    | callable | Block to run                          |
-| `...args` |          | Additional arguments passed to `func` |
-
-#### Returns
-
-Return value of `func`.
-
-#### Example
-
-```
-# Nothing from this reaches the terminal.
-mute do run printf "this will not be printed"
-```
-
 ### `echo ...args`
 
 Prints arguments separated by spaces, followed by a newline. Ordinary values
@@ -203,52 +140,39 @@ are sanitized; direct [`Text`](./text.md) arguments retain their styling.
 echo status: ready count: 3
 ```
 
-### `print :...options ...args`
+### `mute func ...args`
 
-Prints concatenated values without separators or a trailing newline. Styling
-is omitted when stderr is not a terminal.
-
-#### Parameters
-
-| Name      | Type | Description                         |
-| --------- | ---- | ----------------------------------- |
-| `...args` | *    | Values converted to display strings |
-
-Also accepts the module's [style options](#style-options). `:INHERIT:` is a
-no-op for `print`.
-
-#### Example
-
-```
-print "status: " ready fg: :GREEN: bold: true
-```
-
-### `style :...options ...args`
-
-Constructs styled terminal text from concatenated values. With no positional
-arguments, it returns a reusable [`Style`](./style.md) instead.
+Runs a function with default console-bound output silenced: `echo`, `print`,
+unredirected program `stderr`, etc.
 
 #### Parameters
 
-| Name      | Type | Description                         |
-| --------- | ---- | ----------------------------------- |
-| `...args` | *    | Values converted to display strings |
-
-Also accepts the module's [style options](#style-options). `:INHERIT:` leaves
-a setting to the surrounding style. This is normally the default, but clears
-a saved setting when deriving a [`Style`](./style.md).
+| Name      | Type   | Description                           |
+| --------- | ------ | ------------------------------------- |
+| `func`    | `Func` | Block to run                          |
+| `...args` |        | Additional arguments passed to `func` |
 
 #### Returns
 
-[`Text`](./text.md) when positional arguments are provided;
-otherwise [`Style`](./style.md)
+Return value of `func`.
 
 #### Example
 
 ```
-let warning = style Warning fg: :YELLOW: bold: true
-echo $warning
+# Nothing from this reaches the terminal.
+mute do run printf "this will not be printed"
 ```
+
+### `output()`
+
+Returns the current output console: the one installed by an enclosing
+[`capture`](#capture-console-func-args-mode), or [`console`](#console) if there
+is none. This is where `echo`, `print`, diagnostics, and unredirected child
+process output go.
+
+#### Returns
+
+[`Console`](./console.md)
 
 ### `preformat text`
 
@@ -270,6 +194,26 @@ terminal controls, including hyperlinks, are removed.
 ```
 let formatted = preformat input
 echo $formatted
+```
+
+### `print :...options ...args`
+
+Prints concatenated values without separators or a trailing newline. Styling
+is omitted when stderr is not a terminal.
+
+#### Parameters
+
+| Name      | Type | Description                         |
+| --------- | ---- | ----------------------------------- |
+| `...args` | *    | Values converted to display strings |
+
+Also accepts the module's [style options](#style-options). `:INHERIT:` is a
+no-op for `print`.
+
+#### Example
+
+```
+print "status: " ready fg: :GREEN: bold: true
 ```
 
 ### `render_error error :backtrace?`
@@ -307,3 +251,59 @@ catch error: e
 Ordinary values preserve newlines and tabs but remove other C0/C1 controls and
 escape sequences. Raw stdout and stderr sinks are unchanged and are not
 sanitized by this module.
+
+### `style :...options ...args`
+
+Constructs styled terminal text from concatenated values. With no positional
+arguments, it returns a reusable [`Style`](./style.md) instead.
+
+#### Parameters
+
+| Name      | Type | Description                         |
+| --------- | ---- | ----------------------------------- |
+| `...args` | *    | Values converted to display strings |
+
+Also accepts the module's [style options](#style-options). `:INHERIT:` leaves
+a setting to the surrounding style. This is normally the default, but clears
+a saved setting when deriving a [`Style`](./style.md).
+
+#### Returns
+
+[`Text`](./text.md) when positional arguments are provided;
+otherwise [`Style`](./style.md)
+
+#### Example
+
+```
+let warning = style Warning fg: :YELLOW: bold: true
+echo $warning
+```
+
+### `sub func :chomp? :can_style? ...args`
+
+Runs a function and returns its console output as a string. The console
+counterpart to [`proc.sub`](../proc/index.md#sub-func-chomp), which captures a
+strand's implicit output stream.
+
+Verbatim output is captured, which must be valid UTF-8. One final line ending
+(LF or CRLF) is removed unless `chomp: false`.
+
+#### Parameters
+
+| Name        | Type                      | Description                                     |
+| ----------- | ------------------------- | ----------------------------------------------- |
+| `func`      | `Func`                    | Block to run                                    |
+| `chomp`     | [`Bool`](../std/bool.md)? | Strip one trailing line ending (default `true`) |
+| `can_style` | [`Bool`](../std/bool.md)? | Keep ANSI styling (default `false`)             |
+| `...`       |                           | Additional arguments passed to `func`           |
+
+#### Returns
+
+[`Str`](../std/str.md)
+
+#### Example
+
+```
+let greeting = term.sub do greet Alice
+assert_eq $greeting "Hello, Alice!"
+```

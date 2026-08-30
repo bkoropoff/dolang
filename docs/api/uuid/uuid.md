@@ -32,13 +32,13 @@ let copy = Uuid $id
 
 ## Class Fields
 
-### `NIL`
-
-The nil `Uuid`, `00000000-0000-0000-0000-000000000000`.
-
 ### `MAX`
 
 The max `Uuid`, `ffffffff-ffff-ffff-ffff-ffffffffffff`.
+
+### `NIL`
+
+The nil `Uuid`, `00000000-0000-0000-0000-000000000000`.
 
 ## Class Methods
 
@@ -72,13 +72,13 @@ The raw 16-byte binary form.
 
 The simple (no hyphens) lowercase hexadecimal text form.
 
-### `version`
-
-The UUID version number, such as `4` for a randomly generated UUID.
-
 ### `variant`
 
 The UUID variant, one of `:NCS:`, `:RFC4122:`, `:MICROSOFT:`, or `:FUTURE:`.
+
+### `version`
+
+The UUID version number, such as `4` for a randomly generated UUID.
 
 ## Example
 

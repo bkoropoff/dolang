@@ -19,6 +19,13 @@ every operation throws [`sys.UnsupportedError`](../sys/unsupported-error.md).
 
 ## Enumeration values
 
+### Link resolution values
+
+| Value      | Meaning                              |
+| ---------- | ------------------------------------ |
+| `:TARGET:` | Follow a registry link (the default) |
+| `:LINK:`   | Open the link key itself             |
+
 ### Registry root values
 
 | Value              | Meaning                              |
@@ -28,21 +35,6 @@ every operation throws [`sys.UnsupportedError`](../sys/unsupported-error.md).
 | `:LOCAL_MACHINE:`  | Computer-wide configuration          |
 | `:USERS:`          | All user profiles                    |
 | `:CURRENT_CONFIG:` | Current hardware profile             |
-
-### Registry view values
-
-| Value       | Meaning                                   |
-| ----------- | ----------------------------------------- |
-| `:NATIVE:`  | The target process's native registry view |
-| `:WOW32:`   | The 32-bit registry view                  |
-| `:WOW64:`   | The 64-bit registry view                  |
-
-### Link resolution values
-
-| Value      | Meaning                              |
-| ---------- | ------------------------------------ |
-| `:TARGET:` | Follow a registry link (the default) |
-| `:LINK:`   | Open the link key itself             |
 
 ### Registry value kind values
 
@@ -57,6 +49,14 @@ every operation throws [`sys.UnsupportedError`](../sys/unsupported-error.md).
 | `:BINARY:`            | Raw bytes                    |
 | `:NONE:`              | No data                      |
 
+### Registry view values
+
+| Value       | Meaning                                   |
+| ----------- | ----------------------------------------- |
+| `:NATIVE:`  | The target process's native registry view |
+| `:WOW32:`   | The 32-bit registry view                  |
+| `:WOW64:`   | The 64-bit registry view                  |
+
 ## Functions
 
 ### `open root :view? :access? func?`
@@ -70,7 +70,7 @@ Opens a predefined registry root and returns a [`Key`](./key.md).
 | `root`   | sym                                              | [Registry root](#registry-root-values)                       |
 | `view`   | sym?                                             | [Registry view](#registry-view-values) (default: `:NATIVE:`) |
 | `access` | [`AccessMask`](./access-mask.md)\|sym\|iterable? | Access rights (default: `:READ:`)                            |
-| `func`   | func?                                            | Function to run with the key; auto-closes when done          |
+| `func`   | `Func`?                                          | Function to run with the key; auto-closes when done          |
 
 #### Returns
 

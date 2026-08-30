@@ -8,9 +8,9 @@ A running mock HTTP server, bound to a random local port.
 
 #### Parameters
 
-| Name   | Type | Description                                            |
-| ------ | ---- | ------------------------------------------------------ |
-| `func` | func | Callable to run with the server; auto-closes when done |
+| Name   | Type   | Description                                            |
+| ------ | ------ | ------------------------------------------------------ |
+| `func` | `Func` | Function to run with the server; auto-closes when done |
 
 #### Returns
 
@@ -55,6 +55,10 @@ http.mock.Server do |server|
 
 ## Methods
 
+### `close`
+
+Shuts down the server. Further requests to its address will fail.
+
 ### `mock ... do?`
 
 Registers one or more mocks on the server. Each item is a dict describing a
@@ -64,18 +68,18 @@ request matcher and the response to return when it matches.
 
 Each item accepts:
 
-| Name         | Type                           | Description                                                              |
-| ------------ | ------------------------------ | ------------------------------------------------------------------------ |
-| `method`     | [`Str`](../std/str.md)         | HTTP method to match, case-insensitive                                   |
-| `path`       | [`Str`](../std/str.md)         | Exact request path to match                                              |
-| `path_regex` | [`Str`](../std/str.md)         | Regex the request path must match                                        |
-| `headers`    | [`Dict`](../std/dict.md)       | Header name/value pairs that must all be present and match exactly       |
-| `query`      | [`Dict`](../std/dict.md)       | Query parameter name/value pairs that must all match exactly             |
-| `body_json`  | any                            | JSON value the request body must deserialize to and equal                |
-| `match`      | func                           | Callback matcher — see below                                             |
-| `respond`    | [`Dict`](../std/dict.md)\|func | Response to return, or a callback that builds one — see below. Required. |
-| `expect`     | `Int`\|range                   | Number (or range) of matching requests expected                          |
-| `name`       | [`Str`](../std/str.md)         | Name used in `expect:` failure messages                                  |
+| Name         | Type                             | Description                                                              |
+| ------------ | -------------------------------- | ------------------------------------------------------------------------ |
+| `method`     | [`Str`](../std/str.md)           | HTTP method to match, case-insensitive                                   |
+| `path`       | [`Str`](../std/str.md)           | Exact request path to match                                              |
+| `path_regex` | [`Str`](../std/str.md)           | Regex the request path must match                                        |
+| `headers`    | [`Dict`](../std/dict.md)         | Header name/value pairs that must all be present and match exactly       |
+| `query`      | [`Dict`](../std/dict.md)         | Query parameter name/value pairs that must all match exactly             |
+| `body_json`  | any                              | JSON value the request body must deserialize to and equal                |
+| `match`      | `Func`                           | Callback matcher — see below                                             |
+| `respond`    | [`Dict`](../std/dict.md)\|`Func` | Response to return, or a callback that builds one — see below. Required. |
+| `expect`     | `Int`\|range                     | Number (or range) of matching requests expected                          |
+| `name`       | [`Str`](../std/str.md)           | Name used in `expect:` failure messages                                  |
 
 If none of `method`/`path`/`path_regex`/`headers`/`query`/`body_json`/`match`
 are given, the item matches any request. All given matchers on one item must
@@ -175,11 +179,6 @@ http.get (server.url / "/users/42")
 handle.unmount()
 ```
 
-### `reset`
-
-Removes all mocks registered on the server and forgets all received
-requests.
-
 ### `received_requests`
 
 Returns every request the server has received, regardless of which (if any)
@@ -191,6 +190,7 @@ a specific `.mock()` call instead.
 Array of request dicts — see [`Mock.received`](./mock.md#received) for the
 shape.
 
-### `close`
+### `reset`
 
-Shuts down the server. Further requests to its address will fail.
+Removes all mocks registered on the server and forgets all received
+requests.

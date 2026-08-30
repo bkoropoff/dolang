@@ -7,21 +7,13 @@ and passed as the argument to a `match:`/`respond: do |req| ...` callback (see
 
 ## Fields
 
-### `method`
+### `body`
 
-The request method, e.g. `"GET"`.
-
-#### Type
-
-[`Str`](../std/str.md)
-
-### `url`
-
-The full request URL.
+The raw request body.
 
 #### Type
 
-[`Str`](../std/str.md)
+[`Bin`](../std/bin.md)
 
 ### `headers`
 
@@ -44,10 +36,18 @@ server.mock
       status: 200
 ```
 
-### `body`
+### `method`
 
-The raw request body.
+The request method, e.g. `"GET"`.
 
 #### Type
 
-[`Bin`](../std/bin.md)
+[`Str`](../std/str.md)
+
+### `url`
+
+The full request URL.
+
+#### Type
+
+[`Str`](../std/str.md)

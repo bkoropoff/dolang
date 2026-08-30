@@ -59,73 +59,29 @@ let entry = Ace
 
 ## Fields
 
-### `type`
-
-Symbolic native ACE type, or `:UNKNOWN:` for an unrecognized type code.
-
-For recognized values, see [ACE type values](./index.md#ace-type-values).
-
-### `type_code`
-
-Native numeric ACE type code.
-
-### `flags`
-
-[`AceFlags`](./ace-flags.md) from the ACE header.
-
-### `size`
-
-Declared ACE packet size.
-
-### `mask`
-
-[`AccessMask`](./access-mask.md).
-
-Raises `FieldError` for an ACE layout without a projected mask.
-
-### `sid`
-
-Trustee [`Sid`](./sid.md).
-
-Raises `FieldError` for an ACE layout without a projected SID.
-
-### `object_flags`
-
-Native object ACE flags.
-
-Raises `FieldError` for a non-object ACE.
-
-### `object_type`
-
-Object-type [`uuid.Guid`](../../uuid/guid.md), or `nil` when the
-object flag is clear.
-
-Raises `FieldError` for a non-object ACE.
-
-### `inherited_object_type`
-
-Inherited-object-type [`uuid.Guid`](../../uuid/guid.md), or `nil`
-when the object flag is clear.
-
-Raises `FieldError` for a non-object ACE.
-
 ### `application_data`
 
 Exact bytes after the projected SID. The value can be empty.
 
 Raises `FieldError` when the ACE body is not interpreted.
 
-### `object_inherit`
-
-Whether non-container child objects inherit this ACE.
-
 ### `container_inherit`
 
 Whether container child objects inherit this ACE.
 
-### `no_propagate_inherit`
+### `critical`
 
-Whether inherited copies stop propagating after one generation.
+Whether the native critical flag is set.
+
+### `failed_access`
+
+Whether an audit or alarm ACE selects failed access.
+
+Raises `FieldError` for other ACE types.
+
+### `flags`
+
+[`AceFlags`](./ace-flags.md) from the ACE header.
 
 ### `inherit_only`
 
@@ -135,19 +91,53 @@ Whether this ACE applies only through inheritance.
 
 Whether this ACE was inherited.
 
-### `critical`
+### `inherited_object_type`
 
-Whether the native critical flag is set.
+Inherited-object-type [`uuid.Guid`](../../uuid/guid.md), or `nil`
+when the object flag is clear.
+
+Raises `FieldError` for a non-object ACE.
+
+### `mask`
+
+[`AccessMask`](./access-mask.md).
+
+Raises `FieldError` for an ACE layout without a projected mask.
+
+### `no_propagate_inherit`
+
+Whether inherited copies stop propagating after one generation.
+
+### `object_flags`
+
+Native object ACE flags.
+
+Raises `FieldError` for a non-object ACE.
+
+### `object_inherit`
+
+Whether non-container child objects inherit this ACE.
+
+### `object_type`
+
+Object-type [`uuid.Guid`](../../uuid/guid.md), or `nil` when the
+object flag is clear.
+
+Raises `FieldError` for a non-object ACE.
+
+### `sid`
+
+Trustee [`Sid`](./sid.md).
+
+Raises `FieldError` for an ACE layout without a projected SID.
+
+### `size`
+
+Declared ACE packet size.
 
 ### `successful_access`
 
 Whether an audit or alarm ACE selects successful access.
-
-Raises `FieldError` for other ACE types.
-
-### `failed_access`
-
-Whether an audit or alarm ACE selects failed access.
 
 Raises `FieldError` for other ACE types.
 
@@ -156,6 +146,16 @@ Raises `FieldError` for other ACE types.
 Whether an access-filter ACE has the trust-protected flag.
 
 Raises `FieldError` for other ACE types.
+
+### `type`
+
+Symbolic native ACE type, or `:UNKNOWN:` for an unrecognized type code.
+
+For recognized values, see [ACE type values](./index.md#ace-type-values).
+
+### `type_code`
+
+Native numeric ACE type code.
 
 ## Methods
 

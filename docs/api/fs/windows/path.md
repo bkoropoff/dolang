@@ -18,6 +18,17 @@ See [`fs.Path`](../path.md) for shared fields, methods, and operators.
 
 ## Fields
 
+### `device`
+
+Device namespace name for `\\.\name` paths, or `nil` otherwise.
+
+#### Example
+
+```
+let path = Path r"\\.\COM42"
+echo $path.device  # COM42
+```
+
 ### `disk`
 
 Drive letter for `C:`-style and `\\?\C:`-style prefixes, or `nil` otherwise.
@@ -27,6 +38,17 @@ Drive letter for `C:`-style and `\\?\C:`-style prefixes, or `nil` otherwise.
 ```
 let path = Path "C:/work/file.txt"
 echo $path.disk  # C
+```
+
+### `is_verbatim`
+
+Returns whether the path uses a verbatim `\\?\...` prefix.
+
+#### Example
+
+```
+let path = Path r"\\?\C:\work\file.txt"
+echo $path.is_verbatim  # true
 ```
 
 ### `server`
@@ -49,28 +71,6 @@ UNC share name, or `nil` if the path does not use a UNC prefix.
 ```
 let path = Path "//server/share/file.txt"
 echo $path.share  # share
-```
-
-### `device`
-
-Device namespace name for `\\.\name` paths, or `nil` otherwise.
-
-#### Example
-
-```
-let path = Path r"\\.\COM42"
-echo $path.device  # COM42
-```
-
-### `is_verbatim`
-
-Returns whether the path uses a verbatim `\\?\...` prefix.
-
-#### Example
-
-```
-let path = Path r"\\?\C:\work\file.txt"
-echo $path.is_verbatim  # true
 ```
 
 ### `stream_name`

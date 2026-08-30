@@ -9,14 +9,19 @@ modes.
 
 ## Fields
 
+### `icon`
+
+The prefix icon (`Str`). Read-only — see
+[`update`](#update-icon-message-total-position-delta-units).
+
 ### `message`
 
 The indicator message text (`Str`). Read-only — see
 [`update`](#update-icon-message-total-position-delta-units).
 
-### `icon`
+### `position`
 
-The prefix icon (`Str`). Read-only — see
+The current position (`Int`). Read-only — see
 [`update`](#update-icon-message-total-position-delta-units).
 
 ### `total`
@@ -24,12 +29,18 @@ The prefix icon (`Str`). Read-only — see
 The total value for bar mode (`Int`), or `nil` for spinner mode. Read-only —
 see [`update`](#update-icon-message-total-position-delta-units).
 
-### `position`
-
-The current position (`Int`). Read-only — see
-[`update`](#update-icon-message-total-position-delta-units).
-
 ## Methods
+
+### `delta n?`
+
+Adjusts the position by `n` (default +1). Positive values increment, negative
+values decrement. Equivalent to `update delta: n` but without the overhead of
+unpacking unused keys — the common case for a tight loop that only bumps
+progress.
+
+| Name | Type                   | Description                  |
+| ---- | ---------------------- | ---------------------------- |
+| `n`  | [`Int`](../std/int.md) | Amount to adjust (default 1) |
 
 ### `update :icon? :message? :total? :position? :delta? :units?`
 
@@ -64,14 +75,3 @@ w.update delta: 1
 w.update units: :BYTES:
 w.update units: :PERCENT: # 40% when position is 4 and total is 10
 ```
-
-### `delta n?`
-
-Adjusts the position by `n` (default +1). Positive values increment, negative
-values decrement. Equivalent to `update delta: n` but without the overhead of
-unpacking unused keys — the common case for a tight loop that only bumps
-progress.
-
-| Name | Type                   | Description                  |
-| ---- | ---------------------- | ---------------------------- |
-| `n`  | [`Int`](../std/int.md) | Amount to adjust (default 1) |

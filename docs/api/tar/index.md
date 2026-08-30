@@ -4,18 +4,18 @@ Streams TAR archives with optional gzip or zstd compression.
 
 ## Types
 
-| Type                                    | Description                         |
-| --------------------------------------- | ----------------------------------- |
-| [`Reader`](./tar-reader.md)             | Destructive archive entry iterator  |
-| [`Entry`](./tar-entry.md)               | Metadata and content for one entry  |
-| [`Writer`](./tar-writer.md)             | Sequential archive writer           |
-| [`EntryWriter`](./entry-writer.md)      | Scoped entry content sink           |
+| Type                               | Description                        |
+| ---------------------------------- | ---------------------------------- |
+| [`Entry`](./entry.md)              | Metadata and content for one entry |
+| [`EntryWriter`](./entry-writer.md) | Scoped entry content sink          |
+| [`Reader`](./reader.md)            | Destructive archive entry iterator |
+| [`Writer`](./writer.md)            | Sequential archive writer          |
 
 ## Functions
 
 ### `read path func`
 
-Opens an archive and calls `func` with a [`Reader`](./tar-reader.md).
+Opens an archive and calls `func` with a [`Reader`](./reader.md).
 Compression is detected from gzip or zstd magic bytes.
 
 #### Parameters
@@ -23,7 +23,7 @@ Compression is detected from gzip or zstd magic bytes.
 | Name   | Type                                            | Description  |
 | ------ | ----------------------------------------------- | ------------ |
 | `path` | [`Str`](../std/str.md)\|[`Path`](../fs/path.md) | Archive path |
-| `func` | callable                                        | Reader scope |
+| `func` | `Func`                                          | Reader scope |
 
 #### Returns
 
@@ -39,15 +39,15 @@ read "archive.tar.gz" do |archive|
 
 ### `write path :compression? func`
 
-Creates an archive and calls `func` with a [`Writer`](./tar-writer.md).
+Creates an archive and calls `func` with a [`Writer`](./writer.md).
 
 #### Parameters
 
-| Name          | Type                                            | Description                          |
-| ------------- | ----------------------------------------------- | ------------------------------------ |
-| `path`        | [`Str`](../std/str.md)\|[`Path`](../fs/path.md) | Archive path                         |
-| `compression` | [`Sym`](../std/sym.md)?                         | `:NONE:`, `:GZIP:`, or `:ZSTD:`      |
-| `func`        | callable                                        | Writer scope                         |
+| Name          | Type                                            | Description                     |
+| ------------- | ----------------------------------------------- | ------------------------------- |
+| `path`        | [`Str`](../std/str.md)\|[`Path`](../fs/path.md) | Archive path                    |
+| `compression` | [`Sym`](../std/sym.md)?                         | `:NONE:`, `:GZIP:`, or `:ZSTD:` |
+| `func`        | `Func`                                          | Writer scope                    |
 
 When `compression` is omitted, `.gz` and `.tgz` select gzip, `.zst` and
 `.tzst` select zstd, and other extensions select no compression. Extension

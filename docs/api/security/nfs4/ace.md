@@ -4,27 +4,9 @@ Immutable NFSv4 access-control entry.
 
 ## Class Methods
 
-### `owner type: mask: :flags?`
-
-Constructs the `OWNER@` entry.
-
-### `owning_group type: mask: :flags?`
-
-Constructs the `GROUP@` entry.
-
 ### `everyone type: mask: :flags?`
 
 Constructs the `EVERYONE@` entry.
-
-### `user id type: mask: :flags?`
-
-Constructs a named-user entry.
-
-#### Parameters
-
-| Name | Type                      | Description |
-| ---- | ------------------------- | ----------- |
-| `id` | [`Int`](../../std/int.md) | User ID     |
 
 ### `group id type: mask: :flags?`
 
@@ -53,16 +35,29 @@ let read = nfs4.Mask(:READ_DATA:, :READ_ATTRIBUTES:)
 nfs4.Ace.user 1000 type: :ALLOW: mask: $read flags: (nfs4.Flags(:FILE_INHERIT:))
 ```
 
+### `owner type: mask: :flags?`
+
+Constructs the `OWNER@` entry.
+
+### `owning_group type: mask: :flags?`
+
+Constructs the `GROUP@` entry.
+
+### `user id type: mask: :flags?`
+
+Constructs a named-user entry.
+
+#### Parameters
+
+| Name | Type                      | Description |
+| ---- | ------------------------- | ----------- |
+| `id` | [`Int`](../../std/int.md) | User ID     |
+
 ## Fields
 
-### `type`
+### `flags`
 
-Entry type: `:ALLOW:`, `:DENY:`, `:AUDIT:`, or `:ALARM:`.
-
-### `principal`
-
-Entry qualifier: `:OWNER:`, `:OWNING_GROUP:`, `:EVERYONE:`, `:USER:`, or
-`:GROUP:`.
+The entry's inheritance/audit flags, as a [`Flags`](./flags.md).
 
 ### `id`
 
@@ -74,6 +69,11 @@ Raises `FieldError` unless `principal` is `:USER:` or `:GROUP:`.
 
 The entry's permission mask, as a [`Mask`](./mask.md).
 
-### `flags`
+### `principal`
 
-The entry's inheritance/audit flags, as a [`Flags`](./flags.md).
+Entry qualifier: `:OWNER:`, `:OWNING_GROUP:`, `:EVERYONE:`, `:USER:`, or
+`:GROUP:`.
+
+### `type`
+
+Entry type: `:ALLOW:`, `:DENY:`, `:AUDIT:`, or `:ALARM:`.

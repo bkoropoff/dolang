@@ -36,30 +36,6 @@ use [`shell.line_ending()`](../shell/index.md#line_ending) instead.
 
 ## Methods
 
-### `write data`
-
-Writes bytes verbatim and reports how many were written.
-
-#### Parameters
-
-| Name   | Type                                           | Description    |
-| ------ | ---------------------------------------------- | -------------- |
-| `data` | [`Str`](../std/str.md)\|[`Bin`](../std/bin.md) | Bytes to write |
-
-#### Returns
-
-[`Int`](../std/int.md) byte count
-
-#### Example
-
-```
-term.console.write b"\x1b[2K"
-```
-
-A caller that wants a terminated line assembles it and issues **one** `write`
-rather than two — concurrent strands writing to the same console would
-otherwise interleave between the text and its terminator.
-
 ### `flush()`
 
 Makes buffered output visible.
@@ -87,6 +63,30 @@ whether a size is available.
 The host console never returns `nil` here — see
 [`Geometry`](./geometry.md#rows) for how `rows`/`cols` are each
 independently `nil` when unknown rather than the whole result being absent.
+
+### `write data`
+
+Writes bytes verbatim and reports how many were written.
+
+#### Parameters
+
+| Name   | Type                                           | Description    |
+| ------ | ---------------------------------------------- | -------------- |
+| `data` | [`Str`](../std/str.md)\|[`Bin`](../std/bin.md) | Bytes to write |
+
+#### Returns
+
+[`Int`](../std/int.md) byte count
+
+#### Example
+
+```
+term.console.write b"\x1b[2K"
+```
+
+A caller that wants a terminated line assembles it and issues **one** `write`
+rather than two — concurrent strands writing to the same console would
+otherwise interleave between the text and its terminator.
 
 ## Operators
 

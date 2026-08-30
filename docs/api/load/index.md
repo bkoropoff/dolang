@@ -4,44 +4,6 @@ Execute Do bytecode and register runtime import handlers.
 
 ## Functions
 
-### `run bytecode :importer?`
-
-Executes compiled Do bytecode.
-
-#### Parameters
-
-| Name       | Type                      | Description                      |
-| ---------- | ------------------------- | -------------------------------- |
-| `bytecode` | [`Bin`](../std/bin.md)    | Compiled Do bytecode             |
-| `importer` | [`Func`](../std/func.md)? | Program-specific module importer |
-
-The optional importer belongs to the loaded program. It remains active for
-functions and modules retained after `run` returns. Each import calls it
-directly, bypassing native modules, the import cache, and registered import
-handlers. Results are not cached, and `ImportError` is returned without
-automatic fallback.
-
-#### Returns
-
-The result of executing the bytecode.
-
-#### Errors
-
-| Exception   | Condition                                |
-| ----------- | ---------------------------------------- |
-| `TypeError` | `bytecode` is not `Bin`                  |
-| Various     | Bytecode verification or execution fails |
-
-#### Example
-
-```
-import compile
-import load
-
-let result = load.run $ (compile.compile "example.dol" "(1 + 1)").bytecode
-assert_eq $result 2
-```
-
 ### `import name`
 
 Imports a module through the VM's ordinary global import resolution.
@@ -113,4 +75,42 @@ let handle = load.import_handler do |name|
 import demo
 assert_eq $demo.answer 42
 handle.unregister()
+```
+
+### `run bytecode :importer?`
+
+Executes compiled Do bytecode.
+
+#### Parameters
+
+| Name       | Type                      | Description                      |
+| ---------- | ------------------------- | -------------------------------- |
+| `bytecode` | [`Bin`](../std/bin.md)    | Compiled Do bytecode             |
+| `importer` | [`Func`](../std/func.md)? | Program-specific module importer |
+
+The optional importer belongs to the loaded program. It remains active for
+functions and modules retained after `run` returns. Each import calls it
+directly, bypassing native modules, the import cache, and registered import
+handlers. Results are not cached, and `ImportError` is returned without
+automatic fallback.
+
+#### Returns
+
+The result of executing the bytecode.
+
+#### Errors
+
+| Exception   | Condition                                |
+| ----------- | ---------------------------------------- |
+| `TypeError` | `bytecode` is not `Bin`                  |
+| Various     | Bytecode verification or execution fails |
+
+#### Example
+
+```
+import compile
+import load
+
+let result = load.run $ (compile.compile "example.dol" "(1 + 1)").bytecode
+assert_eq $result 2
 ```

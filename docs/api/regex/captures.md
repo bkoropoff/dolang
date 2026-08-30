@@ -8,17 +8,17 @@ Coercing a `Captures` value with `str` produces the text of the overall match.
 
 ## Fields
 
-### `start`
+### `end`
 
-The byte offset of the start of the overall match within the haystack.
+The byte offset of the end of the overall match within the haystack.
 
 #### Type
 
 [`Int`](../std/int.md)
 
-### `end`
+### `start`
 
-The byte offset of the end of the overall match within the haystack.
+The byte offset of the start of the overall match within the haystack.
 
 #### Type
 

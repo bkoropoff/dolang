@@ -42,9 +42,9 @@ invariants.
 
 #### Parameters
 
-| Name    | Type | Description             |
-| ------- | ---- | ----------------------- |
-| `block` | func | scoped work to execute  |
+| Name    | Type   | Description            |
+| ------- | ------ | ---------------------- |
+| `block` | `Func` | scoped work to execute |
 
 #### Returns
 

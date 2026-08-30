@@ -6,13 +6,13 @@ Supports key unpack.
 
 ## Fields
 
-### `name`
-
-Service name. **Type:** [`Str`](../std/str.md)
-
 ### `display_name`
 
 Display name. **Type:** [`Str`](../std/str.md)|`nil`
+
+### `name`
+
+Service name. **Type:** [`Str`](../std/str.md)
 
 ### `status`
 

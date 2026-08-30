@@ -4,47 +4,6 @@ YAML serialization and deserialization.
 
 ## Functions
 
-### `encode value`
-
-Serializes a Do value to a YAML string.
-
-#### Parameters
-
-| Name    | Type | Description            |
-| ------- | ---- | ---------------------- |
-| `value` |      | the value to serialize |
-
-#### Returns
-
-`Str` -- YAML string
-
-#### Errors
-
-| Exception   | Condition                                                                 |
-| ----------- | ------------------------------------------------------------------------- |
-| `TypeError` | A value is not YAML-representable, such as binary data or a custom object |
-
-Type mapping:
-
-| Do Type | YAML Value |
-| ------- | ---------- |
-| `nil`   | `null`     |
-| `Bool`  | boolean    |
-| `Int`   | integer    |
-| `Float` | float      |
-| `Str`   | string     |
-| `Sym`   | string     |
-| `array` | sequence   |
-| `dict`  | mapping    |
-
-#### Example
-
-```
-assert_eq (encode nil) "~"
-assert_eq (encode [1, 2, 3]) "- 1\n- 2\n- 3"
-assert_eq (decode $ encode [1, 2, 3]) [1, 2, 3]
-```
-
 ### `decode yaml`
 
 Parses a YAML string into a Do value.
@@ -92,4 +51,45 @@ let doc = decode |
 assert_eq $doc["name"] "Alice"
 assert_eq $doc["enabled"] true
 assert_eq $doc["ports"] [80, 443]
+```
+
+### `encode value`
+
+Serializes a Do value to a YAML string.
+
+#### Parameters
+
+| Name    | Type | Description            |
+| ------- | ---- | ---------------------- |
+| `value` |      | the value to serialize |
+
+#### Returns
+
+`Str` -- YAML string
+
+#### Errors
+
+| Exception   | Condition                                                                 |
+| ----------- | ------------------------------------------------------------------------- |
+| `TypeError` | A value is not YAML-representable, such as binary data or a custom object |
+
+Type mapping:
+
+| Do Type | YAML Value |
+| ------- | ---------- |
+| `nil`   | `null`     |
+| `Bool`  | boolean    |
+| `Int`   | integer    |
+| `Float` | float      |
+| `Str`   | string     |
+| `Sym`   | string     |
+| `array` | sequence   |
+| `dict`  | mapping    |
+
+#### Example
+
+```
+assert_eq (encode nil) "~"
+assert_eq (encode [1, 2, 3]) "- 1\n- 2\n- 3"
+assert_eq (decode $ encode [1, 2, 3]) [1, 2, 3]
 ```

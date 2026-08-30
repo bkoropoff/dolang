@@ -5,11 +5,6 @@ Operating system information for the active VFS target returned by
 
 ## Fields
 
-### `os`
-
-Specific operating system. Supported values are `:LINUX:`, `:MACOS:`, and
-`:WINDOWS:`.
-
 ### `family`
 
 Operating system family derived from the target OS. Supported values are
@@ -20,3 +15,8 @@ Operating system family derived from the target OS. Supported values are
 Whether the process is running under Wine.
 
 This field is only available for Windows targets.
+
+### `os`
+
+Specific operating system. Supported values are `:LINUX:`, `:MACOS:`, and
+`:WINDOWS:`.

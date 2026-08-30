@@ -37,10 +37,10 @@ A key's colon must be followed by whitespace or an indented block.
 
 ## Bin-packing
 
-A line starting with neither a dash item nor a key item may contain additional
-positional arguments separated horizontally according to the usual rules. Key
-arguments can't be bin-packed in vertical layout; place these on the first line
-of a command or otherwise one per line.
+Positional arguments may continue to be laid out horizontally in the vertical
+continuation of a command. The line must not start with a dash item or a key.
+Key arguments can't be bin-packed in vertical layout; place these on the first
+line of a command or otherwise one per line.
 
 ```
 # Horizontal
@@ -84,23 +84,6 @@ return $
   host: localhost
   port: 8080
 
-# Vertical dictionary with implicit integer keys
-let config = $
-  name: Bob
-  - false # integer key 0
-  - 42 # integer key 1
-
-# Nested
-let data = $
-  name: Example Student
-  scores:
-    - 95
-    - 87
-    - 92
-  address:
-    city: Anytown
-    zip: "00000"
-
 # As an argument (a single array argument, instead of 3 string arguments)
 echo $
   - a
@@ -111,8 +94,22 @@ echo $
 A dictionary results if any keys are present; otherwise, an array is
 constructed.
 
+As with command arguments, vertical data introduced by `$` may contain
+bin-packed positional items.
+
+```
+# Produces an array
+let command = $
+  gcc
+  -Wall -Werror
+  -o $output
+  $input
+```
+
+## Nested Data
+
 In a vertical context, further indentation will introduce an array or
-dictionary as an argument without `$`:
+dictionary as an item:
 
 ```
 my_func
@@ -129,6 +126,9 @@ my_func
     x: 12
     y: 34
 ```
+
+Note that bin-packing is not supported in nested items unless explicitly
+introduced via `$`.
 
 ## Line Items
 

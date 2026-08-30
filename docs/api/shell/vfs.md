@@ -14,9 +14,9 @@ The `Vfs` retains the background stream for its lifetime.
 
 #### Parameters
 
-| Name   | Type     | Description                 |
-| ------ | -------- | --------------------------- |
-| `func` | callable | VFS server launcher         |
+| Name   | Type   | Description         |
+| ------ | ------ | ------------------- |
+| `func` | `Func` | VFS server launcher |
 
 #### Example
 
@@ -132,9 +132,19 @@ let admin = Vfs.windows_admin()
 
 ## Methods
 
+### `stop()`
+
+Sends a stop request to the connected VFS server. A function-backed `Vfs` then
+closes and joins its launcher stream. On Windows, it also waits for the
+elevated process to exit.
+
+```
+a.stop()
+```
+
 ### `with func ...args`
 
-Executes a callable in the `Vfs` context:
+Executes a function in the `Vfs` context:
 
 ```
 a.with do
@@ -163,13 +173,3 @@ Entering a `Vfs` context affects the operations that are routed through it:
 Only VFS-aware operations follow the context. Other network clients and native
 resources remain in the interpreter process unless their documentation says
 otherwise.
-
-### `stop()`
-
-Sends a stop request to the connected VFS server. A callable-backed `Vfs` then
-closes and joins its launcher stream. On Windows, it also waits for the
-elevated process to exit.
-
-```
-a.stop()
-```

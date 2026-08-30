@@ -8,7 +8,7 @@ output capture.
 | Name                      | Description                                      |
 | ------------------------- | ------------------------------------------------ |
 | [`Error`](./error.md)     | Error raised when a process exits unsuccessfully |
-| [`Program`](./program.md) | Callable proxy for an external program           |
+| [`Program`](./program.md) | Function proxy for an external program           |
 
 ## Values
 
@@ -33,15 +33,44 @@ capture, and pipeline behavior.
 
 ## Functions
 
+### `sub func :chomp?`
+
+Captures the output of a function as a string.
+
+Everything written is captured as a byte stream, without line decoding or
+normalization — including values put into the strand's output, which
+contribute exactly their own bytes.
+
+`chomp:` is a whole-capture strip, not a per-value one: it removes at most one
+line ending, from the end of the finished string.
+
+#### Parameters
+
+| Name    | Type                     | Description                                      |
+| ------- | ------------------------ | ------------------------------------------------ |
+| `func`  | `Func`                   | function whose output to capture                 |
+| `chomp` | [`Bool`](../std/bool.md) | Remove one trailing LF or CRLF (default: `true`) |
+
+#### Returns
+
+[`Str`](../std/str.md)
+
+#### Example
+
+```
+let output = sub do run echo hello
+assert_eq $output "hello"
+```
+
 ### `with_policy func :signal? :grace? :force? ...`
 
-Runs a callable with temporary process termination defaults.
+Runs a function with temporary process termination defaults.
 
 #### Parameters
 
 | Name     | Type                                                          | Description                                         |
 | -------- | ------------------------------------------------------------- | --------------------------------------------------- |
-| `func`   | `func`                                                        | Callable to execute                                 |
+| `func`   | `Func`                                                        | Function to execute                                 |
 | `signal` | [`sym`](../std/sym.md)                                        | Unix signal name (default: `:TERM:`)                |
 | `grace`  | [`Duration`](../time/duration.md)\|[`float`](../std/float.md) | Time before forced termination (default: 5 seconds) |
 | `force`  | [`bool`](../std/bool.md)                                      | Force termination after the grace period            |
@@ -60,33 +89,4 @@ that outlives the grace period is orphaned.
 ```
 with_policy signal: :INT: grace: 2.5 do
   run worker
-```
-
-### `sub func :chomp?`
-
-Captures the output of a function as a string.
-
-Everything written is captured as a byte stream, without line decoding or
-normalization — including values put into the strand's output, which
-contribute exactly their own bytes.
-
-`chomp:` is a whole-capture strip, not a per-value one: it removes at most one
-line ending, from the end of the finished string.
-
-#### Parameters
-
-| Name    | Type                     | Description                                      |
-| ------- | ------------------------ | ------------------------------------------------ |
-| `func`  | `func`                   | function whose output to capture                 |
-| `chomp` | [`Bool`](../std/bool.md) | Remove one trailing LF or CRLF (default: `true`) |
-
-#### Returns
-
-[`Str`](../std/str.md)
-
-#### Example
-
-```
-let output = sub do run echo hello
-assert_eq $output "hello"
 ```

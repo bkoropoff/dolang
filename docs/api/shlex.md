@@ -4,6 +4,27 @@ Shell quoting and string splitting utilities.
 
 ## Functions
 
+### `join iterable`
+
+Join an iterable of arguments into a shell-quoted string.
+
+#### Parameters
+
+| Name       | Type | Description                                        |
+| ---------- | ---- | -------------------------------------------------- |
+| `iterable` |      | iterable of values (converted with `std.verbatim`) |
+
+#### Returns
+
+[`Str`](../api/std/str.md) - Joined string with proper quoting.
+
+#### Example
+
+```
+echo $ join ["echo", "hello world"]
+# prints: echo 'hello world'
+```
+
 ### `quote obj`
 
 Quote a string for shell safety.
@@ -48,25 +69,4 @@ done
 # prints:
 # echo
 # hello world
-```
-
-### `join iterable`
-
-Join an iterable of arguments into a shell-quoted string.
-
-#### Parameters
-
-| Name       | Type | Description                                        |
-| ---------- | ---- | -------------------------------------------------- |
-| `iterable` |      | iterable of values (converted with `std.verbatim`) |
-
-#### Returns
-
-[`Str`](../api/std/str.md) - Joined string with proper quoting.
-
-#### Example
-
-```
-echo $ join ["echo", "hello world"]
-# prints: echo 'hello world'
 ```

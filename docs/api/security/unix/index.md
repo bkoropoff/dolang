@@ -7,10 +7,10 @@ lookups.
 
 | Type                            | Description                        |
 | ------------------------------- | ---------------------------------- |
-| [`Acl`](./acl.md)               | POSIX.1e access-control list       |
 | [`Ace`](./ace.md)               | POSIX.1e access-control entry      |
-| [`Permission`](./permission.md) | Read/write/execute permission bits |
+| [`Acl`](./acl.md)               | POSIX.1e access-control list       |
 | [`Identity`](./identity.md)     | Unix process identity information  |
+| [`Permission`](./permission.md) | Read/write/execute permission bits |
 
 ## Functions
 
@@ -46,52 +46,9 @@ acl
 The resulting ACL must satisfy the POSIX completeness rules documented by
 [`Acl`](./acl.md).
 
-### `id()`
+### `group_id name`
 
-Returns Unix security information captured for the active VFS context.
-
-#### Returns
-
-[`Identity`](./identity.md)
-
-#### Errors
-
-- Raises `UnsupportedError` when the active VFS target is not Unix.
-
-#### Example
-
-```
-let info = id()
-echo "uid=$info.uid euid=$info.euid"
-```
-
-### `user_name uid`
-
-Resolves a Unix user ID in the active VFS target. On macOS, `uid` may also
-be a [`uuid.Uuid`](../../uuid/uuid.md) principal, resolved to a uid first via
-[`security.macos.id_for_uuid`](../macos/index.md#id_for_uuid-uuid).
-
-#### Parameters
-
-| Name  | Type               | Description                |
-| ----- | ------------------ | -------------------------- |
-| `uid` | `Int`\|`uuid.Uuid` | Unix user ID or macOS UUID |
-
-#### Returns
-
-[`Str`](../../std/str.md)
-
-#### Errors
-
-| Exception                                            | Condition                                                      |
-| ---------------------------------------------------- | -------------------------------------------------------------- |
-| [`sys.NotFoundError`](../../sys/not-found-error.md)  | The ID is unknown                                              |
-| [`UnsupportedError`](../../std/unsupported-error.md) | The active VFS target is not Unix                              |
-| [`UnsupportedError`](../../std/unsupported-error.md) | A `uuid.Uuid` is passed and the active VFS target is not macOS |
-
-### `user_id name`
-
-Resolves a Unix user name in the active VFS target.
+Resolves a Unix group name in the active VFS target.
 
 #### Returns
 
@@ -128,9 +85,28 @@ be a [`uuid.Uuid`](../../uuid/uuid.md) principal, resolved to a gid first via
 | [`UnsupportedError`](../../std/unsupported-error.md) | The active VFS target is not Unix                              |
 | [`UnsupportedError`](../../std/unsupported-error.md) | A `uuid.Uuid` is passed and the active VFS target is not macOS |
 
-### `group_id name`
+### `id()`
 
-Resolves a Unix group name in the active VFS target.
+Returns Unix security information captured for the active VFS context.
+
+#### Returns
+
+[`Identity`](./identity.md)
+
+#### Errors
+
+- Raises `UnsupportedError` when the active VFS target is not Unix.
+
+#### Example
+
+```
+let info = id()
+echo "uid=$info.uid euid=$info.euid"
+```
+
+### `user_id name`
+
+Resolves a Unix user name in the active VFS target.
 
 #### Returns
 
@@ -142,3 +118,27 @@ Resolves a Unix group name in the active VFS target.
 | ---------------------------------------------------- | --------------------------------- |
 | [`sys.NotFoundError`](../../sys/not-found-error.md)  | The name is unknown               |
 | [`UnsupportedError`](../../std/unsupported-error.md) | The active VFS target is not Unix |
+
+### `user_name uid`
+
+Resolves a Unix user ID in the active VFS target. On macOS, `uid` may also
+be a [`uuid.Uuid`](../../uuid/uuid.md) principal, resolved to a uid first via
+[`security.macos.id_for_uuid`](../macos/index.md#id_for_uuid-uuid).
+
+#### Parameters
+
+| Name  | Type               | Description                |
+| ----- | ------------------ | -------------------------- |
+| `uid` | `Int`\|`uuid.Uuid` | Unix user ID or macOS UUID |
+
+#### Returns
+
+[`Str`](../../std/str.md)
+
+#### Errors
+
+| Exception                                            | Condition                                                      |
+| ---------------------------------------------------- | -------------------------------------------------------------- |
+| [`sys.NotFoundError`](../../sys/not-found-error.md)  | The ID is unknown                                              |
+| [`UnsupportedError`](../../std/unsupported-error.md) | The active VFS target is not Unix                              |
+| [`UnsupportedError`](../../std/unsupported-error.md) | A `uuid.Uuid` is passed and the active VFS target is not macOS |

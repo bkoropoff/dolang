@@ -80,13 +80,13 @@ default. In contrast, omitting positional `start` still defaults it to `0`.
 
 ## Fields
 
-### `start`
-
-The starting value, or `nil` for open-start ranges.
-
 ### `end`
 
 The ending value (exclusive), or `nil` for open-end ranges.
+
+### `start`
+
+The starting value, or `nil` for open-start ranges.
 
 ### `step`
 

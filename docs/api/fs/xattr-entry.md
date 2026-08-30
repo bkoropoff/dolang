@@ -16,9 +16,9 @@ for attr = xattrs "data.txt"
   echo $attr.name
 ```
 
-### Linux and FreeBSD
+## Linux and FreeBSD Fields
 
-#### `namespace`
+### `namespace`
 
 Extended attribute namespace, such as `user`.
 
@@ -27,12 +27,12 @@ for attr = xattrs "data.txt" namespace: :ANY:
   echo "$(attr.namespace):$(attr.name)"
 ```
 
-### Windows
+## Windows Fields
 
-#### `size`
-
-Attribute value size in bytes.
-
-#### `flags`
+### `flags`
 
 Attribute flags.
+
+### `size`
+
+Attribute value size in bytes.

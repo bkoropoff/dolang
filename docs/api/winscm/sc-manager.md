@@ -4,26 +4,9 @@ An open handle to the Windows Service Control Manager.
 
 ## Methods
 
-### `open_service name :access? func?`
+### `close()`
 
-Opens an existing service.
-
-#### Parameters
-
-| Name     | Type                                                            | Description                                             |
-| -------- | --------------------------------------------------------------- | ------------------------------------------------------- |
-| `name`   | [`Str`](../std/str.md)                                          | Service name                                            |
-| `access` | [`ServiceAccessMask`](./service-access-mask.md)\|sym\|iterable? | Access rights (default: `:SERVICE_QUERY_STATUS:`)       |
-| `func`   | func?                                                           | Function to run with the service; auto-closes when done |
-
-#### Returns
-
-[`Service`](./service.md) when no `func` is given, otherwise the
-result of calling `func`
-
-#### Errors
-
-- [`sys.NotFoundError`](../sys/not-found-error.md) — the service does not exist
+Closes the manager. Closing an already-closed manager is a no-op.
 
 ### `create_service name :...options func?`
 
@@ -46,7 +29,7 @@ Omit `display_name` or `binary_path` to pass `NULL` for it to Windows.
 | `dependencies`       | iterable?                                                                     | Service or load-order-group names                                               |
 | `service_start_name` | [`Str`](../std/str.md)?                                                       | Account name                                                                    |
 | `password`           | [`Str`](../std/str.md)?                                                       | Account password                                                                |
-| `func`               | func?                                                                         | Function to run with the service; auto-closes when done                         |
+| `func`               | `Func`?                                                                       | Function to run with the service; auto-closes when done                         |
 
 ##### `binary_path`
 
@@ -85,6 +68,23 @@ iteration advances.
 
 Iterable of [`ServiceInfo`](./service-info.md)
 
-### `close()`
+### `open_service name :access? func?`
 
-Closes the manager. Closing an already-closed manager is a no-op.
+Opens an existing service.
+
+#### Parameters
+
+| Name     | Type                                                            | Description                                             |
+| -------- | --------------------------------------------------------------- | ------------------------------------------------------- |
+| `name`   | [`Str`](../std/str.md)                                          | Service name                                            |
+| `access` | [`ServiceAccessMask`](./service-access-mask.md)\|sym\|iterable? | Access rights (default: `:SERVICE_QUERY_STATUS:`)       |
+| `func`   | `Func`?                                                         | Function to run with the service; auto-closes when done |
+
+#### Returns
+
+[`Service`](./service.md) when no `func` is given, otherwise the
+result of calling `func`
+
+#### Errors
+
+- [`sys.NotFoundError`](../sys/not-found-error.md) — the service does not exist
