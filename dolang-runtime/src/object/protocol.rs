@@ -23,6 +23,7 @@ use crate::{
 pub(crate) struct Inspect<'v, 'a> {
     pub(crate) is_abstract: bool,
     pub(crate) members: &'a [Member<'v, 'a>],
+    pub(crate) type_members: &'a [Member<'v, 'a>],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

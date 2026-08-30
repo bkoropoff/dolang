@@ -3,7 +3,7 @@ use std::hash::{DefaultHasher, Hasher};
 use crate::{
     arg::Arg,
     error::Error,
-    object::{array::Array, dict::Dict, float, int, record::Record, tuple},
+    object::{array::Array, class, dict::Dict, float, int, record::Record, tuple},
     unpack,
     value::{Output, StrEmbryo, Value},
     vm::Builder,
@@ -14,6 +14,8 @@ mod strand;
 
 pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
     let property_types = property::register(builder);
+    let member_scopes = class::register_member_scopes(builder);
+    let member_scopes = builder.register_state(member_scopes);
     let bc = builder.singletons();
 
     // Core types
@@ -94,6 +96,8 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
         .value("Range", &range)
         .value("getter", property_types.getter)
         .value("setter", property_types.setter)
+        .value("class", member_scopes.class)
+        .value("static", member_scopes.statik)
         .value("Module", &module)
         .value("Record", &record)
         .value("Bin", &bin)

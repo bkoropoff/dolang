@@ -1018,9 +1018,14 @@ impl<'v, T: Collect + Boxable<Header>> Gc<'v, T> {
             )
         }
     }
+}
 
+impl<'v, H: Upcast<Header>, T: Boxable<H, Inner = BoxedSized<H, T>> + Collect> Box<'v, H, T>
+where
+    Boxed<H, T>: Upcast<Header>,
+{
     pub(crate) fn annex(&self) -> &T::Annex {
-        unsafe { &self.ptr.cast::<BoxedSized<Header, T>>().as_ref().annex }
+        unsafe { &self.ptr.cast::<BoxedSized<H, T>>().as_ref().annex }
     }
 }
 

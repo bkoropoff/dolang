@@ -16,6 +16,7 @@ Embedded runtimes may provide a different additional prelude.
 | [`Bin`](../api/std/bin.md)                    | [`Bin`](../api/std/bin.md) type       |
 | [`Bool`](../api/std/bool.md)                  | [`Bool`](../api/std/bool.md) type     |
 | [`bool`](../api/std/index.md#bool-value)      | Truthiness coercion                   |
+| [`class`](../api/std/class.md)                | Inherited class member decorator      |
 | [`dbg`](../api/std/index.md#dbg-value)        | Debug representation                  |
 | [`Dict`](../api/std/dict.md)                  | [`Dict`](../api/std/dict.md) type     |
 | [`dict`](../api/std/index.md#dict)            | Variadic dictionary factory           |
@@ -30,6 +31,7 @@ Embedded runtimes may provide a different additional prelude.
 | [`record`](../api/std/index.md#record)        | Variadic record factory               |
 | [`Set`](../api/std/set.md)                    | [`Set`](../api/std/set.md) type       |
 | [`setter`](../api/std/index.md#setter-func)   | Class field setter decorator          |
+| [`static`](../api/std/static.md)              | Uninherited class member decorator    |
 | [`Str`](../api/std/str.md)                    | [`Str`](../api/std/str.md) type       |
 | [`str`](../api/std/index.md#str-value)        | Textual representation                |
 | [`Sym`](../api/std/sym.md)                    | [`Sym`](../api/std/sym.md) type       |

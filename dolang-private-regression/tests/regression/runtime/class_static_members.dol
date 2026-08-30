@@ -1,0 +1,65 @@
+# Class members live on the type object and are inherited; static members live
+# there too but are not.
+
+def assert_err block
+  let threw = false
+  try
+    block()
+  catch _
+    threw = true
+  assert $threw
+
+let thunk_runs = []
+
+class Counter
+  #[class]
+  pub field count = 0
+
+  #[class]
+  pub field log = thunk_runs.push(1)
+
+  #[static]
+  pub field tag = "counter"
+
+  #[class]
+  pub def bump cls
+    cls.count = (cls.count + 1)
+    cls.count
+
+  pub field instance_only = "inst"
+
+class Derived: Counter
+
+class Deeper: Derived
+
+assert_eq $Counter.count 0
+assert_eq $Counter.bump() 1
+assert_eq $Counter.bump() 2
+assert_eq $Counter.count 2
+
+# Each class owns its class-field storage, so a subclass starts from the
+# declared default and writing through one does not disturb the other.
+assert_eq $Derived.count 0
+assert_eq $Derived.bump() 1
+assert_eq $Counter.count 2
+
+Derived.count = 100
+assert_eq $Derived.count 100
+assert_eq $Counter.count 2
+
+# A class method receives the class it was reached through, even two levels down.
+assert_eq $Deeper.bump() 1
+assert_eq $Derived.count 100
+
+# The class-field thunk runs once per class in the hierarchy.
+assert_eq $thunk_runs.len 3
+
+# `static` is not inherited.
+assert_eq $Counter.tag "counter"
+assert_err $ do Derived.tag
+
+# Class members do not leak into the instance namespace, and vice versa.
+let c = Counter()
+assert_eq $c.instance_only "inst"
+assert_err $ do c.count
+assert_err $ do Counter.instance_only

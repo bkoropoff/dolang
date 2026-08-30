@@ -712,6 +712,14 @@ impl<'v> Protocol<'v> for Class {
     fn op_inspect<'a>(_this: Recv<'v, 'a, Self>, _vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {
         Some(Inspect {
             is_abstract: false,
+            type_members: members![
+                Method(sym::VERBATIM_METHOD),
+                Method(sym::STR_METHOD),
+                Method(sym::DBG_METHOD),
+                Method(sym::CALL_METHOD),
+                Method(sym::PACK),
+                Method(sym::UNPACK),
+            ],
             members: members![
                 Method(sym::STR_METHOD),
                 Method(sym::DBG_METHOD),

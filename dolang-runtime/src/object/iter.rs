@@ -472,6 +472,11 @@ impl<'v> Protocol<'v> for Iterable {
         Some(Inspect {
             is_abstract: true,
             members: iterable_members(),
+            type_members: members![
+                Method(sym::VERBATIM_METHOD),
+                Method(sym::STR_METHOD),
+                Method(sym::DBG_METHOD),
+            ],
         })
     }
 
@@ -540,6 +545,11 @@ impl<'v> Protocol<'v> for Sinkable {
         Some(Inspect {
             is_abstract: true,
             members: sinkable_members(),
+            type_members: members![
+                Method(sym::VERBATIM_METHOD),
+                Method(sym::STR_METHOD),
+                Method(sym::DBG_METHOD),
+            ],
         })
     }
 
@@ -1362,6 +1372,11 @@ impl<'v> Protocol<'v> for Iter {
         Some(Inspect {
             is_abstract: true,
             members: iter_members(),
+            type_members: members![
+                Method(sym::VERBATIM_METHOD),
+                Method(sym::STR_METHOD),
+                Method(sym::DBG_METHOD),
+            ],
         })
     }
 
@@ -1509,6 +1524,11 @@ impl<'v> Protocol<'v> for Sink {
         Some(Inspect {
             is_abstract: true,
             members: sink_members(),
+            type_members: members![
+                Method(sym::VERBATIM_METHOD),
+                Method(sym::STR_METHOD),
+                Method(sym::DBG_METHOD),
+            ],
         })
     }
 

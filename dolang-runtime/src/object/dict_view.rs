@@ -13,7 +13,7 @@ use crate::{
     object::{
         BoundMethod, dict,
         native::{Instance, Object, Spread, SpreadContext, Type as NativeType, Unpack, UnpackItem},
-        protocol::{GcObj, Inspect, Protocol, Recv},
+        protocol::{GcObj, Inspect, Protocol, Recv, members},
     },
     sig,
     strand::Strand,
@@ -970,6 +970,11 @@ impl<'v> Protocol<'v> for Type {
         Some(Inspect {
             is_abstract: true,
             members: &[],
+            type_members: members![
+                Method(sym::VERBATIM_METHOD),
+                Method(sym::STR_METHOD),
+                Method(sym::DBG_METHOD),
+            ],
         })
     }
 }

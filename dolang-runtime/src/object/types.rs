@@ -9,6 +9,7 @@ use crate::{
     object::{
         BoundMethod,
         arg::ArgPack,
+        class,
         protocol::{GcObj, Inspect, Protocol, Recv, dispatch_native_method, members},
     },
     strand::Strand,
@@ -88,6 +89,62 @@ impl<'v> Protocol<'v> for Type {
         w: &mut dyn crate::value::Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<type>")
+    }
+
+    /// `Type.(call) SomeType ...` performs default instantiation.
+    ///
+    /// This is the ordinary unbound-method idiom — `Class` is an instance of
+    /// `Type`, so this invokes `Type`'s `(call)` rather than the receiver's
+    /// override, the same way `Base.method $self` does. It is how a class-level
+    /// `(call)` delegates to the construction it replaced.
+    async fn op_mcall<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        method: Sym<'v, 'a>,
+        args: Args<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        match method.tag() {
+            sym::CALL_METHOD => {
+                let ([receiver], [], trailing) = unpack!(strand, args, 1, 0, ...)?;
+                if !receiver.is_instance_of(strand, &strand.singletons().type_obj) {
+                    return Err(Error::type_error(
+                        strand,
+                        "Type.(call): expected a type object",
+                    ));
+                }
+                match receiver.downcast_ref(strand.builtin_types().class_object) {
+                    Some(class) => {
+                        class::instantiate(Recv::new(class), strand, trailing, out).await
+                    }
+                    // A native type object has no overridable `(call)`, so its
+                    // own `op_call` is already the default.
+                    None => receiver.op_call(strand, trailing, out).await,
+                }
+            }
+            sym::GET_METHOD => {
+                let ([field], []) = unpack!(strand, args, 1, 0)?;
+                let field = field
+                    .as_sym(strand)
+                    .ok_or_else(|| Error::type_error(strand, "field: expected `Sym`"))?;
+                Self::op_get(this, strand, field, out)
+            }
+            sym::SET_METHOD => {
+                let ([field, value], []) = unpack!(strand, args, 2, 0)?;
+                let field = field
+                    .as_sym(strand)
+                    .ok_or_else(|| Error::type_error(strand, "field: expected `Sym`"))?;
+                Self::op_set(this, strand, field, value)
+            }
+            _ => {
+                strand
+                    .with_slots(async move |strand, [mut func]| {
+                        Self::op_get(this, strand, method, Slot::reborrow(&mut func))?;
+                        func.op_call(strand, args, out).await
+                    })
+                    .await
+            }
+        }
     }
 
     async fn op_call<'a, 's>(
@@ -175,6 +232,12 @@ impl<'v> Protocol<'v> for Bool {
     fn op_inspect<'a>(_this: Recv<'v, 'a, Self>, _vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {
         Some(Inspect {
             is_abstract: false,
+            type_members: members![
+                Method(sym::VERBATIM_METHOD),
+                Method(sym::STR_METHOD),
+                Method(sym::DBG_METHOD),
+                Method(sym::CALL_METHOD),
+            ],
             members: members![
                 Method(sym::STR_METHOD),
                 Method(sym::DBG_METHOD),

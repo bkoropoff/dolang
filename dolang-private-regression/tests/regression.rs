@@ -202,6 +202,22 @@ mod detail {
                     this.create_flags(strand, TestFlags(value), out);
                     Ok(())
                 })
+                .type_get("type_property", |_this, strand, out| {
+                    Output::set(strand, out, 42_i64);
+                    Ok(())
+                })
+                .type_set("type_property", |_this, strand, value| {
+                    value.to_i64(strand)?;
+                    Ok(())
+                })
+                .type_get("type_readonly", |_this, strand, out| {
+                    Output::set(strand, out, 43_i64);
+                    Ok(())
+                })
+                .type_set("type_writeonly", |_this, strand, value| {
+                    value.to_i64(strand)?;
+                    Ok(())
+                })
         }
     }
 

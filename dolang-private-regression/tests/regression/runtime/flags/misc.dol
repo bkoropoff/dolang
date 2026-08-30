@@ -35,6 +35,27 @@ assert_eq $exec.int 4
 assert $exec.is_exec()
 assert (!(r.is_exec()))
 assert_eq (TestFlags.from_int 4) $exec
+
+# Do subclasses inherit the native type-object namespace independently of the
+# instance namespace. The forwarding remains transitive through Do classes.
+class DerivedFlags: TestFlags
+class FurtherDerivedFlags: DerivedFlags
+
+assert_eq (DerivedFlags.from_int 4) $exec
+assert_eq (FurtherDerivedFlags.from_int 4) $exec
+assert_eq $DerivedFlags.type_property 42
+assert_eq $FurtherDerivedFlags.type_property 42
+assert_eq $FurtherDerivedFlags.type_readonly 43
+DerivedFlags.type_property = 7
+FurtherDerivedFlags.type_property = 8
+DerivedFlags.type_writeonly = 9
+
+# A native type member wins over an unbound instance method with the same name.
+class ShadowFlags: TestFlags
+  pub def from_int _self _value
+    "instance method"
+
+assert_eq (ShadowFlags.from_int 4) $exec
 let all = (rw | exec)
 assert_eq [...all] [:READ:, :WRITE:, :EXEC:]
 

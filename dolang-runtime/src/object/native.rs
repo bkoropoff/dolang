@@ -2861,6 +2861,35 @@ impl<'v, 'a> TypeBuilderInner<'v, 'a> {
             };
             Member::new(*sym, kind)
         }));
+        let mut type_members = type_entries
+            .iter()
+            .map(|(sym, entry)| {
+                let kind = match entry {
+                    Entry::Method(_) => MemberKind::Method,
+                    Entry::Getter(_) => MemberKind::Getter,
+                    Entry::Setter(_) => MemberKind::Setter,
+                    Entry::Property(_, _) => MemberKind::Property,
+                    Entry::Delegate(_, kind) => *kind,
+                };
+                Member::new(*sym, kind)
+            })
+            .collect::<Vec<_>>();
+        // Only the type object's own surface belongs here. The instance namespace is
+        // reachable through the type object as unbound methods, but those are not class
+        // members and must not be inherited by a Do class as such.
+        for member in [
+            Member::method(Sym::well_known(sym::VERBATIM_METHOD)),
+            Member::method(Sym::well_known(sym::STR_METHOD)),
+            Member::method(Sym::well_known(sym::DBG_METHOD)),
+            Member::method(Sym::well_known(sym::CALL_METHOD)),
+        ] {
+            if !type_members
+                .iter()
+                .any(|existing| existing.sym == member.sym)
+            {
+                type_members.push(member);
+            }
+        }
 
         let idx = self.vm.inner.type_singletons.len();
 
@@ -2879,6 +2908,7 @@ impl<'v, 'a> TypeBuilderInner<'v, 'a> {
             base: type_vtbl_base,
             entries: type_entries.into(),
             members: members.into(),
+            type_members: type_members.into(),
             inst_vtbl,
         });
 
@@ -3416,6 +3446,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for TypeObjectWrap<'v, T> {
         Some(Inspect {
             is_abstract: false,
             members: &this.vtbl().members,
+            type_members: &this.vtbl().type_members,
         })
     }
 
@@ -3453,7 +3484,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for TypeObjectWrap<'v, T> {
                 async |strand| match entry {
                     Entry::Method(handler) => unsafe {
                         handler
-                            .call(this.as_header(), None, strand, args, out)
+                            .call(this.as_header(), this.delegator(), strand, args, out)
                             .await
                     },
                     _ => Err(Error::field(strand, method)),
@@ -3736,6 +3767,9 @@ pub(crate) struct TypeVtbl<'v> {
     /// Stable semantic description of the instance namespace advertised by
     /// the type object protocol.
     pub(crate) members: alias::Box<[Member<'v, 'v>]>,
+    /// Stable semantic description of the type-object namespace advertised by
+    /// the type object protocol.
+    pub(crate) type_members: alias::Box<[Member<'v, 'v>]>,
     /// Reference to the instance vtbl for unbound instance method dispatch.
     pub(crate) inst_vtbl: NonNull<ObjectVtbl<'v>>,
 }
@@ -4993,9 +5027,22 @@ mod tests {
                     assert_eq!(kind(state.prop_sym), Some(MemberKind::Property));
                     assert_eq!(kind(state.write_only_sym), Some(MemberKind::Setter));
 
+                    let type_members = inspect.type_members;
+                    let type_kind = |sym| {
+                        type_members
+                            .iter()
+                            .find(|member| member.sym == sym)
+                            .map(|member| member.kind)
+                    };
+                    assert_eq!(type_kind(state.make_sym), Some(MemberKind::Method));
+                    assert_eq!(type_kind(state.meta_sym), Some(MemberKind::Property));
+                    assert_eq!(type_kind(state.readonly_sym), Some(MemberKind::Getter));
+                    assert_eq!(type_kind(state.bump_sym), None);
+
                     let again =
                         TypeObjectWrap::<SlotFixture>::op_inspect(recv, strand.vm()).unwrap();
                     assert!(std::ptr::eq(members, again.members));
+                    assert!(std::ptr::eq(type_members, again.type_members));
                 });
         });
     }
