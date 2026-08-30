@@ -1,10 +1,12 @@
 use std::{
     cell::OnceCell,
-    collections::{HashMap, hash_map::Entry},
+    collections::{HashMap, VecDeque, hash_map::Entry},
     mem,
     ops::ControlFlow,
 };
 
+use bitvec::{bitbox, boxed::BitBox};
+use dolang_bytecode::Variadic;
 use dolang_util::alias;
 
 use crate::{
@@ -15,10 +17,11 @@ use crate::{
     method,
     object::{
         BoundMethod,
+        field_iter::FieldIter,
         protocol::{Inspect, MemberKind, Recv, Spread, SpreadContext, default_spread, members},
         sym::SymObj,
     },
-    sig::Unpack,
+    sig::{self, Unpack},
     strand::Strand,
     sym::{self, Sym},
     unpack,
@@ -919,6 +922,153 @@ pub(crate) fn iter_natives<'v, 'a>(
     borrow.annex().natives.iter().filter_map(|s| s.get())
 }
 
+fn readable_class_entry(entry: &ClassEntry<'_>) -> bool {
+    matches!(
+        entry,
+        ClassEntry::Field(_)
+            | ClassEntry::Property(Property {
+                getter: Some(_),
+                ..
+            })
+            | ClassEntry::Delegate(_, MemberKind::Getter | MemberKind::Property)
+    )
+}
+
+fn read_class_entry<'v, 'a, 's>(
+    this: Recv<'v, 'a, ClassInstance<'v>>,
+    strand: &mut Strand<'v, 's>,
+    sym: Sym<'v, '_>,
+    entry: &ClassEntry<'v>,
+    mut out: Slot<'v, '_>,
+) -> Result<'v, 's, bool> {
+    let result = match entry {
+        ClassEntry::Field(slot_index) => {
+            let borrow = this.borrow(strand)?;
+            out.store(borrow.fields[*slot_index].dup());
+            Ok(())
+        }
+        ClassEntry::Property(Property {
+            getter: Some(getter),
+            ..
+        }) => strand.sync(async |strand| {
+            method!(strand, getter, Sym::well_known(sym::GET), out, &this).await
+        }),
+        ClassEntry::Delegate(slot, MemberKind::Getter | MemberKind::Property) => {
+            this.annex().natives[*slot]
+                .get()
+                .ok_or_else(|| Error::runtime(strand, "native slot uninitialized"))?
+                .op_get(strand, sym, out)
+        }
+        _ => unreachable!(),
+    };
+    match result {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == ErrorKind::Field => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+async fn default_class_unpack<'v, 'a, 's>(
+    this: Recv<'v, 'a, ClassInstance<'v>>,
+    strand: &'a mut Strand<'v, 's>,
+    sig: &'a Unpack<'v, 'a>,
+    mut out: Slots<'v, 'a>,
+) -> Result<'v, 's, ()> {
+    let pos_count = sig.required + sig.optional.len();
+    if sig.required != 0 {
+        return Err(Error::missing_positional(strand, 0));
+    }
+
+    strand
+        .with_slots_dynamic(sig.len(), async |strand, mut staged| {
+            for (index, default) in sig.optional.iter().enumerate() {
+                staged.at(index).store(default.dup());
+            }
+
+            let class = &this.annex().class;
+            let entries = &class.entries;
+            let track = sig.variadic != Variadic::Discard;
+            let mut matched: Option<BitBox> = track.then(|| bitbox![0; entries.len()]);
+
+            for (key_index, key) in sig.keys.iter().enumerate() {
+                let dest = pos_count + key_index;
+                let found = match &key.kind {
+                    sig::UnpackKeyKind::Sym(sym) => entries
+                        .binary_search_by_key(sym, |(candidate, _)| *candidate)
+                        .ok()
+                        .filter(|index| {
+                            let (sym, entry) = &entries[*index];
+                            !strand.sym_obj(*sym).private && readable_class_entry(entry)
+                        }),
+                    sig::UnpackKeyKind::Const(_) => None,
+                };
+                let present = if let Some(index) = found {
+                    let (sym, entry) = &entries[index];
+                    read_class_entry(this.clone(), strand, *sym, entry, staged.at(dest))?
+                } else {
+                    false
+                };
+                if !present {
+                    if let Some(default) = &key.default {
+                        staged.at(dest).store(default.dup());
+                    } else {
+                        return Err(match &key.kind {
+                            sig::UnpackKeyKind::Sym(sym) => Error::missing_key(strand, *sym),
+                            sig::UnpackKeyKind::Const(value) => Error::missing_key(strand, value),
+                        });
+                    }
+                }
+                if let (Some(index), Some(matched)) = (found, &mut matched) {
+                    matched.set(index, true);
+                }
+            }
+
+            if sig.variadic == Variadic::None {
+                let matched = matched.as_mut().unwrap();
+                for (index, (sym, entry)) in entries.iter().enumerate() {
+                    if matched[index]
+                        || strand.sym_obj(*sym).private
+                        || !readable_class_entry(entry)
+                    {
+                        continue;
+                    }
+                    let present = strand.with_slots_sync(|strand, [tmp]| {
+                        read_class_entry(this.clone(), strand, *sym, entry, tmp)
+                    })?;
+                    if present {
+                        return Err(Error::unexpected_key(strand, *sym));
+                    }
+                    matched.set(index, true);
+                }
+            }
+
+            if sig.variadic == Variadic::Capture {
+                let matched = matched.as_ref().unwrap();
+                let symbols = entries
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, (sym, entry))| {
+                        !matched[*index]
+                            && !strand.sym_obj(*sym).private
+                            && readable_class_entry(entry)
+                    })
+                    .map(|(_, (sym, _))| strand.sym_obj(*sym))
+                    .collect::<VecDeque<_>>();
+                strand.builtin_types().field_iter.create(
+                    strand,
+                    FieldIter::new(Value::from_object(this.to_strong()), symbols),
+                    staged.at(sig.len() - 1),
+                );
+            }
+
+            for index in 0..sig.len() {
+                out.at(index).store(staged.at(index).take());
+            }
+            Ok(())
+        })
+        .await
+}
+
 fn class_sync_binary_op<'v, 'a, 's, F>(
     this: Recv<'v, 'a, ClassInstance<'v>>,
     strand: &mut Strand<'v, 's>,
@@ -1348,7 +1498,7 @@ impl<'v> Protocol<'v> for ClassInstance<'v> {
                     .op_unpack(strand, sig, out)
                     .await
             }
-            _ => Err(Error::not_supported(strand)),
+            _ => default_class_unpack(this, strand, sig, out).await,
         }
     }
 

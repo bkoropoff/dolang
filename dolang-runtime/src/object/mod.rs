@@ -9,6 +9,7 @@ pub(crate) mod class;
 pub(crate) mod dict;
 pub mod dict_view;
 pub(crate) mod error;
+pub(crate) mod field_iter;
 pub mod flags;
 pub(crate) mod float;
 pub(crate) mod function;
@@ -115,6 +116,7 @@ pub(crate) struct BuiltinTypes<'v> {
     pub(crate) error: TypeHandle<'v, error::Boxed<'v>>,
     pub(crate) f64: TypeHandle<'v, f64>,
     pub(crate) flags_iter: TypeHandle<'v, flags::Iter<'v>>,
+    pub(crate) field_iter: TypeHandle<'v, field_iter::FieldIter<'v>>,
     pub(crate) function: TypeHandle<'v, function::Function<'v>>,
     pub(crate) native_function: TypeHandle<'v, function::NativeFunction<'v>>,
     pub(crate) int: TypeHandle<'v, i128>,
@@ -254,6 +256,7 @@ impl<'v> BuiltinTypes<'v> {
             error: types.register_type_handle(),
             f64: types.register_type_handle(),
             flags_iter: types.register_type_handle(),
+            field_iter: types.register_type_handle(),
             function: types.register_type_handle(),
             native_function: types.register_type_handle(),
             int: types.register_type_handle(),
