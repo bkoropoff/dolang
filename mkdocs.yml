@@ -118,6 +118,7 @@ nav:
       - api/fs/xattr-entry.md
     - fs.unix:
       - api/fs/unix/index.md
+      - api/fs/unix/mode.md
       - api/fs/unix/path.md
     - fs.windows:
       - api/fs/windows/index.md

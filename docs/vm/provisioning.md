@@ -192,6 +192,16 @@ environment variable; `--unset-env` unsets one:
 dolang -m libvirt --cd build --env CARGO_TERM_COLOR freebsd-build build.dol
 ```
 
+`-m` runs a bundled entrypoint in the guest instead of a local script, using
+the same `-m NAME` spelling as the top-level command line:
+
+```
+dolang -m libvirt freebsd-build -m test tests/
+```
+
+The entrypoint sees its own name as `shell.program`, so it behaves as it would
+when run directly.
+
 ## Troubleshooting
 
 Setting the environment variable `DOLANG_LIBVIRT_KEEP_FAILED` leaves the

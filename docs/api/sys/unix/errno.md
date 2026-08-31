@@ -6,7 +6,7 @@
 
 ### `os`
 
-The originating operating system, as `:LINUX:` or `:MACOS:`.
+The originating operating system, as `:LINUX:`, `:MACOS:`, or `:FREEBSD:`.
 
 ## Inherits
 

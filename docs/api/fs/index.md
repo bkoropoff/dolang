@@ -939,9 +939,9 @@ macOS ACLs on macOS. Other target and format combinations raise
 Updates timestamps, permissions, ownership, and filesystem attributes.
 
 Unspecified metadata is left unchanged. Unix targets support `mode`, numeric or
-named `user` and `group` values, and applicable filesystem attributes. Windows
-targets accept an account name or [`Sid`](../security/windows/sid.md) for `user`
-and `group` and support applicable filesystem attributes.
+named `owner` and `group` values, and applicable filesystem attributes. Windows
+targets accept an account name or [`Sid`](../security/windows/sid.md) for
+`owner` and `group` and support applicable filesystem attributes.
 Unix supports `modified` and `accessed` timestamps; Windows also supports
 `created`.
 Paths are submitted from left to right and processing stops at the first error.
@@ -958,8 +958,8 @@ expensive, may fail when the volume lacks space, and is not transactional.
 | Name                  | Type                                                                                | Description                                      |
 | --------------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------ |
 | `paths`               | ([`Str`](../std/str.md)\|[`Path`](path.md))*                                        | Paths to update in order                         |
-| `mode`                | [`Int`](../std/int.md)                                                              | Optional Unix permission mode                    |
-| `user`                | [`Int`](../std/int.md)\|[`Str`](../std/str.md)\|[`Sid`](../security/windows/sid.md) | Optional owner ID, name, or SID                  |
+| `mode`                | [`Int`](../std/int.md)\|[`Mode`](unix/mode.md)                                      | Optional Unix permission mode                    |
+| `owner`               | [`Int`](../std/int.md)\|[`Str`](../std/str.md)\|[`Sid`](../security/windows/sid.md) | Optional owner ID, name, or SID                  |
 | `group`               | [`Int`](../std/int.md)\|[`Str`](../std/str.md)\|[`Sid`](../security/windows/sid.md) | Optional group ID, name, or SID                  |
 | `modified`            | [`DateTime`](../time/datetime.md)                                                   | Optional new modification time                   |
 | `accessed`            | [`DateTime`](../time/datetime.md)                                                   | Optional new access time                         |
@@ -1002,7 +1002,7 @@ expensive, may fail when the volume lacks space, and is not transactional.
 #### Example
 
 ```
-set_metadata "script.sh" mode: 0o755 user: "deploy" group: "deploy"
+set_metadata "script.sh" mode: 0o755 owner: "deploy" group: "deploy"
 set_metadata "one.txt" "two.txt" mode: 0o640
 set_metadata "data.txt" hidden: true
 set_metadata "data.txt" no_dump: true

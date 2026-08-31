@@ -27,5 +27,6 @@ mod tests {
         assert!(config.bundled_entrypoint("test").is_some());
         assert!(config.bundled_entrypoint("dodo").is_some());
         assert!(config.bundled_entrypoint("ssh").is_some());
+        assert!(config.bundled_entrypoint("metadata").is_some());
     }
 }

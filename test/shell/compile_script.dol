@@ -1,8 +1,12 @@
 import load
   _shell:
+    - bundled_entrypoint
+    - bundled_module
     - compile_script
   fs:
     - with_temp_dir
+  shell:
+    - exe
   test:
     - assert_eq
     - assert_type
@@ -17,3 +21,48 @@ def compiles_a_script_to_bytecode()
     let bytecode = compile_script $script
     assert_type $Bin $bytecode
     assert_eq (load.run bytecode) 42
+
+#[test]
+def passes_through_precompiled_bytecode()
+  with_temp_dir do |dir|
+    let script = (dir / "script.dol")
+    script.write "(40 + 2)\n"
+    let bytecode = compile_script $script
+
+    # Recognized by extension...
+    let by_extension = (dir / "script.dolc")
+    by_extension.write $bytecode
+    assert_eq (compile_script by_extension) $bytecode
+
+    # ...and by magic prefix, whatever the extension.
+    let by_magic = (dir / "script.bytes")
+    by_magic.write $bytecode
+    assert_eq (compile_script by_magic) $bytecode
+
+#[test]
+def runs_a_precompiled_script()
+  with_temp_dir do |dir|
+    let script = (dir / "script.dol")
+    let output = (dir / "output.txt")
+    script.write r|
+      import shell
+        fs:
+          - Path
+
+      (Path $shell.args[0]).write "ran"
+
+    let compiled = (dir / "script.dolc")
+    compiled.write (compile_script script)
+
+    run $exe $compiled $output
+    assert_eq $output.read() "ran"
+
+#[test]
+def looks_up_bundled_modules()
+  assert_type $Bin (bundled_module "test")
+  assert_eq (bundled_module "no.such.module") nil
+
+#[test]
+def looks_up_bundled_entrypoints()
+  assert_type $Bin (bundled_entrypoint "test")
+  assert_eq (bundled_entrypoint "no_such_entrypoint") nil

@@ -1,0 +1,665 @@
+# Dumps everything Do can report about a path: ordinary metadata, platform
+# attributes, ACLs, extended attributes, Windows security descriptors and
+# alternate data streams, and the containing filesystem.
+#
+# The layout is YAML-shaped, so ACL entries and security descriptors read
+# roughly the way the corresponding `security` module spec would be written.
+
+import admin args fs fs.unix fs.windows sys term time uuid
+import security.macos security.unix security.windows
+
+let head_style = term.style bold: true
+let section_style = term.style fg: :BRIGHT_BLUE: bold: true
+let key_style = term.style fg: :CYAN:
+let enum_style = term.style fg: :GREEN:
+let note_style = term.style dim: true
+let bullet_style = term.style dim: true
+let absent_style = term.style dim: true
+let error_style = term.style fg: :BRIGHT_RED: bold: true
+
+# Metadata fields that belong to each section, in the order they are printed.
+# Anything the runtime reports that isn't listed here is a platform attribute
+# (if boolean) or lands in a trailing `other` section, so a field added to
+# `fs.Metadata` later still shows up without touching this file.
+let GENERAL_FIELDS = ["type", "size", "modified", "accessed", "created"]
+let UNIX_FIELDS = $
+  - mode
+  - uid
+  - gid
+  - nlink
+  - ino
+  - dev
+  - rdev
+  - blksize
+  - blocks
+# Raw platform bitmasks, printed in hex wherever they turn up. `win_flags` is
+# an `FsMetadata` field; the rest are on both types.
+let RAW_MASK_FIELDS = $
+  - linux_attrs
+  - macos_attrs
+  - freebsd_attrs
+  - win_attrs
+  - win_flags
+# `owner`/`group` are `Metadata`'s portable view of ownership, and duplicate
+# whatever the platform reports in full: `uid`/`gid` in the unix section, the
+# owner and group SIDs in the security descriptor.
+let SKIP_FIELDS = ["owner", "group"]
+let FS_FIELDS = $
+  - capacity
+  - free
+  - available
+  - block_size
+  - read_only
+  - name_max
+
+let MAX_DEPTH = 6
+
+# Windows ACE types, grouped by the spec key that names their trustee.
+let WINDOWS_ALLOW = $
+  - :ACCESS_ALLOWED:
+  - :ACCESS_ALLOWED_OBJECT:
+  - :ACCESS_ALLOWED_CALLBACK:
+  - :ACCESS_ALLOWED_CALLBACK_OBJECT:
+  - :ACCESS_ALLOWED_COMPOUND:
+let WINDOWS_DENY = $
+  - :ACCESS_DENIED:
+  - :ACCESS_DENIED_OBJECT:
+  - :ACCESS_DENIED_CALLBACK:
+  - :ACCESS_DENIED_CALLBACK_OBJECT:
+let WINDOWS_AUDIT = $
+  - :SYSTEM_AUDIT:
+  - :SYSTEM_AUDIT_OBJECT:
+  - :SYSTEM_AUDIT_CALLBACK:
+  - :SYSTEM_AUDIT_CALLBACK_OBJECT:
+
+# Evaluates `func`, answering `nil` when the value simply isn't there: a
+# field that doesn't apply to this platform, an operation the target VFS
+# doesn't support, or a query the OS refused.
+def opt func
+  try
+    func()
+  catch std.FieldError: _
+    nil
+  catch std.UnsupportedError: _
+    nil
+  catch sys.Error: _
+    nil
+
+def pad n
+  " ".repeat(n)
+
+# --- Node model -------------------------------------------------------------
+#
+# Rendering happens in two passes: build a tree of nodes, then emit it. A
+# node is one of
+#
+#   [:SCALAR:, text, note]        one `key: value` payload, plus a dim aside
+#   [:MAP:, [[key, node], ...]]   nested `key: value` block
+#   [:LIST:, [node, ...]]         nested `- item` block
+
+def scalar text note = nil
+  [:SCALAR:, text, note]
+
+def map_node entries
+  [:MAP:, entries]
+
+def list_node items
+  [:LIST:, items]
+
+def text_node value note = nil
+  scalar (str value) $note
+
+def enum_node value note = nil
+  scalar (enum_style (str value)) $note
+
+# Renders any iterable of symbols — every flag type does this — as the
+# bracketed list its constructor would accept back.
+def flags_node value
+  let names = []
+  for bit = value
+    names.push $ str $bit
+  if (names.len == 0)
+    return scalar (absent_style "[]")
+  let joined = (", ".join(names))
+  scalar (enum_style "[$joined]")
+
+# True when `value` is a flag-set-shaped iterable rather than a sequence of
+# structured values.
+def all_syms items
+  if (items.len == 0)
+    return false
+  for item = items
+    if !(type item Sym)
+      return false
+  true
+
+# Destructures an object into its fields. Answers `nil` for a value that
+# doesn't unpack into key/value pairs at all.
+def unpack_pairs value depth
+  try
+    bind value
+      ...rest
+    let entries = []
+    for item = rest
+      let key item_value = item
+      entries.push [(str key), (node item_value (depth + 1))]
+    entries
+  catch std.RuntimeError: _
+    nil
+
+# Materializes an iterable, or answers `nil` when the value isn't one.
+def collect value
+  try
+    let items = []
+    for item = value
+      items.push $item
+    items
+  catch std.RuntimeError: _
+    nil
+
+def structure_node value depth
+  let entries = unpack_pairs $value $depth
+  if (entries != nil && entries.len > 0)
+    return map_node $entries
+  let raw = collect $value
+  if (raw == nil)
+    return text_node $value
+  if all_syms(raw)
+    return flags_node $raw
+  list_node $
+    for item = raw
+      - $ node $item (depth + 1)
+
+# Converts an arbitrary value into a node, special-casing the types that
+# read better as a single line than as their component fields.
+def node value depth = 0
+  if (value == nil)
+    return scalar (absent_style "~")
+  if (depth > MAX_DEPTH)
+    return text_node $value
+  if ((type value Sym) || (type value Bool))
+    return enum_node $value
+  if ((type value Int) || (type value Float) || (type value Str))
+    return text_node $value
+  if ((type value time.DateTime) || (type value fs.Path) || (type value uuid.Uuid))
+    return text_node $value
+  if (type value Bin)
+    return scalar "<$(value.len) bytes>"
+  if (type value fs.unix.Mode)
+    return mode_node $value
+  if (type value security.windows.Sid)
+    return sid_node $value
+  structure_node $value $depth
+
+# --- Leaf formatting --------------------------------------------------------
+
+# `rwx`, with the set-uid/set-gid/sticky bit folded into the execute slot the
+# way `ls` writes it.
+def triad permissions special special_char
+  let r = (permissions.contains(:READ:) && "r" || "-")
+  let w = (permissions.contains(:WRITE:) && "w" || "-")
+  let executable = permissions.contains(:EXECUTE:)
+  let x = if special
+    (executable && special_char || special_char.upper)
+  else
+    (executable && "x" || "-")
+  "$r$w$x"
+
+def mode_node mode
+  let owner = triad $mode.owner $mode.contains(:SET_UID:) s
+  let group = triad $mode.group $mode.contains(:SET_GID:) s
+  let other = triad $mode.other $mode.contains(:STICKY:) t
+  scalar "0$((mode.int & 0o7777).octal())" "$owner$group$other"
+
+# A uid or gid, annotated with the name it resolves to.
+def id_node id kind
+  let name = opt do
+    if (kind == :USER:)
+      security.unix.user_name $id
+    else
+      security.unix.group_name $id
+  text_node $id $name
+
+def hex_node value
+  if (value == nil)
+    return scalar (absent_style "~")
+  scalar "0x$(value.hex())"
+
+def sid_node sid
+  let name = opt do sid.lookup().qualified_name
+  text_node $sid $name
+
+def uuid_node principal
+  let name = opt do
+    let kind id = security.macos.id_for_uuid $principal
+    let resolved = opt do
+      if (kind == :UID:)
+        security.unix.user_name $id
+      else
+        security.unix.group_name $id
+    if resolved
+      "$(kind.lower) $id ($resolved)"
+    else
+      "$(kind.lower) $id"
+  text_node $principal $name
+
+# --- Access control entries -------------------------------------------------
+#
+# Each of these renders an entry as the declarative spec its module accepts,
+# so a dump can be read back as the thing that would recreate it.
+
+def posix_ace_node ace
+  let kind = ace.type
+  let permissions = flags_node $ace.permissions
+  if (kind == :USER_OBJ:)
+    return map_node [["user_obj", permissions]]
+  if (kind == :GROUP_OBJ:)
+    return map_node [["group_obj", permissions]]
+  if (kind == :MASK:)
+    return map_node [["mask", permissions]]
+  if (kind == :OTHER:)
+    return map_node [["other", permissions]]
+  let key = ((kind == :USER:) && "user" || "group")
+  map_node $
+    - [key, (id_node ace.id kind)]
+    - ["permissions", permissions]
+
+def nfs4_ace_node ace
+  let key = if (ace.type == :ALLOW:)
+    "allow"
+  else if (ace.type == :DENY:)
+    "deny"
+  else if (ace.type == :AUDIT:)
+    "audit"
+  else
+    "alarm"
+  let principal = ace.principal
+  let trustee = if (principal == :USER:)
+    map_node [["user", (id_node ace.id :USER:)]]
+  else if (principal == :GROUP:)
+    map_node [["group", (id_node ace.id :GROUP:)]]
+  else
+    enum_node $principal
+  let entries = [[key, trustee], ["mask", (flags_node ace.mask)]]
+  let flags = collect $ace.flags
+  if (flags != nil && flags.len > 0)
+    entries.push ["flags", (flags_node flags)]
+  map_node $entries
+
+def macos_ace_node ace
+  let key = ((ace.type == :ALLOW:) && "allow" || "deny")
+  let entries = $
+    - [key, (uuid_node ace.principal)]
+    - ["mask", (flags_node ace.mask)]
+  let flags = collect $ace.flags
+  if (flags != nil && flags.len > 0)
+    entries.push ["flags", (flags_node flags)]
+  map_node $entries
+
+def windows_ace_node ace
+  let entries = []
+  let kind = ace.type
+  let sid = opt do ace.sid
+  let key = if WINDOWS_ALLOW.contains(kind)
+    "allow"
+  else if WINDOWS_DENY.contains(kind)
+    "deny"
+  else if WINDOWS_AUDIT.contains(kind)
+    "audit"
+  else
+    nil
+  if (key != nil && sid != nil)
+    entries.push [key, (sid_node sid)]
+  else
+    entries.push ["type", (enum_node kind)]
+    if (sid != nil)
+      entries.push ["sid", (sid_node sid)]
+  let mask = opt do ace.mask
+  if (mask != nil)
+    entries.push ["mask", (flags_node mask)]
+  let flags = opt do collect(ace.flags)
+  if (flags != nil && flags.len > 0)
+    entries.push ["flags", (flags_node flags)]
+  let object_type = opt do ace.object_type
+  if (object_type != nil)
+    entries.push ["object_type", (node object_type)]
+  let inherited_object_type = opt do ace.inherited_object_type
+  if (inherited_object_type != nil)
+    entries.push ["inherited_object_type", (node inherited_object_type)]
+  if (key == "audit")
+    entries.push ["successful", (node (opt do ace.successful_access))]
+    entries.push ["failed", (node (opt do ace.failed_access))]
+  let data = opt do ace.application_data
+  if (data != nil && data.len > 0)
+    entries.push ["application_data", (node data)]
+  map_node $entries
+
+# Renders an ACL's entries as a list of specs, dispatching on the flavor the
+# ACL was fetched as.
+def acl_node acl kind
+  list_node $
+    for ace = acl.aces
+      if (kind == :POSIX:)
+        - $ posix_ace_node $ace
+      else if (kind == :NFS4:)
+        - $ nfs4_ace_node $ace
+      else if (kind == :MACOS:)
+        - $ macos_ace_node $ace
+      else
+        - $ windows_ace_node $ace
+
+# --- Windows security descriptors -------------------------------------------
+
+def sec_desc_node desc
+  let entries = []
+  let revision = opt do desc.revision
+  if (revision != nil)
+    entries.push ["revision", (node revision)]
+  let control = opt do desc.control
+  if (control != nil)
+    entries.push ["control", (flags_node control)]
+  let owner = opt do desc.owner
+  if (owner != nil)
+    entries.push ["owner", (sid_node owner)]
+  let group = opt do desc.group
+  if (group != nil)
+    entries.push ["group", (sid_node group)]
+  let dacl = opt do desc.dacl
+  if (dacl != nil)
+    entries.push ["dacl", (acl_node dacl :WINDOWS:)]
+  let sacl = opt do desc.sacl
+  if (sacl != nil)
+    entries.push ["sacl", (acl_node sacl :WINDOWS:)]
+  let rm_control = opt do desc.rm_control
+  if (rm_control != nil)
+    entries.push ["rm_control", (node rm_control)]
+  map_node $entries
+
+# --- Emitting ---------------------------------------------------------------
+
+def bullet indent
+  bullet_style "$(pad indent)- "
+
+def emit_scalar nd start key align
+  if (key == nil)
+    print $start $nd[1]
+  else
+    print $start (key_style "$key:") $align " " $nd[1]
+  if nd[2]
+    print "  " (note_style "($(nd[2]))")
+  echo()
+
+# Emits `key:` followed by `nd`'s block, or an inline `{}`/`[]` when it is
+# empty. `align` pads the key out to the section's widest scalar key.
+def emit_entry key nd indent start align
+  if (nd[0] == :SCALAR:)
+    emit_scalar $nd $start $key $align
+  else if (nd[1].len == 0)
+    let marker = ((nd[0] == :MAP:) && "{}" || "[]")
+    print $start (key_style "$key:") " " (absent_style marker)
+    echo()
+  else
+    print $start (key_style "$key:")
+    echo()
+    if (nd[0] == :MAP:)
+      emit_map $nd[1] (indent + 2) (pad (indent + 2))
+    else
+      emit_list $nd[1] (indent + 2)
+
+# `start` is what precedes the first line, so a caller can lead into a map
+# with a list bullet; later lines fall back to `indent` spaces.
+def emit_map entries indent start
+  let width = 0
+  for entry = entries
+    let key nd = entry
+    if ((nd[0] == :SCALAR:) && (key.len > width))
+      width = key.len
+  let first = true
+  for entry = entries
+    let key nd = entry
+    let lead = if first
+      start
+    else
+      pad $indent
+    first = false
+    let align = if (nd[0] == :SCALAR:)
+      pad (width - key.len)
+    else
+      ""
+    emit_entry $key $nd $indent $lead $align
+
+def emit_list items indent
+  for item = items
+    if (item[0] == :SCALAR:)
+      emit_scalar $item (bullet indent) nil ""
+    else if (item[1].len == 0)
+      let marker = ((item[0] == :MAP:) && "{}" || "[]")
+      print (bullet indent) (absent_style marker)
+      echo()
+    else if (item[0] == :MAP:)
+      emit_map $item[1] (indent + 2) (bullet indent)
+    else
+      print (bullet indent)
+      echo()
+      emit_list $item[1] (indent + 2)
+
+# Prints one `▸ name` block, or nothing at all when the section has no
+# content to show. A section is either a map or a list node — an ACL is a
+# list of entry specs, everything else is a mapping.
+def emit_section name nd
+  if (nd == nil || nd[1].len == 0)
+    return nil
+  print "  " (section_style "▸ $name")
+  echo()
+  if (nd[0] == :MAP:)
+    emit_map $nd[1] 6 (pad 6)
+  else
+    emit_list $nd[1] 6
+
+# --- Sections ---------------------------------------------------------------
+
+# Reorders `entries` to follow `wanted`, keeping anything unlisted in the
+# order it arrived. Objects report their fields in registration order, which
+# isn't always the order that reads best.
+def order_entries wanted entries
+  let ordered = []
+  for name = wanted
+    for entry = entries
+      if (entry[0] == name)
+        ordered.push $entry
+  for entry = entries
+    if !wanted.contains(entry[0])
+      ordered.push $entry
+  ordered
+
+# Splits `fs.Metadata` into the general/unix/attribute groups. Every reported
+# field lands somewhere: unrecognized booleans are treated as platform
+# attributes, and anything else falls through to `other`.
+def metadata_sections meta all
+  let general = []
+  let unix = []
+  let attributes = []
+  let other = []
+  bind meta
+    ...rest
+  for name value = rest
+    let key = (str name)
+    if SKIP_FIELDS.contains(key)
+      continue
+    if GENERAL_FIELDS.contains(key)
+      general.push [key, (node value)]
+    else if UNIX_FIELDS.contains(key)
+      if (key == "uid")
+        unix.push [key, (id_node value :USER:)]
+      else if (key == "gid")
+        unix.push [key, (id_node value :GROUP:)]
+      else
+        unix.push [key, (node value)]
+    else if RAW_MASK_FIELDS.contains(key)
+      # A raw attribute mask reads as `nil` when the filesystem or file type
+      # can't be asked for one, which is the common case for symlinks.
+      if (value != nil || all)
+        attributes.push [key, (hex_node value)]
+    else if ((type value Bool) || (value == nil))
+      # Platform attribute flags: `false` when the file doesn't have the
+      # attribute, `nil` when this filesystem can't be asked about it.
+      if ((value == true) || all)
+        attributes.push [key, (node value)]
+    else
+      other.push [key, (node value)]
+  let general_ordered = order_entries $GENERAL_FIELDS $general
+  let unix_ordered = order_entries $UNIX_FIELDS $unix
+  [general_ordered, unix_ordered, attributes, other]
+
+def link_section path meta
+  if (meta.type != :SYMLINK:)
+    return nil
+  let target = opt do fs.read_link $path
+  if (target == nil)
+    return nil
+  map_node [["target", (node target)]]
+
+def acl_section path kind default resolve
+  let acl = opt do
+    fs.acl $path kind: $kind default: $default resolve: $resolve
+  if (acl == nil)
+    return nil
+  acl_node $acl $kind
+
+def xattr_section path resolve
+  let listing = opt do
+    [...fs.xattrs path namespace: :ANY: resolve: resolve]
+  let attrs = if (listing == nil)
+    opt do
+      [...fs.xattrs path resolve: resolve]
+  else
+    listing
+  if (attrs == nil)
+    return nil
+  let entries = []
+  for attr = attrs
+    let namespace = opt do attr.namespace
+    let name = if (namespace == nil)
+      attr.name
+    else
+      "$namespace.$(attr.name)"
+    let size = opt do attr.size
+    let value = if (size == nil)
+      let raw = opt do
+        fs.xattr $path $attr.name namespace: $namespace resolve: $resolve
+      (raw != nil && raw.len || nil)
+    else
+      size
+    if (value == nil)
+      entries.push [name, (scalar (absent_style "~"))]
+    else
+      entries.push [name, (scalar "$value bytes")]
+  map_node $entries
+
+def sec_desc_section path resolve
+  # Reading a SACL needs SE_SECURITY_NAME, and asking for one without it fails
+  # the whole fetch rather than just that component, so only ask when elevated.
+  let elevated = opt do admin.query()
+  let sacl = (elevated == true)
+  let desc = opt do
+    fs.windows.sec_desc $path sacl: $sacl resolve: $resolve
+  if (desc == nil)
+    return nil
+  sec_desc_node $desc
+
+def stream_section path resolve
+  # The default stream is always enumerated first, and only repeats the file's
+  # own size, so skip it; a file with no alternate streams then has nothing to
+  # report and the section drops out.
+  let streams = opt do
+    [...(fs.streams path resolve: resolve).skip(1)]
+  if (streams == nil)
+    return nil
+  map_node $
+    for stream = streams
+      - [(str stream.name), (stream_node stream)]
+
+# A stream's own `name` is the key it is filed under, so drop it from the body.
+def stream_node stream
+  let nd = node $stream
+  if (nd[0] != :MAP:)
+    return nd
+  map_node $
+    for entry = nd[1]
+      if (entry[0] != "name")
+        - $entry
+
+def filesystem_section path
+  let fs_meta = opt do fs.fs_metadata $path
+  if (fs_meta == nil)
+    return nil
+  let entries = []
+  bind fs_meta
+    ...rest
+  for name value = rest
+    let key = (str name)
+    if RAW_MASK_FIELDS.contains(key)
+      entries.push [key, (hex_node value)]
+    else
+      entries.push [key, (node value)]
+  map_node $ order_entries $FS_FIELDS $entries
+
+# --- Driver -----------------------------------------------------------------
+
+def dump path resolve all
+  let meta = fs.metadata $path resolve: $resolve
+  let general unix attributes other = metadata_sections $meta $all
+  let os = opt do sys.os_info().os
+
+  emit_section general $ map_node $general
+  emit_section link $ link_section $path $meta
+  emit_section unix $ map_node $unix
+  emit_section attributes $ map_node $attributes
+  emit_section other $ map_node $other
+
+  emit_section acl $ acl_section $path :POSIX: false $resolve
+  if (meta.type == :DIR:)
+    emit_section "default acl" $ acl_section $path :POSIX: true $resolve
+  if (os == :FREEBSD:)
+    emit_section "nfs4 acl" $ acl_section $path :NFS4: false $resolve
+  if (os == :MACOS:)
+    emit_section "macos acl" $ acl_section $path :MACOS: false $resolve
+  if (os == :WINDOWS:)
+    emit_section "security descriptor" $ sec_desc_section $path $resolve
+    emit_section streams $ stream_section $path $resolve
+
+  emit_section xattrs $ xattr_section $path $resolve
+  emit_section filesystem $ filesystem_section $path
+
+args.with
+  help: Dump filesystem metadata, access control, and extended attributes.
+  - flag: link
+    short: L
+    help: Report on a symlink itself rather than its target
+  - flag: all
+    short: a
+    help: Include platform attributes that are not set
+  - arg: paths
+    parse: $fs.Path
+    collect: true
+    help: Paths to inspect
+  do |p|
+    if (p.paths.len == 0)
+      throw args.Error "expected at least one path"
+    let resolve = (p.link && :LINK: || :TARGET:)
+    let rc = 0
+    let first = true
+    for path = p.paths
+      if !first
+        echo()
+      first = false
+      print (head_style "● $path")
+      echo()
+      try
+        dump $path $resolve $p.all
+      catch std.RuntimeError: e
+        # One bad path shouldn't abandon the rest; report it and carry on.
+        rc = 1
+        print "  " (error_style "error") ": "
+        echo $ str $e
+    exit $rc

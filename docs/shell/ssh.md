@@ -52,6 +52,16 @@ script path is passed through unchanged, including arguments beginning with
 `-`. Inside the target script, `shell.program` is the script path and
 `shell.args` contains only those trailing arguments.
 
+`-m` runs a bundled entrypoint over the connection instead of a local script,
+using the same `-m NAME` spelling as the top-level command line:
+
+```
+dolang -m ssh --batch build.example.com -m test tests/
+```
+
+The entrypoint sees its own name as `shell.program`, so it behaves as it would
+when run directly.
+
 The entrypoint accepts the connection options documented below using
 hyphenated command-line names, such as `--identity`, `--jump`,
 `--connect-timeout`, and `--host-key accept-new`. Repeated identities and jump

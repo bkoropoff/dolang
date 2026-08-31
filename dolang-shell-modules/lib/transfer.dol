@@ -569,12 +569,12 @@ def filesystem_metadata path kind options
     :link_mode:
   else
     :mode:
-  let user_name = options.get :user_name: else: do
+  let owner_name = options.get :owner_name: else: do
     try
       if unix
         security_unix.user_name $metadata.uid
       else
-        metadata.user.lookup().qualified_name
+        metadata.owner.lookup().qualified_name
     catch sys.NotFoundError: _
       nil
   let group_name = options.get :group_name: else: do
@@ -582,7 +582,7 @@ def filesystem_metadata path kind options
       if unix
         security_unix.group_name $metadata.gid
       else
-        metadata.user.lookup().qualified_name
+        metadata.group.lookup().qualified_name
     catch sys.NotFoundError: _
       nil
   return $
@@ -590,14 +590,14 @@ def filesystem_metadata path kind options
     uid: (options.get(:uid:) || (unix && metadata.uid) || 0)
     gid: (options.get(:gid:) || (unix && metadata.gid) || 0)
     mtime: (options.get(:mtime:) || metadata.modified || DateTime.from_unix(0))
-    if user_name
-      :user_name
+    if owner_name
+      :owner_name
     if group_name
       :group_name
 
 let ALLOWED_METADATA = Set $
   :mode: :dir_mode: :link_mode: :uid: :gid:
-  :user_name: :group_name: :mtime:
+  :owner_name: :group_name: :mtime:
 
 def validate_metadata arguments
   let positional keyed = arguments.pos_keys()

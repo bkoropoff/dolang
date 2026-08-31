@@ -33,7 +33,7 @@ def numeric_id()
     f.write "ownership"
 
   let before = Path(test_path).metadata()
-  set_metadata $test_path mode: 0o600 user: $before.uid group: $before.gid
+  set_metadata $test_path mode: 0o600 owner: $before.uid group: $before.gid
   let after = Path(test_path).metadata()
   assert_eq $after.uid $before.uid
   assert_eq $after.gid $before.gid
@@ -62,17 +62,17 @@ def multiple_paths()
 
 #[test]
 #[vfs]
-def user_and_group_name()
+def owner_and_group_name()
   let test_path = "test_chown_names.txt"
 
   open $test_path w do |f|
     f.write "ownership"
 
-  let user = sub $id -un
+  let owner = sub $id -un
   let group = sub $id -gn
   let uid = int $ sub $id -u
   let gid = int $ sub $id -g
-  Path(test_path).set_metadata user: $user group: $group
+  Path(test_path).set_metadata owner: $owner group: $group
   let after = Path(test_path).metadata()
   assert_eq $after.uid $uid
   assert_eq $after.gid $gid
@@ -109,14 +109,14 @@ def empty_patch_is_noop()
 
 #[test]
 #[vfs]
-def unknown_user_fails()
+def unknown_owner_fails()
   let test_path = "test_chown_unknown.txt"
 
   open $test_path w do |f|
     f.write "ownership"
 
   assert_throws $RuntimeError do
-    set_metadata $test_path user: "__dolang_missing_user__"
+    set_metadata $test_path owner: "__dolang_missing_user__"
 
   remove $test_path
 

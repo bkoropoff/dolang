@@ -173,7 +173,7 @@ struct CommonEntryOptions {
     uid: u64,
     gid: u64,
     mtime: u64,
-    user_name: Option<String>,
+    owner_name: Option<String>,
     group_name: Option<String>,
 }
 
@@ -185,7 +185,7 @@ fn parse_common_entry_options<'v, 's>(
     uid: Option<Slot<'v, '_>>,
     gid: Option<Slot<'v, '_>>,
     mtime: Option<Slot<'v, '_>>,
-    user_name: Option<Slot<'v, '_>>,
+    owner_name: Option<Slot<'v, '_>>,
     group_name: Option<Slot<'v, '_>>,
 ) -> Result<'v, 's, CommonEntryOptions> {
     let mode = u32::try_from(optional_u64(strand, mode, default_mode, "mode")?)
@@ -200,14 +200,14 @@ fn parse_common_entry_options<'v, 's>(
             .as_secs(),
         None => 0,
     };
-    let user_name = optional_string(strand, user_name, "user_name")?;
+    let owner_name = optional_string(strand, owner_name, "owner_name")?;
     let group_name = optional_string(strand, group_name, "group_name")?;
     Ok(CommonEntryOptions {
         mode,
         uid,
         gid,
         mtime,
-        user_name,
+        owner_name,
         group_name,
     })
 }
@@ -226,7 +226,7 @@ fn build_header<'v, 's>(
     header.set_uid(opts.uid);
     header.set_gid(opts.gid);
     header.set_mtime(opts.mtime);
-    if let Some(value) = &opts.user_name {
+    if let Some(value) = &opts.owner_name {
         header.set_username(value).into_do(strand)?;
     }
     if let Some(value) = &opts.group_name {
@@ -482,7 +482,7 @@ impl<'v> Object<'v> for TarEntry {
                     .into_do(strand)
                 })
             })
-            .get("user_name", |this, strand, out| {
+            .get("owner_name", |this, strand, out| {
                 active_entry!(this, strand, borrow, {
                     match borrow
                         .current
@@ -715,7 +715,7 @@ impl<'v> Object<'v> for TarWriter {
         let uid_sym = builder.sym("uid");
         let gid_sym = builder.sym("gid");
         let mtime_sym = builder.sym("mtime");
-        let user_name_sym = builder.sym("user_name");
+        let owner_name_sym = builder.sym("owner_name");
         let group_name_sym = builder.sym("group_name");
         builder
             .get("compression", |this, strand, out| {
@@ -729,7 +729,7 @@ impl<'v> Object<'v> for TarWriter {
                     let global = *this.annex();
                     let (
                         [path, block],
-                        [size, mode, uid, gid, mtime, user_name, group_name],
+                        [size, mode, uid, gid, mtime, owner_name, group_name],
                     ) = unpack!(
                         strand,
                         args,
@@ -740,14 +740,14 @@ impl<'v> Object<'v> for TarWriter {
                         uid_sym = None,
                         gid_sym = None,
                         mtime_sym = None,
-                        user_name_sym = None,
+                        owner_name_sym = None,
                         group_name_sym = None
                     )?;
                     let path = unix_path_string(strand, path, "path")?;
                     let size = size.ok_or_else(|| Error::value(strand, "size is required"))?;
                     let size = nonnegative_u64(strand, size, "size")?;
                     let opts = parse_common_entry_options(
-                        strand, 0o644, mode, uid, gid, mtime, user_name, group_name,
+                        strand, 0o644, mode, uid, gid, mtime, owner_name, group_name,
                     )?;
 
                     let (mut native_builder, generation) = {
@@ -834,7 +834,7 @@ impl<'v> Object<'v> for TarWriter {
                 },
             )
             .method("create_dir", async move |this, strand, args, _out| {
-                let ([path], [mode, uid, gid, mtime, user_name, group_name]) = unpack!(
+                let ([path], [mode, uid, gid, mtime, owner_name, group_name]) = unpack!(
                     strand,
                     args,
                     1,
@@ -843,18 +843,18 @@ impl<'v> Object<'v> for TarWriter {
                     uid_sym = None,
                     gid_sym = None,
                     mtime_sym = None,
-                    user_name_sym = None,
+                    owner_name_sym = None,
                     group_name_sym = None
                 )?;
                 let path = unix_path_string(strand, path, "path")?;
                 let opts = parse_common_entry_options(
-                    strand, 0o755, mode, uid, gid, mtime, user_name, group_name,
+                    strand, 0o755, mode, uid, gid, mtime, owner_name, group_name,
                 )?;
                 let header = build_header(strand, EntryType::Directory, 0, &opts, None)?;
                 append_metadata_only_entry(strand, this, &path, header).await
             })
             .method("symlink", async move |this, strand, args, _out| {
-                let ([target, path], [mode, uid, gid, mtime, user_name, group_name]) = unpack!(
+                let ([target, path], [mode, uid, gid, mtime, owner_name, group_name]) = unpack!(
                     strand,
                     args,
                     2,
@@ -863,19 +863,19 @@ impl<'v> Object<'v> for TarWriter {
                     uid_sym = None,
                     gid_sym = None,
                     mtime_sym = None,
-                    user_name_sym = None,
+                    owner_name_sym = None,
                     group_name_sym = None
                 )?;
                 let target = unix_path_string(strand, target, "target")?;
                 let path = unix_path_string(strand, path, "path")?;
                 let opts = parse_common_entry_options(
-                    strand, 0o777, mode, uid, gid, mtime, user_name, group_name,
+                    strand, 0o777, mode, uid, gid, mtime, owner_name, group_name,
                 )?;
                 let header = build_header(strand, EntryType::Symlink, 0, &opts, Some(&target))?;
                 append_metadata_only_entry(strand, this, &path, header).await
             })
             .method("hard_link", async move |this, strand, args, _out| {
-                let ([target, path], [mode, uid, gid, mtime, user_name, group_name]) = unpack!(
+                let ([target, path], [mode, uid, gid, mtime, owner_name, group_name]) = unpack!(
                     strand,
                     args,
                     2,
@@ -884,13 +884,13 @@ impl<'v> Object<'v> for TarWriter {
                     uid_sym = None,
                     gid_sym = None,
                     mtime_sym = None,
-                    user_name_sym = None,
+                    owner_name_sym = None,
                     group_name_sym = None
                 )?;
                 let target = unix_path_string(strand, target, "target")?;
                 let path = unix_path_string(strand, path, "path")?;
                 let opts = parse_common_entry_options(
-                    strand, 0o644, mode, uid, gid, mtime, user_name, group_name,
+                    strand, 0o644, mode, uid, gid, mtime, owner_name, group_name,
                 )?;
                 let header = build_header(strand, EntryType::Link, 0, &opts, Some(&target))?;
                 append_metadata_only_entry(strand, this, &path, header).await

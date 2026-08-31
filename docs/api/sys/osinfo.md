@@ -18,5 +18,5 @@ This field is only available for Windows targets.
 
 ### `os`
 
-Specific operating system. Supported values are `:LINUX:`, `:MACOS:`, and
-`:WINDOWS:`.
+Specific operating system. Supported values are `:LINUX:`, `:MACOS:`,
+`:FREEBSD:`, and `:WINDOWS:`.
