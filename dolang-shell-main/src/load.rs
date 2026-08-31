@@ -192,6 +192,38 @@ pub(crate) async fn find_module_file<'v, 's>(
     Err(Error::import(strand, name))
 }
 
+/// Magic prefix of a compiled bytecode file.
+const BYTECODE_MAGIC: [u8; 8] = *b"\xffdobytec";
+
+/// Extension of a compiled bytecode file.
+const BYTECODE_EXTENSION: &str = "dolc";
+
+fn has_bytecode_extension(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext == BYTECODE_EXTENSION)
+}
+
+fn is_bytecode(path: &Path, data: &[u8]) -> bool {
+    has_bytecode_extension(path) || data.starts_with(&BYTECODE_MAGIC)
+}
+
+/// Determine whether `path` holds pre-compiled bytecode without reading it whole.
+///
+/// A missing or unreadable file is reported as not being bytecode so the
+/// regular compile path produces the usual error.
+async fn is_precompiled(path: &Path) -> bool {
+    use tokio::io::AsyncReadExt as _;
+
+    if has_bytecode_extension(path) {
+        return true;
+    }
+    let Ok(mut file) = fs::File::open(path).await else {
+        return false;
+    };
+    let mut header = [0u8; BYTECODE_MAGIC.len()];
+    file.read_exact(&mut header).await.is_ok() && header == BYTECODE_MAGIC
+}
+
 async fn compile_script<'v, 's>(
     strand: &mut Strand<'v, 's>,
     path: &Path,
@@ -199,7 +231,12 @@ async fn compile_script<'v, 's>(
     strict: bool,
 ) -> Result<'v, 's, Vec<u8>> {
     if fs::try_exists(path).await.into_do(strand)? {
-        let source = fs::read_to_string(path).await.into_do(strand)?;
+        let data = fs::read(path).await.into_do(strand)?;
+        if is_bytecode(path, &data) {
+            return Ok(data);
+        }
+        let source = String::from_utf8(data)
+            .map_err(|_| Error::runtime(strand, format!("not valid UTF-8: {}", path.display())))?;
         compile(strand, path, &source, None, prelude, Mode::Script, strict).await
     } else {
         Err(Error::runtime(
@@ -216,6 +253,11 @@ pub(crate) async fn compile_script_cached<'v, 's>(
     strict: bool,
     cache: bool,
 ) -> Result<'v, 's, Vec<u8>> {
+    // Pre-compiled input needs neither compilation nor caching.
+    if is_precompiled(path).await {
+        return fs::read(path).await.into_do(strand);
+    }
+
     let mode = Mode::Script;
     let bc = cache
         .then(|| cache_path(strand, path, &mode, prelude, strict))
@@ -261,6 +303,12 @@ pub(crate) async fn load<'v, 's>(
     cache: bool,
     mut out: Slot<'v, '_>,
 ) -> Result<'v, 's, ()> {
+    // A script given as pre-compiled bytecode is run as-is.
+    if matches!(mode, Mode::Script) && is_precompiled(path).await {
+        let data = fs::read(path).await.into_do(strand)?;
+        return Bytecode::new(data).run(strand, &mut out).await;
+    }
+
     let bc = cache
         .then(|| cache_path(strand, path, &mode, prelude, strict))
         .transpose()?;

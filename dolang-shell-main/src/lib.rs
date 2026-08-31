@@ -12,7 +12,7 @@ use dolang::{
         error::ErrorKind,
         strand::Redirect,
         unpack,
-        value::{Empty, Root},
+        value::{Empty, Nil, Root},
         vm,
     },
 };
@@ -46,6 +46,18 @@ pub trait Config: Send + Sync + 'static {
     fn default_entrypoint(&self) -> Option<&str> {
         None
     }
+}
+
+/// Unpack the single name argument of a bundled resource lookup.
+fn bundled_name<'v, 's>(
+    strand: &mut runtime::Strand<'v, 's>,
+    args: runtime::Args<'v, '_>,
+) -> runtime::Result<'v, 's, String> {
+    let ([name], []) = unpack!(strand, args, 1, 0)?;
+    let name = name
+        .as_str(strand)
+        .ok_or_else(|| RuntimeError::type_error(strand, "name must be a Str"))?;
+    Ok(name.to_string())
 }
 
 fn get_action(cli: &Cli) -> Action {
@@ -172,6 +184,8 @@ fn run(config: Arc<dyn Config>) -> Outcome {
             let compile_prelude = cli.prelude.clone();
             let importer_config = config.clone();
             let batch_config = config.clone();
+            let module_config = config.clone();
+            let entrypoint_config = config.clone();
 
             builder
                 .module("_shell")
@@ -189,6 +203,22 @@ fn run(config: Arc<dyn Config>) -> Outcome {
                     )
                     .await?;
                     Output::set(strand, out, bytecode.as_slice());
+                    Ok(())
+                })
+                .function("bundled_module", async move |strand, args, out| {
+                    let name = bundled_name(strand, args)?;
+                    match module_config.bundled_module(&name) {
+                        Some(bytecode) => Output::set(strand, out, bytecode),
+                        None => Output::set(strand, out, Nil),
+                    }
+                    Ok(())
+                })
+                .function("bundled_entrypoint", async move |strand, args, out| {
+                    let name = bundled_name(strand, args)?;
+                    match entrypoint_config.bundled_entrypoint(&name) {
+                        Some(bytecode) => Output::set(strand, out, bytecode),
+                        None => Output::set(strand, out, Nil),
+                    }
                     Ok(())
                 })
                 .commit()
