@@ -315,6 +315,20 @@ pub(crate) fn create_sid<'v>(
         });
 }
 
+pub(crate) fn as_windows_sid<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    value: &Value<'v>,
+) -> Option<VfsSid> {
+    let global = strand.state::<Global<'v>>();
+    let sid = global.types.sid.cast(value)?;
+    sid.enter_sync(strand, |_strand, sid| Some(sid.annex().clone()))
+}
+
+pub(crate) fn windows_sid<'v>(strand: &mut Strand<'v, '_>, sid: VfsSid, out: &mut Slot<'v, '_>) {
+    let global = strand.state::<Global<'v>>();
+    create_sid(strand, global, sid, out);
+}
+
 /// Do spellings of the SIDs that are the same on every Windows installation.
 ///
 /// Names follow the Windows account or group they identify. A SID that is

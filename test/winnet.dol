@@ -1,0 +1,159 @@
+import winnet rand sys
+  testlib.vfs:
+    - vfs
+  security.windows:
+    - Sid
+  std:
+    - Bool
+    - Int
+  sys:
+    - NotFoundError
+    - PermissionDeniedError
+    - UnsupportedError
+  test:
+    - assert
+    - assert_eq
+    - assert_throws
+    - assert_type
+    - fixture
+    - skip
+    - test
+  time:
+    - DateTime
+    - Duration
+
+let now_nanos = DateTime.now().unix_nanos
+let expires = DateTime.from_unix
+  nanos: (now_nanos - now_nanos % 1000000000 + 365 * 86400 * 1000000000)
+
+def delete_if_present name
+  try
+    winnet.user(name).delete()
+  catch NotFoundError: _
+    nil
+
+#[fixture]
+def scratch_user block ...rest
+  if (sys.os_info().family != :WINDOWS:)
+    skip "requires Windows NetAPI"
+  if sys.os_info().is_wine
+    skip "Wine does not implement NetUserGetInfo level 4 or NetUserSetInfo"
+
+  # NetAPI user names are limited to 20 characters. A random suffix keeps
+  # concurrent test variants from sharing an account.
+  let name = "do-test-$(rand.string 10)"
+  let password = "Do!$(rand.string 16)9"
+  let user = try
+    winnet.create_user $name
+      :password
+      full_name: "Do winnet test"
+      comment: "created by test/winnet.dol"
+      user_comment: scratch
+      home_dir: r"C:\Users\do-test"
+      home_dir_drive: "Z:"
+      profile: r"C:\Users\do-test\profile"
+      script_path: "login.cmd"
+      account_expires: $expires
+      disabled: true
+      password_never_expires: false
+      password_cannot_change: false
+  catch PermissionDeniedError: _
+    skip "requires permission to manage local users"
+
+  try
+    block $user ...rest
+  finally
+    delete_if_present $name
+
+#[test]
+#[vfs]
+def unsupported_without_windows_backend()
+  if (sys.os_info().family == :WINDOWS:)
+    skip "only exercises the non-Windows backend"
+  assert_throws $UnsupportedError do
+    [...winnet.users()]
+  assert_throws $UnsupportedError do
+    winnet.user "Administrator"
+
+#[test]
+#[vfs]
+#[scratch_user]
+def local_user_lifecycle user
+  let name = user.name
+  let replacement_password = "Do!$(rand.string 16)8"
+
+  assert_type $winnet.User $user
+  assert_eq $user.name $name
+  assert_type $Sid $user.sid
+
+  # Lookup by both cached name and stable SID identifies the same account.
+  let by_name = winnet.user $name
+  let by_sid = winnet.user $user.sid
+  assert_eq $by_name.name $name
+  assert_eq (str by_name.sid) (str user.sid)
+  assert_eq $by_sid.name $name
+  assert_eq (str by_sid.sid) (str user.sid)
+
+  # Enumeration is a forward iterator and includes the scratch account.
+  let found = [...winnet.users()].any(do |entry| (entry.name == name))
+  assert $found "scratch user $name missing from users()"
+
+  let initial = user.info()
+  assert_type $winnet.UserInfo $initial
+  assert_eq $initial.name $name
+  assert_eq $initial.full_name "Do winnet test"
+  assert_eq $initial.comment "created by test/winnet.dol"
+  assert_eq $initial.user_comment scratch
+  assert_eq $initial.home_dir r"C:\Users\do-test"
+  assert_eq $initial.home_dir_drive "Z:"
+  assert_eq $initial.profile r"C:\Users\do-test\profile"
+  assert_eq $initial.script_path "login.cmd"
+  assert_eq $initial.account_expires $expires
+  assert_eq $initial.disabled true
+  assert_eq $initial.password_never_expires false
+  assert_eq $initial.password_cannot_change false
+  assert_type $winnet.UserFlags $initial.flags
+  assert_type $Int $initial.flags.int
+  assert_type $Duration $initial.password_age
+  assert_type $Bool $initial.password_expired
+  assert_type $Int $initial.bad_password_count
+  assert_type $Int $initial.logon_count
+
+  # Each flag patch preserves semantic flags which were not mentioned.
+  let never_expires = user.update password_never_expires: true
+  assert_eq $never_expires.disabled true
+  assert_eq $never_expires.password_never_expires true
+  let enabled = user.update disabled: false
+  assert_eq $enabled.disabled false
+  assert_eq $enabled.password_never_expires true
+  let cannot_change = user.update password_cannot_change: true
+  assert_eq $cannot_change.disabled false
+  assert_eq $cannot_change.password_never_expires true
+  assert_eq $cannot_change.password_cannot_change true
+
+  # Omitted fields remain unchanged, while nil clears nullable fields.
+  let updated = user.update
+    password: $replacement_password
+    full_name: "Updated Do user"
+    comment: nil
+    user_comment: nil
+    home_dir: nil
+    home_dir_drive: nil
+    profile: nil
+    script_path: nil
+    account_expires: nil
+  assert_eq $updated.full_name "Updated Do user"
+  assert_eq $updated.comment nil
+  assert_eq $updated.user_comment nil
+  assert_eq $updated.home_dir nil
+  assert_eq $updated.home_dir_drive nil
+  assert_eq $updated.profile nil
+  assert_eq $updated.script_path nil
+  assert_eq $updated.account_expires nil
+  assert_eq $updated.disabled false
+  assert_eq $updated.password_never_expires true
+  assert_eq $updated.password_cannot_change true
+
+  user.delete()
+  assert_throws $NotFoundError do
+    winnet.user $name

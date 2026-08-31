@@ -1,5 +1,7 @@
 #![deny(warnings)]
 
+#[cfg(feature = "winnet")]
+extern crate dolang_vfs_winnet;
 #[cfg(feature = "winreg")]
 extern crate dolang_vfs_winreg;
 #[cfg(feature = "winscm")]

@@ -147,6 +147,41 @@ pub fn datetime<'v>(
     Ok(())
 }
 
+/// Constructs a Do `time.Duration` from a Rust duration.
+pub fn duration<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    duration: std::time::Duration,
+    out: impl Output<'v>,
+) -> Result<'v, 's, ()> {
+    let global = strand.state::<Global<'v>>();
+    let total_nanos =
+        i128::from(duration.as_secs()) * 1_000_000_000 + i128::from(duration.subsec_nanos());
+    global.types.duration.create_with_annex(
+        strand,
+        time::Duration,
+        time::DurationAnnex::from_total_nanos(total_nanos),
+        out,
+    );
+    Ok(())
+}
+
+/// Extracts a `security.windows.Sid` runtime value.
+pub fn as_windows_sid<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    value: &Value<'v>,
+) -> Option<dolang_winterop::security::Sid> {
+    security::as_windows_sid(strand, value)
+}
+
+/// Constructs a `security.windows.Sid` runtime value.
+pub fn windows_sid<'v>(
+    strand: &mut Strand<'v, '_>,
+    sid: dolang_winterop::security::Sid,
+    out: &mut dolang::runtime::Slot<'v, '_>,
+) {
+    security::windows_sid(strand, sid, out);
+}
+
 /// Get current working directory of strand
 pub fn cwd<'v>(strand: &Strand<'v, '_>) -> PathBuf {
     let global = strand.state::<Global<'v>>();
