@@ -526,7 +526,6 @@ macro_rules! impl_concrete_path {
                 let replace = builder.sym("replace");
                 let mode = builder.sym("mode");
                 let data_kw = builder.sym("data");
-                let user = builder.sym("user");
                 let owner = builder.sym("owner");
                 let group = builder.sym("group");
                 let dacl = builder.sym("dacl");
@@ -937,7 +936,7 @@ macro_rules! impl_concrete_path {
                             [],
                             [
                                 mode,
-                                user,
+                                owner,
                                 group,
                                 modified,
                                 accessed,
@@ -977,7 +976,7 @@ macro_rules! impl_concrete_path {
                             0,
                             0,
                             mode = None,
-                            user = None,
+                            owner = None,
                             group = None,
                             modified = None,
                             accessed = None,
@@ -1047,7 +1046,7 @@ macro_rules! impl_concrete_path {
                         let patch = super::metadata_patch(
                             strand,
                             global,
-                            [mode, user, group],
+                            [mode, owner, group],
                             [modified, accessed, created],
                             resolve,
                             attrs,

@@ -330,7 +330,7 @@ fn parse_mode<'v, 's>(
 fn metadata_patch<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    [mode, user, group]: [Option<Slot<'v, '_>>; 3],
+    [mode, owner, group]: [Option<Slot<'v, '_>>; 3],
     [modified, accessed, created]: [Option<Slot<'v, '_>>; 3],
     resolve: Option<Slot<'v, '_>>,
     attrs: Vec<(AttrFlags, Option<bool>)>,
@@ -338,8 +338,8 @@ fn metadata_patch<'v, 's>(
     let mode = mode
         .map(|mode| parse_mode(strand, global, mode))
         .transpose()?;
-    let user = user
-        .map(|user| parse_ownership_identity(strand, global, &user, "user"))
+    let owner = owner
+        .map(|owner| parse_ownership_identity(strand, global, &owner, "owner"))
         .transpose()?;
     let group = group
         .map(|group| parse_ownership_identity(strand, global, &group, "group"))
@@ -352,8 +352,8 @@ fn metadata_patch<'v, 's>(
     if let Some(mode) = mode {
         patch.mode(mode);
     }
-    if let Some(user) = user {
-        patch.user(user);
+    if let Some(owner) = owner {
+        patch.user(owner);
     }
     if let Some(group) = group {
         patch.group(group);
@@ -788,7 +788,7 @@ fn parse_ownership_identity<'v, 's>(
         Err(Error::type_error(
             strand,
             match field {
-                "user" => "user: expected Int, str, or security.Sid",
+                "owner" => "owner: expected Int, str, or security.Sid",
                 "group" => "group: expected Int, str, or security.Sid",
                 _ => "expected Int, str, or security.Sid",
             },
@@ -973,7 +973,6 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
     let resolve = builder.sym("resolve");
     let mode = builder.sym("mode");
     let data_kw = builder.sym("data");
-    let user = builder.sym("user");
     let owner = builder.sym("owner");
     let group = builder.sym("group");
     let dacl = builder.sym("dacl");
@@ -1201,7 +1200,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 [],
                 [
                     mode,
-                    user,
+                    owner,
                     group,
                     modified,
                     accessed,
@@ -1242,7 +1241,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 0,
                 0,
                 mode = None,
-                user = None,
+                owner = None,
                 group = None,
                 modified = None,
                 accessed = None,
@@ -1312,7 +1311,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             let patch = metadata_patch(
                 strand,
                 global,
-                [mode, user, group],
+                [mode, owner, group],
                 [modified, accessed, created],
                 resolve,
                 attrs,

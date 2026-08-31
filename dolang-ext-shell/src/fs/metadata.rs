@@ -212,7 +212,7 @@ impl<'v> Object<'v> for Metadata {
         let freebsd_attrs = builder.sym("freebsd_attrs");
         let linux_attrs = builder.sym("linux_attrs");
         let macos_attrs = builder.sym("macos_attrs");
-        let user = builder.sym("user");
+        let owner = builder.sym("owner");
         let group = builder.sym("group");
         let readonly = builder.sym("readonly");
         let hidden = builder.sym("hidden");
@@ -353,29 +353,30 @@ impl<'v> Object<'v> for Metadata {
                     out,
                 )
             })
-            .get("user", move |this, strand, mut out| {
+            // `owner`/`group` are the portable view of ownership that
+            // `set_metadata` also accepts: a `Sid` on Windows, a uid/gid on
+            // Unix, where they mirror `uid`/`gid`.
+            .get("owner", move |this, strand, mut out| {
                 let annex = this.annex();
-                let Some(value) = annex
-                    .inner
-                    .windows()
-                    .and_then(|value| value.user().cloned())
-                else {
-                    return Err(Error::field(strand, user));
-                };
-                crate::security::create_sid(strand, annex.global, value, &mut out);
-                Ok(())
+                if let Some(windows) = annex.inner.windows() {
+                    let Some(value) = windows.user().cloned() else {
+                        return Err(Error::field(strand, owner));
+                    };
+                    crate::security::create_sid(strand, annex.global, value, &mut out);
+                    return Ok(());
+                }
+                util::option_field(strand, annex.inner.unix().map(|v| v.uid()), owner, out)
             })
             .get("group", move |this, strand, mut out| {
                 let annex = this.annex();
-                let Some(value) = annex
-                    .inner
-                    .windows()
-                    .and_then(|value| value.group().cloned())
-                else {
-                    return Err(Error::field(strand, group));
-                };
-                crate::security::create_sid(strand, annex.global, value, &mut out);
-                Ok(())
+                if let Some(windows) = annex.inner.windows() {
+                    let Some(value) = windows.group().cloned() else {
+                        return Err(Error::field(strand, group));
+                    };
+                    crate::security::create_sid(strand, annex.global, value, &mut out);
+                    return Ok(());
+                }
+                util::option_field(strand, annex.inner.unix().map(|v| v.gid()), group, out)
             })
             .get("linux_attrs", move |this, strand, out| {
                 let annex = this.annex();

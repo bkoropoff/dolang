@@ -21,6 +21,13 @@ Last access time as [`DateTime`](../time/datetime.md).
 
 Creation or status-change time as [`DateTime`](../time/datetime.md).
 
+### `group`
+
+Owning group: the gid as an [`Int`](../std/int.md) on Unix, or the primary group
+[`Sid`](../security/windows/sid.md) on Windows. This is the portable view of
+ownership, in the form [`set_metadata`](./index.md#set_metadata-resolve-paths)
+accepts for its `group` argument.
+
 ### `modified`
 
 Last modification time as [`DateTime`](../time/datetime.md).
@@ -34,6 +41,13 @@ File size in bytes.
 File type as a [`Sym`](../std/sym.md): `:FILE:`, `:DIR:`, `:SYMLINK:`,
 `:FIFO:`, `:CHAR_DEVICE:`, `:BLOCK_DEVICE:`, `:SOCKET:`, or `:UNKNOWN:`.
 
+### `owner`
+
+Owner: the uid as an [`Int`](../std/int.md) on Unix, or the owner
+[`Sid`](../security/windows/sid.md) on Windows. This is the portable view of
+ownership, in the form [`set_metadata`](./index.md#set_metadata-resolve-paths)
+accepts for its `owner` argument.
+
 ## Windows-Only Fields
 
 ### `archive`
@@ -43,10 +57,6 @@ Whether the archive attribute is set.
 ### `encrypted`
 
 Whether the encrypted attribute is set.
-
-### `group`
-
-Primary group [`Sid`](../security/windows/sid.md).
 
 ### `not_content_indexed`
 
@@ -75,10 +85,6 @@ Whether the system attribute is set.
 ### `temporary`
 
 Whether the temporary attribute is set.
-
-### `user`
-
-Owner [`Sid`](../security/windows/sid.md).
 
 ### `win_attrs`
 
@@ -208,7 +214,7 @@ Inode number.
 
 ### `mode`
 
-Stat mode bits.
+Permissions and file type as a [`fs.unix.Mode`](./unix/mode.md).
 
 ### `nlink`
 

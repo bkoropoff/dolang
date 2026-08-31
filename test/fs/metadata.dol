@@ -99,6 +99,10 @@ def unix_fields()
     assert (meta.nlink >= 1)
     assert (meta.uid >= 0)
     assert (meta.gid >= 0)
+    assert_type $Int $meta.owner
+    assert_type $Int $meta.group
+    assert_eq $meta.owner $meta.uid
+    assert_eq $meta.group $meta.gid
     assert (meta.rdev >= 0)
     assert (meta.blksize >= 0)
     assert (meta.blocks >= 0)
@@ -118,7 +122,7 @@ def windows_attrs()
   open $test_path r do |f|
     let meta = f.metadata()
     assert_type $Metadata $meta
-    assert_type $Sid $meta.user
+    assert_type $Sid $meta.owner
     assert_type $Sid $meta.group
     assert_type $Int $meta.win_attrs
     assert_type $Bool $meta.readonly

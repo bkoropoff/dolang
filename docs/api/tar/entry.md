@@ -52,7 +52,7 @@ Entry type as `:FILE:`, `:DIR:`, `:HARDLINK:`, `:SYMLINK:`, `:FIFO:`,
 
 Numeric owner ID.
 
-### `user_name`
+### `owner_name`
 
 Owner name, or `nil` when absent.
 
