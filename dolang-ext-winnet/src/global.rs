@@ -1,4 +1,7 @@
-use crate::user::{User, UserFlags, UserInfo, Users};
+use crate::{
+    group::{Group, GroupInfo, GroupMembers, Groups},
+    user::{User, UserFlags, UserInfo, Users},
+};
 use dolang::runtime::{
     Sym, Type,
     vm::{Builder, Stateful},
@@ -9,6 +12,11 @@ pub(crate) struct Global<'v> {
     pub(crate) info: Type<'v, UserInfo>,
     pub(crate) flags: Type<'v, UserFlags>,
     pub(crate) users: Type<'v, Users>,
+    pub(crate) group: Type<'v, Group>,
+    pub(crate) group_info: Type<'v, GroupInfo>,
+    pub(crate) groups: Type<'v, Groups>,
+    pub(crate) group_members: Type<'v, GroupMembers>,
+    pub(crate) name: Sym<'v, 'v>,
     pub(crate) password: Sym<'v, 'v>,
     pub(crate) full_name: Sym<'v, 'v>,
     pub(crate) comment: Sym<'v, 'v>,
@@ -33,6 +41,11 @@ impl<'v> Global<'v> {
             info: builder.register_type(),
             flags: builder.register_type(),
             users: builder.register_type(),
+            group: builder.register_type(),
+            group_info: builder.register_type(),
+            groups: builder.register_type(),
+            group_members: builder.register_type(),
+            name: builder.sym("name"),
             password: builder.sym("password"),
             full_name: builder.sym("full_name"),
             comment: builder.sym("comment"),

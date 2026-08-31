@@ -5,7 +5,7 @@ use dolang::runtime::{
     object::TypeBuilder,
     unpack,
     value::{Nil, TypeObject},
-    vm::Builder,
+    vm::ModuleBuilder,
 };
 use dolang_ext_shell::ResultExt;
 use dolang_vfs_winnet::{UserCreate, UserUpdate};
@@ -67,6 +67,7 @@ fn nullable_time<'v, 's>(
 #[allow(clippy::too_many_arguments)]
 fn update_from_slots<'v, 's>(
     strand: &mut Strand<'v, 's>,
+    name: Option<Slot<'v, '_>>,
     password: Option<Slot<'v, '_>>,
     full_name: Option<Slot<'v, '_>>,
     comment: Option<Slot<'v, '_>>,
@@ -81,6 +82,14 @@ fn update_from_slots<'v, 's>(
     password_cannot_change: Option<Slot<'v, '_>>,
 ) -> Result<'v, 's, UserUpdate> {
     let mut update = UserUpdate::default();
+    if let Some(value) = name {
+        update = update.name(
+            value
+                .as_str(strand)
+                .ok_or_else(|| Error::type_error(strand, "name must be a Str"))?
+                .to_string(),
+        );
+    }
     macro_rules! nullable_text {
         ($slot:expr, $method:ident, $name:literal) => {
             if let Some(value) = $slot {
@@ -160,14 +169,6 @@ impl<'v> Object<'v> for User {
     type TypeAnnex = ();
     fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
         builder
-            .get("name", |this, strand, out| {
-                let b = this.borrow(strand)?;
-                let u =
-                    b.0.as_ref()
-                        .ok_or_else(|| Error::state_error(strand, "user was deleted"))?;
-                Output::set(strand, out, u.name());
-                Ok(())
-            })
             .get("sid", |this, strand, mut out| {
                 let b = this.borrow(strand)?;
                 let u =
@@ -192,6 +193,7 @@ impl<'v> Object<'v> for User {
             })
             .method("update", async move |this, strand, args, out| {
                 let global = strand.state::<Global<'v>>();
+                let name_sym = global.name;
                 let password_sym = global.password;
                 let full_name_sym = global.full_name;
                 let comment_sym = global.comment;
@@ -207,6 +209,7 @@ impl<'v> Object<'v> for User {
                 let (
                     [],
                     [
+                        name,
                         password,
                         full_name,
                         comment,
@@ -225,6 +228,7 @@ impl<'v> Object<'v> for User {
                     args,
                     0,
                     0,
+                    name_sym = None,
                     password_sym = None,
                     full_name_sym = None,
                     comment_sym = None,
@@ -240,6 +244,7 @@ impl<'v> Object<'v> for User {
                 )?;
                 let update = update_from_slots(
                     strand,
+                    name,
                     password,
                     full_name,
                     comment,
@@ -307,7 +312,7 @@ impl<'v> Object<'v> for Users {
             .await
             .into_sys(strand)?;
         if let Some(user) = user {
-            make_user(strand, *this.annex(), user, out);
+            make_info(strand, *this.annex(), user, out);
             Ok(true)
         } else {
             Ok(false)
@@ -337,6 +342,10 @@ impl<'v> Object<'v> for UserInfo {
     type TypeAnnex = ();
     fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
         builder
+            .get("sid", |this, strand, mut out| {
+                dolang_ext_shell::windows_sid(strand, this.annex().info.sid.clone(), &mut out);
+                Ok(())
+            })
             .get("name", |this, strand, out| {
                 Output::set(strand, out, this.annex().info.name.as_str());
                 Ok(())
@@ -439,8 +448,14 @@ impl<'v> Object<'v> for UserInfo {
 
 fn principal<'v, 's>(
     strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
     value: &Value<'v>,
 ) -> Result<'v, 's, ResultPrincipal> {
+    if let Some(info) = global.info.cast(value) {
+        return Ok(ResultPrincipal::Info(Box::new(
+            info.enter_sync(strand, |_, info| info.annex().info.clone()),
+        )));
+    }
     if let Some(name) = value.as_str(strand) {
         return Ok(ResultPrincipal::Name(name.to_string()));
     }
@@ -455,20 +470,24 @@ fn principal<'v, 's>(
 enum ResultPrincipal {
     Name(String),
     Sid(dolang_winterop::security::Sid),
+    Info(Box<dolang_vfs_winnet::UserInfo>),
 }
 
-pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Global<'v>>) {
-    builder
-        .module("winnet")
+pub(crate) fn configure_module<'v, 'a>(
+    module: ModuleBuilder<'v, 'a>,
+    global: State<'v, Global<'v>>,
+) -> ModuleBuilder<'v, 'a> {
+    module
         .value("User", global.user)
         .value("UserInfo", global.info)
         .value("UserFlags", global.flags)
         .function("user", async move |strand, args, out| {
             let ([value], []) = unpack!(strand, args, 1, 0)?;
             let vfs = dolang_ext_shell::vfs(strand);
-            let user = match principal(strand, &value)? {
+            let user = match principal(strand, global, &value)? {
                 ResultPrincipal::Name(name) => dolang_vfs_winnet::User::by_name(&vfs, &name).await,
                 ResultPrincipal::Sid(sid) => dolang_vfs_winnet::User::by_sid(&vfs, &sid).await,
+                ResultPrincipal::Info(info) => Ok(dolang_vfs_winnet::User::from_info(&vfs, &info)),
             }
             .into_sys(strand)?;
             make_user(strand, global, user, out);
@@ -487,6 +506,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             Ok(())
         })
         .function("create_user", async move |strand, args, out| {
+            let name_sym = global.name;
             let password_sym = global.password;
             let full_name_sym = global.full_name;
             let comment_sym = global.comment;
@@ -517,8 +537,9 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             ) = unpack!(
                 strand,
                 args,
-                1,
                 0,
+                0,
+                name_sym,
                 password_sym,
                 full_name_sym = None,
                 comment_sym = None,
@@ -542,6 +563,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 .to_string();
             let update = update_from_slots(
                 strand,
+                None,
                 None,
                 full_name,
                 comment,
@@ -568,5 +590,4 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             make_user(strand, global, user, out);
             Ok(())
         })
-        .commit();
 }

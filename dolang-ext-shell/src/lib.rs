@@ -182,6 +182,16 @@ pub fn windows_sid<'v>(
     security::windows_sid(strand, sid, out);
 }
 
+/// Constructs a `security.windows.SidName` runtime value.
+pub fn windows_sid_name<'v>(
+    strand: &mut Strand<'v, '_>,
+    name: dolang_vfs::security::SidName,
+    out: &mut dolang::runtime::Slot<'v, '_>,
+) {
+    let global = strand.state::<Global<'v>>();
+    security::create_sid_name(strand, global, name, out);
+}
+
 /// Get current working directory of strand
 pub fn cwd<'v>(strand: &Strand<'v, '_>) -> PathBuf {
     let global = strand.state::<Global<'v>>();
