@@ -3376,6 +3376,55 @@ impl<'v> Object<'v> for TokenInfo {
     }
 }
 
+/// Builds a `security.windows.TokenInfo` around `info`.
+///
+/// The three mandatory SIDs and the optional logon SID become `Sid` objects
+/// rooted in slots 0-3; `groups` is projected from the annex on demand, so it
+/// needs no slot of its own.
+pub(crate) fn create_token_info<'v>(
+    strand: &mut Strand<'v, '_>,
+    global: State<'v, Global<'v>>,
+    info: &WindowsTokenInfo,
+    out: &mut Slot<'v, '_>,
+) {
+    strand.with_slots_sync(|strand, [mut sid]| {
+        global
+            .types
+            .token_info
+            .create_with_annex(strand, TokenInfo, info.clone(), &mut *out);
+        global
+            .types
+            .token_info
+            .cast(out)
+            .unwrap()
+            .enter_sync(strand, |strand, this| {
+                for (index, value) in [
+                    (0, info.user_sid().clone()),
+                    (1, info.owner_sid().clone()),
+                    (2, info.primary_group_sid().clone()),
+                ] {
+                    create_sid(strand, global, value, &mut sid);
+                    let mut borrow = this.borrow_mut_unwrap();
+                    match index {
+                        0 => Output::set(strand, Mut::slot_mut::<0>(&mut borrow), &sid),
+                        1 => Output::set(strand, Mut::slot_mut::<1>(&mut borrow), &sid),
+                        2 => Output::set(strand, Mut::slot_mut::<2>(&mut borrow), &sid),
+                        _ => unreachable!(),
+                    }
+                }
+
+                if let Some(logon_sid) = info.logon_sid().cloned() {
+                    create_sid(strand, global, logon_sid, &mut sid);
+                    Output::set(
+                        strand,
+                        Mut::slot_mut::<3>(&mut this.borrow_mut_unwrap()),
+                        &sid,
+                    );
+                }
+            });
+    });
+}
+
 pub(super) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Global<'v>>) {
     builder
         .module("security.windows")
@@ -3419,53 +3468,14 @@ pub(super) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 Ok(())
             },
         )
-        .function_with_slots(
-            "token_info",
-            async move |strand, args, mut out, [mut sid]| {
-                let ([], []) = unpack!(strand, args, 0, 0)?;
-                let security = security_info(strand, global)?;
-                let Some(info) = security.windows() else {
-                    return Err(Error::not_supported(strand));
-                };
-
-                global.types.token_info.create_with_annex(
-                    strand,
-                    TokenInfo,
-                    info.clone(),
-                    &mut out,
-                );
-                global
-                    .types
-                    .token_info
-                    .cast(&out)
-                    .unwrap()
-                    .enter_sync(strand, |strand, this| {
-                        for (slot, value) in [
-                            (0, info.user_sid().clone()),
-                            (1, info.owner_sid().clone()),
-                            (2, info.primary_group_sid().clone()),
-                        ] {
-                            create_sid(strand, global, value, &mut sid);
-                            let mut borrow = this.borrow_mut_unwrap();
-                            match slot {
-                                0 => Output::set(strand, Mut::slot_mut::<0>(&mut borrow), &sid),
-                                1 => Output::set(strand, Mut::slot_mut::<1>(&mut borrow), &sid),
-                                2 => Output::set(strand, Mut::slot_mut::<2>(&mut borrow), &sid),
-                                _ => unreachable!(),
-                            }
-                        }
-
-                        if let Some(logon_sid) = info.logon_sid().cloned() {
-                            create_sid(strand, global, logon_sid, &mut sid);
-                            Output::set(
-                                strand,
-                                Mut::slot_mut::<3>(&mut this.borrow_mut_unwrap()),
-                                &sid,
-                            );
-                        }
-                    });
-                Ok(())
-            },
-        )
+        .function("token_info", async move |strand, args, mut out| {
+            let ([], []) = unpack!(strand, args, 0, 0)?;
+            let security = security_info(strand, global)?;
+            let Some(info) = security.windows() else {
+                return Err(Error::not_supported(strand));
+            };
+            create_token_info(strand, global, info, &mut out);
+            Ok(())
+        })
         .commit();
 }

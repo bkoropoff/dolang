@@ -52,24 +52,24 @@ use crate::{
     metadata::{FsMetadata, Metadata, MetadataPatch},
     path::WellKnownPath,
     process::{
-        self, ProcessControl, ProcessStatus, StdioRecv, StdioRecvInner, StdioSend, StdioSendInner,
-        TerminationPolicy,
+        self, ProcessControl, ProcessExit, ProcessInfo, ProcessStatus, StartTime, StdioRecv,
+        StdioRecvInner, StdioSend, StdioSendInner, TerminationPolicy,
     },
     protocol::{
         AccessRequest, AclRequest, CanonicalizeRequest, CopyRequest, CreateDirRequest,
         ExtensionRequest, ExtensionResponse, FsMetadataRequest, GlobRequest, HardLinkRequest,
         MetadataRequest, MoveRequest, OpenFlags, OpenHandle, OpenRequest, OpenVfsHandle,
-        QueryResponse, ReadLinkRequest, RemoveDirRequest, RemoveRequest, RenameRequest, Request,
-        RequestKind, ResponseKind, SecDescRequest, SetAclRequest, SetMetadataRequest,
-        SetSecDescRequest, SetXattrRequest, SpawnRequest, StdioRecvTarget, StdioSendTarget,
-        StreamsRequest, SymlinkKind, SymlinkRequest, UnixVfsRequest, VfsProtocol,
+        ProcessPage, QueryResponse, ReadLinkRequest, RemoveDirRequest, RemoveRequest,
+        RenameRequest, Request, RequestKind, ResponseKind, SecDescRequest, SetAclRequest,
+        SetMetadataRequest, SetSecDescRequest, SetXattrRequest, SpawnRequest, StdioRecvTarget,
+        StdioSendTarget, StreamsRequest, SymlinkKind, SymlinkRequest, UnixVfsRequest, VfsProtocol,
         WellKnownPathRequest, WindowsAdminRequest, WirePath, XattrNamespaceRequest, XattrRequest,
         XattrsRequest, rpc_builder,
     },
     security::{Acl, AclKind, PrincipalId, PrincipalIdKind, SecurityInfo, SidName},
     session::{
-        ChildMarker, FileLockMarker, FileMarker, Query, ReadDirMarker, StdioRecvMarker,
-        StdioSendMarker, VfsMarker,
+        ChildMarker, FileLockMarker, FileMarker, ProcessEnumMarker, ProcessMarker, Query,
+        ReadDirMarker, StdioRecvMarker, StdioSendMarker, VfsMarker,
     },
     target::TargetInfo,
 };
@@ -168,6 +168,199 @@ impl Drop for ReadDir {
             let _ = client
                 .request(RequestKind::ReadDirClose {
                     read_dir: read_dir.cite(),
+                })
+                .await;
+        });
+    }
+}
+
+/// Client half of [`crate::process::Processes`].
+///
+/// Buffers a page at a time, same as [`ReadDir`]: the peer decides how much to
+/// send, and everything until the page is drained is answered locally.
+pub(crate) struct Processes {
+    client: Client,
+    handle: Option<Gift<ProcessEnumMarker>>,
+    entries: VecDeque<ProcessInfo>,
+}
+
+impl Processes {
+    fn new(client: Client, handle: Gift<ProcessEnumMarker>) -> Self {
+        Self {
+            client,
+            handle: Some(handle),
+            entries: VecDeque::new(),
+        }
+    }
+
+    pub(crate) async fn next_entry(&mut self) -> Result<Option<ProcessInfo>> {
+        loop {
+            if let Some(entry) = self.entries.pop_front() {
+                return Ok(Some(entry));
+            }
+            let Some(handle) = self.handle.as_ref().map(Gift::cite) else {
+                return Ok(None);
+            };
+            match self
+                .client
+                .request(RequestKind::ProcessEnumerateNext { processes: handle })
+                .await?
+            {
+                ResponseKind::ProcessEnumerateNext(ProcessPage { entries, done }) => {
+                    if done {
+                        self.handle = None;
+                    }
+                    // A page can come back empty without being the last one:
+                    // the peer stops filling it when its payload budget is
+                    // spent, and entries that vanished mid-enumeration are
+                    // dropped rather than counted, so an unlucky page can lose
+                    // every candidate it looked at.
+                    self.entries = entries.into();
+                }
+                response => return Err(unexpected(response).into()),
+            }
+        }
+    }
+}
+
+impl Drop for Processes {
+    fn drop(&mut self) {
+        let Some(processes) = self.handle.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let client = self.client.clone();
+        runtime.spawn(async move {
+            let _ = client
+                .request(RequestKind::ProcessEnumerateClose {
+                    processes: processes.cite(),
+                })
+                .await;
+        });
+    }
+}
+
+/// Client half of [`crate::process::Process`].
+pub(crate) struct Process {
+    client: Client,
+    handle: Option<Gift<ProcessMarker>>,
+}
+
+impl Process {
+    fn new(client: Client, handle: Gift<ProcessMarker>) -> Self {
+        Self {
+            client,
+            handle: Some(handle),
+        }
+    }
+
+    /// Cites the peer's handle, or reports that this one has been closed.
+    ///
+    /// Only [`Process::close`] can produce the closed state, and it consumes
+    /// the value, so this fails for exactly one caller: a `close` that raced
+    /// with an operation started before it.
+    fn cite(&self) -> Result<Cite<ProcessMarker>> {
+        self.handle
+            .as_ref()
+            .map(Gift::cite)
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "process handle is closed"))
+    }
+
+    pub(crate) async fn info(&self) -> Result<ProcessInfo> {
+        match self
+            .client
+            .request(RequestKind::ProcessInfo {
+                process: self.cite()?,
+            })
+            .await?
+        {
+            ResponseKind::ProcessInfo(info) => Ok(info),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    pub(crate) async fn signal(&self, signal: process::Signal) -> Result<()> {
+        match self
+            .client
+            .request(RequestKind::ProcessSignal {
+                process: self.cite()?,
+                signal,
+            })
+            .await?
+        {
+            ResponseKind::ProcessSignal => Ok(()),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    pub(crate) async fn terminate(&self) -> Result<()> {
+        match self
+            .client
+            .request(RequestKind::ProcessTerminate {
+                process: self.cite()?,
+            })
+            .await?
+        {
+            ResponseKind::ProcessTerminate => Ok(()),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    pub(crate) async fn kill(&self) -> Result<()> {
+        match self
+            .client
+            .request(RequestKind::ProcessKill {
+                process: self.cite()?,
+            })
+            .await?
+        {
+            ResponseKind::ProcessKill => Ok(()),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    pub(crate) async fn wait(&self) -> Result<ProcessExit> {
+        match self
+            .client
+            .request(RequestKind::ProcessWait {
+                process: self.cite()?,
+            })
+            .await?
+        {
+            ResponseKind::ProcessWait(exit) => Ok(exit),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    pub(crate) async fn close(mut self) -> Result<()> {
+        let process = self.cite()?;
+        self.handle = None;
+        match self
+            .client
+            .request(RequestKind::ProcessClose { process })
+            .await?
+        {
+            ResponseKind::ProcessClose => Ok(()),
+            response => Err(unexpected(response).into()),
+        }
+    }
+}
+
+impl Drop for Process {
+    fn drop(&mut self) {
+        let Some(process) = self.handle.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let client = self.client.clone();
+        runtime.spawn(async move {
+            let _ = client
+                .request(RequestKind::ProcessClose {
+                    process: process.cite(),
                 })
                 .await;
         });
@@ -1272,6 +1465,7 @@ fn ack_write(cursor: &mut u64, response: ResponseKind) -> io::Result<usize> {
 
 fn query_from_wire(response: QueryResponse) -> Query {
     let QueryResponse {
+        session,
         env,
         cwd,
         current_exe,
@@ -1280,6 +1474,7 @@ fn query_from_wire(response: QueryResponse) -> Query {
         extensions,
     } = response;
     Query {
+        session,
         env,
         cwd: cwd.into(),
         current_exe: current_exe.into(),
@@ -2581,6 +2776,10 @@ impl Client {
         self.shared.query.cwd.to_path()
     }
 
+    pub fn session(&self) -> uuid::Uuid {
+        self.shared.query.session
+    }
+
     pub fn current_exe(&self) -> Utf8TypedPath<'_> {
         self.shared.query.current_exe.to_path()
     }
@@ -2724,6 +2923,32 @@ impl Client {
             .await?
         {
             ResponseKind::ResolvePrincipalId(result) => Ok(result),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    pub(crate) async fn processes(&self) -> Result<process::Processes> {
+        match self.request(RequestKind::ProcessEnumerate).await? {
+            ResponseKind::ProcessEnumerate(processes) => Ok(process::Processes::client(
+                Processes::new(self.clone(), processes),
+            )),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
+    pub(crate) async fn open_process(
+        &self,
+        pid: u32,
+        start: Option<StartTime>,
+    ) -> Result<process::Process> {
+        match self
+            .request(RequestKind::ProcessOpen { pid, start })
+            .await?
+        {
+            ResponseKind::ProcessOpen(process) => Ok(process::Process::client(
+                pid,
+                Process::new(self.clone(), process),
+            )),
             response => Err(unexpected(response).into()),
         }
     }

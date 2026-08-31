@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use typed_path::Utf8TypedPathBuf;
+use uuid::Uuid;
 
 use crate::{
     error::Result, extension::ExtensionSet, path::typed_path, security::SecurityInfo,
@@ -12,6 +13,19 @@ use crate::{
 /// Snapshot of a VFS target's initial process context.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Query {
+    /// Identifies the target this context was captured from.
+    ///
+    /// Values that name something only meaningful on one target — a process ID
+    /// and its start time, for now — carry this so they cannot be silently
+    /// interpreted against a different one. See
+    /// [`crate::process::ProcessInfo`].
+    ///
+    /// Freshly generated per [`Query::current`], so it identifies a target
+    /// *session* rather than a host: a PID validated against a rebooted
+    /// machine, or against a second agent on the same machine, proves nothing
+    /// either. A direct target generates one too, so the local path is not a
+    /// special case that skips the check.
+    pub session: Uuid,
     /// Environment variables from the target process.
     pub env: HashMap<String, String>,
     /// Target process's current working directory.
@@ -30,6 +44,7 @@ impl Query {
     /// Captures the current process context for a direct VFS target.
     pub fn current() -> Result<Self> {
         Ok(Self {
+            session: Uuid::new_v4(),
             env: current_environment().collect(),
             cwd: typed_path(std::env::current_dir()?)?,
             current_exe: typed_path(std::env::current_exe()?)?,
@@ -104,3 +119,9 @@ pub(crate) struct StdioRecvMarker;
 /// Marker for a child process retained by a VFS RPC session.
 #[derive(Debug)]
 pub(crate) struct ChildMarker;
+/// Marker for a foreign process handle retained by a VFS RPC session.
+#[derive(Debug)]
+pub(crate) struct ProcessMarker;
+/// Marker for a process-table enumeration retained by a VFS RPC session.
+#[derive(Debug)]
+pub(crate) struct ProcessEnumMarker;

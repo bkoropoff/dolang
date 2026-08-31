@@ -12,6 +12,7 @@ use dolang::{
 use dolang_vfs::process::Signal;
 
 use crate::{
+    error::ResultExt,
     global::Global,
     io_mode::{encode_value, strip_line_ending},
     local::TerminationPolicy,
@@ -19,7 +20,14 @@ use crate::{
     time::coerce_duration,
 };
 
-fn parse_signal<'v, 's>(strand: &mut Strand<'v, 's>, value: &Value<'v>) -> Result<'v, 's, Signal> {
+mod foreign;
+
+pub(crate) use foreign::{Info, Proc, Procs, Status};
+
+pub(crate) fn parse_signal<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    value: &Value<'v>,
+) -> Result<'v, 's, Signal> {
     parse_signal_with_number(strand, value, false)
 }
 
@@ -342,7 +350,26 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                     Ok(())
                 })
         })
+        .function("enumerate", async move |strand, args, out| {
+            let ([], []) = unpack!(strand, args, 0, 0)?;
+            let vfs = global.local.get(strand).vfs();
+            let processes = vfs.processes().await.into_sys(strand)?;
+            global.types.procs.create_with_annex(
+                strand,
+                Procs(processes),
+                foreign::ProcsAnnex { global },
+                out,
+            );
+            Ok(())
+        })
+        .function("open", async move |strand, args, out| {
+            let ([target], [block]) = unpack!(strand, args, 1, 1)?;
+            foreign::open(strand, global, &target, block.as_ref(), out).await
+        })
         .value("Error", global.types.proc_error)
+        .value("Info", global.types.proc_info)
+        .value("Proc", global.types.proc_handle)
+        .value("Status", global.types.proc_status)
         .object("run", run_ty, program::Run::new(global))
         .value("Program", global.types.program)
         .commit();

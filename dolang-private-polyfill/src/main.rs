@@ -13,7 +13,7 @@ use std::{
 fn main() -> ExitCode {
     let mut args = std::env::args_os().skip(1);
     let Some(mode) = args.next() else {
-        eprintln!("dolang-private-polyfill: expected a subcommand (cat, echo, grep)");
+        eprintln!("dolang-private-polyfill: expected a subcommand (cat, echo, grep, sleep)");
         return ExitCode::FAILURE;
     };
     let args: Vec<_> = args.collect();
@@ -22,6 +22,7 @@ fn main() -> ExitCode {
         Some("cat") => cat(&args).map(|()| true),
         Some("echo") => echo(&args).map(|()| true),
         Some("grep") => grep(&args),
+        Some("sleep") => sleep(&args).map(|()| true),
         _ => {
             eprintln!("dolang-private-polyfill: unknown subcommand {mode:?}");
             return ExitCode::FAILURE;
@@ -36,6 +37,21 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Sleeps for the given number of seconds.
+///
+/// Exists so a test can start a process that stays alive without depending on
+/// a platform shell: `sleep(1)` is POSIX-only, and cmd.exe has no equivalent
+/// that behaves the same under Wine.
+fn sleep(args: &[OsString]) -> io::Result<()> {
+    let seconds: u64 = args
+        .first()
+        .and_then(|arg| arg.to_str())
+        .and_then(|arg| arg.parse().ok())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "sleep: expected seconds"))?;
+    std::thread::sleep(std::time::Duration::from_secs(seconds));
+    Ok(())
 }
 
 /// Copies each file given as an argument to stdout in order, or copies

@@ -1659,3 +1659,133 @@ async fn remote_copy_data_relays_a_mixed_pair() {
     );
     stop_pair(client, server_task).await;
 }
+
+/// The peer's session identity must differ from this process's own, even
+/// though both are served by the same machine.
+///
+/// This is what makes the check in `open_process_info` meaningful: were the
+/// identity per-host, a record captured from one agent would validate against
+/// another agent's process table, which is a different namespace in every way
+/// that matters (a rebooted machine recycles PIDs from the start).
+#[tokio::test]
+async fn session_identity_is_per_session_not_per_host() {
+    let (client, server_task) = connected_pair().await;
+    let direct = Vfs::direct().unwrap();
+    assert_ne!(client.session(), direct.session());
+    stop_pair(client, server_task).await;
+}
+
+#[tokio::test]
+async fn process_enumeration_round_trips_and_pages() {
+    let (client, server_task) = connected_pair().await;
+
+    let mut processes = client.processes().await.unwrap();
+    let mut count = 0usize;
+    let mut found = None;
+    while let Some(info) = processes.next_entry().await.unwrap() {
+        assert_eq!(info.session(), client.session());
+        count += 1;
+        if info.pid() == std::process::id() {
+            found = Some(info);
+        }
+    }
+    // Past the end stays past the end, and does not resurrect the cursor.
+    assert!(processes.next_entry().await.unwrap().is_none());
+    assert!(processes.next_entry().await.unwrap().is_none());
+
+    let found = found.expect("the test process should be in the target's table");
+    assert_eq!(found.pid(), std::process::id());
+    // Any real system has more processes than one page holds, so reaching the
+    // end at all means the paging loop ran more than once.
+    assert!(count > 1, "expected more than one process, got {count}");
+
+    stop_pair(client, server_task).await;
+}
+
+#[tokio::test]
+async fn process_open_validates_identity_across_the_wire() {
+    let (client, server_task) = connected_pair().await;
+
+    let mut processes = client.processes().await.unwrap();
+    let mut info = None;
+    while let Some(entry) = processes.next_entry().await.unwrap() {
+        if entry.pid() == std::process::id() {
+            info = Some(entry);
+            break;
+        }
+    }
+    let info = info.expect("the test process should be in the target's table");
+    drop(processes);
+
+    let process = client.open_process_info(&info).await.unwrap();
+    assert_eq!(process.pid(), info.pid());
+    assert_eq!(
+        process.info().await.unwrap().start_time(),
+        info.start_time()
+    );
+    process.close().await.unwrap();
+
+    // A record from a different session names a PID in a table this VFS knows
+    // nothing about, so it is refused before the PID is ever used.
+    let direct = Vfs::direct().unwrap();
+    assert_eq!(
+        direct.open_process_info(&info).await.unwrap_err().kind(),
+        ErrorKind::InvalidInput
+    );
+
+    stop_pair(client, server_task).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn process_wait_and_terminate_round_trip() {
+    let (client, server_task) = connected_pair().await;
+
+    // A process that will not exit on its own, opened by PID as a stranger
+    // rather than through the child handle that spawned it.
+    let mut child = tokio::process::Command::new("/bin/sh")
+        .args(["-c", "while :; do sleep 1; done"])
+        .spawn()
+        .unwrap();
+    let pid = child.id().expect("a spawned child has a PID");
+
+    let process = client.open_process(pid).await.unwrap();
+    let info = process.info().await.unwrap();
+    assert_eq!(info.pid(), pid);
+    assert!(info.identity().unwrap().is_some());
+
+    process.terminate().await.unwrap();
+    // Weaker than a child's status by design: a non-parent cannot reap, so
+    // there is no code to report on Unix.
+    assert_eq!(process.wait().await.unwrap().code(), None);
+
+    let status = child.wait().await.unwrap();
+    assert_eq!(status.code(), None, "expected termination by signal");
+
+    stop_pair(client, server_task).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn process_kill_ends_a_process_that_ignores_sigterm() {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    let (client, server_task) = connected_pair().await;
+
+    // `trap '' TERM` makes `terminate` a no-op, which is the whole reason
+    // `kill` is a separate operation on a Unix target.
+    let mut child = tokio::process::Command::new("/bin/sh")
+        .args(["-c", "trap '' TERM; while :; do sleep 1; done"])
+        .spawn()
+        .unwrap();
+    let pid = child.id().expect("a spawned child has a PID");
+
+    let process = client.open_process(pid).await.unwrap();
+    process.kill().await.unwrap();
+    process.wait().await.unwrap();
+
+    let status = child.wait().await.unwrap();
+    assert_eq!(status.signal(), Some(libc::SIGKILL));
+
+    stop_pair(client, server_task).await;
+}

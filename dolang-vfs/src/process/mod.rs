@@ -21,6 +21,11 @@ use crate::{
     target::OperatingSystem,
 };
 
+mod foreign;
+
+pub(crate) use foreign::ProcessFamily;
+pub use foreign::{Process, ProcessExit, ProcessInfo, Processes, StartTime};
+
 /// Terminal status of a spawned process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProcessStatus {

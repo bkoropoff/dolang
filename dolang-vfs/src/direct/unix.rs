@@ -1994,7 +1994,7 @@ impl Command<'_> {
     }
 }
 
-fn signal_to_raw(signal: crate::process::Signal) -> Result<libc::c_int> {
+pub(super) fn signal_to_raw(signal: crate::process::Signal) -> Result<libc::c_int> {
     use crate::process::Signal;
     let signal = match signal {
         Signal::Hup => libc::SIGHUP,

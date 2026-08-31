@@ -22,15 +22,19 @@ use crate::{
     file::{XattrEntry, XattrNamespace},
     metadata::{FsMetadata, Metadata, MetadataPatch},
     path::{self, WellKnownPath},
-    process::{ProcessControl, ProcessStatus, TerminationPolicy},
+    process::{
+        ProcessControl, ProcessExit, ProcessInfo, ProcessStatus, Signal, StartTime,
+        TerminationPolicy,
+    },
     security::{Acl, AclKind, PrincipalId, PrincipalIdKind, SecurityInfo, SidName},
     session::{
-        ChildMarker, FileLockMarker, FileMarker, ReadDirMarker, StdioRecvMarker, StdioSendMarker,
-        VfsMarker,
+        ChildMarker, FileLockMarker, FileMarker, ProcessEnumMarker, ProcessMarker, ReadDirMarker,
+        StdioRecvMarker, StdioSendMarker, VfsMarker,
     },
     target::TargetInfo,
 };
 use dolang_winterop::security::{SecDesc, SecInfo, Sid};
+use uuid::Uuid;
 
 pub(crate) struct VfsProtocol;
 
@@ -67,6 +71,7 @@ pub(crate) struct Request {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct QueryResponse {
+    pub(crate) session: Uuid,
     pub(crate) env: HashMap<String, String>,
     pub(crate) cwd: WirePath,
     pub(crate) current_exe: WirePath,
@@ -315,6 +320,17 @@ pub(crate) struct OpenRequest {
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct ReadDirPage {
     pub(crate) entries: Vec<DirEntry>,
+    pub(crate) done: bool,
+}
+
+/// One page of a process-table enumeration.
+///
+/// Unlike [`ReadDirPage`], the page boundary is chosen by payload size rather
+/// than entry count: a record carrying a command line is unbounded in a way a
+/// directory entry is not, and a few thousand of them is megabytes.
+#[derive(Serialize, Deserialize, Debug)]
+pub(crate) struct ProcessPage {
+    pub(crate) entries: Vec<ProcessInfo>,
     pub(crate) done: bool,
 }
 
@@ -900,6 +916,41 @@ pub(crate) enum RequestKind {
         len: Option<u64>,
         mode: CopyMode,
     },
+    /// Opens a forward enumeration of the target's process table. Appended for
+    /// the reason given above.
+    ProcessEnumerate,
+    ProcessEnumerateNext {
+        processes: Cite<ProcessEnumMarker>,
+    },
+    ProcessEnumerateClose {
+        processes: Cite<ProcessEnumMarker>,
+    },
+    ProcessOpen {
+        pid: u32,
+        /// The start time the caller expects, when it has one to check. `None`
+        /// opens whatever currently owns `pid`.
+        start: Option<StartTime>,
+    },
+    ProcessInfo {
+        process: Cite<ProcessMarker>,
+    },
+    ProcessSignal {
+        process: Cite<ProcessMarker>,
+        signal: Signal,
+    },
+    ProcessTerminate {
+        process: Cite<ProcessMarker>,
+    },
+    ProcessWait {
+        process: Cite<ProcessMarker>,
+    },
+    ProcessClose {
+        process: Cite<ProcessMarker>,
+    },
+    /// Kills the process outright. Appended for the reason given above.
+    ProcessKill {
+        process: Cite<ProcessMarker>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -983,4 +1034,14 @@ pub(crate) enum ResponseKind {
     Extension(ExtensionResponse),
     /// Bounded copy result. Appended for the reason given on `RequestKind`.
     FileCopyData(CopyDataResult),
+    ProcessEnumerate(Gift<ProcessEnumMarker>),
+    ProcessEnumerateNext(ProcessPage),
+    ProcessEnumerateClose,
+    ProcessOpen(Gift<ProcessMarker>),
+    ProcessInfo(ProcessInfo),
+    ProcessSignal,
+    ProcessTerminate,
+    ProcessWait(ProcessExit),
+    ProcessClose,
+    ProcessKill,
 }

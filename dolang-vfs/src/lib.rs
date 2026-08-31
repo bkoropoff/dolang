@@ -289,6 +289,73 @@ impl Vfs {
         }
     }
 
+    /// Returns the identity of this target session.
+    ///
+    /// Generated when the target's context was captured, so it distinguishes
+    /// this session from any other — including an earlier session against the
+    /// same machine. Values that are only meaningful against one target, such
+    /// as [`process::ProcessInfo`], carry it so they cannot be quietly
+    /// interpreted against a different one.
+    pub fn session(&self) -> uuid::Uuid {
+        match &self.inner {
+            VfsInner::Client(vfs) => vfs.session(),
+            VfsInner::Direct(vfs) => vfs.session(),
+        }
+    }
+
+    /// Enumerates the target's process table.
+    ///
+    /// Entries are produced lazily, and a process that exits partway through is
+    /// skipped rather than reported. Records from here leave
+    /// [`ProcessInfo::token`](process::ProcessInfo::token) unset even on a
+    /// Windows target; see its documentation.
+    pub async fn processes(&self) -> error::Result<process::Processes> {
+        match &self.inner {
+            VfsInner::Client(client) => client.processes().await,
+            VfsInner::Direct(direct) => direct.processes().await,
+        }
+    }
+
+    /// Opens a handle to the process a snapshot describes.
+    ///
+    /// Fails if the PID has been recycled since the snapshot was taken, or if
+    /// the snapshot came from a different target session.
+    pub async fn open_process_info(
+        &self,
+        info: &process::ProcessInfo,
+    ) -> error::Result<process::Process> {
+        if info.session() != self.session() {
+            return Err(error::Error::new(
+                error::ErrorKind::InvalidInput,
+                "process record was captured from a different target",
+            ));
+        }
+        self.open_process_raw(info.pid(), Some(info.start_time()))
+            .await
+    }
+
+    /// Opens a handle to whatever process currently owns `pid`.
+    ///
+    /// The escape hatch for a PID that did not come from
+    /// [`processes`](Self::processes) — read out of a pidfile, say. Nothing
+    /// here can tell whether the PID still names what the caller meant; prefer
+    /// [`open_process_info`](Self::open_process_info) when a snapshot is
+    /// available.
+    pub async fn open_process(&self, pid: u32) -> error::Result<process::Process> {
+        self.open_process_raw(pid, None).await
+    }
+
+    pub(crate) async fn open_process_raw(
+        &self,
+        pid: u32,
+        start: Option<process::StartTime>,
+    ) -> error::Result<process::Process> {
+        match &self.inner {
+            VfsInner::Client(client) => client.open_process(pid, start).await,
+            VfsInner::Direct(direct) => direct.open_process(pid, start).await,
+        }
+    }
+
     /// Returns supported VFS extension protocol versions.
     pub fn extensions(&self) -> &extension::ExtensionSet {
         match &self.inner {
