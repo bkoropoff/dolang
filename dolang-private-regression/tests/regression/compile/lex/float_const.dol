@@ -12,3 +12,17 @@ assert_eq 5.0e+foo "5.0e+foo"
 assert_eq 5e+foo "5e+foo"
 assert_eq 5efoo "5efoo"
 assert_eq .foo ".foo"
+
+# Verify edge cases discerning floating point literal from field/method
+assert_eq $5.hex() "5"
+let res = try
+  5.e_missing_field
+catch std.FieldError: _
+  true
+assert $res
+# FIXME: this should actually work, but primitive types have limited protocol dispatch
+res = try
+  5.(dbg)
+catch std.FieldError: _
+  true
+assert $res
