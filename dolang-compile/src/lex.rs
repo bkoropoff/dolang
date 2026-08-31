@@ -273,6 +273,8 @@ enum RawState {
     Error,
     Exponent,
     ExponentStart,
+    ExponentStartAfterUnsignedDot,
+    ExponentStartAfterSignedDot,
     Float,
     Gt,
     GtEq,
@@ -301,6 +303,9 @@ enum RawState {
     SlashSlash,
     Space,
     Star,
+    EmitDot,
+    EmitDotBeforeE,
+    EmitDotBeforeParen,
     EmitDotDot,
     Tilde,
     SignedDot,
@@ -950,6 +955,13 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                 }),
                 DotDotDot => return self.token(RawToken::Ellipsis, Empty),
                 EmitDotDot => return self.token(RawToken::DotDot, Empty),
+                // Emit dot that was thought to be floating point but turned
+                // out to be field/method
+                EmitDot => return self.token(RawToken::Op(Op::Dot), Ident),
+                // Same, but it precedes a left paren, probably a special method
+                EmitDotBeforeParen => return self.token(RawToken::Op(Op::Dot), LeftParen),
+                // Same, but we didn't detect it until after seeing a subsequent `e`
+                EmitDotBeforeE => return self.token_adj(RawToken::Op(Op::Dot), Ident, 0, -2),
                 Tilde => symbol!(self, RawToken::Op(Op::Tilde), {}),
                 Caret => symbol!(self, RawToken::Op(Op::Caret), {}),
                 Literal => literal!(self, RawToken::Literal, {
@@ -1050,7 +1062,9 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                 UnsignedDot | SignedDot => {
                     let signed = self.state == SignedDot;
                     number!(self, RawToken::F64, {
-                        match Some(b'.') => {
+                        // Anything after a floating point other than `e` or numbers
+                        // means we misinterpreted a field/method expression
+                        match Some(c@(b'.' | b'A'..=b'Z' | b'a'..=b'z' | b'_' | b'(')) if c != b'e' => {
                             return self.token_adj(
                                 match if signed {
                                     0i128.checked_sub_unsigned(self.acc)
@@ -1068,14 +1082,22 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                                         RawToken::Literal
                                     }
                                 },
-                                EmitDotDot,
+                                match c {
+                                    b'.' => EmitDotDot,
+                                    b'(' => EmitDotBeforeParen,
+                                    _ => EmitDot,
+                                },
                                 0,
                                 -2,
                             );
                         },
                     }, {
                         match Some(b'0'..=b'9') => self.trans(Float),
-                        match Some(b'e') => self.trans(ExponentStart),
+                        match Some(b'e') => self.trans(if signed {
+                            ExponentStartAfterSignedDot
+                        } else {
+                            ExponentStartAfterUnsignedDot
+                        }),
                         match Some(..) => self.trans(Literal),
                     })
                 }
@@ -1224,6 +1246,38 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                 }, {
                         match Some(..) => self.trans(Literal),
                 }),
+                ExponentStartAfterSignedDot | ExponentStartAfterUnsignedDot => {
+                    number!(self, RawToken::F64, {
+                            match Some(b'+' | b'-' | b'0'..=b'9') => self.trans(Exponent),
+                    }, {
+                            match Some(b'a'..=b'z' | b'A'..=b'Z' | b'_') => {
+                                let signed = self.state == ExponentStartAfterSignedDot;
+                                let res = self.token_adj(
+                                    match if signed {
+                                        0i128.checked_sub_unsigned(self.acc)
+                                    } else {
+                                        i128::try_from(self.acc).ok()
+                                    } {
+                                        Some(v) => RawToken::Int(v),
+                                        None => {
+                                            if self.mode == Mode::FullExpr {
+                                                return self.error_adj(ErrorDiagKind::Overflow, 0, -2)
+                                            }
+                                            if self.mode != Mode::String {
+                                                self.warn_adj(WarnDiagKind::OverflowLit, 0, -2);
+                                            }
+                                            RawToken::Literal
+                                        }
+                                    },
+                                    EmitDotBeforeE,
+                                    0,
+                                    -3,
+                                );
+                                return res;
+                            },
+                            match Some(..) => self.trans(Literal),
+                    })
+                }
                 Exponent => number!(self, RawToken::F64, {
                         match Some(b'0'..=b'9') => (),
                         match Some(..) => self.trans(Literal),
