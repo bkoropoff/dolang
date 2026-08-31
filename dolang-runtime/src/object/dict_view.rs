@@ -12,8 +12,8 @@ use crate::{
     gc::{Collect, arena::Visit},
     object::{
         BoundMethod, dict,
-        native::{Instance, Object, Spread, SpreadContext, Unpack, UnpackItem},
-        protocol::{GcObj, Inspect, Protocol, Recv},
+        native::{Instance, Object, Spread, SpreadContext, Type as NativeType, Unpack, UnpackItem},
+        protocol::{GcObj, Inspect, Protocol, Recv, members},
     },
     sig,
     strand::Strand,
@@ -209,6 +209,7 @@ impl<'v, 'a, I: DictLike<'v>> DictView<'v, 'a, I> {
 impl<'v, I: DictLike<'v>> Input<'v> for DictView<'v, '_, I> {
     #[allow(private_interfaces)]
     fn input_take<'a>(&'a mut self, vm: &'a Vm<'v>, _: Sealed) -> InputBy<'v, 'a> {
+        let ty = self.owner.ty(vm);
         let owner = Value::from_input(vm, self.owner);
         let view = self.view.take().expect("DictView used more than once");
         let value = GcObj::new(
@@ -216,7 +217,7 @@ impl<'v, I: DictLike<'v>> Input<'v> for DictView<'v, '_, I> {
             vm.builtin_types().dict_view,
             View {
                 owner,
-                glue: Box::new(Glue(view)),
+                glue: Box::new(Glue { view, ty }),
             },
         );
         InputBy::Value(Value::from_object(value), None)
@@ -263,9 +264,12 @@ trait DictViewGlue<'v>: 'v {
     ) -> Result<'v, 's, ()>;
 }
 
-struct Glue<I>(I);
+struct Glue<'v, I: DictLike<'v>> {
+    view: I,
+    ty: NativeType<'v, I::Object>,
+}
 
-impl<'v, I: DictLike<'v>> DictViewGlue<'v> for Glue<I> {
+impl<'v, I: DictLike<'v>> DictViewGlue<'v> for Glue<'v, I> {
     fn module(&self) -> &'v str {
         I::MODULE
     }
@@ -273,8 +277,8 @@ impl<'v, I: DictLike<'v>> DictViewGlue<'v> for Glue<I> {
         I::NAME
     }
     fn len(&self, owner: &Value<'v>, strand: &mut Strand<'v, '_>) -> usize {
-        self.0
-            .len(unsafe { Instance::from_value_unchecked(owner) }, strand)
+        self.view
+            .len(Instance::from_native_value(owner, strand, self.ty), strand)
     }
     fn get<'a, 's>(
         &self,
@@ -284,8 +288,8 @@ impl<'v, I: DictLike<'v>> DictViewGlue<'v> for Glue<I> {
         instance: i64,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, bool> {
-        self.0.get(
-            unsafe { Instance::from_value_unchecked(owner) },
+        self.view.get(
+            Instance::from_native_value(owner, strand, self.ty),
             strand,
             key,
             instance,
@@ -299,8 +303,8 @@ impl<'v, I: DictLike<'v>> DictViewGlue<'v> for Glue<I> {
         key: Slot<'v, 'a>,
         value: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        self.0.set(
-            unsafe { Instance::from_value_unchecked(owner) },
+        self.view.set(
+            Instance::from_native_value(owner, strand, self.ty),
             strand,
             key,
             value,
@@ -312,8 +316,8 @@ impl<'v, I: DictLike<'v>> DictViewGlue<'v> for Glue<I> {
         strand: &mut Strand<'v, 's>,
         pairs: &mut Vec<(Value<'v>, Value<'v>)>,
     ) -> Result<'v, 's, ()> {
-        self.0.flatten(
-            unsafe { Instance::from_value_unchecked(owner) },
+        self.view.flatten(
+            Instance::from_native_value(owner, strand, self.ty),
             strand,
             &mut DictViewSink { pairs },
         )
@@ -324,8 +328,8 @@ impl<'v, I: DictLike<'v>> DictViewGlue<'v> for Glue<I> {
         strand: &mut Strand<'v, 's>,
         out: Slot<'v, '_>,
     ) -> Result<'v, 's, ()> {
-        self.0.keys(
-            unsafe { Instance::from_value_unchecked(owner) },
+        self.view.keys(
+            Instance::from_native_value(owner, strand, self.ty),
             strand,
             out,
         )
@@ -337,8 +341,8 @@ impl<'v, I: DictLike<'v>> DictViewGlue<'v> for Glue<I> {
         key: &Value<'v>,
         out: Slot<'v, '_>,
     ) -> Result<'v, 's, ()> {
-        self.0.values(
-            unsafe { Instance::from_value_unchecked(owner) },
+        self.view.values(
+            Instance::from_native_value(owner, strand, self.ty),
             strand,
             key,
             out,
@@ -966,6 +970,11 @@ impl<'v> Protocol<'v> for Type {
         Some(Inspect {
             is_abstract: true,
             members: &[],
+            type_members: members![
+                Method(sym::VERBATIM_METHOD),
+                Method(sym::STR_METHOD),
+                Method(sym::DBG_METHOD),
+            ],
         })
     }
 }

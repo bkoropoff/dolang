@@ -237,6 +237,7 @@ nav:
       - api/std/bool.md
       - api/std/bytecode-error.md
       - api/std/canceled-error.md
+      - api/std/class.md
       - api/std/compile-error.md
       - api/std/concurrency-error.md
       - api/std/cyclic-import-error.md
@@ -267,6 +268,7 @@ nav:
       - api/std/sinkable.md
       - api/std/sink-stop.md
       - api/std/state-error.md
+      - api/std/static.md
       - api/std/str.md
       - api/std/strbuf.md
       - api/std/sym.md

@@ -1,0 +1,53 @@
+# `type(SomeClass)` returns a proxy standing in for the class's metaclass. Its
+# namespace is the class's class-level scope, which is the only way to name an
+# unbound class method.
+
+class A
+  #[class]
+  pub field n = 1
+
+  #[class]
+  pub def who cls
+    cls.n
+
+class B: A
+
+class C
+
+B.n = 42
+
+# Equality and hashing are structural on the proxied class, so the proxy does
+# not have to be memoized to behave like an identity.
+assert (type(A) == type(A))
+assert (type(A) != type(B))
+assert (type(A) != type(C))
+
+# A proxy is a subtype of `Type`, which keeps the two-argument `type` test
+# working for class objects.
+assert (type A Type)
+assert (type B Type)
+
+# `type(Type)` stays a fixpoint, so walking the type-of chain terminates.
+assert_eq (type Type) $Type
+assert_eq (type(type(A))) $Type
+
+# Structural equality and hashing agree, so proxies work as dict keys.
+let d = {}
+d[type(A)] = "first"
+d[type(A)] = "second"
+d[type(C)] = "other"
+assert_eq $d.len 2
+assert_eq $d[type(A)] "second"
+
+# The proxy exposes class methods unbound, so they can be retargeted.
+assert_eq (type(A).who(A)) 1
+assert_eq (type(A).who(B)) 42
+
+# Class fields are not reachable through the proxy: the value is already
+# available as `A.n`.
+let threw = false
+try
+  type(A).n
+catch _
+  threw = true
+assert $threw

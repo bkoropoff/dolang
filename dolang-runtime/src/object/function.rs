@@ -395,6 +395,11 @@ impl<'v> Protocol<'v> for Type {
         Some(Inspect {
             is_abstract: true,
             members: members![],
+            type_members: members![
+                Method(sym::VERBATIM_METHOD),
+                Method(sym::STR_METHOD),
+                Method(sym::DBG_METHOD),
+            ],
         })
     }
 

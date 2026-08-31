@@ -824,7 +824,7 @@ impl<'v> Vm<'v> {
                         }
                         builtin::ARGS => self.args(strand, args, Slot::reborrow(&mut res)),
                         builtin::CLASS_CREATE => {
-                            class::create(strand, args, Slot::reborrow(&mut res))
+                            class::create(strand, args, Slot::reborrow(&mut res)).await
                         }
                         builtin::GUARD => self.guard(strand, args, Slot::reborrow(&mut res)).await,
                         builtin::THROW => self.throw(strand, args),

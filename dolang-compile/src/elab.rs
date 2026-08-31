@@ -37,6 +37,41 @@ impl Diagnose for Unbound {
     }
 }
 
+struct DuplicateMemberScope(Span);
+
+impl Diagnose for DuplicateMemberScope {
+    fn severity(&self) -> Severity {
+        Severity::Error
+    }
+
+    fn message(&self, _compiler: &Compiler<'_>, w: &mut dyn Write) -> fmt::Result {
+        write!(w, "a field may have only one `class` or `static` decorator")
+    }
+
+    fn span(&self) -> Span {
+        self.0
+    }
+}
+
+struct UnsupportedFieldDecorator(Span);
+
+impl Diagnose for UnsupportedFieldDecorator {
+    fn severity(&self) -> Severity {
+        Severity::Error
+    }
+
+    fn message(&self, _compiler: &Compiler<'_>, w: &mut dyn Write) -> fmt::Result {
+        write!(
+            w,
+            "only the prelude `class` and `static` decorators are supported on a field"
+        )
+    }
+
+    fn span(&self) -> Span {
+        self.0
+    }
+}
+
 struct BadBreak(Span);
 
 impl Diagnose for BadBreak {
@@ -2183,10 +2218,73 @@ impl<'a> Elaborater<'a> {
         self.visit_function(scope, &mut def.func, None)
     }
 
+    /// Resolve a field decorator to a member-scope annotation.
+    ///
+    /// Fields have no runtime decorator semantics, so `class` and `static` are
+    /// consumed here instead. Requiring the canonical prelude binding — rather
+    /// than any expression that happens to be spelled `class` — keeps the door
+    /// open for giving field decorators real semantics later.
+    fn field_member_scope(&mut self, decorator: &ast::Decorator) -> Option<ast::MemberScope> {
+        let ast::Expr::Ident(ident) = &decorator.expr else {
+            return None;
+        };
+        let res = ident.res?;
+        let origin::Origin::PreludeItem { module, item, .. } = &self.origintab[res.origin] else {
+            return None;
+        };
+        if module != "std" {
+            return None;
+        }
+        match item.as_str() {
+            "class" => Some(ast::MemberScope::Class),
+            "static" => Some(ast::MemberScope::Static),
+            _ => None,
+        }
+    }
+
+    fn visit_field_decorators(
+        &mut self,
+        scope: &mut Scope<'_>,
+        node: &mut ast::FieldDecl,
+    ) -> Result<()> {
+        let mut decorators = std::mem::take(&mut node.decorators);
+        for decorator in &mut decorators {
+            self.visit_expr(scope, &mut decorator.expr, false)?;
+        }
+        for decorator in &decorators {
+            // Anchor on the field rather than the decorator: a comment may not sit
+            // between a decorator and the declaration it applies to, and the field
+            // is what the diagnostic is really about.
+            let span = node.field_span;
+            match self.field_member_scope(decorator) {
+                Some(scope) if node.scope == ast::MemberScope::Instance => node.scope = scope,
+                Some(_) => self.diags.push(DuplicateMemberScope(span)),
+                None => self.diags.push(UnsupportedFieldDecorator(span)),
+            }
+        }
+        node.decorators = decorators;
+        Ok(())
+    }
+
     fn visit_field_decl(&mut self, scope: &mut Scope<'_>, node: &mut ast::FieldDecl) -> Result<()> {
+        self.visit_field_decorators(scope, node)?;
+
+        // A static field is evaluated once at class creation, so it needs no
+        // thunk. Unwrap the one the parser built before resolving anything in it,
+        // so the initializer resolves in the enclosing scope rather than a
+        // function scope of its own.
+        if node.scope == ast::MemberScope::Static
+            && let ast::FieldInit::Thunk(func) = &mut node.init
+            && let Some(ast::Stmt::Prim(ast::PrimStmt::Expr(expr))) = func.body.stmts.pop()
+        {
+            node.init = ast::FieldInit::Expr(expr);
+        }
+
         match &mut node.init {
             ast::FieldInit::None => {}
-            ast::FieldInit::Const(expr, _) => self.visit_expr(scope, expr, false)?,
+            ast::FieldInit::Const(expr, _) | ast::FieldInit::Expr(expr) => {
+                self.visit_expr(scope, expr, false)?
+            }
             ast::FieldInit::Thunk(func) => self.visit_function(scope, func, None)?,
         }
         let class = scope.class_span().expect("class field outside class scope");

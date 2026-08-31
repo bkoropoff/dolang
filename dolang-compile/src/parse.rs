@@ -11,9 +11,9 @@ use crate::{
         Arg, ArrayElem, Assign, Bind, Block, CatchHandler, Class, ClassBody, ClassMember,
         ClassSuper, Const, Decorator, Def, DictElem, Expand, Expr, ExprBody, FieldDecl, FieldInit,
         FieldName, For, Function, GetVariant, GroupDelim, Ident, If, IfBranch, Import,
-        ImportElement, ImportItem, Key, Let, Method, Pair, Param, ParamDefault, Pattern,
-        PatternBind, PatternBindKind, PrimStmt, Return, Single, SpecialMethod, Stmt, Throw, Try,
-        Unit, While, visit::Node,
+        ImportElement, ImportItem, Key, Let, MemberScope, Method, Pair, Param, ParamDefault,
+        Pattern, PatternBind, PatternBindKind, PrimStmt, Return, Single, SpecialMethod, Stmt,
+        Throw, Try, Unit, While, visit::Node,
     },
     diag::{AnnotationKind, NoteKind, Severity},
     lex::{self, Keyword, Lexer, Mode, Op, Token, TokenInfo},
@@ -3717,7 +3717,12 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_field(&mut self, scope: &mut Scope, pub_span: Option<Span>) -> Result<FieldDecl> {
+    fn parse_field(
+        &mut self,
+        scope: &mut Scope,
+        pub_span: Option<Span>,
+        decorators: Vec<Decorator>,
+    ) -> Result<FieldDecl> {
         use self::Ident;
         use TokenInfo::*;
 
@@ -3765,6 +3770,7 @@ impl<'a> Parser<'a> {
 
         if let Some((equal_span, init)) = rhs {
             return Ok(FieldDecl {
+                decorators,
                 fields: fields
                     .into_iter()
                     .map(|span| FieldName {
@@ -3777,10 +3783,12 @@ impl<'a> Parser<'a> {
                 field_span,
                 equal_span: Some(equal_span),
                 pub_span,
+                scope: MemberScope::Instance,
             });
         }
 
         Ok(FieldDecl {
+            decorators,
             fields: fields
                 .into_iter()
                 .map(|span| FieldName {
@@ -3793,6 +3801,7 @@ impl<'a> Parser<'a> {
             field_span,
             equal_span: None,
             pub_span,
+            scope: MemberScope::Instance,
         })
     }
 
@@ -3811,16 +3820,9 @@ impl<'a> Parser<'a> {
         };
 
         match self.peek()? {
-            Some(token @ token!(Keyword(Field))) => {
-                if !decorators.is_empty() {
-                    return Err(self.syntax_error(
-                        scope,
-                        Some(token),
-                        "decorators are only valid before `def` in a class body",
-                    ));
-                }
-                Ok(ClassMember::Field(self.parse_field(scope, pub_span)?))
-            }
+            Some(token!(Keyword(Field))) => Ok(ClassMember::Field(
+                self.parse_field(scope, pub_span, decorators)?,
+            )),
             Some(token!(Keyword(Def))) => Ok(ClassMember::Method(
                 self.parse_method(scope, pub_span, decorators)?,
             )),

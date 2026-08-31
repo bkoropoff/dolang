@@ -29,13 +29,15 @@ def renamed()
 
 ## Valid Positions
 
-Decorators are valid in three places:
+Decorators are valid in four places:
 
 - Before a top-level `def`
 - Before a top-level `class`
 - Before a `def` inside a class body
+- Before a `field` inside a class body, restricted to the prelude `class` and
+  `static` decorators
 
-They are not valid before `let`, `field`, or other statements.
+They are not valid before `let` or other statements.
 
 `pub` goes after any decorators:
 
@@ -127,3 +129,24 @@ class Config
   pub def port self value
     self.#port = value
 ```
+
+## Member Scope Decorators
+
+`class` and `static` place a member in the class-level namespace rather than
+the instance namespace. They apply to both `def` and `field`, and they are the
+only decorators a `field` accepts:
+
+```
+class Registry
+  #[class]
+  pub field entries = []
+
+  #[static]
+  pub def create cls
+    cls()
+```
+
+On a `field` these are pure scope annotations resolved at compile time, so they
+must name the prelude bindings — a shadowed `class` or `static` is rejected
+rather than silently ignored. See
+[Class and Static Members](./classes.md#class-and-static-members).

@@ -11,8 +11,8 @@ use crate::{
     gc::{self, Collect, arena::Visit},
     object::{
         BoundMethod, array, index, iter,
-        native::{Instance, Object, Unpack as NativeUnpack, UnpackItem},
-        protocol::{GcObj, Inspect, Protocol, Recv, Spread, SpreadContext},
+        native::{Instance, Object, Type as NativeType, Unpack as NativeUnpack, UnpackItem},
+        protocol::{GcObj, Inspect, Protocol, Recv, Spread, SpreadContext, members},
         range,
     },
     sig::{Unpack, UnpackKeyKind},
@@ -130,8 +130,9 @@ impl<'v, 'a, I: ArrayLike<'v>> ArrayView<'v, 'a, I> {
         index: &Value<'v>,
         out: Slot<'v, '_>,
     ) -> Result<'v, 's, ()> {
+        let ty = owner.ty(strand.vm());
         let owner = Value::from_input(strand, owner);
-        index_from(&owner, &Glue(view), strand, index, out)
+        index_from(&owner, &Glue { view, ty }, strand, index, out)
     }
 
     /// Implements [`Object::iter`] directly without exposing a view object.
@@ -161,8 +162,9 @@ impl<'v, 'a, I: ArrayLike<'v>> ArrayView<'v, 'a, I> {
         context: SpreadContext,
         sink: &mut dyn Spread<'v, 's>,
     ) -> Result<'v, 's, ()> {
+        let ty = owner.ty(strand.vm());
         let owner = Value::from_input(strand, owner);
-        spread_from(&owner, &Glue(view), strand, context, sink)
+        spread_from(&owner, &Glue { view, ty }, strand, context, sink)
     }
 
     /// Implements [`Object::unpack`] directly without exposing a view object.
@@ -182,13 +184,14 @@ fn create_view<'v, I: ArrayLike<'v>>(
     view: I,
     strand: &Strand<'v, '_>,
 ) -> GcObj<'v, View<'v>> {
+    let ty = owner.ty(strand.vm());
     let owner = Value::from_input(strand, owner);
     GcObj::new(
         strand.vm().arena(),
         strand.builtin_types().array_view,
         View {
             owner,
-            glue: Box::new(Glue(view)),
+            glue: Box::new(Glue { view, ty }),
         },
     )
 }
@@ -196,6 +199,7 @@ fn create_view<'v, I: ArrayLike<'v>>(
 impl<'v, I: ArrayLike<'v>> Input<'v> for ArrayView<'v, '_, I> {
     #[allow(private_interfaces)]
     fn input_take<'a>(&'a mut self, vm: &'a Vm<'v>, _: Sealed) -> InputBy<'v, 'a> {
+        let ty = self.owner.ty(vm);
         let owner = Value::from_input(vm, self.owner);
         let view = self.view.take().expect("ArrayView used more than once");
         let value = GcObj::new(
@@ -203,7 +207,7 @@ impl<'v, I: ArrayLike<'v>> Input<'v> for ArrayView<'v, '_, I> {
             vm.builtin_types().array_view,
             View {
                 owner,
-                glue: Box::new(Glue(view)),
+                glue: Box::new(Glue { view, ty }),
             },
         );
         InputBy::Value(Value::from_object(value), None)
@@ -257,9 +261,12 @@ trait ArrayViewGlue<'v>: 'v {
     fn clear<'s>(&self, owner: &Value<'v>, strand: &mut Strand<'v, 's>) -> Result<'v, 's, ()>;
 }
 
-struct Glue<I>(I);
+struct Glue<'v, I: ArrayLike<'v>> {
+    view: I,
+    ty: NativeType<'v, I::Object>,
+}
 
-impl<'v, I: ArrayLike<'v>> ArrayViewGlue<'v> for Glue<I> {
+impl<'v, I: ArrayLike<'v>> ArrayViewGlue<'v> for Glue<'v, I> {
     fn module(&self) -> &'v str {
         I::MODULE
     }
@@ -267,9 +274,8 @@ impl<'v, I: ArrayLike<'v>> ArrayViewGlue<'v> for Glue<I> {
         I::NAME
     }
     fn len(&self, owner: &Value<'v>, strand: &mut Strand<'v, '_>) -> usize {
-        // SAFETY: ArrayView::input_take pairs this glue with an I::Object value.
-        self.0
-            .len(unsafe { Instance::from_value_unchecked(owner) }, strand)
+        self.view
+            .len(Instance::from_native_value(owner, strand, self.ty), strand)
     }
     fn get<'a, 's>(
         &self,
@@ -278,9 +284,8 @@ impl<'v, I: ArrayLike<'v>> ArrayViewGlue<'v> for Glue<I> {
         index: usize,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        // SAFETY: ArrayView::input_take pairs this glue with an I::Object value.
-        self.0.get(
-            unsafe { Instance::from_value_unchecked(owner) },
+        self.view.get(
+            Instance::from_native_value(owner, strand, self.ty),
             strand,
             index,
             out,
@@ -293,9 +298,8 @@ impl<'v, I: ArrayLike<'v>> ArrayViewGlue<'v> for Glue<I> {
         index: usize,
         value: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        // SAFETY: ArrayView::input_take pairs this glue with an I::Object value.
-        self.0.set(
-            unsafe { Instance::from_value_unchecked(owner) },
+        self.view.set(
+            Instance::from_native_value(owner, strand, self.ty),
             strand,
             index,
             value,
@@ -307,8 +311,8 @@ impl<'v, I: ArrayLike<'v>> ArrayViewGlue<'v> for Glue<I> {
         strand: &'a mut Strand<'v, 's>,
         values: &mut [Slot<'v, 'a>],
     ) -> Result<'v, 's, ()> {
-        self.0.push(
-            unsafe { Instance::from_value_unchecked(owner) },
+        self.view.push(
+            Instance::from_native_value(owner, strand, self.ty),
             strand,
             values,
         )
@@ -320,8 +324,8 @@ impl<'v, I: ArrayLike<'v>> ArrayViewGlue<'v> for Glue<I> {
         index: usize,
         values: &mut [Slot<'v, 'a>],
     ) -> Result<'v, 's, ()> {
-        self.0.insert(
-            unsafe { Instance::from_value_unchecked(owner) },
+        self.view.insert(
+            Instance::from_native_value(owner, strand, self.ty),
             strand,
             index,
             values,
@@ -334,8 +338,8 @@ impl<'v, I: ArrayLike<'v>> ArrayViewGlue<'v> for Glue<I> {
         index: usize,
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
-        self.0.pop(
-            unsafe { Instance::from_value_unchecked(owner) },
+        self.view.pop(
+            Instance::from_native_value(owner, strand, self.ty),
             strand,
             index,
             out,
@@ -347,15 +351,15 @@ impl<'v, I: ArrayLike<'v>> ArrayViewGlue<'v> for Glue<I> {
         strand: &mut Strand<'v, 's>,
         index: usize,
     ) -> Result<'v, 's, ()> {
-        self.0.delete(
-            unsafe { Instance::from_value_unchecked(owner) },
+        self.view.delete(
+            Instance::from_native_value(owner, strand, self.ty),
             strand,
             index,
         )
     }
     fn clear<'s>(&self, owner: &Value<'v>, strand: &mut Strand<'v, 's>) -> Result<'v, 's, ()> {
-        self.0
-            .clear(unsafe { Instance::from_value_unchecked(owner) }, strand)
+        self.view
+            .clear(Instance::from_native_value(owner, strand, self.ty), strand)
     }
 }
 
@@ -938,6 +942,11 @@ impl<'v> Protocol<'v> for Type {
         Some(Inspect {
             is_abstract: true,
             members: &[],
+            type_members: members![
+                Method(sym::VERBATIM_METHOD),
+                Method(sym::STR_METHOD),
+                Method(sym::DBG_METHOD),
+            ],
         })
     }
 }
@@ -1046,7 +1055,10 @@ mod tests {
         with_fixture_vm(async |strand, [mut owner_slot]| {
             make_owner(strand, &[1, 2], Slot::reborrow(&mut owner_slot));
             let owner: &Value = &owner_slot;
-            let glue = Glue(FixtureGlue);
+            let glue = Glue {
+                view: FixtureGlue,
+                ty: strand.vm().state::<FixtureState>().ty,
+            };
             let sig = sig::Unpack::new(3, vec![], vec![], Variadic::None);
             strand
                 .with_slots_dynamic(3, async |strand, mut out| {
@@ -1062,7 +1074,10 @@ mod tests {
         with_fixture_vm(async |strand, [mut owner_slot]| {
             make_owner(strand, &[1, 2, 3], Slot::reborrow(&mut owner_slot));
             let owner: &Value = &owner_slot;
-            let glue = Glue(FixtureGlue);
+            let glue = Glue {
+                view: FixtureGlue,
+                ty: strand.vm().state::<FixtureState>().ty,
+            };
             let sig = sig::Unpack::new(1, vec![], vec![], Variadic::None);
             strand
                 .with_slots_dynamic(1, async |strand, mut out| {
@@ -1078,7 +1093,10 @@ mod tests {
         with_fixture_vm(async |strand, [mut owner_slot]| {
             make_owner(strand, &[1, 2, 3], Slot::reborrow(&mut owner_slot));
             let owner: &Value = &owner_slot;
-            let glue = Glue(FixtureGlue);
+            let glue = Glue {
+                view: FixtureGlue,
+                ty: strand.vm().state::<FixtureState>().ty,
+            };
             let sig = sig::Unpack::new(1, vec![], vec![], Variadic::Capture);
             strand
                 .with_slots_dynamic(1, async |strand, mut out| {
@@ -1098,7 +1116,10 @@ mod tests {
         with_fixture_vm(async |strand, [mut owner_slot]| {
             make_owner(strand, &[], Slot::reborrow(&mut owner_slot));
             let owner: &Value = &owner_slot;
-            let glue = Glue(FixtureGlue);
+            let glue = Glue {
+                view: FixtureGlue,
+                ty: strand.vm().state::<FixtureState>().ty,
+            };
             let key_sym = Sym::well_known(sym::LEN);
             let sig = sig::Unpack::new(
                 0,
@@ -1123,7 +1144,10 @@ mod tests {
         with_fixture_vm(async |strand, [mut owner_slot]| {
             make_owner(strand, &[], Slot::reborrow(&mut owner_slot));
             let owner: &Value = &owner_slot;
-            let glue = Glue(FixtureGlue);
+            let glue = Glue {
+                view: FixtureGlue,
+                ty: strand.vm().state::<FixtureState>().ty,
+            };
             let key_sym = Sym::well_known(sym::LEN);
             // Constructed and consumed in the same expression below, immediately
             // embedded (by value) into `sig` — never a lingering, separately
@@ -1152,7 +1176,10 @@ mod tests {
         with_fixture_vm(async |strand, [mut owner_slot]| {
             make_owner(strand, &[1, 2, 3, 4, 5], Slot::reborrow(&mut owner_slot));
             let owner: &Value = &owner_slot;
-            let glue = Glue(FixtureGlue);
+            let glue = Glue {
+                view: FixtureGlue,
+                ty: strand.vm().state::<FixtureState>().ty,
+            };
 
             // A contiguous range whose resolved start (5) is past its resolved end
             // (2) — `Range::slice`/`index::position` each resolve fine in isolation,

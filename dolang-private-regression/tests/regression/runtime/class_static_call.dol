@@ -1,0 +1,62 @@
+# `(call)` is the one special method allowed at class level. Declaring it
+# `static` gives a class a factory that subclasses do not inherit, so the
+# factory can instantiate a subtype without recursing into itself.
+
+let calls = []
+
+class Shape
+  pub field kind = ""
+
+  def (init) self kind
+    self.kind = kind
+
+  #[static]
+  pub def (call) cls kind
+    calls.push $kind
+    # `Type.(call)` reaches the default instantiation the override replaced.
+    Type.(call) $cls $kind
+
+class Circle: Shape
+
+let s = Shape "round"
+assert_eq $s.kind "round"
+assert_eq $calls.len 1
+
+# The factory is static, so `Circle(...)` uses default instantiation rather
+# than re-entering `Shape`'s `(call)`.
+let c = Circle "arc"
+assert_eq $c.kind "arc"
+assert_eq $calls.len 1
+
+# Reached through the class object, a class member binds the class as `cls`, so
+# retargeting the factory at a subtype needs the unbound form off the proxy.
+let c2 = type(Shape).(call) $Circle "wedge"
+assert_eq $c2.kind "wedge"
+assert (type c2 Circle)
+assert_eq $calls.len 2
+
+# `Type.(call)` on a class with no override is plain instantiation.
+class Plain
+  pub field n = 0
+
+  def (init) self n
+    self.n = n
+
+assert_eq $(Type.(call) Plain 7).n 7
+
+# A class-level `(call)` is inherited when declared with `class` rather than
+# `static`.
+class Inherited
+  pub field kind = ""
+
+  def (init) self kind
+    self.kind = kind
+
+  #[class]
+  pub def (call) cls kind
+    Type.(call) $cls "wrapped-$kind"
+
+class Sub: Inherited
+
+assert_eq $(Inherited "a").kind "wrapped-a"
+assert_eq $(Sub "b").kind "wrapped-b"

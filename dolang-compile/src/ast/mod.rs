@@ -1914,21 +1914,44 @@ pub(crate) struct FieldName {
 }
 
 pub(crate) struct FieldDecl {
+    pub(crate) decorators: Vec<Decorator>,
     pub(crate) fields: Vec<FieldName>,
     pub(crate) init: FieldInit,
     pub(crate) field_span: Span,
     pub(crate) equal_span: Option<Span>,
     pub(crate) pub_span: Option<Span>,
+    /// Which namespace the field belongs to. Set by elab from the decorators,
+    /// which are pure scope annotations here — fields have no runtime decorator
+    /// semantics.
+    pub(crate) scope: MemberScope,
+}
+
+/// Which namespace a class member belongs to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum MemberScope {
+    /// The instance namespace.
+    Instance,
+    /// The type-object namespace, inherited by subclasses.
+    Class,
+    /// The type-object namespace, not inherited.
+    Static,
 }
 
 pub(crate) enum FieldInit {
     None,
     Const(Expr, Const),
+    /// A non-constant initializer evaluated once, where the field's storage is
+    /// created once: static fields. Elab rewrites a [`FieldInit::Thunk`] into
+    /// this once it knows the field's scope.
+    Expr(Expr),
     Thunk(Function),
 }
 
 impl Node for FieldDecl {
     fn accept<'a, V: Visit>(&'a self, visit: &'a mut V) -> ControlFlow<V::Break> {
+        for decorator in &self.decorators {
+            visit.node(decorator)?;
+        }
         if let Some(span) = self.pub_span {
             visit.token(Token::Keyword, span, None)?;
         }
@@ -1941,7 +1964,7 @@ impl Node for FieldDecl {
         }
         match &self.init {
             FieldInit::None => (),
-            FieldInit::Const(expr, _) => visit.node(expr)?,
+            FieldInit::Const(expr, _) | FieldInit::Expr(expr) => visit.node(expr)?,
             FieldInit::Thunk(function) => visit.node(function)?,
         }
         ControlFlow::Continue(())

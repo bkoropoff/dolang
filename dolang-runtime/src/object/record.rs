@@ -532,6 +532,13 @@ impl Class {
             ))
         }
     }
+
+    fn recv<'v, 's, 'a>(
+        strand: &mut Strand<'v, 's>,
+        value: &'a Value<'v>,
+    ) -> Result<'v, 's, Recv<'v, 'a, Record<'v>>> {
+        Ok(Recv::new(Self::downcast(strand, value)?).with_delegator(value))
+    }
 }
 
 unsafe impl Collect for Class {
@@ -575,6 +582,12 @@ impl<'v> Protocol<'v> for Class {
     fn op_inspect<'a>(_this: Recv<'v, 'a, Self>, _vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {
         Some(Inspect {
             is_abstract: false,
+            type_members: members![
+                Method(sym::VERBATIM_METHOD),
+                Method(sym::STR_METHOD),
+                Method(sym::DBG_METHOD),
+                Method(sym::CALL_METHOD),
+            ],
             members: members![
                 Method(sym::STR_METHOD),
                 Method(sym::DBG_METHOD),
@@ -612,63 +625,41 @@ impl<'v> Protocol<'v> for Class {
             }
             sym::LEN => {
                 let ([record], []) = unpack!(strand, args, 1, 0)?;
-                let record = Self::downcast(strand, &record)?;
-                let input = record
-                    .borrow()
-                    .ok_or_else(|| Error::concurrency(strand))?
-                    .0
-                    .total_pairs;
+                let record = Self::recv(strand, &record)?;
+                let input = record.borrow(strand)?.0.total_pairs;
                 Output::set(strand, out, input);
                 Ok(())
             }
             sym::CLEAR => {
                 let ([record], []) = unpack!(strand, args, 1, 0)?;
-                let record = Self::downcast(strand, &record)?;
-                kv::Inner::mcall_clear(Recv::new(record), strand)
+                let record = Self::recv(strand, &record)?;
+                kv::Inner::mcall_clear(record, strand)
             }
             sym::INSERT => {
                 let ([record, key, value], []) = unpack!(strand, args, 3, 0)?;
-                let record = Self::downcast(strand, &record)?;
-                kv::Inner::mcall_insert(Recv::new(record), strand, key, value)
+                let record = Self::recv(strand, &record)?;
+                kv::Inner::mcall_insert(record, strand, key, value)
             }
             sym::GET => {
                 let default = Sym::well_known(sym::DEFAULT);
                 let else_key = Sym::well_known(sym::ELSE);
                 let ([record, key], [subindex, default, or_else]) =
                     unpack!(strand, args, 2, 1, default = None, else_key = None)?;
-                let record = Self::downcast(strand, &record)?;
-                kv::Inner::mcall_get(
-                    Recv::new(record),
-                    strand,
-                    key,
-                    subindex,
-                    default,
-                    or_else,
-                    out,
-                )
-                .await
+                let record = Self::recv(strand, &record)?;
+                kv::Inner::mcall_get(record, strand, key, subindex, default, or_else, out).await
             }
             sym::POP => {
                 let default = Sym::well_known(sym::DEFAULT);
                 let else_key = Sym::well_known(sym::ELSE);
                 let ([record, key], [subindex, default, or_else]) =
                     unpack!(strand, args, 2, 1, default = None, else_key = None)?;
-                let record = Self::downcast(strand, &record)?;
-                kv::Inner::mcall_pop(
-                    Recv::new(record),
-                    strand,
-                    key,
-                    subindex,
-                    default,
-                    or_else,
-                    out,
-                )
-                .await
+                let record = Self::recv(strand, &record)?;
+                kv::Inner::mcall_pop(record, strand, key, subindex, default, or_else, out).await
             }
             sym::DELETE => {
                 let ([record, key], _) = unpack!(strand, args, 2, 0)?;
-                let record = Self::downcast(strand, &record)?;
-                kv::Inner::mcall_delete(Recv::new(record), strand, key, out)
+                let record = Self::recv(strand, &record)?;
+                kv::Inner::mcall_delete(record, strand, key, out)
             }
             sym::PAIRS => {
                 let _ = unpack!(strand, args, 0, 0)?;
@@ -676,25 +667,16 @@ impl<'v> Protocol<'v> for Class {
             }
             sym::KEYS => {
                 let ([record], []) = unpack!(strand, args, 1, 0)?;
-                let record = Self::downcast(strand, &record)?;
-                let epoch = record
-                    .borrow()
-                    .ok_or_else(|| Error::concurrency(strand))?
-                    .0
-                    .epoch;
-                let buckets = record
-                    .borrow()
-                    .ok_or_else(|| Error::concurrency(strand))?
-                    .0
-                    .inner
-                    .buckets();
+                let record = Self::recv(strand, &record)?;
+                let epoch = record.borrow(strand)?.0.epoch;
+                let buckets = record.borrow(strand)?.0.inner.buckets();
                 strand.builtin_types().record_keys.create(
                     strand,
                     kv::Keys {
                         index: Cell::new(0),
                         epoch,
                         visited: RefCell::new(bitbox![0; buckets]),
-                        container: Recv::new(record).to_strong(),
+                        container: record.to_strong(),
                     },
                     out,
                 );
@@ -702,13 +684,9 @@ impl<'v> Protocol<'v> for Class {
             }
             sym::VALUES => {
                 let ([record], [key]) = unpack!(strand, args, 1, 1)?;
-                let record = Self::downcast(strand, &record)?;
-                let epoch = record
-                    .borrow()
-                    .ok_or_else(|| Error::concurrency(strand))?
-                    .0
-                    .epoch;
-                let container = Recv::new(record).to_strong();
+                let record = Self::recv(strand, &record)?;
+                let epoch = record.borrow(strand)?.0.epoch;
+                let container = record.to_strong();
                 let value = if let Some(key) = key {
                     if !key.is_int(strand) && key.as_sym(strand).is_none() {
                         return Err(Error::type_error(
@@ -718,8 +696,7 @@ impl<'v> Protocol<'v> for Class {
                     }
                     let hv = kv::hash(strand, &key)?;
                     let bucket = record
-                        .borrow()
-                        .ok_or_else(|| Error::concurrency(strand))?
+                        .borrow(strand)?
                         .0
                         .inner
                         .find(hv, kv::eq(strand, &key));
@@ -749,13 +726,13 @@ impl<'v> Protocol<'v> for Class {
             }
             sym::COUNT => {
                 let ([record], [key]) = unpack!(strand, args, 1, 1)?;
-                let record = Self::downcast(strand, &record)?;
-                kv::Inner::mcall_count(Recv::new(record), strand, key, out)
+                let record = Self::recv(strand, &record)?;
+                kv::Inner::mcall_count(record, strand, key, out)
             }
             sym::CONTAINS => {
                 let ([record, key], [value]) = unpack!(strand, args, 2, 1)?;
-                let record = Self::downcast(strand, &record)?;
-                kv::Inner::mcall_contains(Recv::new(record), strand, key, value, out)
+                let record = Self::recv(strand, &record)?;
+                kv::Inner::mcall_contains(record, strand, key, value, out)
             }
             _ => {
                 let vm = strand.vm();

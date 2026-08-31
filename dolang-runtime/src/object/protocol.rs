@@ -23,6 +23,7 @@ use crate::{
 pub(crate) struct Inspect<'v, 'a> {
     pub(crate) is_abstract: bool,
     pub(crate) members: &'a [Member<'v, 'a>],
+    pub(crate) type_members: &'a [Member<'v, 'a>],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -163,25 +164,6 @@ pub(crate) trait Protocol<'v>: Boxable<Header> + Collect + 'v {
                     .await
             }
         }
-    }
-
-    /// Like [`op_mcall`], but called when this object received the call via class delegation.
-    ///
-    /// `delegator` is the original value (e.g. a `ClassInstance`) that delegated the call to
-    /// this native object.  The default implementation ignores the delegator and calls
-    /// [`op_mcall`] unchanged, preserving the existing behaviour for all types that do not
-    /// care about the caller's identity.  Types that implement mixin methods (methods that
-    /// operate on the delegator rather than on the native inner object) should override this.
-    async fn op_dcall<'a, 's>(
-        this: Recv<'v, 'a, Self>,
-        strand: &'a mut Strand<'v, 's>,
-        delegator: &'a Value<'v>,
-        method: Sym<'v, 'a>,
-        args: Args<'v, 'a>,
-        out: Slot<'v, 'a>,
-    ) -> Result<'v, 's, ()> {
-        let _ = delegator;
-        Self::op_mcall(this, strand, method, args, out).await
     }
 
     fn op_type<'a, 's>(this: Recv<'v, 'a, Self>, strand: &'a mut Strand<'v, 's>, out: Slot<'v, 'a>);
@@ -622,145 +604,141 @@ pub(crate) struct Vtbl<'v> {
     /// This prevents "mixing" of objects from different GC arenas.
     phantom: PhantomData<&'v mut &'v ()>,
     op_type: for<'a, 's> fn(
-        this: NonNull<Header>,
+        this: ErasedRecv<'v, 'a>,
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,
         // This introduces an implied 'v: 'a bound which can't be expressed explicitly
         _: &'a &'v (),
     ),
     op_subtype: for<'a, 's> fn(
-        this: NonNull<Header>,
+        this: ErasedRecv<'v, 'a>,
         strand: &'a mut Strand<'v, 's>,
         supertype: &Value<'v>,
         _: &'a &'v (),
     ) -> bool,
     op_inspect:
-        for<'a> fn(this: NonNull<Header>, vm: &Vm<'v>, _: &'a &'v ()) -> Option<Inspect<'v, 'a>>,
+        for<'a> fn(this: ErasedRecv<'v, 'a>, vm: &Vm<'v>, _: &'a &'v ()) -> Option<Inspect<'v, 'a>>,
     op_fill: for<'a, 's> fn(
-        this: NonNull<Header>,
+        this: ErasedRecv<'v, 'a>,
         strand: &'a mut Strand<'v, 's>,
         type_obj: &Value<'v>,
         native: Value<'v>,
         _: &'a &'v (),
     ) -> Result<'v, 's, ()>,
     op_call: for<'a, 's> fn(
-        this: NonNull<Header>,
+        this: ErasedRecv<'v, 'a>,
         strand: &'a mut Strand<'v, 's>,
         args: Args<'v, 'a>,
         out: Slot<'v, 'a>,
         _: &'a &'v (),
     ) -> Pinned<'v, 's, 'a, ()>,
-    #[expect(clippy::type_complexity)]
     op_mcall: for<'a, 's> fn(
-        this: NonNull<Header>,
+        this: ErasedRecv<'v, 'a>,
         strand: &'a mut Strand<'v, 's>,
-        delegator: Option<&'a Value<'v>>,
         method: Sym<'v, 'a>,
         args: Args<'v, 'a>,
         out: Slot<'v, 'a>,
         _: &'a &'v (),
     ) -> Pinned<'v, 's, 'a, ()>,
-    #[expect(clippy::type_complexity)]
     op_fmt: for<'a, 's> fn(
-        this: NonNull<Header>,
+        this: ErasedRecv<'v, 'a>,
         strand: &'a mut Strand<'v, 's>,
         op: FmtOp,
         w: &mut dyn crate::value::Format<'v>,
         _: &'a &'v (),
     ) -> Result<'v, 's, ()>,
     op_bool: for<'a, 's> fn(
-        this: NonNull<Header>,
+        this: ErasedRecv<'v, 'a>,
         strand: &'a mut Strand<'v, 's>,
         _: &'a &'v (),
     ) -> bool,
     op_unary: for<'a, 's> fn(
-        this: NonNull<Header>,
+        this: ErasedRecv<'v, 'a>,
         strand: &'a mut Strand<'v, 's>,
         op: UnaryOp,
         _: &'a &'v (),
     ) -> Result<'v, 's, Value<'v>>,
     op_bin: for<'a, 's> fn(
-        this: NonNull<Header>,
+        this: ErasedRecv<'v, 'a>,
         strand: &'a mut Strand<'v, 's>,
         op: BinOp,
         other: &Value<'v>,
         _: &'a &'v (),
     ) -> Result<'v, 's, Value<'v>>,
     op_cmp: for<'a, 's> fn(
-        this: NonNull<Header>,
+        this: ErasedRecv<'v, 'a>,
         strand: &'a mut Strand<'v, 's>,
         op: CmpOp,
         other: &Value<'v>,
         _: &'a &'v (),
     ) -> Result<'v, 's, Value<'v>>,
     op_get: for<'a, 's> fn(
-        this: NonNull<Header>,
+        this: ErasedRecv<'v, 'a>,
         strand: &'a mut Strand<'v, 's>,
         field: Sym<'v, 'a>,
         out: Slot<'v, 'a>,
         _: &'a &'v (),
     ) -> Result<'v, 's, ()>,
     op_set: for<'a, 's> fn(
-        this: NonNull<Header>,
+        this: ErasedRecv<'v, 'a>,
         strand: &'a mut Strand<'v, 's>,
         field: Sym<'v, 'a>,
         value: Slot<'v, 'a>,
         _: &'a &'v (),
     ) -> Result<'v, 's, ()>,
     op_index: for<'a, 's> fn(
-        this: NonNull<Header>,
+        this: ErasedRecv<'v, 'a>,
         strand: &'a mut Strand<'v, 's>,
         index: &Value<'v>,
         out: Slot<'v, 'a>,
         _: &'a &'v (),
     ) -> Result<'v, 's, ()>,
     op_assign: for<'a, 's> fn(
-        this: NonNull<Header>,
+        this: ErasedRecv<'v, 'a>,
         strand: &'a mut Strand<'v, 's>,
         index: Slot<'v, 'a>,
         value: Slot<'v, 'a>,
         _: &'a &'v (),
     ) -> Result<'v, 's, ()>,
     op_hash: for<'a, 's> fn(
-        this: NonNull<Header>,
+        this: ErasedRecv<'v, 'a>,
         strand: &'a mut Strand<'v, 's>,
         hasher: &mut DefaultHasher,
         _: &'a &'v (),
     ) -> Result<'v, 's, ()>,
     op_next: for<'a, 's> fn(
-        this: NonNull<Header>,
+        this: ErasedRecv<'v, 'a>,
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,
         _: &'a &'v (),
     ) -> Pinned<'v, 's, 'a, bool>,
     op_put: for<'a, 's> fn(
-        this: NonNull<Header>,
+        this: ErasedRecv<'v, 'a>,
         strand: &'a mut Strand<'v, 's>,
         item: Slot<'v, 'a>,
         _: &'a &'v (),
     ) -> Pinned<'v, 's, 'a, ()>,
     op_iter: for<'a, 's> fn(
-        this: NonNull<Header>,
+        this: ErasedRecv<'v, 'a>,
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,
         _: &'a &'v (),
     ) -> Pinned<'v, 's, 'a, ()>,
     op_sink: for<'a, 's> fn(
-        this: NonNull<Header>,
+        this: ErasedRecv<'v, 'a>,
         strand: &'a mut Strand<'v, 's>,
         out: Slot<'v, 'a>,
         _: &'a &'v (),
     ) -> Pinned<'v, 's, 'a, ()>,
-    #[expect(clippy::type_complexity)]
     op_spread: for<'a, 's> fn(
-        this: NonNull<Header>,
+        this: ErasedRecv<'v, 'a>,
         strand: &'a mut Strand<'v, 's>,
         context: SpreadContext,
         sink: &'a mut dyn Spread<'v, 's>,
         _: &'a &'v (),
     ) -> Pinned<'v, 's, 'a, ()>,
     op_unpack: for<'a, 's> fn(
-        this: NonNull<Header>,
+        this: ErasedRecv<'v, 'a>,
         strand: &'a mut Strand<'v, 's>,
         sig: &'a Unpack<'v, 'a>,
         out: Slots<'v, 'a>,
@@ -940,27 +918,42 @@ pub(crate) type Mut<'v, 'a, T> = gc::Mut<'v, 'a, Header, T>;
 /// Allows borrowing the underlying `T` or obtaining a strong reference.
 pub(crate) struct Recv<'v, 'a, T: ?Sized + Boxable<Header>> {
     pub(crate) receiver: GcObjBorrow<'v, 'a, T>,
+    delegator: Option<&'a Value<'v>>,
 }
 
 impl<'v, 'a, T: ?Sized + Boxable<Header>> Clone for Recv<'v, 'a, T> {
     fn clone(&self) -> Self {
         Self {
             receiver: self.receiver,
+            delegator: self.delegator,
         }
     }
 }
 
 impl<'v, 'a, T: ?Sized + Boxable<Header>> Recv<'v, 'a, T> {
     pub(crate) fn new(receiver: gc::Borrow<'v, 'a, Header, T>) -> Self {
-        Self { receiver }
+        Self {
+            receiver,
+            delegator: None,
+        }
     }
 
-    unsafe fn from_header(header: NonNull<Header>) -> Self {
+    unsafe fn from_erased(receiver: ErasedRecv<'v, 'a>) -> Self {
         unsafe {
             Self {
-                receiver: gc::Borrow::from_raw(header.cast()),
+                receiver: gc::Borrow::from_raw(receiver.header.cast()),
+                delegator: receiver.delegator,
             }
         }
+    }
+
+    pub(crate) fn delegator(&self) -> Option<&'a Value<'v>> {
+        self.delegator
+    }
+
+    pub(crate) fn with_delegator(mut self, delegator: &'a Value<'v>) -> Self {
+        self.delegator = Some(delegator);
+        self
     }
 
     pub(crate) fn as_header(&self) -> NonNull<Header> {
@@ -1018,55 +1011,67 @@ impl<'v, 'a, T: Protocol<'v> + Boxable<Header, Inner = gc::BoxedSized<Header, T>
 impl<'v, 'a, T: ?Sized + Protocol<'v>> Input<'v> for Recv<'v, 'a, T> {
     #[inline]
     fn input_take<'b>(&'b mut self, _vm: &'b Vm<'v>, _: Sealed) -> InputBy<'v, 'b> {
-        InputBy::Value(Value::from_object(self.receiver.to_strong()), None)
+        match self.delegator {
+            Some(delegator) => InputBy::Borrow(delegator),
+            None => InputBy::Value(Value::from_object(self.receiver.to_strong()), None),
+        }
     }
 }
 
 impl<'v, 'a, T: ?Sized + Protocol<'v>> Input<'v> for &Recv<'v, 'a, T> {
     #[inline]
     fn input_take<'b>(&'b mut self, _vm: &'b Vm<'v>, _: Sealed) -> InputBy<'v, 'b> {
-        InputBy::Value(Value::from_object(self.receiver.to_strong()), None)
+        match self.delegator {
+            Some(delegator) => InputBy::Borrow(delegator),
+            None => InputBy::Value(Value::from_object(self.receiver.to_strong()), None),
+        }
     }
 }
 
+#[derive(Clone, Copy)]
+struct ErasedRecv<'v, 'a> {
+    header: NonNull<Header>,
+    delegator: Option<&'a Value<'v>>,
+}
+
 fn op_type_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
-    this: NonNull<Header>,
+    this: ErasedRecv<'v, 'a>,
     strand: &'a mut Strand<'v, 's>,
     out: Slot<'v, 'a>,
     _: &'a &'v (),
 ) {
-    unsafe { T::op_type(Recv::from_header(this), strand, out) }
+    unsafe { T::op_type(Recv::from_erased(this), strand, out) }
 }
 
 fn op_subtype_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
-    this: NonNull<Header>,
+    this: ErasedRecv<'v, 'a>,
     strand: &'a mut Strand<'v, 's>,
     supertype: &Value<'v>,
     _: &'a &'v (),
 ) -> bool {
-    unsafe { T::op_subtype(Recv::from_header(this), strand, supertype) }
+    unsafe { T::op_subtype(Recv::from_erased(this), strand, supertype) }
 }
 
 fn op_inspect_glue<'v, 'a, T: ?Sized + Protocol<'v>>(
-    this: NonNull<Header>,
+    this: ErasedRecv<'v, 'a>,
     vm: &Vm<'v>,
     _: &'a &'v (),
 ) -> Option<Inspect<'v, 'a>> {
-    unsafe { T::op_inspect(Recv::from_header(this), vm) }
+    unsafe { T::op_inspect(Recv::from_erased(this), vm) }
 }
 
 fn op_fill_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
-    this: NonNull<Header>,
+    this: ErasedRecv<'v, 'a>,
     strand: &'a mut Strand<'v, 's>,
     type_obj: &Value<'v>,
     native: Value<'v>,
     _: &'a &'v (),
 ) -> Result<'v, 's, ()> {
-    unsafe { T::op_fill(Recv::from_header(this), strand, type_obj, native) }
+    unsafe { T::op_fill(Recv::from_erased(this), strand, type_obj, native) }
 }
 
 fn op_call_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
-    this: NonNull<Header>,
+    this: ErasedRecv<'v, 'a>,
     strand: &'a mut Strand<'v, 's>,
     args: Args<'v, 'a>,
     out: Slot<'v, 'a>,
@@ -1074,47 +1079,35 @@ fn op_call_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
 ) -> Pinned<'v, 's, 'a, ()> {
     unsafe {
         strand.pin_future_call(async move |strand| {
-            T::op_call(Recv::from_header(this), strand, args, out).await
+            T::op_call(Recv::from_erased(this), strand, args, out).await
         })
     }
 }
 
 fn op_mcall_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
-    this: NonNull<Header>,
+    this: ErasedRecv<'v, 'a>,
     strand: &'a mut Strand<'v, 's>,
-    delegator: Option<&'a Value<'v>>,
     method: Sym<'v, 'a>,
     args: Args<'v, 'a>,
     out: Slot<'v, 'a>,
     _: &'a &'v (),
 ) -> Pinned<'v, 's, 'a, ()> {
     unsafe {
-        strand.pin_future_call(async move |strand| match delegator {
-            Some(delegator) => {
-                T::op_dcall(
-                    Recv::from_header(this),
-                    strand,
-                    delegator,
-                    method,
-                    args,
-                    out,
-                )
-                .await
-            }
-            None => T::op_mcall(Recv::from_header(this), strand, method, args, out).await,
+        strand.pin_future_call(async move |strand| {
+            T::op_mcall(Recv::from_erased(this), strand, method, args, out).await
         })
     }
 }
 
 fn op_fmt_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
-    this: NonNull<Header>,
+    this: ErasedRecv<'v, 'a>,
     strand: &'a mut Strand<'v, 's>,
     op: FmtOp,
     w: &mut dyn crate::value::Format<'v>,
     _: &'a &'v (),
 ) -> Result<'v, 's, ()> {
     unsafe {
-        let this = Recv::from_header(this);
+        let this = Recv::from_erased(this);
         match op {
             FmtOp::Verbatim => T::op_verbatim(this, strand, w),
             FmtOp::Display => T::op_display(this, strand, w),
@@ -1124,21 +1117,21 @@ fn op_fmt_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
 }
 
 fn to_bool_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
-    this: NonNull<Header>,
+    this: ErasedRecv<'v, 'a>,
     strand: &'a mut Strand<'v, 's>,
     _: &'a &'v (),
 ) -> bool {
-    unsafe { T::op_bool(Recv::from_header(this), strand) }
+    unsafe { T::op_bool(Recv::from_erased(this), strand) }
 }
 
 fn op_unary_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
-    this: NonNull<Header>,
+    this: ErasedRecv<'v, 'a>,
     strand: &'a mut Strand<'v, 's>,
     op: UnaryOp,
     _: &'a &'v (),
 ) -> Result<'v, 's, Value<'v>> {
     unsafe {
-        let this = Recv::from_header(this);
+        let this = Recv::from_erased(this);
         match op {
             UnaryOp::Neg => T::op_neg(this, strand),
             UnaryOp::Bnot => T::op_bnot(this, strand),
@@ -1147,14 +1140,14 @@ fn op_unary_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
 }
 
 fn op_bin_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
-    this: NonNull<Header>,
+    this: ErasedRecv<'v, 'a>,
     strand: &'a mut Strand<'v, 's>,
     op: BinOp,
     other: &'a Value<'v>,
     _: &'a &'v (),
 ) -> Result<'v, 's, Value<'v>> {
     unsafe {
-        let this = Recv::from_header(this);
+        let this = Recv::from_erased(this);
         match op {
             BinOp::Eq => T::op_eq(this, strand, other),
             BinOp::Ne => T::op_ne(this, strand, other),
@@ -1178,14 +1171,14 @@ fn op_bin_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
 }
 
 fn op_cmp_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
-    this: NonNull<Header>,
+    this: ErasedRecv<'v, 'a>,
     strand: &'a mut Strand<'v, 's>,
     op: CmpOp,
     other: &'a Value<'v>,
     _: &'a &'v (),
 ) -> Result<'v, 's, Value<'v>> {
     unsafe {
-        let this = Recv::from_header(this);
+        let this = Recv::from_erased(this);
         match op {
             CmpOp::Lt => T::op_lt(this, strand, other),
             CmpOp::Lte => T::op_lte(this, strand, other),
@@ -1196,108 +1189,108 @@ fn op_cmp_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
 }
 
 fn op_get_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
-    this: NonNull<Header>,
+    this: ErasedRecv<'v, 'a>,
     strand: &'a mut Strand<'v, 's>,
     field: Sym<'v, 'a>,
     out: Slot<'v, 'a>,
     _: &'a &'v (),
 ) -> Result<'v, 's, ()> {
-    unsafe { T::op_get(Recv::from_header(this), strand, field, out) }
+    unsafe { T::op_get(Recv::from_erased(this), strand, field, out) }
 }
 
 fn op_set_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
-    this: NonNull<Header>,
+    this: ErasedRecv<'v, 'a>,
     strand: &'a mut Strand<'v, 's>,
     field: Sym<'v, 'a>,
     value: Slot<'v, 'a>,
     _: &'a &'v (),
 ) -> Result<'v, 's, ()> {
-    unsafe { T::op_set(Recv::from_header(this), strand, field, value) }
+    unsafe { T::op_set(Recv::from_erased(this), strand, field, value) }
 }
 
 fn op_index_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
-    this: NonNull<Header>,
+    this: ErasedRecv<'v, 'a>,
     strand: &'a mut Strand<'v, 's>,
     index: &Value<'v>,
     out: Slot<'v, 'a>,
     _: &'a &'v (),
 ) -> Result<'v, 's, ()> {
-    unsafe { T::op_index(Recv::from_header(this), strand, index, out) }
+    unsafe { T::op_index(Recv::from_erased(this), strand, index, out) }
 }
 
 fn op_assign_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
-    this: NonNull<Header>,
+    this: ErasedRecv<'v, 'a>,
     strand: &'a mut Strand<'v, 's>,
     index: Slot<'v, 'a>,
     value: Slot<'v, 'a>,
     _: &'a &'v (),
 ) -> Result<'v, 's, ()> {
-    unsafe { T::op_assign(Recv::from_header(this), strand, index, value) }
+    unsafe { T::op_assign(Recv::from_erased(this), strand, index, value) }
 }
 
 fn op_hash_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
-    this: NonNull<Header>,
+    this: ErasedRecv<'v, 'a>,
     strand: &'a mut Strand<'v, 's>,
     hasher: &mut DefaultHasher,
     _: &'a &'v (),
 ) -> Result<'v, 's, ()> {
-    unsafe { T::op_hash(Recv::from_header(this), strand, hasher) }
+    unsafe { T::op_hash(Recv::from_erased(this), strand, hasher) }
 }
 
 fn op_next_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
-    this: NonNull<Header>,
+    this: ErasedRecv<'v, 'a>,
     strand: &'a mut Strand<'v, 's>,
     out: Slot<'v, 'a>,
     _: &'a &'v (),
 ) -> Pinned<'v, 's, 'a, bool> {
     unsafe {
         strand.pin_future_call(async move |strand| {
-            T::op_next(Recv::from_header(this), strand, out).await
+            T::op_next(Recv::from_erased(this), strand, out).await
         })
     }
 }
 
 fn op_put_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
-    this: NonNull<Header>,
+    this: ErasedRecv<'v, 'a>,
     strand: &'a mut Strand<'v, 's>,
     item: Slot<'v, 'a>,
     _: &'a &'v (),
 ) -> Pinned<'v, 's, 'a, ()> {
     unsafe {
         strand.pin_future_call(async move |strand| {
-            T::op_put(Recv::from_header(this), strand, item).await
+            T::op_put(Recv::from_erased(this), strand, item).await
         })
     }
 }
 
 fn op_iter_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
-    this: NonNull<Header>,
+    this: ErasedRecv<'v, 'a>,
     strand: &'a mut Strand<'v, 's>,
     out: Slot<'v, 'a>,
     _: &'a &'v (),
 ) -> Pinned<'v, 's, 'a, ()> {
     unsafe {
         strand.pin_future_call(async move |strand| {
-            T::op_iter(Recv::from_header(this), strand, out).await
+            T::op_iter(Recv::from_erased(this), strand, out).await
         })
     }
 }
 
 fn op_sink_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
-    this: NonNull<Header>,
+    this: ErasedRecv<'v, 'a>,
     strand: &'a mut Strand<'v, 's>,
     out: Slot<'v, 'a>,
     _: &'a &'v (),
 ) -> Pinned<'v, 's, 'a, ()> {
     unsafe {
         strand.pin_future_call(async move |strand| {
-            T::op_sink(Recv::from_header(this), strand, out).await
+            T::op_sink(Recv::from_erased(this), strand, out).await
         })
     }
 }
 
 fn op_spread_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
-    this: NonNull<Header>,
+    this: ErasedRecv<'v, 'a>,
     strand: &'a mut Strand<'v, 's>,
     context: SpreadContext,
     sink: &'a mut dyn Spread<'v, 's>,
@@ -1305,13 +1298,13 @@ fn op_spread_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
 ) -> Pinned<'v, 's, 'a, ()> {
     unsafe {
         strand.pin_future_call(async move |strand| {
-            T::op_spread(Recv::from_header(this), strand, context, sink).await
+            T::op_spread(Recv::from_erased(this), strand, context, sink).await
         })
     }
 }
 
 fn op_unpack_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
-    this: NonNull<Header>,
+    this: ErasedRecv<'v, 'a>,
     strand: &'a mut Strand<'v, 's>,
     sig: &'a Unpack<'v, 'a>,
     out: Slots<'v, 'a>,
@@ -1319,7 +1312,7 @@ fn op_unpack_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
 ) -> Pinned<'v, 's, 'a, ()> {
     unsafe {
         strand.pin_future_call(async move |strand| {
-            T::op_unpack(Recv::from_header(this), strand, sig, out).await
+            T::op_unpack(Recv::from_erased(this), strand, sig, out).await
         })
     }
 }
@@ -1381,15 +1374,15 @@ impl<'v, T: Protocol<'v>> GcObj<'v, T> {
 macro_rules! invoke {
     ($obj: expr, $meth: ident, $strand: expr) => {
         {
-            let this = $obj.as_header();
-            let vtbl = this.as_ref().vtbl();
+            let this = $obj.as_recv();
+            let vtbl = this.header.as_ref().vtbl();
             (vtbl.$meth)(this, $strand, &&())
         }
     };
     ($obj: expr, $meth: ident, $strand: expr, $($params: expr),+) => {
         {
-            let this = $obj.as_header();
-            let vtbl = this.as_ref().vtbl();
+            let this = $obj.as_recv();
+            let vtbl = this.header.as_ref().vtbl();
             (vtbl.$meth)(this, $strand, $($params),*, &&())
         }
     };
@@ -1397,6 +1390,42 @@ macro_rules! invoke {
 
 pub(crate) trait AsHeader {
     unsafe fn as_header(&self) -> NonNull<Header>;
+}
+
+trait AsRecv<'v, 'a> {
+    unsafe fn as_recv(&self) -> ErasedRecv<'v, 'a>;
+}
+
+impl<'v, 'a, T: AsHeader> AsRecv<'v, 'a> for T {
+    unsafe fn as_recv(&self) -> ErasedRecv<'v, 'a> {
+        ErasedRecv {
+            header: unsafe { self.as_header() },
+            delegator: None,
+        }
+    }
+}
+
+pub(crate) struct Delegated<'v, 'a, T> {
+    pub(crate) receiver: T,
+    pub(crate) delegator: &'a Value<'v>,
+}
+
+impl<'v, 'a, T> Delegated<'v, 'a, T> {
+    pub(crate) fn new(receiver: T, delegator: &'a Value<'v>) -> Self {
+        Self {
+            receiver,
+            delegator,
+        }
+    }
+}
+
+impl<'v, 'a, T: AsHeader> AsRecv<'v, 'a> for Delegated<'v, 'a, T> {
+    unsafe fn as_recv(&self) -> ErasedRecv<'v, 'a> {
+        ErasedRecv {
+            header: unsafe { self.receiver.as_header() },
+            delegator: Some(self.delegator),
+        }
+    }
 }
 
 /// Trait for dispatching protocol operations on objects.
@@ -1422,15 +1451,6 @@ pub(crate) trait Dispatch<'v, 'a> {
     async fn op_mcall<'s>(
         &self,
         strand: &'a mut Strand<'v, 's>,
-        method: Sym<'v, 'a>,
-        args: Args<'v, 'a>,
-        out: Slot<'v, 'a>,
-    ) -> Result<'v, 's, ()>;
-
-    async fn op_dcall<'s>(
-        &self,
-        strand: &'a mut Strand<'v, 's>,
-        delegator: &'a Value<'v>,
         method: Sym<'v, 'a>,
         args: Args<'v, 'a>,
         out: Slot<'v, 'a>,
@@ -1672,7 +1692,7 @@ pub(crate) trait Dispatch<'v, 'a> {
     ) -> Result<'v, 's, ()>;
 }
 
-impl<'v, 'a, T: AsHeader> Dispatch<'v, 'a> for T {
+impl<'v, 'a, T: AsRecv<'v, 'a>> Dispatch<'v, 'a> for T {
     fn op_call<'s>(
         &self,
         strand: &'a mut Strand<'v, 's>,
@@ -1689,18 +1709,7 @@ impl<'v, 'a, T: AsHeader> Dispatch<'v, 'a> for T {
         args: Args<'v, 'a>,
         out: Slot<'v, 'a>,
     ) -> impl Future<Output = Result<'v, 's, ()>> {
-        unsafe { invoke!(self, op_mcall, strand, None, method, args, out) }
-    }
-
-    fn op_dcall<'s>(
-        &self,
-        strand: &'a mut Strand<'v, 's>,
-        delegator: &'a Value<'v>,
-        method: Sym<'v, 'a>,
-        args: Args<'v, 'a>,
-        out: Slot<'v, 'a>,
-    ) -> impl Future<Output = Result<'v, 's, ()>> {
-        unsafe { invoke!(self, op_mcall, strand, Some(delegator), method, args, out) }
+        unsafe { invoke!(self, op_mcall, strand, method, args, out) }
     }
 
     fn op_fill<'s>(
@@ -2060,114 +2069,143 @@ pub(crate) async fn dispatch_native_method<'v, 's>(
     }
 
     let ([this], [], trailing) = unpack!(strand, args, 1, 0, ...)?;
-    let this = if let Some(inst) = this.downcast_ref(strand.builtin_types().class_instance) {
-        get_native_slot(strand, inst, ty)
-            .ok_or_else(|| Error::type_error(strand, "not a native object subclass"))?
-    } else {
-        strand.with_slots_sync(|strand, [mut tmp]| {
-            this.op_type(strand, Slot::reborrow(&mut tmp));
-            if !tmp.repr_eq(strand, ty) {
-                return Err(Error::type_error(strand, "invalid native object type"));
+    let (receiver, delegator) =
+        if let Some(inst) = this.downcast_ref(strand.builtin_types().class_instance) {
+            (
+                get_native_slot(strand, inst, ty)
+                    .ok_or_else(|| Error::type_error(strand, "not a native object subclass"))?,
+                Some(&*this),
+            )
+        } else {
+            strand.with_slots_sync(|strand, [mut tmp]| {
+                this.op_type(strand, Slot::reborrow(&mut tmp));
+                if !tmp.repr_eq(strand, ty) {
+                    return Err(Error::type_error(strand, "invalid native object type"));
+                }
+                Ok((&*this, None))
+            })?
+        };
+
+    macro_rules! dispatch {
+        ($op:ident $(, $arg:expr)*) => {
+            match delegator {
+                Some(delegator) => Delegated::new(receiver, delegator).$op(strand $(, $arg)*),
+                None => receiver.$op(strand $(, $arg)*),
             }
-            Ok(&this)
-        })?
-    };
+        };
+    }
+
+    macro_rules! dispatch_async {
+        ($op:ident $(, $arg:expr)*) => {
+            match delegator {
+                Some(delegator) => {
+                    Delegated::new(receiver, delegator).$op(strand $(, $arg)*).await
+                }
+                None => receiver.$op(strand $(, $arg)*).await,
+            }
+        };
+    }
+
     match method.tag() {
         sym::STR_METHOD => {
             let mut format = crate::value::StrEmbryo::new();
-            this.display(strand, &mut format)?;
+            dispatch!(op_display, &mut format)?;
             format.finish(strand, out);
         }
         sym::DBG_METHOD => {
             let mut format = crate::value::StrEmbryo::new();
-            this.debug(strand, &mut format)?;
+            dispatch!(op_debug, &mut format)?;
             format.finish(strand, out);
         }
         sym::BOOL_METHOD => {
-            let b = this.op_bool(strand);
+            let b = dispatch!(op_bool);
             Output::set(strand, out, b);
         }
         sym::HASH_METHOD => {
             let mut hasher = DefaultHasher::new();
-            this.op_hash(strand, &mut hasher)?;
+            dispatch!(op_hash, &mut hasher)?;
             Output::set(strand, out, hasher.finish());
         }
         sym::EQ_METHOD => {
             let ([other], []) = unpack!(strand, trailing, 1, 0)?;
-            out.store(this.op_eq(strand, &other));
+            let value = match delegator {
+                Some(delegator) => Delegated::new(receiver, delegator).op_eq(strand, &other)?,
+                None => receiver.op_eq(strand, &other),
+            };
+            out.store(value);
         }
         sym::LT_METHOD => {
             let ([other], []) = unpack!(strand, trailing, 1, 0)?;
-            out.store(this.op_lt(strand, &other)?);
+            out.store(dispatch!(op_lt, &other)?);
         }
         sym::NEG_METHOD => {
-            out.store(this.op_neg(strand)?);
+            out.store(dispatch!(op_neg)?);
         }
         sym::BNOT_METHOD => {
-            out.store(this.op_bnot(strand)?);
+            out.store(dispatch!(op_bnot)?);
         }
         sym::ADD_METHOD => {
             let ([other], []) = unpack!(strand, trailing, 1, 0)?;
-            out.store(this.op_add(strand, &other)?);
+            out.store(dispatch!(op_add, &other)?);
         }
         sym::SUB_METHOD => {
             let ([other], []) = unpack!(strand, trailing, 1, 0)?;
-            out.store(this.op_sub(strand, &other)?);
+            out.store(dispatch!(op_sub, &other)?);
         }
         sym::RSUB_METHOD => {
             let ([other], []) = unpack!(strand, trailing, 1, 0)?;
-            out.store(this.op_rsub(strand, &other)?);
+            out.store(dispatch!(op_rsub, &other)?);
         }
         sym::MUL_METHOD => {
             let ([other], []) = unpack!(strand, trailing, 1, 0)?;
-            out.store(this.op_mul(strand, &other)?);
+            out.store(dispatch!(op_mul, &other)?);
         }
         sym::DIV_METHOD => {
             let ([other], []) = unpack!(strand, trailing, 1, 0)?;
-            out.store(this.op_div(strand, &other)?);
+            out.store(dispatch!(op_div, &other)?);
         }
         sym::RDIV_METHOD => {
             let ([other], []) = unpack!(strand, trailing, 1, 0)?;
-            out.store(this.op_rdiv(strand, &other)?);
+            out.store(dispatch!(op_rdiv, &other)?);
         }
         sym::EDIV_METHOD => {
             let ([other], []) = unpack!(strand, trailing, 1, 0)?;
-            out.store(this.op_ediv(strand, &other)?);
+            out.store(dispatch!(op_ediv, &other)?);
         }
         sym::REDIV_METHOD => {
             let ([other], []) = unpack!(strand, trailing, 1, 0)?;
-            out.store(this.op_rediv(strand, &other)?);
+            out.store(dispatch!(op_rediv, &other)?);
         }
         sym::MOD_METHOD => {
             let ([other], []) = unpack!(strand, trailing, 1, 0)?;
-            out.store(this.op_mod(strand, &other)?);
+            out.store(dispatch!(op_mod, &other)?);
         }
         sym::RMOD_METHOD => {
             let ([other], []) = unpack!(strand, trailing, 1, 0)?;
-            out.store(this.op_rmod(strand, &other)?);
+            out.store(dispatch!(op_rmod, &other)?);
         }
         sym::BAND_METHOD => {
             let ([other], []) = unpack!(strand, trailing, 1, 0)?;
-            out.store(this.op_band(strand, &other)?);
+            out.store(dispatch!(op_band, &other)?);
         }
         sym::BOR_METHOD => {
             let ([other], []) = unpack!(strand, trailing, 1, 0)?;
-            out.store(this.op_bor(strand, &other)?);
+            out.store(dispatch!(op_bor, &other)?);
         }
         sym::BXOR_METHOD => {
             let ([other], []) = unpack!(strand, trailing, 1, 0)?;
-            out.store(this.op_bxor(strand, &other)?);
+            out.store(dispatch!(op_bxor, &other)?);
         }
         sym::SHL_METHOD => {
             let ([other], []) = unpack!(strand, trailing, 1, 0)?;
-            out.store(this.op_shl(strand, &other)?);
+            out.store(dispatch!(op_shl, &other)?);
         }
         sym::SHR_METHOD => {
             let ([other], []) = unpack!(strand, trailing, 1, 0)?;
-            out.store(this.op_shr(strand, &other)?);
+            out.store(dispatch!(op_shr, &other)?);
         }
         _ => {
-            this.op_mcall(strand, method, trailing, out).await?;
+            dispatch_async!(op_mcall, method, trailing, out)?;
         }
     }
     Ok(())

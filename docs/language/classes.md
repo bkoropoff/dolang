@@ -95,6 +95,99 @@ See [Decorators](./decorators.md) for decorator syntax and evaluation order, and
 [`getter`](../api/std/getter.md) / [`setter`](../api/std/setter.md) for the
 descriptor helpers.
 
+## Class and Static Members
+
+Members marked `#[class]` or `#[static]` live on the type object rather than on
+instances. Reach them through the class, not through an instance:
+
+```
+class Counter
+  #[class]
+  pub field count = 0
+
+  #[class]
+  pub def bump cls
+    cls.count = (cls.count + 1)
+    cls.count
+
+assert_eq $Counter.count 0
+assert_eq $Counter.bump() 1
+```
+
+A class method receives the class it was reached through as its first
+parameter, the way an instance method receives `self`.
+
+### Inheritance
+
+`class` members are inherited; `static` members are not. Because both occupy
+the type object's namespace, a static shadows an inherited class member of the
+same name without propagating that shadowing any further.
+
+Each class gets its own storage for a class field, seeded from the declared
+initializer. A subclass therefore starts from the default rather than sharing
+the parent's cell, and a non-constant initializer runs once per class:
+
+```
+class Derived: Counter
+
+assert_eq $Counter.bump() 2
+assert_eq $Derived.count 0
+assert_eq $Derived.bump() 1
+assert_eq $Counter.count 2
+```
+
+Class and static members are a separate namespace from instance members, so a
+class field and an instance field may share a name. Two members of the same
+name in the type namespace — a `class` and a `static`, say — collide, and the
+class fails to build.
+
+### `(call)` as a Class or Static Member
+
+`(call)` is the only special method that may be a class or static member. As an
+instance method it makes instances callable; as a class or static member it
+replaces what happens when the *class* is called.
+
+Declaring it `static` gives a class a factory that subclasses do not inherit,
+so the factory can construct a subtype without re-entering itself:
+
+```
+class Shape
+  pub field kind = ""
+
+  def (init) self kind
+    self.kind = kind
+
+  #[static]
+  pub def (call) cls kind
+    echo "building $kind"
+    Type.(call) $cls $kind
+
+class Circle: Shape
+
+let s = Shape "round"     # prints "building round"
+let c = Circle "arc"      # no factory: Circle did not inherit it
+```
+
+`Type.(call)` performs the default instantiation the override replaced. It is
+the ordinary unbound-method idiom — a class is an instance of `Type`, so this
+invokes `Type`'s implementation rather than the receiver's override, exactly as
+`Animal.(init) $self $name` calls a parent constructor.
+
+### Unbound Class Methods
+
+`Class.method` binds the class, so `Counter.bump()` always passes `Counter`.
+`type(Class)` returns the class's type object, whose namespace holds the
+class-level methods unbound, letting one class's implementation run against
+another:
+
+```
+assert_eq (type(Counter).bump(Derived)) 2
+```
+
+Two type objects are equal when they stand for the same class, and they hash to
+match, so they work as dict keys. A type object is a subtype of
+[`Type`](../api/std/type.md), so `type Counter Type` holds.
+
 ## Visibility
 
 By default, all fields and methods of a class are **private** — they can only
@@ -465,7 +558,9 @@ class Point
 
 ### `(call)`: Function Call
 
-Invoked when an instance is called like a function:
+Invoked when an instance is called like a function. As a class or static member
+it instead governs calling the class itself; see
+[Class and Static Members](#class-and-static-members).
 
 ```
 class Multiplier

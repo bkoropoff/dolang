@@ -9,8 +9,9 @@ use crate::{
     ast::{
         Arg, ArrayElem, Assign, Bind, Block, Class, ClassMember, ClassSuper, Const, Decorator, Def,
         DictElem, Expand, Expr, ExprBody, FieldInit, For, Function, GetVariant, Ident, If, Import,
-        ImportElement, ImportItem, Key, LValue, Let, Method, NlGuard, Pair, Param, ParamDefault,
-        Pattern, PatternBind, PrimStmt, Res, Return, Single, Stmt, Try, Unit, While, visit::Node,
+        ImportElement, ImportItem, Key, LValue, Let, MemberScope, Method, NlGuard, Pair, Param,
+        ParamDefault, Pattern, PatternBind, PrimStmt, Res, Return, Single, Stmt, Try, Unit, While,
+        visit::Node,
     },
     cfg::{self, BlockRefMut, Inst, InstInfo, Term, TermInfo},
     constant::{self, ConstantExt},
@@ -1893,6 +1894,9 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
                 let cid = self.lower_const(value);
                 self.block.insts.push(Inst(InstInfo::LoadConst(cid), span));
             }
+            FieldInit::Expr(expr) => {
+                self.lower_expr(expr)?;
+            }
             FieldInit::Thunk(func) => {
                 self.lower_closure(func, span)?;
             }
@@ -1952,6 +1956,9 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
         let super_sym = self.symtab.id(&self.bintab.id_str("super"));
         let field_sym = self.symtab.id(&self.bintab.id_str("field"));
         let field_thunk_sym = self.symtab.id(&self.bintab.id_str("field_thunk"));
+        let class_field_sym = self.symtab.id(&self.bintab.id_str("class_field"));
+        let class_field_thunk_sym = self.symtab.id(&self.bintab.id_str("class_field_thunk"));
+        let static_field_sym = self.symtab.id(&self.bintab.id_str("static_field"));
         let method_sym = self.symtab.id(&self.bintab.id_str("method"));
 
         for super_ref in &node.super_refs {
@@ -2016,9 +2023,18 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
         for member in &node.body.members {
             match member {
                 ClassMember::Field(field) => {
-                    let key_sym = match &field.init {
-                        FieldInit::Thunk(_) => field_thunk_sym,
-                        _ => field_sym,
+                    // A static field is evaluated once, at class creation, so its
+                    // initializer is lowered inline rather than as a thunk. Class
+                    // and instance fields keep the thunk: it is re-run per subclass
+                    // and per instance respectively, which is what gives each its
+                    // own storage.
+                    let is_thunk = matches!(&field.init, FieldInit::Thunk(_));
+                    let key_sym = match (field.scope, is_thunk) {
+                        (MemberScope::Instance, true) => field_thunk_sym,
+                        (MemberScope::Instance, false) => field_sym,
+                        (MemberScope::Class, true) => class_field_thunk_sym,
+                        (MemberScope::Class, false) => class_field_sym,
+                        (MemberScope::Static, _) => static_field_sym,
                     };
                     for _ in &field.fields {
                         class_sig_args.push(sig::Arg::Key(key_sym));

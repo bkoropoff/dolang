@@ -867,6 +867,15 @@ impl<'v> Protocol<'v> for Array<'v> {
             }
             sym::COPY => {
                 let ([], []) = unpack!(strand, args, 0, 0)?;
+                if this.delegator().is_some() {
+                    return strand
+                        .with_slots(async |strand, [mut receiver, mut ty]| {
+                            Output::set(strand, Slot::reborrow(&mut receiver), &this);
+                            receiver.op_type(strand, Slot::reborrow(&mut ty));
+                            call!(strand, &ty, out, &receiver).await
+                        })
+                        .await;
+                }
                 let borrow = this.borrow(strand)?;
                 let array = Array {
                     inner: borrow.inner.iter().map(Value::dup).collect(),
@@ -958,27 +967,6 @@ impl<'v> Protocol<'v> for Array<'v> {
             out,
         );
         Ok(())
-    }
-
-    async fn op_dcall<'a, 's>(
-        this: Recv<'v, 'a, Self>,
-        strand: &'a mut Strand<'v, 's>,
-        delegator: &'a Value<'v>,
-        method: Sym<'v, 'a>,
-        args: Args<'v, 'a>,
-        out: Slot<'v, 'a>,
-    ) -> Result<'v, 's, ()> {
-        if method.tag() == sym::COPY {
-            let ([], []) = unpack!(strand, args, 0, 0)?;
-            return strand
-                .with_slots(async |strand, [mut tmp, mut ty]| {
-                    Output::set(strand, &mut tmp, delegator);
-                    tmp.op_type(strand, Slot::reborrow(&mut ty));
-                    call!(strand, &ty, out, delegator).await
-                })
-                .await;
-        }
-        Self::op_mcall(this, strand, method, args, out).await
     }
 
     async fn op_spread<'a, 's>(
@@ -1165,6 +1153,12 @@ impl<'v> Protocol<'v> for Type {
     fn op_inspect<'a>(_this: Recv<'v, 'a, Self>, _vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {
         Some(Inspect {
             is_abstract: false,
+            type_members: members![
+                Method(sym::VERBATIM_METHOD),
+                Method(sym::STR_METHOD),
+                Method(sym::DBG_METHOD),
+                Method(sym::CALL_METHOD),
+            ],
             members: members![
                 Method(sym::STR_METHOD),
                 Method(sym::DBG_METHOD),

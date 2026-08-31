@@ -1,0 +1,49 @@
+# Only the prelude `class` and `static` decorators annotate a field's scope.
+# Anything else is rejected, which keeps the door open for giving field
+# decorators real semantics later.
+
+class BadFieldDecorator
+  # warning: unused variable
+  #   --> class_field_decorators.dol:LL:LL
+  #    |
+  # LL | class BadFieldDecorator
+  #    |       ^^^^^^^^^^^^^^^^^
+  #[setter]
+  pub field value = 1
+# error: only the prelude `class` and `static` decorators are supported on a field
+#   --> class_field_decorators.dol:LL:LL
+#    |
+# LL |   pub field value = 1
+#    |       ^^^^^
+
+class TwoScopes
+  # warning: unused variable
+  #   --> class_field_decorators.dol:LL:LL
+  #    |
+  # LL | class TwoScopes
+  #    |       ^^^^^^^^^
+  #[class]
+  #[static]
+  pub field value = 1
+# error: a field may have only one `class` or `static` decorator
+#   --> class_field_decorators.dol:LL:LL
+#    |
+# LL |   pub field value = 1
+#    |       ^^^^^
+
+# A shadowed binding is not the prelude item, so it does not annotate scope.
+let class = 5
+
+class ShadowedScope
+  # warning: unused variable
+  #   --> class_field_decorators.dol:LL:LL
+  #    |
+  # LL | class ShadowedScope
+  #    |       ^^^^^^^^^^^^^
+  #[class]
+  pub field value = 1
+# error: only the prelude `class` and `static` decorators are supported on a field
+#   --> class_field_decorators.dol:LL:LL
+#    |
+# LL |   pub field value = 1
+#    |       ^^^^^
