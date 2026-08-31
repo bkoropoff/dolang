@@ -1,0 +1,31 @@
+[package]
+name = "dolang-vfs-winnet"
+version = "0.1.1"
+description = "Windows NetAPI VFS bindings for dolang-vfs."
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+test = true
+doctest = false
+
+[dependencies]
+bitflags = { version = "2.10.0", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+dolang-vfs = { path = "../dolang-vfs", version = "0.1.1" }
+dolang-winterop = { path = "../dolang-winterop", version = "0.1.1" }
+tokio = { version = "1.48.0", features = ["rt"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_NetworkManagement_NetManagement",
+  "Win32_Security",
+] }
+
+[dev-dependencies]
+postcard = { version = "1.1.3", features = ["use-std"] }
+tokio = { version = "1.48.0", features = ["rt-multi-thread", "macros", "io-util"] }
+tempfile = "3"

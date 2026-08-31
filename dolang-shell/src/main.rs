@@ -36,6 +36,8 @@ extern crate dolang_ext_sqlite;
 extern crate dolang_ext_tar;
 #[cfg(feature = "toml")]
 extern crate dolang_ext_toml;
+#[cfg(feature = "winnet")]
+extern crate dolang_ext_winnet;
 #[cfg(feature = "winreg")]
 extern crate dolang_ext_winreg;
 #[cfg(feature = "winscm")]

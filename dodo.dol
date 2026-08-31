@@ -41,6 +41,7 @@ let PUBLISH_CRATES = $
   - dolang-vfs
   - dolang-vfs-winreg
   - dolang-vfs-winscm
+  - dolang-vfs-winnet
   - dolang-shell-vfs
   - dolang-bytecode
   - dolang-runtime
@@ -64,6 +65,7 @@ let PUBLISH_CRATES = $
   - dolang-ext-shell
   - dolang-ext-winreg
   - dolang-ext-winscm
+  - dolang-ext-winnet
   - dolang-ext-zip
   - dolang-ext-sqlite
   - dolang-ext-progress

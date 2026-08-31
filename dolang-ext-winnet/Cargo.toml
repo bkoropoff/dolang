@@ -1,0 +1,18 @@
+[package]
+name = "dolang-ext-winnet"
+version = "0.1.1"
+description = "Windows NetAPI bindings for the Do language."
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+test = false
+doctest = false
+
+[dependencies]
+dolang = { path = "../dolang", version = "0.1.1" }
+dolang-ext-shell = { path = "../dolang-ext-shell", version = "0.1.1" }
+dolang-vfs-winnet = { path = "../dolang-vfs-winnet", version = "0.1.1" }
+dolang-winterop = { path = "../dolang-winterop", version = "0.1.1" }

@@ -199,7 +199,7 @@ impl DateTimeAnnex {
 }
 
 impl DurationAnnex {
-    fn from_total_nanos(total_nanos: i128) -> Self {
+    pub(crate) fn from_total_nanos(total_nanos: i128) -> Self {
         Self { total_nanos }
     }
 

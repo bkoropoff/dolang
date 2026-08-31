@@ -13,7 +13,7 @@ name = "dolang"
 path = "src/main.rs"
 
 [features]
-default = ["base64", "digest", "json", "regex", "glob", "http", "http_mock", "zip", "tar", "sqlite", "xml", "yaml", "progress", "rand", "toml", "patch", "winreg", "winscm"]
+default = ["base64", "digest", "json", "regex", "glob", "http", "http_mock", "zip", "tar", "sqlite", "xml", "yaml", "progress", "rand", "toml", "patch", "winreg", "winscm", "winnet"]
 debug = ["dolang-shell-main/debug"]
 base64 = ["dep:dolang-ext-base64"]
 digest = ["dep:dolang-ext-digest"]
@@ -34,6 +34,7 @@ toml = ["dep:dolang-ext-toml"]
 patch = ["dep:dolang-ext-patch"]
 winreg = ["dep:dolang-ext-winreg", "dolang-shell-vfs/winreg"]
 winscm = ["dep:dolang-ext-winscm", "dolang-shell-vfs/winscm"]
+winnet = ["dep:dolang-ext-winnet", "dolang-shell-vfs/winnet"]
 
 [dependencies]
 dolang-shell-vfs = { path = "../dolang-shell-vfs", version = "0.1.1", default-features = false }
@@ -156,6 +157,11 @@ optional = true
 
 [dependencies.dolang-ext-winscm]
 path = "../dolang-ext-winscm"
+version = "0.1.1"
+optional = true
+
+[dependencies.dolang-ext-winnet]
+path = "../dolang-ext-winnet"
 version = "0.1.1"
 optional = true
 
