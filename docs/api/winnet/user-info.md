@@ -6,6 +6,10 @@ Passwords are write-only and are never included in snapshots.
 
 ## Fields
 
+### `sid`
+
+The stable `security.windows.Sid`.
+
 ### `name`
 
 Account name. **Type:** [`Str`](../std/str.md)

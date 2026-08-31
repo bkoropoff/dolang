@@ -388,9 +388,11 @@ nav:
       - api/uuid/uuid.md
     - winnet:
       - api/winnet/index.md
+      - api/winnet/group.md
+      - api/winnet/group-info.md
       - api/winnet/user.md
-      - api/winnet/user-info.md
       - api/winnet/user-flags.md
+      - api/winnet/user-info.md
     - winreg:
       - api/winreg/index.md
       - api/winreg/access-mask.md

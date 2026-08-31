@@ -20,7 +20,9 @@ impl Extension for WinnetExt {
     fn apply_vm<'v>(&self, builder: &mut Builder<'v>) -> Result<(), Self::Error> {
         let global = Global::new(builder);
         let global = builder.register_state(global);
-        crate::user::configure_vm(builder, global);
+        let module = builder.module("winnet");
+        let module = crate::user::configure_module(module, global);
+        crate::group::configure_module(module, global).commit();
         Ok(())
     }
 }

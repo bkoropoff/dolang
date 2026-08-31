@@ -5,5 +5,5 @@ mod api;
 mod backend;
 mod wire;
 
-pub use api::{User, Users};
-pub use wire::{UserCreate, UserFlags, UserInfo, UserUpdate};
+pub use api::{Group, GroupMembers, Groups, User, Users};
+pub use wire::{GroupCreate, GroupInfo, GroupUpdate, UserCreate, UserFlags, UserInfo, UserUpdate};

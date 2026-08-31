@@ -41,6 +41,7 @@ bitflags::bitflags! {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserInfo {
+    pub sid: Sid,
     pub name: String,
     pub full_name: Option<String>,
     pub comment: Option<String>,
@@ -60,6 +61,7 @@ pub struct UserInfo {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct UserUpdate {
+    pub name: Option<String>,
     pub password: Option<String>,
     pub full_name: Option<Option<String>>,
     pub comment: Option<Option<String>>,
@@ -75,6 +77,7 @@ pub struct UserUpdate {
 
 #[derive(Serialize, Deserialize)]
 struct UserUpdateWire {
+    name: Option<String>,
     password: Option<String>,
     full_name: Option<Option<String>>,
     comment: Option<Option<String>>,
@@ -97,6 +100,7 @@ impl<'de> Deserialize<'de> for UserUpdate {
             ));
         }
         Ok(Self {
+            name: w.name,
             password: w.password,
             full_name: w.full_name,
             comment: w.comment,
@@ -113,6 +117,10 @@ impl<'de> Deserialize<'de> for UserUpdate {
 }
 
 impl UserUpdate {
+    pub fn name(mut self, value: String) -> Self {
+        self.name = Some(value);
+        self
+    }
     fn flag(mut self, flag: UserFlags, value: bool) -> Self {
         if value {
             self.set_flags.insert(flag);
@@ -183,6 +191,35 @@ pub struct UserCreate {
     pub update: UserUpdate,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupInfo {
+    pub sid: Sid,
+    pub name: String,
+    pub comment: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupUpdate {
+    pub name: Option<String>,
+    pub comment: Option<Option<String>>,
+}
+impl GroupUpdate {
+    pub fn name(mut self, value: String) -> Self {
+        self.name = Some(value);
+        self
+    }
+    pub fn comment(mut self, value: Option<String>) -> Self {
+        self.comment = Some(value);
+        self
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupCreate {
+    pub name: String,
+    pub comment: Option<String>,
+}
+
 #[derive(Serialize, Deserialize)]
 pub(crate) enum WinNetRequest {
     UserByName {
@@ -192,7 +229,7 @@ pub(crate) enum WinNetRequest {
         sid: Sid,
     },
     UsersPage {
-        resume: u32,
+        resume: u64,
     },
     CreateUser(UserCreate),
     Info {
@@ -208,6 +245,41 @@ pub(crate) enum WinNetRequest {
         name: String,
         sid: Sid,
     },
+    GroupByName {
+        name: String,
+    },
+    GroupsPage {
+        resume: u64,
+    },
+    CreateGroup(GroupCreate),
+    GroupInfo {
+        name: String,
+        sid: Sid,
+    },
+    GroupUpdate {
+        name: String,
+        sid: Sid,
+        update: GroupUpdate,
+    },
+    GroupMembersPage {
+        name: String,
+        sid: Sid,
+        resume: u64,
+    },
+    GroupAddMember {
+        name: String,
+        sid: Sid,
+        member: Sid,
+    },
+    GroupRemoveMember {
+        name: String,
+        sid: Sid,
+        member: Sid,
+    },
+    GroupDelete {
+        name: String,
+        sid: Sid,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -217,12 +289,28 @@ pub(crate) enum WinNetResponse {
         sid: Sid,
     },
     UsersPage {
-        users: Vec<(String, Sid)>,
-        resume: u32,
+        users: Vec<UserInfo>,
+        resume: u64,
         done: bool,
     },
     Info(UserInfo),
     Deleted,
+    Group {
+        name: String,
+        sid: Sid,
+    },
+    GroupsPage {
+        groups: Vec<GroupInfo>,
+        resume: u64,
+        done: bool,
+    },
+    GroupInfo(GroupInfo),
+    GroupMembersPage {
+        members: Vec<Sid>,
+        resume: u64,
+        done: bool,
+    },
+    Unit,
 }
 
 pub(crate) struct WinNetExt;
@@ -230,7 +318,7 @@ impl VfsExtension for WinNetExt {
     type Request = WinNetRequest;
     type Response = Result<WinNetResponse, Error>;
     const NAME: &'static str = "dolang-vfs-winnet";
-    const VERSION: u16 = 1;
+    const VERSION: u16 = 2;
     const AVAILABLE: bool = cfg!(windows);
     async fn handle(&self, ctx: &mut ExtContext<'_>, request: WinNetRequest) -> Self::Response {
         #[cfg(windows)]
@@ -260,8 +348,31 @@ mod tests {
         assert!(u.clear_flags().contains(UserFlags::ACCOUNT_DISABLED));
     }
     #[test]
+    fn updates_round_trip_renames() {
+        let user = UserUpdate::default().name("new-user".into());
+        let bytes = postcard::to_stdvec(&user).unwrap();
+        assert_eq!(postcard::from_bytes::<UserUpdate>(&bytes).unwrap(), user);
+        let group = GroupUpdate::default()
+            .name("new-group".into())
+            .comment(None);
+        let bytes = postcard::to_stdvec(&group).unwrap();
+        assert_eq!(postcard::from_bytes::<GroupUpdate>(&bytes).unwrap(), group);
+    }
+    #[test]
+    fn resume_handles_preserve_64_bits() {
+        let request = WinNetRequest::GroupsPage {
+            resume: u64::MAX - 1,
+        };
+        let bytes = postcard::to_stdvec(&request).unwrap();
+        match postcard::from_bytes::<WinNetRequest>(&bytes).unwrap() {
+            WinNetRequest::GroupsPage { resume } => assert_eq!(resume, u64::MAX - 1),
+            _ => panic!("wrong request variant"),
+        }
+    }
+    #[test]
     fn overlap_is_rejected() {
         let bytes = postcard::to_stdvec(&UserUpdateWire {
+            name: None,
             password: None,
             full_name: None,
             comment: None,

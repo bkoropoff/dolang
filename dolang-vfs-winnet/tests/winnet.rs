@@ -3,13 +3,15 @@
 #[cfg(not(windows))]
 mod stub {
     use dolang_vfs::{Vfs, error::ErrorKind, server::Server};
-    use dolang_vfs_winnet::User;
+    use dolang_vfs_winnet::{Group, User};
     use tempfile::tempdir;
 
     #[tokio::test]
     async fn direct_dispatch_reports_unsupported() {
         let vfs = Vfs::direct().unwrap();
         let error = User::by_name(&vfs, "nobody").await.err().unwrap();
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
+        let error = Group::by_name(&vfs, "nobody").await.err().unwrap();
         assert_eq!(error.kind(), ErrorKind::Unsupported);
     }
 
@@ -23,6 +25,8 @@ mod stub {
         });
         let vfs = Vfs::connect(&path).await.unwrap();
         let error = User::by_name(&vfs, "nobody").await.err().unwrap();
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
+        let error = Group::by_name(&vfs, "nobody").await.err().unwrap();
         assert_eq!(error.kind(), ErrorKind::Unsupported);
     }
 }

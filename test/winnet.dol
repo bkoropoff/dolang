@@ -3,10 +3,12 @@ import winnet rand sys
     - vfs
   security.windows:
     - Sid
+    - SidName
   std:
     - Bool
     - Int
   sys:
+    - AlreadyExistsError
     - NotFoundError
     - PermissionDeniedError
     - UnsupportedError
@@ -44,8 +46,9 @@ def scratch_user block ...rest
   let name = "do-test-$(rand.string 10)"
   let password = "Do!$(rand.string 16)9"
   let user = try
-    winnet.create_user $name
-      :password
+    winnet.create_user
+      name: $name
+      password: $password
       full_name: "Do winnet test"
       comment: "created by test/winnet.dol"
       user_comment: scratch
@@ -61,7 +64,7 @@ def scratch_user block ...rest
     skip "requires permission to manage local users"
 
   try
-    block $user ...rest
+    block user: $user ...rest
   finally
     delete_if_present $name
 
@@ -74,31 +77,38 @@ def unsupported_without_windows_backend()
     [...winnet.users()]
   assert_throws $UnsupportedError do
     winnet.user "Administrator"
+  assert_throws $UnsupportedError do
+    [...winnet.groups()]
+  assert_throws $UnsupportedError do
+    winnet.group "Administrators"
 
 #[test]
 #[vfs]
 #[scratch_user]
-def local_user_lifecycle user
-  let name = user.name
+def local_user_lifecycle :user
+  let initial = user.info()
+  let name = initial.name
   let replacement_password = "Do!$(rand.string 16)8"
 
   assert_type $winnet.User $user
-  assert_eq $user.name $name
   assert_type $Sid $user.sid
 
-  # Lookup by both cached name and stable SID identifies the same account.
+  # Lookup by both name and stable SID identifies the same account.
   let by_name = winnet.user $name
   let by_sid = winnet.user $user.sid
-  assert_eq $by_name.name $name
+  let by_info = winnet.user $initial
+  assert_eq $by_name.info().name $name
   assert_eq (str by_name.sid) (str user.sid)
-  assert_eq $by_sid.name $name
+  assert_eq $by_sid.info().name $name
   assert_eq (str by_sid.sid) (str user.sid)
+  assert_eq (str by_info.sid) (str user.sid)
 
   # Enumeration is a forward iterator and includes the scratch account.
-  let found = [...winnet.users()].any(do |entry| (entry.name == name))
+  let user_infos = [...winnet.users()]
+  assert $user_infos.all(do |entry| type(entry) == winnet.UserInfo)
+  let found = user_infos.any(do |entry| (entry.name == name))
   assert $found "scratch user $name missing from users()"
 
-  let initial = user.info()
   assert_type $winnet.UserInfo $initial
   assert_eq $initial.name $name
   assert_eq $initial.full_name "Do winnet test"
@@ -154,6 +164,101 @@ def local_user_lifecycle user
   assert_eq $updated.password_never_expires true
   assert_eq $updated.password_cannot_change true
 
+  # Earlier attributes remain applied when the final rename conflicts.
+  let conflict_name = "do-hit-$(rand.string 10)"
+  let conflict = winnet.create_user
+    name: $conflict_name
+    password: "Do!$(rand.string 16)7"
+  try
+    assert_throws $AlreadyExistsError do
+      user.update full_name: "Applied before conflict" name: $conflict_name
+  finally
+    conflict.delete()
+  assert_eq $user.info().name $name
+  assert_eq $user.info().full_name "Applied before conflict"
+
+  # Rename is applied last and refreshes both the snapshot and handle cache.
+  let renamed = "do-test-$(rand.string 10)"
+  let renamed_info = user.update
+    full_name: "Renamed Do user"
+    name: $renamed
+  assert_eq $renamed_info.name $renamed
+  assert_eq $user.info().name $renamed
+  assert_eq $user.info().full_name "Renamed Do user"
+  let renamed_lookup = winnet.user $renamed
+  assert_eq (str renamed_lookup.sid) (str user.sid)
+
   user.delete()
   assert_throws $NotFoundError do
-    winnet.user $name
+    winnet.user $renamed
+
+#[fixture]
+def scratch_group block ...rest
+  if (sys.os_info().family != :WINDOWS:)
+    skip "requires Windows NetAPI"
+  if sys.os_info().is_wine
+    skip "Wine does not implement local-group lifecycle operations"
+  let name = "do-group-$(rand.string 8)"
+  let group = try
+    winnet.create_group $name comment: "created by test/winnet.dol"
+  catch PermissionDeniedError: _
+    skip "requires permission to manage local groups"
+  try
+    block group: $group ...rest
+  finally
+    try
+      group.delete()
+    catch _
+      nil
+
+#[test]
+#[vfs]
+#[scratch_user]
+#[scratch_group]
+def local_group_lifecycle :user :group
+  let name = group.info().name
+  let user_name = user.info().name
+  assert_type $winnet.Group $group
+  assert_type $Sid $group.sid
+  assert_eq $group.info().comment "created by test/winnet.dol"
+  let group_by_name = winnet.group $name
+  let group_by_sid = winnet.group $group.sid
+  let group_info = group.info()
+  let group_by_info = winnet.group $group_info
+  assert_eq (str group_by_name.sid) (str group.sid)
+  assert_eq (str group_by_sid.sid) (str group.sid)
+  assert_eq (str group_by_info.sid) (str group.sid)
+  let group_infos = [...winnet.groups()]
+  assert $group_infos.all(do |entry| type(entry) == winnet.GroupInfo)
+  assert $group_infos.any(do |entry| (entry.name == name))
+
+  assert_eq $group.update(comment: nil).comment nil
+  group.add_member $user_name
+  assert_throws $AlreadyExistsError do
+    group.add_member $user.sid
+  let members = [...group.members()]
+  assert $members.any(do |member| (str member.sid) == (str user.sid))
+  assert_type $SidName $members[0]
+  group.remove_member $user.sid
+  assert_throws $NotFoundError do
+    group.remove_member $user_name
+  group.add_member $user.sid
+  group.remove_member $user_name
+
+  let conflict_name = "do-hit-$(rand.string 8)"
+  let conflict = winnet.create_group $conflict_name
+  try
+    assert_throws $AlreadyExistsError do
+      group.update comment: "applied before conflict" name: $conflict_name
+  finally
+    conflict.delete()
+  assert_eq $group.info().name $name
+  assert_eq $group.info().comment "applied before conflict"
+
+  let renamed = "do-group-$(rand.string 8)"
+  let info = group.update comment: "renamed" name: $renamed
+  assert_eq $info.name $renamed
+  assert_eq $group.info().name $renamed
+  assert_eq $group.info().comment renamed
+  let renamed_lookup = winnet.group $renamed
+  assert_eq (str renamed_lookup.sid) (str group.sid)

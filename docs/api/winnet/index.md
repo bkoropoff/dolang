@@ -9,6 +9,8 @@ Windows NetAPI bindings.
 | [`User`](./user.md)            | SID-stable local user principal    |
 | [`UserInfo`](./user-info.md)   | Fresh account-information snapshot |
 | [`UserFlags`](./user-flags.md) | Native account flag mask           |
+| [`Group`](./group.md)          | SID-stable local group principal   |
+| [`GroupInfo`](./group-info.md) | Fresh local-group snapshot         |
 
 ## User Options
 
@@ -20,6 +22,7 @@ nullable fields and removes the account expiration.
 
 | Name                     | Type                                    | Description                                |
 | ------------------------ | --------------------------------------- | ------------------------------------------ |
+| `name`                   | [`Str`](../std/str.md)?                 | New account name; applied last             |
 | `password`               | [`Str`](../std/str.md)                  | Password to set                            |
 | `full_name`              | [`Str`](../std/str.md)?                 | Display name                               |
 | `comment`                | [`Str`](../std/str.md)?                 | Administrative account comment             |
@@ -37,7 +40,8 @@ nullable fields and removes the account expiration.
 
 ### `user principal`
 
-Looks up a user by account name or `security.windows.Sid`.
+Obtains a user capability from an account name, `security.windows.Sid`, or
+[`UserInfo`](./user-info.md) snapshot.
 
 #### Returns
 
@@ -49,9 +53,9 @@ Iterates local user accounts.
 
 #### Returns
 
-`Iter` over [`User`](./user.md)
+`Iter` over [`UserInfo`](./user-info.md)
 
-### `create_user name :password ...options`
+### `create_user :name :password ...options`
 
 Creates a normal enabled local user and returns its SID-stable `User`.
 
@@ -59,9 +63,10 @@ See [User options](#user-options) for supported keyword options.
 
 #### Parameters
 
-| Name   | Type                   | Description  |
-| ------ | ---------------------- | ------------ |
-| `name` | [`Str`](../std/str.md) | Account name |
+| Name       | Type                   | Description      |
+| ---------- | ---------------------- | ---------------- |
+| `name`     | [`Str`](../std/str.md) | Account name     |
+| `password` | [`Str`](../std/str.md) | Initial password |
 
 #### Returns
 
@@ -70,9 +75,41 @@ See [User options](#user-options) for supported keyword options.
 #### Example
 
 ```
-let user = create_user "build-user" password: $password
+let user = create_user name: "build-user" password: $password
   full_name: "Build User"
   comment: "Automation account"
   disabled: true
   password_never_expires: true
 ```
+
+### `group principal`
+
+Obtains a group capability from an account name, `security.windows.Sid`, or
+[`GroupInfo`](./group-info.md) snapshot.
+
+#### Returns
+
+[`Group`](./group.md)
+
+### `groups()`
+
+Iterates local groups.
+
+#### Returns
+
+`Iter` over [`GroupInfo`](./group-info.md)
+
+### `create_group name :comment?`
+
+Creates a local group.
+
+#### Parameters
+
+| Name      | Type                    | Description            |
+| --------- | ----------------------- | ---------------------- |
+| `name`    | [`Str`](../std/str.md)  | Group name             |
+| `comment` | [`Str`](../std/str.md)? | Administrative comment |
+
+#### Returns
+
+[`Group`](./group.md)

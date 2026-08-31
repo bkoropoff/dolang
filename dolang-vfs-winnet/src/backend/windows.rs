@@ -8,19 +8,28 @@ use dolang_vfs::{
 use dolang_winterop::security::Sid;
 use windows_sys::Win32::{
     Foundation::{
-        ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, ERROR_INVALID_PASSWORD, ERROR_MORE_DATA,
+        ERROR_ACCESS_DENIED, ERROR_ALIAS_EXISTS, ERROR_INSUFFICIENT_BUFFER,
+        ERROR_INVALID_PARAMETER, ERROR_INVALID_PASSWORD, ERROR_MEMBER_IN_ALIAS,
+        ERROR_MEMBER_NOT_IN_ALIAS, ERROR_MORE_DATA, ERROR_NO_SUCH_ALIAS,
     },
     NetworkManagement::NetManagement::{
-        FILTER_NORMAL_ACCOUNT, MAX_PREFERRED_LENGTH, NERR_PasswordTooShort, NERR_Success,
-        NERR_UserExists, NERR_UserNotFound, NetApiBufferFree, NetUserAdd, NetUserDel, NetUserEnum,
-        NetUserGetInfo, NetUserSetInfo, USER_INFO_0, USER_INFO_1, USER_INFO_4, USER_INFO_1003,
-        USER_INFO_1006, USER_INFO_1007, USER_INFO_1008, USER_INFO_1009, USER_INFO_1011,
-        USER_INFO_1012, USER_INFO_1017, USER_INFO_1052, USER_INFO_1053,
+        FILTER_NORMAL_ACCOUNT, LOCALGROUP_INFO_0, LOCALGROUP_INFO_1, LOCALGROUP_MEMBERS_INFO_0,
+        MAX_PREFERRED_LENGTH, NERR_GroupExists, NERR_GroupNotFound, NERR_PasswordTooShort,
+        NERR_Success, NERR_UserExists, NERR_UserNotFound, NetApiBufferFree, NetLocalGroupAdd,
+        NetLocalGroupAddMember, NetLocalGroupDel, NetLocalGroupDelMember, NetLocalGroupEnum,
+        NetLocalGroupGetInfo, NetLocalGroupGetMembers, NetLocalGroupSetInfo, NetUserAdd,
+        NetUserDel, NetUserEnum, NetUserGetInfo, NetUserSetInfo, USER_INFO_0, USER_INFO_1,
+        USER_INFO_4, USER_INFO_1003, USER_INFO_1006, USER_INFO_1007, USER_INFO_1008,
+        USER_INFO_1009, USER_INFO_1011, USER_INFO_1012, USER_INFO_1017, USER_INFO_1052,
+        USER_INFO_1053,
     },
-    Security::GetLengthSid,
+    Security::{GetLengthSid, LookupAccountNameW, SID_NAME_USE},
 };
 
-use crate::wire::{UserCreate, UserFlags, UserInfo, UserUpdate, WinNetRequest, WinNetResponse};
+use crate::wire::{
+    GroupCreate, GroupInfo, GroupUpdate, UserCreate, UserFlags, UserInfo, UserUpdate,
+    WinNetRequest, WinNetResponse,
+};
 
 struct NetBuffer(*mut u8);
 impl Drop for NetBuffer {
@@ -47,20 +56,27 @@ unsafe fn optional(ptr: *const u16) -> Option<String> {
 }
 
 fn status(operation: &str, code: u32) -> Error {
-    let kind = if code == NERR_UserNotFound {
-        ErrorKind::NotFound
-    } else if code == NERR_UserExists {
-        ErrorKind::AlreadyExists
-    } else if code == ERROR_ACCESS_DENIED {
-        ErrorKind::PermissionDenied
-    } else if code == ERROR_INVALID_PARAMETER
-        || code == ERROR_INVALID_PASSWORD
-        || code == NERR_PasswordTooShort
-    {
-        ErrorKind::InvalidInput
-    } else {
-        ErrorKind::Other
-    };
+    let kind =
+        if code == NERR_UserNotFound || code == NERR_GroupNotFound || code == ERROR_NO_SUCH_ALIAS {
+            ErrorKind::NotFound
+        } else if code == NERR_UserExists
+            || code == NERR_GroupExists
+            || code == ERROR_ALIAS_EXISTS
+            || code == ERROR_MEMBER_IN_ALIAS
+        {
+            ErrorKind::AlreadyExists
+        } else if code == ERROR_MEMBER_NOT_IN_ALIAS {
+            ErrorKind::NotFound
+        } else if code == ERROR_ACCESS_DENIED {
+            ErrorKind::PermissionDenied
+        } else if code == ERROR_INVALID_PARAMETER
+            || code == ERROR_INVALID_PASSWORD
+            || code == NERR_PasswordTooShort
+        {
+            ErrorKind::InvalidInput
+        } else {
+            ErrorKind::Other
+        };
     Error::from_system_code(
         kind,
         format!("{operation}: NetAPI status {code}"),
@@ -86,6 +102,7 @@ fn get(name: &str) -> Result<(Sid, UserInfo), Error> {
     let info = unsafe { &*buffer.0.cast::<USER_INFO_4>() };
     let sid = unsafe { sid_from_raw(info.usri4_user_sid) }?;
     let result = UserInfo {
+        sid: sid.clone(),
         name: unsafe { string(info.usri4_name) },
         full_name: unsafe { optional(info.usri4_full_name) },
         comment: unsafe { optional(info.usri4_comment) },
@@ -141,6 +158,7 @@ fn set<T>(name: &str, level: u32, value: &T) -> Result<(), Error> {
 
 fn update(name: &str, expected: &Sid, update: UserUpdate) -> Result<UserInfo, Error> {
     let current = verified(name, expected)?;
+    let rename = update.name.clone();
     let set_flags = update.set_flags();
     let clear_flags = update.clear_flags();
     macro_rules! text {
@@ -199,7 +217,202 @@ fn update(name: &str, expected: &Sid, update: UserUpdate) -> Result<UserInfo, Er
             },
         )?;
     }
-    verified(name, expected)
+    let mut result = verified(name, expected)?;
+    if let Some(new_name) = rename {
+        let mut w = wide(&new_name);
+        set(
+            name,
+            0,
+            &USER_INFO_0 {
+                usri0_name: w.as_mut_ptr(),
+            },
+        )?;
+        result.name = new_name;
+    }
+    Ok(result)
+}
+
+fn account_sid(name: &str) -> Result<Sid, Error> {
+    let name = wide(name);
+    let mut sid_len = 0;
+    let mut domain_len = 0;
+    let mut use_kind: SID_NAME_USE = 0;
+    unsafe {
+        LookupAccountNameW(
+            ptr::null(),
+            name.as_ptr(),
+            ptr::null_mut(),
+            &mut sid_len,
+            ptr::null_mut(),
+            &mut domain_len,
+            &mut use_kind,
+        )
+    };
+    if unsafe { windows_sys::Win32::Foundation::GetLastError() } != ERROR_INSUFFICIENT_BUFFER {
+        return Err(status("LookupAccountNameW", unsafe {
+            windows_sys::Win32::Foundation::GetLastError()
+        }));
+    }
+    let mut sid = vec![0u8; sid_len as usize];
+    let mut domain = vec![0u16; domain_len as usize];
+    if unsafe {
+        LookupAccountNameW(
+            ptr::null(),
+            name.as_ptr(),
+            sid.as_mut_ptr().cast(),
+            &mut sid_len,
+            domain.as_mut_ptr(),
+            &mut domain_len,
+            &mut use_kind,
+        )
+    } == 0
+    {
+        return Err(status("LookupAccountNameW", unsafe {
+            windows_sys::Win32::Foundation::GetLastError()
+        }));
+    }
+    Sid::from_bytes(&sid).map_err(|e| Error::new(ErrorKind::InvalidData, e))
+}
+
+fn group_get(name: &str) -> Result<(Sid, GroupInfo), Error> {
+    let w = wide(name);
+    let mut raw = ptr::null_mut();
+    let code = unsafe { NetLocalGroupGetInfo(ptr::null(), w.as_ptr(), 1, &mut raw) };
+    if code != NERR_Success {
+        return Err(status("NetLocalGroupGetInfo", code));
+    }
+    let buffer = NetBuffer(raw);
+    let row = unsafe { &*buffer.0.cast::<LOCALGROUP_INFO_1>() };
+    let actual = unsafe { string(row.lgrpi1_name) };
+    let sid = account_sid(&actual)?;
+    Ok((
+        sid.clone(),
+        GroupInfo {
+            sid,
+            name: actual,
+            comment: unsafe { optional(row.lgrpi1_comment) },
+        },
+    ))
+}
+fn group_verified(name: &str, expected: &Sid) -> Result<GroupInfo, Error> {
+    let (sid, info) = group_get(name)?;
+    if &sid != expected {
+        return Err(Error::new(
+            ErrorKind::NotFound,
+            "cached group name now identifies a different SID",
+        ));
+    }
+    Ok(info)
+}
+fn group_set<T>(name: &str, level: u32, value: &T) -> Result<(), Error> {
+    let name = wide(name);
+    let mut parm = 0;
+    let code = unsafe {
+        NetLocalGroupSetInfo(
+            ptr::null(),
+            name.as_ptr(),
+            level,
+            (value as *const T).cast(),
+            &mut parm,
+        )
+    };
+    if code == NERR_Success {
+        Ok(())
+    } else {
+        Err(status(
+            &format!("NetLocalGroupSetInfo level {level} parameter {parm}"),
+            code,
+        ))
+    }
+}
+fn group_update(name: &str, expected: &Sid, update: GroupUpdate) -> Result<GroupInfo, Error> {
+    group_verified(name, expected)?;
+    if let Some(comment) = update.comment {
+        let mut w = wide(comment.as_deref().unwrap_or(""));
+        group_set(
+            name,
+            1002,
+            &windows_sys::Win32::NetworkManagement::NetManagement::LOCALGROUP_INFO_1002 {
+                lgrpi1002_comment: w.as_mut_ptr(),
+            },
+        )?;
+    }
+    let mut result = group_verified(name, expected)?;
+    if let Some(new_name) = update.name {
+        let mut w = wide(&new_name);
+        group_set(
+            name,
+            0,
+            &LOCALGROUP_INFO_0 {
+                lgrpi0_name: w.as_mut_ptr(),
+            },
+        )?;
+        result.name = new_name;
+    }
+    Ok(result)
+}
+fn group_create(create: GroupCreate) -> Result<(String, Sid), Error> {
+    let mut name = wide(&create.name);
+    let raw = LOCALGROUP_INFO_0 {
+        lgrpi0_name: name.as_mut_ptr(),
+    };
+    let mut parm = 0;
+    let code = unsafe {
+        NetLocalGroupAdd(
+            ptr::null(),
+            0,
+            (&raw as *const LOCALGROUP_INFO_0).cast(),
+            &mut parm,
+        )
+    };
+    if code != NERR_Success {
+        return Err(status(&format!("NetLocalGroupAdd parameter {parm}"), code));
+    }
+    let (sid, _) = match group_get(&create.name) {
+        Ok(group) => group,
+        Err(error) => {
+            unsafe { NetLocalGroupDel(ptr::null(), name.as_ptr()) };
+            return Err(error);
+        }
+    };
+    if let Some(comment) = create.comment
+        && let Err(e) = group_update(
+            &create.name,
+            &sid,
+            GroupUpdate::default().comment(Some(comment)),
+        )
+    {
+        unsafe { NetLocalGroupDel(ptr::null(), name.as_ptr()) };
+        return Err(e);
+    }
+    Ok((create.name, sid))
+}
+fn group_member(name: &str, sid: &Sid, member: Sid, add: bool) -> Result<(), Error> {
+    group_verified(name, sid)?;
+    let name = wide(name);
+    let mut bytes = member.to_bytes();
+    let row = LOCALGROUP_MEMBERS_INFO_0 {
+        lgrmi0_sid: bytes.as_mut_ptr().cast(),
+    };
+    let code = unsafe {
+        if add {
+            NetLocalGroupAddMember(ptr::null(), name.as_ptr(), row.lgrmi0_sid)
+        } else {
+            NetLocalGroupDelMember(ptr::null(), name.as_ptr(), row.lgrmi0_sid)
+        }
+    };
+    if code == NERR_Success {
+        Ok(())
+    } else {
+        Err(status(
+            if add {
+                "NetLocalGroupAddMember"
+            } else {
+                "NetLocalGroupDelMember"
+            },
+            code,
+        ))
+    }
 }
 
 fn create(create: UserCreate) -> Result<(String, Sid), Error> {
@@ -282,6 +495,12 @@ fn dispatch(request: WinNetRequest) -> Result<WinNetResponse, Error> {
             format!("SID {sid} requires VFS name resolution"),
         )),
         WinNetRequest::UsersPage { mut resume } => {
+            let mut native_resume = u32::try_from(resume).map_err(|_| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    "user enumeration resume handle exceeds u32",
+                )
+            })?;
             let mut raw = ptr::null_mut();
             let mut read = 0;
             let mut total = 0;
@@ -294,7 +513,7 @@ fn dispatch(request: WinNetRequest) -> Result<WinNetResponse, Error> {
                     MAX_PREFERRED_LENGTH,
                     &mut read,
                     &mut total,
-                    &mut resume,
+                    &mut native_resume,
                 )
             };
             if code != NERR_Success && code != ERROR_MORE_DATA {
@@ -306,9 +525,13 @@ fn dispatch(request: WinNetRequest) -> Result<WinNetResponse, Error> {
             let mut users = Vec::with_capacity(rows.len());
             for row in rows {
                 let name = unsafe { string(row.usri0_name) };
-                let (sid, _) = get(&name)?;
-                users.push((name, sid));
+                match get(&name) {
+                    Ok((_, info)) => users.push(info),
+                    Err(error) if error.kind() == ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
             }
+            resume = u64::from(native_resume);
             Ok(WinNetResponse::UsersPage {
                 users,
                 resume,
@@ -331,6 +554,140 @@ fn dispatch(request: WinNetRequest) -> Result<WinNetResponse, Error> {
             let code = unsafe { NetUserDel(ptr::null(), n.as_ptr()) };
             if code != NERR_Success {
                 return Err(status("NetUserDel", code));
+            }
+            Ok(WinNetResponse::Deleted)
+        }
+        WinNetRequest::GroupByName { name } => {
+            let (sid, info) = group_get(&name)?;
+            Ok(WinNetResponse::Group {
+                name: info.name,
+                sid,
+            })
+        }
+        WinNetRequest::GroupsPage { mut resume } => {
+            let mut native_resume = usize::try_from(resume).map_err(|_| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    "group enumeration resume handle exceeds usize",
+                )
+            })?;
+            let mut raw = ptr::null_mut();
+            let mut read = 0;
+            let mut total = 0;
+            let code = unsafe {
+                NetLocalGroupEnum(
+                    ptr::null(),
+                    0,
+                    &mut raw,
+                    MAX_PREFERRED_LENGTH,
+                    &mut read,
+                    &mut total,
+                    &mut native_resume,
+                )
+            };
+            if code != NERR_Success && code != ERROR_MORE_DATA {
+                return Err(status("NetLocalGroupEnum", code));
+            }
+            let buffer = NetBuffer(raw);
+            let rows = unsafe {
+                slice::from_raw_parts(buffer.0.cast::<LOCALGROUP_INFO_0>(), read as usize)
+            };
+            let mut groups = Vec::with_capacity(rows.len());
+            for row in rows {
+                let name = unsafe { string(row.lgrpi0_name) };
+                match group_get(&name) {
+                    Ok((_, info)) => groups.push(info),
+                    Err(error) if error.kind() == ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            resume = u64::try_from(native_resume).map_err(|_| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    "group enumeration resume handle exceeds u64",
+                )
+            })?;
+            Ok(WinNetResponse::GroupsPage {
+                groups,
+                resume,
+                done: code == NERR_Success,
+            })
+        }
+        WinNetRequest::CreateGroup(create) => {
+            let (name, sid) = group_create(create)?;
+            Ok(WinNetResponse::Group { name, sid })
+        }
+        WinNetRequest::GroupInfo { name, sid } => {
+            Ok(WinNetResponse::GroupInfo(group_verified(&name, &sid)?))
+        }
+        WinNetRequest::GroupUpdate { name, sid, update } => Ok(WinNetResponse::GroupInfo(
+            group_update(&name, &sid, update)?,
+        )),
+        WinNetRequest::GroupMembersPage {
+            name,
+            sid,
+            mut resume,
+        } => {
+            let mut native_resume = usize::try_from(resume).map_err(|_| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    "group member resume handle exceeds usize",
+                )
+            })?;
+            group_verified(&name, &sid)?;
+            let name = wide(&name);
+            let mut raw = ptr::null_mut();
+            let mut read = 0;
+            let mut total = 0;
+            let code = unsafe {
+                NetLocalGroupGetMembers(
+                    ptr::null(),
+                    name.as_ptr(),
+                    0,
+                    &mut raw,
+                    MAX_PREFERRED_LENGTH,
+                    &mut read,
+                    &mut total,
+                    &mut native_resume,
+                )
+            };
+            if code != NERR_Success && code != ERROR_MORE_DATA {
+                return Err(status("NetLocalGroupGetMembers", code));
+            }
+            let buffer = NetBuffer(raw);
+            let rows = unsafe {
+                slice::from_raw_parts(buffer.0.cast::<LOCALGROUP_MEMBERS_INFO_0>(), read as usize)
+            };
+            let members = rows
+                .iter()
+                .map(|row| unsafe { sid_from_raw(row.lgrmi0_sid) })
+                .collect::<Result<Vec<_>, _>>()?;
+            resume = u64::try_from(native_resume).map_err(|_| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    "group member resume handle exceeds u64",
+                )
+            })?;
+            Ok(WinNetResponse::GroupMembersPage {
+                members,
+                resume,
+                done: code == NERR_Success,
+            })
+        }
+        WinNetRequest::GroupAddMember { name, sid, member } => {
+            group_member(&name, &sid, member, true)?;
+            Ok(WinNetResponse::Unit)
+        }
+        WinNetRequest::GroupRemoveMember { name, sid, member } => {
+            group_member(&name, &sid, member, false)?;
+            Ok(WinNetResponse::Unit)
+        }
+        WinNetRequest::GroupDelete { name, sid } => {
+            group_verified(&name, &sid)?;
+            let name = wide(&name);
+            let code = unsafe { NetLocalGroupDel(ptr::null(), name.as_ptr()) };
+            if code != NERR_Success {
+                return Err(status("NetLocalGroupDel", code));
             }
             Ok(WinNetResponse::Deleted)
         }

@@ -3090,7 +3090,7 @@ impl<'v> Object<'v> for SecDesc {
 
 pub(crate) struct SidName;
 
-fn create_sid_name<'v>(
+pub(crate) fn create_sid_name<'v>(
     strand: &mut Strand<'v, '_>,
     global: State<'v, Global<'v>>,
     name: VfsSidName,
