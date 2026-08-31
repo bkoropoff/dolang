@@ -2,6 +2,18 @@ import _shell args libvirt load shell
   fs:
     - Path
 
+# Resolves the target to run remotely, returning its bytecode and the program
+# the target should see as its own invocation.
+def load_target main target
+  if main
+    let bytecode = _shell.bundled_entrypoint $target
+    if (bytecode == nil)
+      throw args.Error "unknown entrypoint: $target"
+    [bytecode, target]
+  else
+    let script = Path $target
+    [(_shell.compile_script script), script]
+
 def parse_env sets unsets
   let overrides = {}
   for spec = sets
@@ -20,7 +32,10 @@ def parse_env sets unsets
   overrides
 
 args.with
-  help: Compile a local Do script and run it through a libvirt domain VFS.
+  help: Run a local Do script or bundled entrypoint through a libvirt domain VFS.
+  - flag: main
+    short: m
+    help: Run a bundled main entrypoint instead of a local script
   - opt: connect-uri
     default: qemu:///session
     meta: URI
@@ -41,15 +56,14 @@ args.with
   - arg: domain
     help: Libvirt domain name
   - arg: script
-    parse: $Path
     divider: true
-    help: Local Do script
+    help: Local Do script, or bundled entrypoint name with --main
   - arg: script-args
     collect: true
     help: Arguments passed to the target script
   do |p|
     let remote_env = parse_env $p.env $p.unset_env
-    let bytecode = _shell.compile_script $p.script
+    let bytecode program = load_target $p.main $p.script
     let domain = libvirt.attach $p.domain connect_uri: $p.connect_uri
 
     domain.with
@@ -57,6 +71,6 @@ args.with
       env: $remote_env
       do
         shell.with_override
-          program: $p.script
+          program: $program
           args: $p.script_args
           do load.run $bytecode

@@ -1,36 +1,43 @@
-import _vfs sys
+import _vfs proc sys
   fs:
     - with_temp_dir
   shell:
     - exe
   test:
+    - assert
     - assert_eq
+    - assert_throws
     - skip
     - test
 
 if (sys.os_info().family == :WINDOWS:)
   skip "requires a Unix SSH shim"
 
+# Writes an `ssh` stand-in into `dir` that drops the SSH options and runs the
+# remote command locally, so the tests exercise the entrypoint without a server.
+def write_ssh_shim dir
+  let ssh = (dir / "ssh")
+  ssh.write r|
+    #!/bin/sh
+    set -eu
+
+    while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
+        shift
+    done
+    shift
+    shift
+    exec "$@"
+  ssh.set_metadata mode: 0o755
+
 #[test]
 def runs_script_in_remote_vfs()
   with_temp_dir do |dir|
-    let ssh = (dir / "ssh")
     let script = (dir / "script.dol")
     let marker = (dir / "marker")
     let remote_dir = (dir / "remote")
     remote_dir.create_dir()
 
-    ssh.write r|
-      #!/bin/sh
-      set -eu
-
-      while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
-          shift
-      done
-      shift
-      shift
-      exec "$@"
-    ssh.set_metadata mode: 0o755
+    write_ssh_shim $dir
 
     script.write r|
       import shell
@@ -84,3 +91,51 @@ def runs_script_in_remote_vfs()
       inherit=local
       unset=nil
     assert_eq $(remote_dir / "cwd-marker").read() remote
+
+#[test]
+def runs_bundled_entrypoint_in_remote_vfs()
+  with_temp_dir do |dir|
+    let module = (dir / "check.dol")
+    let marker = (dir / "marker")
+
+    write_ssh_shim $dir
+
+    # The bundled `test` entrypoint runs this module, so the assertions inside
+    # it observe the invocation the entrypoint was handed: its own name as the
+    # program, and the arguments trailing it rather than ssh's own.
+    module.write r|
+      import shell
+        fs:
+          - Path
+        test:
+          - assert_eq
+          - test
+
+      #[test]
+      def sees_entrypoint_invocation()
+        assert_eq $shell.program test
+        assert_eq $shell.args.len 1
+        (Path shell.env["TEST_DOLANG_SSH_MARKER"]).write ran
+
+    let path = "$dir:$(shell.env["PATH"])"
+    env
+      PATH: $path
+      TEST_DOLANG_SSH_MARKER: $marker
+      do
+        run $exe -m ssh --command $(_vfs.bin()) example -m test $module
+
+    assert_eq $marker.read() ran
+
+#[test]
+def rejects_unknown_bundled_entrypoint()
+  with_temp_dir do |dir|
+    let err = (dir / "err.txt")
+
+    write_ssh_shim $dir
+
+    let path = "$dir:$(shell.env["PATH"])"
+    assert_throws $proc.Error do
+      env PATH: $path do
+        run $exe -m ssh --command $(_vfs.bin()) example -m no_such_entrypoint
+          stderr: $err
+    assert (err.read().contains "unknown entrypoint: no_such_entrypoint")

@@ -2,6 +2,18 @@ import _shell args load shell shlex ssh
   fs:
     - Path
 
+# Resolves the target to run remotely, returning its bytecode and the program
+# the target should see as its own invocation.
+def load_target main target
+  if main
+    let bytecode = _shell.bundled_entrypoint $target
+    if (bytecode == nil)
+      throw args.Error "unknown entrypoint: $target"
+    [bytecode, target]
+  else
+    let script = Path $target
+    [(_shell.compile_script script), script]
+
 def parse_port value
   let port = try
     int $value
@@ -75,7 +87,10 @@ def parse_login_env disabled shell
   true
 
 args.with
-  help: Compile a local Do script and run it through an SSH VFS.
+  help: Run a local Do script or bundled entrypoint through an SSH VFS.
+  - flag: main
+    short: m
+    help: Run a bundled main entrypoint instead of a local script
   - opt: user
     short: l
     default: nil
@@ -152,16 +167,15 @@ args.with
   - arg: host
     help: SSH destination
   - arg: script
-    parse: $Path
     divider: true
-    help: Local Do script
+    help: Local Do script, or bundled entrypoint name with --main
   - arg: script-args
     collect: true
     help: Arguments passed to the target script
   do |p|
     let remote_env = parse_env $p.env $p.unset_env
     let login_env = parse_login_env $p.no_login_env $p.login_shell
-    let bytecode = _shell.compile_script $p.script
+    let bytecode program = load_target $p.main $p.script
 
     ssh.with $p.host
       user: $p.user
@@ -183,6 +197,6 @@ args.with
         jump: $jump
       do
         shell.with_override
-          program: $p.script
+          program: $program
           args: $p.script_args
           do load.run $bytecode
