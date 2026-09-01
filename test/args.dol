@@ -231,6 +231,20 @@ def run_dispatches_selected_subcommand_handler_with_root_record()
   assert_eq $result "us-west:api"
 
 #[test]
+def run_declares_and_dispatches_commands_in_one_layout()
+  let result = args.with
+    args: ["info", "17", "42"]
+    exit: false
+    - cmd: list
+      do |_p| "listed"
+    - cmd: info
+      - arg: pids
+        parse: $int
+        collect: true
+      do |p| p.info.pids
+  assert_eq $result [17, 42]
+
+#[test]
 def parse_exposes_top_level_handler()
   let p = args.parse
     args: ["hello"]
