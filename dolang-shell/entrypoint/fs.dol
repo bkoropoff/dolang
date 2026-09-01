@@ -1,6 +1,8 @@
-# Dumps everything Do can report about a path: ordinary metadata, platform
-# attributes, ACLs, extended attributes, Windows security descriptors and
-# alternate data streams, and the containing filesystem.
+# Inspects the filesystem on the current VFS target.
+#
+# `metadata` dumps everything Do can report about a path: ordinary metadata,
+# platform attributes, ACLs, extended attributes, Windows security descriptors
+# and alternate data streams, and the containing filesystem.
 #
 # The layout is YAML-shaped, so ACL entries and security descriptors read
 # roughly the way the corresponding `security` module spec would be written.
@@ -487,35 +489,40 @@ def dump path resolve all
   display.section xattrs $ xattr_section $path $resolve
   display.section filesystem $ filesystem_section $path
 
-args.with
-  help: Dump filesystem metadata, access control, and extended attributes.
-  - flag: link
-    short: L
-    help: Report on a symlink itself rather than its target
-  - flag: all
-    short: a
-    help: Include platform attributes that are not set
-  - arg: paths
-    parse: $fs.Path
-    collect: true
-    help: Paths to inspect
-  do |p|
-    if (p.paths.len == 0)
-      throw args.Error "expected at least one path"
-    let resolve = (p.link && :LINK: || :TARGET:)
-    let rc = 0
-    let first = true
-    for path = p.paths
-      if !first
-        echo()
-      first = false
-      print (head_style "● $path")
+def dump_metadata p
+  let opts = p.metadata
+  if (opts.paths.len == 0)
+    throw args.Error "expected at least one path"
+  let resolve = (opts.link && :LINK: || :TARGET:)
+  let rc = 0
+  let first = true
+  for path = opts.paths
+    if !first
       echo()
-      try
-        dump $path $resolve $p.all
-      catch std.RuntimeError: e
-        # One bad path shouldn't abandon the rest; report it and carry on.
-        rc = 1
-        print "  " (error_style "error") ": "
-        echo $ str $e
-    exit $rc
+    first = false
+    print (head_style "● $path")
+    echo()
+    try
+      dump $path $resolve $opts.all
+    catch std.RuntimeError: e
+      # One bad path shouldn't abandon the rest; report it and carry on.
+      rc = 1
+      print "  " (error_style "error") ": "
+      echo $ str $e
+  exit $rc
+
+args.with
+  help: Inspect the filesystem.
+  - cmd: metadata
+    help: Dump metadata, access control, and extended attributes for a path.
+    - flag: link
+      short: L
+      help: Report on a symlink itself rather than its target
+    - flag: all
+      short: a
+      help: Include platform attributes that are not set
+    - arg: paths
+      parse: $fs.Path
+      collect: true
+      help: Paths to inspect
+    $dump_metadata
