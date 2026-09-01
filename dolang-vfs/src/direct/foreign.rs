@@ -66,6 +66,15 @@ impl Processes {
         })
     }
 
+    /// Describes one process by PID, without enumerating the table.
+    ///
+    /// Not a shortcut for `open` followed by `info`: nothing here needs any
+    /// right over the process, which is what makes it the only route to a
+    /// Windows process that refuses to be opened at all.
+    pub(crate) async fn describe_one(session: Uuid, pid: u32) -> Result<ProcessInfo> {
+        Self::impl_describe_one(session, pid).await
+    }
+
     /// Returns the next process, skipping any that have gone away.
     ///
     /// A batch can come back empty without the enumeration being over, so this

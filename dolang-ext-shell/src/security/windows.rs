@@ -567,6 +567,30 @@ impl<'v> Object<'v> for Sid {
             })
     }
 
+    /// A SID is its value: two of them naming the same principal are equal
+    /// however each was obtained, and neither carries anything else to
+    /// distinguish it.
+    fn eq<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        other: &Value<'v>,
+    ) -> Result<'v, 's, bool> {
+        let global = strand.state::<Global<'v>>();
+        let Some(other) = global.types.sid.cast(other) else {
+            return Err(Error::not_supported(strand));
+        };
+        Ok(other.enter_sync(strand, |_strand, other| *this.annex() == *other.annex()))
+    }
+
+    fn hash<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        _strand: &'a mut Strand<'v, 's>,
+        hasher: &mut impl Hasher,
+    ) -> Result<'v, 's, ()> {
+        this.annex().hash(hasher);
+        Ok(())
+    }
+
     fn display<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,

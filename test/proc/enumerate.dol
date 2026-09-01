@@ -155,18 +155,33 @@ def open_a_process_by_pid_and_terminate_it()
       let info = p.info()
       assert_eq $info.pid $pid
 
-      # The identity fields exist only on the platform they describe: reading
-      # the wrong one is a FieldError, not nil.
+      # A handle opened by PID has no snapshot to inherit a parent from, so
+      # every target has to read one from the process itself.
+      assert (info.parent_pid != nil)
+
+      # The split command line is portable, including on Windows, where it is
+      # reconstructed from the one string the kernel keeps.
+      assert (info.cmdline != nil)
+      assert_eq $info.cmdline[1] sleep
+      assert_eq $info.cmdline[2] "60"
+
+      assert (info.cwd != nil)
+
+      # The platform-specific fields exist only on the platform they describe:
+      # reading the wrong one is a FieldError, not nil.
       if is_windows
         assert_throws $FieldError do info.unix_id
-        # A handle carries enough to read the token; an enumerated record
-        # deliberately does not.
         assert (info.token_info != nil)
         assert (info.token_info.user_sid != nil)
+        assert (info.cmdline_win.contains "sleep 60")
       else
         assert_throws $FieldError do info.token_info
+        assert_throws $FieldError do info.cmdline_win
         assert (info.unix_id != nil)
         assert (info.unix_id.uid >= 0)
+
+      # Still running, so there is no status yet.
+      assert_eq $info.status nil
 
       p.terminate()
       let status = p.wait()
@@ -178,12 +193,64 @@ def open_a_process_by_pid_and_terminate_it()
         # A non-parent cannot reap on Unix, so only the fact of exit is known.
         assert_eq $status.code nil
 
+      if is_windows
+        # The handle keeps an exited process addressable, so it can still be
+        # described — as gone, with everything read out of its address space
+        # now absent.
+        let after = p.info()
+        assert_eq $after.status.code 1
+        # A zombie is not reliably still there on Unix, since the strand
+        # running the process reaps it, so there is no peer assertion.
+
       p.close()
       # Closing twice is a no-op; using a closed handle is not.
       p.close()
       assert_throws $StateError do p.info()
     finally
       stop_marked_process $worker
+
+#[test]
+#[vfs]
+def describe_a_process_by_pid_without_opening_it()
+  with_temp_dir do |dir|
+    let worker pid = start_marked_process $dir
+    try
+      let info = proc.info $pid
+      assert_type $proc.Info $info
+      assert_eq $info.pid $pid
+      assert (info.parent_pid != nil)
+      assert_eq $info.cmdline[1] sleep
+      assert_eq $info.status nil
+
+      # The record is the one enumeration would have produced for the same
+      # process, reached without walking the table to get to it.
+      let listed = nil
+      for entry = proc.enumerate()
+        if (entry.pid == pid)
+          listed = entry
+          break
+      assert (listed != nil)
+      assert_eq $info.name $listed.name
+      assert_eq (str info.exe) (str listed.exe)
+      assert_eq $info.cmdline $listed.cmdline
+
+      # Same record, whichever route produced it — an enumerated record is not
+      # a reduced one. The credentials are the field that would show it up,
+      # being the one a listing might have been tempted to leave out.
+      if is_windows
+        assert (listed.token_info != nil)
+        assert_eq $listed.token_info.user_sid $info.token_info.user_sid
+      else
+        assert_eq $listed.unix_id.uid $info.unix_id.uid
+    finally
+      stop_marked_process $worker
+
+#[test]
+#[vfs]
+def info_rejects_absent_and_malformed_targets()
+  assert_throws $sys.NotFoundError do proc.info $absent_pid
+  assert_throws $TypeError do proc.info "not a pid"
+  assert_throws $ValueError do proc.info -1
 
 #[test]
 #[vfs]

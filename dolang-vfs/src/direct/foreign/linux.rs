@@ -71,6 +71,9 @@ fn pidfd_send_signal(fd: BorrowedFd<'_>, signal: libc::c_int) -> io::Result<()> 
 /// The fields of `/proc/<pid>/stat` this backend reads.
 struct Stat {
     name: String,
+    /// The `state` character, of which only `Z` (zombie) and `X` (dead) mean
+    /// the process has exited.
+    state: char,
     ppid: Option<u32>,
     start: StartTime,
 }
@@ -86,11 +89,13 @@ fn parse_stat(text: &str) -> Option<Stat> {
     let name = text.get(open + 1..close)?.to_owned();
     let mut rest = text.get(close + 1..)?.split_ascii_whitespace();
     // Fields are 1-based and `comm` is field 2, so `rest` starts at field 3.
-    let ppid = rest.nth(1)?.parse().ok();
+    let state = rest.next()?.chars().next()?;
+    let ppid = rest.next()?.parse().ok();
     // `starttime` is field 22, four past `ppid`'s field 4.
     let start = rest.nth(17)?.parse().ok()?;
     Some(Stat {
         name,
+        state,
         ppid,
         start: StartTime(start),
     })
@@ -108,14 +113,14 @@ fn parse_status(text: &str) -> Option<UnixSecurityInfo> {
 
     let mut ids = None;
     let mut gids = None;
-    let mut group_ids = Vec::new();
+    let mut groups = Vec::new();
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("Uid:") {
             ids = pair(rest);
         } else if let Some(rest) = line.strip_prefix("Gid:") {
             gids = pair(rest);
         } else if let Some(rest) = line.strip_prefix("Groups:") {
-            group_ids = rest
+            groups = rest
                 .split_ascii_whitespace()
                 .filter_map(|group| group.parse().ok())
                 .collect();
@@ -128,7 +133,7 @@ fn parse_status(text: &str) -> Option<UnixSecurityInfo> {
         gid,
         euid,
         egid,
-        group_ids,
+        groups,
     })
 }
 
@@ -180,7 +185,13 @@ fn read_info(session: Uuid, pid: u32) -> Result<Option<ProcessInfo>> {
         }
         Err(error) => return Err(error.into()),
     };
-    let Some(Stat { name, ppid, start }) = parse_stat(&stat) else {
+    let Some(Stat {
+        name,
+        state,
+        ppid,
+        start,
+    }) = parse_stat(&stat)
+    else {
         return Ok(None);
     };
     let identity = fs::read_to_string(format!("/proc/{pid}/status"))
@@ -196,6 +207,10 @@ fn read_info(session: Uuid, pid: u32) -> Result<Option<ProcessInfo>> {
         cmdline: read_cmdline(pid),
         cwd: read_link(pid, "cwd"),
         family: ProcessFamily::Unix(identity),
+        // A zombie is still listed, and still has a `/proc` entry, until its
+        // parent reaps it. Only the parent learns the status, so this reports
+        // the fact and nothing else.
+        exit: matches!(state, 'Z' | 'X').then_some(ProcessExit { code: None }),
     }))
 }
 
@@ -217,6 +232,12 @@ impl Processes {
         })
         .await
         .map_err(Error::other)?
+    }
+
+    pub(super) async fn impl_describe_one(session: Uuid, pid: u32) -> Result<ProcessInfo> {
+        tokio::task::spawn_blocking(move || read_info(session, pid)?.ok_or_else(|| gone(pid)))
+            .await
+            .map_err(Error::other)?
     }
 
     pub(super) async fn impl_describe(
@@ -331,7 +352,7 @@ mod tests {
         assert_eq!(identity.effective_uid(), 1001);
         assert_eq!(identity.gid(), 100);
         assert_eq!(identity.effective_gid(), 101);
-        assert_eq!(identity.group_ids(), [4, 24, 27]);
+        assert_eq!(identity.groups(), [4, 24, 27]);
     }
 
     #[test]

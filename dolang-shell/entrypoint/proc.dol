@@ -194,14 +194,14 @@ def emit_section name nd
 
 def unix_node identity
   let groups = list_node $
-    for gid = identity.group_ids
+    for gid = identity.groups
       - $ id_node $gid :GROUP:
   map_node $
     - ["uid", (id_node identity.uid :USER:)]
     - ["gid", (id_node identity.gid :GROUP:)]
     - ["euid", (id_node identity.euid :USER:)]
     - ["egid", (id_node identity.egid :GROUP:)]
-    - ["group_ids", groups]
+    - ["groups", groups]
 
 def token_node token
   let groups = list_node $
@@ -217,18 +217,51 @@ def token_node token
     - ["logon_sid", (sid_node token.logon_sid)]
     - ["groups", groups]
 
+# Renders the argument vector, distinguishing an absent one from an empty one.
+#
+# `list_node` of nothing is an empty list, so building the node unconditionally
+# would render a command line the target could not report the same as one that
+# is genuinely empty.
+def cmdline_node info
+  if (info.cmdline == nil)
+    return (text_node nil)
+  list_node $
+    for arg = info.cmdline
+      - $ text_node $arg
+
+# Describes how a process ended, or that it has not.
+def status_text info
+  let status = info.status
+  if (status == nil)
+    return "running"
+  if (status.code != nil)
+    return "exited ($(status.code))"
+  "exited"
+
 def dump_info info
-  let cmdline = list_node $
-    if (info.cmdline != nil)
-      for arg = info.cmdline
-        - $ text_node $arg
+  # A process that has exited is still described, because the kernel keeps its
+  # PID, parent and start time — but everything below is read out of an address
+  # space that no longer exists, so for such a process an absence is expected
+  # rather than informative, and only a field that survived earns a row.
+  let ended = (info.status != nil)
   print (heading_style "● process $(info.pid)") "\n"
-  emit_section general $ map_node $
-    - ["name", (text_node info.name)]
-    - ["parent_pid", (text_node info.parent_pid)]
-    - ["exe", (text_node info.exe)]
-    - ["cwd", (text_node info.cwd)]
-    - ["cmdline", cmdline]
+  let general_rows = []
+  if (info.name.len > 0)
+    general_rows.push ["name", (text_node info.name)]
+  general_rows.push ["status", (text_node (status_text info))]
+  general_rows.push ["parent_pid", (text_node info.parent_pid)]
+  if (!ended || info.exe != nil)
+    general_rows.push ["exe", (text_node info.exe)]
+  if (!ended || info.cwd != nil)
+    general_rows.push ["cwd", (text_node info.cwd)]
+  if (!ended || info.cmdline != nil)
+    general_rows.push ["cmdline", (cmdline_node info)]
+  # Windows keeps the command line as one string and the split above is a
+  # reconstruction of it, so show the original where there is one.
+  let raw = opt do info.cmdline_win
+  if (raw != nil)
+    general_rows.push ["cmdline_win", (text_node raw)]
+  emit_section general $ map_node $general_rows
 
   let identity = opt do info.unix_id
   if (identity != nil)
@@ -247,8 +280,7 @@ def info_processes p
       print "\n"
     first = false
     try
-      proc.open $pid do |process|
-        dump_info $ process.info()
+      dump_info $ proc.info $pid
     catch std.RuntimeError: e
       rc = 1
       print (error_style "● $pid") ": " (str e) "\n"

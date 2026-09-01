@@ -310,14 +310,21 @@ fn process_info_size(info: &ProcessInfo) -> usize {
         + info.cwd().map_or(0, |path| path.as_str().len())
         + info
             .command_line()
-            .map_or(0, |args| args.iter().map(|arg| arg.len() + 1).sum());
+            .map_or(0, |args| args.iter().map(|arg| arg.len() + 1).sum::<usize>())
+        // On a Windows target the command line is carried twice, split and
+        // whole, so it counts twice against the page budget.
+        + info
+            .windows_command_line()
+            .ok()
+            .flatten()
+            .map_or(0, str::len);
     // Only one of these applies on any given target, and the accessor for the
     // other reports that rather than returning nothing to measure.
     let identity = info
         .identity()
         .ok()
         .flatten()
-        .map_or(0, |identity| 16 + identity.group_ids().len() * 4);
+        .map_or(0, |identity| 16 + identity.groups().len() * 4);
     // A token carries several SIDs plus one per group, each a variable-length
     // structure; groups dominate.
     let token = info
@@ -952,6 +959,7 @@ impl Connection {
             RequestKind::ProcessEnumerateClose { processes } => {
                 self.handle_process_enumerate_close(context, processes)
             }
+            RequestKind::ProcessDescribe { pid } => self.handle_process_describe(pid).await,
             RequestKind::ProcessOpen { pid, start } => {
                 self.handle_process_open(context, pid, start).await
             }
@@ -1981,6 +1989,12 @@ impl Connection {
             .unregister::<RetainedProcesses>(processes)
             .map_err(|_| Self::invalid_opaque("process enumeration"))?;
         Ok(ResponseKind::ProcessEnumerateClose)
+    }
+
+    async fn handle_process_describe(&self, pid: u32) -> Result<ResponseKind> {
+        Ok(ResponseKind::ProcessDescribe(
+            self.server.vfs.describe_process(pid).await?,
+        ))
     }
 
     async fn handle_process_open(

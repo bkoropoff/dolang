@@ -951,6 +951,11 @@ pub(crate) enum RequestKind {
     ProcessKill {
         process: Cite<ProcessMarker>,
     },
+    /// Describes one process by PID, without opening a handle to it. Appended
+    /// for the reason given above.
+    ProcessDescribe {
+        pid: u32,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -1044,4 +1049,5 @@ pub(crate) enum ResponseKind {
     ProcessWait(ProcessExit),
     ProcessClose,
     ProcessKill,
+    ProcessDescribe(ProcessInfo),
 }

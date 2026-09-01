@@ -1,5 +1,5 @@
 use std::{
-    hash::Hash,
+    hash::{Hash, Hasher},
     ops::{BitAnd, BitOr, BitXor, Not},
 };
 
