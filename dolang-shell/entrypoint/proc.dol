@@ -170,27 +170,37 @@ def info_processes p
       print (error_style "● $pid") ": " (str e) "\n"
   shell.exit $rc
 
+# Reports how a process ended, for the `--wait` flag the commands share.
+def report_exit process
+  let status = process.wait()
+  let detail = (status.code != nil && " with status $(status.code)" || "")
+  print "  " (dim_style "↳") " exited$detail\n"
+
 def terminate_processes p
   let opts = p.term
   if (opts.pids.len == 0)
     throw args.Error "expected at least one PID"
-  if (opts.kill && opts.signal != nil)
-    throw args.Error "--kill and --signal are mutually exclusive"
   for pid = opts.pids
     proc.open $pid do |process|
-      if (opts.signal != nil)
-        process.signal $opts.signal
-        print (dim_style "•") " sent $(opts.signal) to " (pid_style pid) "\n"
-      else if opts.kill
+      if opts.kill
         process.kill()
         print (dim_style "•") " killed " (pid_style pid) "\n"
       else
         process.terminate()
         print (dim_style "•") " terminated " (pid_style pid) "\n"
       if opts.wait
-        let status = process.wait()
-        print "  " (dim_style "↳") " exited" \
-          (status.code != nil && " with status $(status.code)" || "") "\n"
+        report_exit $process
+
+def signal_processes p
+  let opts = p.signal
+  if (opts.pids.len == 0)
+    throw args.Error "expected at least one PID"
+  for pid = opts.pids
+    proc.open $pid do |process|
+      process.signal $opts.signal
+      print (dim_style "•") " sent $(opts.signal) to " (pid_style pid) "\n"
+      if opts.wait
+        report_exit $process
 
 args.with
   help: Inspect and control processes.
@@ -209,12 +219,6 @@ args.with
     - flag: kill
       short: k
       help: Kill aggressively instead of requesting termination
-    - opt: signal
-      short: s
-      parse: $parse_signal
-      default: nil
-      meta: SIGNAL
-      help: Send an explicit Unix signal (for example TERM or HUP)
     - flag: wait
       short: w
       help: Wait for each process to exit
@@ -223,3 +227,16 @@ args.with
       collect: true
       help: Process IDs to terminate
     $terminate_processes
+  - cmd: signal
+    help: Send an explicit signal to one or more processes (Unix targets only).
+    - flag: wait
+      short: w
+      help: Wait for each process to exit
+    - arg: signal
+      parse: $parse_signal
+      help: Signal to send, for example TERM or HUP
+    - arg: pids
+      parse: $parse_pid
+      collect: true
+      help: Process IDs to signal
+    $signal_processes
