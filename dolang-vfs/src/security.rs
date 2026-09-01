@@ -383,6 +383,22 @@ impl WindowsTokenInfo {
 #[cfg(windows)]
 impl WindowsTokenInfo {
     fn current() -> Result<Self> {
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+        // SAFETY: the pseudo-handle from `GetCurrentProcess` is valid for the
+        // life of the process and needs no closing.
+        unsafe { Self::from_process_handle(GetCurrentProcess()) }
+    }
+
+    /// Reads the token of the process `handle` refers to.
+    ///
+    /// # Safety
+    ///
+    /// `handle` must be a live process handle carrying at least
+    /// `PROCESS_QUERY_INFORMATION` (or `PROCESS_QUERY_LIMITED_INFORMATION`).
+    pub(crate) unsafe fn from_process_handle(
+        handle: windows_sys::Win32::Foundation::HANDLE,
+    ) -> Result<Self> {
         use std::{
             io, mem,
             os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
@@ -395,7 +411,7 @@ impl WindowsTokenInfo {
                 TOKEN_INFORMATION_CLASS, TOKEN_OWNER, TOKEN_PRIMARY_GROUP, TOKEN_QUERY, TOKEN_USER,
                 TokenElevation, TokenGroups, TokenOwner, TokenPrimaryGroup, TokenUser,
             },
-            System::Threading::{GetCurrentProcess, OpenProcessToken},
+            System::Threading::OpenProcessToken,
         };
 
         fn query(token: HANDLE, class: TOKEN_INFORMATION_CLASS) -> io::Result<Vec<usize>> {
@@ -441,7 +457,7 @@ impl WindowsTokenInfo {
         }
 
         let mut token = ptr::null_mut();
-        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        if unsafe { OpenProcessToken(handle, TOKEN_QUERY, &mut token) } == 0 {
             return Err(io::Error::last_os_error().into());
         }
         let token = unsafe { OwnedHandle::from_raw_handle(token) };

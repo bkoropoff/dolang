@@ -59,6 +59,42 @@ impl<'v> Object<'v> for Identity {
     }
 }
 
+/// Builds a `security.unix.Identity` around `info`.
+///
+/// The credentials themselves live in the annex, but `group_ids` projects a
+/// tuple, which has to be constructed and rooted in slot 0 rather than built on
+/// demand from a getter.
+pub(crate) fn create_identity<'v>(
+    strand: &mut Strand<'v, '_>,
+    global: State<'v, Global<'v>>,
+    info: &UnixSecurityInfo,
+    out: &mut Slot<'v, '_>,
+) {
+    strand.with_slots_sync(|strand, [mut group_ids]| {
+        Output::set(
+            strand,
+            &mut group_ids,
+            AsTuple::new(info.group_ids().iter().copied()),
+        );
+        global
+            .types
+            .unix_identity
+            .create_with_annex(strand, Identity, info.clone(), &mut *out);
+        global
+            .types
+            .unix_identity
+            .cast(out)
+            .unwrap()
+            .enter_sync(strand, |strand, this| {
+                Output::set(
+                    strand,
+                    Mut::slot_mut::<0>(&mut this.borrow_mut_unwrap()),
+                    &group_ids,
+                );
+            });
+    });
+}
+
 pub(crate) struct PosixAclObject;
 
 struct PosixAclAces;
@@ -538,35 +574,13 @@ pub(super) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 .create_with_annex(strand, PosixAclObject, acl, out);
             Ok(())
         })
-        .function_with_slots("id", async move |strand, args, mut out, [mut group_ids]| {
+        .function("id", async move |strand, args, mut out| {
             let ([], []) = unpack!(strand, args, 0, 0)?;
             let security = security_info(strand, global)?;
             let Some(info) = security.unix() else {
                 return Err(Error::not_supported(strand));
             };
-
-            Output::set(
-                strand,
-                &mut group_ids,
-                AsTuple::new(info.group_ids().iter().copied()),
-            );
-
-            global
-                .types
-                .unix_identity
-                .create_with_annex(strand, Identity, info.clone(), &mut out);
-            global
-                .types
-                .unix_identity
-                .cast(&out)
-                .unwrap()
-                .enter_sync(strand, |strand, this| {
-                    Output::set(
-                        strand,
-                        Mut::slot_mut::<0>(&mut this.borrow_mut_unwrap()),
-                        &group_ids,
-                    );
-                });
+            create_identity(strand, global, info, &mut out);
             Ok(())
         })
         .function("user_name", async move |strand, args, out| {

@@ -40,22 +40,24 @@ use crate::{
     file::XattrEntry,
     file::{AccessFlags, CopyDest, CopyMode, File, FileLock, FileLockRequest, StreamEntry},
     metadata::{FsMetadata, Metadata},
-    process::{Child, Command, StdioRecv, StdioSend},
+    process::{
+        Child, Command, Process, ProcessInfo, Processes, Signal, StartTime, StdioRecv, StdioSend,
+    },
     protocol::{
         AccessRequest, AclRequest, CanonicalizeRequest, CopyRequest, CreateDirRequest,
         ExtensionRequest, ExtensionResponse, FsMetadataRequest, GlobRequest, HardLinkRequest,
         MetadataRequest, MoveRequest, OpenFlags, OpenHandle, OpenRequest, OpenVfsHandle,
-        PipeResponse, QueryResponse, ReadDirPage, ReadLinkRequest, RemoveDirRequest, RemoveRequest,
-        RenameRequest, Request, RequestKind, ResponseKind, SecDescRequest, SetAclRequest,
-        SetMetadataRequest, SetSecDescRequest, SetXattrRequest, SpawnRequest, StdioRecvTarget,
-        StdioSendTarget, StreamsRequest, SymlinkKind, SymlinkRequest, UnixVfsRequest, VfsProtocol,
-        WellKnownPathRequest, WindowsAdminRequest, WirePath, XattrNamespaceRequest, XattrRequest,
-        XattrsRequest, rpc_builder,
+        PipeResponse, ProcessPage, QueryResponse, ReadDirPage, ReadLinkRequest, RemoveDirRequest,
+        RemoveRequest, RenameRequest, Request, RequestKind, ResponseKind, SecDescRequest,
+        SetAclRequest, SetMetadataRequest, SetSecDescRequest, SetXattrRequest, SpawnRequest,
+        StdioRecvTarget, StdioSendTarget, StreamsRequest, SymlinkKind, SymlinkRequest,
+        UnixVfsRequest, VfsProtocol, WellKnownPathRequest, WindowsAdminRequest, WirePath,
+        XattrNamespaceRequest, XattrRequest, XattrsRequest, rpc_builder,
     },
     security::{Acl, AclKind},
     session::{
-        ChildMarker, FileLockMarker, FileMarker, ReadDirMarker, StdioRecvMarker, StdioSendMarker,
-        VfsMarker,
+        ChildMarker, FileLockMarker, FileMarker, ProcessEnumMarker, ProcessMarker, ReadDirMarker,
+        StdioRecvMarker, StdioSendMarker, VfsMarker,
     },
 };
 
@@ -215,6 +217,25 @@ impl OpaqueResource for RetainedReadDir {
     type Marker = ReadDirMarker;
 }
 
+struct RetainedProcesses(Mutex<Processes>);
+
+impl OpaqueResource for RetainedProcesses {
+    type Marker = ProcessEnumMarker;
+}
+
+/// A process handle the peer still holds.
+///
+/// Unlike [`RetainedChild`] this needs no mutex: none of the operations on a
+/// [`Process`] mutate it, so concurrent calls on the same handle are safe. That
+/// matters more than it looks — a `wait` can be outstanding for the life of the
+/// process, and a mutex here would make `terminate` on the same handle
+/// unreachable until it returned.
+struct RetainedProcess(Process);
+
+impl OpaqueResource for RetainedProcess {
+    type Marker = ProcessMarker;
+}
+
 impl OpaqueResource for RetainedFile {
     type Marker = FileMarker;
 }
@@ -263,6 +284,49 @@ const NEGOTIATE_TIMEOUT: Duration = Duration::from_secs(30);
 /// up; the listener resumes accepting as attempts drain.
 #[cfg(unix)]
 const MAX_PENDING_CONNECTIONS: usize = 8;
+
+/// Rough payload budget for one page of a process enumeration.
+///
+/// Process records vary by more than an order of magnitude — a kernel thread
+/// carries a short name and nothing else, a build tool's command line can run
+/// to kilobytes — so a fixed entry count would make the page size unpredictable
+/// in exactly the case that matters. Budgeting bytes instead keeps a page's
+/// cost bounded regardless of what is running on the target.
+const PROCESS_PAGE_BYTES: usize = 64 * 1024;
+
+/// Hard entry cap for one page, so a table of uniformly tiny records still
+/// yields to the caller at a sane interval instead of being sent whole.
+const PROCESS_PAGE_ENTRIES: usize = 512;
+
+/// Estimates a record's encoded size for [`PROCESS_PAGE_BYTES`].
+///
+/// Deliberately approximate: it exists to stop one page from being megabytes,
+/// and paying a serialization pass per entry to find out exactly would cost
+/// more than the imprecision does.
+fn process_info_size(info: &ProcessInfo) -> usize {
+    const FIXED: usize = 64;
+    let strings = info.name().len()
+        + info.exe().map_or(0, |path| path.as_str().len())
+        + info.cwd().map_or(0, |path| path.as_str().len())
+        + info
+            .command_line()
+            .map_or(0, |args| args.iter().map(|arg| arg.len() + 1).sum());
+    // Only one of these applies on any given target, and the accessor for the
+    // other reports that rather than returning nothing to measure.
+    let identity = info
+        .identity()
+        .ok()
+        .flatten()
+        .map_or(0, |identity| 16 + identity.group_ids().len() * 4);
+    // A token carries several SIDs plus one per group, each a variable-length
+    // structure; groups dominate.
+    let token = info
+        .token()
+        .ok()
+        .flatten()
+        .map_or(0, |token| 128 + token.groups().len() * 48);
+    FIXED + strings + identity + token
+}
 
 /// A connection that has completed negotiation, handed from a handler task
 /// back to [`Server::accept_one`].
@@ -881,6 +945,32 @@ impl Connection {
                 self.handle_read_dir_next(context, read_dir).await
             }
             RequestKind::ReadDirClose { read_dir } => self.handle_read_dir_close(context, read_dir),
+            RequestKind::ProcessEnumerate => self.handle_process_enumerate(context).await,
+            RequestKind::ProcessEnumerateNext { processes } => {
+                self.handle_process_enumerate_next(context, processes).await
+            }
+            RequestKind::ProcessEnumerateClose { processes } => {
+                self.handle_process_enumerate_close(context, processes)
+            }
+            RequestKind::ProcessOpen { pid, start } => {
+                self.handle_process_open(context, pid, start).await
+            }
+            RequestKind::ProcessInfo { process } => {
+                self.handle_process_info(context, process).await
+            }
+            RequestKind::ProcessSignal { process, signal } => {
+                self.handle_process_signal(context, process, signal).await
+            }
+            RequestKind::ProcessTerminate { process } => {
+                self.handle_process_terminate(context, process).await
+            }
+            RequestKind::ProcessKill { process } => {
+                self.handle_process_kill(context, process).await
+            }
+            RequestKind::ProcessWait { process } => {
+                self.handle_process_wait(context, process).await
+            }
+            RequestKind::ProcessClose { process } => self.handle_process_close(context, process),
             RequestKind::Remove(request) => self.handle_remove(request).await,
             RequestKind::Metadata(request) => self.handle_metadata(request).await,
             RequestKind::FsMetadata(request) => self.handle_fs_metadata(request).await,
@@ -1154,6 +1244,7 @@ impl Connection {
     async fn handle_query(&self) -> Result<ResponseKind> {
         let vfs = &self.server.vfs;
         Ok(ResponseKind::Query(QueryResponse {
+            session: vfs.session(),
             env: vfs.env().collect(),
             cwd: vfs.cwd().into(),
             current_exe: vfs.current_exe().into(),
@@ -1834,6 +1925,144 @@ impl Connection {
             .unregister::<RetainedReadDir>(read_dir)
             .map_err(|_| Self::invalid_opaque("directory"))?;
         Ok(ResponseKind::ReadDirClose)
+    }
+
+    async fn handle_process_enumerate(
+        &self,
+        context: &CallContext<VfsProtocol>,
+    ) -> Result<ResponseKind> {
+        let processes = self.server.vfs.processes().await?;
+        Ok(ResponseKind::ProcessEnumerate(
+            context.register(RetainedProcesses(Mutex::new(processes))),
+        ))
+    }
+
+    async fn handle_process_enumerate_next(
+        &self,
+        context: &CallContext<VfsProtocol>,
+        processes: Cite<ProcessEnumMarker>,
+    ) -> Result<ResponseKind> {
+        let retained = context
+            .acquire::<RetainedProcesses>(processes.clone())
+            .map_err(|_| Self::invalid_opaque("process enumeration"))?;
+        let mut guard = retained.0.lock().await;
+        let mut entries: Vec<ProcessInfo> = Vec::new();
+        let mut budget = PROCESS_PAGE_BYTES;
+        let mut done = false;
+        while budget > 0 && entries.len() < PROCESS_PAGE_ENTRIES {
+            match guard.next_entry().await? {
+                Some(entry) => {
+                    budget = budget.saturating_sub(process_info_size(&entry));
+                    entries.push(entry);
+                }
+                None => {
+                    done = true;
+                    break;
+                }
+            }
+        }
+        drop(guard);
+        drop(retained);
+        if done {
+            let _ = context.unregister::<RetainedProcesses>(processes);
+        }
+        Ok(ResponseKind::ProcessEnumerateNext(ProcessPage {
+            entries,
+            done,
+        }))
+    }
+
+    fn handle_process_enumerate_close(
+        &self,
+        context: &CallContext<VfsProtocol>,
+        processes: Cite<ProcessEnumMarker>,
+    ) -> Result<ResponseKind> {
+        context
+            .unregister::<RetainedProcesses>(processes)
+            .map_err(|_| Self::invalid_opaque("process enumeration"))?;
+        Ok(ResponseKind::ProcessEnumerateClose)
+    }
+
+    async fn handle_process_open(
+        &self,
+        context: &CallContext<VfsProtocol>,
+        pid: u32,
+        start: Option<StartTime>,
+    ) -> Result<ResponseKind> {
+        let process = self.server.vfs.open_process_raw(pid, start).await?;
+        Ok(ResponseKind::ProcessOpen(
+            context.register(RetainedProcess(process)),
+        ))
+    }
+
+    async fn handle_process_info(
+        &self,
+        context: &CallContext<VfsProtocol>,
+        process: Cite<ProcessMarker>,
+    ) -> Result<ResponseKind> {
+        let retained = context
+            .acquire::<RetainedProcess>(process)
+            .map_err(|_| Self::invalid_opaque("process"))?;
+        Ok(ResponseKind::ProcessInfo(retained.0.info().await?))
+    }
+
+    async fn handle_process_signal(
+        &self,
+        context: &CallContext<VfsProtocol>,
+        process: Cite<ProcessMarker>,
+        signal: Signal,
+    ) -> Result<ResponseKind> {
+        let retained = context
+            .acquire::<RetainedProcess>(process)
+            .map_err(|_| Self::invalid_opaque("process"))?;
+        retained.0.signal(signal).await?;
+        Ok(ResponseKind::ProcessSignal)
+    }
+
+    async fn handle_process_terminate(
+        &self,
+        context: &CallContext<VfsProtocol>,
+        process: Cite<ProcessMarker>,
+    ) -> Result<ResponseKind> {
+        let retained = context
+            .acquire::<RetainedProcess>(process)
+            .map_err(|_| Self::invalid_opaque("process"))?;
+        retained.0.terminate().await?;
+        Ok(ResponseKind::ProcessTerminate)
+    }
+
+    async fn handle_process_kill(
+        &self,
+        context: &CallContext<VfsProtocol>,
+        process: Cite<ProcessMarker>,
+    ) -> Result<ResponseKind> {
+        let retained = context
+            .acquire::<RetainedProcess>(process)
+            .map_err(|_| Self::invalid_opaque("process"))?;
+        retained.0.kill().await?;
+        Ok(ResponseKind::ProcessKill)
+    }
+
+    async fn handle_process_wait(
+        &self,
+        context: &CallContext<VfsProtocol>,
+        process: Cite<ProcessMarker>,
+    ) -> Result<ResponseKind> {
+        let retained = context
+            .acquire::<RetainedProcess>(process)
+            .map_err(|_| Self::invalid_opaque("process"))?;
+        Ok(ResponseKind::ProcessWait(retained.0.wait().await?))
+    }
+
+    fn handle_process_close(
+        &self,
+        context: &CallContext<VfsProtocol>,
+        process: Cite<ProcessMarker>,
+    ) -> Result<ResponseKind> {
+        context
+            .unregister::<RetainedProcess>(process)
+            .map_err(|_| Self::invalid_opaque("process"))?;
+        Ok(ResponseKind::ProcessClose)
     }
 
     async fn handle_unix_vfs(

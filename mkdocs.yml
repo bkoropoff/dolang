@@ -162,9 +162,12 @@ nav:
     - proc:
       - api/proc/index.md
       - api/proc/error.md
+      - api/proc/info.md
       - api/proc/pipe-receiver.md
       - api/proc/pipe-sender.md
+      - api/proc/proc.md
       - api/proc/program.md
+      - api/proc/status.md
     - proc.windows: api/proc.windows.md
     - progress:
       - api/progress/index.md

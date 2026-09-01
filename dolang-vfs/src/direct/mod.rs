@@ -55,6 +55,9 @@ use std::{
     windows
 ))]
 mod copy;
+// Named for the concept rather than "process", which `use crate::process` has
+// already claimed at this module's scope.
+mod foreign;
 mod lock;
 #[cfg(unix)]
 mod security;
@@ -68,6 +71,7 @@ pub(crate) use unix::ReadDir;
 #[cfg(windows)]
 pub(crate) use windows::ReadDir;
 
+pub(crate) use foreign::{Process, Processes};
 pub(crate) use lock::{FileLock, FileLocks};
 
 /// A [`Vfs`] that operates in the local process environment.
@@ -1588,6 +1592,10 @@ impl Direct {
         &self.initial.target
     }
 
+    pub(crate) fn session(&self) -> uuid::Uuid {
+        self.initial.session
+    }
+
     pub(crate) fn security(&self) -> &SecurityInfo {
         &self.initial.security
     }
@@ -1741,6 +1749,22 @@ impl Direct {
             )
             .into())
         }
+    }
+
+    pub(crate) async fn processes(&self) -> Result<process::Processes> {
+        Processes::open(self.session())
+            .await
+            .map(process::Processes::direct)
+    }
+
+    pub(crate) async fn open_process(
+        &self,
+        pid: u32,
+        start: Option<process::StartTime>,
+    ) -> Result<process::Process> {
+        Process::open(self.session(), pid, start)
+            .await
+            .map(|handle| process::Process::direct(pid, handle))
     }
 
     pub(crate) async fn read_dir(&self, path: Utf8TypedPath<'_>) -> Result<directory::ReadDir> {
