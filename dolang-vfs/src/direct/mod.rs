@@ -1757,6 +1757,10 @@ impl Direct {
             .map(process::Processes::direct)
     }
 
+    pub(crate) async fn describe_process(&self, pid: u32) -> Result<process::ProcessInfo> {
+        Processes::describe_one(self.session(), pid).await
+    }
+
     pub(crate) async fn open_process(
         &self,
         pid: u32,

@@ -58,7 +58,7 @@ async fn direct_query_reports_host_target() {
     assert_eq!(security.effective_gid(), getegid().as_raw());
     #[cfg(not(target_os = "macos"))]
     assert_eq!(
-        security.group_ids(),
+        security.groups(),
         getgroups()
             .unwrap()
             .into_iter()
@@ -66,7 +66,7 @@ async fn direct_query_reports_host_target() {
             .collect::<Vec<_>>()
     );
     #[cfg(target_os = "macos")]
-    assert!(security.group_ids().contains(&getegid().as_raw()));
+    assert!(security.groups().contains(&getegid().as_raw()));
 }
 
 #[tokio::test]

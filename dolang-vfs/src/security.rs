@@ -130,7 +130,7 @@ pub struct UnixSecurityInfo {
     /// Effective group ID.
     pub(crate) egid: u32,
     /// Supplementary group IDs.
-    pub(crate) group_ids: Vec<u32>,
+    pub(crate) groups: Vec<u32>,
 }
 
 /// Windows token information for a VFS target.
@@ -242,8 +242,8 @@ impl UnixSecurityInfo {
         self.egid
     }
     /// Returns the supplementary group IDs.
-    pub fn group_ids(&self) -> &[u32] {
-        &self.group_ids
+    pub fn groups(&self) -> &[u32] {
+        &self.groups
     }
 }
 
@@ -290,13 +290,13 @@ impl UnixSecurityInfo {
             gid: getgid().as_raw(),
             euid: euid.as_raw(),
             egid: egid.as_raw(),
-            group_ids: current_group_ids(euid, egid)?,
+            groups: current_groups(euid, egid)?,
         })
     }
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn current_group_ids(_euid: nix::unistd::Uid, _egid: nix::unistd::Gid) -> Result<Vec<u32>> {
+fn current_groups(_euid: nix::unistd::Uid, _egid: nix::unistd::Gid) -> Result<Vec<u32>> {
     Ok(nix::unistd::getgroups()
         .map_err(io::Error::from)?
         .into_iter()
@@ -305,7 +305,7 @@ fn current_group_ids(_euid: nix::unistd::Uid, _egid: nix::unistd::Gid) -> Result
 }
 
 #[cfg(target_os = "macos")]
-fn current_group_ids(euid: nix::unistd::Uid, egid: nix::unistd::Gid) -> Result<Vec<u32>> {
+fn current_groups(euid: nix::unistd::Uid, egid: nix::unistd::Gid) -> Result<Vec<u32>> {
     use std::{ffi::CString, ptr, slice};
 
     // macOS limits the public getgroups/getgrouplist interfaces and resolves

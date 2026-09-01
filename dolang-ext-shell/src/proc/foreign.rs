@@ -70,6 +70,7 @@ impl<'v> Object<'v> for Info {
     fn build<'a>(mut builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
         let unix_id = builder.sym("unix_id");
         let token_info = builder.sym("token_info");
+        let cmdline_win = builder.sym("cmdline_win");
         builder
             .get("pid", |this, strand, out| {
                 Output::set(strand, out, this.annex().info.pid());
@@ -136,6 +137,26 @@ impl<'v> Object<'v> for Info {
                     Ok(Some(token)) => create_token_info(strand, annex.global, token, &mut out),
                     Ok(None) => Output::set(strand, out, Nil),
                     Err(_) => return Err(Error::field(strand, token_info)),
+                }
+                Ok(())
+            })
+            .get("status", |this, strand, out| {
+                let annex = this.annex();
+                match annex.info.exit() {
+                    Some(exit) => annex
+                        .global
+                        .types
+                        .proc_status
+                        .create_with_annex(strand, Status, exit, out),
+                    None => Output::set(strand, out, Nil),
+                }
+                Ok(())
+            })
+            .get("cmdline_win", move |this, strand, out| {
+                match this.annex().info.windows_command_line() {
+                    Ok(Some(cmdline)) => Output::set(strand, out, cmdline),
+                    Ok(None) => Output::set(strand, out, Nil),
+                    Err(_) => return Err(Error::field(strand, cmdline_win)),
                 }
                 Ok(())
             })
@@ -357,6 +378,29 @@ pub(crate) async fn open_value<'v, 's>(
     let pid = u32::try_from(pid)
         .map_err(|_| Error::value(strand, "open: pid must fit in an unsigned 32-bit integer"))?;
     vfs.open_process(pid).await.into_sys(strand)
+}
+
+/// Implements `proc.info`.
+///
+/// Takes a PID rather than a record: a record already *is* the answer, and
+/// re-reading one by PID could not confirm it still describes the same process
+/// anyway — that is what a handle is for. Nothing is opened here, which is why
+/// this reaches processes `open` cannot.
+pub(crate) async fn describe<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    pid: &Value<'v>,
+    out: Slot<'v, '_>,
+) -> Result<'v, 's, ()> {
+    let Some(pid) = pid.as_int(strand) else {
+        return Err(Error::type_error(strand, "info: expected an Int pid"));
+    };
+    let pid = u32::try_from(pid)
+        .map_err(|_| Error::value(strand, "info: pid must fit in an unsigned 32-bit integer"))?;
+    let vfs = global.local.get(strand).vfs();
+    let info = vfs.describe_process(pid).await.into_sys(strand)?;
+    create_info(strand, global, info, out);
+    Ok(())
 }
 
 /// Implements `proc.open`, in both its plain and scoped forms.

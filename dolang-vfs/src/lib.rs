@@ -306,13 +306,32 @@ impl Vfs {
     /// Enumerates the target's process table.
     ///
     /// Entries are produced lazily, and a process that exits partway through is
-    /// skipped rather than reported. Records from here leave
-    /// [`ProcessInfo::token`](process::ProcessInfo::token) unset even on a
-    /// Windows target; see its documentation.
+    /// skipped rather than reported. A record carries everything the target
+    /// would report about that process — the same record
+    /// [`describe_process`](Self::describe_process) would produce for it.
     pub async fn processes(&self) -> error::Result<process::Processes> {
         match &self.inner {
             VfsInner::Client(client) => client.processes().await,
             VfsInner::Direct(direct) => direct.processes().await,
+        }
+    }
+
+    /// Describes the process that currently owns `pid`.
+    ///
+    /// The same record [`processes`](Self::processes) would produce for it,
+    /// without enumerating the table to reach it and without holding the
+    /// process open. Nothing pins the PID, so the record describes whatever
+    /// owned it at the moment it was read — for an identity that can be
+    /// checked, open a handle instead.
+    ///
+    /// Unlike [`open_process`](Self::open_process), this needs no rights over
+    /// the process: on a Windows target the kernel's own processes cannot be
+    /// opened by anyone, and this is the only route to what is known about
+    /// them.
+    pub async fn describe_process(&self, pid: u32) -> error::Result<process::ProcessInfo> {
+        match &self.inner {
+            VfsInner::Client(client) => client.describe_process(pid).await,
+            VfsInner::Direct(direct) => direct.describe_process(pid).await,
         }
     }
 

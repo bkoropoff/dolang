@@ -57,6 +57,36 @@ let mine = $
       - $info
 ```
 
+### `info pid`
+
+Describes the process that currently owns `pid`.
+
+Because this bypasses `open`, it will work on protected processes on Windows
+that would otherwise result in permission errors.
+
+#### Parameters
+
+| Name  | Type                         | Description |
+| ----- | ---------------------------- | ----------- |
+| `pid` | [`Int`](../std/int.md)       | Process ID  |
+
+#### Returns
+
+[`Info`](./info.md).
+
+#### Errors
+
+| Exception                              | Condition       |
+| -------------------------------------- | --------------- |
+| [`sys.NotFoundError`](../sys/error.md) | No such process |
+
+#### Example
+
+```
+let info = info $pid
+echo "$(info.name) started as $(info.cmdline)"
+```
+
 ### `open target func?`
 
 Opens a handle to a process.

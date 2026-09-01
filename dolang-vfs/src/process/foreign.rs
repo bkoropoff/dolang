@@ -52,6 +52,7 @@ pub struct ProcessInfo {
     pub(crate) cmdline: Option<Vec<String>>,
     pub(crate) cwd: Option<WirePath>,
     pub(crate) family: ProcessFamily,
+    pub(crate) exit: Option<ProcessExit>,
 }
 
 /// The platform-specific half of a [`ProcessInfo`].
@@ -64,8 +65,15 @@ pub struct ProcessInfo {
 pub(crate) enum ProcessFamily {
     /// Unix credentials, absent if they could not be read.
     Unix(Option<UnixSecurityInfo>),
-    /// Windows access token information, absent if it was not read.
-    Windows(Option<WindowsTokenInfo>),
+    Windows {
+        /// Access token information, absent if it was not read.
+        token: Option<WindowsTokenInfo>,
+        /// The command line as the process itself sees it, before it was split
+        /// into [`ProcessInfo::cmdline`]. Windows has no argument vector — the
+        /// split is a convention applied by the C runtime — so the unsplit
+        /// form is kept for a caller who needs to apply a different one.
+        cmdline: Option<String>,
+    },
 }
 
 impl ProcessInfo {
@@ -75,6 +83,11 @@ impl ProcessInfo {
     }
 
     /// Returns the parent process ID.
+    ///
+    /// The process that created this one, which may have exited since. Unix
+    /// reparents an orphan to `init` and so reports a live process; Windows
+    /// keeps reporting the original creator, whose PID may by then belong to
+    /// something unrelated.
     pub fn parent_pid(&self) -> Option<u32> {
         self.ppid
     }
@@ -100,22 +113,56 @@ impl ProcessInfo {
 
     /// Returns the process command line.
     ///
-    /// Best-effort. macOS restricts it to processes owned by the same user,
-    /// and Windows has no documented interface for reading another process's
-    /// command line at all.
+    /// Best-effort: macOS restricts it to processes owned by the same user.
+    ///
+    /// On Windows this is a reconstruction. The kernel stores one string and
+    /// leaves splitting it to the process, so what is reported here is that
+    /// string split by the MSVC convention that Rust and every C runtime
+    /// follow — which is what the target process almost certainly did with it,
+    /// but not something the system guarantees. [`windows_command_line`] has
+    /// the original.
+    ///
+    /// [`windows_command_line`]: Self::windows_command_line
     pub fn command_line(&self) -> Option<&[String]> {
         self.cmdline.as_deref()
     }
 
+    /// Returns the process command line as a single unsplit string.
+    ///
+    /// Windows only, where this is the form the kernel actually stores.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::Unsupported`](crate::error::ErrorKind::Unsupported) if the
+    /// record came from a Unix target, where the argument vector is what the
+    /// kernel holds and there is no original string to fall back to.
+    pub fn windows_command_line(&self) -> Result<Option<&str>> {
+        match &self.family {
+            ProcessFamily::Windows { cmdline, .. } => Ok(cmdline.as_deref()),
+            ProcessFamily::Unix(_) => Err(Error::new(
+                ErrorKind::Unsupported,
+                "Unix processes have an argument vector, not a command line string",
+            )),
+        }
+    }
+
     /// Returns the process working directory.
     ///
-    /// Available on Linux and macOS only. FreeBSD exposes it through
-    /// `libprocstat`, and Windows not at all.
+    /// On Windows this is the process's own bookkeeping rather than something
+    /// the system tracks: NT has no per-process current directory, so what is
+    /// reported is the Win32 one the target keeps in its own memory, read from
+    /// there. A process is free to put anything in that field.
     pub fn cwd(&self) -> Option<Utf8TypedPath<'_>> {
         self.cwd.as_ref().map(Into::into)
     }
 
     /// Returns the process's Unix credentials.
+    ///
+    /// The group list holds the supplementary groups alone. The BSDs keep the
+    /// effective group in the first slot of the credential's group array and
+    /// report it that way, so it is dropped here to leave the field meaning
+    /// the same thing on every target — it is reported by
+    /// [`UnixSecurityInfo::effective_gid`] instead.
     ///
     /// On macOS the supplementary group list is the kernel credential list,
     /// capped at `NGROUPS` (16). That is narrower than what
@@ -133,7 +180,7 @@ impl ProcessInfo {
     pub fn identity(&self) -> Result<Option<&UnixSecurityInfo>> {
         match &self.family {
             ProcessFamily::Unix(identity) => Ok(identity.as_ref()),
-            ProcessFamily::Windows(_) => Err(Error::new(
+            ProcessFamily::Windows { .. } => Err(Error::new(
                 ErrorKind::Unsupported,
                 "Windows processes have no Unix credentials",
             )),
@@ -142,11 +189,10 @@ impl ProcessInfo {
 
     /// Returns the process's access token information.
     ///
-    /// `None` for a record produced by
-    /// [`Vfs::processes`](crate::Vfs::processes): reading it costs a process
-    /// open and a token open per entry, and is denied for most of the table to
-    /// an unelevated caller. Fetch it through [`Process::info`], which already
-    /// holds a handle.
+    /// `None` where it could not be read, which every route reports the same
+    /// way: a process that refuses to be opened, or one whose token the caller
+    /// has no right to. Nothing about which call produced the record changes
+    /// what is here.
     ///
     /// # Errors
     ///
@@ -154,12 +200,31 @@ impl ProcessInfo {
     /// record came from a Unix target, which has no access tokens.
     pub fn token(&self) -> Result<Option<&WindowsTokenInfo>> {
         match &self.family {
-            ProcessFamily::Windows(token) => Ok(token.as_ref()),
+            ProcessFamily::Windows { token, .. } => Ok(token.as_ref()),
             ProcessFamily::Unix(_) => Err(Error::new(
                 ErrorKind::Unsupported,
                 "Unix processes have no access token",
             )),
         }
+    }
+
+    /// Returns how the process ended, or `None` if it was still running.
+    ///
+    /// A process can outlive itself in the table: Unix keeps a zombie until its
+    /// parent reaps it, and Windows keeps an exited process addressable while
+    /// any handle to it remains open. Such a record still reports what the
+    /// kernel holds — the PID, the parent, when it started — while everything
+    /// read out of its address space, the command line and working directory
+    /// included, is gone. This is what distinguishes that from a live process
+    /// whose fields were merely denied.
+    ///
+    /// Only Windows reports a code, for the reason [`ProcessExit`] gives.
+    ///
+    /// `None` is also what a record carries when its process could not be
+    /// examined closely enough to tell, which on Windows means one that could
+    /// not be opened at all.
+    pub fn exit(&self) -> Option<ProcessExit> {
+        self.exit
     }
 
     /// Returns the identity of the target session this was captured from.

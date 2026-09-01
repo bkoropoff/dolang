@@ -70,6 +70,17 @@ def sid_converts_between_structural_forms()
   let unknown = Sid S-1-0x010203040506-7
   assert_eq $unknown.identifier_authority 1108152157446
 
+  # A SID is its value, so two built by different routes compare equal, hash
+  # alike, and index the same dict entry.
+  assert_eq $sid (Sid(bytes))
+  assert_eq (sid == unknown) false
+  assert_eq (hash sid) (hash(Sid(bytes)))
+  let seen = {}
+  seen[sid] = "first"
+  seen[Sid(bytes)] = "second"
+  assert_eq $seen.len 1
+  assert_eq $seen[Sid("S-1-5-32-544")] "second"
+
 #[test]
 def security_descriptor_converts_self_relative_packets()
   let packet = b"\x01\x5a\x15\xd0\x14\x00\x00\x00\x20\x00\x00\x00\x00\x00\x00\x00\x30\x00\x00\x00\x01\x01\x00\x00\x00\x00\x00\x05\x12\x00\x00\x00\x01\x02\x00\x00\x00\x00\x00\x05\x20\x00\x00\x00\x20\x02\x00\x00\x02\x00\x08\x00\x00\x00\x00\x00"
@@ -427,9 +438,9 @@ def reports_security_information_for_target()
     assert_type $Int $info.gid
     assert_type $Int $info.euid
     assert_type $Int $info.egid
-    assert_type $Tuple $info.group_ids
-    for group_id = info.group_ids
-      assert_type $Int $group_id
+    assert_type $Tuple $info.groups
+    for group = info.groups
+      assert_type $Int $group
     let user = unix_user_name $info.euid
     let group = group_name $info.egid
     assert_type $Str $user

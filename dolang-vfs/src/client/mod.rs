@@ -2936,6 +2936,13 @@ impl Client {
         }
     }
 
+    pub(crate) async fn describe_process(&self, pid: u32) -> Result<ProcessInfo> {
+        match self.request(RequestKind::ProcessDescribe { pid }).await? {
+            ResponseKind::ProcessDescribe(info) => Ok(info),
+            response => Err(unexpected(response).into()),
+        }
+    }
+
     pub(crate) async fn open_process(
         &self,
         pid: u32,

@@ -117,6 +117,9 @@ pub(super) struct Listed {
     name: String,
     start: StartTime,
     identity: Option<UnixSecurityInfo>,
+    /// Whether the process is a zombie: exited, and still listed only because
+    /// its parent has not reaped it.
+    exited: bool,
 }
 
 #[cfg(target_os = "freebsd")]
@@ -128,7 +131,14 @@ mod platform {
     /// Converts one `kinfo_proc` into a listing.
     fn listed(kinfo: &libc::kinfo_proc) -> Listed {
         let ngroups = kinfo.ki_ngroups.max(0) as usize;
-        let group_ids = kinfo.ki_groups[..ngroups.min(kinfo.ki_groups.len())].to_vec();
+        let exported = &kinfo.ki_groups[..ngroups.min(kinfo.ki_groups.len())];
+        // The exported list always leads with the effective GID, so the
+        // supplementary groups are what follows it. That held when the
+        // credential stored the effective GID in the first slot of its group
+        // array, and it still holds now that the two are separate fields, since
+        // the export re-prepends it to keep `kinfo_proc` ABI-compatible.
+        let egid = exported.first().copied();
+        let groups = exported.get(1..).unwrap_or_default().to_vec();
         Listed {
             pid: kinfo.ki_pid as u32,
             ppid: (kinfo.ki_ppid > 0).then_some(kinfo.ki_ppid as u32),
@@ -140,11 +150,10 @@ mod platform {
                 uid: kinfo.ki_ruid,
                 gid: kinfo.ki_rgid,
                 euid: kinfo.ki_uid,
-                // The effective GID is the first entry of the credential's
-                // group list, which is how the kernel stores it.
-                egid: group_ids.first().copied().unwrap_or(kinfo.ki_rgid),
-                group_ids,
+                egid: egid.unwrap_or(kinfo.ki_rgid),
+                groups,
             }),
+            exited: kinfo.ki_stat == libc::SZOMB,
         }
     }
 
@@ -200,13 +209,52 @@ mod platform {
         ];
         let bytes = sysctl(&mib).ok()?;
         let path = CStr::from_bytes_until_nul(&bytes).ok()?.to_str().ok()?;
+        // A process with no executable — a kernel process, or one whose image
+        // the kernel cannot name — answers with an empty string rather than an
+        // error. That is an absent path, not a path that happens to be empty.
+        if path.is_empty() {
+            return None;
+        }
         typed_path(path.into()).ok().map(Into::into)
     }
 
-    /// FreeBSD exposes no working directory without `libprocstat`, which is a
-    /// separate library and a much larger dependency than the field is worth.
-    pub(super) fn cwd(_pid: u32) -> Option<WirePath> {
-        None
+    /// Reads one process's working directory.
+    ///
+    /// `KERN_PROC_CWD` answers with a single `kinfo_file`, which is the same
+    /// kernel data `libprocstat` returns — that library's contribution is
+    /// walking the whole descriptor table to find this one entry, which is not
+    /// worth linking a second library and hand-rolling the `struct filestat`
+    /// layout for.
+    ///
+    /// Subject to `p_candebug`, so another user's working directory is denied
+    /// rather than reported.
+    pub(super) fn cwd(pid: u32) -> Option<WirePath> {
+        let mib = [
+            libc::CTL_KERN,
+            libc::KERN_PROC,
+            libc::KERN_PROC_CWD,
+            pid as libc::c_int,
+        ];
+        let bytes = sysctl(&mib).ok()?;
+        if bytes.len() < mem::size_of::<libc::kinfo_file>() {
+            return None;
+        }
+        // SAFETY: the buffer holds at least one record, and `read_unaligned`
+        // makes no alignment assumption about it.
+        let kinfo: libc::kinfo_file = unsafe { ptr::read_unaligned(bytes.as_ptr().cast()) };
+        // The record leads with its own size so that a consumer can tell it is
+        // reading the layout it was built against. `libc` describes the middle
+        // of the structure as opaque padding standing in for a union, so a
+        // disagreement here would move `kf_path` rather than merely truncate
+        // it — refuse the record instead of reading a path out of the wrong
+        // offset.
+        if kinfo.kf_structsize as usize != mem::size_of::<libc::kinfo_file>() {
+            return None;
+        }
+        let path = c_string(&kinfo.kf_path);
+        (!path.is_empty())
+            .then(|| typed_path(path.into()).ok().map(Into::into))
+            .flatten()
     }
 
     pub(super) fn cmdline(pid: u32) -> Option<Vec<String>> {
@@ -345,7 +393,7 @@ mod platform {
     /// is believed — five fields, four of them immediately preceding the
     /// groups, which is a far stronger check on the transcribed layout than
     /// the size of the buffer.
-    fn group_ids(bsd: &libc::proc_bsdinfo) -> Vec<libc::gid_t> {
+    fn groups(bsd: &libc::proc_bsdinfo) -> Vec<libc::gid_t> {
         let pid = bsd.pbi_pid;
         let mib = [
             libc::CTL_KERN,
@@ -378,7 +426,14 @@ mod platform {
         if count < 0 || count as usize > NGROUPS {
             return Vec::new();
         }
-        info.e_ucred.cr_groups[..count as usize].to_vec()
+        // The credential keeps the effective GID in the first slot of its group
+        // array, so the supplementary groups are what follows it. Dropping it
+        // is what keeps this field meaning the same thing on every target;
+        // `egid` reports it, out of `pbi_gid`.
+        info.e_ucred.cr_groups[..count as usize]
+            .get(1..)
+            .unwrap_or_default()
+            .to_vec()
     }
 
     /// Reads `PROC_PIDTBSDINFO` for one process.
@@ -414,8 +469,9 @@ mod platform {
                 gid: info.pbi_rgid,
                 euid: info.pbi_uid,
                 egid: info.pbi_gid,
-                group_ids: group_ids(info),
+                groups: groups(info),
             }),
+            exited: info.pbi_status == libc::SZOMB,
         }
     }
 
@@ -443,6 +499,9 @@ mod platform {
                 name: String::new(),
                 start: StartTime(0),
                 identity: None,
+                // A bare PID from `proc_listallpids`; everything, this
+                // included, is filled in when the entry is reached.
+                exited: false,
             })
             .collect())
     }
@@ -529,6 +588,9 @@ fn describe(session: Uuid, listed: Listed) -> ProcessInfo {
         cmdline: platform::cmdline(pid),
         cwd: platform::cwd(pid),
         family: ProcessFamily::Unix(listed.identity),
+        // Only the parent may reap, and this process is not it, so a zombie is
+        // reported as gone and nothing more.
+        exit: listed.exited.then_some(ProcessExit { code: None }),
     }
 }
 
@@ -537,6 +599,15 @@ impl Processes {
         tokio::task::spawn_blocking(platform::scan)
             .await
             .map_err(Error::other)?
+    }
+
+    pub(super) async fn impl_describe_one(session: Uuid, pid: u32) -> Result<ProcessInfo> {
+        tokio::task::spawn_blocking(move || {
+            let listed = platform::lookup(pid)?.ok_or_else(|| gone(pid))?;
+            Ok(describe(session, listed))
+        })
+        .await
+        .map_err(Error::other)?
     }
 
     pub(super) async fn impl_describe(
@@ -734,6 +805,52 @@ fn drain_exit(queue: libc::c_int) -> io::Result<bool> {
     Ok(count > 0)
 }
 
+#[cfg(all(test, target_os = "freebsd"))]
+mod tests {
+    use super::*;
+
+    /// Proves the exported group list leads with the effective GID, which is
+    /// what [`platform::listed`] strips to arrive at the supplementary groups.
+    ///
+    /// The two kernels this has to hold on disagree about what `getgroups`
+    /// returns — it leads with the effective GID where the credential keeps the
+    /// two in one array, and does not where they are separate fields — so the
+    /// assertion is that the stripped list is what remains either way.
+    #[test]
+    fn kinfo_group_list_leads_with_the_effective_gid() {
+        let mut reported = vec![0 as libc::gid_t; 128];
+        // SAFETY: the buffer is as long as the count passed.
+        let count =
+            unsafe { libc::getgroups(reported.len() as libc::c_int, reported.as_mut_ptr()) };
+        assert!(
+            count >= 0,
+            "getgroups failed: {}",
+            io::Error::last_os_error()
+        );
+        reported.truncate(count as usize);
+
+        let listed = platform::lookup(std::process::id())
+            .unwrap()
+            .expect("the current process should be listed");
+        let identity = listed
+            .identity
+            .expect("FreeBSD reports credentials for every process");
+        let egid = unsafe { libc::getegid() };
+
+        assert_eq!(identity.effective_gid(), egid);
+
+        let stripped = identity.groups();
+        let prepended: Vec<libc::gid_t> = std::iter::once(egid)
+            .chain(stripped.iter().copied())
+            .collect();
+        assert!(
+            reported == stripped || reported == prepended,
+            "supplementary groups {stripped:?} match neither {reported:?} nor that list \
+             without its leading effective GID"
+        );
+    }
+}
+
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
@@ -741,6 +858,10 @@ mod tests {
     /// Proves the hand-transcribed `kinfo_proc` prefix lines up with the
     /// kernel's, by checking the group list it produces against the one the
     /// process can read about itself.
+    ///
+    /// `getgroups` reports the credential's group array whole, so what it
+    /// returns is the effective GID followed by the supplementary groups this
+    /// strips it down to.
     ///
     /// A misread layout fails the credential cross-check and yields an empty
     /// list, so asserting the list is *non-empty* is what catches a bad
@@ -766,10 +887,14 @@ mod tests {
             .expect("macOS reports credentials for every process");
 
         assert!(
-            !identity.group_ids().is_empty(),
+            !expected.is_empty(),
             "empty group list means the kinfo_proc layout failed its credential cross-check"
         );
-        assert_eq!(identity.group_ids(), expected);
+        let prepended: Vec<libc::gid_t> = std::iter::once(identity.effective_gid())
+            .chain(identity.groups().iter().copied())
+            .collect();
+        assert_eq!(prepended, expected);
+        assert_eq!(identity.effective_gid(), unsafe { libc::getegid() });
         assert_eq!(identity.effective_uid(), unsafe { libc::geteuid() });
         assert_eq!(identity.uid(), unsafe { libc::getuid() });
     }

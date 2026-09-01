@@ -16,7 +16,7 @@ Effective user ID.
 
 Real group ID.
 
-### `group_ids`
+### `groups`
 
 Group IDs as an immutable [`Tuple`](../../std/tuple.md).
 

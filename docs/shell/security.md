@@ -36,7 +36,7 @@ import security.unix:
 let identity = id()
 echo "uid=$(identity.uid) gid=$(identity.gid)"
 echo "effective uid=$(identity.euid) gid=$(identity.egid)"
-for gid = identity.group_ids
+for gid = identity.groups
   echo "group $gid: $(group_name(gid))"
 ```
 

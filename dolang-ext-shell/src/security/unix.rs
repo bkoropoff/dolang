@@ -51,7 +51,7 @@ impl<'v> Object<'v> for Identity {
                 Output::set(strand, out, this.annex().effective_gid());
                 Ok(())
             })
-            .get("group_ids", |this, strand, out| {
+            .get("groups", |this, strand, out| {
                 let borrow = this.borrow(strand)?;
                 Output::set(strand, out, Ref::slot::<0>(&borrow));
                 Ok(())
@@ -61,7 +61,7 @@ impl<'v> Object<'v> for Identity {
 
 /// Builds a `security.unix.Identity` around `info`.
 ///
-/// The credentials themselves live in the annex, but `group_ids` projects a
+/// The credentials themselves live in the annex, but `groups` projects a
 /// tuple, which has to be constructed and rooted in slot 0 rather than built on
 /// demand from a getter.
 pub(crate) fn create_identity<'v>(
@@ -70,11 +70,11 @@ pub(crate) fn create_identity<'v>(
     info: &UnixSecurityInfo,
     out: &mut Slot<'v, '_>,
 ) {
-    strand.with_slots_sync(|strand, [mut group_ids]| {
+    strand.with_slots_sync(|strand, [mut groups]| {
         Output::set(
             strand,
-            &mut group_ids,
-            AsTuple::new(info.group_ids().iter().copied()),
+            &mut groups,
+            AsTuple::new(info.groups().iter().copied()),
         );
         global
             .types
@@ -89,7 +89,7 @@ pub(crate) fn create_identity<'v>(
                 Output::set(
                     strand,
                     Mut::slot_mut::<0>(&mut this.borrow_mut_unwrap()),
-                    &group_ids,
+                    &groups,
                 );
             });
     });
