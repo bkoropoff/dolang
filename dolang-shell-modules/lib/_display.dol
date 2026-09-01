@@ -1,0 +1,240 @@
+# Shared rendering for the YAML-shaped dumps the shell's inspection
+# entrypoints print.
+#
+# A dump is built as a tree of nodes and then emitted, rather than printed as
+# it is discovered: a section that turns out to have no content can be dropped
+# whole, and a block can align its keys against the widest one it holds.
+#
+# A node is one of
+#
+#   Scalar   one `key: value` payload, plus an optional dim aside
+#   Map      a nested block of `key: value` entries
+#   List     a nested block of `- item` entries
+#
+# and renders itself in whichever of the three positions it turns up in: as
+# the value of a key, as an item of a list, or as a whole section.
+
+import std sys term
+import security.unix
+
+let section_style = term.style fg: :BRIGHT_BLUE: bold: true
+let key_style = term.style fg: :CYAN:
+let value_style = term.style fg: :GREEN:
+let note_style = term.style dim: true
+let bullet_style = term.style dim: true
+let absent_style = term.style dim: true
+
+def pad n
+  " ".repeat(n)
+
+def bullet indent
+  bullet_style "$(pad indent)- "
+
+# --- Nodes ------------------------------------------------------------------
+
+pub class Node
+  # True when the node has nothing to print. An empty branch renders as `{}`
+  # or `[]` inline, and a section holding one is skipped entirely.
+  pub def empty _self
+    false
+
+  # True when the node renders on the same line as its key, which is what
+  # decides whether that key takes part in a block's alignment.
+  pub def inline self
+    self.empty()
+
+  # Emits the node as the value of `key`, or as a bare value when `key` is
+  # `nil`. `start` is what precedes the line -- indentation, or a bullet
+  # leading into a block -- and `align` pads the key out to the width of the
+  # block it appears in.
+  pub def entry self key indent start align
+    let _ = [self, key, indent, start, align]
+    throw "Node.entry not implemented"
+
+  # Emits the node as an item of an enclosing list.
+  pub def item self indent
+    let _ = [self, indent]
+    throw "Node.item not implemented"
+
+  # Emits the node's children, one per line. `start` precedes the first line,
+  # so a caller can lead into a block with a key or a bullet.
+  pub def block self indent start
+    let _ = [self, indent, start]
+    throw "Node.block not implemented"
+
+# A single payload. `text` is already styled; `note` is a dim parenthetical
+# aside naming what the payload resolves to.
+pub class Scalar: Node
+  pub field text = ""
+  pub field note = nil
+
+  def (init) self text note = nil
+    self.text = text
+    self.note = note
+
+  pub def inline _self
+    true
+
+  pub def entry self key _indent start align
+    if (key == nil)
+      print $start $self.text
+    else
+      print $start (key_style "$key:") $align " " $self.text
+    if self.note
+      print " " (note_style "($(self.note))")
+    print "\n"
+
+  pub def item self indent
+    self.entry nil $indent (bullet indent) ""
+
+# A block of keyed entries, held as `[key, node]` pairs.
+pub class Map: Node
+  pub field entries = nil
+
+  def (init) self entries = nil
+    self.entries = (entries || [])
+
+  # Appends an entry, answering the map so building can be chained.
+  pub def set self key node
+    self.entries.push [key, node]
+    self
+
+  pub def empty self
+    (self.entries.len == 0)
+
+  pub def entry self key indent start align
+    if self.empty()
+      print $start (key_style "$key:") $align " " (absent_style "{}") "\n"
+      return nil
+    print $start (key_style "$key:") "\n"
+    self.block (indent + 2) (pad (indent + 2))
+
+  pub def item self indent
+    if self.empty()
+      print (bullet indent) (absent_style "{}") "\n"
+      return nil
+    self.block (indent + 2) (bullet indent)
+
+  pub def block self indent start
+    let width = 0
+    for pair = self.entries
+      let key node = pair
+      if (node.inline() && key.len > width)
+        width = key.len
+    let first = true
+    for pair = self.entries
+      let key node = pair
+      let lead = if first
+        start
+      else
+        pad $indent
+      first = false
+      let align = if node.inline()
+        pad (width - key.len)
+      else
+        ""
+      node.entry $key $indent $lead $align
+
+# A block of bulleted items.
+pub class List: Node
+  pub field items = nil
+
+  def (init) self items = nil
+    self.items = (items || [])
+
+  # Appends an item, answering the list so building can be chained.
+  pub def push self node
+    self.items.push $node
+    self
+
+  pub def empty self
+    (self.items.len == 0)
+
+  pub def entry self key indent start align
+    if self.empty()
+      print $start (key_style "$key:") $align " " (absent_style "[]") "\n"
+      return nil
+    print $start (key_style "$key:") "\n"
+    self.block (indent + 2) nil
+
+  pub def item self indent
+    if self.empty()
+      print (bullet indent) (absent_style "[]") "\n"
+      return nil
+    print (bullet indent) "\n"
+    self.block (indent + 2) nil
+
+  # Every item carries its own bullet, so there is no lead-in to honor.
+  pub def block self indent _start
+    for item = self.items
+      item.item $indent
+
+# --- Leaves -----------------------------------------------------------------
+
+# Renders `value` as plain text, or as `~` when it is absent.
+pub def text value note = nil
+  if (value == nil)
+    Scalar (absent_style "~")
+  else
+    Scalar (str value) $note
+
+# Renders an enumerated value -- a symbol or a boolean -- in the value color.
+pub def enum value note = nil
+  Scalar (value_style (str value)) $note
+
+# Renders any iterable of symbols -- every flag type does this -- as the
+# bracketed list its constructor would accept back.
+pub def flags value
+  if (value == nil)
+    return text nil
+  let names = []
+  for bit = value
+    names.push $ str $bit
+  if (names.len == 0)
+    return Scalar (absent_style "[]")
+  let joined = (", ".join(names))
+  Scalar (value_style "[$joined]")
+
+# --- Sections ---------------------------------------------------------------
+
+# Prints one `▸ name` block, or nothing at all when the section has no content
+# to show. A section that could not be read at all arrives as `nil` and reads
+# the same way as one that came back empty.
+pub def section name node
+  if (node == nil || node.empty())
+    return nil
+  print "  " (section_style "▸ $name") "\n"
+  node.block 6 (pad 6)
+
+# --- System values ----------------------------------------------------------
+
+# Evaluates `func`, answering `nil` when the value simply isn't there: a field
+# that doesn't apply to this platform, an operation the target VFS doesn't
+# support, or a query the OS refused.
+pub def opt func
+  try
+    func()
+  catch std.FieldError: _
+    nil
+  catch std.UnsupportedError: _
+    nil
+  catch sys.Error: _
+    nil
+
+# A uid or gid, annotated with the name it resolves to.
+pub def id value kind
+  if (value == nil)
+    return text nil
+  let name = opt do
+    if (kind == :USER:)
+      security.unix.user_name $value
+    else
+      security.unix.group_name $value
+  text $value $name
+
+# A Windows SID, annotated with the account it names.
+pub def sid value
+  if (value == nil)
+    return text nil
+  let name = opt do value.lookup().qualified_name
+  text $value $name
