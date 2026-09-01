@@ -1,0 +1,309 @@
+# Inspects and controls processes on the current VFS target.
+
+import args fs proc shell std sys term
+import security.unix security.windows
+
+let heading_style = term.style fg: :BRIGHT_BLUE: bold: true
+let section_style = term.style fg: :BRIGHT_BLUE: bold: true
+let pid_style = term.style fg: :CYAN: bold: true
+let key_style = term.style fg: :CYAN:
+let value_style = term.style fg: :GREEN:
+let dim_style = term.style dim: true
+let note_style = term.style dim: true
+let bullet_style = term.style dim: true
+let absent_style = term.style dim: true
+let error_style = term.style fg: :BRIGHT_RED: bold: true
+
+# This is a byte limit, not terminal width. Proper clipping needs Unicode
+# grapheme segmentation and terminal-cell measurement.
+let MAX_ARGV0_NAME_BYTES = 128
+
+def parse_pid value
+  let pid = try
+    int $value
+  catch std.RuntimeError: _
+    throw args.Error "invalid PID: $value"
+  if (pid < 0)
+    throw args.Error "invalid PID: $value"
+  pid
+
+def parse_signal value
+  sym $ value.upper()
+
+def pad_left value width
+  "$(" ".repeat(width - value.len))$value"
+
+def pad_right value width
+  "$value$(" ".repeat(width - value.len))"
+
+def opt func
+  try
+    func()
+  catch std.FieldError: _
+    nil
+  catch std.UnsupportedError: _
+    nil
+  catch sys.Error: _
+    nil
+
+def process_name info
+  let exe = info.exe
+  if (exe != nil)
+    let name = exe.name
+    if (name != nil && name.len > 0)
+      return name
+  let cmdline = info.cmdline
+  if (cmdline != nil && cmdline.len > 0 &&
+      cmdline[0].len > 0 && cmdline[0].len <= MAX_ARGV0_NAME_BYTES)
+    let name = (fs.Path cmdline[0]).name
+    if (name != nil && name.len > 0)
+      return name
+  info.name
+
+def list_processes _p
+  let rows = []
+  let pid_width = 3
+  let ppid_width = 4
+  let name_width = 4
+  for info = proc.enumerate()
+    let pid = str $info.pid
+    let ppid = (info.parent_pid != nil && str(info.parent_pid) || "~")
+    let name = process_name $info
+    rows.push [pid, ppid, name]
+    if (pid.len > pid_width)
+      pid_width = pid.len
+    if (ppid.len > ppid_width)
+      ppid_width = ppid.len
+    if (name.len > name_width)
+      name_width = name.len
+
+  print (heading_style(pad_left("PID", pid_width))) "  "
+  print (heading_style(pad_left("PPID", ppid_width))) "  "
+  print (heading_style(pad_right("NAME", name_width))) "\n"
+  for row = rows
+    let pid ppid name = row
+    print (pid_style(pad_left(pid, pid_width))) "  "
+    let ppid_cell = pad_left $ppid $ppid_width
+    if (ppid == "~")
+      print $ absent_style $ppid_cell
+    else
+      print $ppid_cell
+    print "  " $ pad_right $name $name_width
+    print "\n"
+
+# The process dump uses the same node model and visual grammar as metadata.dol:
+# scalar notes are dim parentheticals, maps align scalar keys, and nested lists
+# use dim hyphen bullets.
+def scalar text note = nil
+  [:SCALAR:, text, note]
+
+def map_node entries
+  [:MAP:, entries]
+
+def list_node items
+  [:LIST:, items]
+
+def text_node value note = nil
+  if (value == nil)
+    scalar (absent_style "~")
+  else
+    scalar (str value) $note
+
+def enum_node value
+  scalar (value_style (str value))
+
+def id_node id kind
+  let name = opt do
+    if (kind == :USER:)
+      security.unix.user_name $id
+    else
+      security.unix.group_name $id
+  text_node $id $name
+
+def sid_node sid
+  if (sid == nil)
+    return text_node nil
+  let name = opt do sid.lookup().qualified_name
+  text_node $sid $name
+
+def pad n
+  " ".repeat(n)
+
+def bullet indent
+  bullet_style "$(pad indent)- "
+
+def emit_scalar nd start key align
+  if (key == nil)
+    print $start $nd[1]
+  else
+    print $start (key_style "$key:") $align " " $nd[1]
+  if nd[2]
+    print " " (note_style "($(nd[2]))")
+  print "\n"
+
+def emit_entry key nd indent start align
+  if (nd[0] == :SCALAR:)
+    emit_scalar $nd $start $key $align
+  else if (nd[1].len == 0)
+    let marker = ((nd[0] == :MAP:) && "{}" || "[]")
+    print $start (key_style "$key:") $align " " (absent_style marker) "\n"
+  else
+    print $start (key_style "$key:") "\n"
+    if (nd[0] == :MAP:)
+      emit_map $nd[1] (indent + 2) (pad (indent + 2))
+    else
+      emit_list $nd[1] (indent + 2)
+
+def emit_map entries indent start
+  let width = 0
+  for entry = entries
+    let key nd = entry
+    let inline = (nd[0] == :SCALAR: || nd[1].len == 0)
+    if (inline && key.len > width)
+      width = key.len
+  let first = true
+  for entry = entries
+    let key nd = entry
+    let lead = (first && start || pad(indent))
+    first = false
+    let inline = (nd[0] == :SCALAR: || nd[1].len == 0)
+    let align = (inline && pad(width - key.len) || "")
+    emit_entry $key $nd $indent $lead $align
+
+def emit_list items indent
+  for item = items
+    if (item[0] == :SCALAR:)
+      emit_scalar $item (bullet indent) nil ""
+    else if (item[1].len == 0)
+      let marker = ((item[0] == :MAP:) && "{}" || "[]")
+      print (bullet indent) (absent_style marker) "\n"
+    else if (item[0] == :MAP:)
+      emit_map $item[1] (indent + 2) (bullet indent)
+    else
+      print (bullet indent) "\n"
+      emit_list $item[1] (indent + 2)
+
+def emit_section name nd
+  if (nd == nil || nd[1].len == 0)
+    return nil
+  print "  " (section_style "▸ $name") "\n"
+  if (nd[0] == :MAP:)
+    emit_map $nd[1] 6 (pad 6)
+  else
+    emit_list $nd[1] 6
+
+def unix_node identity
+  let groups = list_node $
+    for gid = identity.group_ids
+      - $ id_node $gid :GROUP:
+  map_node $
+    - ["uid", (id_node identity.uid :USER:)]
+    - ["gid", (id_node identity.gid :GROUP:)]
+    - ["euid", (id_node identity.euid :USER:)]
+    - ["egid", (id_node identity.egid :GROUP:)]
+    - ["group_ids", groups]
+
+def token_node token
+  let groups = list_node $
+    for group = token.groups
+      $ map_node $
+        - ["sid", sid_node group.sid]
+        - ["attributes", text_node "[$(", ".join group.attributes)]"]
+  map_node $
+    - ["elevated", (enum_node token.is_elevated)]
+    - ["user_sid", (sid_node token.user_sid)]
+    - ["owner_sid", (sid_node token.owner_sid)]
+    - ["primary_group_sid", (sid_node token.primary_group_sid)]
+    - ["logon_sid", (sid_node token.logon_sid)]
+    - ["groups", groups]
+
+def dump_info info
+  let cmdline = list_node $
+    if (info.cmdline != nil)
+      for arg = info.cmdline
+        - $ text_node $arg
+  print (heading_style "● process $(info.pid)") "\n"
+  emit_section general $ map_node $
+    - ["name", (text_node info.name)]
+    - ["parent_pid", (text_node info.parent_pid)]
+    - ["exe", (text_node info.exe)]
+    - ["cwd", (text_node info.cwd)]
+    - ["cmdline", cmdline]
+
+  let identity = opt do info.unix_id
+  if (identity != nil)
+    emit_section "unix identity" $ unix_node $identity
+  let token = opt do info.token_info
+  if (token != nil)
+    emit_section "windows token" $ token_node $token
+
+def info_processes p
+  if (p.info.pids.len == 0)
+    throw args.Error "expected at least one PID"
+  let rc = 0
+  let first = true
+  for pid = p.info.pids
+    if !first
+      print "\n"
+    first = false
+    try
+      proc.open $pid do |process|
+        dump_info $ process.info()
+    catch std.RuntimeError: e
+      rc = 1
+      print (error_style "● $pid") ": " (str e) "\n"
+  shell.exit $rc
+
+def terminate_processes p
+  let opts = p.term
+  if (opts.pids.len == 0)
+    throw args.Error "expected at least one PID"
+  if (opts.kill && opts.signal != nil)
+    throw args.Error "--kill and --signal are mutually exclusive"
+  for pid = opts.pids
+    proc.open $pid do |process|
+      if (opts.signal != nil)
+        process.signal $opts.signal
+        print (dim_style "•") " sent $(opts.signal) to " (pid_style pid) "\n"
+      else if opts.kill
+        process.kill()
+        print (dim_style "•") " killed " (pid_style pid) "\n"
+      else
+        process.terminate()
+        print (dim_style "•") " terminated " (pid_style pid) "\n"
+      if opts.wait
+        let status = process.wait()
+        print "  " (dim_style "↳") " exited" \
+          (status.code != nil && " with status $(status.code)" || "") "\n"
+
+args.with
+  help: Inspect and control processes.
+  - cmd: list
+    help: List processes in a compact portable table.
+    $list_processes
+  - cmd: info
+    help: Dump detailed information for one or more processes.
+    - arg: pids
+      parse: $parse_pid
+      collect: true
+      help: Process IDs to inspect
+    $info_processes
+  - cmd: term
+    help: Terminate one or more processes.
+    - flag: kill
+      short: k
+      help: Kill aggressively instead of requesting termination
+    - opt: signal
+      short: s
+      parse: $parse_signal
+      default: nil
+      meta: SIGNAL
+      help: Send an explicit Unix signal (for example TERM or HUP)
+    - flag: wait
+      short: w
+      help: Wait for each process to exit
+    - arg: pids
+      parse: $parse_pid
+      collect: true
+      help: Process IDs to terminate
+    $terminate_processes
