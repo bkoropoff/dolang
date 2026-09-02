@@ -821,6 +821,47 @@ class Path
     "Path($(self.parts.join("/")))"
 ```
 
+### `(fmt)`: Formatted Conversion
+
+Called when an instance is formatted with a specification, as produced by
+[`fmt`](../api/std/index.md#fmt-value-fill-align-sign-width-precision-alt-kind).
+Receives a [`FmtSpec`](../api/std/fmt-spec.md) and must return a `Str`.
+
+The `kind` field of the specification says which conversion the surrounding
+operation asked for, and [`FmtSpec.pad`](../api/std/fmt-spec.md#pad-value)
+applies the fill, alignment, width, and precision to a string, so a class that
+only wants the standard layout applied to its own text is one line:
+
+```
+class Field
+  pub field name = ""
+
+  def (init) self name
+    self.name = name
+
+  def (fmt) self spec
+    spec.pad(self.name)
+
+assert_eq (str $ fmt (Field "id") width: 6) "id    "
+```
+
+A class that defines no `(fmt)` still gets width and alignment: the default
+applies `(verbatim)`, `(str)`, or `(dbg)` according to `kind` and then pads the
+result. A class inheriting a native type delegates to that type instead, so a
+subclass of `Int` or `Float` keeps the numeric options:
+
+```
+class Money: Float
+  def (init) self value
+    Float.(init) $self $value
+
+assert_eq (str $ fmt (Money 1.5) sign: :PLUS: precision: 2 kind: :FIXED:) "+1.50"
+```
+
+Defining `(fmt)` replaces both, including the default's rejection of numeric
+kinds and of options such as `sign` — an instance handed a specification it does
+not understand should raise an error itself.
+
 ### `(index)` and `(assign)`: Subscript Access
 
 `(index)` is called for `instance[key]` reads; `(assign)` is called for

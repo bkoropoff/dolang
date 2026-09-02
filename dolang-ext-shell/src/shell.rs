@@ -4,6 +4,8 @@ use std::{
     process::Command,
 };
 
+use dolang::runtime::value::fmt::Format;
+
 use tokio::io::AsyncWriteExt;
 
 use dolang::runtime::object::fmt;
@@ -430,7 +432,7 @@ impl<'v> Object<'v> for Vfs {
     fn debug<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         match &this.annex().source {
             VfsSource::Stream => fmt!(strand, w, "<shell.Vfs stream>"),

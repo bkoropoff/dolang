@@ -896,7 +896,7 @@ impl<'v> Object<'v> for Program {
     fn debug<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         fmt!(strand, w, "<proc.Program {:?}>", this.annex().name)
     }
@@ -997,3 +997,4 @@ pub(crate) fn register_run_type<'v>(
 ) -> dolang::runtime::Type<'v, Run<'v>> {
     builder.register_type()
 }
+use dolang::runtime::value::fmt::Format;

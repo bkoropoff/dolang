@@ -1,5 +1,7 @@
 use std::{cell::UnsafeCell, ops::ControlFlow};
 
+use crate::value::fmt::Format;
+
 use crate::{
     arg::{Arg, Args},
     bytecode::Variadic,
@@ -463,7 +465,7 @@ impl<'v> Protocol<'v> for Iterable {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<type Iterable>")
     }
@@ -536,7 +538,7 @@ impl<'v> Protocol<'v> for Sinkable {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<type Sinkable>")
     }
@@ -826,7 +828,7 @@ impl<'v> Protocol<'v> for Chain<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<std.Chain>")
     }
@@ -892,7 +894,7 @@ impl<'v> Protocol<'v> for Zip<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<std.Zip>")
     }
@@ -1046,7 +1048,7 @@ impl<'v> Protocol<'v> for Take<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<std.Take>")
     }
@@ -1111,7 +1113,7 @@ impl<'v> Protocol<'v> for Skip<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<std.Skip>")
     }
@@ -1185,7 +1187,7 @@ impl<'v> Protocol<'v> for Enumerate<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<std.Enumerate>")
     }
@@ -1258,7 +1260,7 @@ impl<'v> Protocol<'v> for Kv<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<std.Kv>")
     }
@@ -1363,7 +1365,7 @@ impl<'v> Protocol<'v> for Iter {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<type Iter>")
     }
@@ -1515,7 +1517,7 @@ impl<'v> Protocol<'v> for Sink {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<type Sink>")
     }
@@ -1629,7 +1631,7 @@ impl<'v> Protocol<'v> for Map<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<std.Map>")
     }
@@ -1731,7 +1733,7 @@ impl<'v> Protocol<'v> for Premap<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<std.Premap>")
     }
@@ -1831,7 +1833,7 @@ impl<'v> Protocol<'v> for Filter<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<std.Filter>")
     }
@@ -1936,7 +1938,7 @@ impl<'v> Protocol<'v> for Prefilter<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<std.Prefilter>")
     }
@@ -2131,7 +2133,7 @@ impl<'v> Protocol<'v> for Chomp<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<std.Chomp>")
     }
@@ -2229,7 +2231,7 @@ impl<'v> Protocol<'v> for Prechomp<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<std.Prechomp>")
     }
@@ -2332,7 +2334,7 @@ impl<'v> Protocol<'v> for Crimp<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<std.Crimp>")
     }
@@ -2445,7 +2447,7 @@ impl<'v> Protocol<'v> for Precrimp<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<std.Precrimp>")
     }
@@ -2540,7 +2542,7 @@ impl<'v> Protocol<'v> for MapType {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<type std.Map>")
     }
@@ -2583,7 +2585,7 @@ impl<'v> Protocol<'v> for FilterType {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<type std.Filter>")
     }
@@ -2848,7 +2850,7 @@ impl<'v> Protocol<'v> for Null {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<std.Null>")
     }

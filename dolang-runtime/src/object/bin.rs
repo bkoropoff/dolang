@@ -3,6 +3,8 @@ use std::{
     ops::ControlFlow,
 };
 
+use crate::value::fmt;
+
 use crate::{
     arg::Args,
     bytecode::Variadic,
@@ -91,6 +93,66 @@ fn trim_end_bytes<'a>(me: &'a [u8], pattern: &[u8]) -> &'a [u8] {
 }
 
 impl<'v> Protocol<'v> for [u8] {
+    fn op_fmt<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &mut Strand<'v, 's>,
+        spec: &fmt::Spec,
+        w: &mut dyn fmt::Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        use fmt::{Fill, Kind, Pad};
+
+        let kind = spec.kind.ok_or_else(|| fmt::unresolved_kind(strand))?;
+        if kind.is_text() {
+            if spec.sign.is_some() || spec.alt || spec.fill == Fill::Zero {
+                return Err(Error::type_error(
+                    strand,
+                    "unsupported binary format option",
+                ));
+            }
+            let mut pad = Pad::new(*spec, w);
+            match kind {
+                Kind::Str => Self::op_display(this, strand, &mut pad)?,
+                Kind::Dbg => Self::op_debug(this, strand, &mut pad)?,
+                Kind::Verbatim => Self::op_verbatim(this, strand, &mut pad)?,
+                _ => unreachable!(),
+            }
+            return pad.finish(strand);
+        }
+        if spec.sign.is_some()
+            || spec.precision.is_some()
+            || matches!(kind, Kind::Exp | Kind::Fixed)
+            || (spec.alt && kind == Kind::Dec)
+        {
+            return Err(Error::type_error(
+                strand,
+                "unsupported binary format option",
+            ));
+        }
+        let mut digits = String::new();
+        for byte in this.get() {
+            use std::fmt::Write as _;
+            match kind {
+                Kind::Hex => write!(&mut digits, "{byte:02x}"),
+                Kind::Oct => write!(&mut digits, "{byte:03o}"),
+                Kind::Bin => write!(&mut digits, "{byte:08b}"),
+                Kind::Dec => write!(&mut digits, "{byte:03}"),
+                _ => unreachable!(),
+            }
+            .unwrap();
+        }
+        let prefix = if spec.alt {
+            match kind {
+                Kind::Hex => "0x",
+                Kind::Oct => "0o",
+                Kind::Bin => "0b",
+                _ => "",
+            }
+        } else {
+            ""
+        };
+        fmt::finish_numeric(strand, spec, w, "", prefix, &digits)
+    }
+
     fn op_type<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
@@ -102,7 +164,7 @@ impl<'v> Protocol<'v> for [u8] {
     fn op_display<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn fmt::Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "{}", BStr::new(this.receiver.get()))
     }
@@ -110,7 +172,7 @@ impl<'v> Protocol<'v> for [u8] {
     fn op_debug<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn fmt::Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "b{:?}", BStr::new(this.receiver.get()))
     }
@@ -399,12 +461,6 @@ impl<'v> Protocol<'v> for [u8] {
                 }
                 Ok(())
             }
-            sym::HEX => {
-                let ([], []) = unpack!(strand, args, 0, 0)?;
-                let encoded = hex::encode(this.receiver.get());
-                Output::set(strand, out, encoded.as_str());
-                Ok(())
-            }
             sym::LEN => Err(Error::type_error(strand, "len is a field, not a method")),
             _ => Err(Error::field(strand, method)),
         }
@@ -432,8 +488,7 @@ impl<'v> Protocol<'v> for [u8] {
             | sym::TRIM
             | sym::TRIM_START
             | sym::TRIM_END
-            | sym::CONTAINS
-            | sym::HEX => {
+            | sym::CONTAINS => {
                 BoundMethod::create(strand, &this, field, out);
                 Ok(())
             }
@@ -536,7 +591,7 @@ impl<'v> Protocol<'v> for Split<'v> {
     fn op_debug<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn fmt::Format<'v>,
     ) -> Result<'v, 's, ()> {
         let forward = this.borrow_mut(strand)?.forward;
         let label = if forward {
@@ -670,7 +725,7 @@ impl<'v> Protocol<'v> for Class {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn fmt::Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<type std.Bin>")
     }
@@ -704,6 +759,7 @@ impl<'v> Protocol<'v> for Class {
             members: members![
                 Method(sym::STR_METHOD),
                 Method(sym::DBG_METHOD),
+                Method(sym::FMT_METHOD),
                 Method(sym::EQ_METHOD),
                 Method(sym::LT_METHOD),
                 Method(sym::BOOL_METHOD),
@@ -722,7 +778,6 @@ impl<'v> Protocol<'v> for Class {
                 Method(sym::TRIM_END),
                 Method(sym::CONTAINS),
                 Method(sym::UNPACK),
-                Method(sym::HEX),
             ],
         })
     }
@@ -790,9 +845,9 @@ impl<'v> Protocol<'v> for Class {
             sym::INIT_METHOD
             | sym::PACK
             | sym::UNPACK
-            | sym::HEX
             | sym::STR_METHOD
             | sym::DBG_METHOD
+            | sym::FMT_METHOD
             | sym::EQ_METHOD
             | sym::LT_METHOD
             | sym::BOOL_METHOD
@@ -936,10 +991,12 @@ mod tests {
             assert_eq!(out.to_i64(strand).unwrap(), 5);
 
             // A recognized method name field-accesses to a callable bound method.
-            slot.get(strand, Sym::well_known(sym::HEX), &mut bound)
+            slot.get(strand, Sym::well_known(sym::CONTAINS), &mut bound)
                 .unwrap();
-            call!(strand, &bound, &mut out).await.unwrap();
-            assert_eq!(out.to_string(strand).unwrap(), "68656c6c6f");
+            call!(strand, &bound, &mut out, b"ell".as_slice())
+                .await
+                .unwrap();
+            assert!(out.to_bool(strand));
 
             let err = slot
                 .get(strand, Sym::well_known(sym::COUNT), &mut out)
@@ -1153,7 +1210,7 @@ mod tests {
     }
 
     #[test]
-    fn bin_mcall_unpack_and_hex() {
+    fn bin_mcall_unpack() {
         with_vm(async |strand, [mut slot, mut out]| {
             Output::set(strand, &mut slot, b"AB".as_slice());
 
@@ -1165,11 +1222,6 @@ mod tests {
             let mut first = Value::NIL;
             array.get(strand, 0, Slot::new(&mut first)).unwrap();
             assert_eq!(first.to_i64(strand).unwrap(), b'A' as i64);
-
-            method!(strand, &slot, Sym::well_known(sym::HEX), &mut out)
-                .await
-                .unwrap();
-            assert_eq!(out.to_string(strand).unwrap(), "4142");
         });
     }
 

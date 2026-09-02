@@ -89,7 +89,7 @@ def digest_state path constructor
   state
 
 def file_digest path constructor
-  digest_state(path, constructor).digest().hex()
+  str (fmt (digest_state(path, constructor).digest()) kind: :HEX:)
 
 def read_metadata path identity
   if !path.exists()
@@ -236,7 +236,7 @@ class Cache
 
   def entry self url
     let identity = str(normalized_url url)
-    let key = digest.blake3(identity).hex()
+    let key = str (fmt (digest.blake3(identity)) kind: :HEX:)
     let entry = (self.#root / key)
     entry.create_dir all: true
     [identity, entry]
@@ -328,7 +328,7 @@ class Cache
       if (total != nil && size != total)
         # The sidecar and its metadata stay put: the next `get` resumes here.
         throw std.ValueError "incomplete download for $identity: got $size of $total bytes"
-      if (state && state.digest().hex() != digest_info.expected)
+      if (state && (str (fmt (state.digest()) kind: :HEX:)) != digest_info.expected)
         part.remove ignore: true
         metadata_path.remove ignore: true
         throw std.ValueError "digest mismatch for $identity"

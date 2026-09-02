@@ -81,8 +81,8 @@ let bytes = b"\x01\x02\x03".unpack()
 assert_eq [...bytes] [1, 2, 3]
 
 # Lowercase hex encoding
-assert_eq (b"ABC".hex()) "414243"
-assert_eq (b"\x00\x01\xff".hex()) "0001ff"
+assert_eq (str (fmt b"ABC" kind: :HEX:)) "414243"
+assert_eq (str (fmt b"\x00\x01\xff" kind: :HEX:)) "0001ff"
 
 # bin is not equal to Str even when bytes match
 assert (!(b"hello" == "hello"))

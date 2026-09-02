@@ -3,6 +3,8 @@ use std::{
     ops::ControlFlow,
 };
 
+use crate::value::fmt::{Format, Spec};
+
 use bitvec::bitbox;
 
 use crate::{
@@ -238,7 +240,7 @@ impl<'v> Protocol<'v> for Iter<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<dict iterator>")
     }
@@ -343,7 +345,7 @@ impl<'v> Protocol<'v> for Unpack<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<dict unpack iter>")
     }
@@ -406,6 +408,34 @@ impl<'v> Protocol<'v> for Unpack<'v> {
 // ── Protocol: Dict ──────────────────────────────────────────────────
 
 impl<'v> Protocol<'v> for Dict<'v> {
+    fn op_fmt<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &mut Strand<'v, 's>,
+        spec: &Spec,
+        w: &mut dyn Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        use crate::value::fmt::{Fill, Kind, Pad};
+
+        let kind = spec
+            .kind
+            .ok_or_else(|| crate::value::fmt::unresolved_kind(strand))?;
+        if !kind.is_text() || spec.sign.is_some() || spec.fill == Fill::Zero {
+            return Err(Error::type_error(strand, "unsupported dict format option"));
+        }
+        let mut pad = Pad::new(*spec, w);
+        if spec.alt {
+            kv::Inner::op_format_pretty(this, strand, kind, &mut pad)?;
+        } else {
+            match kind {
+                Kind::Str => Self::op_display(this, strand, &mut pad)?,
+                Kind::Dbg => Self::op_debug(this, strand, &mut pad)?,
+                Kind::Verbatim => Self::op_verbatim(this, strand, &mut pad)?,
+                _ => unreachable!(),
+            }
+        }
+        pad.finish(strand)
+    }
+
     fn op_type<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
@@ -417,7 +447,7 @@ impl<'v> Protocol<'v> for Dict<'v> {
     fn op_debug<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         kv::Inner::op_debug(this, strand, w, "{", "}", ", ")
     }
@@ -750,7 +780,7 @@ impl<'v> Protocol<'v> for Type {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<type std.Dict>")
     }
@@ -767,6 +797,7 @@ impl<'v> Protocol<'v> for Type {
             members: members![
                 Method(sym::STR_METHOD),
                 Method(sym::DBG_METHOD),
+                Method(sym::FMT_METHOD),
                 Method(sym::EQ_METHOD),
                 Method(sym::LT_METHOD),
                 Method(sym::HASH_METHOD),
@@ -801,6 +832,7 @@ impl<'v> Protocol<'v> for Type {
             sym::INIT_METHOD
             | sym::STR_METHOD
             | sym::DBG_METHOD
+            | sym::FMT_METHOD
             | sym::EQ_METHOD
             | sym::LT_METHOD
             | sym::HASH_METHOD

@@ -1,5 +1,6 @@
+use dolang::runtime::value::fmt::Format;
 use dolang::runtime::{
-    Args, Error, Format, Instance, Object, Output, Result, Slot, Strand, Type,
+    Args, Error, Instance, Object, Output, Result, Slot, Strand, Type,
     object::{TypeBuilder, fmt},
     unpack,
 };

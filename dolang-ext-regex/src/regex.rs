@@ -1,5 +1,7 @@
 use std::{borrow::Cow, mem};
 
+use dolang::runtime::value::fmt::Format;
+
 use dolang::runtime::object::fmt;
 
 use dolang::runtime::{
@@ -440,7 +442,7 @@ impl<'v> Object<'v> for Captures<'v> {
     fn display<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         let borrow = this.borrow(strand)?;
         fmt!(strand, w, "{}", &borrow.caps[0])
@@ -552,7 +554,7 @@ impl<'v> Object<'v> for Match<'v> {
     fn display<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         let borrow = this.borrow(strand)?;
         fmt!(strand, w, "{}", borrow.match_.as_str())

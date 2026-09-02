@@ -10,6 +10,8 @@ use std::{
     ptr::NonNull,
 };
 
+use crate::value::fmt::{Format, Spec};
+
 use bitvec::{bitbox, boxed::BitBox};
 
 use crate::{
@@ -683,7 +685,7 @@ pub trait Object<'v>: Sized + 'v {
     fn verbatim<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         Self::display(this, strand, w)
     }
@@ -692,7 +694,7 @@ pub trait Object<'v>: Sized + 'v {
     fn display<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         Self::debug(this, strand, w)
     }
@@ -703,10 +705,35 @@ pub trait Object<'v>: Sized + 'v {
     fn debug<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         let _ = this;
         crate::fmt!(strand, w, "<{}.{}>", Self::MODULE, Self::NAME)
+    }
+
+    /// Implements formatting according to a resolved specification.
+    fn fmt<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        spec: &Spec,
+        w: &mut dyn Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        use crate::value::fmt::{Fill, Kind, Pad};
+
+        let kind = spec
+            .kind
+            .ok_or_else(|| crate::value::fmt::unresolved_kind(strand))?;
+        if !kind.is_text() || spec.sign.is_some() || spec.alt || spec.fill == Fill::Zero {
+            return Err(Error::type_error(strand, "unsupported format option"));
+        }
+        let mut pad = Pad::new(*spec, w);
+        match kind {
+            Kind::Str => Self::display(this, strand, &mut pad)?,
+            Kind::Dbg => Self::debug(this, strand, &mut pad)?,
+            Kind::Verbatim => Self::verbatim(this, strand, &mut pad)?,
+            _ => unreachable!(),
+        }
+        pad.finish(strand)
     }
 
     /// Implements boolean conversion.
@@ -1566,10 +1593,25 @@ impl<'v, 'a, T: Object<'v>> Recv<'v, 'a, ObjectWrap<'v, T>> {
 }
 
 impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
+    fn op_fmt<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        spec: &Spec,
+        w: &mut dyn Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        Strand::for_native_frame(
+            strand,
+            Cow::Borrowed(T::MODULE),
+            Cow::Borrowed(T::NAME),
+            Some(Cow::Borrowed("(fmt)")),
+            |strand| T::fmt(Instance::from_recv(&this), strand, spec, w),
+        )
+    }
+
     fn op_display<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         Strand::for_native_frame(
             strand,
@@ -1583,7 +1625,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
     fn op_verbatim<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         Strand::for_native_frame(
             strand,
@@ -1597,7 +1639,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for ObjectWrap<'v, T> {
     fn op_debug<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         Strand::for_native_frame(
             strand,
@@ -2831,6 +2873,7 @@ impl<'v, 'a> TypeBuilderInner<'v, 'a> {
             Member::method(Sym::well_known(sym::INIT_METHOD)),
             Member::method(Sym::well_known(sym::STR_METHOD)),
             Member::method(Sym::well_known(sym::DBG_METHOD)),
+            Member::method(Sym::well_known(sym::FMT_METHOD)),
             Member::method(Sym::well_known(sym::BOOL_METHOD)),
             Member::method(Sym::well_known(sym::HASH_METHOD)),
             Member::method(Sym::well_known(sym::EQ_METHOD)),
@@ -3437,7 +3480,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for TypeObjectWrap<'v, T> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<type: {}.{}>", T::MODULE, T::NAME)
     }
@@ -3559,6 +3602,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for TypeObjectWrap<'v, T> {
                 method.tag(),
                 sym::STR_METHOD
                     | sym::DBG_METHOD
+                    | sym::FMT_METHOD
                     | sym::BOOL_METHOD
                     | sym::HASH_METHOD
                     | sym::EQ_METHOD
@@ -3639,6 +3683,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for TypeObjectWrap<'v, T> {
             sym::INIT_METHOD
                 | sym::STR_METHOD
                 | sym::DBG_METHOD
+                | sym::FMT_METHOD
                 | sym::BOOL_METHOD
                 | sym::HASH_METHOD
                 | sym::EQ_METHOD

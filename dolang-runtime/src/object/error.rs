@@ -5,6 +5,8 @@ use std::{
     ops::ControlFlow,
 };
 
+use crate::value::fmt::Format;
+
 use dolang_util::alias;
 
 use crate::{
@@ -144,7 +146,7 @@ impl<'v> Protocol<'v> for Boxed<'v> {
     fn op_display<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "{}", this.get())
     }
@@ -152,7 +154,7 @@ impl<'v> Protocol<'v> for Boxed<'v> {
     fn op_debug<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<error: {}>", this.get())
     }
@@ -186,7 +188,7 @@ impl<'v> Protocol<'v> for Type {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<type Error>")
     }
@@ -254,7 +256,7 @@ impl<'v> Protocol<'v> for VariantType {
     fn op_debug<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<type std.{}>", variant_name(this.get().0))
     }
@@ -262,7 +264,11 @@ impl<'v> Protocol<'v> for VariantType {
     fn op_inspect<'a>(_this: Recv<'v, 'a, Self>, _vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {
         Some(Inspect {
             is_abstract: false,
-            members: members![Method(sym::STR_METHOD), Method(sym::DBG_METHOD),],
+            members: members![
+                Method(sym::STR_METHOD),
+                Method(sym::DBG_METHOD),
+                Method(sym::FMT_METHOD),
+            ],
             type_members: members![
                 Method(sym::VERBATIM_METHOD),
                 Method(sym::STR_METHOD),

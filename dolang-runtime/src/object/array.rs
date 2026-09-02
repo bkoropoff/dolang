@@ -1,5 +1,7 @@
 use std::{mem, ops::ControlFlow};
 
+use crate::value::fmt::{Format, Spec};
+
 use dolang_util::pairsort;
 
 use crate::{
@@ -77,7 +79,7 @@ impl<'v> Protocol<'v> for Iter<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<array iterator>")
     }
@@ -182,7 +184,7 @@ impl<'v> Protocol<'v> for Sink<'v> {
     fn op_display<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         Self::op_debug(this, strand, w)
     }
@@ -190,7 +192,7 @@ impl<'v> Protocol<'v> for Sink<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<array sink>")
     }
@@ -269,7 +271,7 @@ impl<'v> Protocol<'v> for Pairs<'v> {
     fn op_display<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         Self::op_debug(this, strand, w)
     }
@@ -277,7 +279,7 @@ impl<'v> Protocol<'v> for Pairs<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<array pair iterator>")
     }
@@ -519,10 +521,61 @@ impl<'v> Array<'v> {
 }
 
 impl<'v> Protocol<'v> for Array<'v> {
+    fn op_fmt<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &mut Strand<'v, 's>,
+        spec: &Spec,
+        w: &mut dyn Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        use crate::value::fmt::{Fill, Kind, Pad};
+
+        let kind = spec
+            .kind
+            .ok_or_else(|| crate::value::fmt::unresolved_kind(strand))?;
+        if !kind.is_text() || spec.sign.is_some() || spec.fill == Fill::Zero {
+            return Err(Error::type_error(strand, "unsupported array format option"));
+        }
+        let mut pad = Pad::new(*spec, w);
+        if !spec.alt {
+            match kind {
+                Kind::Str => Self::op_display(this, strand, &mut pad)?,
+                Kind::Dbg => Self::op_debug(this, strand, &mut pad)?,
+                Kind::Verbatim => Self::op_verbatim(this, strand, &mut pad)?,
+                _ => unreachable!(),
+            }
+            return pad.finish(strand);
+        }
+
+        let borrow = this.borrow(strand)?;
+        if borrow.inner.is_empty() {
+            crate::fmt!(strand, &mut pad, "[]")?;
+        } else {
+            crate::fmt!(strand, &mut pad, "[\n")?;
+            for (index, item) in borrow.inner.iter().enumerate() {
+                if (index + 1).is_multiple_of(crate::INTERRUPT_INTERVAL) {
+                    strand.check_trap()?;
+                }
+                let child_spec = Spec {
+                    alt: item.downcast_ref(strand.builtin_types().array).is_some()
+                        || item.downcast_ref(strand.builtin_types().dict).is_some(),
+                    kind: Some(kind),
+                    ..Default::default()
+                };
+                let mut child = String::new();
+                item.fmt(strand, &child_spec, &mut child)?;
+                let mut indented = String::new();
+                crate::value::fmt::push_indented(&mut indented, &child, 2);
+                crate::fmt!(strand, &mut pad, "{indented},\n")?;
+            }
+            crate::fmt!(strand, &mut pad, "]")?;
+        }
+        pad.finish(strand)
+    }
+
     fn op_debug<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         let this_borrow = this.borrow(strand)?;
         crate::fmt!(strand, w, "[")?;
@@ -1145,7 +1198,7 @@ impl<'v> Protocol<'v> for Type {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<type std.Array>")
     }
@@ -1162,6 +1215,7 @@ impl<'v> Protocol<'v> for Type {
             members: members![
                 Method(sym::STR_METHOD),
                 Method(sym::DBG_METHOD),
+                Method(sym::FMT_METHOD),
                 Method(sym::EQ_METHOD),
                 Method(sym::LT_METHOD),
                 Method(sym::HASH_METHOD),
@@ -1194,6 +1248,7 @@ impl<'v> Protocol<'v> for Type {
             sym::INIT_METHOD
             | sym::STR_METHOD
             | sym::DBG_METHOD
+            | sym::FMT_METHOD
             | sym::EQ_METHOD
             | sym::LT_METHOD
             | sym::HASH_METHOD

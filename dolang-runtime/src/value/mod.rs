@@ -1,3 +1,4 @@
+pub mod fmt;
 pub(crate) mod prim;
 pub(crate) mod repr;
 pub mod view;
@@ -5,7 +6,6 @@ pub mod view;
 use std::{
     cell::UnsafeCell,
     convert::Into,
-    fmt,
     hash::DefaultHasher,
     marker::PhantomData,
     mem::{self, MaybeUninit},
@@ -41,6 +41,8 @@ use prim::Prim;
 use repr::{Decode, Repr};
 use view::{Array, Bin, Dict, ObjectView, Range, Record, Str, Tuple, View};
 
+use self::fmt::{Format, Spec};
+
 pub(crate) enum Case<'v, 'a> {
     Prim(Prim),
     Object(BaseBorrow<'v, 'a, Header>),
@@ -70,88 +72,6 @@ pub struct BinEmbryo<'v> {
 /// caller can uphold that invariant manually.
 pub struct StrEmbryo<'v> {
     embryo: Option<gc::Embryo<'v, Header, [u8]>>,
-}
-
-/// Destination for formatting Do values.
-///
-/// This mirrors [`fmt::Write`], but supplies the active [`Strand`] to each
-/// operation and returns native Do errors so destinations may allocate
-/// GC-managed storage while data is appended.
-pub trait Format<'v> {
-    /// Appends a string slice to this destination.
-    fn write_str<'s>(&mut self, strand: &mut Strand<'v, 's>, s: &str) -> Result<'v, 's, ()>;
-
-    /// Appends a character to this destination.
-    fn write_char<'s>(&mut self, strand: &mut Strand<'v, 's>, c: char) -> Result<'v, 's, ()> {
-        let mut buf = [0; 4];
-        self.write_str(strand, c.encode_utf8(&mut buf))
-    }
-
-    /// Writes formatted data to this destination.
-    fn write_fmt<'s>(
-        &mut self,
-        strand: &mut Strand<'v, 's>,
-        args: fmt::Arguments<'_>,
-    ) -> Result<'v, 's, ()> {
-        let mut writer = FormatWrite::new(self, strand);
-        let result = fmt::write(&mut writer, args);
-        let error = writer.error.take();
-        drop(writer);
-        match result {
-            Ok(()) => Ok(()),
-            Err(err) => Err(error.unwrap_or_else(|| Error::runtime(strand, err))),
-        }
-    }
-}
-
-struct FormatWrite<'v, 's, 'a, F: ?Sized> {
-    format: &'a mut F,
-    strand: &'a mut Strand<'v, 's>,
-    error: Option<Error<'v, 's>>,
-}
-
-impl<'v, 's, 'a, F: ?Sized> FormatWrite<'v, 's, 'a, F> {
-    fn new(format: &'a mut F, strand: &'a mut Strand<'v, 's>) -> Self {
-        Self {
-            format,
-            strand,
-            error: None,
-        }
-    }
-}
-
-impl<'v, F: Format<'v> + ?Sized> fmt::Write for FormatWrite<'v, '_, '_, F> {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        self.format.write_str(self.strand, s).map_err(|error| {
-            self.error = Some(error);
-            fmt::Error
-        })
-    }
-
-    fn write_char(&mut self, c: char) -> fmt::Result {
-        self.format.write_char(self.strand, c).map_err(|error| {
-            self.error = Some(error);
-            fmt::Error
-        })
-    }
-}
-
-impl<'v, W: fmt::Write + ?Sized> Format<'v> for W {
-    fn write_str<'s>(&mut self, strand: &mut Strand<'v, 's>, s: &str) -> Result<'v, 's, ()> {
-        fmt::Write::write_str(self, s).map_err(|err| Error::runtime(strand, err))
-    }
-
-    fn write_char<'s>(&mut self, strand: &mut Strand<'v, 's>, c: char) -> Result<'v, 's, ()> {
-        fmt::Write::write_char(self, c).map_err(|err| Error::runtime(strand, err))
-    }
-
-    fn write_fmt<'s>(
-        &mut self,
-        strand: &mut Strand<'v, 's>,
-        args: fmt::Arguments<'_>,
-    ) -> Result<'v, 's, ()> {
-        fmt::Write::write_fmt(self, args).map_err(|err| Error::runtime(strand, err))
-    }
 }
 
 unsafe impl<'v> Collect for Value<'v> {
@@ -513,6 +433,18 @@ impl<'v> Value<'v> {
         match self.case() {
             Case::Prim(prim) => crate::fmt!(strand, w, "{}", prim),
             Case::Object(o) => o.op_debug(strand, w),
+        }
+    }
+
+    pub(crate) fn op_fmt<'a, 's>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        spec: &Spec,
+        w: &mut dyn Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        match self.case() {
+            Case::Prim(prim) => fmt::format_prim(prim, strand, spec, w),
+            Case::Object(object) => object.op_fmt(strand, spec, w),
         }
     }
 
@@ -1112,6 +1044,17 @@ impl<'v> Value<'v> {
         format: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         self.op_debug(strand, format)
+    }
+
+    /// Writes this value according to a resolved formatting specification.
+    #[inline]
+    pub fn fmt<'a, 's>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        spec: &Spec,
+        format: &mut dyn Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        self.op_fmt(strand, spec, format)
     }
 
     /// Converts a value to its verbatim representation.
@@ -1736,6 +1679,20 @@ impl<'v, 'a> Dispatch<'v, 'a> for Delegated<'v, 'a, &'a Value<'v>> {
         match self.receiver.case() {
             Case::Object(receiver) => Delegated::new(receiver, self.delegator).op_debug(strand, w),
             Case::Prim(_) => self.receiver.op_debug(strand, w),
+        }
+    }
+
+    fn op_fmt<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        spec: &Spec,
+        w: &mut dyn Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        match self.receiver.case() {
+            Case::Object(receiver) => {
+                Delegated::new(receiver, self.delegator).op_fmt(strand, spec, w)
+            }
+            Case::Prim(_) => self.receiver.op_fmt(strand, spec, w),
         }
     }
 

@@ -1,4 +1,5 @@
 use dolang::runtime::object::fmt;
+use dolang::runtime::value::fmt::Format;
 
 use dolang::runtime::{
     Args, Error, Instance, Object, Output, Result, Slot, Strand, Type, Value, object::TypeBuilder,
@@ -83,7 +84,7 @@ impl<'v> Object<'v> for Attr {
     fn debug<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         let borrow = this.borrow(strand)?;
         fmt!(strand, w, "<xml.Attr {}>", borrow.name.qname())

@@ -2,6 +2,8 @@
 
 use std::{cell::Cell, ops::ControlFlow};
 
+use crate::value::fmt::Format;
+
 use dolang_bytecode::Variadic;
 
 use crate::{
@@ -441,7 +443,7 @@ fn debug<'v, 's>(
     module: &str,
     name: &str,
     strand: &mut Strand<'v, 's>,
-    w: &mut dyn crate::value::Format<'v>,
+    w: &mut dyn Format<'v>,
 ) -> Result<'v, 's, ()> {
     crate::fmt!(strand, w, "<{module}.{name}>")
 }
@@ -470,7 +472,7 @@ impl<'v> Protocol<'v> for View<'v> {
     fn op_debug<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         let view = this.get();
         debug(view.glue.module(), view.glue.name(), strand, w)
@@ -676,7 +678,7 @@ impl<'v> Protocol<'v> for Iter<'v> {
     fn op_debug<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         let view = &*this.get().parent;
         debug(view.glue.module(), view.glue.name(), strand, w)
@@ -933,7 +935,7 @@ impl<'v> Protocol<'v> for Type {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<type std.ArrayView>")
     }

@@ -1,9 +1,10 @@
 use dolang::runtime::object::fmt;
+use dolang::runtime::value::fmt::Format;
 use dolang::{
     compile::Compiler,
     runtime::{
-        Arg, Args, Error, Format, Instance, Object, Output, Result, Slot, State, Strand, Sym,
-        Value, method,
+        Arg, Args, Error, Instance, Object, Output, Result, Slot, State, Strand, Sym, Value,
+        method,
         object::{Mut, Ref, TypeBuilder},
         strand::Redirect,
         unpack,
@@ -1293,7 +1294,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
 #[cfg(test)]
 mod tests {
     use super::{Filter, FilterMode, Style};
-    use dolang::runtime::Format;
+    use dolang::runtime::value::fmt::Format;
 
     fn filter(input: &str, mode: FilterMode) -> String {
         futures::executor::block_on(dolang::runtime::vm::Builder::build(async |builder| {

@@ -32,6 +32,8 @@ pub(crate) mod types;
 
 use std::{ops::ControlFlow, ptr::NonNull};
 
+use crate::value::fmt::Format;
+
 use crate::{
     arg::Args,
     error::{ErrorKind, Result},
@@ -582,7 +584,7 @@ impl<'v> Protocol<'v> for BoundMethod<'v> {
     fn op_debug<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         let me = this.receiver.get();
         crate::fmt!(strand, w, "<bound method: {} receiver: ", me.method.name)?;

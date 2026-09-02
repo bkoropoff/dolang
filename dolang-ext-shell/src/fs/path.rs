@@ -3,6 +3,8 @@ use std::{
     marker::PhantomData,
 };
 
+use dolang::runtime::value::fmt::Format;
+
 use crate::{
     error::ResultExt as _,
     fs::{path_absolute, path_relative},
@@ -505,7 +507,7 @@ macro_rules! impl_concrete_path {
             fn debug<'a, 's>(
                 this: Instance<'v, 'a, Self>,
                 strand: &'a mut Strand<'v, 's>,
-                w: &mut dyn dolang::runtime::Format<'v>,
+                w: &mut dyn Format<'v>,
             ) -> Result<'v, 's, ()> {
                 fmt!(strand, w, "<{}.Path {:?}>", $module, this.annex().display())
             }
@@ -513,7 +515,7 @@ macro_rules! impl_concrete_path {
             fn display<'a, 's>(
                 this: Instance<'v, 'a, Self>,
                 strand: &'a mut Strand<'v, 's>,
-                w: &mut dyn dolang::runtime::Format<'v>,
+                w: &mut dyn Format<'v>,
             ) -> Result<'v, 's, ()> {
                 fmt!(strand, w, "{}", this.annex().display())
             }

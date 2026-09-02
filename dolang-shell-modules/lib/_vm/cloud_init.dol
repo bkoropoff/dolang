@@ -46,7 +46,7 @@ pub def cloud_config user public_key packages boot write_files
 # Builds the cloud-init seed ISO, cached under a digest of its contents so
 # identical configurations share one.
 pub def build_seed root user_data
-  let key = digest.blake3(user_data).hex()
+  let key = str (fmt (digest.blake3(user_data)) kind: :HEX:)
   let entry = (root / "seeds" / key)
   entry.create_dir all: true
   let destination = (entry / "seed.iso")

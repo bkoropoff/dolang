@@ -3,6 +3,8 @@ use std::{
     ops::ControlFlow,
 };
 
+use crate::value::fmt::Format;
+
 use crate::{
     arg::{Arg, Args},
     error::{Error, Result},
@@ -190,7 +192,7 @@ impl<'v> Protocol<'v> for BinBuf<'v> {
     fn op_debug<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         let borrow = this.borrow(strand)?;
         crate::fmt!(
@@ -467,13 +469,6 @@ impl<'v> Protocol<'v> for BinBuf<'v> {
                 Output::set(strand, out, input);
                 Ok(())
             }
-            sym::HEX => {
-                let ([], []) = unpack!(strand, args, 0, 0)?;
-                let borrow = this.borrow(strand)?;
-                let encoded = hex::encode(borrow.as_slice());
-                Output::set(strand, out, encoded.as_str());
-                Ok(())
-            }
             sym::DRAIN => {
                 let ([], [size]) = unpack!(strand, args, 0, 1)?;
                 let chunk_size = match size {
@@ -521,7 +516,6 @@ impl<'v> Protocol<'v> for BinBuf<'v> {
             | sym::STARTS_WITH
             | sym::ENDS_WITH
             | sym::CONTAINS
-            | sym::HEX
             | sym::DRAIN => {
                 BoundMethod::create(strand, &this, field, out);
                 Ok(())
@@ -580,7 +574,7 @@ impl<'v> Protocol<'v> for Class {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<type std.BinBuf>")
     }
@@ -622,6 +616,7 @@ impl<'v> Protocol<'v> for Class {
             members: members![
                 Method(sym::STR_METHOD),
                 Method(sym::DBG_METHOD),
+                Method(sym::FMT_METHOD),
                 Method(sym::EQ_METHOD),
                 Method(sym::LT_METHOD),
                 Method(sym::BOOL_METHOD),
@@ -638,7 +633,6 @@ impl<'v> Protocol<'v> for Class {
                 Method(sym::STARTS_WITH),
                 Method(sym::ENDS_WITH),
                 Method(sym::CONTAINS),
-                Method(sym::HEX),
                 Method(sym::DRAIN),
             ],
         })
@@ -682,6 +676,7 @@ impl<'v> Protocol<'v> for Class {
             sym::INIT_METHOD
             | sym::STR_METHOD
             | sym::DBG_METHOD
+            | sym::FMT_METHOD
             | sym::EQ_METHOD
             | sym::LT_METHOD
             | sym::BOOL_METHOD
@@ -698,7 +693,6 @@ impl<'v> Protocol<'v> for Class {
             | sym::STARTS_WITH
             | sym::ENDS_WITH
             | sym::CONTAINS
-            | sym::HEX
             | sym::DRAIN => {
                 BoundMethod::create(strand, &this, field, out);
                 Ok(())
@@ -743,7 +737,7 @@ impl<'v> Protocol<'v> for Chunks<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<BinBuf drain iterator>")
     }

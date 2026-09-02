@@ -4,6 +4,8 @@ use std::{
     ops::ControlFlow,
 };
 
+use crate::value::fmt::Format;
+
 use crate::{
     arg::Args,
     error::{Error, Result},
@@ -325,7 +327,7 @@ impl<'v> Protocol<'v> for Iter<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<set iterator>")
     }
@@ -400,7 +402,7 @@ impl<'v> Protocol<'v> for Set<'v> {
     fn op_debug<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "set([")?;
         let borrow = this.borrow(strand)?;
@@ -776,7 +778,7 @@ impl<'v> Protocol<'v> for Type {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<type std.Set>")
     }
@@ -793,6 +795,7 @@ impl<'v> Protocol<'v> for Type {
             members: members![
                 Method(sym::STR_METHOD),
                 Method(sym::DBG_METHOD),
+                Method(sym::FMT_METHOD),
                 Method(sym::EQ_METHOD),
                 Method(sym::HASH_METHOD),
                 Getter(sym::LEN),
@@ -822,6 +825,7 @@ impl<'v> Protocol<'v> for Type {
             sym::INIT_METHOD
             | sym::STR_METHOD
             | sym::DBG_METHOD
+            | sym::FMT_METHOD
             | sym::EQ_METHOD
             | sym::HASH_METHOD
             | sym::LEN

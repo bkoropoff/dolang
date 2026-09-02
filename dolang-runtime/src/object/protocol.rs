@@ -4,6 +4,8 @@ use std::{
     ptr::{self, NonNull},
 };
 
+use crate::value::fmt::{Format, Spec};
+
 use crate::{
     arg::Args,
     error::{Error, Result},
@@ -200,7 +202,7 @@ pub(crate) trait Protocol<'v>: Boxable<Header> + Collect + 'v {
     fn op_verbatim<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         Self::op_display(this, strand, w)
     }
@@ -208,7 +210,7 @@ pub(crate) trait Protocol<'v>: Boxable<Header> + Collect + 'v {
     fn op_display<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         Self::op_debug(this, strand, w)
     }
@@ -216,8 +218,17 @@ pub(crate) trait Protocol<'v>: Boxable<Header> + Collect + 'v {
     fn op_debug<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()>;
+
+    fn op_fmt<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &mut Strand<'v, 's>,
+        spec: &Spec,
+        w: &mut dyn Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        default_fmt::<Self>(this, strand, spec, w)
+    }
 
     fn op_bool<'a, 's>(_this: Recv<'v, 'a, Self>, _strand: &mut Strand<'v, 's>) -> bool {
         true
@@ -523,6 +534,36 @@ pub(crate) trait Protocol<'v>: Boxable<Header> + Collect + 'v {
     }
 }
 
+pub(crate) fn default_fmt<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
+    this: Recv<'v, 'a, T>,
+    strand: &mut Strand<'v, 's>,
+    spec: &Spec,
+    w: &mut dyn Format<'v>,
+) -> Result<'v, 's, ()> {
+    use crate::value::fmt::{Fill, Kind, Pad};
+
+    let kind = spec
+        .kind
+        .ok_or_else(|| crate::value::fmt::unresolved_kind(strand))?;
+    if !kind.is_text() {
+        return Err(Error::type_error(
+            strand,
+            format!("unsupported format kind `:{}`", kind.symbol()),
+        ));
+    }
+    if spec.sign.is_some() || spec.alt || spec.fill == Fill::Zero {
+        return Err(Error::type_error(strand, "unsupported format option"));
+    }
+    let mut pad = Pad::new(*spec, w);
+    match kind {
+        Kind::Str => T::op_display(this, strand, &mut pad)?,
+        Kind::Dbg => T::op_debug(this, strand, &mut pad)?,
+        Kind::Verbatim => T::op_verbatim(this, strand, &mut pad)?,
+        _ => unreachable!(),
+    }
+    pad.finish(strand)
+}
+
 #[derive(Clone, Copy)]
 enum BinOp {
     Eq,
@@ -640,11 +681,18 @@ pub(crate) struct Vtbl<'v> {
         out: Slot<'v, 'a>,
         _: &'a &'v (),
     ) -> Pinned<'v, 's, 'a, ()>,
-    op_fmt: for<'a, 's> fn(
+    op_convert: for<'a, 's> fn(
         this: ErasedRecv<'v, 'a>,
         strand: &'a mut Strand<'v, 's>,
         op: FmtOp,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
+        _: &'a &'v (),
+    ) -> Result<'v, 's, ()>,
+    op_fmt: for<'a, 's> fn(
+        this: ErasedRecv<'v, 'a>,
+        strand: &'a mut Strand<'v, 's>,
+        spec: &Spec,
+        w: &mut dyn Format<'v>,
         _: &'a &'v (),
     ) -> Result<'v, 's, ()>,
     op_bool: for<'a, 's> fn(
@@ -757,6 +805,7 @@ impl<'v> Vtbl<'v> {
             op_fill: op_fill_glue::<T>,
             op_call: op_call_glue::<T>,
             op_mcall: op_mcall_glue::<T>,
+            op_convert: op_convert_glue::<T>,
             op_fmt: op_fmt_glue::<T>,
             op_bool: to_bool_glue::<T>,
             op_unary: op_unary_glue::<T>,
@@ -1099,11 +1148,11 @@ fn op_mcall_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
     }
 }
 
-fn op_fmt_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
+fn op_convert_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
     this: ErasedRecv<'v, 'a>,
     strand: &'a mut Strand<'v, 's>,
     op: FmtOp,
-    w: &mut dyn crate::value::Format<'v>,
+    w: &mut dyn Format<'v>,
     _: &'a &'v (),
 ) -> Result<'v, 's, ()> {
     unsafe {
@@ -1114,6 +1163,16 @@ fn op_fmt_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
             FmtOp::Debug => T::op_debug(this, strand, w),
         }
     }
+}
+
+fn op_fmt_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
+    this: ErasedRecv<'v, 'a>,
+    strand: &'a mut Strand<'v, 's>,
+    spec: &Spec,
+    w: &mut dyn Format<'v>,
+    _: &'a &'v (),
+) -> Result<'v, 's, ()> {
+    unsafe { T::op_fmt(Recv::from_erased(this), strand, spec, w) }
 }
 
 fn to_bool_glue<'v, 'a, 's, T: ?Sized + Protocol<'v>>(
@@ -1472,19 +1531,26 @@ pub(crate) trait Dispatch<'v, 'a> {
     fn op_verbatim<'s>(
         &self,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()>;
 
     fn op_display<'s>(
         &self,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()>;
 
     fn op_debug<'s>(
         &self,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
+    ) -> Result<'v, 's, ()>;
+
+    fn op_fmt<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        spec: &Spec,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()>;
 
     fn op_bool<'s>(&self, strand: &'a mut Strand<'v, 's>) -> bool;
@@ -1736,25 +1802,34 @@ impl<'v, 'a, T: AsRecv<'v, 'a>> Dispatch<'v, 'a> for T {
     fn op_verbatim<'s>(
         &self,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
-        unsafe { invoke!(self, op_fmt, strand, FmtOp::Verbatim, w) }
+        unsafe { invoke!(self, op_convert, strand, FmtOp::Verbatim, w) }
     }
 
     fn op_display<'s>(
         &self,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
-        unsafe { invoke!(self, op_fmt, strand, FmtOp::Display, w) }
+        unsafe { invoke!(self, op_convert, strand, FmtOp::Display, w) }
     }
 
     fn op_debug<'s>(
         &self,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
-        unsafe { invoke!(self, op_fmt, strand, FmtOp::Debug, w) }
+        unsafe { invoke!(self, op_convert, strand, FmtOp::Debug, w) }
+    }
+
+    fn op_fmt<'s>(
+        &self,
+        strand: &'a mut Strand<'v, 's>,
+        spec: &Spec,
+        w: &mut dyn Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        unsafe { invoke!(self, op_fmt, strand, spec, w) }
     }
 
     fn op_bool<'s>(&self, strand: &'a mut Strand<'v, 's>) -> bool {
@@ -2115,6 +2190,13 @@ pub(crate) async fn dispatch_native_method<'v, 's>(
         sym::DBG_METHOD => {
             let mut format = crate::value::StrEmbryo::new();
             dispatch!(op_debug, &mut format)?;
+            format.finish(strand, out);
+        }
+        sym::FMT_METHOD => {
+            let ([spec], []) = unpack!(strand, trailing, 1, 0)?;
+            let spec = crate::stdlib::fmt::spec_of(strand, &spec)?;
+            let mut format = crate::value::StrEmbryo::new();
+            dispatch!(op_fmt, &spec, &mut format)?;
             format.finish(strand, out);
         }
         sym::BOOL_METHOD => {

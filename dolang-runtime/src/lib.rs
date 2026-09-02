@@ -1,10 +1,10 @@
 #![deny(warnings)]
 
-/// Writes formatted data to a [`Format`](crate::value::Format) destination.
+/// Writes formatted data to a [`Format`](crate::value::fmt::Format) destination.
 #[macro_export]
 macro_rules! fmt {
     ($strand:expr, $destination:expr, $($arg:tt)*) => {
-        $crate::value::Format::write_fmt(
+        $crate::value::fmt::Format::write_fmt(
             $destination,
             $strand,
             format_args!($($arg)*),

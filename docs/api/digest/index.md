@@ -34,7 +34,7 @@ Computes the BLAKE3 digest.
 ```
 let digest = blake3 "abc"
 assert_eq $digest.len 32
-assert_eq $digest.hex()
+assert_eq (str (fmt digest kind: :HEX:))
   6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85
 ```
 
@@ -55,7 +55,7 @@ Computes the MD5 digest.
 #### Example
 
 ```
-assert_eq $md5("abc").hex()
+assert_eq (str (fmt (md5 "abc") kind: :HEX:))
   900150983cd24fb0d6963f7d28e17f72
 ```
 
@@ -76,7 +76,7 @@ Computes the SHA-1 digest.
 #### Example
 
 ```
-assert_eq $sha1("abc").hex()
+assert_eq (str (fmt (sha1 "abc") kind: :HEX:))
   a9993e364706816aba3e25717850c26c9cd0d89d
 ```
 
@@ -97,7 +97,7 @@ Computes the SHA-256 digest.
 #### Example
 
 ```
-assert_eq $sha256("abc").hex()
+assert_eq (str (fmt (sha256 "abc") kind: :HEX:))
   ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
 ```
 
@@ -118,6 +118,6 @@ Computes the SHA-512 digest.
 #### Example
 
 ```
-assert_eq $sha512("abc").hex()[..10]
+assert_eq ((str (fmt (sha512 "abc") kind: :HEX:))[..10])
   ddaf35a193
 ```

@@ -212,7 +212,7 @@ impl<'v> Object<'v> for Capture {
     fn debug<'a, 's>(
         _this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         fmt!(strand, w, "<capture>")
     }
@@ -429,3 +429,4 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         })
         .commit();
 }
+use dolang::runtime::value::fmt::Format;

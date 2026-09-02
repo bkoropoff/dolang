@@ -4,6 +4,8 @@ use std::{
     time::SystemTime,
 };
 
+use dolang::runtime::value::fmt::Format;
+
 use dolang::runtime::object::fmt;
 
 use dolang::runtime::strand::InterruptMask;
@@ -210,7 +212,7 @@ impl DurationAnnex {
     fn write_seconds<'v, 's>(
         &self,
         strand: &mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         if self.total_nanos == 0 {
             return fmt!(strand, w, "0s");
@@ -538,14 +540,14 @@ impl<'v> Object<'v> for Date {
     fn display<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         fmt!(strand, w, "{}", format_date_rfc(*this.annex()))
     }
     fn debug<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         fmt!(strand, w, "<Date {}>", format_date_rfc(*this.annex()))
     }
@@ -664,14 +666,14 @@ macro_rules! calendar_enum {
             fn display<'a, 's>(
                 this: Instance<'v, 'a, Self>,
                 strand: &'a mut Strand<'v, 's>,
-                w: &mut dyn dolang::runtime::Format<'v>,
+                w: &mut dyn Format<'v>,
             ) -> Result<'v, 's, ()> {
                 fmt!(strand, w, "{}", $name_fn(*this.annex()))
             }
             fn debug<'a, 's>(
                 this: Instance<'v, 'a, Self>,
                 strand: &'a mut Strand<'v, 's>,
-                w: &mut dyn dolang::runtime::Format<'v>,
+                w: &mut dyn Format<'v>,
             ) -> Result<'v, 's, ()> {
                 fmt!(
                     strand,
@@ -782,14 +784,14 @@ impl<'v> Object<'v> for Month {
     fn display<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         fmt!(strand, w, "{}", month_name(*this.annex()))
     }
     fn debug<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         fmt!(strand, w, "<Month {}>", month_name(*this.annex()))
     }
@@ -916,7 +918,7 @@ impl<'v> Object<'v> for DateTime {
     fn display<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         let formatted = format_datetime_rfc3339(strand, &this.annex())?;
         fmt!(strand, w, "{}", formatted)
@@ -925,7 +927,7 @@ impl<'v> Object<'v> for DateTime {
     fn debug<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         fmt!(strand, w, "<DateTime ")?;
         Self::display(this, strand, w)?;
@@ -1009,7 +1011,7 @@ impl<'v> Object<'v> for Duration {
     fn display<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         this.annex().write_seconds(strand, w)
     }
@@ -1017,7 +1019,7 @@ impl<'v> Object<'v> for Duration {
     fn debug<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         fmt!(strand, w, "<Duration ")?;
         Self::display(this, strand, w)?;

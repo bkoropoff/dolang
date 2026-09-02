@@ -5,6 +5,8 @@ use std::{
     ptr,
 };
 
+use dolang::runtime::value::fmt::Format;
+
 use dolang::runtime::{object::fmt, strand::InterruptMask};
 
 use dolang::runtime::{
@@ -281,7 +283,7 @@ impl<'v> Object<'v> for SqliteError {
     fn display<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         fmt!(strand, w, "{}", this.annex().1)
     }
@@ -297,7 +299,7 @@ impl<'v> Object<'v> for SqliteBusy {
     fn display<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         fmt!(strand, w, "{}", this.annex().1)
     }

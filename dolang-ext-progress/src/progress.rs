@@ -7,6 +7,8 @@ use std::{
     time::Duration,
 };
 
+use dolang::runtime::value::fmt::Format;
+
 use dolang::runtime::object::fmt;
 
 use dolang::runtime::{
@@ -1055,7 +1057,7 @@ impl<'v> Object<'v> for Indicator {
     fn debug<'a, 's>(
         _this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         fmt!(strand, w, "<progress.Indicator>")
     }

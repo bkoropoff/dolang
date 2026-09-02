@@ -313,7 +313,7 @@ impl<'v, 'a> Args<'v, 'a> {
                     }
                 }
             }
-            if VAR {
+            if !self.mask.is_empty() {
                 self.index = self.mask[self.index + 1..]
                     .iter()
                     .position(|b| !*b)

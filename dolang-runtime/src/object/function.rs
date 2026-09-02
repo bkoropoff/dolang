@@ -1,5 +1,7 @@
 use std::{borrow::Cow, cell::UnsafeCell, marker::PhantomData, ops::ControlFlow, ptr::NonNull};
 
+use crate::value::fmt::Format;
+
 use dolang_util::alias;
 
 use crate::{
@@ -226,7 +228,7 @@ impl<'v> Protocol<'v> for NativeFunction<'v> {
     fn op_display<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         let borrow = this.get();
         crate::fmt!(strand, w, "{}.{}", borrow.module, borrow.name)
@@ -235,7 +237,7 @@ impl<'v> Protocol<'v> for NativeFunction<'v> {
     fn op_debug<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         let borrow = this.get();
         crate::fmt!(strand, w, "<{}.{}>", borrow.module, borrow.name)
@@ -326,7 +328,7 @@ impl<'v> Protocol<'v> for Function<'v> {
     fn op_display<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         let borrow = this.get();
         let program = borrow.module.annex();
@@ -350,7 +352,7 @@ impl<'v> Protocol<'v> for Function<'v> {
     fn op_debug<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<")?;
         Self::op_display(this, strand, w)?;
@@ -386,7 +388,7 @@ impl<'v> Protocol<'v> for Type {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<type std.Func>")
     }

@@ -422,7 +422,7 @@ def file_digest path
   path.open rb do |file|
     for chunk = file
       state.update $chunk
-  state.digest().hex()
+  str (fmt (state.digest()) kind: :HEX:)
 
 def find_child node tag :namespace = nil
   for child = node.children
@@ -2248,7 +2248,7 @@ def write_bundle path members info domain_xml
                 do entry.write $chunk
                 do state.update $chunk
               ind.delta $chunk.len
-      digests[member.kind] = state.digest().hex()
+      digests[member.kind] = str (fmt (state.digest()) kind: :HEX:)
     archive.open $MANIFEST_MEMBER mode: 0o644 do |entry|
       entry.write $ bundle_manifest $info $members $domain_xml $digests
 
@@ -2462,7 +2462,7 @@ def extract_member bundle member dest
             do out.write $chunk
             do state.update $chunk
           ind.delta $chunk.len
-    let actual = state.digest().hex()
+    let actual = str (fmt (state.digest()) kind: :HEX:)
     if (actual != member.hex)
       let expected = member.hex
       let kind = str(member.kind).lower()
@@ -2505,7 +2505,7 @@ def ensure_key root app
 #
 # cloud-init's `write_files` wants `permissions` as an octal string, but that is
 # its serialization detail, not a second calling convention: `write_files_entry`
-# renders the int with `Int.octal()` instead.
+# formats the int as octal instead.
 def require_chmod chmod
   _vfs.parse_mode $chmod
 
@@ -2524,7 +2524,7 @@ def write_files_entry add app
     file[:encoding:] = "b64"
 
   if (add.chmod != nil)
-    file[:permissions:] = add.chmod.octal()
+    file[:permissions:] = str (fmt (add.chmod) kind: :OCT:)
   for key value = add.extra
     file[key] = value
   file
@@ -2659,9 +2659,9 @@ def build_provision_iso root files
     manifest[name] = if (type value Path)
       file_digest $value
     else
-      digest.blake3(value).hex()
+      str (fmt (digest.blake3(value)) kind: :HEX:)
 
-  let key = digest.blake3(json.encode manifest).hex()
+  let key = str (fmt (digest.blake3(json.encode manifest)) kind: :HEX:)
   let entry = (root / "provision" / key)
   entry.create_dir all: true
   let destination = (entry / "provision.iso")

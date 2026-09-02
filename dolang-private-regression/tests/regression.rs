@@ -21,6 +21,8 @@ mod detail {
         task::{Context as TaskContext, Poll},
     };
 
+    use dolang::runtime::value::fmt::Format;
+
     const MOD_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/mod");
 
     struct DummyAsync<T>(Option<T>, bool);
@@ -119,7 +121,7 @@ mod detail {
         fn display<'a, 's>(
             this: Instance<'v, 'a, Self>,
             strand: &'a mut Strand<'v, 's>,
-            w: &mut dyn dolang::runtime::Format<'v>,
+            w: &mut dyn Format<'v>,
         ) -> runtime::Result<'v, 's, ()> {
             Self::debug(this, strand, w)
         }
@@ -127,7 +129,7 @@ mod detail {
         fn debug<'a, 's>(
             _this: Instance<'v, 'a, Self>,
             strand: &'a mut Strand<'v, 's>,
-            w: &mut dyn dolang::runtime::Format<'v>,
+            w: &mut dyn Format<'v>,
         ) -> runtime::Result<'v, 's, ()> {
             fmt!(strand, w, "foo")
         }

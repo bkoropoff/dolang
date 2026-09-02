@@ -1,0 +1,132 @@
+import std:
+  - Fmt
+  - FmtSpec
+
+def assert_fails block
+  let failed = try
+    block()
+    false
+  catch _
+    true
+  assert $failed
+
+# fmt is a bare prelude item, while the types are explicit std imports.
+let empty = fmt()
+assert $ type $empty $FmtSpec
+assert_eq $empty.fill nil
+assert_eq $empty.align nil
+assert_eq $empty.sign nil
+assert_eq $empty.width nil
+assert_eq $empty.precision nil
+assert_eq $empty.alt false
+assert_eq $empty.kind nil
+
+# A positional nil is still a bound value.
+let nil_fmt = fmt nil
+assert_eq (type nil_fmt) $Fmt
+assert $ type $nil_fmt $FmtSpec
+assert_eq $nil_fmt.value nil
+assert_eq $nil_fmt.source nil
+assert_eq (str nil_fmt) "nil"
+
+# Specifications are immutable and calls merge only the supplied fields.
+let base = fmt fill: * align: :RIGHT: sign: :PLUS: width: 6 precision: 2 kind: :FIXED:
+assert_eq $base.fill *
+assert_eq $base.align :RIGHT:
+assert_eq $base.sign :PLUS:
+assert_eq $base.width 6
+assert_eq $base.precision 2
+assert_eq $base.alt false
+assert_eq $base.kind :FIXED:
+
+let changed = base width: 8 kind: nil alt: true
+assert_eq $base.width 6
+assert_eq $base.kind :FIXED:
+assert_eq $base.alt false
+assert_eq $changed.fill *
+assert_eq $changed.width 8
+assert_eq $changed.kind nil
+assert_eq $changed.alt true
+
+# An explicit nil resets an option to its default.
+let reset = changed fill: nil alt: nil precision: nil
+assert_eq $reset.fill nil
+assert_eq $reset.alt false
+assert_eq $reset.precision nil
+assert_eq $reset.width 8
+
+let applied = base 1.5
+assert_eq (type applied) $Fmt
+assert_eq (str applied) "*+1.50"
+
+let rebound = applied width: 8 fill: :ZERO:
+assert_eq $rebound.value 1.5
+assert_eq (str rebound) "+0001.50"
+assert_fails do applied 2
+
+# The surrounding conversion supplies kind only when none was explicit.
+let inherited = fmt "x" width: 5
+assert_eq "[$inherited]" "[x    ]"
+assert_eq (str inherited) "x    "
+assert_eq (dbg inherited) "\"x\"  "
+assert_eq (str $ fmt 42 kind: :HEX:) 2a
+
+# pad applies the layout portion of a specification directly to strings.
+let centered = fmt fill: . align: :CENTER: width: 7 precision: 3
+assert_eq $centered.pad("a界b") "..a界.."
+
+# Keyword validation is strict.
+assert_fails do fmt fill: ""
+assert_fails do fmt fill: ab
+assert_fails do fmt align: :SIDEWAYS:
+assert_fails do fmt sign: true
+assert_fails do fmt width: -1
+assert_fails do fmt precision: 1.5
+assert_fails do fmt alt: 1
+assert_fails do fmt kind: :UNKNOWN:
+
+# Core formatting implementations are reachable from Do code.
+assert_eq (str $ fmt 42 fill: :ZERO: width: 6 alt: true kind: :HEX:) "0x002a"
+assert_eq (str $ fmt 1.5 sign: :PLUS: width: 7 precision: 2 kind: :FIXED:) "  +1.50"
+assert_eq (str $ fmt "a界b" fill: "." width: 6 precision: 3) "a界..."
+assert_eq (str $ fmt b"\x0a\xff" alt: true kind: :HEX:) "0x0aff"
+assert_eq (dbg $ fmt [1, 2] alt: true) |-
+  [
+    1,
+    2,
+  ]
+assert_eq (dbg $ fmt {a: 1} alt: true) |-
+  {
+    a: 1,
+  }
+
+# Do classes get width and alignment through the default formatter.
+class Point
+  pub field x = 0
+  pub field y = 0
+
+  def (init) self x y
+    self.x = x
+    self.y = y
+
+  pub def (str) self
+    "($(self.x),$(self.y))"
+
+let p = Point 1 2
+assert_eq (str $ fmt p width: 9 align: :RIGHT:) "    (1,2)"
+assert_eq (str $ fmt p fill: "-" width: 7) "(1,2)--"
+assert_eq (str $ fmt p precision: 3) "(1,"
+
+# A numeric kind is a type error rather than being silently ignored.
+assert_fails do str $ fmt p kind: :HEX:
+assert_fails do str $ fmt p sign: :PLUS:
+assert_fails do str $ fmt p fill: :ZERO: width: 9
+
+# Symbols, bools and nil use the text kinds only.
+assert_eq (str $ fmt :sym: width: 5) "sym  "
+assert_eq (dbg $ fmt true width: 6 align: :RIGHT:) "  true"
+assert_fails do str $ fmt true kind: :DEC:
+
+# A specification is reusable across values.
+let money = fmt precision: 2 kind: :FIXED:
+assert_eq "$(money 1.5)/$(money 2.25)" "1.50/2.25"

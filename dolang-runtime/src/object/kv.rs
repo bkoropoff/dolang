@@ -5,6 +5,8 @@ use std::{
     ops::ControlFlow,
 };
 
+use crate::value::fmt::{Format, Spec};
+
 use bitvec::boxed::BitBox;
 
 use crate::{
@@ -616,7 +618,7 @@ impl<'v, T: AsRef<Inner<'v>> + Collect + 'v> Protocol<'v> for Values<'v, T> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<values iterator>")
     }
@@ -702,7 +704,7 @@ impl<'v, T: AsRef<Inner<'v>> + Collect + 'v> Protocol<'v> for KeyValues<'v, T> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<key values iterator>")
     }
@@ -796,7 +798,7 @@ impl<'v, T: AsRef<Inner<'v>> + Collect + 'v> Protocol<'v> for Keys<'v, T> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<keys iterator>")
     }
@@ -888,10 +890,80 @@ impl<'v, T: AsRef<Inner<'v>> + Collect + 'v> Protocol<'v> for Keys<'v, T> {
 }
 
 impl<'v> Inner<'v> {
+    pub(crate) fn op_format_pretty<'a, 's, T: AsRef<Inner<'v>> + Collect + 'v>(
+        this: Recv<'v, 'a, T>,
+        strand: &'a mut Strand<'v, 's>,
+        kind: crate::value::fmt::Kind,
+        w: &mut dyn Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        let borrow = this.borrow(strand)?;
+        let inner = (*borrow).as_ref();
+        if inner.total_pairs == 0 {
+            return crate::fmt!(strand, w, "{{}}");
+        }
+        crate::fmt!(strand, w, "{{\n")?;
+        let mut next_int_key = Some(0);
+        unsafe {
+            for (index, entry) in inner.index.iter().enumerate() {
+                let Some((bucket, subindex)) = entry else {
+                    continue;
+                };
+                if (index + 1).is_multiple_of(crate::INTERRUPT_INTERVAL) {
+                    strand.check_trap()?;
+                }
+                let bucket = bucket.as_ref();
+                let mut rendered = String::new();
+                let implicit = if let (Some(int_key), Some(expected)) =
+                    (bucket.key.to_i64(strand).ok(), next_int_key)
+                {
+                    if int_key == expected {
+                        next_int_key = Some(expected + 1);
+                        true
+                    } else {
+                        next_int_key = None;
+                        false
+                    }
+                } else {
+                    false
+                };
+                if !implicit {
+                    if let Some(symbol) = bucket.key.downcast_ref(strand.builtin_types().sym) {
+                        rendered.push_str(&symbol.get().name);
+                    } else {
+                        bucket.key.fmt(
+                            strand,
+                            &Spec {
+                                kind: Some(kind),
+                                ..Default::default()
+                            },
+                            &mut rendered,
+                        )?;
+                    }
+                    rendered.push_str(": ");
+                }
+                let value = bucket.value.at(*subindex);
+                value.fmt(
+                    strand,
+                    &Spec {
+                        alt: value.downcast_ref(strand.builtin_types().array).is_some()
+                            || value.downcast_ref(strand.builtin_types().dict).is_some(),
+                        kind: Some(kind),
+                        ..Default::default()
+                    },
+                    &mut rendered,
+                )?;
+                let mut indented = String::new();
+                crate::value::fmt::push_indented(&mut indented, &rendered, 2);
+                crate::fmt!(strand, w, "{indented},\n")?;
+            }
+        }
+        crate::fmt!(strand, w, "}}")
+    }
+
     pub(crate) fn op_debug<'a, 's, T: AsRef<Inner<'v>> + Collect + 'v>(
         this: Recv<'v, 'a, T>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
         open: &str,
         close: &str,
         separator: &str,

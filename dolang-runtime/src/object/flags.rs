@@ -18,6 +18,8 @@ use std::{
     ops::{BitAnd, BitOr, BitXor, Not},
 };
 
+use crate::value::fmt::Format;
+
 use crate::{
     arg::{Arg, Args},
     error::{Error, Result},
@@ -29,7 +31,7 @@ use crate::{
     strand::Strand,
     sym::Sym,
     unpack,
-    value::{Format, Output, Slot, Value},
+    value::{Output, Slot, Value},
     vm::Builder,
 };
 

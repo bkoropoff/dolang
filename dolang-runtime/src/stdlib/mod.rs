@@ -5,15 +5,17 @@ use crate::{
     error::Error,
     object::{array::Array, class, dict::Dict, float, int, record::Record, tuple},
     unpack,
-    value::{Output, StrEmbryo, Value},
+    value::{Output, StrEmbryo, Value, fmt::Spec},
     vm::Builder,
 };
 
+pub(crate) mod fmt;
 mod property;
 mod strand;
 
 pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
     let property_types = property::register(builder);
+    let fmt = fmt::register(builder);
     let member_scopes = class::register_member_scopes(builder);
     let member_scopes = builder.register_state(member_scopes);
     let bc = builder.singletons();
@@ -103,6 +105,8 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
         .value("Bin", &bin)
         .value("BinBuf", &binbuf)
         .value("Args", &args)
+        .value("FmtSpec", fmt.types.spec)
+        .value("Fmt", fmt.types.fmt)
         // Iterator protocol types
         .value("Iterable", &iterable_type)
         .value("Sinkable", &sinkable_type)
@@ -206,6 +210,9 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
             } else {
                 Err(Error::type_error(strand, "sym: expected Str or Sym"))
             }
+        })
+        .function("fmt", async move |strand, args, out| {
+            fmt::create(strand, fmt, Spec::default(), args, out).await
         })
         // Core functions
         .function("verbatim", async move |strand, args, out| {

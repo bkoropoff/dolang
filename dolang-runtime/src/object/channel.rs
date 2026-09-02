@@ -6,6 +6,8 @@ use std::{
     task::{self, Poll, Waker},
 };
 
+use crate::value::fmt::Format;
+
 use crate::{
     arg::Args,
     error::{Error, Result},
@@ -215,7 +217,7 @@ impl<'v> Protocol<'v> for Receiver<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<channel recv>")
     }
@@ -328,7 +330,7 @@ impl<'v> Protocol<'v> for Sender<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<channel send>")
     }

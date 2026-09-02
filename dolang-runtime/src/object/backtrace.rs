@@ -1,5 +1,7 @@
 use std::ops::ControlFlow;
 
+use crate::value::fmt::Format;
+
 use crate::{
     arg::Args,
     error::{BacktraceIter, Error, Result, UnwindEntry},
@@ -77,7 +79,7 @@ impl<'v> Protocol<'v> for Backtrace<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<backtrace>")
     }
@@ -85,7 +87,11 @@ impl<'v> Protocol<'v> for Backtrace<'v> {
     fn op_inspect<'a>(_this: Recv<'v, 'a, Self>, _vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {
         Some(Inspect {
             is_abstract: false,
-            members: members![Getter(sym::LEN), Method(sym::ITER_METHOD)],
+            members: members![
+                Getter(sym::LEN),
+                Method(sym::ITER_METHOD),
+                Method(sym::FMT_METHOD)
+            ],
             type_members: &[],
         })
     }
@@ -186,7 +192,7 @@ impl<'v> Protocol<'v> for Iter<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<backtrace.iter>")
     }
@@ -260,7 +266,7 @@ impl<'v> Protocol<'v> for Frame<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<backtrace frame>")
     }
@@ -352,7 +358,7 @@ impl<'v> Protocol<'v> for Type {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<type strand.Backtrace>")
     }

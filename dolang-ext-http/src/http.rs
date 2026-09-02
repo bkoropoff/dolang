@@ -6,11 +6,13 @@ use std::{
     task::{Context, Poll},
 };
 
+use dolang::runtime::value::fmt::Format;
+
 use dolang::runtime::{object::fmt, strand::InterruptMask};
 
 use dolang::runtime::{
-    Arg, Args, Error, Format, Instance, Object, Output, Result, Slot, State, Strand, Sym, Type,
-    Value, call,
+    Arg, Args, Error, Instance, Object, Output, Result, Slot, State, Strand, Sym, Type, Value,
+    call,
     error::{ErrorKind, ResultExt as _},
     method,
     object::{DictLike, DictView, DictViewSink, Mut, Ref, TypeBuilder},
@@ -406,7 +408,7 @@ impl<'v> Object<'v> for ErrorObject {
     fn display<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         fmt!(strand, w, "{}", this.annex().inner)
     }
@@ -414,7 +416,7 @@ impl<'v> Object<'v> for ErrorObject {
     fn debug<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         fmt!(strand, w, "<http.Error ")?;
         Self::display(this, strand, w)?;
@@ -480,7 +482,7 @@ impl<'v> Object<'v> for StatusObject {
     fn display<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         fmt!(strand, w, "{}", this.annex().message)
     }
@@ -488,7 +490,7 @@ impl<'v> Object<'v> for StatusObject {
     fn debug<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         fmt!(strand, w, "<http.Status ")?;
         Self::display(this, strand, w)?;
