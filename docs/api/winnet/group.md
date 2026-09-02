@@ -35,6 +35,18 @@ member raises `sys.AlreadyExistsError`.
 Removes an account name or `security.windows.Sid` from the group. Removing an
 absent member raises `sys.NotFoundError`.
 
+### `rights()`
+
+Returns the account rights assigned through the local security policy.
+
+### `grant_right name`
+
+Grants an account right such as `SeServiceLogonRight`.
+
+### `revoke_right name`
+
+Revokes an account right. Revoking an unassigned right has no effect.
+
 ### `delete()`
 
 Deletes the group.

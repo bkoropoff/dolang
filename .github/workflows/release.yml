@@ -7,6 +7,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  DOLANG_WINNET_POLICY_MUTATION_TEST: "1"
   FORCE_COLOR: 3
 
 permissions:

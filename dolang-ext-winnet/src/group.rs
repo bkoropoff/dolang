@@ -108,6 +108,50 @@ impl<'v> Object<'v> for Group {
                 make_info(strand, global, info, out);
                 Ok(())
             })
+            .method("rights", async move |this, strand, args, out| {
+                let ([], []) = unpack!(strand, args, 0, 0)?;
+                let rights = this
+                    .borrow(strand)?
+                    .0
+                    .as_ref()
+                    .ok_or_else(|| Error::state_error(strand, "group was deleted"))?
+                    .rights()
+                    .await
+                    .into_sys(strand)?;
+                crate::user::make_rights(strand, rights, out)
+            })
+            .method("grant_right", async move |this, strand, args, out| {
+                let ([right], []) = unpack!(strand, args, 1, 0)?;
+                let right = right
+                    .as_str(strand)
+                    .ok_or_else(|| Error::type_error(strand, "right must be a Str"))?
+                    .to_string();
+                this.borrow(strand)?
+                    .0
+                    .as_ref()
+                    .ok_or_else(|| Error::state_error(strand, "group was deleted"))?
+                    .grant_right(right)
+                    .await
+                    .into_sys(strand)?;
+                Output::set(strand, out, Nil);
+                Ok(())
+            })
+            .method("revoke_right", async move |this, strand, args, out| {
+                let ([right], []) = unpack!(strand, args, 1, 0)?;
+                let right = right
+                    .as_str(strand)
+                    .ok_or_else(|| Error::type_error(strand, "right must be a Str"))?
+                    .to_string();
+                this.borrow(strand)?
+                    .0
+                    .as_ref()
+                    .ok_or_else(|| Error::state_error(strand, "group was deleted"))?
+                    .revoke_right(right)
+                    .await
+                    .into_sys(strand)?;
+                Output::set(strand, out, Nil);
+                Ok(())
+            })
             .method("update", async move |this, strand, args, out| {
                 let global = strand.state::<Global<'v>>();
                 let name_sym = global.name;
@@ -208,15 +252,15 @@ impl<'v> Object<'v> for GroupInfo {
     fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
         builder
             .get("sid", |this, strand, mut out| {
-                dolang_ext_shell::windows_sid(strand, this.annex().0.sid.clone(), &mut out);
+                dolang_ext_shell::windows_sid(strand, this.annex().0.sid().clone(), &mut out);
                 Ok(())
             })
             .get("name", |this, strand, out| {
-                Output::set(strand, out, this.annex().0.name.as_str());
+                Output::set(strand, out, this.annex().0.name());
                 Ok(())
             })
             .get("comment", |this, strand, out| {
-                match this.annex().0.comment.as_deref() {
+                match this.annex().0.comment() {
                     Some(v) => Output::set(strand, out, v),
                     None => Output::set(strand, out, Nil),
                 };
@@ -346,7 +390,7 @@ pub(crate) fn configure_module<'v, 'a>(
             };
             let group = dolang_vfs_winnet::Group::create(
                 &dolang_ext_shell::vfs(strand),
-                GroupCreate { name, comment },
+                GroupCreate::new(name).comment(comment),
             )
             .await
             .into_sys(strand)?;

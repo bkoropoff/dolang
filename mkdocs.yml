@@ -393,6 +393,7 @@ nav:
       - api/uuid/uuid.md
     - winnet:
       - api/winnet/index.md
+      - api/winnet/account-policy.md
       - api/winnet/group.md
       - api/winnet/group-info.md
       - api/winnet/user.md

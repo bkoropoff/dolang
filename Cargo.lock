@@ -1105,6 +1105,7 @@ dependencies = [
  "dolang-ext-shell",
  "dolang-vfs-winnet",
  "dolang-winterop",
+ "typed-path",
 ]
 
 [[package]]
@@ -1410,6 +1411,7 @@ dependencies = [
  "serde",
  "tempfile",
  "tokio",
+ "typed-path",
  "windows-sys 0.61.2",
 ]
 

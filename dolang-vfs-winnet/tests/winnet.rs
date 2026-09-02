@@ -3,7 +3,7 @@
 #[cfg(not(windows))]
 mod stub {
     use dolang_vfs::{Vfs, error::ErrorKind, server::Server};
-    use dolang_vfs_winnet::{Group, User};
+    use dolang_vfs_winnet::{Group, User, account_policy};
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -12,6 +12,8 @@ mod stub {
         let error = User::by_name(&vfs, "nobody").await.err().unwrap();
         assert_eq!(error.kind(), ErrorKind::Unsupported);
         let error = Group::by_name(&vfs, "nobody").await.err().unwrap();
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
+        let error = account_policy(&vfs).await.err().unwrap();
         assert_eq!(error.kind(), ErrorKind::Unsupported);
     }
 
@@ -27,6 +29,8 @@ mod stub {
         let error = User::by_name(&vfs, "nobody").await.err().unwrap();
         assert_eq!(error.kind(), ErrorKind::Unsupported);
         let error = Group::by_name(&vfs, "nobody").await.err().unwrap();
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
+        let error = account_policy(&vfs).await.err().unwrap();
         assert_eq!(error.kind(), ErrorKind::Unsupported);
     }
 }

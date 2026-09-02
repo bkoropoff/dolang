@@ -22,6 +22,7 @@ impl Extension for WinnetExt {
         let global = builder.register_state(global);
         let module = builder.module("winnet");
         let module = crate::user::configure_module(module, global);
+        let module = crate::policy::configure_module(module, global);
         crate::group::configure_module(module, global).commit();
         Ok(())
     }

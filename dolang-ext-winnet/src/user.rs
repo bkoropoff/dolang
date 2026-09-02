@@ -4,7 +4,7 @@ use dolang::runtime::{
     Error, Instance, Object, Output, Result, Slot, State, Strand, Value,
     object::TypeBuilder,
     unpack,
-    value::{Nil, TypeObject},
+    value::{Empty, Nil, TypeObject},
     vm::ModuleBuilder,
 };
 use dolang_ext_shell::ResultExt;
@@ -44,6 +44,34 @@ fn nullable_str<'v>(value: Option<&str>, out: impl Output<'v>, strand: &mut Stra
         Some(v) => Output::set(strand, out, v),
         None => Output::set(strand, out, Nil),
     }
+}
+fn nullable_windows_path<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    value: Option<&typed_path::Utf8WindowsPath>,
+    out: Slot<'v, '_>,
+) -> Result<'v, 's, ()> {
+    match value {
+        Some(path) => dolang_ext_shell::windows_path(strand, path.as_str(), out),
+        None => {
+            Output::set(strand, out, Nil);
+            Ok(())
+        }
+    }
+}
+pub(crate) fn make_rights<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    rights: Vec<String>,
+    mut out: Slot<'v, '_>,
+) -> Result<'v, 's, ()> {
+    strand.with_slots_sync(|strand, [mut item]| {
+        Output::set(strand, &mut out, Empty::Array);
+        let array = out.as_array(strand).unwrap();
+        for right in rights {
+            Output::set(strand, &mut item, right.as_str());
+            array.push(strand, &item)?;
+        }
+        Ok(())
+    })
 }
 fn nullable_time<'v, 's>(
     strand: &mut Strand<'v, 's>,
@@ -119,10 +147,28 @@ fn update_from_slots<'v, 's>(
     nullable_text!(full_name, full_name, "full_name");
     nullable_text!(comment, comment, "comment");
     nullable_text!(user_comment, user_comment, "user_comment");
-    nullable_text!(home_dir, home_dir, "home_dir");
     nullable_text!(home_dir_drive, home_dir_drive, "home_dir_drive");
-    nullable_text!(profile, profile, "profile");
-    nullable_text!(script_path, script_path, "script_path");
+    macro_rules! nullable_windows_path {
+        ($slot:expr, $method:ident, $name:literal) => {
+            if let Some(value) = $slot {
+                update = if value.is_nil() {
+                    update.$method(None)
+                } else {
+                    let path =
+                        dolang_ext_shell::as_windows_path(strand, &value).ok_or_else(|| {
+                            Error::type_error(
+                                strand,
+                                concat!($name, " must be an fs.windows.Path or nil"),
+                            )
+                        })?;
+                    update.$method(Some(path))
+                };
+            }
+        };
+    }
+    nullable_windows_path!(home_dir, home_dir, "home_dir");
+    nullable_windows_path!(profile, profile, "profile");
+    nullable_windows_path!(script_path, script_path, "script_path");
     if let Some(value) = account_expires {
         update = if value.is_nil() {
             update.account_expires(None)
@@ -189,6 +235,50 @@ impl<'v> Object<'v> for User {
                         .into_sys(strand)?
                 };
                 make_info(strand, global, info, out);
+                Ok(())
+            })
+            .method("rights", async move |this, strand, args, out| {
+                let ([], []) = unpack!(strand, args, 0, 0)?;
+                let rights = this
+                    .borrow(strand)?
+                    .0
+                    .as_ref()
+                    .ok_or_else(|| Error::state_error(strand, "user was deleted"))?
+                    .rights()
+                    .await
+                    .into_sys(strand)?;
+                make_rights(strand, rights, out)
+            })
+            .method("grant_right", async move |this, strand, args, out| {
+                let ([right], []) = unpack!(strand, args, 1, 0)?;
+                let right = right
+                    .as_str(strand)
+                    .ok_or_else(|| Error::type_error(strand, "right must be a Str"))?
+                    .to_string();
+                this.borrow(strand)?
+                    .0
+                    .as_ref()
+                    .ok_or_else(|| Error::state_error(strand, "user was deleted"))?
+                    .grant_right(right)
+                    .await
+                    .into_sys(strand)?;
+                Output::set(strand, out, Nil);
+                Ok(())
+            })
+            .method("revoke_right", async move |this, strand, args, out| {
+                let ([right], []) = unpack!(strand, args, 1, 0)?;
+                let right = right
+                    .as_str(strand)
+                    .ok_or_else(|| Error::type_error(strand, "right must be a Str"))?
+                    .to_string();
+                this.borrow(strand)?
+                    .0
+                    .as_ref()
+                    .ok_or_else(|| Error::state_error(strand, "user was deleted"))?
+                    .revoke_right(right)
+                    .await
+                    .into_sys(strand)?;
+                Output::set(strand, out, Nil);
                 Ok(())
             })
             .method("update", async move |this, strand, args, out| {
@@ -343,46 +433,43 @@ impl<'v> Object<'v> for UserInfo {
     fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
         builder
             .get("sid", |this, strand, mut out| {
-                dolang_ext_shell::windows_sid(strand, this.annex().info.sid.clone(), &mut out);
+                dolang_ext_shell::windows_sid(strand, this.annex().info.sid().clone(), &mut out);
                 Ok(())
             })
             .get("name", |this, strand, out| {
-                Output::set(strand, out, this.annex().info.name.as_str());
+                Output::set(strand, out, this.annex().info.name());
                 Ok(())
             })
             .get("full_name", |this, strand, out| {
-                nullable_str(this.annex().info.full_name.as_deref(), out, strand);
+                nullable_str(this.annex().info.full_name(), out, strand);
                 Ok(())
             })
             .get("comment", |this, strand, out| {
-                nullable_str(this.annex().info.comment.as_deref(), out, strand);
+                nullable_str(this.annex().info.comment(), out, strand);
                 Ok(())
             })
             .get("user_comment", |this, strand, out| {
-                nullable_str(this.annex().info.user_comment.as_deref(), out, strand);
+                nullable_str(this.annex().info.user_comment(), out, strand);
                 Ok(())
             })
             .get("home_dir", |this, strand, out| {
-                nullable_str(this.annex().info.home_dir.as_deref(), out, strand);
-                Ok(())
+                nullable_windows_path(strand, this.annex().info.home_dir(), out)
             })
             .get("home_dir_drive", |this, strand, out| {
-                nullable_str(this.annex().info.home_dir_drive.as_deref(), out, strand);
+                nullable_str(this.annex().info.home_dir_drive(), out, strand);
                 Ok(())
             })
             .get("profile", |this, strand, out| {
-                nullable_str(this.annex().info.profile.as_deref(), out, strand);
-                Ok(())
+                nullable_windows_path(strand, this.annex().info.profile(), out)
             })
             .get("script_path", |this, strand, out| {
-                nullable_str(this.annex().info.script_path.as_deref(), out, strand);
-                Ok(())
+                nullable_windows_path(strand, this.annex().info.script_path(), out)
             })
             .get("flags", |this, strand, out| {
                 let a = this.annex();
                 a.global
                     .flags
-                    .create_with_annex(strand, UserFlags, a.info.flags, out);
+                    .create_with_annex(strand, UserFlags, a.info.flags(), out);
                 Ok(())
             })
             .get("disabled", |this, strand, out| {
@@ -391,7 +478,7 @@ impl<'v> Object<'v> for UserInfo {
                     out,
                     this.annex()
                         .info
-                        .flags
+                        .flags()
                         .contains(dolang_vfs_winnet::UserFlags::ACCOUNT_DISABLED),
                 );
                 Ok(())
@@ -402,7 +489,7 @@ impl<'v> Object<'v> for UserInfo {
                     out,
                     this.annex()
                         .info
-                        .flags
+                        .flags()
                         .contains(dolang_vfs_winnet::UserFlags::PASSWORD_NEVER_EXPIRES),
                 );
                 Ok(())
@@ -413,7 +500,7 @@ impl<'v> Object<'v> for UserInfo {
                     out,
                     this.annex()
                         .info
-                        .flags
+                        .flags()
                         .contains(dolang_vfs_winnet::UserFlags::PASSWORD_CANNOT_CHANGE),
                 );
                 Ok(())
@@ -421,26 +508,26 @@ impl<'v> Object<'v> for UserInfo {
             .get("password_age", |this, strand, out| {
                 dolang_ext_shell::duration(
                     strand,
-                    Duration::from_secs(this.annex().info.password_age),
+                    Duration::from_secs(this.annex().info.password_age()),
                     out,
                 )
             })
             .get("password_expired", |this, strand, out| {
-                Output::set(strand, out, this.annex().info.password_expired);
+                Output::set(strand, out, this.annex().info.password_expired());
                 Ok(())
             })
             .get("last_logon", |this, strand, out| {
-                nullable_time(strand, this.annex().info.last_logon, out)
+                nullable_time(strand, this.annex().info.last_logon(), out)
             })
             .get("account_expires", |this, strand, out| {
-                nullable_time(strand, this.annex().info.account_expires, out)
+                nullable_time(strand, this.annex().info.account_expires(), out)
             })
             .get("bad_password_count", |this, strand, out| {
-                Output::set(strand, out, this.annex().info.bad_password_count);
+                Output::set(strand, out, this.annex().info.bad_password_count());
                 Ok(())
             })
             .get("logon_count", |this, strand, out| {
-                Output::set(strand, out, this.annex().info.logon_count);
+                Output::set(strand, out, this.annex().info.logon_count());
                 Ok(())
             })
     }
@@ -579,11 +666,7 @@ pub(crate) fn configure_module<'v, 'a>(
             )?;
             let user = dolang_vfs_winnet::User::create(
                 &dolang_ext_shell::vfs(strand),
-                UserCreate {
-                    name,
-                    password,
-                    update,
-                },
+                UserCreate::new(name, password).update(update),
             )
             .await
             .into_sys(strand)?;
