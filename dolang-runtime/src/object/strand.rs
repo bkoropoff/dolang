@@ -1,5 +1,7 @@
 use std::{future, ops::ControlFlow, rc::Rc, task::Poll, task::Waker};
 
+use crate::value::fmt::Format;
+
 use crate::{
     arg::Args,
     error::{Error, ErrorPair, Result},
@@ -141,7 +143,7 @@ impl<'v> Protocol<'v> for Handle<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<strand.Strand>")
     }
@@ -268,7 +270,7 @@ impl<'v> Protocol<'v> for StreamIter<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<strand.Stream.iter>")
     }
@@ -366,7 +368,7 @@ impl<'v> Protocol<'v> for StreamSink<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<strand.Stream.sink>")
     }
@@ -432,7 +434,7 @@ impl<'v> Protocol<'v> for Stream<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<strand.Stream>")
     }
@@ -567,7 +569,7 @@ impl<'v> Protocol<'v> for Type {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<type strand.Strand>")
     }
@@ -613,7 +615,7 @@ impl<'v> Protocol<'v> for StreamType {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<type strand.Stream>")
     }

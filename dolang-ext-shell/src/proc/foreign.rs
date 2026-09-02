@@ -55,7 +55,7 @@ impl<'v> Object<'v> for Info {
     fn debug<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         let annex = this.annex();
         fmt!(
@@ -179,7 +179,7 @@ impl<'v> Object<'v> for Status {
     fn debug<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         match this.annex().code() {
             Some(code) => fmt!(strand, w, "<proc.Status {code}>"),
@@ -265,7 +265,7 @@ impl<'v> Object<'v> for Proc {
     fn debug<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         let pid = this.borrow(strand)?.0.as_ref().map(VfsProcess::pid);
         match pid {
@@ -440,3 +440,4 @@ pub(crate) async fn open<'v, 's>(
         })
         .await
 }
+use dolang::runtime::value::fmt::Format;

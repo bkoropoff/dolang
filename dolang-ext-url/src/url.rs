@@ -1,5 +1,7 @@
 use std::hash::{Hash, Hasher};
 
+use dolang::runtime::value::fmt::Format;
+
 use dolang::runtime::object::fmt;
 
 use dolang::runtime::{
@@ -215,7 +217,7 @@ impl<'v> Object<'v> for Url {
     fn debug<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         fmt!(strand, w, "<url.Url {:?}>", this.annex().inner.as_str())
     }
@@ -223,7 +225,7 @@ impl<'v> Object<'v> for Url {
     fn display<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         fmt!(strand, w, "{}", this.annex().inner)
     }

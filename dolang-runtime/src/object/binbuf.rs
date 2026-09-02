@@ -3,6 +3,8 @@ use std::{
     ops::ControlFlow,
 };
 
+use crate::value::fmt::Format;
+
 use crate::{
     arg::{Arg, Args},
     error::{Error, Result},
@@ -190,7 +192,7 @@ impl<'v> Protocol<'v> for BinBuf<'v> {
     fn op_debug<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         let borrow = this.borrow(strand)?;
         crate::fmt!(
@@ -580,7 +582,7 @@ impl<'v> Protocol<'v> for Class {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<type std.BinBuf>")
     }
@@ -743,7 +745,7 @@ impl<'v> Protocol<'v> for Chunks<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<BinBuf drain iterator>")
     }

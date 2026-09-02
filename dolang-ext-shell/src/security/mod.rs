@@ -3,11 +3,11 @@ use std::{
     ops::{BitAnd, BitOr, BitXor, Not},
 };
 
+use dolang::runtime::value::fmt::Format;
 use dolang::{
     compile::Compiler,
     runtime::{
-        Arg, Args, Error, Format, Instance, Object, Output, Result, Slot, State, Strand, Sym, Type,
-        Value,
+        Arg, Args, Error, Instance, Object, Output, Result, Slot, State, Strand, Sym, Type, Value,
         object::{
             ArrayLike, ArrayView, FlagLike, Flags, FlagsInstanceExt, FlagsTypeExt, Mut, Ref,
             TypeBuilder, fmt,

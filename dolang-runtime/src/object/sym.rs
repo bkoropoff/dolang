@@ -3,6 +3,8 @@ use std::{
     ops::ControlFlow,
 };
 
+use crate::value::fmt::Format;
+
 use crate::{
     arg::Args,
     error::{Error, Result},
@@ -47,7 +49,7 @@ impl<'v> Protocol<'v> for SymObj {
     fn op_verbatim<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, ":{}:", this.get().name)
     }
@@ -55,7 +57,7 @@ impl<'v> Protocol<'v> for SymObj {
     fn op_display<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "{}", this.get().name)
     }
@@ -63,7 +65,7 @@ impl<'v> Protocol<'v> for SymObj {
     fn op_debug<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<sym {}>", this.get().name)
     }
@@ -128,7 +130,7 @@ impl<'v> Protocol<'v> for Type {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<type std.Sym>")
     }

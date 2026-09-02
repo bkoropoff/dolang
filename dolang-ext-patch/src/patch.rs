@@ -1,5 +1,7 @@
 use std::{borrow::Cow, mem, path::PathBuf, result};
 
+use dolang::runtime::value::fmt::Format;
+
 #[cfg(unix)]
 use std::os::unix::ffi::OsStringExt;
 
@@ -379,7 +381,7 @@ impl<'v> Object<'v> for ParseError {
     fn display<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         fmt!(strand, w, "{}", this.annex().message)
     }
@@ -387,7 +389,7 @@ impl<'v> Object<'v> for ParseError {
     fn debug<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         fmt!(strand, w, "<patch.ParseError ")?;
         Self::display(this, strand, w)?;
@@ -409,7 +411,7 @@ impl<'v> Object<'v> for ApplyError {
     fn display<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         fmt!(strand, w, "{}", this.annex().message)
     }
@@ -417,7 +419,7 @@ impl<'v> Object<'v> for ApplyError {
     fn debug<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         fmt!(strand, w, "<patch.ApplyError ")?;
         Self::display(this, strand, w)?;

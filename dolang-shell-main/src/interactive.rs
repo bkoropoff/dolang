@@ -1,5 +1,7 @@
 use std::{borrow::Cow, ops::ControlFlow, path::Path, string::String};
 
+use dolang::runtime::value::fmt::Format;
+
 use dolang::{
     compile::{Context, Diag, Mode, Origin, Span, Token},
     runtime::{
@@ -36,7 +38,7 @@ impl<'v> Object<'v> for DynamicPrelude<'v> {
     fn display<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         Self::debug(this, strand, w)
     }

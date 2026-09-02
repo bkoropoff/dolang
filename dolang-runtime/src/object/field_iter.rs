@@ -1,5 +1,7 @@
 use std::{collections::VecDeque, ops::ControlFlow};
 
+use crate::value::fmt::Format;
+
 use bitvec::{bitbox, boxed::BitBox};
 
 use crate::{
@@ -78,7 +80,7 @@ impl<'v> Protocol<'v> for FieldIter<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<field iter>")
     }

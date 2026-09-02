@@ -63,7 +63,7 @@ impl<'v> Object<'v> for DirEntry {
     fn debug<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         fmt!(strand, w, "<fs.DirEntry {:?}>", this.annex().name)
     }
@@ -144,3 +144,4 @@ pub(crate) fn path_with_entry<'v, 's>(
         path.join(entry.annex().name.as_str())
     }))
 }
+use dolang::runtime::value::fmt::Format;

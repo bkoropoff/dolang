@@ -6,6 +6,8 @@ use std::{
     ops::ControlFlow,
 };
 
+use crate::value::fmt::{Format, Spec};
+
 use bitvec::{bitbox, boxed::BitBox};
 use dolang_bytecode::Variadic;
 use dolang_util::alias;
@@ -610,7 +612,7 @@ impl<'v> Protocol<'v> for Getter {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<type Getter>")
     }
@@ -654,7 +656,7 @@ impl<'v> Protocol<'v> for Setter {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<type Setter>")
     }
@@ -977,7 +979,7 @@ impl<'v> Protocol<'v> for ClassObject<'v> {
     fn op_debug<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         let this = this.annex();
         if let Some(module_name) = &this.module_name {
@@ -1523,7 +1525,7 @@ impl<'v> Protocol<'v> for ClassTypeProxy<'v> {
     fn op_debug<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         let class = this.get().class(strand.vm());
         if let Some(module_name) = &class.module_name {
@@ -1869,6 +1871,37 @@ fn class_sync_unary_op<'v, 'a, 's>(
 }
 
 impl<'v> Protocol<'v> for ClassInstance<'v> {
+    fn op_fmt<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &mut Strand<'v, 's>,
+        spec: &Spec,
+        w: &mut dyn Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        use crate::value::fmt::{Fill, Kind, Pad};
+
+        let kind = spec
+            .kind
+            .ok_or_else(|| crate::value::fmt::unresolved_kind(strand))?;
+        if !kind.is_text() {
+            let name = &this.annex().class.annex().name;
+            return Err(Error::type_error(
+                strand,
+                format!("{name}: unsupported format kind `:{}`", kind.symbol()),
+            ));
+        }
+        if spec.sign.is_some() || spec.alt || spec.fill == Fill::Zero {
+            return Err(Error::type_error(strand, "unsupported format option"));
+        }
+        let mut pad = Pad::new(*spec, w);
+        match kind {
+            Kind::Str => Self::op_display(this, strand, &mut pad)?,
+            Kind::Dbg => Self::op_debug(this, strand, &mut pad)?,
+            Kind::Verbatim => Self::op_verbatim(this, strand, &mut pad)?,
+            _ => unreachable!(),
+        }
+        pad.finish(strand)
+    }
+
     fn op_fill<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
@@ -1914,7 +1947,7 @@ impl<'v> Protocol<'v> for ClassInstance<'v> {
     fn op_display<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         let res = {
             let w = &mut *w;
@@ -1951,7 +1984,7 @@ impl<'v> Protocol<'v> for ClassInstance<'v> {
     fn op_debug<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         let annex = this.annex();
         match annex.class.annex().entry_by_tag(sym::DBG_METHOD) {
@@ -1984,7 +2017,7 @@ impl<'v> Protocol<'v> for ClassInstance<'v> {
     fn op_verbatim<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         let res = {
             let w = &mut *w;

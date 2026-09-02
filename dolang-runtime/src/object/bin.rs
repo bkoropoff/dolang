@@ -3,6 +3,8 @@ use std::{
     ops::ControlFlow,
 };
 
+use crate::value::fmt;
+
 use crate::{
     arg::Args,
     bytecode::Variadic,
@@ -91,6 +93,66 @@ fn trim_end_bytes<'a>(me: &'a [u8], pattern: &[u8]) -> &'a [u8] {
 }
 
 impl<'v> Protocol<'v> for [u8] {
+    fn op_fmt<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &mut Strand<'v, 's>,
+        spec: &fmt::Spec,
+        w: &mut dyn fmt::Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        use fmt::{Fill, Kind, Pad};
+
+        let kind = spec.kind.ok_or_else(|| fmt::unresolved_kind(strand))?;
+        if kind.is_text() {
+            if spec.sign.is_some() || spec.alt || spec.fill == Fill::Zero {
+                return Err(Error::type_error(
+                    strand,
+                    "unsupported binary format option",
+                ));
+            }
+            let mut pad = Pad::new(*spec, w);
+            match kind {
+                Kind::Str => Self::op_display(this, strand, &mut pad)?,
+                Kind::Dbg => Self::op_debug(this, strand, &mut pad)?,
+                Kind::Verbatim => Self::op_verbatim(this, strand, &mut pad)?,
+                _ => unreachable!(),
+            }
+            return pad.finish(strand);
+        }
+        if spec.sign.is_some()
+            || spec.precision.is_some()
+            || matches!(kind, Kind::Exp | Kind::Fixed)
+            || (spec.alt && kind == Kind::Dec)
+        {
+            return Err(Error::type_error(
+                strand,
+                "unsupported binary format option",
+            ));
+        }
+        let mut digits = String::new();
+        for byte in this.get() {
+            use std::fmt::Write as _;
+            match kind {
+                Kind::Hex => write!(&mut digits, "{byte:02x}"),
+                Kind::Oct => write!(&mut digits, "{byte:03o}"),
+                Kind::Bin => write!(&mut digits, "{byte:08b}"),
+                Kind::Dec => write!(&mut digits, "{byte:03}"),
+                _ => unreachable!(),
+            }
+            .unwrap();
+        }
+        let prefix = if spec.alt {
+            match kind {
+                Kind::Hex => "0x",
+                Kind::Oct => "0o",
+                Kind::Bin => "0b",
+                _ => "",
+            }
+        } else {
+            ""
+        };
+        fmt::finish_numeric(strand, spec, w, "", prefix, &digits)
+    }
+
     fn op_type<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
@@ -102,7 +164,7 @@ impl<'v> Protocol<'v> for [u8] {
     fn op_display<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn fmt::Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "{}", BStr::new(this.receiver.get()))
     }
@@ -110,7 +172,7 @@ impl<'v> Protocol<'v> for [u8] {
     fn op_debug<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn fmt::Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "b{:?}", BStr::new(this.receiver.get()))
     }
@@ -536,7 +598,7 @@ impl<'v> Protocol<'v> for Split<'v> {
     fn op_debug<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn fmt::Format<'v>,
     ) -> Result<'v, 's, ()> {
         let forward = this.borrow_mut(strand)?.forward;
         let label = if forward {
@@ -670,7 +732,7 @@ impl<'v> Protocol<'v> for Class {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn fmt::Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<type std.Bin>")
     }

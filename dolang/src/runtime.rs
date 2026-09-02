@@ -9,8 +9,8 @@ pub use dolang_runtime::{
 /// Value manipulation
 pub mod value {
     pub use dolang_runtime::value::{
-        AsBoundFunction, AsFunction, AsTuple, BinEmbryo, Empty, Format, Input, Nil, Output, Root,
-        Singleton, Slot, StrEmbryo, TypeObject, Value,
+        AsBoundFunction, AsFunction, AsTuple, BinEmbryo, Empty, Input, Nil, Output, Root,
+        Singleton, Slot, StrEmbryo, TypeObject, Value, fmt,
         view::{
             Array, Bin, Dict, DictPairs, ObjectId, ObjectView, PinBin, PinStr, Record, RecordPairs,
             Str, Tuple, View,
@@ -18,7 +18,7 @@ pub mod value {
     };
 }
 
-pub use value::{Format, Input, Output, Slot, Value};
+pub use value::{Input, Output, Slot, Value};
 
 /// Error handling
 pub mod error {
@@ -31,6 +31,7 @@ pub use error::{Error, Result};
 
 /// Native objects
 pub mod object {
+    pub use dolang_runtime::fmt;
     pub use dolang_runtime::object::native::{
         Cast, Instance, Mut, Object, Ref, Spread, SpreadContext, Type, TypeBuilder, TypeMut,
         TypeRef, Unpack, UnpackItem,
@@ -40,7 +41,6 @@ pub mod object {
         dict_view::{DictLike, DictView, DictViewSink},
         flags::{FlagLike, FlagLikeExt, Flags, FlagsInstanceExt, FlagsTypeExt},
     };
-    pub use dolang_runtime::{fmt, value::Format};
 }
 
 pub use object::{Instance, Object, Type};

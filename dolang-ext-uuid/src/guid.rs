@@ -1,5 +1,7 @@
 use std::hash::{Hash, Hasher};
 
+use dolang::runtime::value::fmt::Format;
+
 use dolang::runtime::{
     Args, Error, Instance, Object, Output, Result, Slot, State, Strand, Type, Value,
     object::TypeBuilder, unpack, value::View,
@@ -104,7 +106,7 @@ impl<'v> Object<'v> for Guid {
     fn debug<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         dolang::runtime::object::fmt!(strand, w, "<uuid.Guid {}>", this.annex().inner)
     }
@@ -112,7 +114,7 @@ impl<'v> Object<'v> for Guid {
     fn display<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         dolang::runtime::object::fmt!(strand, w, "{}", this.annex().inner)
     }

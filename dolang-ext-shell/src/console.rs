@@ -1,8 +1,9 @@
 use std::mem;
 
 use dolang::runtime::object::fmt;
+use dolang::runtime::value::fmt::Format;
 use dolang::runtime::{
-    Error, Format, Input, Instance, Object, Output, Result, Slot, Strand, Sym, Value, method,
+    Error, Input, Instance, Object, Output, Result, Slot, Strand, Sym, Value, method,
     object::{Mut, TypeBuilder},
     unpack,
     value::{TypeObject, View},

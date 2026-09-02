@@ -6,6 +6,8 @@ use std::{
     str::Chars,
 };
 
+use crate::value::fmt::Format;
+
 use unicode_segmentation::{Graphemes, UnicodeSegmentation};
 
 use crate::{
@@ -101,7 +103,7 @@ impl<'v> Protocol<'v> for str {
     fn op_display<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "{}", this.receiver.get())
     }
@@ -109,7 +111,7 @@ impl<'v> Protocol<'v> for str {
     fn op_debug<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "\"")?;
         for char in this.receiver.get().chars() {
@@ -696,7 +698,7 @@ impl<'v> Protocol<'v> for View<'v> {
     fn op_debug<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         let label = match this.get().kind {
             ViewKind::Scalar => "scalars",
@@ -819,7 +821,7 @@ impl<'v> Protocol<'v> for ViewIter<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<str view iter>")
     }
@@ -990,7 +992,7 @@ impl<'v> Protocol<'v> for Split<'v> {
     fn op_debug<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         let forward = this.borrow_mut(strand)?.forward;
         let label = if forward {
@@ -1124,7 +1126,7 @@ impl<'v> Protocol<'v> for Type {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<type std.Str>")
     }

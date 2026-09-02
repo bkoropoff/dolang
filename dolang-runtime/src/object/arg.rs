@@ -1,5 +1,7 @@
 use std::{collections::HashSet, ops::ControlFlow};
 
+use crate::value::fmt::Format;
+
 use crate::{
     arg::{Arg, Args},
     bytecode::Variadic,
@@ -290,7 +292,7 @@ impl<'v> Protocol<'v> for ArgPack<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<args>")
     }
@@ -481,7 +483,7 @@ impl<'v> Protocol<'v> for ArgIter<'v> {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<arg iter>")
     }

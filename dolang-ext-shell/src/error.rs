@@ -1,5 +1,7 @@
 use std::{io, marker::PhantomData};
 
+use dolang::runtime::value::fmt::Format;
+
 use dolang::runtime::object::fmt;
 use dolang_vfs::{
     error::{Error as VfsError, ErrorKind},
@@ -144,7 +146,7 @@ impl<'v, T: SysErrorType<'v>> Object<'v> for SysErrorObject<T> {
     fn display<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         fmt!(strand, w, "{}", this.annex().message())
     }
@@ -152,7 +154,7 @@ impl<'v, T: SysErrorType<'v>> Object<'v> for SysErrorObject<T> {
     fn debug<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         fmt!(strand, w, "<sys.{} ", T::NAME)?;
         Self::display(this, strand, w)?;
@@ -259,7 +261,7 @@ impl<'v> Object<'v> for ProcError {
     fn display<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         fmt!(strand, w, "{}", this.annex().message())
     }
@@ -267,7 +269,7 @@ impl<'v> Object<'v> for ProcError {
     fn debug<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn dolang::runtime::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         fmt!(strand, w, "<proc.Error ")?;
         Self::display(this, strand, w)?;

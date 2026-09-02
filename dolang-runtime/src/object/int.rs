@@ -1,5 +1,7 @@
 use std::{hash::DefaultHasher, num::IntErrorKind, ops::ControlFlow};
 
+use crate::value::fmt::{Format, Spec};
+
 use dolang_util::alias;
 
 use crate::{
@@ -107,6 +109,15 @@ pub(crate) async fn op_mcall<'v, 'a, 's>(
 }
 
 impl<'v> Protocol<'v> for i128 {
+    fn op_fmt<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &mut Strand<'v, 's>,
+        spec: &Spec,
+        w: &mut dyn Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        crate::value::fmt::format_int(*this.get(), strand, spec, w)
+    }
+
     fn op_type<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
@@ -118,7 +129,7 @@ impl<'v> Protocol<'v> for i128 {
     fn op_debug<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "{}", *this.get())
     }
@@ -347,6 +358,36 @@ unsafe impl Collect for Verbatim {
 }
 
 impl<'v> Protocol<'v> for Verbatim {
+    fn op_fmt<'a, 's>(
+        this: Recv<'v, 'a, Self>,
+        strand: &mut Strand<'v, 's>,
+        spec: &Spec,
+        w: &mut dyn Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        use crate::value::fmt::{Fill, Kind, Pad};
+
+        let kind = spec
+            .kind
+            .ok_or_else(|| crate::value::fmt::unresolved_kind(strand))?;
+        if !kind.is_text() || spec.sign.is_some() || spec.fill == Fill::Zero {
+            return crate::value::fmt::format_int(this.get().value, strand, spec, w);
+        }
+        if spec.alt {
+            return Err(Error::type_error(
+                strand,
+                "unsupported integer format option",
+            ));
+        }
+        let mut pad = Pad::new(*spec, w);
+        match kind {
+            Kind::Str => Self::op_display(this, strand, &mut pad)?,
+            Kind::Dbg => Self::op_debug(this, strand, &mut pad)?,
+            Kind::Verbatim => Self::op_verbatim(this, strand, &mut pad)?,
+            _ => unreachable!(),
+        }
+        pad.finish(strand)
+    }
+
     fn op_type<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
@@ -358,7 +399,7 @@ impl<'v> Protocol<'v> for Verbatim {
     fn op_verbatim<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "{}", this.get().text)
     }
@@ -366,7 +407,7 @@ impl<'v> Protocol<'v> for Verbatim {
     fn op_display<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "{}", this.get().value)
     }
@@ -374,7 +415,7 @@ impl<'v> Protocol<'v> for Verbatim {
     fn op_debug<'a, 's>(
         this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         let borrow = this.get();
         crate::fmt!(strand, w, "{}", borrow.text)
@@ -643,7 +684,7 @@ impl<'v> Protocol<'v> for Int {
     fn op_debug<'a, 's>(
         _this: Recv<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
-        w: &mut dyn crate::value::Format<'v>,
+        w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         crate::fmt!(strand, w, "<type std.Int>")
     }
