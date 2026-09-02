@@ -592,7 +592,7 @@ macro_rules! lex {
                 Some(b' ' | b'\t') => return $self.token($token, Space),
                 Some(b'\r') => return $self.token($token, Cr),
                 Some(b'\n') => return $self.token($token, Indent),
-                Some(b'\\') if matches!($self.mode, Mode::Shell | Mode::String | Mode::Heredoc) => return $self.token($token, Backslash)
+                Some(b'\\') if matches!($self.mode, Mode::Shell | Mode::String | Mode::Heredoc | Mode::RawHeredoc) => return $self.token($token, Backslash)
             };
             { $($rest)* }
         }
@@ -748,7 +748,7 @@ macro_rules! symbol {
                 enum symbol_reserved(token),
                 match Some(_) => match $self.mode {
                     Mode::FullExpr => return $self.error(ErrorDiagKind::BadIdent),
-                    Mode::Shell | Mode::String | Mode::Heredoc | Mode::RawHeredoc => $self.trans(Literal),
+                    Mode::Shell | Mode::String | Mode::Heredoc | Mode::RawHeredoc => return $self.token($token, Literal),
                 },
             }
         }
