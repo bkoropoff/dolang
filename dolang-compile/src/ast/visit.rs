@@ -112,6 +112,7 @@ pub enum NodeKind {
     Nil,
     Sym,
     Concat,
+    Fmt,
     Escape,
     BinConcat,
     EscapeByte,

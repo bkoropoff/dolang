@@ -117,7 +117,7 @@ pub class Size: Scalar
         if (scaled < SIZE_STEP)
           break
       note = "$value bytes"
-      "$(fmt scaled kind: :FIXED: precision: 2) $unit"
+      "${scaled:.2f} $unit"
     Scalar.(init) $self $text $note
 
 # A block of keyed entries, held as `[key, node]` pairs.

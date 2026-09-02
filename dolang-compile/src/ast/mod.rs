@@ -441,6 +441,48 @@ pub(crate) enum GetVariant {
     },
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum FormatAlign {
+    Left,
+    Right,
+    Center,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum FormatSign {
+    Plus,
+    Space,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum FormatKind {
+    Str,
+    Dbg,
+    Verbatim,
+    Hex,
+    Oct,
+    Bin,
+    Dec,
+    Exp,
+    Fixed,
+}
+
+pub(crate) struct FormatValue<T> {
+    pub(crate) value: T,
+    pub(crate) span: Span,
+}
+
+pub(crate) struct FormatSpec {
+    pub(crate) fill: Option<FormatValue<char>>,
+    pub(crate) zero: Option<Span>,
+    pub(crate) align: Option<FormatValue<FormatAlign>>,
+    pub(crate) sign: Option<FormatValue<FormatSign>>,
+    pub(crate) alt: Option<Span>,
+    pub(crate) width: Option<Expr>,
+    pub(crate) precision: Option<Expr>,
+    pub(crate) kind: Option<FormatValue<FormatKind>>,
+}
+
 pub(crate) enum Expr {
     Literal(Span),
     Ident(Ident),
@@ -455,6 +497,13 @@ pub(crate) enum Expr {
         exprs: Vec<Expr>,
         delim_span: Option<Span>,
         verbatim: bool,
+    },
+    Fmt {
+        value: Box<Expr>,
+        spec: Box<FormatSpec>,
+        dollar_span: Span,
+        brace_span: Span,
+        colon_span: Span,
     },
     Escape(char, Span),
     BinConcat {
@@ -576,6 +625,7 @@ impl Expr {
                 }
                 Some(Const::Str(acc))
             }
+            Expr::Fmt { .. } => None,
             Expr::Escape(v, _) => Some(Const::Str(v.to_string())),
             Expr::BinConcat { exprs, .. } => {
                 let mut acc = Vec::new();
@@ -656,6 +706,7 @@ impl Expr {
                     verbatim,
                 }
             }
+            Expr::Fmt { .. } => self,
             Expr::BinConcat { exprs, open, close } if !exprs.is_empty() => {
                 let mut new_exprs = vec![];
                 let mut exprs = VecDeque::from(exprs);
@@ -843,6 +894,14 @@ impl Expr {
                 Self::combine_iter(exprs.iter().map(|e| e.side_effect().unlikely()))
             }
 
+            Expr::Fmt { value, spec, .. } => Self::combine_iter(
+                std::iter::once(value.side_effect()).chain(
+                    [&spec.width, &spec.precision]
+                        .into_iter()
+                        .filter_map(|count| count.as_ref().map(|expr| expr.side_effect())),
+                ),
+            ),
+
             // Binary concatenation - similar to string concatenation
             Expr::BinConcat { exprs, .. } => {
                 Self::combine_iter(exprs.iter().map(|e| e.side_effect().unlikely()))
@@ -902,6 +961,35 @@ impl Node for Expr {
                     visit.token(Token::StringDelim, delim_span.right_char(), None)?
                 }
                 ControlFlow::Continue(())
+            }
+            Expr::Fmt {
+                value,
+                spec,
+                dollar_span,
+                brace_span,
+                colon_span,
+            } => {
+                visit.token(Token::Sigil, *dollar_span, None)?;
+                visit.token(Token::Delim, brace_span.left_char(), None)?;
+                visit.node(&**value)?;
+                visit.token(Token::Delim, *colon_span, None)?;
+                for span in [
+                    spec.fill.as_ref().map(|v| v.span),
+                    spec.zero,
+                    spec.align.as_ref().map(|v| v.span),
+                    spec.sign.as_ref().map(|v| v.span),
+                    spec.alt,
+                    spec.kind.as_ref().map(|v| v.span),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    visit.token(Token::Operator, span, None)?;
+                }
+                for count in [&spec.width, &spec.precision].into_iter().flatten() {
+                    visit.node(count)?;
+                }
+                visit.token(Token::Delim, brace_span.right_char(), None)
             }
             Expr::Escape(_, span) => visit.token(Token::Escape, *span, None),
             Expr::BinConcat { exprs, open, close } => {
@@ -1033,6 +1121,7 @@ impl Node for Expr {
             Expr::Nil(_) => NodeKind::Nil,
             Expr::Sym(_) => NodeKind::Sym,
             Expr::Concat { .. } => NodeKind::Concat,
+            Expr::Fmt { .. } => NodeKind::Fmt,
             Expr::Escape(_, _) => NodeKind::Escape,
             Expr::BinConcat { .. } => NodeKind::BinConcat,
             Expr::EscapeByte(_, _) => NodeKind::EscapeByte,

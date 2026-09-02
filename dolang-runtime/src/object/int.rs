@@ -1,7 +1,5 @@
 use std::{hash::DefaultHasher, num::IntErrorKind, ops::ControlFlow};
 
-use crate::value::fmt::{Format, Spec};
-
 use dolang_util::alias;
 
 use crate::{
@@ -15,7 +13,11 @@ use crate::{
     strand::Strand,
     sym::{self, Sym},
     unpack,
-    value::{Output, Slot, Value, prim::Prim},
+    value::{
+        Output, Slot, Value,
+        fmt::{self, Format, Spec},
+        prim::Prim,
+    },
     vm::Vm,
 };
 
@@ -62,7 +64,7 @@ impl<'v> Protocol<'v> for i128 {
         spec: &Spec,
         w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::value::fmt::format_int(*this.get(), strand, spec, w)
+        fmt::format_int(*this.get(), strand, spec, w)
     }
 
     fn op_type<'a, 's>(
@@ -78,7 +80,7 @@ impl<'v> Protocol<'v> for i128 {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "{}", *this.get())
+        fmt!(strand, w, "{}", *this.get())
     }
 
     fn op_get<'a, 's>(
@@ -307,11 +309,9 @@ impl<'v> Protocol<'v> for Verbatim {
     ) -> Result<'v, 's, ()> {
         use crate::value::fmt::{Fill, Kind, Pad};
 
-        let kind = spec
-            .kind
-            .ok_or_else(|| crate::value::fmt::unresolved_kind(strand))?;
+        let kind = spec.kind.ok_or_else(|| fmt::unresolved_kind(strand))?;
         if !kind.is_text() || spec.sign.is_some() || spec.fill == Fill::Zero {
-            return crate::value::fmt::format_int(this.get().value, strand, spec, w);
+            return fmt::format_int(this.get().value, strand, spec, w);
         }
         if spec.alt {
             return Err(Error::type_error(
@@ -342,7 +342,7 @@ impl<'v> Protocol<'v> for Verbatim {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "{}", this.get().text)
+        fmt!(strand, w, "{}", this.get().text)
     }
 
     fn op_display<'a, 's>(
@@ -350,7 +350,7 @@ impl<'v> Protocol<'v> for Verbatim {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "{}", this.get().value)
+        fmt!(strand, w, "{}", this.get().value)
     }
 
     fn op_debug<'a, 's>(
@@ -359,7 +359,7 @@ impl<'v> Protocol<'v> for Verbatim {
         w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
         let borrow = this.get();
-        crate::fmt!(strand, w, "{}", borrow.text)
+        fmt!(strand, w, "{}", borrow.text)
     }
 
     fn op_get<'a, 's>(
@@ -621,7 +621,7 @@ impl<'v> Protocol<'v> for Int {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "<type std.Int>")
+        fmt!(strand, w, "<type std.Int>")
     }
 
     fn op_inspect<'a>(_this: Recv<'v, 'a, Self>, _vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {

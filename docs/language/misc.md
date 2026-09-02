@@ -83,5 +83,6 @@ print_verbatim 042   # prints "042"
 print_verbatim (042) # prints "42"
 ```
 
-This is also the form used for concatenation or string interpolation in
-statement and vertical-layout contexts.
+This is also the form used for implicit concatenation in statement and
+vertical-layout contexts. Interpolation inside ordinary quoted strings and
+here strings uses `str` conversion instead.

@@ -831,6 +831,17 @@ impl<'v> Vm<'v> {
                         builtin::CONCAT_BIN => {
                             self.concat_bin(strand, args, Slot::reborrow(&mut res))
                         }
+                        builtin::FMT => {
+                            let global = strand.vm().state::<crate::stdlib::fmt::Global<'v>>();
+                            crate::stdlib::fmt::create(
+                                strand,
+                                global,
+                                crate::value::fmt::Spec::default(),
+                                args,
+                                Slot::reborrow(&mut res),
+                            )
+                            .await
+                        }
                         _ => unreachable_unchecked(),
                     })
                     .await?;

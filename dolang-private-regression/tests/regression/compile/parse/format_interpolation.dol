@@ -1,0 +1,69 @@
+echo "${42}"
+# error: expected `:`
+#   --> format_interpolation.dol:LL:LL
+#    |
+# LL | echo "${42}"
+#    |           ^
+
+echo "${:s}"
+# error: invalid expression
+#   --> format_interpolation.dol:LL:LL
+#    |
+# LL | echo "${:s}"
+#    |          ^
+
+echo "${42:}"
+# error: format specification must not be empty
+#   --> format_interpolation.dol:LL:LL
+#    |
+# LL | echo "${42:}"
+#    |           ^
+
+echo "${42:5+}"
+# error: invalid format specification
+#   --> format_interpolation.dol:LL:LL
+#    |
+# LL | echo "${42:5+}"
+#    |             ^
+
+echo "${1.2:.}"
+# error: expected precision after `.`
+#   --> format_interpolation.dol:LL:LL
+#    |
+# LL | echo "${1.2:.}"
+#    |             ^
+
+echo "${42:q}"
+# error: invalid format specification
+#   --> format_interpolation.dol:LL:LL
+#    |
+# LL | echo "${42:q}"
+#    |            ^
+
+echo "${42:X}"
+# error: invalid format specification
+#   --> format_interpolation.dol:LL:LL
+#    |
+# LL | echo "${42:X}"
+#    |            ^
+
+echo "${42:$width<}"
+# error: invalid format specification
+#   --> format_interpolation.dol:LL:LL
+#    |
+# LL | echo "${42:$width<}"
+#    |                  ^
+
+echo "${42:4294967296}"
+# error: format count is too large
+#   --> format_interpolation.dol:LL:LL
+#    |
+# LL | echo "${42:4294967296}"
+#    |                     ^
+
+echo b"${42:5}"
+# error: formatted interpolation is not valid in binary strings
+#   --> format_interpolation.dol:LL:LL
+#    |
+# LL | echo b"${42:5}"
+#    |         ^

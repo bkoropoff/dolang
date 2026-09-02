@@ -1,0 +1,6 @@
+echo "${42:5"
+# error: expected closing `}` in formatted interpolation
+#   --> format_interpolation_unterminated.dol:LL:LL
+#    |
+# LL | echo "${42:5"
+#    |             ^

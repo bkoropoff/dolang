@@ -422,7 +422,7 @@ def file_digest path
   path.open rb do |file|
     for chunk = file
       state.update $chunk
-  str (fmt (state.digest()) kind: :HEX:)
+  "${state.digest():x}"
 
 def find_child node tag :namespace = nil
   for child = node.children
@@ -2248,7 +2248,7 @@ def write_bundle path members info domain_xml
                 do entry.write $chunk
                 do state.update $chunk
               ind.delta $chunk.len
-      digests[member.kind] = str (fmt (state.digest()) kind: :HEX:)
+      digests[member.kind] = "${state.digest():x}"
     archive.open $MANIFEST_MEMBER mode: 0o644 do |entry|
       entry.write $ bundle_manifest $info $members $domain_xml $digests
 
@@ -2462,7 +2462,7 @@ def extract_member bundle member dest
             do out.write $chunk
             do state.update $chunk
           ind.delta $chunk.len
-    let actual = str (fmt (state.digest()) kind: :HEX:)
+    let actual = "${state.digest():x}"
     if (actual != member.hex)
       let expected = member.hex
       let kind = str(member.kind).lower()
@@ -2524,7 +2524,7 @@ def write_files_entry add app
     file[:encoding:] = "b64"
 
   if (add.chmod != nil)
-    file[:permissions:] = str (fmt (add.chmod) kind: :OCT:)
+    file[:permissions:] = "${add.chmod:o}"
   for key value = add.extra
     file[key] = value
   file
@@ -2659,9 +2659,9 @@ def build_provision_iso root files
     manifest[name] = if (type value Path)
       file_digest $value
     else
-      str (fmt (digest.blake3(value)) kind: :HEX:)
+      "${digest.blake3(value):x}"
 
-  let key = str (fmt (digest.blake3(json.encode manifest)) kind: :HEX:)
+  let key = "${(digest.blake3(json.encode manifest)):x}"
   let entry = (root / "provision" / key)
   entry.create_dir all: true
   let destination = (entry / "provision.iso")

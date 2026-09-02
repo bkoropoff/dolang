@@ -1483,6 +1483,13 @@ impl<'a> Elaborater<'a> {
                 }
                 Ok(())
             }
+            Expr::Fmt { value, spec, .. } => {
+                self.visit_expr(scope, value, is_arg)?;
+                for expr in [&mut spec.width, &mut spec.precision].into_iter().flatten() {
+                    self.visit_expr(scope, expr, is_arg)?;
+                }
+                Ok(())
+            }
             Expr::BinConcat { exprs, .. } => {
                 for expr in exprs.iter_mut() {
                     self.visit_expr(scope, expr, is_arg)?;

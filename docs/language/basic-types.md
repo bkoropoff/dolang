@@ -51,6 +51,7 @@ interpolation with `$`:
 let name = Alice
 echo "Hello, $name!"
 echo "2 + 2 = $(2 + 2)"
+echo "padded: ${count:05d}"
 ```
 
 See [Expressions](expressions.md) for details on string interpolation behavior.
@@ -142,6 +143,7 @@ let name = Alice
 let greeting = |
   Hello, $name!
   You have $(3 + 1) messages.
+  Total: ${total:8.2f}
 ```
 
 Use `\$` to suppress interpolation:
