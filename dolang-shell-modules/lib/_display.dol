@@ -24,11 +24,21 @@ let note_style = term.style dim: true
 let bullet_style = term.style dim: true
 let absent_style = term.style dim: true
 
-def pad n
+def spaces n
   " ".repeat(n)
 
 def bullet indent
-  bullet_style "$(pad indent)- "
+  bullet_style "$(spaces indent)- "
+
+# Lays a key out plainly, for a key that leads into a block rather than
+# sharing a column with its siblings.
+let free_column = fmt()
+
+let SIZE_UNITS = ["KiB", "MiB", "GiB", "TiB", "PiB", "EiB"]
+# A unit only takes over from the one below it once the count is half again
+# larger than the unit itself: switching exactly at 1024 would render 1025
+# bytes as `1.00 KiB`, which says less than the number it replaced.
+let SIZE_STEP = 1536.0
 
 # --- Nodes ------------------------------------------------------------------
 
@@ -45,10 +55,10 @@ pub class Node
 
   # Emits the node as the value of `key`, or as a bare value when `key` is
   # `nil`. `start` is what precedes the line -- indentation, or a bullet
-  # leading into a block -- and `align` pads the key out to the width of the
-  # block it appears in.
-  pub def entry self key indent start align
-    let _ = [self, key, indent, start, align]
+  # leading into a block -- and `column` is the `FmtSpec` that lays the key
+  # out against the block it appears in.
+  pub def entry self key indent start column
+    let _ = [self, key, indent, start, column]
     throw "Node.entry not implemented"
 
   # Emits the node as an item of an enclosing list.
@@ -75,17 +85,40 @@ pub class Scalar: Node
   pub def inline _self
     true
 
-  pub def entry self key _indent start align
+  pub def entry self key _indent start column
     if (key == nil)
       print $start $self.text
     else
-      print $start (key_style "$key:") $align " " $self.text
+      print $start (key_style(column("$key:"))) " " $self.text
     if self.note
       print " " (note_style "($(self.note))")
     print "\n"
 
   pub def item self indent
-    self.entry nil $indent (bullet indent) ""
+    self.entry nil $indent (bullet indent) $free_column
+
+# A byte count, scaled to the largest binary unit it fills, with the exact
+# number kept as the aside so the size is still readable off the line it is
+# scaled on. A count small enough that a unit would only cost it precision is
+# left as it is, as is one the caller asked for `raw`.
+pub class Size: Scalar
+  def (init) self value raw = false
+    let note = nil
+    let text = if (value == nil)
+      absent_style "~"
+    else if (raw || value < SIZE_STEP)
+      str $value
+    else
+      let scaled = (value * 1.0)
+      let unit = nil
+      for candidate = SIZE_UNITS
+        scaled = (scaled / 1024.0)
+        unit = candidate
+        if (scaled < SIZE_STEP)
+          break
+      note = "$value bytes"
+      "$(fmt scaled kind: :FIXED: precision: 2) $unit"
+    Scalar.(init) $self $text $note
 
 # A block of keyed entries, held as `[key, node]` pairs.
 pub class Map: Node
@@ -102,12 +135,12 @@ pub class Map: Node
   pub def empty self
     (self.entries.len == 0)
 
-  pub def entry self key indent start align
+  pub def entry self key indent start column
     if self.empty()
-      print $start (key_style "$key:") $align " " (absent_style "{}") "\n"
+      print $start (key_style(column("$key:"))) " " (absent_style "{}") "\n"
       return nil
     print $start (key_style "$key:") "\n"
-    self.block (indent + 2) (pad (indent + 2))
+    self.block (indent + 2) (spaces (indent + 2))
 
   pub def item self indent
     if self.empty()
@@ -119,21 +152,23 @@ pub class Map: Node
     let width = 0
     for pair = self.entries
       let key node = pair
-      if (node.inline() && key.len > width)
-        width = key.len
+      if (node.inline() && key.width() > width)
+        width = key.width()
+    # The `:` is part of what gets laid out, hence the extra column.
+    let key_column = fmt width: (width + 1)
     let first = true
     for pair = self.entries
       let key node = pair
       let lead = if first
         start
       else
-        pad $indent
+        spaces $indent
       first = false
-      let align = if node.inline()
-        pad (width - key.len)
+      let column = if node.inline()
+        key_column
       else
-        ""
-      node.entry $key $indent $lead $align
+        free_column
+      node.entry $key $indent $lead $column
 
 # A block of bulleted items.
 pub class List: Node
@@ -150,9 +185,9 @@ pub class List: Node
   pub def empty self
     (self.items.len == 0)
 
-  pub def entry self key indent start align
+  pub def entry self key indent start column
     if self.empty()
-      print $start (key_style "$key:") $align " " (absent_style "[]") "\n"
+      print $start (key_style(column("$key:"))) " " (absent_style "[]") "\n"
       return nil
     print $start (key_style "$key:") "\n"
     self.block (indent + 2) nil
@@ -204,7 +239,7 @@ pub def section name node
   if (node == nil || node.empty())
     return nil
   print "  " (section_style "▸ $name") "\n"
-  node.block 6 (pad 6)
+  node.block 6 (spaces 6)
 
 # --- System values ----------------------------------------------------------
 

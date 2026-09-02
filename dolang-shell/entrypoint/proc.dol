@@ -1,6 +1,6 @@
 # Inspects and controls processes on the current VFS target.
 
-import args fs proc shell std term
+import args proc shell std term
 import _display: display
 
 let heading_style = term.style fg: :BRIGHT_BLUE: bold: true
@@ -9,9 +9,13 @@ let dim_style = term.style dim: true
 let absent_style = term.style dim: true
 let error_style = term.style fg: :BRIGHT_RED: bold: true
 
-# This is a byte limit, not terminal width. Proper clipping needs Unicode
-# grapheme segmentation and terminal-cell measurement.
-let MAX_ARGV0_NAME_BYTES = 128
+# Layout width to assume when the console has none to report: output is being
+# piped, or the terminal would not say how wide it is.
+let DEFAULT_COLS = 80
+
+# A name column narrower than this tells the reader nothing, so a very narrow
+# console gets an overlong line rather than a useless one.
+let MIN_NAME_WIDTH = 12
 
 def parse_pid value
   let pid = try
@@ -25,56 +29,58 @@ def parse_pid value
 def parse_signal value
   sym $ value.upper()
 
-def pad_left value width
-  "$(" ".repeat(width - value.len))$value"
-
-def pad_right value width
-  "$value$(" ".repeat(width - value.len))"
-
+# What the NAME column shows: argv[0] as the process reported it, or the name
+# the OS knows it by when there is no command line to read.
+#
+# argv[0] is whatever the process chose to write there -- a bare name, a path,
+# or, as Electron's helpers do, an entire command line -- so this is the column
+# that has to be clipped to fit.
 def process_name info
-  let exe = info.exe
-  if (exe != nil)
-    let name = exe.name
-    if (name != nil && name.len > 0)
-      return name
   let cmdline = info.cmdline
-  if (cmdline != nil && cmdline.len > 0 &&
-      cmdline[0].len > 0 && cmdline[0].len <= MAX_ARGV0_NAME_BYTES)
-    let name = (fs.Path cmdline[0]).name
-    if (name != nil && name.len > 0)
-      return name
+  if (cmdline != nil && cmdline.len > 0 && cmdline[0].len > 0)
+    return cmdline[0]
   info.name
 
 def list_processes _p
   let rows = []
   let pid_width = 3
   let ppid_width = 4
-  let name_width = 4
   for info = proc.enumerate()
     let pid = str $info.pid
     let ppid = (info.parent_pid != nil && str(info.parent_pid) || "~")
     let name = process_name $info
     rows.push [pid, ppid, name]
-    if (pid.len > pid_width)
-      pid_width = pid.len
-    if (ppid.len > ppid_width)
-      ppid_width = ppid.len
-    if (name.len > name_width)
-      name_width = name.len
+    if (pid.width() > pid_width)
+      pid_width = pid.width()
+    if (ppid.width() > ppid_width)
+      ppid_width = ppid.width()
 
-  print (heading_style(pad_left("PID", pid_width))) "  "
-  print (heading_style(pad_left("PPID", ppid_width))) "  "
-  print (heading_style(pad_right("NAME", name_width))) "\n"
+  # The PID columns are sized to their contents and the name takes whatever is
+  # left of the line, clipped rather than wrapped. A name is arbitrary text an
+  # arbitrary process chose, so this is what keeps one row to one line.
+  let cols = (term.console.geometry().cols || DEFAULT_COLS)
+  let name_width = (cols - pid_width - ppid_width - 4)
+  if (name_width < MIN_NAME_WIDTH)
+    name_width = MIN_NAME_WIDTH
+
+  # Each column is laid out by a specification the header and every cell
+  # share, so a column is described once rather than at each use. The name
+  # ends the line, so it is clipped but not padded.
+  let pid_column = fmt align: :RIGHT: width: $pid_width
+  let ppid_column = fmt align: :RIGHT: width: $ppid_width
+
+  print (heading_style(pid_column("PID"))) "  "
+  print (heading_style(ppid_column("PPID"))) "  "
+  print (heading_style "NAME") "\n"
   for row = rows
     let pid ppid name = row
-    print (pid_style(pad_left(pid, pid_width))) "  "
-    let ppid_cell = pad_left $ppid $ppid_width
+    print (pid_style(pid_column(pid))) "  "
+    let ppid_cell = ppid_column(ppid)
     if (ppid == "~")
       print $ absent_style $ppid_cell
     else
       print $ppid_cell
-    print "  " $ pad_right $name $name_width
-    print "\n"
+    print "  " (name.clip(name_width, suffix: "…")) "\n"
 
 def unix_node identity
   let groups = display.List $

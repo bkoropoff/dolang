@@ -48,6 +48,9 @@ let FS_FIELDS = $
   - block_size
   - read_only
   - name_max
+# Byte counts, which are reported in binary units unless raw ones are asked
+# for. `size` is a `Metadata` field; the rest are on `FsMetadata`.
+let SIZE_FIELDS = ["size", "capacity", "free", "available"]
 
 let MAX_DEPTH = 6
 
@@ -161,12 +164,12 @@ def mode_node mode
   let owner = triad $mode.owner $mode.contains(:SET_UID:) s
   let group = triad $mode.group $mode.contains(:SET_GID:) s
   let other = triad $mode.other $mode.contains(:STICKY:) t
-  display.Scalar "0$((mode.int & 0o7777).octal())" "$owner$group$other"
+  display.Scalar (fmt (mode.int & 0o7777) kind: :OCT: alt: true) "$owner$group$other"
 
 def hex_node value
   if (value == nil)
     return display.text nil
-  display.Scalar "0x$(value.hex())"
+  display.Scalar (fmt value kind: :HEX: alt: true)
 
 def uuid_node principal
   let name = display.opt do
@@ -333,7 +336,7 @@ def order_entries wanted entries
 # Splits `fs.Metadata` into the general/unix/attribute groups. Every reported
 # field lands somewhere: unrecognized booleans are treated as platform
 # attributes, and anything else falls through to `other`.
-def metadata_sections meta all
+def metadata_sections meta all raw
   let general = []
   let unix = []
   let attributes = []
@@ -345,7 +348,10 @@ def metadata_sections meta all
     if SKIP_FIELDS.contains(key)
       continue
     if GENERAL_FIELDS.contains(key)
-      general.push [key, node value]
+      if SIZE_FIELDS.contains(key)
+        general.push [key, display.Size value raw]
+      else
+        general.push [key, node value]
     else if UNIX_FIELDS.contains(key)
       if (key == "uid")
         unix.push [key, display.id value :USER:]
@@ -447,7 +453,7 @@ def stream_node stream
       if (entry[0] != "name")
         - $entry
 
-def filesystem_section path
+def filesystem_section path raw
   let fs_meta = display.opt do fs.fs_metadata $path
   if (fs_meta == nil)
     return nil
@@ -458,15 +464,17 @@ def filesystem_section path
     let key = (str name)
     if RAW_MASK_FIELDS.contains(key)
       entries.push [key, hex_node value]
+    else if SIZE_FIELDS.contains(key)
+      entries.push [key, display.Size value raw]
     else
       entries.push [key, node value]
   display.Map $ order_entries $FS_FIELDS $entries
 
 # --- Driver -----------------------------------------------------------------
 
-def dump path resolve all
+def dump path resolve all raw
   let meta = fs.metadata $path resolve: $resolve
-  let general unix attributes other = metadata_sections $meta $all
+  let general unix attributes other = metadata_sections $meta $all $raw
   let os = display.opt do sys.os_info().os
 
   display.section general $ display.Map $general
@@ -487,7 +495,7 @@ def dump path resolve all
     display.section streams $ stream_section $path $resolve
 
   display.section xattrs $ xattr_section $path $resolve
-  display.section filesystem $ filesystem_section $path
+  display.section filesystem $ filesystem_section $path $raw
 
 def dump_metadata p
   let opts = p.metadata
@@ -503,7 +511,7 @@ def dump_metadata p
     print (head_style "● $path")
     echo()
     try
-      dump $path $resolve $opts.all
+      dump $path $resolve $opts.all $opts.bytes
     catch std.RuntimeError: e
       # One bad path shouldn't abandon the rest; report it and carry on.
       rc = 1
@@ -521,6 +529,9 @@ args.with
     - flag: all
       short: a
       help: Include platform attributes that are not set
+    - flag: bytes
+      short: b
+      help: Report sizes as a plain number of bytes
     - arg: paths
       parse: $fs.Path
       collect: true
