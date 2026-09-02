@@ -10,7 +10,7 @@ use windows_sys::Win32::{
     Foundation::{
         ERROR_ACCESS_DENIED, ERROR_ALIAS_EXISTS, ERROR_INSUFFICIENT_BUFFER,
         ERROR_INVALID_PARAMETER, ERROR_INVALID_PASSWORD, ERROR_MEMBER_IN_ALIAS,
-        ERROR_MEMBER_NOT_IN_ALIAS, ERROR_MORE_DATA, ERROR_NO_SUCH_ALIAS,
+        ERROR_MEMBER_NOT_IN_ALIAS, ERROR_MORE_DATA, ERROR_NO_SUCH_ALIAS, ERROR_NONE_MAPPED,
     },
     NetworkManagement::NetManagement::{
         FILTER_NORMAL_ACCOUNT, LOCALGROUP_INFO_0, LOCALGROUP_INFO_1, LOCALGROUP_MEMBERS_INFO_0,
@@ -56,27 +56,30 @@ unsafe fn optional(ptr: *const u16) -> Option<String> {
 }
 
 fn status(operation: &str, code: u32) -> Error {
-    let kind =
-        if code == NERR_UserNotFound || code == NERR_GroupNotFound || code == ERROR_NO_SUCH_ALIAS {
-            ErrorKind::NotFound
-        } else if code == NERR_UserExists
-            || code == NERR_GroupExists
-            || code == ERROR_ALIAS_EXISTS
-            || code == ERROR_MEMBER_IN_ALIAS
-        {
-            ErrorKind::AlreadyExists
-        } else if code == ERROR_MEMBER_NOT_IN_ALIAS {
-            ErrorKind::NotFound
-        } else if code == ERROR_ACCESS_DENIED {
-            ErrorKind::PermissionDenied
-        } else if code == ERROR_INVALID_PARAMETER
-            || code == ERROR_INVALID_PASSWORD
-            || code == NERR_PasswordTooShort
-        {
-            ErrorKind::InvalidInput
-        } else {
-            ErrorKind::Other
-        };
+    let kind = if code == NERR_UserNotFound
+        || code == NERR_GroupNotFound
+        || code == ERROR_NO_SUCH_ALIAS
+        || code == ERROR_NONE_MAPPED
+    {
+        ErrorKind::NotFound
+    } else if code == NERR_UserExists
+        || code == NERR_GroupExists
+        || code == ERROR_ALIAS_EXISTS
+        || code == ERROR_MEMBER_IN_ALIAS
+    {
+        ErrorKind::AlreadyExists
+    } else if code == ERROR_MEMBER_NOT_IN_ALIAS {
+        ErrorKind::NotFound
+    } else if code == ERROR_ACCESS_DENIED {
+        ErrorKind::PermissionDenied
+    } else if code == ERROR_INVALID_PARAMETER
+        || code == ERROR_INVALID_PASSWORD
+        || code == NERR_PasswordTooShort
+    {
+        ErrorKind::InvalidInput
+    } else {
+        ErrorKind::Other
+    };
     Error::from_system_code(
         kind,
         format!("{operation}: NetAPI status {code}"),
