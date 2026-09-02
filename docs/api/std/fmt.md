@@ -30,6 +30,6 @@ let money = fmt precision: 2 kind: :FIXED:
 echo "total: $(money $amount)"
 ```
 
-When `kind` is nil, string interpolation uses verbatim formatting, `str` uses
-display formatting, and `dbg` uses debug formatting. An explicit `kind`
-overrides the surrounding operation.
+When `kind` is nil, interpolation in an ordinary quoted string or here string
+uses display formatting. `str` and `dbg` supply display and debug formatting,
+respectively. An explicit `kind` overrides the surrounding operation.

@@ -8,10 +8,10 @@ use crate::{
     Mode, PreludeImport,
     ast::{
         Arg, ArrayElem, Assign, Bind, Block, Class, ClassMember, ClassSuper, Const, Decorator, Def,
-        DictElem, Expand, Expr, ExprBody, FieldInit, For, Function, GetVariant, Ident, If, Import,
-        ImportElement, ImportItem, Key, LValue, Let, MemberScope, Method, NlGuard, Pair, Param,
-        ParamDefault, Pattern, PatternBind, PrimStmt, Res, Return, Single, Stmt, Try, Unit, While,
-        visit::Node,
+        DictElem, Expand, Expr, ExprBody, FieldInit, For, FormatAlign, FormatKind, FormatSign,
+        FormatSpec, Function, GetVariant, Ident, If, Import, ImportElement, ImportItem, Key,
+        LValue, Let, MemberScope, Method, NlGuard, Pair, Param, ParamDefault, Pattern, PatternBind,
+        PrimStmt, Res, Return, Single, Stmt, Try, Unit, While, visit::Node,
     },
     cfg::{self, BlockRefMut, Inst, InstInfo, Term, TermInfo},
     constant::{self, ConstantExt},
@@ -414,6 +414,7 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
                 delim_span,
                 verbatim,
             } => self.lower_concat(exprs, *delim_span, *verbatim)?,
+            Expr::Fmt { value, spec, .. } => self.lower_fmt(value, spec, expr.span())?,
             Expr::Escape(char, span) => {
                 let cid = self.consttab.str(self.bintab.id_str(&format!("{char}")));
                 self.block.insts.push(Inst(InstInfo::LoadConst(cid), *span));
@@ -632,6 +633,91 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
             }
         }
         Ok(())
+    }
+
+    fn lower_fmt(&mut self, value: &'a Expr, spec: &'a FormatSpec, span: Span) -> Result<()> {
+        self.lower_expr(value)?;
+        let mut sig = vec![sig::Arg::Value];
+
+        if let Some(fill) = &spec.fill {
+            let mut buf = [0; 4];
+            let value = Const::Str(fill.value.encode_utf8(&mut buf).to_owned());
+            let cid = self.lower_const(&value);
+            self.block
+                .insts
+                .push(Inst(InstInfo::LoadConst(cid), fill.span));
+            sig.push(sig::Arg::Key(self.symtab.id(&self.bintab.id_str("fill"))));
+        }
+        if let Some(align) = &spec.align {
+            self.lower_known_sym(
+                match align.value {
+                    FormatAlign::Left => "LEFT",
+                    FormatAlign::Right => "RIGHT",
+                    FormatAlign::Center => "CENTER",
+                },
+                align.span,
+            );
+            sig.push(sig::Arg::Key(self.symtab.id(&self.bintab.id_str("align"))));
+        }
+        if let Some(sign) = &spec.sign {
+            self.lower_known_sym(
+                match sign.value {
+                    FormatSign::Plus => "PLUS",
+                    FormatSign::Space => "SPACE",
+                },
+                sign.span,
+            );
+            sig.push(sig::Arg::Key(self.symtab.id(&self.bintab.id_str("sign"))));
+        }
+        if let Some(alt_span) = spec.alt {
+            let cid = self.lower_const(&Const::Bool(true));
+            self.block
+                .insts
+                .push(Inst(InstInfo::LoadConst(cid), alt_span));
+            sig.push(sig::Arg::Key(self.symtab.id(&self.bintab.id_str("alt"))));
+        }
+        if let Some(zero_span) = spec.zero {
+            self.lower_known_sym("ZERO", zero_span);
+            sig.push(sig::Arg::Key(self.symtab.id(&self.bintab.id_str("fill"))));
+        }
+        for (count, key) in [
+            (spec.width.as_ref(), "width"),
+            (spec.precision.as_ref(), "precision"),
+        ] {
+            if let Some(count) = count {
+                self.lower_expr(count)?;
+                sig.push(sig::Arg::Key(self.symtab.id(&self.bintab.id_str(key))));
+            }
+        }
+        if let Some(kind) = &spec.kind {
+            self.lower_known_sym(
+                match kind.value {
+                    FormatKind::Str => "STR",
+                    FormatKind::Dbg => "DBG",
+                    FormatKind::Verbatim => "VERBATIM",
+                    FormatKind::Hex => "HEX",
+                    FormatKind::Oct => "OCT",
+                    FormatKind::Bin => "BIN",
+                    FormatKind::Dec => "DEC",
+                    FormatKind::Exp => "EXP",
+                    FormatKind::Fixed => "FIXED",
+                },
+                kind.span,
+            );
+            sig.push(sig::Arg::Key(self.symtab.id(&self.bintab.id_str("kind"))));
+        }
+        let pack = sig::Pack::new(sig.into_iter());
+        self.block.insts.push(Inst(
+            InstInfo::Builtin(builtin::FMT, self.packtab.id(&pack)),
+            span,
+        ));
+        Ok(())
+    }
+
+    fn lower_known_sym(&mut self, value: &str, span: Span) {
+        let id = self.symtab.id(&self.bintab.id_str(value));
+        let cid = self.consttab.sym(id);
+        self.block.insts.push(Inst(InstInfo::LoadConst(cid), span));
     }
 
     fn lower_dict_elem(&mut self, elem: &'a DictElem) -> Result<(sig::Arg, Option<sig::Arg>)> {

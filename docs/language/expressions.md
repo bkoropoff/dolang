@@ -139,6 +139,62 @@ echo "In 10 years: $(age + 10)"
 echo "Type: $(type name)"
 ```
 
+### Formatted Interpolation
+
+Ordinary quoted strings and non-raw here strings accept
+`${value:format-spec}`. The value uses compact-expression syntax; wrap it in
+parentheses to use a full expression.
+
+```
+let count = 42
+echo "count: ${count:05d}"
+echo "total: ${(subtotal + tax):8.2f}"
+```
+
+The format specification is:
+
+```
+[[fill]align][sign][#][0][width][.precision][conversion]
+```
+
+`align` is `<`, `>`, or `^`. A preceding Unicode scalar sets the fill
+character. `sign` is `+` or a space, `#` enables alternate formatting, and
+`0` selects numeric-aware zero padding. Width and precision are decimal
+counts.
+
+Conversions select the representation:
+
+| Conversion | `kind`       |
+| ---------- | ------------ |
+| `s`        | `:STR:`      |
+| `?`        | `:DBG:`      |
+| `!`        | `:VERBATIM:` |
+| `x`        | `:HEX:`      |
+| `o`        | `:OCT:`      |
+| `b`        | `:BIN:`      |
+| `d`        | `:DEC:`      |
+| `e`        | `:EXP:`      |
+| `f`        | `:FIXED:`    |
+
+Without a conversion, quoted strings and here strings use display (`:STR:`)
+conversion. The options and validation are the same as
+[`fmt`](../api/std/index.md),
+[`Fmt`](../api/std/fmt.md), and [`FmtSpec`](../api/std/fmt-spec.md).
+
+Width and precision may use `$name` or `$(expression)` instead of a decimal
+count:
+
+```
+let width = 8
+let precision = 2
+echo "${amount:$(width).$(precision)f}"
+```
+
+A bare substitution consumes its full identifier. Use parentheses when a
+conversion immediately follows it: `$(width)f`, not `$widthf`. The format
+specification is required and must not contain a newline. Formatted
+interpolation is not available in binary or raw strings.
+
 Escape sequences in quoted strings:
 
 | Sequence | Meaning             |

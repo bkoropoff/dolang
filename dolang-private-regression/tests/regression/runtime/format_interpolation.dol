@@ -1,0 +1,104 @@
+# Static layout and conversions
+assert_eq "${42:05d}" "00042"
+assert_eq "${1.25:8.2f}" "    1.25"
+assert_eq "${42:+d}" "+42"
+assert_eq "${42: d}" " 42"
+assert_eq "${42:#x}" "0x2a"
+assert_eq "${42:x}" "2a"
+assert_eq "${42:o}" "52"
+assert_eq "${42:b}" "101010"
+assert_eq "${42:d}" "42"
+assert_eq "${1000.0:e}" "1e3"
+assert_eq "${1.25:f}" "1.25"
+assert_eq "${"x":s}" "x"
+assert_eq "${"x":?}" "\"x\""
+assert_eq "${:x::1}" "x"
+assert_eq "${:x::!}" ":x:"
+
+# Fill and alignment, including Unicode, escapes, and alignment glyphs as fill.
+assert_eq "${"x":界^9s}" "界界x界界"
+assert_eq "${"x":\"<3s}" "x\"\""
+assert_eq "${"x":>3s}" "  x"
+assert_eq "${"x":<<4s}" "x<<<"
+assert_eq "${"x":>>4s}" ">>>x"
+assert_eq "${"x":^^5s}" "^^x^^"
+
+# Compact and full expressions, including colons nested in the value.
+def select value :key
+  value[key]
+assert_eq "${select({answer: 42}, key: :answer:):d}" "42"
+assert_eq "${(20 + 22):d}" "42"
+
+# A bare name as the value keeps its `:` apart from the specification, whatever
+# the specification leads with -- including characters that are neither
+# identifier nor operator characters.
+let count = 42
+let word = "z"
+assert_eq "${count:d}" "42"
+assert_eq "${count:#x}" "0x2a"
+assert_eq "${count:05d}" "00042"
+assert_eq "${word:?}" "\"z\""
+assert_eq "${word:@^5s}" "@@z@@"
+assert_eq "${word:界^9s}" "界界z界界"
+
+# Dynamic counts are evaluated as expressions.
+let width = 5
+let precision = 1
+assert_eq "${42:$width}" "   42"
+assert_eq "${1.25:.$precision}" "1.2"
+assert_eq "${42:$(width)d}" "   42"
+assert_eq "${1.25:.$(precision)f}" "1.2"
+
+# A bare substitution consumes the full identifier; parentheses delimit a suffix.
+let widthf = 2
+assert_eq "${1.25:$widthf}" "1.25"
+assert_eq "${1.25:$(width)f}" " 1.25"
+
+# Value, width, and precision expressions run once in source order.
+let events = []
+def mark value label
+  events.push $label
+  value
+assert_eq "${mark(1.25, :value:):$(mark(6, :width:)).$(mark(1, :precision:))f}" "   1.2"
+assert_eq $events [:value:, :width:, :precision:]
+
+# Dynamic validation is shared with the public `fmt` function.
+def assert_fails block
+  let failed = try
+    block()
+    false
+  catch _
+    true
+  assert $failed
+assert_fails do "${42:$(0 - 1)}"
+assert_fails do "${42:$(1.5)}"
+assert_fails do "${42:$(4294967296)}"
+assert_fails do "${"x":+s}"
+
+def failure block
+  try
+    block()
+  catch err
+    [type(err), str(err)]
+assert_eq (failure do "${42:$(0 - 1)}") (failure do fmt 42 width: (0 - 1))
+assert_eq (failure do "${42:$(1.5)}") (failure do fmt 42 width: 1.5)
+assert_eq (failure do "${42:$(4294967296)}") (failure do fmt 42 width: 4294967296)
+assert_eq
+  - (failure do "${"x":+s}")
+  - (failure do str $ fmt "x" sign: :PLUS: kind: :STR:)
+
+# Formatted interpolation works in non-raw here documents.
+let doc = |-
+  value=${42:05d}
+assert_eq $doc "value=00042"
+
+# Raw strings and raw here documents leave the syntax literal.
+assert_eq r"${42:05d}" r"${42:05d}"
+doc = r|-
+  ${42:05d}
+assert_eq $doc r"${42:05d}"
+
+# The intrinsic does not resolve the public `fmt` binding.
+let fmt = nil
+assert_eq "${42:04d}" "0042"
+assert_eq $fmt nil

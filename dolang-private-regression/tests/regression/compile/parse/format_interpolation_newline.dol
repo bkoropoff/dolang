@@ -1,0 +1,10 @@
+echo |-
+  ${42:
+  5}
+# error: newlines are not valid in format specifications
+#   --> format_interpolation_newline.dol:LL:LL
+#    |
+# LL |     ${42:
+#    |  ________^
+# LL | |   5}
+#    | |_^
