@@ -14,7 +14,14 @@ assert_eq 5efoo "5efoo"
 assert_eq .foo ".foo"
 
 # Verify edge cases discerning floating point literal from field/method
-assert_eq $5.hex() "5"
+# `5.no_field` is a field access on the int, not the float literal `5.`
+let field_res = try
+  5.no_method()
+  false
+catch std.FieldError: _
+  true
+assert $field_res
+
 let res = try
   5.e_missing_field
 catch std.FieldError: _

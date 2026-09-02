@@ -186,21 +186,6 @@ buf.append b"def"
 assert_eq $frozen b"abc"
 ```
 
-### `hex`
-
-Returns the buffer's contents as a lowercase hexadecimal string, without
-modifying the buffer.
-
-#### Returns
-
-[`Str`](./str.md)
-
-#### Example
-
-```
-assert_eq (BinBuf(b"ABC").hex()) "414243"
-```
-
 ### `insert index value`
 
 Inserts `value` at the given byte index, shifting the rest of the buffer

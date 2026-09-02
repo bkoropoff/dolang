@@ -461,12 +461,6 @@ impl<'v> Protocol<'v> for [u8] {
                 }
                 Ok(())
             }
-            sym::HEX => {
-                let ([], []) = unpack!(strand, args, 0, 0)?;
-                let encoded = hex::encode(this.receiver.get());
-                Output::set(strand, out, encoded.as_str());
-                Ok(())
-            }
             sym::LEN => Err(Error::type_error(strand, "len is a field, not a method")),
             _ => Err(Error::field(strand, method)),
         }
@@ -494,8 +488,7 @@ impl<'v> Protocol<'v> for [u8] {
             | sym::TRIM
             | sym::TRIM_START
             | sym::TRIM_END
-            | sym::CONTAINS
-            | sym::HEX => {
+            | sym::CONTAINS => {
                 BoundMethod::create(strand, &this, field, out);
                 Ok(())
             }
@@ -785,7 +778,6 @@ impl<'v> Protocol<'v> for Class {
                 Method(sym::TRIM_END),
                 Method(sym::CONTAINS),
                 Method(sym::UNPACK),
-                Method(sym::HEX),
             ],
         })
     }
@@ -853,7 +845,6 @@ impl<'v> Protocol<'v> for Class {
             sym::INIT_METHOD
             | sym::PACK
             | sym::UNPACK
-            | sym::HEX
             | sym::STR_METHOD
             | sym::DBG_METHOD
             | sym::FMT_METHOD
@@ -1000,10 +991,12 @@ mod tests {
             assert_eq!(out.to_i64(strand).unwrap(), 5);
 
             // A recognized method name field-accesses to a callable bound method.
-            slot.get(strand, Sym::well_known(sym::HEX), &mut bound)
+            slot.get(strand, Sym::well_known(sym::CONTAINS), &mut bound)
                 .unwrap();
-            call!(strand, &bound, &mut out).await.unwrap();
-            assert_eq!(out.to_string(strand).unwrap(), "68656c6c6f");
+            call!(strand, &bound, &mut out, b"ell".as_slice())
+                .await
+                .unwrap();
+            assert!(out.to_bool(strand));
 
             let err = slot
                 .get(strand, Sym::well_known(sym::COUNT), &mut out)
@@ -1217,7 +1210,7 @@ mod tests {
     }
 
     #[test]
-    fn bin_mcall_unpack_and_hex() {
+    fn bin_mcall_unpack() {
         with_vm(async |strand, [mut slot, mut out]| {
             Output::set(strand, &mut slot, b"AB".as_slice());
 
@@ -1229,11 +1222,6 @@ mod tests {
             let mut first = Value::NIL;
             array.get(strand, 0, Slot::new(&mut first)).unwrap();
             assert_eq!(first.to_i64(strand).unwrap(), b'A' as i64);
-
-            method!(strand, &slot, Sym::well_known(sym::HEX), &mut out)
-                .await
-                .unwrap();
-            assert_eq!(out.to_string(strand).unwrap(), "4142");
         });
     }
 

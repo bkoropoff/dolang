@@ -9,7 +9,6 @@ use std::{
 use crate::{
     arg::Args,
     error::{Error, Result},
-    object::int,
     strand::Strand,
     sym::Sym,
 };
@@ -76,13 +75,15 @@ impl Display for Prim {
 impl Prim {
     pub(crate) fn op_get<'v, 'a, 's>(
         self,
-        receiver: &'a Value<'v>,
+        _receiver: &'a Value<'v>,
         strand: &'a mut Strand<'v, 's>,
         field: Sym<'v, 'a>,
-        out: Slot<'v, 'a>,
+        _out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
         match self {
-            Prim::Int(_) => int::op_get(receiver, strand, field, out),
+            // `Int` has no fields, but it is the one primitive whose values
+            // take field syntax at all, so a miss names the field.
+            Prim::Int(_) => Err(Error::field(strand, field)),
             _ => Err(Error::type_error(strand, "field get not supported")),
         }
     }
@@ -91,11 +92,11 @@ impl Prim {
         self,
         strand: &'a mut Strand<'v, 's>,
         method: Sym<'v, 'a>,
-        args: Args<'v, 'a>,
-        out: Slot<'v, 'a>,
+        _args: Args<'v, 'a>,
+        _out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
         match self {
-            Prim::Int(value) => int::op_mcall(value, strand, method, args, out).await,
+            Prim::Int(_) => Err(Error::field(strand, method)),
             _ => Err(Error::type_error(strand, "method call not supported")),
         }
     }

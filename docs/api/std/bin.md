@@ -86,21 +86,6 @@ Tests whether the binary data ends with the given suffix.
 assert (b"hello".ends_with b"lo")
 ```
 
-### `hex`
-
-Returns the binary data as a lowercase hexadecimal string.
-
-#### Returns
-
-[`Str`](./str.md)
-
-#### Example
-
-```
-assert_eq (b"ABC".hex()) "414243"
-assert_eq (b"\x00\x01\xff".hex()) "0001ff"
-```
-
 ### `join iter?`
 
 Joins values from an input source using this binary data as a separator.

@@ -98,7 +98,7 @@ class Operation
     state.update (str self.#prelude)
     state.update "\0"
     state.update (str $ inject_keys self.#inject)
-    state.digest().hex()
+    str (fmt (state.digest()) kind: :HEX:)
 
   def compile self
     let source = self.#path.read()

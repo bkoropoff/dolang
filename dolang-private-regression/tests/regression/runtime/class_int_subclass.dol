@@ -50,7 +50,7 @@ assert (!(bool (MyInt 0)))
 # Hash: two equal values must have equal hashes
 assert_eq (hash x) (hash (MyInt 21))
 
-# Inherited formatting methods
-assert_eq $x.binary() "10101"
-assert_eq $x.octal() "25"
-assert_eq $x.hex() "15"
+# Inherited formatting
+assert_eq (str (fmt x kind: :BIN:)) "10101"
+assert_eq (str (fmt x kind: :OCT:)) "25"
+assert_eq (str (fmt x kind: :HEX:)) "15"

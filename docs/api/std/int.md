@@ -19,53 +19,6 @@ assert_eq (int "42") 42
 assert_eq (int 3.14) 3
 ```
 
-## Methods
-
-### `binary()`
-
-Formats the integer in base 2.
-
-#### Returns
-
-[`Str`](./str.md)
-
-#### Example
-
-```
-assert_eq ((10).binary()) "1010"
-assert_eq ((-10).binary()) "-1010"
-```
-
-### `hex()`
-
-Formats the integer in lowercase base 16.
-
-#### Returns
-
-[`Str`](./str.md)
-
-#### Example
-
-```
-assert_eq ((255).hex()) "ff"
-assert_eq ((-255).hex()) "-ff"
-```
-
-### `octal()`
-
-Formats the integer in base 8.
-
-#### Returns
-
-[`Str`](./str.md)
-
-#### Example
-
-```
-assert_eq ((10).octal()) "12"
-assert_eq ((-10).octal()) "-12"
-```
-
 ## Operators
 
 ### Arithmetic
