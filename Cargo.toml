@@ -104,6 +104,8 @@ rust-version = "1.93"
 
 [workspace.dependencies]
 typed-path = "0.12.3"
+unicode-segmentation = "1.13"
+unicode-width = "0.2"
 
 [profile.dist]
 inherits = "release"

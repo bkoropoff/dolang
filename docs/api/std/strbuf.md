@@ -254,30 +254,6 @@ Tests whether the buffer's contents start with the given prefix.
 assert (StrBuf("foobar").starts_with "foo")
 ```
 
-### `sub start end?`
-
-Returns a copy of the substring from `start` to `end` (or to the end of the
-buffer if omitted), without modifying the buffer.
-
-#### Parameters
-
-| Name    | Type                 | Description           |
-| ------- | -------------------- | --------------------- |
-| `start` | [`Int`](./index.md)  | start index           |
-| `end`   | [`Int`](./index.md)? | end index (exclusive) |
-
-#### Returns
-
-[`Str`](./str.md)
-
-#### Example
-
-```
-let buf = StrBuf("foobar")
-assert_eq (buf.sub 2) "obar"
-assert_eq (buf.sub 2 4) "ob"
-```
-
 ### `truncate len`
 
 Shrinks the buffer to `len` bytes, discarding anything past that point.

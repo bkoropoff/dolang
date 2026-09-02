@@ -18,7 +18,7 @@ use crate::{
 };
 
 use super::{
-    BoundMethod, index, iter,
+    BoundMethod, iter,
     protocol::{Inspect, Protocol, Recv, dispatch_native_method},
     range,
 };
@@ -379,24 +379,6 @@ impl<'v> Protocol<'v> for [u8] {
                 Output::set(strand, out, trimmed);
                 Ok(())
             }
-            sym::SUB => {
-                let me = this.receiver.get();
-                let ([start], [end]) = unpack!(strand, args, 1, 1)?;
-                let start = start.to_i64(strand).map_err(|_| Error::index(strand))?;
-                let start = index::position(me.len(), start).ok_or_else(|| Error::index(strand))?;
-                let slice = match end {
-                    None => me.get(start..),
-                    Some(end) => {
-                        let end = end.to_i64(strand).map_err(|_| Error::index(strand))?;
-                        let end =
-                            index::position(me.len(), end).ok_or_else(|| Error::index(strand))?;
-                        me.get(start..end)
-                    }
-                }
-                .ok_or_else(|| Error::index(strand))?;
-                Output::set(strand, out, slice);
-                Ok(())
-            }
             sym::CONTAINS => {
                 let ([needle], []) = unpack!(strand, args, 1, 0)?;
                 let input =
@@ -445,7 +427,6 @@ impl<'v> Protocol<'v> for [u8] {
             | sym::WITHOUT_SUFFIX
             | sym::SPLIT
             | sym::RSPLIT
-            | sym::SUB
             | sym::JOIN
             | sym::CHOMP
             | sym::TRIM
@@ -739,7 +720,6 @@ impl<'v> Protocol<'v> for Class {
                 Method(sym::TRIM),
                 Method(sym::TRIM_START),
                 Method(sym::TRIM_END),
-                Method(sym::SUB),
                 Method(sym::CONTAINS),
                 Method(sym::UNPACK),
                 Method(sym::HEX),
@@ -829,7 +809,6 @@ impl<'v> Protocol<'v> for Class {
             | sym::TRIM
             | sym::TRIM_START
             | sym::TRIM_END
-            | sym::SUB
             | sym::CONTAINS => {
                 BoundMethod::create(strand, &this, field, out);
                 Ok(())
@@ -1145,26 +1124,9 @@ mod tests {
     }
 
     #[test]
-    fn bin_mcall_sub_and_contains() {
+    fn bin_mcall_contains() {
         with_vm(async |strand, [mut slot, mut out]| {
             Output::set(strand, &mut slot, b"hello world".as_slice());
-
-            method!(strand, &slot, Sym::well_known(sym::SUB), &mut out, 6_i64)
-                .await
-                .unwrap();
-            assert_eq!(out.to_string(strand).unwrap(), "world");
-
-            method!(
-                strand,
-                &slot,
-                Sym::well_known(sym::SUB),
-                &mut out,
-                0_i64,
-                5_i64
-            )
-            .await
-            .unwrap();
-            assert_eq!(out.to_string(strand).unwrap(), "hello");
 
             method!(
                 strand,

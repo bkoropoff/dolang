@@ -467,25 +467,6 @@ impl<'v> Protocol<'v> for BinBuf<'v> {
                 Output::set(strand, out, input);
                 Ok(())
             }
-            sym::SUB => {
-                let borrow = this.borrow(strand)?;
-                let me = borrow.as_slice();
-                let ([start], [end]) = unpack!(strand, args, 1, 1)?;
-                let start = start.to_i64(strand).map_err(|_| Error::index(strand))?;
-                let start = index::position(me.len(), start).ok_or_else(|| Error::index(strand))?;
-                let slice = match end {
-                    None => me.get(start..),
-                    Some(end) => {
-                        let end = end.to_i64(strand).map_err(|_| Error::index(strand))?;
-                        let end =
-                            index::position(me.len(), end).ok_or_else(|| Error::index(strand))?;
-                        me.get(start..end)
-                    }
-                }
-                .ok_or_else(|| Error::index(strand))?;
-                Output::set(strand, out, slice);
-                Ok(())
-            }
             sym::HEX => {
                 let ([], []) = unpack!(strand, args, 0, 0)?;
                 let borrow = this.borrow(strand)?;
@@ -540,7 +521,6 @@ impl<'v> Protocol<'v> for BinBuf<'v> {
             | sym::STARTS_WITH
             | sym::ENDS_WITH
             | sym::CONTAINS
-            | sym::SUB
             | sym::HEX
             | sym::DRAIN => {
                 BoundMethod::create(strand, &this, field, out);
@@ -657,7 +637,6 @@ impl<'v> Protocol<'v> for Class {
                 Method(sym::FREEZE),
                 Method(sym::STARTS_WITH),
                 Method(sym::ENDS_WITH),
-                Method(sym::SUB),
                 Method(sym::CONTAINS),
                 Method(sym::HEX),
                 Method(sym::DRAIN),
@@ -718,7 +697,6 @@ impl<'v> Protocol<'v> for Class {
             | sym::FREEZE
             | sym::STARTS_WITH
             | sym::ENDS_WITH
-            | sym::SUB
             | sym::CONTAINS
             | sym::HEX
             | sym::DRAIN => {

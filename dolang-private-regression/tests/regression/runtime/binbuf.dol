@@ -104,8 +104,8 @@ let buf17 = BinBuf(b"foobar")
 assert (buf17.starts_with b"foo")
 assert (buf17.ends_with b"bar")
 assert (buf17.contains b"oob")
-assert_eq (buf17.sub 2) b"obar"
-assert_eq (buf17.sub 2 4) b"ob"
+assert_eq $buf17[2..] b"obar"
+assert_eq $buf17[2..4] b"ob"
 assert_eq (buf17.hex()) "666f6f626172"
 
 # equality/ordering compare BinBuf to BinBuf only

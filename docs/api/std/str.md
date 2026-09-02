@@ -33,6 +33,48 @@ assert_eq $"".len 0
 
 ## Methods
 
+### `scalars()`
+
+Returns an immutable view of the string's Unicode scalar values.
+
+The view supports `len`, positive and negative indexing, contiguous range
+slicing, iteration, spreading, and positional destructuring. Elements and
+slices are strings. Its operations do not change the byte-oriented behavior of
+[`Str.len`](#len) or string indexing.
+
+#### Returns
+
+[`Iterable`](./iterable.md) view of [`Str`](./str.md)
+
+#### Example
+
+```
+let scalars = "Aé".scalars()
+assert_eq $scalars.len 3
+assert_eq [...scalars] ["A", "e", "́"]
+assert_eq $scalars[-1] "́"
+```
+
+### `scalar()`
+
+Returns the Unicode scalar value encoded by a single-scalar string.
+
+#### Returns
+
+[`Int`](./index.md)
+
+#### Errors
+
+Raises [`ValueError`](./value-error.md) if the string contains zero or multiple
+Unicode scalar values.
+
+#### Example
+
+```
+assert_eq ("A".scalar()) 65
+assert_eq ("😀".scalar()) 128512
+```
+
 ### `chomp`
 
 Removes one trailing line terminator.
@@ -62,6 +104,32 @@ assert_eq ("z  \n".trim_end()) "z"
 
 [`Iter.chomp`](./iter.md#chomp) lifts this over an iterator — it is exactly
 `.map do |x| x.chomp()`, with the mapping done inline.
+
+### `clip width suffix: str?`
+
+Clips the string to a terminal-cell width at an extended grapheme boundary.
+
+If the string already fits, it is returned unchanged and `suffix` is ignored.
+Otherwise, the suffix is first clipped to the total budget, its display width
+is reserved, and the longest fitting source prefix is prepended.
+
+#### Parameters
+
+| Name     | Type                | Description                          |
+| -------- | ------------------- | ------------------------------------ |
+| `width`  | [`Int`](./index.md) | non-negative terminal-cell budget    |
+| `suffix` | [`Str`](./str.md)?  | suffix appended only when truncating |
+
+#### Returns
+
+[`Str`](./str.md)
+
+#### Example
+
+```
+assert_eq ("abcdef".clip 4 suffix: "…") "abc…"
+assert_eq ("界a".clip 2) "界"
+```
 
 ### `contains needle`
 
@@ -104,6 +172,26 @@ Tests whether the string ends with the given suffix.
 
 ```
 assert ("foobar".ends_with "bar")
+```
+
+### `graphemes()`
+
+Returns an immutable view of the string's extended grapheme clusters.
+
+The view has the same indexing, slicing, iteration, spreading, and destructuring
+operations as [`scalars`](#scalars). It keeps combining sequences and emoji
+sequences together.
+
+#### Returns
+
+[`Iterable`](./iterable.md) view of [`Str`](./str.md)
+
+#### Example
+
+```
+let graphemes = "é👩‍💻".graphemes()
+assert_eq $graphemes.len 2
+assert_eq [...graphemes] ["é", "👩‍💻"]
 ```
 
 ### `join iter?`
@@ -402,6 +490,26 @@ the original string.
 
 ```
 assert_eq ("foobar".without_suffix "bar") "foo"
+```
+
+### `width()`
+
+Returns the terminal-cell width of the string.
+
+Widths are summed within each extended grapheme cluster and capped at two
+cells per cluster. C0 control characters contribute zero. ANSI escape
+sequences are measured as literal text.
+
+#### Returns
+
+[`Int`](./index.md)
+
+#### Example
+
+```
+assert_eq ("é".width()) 1
+assert_eq ("👩‍💻".width()) 2
+assert_eq ("界".width()) 2
 ```
 
 ## Operations
