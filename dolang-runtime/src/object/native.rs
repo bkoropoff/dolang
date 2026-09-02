@@ -2873,6 +2873,7 @@ impl<'v, 'a> TypeBuilderInner<'v, 'a> {
             Member::method(Sym::well_known(sym::INIT_METHOD)),
             Member::method(Sym::well_known(sym::STR_METHOD)),
             Member::method(Sym::well_known(sym::DBG_METHOD)),
+            Member::method(Sym::well_known(sym::FMT_METHOD)),
             Member::method(Sym::well_known(sym::BOOL_METHOD)),
             Member::method(Sym::well_known(sym::HASH_METHOD)),
             Member::method(Sym::well_known(sym::EQ_METHOD)),
@@ -3601,6 +3602,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for TypeObjectWrap<'v, T> {
                 method.tag(),
                 sym::STR_METHOD
                     | sym::DBG_METHOD
+                    | sym::FMT_METHOD
                     | sym::BOOL_METHOD
                     | sym::HASH_METHOD
                     | sym::EQ_METHOD
@@ -3681,6 +3683,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for TypeObjectWrap<'v, T> {
             sym::INIT_METHOD
                 | sym::STR_METHOD
                 | sym::DBG_METHOD
+                | sym::FMT_METHOD
                 | sym::BOOL_METHOD
                 | sym::HASH_METHOD
                 | sym::EQ_METHOD

@@ -264,7 +264,11 @@ impl<'v> Protocol<'v> for VariantType {
     fn op_inspect<'a>(_this: Recv<'v, 'a, Self>, _vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {
         Some(Inspect {
             is_abstract: false,
-            members: members![Method(sym::STR_METHOD), Method(sym::DBG_METHOD),],
+            members: members![
+                Method(sym::STR_METHOD),
+                Method(sym::DBG_METHOD),
+                Method(sym::FMT_METHOD),
+            ],
             type_members: members![
                 Method(sym::VERBATIM_METHOD),
                 Method(sym::STR_METHOD),

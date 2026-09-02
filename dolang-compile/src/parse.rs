@@ -2132,6 +2132,7 @@ impl<'a> Parser<'a> {
             "str" => SpecialMethod::Str,
             "dbg" => SpecialMethod::Dbg,
             "verbatim" => SpecialMethod::Verbatim,
+            "fmt" => SpecialMethod::Fmt,
             "add" => SpecialMethod::Add,
             "sub" => SpecialMethod::Sub,
             "rsub" => SpecialMethod::Rsub,

@@ -372,12 +372,48 @@ pub(crate) async fn create<'v, 'a, 's>(
     if let Some(value) = value {
         create_fmt(strand, global, spec, value, out);
     } else {
-        global
-            .types
-            .spec
-            .create_with_annex(strand, FmtSpec, SpecAnnex { global, spec }, out);
+        create_spec(strand, global, spec, out);
     }
     Ok(())
+}
+
+/// Extracts the specification carried by a Do [`FmtSpec`] or [`Fmt`].
+///
+/// This is the inverse of [`reify_spec`]: it accepts the value a Do `(fmt)`
+/// method was handed and recovers the specification for a native formatter.
+pub(crate) fn spec_of<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    value: &Value<'v>,
+) -> Result<'v, 's, Spec> {
+    let global = strand.vm().state::<Global<'v>>();
+    if let Some(cast) = global.types.spec.cast(value) {
+        return Ok(cast.enter_sync(strand, |_, this| this.annex().spec));
+    }
+    if let Some(cast) = global.types.fmt.cast(value) {
+        return Ok(cast.enter_sync(strand, |_, this| this.annex().spec));
+    }
+    Err(Error::type_error(strand, "expected FmtSpec"))
+}
+
+/// Reifies a specification as a Do [`FmtSpec`], looking up the module state.
+///
+/// This is the entry point for code outside this module — notably the class
+/// protocol, which hands a `FmtSpec` to a Do-defined `(fmt)` method.
+pub(crate) fn reify_spec<'v>(strand: &mut Strand<'v, '_>, spec: Spec, out: Slot<'v, '_>) {
+    let global = strand.vm().state::<Global<'v>>();
+    create_spec(strand, global, spec, out);
+}
+
+fn create_spec<'v>(
+    strand: &mut Strand<'v, '_>,
+    global: State<'v, Global<'v>>,
+    spec: Spec,
+    out: Slot<'v, '_>,
+) {
+    global
+        .types
+        .spec
+        .create_with_annex(strand, FmtSpec, SpecAnnex { global, spec }, out);
 }
 
 fn create_fmt<'v>(

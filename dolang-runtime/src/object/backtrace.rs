@@ -87,7 +87,11 @@ impl<'v> Protocol<'v> for Backtrace<'v> {
     fn op_inspect<'a>(_this: Recv<'v, 'a, Self>, _vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {
         Some(Inspect {
             is_abstract: false,
-            members: members![Getter(sym::LEN), Method(sym::ITER_METHOD)],
+            members: members![
+                Getter(sym::LEN),
+                Method(sym::ITER_METHOD),
+                Method(sym::FMT_METHOD)
+            ],
             type_members: &[],
         })
     }

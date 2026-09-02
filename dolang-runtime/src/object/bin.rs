@@ -766,6 +766,7 @@ impl<'v> Protocol<'v> for Class {
             members: members![
                 Method(sym::STR_METHOD),
                 Method(sym::DBG_METHOD),
+                Method(sym::FMT_METHOD),
                 Method(sym::EQ_METHOD),
                 Method(sym::LT_METHOD),
                 Method(sym::BOOL_METHOD),
@@ -855,6 +856,7 @@ impl<'v> Protocol<'v> for Class {
             | sym::HEX
             | sym::STR_METHOD
             | sym::DBG_METHOD
+            | sym::FMT_METHOD
             | sym::EQ_METHOD
             | sym::LT_METHOD
             | sym::BOOL_METHOD

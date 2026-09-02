@@ -507,6 +507,7 @@ impl<'v> Protocol<'v> for Float {
             members: members![
                 Method(sym::STR_METHOD),
                 Method(sym::DBG_METHOD),
+                Method(sym::FMT_METHOD),
                 Method(sym::ADD_METHOD),
                 Method(sym::SUB_METHOD),
                 Method(sym::RSUB_METHOD),
@@ -536,6 +537,7 @@ impl<'v> Protocol<'v> for Float {
             sym::INIT_METHOD
             | sym::STR_METHOD
             | sym::DBG_METHOD
+            | sym::FMT_METHOD
             | sym::ADD_METHOD
             | sym::SUB_METHOD
             | sym::RSUB_METHOD

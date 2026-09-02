@@ -795,6 +795,7 @@ impl<'v> Protocol<'v> for Type {
             members: members![
                 Method(sym::STR_METHOD),
                 Method(sym::DBG_METHOD),
+                Method(sym::FMT_METHOD),
                 Method(sym::EQ_METHOD),
                 Method(sym::HASH_METHOD),
                 Getter(sym::LEN),
@@ -824,6 +825,7 @@ impl<'v> Protocol<'v> for Type {
             sym::INIT_METHOD
             | sym::STR_METHOD
             | sym::DBG_METHOD
+            | sym::FMT_METHOD
             | sym::EQ_METHOD
             | sym::HASH_METHOD
             | sym::LEN

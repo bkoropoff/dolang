@@ -1,0 +1,98 @@
+import std:
+  - FmtSpec
+  - verbatim
+
+def assert_fails block
+  let failed = try
+    block()
+    false
+  catch _
+    true
+  assert $failed
+
+# A class implementing (fmt) receives a reified FmtSpec and does its own layout.
+class Field
+  pub field name = ""
+
+  def (init) self name
+    self.name = name
+
+  pub def (fmt) self spec
+    assert $ type $spec $FmtSpec
+    spec.pad(self.name)
+
+let f = Field "id"
+assert_eq (str $ fmt f width: 6) "id    "
+assert_eq (str $ fmt f width: 6 align: :RIGHT:) "    id"
+assert_eq (str $ fmt f fill: "." align: :CENTER: width: 7) "..id..."
+assert_eq "$(fmt f width: 4)" "id  "
+
+# The spec carries the kind the surrounding conversion resolved, and a class
+# that implements (fmt) is not bound by the default formatter's restrictions.
+class Probe
+  pub def (fmt) _ spec
+    str $ spec.kind
+
+let p = Probe()
+assert_eq (str $ fmt p) "STR"
+assert_eq (dbg $ fmt p) "DBG"
+assert_eq (verbatim $ fmt p) "VERBATIM"
+assert_eq (str $ fmt p kind: :HEX:) "HEX"
+
+# (fmt) is inherited like any other method.
+class Tagged: Field
+  def (init) self name
+    Field.(init) $self $name
+
+assert_eq (str $ fmt (Tagged "x") width: 3) "x  "
+
+# ...and can be overridden.
+class Loud: Field
+  def (init) self name
+    Field.(init) $self $name
+
+  pub def (fmt) self spec
+    spec.pad(self.name.upper())
+
+assert_eq (str $ fmt (Loud "y") width: 3) "Y  "
+
+# A class that defines none falls back to (str) plus padding.
+class Plain
+  pub def (str) _
+    "plain"
+
+assert_eq (str $ fmt (Plain()) width: 7 align: :RIGHT:) "  plain"
+assert_eq (str $ fmt (Plain()) precision: 2) "pl"
+
+# A subclass of a native type delegates (fmt) to the native implementation,
+# so the numeric options the default formatter rejects still work.
+class Money: Float
+  def (init) self value
+    Float.(init) $self $value
+
+let m = Money 1.5
+assert_eq (str $ fmt m precision: 2 kind: :FIXED: sign: :PLUS:) "+1.50"
+assert_eq (str $ fmt m width: 8 precision: 2 kind: :FIXED: fill: :ZERO:) "00001.50"
+
+class Tag: Str
+  def (init) self value
+    Str.(init) $self $value
+
+assert_eq (str $ fmt (Tag "abc") width: 5) "abc  "
+assert_eq (str $ fmt (Tag "abcdef") precision: 3) "abc"
+
+# The delegated implementation is reachable as an explicit qualified call.
+# A specification used this way must name a kind: there is no surrounding
+# conversion to supply one.
+assert_eq (Str.(fmt) (Tag "abcdef") (fmt precision: 3 kind: :STR:)) "abc"
+assert_fails do Str.(fmt) (Tag "abc") (fmt())
+
+# An overriding (fmt) wins over the native delegate.
+class Loud2: Str
+  def (init) self value
+    Str.(init) $self $value
+
+  pub def (fmt) self spec
+    spec.pad(Str.(str)(self).upper())
+
+assert_eq (str $ fmt (Loud2 "hi") width: 4) "HI  "

@@ -9,7 +9,7 @@ use crate::{
     vm::Builder,
 };
 
-mod fmt;
+pub(crate) mod fmt;
 mod property;
 mod strand;
 

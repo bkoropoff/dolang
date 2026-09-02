@@ -2192,6 +2192,13 @@ pub(crate) async fn dispatch_native_method<'v, 's>(
             dispatch!(op_debug, &mut format)?;
             format.finish(strand, out);
         }
+        sym::FMT_METHOD => {
+            let ([spec], []) = unpack!(strand, trailing, 1, 0)?;
+            let spec = crate::stdlib::fmt::spec_of(strand, &spec)?;
+            let mut format = crate::value::StrEmbryo::new();
+            dispatch!(op_fmt, &spec, &mut format)?;
+            format.finish(strand, out);
+        }
         sym::BOOL_METHOD => {
             let b = dispatch!(op_bool);
             Output::set(strand, out, b);

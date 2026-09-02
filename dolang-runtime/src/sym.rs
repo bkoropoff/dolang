@@ -78,6 +78,7 @@ well_known_symbols! {
     (Enumerate, "enumerate", ENUMERATE),
     (Extend, "extend", EXTEND),
     (Find, "find", FIND),
+    (FmtMethod, "(fmt)", FMT_METHOD),
     (Freeze, "freeze", FREEZE),
     (Graphemes, "graphemes", GRAPHEMES),
     (Get, "get", GET),

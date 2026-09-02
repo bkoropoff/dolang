@@ -1870,6 +1870,39 @@ fn class_sync_unary_op<'v, 'a, 's>(
     }
 }
 
+/// Formats an instance of a class that defines no `(fmt)` method: the string
+/// conversion selected by `spec.kind`, padded to the requested layout.
+fn default_fmt<'v, 's>(
+    this: Recv<'v, '_, ClassInstance<'v>>,
+    strand: &mut Strand<'v, 's>,
+    spec: &Spec,
+    w: &mut dyn Format<'v>,
+) -> Result<'v, 's, ()> {
+    use crate::value::fmt::{Fill, Kind, Pad};
+
+    let kind = spec
+        .kind
+        .ok_or_else(|| crate::value::fmt::unresolved_kind(strand))?;
+    if !kind.is_text() {
+        let name = &this.annex().class.annex().name;
+        return Err(Error::type_error(
+            strand,
+            format!("{name}: unsupported format kind `:{}`", kind.symbol()),
+        ));
+    }
+    if spec.sign.is_some() || spec.alt || spec.fill == Fill::Zero {
+        return Err(Error::type_error(strand, "unsupported format option"));
+    }
+    let mut pad = Pad::new(*spec, w);
+    match kind {
+        Kind::Str => ClassInstance::op_display(this, strand, &mut pad)?,
+        Kind::Dbg => ClassInstance::op_debug(this, strand, &mut pad)?,
+        Kind::Verbatim => ClassInstance::op_verbatim(this, strand, &mut pad)?,
+        _ => unreachable!(),
+    }
+    pad.finish(strand)
+}
+
 impl<'v> Protocol<'v> for ClassInstance<'v> {
     fn op_fmt<'a, 's>(
         this: Recv<'v, 'a, Self>,
@@ -1877,29 +1910,31 @@ impl<'v> Protocol<'v> for ClassInstance<'v> {
         spec: &Spec,
         w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
-        use crate::value::fmt::{Fill, Kind, Pad};
-
-        let kind = spec
-            .kind
-            .ok_or_else(|| crate::value::fmt::unresolved_kind(strand))?;
-        if !kind.is_text() {
-            let name = &this.annex().class.annex().name;
-            return Err(Error::type_error(
-                strand,
-                format!("{name}: unsupported format kind `:{}`", kind.symbol()),
-            ));
+        let annex = this.annex();
+        match annex.class.annex().entry_by_tag(sym::FMT_METHOD) {
+            Some(ClassEntry::Method(v)) => {
+                strand.with_slots_sync(|strand, [mut result, mut reified]| {
+                    crate::stdlib::fmt::reify_spec(strand, *spec, Slot::reborrow(&mut reified));
+                    strand.sync(async |strand| {
+                        call!(strand, v, &mut result, &this, &reified).await
+                    })?;
+                    let result = result
+                        .as_str_raw(strand)
+                        .ok_or_else(|| Error::type_error(strand, "expected Str result"))?;
+                    crate::fmt!(strand, w, "{result}")
+                })
+            }
+            Some(ClassEntry::Delegate(slot, _)) => {
+                let native = annex.natives[*slot]
+                    .get()
+                    .ok_or_else(|| Error::runtime(strand, "native slot uninitialized"))?;
+                strand.with_slots_sync(|strand, [mut delegator]| {
+                    Output::set(strand, Slot::reborrow(&mut delegator), &this);
+                    Delegated::new(native, &delegator).op_fmt(strand, spec, w)
+                })
+            }
+            _ => default_fmt(this, strand, spec, w),
         }
-        if spec.sign.is_some() || spec.alt || spec.fill == Fill::Zero {
-            return Err(Error::type_error(strand, "unsupported format option"));
-        }
-        let mut pad = Pad::new(*spec, w);
-        match kind {
-            Kind::Str => Self::op_display(this, strand, &mut pad)?,
-            Kind::Dbg => Self::op_debug(this, strand, &mut pad)?,
-            Kind::Verbatim => Self::op_verbatim(this, strand, &mut pad)?,
-            _ => unreachable!(),
-        }
-        pad.finish(strand)
     }
 
     fn op_fill<'a, 's>(

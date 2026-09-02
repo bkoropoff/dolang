@@ -243,6 +243,7 @@ impl<'v> Protocol<'v> for Bool {
             members: members![
                 Method(sym::STR_METHOD),
                 Method(sym::DBG_METHOD),
+                Method(sym::FMT_METHOD),
                 Method(sym::EQ_METHOD),
                 Method(sym::BAND_METHOD),
                 Method(sym::BOR_METHOD),
@@ -264,6 +265,7 @@ impl<'v> Protocol<'v> for Bool {
             sym::INIT_METHOD
             | sym::STR_METHOD
             | sym::DBG_METHOD
+            | sym::FMT_METHOD
             | sym::EQ_METHOD
             | sym::BAND_METHOD
             | sym::BOR_METHOD
