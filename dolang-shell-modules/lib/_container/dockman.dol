@@ -1,4 +1,4 @@
-import progress json patch rand strand proc sys transfer _vfs
+import progress json patch rand shlex strand proc sys transfer _vfs
   std:
     - RuntimeError
     - TypeError
@@ -29,6 +29,10 @@ let SAVE_FORMATS = $
 
 let CONTAINER_STATES = $
   "created": :CREATED:
+  # Podman's own name for the state a container is in between `create` and
+  # `start`, which is what Docker calls `created`. Podman 3.x reports it
+  # verbatim in inspect output; 4.x onward reports `created` there instead.
+  "configured": :CREATED:
   "running": :RUNNING:
   "paused": :PAUSED:
   "restarting": :RESTARTING:
@@ -214,7 +218,20 @@ def ensure_image runtime img policy
       runtime.pull $img
 
 def normalize_known mapping value
-  mapping.get $value else: $value
+  mapping.get $value default: $value
+
+# `Cmd` and `Entrypoint` in inspect output are an argument array, except in
+# podman 3.x, which reports `Entrypoint` as a single string. Split it back
+# apart so the field has the same shape on every backend.
+#
+# Podman built the string with a plain space join, which does not quote, so
+# an argument containing whitespace cannot be recovered faithfully by any
+# splitting rule. `shlex` at least handles the case where such an argument
+# was quoted before it reached the runtime.
+def normalize_argv value
+  if !(type value Str)
+    return value
+  [...shlex.split value]
 
 def container_env_args env
   if !(type env Dict)
@@ -501,13 +518,23 @@ def inspect_container runtime ref
     throw e
   (json.decode output)[0]
 
+# Recognized prefixes, in the forms `load` reports them:
+#
+# - `Loaded image: ref` and `Loaded image ID: sha256:...`, one line per
+#   image, from Docker and podman 4.x onward
+# - `Loaded image(s): ref,ref`, a single line listing every image, from
+#   podman 3.x
 def parse_loaded_refs output stderr
   let refs = []
   for line = output_lines $output $stderr
-    if (line.starts_with "Loaded image ID:")
-      let _ ref = line.split ":" limit: 1
-      refs.push $ref.trim()
-    else if (line.starts_with "Loaded image:")
+    if (line.starts_with "Loaded image(s):")
+      let _ rest = line.split ":" limit: 1
+      for ref = rest.split ","
+        refs.push $ref.trim()
+    else if (
+      line.starts_with "Loaded image ID:" ||
+      line.starts_with "Loaded image:"
+    )
       let _ ref = line.split ":" limit: 1
       refs.push $ref.trim()
   refs
@@ -1241,8 +1268,8 @@ pub class Image
       ...
 
     self.labels = labels
-    self.cmd = cmd
-    self.entrypoint = entrypoint
+    self.cmd = normalize_argv $cmd
+    self.entrypoint = normalize_argv $entrypoint
     self.working_dir = (working_dir && Path working_dir)
     self.user = user
     self.env = Dict $ env.map do |e| e.split "=" limit: 1
@@ -1327,8 +1354,8 @@ pub class Container
     self.image = image
     self.image_id = image_id
     self.created = created
-    self.cmd = cmd
-    self.entrypoint = entrypoint
+    self.cmd = normalize_argv $cmd
+    self.entrypoint = normalize_argv $entrypoint
     self.labels = labels
 
   pub def (str) self
