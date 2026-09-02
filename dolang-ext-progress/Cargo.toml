@@ -14,7 +14,7 @@ doctest = false
 [dependencies]
 indicatif = "0.18"
 tokio = { version = "1", features = ["io-util"] }
-unicode-width = "0.2"
+unicode-width.workspace = true
 
 [dependencies.dolang]
 path = "../dolang"

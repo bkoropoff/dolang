@@ -98,8 +98,8 @@ let buf17 = StrBuf("foobar")
 assert (buf17.starts_with "foo")
 assert (buf17.ends_with "bar")
 assert (buf17.contains "oob")
-assert_eq (buf17.sub 2) "obar"
-assert_eq (buf17.sub 2 4) "ob"
+assert_eq $buf17[2..] "obar"
+assert_eq $buf17[2..4] "ob"
 
 # equality/ordering compare StrBuf to StrBuf only
 assert_eq (StrBuf("abc")) (StrBuf("abc"))

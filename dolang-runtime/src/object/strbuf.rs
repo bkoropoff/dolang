@@ -386,26 +386,6 @@ impl<'v> Protocol<'v> for StrBuf<'v> {
                 Output::set(strand, out, input);
                 Ok(())
             }
-            sym::SUB => {
-                let borrow = this.borrow(strand)?;
-                let me = borrow.as_str();
-                let ([start], [end]) = unpack!(strand, args, 1, 1)?;
-                let start = start.to_i64(strand).map_err(|_| Error::index(strand))?;
-                let start = index::position(me.len(), start)
-                    .ok_or_else(|| Error::runtime(strand, BOUNDARY_ERROR))?;
-                let slice = match end {
-                    None => me.get(start..),
-                    Some(end) => {
-                        let end = end.to_i64(strand).map_err(|_| Error::index(strand))?;
-                        let end = index::position(me.len(), end)
-                            .ok_or_else(|| Error::runtime(strand, BOUNDARY_ERROR))?;
-                        me.get(start..end)
-                    }
-                }
-                .ok_or_else(|| Error::runtime(strand, BOUNDARY_ERROR))?;
-                Output::set(strand, out, slice);
-                Ok(())
-            }
             sym::DRAIN => {
                 let ([], [size]) = unpack!(strand, args, 0, 1)?;
                 let chunk_size = match size {
@@ -455,7 +435,6 @@ impl<'v> Protocol<'v> for StrBuf<'v> {
             | sym::STARTS_WITH
             | sym::ENDS_WITH
             | sym::CONTAINS
-            | sym::SUB
             | sym::DRAIN => {
                 BoundMethod::create(strand, &this, field, out);
                 Ok(())
@@ -572,7 +551,6 @@ impl<'v> Protocol<'v> for Type {
                 Method(sym::FREEZE),
                 Method(sym::STARTS_WITH),
                 Method(sym::ENDS_WITH),
-                Method(sym::SUB),
                 Method(sym::CONTAINS),
                 Method(sym::DRAIN),
             ],
@@ -633,7 +611,6 @@ impl<'v> Protocol<'v> for Type {
             | sym::FREEZE
             | sym::STARTS_WITH
             | sym::ENDS_WITH
-            | sym::SUB
             | sym::CONTAINS
             | sym::DRAIN => {
                 BoundMethod::create(strand, &this, field, out);

@@ -1286,6 +1286,8 @@ dependencies = [
  "dolang-private-util",
  "futures",
  "hex",
+ "unicode-segmentation",
+ "unicode-width",
 ]
 
 [[package]]
