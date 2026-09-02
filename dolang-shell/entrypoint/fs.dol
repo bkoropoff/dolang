@@ -164,12 +164,12 @@ def mode_node mode
   let owner = triad $mode.owner $mode.contains(:SET_UID:) s
   let group = triad $mode.group $mode.contains(:SET_GID:) s
   let other = triad $mode.other $mode.contains(:STICKY:) t
-  display.Scalar (fmt (mode.int & 0o7777) kind: :OCT: alt: true) "$owner$group$other"
+  display.Scalar "${(mode.int & 0o7777):#o}" "$owner$group$other"
 
 def hex_node value
   if (value == nil)
     return display.text nil
-  display.Scalar (fmt value kind: :HEX: alt: true)
+  display.Scalar "${value:#x}"
 
 def uuid_node principal
   let name = display.opt do
