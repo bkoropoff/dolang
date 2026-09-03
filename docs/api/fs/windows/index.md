@@ -30,7 +30,7 @@ Gets selected parts of a Windows security descriptor.
 
 [`security.windows.SecDesc`](../../security/windows/secdesc.md)
 
-### `set_sec_desc path desc? :resolve? ...options`
+### `update_sec_desc path desc? :resolve? ...options`
 
 Applies the components selected by a Windows security descriptor's `mask`.
 

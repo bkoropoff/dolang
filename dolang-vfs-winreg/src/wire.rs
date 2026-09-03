@@ -176,7 +176,7 @@ pub(crate) enum WinRegRequest {
         key: ExtCite<KeyMarker>,
         mask: SecInfo,
     },
-    SetSecDesc {
+    UpdateSecDesc {
         key: ExtCite<KeyMarker>,
         sec_desc: SecDesc,
     },

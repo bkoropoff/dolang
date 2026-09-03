@@ -591,7 +591,7 @@ pub class Runtime
     let uopt = self.mount_uopt()
 
     with_temp_dir parent: $runtime_dir() do |subdir|
-      subdir.set_metadata mode: 0o700
+      subdir.update_metadata mode: 0o700
       let socket = (subdir / "socket")
       let input = strand.input()
       # The socket's mode cannot identify the client: the container maps uids
@@ -704,7 +704,7 @@ pub class Runtime
 
   pub def build self :pull = :MISSING: :mounts = [] :cd = nil :env = {} :from ...args
     with_temp_dir parent: $runtime_dir() do |subdir|
-      subdir.set_metadata mode: 0o700
+      subdir.update_metadata mode: 0o700
       let b = Builder $self $subdir $_vfs.bin() $mounts $cd $env
       b.build $from :pull ...args
 
@@ -1079,7 +1079,7 @@ pub class Builder
       target.open wb do |dest|
         copy_data $dest
       if (mode != nil)
-        target.set_metadata mode: $mode
+        target.update_metadata mode: $mode
 
   def add_file self path target chmod
     path.open rb do |src|

@@ -246,7 +246,7 @@ impl Direct {
         ))
     }
 
-    pub(super) fn set_sec_desc_path(
+    pub(super) fn update_sec_desc_path(
         _path: &Path,
         _descriptor: &SecDesc,
         _follow: bool,
@@ -267,7 +267,7 @@ impl Direct {
         ))
     }
 
-    pub(super) fn set_sec_desc_file(_file: &std::fs::File, _descriptor: &SecDesc) -> Result<()> {
+    pub(super) fn update_sec_desc_file(_file: &std::fs::File, _descriptor: &SecDesc) -> Result<()> {
         Err(Error::new(
             ErrorKind::Unsupported,
             "security descriptors are only supported on Windows",
@@ -1737,7 +1737,7 @@ impl Direct {
             .unwrap_or_else(|_| Err(Error::other("failed to join attrs update task")))
     }
 
-    pub(super) async fn impl_set_metadata(
+    pub(super) async fn impl_update_metadata(
         &self,
         paths: &[PathBuf],
         mut patch: MetadataPatch,

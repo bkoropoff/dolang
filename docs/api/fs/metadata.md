@@ -24,9 +24,9 @@ Creation or status-change time as [`DateTime`](../time/datetime.md).
 ### `group`
 
 Owning group: the gid as an [`Int`](../std/int.md) on Unix, or the primary group
-[`Sid`](../security/windows/sid.md) on Windows. This is the portable view of
-ownership, in the form [`set_metadata`](./index.md#set_metadata-resolve-paths)
-accepts for its `group` argument.
+[`Sid`](../security/windows/sid.md) on Windows. This representation matches the
+`group` argument accepted by
+[`update_metadata`](./index.md#update_metadata-resolve-paths).
 
 ### `modified`
 
@@ -44,9 +44,9 @@ File type as a [`Sym`](../std/sym.md): `:FILE:`, `:DIR:`, `:SYMLINK:`,
 ### `owner`
 
 Owner: the uid as an [`Int`](../std/int.md) on Unix, or the owner
-[`Sid`](../security/windows/sid.md) on Windows. This is the portable view of
-ownership, in the form [`set_metadata`](./index.md#set_metadata-resolve-paths)
-accepts for its `owner` argument.
+[`Sid`](../security/windows/sid.md) on Windows. This representation matches the
+`owner` argument accepted by
+[`update_metadata`](./index.md#update_metadata-resolve-paths).
 
 ## Windows-Only Fields
 

@@ -190,7 +190,7 @@ impl<'v> Object<'v> for Service {
                 );
                 Ok(())
             })
-            .method("set_config", async move |this, strand, args, _out| {
+            .method("update_config", async move |this, strand, args, _out| {
                 let global = strand.state::<Global<'v>>();
                 let service_type = global.syms.service_type;
                 let start_type = global.syms.start_type;
@@ -282,7 +282,7 @@ impl<'v> Object<'v> for Service {
                     .0
                     .as_ref()
                     .ok_or_else(|| Error::state_error(strand, "service is closed"))?;
-                service.set_config(update).await.into_sys(strand)
+                service.update_config(update).await.into_sys(strand)
             })
             .method(
                 "wait_for_status_change",
@@ -328,15 +328,15 @@ impl<'v> Object<'v> for Service {
                 dolang_ext_shell::create_sec_desc(strand, descriptor, out);
                 Ok(())
             })
-            .method("set_sec_desc", async move |this, strand, args, _out| {
+            .method("update_sec_desc", async move |this, strand, args, _out| {
                 let descriptor =
-                    dolang_ext_shell::sec_desc_from_args(strand, args, "set_sec_desc").await?;
+                    dolang_ext_shell::sec_desc_from_args(strand, args, "update_sec_desc").await?;
                 let borrow = this.borrow(strand)?;
                 let service = borrow
                     .0
                     .as_ref()
                     .ok_or_else(|| Error::state_error(strand, "service is closed"))?;
-                service.set_sec_desc(&descriptor).await.into_sys(strand)
+                service.update_sec_desc(&descriptor).await.into_sys(strand)
             })
     }
 }

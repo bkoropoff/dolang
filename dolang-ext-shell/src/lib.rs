@@ -359,7 +359,7 @@ pub fn create_sec_desc<'v>(
         .create_with_annex(strand, security::SecDesc, sec_desc, out);
 }
 
-/// Read a [`dolang_winterop::SecDesc`] from a `set_sec_desc`-style call's
+/// Read a [`dolang_winterop::SecDesc`] from a `update_sec_desc`-style call's
 /// own arguments.
 ///
 /// Accepts a positional descriptor — a `security.windows.SecDesc`, a

@@ -531,7 +531,7 @@ macro_rules! impl_concrete_path {
                         )
                         .await
                     })
-                    .method("set_sec_desc", async move |this, strand, args, _out| {
+                    .method("update_sec_desc", async move |this, strand, args, _out| {
                         let ([], [resolve], rest) =
                             unpack!(strand, args, 0, 0, resolve = None, ...)?;
                         let annex = this.annex();
@@ -539,11 +539,11 @@ macro_rules! impl_concrete_path {
                             strand,
                             annex.global,
                             rest,
-                            &crate::security::SpecPath::root("set_sec_desc"),
+                            &crate::security::SpecPath::root("update_sec_desc"),
                         )
                         .await?;
                         let follow = super::resolve_sym(strand, annex.global, resolve, true)?;
-                        super::set_sec_desc(
+                        super::update_sec_desc(
                             strand,
                             annex.global,
                             annex.as_path(),
@@ -773,7 +773,7 @@ macro_rules! impl_concrete_path {
                         let annex = this.annex();
                         super::remove_dir(strand, annex.global, annex.as_path(), all, ignore).await
                     })
-                    .method("set_metadata", async move |this, strand, args, _out| {
+                    .method("update_metadata", async move |this, strand, args, _out| {
                         let (
                             [],
                             [
@@ -894,7 +894,7 @@ macro_rules! impl_concrete_path {
                             attrs,
                         )?;
                         let annex = this.annex();
-                        super::set_metadata(
+                        super::update_metadata(
                             strand,
                             annex.global,
                             vec![annex.as_path().to_path_buf()],

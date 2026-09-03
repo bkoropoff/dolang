@@ -1356,13 +1356,13 @@ impl<'v> Object<'v> for File<'v> {
                     .await
                     .into_sys(strand)
             })
-            .method("set_sec_desc", async move |this, strand, args, _out| {
+            .method("update_sec_desc", async move |this, strand, args, _out| {
                 let global = this.annex().global;
                 let descriptor = crate::security::sec_desc_from_args(
                     strand,
                     global,
                     args,
-                    &crate::security::SpecPath::root("set_sec_desc"),
+                    &crate::security::SpecPath::root("update_sec_desc"),
                 )
                 .await?;
                 let borrow = this.borrow(strand)?;
@@ -1370,7 +1370,7 @@ impl<'v> Object<'v> for File<'v> {
                     .file
                     .as_ref()
                     .ok_or_else(|| Error::state_error(strand, "file is closed"))?;
-                file.set_sec_desc(&descriptor).await.into_sys(strand)
+                file.update_sec_desc(&descriptor).await.into_sys(strand)
             })
             .method("xattrs", async move |this, strand, args, out| {
                 let ([], [namespace]) = unpack!(strand, args, 0, 0, namespace = None)?;

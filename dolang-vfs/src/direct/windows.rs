@@ -408,7 +408,7 @@ impl Direct {
             .map_err(|error| Error::new(ErrorKind::InvalidData, error))
     }
 
-    fn set_sec_desc_on_handle(handle: BorrowedHandle<'_>, descriptor: &SecDesc) -> Result<()> {
+    fn update_sec_desc_on_handle(handle: BorrowedHandle<'_>, descriptor: &SecDesc) -> Result<()> {
         let mask = descriptor.mask() & SecInfo::ALL;
         if mask.is_empty() {
             return Ok(());
@@ -498,7 +498,11 @@ impl Direct {
         Self::sec_desc_from_handle(handle.as_handle(), mask)
     }
 
-    pub(super) fn set_sec_desc_path(path: &Path, descriptor: &SecDesc, follow: bool) -> Result<()> {
+    pub(super) fn update_sec_desc_path(
+        path: &Path,
+        descriptor: &SecDesc,
+        follow: bool,
+    ) -> Result<()> {
         let mask = descriptor.mask();
         let mut access = 0;
         if mask.intersects(SecInfo::OWNER | SecInfo::GROUP) {
@@ -516,7 +520,7 @@ impl Direct {
             access |= ACCESS_SYSTEM_SECURITY | READ_CONTROL;
         }
         let handle = Self::security_handle(path, access, follow)?;
-        Self::set_sec_desc_on_handle(handle.as_handle(), descriptor)
+        Self::update_sec_desc_on_handle(handle.as_handle(), descriptor)
     }
 
     pub(super) fn sec_desc_from_file(
@@ -527,8 +531,8 @@ impl Direct {
         Self::sec_desc_from_handle(file.as_handle(), mask)
     }
 
-    pub(super) fn set_sec_desc_file(file: &std::fs::File, descriptor: &SecDesc) -> Result<()> {
-        Self::set_sec_desc_on_handle(file.as_handle(), descriptor)
+    pub(super) fn update_sec_desc_file(file: &std::fs::File, descriptor: &SecDesc) -> Result<()> {
+        Self::update_sec_desc_on_handle(file.as_handle(), descriptor)
     }
 
     fn sid_name_use(value: i32) -> Result<SidNameUse> {
@@ -1699,7 +1703,7 @@ impl Direct {
         .unwrap_or_else(|e| Err(Error::other(e)))
     }
 
-    pub(super) async fn impl_set_metadata(
+    pub(super) async fn impl_update_metadata(
         &self,
         paths: &[PathBuf],
         patch: MetadataPatch,
@@ -1762,7 +1766,7 @@ impl Direct {
 
             for path in paths {
                 if let Some(descriptor) = &descriptor {
-                    Self::set_sec_desc_path(&path, descriptor, patch.follow)?;
+                    Self::update_sec_desc_path(&path, descriptor, patch.follow)?;
                 }
                 if !patch.attrs.is_empty() {
                     Self::set_attrs_path(path.clone(), patch.attrs)?;

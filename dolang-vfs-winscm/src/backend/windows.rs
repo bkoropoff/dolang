@@ -465,7 +465,7 @@ unsafe fn query_config(handle: SC_HANDLE) -> Result<ServiceConfig, Error> {
     })
 }
 
-unsafe fn change_config(handle: SC_HANDLE, update: &ServiceConfigUpdate) -> Result<(), Error> {
+unsafe fn update_config(handle: SC_HANDLE, update: &ServiceConfigUpdate) -> Result<(), Error> {
     let binary_path = optional_wide(update.binary_path.as_deref());
     let load_order_group = optional_wide(update.load_order_group.as_deref());
     let dependencies = update
@@ -542,7 +542,7 @@ unsafe fn query_status(handle: SC_HANDLE) -> Result<ServiceStatus, Error> {
 }
 
 /// Converts an `io::Error` carrying a raw Win32 error code (as produced by
-/// [`sec_desc`]/[`set_sec_desc`] below) back into this crate's [`Error`]
+/// [`sec_desc`]/[`update_sec_desc`] below) back into this crate's [`Error`]
 /// type, using the same code-to-`ErrorKind` mapping as every other
 /// operation in this file.
 fn from_io(operation: &str, err: io::Error) -> Error {
@@ -593,8 +593,8 @@ unsafe fn sec_desc(handle: SC_HANDLE, mask: SecInfo) -> Result<VfsSecDesc, Error
 
 /// Sets `handle`'s security descriptor via `SetServiceObjectSecurity`,
 /// passing the native self-relative byte blob `SecDesc::to_bytes` produces
-/// straight through — same shape as `dolang-vfs-winreg`'s `set_sec_desc`.
-unsafe fn set_sec_desc(handle: SC_HANDLE, descriptor: &VfsSecDesc) -> Result<(), Error> {
+/// straight through — same shape as `dolang-vfs-winreg`'s `update_sec_desc`.
+unsafe fn update_sec_desc(handle: SC_HANDLE, descriptor: &VfsSecDesc) -> Result<(), Error> {
     let mut mask = (descriptor.mask() & SecInfo::ALL).bits();
     if mask == 0 {
         return Ok(());
@@ -923,11 +923,11 @@ pub(crate) async fn handle(
                 .await?,
             ))
         }
-        WinScmRequest::ChangeConfig { service, update } => {
+        WinScmRequest::UpdateConfig { service, update } => {
             let guard = ctx.acquire::<Service>(service).map_err(invalid_handle)?;
             with_service(guard, move |h| {
                 // SAFETY: `h` comes from the live service guard.
-                unsafe { change_config(h, &update) }
+                unsafe { update_config(h, &update) }
             })
             .await?;
             Ok(WinScmResponse::Ack)
@@ -941,14 +941,14 @@ pub(crate) async fn handle(
             .await?;
             Ok(WinScmResponse::SecDesc(descriptor))
         }
-        WinScmRequest::SetSecDesc {
+        WinScmRequest::UpdateSecDesc {
             service,
             sec_desc: descriptor,
         } => {
             let guard = ctx.acquire::<Service>(service).map_err(invalid_handle)?;
             with_service(guard, move |h| {
                 // SAFETY: `h` comes from the live service guard.
-                unsafe { set_sec_desc(h, &descriptor) }
+                unsafe { update_sec_desc(h, &descriptor) }
             })
             .await?;
             Ok(WinScmResponse::Ack)

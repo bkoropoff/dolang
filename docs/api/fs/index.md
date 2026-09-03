@@ -4,7 +4,7 @@ The `fs` module provides functions and types for filesystem operations.
 
 Ordinary metadata such as size, timestamps, ownership, permissions, and file
 attributes are available through [`Metadata`](./metadata.md) and
-[`set_metadata`](#set_metadata-resolve-paths). Extended attributes use
+[`update_metadata`](#update_metadata-resolve-paths). Extended attributes use
 [`xattrs`](#xattrs-path-namespace-resolve) and related functions. POSIX and
 NFSv4 ACLs use [`acl`](#acl-path-kind-posix-default-resolve) and
 [`set_acl`](#set_acl-path-acl-kind-default-resolve). Windows security
@@ -934,7 +934,7 @@ POSIX ACLs are supported on Linux and FreeBSD, NFSv4 ACLs on FreeBSD, and
 macOS ACLs on macOS. Other target and format combinations raise
 `sys.UnsupportedError`.
 
-### `set_metadata :resolve? ...paths ...`
+### `update_metadata :resolve? ...paths ...`
 
 Updates timestamps, permissions, ownership, and filesystem attributes.
 
@@ -1002,13 +1002,13 @@ expensive, may fail when the volume lacks space, and is not transactional.
 #### Example
 
 ```
-set_metadata "script.sh" mode: 0o755 owner: "deploy" group: "deploy"
-set_metadata "one.txt" "two.txt" mode: 0o640
-set_metadata "data.txt" hidden: true
-set_metadata "data.txt" no_dump: true
-set_metadata "link" group: "www-data" resolve: :LINK:
-set_metadata "artifact.tar" modified: $DateTime.from_unix(1700000000)
-set_metadata "cache.db" accessed: $DateTime.now()
+update_metadata "script.sh" mode: 0o755 owner: "deploy" group: "deploy"
+update_metadata "one.txt" "two.txt" mode: 0o640
+update_metadata "data.txt" hidden: true
+update_metadata "data.txt" no_dump: true
+update_metadata "link" group: "www-data" resolve: :LINK:
+update_metadata "artifact.tar" modified: $DateTime.from_unix(1700000000)
+update_metadata "cache.db" accessed: $DateTime.now()
 ```
 
 ### `set_size path size`

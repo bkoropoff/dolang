@@ -60,10 +60,10 @@ use crate::{
         MetadataRequest, MoveRequest, OpenFlags, OpenHandle, OpenRequest, OpenVfsHandle,
         ProcessPage, QueryResponse, ReadLinkRequest, RemoveDirRequest, RemoveRequest,
         RenameRequest, Request, RequestKind, ResponseKind, SecDescRequest, SetAclRequest,
-        SetMetadataRequest, SetSecDescRequest, SetXattrRequest, SpawnRequest, StdioRecvTarget,
-        StdioSendTarget, StreamsRequest, SymlinkKind, SymlinkRequest, UnixVfsRequest, VfsProtocol,
-        WellKnownPathRequest, WindowsAdminRequest, XattrNamespaceRequest, XattrRequest,
-        XattrsRequest, rpc_builder,
+        SetXattrRequest, SpawnRequest, StdioRecvTarget, StdioSendTarget, StreamsRequest,
+        SymlinkKind, SymlinkRequest, UnixVfsRequest, UpdateMetadataRequest, UpdateSecDescRequest,
+        VfsProtocol, WellKnownPathRequest, WindowsAdminRequest, XattrNamespaceRequest,
+        XattrRequest, XattrsRequest, rpc_builder,
     },
     security::{Acl, AclKind, PrincipalId, PrincipalIdKind, SecurityInfo, SidName},
     session::{
@@ -1305,18 +1305,18 @@ impl File {
         }
     }
 
-    pub(crate) async fn set_sec_desc(&self, sec_desc: &SecDesc) -> Result<()> {
+    pub(crate) async fn update_sec_desc(&self, sec_desc: &SecDesc) -> Result<()> {
         let file = self;
         file.idle()?;
         match file
             .client
-            .request(RequestKind::FileSetSecDesc {
+            .request(RequestKind::FileUpdateSecDesc {
                 file: file.cite(),
                 sec_desc: sec_desc.clone(),
             })
             .await?
         {
-            ResponseKind::FileSetSecDesc => Ok(()),
+            ResponseKind::FileUpdateSecDesc => Ok(()),
             response => Err(unexpected(response).into()),
         }
     }
@@ -3188,19 +3188,19 @@ impl Client {
         }
     }
 
-    pub async fn set_sec_desc(
+    pub async fn update_sec_desc(
         &self,
         path: path::Path<'_>,
         sec_desc: &SecDesc,
         follow: bool,
     ) -> Result<()> {
-        let request = SetSecDescRequest {
+        let request = UpdateSecDescRequest {
             path: path.into(),
             sec_desc: sec_desc.clone(),
             follow,
         };
-        match self.request(RequestKind::SetSecDesc(request)).await? {
-            ResponseKind::SetSecDesc => Ok(()),
+        match self.request(RequestKind::UpdateSecDesc(request)).await? {
+            ResponseKind::UpdateSecDesc => Ok(()),
             response => Err(unexpected(response).into()),
         }
     }
@@ -3332,13 +3332,17 @@ impl Client {
         }
     }
 
-    pub async fn set_metadata(&self, paths: &[path::PathBuf], patch: MetadataPatch) -> Result<()> {
-        let request = SetMetadataRequest {
+    pub async fn update_metadata(
+        &self,
+        paths: &[path::PathBuf],
+        patch: MetadataPatch,
+    ) -> Result<()> {
+        let request = UpdateMetadataRequest {
             paths: paths.iter().map(|path| path.to_path().into()).collect(),
             patch,
         };
-        match self.request(RequestKind::SetMetadata(request)).await? {
-            ResponseKind::SetMetadata => Ok(()),
+        match self.request(RequestKind::UpdateMetadata(request)).await? {
+            ResponseKind::UpdateMetadata => Ok(()),
             response => Err(unexpected(response).into()),
         }
     }

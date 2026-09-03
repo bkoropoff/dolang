@@ -354,7 +354,7 @@ impl<'v> Object<'v> for Metadata {
                 )
             })
             // `owner`/`group` are the portable view of ownership that
-            // `set_metadata` also accepts: a `Sid` on Windows, a uid/gid on
+            // `update_metadata` also accepts: a `Sid` on Windows, a uid/gid on
             // Unix, where they mirror `uid`/`gid`.
             .get("owner", move |this, strand, mut out| {
                 let annex = this.annex();

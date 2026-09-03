@@ -688,15 +688,15 @@ impl Vfs {
     }
 
     /// Replaces the Windows security descriptor for a path.
-    pub async fn set_sec_desc(
+    pub async fn update_sec_desc(
         &self,
         path: path::Path<'_>,
         sec_desc: &SecDesc,
         follow: bool,
     ) -> error::Result<()> {
         match &self.inner {
-            VfsInner::Client(client) => client.set_sec_desc(path, sec_desc, follow).await,
-            VfsInner::Direct(direct) => direct.set_sec_desc(path, sec_desc, follow).await,
+            VfsInner::Client(client) => client.update_sec_desc(path, sec_desc, follow).await,
+            VfsInner::Direct(direct) => direct.update_sec_desc(path, sec_desc, follow).await,
         }
     }
 
@@ -813,14 +813,14 @@ impl Vfs {
     }
 
     /// Applies a metadata patch to every path.
-    pub async fn set_metadata(
+    pub async fn update_metadata(
         &self,
         paths: &[path::PathBuf],
         patch: metadata::MetadataPatch,
     ) -> error::Result<()> {
         match &self.inner {
-            VfsInner::Client(client) => client.set_metadata(paths, patch).await,
-            VfsInner::Direct(direct) => direct.set_metadata(paths, patch).await,
+            VfsInner::Client(client) => client.update_metadata(paths, patch).await,
+            VfsInner::Direct(direct) => direct.update_metadata(paths, patch).await,
         }
     }
 

@@ -182,7 +182,7 @@ async fn windows_metadata_and_ownership_round_trip_over_rpc() {
 
     if is_elevated() {
         client
-            .set_metadata(
+            .update_metadata(
                 &[
                     typed(&path).to_path_buf(),
                     typed(&second_path).to_path_buf(),
@@ -199,7 +199,7 @@ async fn windows_metadata_and_ownership_round_trip_over_rpc() {
             format!("{}\\{}", name.domain(), name.name())
         };
         client
-            .set_metadata(
+            .update_metadata(
                 &[
                     typed(&path).to_path_buf(),
                     typed(&second_path).to_path_buf(),

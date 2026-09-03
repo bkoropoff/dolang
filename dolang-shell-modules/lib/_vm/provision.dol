@@ -140,7 +140,7 @@ pub let PROVISION_SOURCE = r|
 
     # Protected, so the inherited entries granting the containing directory to
     # everyone do not come back and disqualify the file.
-    path.set_sec_desc
+    path.update_sec_desc
       owner: :BUILTIN_ADMINISTRATORS:
       dacl_protected: true
       dacl:
@@ -206,7 +206,7 @@ pub let PROVISION_SOURCE = r|
     winscm.open access: :SC_MANAGER_CONNECT: do |manager|
       let access = [:SERVICE_CHANGE_CONFIG:, :SERVICE_START:, :SERVICE_QUERY_STATUS:]
       manager.open_service sshd access: $access do |service|
-        service.set_config start_type: :AUTO_START:
+        service.update_config start_type: :AUTO_START:
         # Starting an already-running service raises rather than doing
         # nothing, which would make a second run of this script fail on a
         # guest that is already provisioned.

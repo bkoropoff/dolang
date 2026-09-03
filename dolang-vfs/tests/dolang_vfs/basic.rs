@@ -659,7 +659,7 @@ async fn metadata_nonexistent() {
 }
 
 #[tokio::test]
-async fn set_metadata_by_numeric_id() {
+async fn update_metadata_by_numeric_id() {
     let dir = tempdir().unwrap();
     let socket_path = dir.path().join("test.sock");
 
@@ -670,7 +670,7 @@ async fn set_metadata_by_numeric_id() {
 
     let client = connect_client(&socket_path).await;
     client
-        .set_metadata(
+        .update_metadata(
             &[typed(&test_file).to_path_buf()],
             MetadataPatch::new()
                 .with_mode(Mode::from_bits_retain(0o600))
@@ -691,7 +691,7 @@ async fn set_metadata_by_numeric_id() {
 }
 
 #[tokio::test]
-async fn set_metadata_by_name() {
+async fn update_metadata_by_name() {
     let dir = tempdir().unwrap();
     let socket_path = dir.path().join("test.sock");
 
@@ -705,7 +705,7 @@ async fn set_metadata_by_name() {
 
     let client = connect_client(&socket_path).await;
     client
-        .set_metadata(
+        .update_metadata(
             &[typed(&test_file).to_path_buf()],
             MetadataPatch::new()
                 .with_user(OwnershipIdentity::Name(user.name))
@@ -724,7 +724,7 @@ async fn set_metadata_by_name() {
 }
 
 #[tokio::test]
-async fn set_metadata_follow_false_on_dangling_symlink() {
+async fn update_metadata_follow_false_on_dangling_symlink() {
     let dir = tempdir().unwrap();
     let socket_path = dir.path().join("test.sock");
 
@@ -735,7 +735,7 @@ async fn set_metadata_follow_false_on_dangling_symlink() {
 
     let client = connect_client(&socket_path).await;
     client
-        .set_metadata(
+        .update_metadata(
             &[typed(&link_path).to_path_buf()],
             MetadataPatch::new()
                 .with_group(OwnershipIdentity::Id(getgid().as_raw()))
@@ -745,7 +745,7 @@ async fn set_metadata_follow_false_on_dangling_symlink() {
         .unwrap();
 
     let result = client
-        .set_metadata(
+        .update_metadata(
             &[typed(&link_path).to_path_buf()],
             MetadataPatch::new().with_group(OwnershipIdentity::Id(getgid().as_raw())),
         )
@@ -757,7 +757,7 @@ async fn set_metadata_follow_false_on_dangling_symlink() {
 }
 
 #[tokio::test]
-async fn set_metadata_unknown_user_errors() {
+async fn update_metadata_unknown_user_errors() {
     let dir = tempdir().unwrap();
     let socket_path = dir.path().join("test.sock");
 
@@ -768,7 +768,7 @@ async fn set_metadata_unknown_user_errors() {
 
     let client = connect_client(&socket_path).await;
     let result = client
-        .set_metadata(
+        .update_metadata(
             &[typed(&test_file).to_path_buf()],
             MetadataPatch::new().with_user(OwnershipIdentity::Name(
                 "__dolang_missing_user__".to_string(),

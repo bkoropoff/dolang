@@ -27,7 +27,7 @@ def write_ssh_shim dir
     shift
     shift
     exec "$@"
-  ssh.set_metadata mode: 0o755
+  ssh.update_metadata mode: 0o755
 
 #[test]
 def runs_script_in_remote_vfs()

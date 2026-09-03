@@ -49,9 +49,9 @@ use crate::{
         MetadataRequest, MoveRequest, OpenFlags, OpenHandle, OpenRequest, OpenVfsHandle,
         PipeResponse, ProcessPage, QueryResponse, ReadDirPage, ReadLinkRequest, RemoveDirRequest,
         RemoveRequest, RenameRequest, Request, RequestKind, ResponseKind, SecDescRequest,
-        SetAclRequest, SetMetadataRequest, SetSecDescRequest, SetXattrRequest, SpawnRequest,
-        StdioRecvTarget, StdioSendTarget, StreamsRequest, SymlinkKind, SymlinkRequest,
-        UnixVfsRequest, VfsProtocol, WellKnownPathRequest, WindowsAdminRequest,
+        SetAclRequest, SetXattrRequest, SpawnRequest, StdioRecvTarget, StdioSendTarget,
+        StreamsRequest, SymlinkKind, SymlinkRequest, UnixVfsRequest, UpdateMetadataRequest,
+        UpdateSecDescRequest, VfsProtocol, WellKnownPathRequest, WindowsAdminRequest,
         XattrNamespaceRequest, XattrRequest, XattrsRequest, rpc_builder,
     },
     security::{Acl, AclKind},
@@ -906,10 +906,10 @@ impl Connection {
             RequestKind::FileSecDesc { file, mask } => Ok(ResponseKind::FileSecDesc(
                 self.handle_file_sec_desc(context, file, mask).await?,
             )),
-            RequestKind::FileSetSecDesc { file, sec_desc } => {
-                self.handle_file_set_sec_desc(context, file, sec_desc)
+            RequestKind::FileUpdateSecDesc { file, sec_desc } => {
+                self.handle_file_update_sec_desc(context, file, sec_desc)
                     .await?;
-                Ok(ResponseKind::FileSetSecDesc)
+                Ok(ResponseKind::FileUpdateSecDesc)
             }
             RequestKind::FileXattrs { file, namespace } => Ok(ResponseKind::FileXattrs(
                 self.handle_file_xattrs(context, file, namespace).await?,
@@ -985,7 +985,7 @@ impl Connection {
             RequestKind::Acl(request) => self.handle_acl(request).await,
             RequestKind::SetAcl(request) => self.handle_set_acl(request).await,
             RequestKind::SecDesc(request) => self.handle_sec_desc(request).await,
-            RequestKind::SetSecDesc(request) => self.handle_set_sec_desc(request).await,
+            RequestKind::UpdateSecDesc(request) => self.handle_update_sec_desc(request).await,
             RequestKind::CreateDir(request) => self.handle_create_dir(request).await,
             RequestKind::RemoveDir(request) => self.handle_remove_dir(request).await,
             RequestKind::Copy(request) => self.handle_copy(request).await,
@@ -994,7 +994,7 @@ impl Connection {
             RequestKind::Symlink(request) => self.handle_symlink(request).await,
             RequestKind::HardLink(request) => self.handle_hard_link(request).await,
             RequestKind::SymlinkMetadata(request) => self.handle_symlink_metadata(request).await,
-            RequestKind::SetMetadata(request) => self.handle_set_metadata(request).await,
+            RequestKind::UpdateMetadata(request) => self.handle_update_metadata(request).await,
             RequestKind::Canonicalize(request) => self.handle_canonicalize(request).await,
             RequestKind::ReadLink(request) => self.handle_read_link(request).await,
             RequestKind::Access(request) => self.handle_access(request).await,
@@ -1757,14 +1757,14 @@ impl Connection {
         file.0.set_acl(kind, acl.as_ref(), default).await
     }
 
-    async fn handle_file_set_sec_desc(
+    async fn handle_file_update_sec_desc(
         &self,
         context: &CallContext<VfsProtocol>,
         file: Cite<FileMarker>,
         sec_desc: SecDesc,
     ) -> Result<()> {
         let file = self.retained_file(context, file)?;
-        file.0.set_sec_desc(&sec_desc).await
+        file.0.update_sec_desc(&sec_desc).await
     }
 
     async fn handle_file_xattrs(
@@ -2174,12 +2174,12 @@ impl Connection {
         Ok(ResponseKind::SetAcl)
     }
 
-    async fn handle_set_sec_desc(&self, req: SetSecDescRequest) -> Result<ResponseKind> {
+    async fn handle_update_sec_desc(&self, req: UpdateSecDescRequest) -> Result<ResponseKind> {
         self.server
             .vfs
-            .set_sec_desc(Into::into(&req.path), &req.sec_desc, req.follow)
+            .update_sec_desc(Into::into(&req.path), &req.sec_desc, req.follow)
             .await?;
-        Ok(ResponseKind::SetSecDesc)
+        Ok(ResponseKind::UpdateSecDesc)
     }
 
     async fn handle_create_dir(&self, req: CreateDirRequest) -> Result<ResponseKind> {
@@ -2267,14 +2267,14 @@ impl Connection {
         Ok(ResponseKind::SymlinkMetadata(metadata))
     }
 
-    async fn handle_set_metadata(&self, req: SetMetadataRequest) -> Result<ResponseKind> {
+    async fn handle_update_metadata(&self, req: UpdateMetadataRequest) -> Result<ResponseKind> {
         let paths: Vec<_> = req
             .paths
             .iter()
             .map(|path| path::Path::from(path).to_path_buf())
             .collect();
-        self.server.vfs.set_metadata(&paths, req.patch).await?;
-        Ok(ResponseKind::SetMetadata)
+        self.server.vfs.update_metadata(&paths, req.patch).await?;
+        Ok(ResponseKind::UpdateMetadata)
     }
 
     async fn handle_canonicalize(&self, req: CanonicalizeRequest) -> Result<ResponseKind> {

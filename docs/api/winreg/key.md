@@ -274,7 +274,7 @@ key.set "tags" ["a", "b"]
 key.set "raw" b"\x01\x02" kind: :BINARY:
 ```
 
-### `set_sec_desc desc? ...options`
+### `update_sec_desc desc? ...options`
 
 Applies the components selected by a Windows security descriptor's `mask`
 through the key's existing handle.
