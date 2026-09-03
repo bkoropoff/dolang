@@ -273,8 +273,7 @@ enum RawState {
     Error,
     Exponent,
     ExponentStart,
-    ExponentStartAfterUnsignedDot,
-    ExponentStartAfterSignedDot,
+    ExponentStartAfterDot { negative: bool },
     Float,
     Gt,
     GtEq,
@@ -298,7 +297,7 @@ enum RawState {
     RightBrace,
     RightBracket,
     RightParen,
-    Signed,
+    Integer { negative: bool, radix: u8 },
     Slash,
     SlashSlash,
     Space,
@@ -308,18 +307,9 @@ enum RawState {
     EmitDotBeforeParen,
     EmitDotDot,
     Tilde,
-    SignedDot,
-    Unsigned,
-    UnsignedDot,
-    Zero,
-    SignedZero,
-    Hex,
+    PostDot { negative: bool },
+    LeadingZero { negative: bool },
     Hash,
-    SignedHex,
-    Octal,
-    SignedOctal,
-    Binary,
-    SignedBinary,
     LtLt,
     GtGt,
     R,
@@ -609,12 +599,12 @@ macro_rules! lex {
                 #[allow(unreachable_patterns)]
                 Some(b'0') => {
                     $self.acc = 0;
-                    emit!($self.$method, $token, Zero);
+                    emit!($self.$method, $token, LeadingZero { negative: false });
                 }
                 #[allow(unreachable_patterns)]
                 Some(c @ b'1'..=b'9') => {
                     $self.acc = (c - b'0') as u128;
-                    emit!($self.$method, $token, Unsigned);
+                    emit!($self.$method, $token, Integer { negative: false, radix: 10 });
                 }
             };
             { $($rest)* }
@@ -772,7 +762,7 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
     /// - **Whitespace/neutral states**: `Init`, `Indent`, `Space`, `Empty` - handle whitespace
     ///   prior to next "real" token
     /// - **Identifier states**: `Ident`, `Key`, etc. - mostly alphanumeric tokens
-    /// - **Number states**: `Signed`, `Unsigned`, `Float`, `Hex`, etc. - parse numeric literals
+    /// - **Number states**: `Integer`, `LeadingZero`, `PostDot`, `Float`, etc. - parse numeric literals
     /// - **Operator states**: `Bang`, `Minus`, `Slash`, etc. - recognize operators
     /// - **String states**: `DQuote`, `Backslash`, etc. - handle string literals
     /// - **Raw string states**: `RawHash`, `RawBody`, `RawCloseHash` - raw string handling
@@ -887,11 +877,11 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                 Minus => symbol!(self, RawToken::Op(Op::Minus), {
                     match Some(b'0') => {
                         self.acc = 0;
-                        self.trans(SignedZero)
+                        self.trans(LeadingZero { negative: true })
                     },
                     match Some(c@b'1'..=b'9') => {
                         self.acc = (c - b'0') as u128;
-                        self.trans(Signed)
+                        self.trans(Integer { negative: true, radix: 10 })
                     },
                 }),
                 Plus => symbol!(self, RawToken::Op(Op::Plus), {}),
@@ -967,8 +957,21 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                 Literal => literal!(self, RawToken::Literal, {
                     match Some(_) => (),
                 }),
-                Unsigned | Signed => number!(self,
-                    if self.state == Unsigned {
+                Integer { negative, radix } => number!(self,
+                    if negative {
+                        match 0i128.checked_sub_unsigned(self.acc) {
+                            Some(v) => RawToken::Int(v),
+                            None => {
+                                if self.mode == Mode::FullExpr {
+                                    return self.error_adj(ErrorDiagKind::Overflow, 0, -1)
+                                }
+                                if self.mode != Mode::String || radix == 8 {
+                                    self.warn_adj(WarnDiagKind::OverflowLit, 0, -1);
+                                }
+                                RawToken::Literal
+                            }
+                        }
+                    } else if radix == 10 {
                         match i128::try_from(self.acc) {
                             Ok(v) => RawToken::Int(v),
                             Err(_) => {
@@ -982,21 +985,18 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                             }
                         }
                     } else {
-                        match 0i128.checked_sub_unsigned(self.acc) {
-                            Some(v) => RawToken::Int(v),
-                            None => {
-                                if self.mode == Mode::FullExpr {
-                                    return self.error_adj(ErrorDiagKind::Overflow, 0, -1)
-                                }
-                                if self.mode != Mode::String {
-                                    self.warn_adj(WarnDiagKind::OverflowLit, 0, -1);
-                                }
-                                RawToken::Literal
-                            }
-                        }
+                        RawToken::Int(self.acc as i128)
                     }, {
-                        match Some(c@b'0'..=b'9') => {
-                            match self.acc.checked_mul(10).and_then(|v| v.checked_add((c - b'0') as u128)) {
+                        match Some(c @ (b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F'))
+                            if (c.is_ascii_digit() && c - b'0' < radix)
+                                || (radix == 16 && c.is_ascii_hexdigit()) => {
+                            let digit = match c {
+                                b'0'..=b'9' => c - b'0',
+                                b'a'..=b'f' => c - b'a' + 10,
+                                b'A'..=b'F' => c - b'A' + 10,
+                                _ => unreachable!(),
+                            };
+                            match self.acc.checked_mul(radix.into()).and_then(|v| v.checked_add(digit.into())) {
                                 Some(v) => self.acc = v,
                                 None => {
                                     if self.mode == Mode::FullExpr {
@@ -1011,11 +1011,11 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                                 }
                             }
                         },
-                        match Some(b'.') => {
+                        match Some(b'.') if radix == 10 => {
                             self.defer = None;
-                            self.trans(if self.state == Signed { SignedDot } else { UnsignedDot } )
+                            self.trans(PostDot { negative })
                         },
-                        match Some(b'e') => {
+                        match Some(b'e') if radix == 10 => {
                             self.defer = None;
                             self.trans(ExponentStart)
                         },
@@ -1026,28 +1026,27 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                         },
                     }
                 ),
-                Zero | SignedZero => {
-                    let signed = self.state == SignedZero;
+                LeadingZero { negative } => {
                     number!(self, RawToken::Int(0), {
                         match Some(b'x' | b'X') => {
                             self.acc = 0;
-                            self.trans(if signed { SignedHex } else { Hex })
+                            self.trans(Integer { negative, radix: 16 })
                         },
                         match Some(b'o' | b'O') => {
                             self.acc = 0;
-                            self.trans(if signed { SignedOctal } else { Octal })
+                            self.trans(Integer { negative, radix: 8 })
                         },
                         match Some(b'b' | b'B') => {
                             self.acc = 0;
-                            self.trans(if signed { SignedBinary } else { Binary })
+                            self.trans(Integer { negative, radix: 2 })
                         },
                         match Some(c @ b'0'..=b'9') => {
                             self.acc = (c - b'0') as u128;
-                            self.trans(if signed { Signed } else { Unsigned })
+                            self.trans(Integer { negative, radix: 10 })
                         },
                         match Some(b'.') => {
                             self.defer = None;
-                            self.trans(if signed { SignedDot } else { UnsignedDot })
+                            self.trans(PostDot { negative })
                         },
                         match Some(b'e') => {
                             self.defer = None;
@@ -1059,14 +1058,13 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                         },
                     })
                 }
-                UnsignedDot | SignedDot => {
-                    let signed = self.state == SignedDot;
+                PostDot { negative } => {
                     number!(self, RawToken::F64, {
                         // Anything after a floating point other than `e` or numbers
                         // means we misinterpreted a field/method expression
                         match Some(c@(b'.' | b'A'..=b'Z' | b'a'..=b'z' | b'_' | b'(')) if c != b'e' => {
                             return self.token_adj(
-                                match if signed {
+                                match if negative {
                                     0i128.checked_sub_unsigned(self.acc)
                                 } else {
                                     i128::try_from(self.acc).ok()
@@ -1093,148 +1091,9 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                         },
                     }, {
                         match Some(b'0'..=b'9') => self.trans(Float),
-                        match Some(b'e') => self.trans(if signed {
-                            ExponentStartAfterSignedDot
-                        } else {
-                            ExponentStartAfterUnsignedDot
-                        }),
+                        match Some(b'e') => self.trans(ExponentStartAfterDot { negative }),
                         match Some(..) => self.trans(Literal),
                     })
-                }
-                Hex | SignedHex => {
-                    let signed = self.state == SignedHex;
-                    number!(self,
-                        if signed {
-                            match 0i128.checked_sub_unsigned(self.acc) {
-                                Some(v) => RawToken::Int(v),
-                                None => {
-                                    if self.mode == Mode::FullExpr {
-                                        return self.error_adj(ErrorDiagKind::Overflow, 0, -1)
-                                    }
-                                    if self.mode != Mode::String {
-                                        self.warn_adj(WarnDiagKind::OverflowLit, 0, -1);
-                                    }
-                                    RawToken::Literal
-                                }
-                            }
-                        } else {
-                            RawToken::Int(self.acc as i128)
-                        }, {
-                            match Some(c) if c.is_ascii_hexdigit() => {
-                                let digit = match c {
-                                    b'0'..=b'9' => c - b'0',
-                                    b'a'..=b'f' => c - b'a' + 10,
-                                    b'A'..=b'F' => c - b'A' + 10,
-                                    _ => unreachable!(),
-                                };
-                                match self.acc.checked_mul(16).and_then(|v| v.checked_add(digit as u128)) {
-                                    Some(v) => self.acc = v,
-                                    None => {
-                                        if self.mode == Mode::FullExpr {
-                                            self.acc = 0;
-                                            self.defer(Defer::Error(ErrorDiagKind::Overflow));
-                                        } else {
-                                            if self.mode != Mode::String {
-                                                self.defer(Defer::Warn(WarnDiagKind::OverflowLit));
-                                            }
-                                            self.trans(Literal)
-                                        }
-                                    }
-                                }
-                            },
-                        }, {
-                            match Some(..) => {
-                                self.defer = None;
-                                self.trans(Literal)
-                            },
-                        }
-                    )
-                }
-                Octal | SignedOctal => {
-                    let signed = self.state == SignedOctal;
-                    number!(self,
-                        if signed {
-                            match 0i128.checked_sub_unsigned(self.acc) {
-                                Some(v) => RawToken::Int(v),
-                                None => {
-                                    if self.mode == Mode::FullExpr {
-                                        return self.error_adj(ErrorDiagKind::Overflow, 0, -1)
-                                    }
-                                    self.warn_adj(WarnDiagKind::OverflowLit, 0, -1);
-                                    RawToken::Literal
-                                }
-                            }
-                        } else {
-                            RawToken::Int(self.acc as i128)
-                        }, {
-                            match Some(c @ b'0'..=b'7') => {
-                                let digit = (c - b'0') as u128;
-                                match self.acc.checked_mul(8).and_then(|v| v.checked_add(digit)) {
-                                    Some(v) => self.acc = v,
-                                    None => {
-                                        if self.mode == Mode::FullExpr {
-                                            self.acc = 0;
-                                            self.defer(Defer::Error(ErrorDiagKind::Overflow));
-                                        } else {
-                                            if self.mode != Mode::String {
-                                                self.defer(Defer::Warn(WarnDiagKind::OverflowLit));
-                                            }
-                                            self.trans(Literal)
-                                        }
-                                    }
-                                }
-                            },
-                        }, {
-                            match Some(..) => {
-                                self.defer = None;
-                                self.trans(Literal)
-                            },
-                        }
-                    )
-                }
-                Binary | SignedBinary => {
-                    let signed = self.state == SignedBinary;
-                    number!(self,
-                        if signed {
-                            match 0i128.checked_sub_unsigned(self.acc) {
-                                Some(v) => RawToken::Int(v),
-                                None => {
-                                    if self.mode == Mode::FullExpr {
-                                        return self.error_adj(ErrorDiagKind::Overflow, 0, -1)
-                                    }
-                                    if self.mode != Mode::String {
-                                        self.warn_adj(WarnDiagKind::OverflowLit, 0, -1);
-                                    }
-                                    RawToken::Literal
-                                }
-                            }
-                        } else {
-                            RawToken::Int(self.acc as i128)
-                        }, {
-                            match Some(c @ b'0'..=b'1') => {
-                                let digit = (c - b'0') as u128;
-                                match self.acc.checked_mul(2).and_then(|v| v.checked_add(digit)) {
-                                    Some(v) => self.acc = v,
-                                    None => {
-                                        if self.mode == Mode::FullExpr {
-                                            self.acc = 0;
-                                            self.defer(Defer::Error(ErrorDiagKind::Overflow));
-                                        } else {
-                                            if self.mode != Mode::String {
-                                                self.defer(Defer::Warn(WarnDiagKind::OverflowLit));
-                                            }
-                                            self.trans(Literal)
-                                        }
-                                    }
-                                }
-                            },
-                        }, {
-                            match Some(..) => {
-                                self.defer = None;
-                                self.trans(Literal)
-                            },
-                        }
-                    )
                 }
                 Float => number!(self, RawToken::F64, {
                         match Some(b'0'..=b'9') => (),
@@ -1246,14 +1105,13 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                 }, {
                         match Some(..) => self.trans(Literal),
                 }),
-                ExponentStartAfterSignedDot | ExponentStartAfterUnsignedDot => {
+                ExponentStartAfterDot { negative } => {
                     number!(self, RawToken::F64, {
                             match Some(b'+' | b'-' | b'0'..=b'9') => self.trans(Exponent),
                     }, {
                             match Some(b'a'..=b'z' | b'A'..=b'Z' | b'_') => {
-                                let signed = self.state == ExponentStartAfterSignedDot;
                                 let res = self.token_adj(
-                                    match if signed {
+                                    match if negative {
                                         0i128.checked_sub_unsigned(self.acc)
                                     } else {
                                         i128::try_from(self.acc).ok()

@@ -23,7 +23,16 @@ assert_eq -0x10 -16
 assert_eq -0o10 -8
 assert_eq -0b10 -2
 
+# Test negative decimal constants
+assert_eq -0 0
+assert_eq -10 -10
+
 # Test mixed case prefixes
 assert_eq 0Xa 10
 assert_eq 0O7 7
 assert_eq 0B1 1
+
+# Test fallback to literal strings for invalid radix digits
+assert_eq 0xg "0xg"
+assert_eq 0o8 "0o8"
+assert_eq 0b2 "0b2"
