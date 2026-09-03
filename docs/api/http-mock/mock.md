@@ -6,7 +6,7 @@ was one item or several — its methods act on all of them together.
 
 ## Methods
 
-### `received`
+### `received()`
 
 Returns every request matched by any of this handle's mocks, in the order
 received.
@@ -30,12 +30,12 @@ server.mock
     assert_eq $reqs[0].method "POST"
 ```
 
-### `unmount`
+### `unmount()`
 
 Unmounts every mock this handle registered. They stop matching further
 requests. Has no effect on items already unmounted.
 
-### `verify`
+### `verify()`
 
 Re-checks the `expect:` condition of every item registered by this handle
 (if any were given) against requests received so far.

@@ -27,7 +27,7 @@ assert_eq $[1, 2, 3].len 3
 
 ## Methods
 
-### `clear`
+### `clear()`
 
 Removes all elements from the array.
 
@@ -61,7 +61,7 @@ assert (!arr.contains 4)
 assert (![].contains 1)
 ```
 
-### `copy`
+### `copy()`
 
 Returns a shallow copy of the array. Contents are *not* copied recursively.
 
@@ -142,7 +142,7 @@ arr.insert -1 99
 assert_eq $arr [1, 42, 2, 99, 3]
 ```
 
-### `pairs`
+### `pairs()`
 
 Returns an iterator yielding `[index, value]` pairs.
 

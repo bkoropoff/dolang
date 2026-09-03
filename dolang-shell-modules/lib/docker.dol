@@ -22,11 +22,13 @@ class DockerRuntime: dockman.Runtime
 
 let docker = DockerRuntime()
 
-# Run a direct command in a temporary Docker container from `image`.
+# Runs a command in a temporary Docker container.
 #
-# `pull` is `:MISSING:` (default), `:ALWAYS:`, or `:NEVER:`.
+# See [Create and run parameters](#create-and-run-parameters).
 #
-# Returns `nil`.
+# # Returns
+#
+# `nil`
 pub def run
   image cmd
   :cd = nil
@@ -46,21 +48,35 @@ do
 
 # Creates a stopped Docker container.
 #
-# `cmd` and trailing arguments override the image command. Configuration uses
-# keyword arguments: `env` and `labels` are dictionaries; `networks` is an
-# array of names or IDs; and `mounts` and `ports` are arrays of records.
+# See [Create and run parameters](#create-and-run-parameters).
 #
-# Mount records use `type:`, `target:`, and optional `source:` and `readonly:`.
-# `type:` is `:BIND:`, `:VOLUME:`, or `:TMPFS:`. Port records use
-# `container_port:` and optional `host_port:`, `host_ip:`, and `protocol:`;
-# `protocol:` defaults to `:TCP:` and also accepts `:UDP:` or `:SCTP:`.
+# # Parameters
 #
-# `restart` is a record with `policy:` and optional `max_retries:`. Policies
-# are `:NO:`, `:ON_FAILURE:`, `:ALWAYS:`, and `:UNLESS_STOPPED:`;
-# `max_retries:` is only valid with `:ON_FAILURE:`. `pull` is `:MISSING:`
-# (default), `:ALWAYS:`, or `:NEVER:`.
+# | Name      | Type                          | Description              |
+# | --------- | ----------------------------- | ------------------------ |
+# | `restart` | [`Dict`](../std/dict.md) | Container restart policy |
 #
-# Returns a `Container` in the `:CREATED:` state.
+# ## `restart`
+#
+# The dictionary accepts these keys:
+#
+# | Name          | Type                   | Meaning                              |
+# | ------------- | ---------------------- | ------------------------------------ |
+# | `policy`      | [`Sym`](../std/sym.md) | Restart policy                       |
+# | `max_retries` | [`Int`](../std/int.md) | Optional retry limit for `:ON_FAILURE:` only |
+#
+# `policy` accepts:
+#
+# | Value              | Meaning                              |
+# | ------------------ | ------------------------------------ |
+# | `:NO:`             | Do not restart the container         |
+# | `:ON_FAILURE:`     | Restart after an unsuccessful exit   |
+# | `:ALWAYS:`         | Always restart the container         |
+# | `:UNLESS_STOPPED:` | Restart unless explicitly stopped    |
+#
+# # Returns
+#
+# [`Container`](./container.md) in the `:CREATED:` state
 pub def create
   image cmd = nil
   :name = nil
@@ -79,70 +95,101 @@ do
   docker.create $image $cmd :name :env :mounts :labels :ports :networks :user
     :cd :entrypoint :restart :pull ...args
 
-# Run a function in a temporary Docker container from `image`.
+# Runs a function in a temporary Docker container.
 #
 # Program execution and filesystem access will be redirected for the
 # duration of the function.
 #
-# `pull` is `:MISSING:` (default), `:ALWAYS:`, or `:NEVER:`.
+# # Parameters
+#
+# | Name    | Type                     | Description                         |
+# | ------- | ------------------------ | ----------------------------------- |
+# | `image` | [`Str`](../std/str.md)   | Image name or ID                    |
+# | `func`  | [`Func`](../std/func.md) | Function to run                     |
+# | `cd`    | [`Str`](../std/str.md)   | Optional container working directory |
+# | `env`   | [`Dict`](../std/dict.md) | Container environment               |
+# | `pull`  | [`Sym`](../std/sym.md)   | `:MISSING:`, `:ALWAYS:`, or `:NEVER:` |
 #
 # # Returns
 #
-# The result of `func`
+# Result of `func`
 pub def with image func :cd = nil :env = {} :pull = :MISSING:
   docker.with $image $func :cd :env :pull
 
 # Build a Docker image.
 #
-# # Base parameters
+# # Parameters
 #
-# - `from`: base image
-# - `pull`:
-#     - `:MISSING:` (default): only pull missing images
-#     - `:ALWAYS:`: always attempt to pull images
-#     - `:NEVER:`: never pull images
-# - `tag`: output image tag; may be omitted or repeated
+# | Name     | Type                     | Description                            |
+# | -------- | ------------------------ | -------------------------------------- |
+# | `pull`   | [`Sym`](../std/sym.md)   | Image pull policy; default `:MISSING:` |
+# | `mounts` | [`Iterable`](../std/iterable.md) | Mounts available to every build step   |
+# | `cd`     | [`Str`](../std/str.md)   | Optional working directory for `run` steps |
+# | `env`    | [`Dict`](../std/dict.md)  | Environment for `run` steps            |
+# | `from`   | [`Str`](../std/str.md)   | Base image                             |
+# | `args`   | [`Value`](../std/value.md) | Ordered build items                    |
 #
-# # Optional parameters
+# ## `pull`
 #
-# ## `mounts: <array>`
+# | Value       | Meaning                                  |
+# | ----------- | ---------------------------------------- |
+# | `:MISSING:` | Pull the image only when it is not local |
+# | `:ALWAYS:`  | Always pull the image                    |
+# | `:NEVER:`   | Never pull the image                     |
 #
-# Container mounts available for the entire build process.
-# Each element is a `Dict` of the form:
+# ## `mounts`
 #
-# - `type`:
-#     - `:CACHE:`: Mount a persistent cache at `target`
-#     - `:BIND:`: Bind mount `source` at `target`
-# - `target: <path | Str>`: target mount path
-# - `source: <path | Str>`: mount source (omit for `:CACHE:` mounts)
-# - `id` (optional): identifier for `:CACHE:` mounts; `target` used if omitted
+# Each element is a [`Dict`](../std/dict.md) with these keys:
 #
-# # Build steps
+# | Name     | Type                   | Meaning                                      |
+# | -------- | ---------------------- | -------------------------------------------- |
+# | `type`   | [`Sym`](../std/sym.md) | `:CACHE:`, `:BIND:`, `:VOLUME:`, or `:TMPFS:` |
+# | `target` | [`Value`](../std/value.md) | Mount path in the container                  |
+# | `source` | [`Value`](../std/value.md) | Mount source; required for `:BIND:`           |
+# | `id`     | [`Value`](../std/value.md) | Optional cache ID; defaults to `target`       |
 #
-# ## `run: func`
+# ## `args`
 #
-# Run `func` (a callable) inside the container
+# Vertical keyword items define tags and build steps. Items may be repeated.
 #
-# ## `add: <dict>`
+# | Pattern       | Value                       | Meaning                            |
+# | ------------- | --------------------------- | ---------------------------------- |
+# | `tag: name`   | [`Str`](../std/str.md)       | Apply an output image tag          |
+# | `run: func`   | [`Func`](../std/func.md)    | Run a function inside the container |
+# | `add: spec`   | [`Dict`](../std/dict.md)     | Add a file to the image            |
+# | `patch: spec` | [`Dict`](../std/dict.md)     | Apply a patch inside the image     |
+# | `commit: msg` | [`Str`](../std/str.md)       | Commit a layer with a message      |
 #
-# Add a file to the image:
+# ### `add: spec`
 #
-# - `source: <path | url | Str>`: source path or URL
-# - `content: <Str | bin>`: content to write directly to `target`
-# - `target: <path | Str>`: target path; if a directory, source file name will be appended for `source`, but not for `content`
-# - `chmod: <Int | fs.unix.Mode>` (optional): change target permissions
+# `spec` accepts exactly one of `source` and `content`.
 #
-# ## `commit: msg`
-# 
-# Creates a layer with the given message
+# | Name      | Type                                                                  | Meaning                         |
+# | --------- | --------------------------------------------------------------------- | ------------------------------- |
+# | `source`  | [`Str`](../std/str.md)\|[`fs.Path`](../fs/path.md)\|[`url.Url`](../url/url.md) | Source path or URL              |
+# | `content` | [`Str`](../std/str.md)\|[`Bin`](../std/bin.md)                        | Content to write                |
+# | `target`  | [`Str`](../std/str.md)\|[`fs.Path`](../fs/path.md)                    | Destination path                |
+# | `chmod`   | [`Int`](../std/int.md)\|[`fs.unix.Mode`](../fs/unix/mode.md)         | Optional destination permissions |
 #
-# # Example
+# If `target` is a directory, a source path or URL retains its filename.
+# Direct content is always written to `target` itself.
+#
+# ### `patch: spec`
+#
+# `spec` accepts exactly one of `source` and `content`.
+#
+# | Name      | Type                                            | Meaning                    |
+# | --------- | ----------------------------------------------- | -------------------------- |
+# | `source`  | [`Str`](../std/str.md)\|[`fs.Path`](../fs/path.md) | Unified patch file         |
+# | `content` | [`Str`](../std/str.md)\|[`Bin`](../std/bin.md) | Unified patch data         |
+#
 # # Returns
 #
-# The final `Image`
+# [`Image`](./image.md)
+#
+# # Example
 #
 # ```
-# import docker
 # let img = docker.build
 #   from: ubuntu:24.04
 #   run: do run apt install -y curl

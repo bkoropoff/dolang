@@ -418,7 +418,7 @@ open data.txt r+ do |file|
   file.set_xattr "comment" "ready"
 ```
 
-### `streams`
+### `streams()`
 
 Lists alternate data streams for this file.
 

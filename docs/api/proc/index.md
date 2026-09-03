@@ -36,7 +36,7 @@ capture, and pipeline behavior.
 
 ## Functions
 
-### `enumerate`
+### `enumerate()`
 
 Lists the processes running on the target.
 

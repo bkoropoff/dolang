@@ -161,7 +161,7 @@ because attribute identity fields are immutable.
 | `namespace` | `str?` | Namespace URI                       |
 | `prefix`    | `str?` | Preferred namespace prefix          |
 
-### `traverse`
+### `traverse()`
 
 Returns a depth-first, parent-first iterator over the node and its descendants.
 

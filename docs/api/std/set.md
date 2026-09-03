@@ -42,7 +42,7 @@ s.add 2
 assert_eq [...s] [1, 2, 3]
 ```
 
-### `clear`
+### `clear()`
 
 Removes all members.
 
@@ -66,7 +66,7 @@ Tests whether the Set contains `value`.
 
 [`Bool`](./index.md)
 
-### `copy`
+### `copy()`
 
 Returns a shallow copy of the Set.
 

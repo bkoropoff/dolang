@@ -62,7 +62,7 @@ buf.append 42
 assert_eq $buf.freeze() b"foobar42"
 ```
 
-### `clear`
+### `clear()`
 
 Empties the buffer, retaining its allocated capacity.
 
@@ -165,7 +165,7 @@ buf.extend b"bar"
 assert_eq $buf.freeze() b"foobar"
 ```
 
-### `freeze`
+### `freeze()`
 
 Converts the buffer's current contents into an immutable [`Bin`](./bin.md)
 in place, without copying, and empties the buffer. The buffer stays usable
