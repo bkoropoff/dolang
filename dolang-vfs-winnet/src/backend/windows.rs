@@ -9,7 +9,7 @@ use dolang_vfs::{
 use dolang_winterop::security::{SecDesc, Sid};
 use windows_sys::Win32::{
     Foundation::{
-        ERROR_ACCESS_DENIED, ERROR_ALIAS_EXISTS, ERROR_INSUFFICIENT_BUFFER,
+        ERROR_ACCESS_DENIED, ERROR_ALIAS_EXISTS, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_HANDLE,
         ERROR_INVALID_PARAMETER, ERROR_INVALID_PASSWORD, ERROR_MEMBER_IN_ALIAS,
         ERROR_MEMBER_NOT_IN_ALIAS, ERROR_MORE_DATA, ERROR_NO_SUCH_ALIAS, ERROR_NO_SUCH_PRIVILEGE,
         ERROR_NONE_MAPPED, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS,
@@ -88,6 +88,7 @@ fn windows_path<'a>(value: Option<&'a WirePath>, field: &str) -> Result<&'a str,
 fn status(operation: &str, code: u32) -> Error {
     let kind = if code == NERR_UserNotFound
         || code == NERR_GroupNotFound
+        || code == ERROR_INVALID_HANDLE
         || code == ERROR_NO_SUCH_ALIAS
         || code == ERROR_NONE_MAPPED
         || code == NERR_NetNameNotFound
