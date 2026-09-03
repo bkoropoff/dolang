@@ -15,15 +15,9 @@ use dolang_vfs::{
 #[cfg(windows)]
 use dolang_winterop::security::SecInfo;
 use tempfile::tempdir;
-use typed_path::{Utf8TypedPath, Utf8UnixPath, Utf8WindowsPath};
 
-fn typed(path: &Path) -> Utf8TypedPath<'_> {
-    let path = path.to_str().unwrap();
-    if cfg!(windows) {
-        Utf8TypedPath::Windows(Utf8WindowsPath::new(path))
-    } else {
-        Utf8TypedPath::Unix(Utf8UnixPath::new(path))
-    }
+fn typed(path: &Path) -> dolang_vfs::path::Path<'_> {
+    dolang_vfs::path::Path::new(path.to_str().unwrap(), dolang_vfs::path::Kind::native())
 }
 
 #[cfg(any(windows, target_os = "linux"))]
@@ -33,12 +27,8 @@ fn attr_patch(flag: AttrFlags, value: bool) -> MetadataPatch {
     patch
 }
 
-fn typed_str(path: &str) -> Utf8TypedPath<'_> {
-    if cfg!(windows) {
-        Utf8TypedPath::Windows(Utf8WindowsPath::new(path))
-    } else {
-        Utf8TypedPath::Unix(Utf8UnixPath::new(path))
-    }
+fn typed_str(path: &str) -> dolang_vfs::path::Path<'_> {
+    dolang_vfs::path::Path::new(path, dolang_vfs::path::Kind::native())
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
@@ -143,7 +133,7 @@ async fn background_termination_signals_the_process_group() {
     let dir = tempdir().unwrap();
     let pid_path = dir.path().join("descendant.pid");
     let script = format!("sleep 60 & echo $! > '{}'; wait", pid_path.display());
-    let mut command = direct.command(Utf8TypedPath::Unix(Utf8UnixPath::new("sh")));
+    let mut command = direct.command(dolang_vfs::path::Path::unix("sh"));
     command
         .arg("-c")
         .arg(&script)
@@ -176,7 +166,7 @@ async fn force_false_orphans_the_background_process_group() {
         "trap '' TERM; echo $$ > '{}'; sleep 60 & wait",
         pid_path.display()
     );
-    let mut command = direct.command(Utf8TypedPath::Unix(Utf8UnixPath::new("sh")));
+    let mut command = direct.command(dolang_vfs::path::Path::unix("sh"));
     command
         .arg("-c")
         .arg(&script)
@@ -199,7 +189,7 @@ async fn force_false_orphans_the_background_process_group() {
 #[cfg(windows)]
 async fn assert_windows_termination(control: ProcessControl) {
     let direct = Vfs::direct().unwrap();
-    let mut command = direct.command(Utf8TypedPath::Windows(Utf8WindowsPath::new("cmd")));
+    let mut command = direct.command(dolang_vfs::path::Path::windows("cmd"));
     command
         .arg("/C")
         .arg("ping -n 60 127.0.0.1 >nul")

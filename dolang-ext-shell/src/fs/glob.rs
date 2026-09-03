@@ -5,7 +5,8 @@ use dolang::runtime::{
     object::{TypeBuilder, Unpack, UnpackItem},
     value::TypeObject,
 };
-use typed_path::Utf8TypedPathBuf;
+
+use dolang_vfs::path as vfs_path;
 
 use crate::{
     fs::path::{PathAnnex, create_path_annex},
@@ -14,13 +15,13 @@ use crate::{
 
 /// Iterator over glob results, yielding Path objects.
 pub(crate) struct GlobIter {
-    pub(crate) paths: VecDeque<Utf8TypedPathBuf>,
+    pub(crate) paths: VecDeque<vfs_path::PathBuf>,
 }
 
 pub(crate) struct GlobIterAnnex<'v> {
     pub(crate) global: State<'v, Global<'v>>,
     /// Prefix to prepend to each result path.
-    pub(crate) prefix: Utf8TypedPathBuf,
+    pub(crate) prefix: vfs_path::PathBuf,
 }
 
 impl<'v> Object<'v> for GlobIter {

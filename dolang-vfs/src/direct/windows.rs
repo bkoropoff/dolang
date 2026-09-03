@@ -30,7 +30,6 @@ use tokio::{
     fs::{self, OpenOptions as TokioOpenOptions},
     time::{Duration, timeout},
 };
-use typed_path::{Utf8TypedPath, Utf8WindowsPath};
 use windows_sys::{
     Wdk::Storage::FileSystem::{
         FILE_FULL_EA_INFORMATION, FILE_GET_EA_INFORMATION, FILE_RENAME_POSIX_SEMANTICS,
@@ -175,11 +174,11 @@ impl File {
     }
 }
 
-fn typed_windows_path(path: &Path) -> Result<Utf8TypedPath<'_>> {
+fn typed_windows_path(path: &Path) -> Result<crate::path::Path<'_>> {
     let path = path
         .to_str()
         .ok_or_else(|| Error::new(ErrorKind::InvalidData, "path is not UTF-8"))?;
-    Ok(Utf8TypedPath::Windows(Utf8WindowsPath::new(path)))
+    Ok(crate::path::Path::windows(path))
 }
 
 impl Direct {
@@ -1363,19 +1362,6 @@ impl Direct {
         }
     }
 
-    fn windows_parse_stream_name(name: &str) -> Result<(String, String)> {
-        let rest = name
-            .strip_prefix(':')
-            .ok_or_else(|| Error::new(ErrorKind::InvalidData, "stream name missing `:` prefix"))?;
-        let split = rest
-            .rfind(':')
-            .ok_or_else(|| Error::new(ErrorKind::InvalidData, "stream name missing type suffix"))?;
-        let stream_type = rest[split + 1..]
-            .strip_prefix('$')
-            .ok_or_else(|| Error::new(ErrorKind::InvalidData, "stream type missing `$` prefix"))?;
-        Ok((rest[..split].to_owned(), stream_type.to_owned()))
-    }
-
     fn windows_parse_streams(buf: &[u8]) -> Result<Vec<StreamEntry>> {
         let mut streams = Vec::new();
         let mut offset = 0usize;
@@ -1399,7 +1385,7 @@ impl Direct {
                 unsafe { slice::from_raw_parts(info.StreamName.as_ptr(), name_len / 2) };
             let raw_name = String::from_utf16(name_slice)
                 .map_err(|_| Error::new(ErrorKind::InvalidData, "stream name is not UTF-16"))?;
-            let (name, r#type) = Self::windows_parse_stream_name(&raw_name)?;
+            let (name, r#type) = crate::path::stream::parse_raw_name(&raw_name)?;
             let size = u64::try_from(info.StreamSize)
                 .map_err(|_| Error::new(ErrorKind::InvalidData, "stream size out of range"))?;
             let alloc_size = u64::try_from(info.StreamAllocationSize).map_err(|_| {

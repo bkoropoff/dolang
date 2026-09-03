@@ -18,7 +18,7 @@ use dolang::runtime::{
     unpack,
 };
 use dolang_vfs::metadata::AttrFlags;
-use typed_path::{Utf8TypedPath, Utf8TypedPathBuf, Utf8WindowsPrefix};
+use dolang_vfs::path as vfs_path;
 
 use super::file::File;
 
@@ -27,34 +27,28 @@ pub(crate) struct UnixPath;
 pub(crate) struct WindowsPath;
 
 pub(crate) struct PathAnnex<'v> {
-    pub(crate) inner: Utf8TypedPathBuf,
-    dispatch: Utf8TypedPathBuf,
+    pub(crate) path: vfs_path::PathBuf,
     pub(crate) global: State<'v, Global<'v>>,
-    stream_name: Option<String>,
-    stream_type: Option<String>,
 }
 
-fn target_path_type<'v>(
-    strand: &Strand<'v, '_>,
-    global: State<'v, Global<'v>>,
-) -> typed_path::PathType {
-    global.local.get(strand).target().os().path_type()
+fn target_path_type<'v>(strand: &Strand<'v, '_>, global: State<'v, Global<'v>>) -> vfs_path::Kind {
+    global.local.get(strand).target().os().path_kind()
 }
 
 pub(crate) fn path_from_value<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
     value: &Value<'v>,
-) -> Result<'v, 's, Utf8TypedPathBuf> {
+) -> Result<'v, 's, vfs_path::PathBuf> {
     let path = if let Some(path) = global.types.unix_path.cast(value) {
-        Ok(path.enter_sync(strand, |_strand, inst| inst.annex().inner.clone()))
+        Ok(path.enter_sync(strand, |_strand, inst| inst.annex().path_buf()))
     } else if let Some(path) = global.types.windows_path.cast(value) {
-        Ok(path.enter_sync(strand, |_strand, inst| inst.annex().typed_path_buf()))
+        Ok(path.enter_sync(strand, |_strand, inst| inst.annex().path_buf()))
     } else if let Some(str) = value.as_str(strand) {
         let target = target_path_type(strand, global);
         Ok(strand.access(|x| match target {
-            typed_path::PathType::Unix => Utf8TypedPathBuf::from_unix(str.as_str(x)),
-            typed_path::PathType::Windows => Utf8TypedPathBuf::from_windows(str.as_str(x)),
+            vfs_path::Kind::Unix => vfs_path::PathBuf::from_unix(str.as_str(x)),
+            vfs_path::Kind::Windows => vfs_path::PathBuf::from_windows(str.as_str(x)),
         }))
     } else {
         Err(Error::type_error(strand, "expected Path or Str"))
@@ -62,64 +56,20 @@ pub(crate) fn path_from_value<'v, 's>(
     Ok(path)
 }
 
-fn path_path_type(path: Utf8TypedPath<'_>) -> typed_path::PathType {
-    match path {
-        Utf8TypedPath::Unix(_) => typed_path::PathType::Unix,
-        Utf8TypedPath::Windows(_) => typed_path::PathType::Windows,
-    }
-}
-
-pub(crate) fn normalize_path(path: Utf8TypedPath<'_>) -> Utf8TypedPathBuf {
-    let has_root = path.has_root();
-    let mut components: Vec<typed_path::Utf8TypedComponent<'_>> = Vec::new();
-
-    for component in path.components() {
-        if component.is_current() {
-            continue;
-        }
-        if component.is_parent() {
-            if components.last().is_some_and(|last| last.is_normal()) {
-                components.pop();
-            } else if !has_root {
-                components.push(component);
-            }
-        } else {
-            components.push(component);
-        }
-    }
-
-    let mut normalized = match path {
-        Utf8TypedPath::Unix(_) => Utf8TypedPathBuf::from_unix(""),
-        Utf8TypedPath::Windows(_) => Utf8TypedPathBuf::from_windows(""),
-    };
-    for component in components {
-        normalized.push(component.as_str());
-    }
-    normalized
-}
-
-fn same_path_type(a: &typed_path::PathType, b: &typed_path::PathType) -> bool {
-    matches!(
-        (a, b),
-        (typed_path::PathType::Unix, typed_path::PathType::Unix)
-            | (typed_path::PathType::Windows, typed_path::PathType::Windows)
-    )
-}
-
 fn any_path_from_value<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
     value: &Value<'v>,
-) -> Result<'v, 's, Utf8TypedPathBuf> {
+) -> Result<'v, 's, vfs_path::PathBuf> {
     if let Some(path) = global.types.unix_path.cast(value) {
-        Ok(path.enter_sync(strand, |_strand, inst| inst.annex().inner.clone()))
+        Ok(path.enter_sync(strand, |_strand, inst| inst.annex().path_buf()))
     } else if let Some(path) = global.types.windows_path.cast(value) {
-        Ok(path.enter_sync(strand, |_strand, inst| inst.annex().typed_path_buf()))
+        Ok(path.enter_sync(strand, |_strand, inst| inst.annex().path_buf()))
     } else if let Some(value) = value.as_str(strand) {
         let target = target_path_type(strand, global);
         Ok(strand.access(|x| match target {
-            typed_path::PathType::Unix => Utf8TypedPathBuf::from_unix(value.as_str(x)),
-            typed_path::PathType::Windows => Utf8TypedPathBuf::from_windows(value.as_str(x)),
+            vfs_path::Kind::Unix => vfs_path::PathBuf::from_unix(value.as_str(x)),
+            vfs_path::Kind::Windows => vfs_path::PathBuf::from_windows(value.as_str(x)),
         }))
     } else {
         Err(Error::type_error(strand, "expected Path or Str"))
@@ -130,15 +80,15 @@ fn path_object_from_value<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
     value: &Value<'v>,
-) -> Option<Utf8TypedPathBuf> {
+) -> Option<vfs_path::PathBuf> {
     if let Some(path) = global.types.unix_path.cast(value) {
-        Some(path.enter_sync(strand, |_strand, inst| inst.annex().inner.clone()))
+        Some(path.enter_sync(strand, |_strand, inst| inst.annex().path_buf()))
     } else {
         global
             .types
             .windows_path
             .cast(value)
-            .map(|path| path.enter_sync(strand, |_strand, inst| inst.annex().typed_path_buf()))
+            .map(|path| path.enter_sync(strand, |_strand, inst| inst.annex().path_buf()))
     }
 }
 
@@ -152,42 +102,28 @@ fn is_path_value<'v>(
         || value.as_str(strand).is_some()
 }
 
-pub(crate) fn convert_path_type<'v, 's>(
+/// Converts `path` into `target` syntax, reporting failure as a Do type error.
+///
+/// The rules live in [`vfs_path::Path::to_kind`]; this only restates the
+/// failure as the `TypeError` the Do-side `Path` API promises.
+pub(crate) fn convert_path_kind<'v, 's>(
     strand: &mut Strand<'v, 's>,
-    path: Utf8TypedPathBuf,
-    target: &typed_path::PathType,
-) -> Result<'v, 's, Utf8TypedPathBuf> {
-    if same_path_type(&path_path_type(path.to_path()), target) {
-        return Ok(path);
+    path: vfs_path::PathBuf,
+    target: vfs_path::Kind,
+) -> Result<'v, 's, vfs_path::PathBuf> {
+    match path.to_kind(target) {
+        Ok(path) => Ok(path),
+        Err(error) => Err(Error::type_error(strand, error.to_string())),
     }
-    let invalid_windows_source = match path.to_path() {
-        Utf8TypedPath::Windows(path) => {
-            path.has_root()
-                || path.components().prefix_kind().is_some()
-                || path.file_name().is_some_and(|name| name.contains(':'))
-        }
-        Utf8TypedPath::Unix(path) => path.has_root(),
-    };
-    if invalid_windows_source || path.is_absolute() {
-        return Err(Error::type_error(
-            strand,
-            "only relative, unrooted paths can be converted between path types",
-        ));
-    }
-    let converted = match target {
-        typed_path::PathType::Unix => path.with_unix_encoding_checked(),
-        typed_path::PathType::Windows => path.with_windows_encoding_checked(),
-    };
-    converted.map_err(|_| Error::type_error(strand, "path cannot be converted between path types"))
 }
 
 pub(crate) fn safe_concat<'v, 's>(
     strand: &mut Strand<'v, 's>,
-    left: Utf8TypedPath<'_>,
-    right: Utf8TypedPath<'_>,
-) -> Result<'v, 's, Utf8TypedPathBuf> {
-    let target = path_path_type(left);
-    let right = convert_path_type(strand, right.to_path_buf(), &target)?;
+    left: vfs_path::Path<'_>,
+    right: vfs_path::Path<'_>,
+) -> Result<'v, 's, vfs_path::PathBuf> {
+    let target = left.kind();
+    let right = convert_path_kind(strand, right.to_path_buf(), target)?;
     Ok(left.join(right.as_str()))
 }
 
@@ -195,16 +131,16 @@ fn concrete_path_from_value<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
     value: &Value<'v>,
-    style: typed_path::PathType,
-) -> Result<'v, 's, Utf8TypedPathBuf> {
+    style: vfs_path::Kind,
+) -> Result<'v, 's, vfs_path::PathBuf> {
     if let Some(value) = value.as_str(strand) {
         return Ok(strand.access(|x| match style {
-            typed_path::PathType::Unix => Utf8TypedPathBuf::from_unix(value.as_str(x)),
-            typed_path::PathType::Windows => Utf8TypedPathBuf::from_windows(value.as_str(x)),
+            vfs_path::Kind::Unix => vfs_path::PathBuf::from_unix(value.as_str(x)),
+            vfs_path::Kind::Windows => vfs_path::PathBuf::from_windows(value.as_str(x)),
         }));
     }
     let path = any_path_from_value(strand, global, value)?;
-    convert_path_type(strand, path, &style)
+    convert_path_kind(strand, path, style)
 }
 
 pub(crate) fn create_path_annex<'v, 's>(
@@ -213,12 +149,12 @@ pub(crate) fn create_path_annex<'v, 's>(
     out: impl Output<'v>,
 ) {
     let global = annex.global;
-    match annex.inner.to_path() {
-        Utf8TypedPath::Unix(_) => global
+    match annex.path.kind() {
+        vfs_path::Kind::Unix => global
             .types
             .unix_path
             .create_with_annex(strand, UnixPath, annex, out),
-        Utf8TypedPath::Windows(_) => {
+        vfs_path::Kind::Windows => {
             global
                 .types
                 .windows_path
@@ -230,7 +166,7 @@ pub(crate) fn create_path_annex<'v, 's>(
 pub(crate) fn create_path<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    path: Utf8TypedPathBuf,
+    path: vfs_path::PathBuf,
     out: impl Output<'v>,
 ) -> Result<'v, 's, ()> {
     let annex = PathAnnex::try_new(strand, path, global)?;
@@ -248,152 +184,59 @@ fn expect_str<'v, 's>(strand: &mut Strand<'v, 's>, value: &Value<'v>) -> Result<
 fn rewrite_path<'v, 'a, 's>(
     strand: &mut Strand<'v, 's>,
     annex: &PathAnnex<'v>,
-    path: Utf8TypedPath<'_>,
     out: Slot<'v, 'a>,
-    rewrite: impl FnOnce(&mut Utf8TypedPathBuf),
+    rewrite: impl FnOnce(&mut vfs_path::PathBuf),
 ) -> Result<'v, 's, ()> {
-    let mut path = path.to_path_buf();
+    let mut path = annex.path_buf();
     rewrite(&mut path);
-    let next = annex.with_path(strand, path)?;
+    let next = PathAnnex::try_new(strand, path, annex.global)?;
     create_path_annex(strand, next, out);
     Ok(())
 }
 
-fn with_stem_path(path: Utf8TypedPath<'_>, stem: &str) -> Utf8TypedPathBuf {
-    let mut path = path.to_path_buf();
-    let ext = path.extension().map(str::to_owned);
-    match ext {
-        Some(ext) => path.set_file_name(format!("{stem}.{ext}")),
-        None => path.set_file_name(stem),
-    }
-    path
-}
-
 impl<'v> PathAnnex<'v> {
+    /// Wraps `path`, rejecting a malformed alternate data stream suffix.
+    ///
+    /// Validating here is what lets every accessor below stay infallible: a Do
+    /// `Path` value never holds a suffix the path layer cannot parse.
     pub(crate) fn try_new<'s>(
         strand: &mut Strand<'v, 's>,
-        path: Utf8TypedPathBuf,
+        path: vfs_path::PathBuf,
         global: State<'v, Global<'v>>,
     ) -> Result<'v, 's, Self> {
-        let dispatch = path.clone();
-        let (path, stream_name, stream_type) = split_windows_ads(strand, path)?;
-        Ok(Self {
-            inner: path,
-            dispatch,
-            global,
-            stream_name,
-            stream_type,
-        })
+        stream_spec(strand, path.to_path())?;
+        Ok(Self { path, global })
     }
 
-    pub(crate) fn new(path: Utf8TypedPathBuf, global: State<'v, Global<'v>>) -> Self {
-        Self {
-            inner: path.clone(),
-            dispatch: path,
-            global,
-            stream_name: None,
-            stream_type: None,
-        }
+    pub(crate) fn as_path(&self) -> vfs_path::Path<'_> {
+        self.path.to_path()
     }
 
-    pub(crate) fn as_path(&self) -> Utf8TypedPath<'_> {
-        self.dispatch.to_path()
-    }
-
-    pub(crate) fn typed_path_buf(&self) -> Utf8TypedPathBuf {
-        self.dispatch.clone()
-    }
-
-    fn rebuild_dispatch(&mut self) {
-        let (Some(stream_name), Some(name)) = (&self.stream_name, self.inner.file_name()) else {
-            self.dispatch = self.inner.clone();
-            return;
-        };
-        let mut name = name.to_owned();
-        name.push(':');
-        name.push_str(stream_name);
-        if let Some(stream_type) = &self.stream_type {
-            name.push_str(":$");
-            name.push_str(stream_type);
-        }
-        self.dispatch = self.inner.with_file_name(name);
-    }
-
-    fn with_path<'s>(
-        &self,
-        strand: &mut Strand<'v, 's>,
-        path: Utf8TypedPathBuf,
-    ) -> Result<'v, 's, Self> {
-        let annex = Self::try_new(strand, path, self.global)?;
-        let mut annex = annex;
-        annex.stream_name = self.stream_name.clone();
-        annex.stream_type = self.stream_type.clone();
-        annex.rebuild_dispatch();
-        Ok(annex)
+    pub(crate) fn path_buf(&self) -> vfs_path::PathBuf {
+        self.path.clone()
     }
 
     fn display(&self) -> String {
-        self.dispatch.as_str().to_owned()
+        self.path.as_str().to_owned()
     }
 
-    fn with_windows_prefix<R>(&self, f: impl FnOnce(Option<Utf8WindowsPrefix<'_>>) -> R) -> R {
-        match self.inner.to_path() {
-            Utf8TypedPath::Windows(path) => {
-                let components = path.components();
-                f(components.prefix_kind())
-            }
-            Utf8TypedPath::Unix(_) => f(None),
-        }
+    fn windows_prefix(&self) -> Option<vfs_path::WindowsPrefix<'_>> {
+        self.as_path().windows_prefix()
     }
 }
 
-fn split_windows_ads<'v, 's>(
+/// Reads a path's alternate data stream specifier.
+///
+/// The grammar lives in [`vfs_path::Path::stream`]; this only restates a
+/// malformed suffix as the `ValueError` the Do-side `Path` API promises.
+fn stream_spec<'v, 'a, 's>(
     strand: &mut Strand<'v, 's>,
-    mut path: Utf8TypedPathBuf,
-) -> Result<'v, 's, (Utf8TypedPathBuf, Option<String>, Option<String>)> {
-    if path.is_unix() {
-        return Ok((path, None, None));
+    path: vfs_path::Path<'a>,
+) -> Result<'v, 's, Option<vfs_path::StreamSpec<'a>>> {
+    match path.stream() {
+        Ok(spec) => Ok(spec),
+        Err(error) => Err(Error::value(strand, error.to_string())),
     }
-    let Some(file_name) = path.file_name() else {
-        return Ok((path, None, None));
-    };
-    let file_name = file_name.to_owned();
-    let parts = file_name.split(':').collect::<Vec<_>>();
-    match parts.as_slice() {
-        [_base] => Ok((path, None, None)),
-        [base, stream_name] => {
-            path.set_file_name(base);
-            Ok((path, Some((*stream_name).to_owned()), None))
-        }
-        [base, stream_name, stream_type] if stream_type.starts_with('$') => {
-            path.set_file_name(base);
-            Ok((
-                path,
-                Some((*stream_name).to_owned()),
-                Some(stream_type[1..].to_owned()),
-            ))
-        }
-        [_base, _stream_name, _stream_type] => Err(Error::value(
-            strand,
-            "explicit alternate data stream type must start with `$`",
-        )),
-        _ => Err(Error::value(
-            strand,
-            "path final component has too many alternate data stream parts",
-        )),
-    }
-}
-
-fn with_added_extension(path: Utf8TypedPath<'_>, ext: &str) -> Utf8TypedPathBuf {
-    let Some(name) = path.file_name() else {
-        return path.to_path_buf();
-    };
-    let mut name = name.to_owned();
-    if !ext.is_empty() {
-        name.push('.');
-        name.push_str(ext);
-    }
-    path.with_file_name(name)
 }
 
 trait ConcretePath<'v>: Object<'v, Annex = PathAnnex<'v>> {}
@@ -448,7 +291,7 @@ impl<'v> Object<'v> for Path {
         let ([path], []) = unpack!(strand, args, 1, 0)?;
         let path = any_path_from_value(strand, global, &path)?;
         let target = target_path_type(strand, global);
-        let path = convert_path_type(strand, path, &target)?;
+        let path = convert_path_kind(strand, path, target)?;
         create_path(strand, global, path, out)
     }
 
@@ -461,20 +304,17 @@ impl<'v> Object<'v> for Path {
                 match arg {
                     Arg::Pos(slot) => {
                         let path = any_path_from_value(strand, global, &slot)?;
-                        let target = target.get_or_insert_with(|| path_path_type(path.to_path()));
-                        let path = convert_path_type(strand, path, target)?;
-                        let buf = buf.get_or_insert_with(|| match target {
-                            typed_path::PathType::Unix => Utf8TypedPathBuf::from_unix(""),
-                            typed_path::PathType::Windows => Utf8TypedPathBuf::from_windows(""),
-                        });
+                        let target = *target.get_or_insert_with(|| path.kind());
+                        let path = convert_path_kind(strand, path, target)?;
+                        let buf = buf.get_or_insert_with(|| vfs_path::PathBuf::empty(target));
                         buf.push(path.as_str());
                     }
                     Arg::Key(sym, _) => return Err(Error::unexpected_key(strand, sym)),
                 }
             }
             let buf = buf.unwrap_or_else(|| match target_path_type(strand, global) {
-                typed_path::PathType::Unix => Utf8TypedPathBuf::from_unix(""),
-                typed_path::PathType::Windows => Utf8TypedPathBuf::from_windows(""),
+                vfs_path::Kind::Unix => vfs_path::PathBuf::from_unix(""),
+                vfs_path::Kind::Windows => vfs_path::PathBuf::from_windows(""),
             });
             create_path(strand, global, buf, out)
         })
@@ -568,35 +408,35 @@ macro_rules! impl_concrete_path {
                 let builder = builder
                     .get("name", |this, strand, out| {
                         let borrow = this.annex();
-                        if let Some(n) = borrow.inner.file_name() {
+                        if let Some(n) = borrow.as_path().file_name() {
                             Output::set(strand, out, n);
                         }
                         Ok(())
                     })
                     .get("stem", |this, strand, out| {
                         let borrow = this.annex();
-                        if let Some(stem) = borrow.inner.file_stem() {
+                        if let Some(stem) = borrow.as_path().file_stem() {
                             Output::set(strand, out, stem);
                         }
                         Ok(())
                     })
                     .get("parent", |this, strand, out| {
                         let borrow = this.annex();
-                        if let Some(path) = borrow.inner.parent() {
+                        if let Some(path) = borrow.as_path().parent() {
                             create_path(strand, borrow.global, path.to_path_buf(), out)?;
                         }
                         Ok(())
                     })
                     .get("ext", |this, strand, out| {
                         let borrow = this.annex();
-                        if let Some(e) = borrow.inner.extension() {
+                        if let Some(e) = borrow.as_path().extension() {
                             Output::set(strand, out, e);
                         }
                         Ok(())
                     })
                     .get("is_absolute", |this, strand, out| {
                         let borrow = this.annex();
-                        Output::set(strand, out, borrow.inner.is_absolute());
+                        Output::set(strand, out, borrow.as_path().is_absolute());
                         Ok(())
                     })
                     .method("open", async move |this, strand, args, out| {
@@ -1062,27 +902,31 @@ macro_rules! impl_concrete_path {
                         )
                         .await
                     });
-                let builder = if matches!($style, typed_path::PathType::Windows) {
+                let builder = if matches!($style, vfs_path::Kind::Windows) {
                     builder
                         .get("stream_name", |this, strand, out| {
-                            if let Some(stream_name) = &this.annex().stream_name {
-                                Output::set(strand, out, stream_name.as_str());
+                            let annex = this.annex();
+                            if let Some(spec) = stream_spec(strand, annex.as_path())? {
+                                Output::set(strand, out, spec.name());
                             }
                             Ok(())
                         })
                         .get("stream_type", |this, strand, out| {
-                            if let Some(stream_type) = &this.annex().stream_type {
-                                Output::set(strand, out, stream_type.as_str());
+                            let annex = this.annex();
+                            let stream_type = stream_spec(strand, annex.as_path())?
+                                .and_then(|spec| spec.stream_type());
+                            if let Some(stream_type) = stream_type {
+                                Output::set(strand, out, stream_type);
                             }
                             Ok(())
                         })
                         .get("disk", |this, strand, out| {
                             let annex = this.annex();
-                            let disk = annex.with_windows_prefix(|prefix| match prefix {
-                                Some(Utf8WindowsPrefix::Disk(disk))
-                                | Some(Utf8WindowsPrefix::VerbatimDisk(disk)) => Some(disk),
+                            let disk = match annex.windows_prefix() {
+                                Some(vfs_path::WindowsPrefix::Disk(disk))
+                                | Some(vfs_path::WindowsPrefix::VerbatimDisk(disk)) => Some(disk),
                                 _ => None,
-                            });
+                            };
                             if let Some(disk) = disk {
                                 let disk = disk.to_string();
                                 Output::set(strand, out, disk.as_str());
@@ -1091,13 +935,13 @@ macro_rules! impl_concrete_path {
                         })
                         .get("server", |this, strand, out| {
                             let annex = this.annex();
-                            let server = annex.with_windows_prefix(|prefix| match prefix {
-                                Some(Utf8WindowsPrefix::UNC(server, _))
-                                | Some(Utf8WindowsPrefix::VerbatimUNC(server, _)) => {
+                            let server = match annex.windows_prefix() {
+                                Some(vfs_path::WindowsPrefix::UNC(server, _))
+                                | Some(vfs_path::WindowsPrefix::VerbatimUNC(server, _)) => {
                                     Some(server.to_owned())
                                 }
                                 _ => None,
-                            });
+                            };
                             if let Some(server) = server {
                                 Output::set(strand, out, server.as_str());
                             }
@@ -1105,13 +949,13 @@ macro_rules! impl_concrete_path {
                         })
                         .get("share", |this, strand, out| {
                             let annex = this.annex();
-                            let share = annex.with_windows_prefix(|prefix| match prefix {
-                                Some(Utf8WindowsPrefix::UNC(_, share))
-                                | Some(Utf8WindowsPrefix::VerbatimUNC(_, share)) => {
+                            let share = match annex.windows_prefix() {
+                                Some(vfs_path::WindowsPrefix::UNC(_, share))
+                                | Some(vfs_path::WindowsPrefix::VerbatimUNC(_, share)) => {
                                     Some(share.to_owned())
                                 }
                                 _ => None,
-                            });
+                            };
                             if let Some(share) = share {
                                 Output::set(strand, out, share.as_str());
                             }
@@ -1119,12 +963,12 @@ macro_rules! impl_concrete_path {
                         })
                         .get("device", |this, strand, out| {
                             let annex = this.annex();
-                            let device = annex.with_windows_prefix(|prefix| match prefix {
-                                Some(Utf8WindowsPrefix::DeviceNS(device)) => {
+                            let device = match annex.windows_prefix() {
+                                Some(vfs_path::WindowsPrefix::DeviceNS(device)) => {
                                     Some(device.to_owned())
                                 }
                                 _ => None,
-                            });
+                            };
                             if let Some(device) = device {
                                 Output::set(strand, out, device.as_str());
                             }
@@ -1132,9 +976,9 @@ macro_rules! impl_concrete_path {
                         })
                         .get("is_verbatim", |this, strand, out| {
                             let annex = this.annex();
-                            let verbatim = annex.with_windows_prefix(|prefix| {
-                                prefix.is_some_and(|prefix| prefix.is_verbatim())
-                            });
+                            let verbatim = annex
+                                .windows_prefix()
+                                .is_some_and(|prefix| prefix.is_verbatim());
                             Output::set(strand, out, verbatim);
                             Ok(())
                         })
@@ -1168,7 +1012,7 @@ macro_rules! impl_concrete_path {
                     .method("normalize", async move |this, strand, args, out| {
                         let ([], []) = unpack!(strand, args, 0, 0)?;
                         let annex = this.annex();
-                        let normalized = normalize_path(annex.as_path());
+                        let normalized = annex.as_path().normalize();
                         create_path(strand, annex.global, normalized, out)?;
                         Ok(())
                     })
@@ -1186,50 +1030,56 @@ macro_rules! impl_concrete_path {
                         let ([ext], []) = unpack!(strand, args, 1, 0)?;
                         let ext = expect_str(strand, &ext)?;
                         let annex = this.annex();
-                        let annex =
-                            annex.with_path(strand, with_added_extension(annex.as_path(), &ext))?;
-                        create_path_annex(strand, annex, out);
-                        Ok(())
+                        rewrite_path(strand, &annex, out, |path| {
+                            let Some(name) = path.file_name() else {
+                                return;
+                            };
+                            let mut name = name.to_owned();
+                            if !ext.is_empty() {
+                                name.push('.');
+                                name.push_str(&ext);
+                            }
+                            path.set_file_name(name);
+                        })
                     })
                     .method("without_ext", async move |this, strand, args, out| {
                         let ([], []) = unpack!(strand, args, 0, 0)?;
                         let annex = this.annex();
-                        rewrite_path(strand, &annex, annex.inner.to_path(), out, |path| {
+                        rewrite_path(strand, &annex, out, |path| {
                             let _ = path.set_extension("");
-                        })?;
-                        Ok(())
+                        })
                     })
                     .method("with_ext", async move |this, strand, args, out| {
                         let ([ext], []) = unpack!(strand, args, 1, 0)?;
                         let ext = expect_str(strand, &ext)?;
                         let annex = this.annex();
-                        rewrite_path(strand, &annex, annex.inner.to_path(), out, |path| {
+                        rewrite_path(strand, &annex, out, |path| {
                             let _ = path.set_extension(ext);
-                        })?;
-                        Ok(())
+                        })
                     })
                     .method("with_name", async move |this, strand, args, out| {
                         let ([name], []) = unpack!(strand, args, 1, 0)?;
                         let name = expect_str(strand, &name)?;
                         let annex = this.annex();
-                        rewrite_path(strand, &annex, annex.inner.to_path(), out, |path| {
-                            path.set_file_name(name)
-                        })?;
-                        Ok(())
+                        rewrite_path(strand, &annex, out, |path| path.set_file_name(name))
                     })
                     .method("with_stem", async move |this, strand, args, out| {
                         let ([stem], []) = unpack!(strand, args, 1, 0)?;
                         let stem = expect_str(strand, &stem)?;
-                        let path = with_stem_path(this.annex().inner.to_path(), &stem);
-                        let annex = this.annex().with_path(strand, path)?;
-                        create_path_annex(strand, annex, out);
-                        Ok(())
+                        let annex = this.annex();
+                        rewrite_path(strand, &annex, out, |path| {
+                            let name = match path.extension() {
+                                Some(ext) => format!("{stem}.{ext}"),
+                                None => stem.clone(),
+                            };
+                            path.set_file_name(name);
+                        })
                     })
                     .type_method("join", async move |this, strand, args, out| {
                         let global = strand.state::<Global<'v>>();
                         let mut buf = match $style {
-                            typed_path::PathType::Unix => Utf8TypedPathBuf::from_unix(""),
-                            typed_path::PathType::Windows => Utf8TypedPathBuf::from_windows(""),
+                            vfs_path::Kind::Unix => vfs_path::PathBuf::from_unix(""),
+                            vfs_path::Kind::Windows => vfs_path::PathBuf::from_windows(""),
                         };
                         for arg in args {
                             match arg {
@@ -1255,7 +1105,7 @@ macro_rules! impl_concrete_path {
                 let borrow = this.annex();
                 let global = borrow.global;
                 if let Some(other) = path_object_from_value(strand, global, other) {
-                    Ok(borrow.typed_path_buf() == other)
+                    Ok(borrow.path_buf() == other)
                 } else {
                     Err(Error::not_supported(strand))
                 }
@@ -1278,7 +1128,7 @@ macro_rules! impl_concrete_path {
                 let borrow = this.annex();
                 let global = borrow.global;
                 if let Some(other) = path_object_from_value(strand, global, other) {
-                    Ok(borrow.typed_path_buf() < other)
+                    Ok(borrow.path_buf() < other)
                 } else {
                     Err(Error::not_supported(strand))
                 }
@@ -1294,8 +1144,8 @@ macro_rules! impl_concrete_path {
                 let global = borrow.global;
                 if is_path_value(strand, global, other) {
                     let other = any_path_from_value(strand, global, other)?;
-                    let other = convert_path_type(strand, other, &$style)?;
-                    let path = borrow.inner.join(other.as_str());
+                    let other = convert_path_kind(strand, other, $style)?;
+                    let path = borrow.as_path().without_stream().join(other.as_str());
                     let annex = PathAnnex::try_new(strand, path, global)?;
                     create_path_annex(strand, annex, out);
                     Ok(())
@@ -1326,7 +1176,7 @@ macro_rules! impl_concrete_path {
                 let global = borrow.global;
                 if is_path_value(strand, global, other) {
                     let other = any_path_from_value(strand, global, other)?;
-                    let other = convert_path_type(strand, other, &$style)?;
+                    let other = convert_path_kind(strand, other, $style)?;
                     let path = other.join(borrow.as_path().as_str());
                     let annex = PathAnnex::try_new(strand, path, global)?;
                     create_path_annex(strand, annex, out);
@@ -1339,5 +1189,5 @@ macro_rules! impl_concrete_path {
     };
 }
 
-impl_concrete_path!(UnixPath, "fs.unix", typed_path::PathType::Unix);
-impl_concrete_path!(WindowsPath, "fs.windows", typed_path::PathType::Windows);
+impl_concrete_path!(UnixPath, "fs.unix", vfs_path::Kind::Unix);
+impl_concrete_path!(WindowsPath, "fs.windows", vfs_path::Kind::Windows);

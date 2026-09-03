@@ -6,6 +6,7 @@ use dolang::runtime::{
     value::{BinEmbryo, View},
     vm::Builder,
 };
+use dolang_vfs::path as vfs_path;
 use dolang_vfs::{
     metadata::{AttrFlags, FileType, Mode as VfsMode},
     path::WellKnownPath,
@@ -20,7 +21,6 @@ use std::{
     str,
 };
 use tokio::io::{AsyncRead, AsyncWriteExt, ReadBuf};
-use typed_path::{Utf8TypedPath, Utf8TypedPathBuf};
 
 use rand::{RngExt, distr::Alphanumeric};
 
@@ -41,7 +41,7 @@ use crate::{
         file::File,
         fs_metadata::create_fs_metadata,
         metadata::create_metadata,
-        path::{convert_path_type, create_path, normalize_path, path_from_value, safe_concat},
+        path::{convert_path_kind, create_path, path_from_value, safe_concat},
         readdir::{DirEntryIter, DirEntryIterAnnex},
     },
     global::Global,
@@ -86,7 +86,7 @@ fn sec_desc_mask<'v, 's>(
 async fn sec_desc<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    path: Utf8TypedPath<'_>,
+    path: vfs_path::Path<'_>,
     mask: SecInfo,
     follow: bool,
     mut out: Slot<'v, '_>,
@@ -134,7 +134,7 @@ fn check_acl_default<'v, 's>(
 async fn acl<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    path: Utf8TypedPath<'_>,
+    path: vfs_path::Path<'_>,
     kind: VfsAclKind,
     default: bool,
     follow: bool,
@@ -156,7 +156,7 @@ async fn acl<'v, 's>(
 async fn set_acl<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    path: Utf8TypedPath<'_>,
+    path: vfs_path::Path<'_>,
     kind: VfsAclKind,
     acl: Option<&VfsAnyAcl>,
     default: bool,
@@ -176,7 +176,7 @@ async fn set_acl<'v, 's>(
 async fn set_sec_desc<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    path: Utf8TypedPath<'_>,
+    path: vfs_path::Path<'_>,
     descriptor: &SecDesc,
     follow: bool,
 ) -> Result<'v, 's, ()> {
@@ -226,8 +226,8 @@ pub(crate) async fn read_all<'v, 's>(
 pub(crate) fn prepend_cwd<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    path: Utf8TypedPath<'_>,
-) -> Result<'v, 's, Utf8TypedPathBuf> {
+    path: vfs_path::Path<'_>,
+) -> Result<'v, 's, vfs_path::PathBuf> {
     let cwd = global.local.get(strand).cwd().clone();
     safe_concat(strand, cwd.to_path(), path)
 }
@@ -235,7 +235,7 @@ pub(crate) fn prepend_cwd<'v, 's>(
 async fn metadata<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    path: Utf8TypedPath<'_>,
+    path: vfs_path::Path<'_>,
     follow: bool,
     out: impl Output<'v>,
 ) -> Result<'v, 's, ()> {
@@ -255,7 +255,7 @@ async fn metadata<'v, 's>(
 async fn fs_metadata<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    path: Utf8TypedPath<'_>,
+    path: vfs_path::Path<'_>,
     follow: bool,
     out: impl Output<'v>,
 ) -> Result<'v, 's, ()> {
@@ -377,7 +377,7 @@ fn metadata_patch<'v, 's>(
 async fn set_metadata<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    paths: Vec<Utf8TypedPathBuf>,
+    paths: Vec<vfs_path::PathBuf>,
     patch: dolang_vfs::metadata::MetadataPatch,
 ) -> Result<'v, 's, ()> {
     let paths = paths
@@ -393,7 +393,7 @@ async fn set_metadata<'v, 's>(
 async fn remove<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    path: Utf8TypedPath<'_>,
+    path: vfs_path::Path<'_>,
     all: bool,
     ignore: bool,
 ) -> Result<'v, 's, ()> {
@@ -423,7 +423,7 @@ async fn remove<'v, 's>(
 async fn exists<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    path: Utf8TypedPath<'_>,
+    path: vfs_path::Path<'_>,
     out: impl Output<'v>,
 ) -> Result<'v, 's, ()> {
     let path = prepend_cwd(strand, global, path)?;
@@ -445,7 +445,7 @@ async fn exists<'v, 's>(
 async fn entries<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    path: Utf8TypedPathBuf,
+    path: vfs_path::PathBuf,
     out: impl Output<'v>,
 ) -> Result<'v, 's, ()> {
     let full = prepend_cwd(strand, global, path.to_path())?;
@@ -468,7 +468,7 @@ async fn entries<'v, 's>(
 async fn read<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    path: Utf8TypedPath<'_>,
+    path: vfs_path::Path<'_>,
     mode: Option<Slot<'v, '_>>,
     out: impl Output<'v>,
 ) -> Result<'v, 's, ()> {
@@ -500,7 +500,7 @@ async fn read<'v, 's>(
 async fn write<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    path: Utf8TypedPath<'_>,
+    path: vfs_path::Path<'_>,
     data: Slot<'v, '_>,
     out: impl Output<'v>,
 ) -> Result<'v, 's, ()> {
@@ -510,7 +510,7 @@ async fn write<'v, 's>(
 async fn append<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    path: Utf8TypedPath<'_>,
+    path: vfs_path::Path<'_>,
     data: Slot<'v, '_>,
     out: impl Output<'v>,
 ) -> Result<'v, 's, ()> {
@@ -520,7 +520,7 @@ async fn append<'v, 's>(
 async fn write_with_mode<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    path: Utf8TypedPath<'_>,
+    path: vfs_path::Path<'_>,
     data: Slot<'v, '_>,
     out: impl Output<'v>,
     mode: &str,
@@ -551,7 +551,7 @@ async fn write_with_mode<'v, 's>(
 async fn set_size<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    path: Utf8TypedPath<'_>,
+    path: vfs_path::Path<'_>,
     size: u64,
 ) -> Result<'v, 's, ()> {
     let path = prepend_cwd(strand, global, path)?;
@@ -583,7 +583,7 @@ async fn set_size<'v, 's>(
 async fn sync_file<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    path: Utf8TypedPath<'_>,
+    path: vfs_path::Path<'_>,
     data: bool,
 ) -> Result<'v, 's, ()> {
     let path = prepend_cwd(strand, global, path)?;
@@ -605,8 +605,8 @@ async fn sync_file<'v, 's>(
 async fn copy<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    from: Utf8TypedPath<'_>,
-    to: Utf8TypedPath<'_>,
+    from: vfs_path::Path<'_>,
+    to: vfs_path::Path<'_>,
     all: bool,
 ) -> Result<'v, 's, ()> {
     let from_path = prepend_cwd(strand, global, from)?;
@@ -622,8 +622,8 @@ async fn copy<'v, 's>(
 async fn move_<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    from: Utf8TypedPath<'_>,
-    to: Utf8TypedPath<'_>,
+    from: vfs_path::Path<'_>,
+    to: vfs_path::Path<'_>,
     all: bool,
 ) -> Result<'v, 's, ()> {
     let from_path = prepend_cwd(strand, global, from)?;
@@ -639,8 +639,8 @@ async fn move_<'v, 's>(
 async fn rename<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    from: Utf8TypedPath<'_>,
-    to: Utf8TypedPath<'_>,
+    from: vfs_path::Path<'_>,
+    to: vfs_path::Path<'_>,
     replace: bool,
 ) -> Result<'v, 's, ()> {
     let from_path = prepend_cwd(strand, global, from)?;
@@ -656,12 +656,12 @@ async fn rename<'v, 's>(
 async fn symlink<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    src: Utf8TypedPath<'_>,
-    dst: Utf8TypedPath<'_>,
+    src: vfs_path::Path<'_>,
+    dst: vfs_path::Path<'_>,
 ) -> Result<'v, 's, ()> {
     let cwd = global.local.get(strand).cwd().clone();
-    let target = global.local.get(strand).target().os().path_type();
-    let src = convert_path_type(strand, src.to_path_buf(), &target)?;
+    let target = global.local.get(strand).target().os().path_kind();
+    let src = convert_path_kind(strand, src.to_path_buf(), target)?;
     let dst = safe_concat(strand, cwd.to_path(), dst)?;
     let local = global.local.get(strand);
     let vfs = local.vfs();
@@ -674,8 +674,8 @@ async fn symlink<'v, 's>(
 async fn hard_link<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    src: Utf8TypedPath<'_>,
-    dst: Utf8TypedPath<'_>,
+    src: vfs_path::Path<'_>,
+    dst: vfs_path::Path<'_>,
 ) -> Result<'v, 's, ()> {
     let src_path = prepend_cwd(strand, global, src)?;
     let dst_path = prepend_cwd(strand, global, dst)?;
@@ -690,11 +690,11 @@ async fn hard_link<'v, 's>(
 async fn symlink_dir<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    src: Utf8TypedPath<'_>,
-    dst: Utf8TypedPath<'_>,
+    src: vfs_path::Path<'_>,
+    dst: vfs_path::Path<'_>,
 ) -> Result<'v, 's, ()> {
-    let target = global.local.get(strand).target().os().path_type();
-    let src = convert_path_type(strand, src.to_path_buf(), &target)?;
+    let target = global.local.get(strand).target().os().path_kind();
+    let src = convert_path_kind(strand, src.to_path_buf(), target)?;
     let dst = prepend_cwd(strand, global, dst)?;
     let local = global.local.get(strand);
     let vfs = local.vfs();
@@ -707,11 +707,11 @@ async fn symlink_dir<'v, 's>(
 async fn symlink_file<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    src: Utf8TypedPath<'_>,
-    dst: Utf8TypedPath<'_>,
+    src: vfs_path::Path<'_>,
+    dst: vfs_path::Path<'_>,
 ) -> Result<'v, 's, ()> {
-    let target = global.local.get(strand).target().os().path_type();
-    let src = convert_path_type(strand, src.to_path_buf(), &target)?;
+    let target = global.local.get(strand).target().os().path_kind();
+    let src = convert_path_kind(strand, src.to_path_buf(), target)?;
     let dst = prepend_cwd(strand, global, dst)?;
     let local = global.local.get(strand);
     let vfs = local.vfs();
@@ -724,7 +724,7 @@ async fn symlink_file<'v, 's>(
 async fn create_dir<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    path: Utf8TypedPath<'_>,
+    path: vfs_path::Path<'_>,
     all: bool,
 ) -> Result<'v, 's, ()> {
     let path = prepend_cwd(strand, global, path)?;
@@ -737,7 +737,7 @@ async fn create_dir<'v, 's>(
 async fn remove_dir<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    path: Utf8TypedPath<'_>,
+    path: vfs_path::Path<'_>,
     all: bool,
     ignore: bool,
 ) -> Result<'v, 's, ()> {
@@ -800,7 +800,7 @@ fn parse_ownership_identity<'v, 's>(
 pub(crate) fn path_absolute<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    path: Utf8TypedPath<'_>,
+    path: vfs_path::Path<'_>,
     out: impl Output<'v>,
 ) -> Result<'v, 's, ()> {
     let absolute = if path.is_absolute() {
@@ -831,7 +831,7 @@ async fn well_known_path<'v, 's>(
 pub(crate) fn path_relative<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    path: Utf8TypedPath<'_>,
+    path: vfs_path::Path<'_>,
     base: Option<Slot<'v, '_>>,
     out: impl Output<'v>,
 ) -> Result<'v, 's, ()> {
@@ -850,7 +850,7 @@ pub(crate) fn path_relative<'v, 's>(
 pub(crate) async fn path_canonical<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    path: Utf8TypedPath<'_>,
+    path: vfs_path::Path<'_>,
     out: impl Output<'v>,
 ) -> Result<'v, 's, ()> {
     let absolute = prepend_cwd(strand, global, path)?;
@@ -867,7 +867,7 @@ pub(crate) async fn path_canonical<'v, 's>(
 async fn glob<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    root: Option<Utf8TypedPath<'_>>,
+    root: Option<vfs_path::Path<'_>>,
     pattern: Slot<'v, '_>,
     max_depth: Option<Slot<'v, '_>>,
     resolve: Option<Slot<'v, '_>>,
@@ -884,11 +884,9 @@ async fn glob<'v, 's>(
     let follow = resolve_sym(strand, global, resolve, false)?;
 
     let root = root.unwrap_or_else(
-        || match global.local.get(strand).target().os().path_type() {
-            typed_path::PathType::Unix => Utf8TypedPath::Unix(typed_path::Utf8UnixPath::new("")),
-            typed_path::PathType::Windows => {
-                Utf8TypedPath::Windows(typed_path::Utf8WindowsPath::new(""))
-            }
+        || match global.local.get(strand).target().os().path_kind() {
+            vfs_path::Kind::Unix => vfs_path::Path::unix(""),
+            vfs_path::Kind::Windows => vfs_path::Path::windows(""),
         },
     );
     let abs_root = prepend_cwd(strand, global, root)?;
@@ -920,7 +918,7 @@ async fn resolve_temp_parent<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
     parent: Option<Slot<'v, '_>>,
-) -> Result<'v, 's, Utf8TypedPathBuf> {
+) -> Result<'v, 's, vfs_path::PathBuf> {
     match parent {
         Some(p) => {
             let p = path_from_value(strand, global, &p)?;
@@ -941,8 +939,8 @@ async fn resolve_temp_parent<'v, 's>(
 async fn create_temp_dir<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    parent: Utf8TypedPath<'_>,
-) -> dolang_vfs::error::Result<Utf8TypedPathBuf> {
+    parent: vfs_path::Path<'_>,
+) -> dolang_vfs::error::Result<vfs_path::PathBuf> {
     let mut rng = rand::rng();
     let vfs = global.local.get(strand).vfs();
     for attempt in 0..1000 {
@@ -1490,7 +1488,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         .function("normalize", async move |strand, args, out| {
             let ([path], []) = unpack!(strand, args, 1, 0)?;
             let path = path_from_value(strand, global, &path)?;
-            let normalized = normalize_path(path.to_path());
+            let normalized = path.normalize();
             create_path(strand, global, normalized, out)?;
             Ok(())
         })

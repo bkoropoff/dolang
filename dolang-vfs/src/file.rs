@@ -12,12 +12,12 @@ use bytes::{Bytes, BytesMut};
 use dolang_winterop::security::SecDesc;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
-use typed_path::Utf8TypedPath;
 
 use crate::{
     client, direct,
     error::{Error, ErrorKind, HandoffError, Result},
     metadata::{FsMetadata, Metadata},
+    path,
     process::{StdioRecv, StdioSend},
     security::{Acl, AclKind},
 };
@@ -888,7 +888,7 @@ impl OpenOptions<'_> {
     }
 
     /// Opens `path` using the configured options.
-    pub async fn open(&self, path: Utf8TypedPath<'_>) -> Result<File> {
+    pub async fn open(&self, path: path::Path<'_>) -> Result<File> {
         match &self.inner {
             OpenOptionsInner::Client(opts) => client::OpenOptions::open(opts, path).await,
             OpenOptionsInner::Direct(opts) => direct::OpenOptions::open(opts, path)

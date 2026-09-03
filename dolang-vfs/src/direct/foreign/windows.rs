@@ -48,13 +48,11 @@ use windows_sys::Win32::{
 use windows_sys::core::w;
 
 use dolang_winterop::process::split_arguments;
-use typed_path::Utf8TypedPath;
 
 use crate::{
     error::{Error, ErrorKind, Result},
-    path::typed_path,
+    path,
     process::{ProcessExit, ProcessFamily, ProcessInfo, Signal, StartTime},
-    protocol::WirePath,
     security::WindowsTokenInfo,
 };
 
@@ -130,7 +128,7 @@ fn creation_time(handle: HANDLE) -> io::Result<StartTime> {
 /// `PROCESS_QUERY_LIMITED_INFORMATION`, but the native form names the device
 /// (`\\Device\\HarddiskVolume3\\...`), which no caller can compare against a
 /// path they hold.
-fn image_path(handle: HANDLE) -> Option<WirePath> {
+fn image_path(handle: HANDLE) -> Option<path::PathBuf> {
     let mut buffer = vec![0u16; 32768];
     let mut len = buffer.len() as u32;
     // SAFETY: `buffer` is `len` u16s long and `len` is updated in place.
@@ -142,7 +140,7 @@ fn image_path(handle: HANDLE) -> Option<WirePath> {
     }
     buffer.truncate(len as usize);
     let path = String::from_utf16(&buffer).ok()?;
-    typed_path(path.into()).ok().map(Into::into)
+    path::PathBuf::from_native(path.into()).ok()
 }
 
 /// `ProcessCommandLineInformation`, which `PROCESSINFOCLASS` does not name.
@@ -474,14 +472,14 @@ fn peb_parameters(handle: HANDLE, basic: Option<PROCESS_BASIC_INFORMATION>) -> O
 /// Windows stores it with a trailing separator, which no other path this VFS
 /// produces carries. A root keeps one, since `C:` alone means the drive's
 /// current directory rather than its root.
-fn cwd_path(dos_path: String) -> Option<WirePath> {
+fn cwd_path(dos_path: String) -> Option<path::PathBuf> {
     let trimmed = dos_path.trim_end_matches('\\');
     let path = if trimmed.ends_with(':') || trimmed.is_empty() {
         dos_path.as_str()
     } else {
         trimmed
     };
-    typed_path(path.into()).ok().map(Into::into)
+    path::PathBuf::from_native(path.into()).ok()
 }
 
 /// Reports how the process ended, if it has.
@@ -512,7 +510,7 @@ fn describe(
     pid: u32,
     ppid: Option<u32>,
     name: String,
-    exe: Option<WirePath>,
+    exe: Option<path::PathBuf>,
     token: Option<WindowsTokenInfo>,
 ) -> Result<ProcessInfo> {
     let Parameters {
@@ -724,7 +722,7 @@ impl Process {
             // recovered from the image path — the same string Toolhelp reports.
             let name = exe
                 .as_ref()
-                .and_then(|path| Utf8TypedPath::from(path).file_name().map(ToOwned::to_owned))
+                .and_then(|path| path::Path::from(path).file_name().map(ToOwned::to_owned))
                 .unwrap_or_default();
             // Best-effort: reading the token needs rights `MAXIMUM_ALLOWED` may
             // not have granted, and a denial is not a reason to fail the call.

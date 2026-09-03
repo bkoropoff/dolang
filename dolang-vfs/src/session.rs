@@ -2,12 +2,10 @@
 
 use std::collections::HashMap;
 
-use typed_path::Utf8TypedPathBuf;
 use uuid::Uuid;
 
 use crate::{
-    error::Result, extension::ExtensionSet, path::typed_path, security::SecurityInfo,
-    target::TargetInfo,
+    error::Result, extension::ExtensionSet, path, security::SecurityInfo, target::TargetInfo,
 };
 
 /// Snapshot of a VFS target's initial process context.
@@ -29,9 +27,9 @@ pub(crate) struct Query {
     /// Environment variables from the target process.
     pub env: HashMap<String, String>,
     /// Target process's current working directory.
-    pub cwd: Utf8TypedPathBuf,
+    pub cwd: path::PathBuf,
     /// Path to the target process's current executable.
-    pub current_exe: Utf8TypedPathBuf,
+    pub current_exe: path::PathBuf,
     /// Target operating system and processor information.
     pub target: TargetInfo,
     /// Target process security information.
@@ -46,8 +44,8 @@ impl Query {
         Ok(Self {
             session: Uuid::new_v4(),
             env: current_environment().collect(),
-            cwd: typed_path(std::env::current_dir()?)?,
-            current_exe: typed_path(std::env::current_exe()?)?,
+            cwd: path::PathBuf::from_native(std::env::current_dir()?)?,
+            current_exe: path::PathBuf::from_native(std::env::current_exe()?)?,
             target: TargetInfo::current(),
             security: SecurityInfo::current()?,
             extensions: crate::extension::registered()?.clone(),

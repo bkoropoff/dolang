@@ -4,11 +4,11 @@ use dolang::runtime::{
     Error, Instance, Object, Output, Result, Slot, State, Strand, Value, object::TypeBuilder,
     value::TypeObject,
 };
+use dolang_vfs::path as vfs_path;
 use dolang_vfs::{
     directory::{DirEntry as VfsDirEntry, ReadDir},
     metadata::FileType,
 };
-use typed_path::{Utf8TypedPath, Utf8TypedPathBuf};
 
 use crate::error::ErrorExt as ShellErrorExt;
 use crate::global::Global;
@@ -132,9 +132,9 @@ impl<'v> Object<'v> for DirEntryIter {
 pub(crate) fn path_with_entry<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    path: Utf8TypedPath<'_>,
+    path: vfs_path::Path<'_>,
     entry: &Value<'v>,
-) -> Result<'v, 's, Utf8TypedPathBuf> {
+) -> Result<'v, 's, vfs_path::PathBuf> {
     let entry = global
         .types
         .dir_entry

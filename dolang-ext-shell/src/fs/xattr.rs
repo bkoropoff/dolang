@@ -5,9 +5,9 @@ use dolang::runtime::{
     value::TypeObject,
 };
 use dolang_vfs::file::{XattrEntry as VfsXattrEntry, XattrNamespace};
-use typed_path::Utf8TypedPath;
 
 use crate::{error::ResultExt as _, global::Global, util};
+use dolang_vfs::path as vfs_path;
 
 pub(crate) struct XattrEntry;
 
@@ -105,7 +105,7 @@ pub(crate) fn parse_named_namespace<'v, 's>(
 pub(crate) async fn path_list<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    path: Utf8TypedPath<'_>,
+    path: vfs_path::Path<'_>,
     namespace: Option<Slot<'v, '_>>,
     resolve: Option<Slot<'v, '_>>,
     out: Slot<'v, '_>,
@@ -149,7 +149,7 @@ pub(crate) async fn path_list<'v, 's>(
 pub(crate) async fn path_get<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    path: Utf8TypedPath<'_>,
+    path: vfs_path::Path<'_>,
     name: &Value<'v>,
     namespace: Option<Slot<'v, '_>>,
     resolve: Option<Slot<'v, '_>>,
@@ -171,7 +171,7 @@ pub(crate) async fn path_get<'v, 's>(
 pub(crate) async fn path_set<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    path: Utf8TypedPath<'_>,
+    path: vfs_path::Path<'_>,
     name: &Value<'v>,
     namespace: Option<Slot<'v, '_>>,
     value: &Value<'v>,
@@ -192,7 +192,7 @@ pub(crate) async fn path_set<'v, 's>(
 pub(crate) async fn path_remove<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    path: Utf8TypedPath<'_>,
+    path: vfs_path::Path<'_>,
     name: &Value<'v>,
     namespace: Option<Slot<'v, '_>>,
     resolve: Option<Slot<'v, '_>>,

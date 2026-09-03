@@ -20,7 +20,8 @@ use dolang_vfs::{
     process::{StdioRecv, StdioSend},
 };
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-use typed_path::Utf8TypedPath;
+
+use dolang_vfs::path as vfs_path;
 
 use crate::{
     error::{ErrorExt as _, ResultExt as _},
@@ -469,7 +470,7 @@ pub(crate) struct FileAnnex<'v> {
 pub(crate) async fn open<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    path: Utf8TypedPath<'_>,
+    path: vfs_path::Path<'_>,
     mode: &str,
 ) -> Result<'v, 's, VfsFile> {
     let path = super::prepend_cwd(strand, global, path)?;
@@ -483,7 +484,7 @@ pub(crate) async fn open<'v, 's>(
 pub(crate) async fn open_native<'v>(
     strand: &Strand<'v, '_>,
     global: State<'v, Global<'v>>,
-    path: Utf8TypedPath<'_>,
+    path: vfs_path::Path<'_>,
     mode: &str,
 ) -> io::Result<VfsFile> {
     let local = global.local.get(strand);
@@ -675,7 +676,7 @@ impl<'v> File<'v> {
     pub(crate) async fn open<'s>(
         strand: &mut Strand<'v, 's>,
         global: State<'v, Global<'v>>,
-        path: Utf8TypedPath<'_>,
+        path: vfs_path::Path<'_>,
         opt1: Option<Slot<'v, '_>>,
         opt2: Option<Slot<'v, '_>>,
         out: Slot<'v, '_>,

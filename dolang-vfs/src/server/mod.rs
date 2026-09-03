@@ -20,7 +20,6 @@ use std::os::unix::io::OwnedFd;
 use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::NamedPipeClient;
-use typed_path::Utf8TypedPath;
 #[cfg(all(docsrs, not(windows)))]
 struct NamedPipeClient;
 use tokio::sync::{Mutex, watch};
@@ -40,6 +39,7 @@ use crate::{
     file::XattrEntry,
     file::{AccessFlags, CopyDest, CopyMode, File, FileLock, FileLockRequest, StreamEntry},
     metadata::{FsMetadata, Metadata},
+    path,
     process::{
         Child, Command, Process, ProcessInfo, Processes, Signal, StartTime, StdioRecv, StdioSend,
     },
@@ -51,7 +51,7 @@ use crate::{
         RemoveRequest, RenameRequest, Request, RequestKind, ResponseKind, SecDescRequest,
         SetAclRequest, SetMetadataRequest, SetSecDescRequest, SetXattrRequest, SpawnRequest,
         StdioRecvTarget, StdioSendTarget, StreamsRequest, SymlinkKind, SymlinkRequest,
-        UnixVfsRequest, VfsProtocol, WellKnownPathRequest, WindowsAdminRequest, WirePath,
+        UnixVfsRequest, VfsProtocol, WellKnownPathRequest, WindowsAdminRequest,
         XattrNamespaceRequest, XattrRequest, XattrsRequest, rpc_builder,
     },
     security::{Acl, AclKind},
@@ -1035,9 +1035,9 @@ impl Connection {
 
     async fn handle_which(
         &self,
-        program: WirePath,
+        program: path::PathBuf,
         path: Option<String>,
-        cwd: Option<WirePath>,
+        cwd: Option<path::PathBuf>,
     ) -> Result<ResponseKind> {
         let resolved = self
             .server
@@ -1047,8 +1047,7 @@ impl Connection {
                 path.as_deref(),
                 cwd.as_ref().map(Into::into),
             )
-            .await?
-            .map(Into::into);
+            .await?;
         Ok(ResponseKind::Which(resolved))
     }
 
@@ -1057,8 +1056,7 @@ impl Connection {
             .server
             .vfs
             .well_known_path(req.key, req.app.as_deref(), &req.env)
-            .await?
-            .into();
+            .await?;
         Ok(ResponseKind::WellKnownPath(path))
     }
 
@@ -1888,7 +1886,7 @@ impl Connection {
     async fn handle_read_dir(
         &self,
         context: &CallContext<VfsProtocol>,
-        path: WirePath,
+        path: path::PathBuf,
     ) -> Result<ResponseKind> {
         let read_dir = self.server.vfs.read_dir(Into::into(&path)).await?;
         Ok(ResponseKind::ReadDir(
@@ -2087,7 +2085,7 @@ impl Connection {
         #[cfg(unix)]
         if self.mode == SessionMode::Native && self.server.vfs.is_direct() {
             let handle: OwnedFd = async {
-                let path = crate::path::native_path(Into::into(&req.path))?;
+                let path = req.path.to_native()?;
                 let stream = UnixStream::connect(path).await?;
                 Ok::<OwnedFd, Error>(stream.into_std()?.into())
             }
@@ -2273,29 +2271,19 @@ impl Connection {
         let paths: Vec<_> = req
             .paths
             .iter()
-            .map(|path| Utf8TypedPath::from(path).to_path_buf())
+            .map(|path| path::Path::from(path).to_path_buf())
             .collect();
         self.server.vfs.set_metadata(&paths, req.patch).await?;
         Ok(ResponseKind::SetMetadata)
     }
 
     async fn handle_canonicalize(&self, req: CanonicalizeRequest) -> Result<ResponseKind> {
-        let path = self
-            .server
-            .vfs
-            .canonicalize(Into::into(&req.path))
-            .await?
-            .into();
+        let path = self.server.vfs.canonicalize(Into::into(&req.path)).await?;
         Ok(ResponseKind::Canonicalize(path))
     }
 
     async fn handle_read_link(&self, req: ReadLinkRequest) -> Result<ResponseKind> {
-        let path = self
-            .server
-            .vfs
-            .read_link(Into::into(&req.path))
-            .await?
-            .into();
+        let path = self.server.vfs.read_link(Into::into(&req.path)).await?;
         Ok(ResponseKind::ReadLink(path))
     }
 
@@ -2315,10 +2303,7 @@ impl Connection {
                 req.follow_symlinks,
                 req.max_depth,
             )
-            .await?
-            .into_iter()
-            .map(Into::into)
-            .collect();
+            .await?;
         Ok(ResponseKind::Glob(paths))
     }
 
@@ -2459,7 +2444,7 @@ mod tests {
         let temp = tempfile::NamedTempFile::new().unwrap();
         let response = client
             .call(request(RequestKind::Open(OpenRequest {
-                path: path::typed_path(temp.path().to_path_buf())
+                path: path::PathBuf::from_native(temp.path().to_path_buf())
                     .unwrap()
                     .to_path()
                     .into(),

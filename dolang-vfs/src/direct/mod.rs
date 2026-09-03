@@ -8,7 +8,6 @@ use std::{
 };
 
 use bytes::{Bytes, BytesMut};
-use typed_path::{Utf8TypedPath, Utf8TypedPathBuf};
 
 #[cfg(unix)]
 use std::os::fd::AsFd;
@@ -35,7 +34,7 @@ use crate::{
     file::{self, AccessFlags, FileId, FileLockRequest, StreamEntry},
     file::{XattrEntry, XattrNamespace},
     metadata::{FsMetadata, Metadata, MetadataPatch},
-    path::{WellKnownPath, native_path, typed_path},
+    path::{self, WellKnownPath},
     process::{self, ProcessControl, ProcessStatus, StdioRecv, StdioSend, TerminationPolicy},
     security::{Acl, AclKind, PrincipalId, PrincipalIdKind, SecurityInfo, SidName},
     session::{self, Query},
@@ -1121,8 +1120,8 @@ impl Direct {
 }
 
 impl<'a> Command<'a> {
-    fn new(direct: &'a Direct, program: Utf8TypedPath<'_>) -> Self {
-        let program = native_path(program);
+    fn new(direct: &'a Direct, program: path::Path<'_>) -> Self {
+        let program = program.to_native();
         Self {
             direct,
             program: program.as_ref().cloned().unwrap_or_default(),
@@ -1190,8 +1189,8 @@ impl Command<'_> {
         self
     }
 
-    pub(crate) fn current_dir(&mut self, dir: Utf8TypedPath<'_>) -> &mut Self {
-        match native_path(dir) {
+    pub(crate) fn current_dir(&mut self, dir: path::Path<'_>) -> &mut Self {
+        match dir.to_native() {
             Ok(dir) => self.cwd = Some(dir),
             Err(error) => self.error = Some(error),
         }
@@ -1406,13 +1405,13 @@ impl OpenOptions {
         self
     }
 
-    pub(crate) async fn open(&self, path: Utf8TypedPath<'_>) -> Result<File> {
+    pub(crate) async fn open(&self, path: path::Path<'_>) -> Result<File> {
         // `as_tokio` carries the platform-specific open flags, so go through
         // it and then unwrap: the handle is driven positionally from here on
         // and has no use for tokio's cursor bookkeeping.
         let file = self
             .as_tokio()
-            .open(native_path(path)?)
+            .open(path.to_native()?)
             .await?
             .into_std()
             .await;
@@ -1580,11 +1579,11 @@ impl Direct {
         Box::new(session::current_environment())
     }
 
-    pub(crate) fn cwd(&self) -> Utf8TypedPath<'_> {
+    pub(crate) fn cwd(&self) -> path::Path<'_> {
         self.initial.cwd.to_path()
     }
 
-    pub(crate) fn current_exe(&self) -> Utf8TypedPath<'_> {
+    pub(crate) fn current_exe(&self) -> path::Path<'_> {
         self.initial.current_exe.to_path()
     }
 
@@ -1608,13 +1607,13 @@ impl Direct {
         OpenOptions::default()
     }
 
-    pub(crate) fn command(&self, program: Utf8TypedPath<'_>) -> Command<'_> {
+    pub(crate) fn command(&self, program: path::Path<'_>) -> Command<'_> {
         Command::new(self, program)
     }
 
     pub(crate) async fn unix_socket(
         &self,
-        path: Utf8TypedPath<'_>,
+        path: path::Path<'_>,
         key: Option<&[u8]>,
     ) -> Result<Vfs> {
         #[cfg(unix)]
@@ -1624,7 +1623,7 @@ impl Direct {
                 .transpose()
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
             Ok(Vfs::from_client(
-                crate::client::Client::connect_with_key(native_path(path)?, key).await?,
+                crate::client::Client::connect_with_key(path.to_native()?, key).await?,
             ))
         }
         #[cfg(not(unix))]
@@ -1640,13 +1639,13 @@ impl Direct {
 
     pub(crate) async fn windows_admin(
         &self,
-        cwd: Utf8TypedPath<'_>,
+        cwd: path::Path<'_>,
         env: HashMap<String, Option<String>>,
         elevate: bool,
     ) -> Result<Vfs> {
         #[cfg(windows)]
         {
-            let cwd = native_path(cwd)?;
+            let cwd = cwd.to_native()?;
             let client = if elevate {
                 crate::windows::launch_admin(cwd, env).await
             } else {
@@ -1771,24 +1770,24 @@ impl Direct {
             .map(|handle| process::Process::direct(pid, handle))
     }
 
-    pub(crate) async fn read_dir(&self, path: Utf8TypedPath<'_>) -> Result<directory::ReadDir> {
-        ReadDir::open(&native_path(path)?)
+    pub(crate) async fn read_dir(&self, path: path::Path<'_>) -> Result<directory::ReadDir> {
+        ReadDir::open(&path.to_native()?)
             .await
             .map(directory::ReadDir::direct)
     }
 
     pub(crate) async fn which(
         &self,
-        program: Utf8TypedPath<'_>,
+        program: path::Path<'_>,
         path: Option<&str>,
-        cwd: Option<Utf8TypedPath<'_>>,
-    ) -> Result<Option<Utf8TypedPathBuf>> {
-        let program = native_path(program)?;
-        let cwd = cwd.map(native_path).transpose()?;
+        cwd: Option<path::Path<'_>>,
+    ) -> Result<Option<path::PathBuf>> {
+        let program = program.to_native()?;
+        let cwd = cwd.map(|cwd| cwd.to_native()).transpose()?;
         self.path_cache
             .resolve(&program, path, cwd.as_deref())
             .await
-            .map(typed_path)
+            .map(path::PathBuf::from_native)
             .transpose()
     }
 
@@ -1797,13 +1796,13 @@ impl Direct {
         key: WellKnownPath,
         app: Option<&str>,
         env: &HashMap<String, Option<String>>,
-    ) -> Result<Utf8TypedPathBuf> {
+    ) -> Result<path::PathBuf> {
         let path = match key {
             WellKnownPath::HomeDir => Self::home_dir_platform(env),
             WellKnownPath::CacheDir => Self::cache_dir_platform(app, env),
             WellKnownPath::TempDir => Self::temp_dir_platform(env),
         }?;
-        typed_path(path)
+        path::PathBuf::from_native(path)
     }
 
     pub(crate) async fn clear_cache(&self) -> Result<()> {
@@ -1820,63 +1819,58 @@ impl Direct {
 
     pub(crate) async fn xattrs(
         &self,
-        path: Utf8TypedPath<'_>,
+        path: path::Path<'_>,
         namespace: XattrNamespace<'_>,
         follow: bool,
     ) -> Result<Vec<XattrEntry>> {
-        self.impl_xattrs(&native_path(path)?, namespace, follow)
+        self.impl_xattrs(&path.to_native()?, namespace, follow)
             .await
     }
 
     pub(crate) async fn streams(
         &self,
-        path: Utf8TypedPath<'_>,
+        path: path::Path<'_>,
         follow: bool,
     ) -> Result<Vec<StreamEntry>> {
-        self.impl_streams(&native_path(path)?, follow).await
+        self.impl_streams(&path.to_native()?, follow).await
     }
 
     pub(crate) async fn xattr(
         &self,
-        path: Utf8TypedPath<'_>,
+        path: path::Path<'_>,
         name: &str,
         namespace: Option<&str>,
         follow: bool,
     ) -> Result<Vec<u8>> {
-        self.impl_xattr(&native_path(path)?, name, namespace, follow)
+        self.impl_xattr(&path.to_native()?, name, namespace, follow)
             .await
     }
 
     pub(crate) async fn set_xattr(
         &self,
-        path: Utf8TypedPath<'_>,
+        path: path::Path<'_>,
         name: &str,
         namespace: Option<&str>,
         value: &[u8],
         follow: bool,
     ) -> Result<()> {
-        self.impl_set_xattr(&native_path(path)?, name, namespace, value, follow)
+        self.impl_set_xattr(&path.to_native()?, name, namespace, value, follow)
             .await
     }
 
     pub(crate) async fn remove_xattr(
         &self,
-        path: Utf8TypedPath<'_>,
+        path: path::Path<'_>,
         name: &str,
         namespace: Option<&str>,
         follow: bool,
     ) -> Result<()> {
-        self.impl_remove_xattr(&native_path(path)?, name, namespace, follow)
+        self.impl_remove_xattr(&path.to_native()?, name, namespace, follow)
             .await
     }
 
-    pub(crate) async fn remove(
-        &self,
-        path: Utf8TypedPath<'_>,
-        all: bool,
-        ignore: bool,
-    ) -> Result<()> {
-        let path = native_path(path)?;
+    pub(crate) async fn remove(&self, path: path::Path<'_>, all: bool, ignore: bool) -> Result<()> {
+        let path = path.to_native()?;
         let path = path.as_path();
         let result = if all {
             match fs::symlink_metadata(path).await {
@@ -1894,17 +1888,17 @@ impl Direct {
         }
     }
 
-    pub(crate) async fn metadata(&self, path: Utf8TypedPath<'_>) -> Result<Metadata> {
+    pub(crate) async fn metadata(&self, path: path::Path<'_>) -> Result<Metadata> {
         #[cfg(unix)]
         {
-            let path = native_path(path)?;
+            let path = path.to_native()?;
             tokio::task::spawn_blocking(move || Self::metadata_from_path(&path, true))
                 .await
                 .unwrap_or_else(|_| Err(Error::other("failed to join metadata query task")))
         }
         #[cfg(windows)]
         {
-            let path = native_path(path)?;
+            let path = path.to_native()?;
             tokio::task::spawn_blocking(move || Self::metadata_from_path(&path, true))
                 .await
                 .unwrap_or_else(|_| Err(Error::other("failed to join metadata query task")))
@@ -1913,10 +1907,10 @@ impl Direct {
 
     pub(crate) async fn fs_metadata(
         &self,
-        path: Utf8TypedPath<'_>,
+        path: path::Path<'_>,
         follow: bool,
     ) -> Result<FsMetadata> {
-        let path = native_path(path)?;
+        let path = path.to_native()?;
         tokio::task::spawn_blocking(move || Self::fs_metadata_from_path(&path, follow))
             .await
             .unwrap_or_else(|_| Err(Error::other("failed to join fs metadata query task")))
@@ -1924,12 +1918,12 @@ impl Direct {
 
     pub(crate) async fn acl(
         &self,
-        path: Utf8TypedPath<'_>,
+        path: path::Path<'_>,
         kind: AclKind,
         default: bool,
         follow: bool,
     ) -> Result<Option<Acl>> {
-        let path = native_path(path)?;
+        let path = path.to_native()?;
         tokio::task::spawn_blocking(move || Self::acl_from_path(&path, kind, default, follow))
             .await
             .unwrap_or_else(|_| Err(Error::other("failed to join ACL query task")))
@@ -1937,13 +1931,13 @@ impl Direct {
 
     pub(crate) async fn set_acl(
         &self,
-        path: Utf8TypedPath<'_>,
+        path: path::Path<'_>,
         kind: AclKind,
         acl: Option<&Acl>,
         default: bool,
         follow: bool,
     ) -> Result<()> {
-        let path = native_path(path)?;
+        let path = path.to_native()?;
         let acl = acl.cloned();
         tokio::task::spawn_blocking(move || {
             Self::set_acl_path(&path, kind, acl.as_ref(), default, follow)
@@ -1954,11 +1948,11 @@ impl Direct {
 
     pub(crate) async fn sec_desc(
         &self,
-        path: Utf8TypedPath<'_>,
+        path: path::Path<'_>,
         mask: dolang_winterop::security::SecInfo,
         follow: bool,
     ) -> Result<SecDesc> {
-        let path = native_path(path)?;
+        let path = path.to_native()?;
         tokio::task::spawn_blocking(move || Self::sec_desc_from_path(&path, mask, follow))
             .await
             .unwrap_or_else(|_| Err(Error::other("failed to join security descriptor task")))
@@ -1966,19 +1960,19 @@ impl Direct {
 
     pub(crate) async fn set_sec_desc(
         &self,
-        path: Utf8TypedPath<'_>,
+        path: path::Path<'_>,
         sec_desc: &SecDesc,
         follow: bool,
     ) -> Result<()> {
-        let path = native_path(path)?;
+        let path = path.to_native()?;
         let sec_desc = sec_desc.clone();
         tokio::task::spawn_blocking(move || Self::set_sec_desc_path(&path, &sec_desc, follow))
             .await
             .unwrap_or_else(|_| Err(Error::other("failed to join security descriptor task")))
     }
 
-    pub(crate) async fn create_dir(&self, path: Utf8TypedPath<'_>, all: bool) -> Result<()> {
-        let path = native_path(path)?;
+    pub(crate) async fn create_dir(&self, path: path::Path<'_>, all: bool) -> Result<()> {
+        let path = path.to_native()?;
         if all {
             Ok(fs::create_dir_all(path).await?)
         } else {
@@ -1988,11 +1982,11 @@ impl Direct {
 
     pub(crate) async fn remove_dir(
         &self,
-        path: Utf8TypedPath<'_>,
+        path: path::Path<'_>,
         all: bool,
         ignore: bool,
     ) -> Result<()> {
-        let path = native_path(path)?;
+        let path = path.to_native()?;
         let result = if all {
             Self::remove_dir_empty_tree_local(&path, ignore)
                 .await
@@ -2009,75 +2003,67 @@ impl Direct {
 
     pub(crate) async fn copy(
         &self,
-        from: Utf8TypedPath<'_>,
-        to: Utf8TypedPath<'_>,
+        from: path::Path<'_>,
+        to: path::Path<'_>,
         all: bool,
     ) -> Result<()> {
-        Self::copy_local(&native_path(from)?, &native_path(to)?, all).await
+        Self::copy_local(&from.to_native()?, &to.to_native()?, all).await
     }
 
     pub(crate) async fn rename(
         &self,
-        from: Utf8TypedPath<'_>,
-        to: Utf8TypedPath<'_>,
+        from: path::Path<'_>,
+        to: path::Path<'_>,
         replace: bool,
     ) -> Result<()> {
-        Self::impl_rename(native_path(from)?, native_path(to)?, replace).await
+        Self::impl_rename(from.to_native()?, to.to_native()?, replace).await
     }
 
     pub(crate) async fn move_(
         &self,
-        from: Utf8TypedPath<'_>,
-        to: Utf8TypedPath<'_>,
+        from: path::Path<'_>,
+        to: path::Path<'_>,
         all: bool,
     ) -> Result<()> {
-        Self::move_local(&native_path(from)?, &native_path(to)?, all).await
+        Self::move_local(&from.to_native()?, &to.to_native()?, all).await
     }
 
     pub(crate) async fn symlink(
         &self,
-        cwd: Utf8TypedPath<'_>,
-        src: Utf8TypedPath<'_>,
-        dst: Utf8TypedPath<'_>,
+        cwd: path::Path<'_>,
+        src: path::Path<'_>,
+        dst: path::Path<'_>,
     ) -> Result<()> {
-        Self::impl_symlink(&native_path(cwd)?, &native_path(src)?, &native_path(dst)?).await
+        Self::impl_symlink(&cwd.to_native()?, &src.to_native()?, &dst.to_native()?).await
     }
 
-    pub(crate) async fn hard_link(
-        &self,
-        src: Utf8TypedPath<'_>,
-        dst: Utf8TypedPath<'_>,
-    ) -> Result<()> {
-        Ok(fs::hard_link(native_path(src)?, native_path(dst)?).await?)
+    pub(crate) async fn hard_link(&self, src: path::Path<'_>, dst: path::Path<'_>) -> Result<()> {
+        Ok(fs::hard_link(src.to_native()?, dst.to_native()?).await?)
     }
 
-    pub(crate) async fn symlink_dir(
-        &self,
-        src: Utf8TypedPath<'_>,
-        dst: Utf8TypedPath<'_>,
-    ) -> Result<()> {
-        Self::impl_symlink_dir(&native_path(src)?, &native_path(dst)?).await
+    pub(crate) async fn symlink_dir(&self, src: path::Path<'_>, dst: path::Path<'_>) -> Result<()> {
+        Self::impl_symlink_dir(&src.to_native()?, &dst.to_native()?).await
     }
 
     pub(crate) async fn symlink_file(
         &self,
-        src: Utf8TypedPath<'_>,
-        dst: Utf8TypedPath<'_>,
+        src: path::Path<'_>,
+        dst: path::Path<'_>,
     ) -> Result<()> {
-        Self::impl_symlink_file(&native_path(src)?, &native_path(dst)?).await
+        Self::impl_symlink_file(&src.to_native()?, &dst.to_native()?).await
     }
 
-    pub(crate) async fn symlink_metadata(&self, path: Utf8TypedPath<'_>) -> Result<Metadata> {
+    pub(crate) async fn symlink_metadata(&self, path: path::Path<'_>) -> Result<Metadata> {
         #[cfg(unix)]
         {
-            let path = native_path(path)?;
+            let path = path.to_native()?;
             tokio::task::spawn_blocking(move || Self::metadata_from_path(&path, false))
                 .await
                 .unwrap_or_else(|_| Err(Error::other("failed to join metadata query task")))
         }
         #[cfg(windows)]
         {
-            let path = native_path(path)?;
+            let path = path.to_native()?;
             tokio::task::spawn_blocking(move || Self::metadata_from_path(&path, false))
                 .await
                 .unwrap_or_else(|_| Err(Error::other("failed to join metadata query task")))
@@ -2086,37 +2072,37 @@ impl Direct {
 
     pub(crate) async fn set_metadata(
         &self,
-        paths: &[Utf8TypedPathBuf],
+        paths: &[path::PathBuf],
         patch: MetadataPatch,
     ) -> Result<()> {
         let paths = paths
             .iter()
-            .map(|path| native_path(path.to_path()))
+            .map(|path| path.to_path().to_native())
             .collect::<Result<Vec<_>>>()?;
         self.impl_set_metadata(&paths, patch).await
     }
 
-    pub(crate) async fn canonicalize(&self, path: Utf8TypedPath<'_>) -> Result<Utf8TypedPathBuf> {
-        typed_path(self.impl_canonicalize(&native_path(path)?).await?)
+    pub(crate) async fn canonicalize(&self, path: path::Path<'_>) -> Result<path::PathBuf> {
+        path::PathBuf::from_native(self.impl_canonicalize(&path.to_native()?).await?)
     }
 
-    pub(crate) async fn read_link(&self, path: Utf8TypedPath<'_>) -> Result<Utf8TypedPathBuf> {
-        typed_path(fs::read_link(native_path(path)?).await?)
+    pub(crate) async fn read_link(&self, path: path::Path<'_>) -> Result<path::PathBuf> {
+        path::PathBuf::from_native(fs::read_link(path.to_native()?).await?)
     }
 
-    pub(crate) async fn access(&self, path: Utf8TypedPath<'_>, mode: AccessFlags) -> Result<()> {
-        Self::impl_access(native_path(path)?, mode).await
+    pub(crate) async fn access(&self, path: path::Path<'_>, mode: AccessFlags) -> Result<()> {
+        Self::impl_access(path.to_native()?, mode).await
     }
 
     pub(crate) async fn glob(
         &self,
         pattern: impl Into<String>,
-        root: Utf8TypedPath<'_>,
+        root: path::Path<'_>,
         follow_symlinks: bool,
         max_depth: Option<usize>,
-    ) -> Result<Vec<Utf8TypedPathBuf>> {
+    ) -> Result<Vec<path::PathBuf>> {
         let pattern = pattern.into();
-        let root = native_path(root)?;
+        let root = root.to_native()?;
         tokio::task::spawn_blocking(move || {
             let (prefix, glob) = Glob::new(&pattern)
                 .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid glob pattern"))?
@@ -2140,7 +2126,10 @@ impl Direct {
                 if std::fs::symlink_metadata(&walk_root).is_ok() {
                     paths.push(prefix.clone());
                 }
-                return paths.into_iter().map(typed_path).collect::<Result<_>>();
+                return paths
+                    .into_iter()
+                    .map(path::PathBuf::from_native)
+                    .collect::<Result<_>>();
             };
 
             for entry in glob.walk_with_behavior(&walk_root, behavior) {
@@ -2158,7 +2147,10 @@ impl Direct {
             }
 
             paths.sort();
-            paths.into_iter().map(typed_path).collect::<Result<_>>()
+            paths
+                .into_iter()
+                .map(path::PathBuf::from_native)
+                .collect::<Result<_>>()
         })
         .await
         .unwrap_or_else(|e| Err(Error::new(ErrorKind::Other, e.to_string())))

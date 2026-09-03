@@ -37,10 +37,10 @@ impl OperatingSystem {
     }
 
     /// Returns the path syntax associated with this operating system.
-    pub const fn path_type(&self) -> typed_path::PathType {
+    pub const fn path_kind(&self) -> crate::path::Kind {
         match self {
-            Self::Linux | Self::Macos | Self::FreeBsd => typed_path::PathType::Unix,
-            Self::Windows => typed_path::PathType::Windows,
+            Self::Linux | Self::Macos | Self::FreeBsd => crate::path::Kind::Unix,
+            Self::Windows => crate::path::Kind::Windows,
         }
     }
 }

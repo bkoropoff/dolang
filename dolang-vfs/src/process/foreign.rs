@@ -16,13 +16,12 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
-use typed_path::Utf8TypedPath;
 use uuid::Uuid;
 
 use crate::{
     client, direct,
     error::{Error, ErrorKind, Result},
-    protocol::WirePath,
+    path,
     security::{UnixSecurityInfo, WindowsTokenInfo},
 };
 
@@ -48,9 +47,9 @@ pub struct ProcessInfo {
     pub(crate) ppid: Option<u32>,
     pub(crate) name: String,
     pub(crate) start: StartTime,
-    pub(crate) exe: Option<WirePath>,
+    pub(crate) exe: Option<path::PathBuf>,
     pub(crate) cmdline: Option<Vec<String>>,
-    pub(crate) cwd: Option<WirePath>,
+    pub(crate) cwd: Option<path::PathBuf>,
     pub(crate) family: ProcessFamily,
     pub(crate) exit: Option<ProcessExit>,
 }
@@ -107,7 +106,7 @@ impl ProcessInfo {
     }
 
     /// Returns the path to the process executable.
-    pub fn exe(&self) -> Option<Utf8TypedPath<'_>> {
+    pub fn exe(&self) -> Option<path::Path<'_>> {
         self.exe.as_ref().map(Into::into)
     }
 
@@ -152,7 +151,7 @@ impl ProcessInfo {
     /// the system tracks: NT has no per-process current directory, so what is
     /// reported is the Win32 one the target keeps in its own memory, read from
     /// there. A process is free to put anything in that field.
-    pub fn cwd(&self) -> Option<Utf8TypedPath<'_>> {
+    pub fn cwd(&self) -> Option<path::Path<'_>> {
         self.cwd.as_ref().map(Into::into)
     }
 
