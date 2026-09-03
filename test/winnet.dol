@@ -1,9 +1,12 @@
 import winnet rand shell strand sys
+  fs:
+    - with_temp_dir
   testlib.vfs:
     - vfs
   fs.windows:
     - Path
   security.windows:
+    - SecDesc
     - Sid
     - SidName
   std:
@@ -84,6 +87,68 @@ def unsupported_without_windows_backend()
     [...winnet.groups()]
   assert_throws $UnsupportedError do
     winnet.group "Administrators"
+  assert_throws $UnsupportedError do
+    [...winnet.shares()]
+  assert_throws $UnsupportedError do
+    winnet.share r"C$"
+
+#[fixture]
+def scratch_share block ...rest
+  if (sys.os_info().family != :WINDOWS:)
+    skip "requires Windows SMB server management"
+  if sys.os_info().is_wine
+    skip "Wine does not implement a credible SMB server service"
+  with_temp_dir do |dir|
+    let name = "do-share-$(rand.string 8)"
+    let descriptor = SecDesc b"\x01\x00\x04\x80\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+    let share = try
+      winnet.create_share
+        name: $name
+        path: $dir
+        comment: "created by test/winnet.dol"
+        max_uses: 3
+        sec_desc: $descriptor
+    catch PermissionDeniedError: _
+      skip "requires permission to manage local shares"
+    try
+      block share: $share path: $dir ...rest
+    finally
+      try
+        share.delete()
+      catch _
+        nil
+
+#[test]
+#[vfs]
+#[scratch_share]
+def local_share_lifecycle :share :path
+  let initial = share.info()
+  let name = initial.name
+  assert_type $winnet.Share $share
+  assert_type $winnet.ShareInfo $initial
+  assert_eq $initial.name $name
+  assert_eq $initial.kind :DISKTREE:
+  assert_eq $initial.special false
+  assert_eq $initial.temporary false
+  assert_eq $initial.comment "created by test/winnet.dol"
+  assert_eq $initial.max_uses 3
+  assert_type $Int $initial.current_uses
+  assert_eq $initial.path $path
+  assert_type $SecDesc $initial.sec_desc
+  assert_eq $share.name $name
+  assert_eq $winnet.share(name).info().name $name
+  assert_eq $winnet.share(initial).info().name $name
+  assert $winnet.shares().any(do |entry| entry.name == name)
+  let updated = share.update
+    comment: nil
+    max_uses: nil
+    sec_desc: $initial.sec_desc.to_bin()
+  assert_eq $updated.comment nil
+  assert_eq $updated.max_uses nil
+  assert_type $SecDesc $updated.sec_desc
+  share.delete()
+  assert_throws $NotFoundError do
+    winnet.share $name
 
 #[test]
 #[vfs]

@@ -12,6 +12,8 @@ Windows NetAPI bindings.
 | [`Group`](./group.md)                  | SID-stable local group principal   |
 | [`GroupInfo`](./group-info.md)         | Fresh local-group snapshot         |
 | [`AccountPolicy`](./account-policy.md) | Local password and lockout policy  |
+| [`Share`](./share.md)                  | Local SMB share capability         |
+| [`ShareInfo`](./share-info.md)         | Fresh local SMB share snapshot     |
 
 ## User Options
 
@@ -144,3 +146,48 @@ Creates a local group.
 #### Returns
 
 [`Group`](./group.md)
+
+### `share name_or_info`
+
+Obtains a share capability from a share name or [`ShareInfo`](./share-info.md).
+
+#### Parameters
+
+| Name           | Type                                                   | Description                  |
+| -------------- | ------------------------------------------------------ | ---------------------------- |
+| `name_or_info` | [`Str`](../std/str.md)\|[`ShareInfo`](./share-info.md) | Share name or prior snapshot |
+
+#### Returns
+
+[`Share`](./share.md)
+
+### `shares()`
+
+Iterates every local SMB share, including administrative and non-disk shares.
+
+#### Returns
+
+`Iter` over [`ShareInfo`](./share-info.md)
+
+### `create_share :name :path ...options`
+
+Creates a local SMB share. The default kind is `:DISKTREE:`, usage is
+unlimited, and Windows supplies the default security descriptor. `kind`
+accepts `:DISKTREE:`, `:PRINTQ:`, `:DEVICE:`, or `:IPC:`.
+
+#### Parameters
+
+| Name        | Type                                                          | Description                                                          |
+| ----------- | ------------------------------------------------------------- | -------------------------------------------------------------------- |
+| `name`      | [`Str`](../std/str.md)                                        | Share name                                                           |
+| `path`      | [`fs.windows.Path`](../fs/windows/path.md)                    | Shared local path                                                    |
+| `kind`      | [`Sym`](../std/sym.md)?                                       | Resource kind                                                        |
+| `comment`   | [`Str`](../std/str.md)?                                       | Comment                                                              |
+| `max_uses`  | [`Int`](../std/int.md)?                                       | Connection limit; `nil` is unlimited                                 |
+| `special`   | [`Bool`](../std/bool.md)?                                     | Marks a special share                                                |
+| `temporary` | [`Bool`](../std/bool.md)?                                     | Marks a temporary share                                              |
+| `sec_desc`  | [`security.windows.SecDesc`](../security/windows/secdesc.md)? | Security descriptor, self-relative packet, or declarative descriptor |
+
+#### Returns
+
+[`Share`](./share.md)

@@ -6,7 +6,7 @@ use dolang_vfs::{
     extension::ExtContext,
     path::WirePath,
 };
-use dolang_winterop::security::Sid;
+use dolang_winterop::security::{SecDesc, Sid};
 use windows_sys::Win32::{
     Foundation::{
         ERROR_ACCESS_DENIED, ERROR_ALIAS_EXISTS, ERROR_INSUFFICIENT_BUFFER,
@@ -16,8 +16,9 @@ use windows_sys::Win32::{
     },
     NetworkManagement::NetManagement::{
         FILTER_NORMAL_ACCOUNT, LOCALGROUP_INFO_0, LOCALGROUP_INFO_1, LOCALGROUP_MEMBERS_INFO_0,
-        MAX_PREFERRED_LENGTH, NERR_GroupExists, NERR_GroupNotFound, NERR_PasswordTooShort,
-        NERR_Success, NERR_UserExists, NERR_UserNotFound, NetApiBufferFree, NetLocalGroupAdd,
+        MAX_PREFERRED_LENGTH, NERR_DuplicateShare, NERR_GroupExists, NERR_GroupNotFound,
+        NERR_NetNameNotFound, NERR_PasswordTooShort, NERR_Success, NERR_UnknownDevDir,
+        NERR_UserExists, NERR_UserNotFound, NetApiBufferFree, NetLocalGroupAdd,
         NetLocalGroupAddMember, NetLocalGroupDel, NetLocalGroupDelMember, NetLocalGroupEnum,
         NetLocalGroupGetInfo, NetLocalGroupGetMembers, NetLocalGroupSetInfo, NetUserAdd,
         NetUserDel, NetUserEnum, NetUserGetInfo, NetUserModalsGet, NetUserModalsSet,
@@ -33,13 +34,19 @@ use windows_sys::Win32::{
             LsaEnumerateAccountRights, LsaFreeMemory, LsaNtStatusToWinError, LsaOpenPolicy,
             LsaRemoveAccountRights, POLICY_CREATE_ACCOUNT, POLICY_LOOKUP_NAMES,
         },
-        GetLengthSid, LookupAccountNameW, SID_NAME_USE,
+        GetLengthSid, GetSecurityDescriptorLength, LookupAccountNameW, SID_NAME_USE,
+    },
+    Storage::FileSystem::{
+        NetShareAdd, NetShareDel, NetShareEnum, NetShareGetInfo, NetShareSetInfo, SHARE_INFO_502,
+        SHARE_INFO_1004, SHARE_INFO_1006, SHARE_INFO_1501, STYPE_DEVICE, STYPE_DISKTREE, STYPE_IPC,
+        STYPE_MASK, STYPE_PRINTQ, STYPE_SPECIAL, STYPE_TEMPORARY,
     },
 };
 
 use crate::wire::{
-    AccountPolicy, AccountPolicyUpdate, GroupCreate, GroupInfo, GroupUpdate, UserCreate, UserFlags,
-    UserInfo, UserUpdate, WinNetRequest, WinNetResponse,
+    AccountPolicy, AccountPolicyUpdate, GroupCreate, GroupInfo, GroupUpdate, ShareCreate,
+    ShareInfo, ShareKind, ShareUpdate, UserCreate, UserFlags, UserInfo, UserUpdate, WinNetRequest,
+    WinNetResponse,
 };
 
 struct NetBuffer(*mut u8);
@@ -83,12 +90,15 @@ fn status(operation: &str, code: u32) -> Error {
         || code == NERR_GroupNotFound
         || code == ERROR_NO_SUCH_ALIAS
         || code == ERROR_NONE_MAPPED
+        || code == NERR_NetNameNotFound
+        || code == NERR_UnknownDevDir
     {
         ErrorKind::NotFound
     } else if code == NERR_UserExists
         || code == NERR_GroupExists
         || code == ERROR_ALIAS_EXISTS
         || code == ERROR_MEMBER_IN_ALIAS
+        || code == NERR_DuplicateShare
     {
         ErrorKind::AlreadyExists
     } else if code == ERROR_MEMBER_NOT_IN_ALIAS {
@@ -748,6 +758,172 @@ fn create(create: UserCreate) -> Result<(String, Sid), Error> {
     Ok((create.name, sid))
 }
 
+fn share_kind(value: u32) -> Result<ShareKind, Error> {
+    match value & STYPE_MASK {
+        STYPE_DISKTREE => Ok(ShareKind::DiskTree),
+        STYPE_PRINTQ => Ok(ShareKind::PrintQueue),
+        STYPE_DEVICE => Ok(ShareKind::Device),
+        STYPE_IPC => Ok(ShareKind::Ipc),
+        value => Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("unknown share type {value}"),
+        )),
+    }
+}
+fn share_type(kind: ShareKind, special: bool, temporary: bool) -> u32 {
+    let base = match kind {
+        ShareKind::DiskTree => STYPE_DISKTREE,
+        ShareKind::PrintQueue => STYPE_PRINTQ,
+        ShareKind::Device => STYPE_DEVICE,
+        ShareKind::Ipc => STYPE_IPC,
+    };
+    base | if special { STYPE_SPECIAL } else { 0 } | if temporary { STYPE_TEMPORARY } else { 0 }
+}
+unsafe fn share_descriptor(ptr: *mut core::ffi::c_void) -> Result<Option<SecDesc>, Error> {
+    // A share left to the server service's default security carries a null
+    // descriptor, which is distinct from an empty one.
+    if ptr.is_null() {
+        return Ok(None);
+    }
+    let len = unsafe { GetSecurityDescriptorLength(ptr) } as usize;
+    let bytes = unsafe { slice::from_raw_parts(ptr.cast::<u8>(), len) };
+    SecDesc::from_bytes(bytes).map(Some).map_err(|e| {
+        Error::new(
+            ErrorKind::InvalidData,
+            format!("invalid share security descriptor: {e}"),
+        )
+    })
+}
+unsafe fn share_info(row: &SHARE_INFO_502) -> Result<ShareInfo, Error> {
+    let ty = row.shi502_type;
+    let path = unsafe { string(row.shi502_path) };
+    Ok(ShareInfo {
+        name: unsafe { string(row.shi502_netname) },
+        kind: share_kind(ty)?,
+        special: ty & STYPE_SPECIAL != 0,
+        temporary: ty & STYPE_TEMPORARY != 0,
+        comment: unsafe { optional(row.shi502_remark) },
+        max_uses: (row.shi502_max_uses != u32::MAX).then_some(row.shi502_max_uses),
+        current_uses: row.shi502_current_uses,
+        path: WirePath::from(typed_path::Utf8TypedPath::Windows(
+            typed_path::Utf8WindowsPath::new(&path),
+        )),
+        sec_desc: unsafe { share_descriptor(row.shi502_security_descriptor) }?,
+    })
+}
+fn share_get(name: &str) -> Result<ShareInfo, Error> {
+    let name = wide(name);
+    let mut raw = ptr::null_mut();
+    let code = unsafe { NetShareGetInfo(ptr::null(), name.as_ptr(), 502, &mut raw) };
+    if code != NERR_Success {
+        return Err(status("NetShareGetInfo", code));
+    }
+    let buffer = NetBuffer(raw);
+    unsafe { share_info(&*buffer.0.cast::<SHARE_INFO_502>()) }
+}
+fn share_set<T>(name: &[u16], level: u32, value: &T) -> Result<(), Error> {
+    let mut parm = 0;
+    let code = unsafe {
+        NetShareSetInfo(
+            ptr::null(),
+            name.as_ptr(),
+            level,
+            (value as *const T).cast(),
+            &mut parm,
+        )
+    };
+    if code == NERR_Success {
+        Ok(())
+    } else {
+        Err(status(
+            &format!("NetShareSetInfo level {level} parameter {parm}"),
+            code,
+        ))
+    }
+}
+fn share_update(name: &str, update: ShareUpdate) -> Result<ShareInfo, Error> {
+    let n = wide(name);
+    if let Some(comment) = update.comment {
+        let mut value = comment.as_deref().map(wide).unwrap_or_else(|| vec![0]);
+        share_set(
+            &n,
+            1004,
+            &SHARE_INFO_1004 {
+                shi1004_remark: value.as_mut_ptr(),
+            },
+        )?;
+    }
+    if let Some(max) = update.max_uses {
+        share_set(
+            &n,
+            1006,
+            &SHARE_INFO_1006 {
+                shi1006_max_uses: max.unwrap_or(u32::MAX),
+            },
+        )?;
+    }
+    if let Some(descriptor) = update.sec_desc {
+        let mut bytes = descriptor.to_bytes();
+        share_set(
+            &n,
+            1501,
+            &SHARE_INFO_1501 {
+                shi1501_reserved: 0,
+                shi1501_security_descriptor: bytes.as_mut_ptr().cast(),
+            },
+        )?;
+    }
+    share_get(name)
+}
+fn share_create(create: ShareCreate) -> Result<ShareInfo, Error> {
+    let name = create.name;
+    let mut name_w = wide(&name);
+    let path = create
+        .path
+        .as_windows_str()
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "path must use Windows path syntax"))?;
+    let mut path_w = wide(path);
+    let mut comment_w = create
+        .comment
+        .as_deref()
+        .map(wide)
+        .unwrap_or_else(|| vec![0]);
+    let mut descriptor = create.sec_desc.map(|v| v.to_bytes());
+    let mut row = SHARE_INFO_502 {
+        shi502_netname: name_w.as_mut_ptr(),
+        shi502_type: share_type(create.kind, create.special, create.temporary),
+        shi502_remark: comment_w.as_mut_ptr(),
+        shi502_permissions: 0,
+        shi502_max_uses: create.max_uses.unwrap_or(u32::MAX),
+        shi502_current_uses: 0,
+        shi502_path: path_w.as_mut_ptr(),
+        shi502_passwd: ptr::null_mut(),
+        shi502_reserved: 0,
+        shi502_security_descriptor: descriptor
+            .as_mut()
+            .map_or(ptr::null_mut(), |v| v.as_mut_ptr().cast()),
+    };
+    let mut parm = 0;
+    let code = unsafe {
+        NetShareAdd(
+            ptr::null(),
+            502,
+            (&mut row as *mut SHARE_INFO_502).cast(),
+            &mut parm,
+        )
+    };
+    if code != NERR_Success {
+        return Err(status(&format!("NetShareAdd parameter {parm}"), code));
+    }
+    match share_get(&name) {
+        Ok(info) => Ok(info),
+        Err(error) => {
+            unsafe { NetShareDel(ptr::null(), name_w.as_ptr(), 0) };
+            Err(error)
+        }
+    }
+}
+
 fn dispatch(request: WinNetRequest) -> Result<WinNetResponse, Error> {
     match request {
         WinNetRequest::UserByName { name } => {
@@ -975,6 +1151,61 @@ fn dispatch(request: WinNetRequest) -> Result<WinNetResponse, Error> {
         WinNetRequest::UpdateAccountPolicy(update) => Ok(WinNetResponse::AccountPolicy(
             update_account_policy(update)?,
         )),
+        WinNetRequest::ShareInfo { name } => {
+            Ok(WinNetResponse::ShareInfo(Box::new(share_get(&name)?)))
+        }
+        WinNetRequest::SharesPage { mut resume } => {
+            let mut native_resume = u32::try_from(resume).map_err(|_| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    "share enumeration resume handle exceeds u32",
+                )
+            })?;
+            let mut raw = ptr::null_mut();
+            let mut read = 0;
+            let mut total = 0;
+            let code = unsafe {
+                NetShareEnum(
+                    ptr::null(),
+                    502,
+                    &mut raw,
+                    MAX_PREFERRED_LENGTH,
+                    &mut read,
+                    &mut total,
+                    &mut native_resume,
+                )
+            };
+            if code != NERR_Success && code != ERROR_MORE_DATA {
+                return Err(status("NetShareEnum", code));
+            }
+            let buffer = NetBuffer(raw);
+            let rows =
+                unsafe { slice::from_raw_parts(buffer.0.cast::<SHARE_INFO_502>(), read as usize) };
+            let shares = rows
+                .iter()
+                .map(|row| unsafe { share_info(row) })
+                .collect::<Result<Vec<_>, _>>()?;
+            resume = u64::from(native_resume);
+            Ok(WinNetResponse::SharesPage {
+                shares,
+                resume,
+                done: code == NERR_Success,
+            })
+        }
+        WinNetRequest::CreateShare(create) => {
+            Ok(WinNetResponse::ShareInfo(Box::new(share_create(create)?)))
+        }
+        WinNetRequest::UpdateShare { name, update } => Ok(WinNetResponse::ShareInfo(Box::new(
+            share_update(&name, update)?,
+        ))),
+        WinNetRequest::DeleteShare { name } => {
+            let n = wide(&name);
+            let code = unsafe { NetShareDel(ptr::null(), n.as_ptr(), 0) };
+            if code != NERR_Success {
+                return Err(status("NetShareDel", code));
+            }
+            Ok(WinNetResponse::Deleted)
+        }
     }
 }
 
