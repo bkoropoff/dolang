@@ -89,6 +89,7 @@ def install_wrapper shell
     fs.write $wrapper |
       #!/bin/sh
       exec dolang "$shell" "\$@"
+    # FIXME: bootstrap — rename to fs.update_metadata after the next bootstrap.
     fs.set_metadata mode: 0o755 $wrapper
 
   fs.append $env["GITHUB_PATH"] "$bin_dir\n"
@@ -129,6 +130,7 @@ def install_virt()
 def unconfine()
   sudo.with do
     run usermod -aG kvm,libvirt $env["USER"]
+    # FIXME: bootstrap — rename to fs.update_metadata after the next bootstrap.
     fs.set_metadata mode: 0o666 /dev/kvm
     run sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
     run sysctl -w kernel.unprivileged_userns_clone=1

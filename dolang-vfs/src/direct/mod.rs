@@ -962,10 +962,10 @@ impl File {
             .unwrap_or_else(|_| Err(Error::other("failed to join security descriptor task")))
     }
 
-    pub(crate) async fn set_sec_desc(&self, sec_desc: &SecDesc) -> Result<()> {
+    pub(crate) async fn update_sec_desc(&self, sec_desc: &SecDesc) -> Result<()> {
         let file = Arc::clone(&self.file);
         let sec_desc = sec_desc.clone();
-        tokio::task::spawn_blocking(move || Direct::set_sec_desc_file(&file, &sec_desc))
+        tokio::task::spawn_blocking(move || Direct::update_sec_desc_file(&file, &sec_desc))
             .await
             .unwrap_or_else(|_| Err(Error::other("failed to join security descriptor task")))
     }
@@ -1958,7 +1958,7 @@ impl Direct {
             .unwrap_or_else(|_| Err(Error::other("failed to join security descriptor task")))
     }
 
-    pub(crate) async fn set_sec_desc(
+    pub(crate) async fn update_sec_desc(
         &self,
         path: path::Path<'_>,
         sec_desc: &SecDesc,
@@ -1966,7 +1966,7 @@ impl Direct {
     ) -> Result<()> {
         let path = path.to_native()?;
         let sec_desc = sec_desc.clone();
-        tokio::task::spawn_blocking(move || Self::set_sec_desc_path(&path, &sec_desc, follow))
+        tokio::task::spawn_blocking(move || Self::update_sec_desc_path(&path, &sec_desc, follow))
             .await
             .unwrap_or_else(|_| Err(Error::other("failed to join security descriptor task")))
     }
@@ -2070,7 +2070,7 @@ impl Direct {
         }
     }
 
-    pub(crate) async fn set_metadata(
+    pub(crate) async fn update_metadata(
         &self,
         paths: &[path::PathBuf],
         patch: MetadataPatch,
@@ -2079,7 +2079,7 @@ impl Direct {
             .iter()
             .map(|path| path.to_path().to_native())
             .collect::<Result<Vec<_>>>()?;
-        self.impl_set_metadata(&paths, patch).await
+        self.impl_update_metadata(&paths, patch).await
     }
 
     pub(crate) async fn canonicalize(&self, path: path::Path<'_>) -> Result<path::PathBuf> {

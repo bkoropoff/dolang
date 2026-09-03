@@ -304,14 +304,14 @@ pub(crate) struct SecDescRequest {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub(crate) struct SetSecDescRequest {
+pub(crate) struct UpdateSecDescRequest {
     pub(crate) path: path::PathBuf,
     pub(crate) sec_desc: SecDesc,
     pub(crate) follow: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub(crate) struct SetMetadataRequest {
+pub(crate) struct UpdateMetadataRequest {
     pub(crate) paths: Vec<path::PathBuf>,
     pub(crate) patch: MetadataPatch,
 }
@@ -704,7 +704,7 @@ pub(crate) enum RequestKind {
         file: Cite<FileMarker>,
         mask: SecInfo,
     },
-    FileSetSecDesc {
+    FileUpdateSecDesc {
         file: Cite<FileMarker>,
         sec_desc: SecDesc,
     },
@@ -751,7 +751,7 @@ pub(crate) enum RequestKind {
     Acl(AclRequest),
     SetAcl(SetAclRequest),
     SecDesc(SecDescRequest),
-    SetSecDesc(SetSecDescRequest),
+    UpdateSecDesc(UpdateSecDescRequest),
     CreateDir(CreateDirRequest),
     RemoveDir(RemoveDirRequest),
     Copy(CopyRequest),
@@ -760,7 +760,7 @@ pub(crate) enum RequestKind {
     Symlink(SymlinkRequest),
     HardLink(HardLinkRequest),
     SymlinkMetadata(MetadataRequest),
-    SetMetadata(SetMetadataRequest),
+    UpdateMetadata(UpdateMetadataRequest),
     Canonicalize(CanonicalizeRequest),
     ReadLink(ReadLinkRequest),
     Access(AccessRequest),
@@ -874,7 +874,7 @@ pub(crate) enum ResponseKind {
     FileAcl(Option<Acl>),
     FileSetAcl,
     FileSecDesc(SecDesc),
-    FileSetSecDesc,
+    FileUpdateSecDesc,
     FileXattrs(Vec<XattrEntry>),
     FileXattr(Vec<u8>),
     FileStreams(Vec<StreamEntry>),
@@ -892,7 +892,7 @@ pub(crate) enum ResponseKind {
     Acl(Option<Acl>),
     SetAcl,
     SecDesc(SecDesc),
-    SetSecDesc,
+    UpdateSecDesc,
     CreateDir,
     RemoveDir,
     Copy,
@@ -901,7 +901,7 @@ pub(crate) enum ResponseKind {
     Symlink,
     HardLink,
     SymlinkMetadata(Metadata),
-    SetMetadata,
+    UpdateMetadata,
     Canonicalize(path::PathBuf),
     ReadLink(path::PathBuf),
     Access,

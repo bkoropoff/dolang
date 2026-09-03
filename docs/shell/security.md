@@ -249,18 +249,18 @@ the caller has the required Windows access rights and privileges.
 
 `SecDesc.with` creates a modified descriptor while preserving other components.
 Apply a modified descriptor with
-[`fs.windows.set_sec_desc`](../api/fs/windows/index.md#set_sec_desc-path-desc-resolve-options):
+[`fs.windows.update_sec_desc`](../api/fs/windows/index.md#update_sec_desc-path-desc-resolve-options):
 
 ```
 import fs.windows:
   - sec_desc
-  - set_sec_desc
+  - update_sec_desc
 import security.windows:
   - SidName
 
 let desc = sec_desc config.ini
 let owner = (SidName.lookup "BUILTIN\\Administrators").sid
-set_sec_desc config.ini $ desc.with :owner
+update_sec_desc config.ini $ desc.with :owner
 ```
 
 Changing a DACL normally requires `WRITE_DAC`; changing an owner normally

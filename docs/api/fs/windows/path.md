@@ -158,7 +158,7 @@ Gets selected parts of the Windows security descriptor.
 
 SACL access requires `SeSecurityPrivilege`.
 
-### `set_sec_desc desc? :resolve? ...options`
+### `update_sec_desc desc? :resolve? ...options`
 
 Applies the components selected by a `SecDesc`'s `mask`.
 
@@ -178,7 +178,7 @@ them.
 #### Example
 
 ```
-path.set_sec_desc
+path.update_sec_desc
   owner: :BUILTIN_ADMINISTRATORS:
   dacl_protected: true
   dacl:

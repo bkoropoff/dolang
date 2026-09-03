@@ -59,7 +59,7 @@ Gets selected parts of the service's Windows security descriptor.
 
 [`security.windows.SecDesc`](../security/windows/secdesc.md)
 
-### `set_config :...options`
+### `update_config :...options`
 
 Updates the supplied configuration fields. Omitted fields are unchanged.
 
@@ -84,12 +84,12 @@ uses the [`ScManager.create_service` rules](./sc-manager.md#binary_path).
 #### Example
 
 ```
-service.set_config
+service.update_config
   start_type: :AUTO_START:
   dependencies: (tuple "RpcSs" "EventLog")
 ```
 
-### `set_sec_desc desc? ...options`
+### `update_sec_desc desc? ...options`
 
 Applies the components selected by a Windows security descriptor's `mask`.
 

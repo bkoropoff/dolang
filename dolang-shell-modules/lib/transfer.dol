@@ -825,9 +825,9 @@ def apply_metadata path item
   let modified = item.mtime
   let mode = item.mode
   if (sys.os_info().family != :WINDOWS: && mode != nil)
-    path.set_metadata mode: (mode & 0o7777)
+    path.update_metadata mode: (mode & 0o7777)
   if modified
-    path.set_metadata modified: $modified
+    path.update_metadata modified: $modified
 
 def finish_links root records outputs
   for item = records

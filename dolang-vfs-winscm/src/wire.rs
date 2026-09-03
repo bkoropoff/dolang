@@ -70,7 +70,7 @@ impl ServiceAccess {
         ServiceAccess(AccessMask::from_bits_retain(0x000F_01FF));
 
     // Generic object rights, shared by both SC manager and service handles
-    // (needed for `sec_desc`/`set_sec_desc`, same as
+    // (needed for `sec_desc`/`update_sec_desc`, same as
     // `dolang-vfs-winreg::Access`'s equivalents).
     pub const READ_CONTROL: ServiceAccess =
         ServiceAccess(AccessMask::from_bits_retain(0x0002_0000));
@@ -327,7 +327,7 @@ pub(crate) enum WinScmRequest {
     QueryConfig {
         service: ExtCite<ServiceMarker>,
     },
-    ChangeConfig {
+    UpdateConfig {
         service: ExtCite<ServiceMarker>,
         update: ServiceConfigUpdate,
     },
@@ -339,7 +339,7 @@ pub(crate) enum WinScmRequest {
         service: ExtCite<ServiceMarker>,
         mask: SecInfo,
     },
-    SetSecDesc {
+    UpdateSecDesc {
         service: ExtCite<ServiceMarker>,
         sec_desc: SecDesc,
     },

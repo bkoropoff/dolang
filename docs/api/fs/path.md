@@ -243,9 +243,9 @@ Equivalent to [`fs.set_acl`](index.md#set_acl-path-acl-kind-default-resolve).
 Untyped declarative ACL specifications require an explicit `kind:`; a built
 ACL supplies its kind and must match one when provided.
 
-### `set_metadata :resolve? ...`
+### `update_metadata :resolve? ...`
 
-Equivalent to [`fs.set_metadata`](index.md#set_metadata-resolve-paths).
+Equivalent to [`fs.update_metadata`](index.md#update_metadata-resolve-paths).
 
 ### `set_size size`
 

@@ -427,17 +427,17 @@ impl Key {
     /// setting the SACL requires [`Access::ACCESS_SYSTEM_SECURITY`] plus
     /// `SeSecurityPrivilege` (elevated automatically for the duration of
     /// this call if available).
-    pub async fn set_sec_desc(&self, descriptor: &SecDesc) -> Result<(), Error> {
+    pub async fn update_sec_desc(&self, descriptor: &SecDesc) -> Result<(), Error> {
         let response = self
             .vfs
-            .call_extension::<WinRegExt>(WinRegRequest::SetSecDesc {
+            .call_extension::<WinRegExt>(WinRegRequest::UpdateSecDesc {
                 key: self.handle.cite()?,
                 sec_desc: descriptor.clone(),
             })
             .await??;
         match response {
             WinRegResponse::Ack => Ok(()),
-            _ => Err(unexpected("SetSecDesc")),
+            _ => Err(unexpected("UpdateSecDesc")),
         }
     }
 }

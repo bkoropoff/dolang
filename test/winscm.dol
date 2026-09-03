@@ -60,7 +60,7 @@ def scm_crud_round_trips()
     assert_type $winscm.Status $status
     assert_eq $status.current_state :STOPPED:
 
-    # config() returns an immutable point-in-time snapshot; set_config only
+    # config() returns an immutable point-in-time snapshot; update_config only
     # changes explicitly supplied keyword fields.
     let config = service.config()
     assert_type $winscm.ServiceConfig $config
@@ -68,7 +68,7 @@ def scm_crud_round_trips()
     assert_eq $config.start_type :DEMAND_START:
     assert_eq $config.dependencies.len 0
     let updated_display_name = "$display_name updated"
-    service.set_config
+    service.update_config
       display_name: $updated_display_name
       dependencies: []
     let updated_config = service.config()
@@ -92,7 +92,7 @@ def scm_crud_round_trips()
     let owner_descriptor = service.sec_desc group: false dacl: false
     assert_type $SecDesc $owner_descriptor
     let dacl_descriptor = service.sec_desc owner: false group: false
-    service.set_sec_desc $dacl_descriptor
+    service.update_sec_desc $dacl_descriptor
 
     # The scratch service shows up in an enumeration.
     let services = manager.enumerate_services()

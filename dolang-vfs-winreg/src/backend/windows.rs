@@ -853,7 +853,7 @@ unsafe fn set_value(handle: HKEY, name: Option<&str>, value: &Value) -> Result<(
 }
 
 /// Converts an `io::Error` carrying a raw Win32 error code (as produced by
-/// [`sec_desc`]/[`set_sec_desc`] below) back into this crate's [`Error`]
+/// [`sec_desc`]/[`update_sec_desc`] below) back into this crate's [`Error`]
 /// type, using the same code-to-`ErrorKind` mapping as every other
 /// operation in this file.
 fn from_io(operation: &str, err: io::Error) -> Error {
@@ -905,7 +905,7 @@ unsafe fn sec_desc(handle: HKEY, mask: SecInfo) -> Result<VfsSecDesc, Error> {
 /// Sets `handle`'s security descriptor via `RegSetKeySecurity`, passing the
 /// native self-relative byte blob `SecDesc::to_bytes` produces straight
 /// through.
-unsafe fn set_sec_desc(handle: HKEY, descriptor: &VfsSecDesc) -> Result<(), Error> {
+unsafe fn update_sec_desc(handle: HKEY, descriptor: &VfsSecDesc) -> Result<(), Error> {
     let mut mask = (descriptor.mask() & SecInfo::ALL).bits();
     if mask == 0 {
         return Ok(());
@@ -1246,12 +1246,12 @@ pub(crate) async fn handle(
                 with_handle(guard, move |h| unsafe { sec_desc(h, mask) }).await?,
             ))
         }
-        WinRegRequest::SetSecDesc {
+        WinRegRequest::UpdateSecDesc {
             key,
             sec_desc: descriptor,
         } => {
             let guard = ctx.acquire::<Key>(key).map_err(invalid_handle)?;
-            with_handle(guard, move |h| unsafe { set_sec_desc(h, &descriptor) }).await?;
+            with_handle(guard, move |h| unsafe { update_sec_desc(h, &descriptor) }).await?;
             Ok(WinRegResponse::Ack)
         }
     }

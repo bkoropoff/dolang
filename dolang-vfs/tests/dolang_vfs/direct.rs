@@ -1093,7 +1093,7 @@ async fn direct_security_descriptor_path_and_file() {
     // READ_CONTROL on the handle go unnoticed — the assertion below was never
     // reached, because every DACL write took the error branch.
     direct
-        .set_sec_desc(typed(&path), &dacl, true)
+        .update_sec_desc(typed(&path), &dacl, true)
         .await
         .unwrap();
     let round_trip = direct
@@ -1133,14 +1133,14 @@ async fn direct_security_descriptors_are_unsupported() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn direct_set_metadata_rejects_created_timestamp() {
+async fn direct_update_metadata_rejects_created_timestamp() {
     let direct = Vfs::direct().unwrap();
     let dir = tempdir().unwrap();
     let path = dir.path().join("timestamps.txt");
     tokio::fs::write(&path, "hello").await.unwrap();
 
     let err = direct
-        .set_metadata(
+        .update_metadata(
             &[typed(&path).to_path_buf()],
             MetadataPatch::new().with_created(1_000_000_000),
         )
@@ -1159,7 +1159,7 @@ async fn direct_windows_attrs() {
     tokio::fs::write(&path, "hello").await.unwrap();
 
     direct
-        .set_metadata(
+        .update_metadata(
             &[typed(&path).to_path_buf()],
             attr_patch(AttrFlags::READONLY, true),
         )
@@ -1175,7 +1175,7 @@ async fn direct_windows_attrs() {
     assert_ne!(attrs & 0x1, 0);
 
     direct
-        .set_metadata(
+        .update_metadata(
             &[typed(&path).to_path_buf()],
             attr_patch(AttrFlags::READONLY, false),
         )
@@ -1195,7 +1195,7 @@ async fn direct_windows_attrs() {
     }
 
     direct
-        .set_metadata(
+        .update_metadata(
             &[typed(&path).to_path_buf()],
             attr_patch(AttrFlags::COMPRESSED, true),
         )
@@ -1211,7 +1211,7 @@ async fn direct_windows_attrs() {
     assert_ne!(attrs & 0x800, 0);
 
     direct
-        .set_metadata(
+        .update_metadata(
             &[typed(&path).to_path_buf()],
             attr_patch(AttrFlags::COMPRESSED, false),
         )
@@ -1227,7 +1227,7 @@ async fn direct_windows_attrs() {
     assert_eq!(attrs & 0x800, 0);
 
     direct
-        .set_metadata(
+        .update_metadata(
             &[typed(&path).to_path_buf()],
             attr_patch(AttrFlags::SPARSE, true),
         )
@@ -1242,7 +1242,7 @@ async fn direct_windows_attrs() {
     assert_ne!(attrs & 0x200, 0);
 
     direct
-        .set_metadata(
+        .update_metadata(
             &[typed(&path).to_path_buf()],
             attr_patch(AttrFlags::SPARSE, false),
         )
@@ -1314,7 +1314,7 @@ async fn direct_linux_attrs() {
     };
 
     if let Err(err) = direct
-        .set_metadata(
+        .update_metadata(
             &[typed(&path).to_path_buf()],
             attr_patch(AttrFlags::NO_DUMP, true),
         )
@@ -1327,7 +1327,7 @@ async fn direct_linux_attrs() {
         {
             return;
         }
-        panic!("set_metadata failed: {err}");
+        panic!("update_metadata failed: {err}");
     }
 
     let attrs = direct
@@ -1339,7 +1339,7 @@ async fn direct_linux_attrs() {
     assert_ne!(attrs & 0x40, 0);
 
     direct
-        .set_metadata(
+        .update_metadata(
             &[typed(&path).to_path_buf()],
             attr_patch(AttrFlags::NO_DUMP, false),
         )
@@ -1731,7 +1731,7 @@ async fn windows_positional_copy_preserves_sparse_holes_without_marking_destinat
     let dst_path = dir.path().join("dense-dst.bin");
     std::fs::write(&src_path, []).unwrap();
     direct
-        .set_metadata(
+        .update_metadata(
             &[typed(&src_path).to_path_buf()],
             attr_patch(AttrFlags::SPARSE, true),
         )

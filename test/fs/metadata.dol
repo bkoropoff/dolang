@@ -18,7 +18,7 @@ import sys
     - metadata
     - open
     - remove
-    - set_metadata
+    - update_metadata
   fs.unix:
     - Mode
   security.windows:
@@ -140,25 +140,25 @@ def windows_attrs()
     let path_meta = Path(test_path).metadata()
     assert_eq $meta.win_attrs $path_meta.win_attrs
 
-    set_metadata $test_path readonly: true
+    update_metadata $test_path readonly: true
     let readonly_meta = metadata $test_path
     assert_eq $readonly_meta.readonly true
-    Path(test_path).set_metadata readonly: false
+    Path(test_path).update_metadata readonly: false
     let writable_meta = Path(test_path).metadata()
     assert_eq $writable_meta.readonly false
 
   if !sys.os_info().is_wine
-    set_metadata $test_path compressed: true
+    update_metadata $test_path compressed: true
     let compressed_meta = metadata $test_path
     assert_eq $compressed_meta.compressed true
-    Path(test_path).set_metadata compressed: false
+    Path(test_path).update_metadata compressed: false
     let uncompressed_meta = Path(test_path).metadata()
     assert_eq $uncompressed_meta.compressed false
 
-    set_metadata $test_path sparse: true
+    update_metadata $test_path sparse: true
     let sparse_meta = metadata $test_path
     assert_eq $sparse_meta.sparse true
-    Path(test_path).set_metadata sparse: false
+    Path(test_path).update_metadata sparse: false
     let dense_meta = Path(test_path).metadata()
     assert_eq $dense_meta.sparse false
 
@@ -176,10 +176,10 @@ def windows_batch_attrs()
   open $second w do |f|
     f.write "two"
 
-  set_metadata $first $second readonly: true
+  update_metadata $first $second readonly: true
   assert_eq (metadata(first).readonly) true
   assert_eq (metadata(second).readonly) true
-  set_metadata $first $second readonly: false
+  update_metadata $first $second readonly: false
 
   remove $first
   remove $second
@@ -214,10 +214,10 @@ def linux_attrs()
   assert_type $Bool $meta.direct_access
   assert_type $Bool $meta.extent_format
 
-  set_metadata $test_path no_dump: true
+  update_metadata $test_path no_dump: true
   let no_dump_meta = metadata $test_path
   assert_eq $no_dump_meta.no_dump true
-  Path(test_path).set_metadata no_dump: false
+  Path(test_path).update_metadata no_dump: false
   let normal_meta = Path(test_path).metadata()
   assert_eq $normal_meta.no_dump false
 
@@ -242,11 +242,11 @@ def macos_attrs()
   assert_type $Bool $meta.no_dump
   assert_type $Bool $meta.opaque
 
-  set_metadata $test_path hidden: true no_dump: true
+  update_metadata $test_path hidden: true no_dump: true
   let hidden_meta = metadata $test_path
   assert_eq $hidden_meta.hidden true
   assert_eq $hidden_meta.no_dump true
-  Path(test_path).set_metadata hidden: false no_dump: false
+  Path(test_path).update_metadata hidden: false no_dump: false
   let normal_meta = Path(test_path).metadata()
   assert_eq $normal_meta.hidden false
   assert_eq $normal_meta.no_dump false
@@ -320,10 +320,10 @@ def freebsd_attrs()
   assert_type $Bool $meta.no_dump
   assert_type $Bool $meta.opaque
 
-  set_metadata $test_path no_dump: true
+  update_metadata $test_path no_dump: true
   let no_dump_meta = metadata $test_path
   assert_eq $no_dump_meta.no_dump true
-  Path(test_path).set_metadata no_dump: false
+  Path(test_path).update_metadata no_dump: false
   let normal_meta = Path(test_path).metadata()
   assert_eq $normal_meta.no_dump false
 

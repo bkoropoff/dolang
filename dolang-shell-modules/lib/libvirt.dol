@@ -1470,7 +1470,7 @@ class DomainImpl
       let target = Path $step.target
       target.write $resolved
       if (step.chmod != nil)
-        target.set_metadata mode: $step.chmod
+        target.update_metadata mode: $step.chmod
 
   # Copies one local file into the domain.
   # `chmod:` sets `dest`s mode if given
@@ -1489,7 +1489,7 @@ class DomainImpl
           target.open wb do |output|
             copy_chunks $total $input $output $ind
           if (chmod != nil)
-            target.set_metadata mode: $chmod
+            target.update_metadata mode: $chmod
 
   # Copies one file from the domain to the local VFS.
   pub def download self source dest

@@ -261,7 +261,7 @@ mod live {
         assert!(config.dependencies.is_empty());
         let updated_display_name = format!("{name} updated");
         service
-            .set_config(ServiceConfigUpdate {
+            .update_config(ServiceConfigUpdate {
                 display_name: Some(updated_display_name.clone()),
                 dependencies: Some(Vec::new()),
                 ..ServiceConfigUpdate::default()
@@ -327,7 +327,7 @@ mod live {
             assert!(descriptor.owner().is_some(), "expected an owner SID");
         }
         let descriptor = service.sec_desc(SecInfo::DACL.bits()).await.unwrap();
-        service.set_sec_desc(&descriptor).await.unwrap();
+        service.update_sec_desc(&descriptor).await.unwrap();
 
         // Start the service and observe a status-change notification
         // fire — the actual point of this crate: an async wait built on

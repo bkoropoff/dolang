@@ -174,11 +174,11 @@ def registry_crud_round_trips()
   # round-trip it back unmodified. The scratch key was opened with the
   # extra access rights (READ_CONTROL/WRITE_DAC/WRITE_OWNER) this requires
   # — a registry key is opened once and reused, so unlike path-based
-  # sec_desc/set_sec_desc there's no fresh handle opened per call.
+  # sec_desc/update_sec_desc there's no fresh handle opened per call.
   let descriptor = scratch.sec_desc()
   assert_type $SecDesc $descriptor
   assert (descriptor.dacl != nil) "expected a dacl"
-  scratch.set_sec_desc $descriptor
+  scratch.update_sec_desc $descriptor
 
   # A narrower mask fetches fewer components.
   let owner_only = scratch.sec_desc group: false dacl: false

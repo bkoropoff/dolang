@@ -115,5 +115,5 @@ Reading a file's mode and applying it elsewhere:
 
 ```
 let mode = metadata("template.sh").mode
-set_metadata "script.sh" mode: $mode
+update_metadata "script.sh" mode: $mode
 ```

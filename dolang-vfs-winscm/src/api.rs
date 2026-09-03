@@ -391,17 +391,17 @@ impl Service {
     }
 
     /// Changes the selected fields of the service's base configuration.
-    pub async fn set_config(&self, update: ServiceConfigUpdate) -> Result<(), Error> {
+    pub async fn update_config(&self, update: ServiceConfigUpdate) -> Result<(), Error> {
         let response = self
             .vfs
-            .call_extension::<WinScmExt>(WinScmRequest::ChangeConfig {
+            .call_extension::<WinScmExt>(WinScmRequest::UpdateConfig {
                 service: self.handle.cite(),
                 update,
             })
             .await??;
         match response {
             WinScmResponse::Ack => Ok(()),
-            _ => Err(unexpected("ChangeConfig")),
+            _ => Err(unexpected("UpdateConfig")),
         }
     }
 
@@ -439,17 +439,17 @@ impl Service {
     /// setting the SACL requires [`ServiceAccess::ACCESS_SYSTEM_SECURITY`]
     /// plus `SeSecurityPrivilege` (elevated automatically for the duration
     /// of this call if available).
-    pub async fn set_sec_desc(&self, descriptor: &SecDesc) -> Result<(), Error> {
+    pub async fn update_sec_desc(&self, descriptor: &SecDesc) -> Result<(), Error> {
         let response = self
             .vfs
-            .call_extension::<WinScmExt>(WinScmRequest::SetSecDesc {
+            .call_extension::<WinScmExt>(WinScmRequest::UpdateSecDesc {
                 service: self.handle.cite(),
                 sec_desc: descriptor.clone(),
             })
             .await??;
         match response {
             WinScmResponse::Ack => Ok(()),
-            _ => Err(unexpected("SetSecDesc")),
+            _ => Err(unexpected("UpdateSecDesc")),
         }
     }
 

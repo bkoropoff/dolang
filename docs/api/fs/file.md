@@ -356,7 +356,7 @@ dictionaries requires `kind:`. With `nil`, the omitted kind remains POSIX.
 | `kind`    | `:POSIX:`\|`:NFS4:`\|`:MACOS:`?             | Required for an untyped ACL specification      |
 | `default` | [`Bool`](../std/bool.md)?                   | Update the directory's inheritable default ACL |
 
-### `set_sec_desc desc? ...options`
+### `update_sec_desc desc? ...options`
 
 Applies the components selected by a security descriptor's `mask` through
 this file's existing handle.

@@ -12,7 +12,7 @@ import sys std
     - remove
   fs.windows:
     - sec_desc
-    - set_sec_desc
+    - update_sec_desc
   security.windows:
     - SecDesc
     - SecInfo
@@ -31,17 +31,17 @@ def query_security_descriptors()
     let shallow = path.sec_desc owner: false group: false dacl: false
     assert_eq $shallow.mask (SecInfo())
     assert_type $SecDesc (sec_desc "test_sec_desc.txt")
-    set_sec_desc test_sec_desc.txt $shallow
+    update_sec_desc test_sec_desc.txt $shallow
     # A descriptor whose mask is empty never reaches Windows — the backend
     # returns early — so the call above proves nothing about writing one.
     # Replaying the file's own DACL is the smallest write that does, and it
     # needs READ_CONTROL as well as WRITE_DAC on the handle.
-    set_sec_desc $path (SecDesc dacl: descriptor.dacl)
+    update_sec_desc $path (SecDesc dacl: descriptor.dacl)
     let replayed = path.sec_desc()
     assert_eq $replayed.dacl.aces.len $descriptor.dacl.aces.len
     # The same write in declarative form, straight through the method's own
     # component options.
-    path.set_sec_desc
+    path.update_sec_desc
       dacl:
         for entry = descriptor.dacl.aces
           - $entry
@@ -53,9 +53,9 @@ def query_security_descriptors()
     assert_throws $sys.UnsupportedError do path.sec_desc()
     assert_throws $sys.UnsupportedError do sec_desc test_sec_desc.txt
     let empty = SecDesc b"\x01\x00\x00\x80\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
-    assert_throws $sys.UnsupportedError do set_sec_desc test_sec_desc.txt $empty
+    assert_throws $sys.UnsupportedError do update_sec_desc test_sec_desc.txt $empty
     assert_throws $sys.UnsupportedError do
-      set_sec_desc test_sec_desc.txt
+      update_sec_desc test_sec_desc.txt
         dacl:
           - allow: :LOCAL_SYSTEM:
             mask: :GENERIC_ALL:

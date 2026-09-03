@@ -99,7 +99,7 @@ pub def with_socket_dir
   thunk
 do
   let body = do |subdir|
-    subdir.set_metadata mode: 0o700
+    subdir.update_metadata mode: 0o700
     thunk $subdir
   let runtime_dir = xdg.runtime_dir()
   if (runtime_dir != nil)

@@ -1114,7 +1114,7 @@ async fn security_descriptor_round_trip_over_generic_stream() {
     // Must succeed rather than be tolerated — see the note in `direct.rs`'s
     // `direct_security_descriptor_path_and_file`.
     client
-        .set_sec_desc(path.to_path(), &dacl, true)
+        .update_sec_desc(path.to_path(), &dacl, true)
         .await
         .unwrap();
     let round_trip = client

@@ -722,8 +722,8 @@ impl File {
     }
 
     /// Replaces the Windows security descriptor.
-    pub async fn set_sec_desc(&self, sec_desc: &SecDesc) -> Result<()> {
-        match_file!(self, file => file.set_sec_desc(sec_desc).await)
+    pub async fn update_sec_desc(&self, sec_desc: &SecDesc) -> Result<()> {
+        match_file!(self, file => file.update_sec_desc(sec_desc).await)
     }
 
     /// Lists extended attributes in `namespace`.

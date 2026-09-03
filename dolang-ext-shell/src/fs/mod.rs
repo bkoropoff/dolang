@@ -173,7 +173,7 @@ async fn set_acl<'v, 's>(
         .into_sys(strand)
 }
 
-async fn set_sec_desc<'v, 's>(
+async fn update_sec_desc<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
     path: vfs_path::Path<'_>,
@@ -185,7 +185,7 @@ async fn set_sec_desc<'v, 's>(
         .local
         .get(strand)
         .vfs()
-        .set_sec_desc(path.to_path(), descriptor, follow)
+        .update_sec_desc(path.to_path(), descriptor, follow)
         .await
         .into_sys(strand)
 }
@@ -374,7 +374,7 @@ fn metadata_patch<'v, 's>(
     Ok(patch)
 }
 
-async fn set_metadata<'v, 's>(
+async fn update_metadata<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
     paths: Vec<vfs_path::PathBuf>,
@@ -386,7 +386,7 @@ async fn set_metadata<'v, 's>(
         .collect::<Result<'v, 's, Vec<_>>>()?;
     let local = global.local.get(strand);
     let vfs = local.vfs();
-    vfs.set_metadata(&paths, patch).await.into_sys(strand)?;
+    vfs.update_metadata(&paths, patch).await.into_sys(strand)?;
     Ok(())
 }
 
@@ -1193,7 +1193,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 .unwrap_or(false);
             sync_file(strand, global, path.to_path(), data).await
         })
-        .function("set_metadata", async move |strand, args, _out| {
+        .function("update_metadata", async move |strand, args, _out| {
             let (
                 [],
                 [
@@ -1327,7 +1327,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             if requested_paths.is_empty() {
                 return Err(Error::missing_positional(strand, 0));
             }
-            set_metadata(strand, global, requested_paths, patch).await?;
+            update_metadata(strand, global, requested_paths, patch).await?;
             Ok(())
         })
         .function("is_absolute", async move |strand, args, out| {
@@ -1592,18 +1592,18 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             let follow = resolve_sym(strand, global, resolve, true)?;
             sec_desc(strand, global, path.to_path(), mask, follow, out).await
         })
-        .function("set_sec_desc", async move |strand, args, _out| {
+        .function("update_sec_desc", async move |strand, args, _out| {
             let ([path], [resolve], rest) = unpack!(strand, args, 1, 0, resolve = None, ...)?;
             let path = path_from_value(strand, global, &path)?;
             let descriptor = security::sec_desc_from_args(
                 strand,
                 global,
                 rest,
-                &security::SpecPath::root("set_sec_desc"),
+                &security::SpecPath::root("update_sec_desc"),
             )
             .await?;
             let follow = resolve_sym(strand, global, resolve, true)?;
-            set_sec_desc(strand, global, path.to_path(), &descriptor, follow).await
+            update_sec_desc(strand, global, path.to_path(), &descriptor, follow).await
         })
         .commit();
 }

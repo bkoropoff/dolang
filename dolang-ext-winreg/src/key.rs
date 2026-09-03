@@ -537,15 +537,15 @@ impl<'v> Object<'v> for Key {
                 dolang_ext_shell::create_sec_desc(strand, descriptor, out);
                 Ok(())
             })
-            .method("set_sec_desc", async move |this, strand, args, _out| {
+            .method("update_sec_desc", async move |this, strand, args, _out| {
                 let descriptor =
-                    dolang_ext_shell::sec_desc_from_args(strand, args, "set_sec_desc").await?;
+                    dolang_ext_shell::sec_desc_from_args(strand, args, "update_sec_desc").await?;
                 let borrow = this.borrow(strand)?;
                 let key = borrow
                     .0
                     .as_ref()
                     .ok_or_else(|| Error::state_error(strand, "key is closed"))?;
-                key.set_sec_desc(&descriptor).await.into_sys(strand)
+                key.update_sec_desc(&descriptor).await.into_sys(strand)
             })
     }
 }
