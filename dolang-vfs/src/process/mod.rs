@@ -13,11 +13,11 @@ use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf},
     task::JoinHandle,
 };
-use typed_path::Utf8TypedPath;
 
 use crate::{
     STREAM_CHUNK_SIZE, SessionMode, Vfs, VfsInner, client, direct,
     error::{Error, ErrorKind, Result},
+    path,
     target::OperatingSystem,
 };
 
@@ -153,7 +153,7 @@ pub struct Command<'a> {
 }
 
 impl<'a> Command<'a> {
-    pub(crate) fn new(vfs: &'a Vfs, program: Utf8TypedPath<'_>) -> Self {
+    pub(crate) fn new(vfs: &'a Vfs, program: path::Path<'_>) -> Self {
         let inner = match &vfs.inner {
             VfsInner::Client(client) => CommandInner::Client(client.command(program)),
             VfsInner::Direct(direct) => CommandInner::Direct(direct.command(program)),
@@ -380,7 +380,7 @@ impl<'a> Command<'a> {
     }
 
     /// Sets the child's working directory.
-    pub fn current_dir(&mut self, dir: Utf8TypedPath<'_>) -> &mut Self {
+    pub fn current_dir(&mut self, dir: path::Path<'_>) -> &mut Self {
         match &mut self.inner {
             CommandInner::Client(builder) => {
                 builder.current_dir(dir);

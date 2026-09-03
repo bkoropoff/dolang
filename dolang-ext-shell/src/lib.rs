@@ -51,6 +51,7 @@ use tokio::io::AsyncWriteExt;
 use crate::global::Global;
 
 pub use diagnostic::{print_compile_diag_stderr, print_error_stderr, render_message_backtrace};
+use dolang_vfs::path as vfs_path;
 #[doc(hidden)]
 pub use syntax::{SemanticToken, highlight_range as highlight_source_range};
 
@@ -207,7 +208,11 @@ pub fn windows_sid_name<'v>(
 /// Get current working directory of strand
 pub fn cwd<'v>(strand: &Strand<'v, '_>) -> PathBuf {
     let global = strand.state::<Global<'v>>();
-    dolang_vfs::path::native_path(global.local.get(strand).cwd().to_path())
+    global
+        .local
+        .get(strand)
+        .cwd()
+        .to_native()
         .expect("local working directory has the host path style")
 }
 
@@ -238,12 +243,10 @@ pub async fn set_program<'v, 's>(
 pub fn as_path<'v, 's>(strand: &mut Strand<'v, 's>, value: &Value<'v>) -> Option<PathBuf> {
     let global = strand.state::<Global<'v>>();
     if let Some(path) = global.types.unix_path.cast(value) {
-        path.enter_sync(strand, |_strand, inst| {
-            dolang_vfs::path::native_path(inst.annex().inner.to_path()).ok()
-        })
+        path.enter_sync(strand, |_strand, inst| inst.annex().inner.to_native().ok())
     } else if let Some(path) = global.types.windows_path.cast(value) {
         path.enter_sync(strand, |_strand, inst| {
-            dolang_vfs::path::native_path(inst.annex().typed_path_buf().to_path()).ok()
+            inst.annex().path_buf().to_native().ok()
         })
     } else {
         value.as_str(strand).map(|s| PathBuf::from(s.to_string()))
@@ -254,15 +257,12 @@ pub fn as_path<'v, 's>(strand: &mut Strand<'v, 's>, value: &Value<'v>) -> Option
 pub fn as_unix_path<'v, 's>(
     strand: &mut Strand<'v, 's>,
     value: &Value<'v>,
-) -> Option<typed_path::Utf8UnixPathBuf> {
+) -> Option<vfs_path::PathBuf> {
     let global = strand.state::<Global<'v>>();
     let path = global.types.unix_path.cast(value)?;
     path.enter_sync(strand, |_strand, inst| {
-        let annex = inst.annex();
-        match &annex.inner {
-            typed_path::Utf8TypedPathBuf::Unix(path) => Some(path.clone()),
-            typed_path::Utf8TypedPathBuf::Windows(_) => None,
-        }
+        let inner = &inst.annex().inner;
+        (inner.kind() == vfs_path::Kind::Unix).then(|| inner.clone())
     })
 }
 
@@ -270,15 +270,12 @@ pub fn as_unix_path<'v, 's>(
 pub fn as_windows_path<'v, 's>(
     strand: &mut Strand<'v, 's>,
     value: &Value<'v>,
-) -> Option<typed_path::Utf8WindowsPathBuf> {
+) -> Option<vfs_path::PathBuf> {
     let global = strand.state::<Global<'v>>();
     let path = global.types.windows_path.cast(value)?;
     path.enter_sync(strand, |_strand, inst| {
-        let annex = inst.annex();
-        match &annex.inner {
-            typed_path::Utf8TypedPathBuf::Windows(path) => Some(path.clone()),
-            typed_path::Utf8TypedPathBuf::Unix(_) => None,
-        }
+        let inner = &inst.annex().inner;
+        (inner.kind() == vfs_path::Kind::Windows).then(|| inner.clone())
     })
 }
 
@@ -292,7 +289,7 @@ pub fn unix_path<'v, 's>(
     fs::path::create_path(
         strand,
         global,
-        typed_path::Utf8TypedPathBuf::from_unix(path.as_ref()),
+        vfs_path::PathBuf::from_unix(path.as_ref()),
         out,
     )
 }
@@ -307,7 +304,7 @@ pub fn windows_path<'v, 's>(
     fs::path::create_path(
         strand,
         global,
-        typed_path::Utf8TypedPathBuf::from_windows(path.as_ref()),
+        vfs_path::PathBuf::from_windows(path.as_ref()),
         out,
     )
 }
@@ -318,7 +315,7 @@ pub fn path<'v, 's>(
     out: impl Output<'v>,
 ) -> Result<'v, 's, ()> {
     let global = strand.state::<Global<'v>>();
-    let path = dolang_vfs::path::typed_path(path).map_err(|e| Error::runtime(strand, e))?;
+    let path = vfs_path::PathBuf::from_native(path).map_err(|e| Error::runtime(strand, e))?;
     fs::path::create_path(strand, global, path, out)
 }
 
@@ -336,7 +333,7 @@ pub async fn open<'v, 's>(
     fs::file::open_native(
         strand,
         global,
-        dolang_vfs::path::typed_path(path.to_owned())?.to_path(),
+        vfs_path::PathBuf::from_native(path.to_owned())?.to_path(),
         mode,
     )
     .await

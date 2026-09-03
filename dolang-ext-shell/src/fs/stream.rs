@@ -5,7 +5,7 @@ use dolang::runtime::{
     value::TypeObject,
 };
 use dolang_vfs::file::StreamEntry as VfsStreamEntry;
-use typed_path::{Utf8TypedPath, Utf8TypedPathBuf};
+use dolang_vfs::path as vfs_path;
 
 use crate::{error::ResultExt as _, global::Global};
 
@@ -55,9 +55,9 @@ pub(crate) fn create_stream_iter<'v, 's>(
 }
 
 pub(crate) fn stream_path(
-    base_path: Utf8TypedPath<'_>,
+    base_path: vfs_path::Path<'_>,
     entry: &VfsStreamEntry,
-) -> Utf8TypedPathBuf {
+) -> vfs_path::PathBuf {
     let mut path = base_path.to_path_buf();
     let mut name = path
         .file_name()
@@ -74,9 +74,9 @@ pub(crate) fn stream_path(
 pub(crate) fn path_with_stream<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    path: Utf8TypedPath<'_>,
+    path: vfs_path::Path<'_>,
     stream: &Value<'v>,
-) -> Result<'v, 's, Utf8TypedPathBuf> {
+) -> Result<'v, 's, vfs_path::PathBuf> {
     let stream = global
         .types
         .stream_entry
@@ -90,7 +90,7 @@ pub(crate) fn path_with_stream<'v, 's>(
 pub(crate) async fn path_list<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    path: Utf8TypedPath<'_>,
+    path: vfs_path::Path<'_>,
     resolve: Option<Slot<'v, '_>>,
     out: Slot<'v, '_>,
 ) -> Result<'v, 's, ()> {

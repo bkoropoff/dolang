@@ -29,9 +29,8 @@ use uuid::Uuid;
 use crate::{
     direct::unix::signal_to_raw,
     error::{Error, Result},
-    path::typed_path,
+    path,
     process::{ProcessExit, ProcessFamily, ProcessInfo, Signal, StartTime},
-    protocol::WirePath,
     security::UnixSecurityInfo,
 };
 
@@ -160,11 +159,11 @@ fn read_cmdline(pid: u32) -> Option<Vec<String>> {
 /// Returns `None` rather than an error for the common denials: reading another
 /// user's `exe` or `cwd` needs `PTRACE_MODE_READ`, and a kernel thread has
 /// neither.
-fn read_link(pid: u32, name: &str) -> Option<WirePath> {
+fn read_link(pid: u32, name: &str) -> Option<path::PathBuf> {
     let target = fs::read_link(format!("/proc/{pid}/{name}")).ok()?;
     // A deleted executable resolves to "<path> (deleted)", which is not a path
     // the caller can use, but it is still the most accurate answer available.
-    typed_path(target).ok().map(Into::into)
+    path::PathBuf::from_native(target).ok()
 }
 
 /// Builds a snapshot for `pid`, or `None` if it has gone away.

@@ -34,11 +34,11 @@ use sqlite_plugin::{
     vfs::{RegisterOpts, Vfs, VfsHandle, VfsResult, register_static},
 };
 
+use dolang_vfs::path;
 use dolang_vfs::{
     Vfs as VfsVfs,
     error::{Error, ErrorKind},
 };
-use typed_path::{Utf8TypedPath, Utf8UnixPath};
 
 // Shadow libc's F_RDLCK/F_WRLCK/F_UNLCK with i32 versions.
 // On Linux these constants are already i32; on macOS they are i16.
@@ -523,7 +523,7 @@ fn open_or_join_shm(handle: &mut ShellFileHandle) -> VfsResult<()> {
                     .read(true)
                     .write(true)
                     .create(true)
-                    .open(shm_path_clone.as_str().into())
+                    .open(path::Path::unix(shm_path_clone.as_str()))
                     .await
                 {
                     Ok(f) => Ok((f.try_into_std().await.map_err(|_| SQLITE_CANTOPEN)?, false)),
@@ -532,7 +532,7 @@ fn open_or_join_shm(handle: &mut ShellFileHandle) -> VfsResult<()> {
                         let f = client
                             .open_options()
                             .read(true)
-                            .open(shm_path_clone.as_str().into())
+                            .open(path::Path::unix(shm_path_clone.as_str()))
                             .await
                             .map_err(|e| map_vfs_err(e, SQLITE_CANTOPEN, SQLITE_IOERR_SHMOPEN))?;
                         Ok::<_, i32>((f.try_into_std().await.map_err(|_| SQLITE_CANTOPEN)?, true))
@@ -661,7 +661,7 @@ impl Vfs for ShellVfs {
                     }
                 }
                 let tokio_file = open_opts
-                    .open(path.as_str().into())
+                    .open(path::Path::unix(path.as_str()))
                     .await
                     .map_err(|e| map_vfs_err(e, SQLITE_CANTOPEN, SQLITE_IOERR))?;
                 tokio_file.try_into_std().await.map_err(|_| SQLITE_CANTOPEN)
@@ -678,7 +678,7 @@ impl Vfs for ShellVfs {
                     .read(true)
                     .write(true)
                     .create_new(true)
-                    .open(tp.as_str().into())
+                    .open(path::Path::unix(tp.as_str()))
                     .await
                     .map_err(|e| map_vfs_err(e, SQLITE_CANTOPEN, SQLITE_IOERR))?;
                 tokio_file.try_into_std().await.map_err(|_| SQLITE_CANTOPEN)
@@ -727,7 +727,7 @@ impl Vfs for ShellVfs {
         let client = get_shell_vfs();
         block_on_shell(async move {
             client
-                .remove(Utf8TypedPath::Unix(Utf8UnixPath::new(&path)), false, false)
+                .remove(path::Path::unix(&path), false, false)
                 .await
                 .map_err(|e| map_vfs_err(e, SQLITE_IOERR_DELETE_NOENT, SQLITE_IOERR_DELETE))
         })
@@ -747,10 +747,7 @@ impl Vfs for ShellVfs {
         };
 
         block_on_shell(async move {
-            match client
-                .access(Utf8TypedPath::Unix(Utf8UnixPath::new(&path)), mode)
-                .await
-            {
+            match client.access(path::Path::unix(&path), mode).await {
                 Ok(_) => Ok(true),
                 Err(_) => Ok(false),
             }
@@ -975,7 +972,7 @@ impl Vfs for ShellVfs {
             let client = get_shell_vfs();
             let _ = block_on_shell(async move {
                 client
-                    .remove(Utf8TypedPath::Unix(Utf8UnixPath::new(&path)), false, false)
+                    .remove(path::Path::unix(&path), false, false)
                     .await
                     .map_err(|_| SQLITE_IOERR)
             });
@@ -1220,7 +1217,7 @@ impl Vfs for ShellVfs {
             let client = get_shell_vfs();
             let _ = block_on_shell(async move {
                 client
-                    .remove(Utf8TypedPath::Unix(Utf8UnixPath::new(&path)), false, false)
+                    .remove(path::Path::unix(&path), false, false)
                     .await
                     .map_err(|_| SQLITE_IOERR)
             });

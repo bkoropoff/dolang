@@ -22,7 +22,6 @@ use tokio::{
     net::windows::named_pipe::{ClientOptions, ServerOptions},
     task::JoinHandle,
 };
-use typed_path::{Utf8TypedPath, Utf8WindowsPath};
 use windows_sys::Win32::Security::{
     GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
 };
@@ -72,12 +71,12 @@ fn direct_security_info_reports_token_elevation() {
     assert_eq!(info.is_elevated(), is_elevated());
 }
 
-fn typed(path: &Path) -> Utf8TypedPath<'_> {
-    Utf8TypedPath::Windows(Utf8WindowsPath::new(path.to_str().unwrap()))
+fn typed(path: &Path) -> dolang_vfs::path::Path<'_> {
+    dolang_vfs::path::Path::windows(path.to_str().unwrap())
 }
 
-fn typed_str(path: &str) -> Utf8TypedPath<'_> {
-    Utf8TypedPath::Windows(Utf8WindowsPath::new(path))
+fn typed_str(path: &str) -> dolang_vfs::path::Path<'_> {
+    dolang_vfs::path::Path::windows(path)
 }
 
 fn current_process_handle() -> OwnedHandle {

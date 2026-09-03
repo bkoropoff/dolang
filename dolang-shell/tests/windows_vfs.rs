@@ -10,7 +10,6 @@ use std::{
 use dolang_vfs::Vfs;
 use tokio::net::windows::named_pipe::ServerOptions;
 use tokio::process::Command as TokioCommand;
-use typed_path::{Utf8TypedPath, Utf8WindowsPath};
 
 static NEXT_PIPE: AtomicU64 = AtomicU64::new(0);
 
@@ -38,13 +37,13 @@ async fn embedded_vfs_mode_serves_and_stops() {
         .unwrap();
     assert_eq!(
         client.cwd(),
-        dolang_vfs::path::typed_path(std::env::current_dir().unwrap())
+        dolang_vfs::path::PathBuf::from_native(std::env::current_dir().unwrap())
             .unwrap()
             .to_path()
     );
 
     let current_exe = std::env::current_exe().unwrap();
-    let current_exe = Utf8TypedPath::Windows(Utf8WindowsPath::new(current_exe.to_str().unwrap()));
+    let current_exe = dolang_vfs::path::Path::windows(current_exe.to_str().unwrap());
     let metadata = client.metadata(current_exe).await.unwrap();
     assert!(!metadata.is_empty());
 
@@ -71,7 +70,7 @@ async fn embedded_vfs_stdio_mode_serves_and_stops() {
 
     assert_eq!(
         client.cwd(),
-        dolang_vfs::path::typed_path(std::env::current_dir().unwrap())
+        dolang_vfs::path::PathBuf::from_native(std::env::current_dir().unwrap())
             .unwrap()
             .to_path()
     );

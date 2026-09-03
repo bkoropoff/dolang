@@ -38,7 +38,6 @@ mod bench {
         net::unix::pipe,
         runtime::{Builder, Runtime},
     };
-    use typed_path::{Utf8TypedPath, Utf8UnixPath};
 
     /// Matches the buffer `dolang-ext-shell` requests for its remote VFS
     /// subprocess transport (`REMOTE_VFS_PIPE_BUFFER_SIZE`).
@@ -73,8 +72,8 @@ mod bench {
         Builder::new_current_thread().enable_all().build().unwrap()
     }
 
-    fn typed(path: &str) -> Utf8TypedPath<'_> {
-        Utf8TypedPath::Unix(Utf8UnixPath::new(path))
+    fn typed(path: &str) -> dolang_vfs::path::Path<'_> {
+        dolang_vfs::path::Path::unix(path)
     }
 
     /// Connects a client to a server over two pipes (one per direction, like

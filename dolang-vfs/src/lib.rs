@@ -5,7 +5,7 @@
 //! [`Vfs`] performs operations in either the current process's environment
 //! or through a `dolang-vfs` agent.
 //!
-//! Paths passed through [`Vfs`] are `typed_path::Utf8TypedPath` values. Their syntax
+//! Paths passed through [`Vfs`] are [`path::Path`] values. Their syntax
 //! belongs to the target VFS rather than necessarily to the host running this
 //! code, which lets a Unix host describe Windows paths and vice versa.
 
@@ -258,7 +258,7 @@ impl Vfs {
     }
 
     /// Returns the target's initial working directory.
-    pub fn cwd(&self) -> typed_path::Utf8TypedPath<'_> {
+    pub fn cwd(&self) -> path::Path<'_> {
         match &self.inner {
             VfsInner::Client(vfs) => vfs.cwd(),
             VfsInner::Direct(vfs) => vfs.cwd(),
@@ -266,7 +266,7 @@ impl Vfs {
     }
 
     /// Returns the target process executable.
-    pub fn current_exe(&self) -> typed_path::Utf8TypedPath<'_> {
+    pub fn current_exe(&self) -> path::Path<'_> {
         match &self.inner {
             VfsInner::Client(vfs) => vfs.current_exe(),
             VfsInner::Direct(vfs) => vfs.current_exe(),
@@ -392,7 +392,7 @@ impl Vfs {
     }
 
     /// Creates a command builder for `program`.
-    pub fn command(&self, program: typed_path::Utf8TypedPath<'_>) -> process::Command<'_> {
+    pub fn command(&self, program: path::Path<'_>) -> process::Command<'_> {
         process::Command::new(self, program)
     }
 
@@ -404,7 +404,7 @@ impl Vfs {
     /// key when connecting.
     pub async fn unix_socket(
         &self,
-        path: typed_path::Utf8TypedPath<'_>,
+        path: path::Path<'_>,
         key: Option<&[u8]>,
     ) -> error::Result<Vfs> {
         match &self.inner {
@@ -416,7 +416,7 @@ impl Vfs {
     /// Starts a Windows administrative VFS session.
     pub async fn windows_admin(
         &self,
-        cwd: typed_path::Utf8TypedPath<'_>,
+        cwd: path::Path<'_>,
         env: HashMap<String, Option<String>>,
         elevate: bool,
     ) -> error::Result<Vfs> {
@@ -502,10 +502,7 @@ impl Vfs {
     }
 
     /// Opens a directory iterator.
-    pub async fn read_dir(
-        &self,
-        path: typed_path::Utf8TypedPath<'_>,
-    ) -> error::Result<directory::ReadDir> {
+    pub async fn read_dir(&self, path: path::Path<'_>) -> error::Result<directory::ReadDir> {
         match &self.inner {
             VfsInner::Client(client) => client.read_dir(path).await,
             VfsInner::Direct(direct) => direct.read_dir(path).await,
@@ -515,10 +512,10 @@ impl Vfs {
     /// Finds an executable using a target search path.
     pub async fn which(
         &self,
-        program: typed_path::Utf8TypedPath<'_>,
+        program: path::Path<'_>,
         path: Option<&str>,
-        cwd: Option<typed_path::Utf8TypedPath<'_>>,
-    ) -> error::Result<Option<typed_path::Utf8TypedPathBuf>> {
+        cwd: Option<path::Path<'_>>,
+    ) -> error::Result<Option<path::PathBuf>> {
         match &self.inner {
             VfsInner::Client(client) => client.which(program, path, cwd).await,
             VfsInner::Direct(direct) => direct.which(program, path, cwd).await,
@@ -531,7 +528,7 @@ impl Vfs {
         key: path::WellKnownPath,
         app: Option<&str>,
         env: &HashMap<String, Option<String>>,
-    ) -> error::Result<typed_path::Utf8TypedPathBuf> {
+    ) -> error::Result<path::PathBuf> {
         match &self.inner {
             VfsInner::Client(client) => client.well_known_path(key, app, env).await,
             VfsInner::Direct(direct) => direct.well_known_path(key, app, env).await,
@@ -549,7 +546,7 @@ impl Vfs {
     /// Lists extended attributes for a path.
     pub async fn xattrs(
         &self,
-        path: typed_path::Utf8TypedPath<'_>,
+        path: path::Path<'_>,
         namespace: file::XattrNamespace<'_>,
         follow: bool,
     ) -> error::Result<Vec<file::XattrEntry>> {
@@ -562,7 +559,7 @@ impl Vfs {
     /// Lists alternate data streams for a path.
     pub async fn streams(
         &self,
-        path: typed_path::Utf8TypedPath<'_>,
+        path: path::Path<'_>,
         follow: bool,
     ) -> error::Result<Vec<file::StreamEntry>> {
         match &self.inner {
@@ -574,7 +571,7 @@ impl Vfs {
     /// Reads an extended attribute for a path.
     pub async fn xattr(
         &self,
-        path: typed_path::Utf8TypedPath<'_>,
+        path: path::Path<'_>,
         name: &str,
         namespace: Option<&str>,
         follow: bool,
@@ -588,7 +585,7 @@ impl Vfs {
     /// Creates or replaces an extended attribute for a path.
     pub async fn set_xattr(
         &self,
-        path: typed_path::Utf8TypedPath<'_>,
+        path: path::Path<'_>,
         name: &str,
         namespace: Option<&str>,
         value: &[u8],
@@ -607,7 +604,7 @@ impl Vfs {
     /// Removes an extended attribute from a path.
     pub async fn remove_xattr(
         &self,
-        path: typed_path::Utf8TypedPath<'_>,
+        path: path::Path<'_>,
         name: &str,
         namespace: Option<&str>,
         follow: bool,
@@ -619,12 +616,7 @@ impl Vfs {
     }
 
     /// Removes a file or symlink.
-    pub async fn remove(
-        &self,
-        path: typed_path::Utf8TypedPath<'_>,
-        all: bool,
-        ignore: bool,
-    ) -> error::Result<()> {
+    pub async fn remove(&self, path: path::Path<'_>, all: bool, ignore: bool) -> error::Result<()> {
         match &self.inner {
             VfsInner::Client(client) => client.remove(path, all, ignore).await,
             VfsInner::Direct(direct) => direct.remove(path, all, ignore).await,
@@ -632,10 +624,7 @@ impl Vfs {
     }
 
     /// Returns metadata without following the final symlink.
-    pub async fn metadata(
-        &self,
-        path: typed_path::Utf8TypedPath<'_>,
-    ) -> error::Result<metadata::Metadata> {
+    pub async fn metadata(&self, path: path::Path<'_>) -> error::Result<metadata::Metadata> {
         match &self.inner {
             VfsInner::Client(client) => client.metadata(path).await,
             VfsInner::Direct(direct) => direct.metadata(path).await,
@@ -645,7 +634,7 @@ impl Vfs {
     /// Returns filesystem metadata for a path.
     pub async fn fs_metadata(
         &self,
-        path: typed_path::Utf8TypedPath<'_>,
+        path: path::Path<'_>,
         follow: bool,
     ) -> error::Result<metadata::FsMetadata> {
         match &self.inner {
@@ -658,7 +647,7 @@ impl Vfs {
     /// [`file::File::acl`] for `default`'s meaning.
     pub async fn acl(
         &self,
-        path: typed_path::Utf8TypedPath<'_>,
+        path: path::Path<'_>,
         kind: security::AclKind,
         default: bool,
         follow: bool,
@@ -673,7 +662,7 @@ impl Vfs {
     /// `default`'s meaning.
     pub async fn set_acl(
         &self,
-        path: typed_path::Utf8TypedPath<'_>,
+        path: path::Path<'_>,
         kind: security::AclKind,
         acl: Option<&security::Acl>,
         default: bool,
@@ -688,7 +677,7 @@ impl Vfs {
     /// Returns the Windows security descriptor for a path.
     pub async fn sec_desc(
         &self,
-        path: typed_path::Utf8TypedPath<'_>,
+        path: path::Path<'_>,
         mask: dolang_winterop::security::SecInfo,
         follow: bool,
     ) -> error::Result<SecDesc> {
@@ -701,7 +690,7 @@ impl Vfs {
     /// Replaces the Windows security descriptor for a path.
     pub async fn set_sec_desc(
         &self,
-        path: typed_path::Utf8TypedPath<'_>,
+        path: path::Path<'_>,
         sec_desc: &SecDesc,
         follow: bool,
     ) -> error::Result<()> {
@@ -712,11 +701,7 @@ impl Vfs {
     }
 
     /// Creates a directory, optionally including missing parents.
-    pub async fn create_dir(
-        &self,
-        path: typed_path::Utf8TypedPath<'_>,
-        all: bool,
-    ) -> error::Result<()> {
+    pub async fn create_dir(&self, path: path::Path<'_>, all: bool) -> error::Result<()> {
         match &self.inner {
             VfsInner::Client(client) => client.create_dir(path, all).await,
             VfsInner::Direct(direct) => direct.create_dir(path, all).await,
@@ -726,7 +711,7 @@ impl Vfs {
     /// Removes a directory.
     pub async fn remove_dir(
         &self,
-        path: typed_path::Utf8TypedPath<'_>,
+        path: path::Path<'_>,
         all: bool,
         ignore: bool,
     ) -> error::Result<()> {
@@ -739,8 +724,8 @@ impl Vfs {
     /// Copies a path, optionally including directory contents.
     pub async fn copy(
         &self,
-        from: typed_path::Utf8TypedPath<'_>,
-        to: typed_path::Utf8TypedPath<'_>,
+        from: path::Path<'_>,
+        to: path::Path<'_>,
         all: bool,
     ) -> error::Result<()> {
         match &self.inner {
@@ -752,8 +737,8 @@ impl Vfs {
     /// Renames a path.
     pub async fn rename(
         &self,
-        from: typed_path::Utf8TypedPath<'_>,
-        to: typed_path::Utf8TypedPath<'_>,
+        from: path::Path<'_>,
+        to: path::Path<'_>,
         replace: bool,
     ) -> error::Result<()> {
         match &self.inner {
@@ -765,8 +750,8 @@ impl Vfs {
     /// Moves a path, optionally including directory contents.
     pub async fn move_(
         &self,
-        from: typed_path::Utf8TypedPath<'_>,
-        to: typed_path::Utf8TypedPath<'_>,
+        from: path::Path<'_>,
+        to: path::Path<'_>,
         all: bool,
     ) -> error::Result<()> {
         match &self.inner {
@@ -778,9 +763,9 @@ impl Vfs {
     /// Creates a symbolic link using `cwd` to interpret relative source paths.
     pub async fn symlink(
         &self,
-        cwd: typed_path::Utf8TypedPath<'_>,
-        src: typed_path::Utf8TypedPath<'_>,
-        dst: typed_path::Utf8TypedPath<'_>,
+        cwd: path::Path<'_>,
+        src: path::Path<'_>,
+        dst: path::Path<'_>,
     ) -> error::Result<()> {
         match &self.inner {
             VfsInner::Client(client) => client.symlink(cwd, src, dst).await,
@@ -789,11 +774,7 @@ impl Vfs {
     }
 
     /// Creates a hard link.
-    pub async fn hard_link(
-        &self,
-        src: typed_path::Utf8TypedPath<'_>,
-        dst: typed_path::Utf8TypedPath<'_>,
-    ) -> error::Result<()> {
+    pub async fn hard_link(&self, src: path::Path<'_>, dst: path::Path<'_>) -> error::Result<()> {
         match &self.inner {
             VfsInner::Client(client) => client.hard_link(src, dst).await,
             VfsInner::Direct(direct) => direct.hard_link(src, dst).await,
@@ -801,11 +782,7 @@ impl Vfs {
     }
 
     /// Creates a symbolic link to a directory.
-    pub async fn symlink_dir(
-        &self,
-        src: typed_path::Utf8TypedPath<'_>,
-        dst: typed_path::Utf8TypedPath<'_>,
-    ) -> error::Result<()> {
+    pub async fn symlink_dir(&self, src: path::Path<'_>, dst: path::Path<'_>) -> error::Result<()> {
         match &self.inner {
             VfsInner::Client(client) => client.symlink_dir(src, dst).await,
             VfsInner::Direct(direct) => direct.symlink_dir(src, dst).await,
@@ -815,8 +792,8 @@ impl Vfs {
     /// Creates a symbolic link to a file.
     pub async fn symlink_file(
         &self,
-        src: typed_path::Utf8TypedPath<'_>,
-        dst: typed_path::Utf8TypedPath<'_>,
+        src: path::Path<'_>,
+        dst: path::Path<'_>,
     ) -> error::Result<()> {
         match &self.inner {
             VfsInner::Client(client) => client.symlink_file(src, dst).await,
@@ -827,7 +804,7 @@ impl Vfs {
     /// Returns metadata without following the final symlink.
     pub async fn symlink_metadata(
         &self,
-        path: typed_path::Utf8TypedPath<'_>,
+        path: path::Path<'_>,
     ) -> error::Result<metadata::Metadata> {
         match &self.inner {
             VfsInner::Client(client) => client.symlink_metadata(path).await,
@@ -838,7 +815,7 @@ impl Vfs {
     /// Applies a metadata patch to every path.
     pub async fn set_metadata(
         &self,
-        paths: &[typed_path::Utf8TypedPathBuf],
+        paths: &[path::PathBuf],
         patch: metadata::MetadataPatch,
     ) -> error::Result<()> {
         match &self.inner {
@@ -848,10 +825,7 @@ impl Vfs {
     }
 
     /// Resolves a path to its canonical absolute form.
-    pub async fn canonicalize(
-        &self,
-        path: typed_path::Utf8TypedPath<'_>,
-    ) -> error::Result<typed_path::Utf8TypedPathBuf> {
+    pub async fn canonicalize(&self, path: path::Path<'_>) -> error::Result<path::PathBuf> {
         match &self.inner {
             VfsInner::Client(client) => client.canonicalize(path).await,
             VfsInner::Direct(direct) => direct.canonicalize(path).await,
@@ -859,10 +833,7 @@ impl Vfs {
     }
 
     /// Returns the destination of a symbolic link.
-    pub async fn read_link(
-        &self,
-        path: typed_path::Utf8TypedPath<'_>,
-    ) -> error::Result<typed_path::Utf8TypedPathBuf> {
+    pub async fn read_link(&self, path: path::Path<'_>) -> error::Result<path::PathBuf> {
         match &self.inner {
             VfsInner::Client(client) => client.read_link(path).await,
             VfsInner::Direct(direct) => direct.read_link(path).await,
@@ -870,11 +841,7 @@ impl Vfs {
     }
 
     /// Checks whether the process can access a path with the requested permissions.
-    pub async fn access(
-        &self,
-        path: typed_path::Utf8TypedPath<'_>,
-        mode: file::AccessFlags,
-    ) -> error::Result<()> {
+    pub async fn access(&self, path: path::Path<'_>, mode: file::AccessFlags) -> error::Result<()> {
         match &self.inner {
             VfsInner::Client(client) => client.access(path, mode).await,
             VfsInner::Direct(direct) => direct.access(path, mode).await,
@@ -885,10 +852,10 @@ impl Vfs {
     pub async fn glob(
         &self,
         pattern: impl Into<String>,
-        root: typed_path::Utf8TypedPath<'_>,
+        root: path::Path<'_>,
         follow_symlinks: bool,
         max_depth: Option<usize>,
-    ) -> error::Result<Vec<typed_path::Utf8TypedPathBuf>> {
+    ) -> error::Result<Vec<path::PathBuf>> {
         let pattern = pattern.into();
 
         match &self.inner {

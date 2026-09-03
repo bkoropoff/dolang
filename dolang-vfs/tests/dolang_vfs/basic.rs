@@ -11,17 +11,16 @@ use dolang_vfs::{
 use nix::unistd::getgroups;
 use nix::unistd::{Group, User, getegid, geteuid, getgid, getuid};
 use std::{os::fd::OwnedFd, path::Path};
-use typed_path::{Utf8TypedPath, Utf8UnixPath};
 
 use tempfile::tempdir;
 use tokio::task::JoinHandle;
 
-fn typed(path: &Path) -> Utf8TypedPath<'_> {
-    Utf8TypedPath::Unix(Utf8UnixPath::new(path.to_str().unwrap()))
+fn typed(path: &Path) -> dolang_vfs::path::Path<'_> {
+    dolang_vfs::path::Path::unix(path.to_str().unwrap())
 }
 
-fn typed_str(path: &str) -> Utf8TypedPath<'_> {
-    Utf8TypedPath::Unix(Utf8UnixPath::new(path))
+fn typed_str(path: &str) -> dolang_vfs::path::Path<'_> {
+    dolang_vfs::path::Path::unix(path)
 }
 
 async fn start_server(socket_path: &Path) -> JoinHandle<()> {
@@ -348,7 +347,7 @@ async fn fd_passing() {
     let output = client
         .open_options()
         .write(true)
-        .open(file.path().to_str().unwrap().into())
+        .open(typed_str(file.path().to_str().unwrap()))
         .await
         .unwrap();
     let mut command = client.command(typed_str("echo"));
@@ -385,7 +384,7 @@ async fn file_open_read() {
     let file = client
         .open_options()
         .read(true)
-        .open(test_file.to_str().unwrap().into())
+        .open(typed_str(test_file.to_str().unwrap()))
         .await
         .unwrap();
 
@@ -413,7 +412,7 @@ async fn file_open_write() {
         .open_options()
         .write(true)
         .truncate(true)
-        .open(test_file.to_str().unwrap().into())
+        .open(typed_str(test_file.to_str().unwrap()))
         .await
         .unwrap();
 
@@ -443,7 +442,7 @@ async fn file_create() {
         .open_options()
         .write(true)
         .create(true)
-        .open(test_file.to_str().unwrap().into())
+        .open(typed_str(test_file.to_str().unwrap()))
         .await
         .unwrap();
 
@@ -477,7 +476,7 @@ async fn file_create_new() {
         .open_options()
         .write(true)
         .create_new(true)
-        .open(test_file.to_str().unwrap().into())
+        .open(typed_str(test_file.to_str().unwrap()))
         .await
         .unwrap();
     drop(file);
@@ -489,7 +488,7 @@ async fn file_create_new() {
         .open_options()
         .write(true)
         .create_new(true)
-        .open(test_file.to_str().unwrap().into())
+        .open(typed_str(test_file.to_str().unwrap()))
         .await;
 
     assert!(result.is_err());
@@ -545,7 +544,7 @@ async fn file_open_error() {
     let result = client
         .open_options()
         .read(true)
-        .open(test_file.to_str().unwrap().into())
+        .open(typed_str(test_file.to_str().unwrap()))
         .await;
 
     assert!(result.is_err());

@@ -30,7 +30,6 @@ use tokio::{
     fs::{self, OpenOptions as TokioOpenOptions},
     time::{Duration, timeout},
 };
-use typed_path::{Utf8TypedPath, Utf8WindowsPath};
 use windows_sys::{
     Wdk::Storage::FileSystem::{
         FILE_FULL_EA_INFORMATION, FILE_GET_EA_INFORMATION, FILE_RENAME_POSIX_SEMANTICS,
@@ -175,11 +174,11 @@ impl File {
     }
 }
 
-fn typed_windows_path(path: &Path) -> Result<Utf8TypedPath<'_>> {
+fn typed_windows_path(path: &Path) -> Result<crate::path::Path<'_>> {
     let path = path
         .to_str()
         .ok_or_else(|| Error::new(ErrorKind::InvalidData, "path is not UTF-8"))?;
-    Ok(Utf8TypedPath::Windows(Utf8WindowsPath::new(path)))
+    Ok(crate::path::Path::windows(path))
 }
 
 impl Direct {

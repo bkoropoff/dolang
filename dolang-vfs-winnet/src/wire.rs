@@ -1,14 +1,22 @@
 use dolang_vfs::{
     error::Error,
     extension::{ExtContext, VfsExtension},
-    path::WirePath,
+    path,
 };
 use dolang_winterop::security::{SecDesc, Sid};
 use serde::{Deserialize, Serialize};
-use typed_path::{Utf8TypedPath, Utf8WindowsPath, Utf8WindowsPathBuf};
 
 #[cfg(windows)]
 use crate::backend;
+
+/// Narrows a wire path to a Windows path.
+///
+/// The wire carries a path syntax tag, so a peer could in principle send a Unix
+/// path where a Windows one belongs; every accessor here reports that as an
+/// absent value rather than handing back a path the caller cannot use.
+fn windows_path(path: &path::PathBuf) -> Option<path::Path<'_>> {
+    (path.kind() == path::Kind::Windows).then(|| path.to_path())
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ShareKind {
@@ -28,7 +36,7 @@ pub struct ShareInfo {
     pub(crate) comment: Option<String>,
     pub(crate) max_uses: Option<u32>,
     pub(crate) current_uses: u32,
-    pub(crate) path: WirePath,
+    pub(crate) path: path::PathBuf,
     pub(crate) sec_desc: Option<SecDesc>,
 }
 impl ShareInfo {
@@ -53,11 +61,8 @@ impl ShareInfo {
     pub fn current_uses(&self) -> u32 {
         self.current_uses
     }
-    pub fn path(&self) -> Option<&Utf8WindowsPath> {
-        match (&self.path).into() {
-            Utf8TypedPath::Windows(path) => Some(path),
-            Utf8TypedPath::Unix(_) => None,
-        }
+    pub fn path(&self) -> Option<path::Path<'_>> {
+        windows_path(&self.path)
     }
     /// The share's security descriptor, or `None` when the share uses the
     /// server service's default security.
@@ -69,7 +74,7 @@ impl ShareInfo {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShareCreate {
     pub(crate) name: String,
-    pub(crate) path: WirePath,
+    pub(crate) path: path::PathBuf,
     pub(crate) kind: ShareKind,
     pub(crate) comment: Option<String>,
     pub(crate) max_uses: Option<u32>,
@@ -78,10 +83,10 @@ pub struct ShareCreate {
     pub(crate) sec_desc: Option<SecDesc>,
 }
 impl ShareCreate {
-    pub fn new(name: String, path: Utf8WindowsPathBuf) -> Self {
+    pub fn new(name: String, path: path::PathBuf) -> Self {
         Self {
             name,
-            path: WirePath::from(Utf8TypedPath::Windows(&path)),
+            path,
             kind: ShareKind::default(),
             comment: None,
             max_uses: None,
@@ -175,10 +180,10 @@ pub struct UserInfo {
     pub(crate) full_name: Option<String>,
     pub(crate) comment: Option<String>,
     pub(crate) user_comment: Option<String>,
-    pub(crate) home_dir: Option<WirePath>,
+    pub(crate) home_dir: Option<path::PathBuf>,
     pub(crate) home_dir_drive: Option<String>,
-    pub(crate) profile: Option<WirePath>,
-    pub(crate) script_path: Option<WirePath>,
+    pub(crate) profile: Option<path::PathBuf>,
+    pub(crate) script_path: Option<path::PathBuf>,
     pub(crate) flags: UserFlags,
     pub(crate) password_age: u64,
     pub(crate) password_expired: bool,
@@ -188,12 +193,6 @@ pub struct UserInfo {
     pub(crate) logon_count: u32,
 }
 impl UserInfo {
-    fn windows_path(value: &Option<WirePath>) -> Option<&Utf8WindowsPath> {
-        value.as_ref().and_then(|path| match path.into() {
-            Utf8TypedPath::Windows(path) => Some(path),
-            Utf8TypedPath::Unix(_) => None,
-        })
-    }
     pub fn sid(&self) -> &Sid {
         &self.sid
     }
@@ -209,17 +208,17 @@ impl UserInfo {
     pub fn user_comment(&self) -> Option<&str> {
         self.user_comment.as_deref()
     }
-    pub fn home_dir(&self) -> Option<&Utf8WindowsPath> {
-        Self::windows_path(&self.home_dir)
+    pub fn home_dir(&self) -> Option<path::Path<'_>> {
+        self.home_dir.as_ref().and_then(windows_path)
     }
     pub fn home_dir_drive(&self) -> Option<&str> {
         self.home_dir_drive.as_deref()
     }
-    pub fn profile(&self) -> Option<&Utf8WindowsPath> {
-        Self::windows_path(&self.profile)
+    pub fn profile(&self) -> Option<path::Path<'_>> {
+        self.profile.as_ref().and_then(windows_path)
     }
-    pub fn script_path(&self) -> Option<&Utf8WindowsPath> {
-        Self::windows_path(&self.script_path)
+    pub fn script_path(&self) -> Option<path::Path<'_>> {
+        self.script_path.as_ref().and_then(windows_path)
     }
     pub fn flags(&self) -> UserFlags {
         self.flags
@@ -251,10 +250,10 @@ pub struct UserUpdate {
     pub(crate) full_name: Option<Option<String>>,
     pub(crate) comment: Option<Option<String>>,
     pub(crate) user_comment: Option<Option<String>>,
-    pub(crate) home_dir: Option<Option<WirePath>>,
+    pub(crate) home_dir: Option<Option<path::PathBuf>>,
     pub(crate) home_dir_drive: Option<Option<String>>,
-    pub(crate) profile: Option<Option<WirePath>>,
-    pub(crate) script_path: Option<Option<WirePath>>,
+    pub(crate) profile: Option<Option<path::PathBuf>>,
+    pub(crate) script_path: Option<Option<path::PathBuf>>,
     pub(crate) account_expires: Option<Option<u64>>,
     pub(crate) set_flags: UserFlags,
     pub(crate) clear_flags: UserFlags,
@@ -300,20 +299,20 @@ impl UserUpdate {
         self.user_comment = Some(value);
         self
     }
-    pub fn home_dir(mut self, value: Option<Utf8WindowsPathBuf>) -> Self {
-        self.home_dir = Some(value.map(|path| WirePath::from(Utf8TypedPath::Windows(&path))));
+    pub fn home_dir(mut self, value: Option<path::PathBuf>) -> Self {
+        self.home_dir = Some(value);
         self
     }
     pub fn home_dir_drive(mut self, value: Option<String>) -> Self {
         self.home_dir_drive = Some(value);
         self
     }
-    pub fn profile(mut self, value: Option<Utf8WindowsPathBuf>) -> Self {
-        self.profile = Some(value.map(|path| WirePath::from(Utf8TypedPath::Windows(&path))));
+    pub fn profile(mut self, value: Option<path::PathBuf>) -> Self {
+        self.profile = Some(value);
         self
     }
-    pub fn script_path(mut self, value: Option<Utf8WindowsPathBuf>) -> Self {
-        self.script_path = Some(value.map(|path| WirePath::from(Utf8TypedPath::Windows(&path))));
+    pub fn script_path(mut self, value: Option<path::PathBuf>) -> Self {
+        self.script_path = Some(value);
         self
     }
     pub fn account_expires(mut self, value: Option<u64>) -> Self {
@@ -687,7 +686,7 @@ mod tests {
             1, 0, 0, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         ])
         .unwrap();
-        let create = ShareCreate::new("docs".into(), Utf8WindowsPathBuf::from(r"C:\docs"))
+        let create = ShareCreate::new("docs".into(), path::PathBuf::from_windows(r"C:\docs"))
             .kind(ShareKind::Ipc)
             .comment(Some("comment".into()))
             .max_uses(Some(7))

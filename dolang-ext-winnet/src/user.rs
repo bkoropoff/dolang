@@ -57,7 +57,7 @@ fn nullable_str<'v>(value: Option<&str>, out: impl Output<'v>, strand: &mut Stra
 
 fn nullable_windows_path<'v, 's>(
     strand: &mut Strand<'v, 's>,
-    value: Option<&typed_path::Utf8WindowsPath>,
+    value: Option<dolang_vfs::path::Path<'_>>,
     out: Slot<'v, '_>,
 ) -> Result<'v, 's, ()> {
     match value {

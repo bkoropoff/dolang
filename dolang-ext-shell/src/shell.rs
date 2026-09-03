@@ -39,9 +39,9 @@ use dolang_vfs::{
     process::{StdioRecv, StdioSend},
 };
 use std::collections::HashMap;
-use typed_path::Utf8TypedPathBuf;
 
 use crate::error;
+use dolang_vfs::path as vfs_path;
 
 /// Exit error.
 ///
@@ -417,7 +417,7 @@ pub(crate) struct VfsAnnex<'v> {
 
 enum VfsSource {
     Stream,
-    Unix(Utf8TypedPathBuf),
+    Unix(vfs_path::PathBuf),
     WindowsAdmin,
 }
 
@@ -834,8 +834,8 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             };
             debug_assert!(vfs.is_direct());
 
-            let program = dolang_vfs::path::native_path(path.to_path()).into_sys(strand)?;
-            let cwd = dolang_vfs::path::native_path(cwd.to_path()).into_sys(strand)?;
+            let program = path.to_native().into_sys(strand)?;
+            let cwd = cwd.to_native().into_sys(strand)?;
             let mut command_args = Vec::new();
             for arg in args {
                 match arg {
@@ -887,7 +887,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                 Some(ProgramOverride::Module(name)) => Output::set(strand, out, name.as_ref()),
                 None => match global.program.borrow().as_ref() {
                     Some(ProgramSource::Path(path)) => {
-                        let path = dolang_vfs::path::typed_path(path.clone()).into_sys(strand)?;
+                        let path = vfs_path::PathBuf::from_native(path.clone()).into_sys(strand)?;
                         let annex = PathAnnex::try_new(strand, path, global)?;
                         create_path_annex(strand, annex, out);
                     }
@@ -919,11 +919,11 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
                         Some(ProgramOverride::Module(name.to_string().into_boxed_str()))
                     } else if let Some(path) = global.types.unix_path.cast(&program) {
                         Some(ProgramOverride::Path(
-                            path.enter_sync(strand, |_strand, path| path.annex().typed_path_buf()),
+                            path.enter_sync(strand, |_strand, path| path.annex().path_buf()),
                         ))
                     } else if let Some(path) = global.types.windows_path.cast(&program) {
                         Some(ProgramOverride::Path(
-                            path.enter_sync(strand, |_strand, path| path.annex().typed_path_buf()),
+                            path.enter_sync(strand, |_strand, path| path.annex().path_buf()),
                         ))
                     } else {
                         return Err(Error::type_error(
@@ -954,7 +954,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         .object("env", env_ty, EnvObject { global })
         .get("exe", move |strand, out| {
             let annex = PathAnnex::new(
-                dolang_vfs::path::typed_path(
+                vfs_path::PathBuf::from_native(
                     std::env::current_exe().expect("could not get current exe"),
                 )
                 .expect("current executable path is UTF-8"),

@@ -14,9 +14,9 @@ use dolang_vfs::{
     security::SecurityInfo,
     target::{OperatingSystem, OperatingSystemFamily, TargetInfo},
 };
-use typed_path::Utf8TypedPathBuf;
 
 use crate::{global::Global, shell_args::ArgsData};
+use dolang_vfs::path as vfs_path;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TerminationPolicy {
@@ -174,7 +174,7 @@ impl Env {
 
 #[derive(Clone)]
 pub(crate) enum ProgramOverride {
-    Path(Utf8TypedPathBuf),
+    Path(vfs_path::PathBuf),
     Module(Box<str>),
 }
 
@@ -185,7 +185,7 @@ pub(crate) struct InvocationOverride {
 }
 
 pub(crate) struct Local {
-    cwd: RefCell<Utf8TypedPathBuf>,
+    cwd: RefCell<vfs_path::PathBuf>,
     env: RefCell<Rc<Env>>,
     vfs: RefCell<Vfs>,
     background: Cell<bool>,
@@ -261,11 +261,11 @@ impl Local {
         self.env.borrow().clone()
     }
 
-    pub(crate) fn cwd(&self) -> impl Deref<Target = Utf8TypedPathBuf> {
+    pub(crate) fn cwd(&self) -> impl Deref<Target = vfs_path::PathBuf> {
         self.cwd.borrow()
     }
 
-    pub(crate) fn replace_cwd(&self, cwd: Utf8TypedPathBuf) -> Utf8TypedPathBuf {
+    pub(crate) fn replace_cwd(&self, cwd: vfs_path::PathBuf) -> vfs_path::PathBuf {
         mem::replace(&mut *self.cwd.borrow_mut(), cwd)
     }
 
@@ -281,7 +281,7 @@ impl Local {
         self.vfs.borrow().clone()
     }
 
-    pub(crate) fn vfs_exe(&self) -> Option<Utf8TypedPathBuf> {
+    pub(crate) fn vfs_exe(&self) -> Option<vfs_path::PathBuf> {
         let vfs = self.vfs.borrow();
         (!vfs.is_direct()).then(|| vfs.current_exe().to_path_buf())
     }

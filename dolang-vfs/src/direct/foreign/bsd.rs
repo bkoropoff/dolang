@@ -27,9 +27,8 @@ use uuid::Uuid;
 use crate::{
     direct::unix::signal_to_raw,
     error::{Error, Result},
-    path::typed_path,
+    path,
     process::{ProcessExit, ProcessFamily, ProcessInfo, Signal, StartTime},
-    protocol::WirePath,
     security::UnixSecurityInfo,
 };
 
@@ -200,7 +199,7 @@ mod platform {
         }
     }
 
-    pub(super) fn exe(pid: u32) -> Option<WirePath> {
+    pub(super) fn exe(pid: u32) -> Option<path::PathBuf> {
         let mib = [
             libc::CTL_KERN,
             libc::KERN_PROC,
@@ -215,7 +214,7 @@ mod platform {
         if path.is_empty() {
             return None;
         }
-        typed_path(path.into()).ok().map(Into::into)
+        path::PathBuf::from_native(path.into()).ok()
     }
 
     /// Reads one process's working directory.
@@ -228,7 +227,7 @@ mod platform {
     ///
     /// Subject to `p_candebug`, so another user's working directory is denied
     /// rather than reported.
-    pub(super) fn cwd(pid: u32) -> Option<WirePath> {
+    pub(super) fn cwd(pid: u32) -> Option<path::PathBuf> {
         let mib = [
             libc::CTL_KERN,
             libc::KERN_PROC,
@@ -253,7 +252,7 @@ mod platform {
         }
         let path = c_string(&kinfo.kf_path);
         (!path.is_empty())
-            .then(|| typed_path(path.into()).ok().map(Into::into))
+            .then(|| path::PathBuf::from_native(path.into()).ok())
             .flatten()
     }
 
@@ -510,7 +509,7 @@ mod platform {
         Ok(bsdinfo(pid).as_ref().map(listed_from))
     }
 
-    pub(super) fn exe(pid: u32) -> Option<WirePath> {
+    pub(super) fn exe(pid: u32) -> Option<path::PathBuf> {
         let mut buffer = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
         // SAFETY: `buffer` is as long as the length passed.
         let len = unsafe {
@@ -525,10 +524,10 @@ mod platform {
         }
         buffer.truncate(len as usize);
         let path = String::from_utf8(buffer).ok()?;
-        typed_path(path.into()).ok().map(Into::into)
+        path::PathBuf::from_native(path.into()).ok()
     }
 
-    pub(super) fn cwd(pid: u32) -> Option<WirePath> {
+    pub(super) fn cwd(pid: u32) -> Option<path::PathBuf> {
         let mut info: libc::proc_vnodepathinfo = unsafe { mem::zeroed() };
         let size = mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
         // SAFETY: `info` is a live, correctly sized out-parameter.
@@ -549,7 +548,7 @@ mod platform {
         let path = info.pvi_cdir.vip_path.as_flattened();
         let path = c_string(path);
         (!path.is_empty())
-            .then(|| typed_path(path.into()).ok().map(Into::into))
+            .then(|| path::PathBuf::from_native(path.into()).ok())
             .flatten()
     }
 

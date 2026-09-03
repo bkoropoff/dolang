@@ -4,7 +4,7 @@ use dolang_vfs::target::OperatingSystem;
 use dolang_vfs::{
     error::{Error, ErrorKind},
     extension::ExtContext,
-    path::WirePath,
+    path,
 };
 use dolang_winterop::security::{SecDesc, Sid};
 use windows_sys::Win32::{
@@ -73,14 +73,15 @@ unsafe fn optional(ptr: *const u16) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
-fn windows_path<'a>(value: Option<&'a WirePath>, field: &str) -> Result<&'a str, Error> {
+fn windows_path<'a>(value: Option<&'a path::PathBuf>, field: &str) -> Result<&'a str, Error> {
     match value {
-        Some(path) => path.as_windows_str().ok_or_else(|| {
-            Error::new(
+        Some(path) => match path.kind() {
+            path::Kind::Windows => Ok(path.as_str()),
+            path::Kind::Unix => Err(Error::new(
                 ErrorKind::InvalidInput,
                 format!("{field} must use Windows path syntax"),
-            )
-        }),
+            )),
+        },
         None => Ok(""),
     }
 }
@@ -378,10 +379,10 @@ fn get(name: &str) -> Result<(Sid, UserInfo), Error> {
         full_name: unsafe { optional(info.usri4_full_name) },
         comment: unsafe { optional(info.usri4_comment) },
         user_comment: unsafe { optional(info.usri4_usr_comment) },
-        home_dir: unsafe { optional(info.usri4_home_dir) }.map(WirePath::windows),
+        home_dir: unsafe { optional(info.usri4_home_dir) }.map(path::PathBuf::from_windows),
         home_dir_drive: unsafe { optional(info.usri4_home_dir_drive) },
-        profile: unsafe { optional(info.usri4_profile) }.map(WirePath::windows),
-        script_path: unsafe { optional(info.usri4_script_path) }.map(WirePath::windows),
+        profile: unsafe { optional(info.usri4_profile) }.map(path::PathBuf::from_windows),
+        script_path: unsafe { optional(info.usri4_script_path) }.map(path::PathBuf::from_windows),
         flags: UserFlags::from_bits_retain(info.usri4_flags),
         password_age: u64::from(info.usri4_password_age),
         password_expired: info.usri4_password_expired != 0,
@@ -805,9 +806,7 @@ unsafe fn share_info(row: &SHARE_INFO_502) -> Result<ShareInfo, Error> {
         comment: unsafe { optional(row.shi502_remark) },
         max_uses: (row.shi502_max_uses != u32::MAX).then_some(row.shi502_max_uses),
         current_uses: row.shi502_current_uses,
-        path: WirePath::from(typed_path::Utf8TypedPath::Windows(
-            typed_path::Utf8WindowsPath::new(&path),
-        )),
+        path: path::PathBuf::from_windows(&path),
         sec_desc: unsafe { share_descriptor(row.shi502_security_descriptor) }?,
     })
 }
@@ -878,10 +877,7 @@ fn share_update(name: &str, update: ShareUpdate) -> Result<ShareInfo, Error> {
 fn share_create(create: ShareCreate) -> Result<ShareInfo, Error> {
     let name = create.name;
     let mut name_w = wide(&name);
-    let path = create
-        .path
-        .as_windows_str()
-        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "path must use Windows path syntax"))?;
+    let path = windows_path(Some(&create.path), "path")?;
     let mut path_w = wide(path);
     let mut comment_w = create
         .comment

@@ -39,7 +39,6 @@ use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf},
     task::JoinHandle,
 };
-use typed_path::{Utf8TypedPath, Utf8TypedPathBuf};
 
 use crate::{
     MAX_FILE_READ, STREAM_CHUNK_SIZE, SessionMode, Vfs, client, direct,
@@ -50,7 +49,7 @@ use crate::{
     file::{self, AccessFlags, CopyDest, CopyMode, File as VfsFile, FileLockRequest, StreamEntry},
     file::{XattrEntry, XattrNamespace},
     metadata::{FsMetadata, Metadata, MetadataPatch},
-    path::WellKnownPath,
+    path::{self, WellKnownPath},
     process::{
         self, ProcessControl, ProcessExit, ProcessInfo, ProcessStatus, StartTime, StdioRecv,
         StdioRecvInner, StdioSend, StdioSendInner, TerminationPolicy,
@@ -63,7 +62,7 @@ use crate::{
         RenameRequest, Request, RequestKind, ResponseKind, SecDescRequest, SetAclRequest,
         SetMetadataRequest, SetSecDescRequest, SetXattrRequest, SpawnRequest, StdioRecvTarget,
         StdioSendTarget, StreamsRequest, SymlinkKind, SymlinkRequest, UnixVfsRequest, VfsProtocol,
-        WellKnownPathRequest, WindowsAdminRequest, WirePath, XattrNamespaceRequest, XattrRequest,
+        WellKnownPathRequest, WindowsAdminRequest, XattrNamespaceRequest, XattrRequest,
         XattrsRequest, rpc_builder,
     },
     security::{Acl, AclKind, PrincipalId, PrincipalIdKind, SecurityInfo, SidName},
@@ -1476,8 +1475,8 @@ fn query_from_wire(response: QueryResponse) -> Query {
     Query {
         session,
         env,
-        cwd: cwd.into(),
-        current_exe: current_exe.into(),
+        cwd,
+        current_exe,
         target,
         security,
         extensions,
@@ -1670,7 +1669,7 @@ impl Client {
         self.call(request).await?.into_response()
     }
 
-    async fn unix_vfs(&self, path: Utf8TypedPath<'_>, key: Option<&[u8]>) -> Result<Vfs> {
+    async fn unix_vfs(&self, path: path::Path<'_>, key: Option<&[u8]>) -> Result<Vfs> {
         // The key is sent because the peer may have to establish the nested
         // connection itself (the `Opaque` arm below), and which arm it takes
         // is its decision, not ours. When it returns a descriptor instead, we
@@ -1712,7 +1711,7 @@ impl Client {
 
     async fn windows_admin_vfs(
         &self,
-        cwd: Utf8TypedPath<'_>,
+        cwd: path::Path<'_>,
         env: HashMap<String, Option<String>>,
         elevate: bool,
     ) -> Result<Vfs> {
@@ -1844,10 +1843,10 @@ fn clone_stderr_handle() -> io::Result<DefaultHandle> {
 /// ```
 pub struct Command<'a> {
     client: &'a Client,
-    program: WirePath,
+    program: path::PathBuf,
     args: Vec<String>,
     env: HashMap<String, Option<String>>,
-    cwd: Option<WirePath>,
+    cwd: Option<path::PathBuf>,
     stdin: ClientRecv,
     stdout: ClientSend,
     stderr: ClientSend,
@@ -2245,7 +2244,7 @@ enum ClientSend {
 }
 
 impl<'a> Command<'a> {
-    fn new(client: &'a Client, program: Utf8TypedPath<'_>) -> Self {
+    fn new(client: &'a Client, program: path::Path<'_>) -> Self {
         Self {
             client,
             program: program.into(),
@@ -2507,7 +2506,7 @@ impl<'a> Command<'a> {
         self
     }
 
-    pub(crate) fn current_dir(&mut self, dir: Utf8TypedPath<'_>) -> &mut Self {
+    pub(crate) fn current_dir(&mut self, dir: path::Path<'_>) -> &mut Self {
         self.cwd = Some(dir.into());
         self
     }
@@ -2737,7 +2736,7 @@ impl OpenOptions<'_> {
         self
     }
 
-    pub async fn open(&self, path: Utf8TypedPath<'_>) -> Result<VfsFile> {
+    pub async fn open(&self, path: path::Path<'_>) -> Result<VfsFile> {
         let req = OpenRequest {
             path: path.into(),
             flags: self.flags,
@@ -2772,7 +2771,7 @@ impl Client {
         )
     }
 
-    pub fn cwd(&self) -> Utf8TypedPath<'_> {
+    pub fn cwd(&self) -> path::Path<'_> {
         self.shared.query.cwd.to_path()
     }
 
@@ -2780,7 +2779,7 @@ impl Client {
         self.shared.query.session
     }
 
-    pub fn current_exe(&self) -> Utf8TypedPath<'_> {
+    pub fn current_exe(&self) -> path::Path<'_> {
         self.shared.query.current_exe.to_path()
     }
 
@@ -2800,13 +2799,13 @@ impl Client {
         OpenOptions::new(self)
     }
 
-    pub fn command(&self, program: Utf8TypedPath<'_>) -> Command<'_> {
+    pub fn command(&self, program: path::Path<'_>) -> Command<'_> {
         Command::new(self, program)
     }
 
-    pub async fn access(&self, path: Utf8TypedPath<'_>, mode: AccessFlags) -> Result<()> {
+    pub async fn access(&self, path: path::Path<'_>, mode: AccessFlags) -> Result<()> {
         let request = AccessRequest {
-            path: path.to_path_buf().into(),
+            path: path.to_path_buf(),
             mode: mode.bits(),
         };
         match self.request(RequestKind::Access(request)).await? {
@@ -2815,13 +2814,13 @@ impl Client {
         }
     }
 
-    pub async fn unix_socket(&self, path: Utf8TypedPath<'_>, key: Option<&[u8]>) -> Result<Vfs> {
+    pub async fn unix_socket(&self, path: path::Path<'_>, key: Option<&[u8]>) -> Result<Vfs> {
         self.unix_vfs(path, key).await
     }
 
     pub async fn windows_admin(
         &self,
-        cwd: Utf8TypedPath<'_>,
+        cwd: path::Path<'_>,
         env: HashMap<String, Option<String>>,
         elevate: bool,
     ) -> Result<Vfs> {
@@ -2960,7 +2959,7 @@ impl Client {
         }
     }
 
-    pub(crate) async fn read_dir(&self, path: Utf8TypedPath<'_>) -> Result<directory::ReadDir> {
+    pub(crate) async fn read_dir(&self, path: path::Path<'_>) -> Result<directory::ReadDir> {
         match self
             .request(RequestKind::ReadDir { path: path.into() })
             .await?
@@ -2975,17 +2974,17 @@ impl Client {
 
     pub async fn which(
         &self,
-        program: Utf8TypedPath<'_>,
+        program: path::Path<'_>,
         path: Option<&str>,
-        cwd: Option<Utf8TypedPath<'_>>,
-    ) -> Result<Option<Utf8TypedPathBuf>> {
+        cwd: Option<path::Path<'_>>,
+    ) -> Result<Option<path::PathBuf>> {
         let request = RequestKind::Which {
             program: program.into(),
             path: path.map(str::to_owned),
             cwd: cwd.map(Into::into),
         };
         match self.request(request).await? {
-            ResponseKind::Which(result) => Ok(result.map(Into::into)),
+            ResponseKind::Which(result) => Ok(result),
             response => Err(unexpected(response).into()),
         }
     }
@@ -2995,14 +2994,14 @@ impl Client {
         key: WellKnownPath,
         app: Option<&str>,
         env: &HashMap<String, Option<String>>,
-    ) -> Result<Utf8TypedPathBuf> {
+    ) -> Result<path::PathBuf> {
         let request = WellKnownPathRequest {
             key,
             app: app.map(str::to_owned),
             env: env.clone(),
         };
         match self.request(RequestKind::WellKnownPath(request)).await? {
-            ResponseKind::WellKnownPath(result) => Ok(result.into()),
+            ResponseKind::WellKnownPath(result) => Ok(result),
             response => Err(unexpected(response).into()),
         }
     }
@@ -3016,7 +3015,7 @@ impl Client {
 
     pub async fn xattrs(
         &self,
-        path: Utf8TypedPath<'_>,
+        path: path::Path<'_>,
         namespace: XattrNamespace<'_>,
         follow: bool,
     ) -> Result<Vec<XattrEntry>> {
@@ -3031,7 +3030,7 @@ impl Client {
         }
     }
 
-    pub async fn streams(&self, path: Utf8TypedPath<'_>, follow: bool) -> Result<Vec<StreamEntry>> {
+    pub async fn streams(&self, path: path::Path<'_>, follow: bool) -> Result<Vec<StreamEntry>> {
         let request = StreamsRequest {
             path: path.into(),
             follow,
@@ -3044,7 +3043,7 @@ impl Client {
 
     pub async fn xattr(
         &self,
-        path: Utf8TypedPath<'_>,
+        path: path::Path<'_>,
         name: &str,
         namespace: Option<&str>,
         follow: bool,
@@ -3063,7 +3062,7 @@ impl Client {
 
     pub async fn set_xattr(
         &self,
-        path: Utf8TypedPath<'_>,
+        path: path::Path<'_>,
         name: &str,
         namespace: Option<&str>,
         value: &[u8],
@@ -3084,7 +3083,7 @@ impl Client {
 
     pub async fn remove_xattr(
         &self,
-        path: Utf8TypedPath<'_>,
+        path: path::Path<'_>,
         name: &str,
         namespace: Option<&str>,
         follow: bool,
@@ -3101,7 +3100,7 @@ impl Client {
         }
     }
 
-    pub async fn remove(&self, path: Utf8TypedPath<'_>, all: bool, ignore: bool) -> Result<()> {
+    pub async fn remove(&self, path: path::Path<'_>, all: bool, ignore: bool) -> Result<()> {
         let request = RemoveRequest {
             path: path.into(),
             all,
@@ -3113,7 +3112,7 @@ impl Client {
         }
     }
 
-    pub async fn metadata(&self, path: Utf8TypedPath<'_>) -> Result<Metadata> {
+    pub async fn metadata(&self, path: path::Path<'_>) -> Result<Metadata> {
         let request = MetadataRequest { path: path.into() };
         match self.request(RequestKind::Metadata(request)).await? {
             ResponseKind::Metadata(result) => Ok(result),
@@ -3121,7 +3120,7 @@ impl Client {
         }
     }
 
-    pub async fn fs_metadata(&self, path: Utf8TypedPath<'_>, follow: bool) -> Result<FsMetadata> {
+    pub async fn fs_metadata(&self, path: path::Path<'_>, follow: bool) -> Result<FsMetadata> {
         let request = FsMetadataRequest {
             path: path.into(),
             follow,
@@ -3134,7 +3133,7 @@ impl Client {
 
     pub async fn acl(
         &self,
-        path: Utf8TypedPath<'_>,
+        path: path::Path<'_>,
         kind: AclKind,
         default: bool,
         follow: bool,
@@ -3153,7 +3152,7 @@ impl Client {
 
     pub async fn set_acl(
         &self,
-        path: Utf8TypedPath<'_>,
+        path: path::Path<'_>,
         kind: AclKind,
         acl: Option<&Acl>,
         default: bool,
@@ -3174,7 +3173,7 @@ impl Client {
 
     pub async fn sec_desc(
         &self,
-        path: Utf8TypedPath<'_>,
+        path: path::Path<'_>,
         mask: dolang_winterop::security::SecInfo,
         follow: bool,
     ) -> Result<SecDesc> {
@@ -3191,7 +3190,7 @@ impl Client {
 
     pub async fn set_sec_desc(
         &self,
-        path: Utf8TypedPath<'_>,
+        path: path::Path<'_>,
         sec_desc: &SecDesc,
         follow: bool,
     ) -> Result<()> {
@@ -3206,7 +3205,7 @@ impl Client {
         }
     }
 
-    pub async fn create_dir(&self, path: Utf8TypedPath<'_>, all: bool) -> Result<()> {
+    pub async fn create_dir(&self, path: path::Path<'_>, all: bool) -> Result<()> {
         let request = CreateDirRequest {
             path: path.into(),
             all,
@@ -3217,7 +3216,7 @@ impl Client {
         }
     }
 
-    pub async fn remove_dir(&self, path: Utf8TypedPath<'_>, all: bool, ignore: bool) -> Result<()> {
+    pub async fn remove_dir(&self, path: path::Path<'_>, all: bool, ignore: bool) -> Result<()> {
         let request = RemoveDirRequest {
             path: path.into(),
             ignore,
@@ -3229,12 +3228,7 @@ impl Client {
         }
     }
 
-    pub async fn copy(
-        &self,
-        from: Utf8TypedPath<'_>,
-        to: Utf8TypedPath<'_>,
-        all: bool,
-    ) -> Result<()> {
+    pub async fn copy(&self, from: path::Path<'_>, to: path::Path<'_>, all: bool) -> Result<()> {
         let request = CopyRequest {
             from: from.into(),
             to: to.into(),
@@ -3248,8 +3242,8 @@ impl Client {
 
     pub async fn rename(
         &self,
-        from: Utf8TypedPath<'_>,
-        to: Utf8TypedPath<'_>,
+        from: path::Path<'_>,
+        to: path::Path<'_>,
         replace: bool,
     ) -> Result<()> {
         let request = RenameRequest {
@@ -3263,12 +3257,7 @@ impl Client {
         }
     }
 
-    pub async fn move_(
-        &self,
-        from: Utf8TypedPath<'_>,
-        to: Utf8TypedPath<'_>,
-        all: bool,
-    ) -> Result<()> {
+    pub async fn move_(&self, from: path::Path<'_>, to: path::Path<'_>, all: bool) -> Result<()> {
         let request = MoveRequest {
             from: from.into(),
             to: to.into(),
@@ -3282,9 +3271,9 @@ impl Client {
 
     pub async fn symlink(
         &self,
-        cwd: Utf8TypedPath<'_>,
-        src: Utf8TypedPath<'_>,
-        dst: Utf8TypedPath<'_>,
+        cwd: path::Path<'_>,
+        src: path::Path<'_>,
+        dst: path::Path<'_>,
     ) -> Result<()> {
         let request = SymlinkRequest {
             cwd: cwd.into(),
@@ -3298,7 +3287,7 @@ impl Client {
         }
     }
 
-    pub async fn hard_link(&self, src: Utf8TypedPath<'_>, dst: Utf8TypedPath<'_>) -> Result<()> {
+    pub async fn hard_link(&self, src: path::Path<'_>, dst: path::Path<'_>) -> Result<()> {
         let request = HardLinkRequest {
             src: src.into(),
             dst: dst.into(),
@@ -3309,9 +3298,9 @@ impl Client {
         }
     }
 
-    pub async fn symlink_dir(&self, src: Utf8TypedPath<'_>, dst: Utf8TypedPath<'_>) -> Result<()> {
+    pub async fn symlink_dir(&self, src: path::Path<'_>, dst: path::Path<'_>) -> Result<()> {
         let request = SymlinkRequest {
-            cwd: WirePath::empty_like(src),
+            cwd: path::PathBuf::empty(src.kind()),
             src: src.into(),
             dst: dst.into(),
             kind: SymlinkKind::Dir,
@@ -3322,9 +3311,9 @@ impl Client {
         }
     }
 
-    pub async fn symlink_file(&self, src: Utf8TypedPath<'_>, dst: Utf8TypedPath<'_>) -> Result<()> {
+    pub async fn symlink_file(&self, src: path::Path<'_>, dst: path::Path<'_>) -> Result<()> {
         let request = SymlinkRequest {
-            cwd: WirePath::empty_like(src),
+            cwd: path::PathBuf::empty(src.kind()),
             src: src.into(),
             dst: dst.into(),
             kind: SymlinkKind::File,
@@ -3335,7 +3324,7 @@ impl Client {
         }
     }
 
-    pub async fn symlink_metadata(&self, path: Utf8TypedPath<'_>) -> Result<Metadata> {
+    pub async fn symlink_metadata(&self, path: path::Path<'_>) -> Result<Metadata> {
         let request = MetadataRequest { path: path.into() };
         match self.request(RequestKind::SymlinkMetadata(request)).await? {
             ResponseKind::SymlinkMetadata(result) => Ok(result),
@@ -3343,11 +3332,7 @@ impl Client {
         }
     }
 
-    pub async fn set_metadata(
-        &self,
-        paths: &[Utf8TypedPathBuf],
-        patch: MetadataPatch,
-    ) -> Result<()> {
+    pub async fn set_metadata(&self, paths: &[path::PathBuf], patch: MetadataPatch) -> Result<()> {
         let request = SetMetadataRequest {
             paths: paths.iter().map(|path| path.to_path().into()).collect(),
             patch,
@@ -3358,18 +3343,18 @@ impl Client {
         }
     }
 
-    pub async fn canonicalize(&self, path: Utf8TypedPath<'_>) -> Result<Utf8TypedPathBuf> {
+    pub async fn canonicalize(&self, path: path::Path<'_>) -> Result<path::PathBuf> {
         let request = CanonicalizeRequest { path: path.into() };
         match self.request(RequestKind::Canonicalize(request)).await? {
-            ResponseKind::Canonicalize(result) => Ok(result.into()),
+            ResponseKind::Canonicalize(result) => Ok(result),
             response => Err(unexpected(response).into()),
         }
     }
 
-    pub async fn read_link(&self, path: Utf8TypedPath<'_>) -> Result<Utf8TypedPathBuf> {
+    pub async fn read_link(&self, path: path::Path<'_>) -> Result<path::PathBuf> {
         let request = ReadLinkRequest { path: path.into() };
         match self.request(RequestKind::ReadLink(request)).await? {
-            ResponseKind::ReadLink(result) => Ok(result.into()),
+            ResponseKind::ReadLink(result) => Ok(result),
             response => Err(unexpected(response).into()),
         }
     }
@@ -3377,10 +3362,10 @@ impl Client {
     pub async fn glob(
         &self,
         pattern: impl Into<String>,
-        root: Utf8TypedPath<'_>,
+        root: path::Path<'_>,
         follow_symlinks: bool,
         max_depth: Option<usize>,
-    ) -> Result<Vec<Utf8TypedPathBuf>> {
+    ) -> Result<Vec<path::PathBuf>> {
         let request = GlobRequest {
             pattern: pattern.into(),
             root: root.into(),
@@ -3388,9 +3373,7 @@ impl Client {
             max_depth,
         };
         match self.request(RequestKind::Glob(request)).await? {
-            ResponseKind::Glob(result) => {
-                Ok(result.into_iter().map(Utf8TypedPathBuf::from).collect())
-            }
+            ResponseKind::Glob(result) => Ok(result),
             response => Err(unexpected(response).into()),
         }
     }
@@ -3449,18 +3432,14 @@ mod tests {
 
     #[cfg(unix)]
     fn successful_command(client: &Client) -> super::Command<'_> {
-        use typed_path::{Utf8TypedPath, Utf8UnixPath};
-
-        let mut command = client.command(Utf8TypedPath::Unix(Utf8UnixPath::new("sh")));
+        let mut command = client.command(crate::path::Path::unix("sh"));
         command.arg("-c").arg("exit 0");
         command
     }
 
     #[cfg(windows)]
     fn successful_command(client: &Client) -> super::Command<'_> {
-        use typed_path::{Utf8TypedPath, Utf8WindowsPath};
-
-        let mut command = client.command(Utf8TypedPath::Windows(Utf8WindowsPath::new("cmd")));
+        let mut command = client.command(crate::path::Path::windows("cmd"));
         command.arg("/C").arg("exit 0");
         command
     }

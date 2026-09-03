@@ -6,7 +6,6 @@ use dolang_vfs::{Vfs, security::SecurityInfo, target::TargetInfo};
 use std::collections::HashMap;
 use tempfile::tempdir;
 use tokio::time::timeout;
-use typed_path::Utf8TypedPathBuf;
 
 const AGENT_BIN: &str = env!("CARGO_BIN_EXE_dolang-vfs");
 
@@ -49,8 +48,8 @@ async fn spawn_stdio(
 /// covers stdio-stream cleanliness for every caller.
 struct Snapshot {
     env: HashMap<String, String>,
-    cwd: Utf8TypedPathBuf,
-    current_exe: Utf8TypedPathBuf,
+    cwd: dolang_vfs::path::PathBuf,
+    current_exe: dolang_vfs::path::PathBuf,
     target: TargetInfo,
     security: SecurityInfo,
 }
@@ -310,12 +309,11 @@ mod listen_mode {
     use dolang_vfs::Vfs;
     use tempfile::tempdir;
     use tokio::time::timeout;
-    use typed_path::{Utf8TypedPath, Utf8UnixPath};
 
     use super::AGENT_BIN;
 
-    fn typed_str(path: &str) -> Utf8TypedPath<'_> {
-        Utf8TypedPath::Unix(Utf8UnixPath::new(path))
+    fn typed_str(path: &str) -> dolang_vfs::path::Path<'_> {
+        dolang_vfs::path::Path::unix(path)
     }
 
     fn find_free_socket_path() -> (tempfile::TempDir, std::path::PathBuf) {
@@ -569,7 +567,7 @@ mod listen_mode {
             .await
             .expect("well-known path should succeed");
 
-        assert_eq!(path, "/tmp/test-home");
+        assert_eq!(path.as_str(), "/tmp/test-home");
 
         stop_daemon(&socket_path).await;
     }
