@@ -87,12 +87,25 @@ pub(crate) enum WirePathKind {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WirePath {
+pub struct WirePath {
     kind: WirePathKind,
     path: String,
 }
 
 impl WirePath {
+    /// Creates a wire path tagged with Windows syntax.
+    pub fn windows(path: impl Into<String>) -> Self {
+        Self {
+            kind: WirePathKind::Windows,
+            path: path.into(),
+        }
+    }
+
+    /// Returns the path text when this path uses Windows syntax.
+    pub fn as_windows_str(&self) -> Option<&str> {
+        (self.kind == WirePathKind::Windows).then_some(&self.path)
+    }
+
     pub(crate) fn empty_like(path: Utf8TypedPath<'_>) -> Self {
         Self {
             kind: match path {

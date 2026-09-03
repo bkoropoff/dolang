@@ -1,6 +1,8 @@
-import winnet rand sys
+import winnet rand shell strand sys
   testlib.vfs:
     - vfs
+  fs.windows:
+    - Path
   security.windows:
     - Sid
     - SidName
@@ -27,6 +29,7 @@ import winnet rand sys
 let now_nanos = DateTime.now().unix_nanos
 let expires = DateTime.from_unix
   nanos: (now_nanos - now_nanos % 1000000000 + 365 * 86400 * 1000000000)
+let account_policy_resource = strand.Resource 1
 
 def delete_if_present name
   try
@@ -52,10 +55,10 @@ def scratch_user block ...rest
       full_name: "Do winnet test"
       comment: "created by test/winnet.dol"
       user_comment: scratch
-      home_dir: r"C:\Users\do-test"
+      home_dir: (Path r"C:\Users\do-test")
       home_dir_drive: "Z:"
-      profile: r"C:\Users\do-test\profile"
-      script_path: "login.cmd"
+      profile: (Path r"C:\Users\do-test\profile")
+      script_path: (Path "login.cmd")
       account_expires: $expires
       disabled: true
       password_never_expires: false
@@ -114,10 +117,13 @@ def local_user_lifecycle :user
   assert_eq $initial.full_name "Do winnet test"
   assert_eq $initial.comment "created by test/winnet.dol"
   assert_eq $initial.user_comment scratch
-  assert_eq $initial.home_dir r"C:\Users\do-test"
+  assert_type $Path $initial.home_dir
+  assert_eq $initial.home_dir (Path r"C:\Users\do-test")
   assert_eq $initial.home_dir_drive "Z:"
-  assert_eq $initial.profile r"C:\Users\do-test\profile"
-  assert_eq $initial.script_path "login.cmd"
+  assert_type $Path $initial.profile
+  assert_eq $initial.profile (Path r"C:\Users\do-test\profile")
+  assert_type $Path $initial.script_path
+  assert_eq $initial.script_path (Path "login.cmd")
   assert_eq $initial.account_expires $expires
   assert_eq $initial.disabled true
   assert_eq $initial.password_never_expires false
@@ -192,6 +198,60 @@ def local_user_lifecycle :user
   assert_throws $NotFoundError do
     winnet.user $renamed
 
+#[test]
+#[vfs]
+#[scratch_user]
+def local_user_account_rights :user
+  let right = "SeServiceLogonRight"
+  try
+    user.revoke_right $right
+  catch PermissionDeniedError: _
+    skip "requires permission to manage local security policy"
+  assert_eq $user.rights().any(do |value| value == right) false
+  try
+    user.grant_right $right
+    assert $user.rights().any(do |value| value == right)
+  finally
+    user.revoke_right $right
+  assert_eq $user.rights().any(do |value| value == right) false
+
+#[test]
+#[vfs]
+def local_account_policy()
+  if (sys.os_info().family != :WINDOWS:)
+    skip "requires Windows account policy"
+  if sys.os_info().is_wine
+    skip "Wine does not reliably implement NetUserModalsGet"
+  let policy = winnet.account_policy()
+  assert_type $winnet.AccountPolicy $policy
+  assert_type $Int $policy.min_password_length
+  assert_type $Duration $policy.min_password_age
+  assert_type $Int $policy.password_history_length
+  assert_type $Duration $policy.lockout_duration
+  assert_type $Duration $policy.lockout_observation_window
+  assert_type $Int $policy.lockout_threshold
+
+#[test]
+#[vfs]
+def update_local_account_policy()
+  if (sys.os_info().family != :WINDOWS:)
+    skip "requires Windows account policy"
+  if sys.os_info().is_wine
+    skip "Wine does not reliably implement NetUserModalsSet"
+  if (shell.env.get("DOLANG_WINNET_POLICY_MUTATION_TEST") != "1")
+    skip "set DOLANG_WINNET_POLICY_MUTATION_TEST=1 to mutate machine policy"
+  account_policy_resource.with do
+    let original = winnet.account_policy()
+    let changed_length = (original.min_password_length == 0 && 1 || 0)
+    let changed = try
+      winnet.update_account_policy min_password_length: $changed_length
+    catch PermissionDeniedError: _
+      skip "requires permission to modify machine policy"
+    try
+      assert_eq $changed.min_password_length $changed_length
+    finally
+      winnet.update_account_policy min_password_length: $original.min_password_length
+
 #[fixture]
 def scratch_group block ...rest
   if (sys.os_info().family != :WINDOWS:)
@@ -244,6 +304,18 @@ def local_group_lifecycle :user :group
     group.remove_member $user_name
   group.add_member $user.sid
   group.remove_member $user_name
+
+  let right = "SeServiceLogonRight"
+  try
+    group.revoke_right $right
+  catch PermissionDeniedError: _
+    skip "requires permission to manage local security policy"
+  assert_eq $group.rights().any(do |value| value == right) false
+  try
+    group.grant_right $right
+    assert $group.rights().any(do |value| value == right)
+  finally
+    group.revoke_right $right
 
   let conflict_name = "do-hit-$(rand.string 8)"
   let conflict = winnet.create_group $conflict_name

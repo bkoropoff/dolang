@@ -1,9 +1,11 @@
 use dolang_vfs::{
     error::Error,
     extension::{ExtContext, VfsExtension},
+    path::WirePath,
 };
 use dolang_winterop::security::Sid;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
+use typed_path::{Utf8TypedPath, Utf8WindowsPath, Utf8WindowsPathBuf};
 
 #[cfg(windows)]
 use crate::backend;
@@ -41,79 +43,94 @@ bitflags::bitflags! {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserInfo {
-    pub sid: Sid,
-    pub name: String,
-    pub full_name: Option<String>,
-    pub comment: Option<String>,
-    pub user_comment: Option<String>,
-    pub home_dir: Option<String>,
-    pub home_dir_drive: Option<String>,
-    pub profile: Option<String>,
-    pub script_path: Option<String>,
-    pub flags: UserFlags,
-    pub password_age: u64,
-    pub password_expired: bool,
-    pub last_logon: Option<u64>,
-    pub account_expires: Option<u64>,
-    pub bad_password_count: u32,
-    pub logon_count: u32,
+    pub(crate) sid: Sid,
+    pub(crate) name: String,
+    pub(crate) full_name: Option<String>,
+    pub(crate) comment: Option<String>,
+    pub(crate) user_comment: Option<String>,
+    pub(crate) home_dir: Option<WirePath>,
+    pub(crate) home_dir_drive: Option<String>,
+    pub(crate) profile: Option<WirePath>,
+    pub(crate) script_path: Option<WirePath>,
+    pub(crate) flags: UserFlags,
+    pub(crate) password_age: u64,
+    pub(crate) password_expired: bool,
+    pub(crate) last_logon: Option<u64>,
+    pub(crate) account_expires: Option<u64>,
+    pub(crate) bad_password_count: u32,
+    pub(crate) logon_count: u32,
 }
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
-pub struct UserUpdate {
-    pub name: Option<String>,
-    pub password: Option<String>,
-    pub full_name: Option<Option<String>>,
-    pub comment: Option<Option<String>>,
-    pub user_comment: Option<Option<String>>,
-    pub home_dir: Option<Option<String>>,
-    pub home_dir_drive: Option<Option<String>>,
-    pub profile: Option<Option<String>>,
-    pub script_path: Option<Option<String>>,
-    pub account_expires: Option<Option<u64>>,
-    pub(crate) set_flags: UserFlags,
-    pub(crate) clear_flags: UserFlags,
-}
-
-#[derive(Serialize, Deserialize)]
-struct UserUpdateWire {
-    name: Option<String>,
-    password: Option<String>,
-    full_name: Option<Option<String>>,
-    comment: Option<Option<String>>,
-    user_comment: Option<Option<String>>,
-    home_dir: Option<Option<String>>,
-    home_dir_drive: Option<Option<String>>,
-    profile: Option<Option<String>>,
-    script_path: Option<Option<String>>,
-    account_expires: Option<Option<u64>>,
-    set_flags: UserFlags,
-    clear_flags: UserFlags,
-}
-
-impl<'de> Deserialize<'de> for UserUpdate {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let w = UserUpdateWire::deserialize(deserializer)?;
-        if w.set_flags.intersects(w.clear_flags) {
-            return Err(serde::de::Error::custom(
-                "user flag set and clear masks overlap",
-            ));
-        }
-        Ok(Self {
-            name: w.name,
-            password: w.password,
-            full_name: w.full_name,
-            comment: w.comment,
-            user_comment: w.user_comment,
-            home_dir: w.home_dir,
-            home_dir_drive: w.home_dir_drive,
-            profile: w.profile,
-            script_path: w.script_path,
-            account_expires: w.account_expires,
-            set_flags: w.set_flags,
-            clear_flags: w.clear_flags,
+impl UserInfo {
+    fn windows_path(value: &Option<WirePath>) -> Option<&Utf8WindowsPath> {
+        value.as_ref().and_then(|path| match path.into() {
+            Utf8TypedPath::Windows(path) => Some(path),
+            Utf8TypedPath::Unix(_) => None,
         })
     }
+    pub fn sid(&self) -> &Sid {
+        &self.sid
+    }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn full_name(&self) -> Option<&str> {
+        self.full_name.as_deref()
+    }
+    pub fn comment(&self) -> Option<&str> {
+        self.comment.as_deref()
+    }
+    pub fn user_comment(&self) -> Option<&str> {
+        self.user_comment.as_deref()
+    }
+    pub fn home_dir(&self) -> Option<&Utf8WindowsPath> {
+        Self::windows_path(&self.home_dir)
+    }
+    pub fn home_dir_drive(&self) -> Option<&str> {
+        self.home_dir_drive.as_deref()
+    }
+    pub fn profile(&self) -> Option<&Utf8WindowsPath> {
+        Self::windows_path(&self.profile)
+    }
+    pub fn script_path(&self) -> Option<&Utf8WindowsPath> {
+        Self::windows_path(&self.script_path)
+    }
+    pub fn flags(&self) -> UserFlags {
+        self.flags
+    }
+    pub fn password_age(&self) -> u64 {
+        self.password_age
+    }
+    pub fn password_expired(&self) -> bool {
+        self.password_expired
+    }
+    pub fn last_logon(&self) -> Option<u64> {
+        self.last_logon
+    }
+    pub fn account_expires(&self) -> Option<u64> {
+        self.account_expires
+    }
+    pub fn bad_password_count(&self) -> u32 {
+        self.bad_password_count
+    }
+    pub fn logon_count(&self) -> u32 {
+        self.logon_count
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserUpdate {
+    pub(crate) name: Option<String>,
+    pub(crate) password: Option<String>,
+    pub(crate) full_name: Option<Option<String>>,
+    pub(crate) comment: Option<Option<String>>,
+    pub(crate) user_comment: Option<Option<String>>,
+    pub(crate) home_dir: Option<Option<WirePath>>,
+    pub(crate) home_dir_drive: Option<Option<String>>,
+    pub(crate) profile: Option<Option<WirePath>>,
+    pub(crate) script_path: Option<Option<WirePath>>,
+    pub(crate) account_expires: Option<Option<u64>>,
+    pub(crate) set_flags: UserFlags,
+    pub(crate) clear_flags: UserFlags,
 }
 
 impl UserUpdate {
@@ -156,20 +173,20 @@ impl UserUpdate {
         self.user_comment = Some(value);
         self
     }
-    pub fn home_dir(mut self, value: Option<String>) -> Self {
-        self.home_dir = Some(value);
+    pub fn home_dir(mut self, value: Option<Utf8WindowsPathBuf>) -> Self {
+        self.home_dir = Some(value.map(|path| WirePath::from(Utf8TypedPath::Windows(&path))));
         self
     }
     pub fn home_dir_drive(mut self, value: Option<String>) -> Self {
         self.home_dir_drive = Some(value);
         self
     }
-    pub fn profile(mut self, value: Option<String>) -> Self {
-        self.profile = Some(value);
+    pub fn profile(mut self, value: Option<Utf8WindowsPathBuf>) -> Self {
+        self.profile = Some(value.map(|path| WirePath::from(Utf8TypedPath::Windows(&path))));
         self
     }
-    pub fn script_path(mut self, value: Option<String>) -> Self {
-        self.script_path = Some(value);
+    pub fn script_path(mut self, value: Option<Utf8WindowsPathBuf>) -> Self {
+        self.script_path = Some(value.map(|path| WirePath::from(Utf8TypedPath::Windows(&path))));
         self
     }
     pub fn account_expires(mut self, value: Option<u64>) -> Self {
@@ -186,22 +203,46 @@ impl UserUpdate {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserCreate {
-    pub name: String,
-    pub password: String,
-    pub update: UserUpdate,
+    pub(crate) name: String,
+    pub(crate) password: String,
+    pub(crate) update: UserUpdate,
+}
+impl UserCreate {
+    pub fn new(name: String, password: String) -> Self {
+        Self {
+            name,
+            password,
+            update: UserUpdate::default(),
+        }
+    }
+    pub fn update(mut self, update: UserUpdate) -> Self {
+        self.update = update;
+        self
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GroupInfo {
-    pub sid: Sid,
-    pub name: String,
-    pub comment: Option<String>,
+    pub(crate) sid: Sid,
+    pub(crate) name: String,
+    pub(crate) comment: Option<String>,
+}
+impl GroupInfo {
+    pub fn sid(&self) -> &Sid {
+        &self.sid
+    }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn comment(&self) -> Option<&str> {
+        self.comment.as_deref()
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GroupUpdate {
-    pub name: Option<String>,
-    pub comment: Option<Option<String>>,
+    pub(crate) name: Option<String>,
+    pub(crate) comment: Option<Option<String>>,
 }
 impl GroupUpdate {
     pub fn name(mut self, value: String) -> Self {
@@ -216,8 +257,104 @@ impl GroupUpdate {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GroupCreate {
-    pub name: String,
-    pub comment: Option<String>,
+    pub(crate) name: String,
+    pub(crate) comment: Option<String>,
+}
+impl GroupCreate {
+    pub fn new(name: String) -> Self {
+        Self {
+            name,
+            comment: None,
+        }
+    }
+    pub fn comment(mut self, value: Option<String>) -> Self {
+        self.comment = value;
+        self
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountPolicy {
+    pub(crate) min_password_length: u32,
+    pub(crate) max_password_age: Option<u64>,
+    pub(crate) min_password_age: u64,
+    pub(crate) force_logoff: Option<u64>,
+    pub(crate) password_history_length: u32,
+    pub(crate) lockout_duration: u64,
+    pub(crate) lockout_observation_window: u64,
+    pub(crate) lockout_threshold: u32,
+}
+impl AccountPolicy {
+    pub fn min_password_length(&self) -> u32 {
+        self.min_password_length
+    }
+    pub fn max_password_age(&self) -> Option<u64> {
+        self.max_password_age
+    }
+    pub fn min_password_age(&self) -> u64 {
+        self.min_password_age
+    }
+    pub fn force_logoff(&self) -> Option<u64> {
+        self.force_logoff
+    }
+    pub fn password_history_length(&self) -> u32 {
+        self.password_history_length
+    }
+    pub fn lockout_duration(&self) -> u64 {
+        self.lockout_duration
+    }
+    pub fn lockout_observation_window(&self) -> u64 {
+        self.lockout_observation_window
+    }
+    pub fn lockout_threshold(&self) -> u32 {
+        self.lockout_threshold
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountPolicyUpdate {
+    pub(crate) min_password_length: Option<u32>,
+    pub(crate) max_password_age: Option<Option<u64>>,
+    pub(crate) min_password_age: Option<u64>,
+    pub(crate) force_logoff: Option<Option<u64>>,
+    pub(crate) password_history_length: Option<u32>,
+    pub(crate) lockout_duration: Option<u64>,
+    pub(crate) lockout_observation_window: Option<u64>,
+    pub(crate) lockout_threshold: Option<u32>,
+}
+impl AccountPolicyUpdate {
+    pub fn min_password_length(mut self, value: u32) -> Self {
+        self.min_password_length = Some(value);
+        self
+    }
+    pub fn max_password_age(mut self, value: Option<u64>) -> Self {
+        self.max_password_age = Some(value);
+        self
+    }
+    pub fn min_password_age(mut self, value: u64) -> Self {
+        self.min_password_age = Some(value);
+        self
+    }
+    pub fn force_logoff(mut self, value: Option<u64>) -> Self {
+        self.force_logoff = Some(value);
+        self
+    }
+    pub fn password_history_length(mut self, value: u32) -> Self {
+        self.password_history_length = Some(value);
+        self
+    }
+    pub fn lockout_duration(mut self, value: u64) -> Self {
+        self.lockout_duration = Some(value);
+        self
+    }
+    pub fn lockout_observation_window(mut self, value: u64) -> Self {
+        self.lockout_observation_window = Some(value);
+        self
+    }
+    pub fn lockout_threshold(mut self, value: u32) -> Self {
+        self.lockout_threshold = Some(value);
+        self
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -280,6 +417,19 @@ pub(crate) enum WinNetRequest {
         name: String,
         sid: Sid,
     },
+    AccountRights {
+        sid: Sid,
+    },
+    GrantAccountRight {
+        sid: Sid,
+        right: String,
+    },
+    RevokeAccountRight {
+        sid: Sid,
+        right: String,
+    },
+    AccountPolicy,
+    UpdateAccountPolicy(AccountPolicyUpdate),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -293,7 +443,7 @@ pub(crate) enum WinNetResponse {
         resume: u64,
         done: bool,
     },
-    Info(UserInfo),
+    Info(Box<UserInfo>),
     Deleted,
     Group {
         name: String,
@@ -311,6 +461,8 @@ pub(crate) enum WinNetResponse {
         done: bool,
     },
     Unit,
+    AccountRights(Vec<String>),
+    AccountPolicy(AccountPolicy),
 }
 
 pub(crate) struct WinNetExt;
@@ -318,7 +470,7 @@ impl VfsExtension for WinNetExt {
     type Request = WinNetRequest;
     type Response = Result<WinNetResponse, Error>;
     const NAME: &'static str = "dolang-vfs-winnet";
-    const VERSION: u16 = 2;
+    const VERSION: u16 = 3;
     const AVAILABLE: bool = cfg!(windows);
     async fn handle(&self, ctx: &mut ExtContext<'_>, request: WinNetRequest) -> Self::Response {
         #[cfg(windows)]
@@ -370,22 +522,16 @@ mod tests {
         }
     }
     #[test]
-    fn overlap_is_rejected() {
-        let bytes = postcard::to_stdvec(&UserUpdateWire {
-            name: None,
-            password: None,
-            full_name: None,
-            comment: None,
-            user_comment: None,
-            home_dir: None,
-            home_dir_drive: None,
-            profile: None,
-            script_path: None,
-            account_expires: None,
-            set_flags: UserFlags::ACCOUNT_DISABLED,
-            clear_flags: UserFlags::ACCOUNT_DISABLED,
-        })
-        .unwrap();
-        assert!(postcard::from_bytes::<UserUpdate>(&bytes).is_err());
+    fn account_policy_updates_round_trip() {
+        let update = AccountPolicyUpdate::default()
+            .min_password_length(12)
+            .max_password_age(None)
+            .lockout_duration(300)
+            .lockout_threshold(5);
+        let bytes = postcard::to_stdvec(&update).unwrap();
+        assert_eq!(
+            postcard::from_bytes::<AccountPolicyUpdate>(&bytes).unwrap(),
+            update
+        );
     }
 }

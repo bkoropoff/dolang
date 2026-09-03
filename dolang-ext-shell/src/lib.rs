@@ -165,6 +165,18 @@ pub fn duration<'v, 's>(
     Ok(())
 }
 
+/// Extracts a non-negative Do `time.Duration` runtime value.
+pub fn as_duration<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    value: &Value<'v>,
+) -> Option<std::time::Duration> {
+    let global = strand.state::<Global<'v>>();
+    let duration = global.types.duration.cast(value)?;
+    duration.enter_sync(strand, |strand, duration| {
+        duration.annex().to_std_duration(strand).ok()
+    })
+}
+
 /// Extracts a `security.windows.Sid` runtime value.
 pub fn as_windows_sid<'v, 's>(
     strand: &mut Strand<'v, 's>,
@@ -254,6 +266,22 @@ pub fn as_unix_path<'v, 's>(
     })
 }
 
+/// Downcast a Do value to a Windows path.
+pub fn as_windows_path<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    value: &Value<'v>,
+) -> Option<typed_path::Utf8WindowsPathBuf> {
+    let global = strand.state::<Global<'v>>();
+    let path = global.types.windows_path.cast(value)?;
+    path.enter_sync(strand, |_strand, inst| {
+        let annex = inst.annex();
+        match &annex.inner {
+            typed_path::Utf8TypedPathBuf::Windows(path) => Some(path.clone()),
+            typed_path::Utf8TypedPathBuf::Unix(_) => None,
+        }
+    })
+}
+
 /// Construct a Do `fs.unix.Path` value.
 pub fn unix_path<'v, 's>(
     strand: &mut Strand<'v, 's>,
@@ -265,6 +293,21 @@ pub fn unix_path<'v, 's>(
         strand,
         global,
         typed_path::Utf8TypedPathBuf::from_unix(path.as_ref()),
+        out,
+    )
+}
+
+/// Construct a Do `fs.windows.Path` value.
+pub fn windows_path<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    path: impl AsRef<str>,
+    out: impl Output<'v>,
+) -> Result<'v, 's, ()> {
+    let global = strand.state::<Global<'v>>();
+    fs::path::create_path(
+        strand,
+        global,
+        typed_path::Utf8TypedPathBuf::from_windows(path.as_ref()),
         out,
     )
 }

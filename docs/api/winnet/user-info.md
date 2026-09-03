@@ -28,19 +28,20 @@ User-facing account comment. **Type:** [`Str`](../std/str.md)|`nil`
 
 ### `home_dir`
 
-Home directory. **Type:** [`Str`](../std/str.md)|`nil`
+Home directory. **Type:** [`fs.windows.Path`](../fs/windows/path.md)|`nil`
 
 ### `home_dir_drive`
 
-Drive mapped to the home directory. **Type:** [`Str`](../std/str.md)|`nil`
+Drive designator assigned to the home directory during logon, such as `"Z:"`.
+**Type:** [`Str`](../std/str.md)|`nil`
 
 ### `profile`
 
-Profile path. **Type:** [`Str`](../std/str.md)|`nil`
+Profile path. **Type:** [`fs.windows.Path`](../fs/windows/path.md)|`nil`
 
 ### `script_path`
 
-Logon script path. **Type:** [`Str`](../std/str.md)|`nil`
+Logon script path. **Type:** [`fs.windows.Path`](../fs/windows/path.md)|`nil`
 
 ### `flags`
 

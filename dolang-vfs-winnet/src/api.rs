@@ -8,8 +8,8 @@ use dolang_vfs::{
 use dolang_winterop::security::Sid;
 
 use crate::wire::{
-    GroupCreate, GroupInfo, GroupUpdate, UserCreate, UserInfo, UserUpdate, WinNetExt,
-    WinNetRequest, WinNetResponse,
+    AccountPolicy, AccountPolicyUpdate, GroupCreate, GroupInfo, GroupUpdate, UserCreate, UserInfo,
+    UserUpdate, WinNetExt, WinNetRequest, WinNetResponse,
 };
 
 fn unsupported() -> Error {
@@ -35,6 +35,57 @@ async fn call(vfs: &Vfs, request: WinNetRequest) -> Result<WinNetResponse, Error
         return Err(unsupported());
     }
     vfs.call_extension::<WinNetExt>(request).await?
+}
+
+async fn account_rights(vfs: &Vfs, sid: &Sid) -> Result<Vec<String>, Error> {
+    match call(vfs, WinNetRequest::AccountRights { sid: sid.clone() }).await? {
+        WinNetResponse::AccountRights(rights) => Ok(rights),
+        _ => Err(unexpected("AccountRights")),
+    }
+}
+
+async fn change_account_right(
+    vfs: &Vfs,
+    sid: &Sid,
+    right: String,
+    grant: bool,
+) -> Result<(), Error> {
+    let request = if grant {
+        WinNetRequest::GrantAccountRight {
+            sid: sid.clone(),
+            right,
+        }
+    } else {
+        WinNetRequest::RevokeAccountRight {
+            sid: sid.clone(),
+            right,
+        }
+    };
+    match call(vfs, request).await? {
+        WinNetResponse::Unit => Ok(()),
+        _ => Err(unexpected(if grant {
+            "GrantAccountRight"
+        } else {
+            "RevokeAccountRight"
+        })),
+    }
+}
+
+pub async fn account_policy(vfs: &Vfs) -> Result<AccountPolicy, Error> {
+    match call(vfs, WinNetRequest::AccountPolicy).await? {
+        WinNetResponse::AccountPolicy(policy) => Ok(policy),
+        _ => Err(unexpected("AccountPolicy")),
+    }
+}
+
+pub async fn update_account_policy(
+    vfs: &Vfs,
+    update: AccountPolicyUpdate,
+) -> Result<AccountPolicy, Error> {
+    match call(vfs, WinNetRequest::UpdateAccountPolicy(update)).await? {
+        WinNetResponse::AccountPolicy(policy) => Ok(policy),
+        _ => Err(unexpected("UpdateAccountPolicy")),
+    }
 }
 
 /// A SID-stable Windows local user.
@@ -87,6 +138,15 @@ impl User {
     pub fn sid(&self) -> &Sid {
         &self.sid
     }
+    pub async fn rights(&self) -> Result<Vec<String>, Error> {
+        account_rights(&self.vfs, &self.sid).await
+    }
+    pub async fn grant_right(&self, right: String) -> Result<(), Error> {
+        change_account_right(&self.vfs, &self.sid, right, true).await
+    }
+    pub async fn revoke_right(&self, right: String) -> Result<(), Error> {
+        change_account_right(&self.vfs, &self.sid, right, false).await
+    }
     async fn retry_name(&mut self, error: Error) -> Result<(), Error> {
         if error.kind() != ErrorKind::NotFound {
             return Err(error);
@@ -127,7 +187,7 @@ impl User {
         match response {
             WinNetResponse::Info(info) => {
                 self.name.clone_from(&info.name);
-                Ok(info)
+                Ok(*info)
             }
             _ => Err(unexpected("Info")),
         }
@@ -160,7 +220,7 @@ impl User {
         match response {
             WinNetResponse::Info(info) => {
                 self.name.clone_from(&info.name);
-                Ok(info)
+                Ok(*info)
             }
             _ => Err(unexpected("Update")),
         }
@@ -238,6 +298,15 @@ impl Group {
     }
     pub fn sid(&self) -> &Sid {
         &self.sid
+    }
+    pub async fn rights(&self) -> Result<Vec<String>, Error> {
+        account_rights(&self.vfs, &self.sid).await
+    }
+    pub async fn grant_right(&self, right: String) -> Result<(), Error> {
+        change_account_right(&self.vfs, &self.sid, right, true).await
+    }
+    pub async fn revoke_right(&self, right: String) -> Result<(), Error> {
+        change_account_right(&self.vfs, &self.sid, right, false).await
     }
     async fn retry_name(&mut self, error: Error) -> Result<(), Error> {
         if error.kind() != ErrorKind::NotFound {

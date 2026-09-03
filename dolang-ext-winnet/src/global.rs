@@ -1,5 +1,6 @@
 use crate::{
     group::{Group, GroupInfo, GroupMembers, Groups},
+    policy::AccountPolicy,
     user::{User, UserFlags, UserInfo, Users},
 };
 use dolang::runtime::{
@@ -16,6 +17,7 @@ pub(crate) struct Global<'v> {
     pub(crate) group_info: Type<'v, GroupInfo>,
     pub(crate) groups: Type<'v, Groups>,
     pub(crate) group_members: Type<'v, GroupMembers>,
+    pub(crate) account_policy: Type<'v, AccountPolicy>,
     pub(crate) name: Sym<'v, 'v>,
     pub(crate) password: Sym<'v, 'v>,
     pub(crate) full_name: Sym<'v, 'v>,
@@ -29,6 +31,14 @@ pub(crate) struct Global<'v> {
     pub(crate) disabled: Sym<'v, 'v>,
     pub(crate) password_never_expires: Sym<'v, 'v>,
     pub(crate) password_cannot_change: Sym<'v, 'v>,
+    pub(crate) min_password_length: Sym<'v, 'v>,
+    pub(crate) max_password_age: Sym<'v, 'v>,
+    pub(crate) min_password_age: Sym<'v, 'v>,
+    pub(crate) force_logoff: Sym<'v, 'v>,
+    pub(crate) password_history_length: Sym<'v, 'v>,
+    pub(crate) lockout_duration: Sym<'v, 'v>,
+    pub(crate) lockout_observation_window: Sym<'v, 'v>,
+    pub(crate) lockout_threshold: Sym<'v, 'v>,
 }
 pub struct Tag;
 impl<'v> Stateful<'v> for Global<'v> {
@@ -45,6 +55,7 @@ impl<'v> Global<'v> {
             group_info: builder.register_type(),
             groups: builder.register_type(),
             group_members: builder.register_type(),
+            account_policy: builder.register_type(),
             name: builder.sym("name"),
             password: builder.sym("password"),
             full_name: builder.sym("full_name"),
@@ -58,6 +69,14 @@ impl<'v> Global<'v> {
             disabled: builder.sym("disabled"),
             password_never_expires: builder.sym("password_never_expires"),
             password_cannot_change: builder.sym("password_cannot_change"),
+            min_password_length: builder.sym("min_password_length"),
+            max_password_age: builder.sym("max_password_age"),
+            min_password_age: builder.sym("min_password_age"),
+            force_logoff: builder.sym("force_logoff"),
+            password_history_length: builder.sym("password_history_length"),
+            lockout_duration: builder.sym("lockout_duration"),
+            lockout_observation_window: builder.sym("lockout_observation_window"),
+            lockout_threshold: builder.sym("lockout_threshold"),
         }
     }
 }
