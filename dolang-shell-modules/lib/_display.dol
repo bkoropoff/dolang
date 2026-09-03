@@ -103,21 +103,19 @@ pub class Scalar: Node
 # left as it is, as is one the caller asked for `raw`.
 pub class Size: Scalar
   def (init) self value raw = false
-    let note = nil
-    let text = if (value == nil)
-      absent_style "~"
+    let text note = if (value == nil)
+      [absent_style "~", nil]
     else if (raw || value < SIZE_STEP)
-      str $value
+      ["$value bytes", nil]
     else
-      let scaled = (value * 1.0)
+      let scaled = float $value
       let unit = nil
       for candidate = SIZE_UNITS
         scaled = (scaled / 1024.0)
         unit = candidate
         if (scaled < SIZE_STEP)
           break
-      note = "$value bytes"
-      "${scaled:.2f} $unit"
+      ["$value bytes", "${scaled:.2f} $unit"]
     Scalar.(init) $self $text $note
 
 # A block of keyed entries, held as `[key, node]` pairs.
@@ -271,5 +269,7 @@ pub def id value kind
 pub def sid value
   if (value == nil)
     return text nil
-  let name = opt do value.lookup().qualified_name
+  let name = opt do
+    let :kind :qualified_name ... = value.lookup()
+    "$kind: $qualified_name"
   text $value $name
