@@ -71,7 +71,7 @@ import _ssh
 #
 # ssh.with build.example.com
 #   user: builder
-#   identity: ~/.ssh/build
+#   identity: $env["HOME"]/.ssh/build
 #   jump: bastion.example.com
 #   batch: true
 #   host_key: :STRICT:

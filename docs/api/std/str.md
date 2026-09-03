@@ -75,7 +75,7 @@ assert_eq ("A".scalar()) 65
 assert_eq ("😀".scalar()) 128512
 ```
 
-### `chomp`
+### `chomp()`
 
 Removes one trailing line terminator.
 
@@ -214,7 +214,7 @@ Joins values from an input source using this string as a separator.
 assert_eq (",".join ["a", "b", "c"]) "a,b,c"
 ```
 
-### `lower`
+### `lower()`
 
 Returns the string converted to lowercase.
 
@@ -434,7 +434,7 @@ assert_eq ("  hello  ".trim_start()) "hello  "
 assert_eq ("xxhelloxx".trim_start "x") "helloxx"
 ```
 
-### `upper`
+### `upper()`
 
 Returns the string converted to uppercase.
 

@@ -55,7 +55,7 @@ http.mock.Server do |server|
 
 ## Methods
 
-### `close`
+### `close()`
 
 Shuts down the server. Further requests to its address will fail.
 
@@ -179,7 +179,7 @@ http.get (server.url / "/users/42")
 handle.unmount()
 ```
 
-### `received_requests`
+### `received_requests()`
 
 Returns every request the server has received, regardless of which (if any)
 mock matched it. See [`Mock.received`](./mock.md#received) to scope this to
@@ -190,7 +190,7 @@ a specific `.mock()` call instead.
 Array of request dicts — see [`Mock.received`](./mock.md#received) for the
 shape.
 
-### `reset`
+### `reset()`
 
 Removes all mocks registered on the server and forgets all received
 requests.

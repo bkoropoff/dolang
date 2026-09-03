@@ -23,19 +23,9 @@ HTTP-date, it is returned as a [`DateTime`](../time/datetime.md) instead.
 #### Example
 
 ```
-
 let response = get https://api.example.com/users
 echo $response.headers["content-type"]
 echo $response.headers["content-length"]
-```
-
-```
-import time:
-  - DateTime
-
-get https://api.example.com/archive do |response|
-  let modified = response.headers["last-modified"]
-  assert (type modified DateTime)
 ```
 
 ### `status`
@@ -48,12 +38,6 @@ The HTTP status code of the response.
 
 #### Example
 
-```
-
-let response = get https://api.example.com/users
-echo $response.status  # 200 for success
-```
-
 ### `url`
 
 The final response URL after redirects.
@@ -64,7 +48,7 @@ The final response URL after redirects.
 
 ## Methods
 
-### `body`
+### `body()`
 
 Reads the response body as binary data. This method consumes the response and
 leaves it in a "closed" state.
@@ -75,14 +59,7 @@ leaves it in a "closed" state.
 
 #### Example
 
-```
-
-let response = get https://api.example.com/image.png
-let data = response.body()
-echo "Downloaded $data.len bytes"
-```
-
-### `chunks`
+### `chunks()`
 
 Returns an iterator that yields the response body as raw bytes chunks. This
 method is useful for processing large responses without loading the entire
@@ -95,7 +72,6 @@ An iterator of [`Bin`](../std/bin.md) values
 #### Example
 
 ```
-
 get https://api.example.com/large-file do |response|
   let total_size = 0
   for chunk = response.chunks()
@@ -103,11 +79,11 @@ get https://api.example.com/large-file do |response|
   echo "Downloaded $total_size bytes"
 ```
 
-### `close`
+### `close()`
 
 Closes the response if it hasn't been already.
 
-### `events`
+### `events()`
 
 Returns an iterator that parses the response body as a Server-Sent Events
 stream. This is useful for streaming LLM responses, log tails, and other
@@ -135,14 +111,12 @@ An iterator of [`Event`](./event.md) values
 #### Example
 
 ```
-
-get https://api.example.com/stream do |response|
-  for event = response.events()
-    echo "event=$event.type id=$event.id"
-    echo $event.data
+http.get https://api.example.com/stream do |response|
+  for :type :data ... = response.events()
+    echo "[$type] $data"
 ```
 
-### `json`
+### `json()`
 
 Reads the response body and parses it as JSON. This method consumes the response
 and leaves it in a "closed" state.
@@ -166,13 +140,12 @@ appropriate.
 #### Example
 
 ```
-
 let response = get https://api.example.com/users
 let data = response.json()
 echo $data["users"][0]["name"]
 ```
 
-### `lines`
+### `lines()`
 
 Returns an iterator that yields the response body as lines (split on `\n` or
 `\r\n`). Line endings are stripped from the returned values.
@@ -184,14 +157,13 @@ An iterator of [`Str`](../std/str.md) values
 #### Example
 
 ```
-
 get https://api.example.com/logs do |response|
   for line = response.lines()
     if (line.contains "ERROR")
       echo $line
 ```
 
-### `text`
+### `text()`
 
 Reads the response body as text. This method consumes the response and leaves it
 in a "closed" state.
@@ -208,9 +180,3 @@ in a "closed" state.
 | [`Error`](./error.md) | A transport or protocol failure occurs |
 
 #### Example
-
-```
-
-let response = get https://api.example.com/users
-echo $response.text()
-```

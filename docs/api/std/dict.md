@@ -46,7 +46,7 @@ separately).
 
 ## Methods
 
-### `clear`
+### `clear()`
 
 Removes all key-value pairs.
 
@@ -90,7 +90,7 @@ assert (d.contains "multi" "second")
 assert (!d.contains "multi" "third")
 ```
 
-### `copy`
+### `copy()`
 
 Returns a shallow copy of the dictionary.
 
@@ -179,7 +179,7 @@ Adds a key-value pair. Does **not** remove existing values for the same key
 | `key`   |      | the key     |
 | `value` |      | the value   |
 
-### `keys`
+### `keys()`
 
 Returns an iterator of keys. Each distinct key is yielded exactly once, in the
 order its first pair was inserted.
@@ -190,7 +190,7 @@ If duplicate-key iteration is needed, use [`pairs`](#pairs) instead.
 
 iterator of keys
 
-### `pairs`
+### `pairs()`
 
 Returns an iterator yielding `[key, value]` pairs, the same as ordinary
 iteration. This method is present to allow uniform key/value iteration

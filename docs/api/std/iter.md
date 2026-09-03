@@ -37,7 +37,7 @@ Empty iterators return `false`.
 Returns an iterator that yields this iterator followed by each additional
 iterable in sequence.
 
-### `chomp`
+### `chomp()`
 
 Creates a wrapper `Iter` which removes one trailing line terminator (`\r\n` or
 `\n`) from each item, if present.
@@ -60,7 +60,7 @@ Distinct from [`Str.trim_end`](./str.md), which is about whitespace generally
 and takes an optional character set. `chomp` is about a line terminator
 specifically and takes nothing.
 
-### `count`
+### `count()`
 
 Consumes the iterator and returns the number of yielded values.
 
@@ -99,7 +99,7 @@ assert_eq [...["a"].crimp("\r\n")] ["a\r\n"]
 run cmd stdin: (["one", "two"].crimp())
 ```
 
-### `enumerate`
+### `enumerate()`
 
 Returns an iterator that yields `[index, value]` tuples.
 
@@ -133,7 +133,7 @@ Consumes the iterator left-to-right, repeatedly applying `func(acc, value)`.
 
 Returns `init` unchanged if the iterator is empty.
 
-### `kv`
+### `kv()`
 
 Returns an iterator wrapper that preserves normal iteration, but opts into
 key/value spreading.

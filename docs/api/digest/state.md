@@ -7,7 +7,7 @@ or [`Bin`](../std/bin.md) value updates the digest state with its bytes.
 
 ## Methods
 
-### `digest`
+### `digest()`
 
 Returns the current digest bytes without consuming the handle.
 

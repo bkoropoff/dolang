@@ -28,15 +28,6 @@ The reconnection delay hint from the stream, if present.
 
 [`Int`](../std/int.md) or `nil`
 
-#### Example
-
-```
-
-get https://api.example.com/stream do |response|
-  for event = response.events()
-    echo "[$event.type] $event.data"
-```
-
 ### `type`
 
 The event type. When the stream omits `event:`, or provides an empty `event:`

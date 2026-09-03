@@ -15,7 +15,7 @@ assert_eq (type $ [].sink()) $Sink
 
 ## Methods
 
-### `prechomp`
+### `prechomp()`
 
 Creates a wrapper `Sink` which removes a trailing line terminator (`\n` or
 `\r\n`) from each item, if present, before it is written.

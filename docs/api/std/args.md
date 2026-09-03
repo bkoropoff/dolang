@@ -30,7 +30,7 @@ assert_eq $pack.len 3
 
 ## Methods
 
-### `pos_keys`
+### `pos_keys()`
 
 Returns a tuple of positional values and keyed entries.
 
@@ -45,7 +45,7 @@ assert_eq [...keyed] [[:left:, 2], [:right:, 4]]
 assert_eq [...pack] [[0, 1], [:left:, 2], [1, 3], [:right:, 4]]
 ```
 
-### `pos_only`
+### `pos_only()`
 
 Returns an iterator over positional values.
 

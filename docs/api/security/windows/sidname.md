@@ -46,7 +46,7 @@ For recognized values, see
 #### Example
 
 ```
-let account = SidName.lookup "BUILTIN\\Users"
+let account = SidName.lookup BUILTIN\Users
 echo "$account.qualified_name ($account.kind)"
 ```
 

@@ -62,7 +62,7 @@ Tests whether the tuple contains the given element (by equality).
 
 `Bool`
 
-### `copy`
+### `copy()`
 
 Returns a shallow copy of the tuple. Because tuples are immutable, the
 returned copy may be the same object.
@@ -88,7 +88,7 @@ alternative is provided. Negative indexes count from the end.
 
 The value, or the default/else result.
 
-### `pairs`
+### `pairs()`
 
 Returns an iterator yielding `[index, value]` pairs.
 

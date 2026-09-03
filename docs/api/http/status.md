@@ -43,15 +43,15 @@ was attached.
 
 ## Methods
 
-### `body`
+### `body()`
 
 Returns the saved body excerpt as [`Bin`](../std/bin.md).
 
-### `json`
+### `json()`
 
 When the `json` feature is enabled, parses the saved body excerpt as JSON.
 
-### `text`
+### `text()`
 
 Returns the saved body excerpt as [`Str`](../std/str.md), failing on
 invalid UTF-8.

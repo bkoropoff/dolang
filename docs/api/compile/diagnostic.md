@@ -34,7 +34,7 @@ The primary source [`Span`](./span.md) for the diagnostic.
 
 ## Methods
 
-### `render`
+### `render()`
 
 Renders the diagnostic for terminal presentation. The rendered value does not
 include a final newline.
