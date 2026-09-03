@@ -5,7 +5,7 @@ use dolang::runtime::{
     value::Nil, vm::ModuleBuilder,
 };
 use dolang_ext_shell::ResultExt;
-use dolang_vfs_winnet::AccountPolicyUpdate;
+use dolang_vfs_winnet::policy;
 
 use crate::global::Global;
 
@@ -14,7 +14,7 @@ pub(crate) struct AccountPolicy;
 fn make_policy<'v>(
     strand: &mut Strand<'v, '_>,
     global: State<'v, Global<'v>>,
-    policy: dolang_vfs_winnet::AccountPolicy,
+    policy: policy::Policy,
     out: impl Output<'v>,
 ) {
     global
@@ -69,7 +69,7 @@ fn duration<'v, 's>(
 impl<'v> Object<'v> for AccountPolicy {
     const NAME: &'v str = "AccountPolicy";
     const MODULE: &'v str = "winnet";
-    type Annex = dolang_vfs_winnet::AccountPolicy;
+    type Annex = policy::Policy;
     type Type = ();
     type TypeAnnex = ();
 
@@ -125,7 +125,7 @@ pub(crate) fn configure_module<'v, 'a>(
         .value("AccountPolicy", global.account_policy)
         .function("account_policy", async move |strand, args, out| {
             let ([], []) = unpack!(strand, args, 0, 0)?;
-            let policy = dolang_vfs_winnet::account_policy(&dolang_ext_shell::vfs(strand))
+            let policy = policy::get(&dolang_ext_shell::vfs(strand))
                 .await
                 .into_sys(strand)?;
             make_policy(strand, global, policy, out);
@@ -166,7 +166,7 @@ pub(crate) fn configure_module<'v, 'a>(
                 lockout_observation_window_sym = None,
                 lockout_threshold_sym = None
             )?;
-            let mut update = AccountPolicyUpdate::default();
+            let mut update = policy::Update::default();
             if let Some(value) = min_length {
                 update =
                     update.min_password_length(integer(strand, &value, "min_password_length")?);
@@ -208,10 +208,9 @@ pub(crate) fn configure_module<'v, 'a>(
             if let Some(value) = threshold {
                 update = update.lockout_threshold(integer(strand, &value, "lockout_threshold")?);
             }
-            let policy =
-                dolang_vfs_winnet::update_account_policy(&dolang_ext_shell::vfs(strand), update)
-                    .await
-                    .into_sys(strand)?;
+            let policy = policy::update(&dolang_ext_shell::vfs(strand), update)
+                .await
+                .into_sys(strand)?;
             make_policy(strand, global, policy, out);
             Ok(())
         })

@@ -396,6 +396,8 @@ nav:
       - api/winnet/account-policy.md
       - api/winnet/group.md
       - api/winnet/group-info.md
+      - api/winnet/share.md
+      - api/winnet/share-info.md
       - api/winnet/user.md
       - api/winnet/user-flags.md
       - api/winnet/user-info.md

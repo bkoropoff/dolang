@@ -94,7 +94,7 @@ pub use windows::AccessMask;
 pub(crate) use windows::{
     Ace, AceFlags, Acl, SecDesc, SecDescControl, SecInfo, Sid, SidName, TokenGroup,
     TokenGroupAttributes, TokenInfo, WellKnownSids, as_windows_sid, create_sec_desc, create_sid,
-    create_sid_name, create_token_info, sec_desc_from_args, windows_sid,
+    create_sid_name, create_token_info, sec_desc_from_args, sec_desc_from_value, windows_sid,
 };
 
 /// A position inside a declarative specification.

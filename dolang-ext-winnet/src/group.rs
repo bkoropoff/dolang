@@ -7,18 +7,29 @@ use dolang::runtime::{
     vm::ModuleBuilder,
 };
 use dolang_ext_shell::ResultExt;
-use dolang_vfs_winnet::{GroupCreate, GroupUpdate};
+use dolang_vfs_winnet::group;
 
-pub(crate) struct Group(pub(crate) Option<dolang_vfs_winnet::Group>);
-pub(crate) struct Groups(pub(crate) dolang_vfs_winnet::Groups);
-pub(crate) struct GroupMembers(pub(crate) dolang_vfs_winnet::GroupMembers);
+use crate::rights::{self, Principal};
+
+pub(crate) struct Group(pub(crate) Option<group::Group>);
+
+impl Principal for Group {
+    const NAME: &'static str = "group";
+
+    fn sid(&self) -> Option<&dolang_winterop::security::Sid> {
+        self.0.as_ref().map(group::Group::sid)
+    }
+}
+
+pub(crate) struct Groups(pub(crate) group::Groups);
+pub(crate) struct GroupMembers(pub(crate) group::Members);
 pub(crate) struct GroupInfo;
-pub(crate) struct GroupInfoAnnex(pub(crate) dolang_vfs_winnet::GroupInfo);
+pub(crate) struct GroupInfoAnnex(pub(crate) group::Info);
 
 fn make_group<'v>(
     strand: &mut Strand<'v, '_>,
     global: State<'v, Global<'v>>,
-    group: dolang_vfs_winnet::Group,
+    group: group::Group,
     out: impl Output<'v>,
 ) {
     global.group.create(strand, Group(Some(group)), out);
@@ -26,7 +37,7 @@ fn make_group<'v>(
 fn make_info<'v>(
     strand: &mut Strand<'v, '_>,
     global: State<'v, Global<'v>>,
-    info: dolang_vfs_winnet::GroupInfo,
+    info: group::Info,
     out: impl Output<'v>,
 ) {
     global
@@ -57,7 +68,7 @@ fn principal<'v, 's>(
 enum ResultPrincipal {
     Name(String),
     Sid(dolang_winterop::security::Sid),
-    Info(dolang_vfs_winnet::GroupInfo),
+    Info(group::Info),
 }
 async fn member_sid<'v, 's>(
     strand: &mut Strand<'v, 's>,
@@ -85,6 +96,7 @@ impl<'v> Object<'v> for Group {
     type Type = ();
     type TypeAnnex = ();
     fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
+        let builder = rights::build(builder);
         builder
             .get("sid", |this, strand, mut out| {
                 let b = this.borrow(strand)?;
@@ -108,57 +120,13 @@ impl<'v> Object<'v> for Group {
                 make_info(strand, global, info, out);
                 Ok(())
             })
-            .method("rights", async move |this, strand, args, out| {
-                let ([], []) = unpack!(strand, args, 0, 0)?;
-                let rights = this
-                    .borrow(strand)?
-                    .0
-                    .as_ref()
-                    .ok_or_else(|| Error::state_error(strand, "group was deleted"))?
-                    .rights()
-                    .await
-                    .into_sys(strand)?;
-                crate::user::make_rights(strand, rights, out)
-            })
-            .method("grant_right", async move |this, strand, args, out| {
-                let ([right], []) = unpack!(strand, args, 1, 0)?;
-                let right = right
-                    .as_str(strand)
-                    .ok_or_else(|| Error::type_error(strand, "right must be a Str"))?
-                    .to_string();
-                this.borrow(strand)?
-                    .0
-                    .as_ref()
-                    .ok_or_else(|| Error::state_error(strand, "group was deleted"))?
-                    .grant_right(right)
-                    .await
-                    .into_sys(strand)?;
-                Output::set(strand, out, Nil);
-                Ok(())
-            })
-            .method("revoke_right", async move |this, strand, args, out| {
-                let ([right], []) = unpack!(strand, args, 1, 0)?;
-                let right = right
-                    .as_str(strand)
-                    .ok_or_else(|| Error::type_error(strand, "right must be a Str"))?
-                    .to_string();
-                this.borrow(strand)?
-                    .0
-                    .as_ref()
-                    .ok_or_else(|| Error::state_error(strand, "group was deleted"))?
-                    .revoke_right(right)
-                    .await
-                    .into_sys(strand)?;
-                Output::set(strand, out, Nil);
-                Ok(())
-            })
             .method("update", async move |this, strand, args, out| {
                 let global = strand.state::<Global<'v>>();
                 let name_sym = global.name;
                 let comment_sym = global.comment;
                 let ([], [name, comment]) =
                     unpack!(strand, args, 0, 0, name_sym = None, comment_sym = None)?;
-                let mut update = GroupUpdate::default();
+                let mut update = group::Update::default();
                 if let Some(v) = name {
                     update = update.name(
                         v.as_str(strand)
@@ -352,9 +320,9 @@ pub(crate) fn configure_module<'v, 'a>(
             let ([value], []) = unpack!(strand, args, 1, 0)?;
             let vfs = dolang_ext_shell::vfs(strand);
             let group = match principal(strand, global, &value)? {
-                ResultPrincipal::Name(v) => dolang_vfs_winnet::Group::by_name(&vfs, &v).await,
-                ResultPrincipal::Sid(v) => dolang_vfs_winnet::Group::by_sid(&vfs, &v).await,
-                ResultPrincipal::Info(info) => Ok(dolang_vfs_winnet::Group::from_info(&vfs, &info)),
+                ResultPrincipal::Name(v) => group::by_name(&vfs, &v).await,
+                ResultPrincipal::Sid(v) => group::by_sid(&vfs, &v).await,
+                ResultPrincipal::Info(info) => Ok(group::from_info(&vfs, &info)),
             }
             .into_sys(strand)?;
             make_group(strand, global, group, out);
@@ -364,9 +332,7 @@ pub(crate) fn configure_module<'v, 'a>(
             let ([], []) = unpack!(strand, args, 0, 0)?;
             global.groups.create_with_annex(
                 strand,
-                Groups(dolang_vfs_winnet::Groups::new(&dolang_ext_shell::vfs(
-                    strand,
-                ))),
+                Groups(group::enumerate(&dolang_ext_shell::vfs(strand))),
                 global,
                 out,
             );
@@ -388,9 +354,9 @@ pub(crate) fn configure_module<'v, 'a>(
                 ),
                 None => None,
             };
-            let group = dolang_vfs_winnet::Group::create(
+            let group = group::create(
                 &dolang_ext_shell::vfs(strand),
-                GroupCreate::new(name).comment(comment),
+                group::Create::new(name).comment(comment),
             )
             .await
             .into_sys(strand)?;

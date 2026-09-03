@@ -23,7 +23,8 @@ impl Extension for WinnetExt {
         let module = builder.module("winnet");
         let module = crate::user::configure_module(module, global);
         let module = crate::policy::configure_module(module, global);
-        crate::group::configure_module(module, global).commit();
+        let module = crate::group::configure_module(module, global);
+        crate::share::configure_module(module, global).commit();
         Ok(())
     }
 }

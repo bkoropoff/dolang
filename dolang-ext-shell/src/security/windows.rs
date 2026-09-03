@@ -2362,6 +2362,15 @@ async fn coerce_sec_desc<'v, 's>(
         .map_err(|error| Error::value(strand, format!("{path}: {error}")))
 }
 
+pub(crate) async fn sec_desc_from_value<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    value: &Value<'v>,
+    name: &str,
+) -> Result<'v, 's, VfsSecDesc> {
+    coerce_sec_desc(strand, global, value, &SpecPath::root(name)).await
+}
+
 pub(crate) fn create_sec_desc<'v>(
     strand: &mut Strand<'v, '_>,
     global: State<'v, Global<'v>>,

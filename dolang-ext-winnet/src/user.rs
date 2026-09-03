@@ -4,47 +4,57 @@ use dolang::runtime::{
     Error, Instance, Object, Output, Result, Slot, State, Strand, Value,
     object::TypeBuilder,
     unpack,
-    value::{Empty, Nil, TypeObject},
+    value::{Nil, TypeObject},
     vm::ModuleBuilder,
 };
 use dolang_ext_shell::ResultExt;
-use dolang_vfs_winnet::{UserCreate, UserUpdate};
+use dolang_vfs_winnet::user;
 
-use crate::global::Global;
+use crate::{
+    global::Global,
+    rights::{self, Principal},
+};
 
-pub(crate) struct User(pub(crate) Option<dolang_vfs_winnet::User>);
-pub(crate) struct Users(pub(crate) dolang_vfs_winnet::Users);
+pub(crate) struct User(pub(crate) Option<user::User>);
+
+pub(crate) struct Users(pub(crate) user::Users);
+
 pub(crate) struct UserInfo;
+
 pub(crate) struct UserFlags;
+
 pub(crate) struct UserInfoAnnex<'v> {
     global: State<'v, Global<'v>>,
-    info: dolang_vfs_winnet::UserInfo,
+    info: user::Info,
 }
 
 fn make_user<'v>(
     strand: &mut Strand<'v, '_>,
     global: State<'v, Global<'v>>,
-    user: dolang_vfs_winnet::User,
+    user: user::User,
     out: impl Output<'v>,
 ) {
     global.user.create(strand, User(Some(user)), out);
 }
+
 fn make_info<'v>(
     strand: &mut Strand<'v, '_>,
     global: State<'v, Global<'v>>,
-    info: dolang_vfs_winnet::UserInfo,
+    info: user::Info,
     out: impl Output<'v>,
 ) {
     global
         .info
         .create_with_annex(strand, UserInfo, UserInfoAnnex { global, info }, out);
 }
+
 fn nullable_str<'v>(value: Option<&str>, out: impl Output<'v>, strand: &mut Strand<'v, '_>) {
     match value {
         Some(v) => Output::set(strand, out, v),
         None => Output::set(strand, out, Nil),
     }
 }
+
 fn nullable_windows_path<'v, 's>(
     strand: &mut Strand<'v, 's>,
     value: Option<&typed_path::Utf8WindowsPath>,
@@ -58,21 +68,7 @@ fn nullable_windows_path<'v, 's>(
         }
     }
 }
-pub(crate) fn make_rights<'v, 's>(
-    strand: &mut Strand<'v, 's>,
-    rights: Vec<String>,
-    mut out: Slot<'v, '_>,
-) -> Result<'v, 's, ()> {
-    strand.with_slots_sync(|strand, [mut item]| {
-        Output::set(strand, &mut out, Empty::Array);
-        let array = out.as_array(strand).unwrap();
-        for right in rights {
-            Output::set(strand, &mut item, right.as_str());
-            array.push(strand, &item)?;
-        }
-        Ok(())
-    })
-}
+
 fn nullable_time<'v, 's>(
     strand: &mut Strand<'v, 's>,
     seconds: Option<u64>,
@@ -108,8 +104,8 @@ fn update_from_slots<'v, 's>(
     disabled: Option<Slot<'v, '_>>,
     password_never_expires: Option<Slot<'v, '_>>,
     password_cannot_change: Option<Slot<'v, '_>>,
-) -> Result<'v, 's, UserUpdate> {
-    let mut update = UserUpdate::default();
+) -> Result<'v, 's, user::Update> {
+    let mut update = user::Update::default();
     if let Some(value) = name {
         update = update.name(
             value
@@ -136,6 +132,7 @@ fn update_from_slots<'v, 's>(
             }
         };
     }
+
     if let Some(value) = password {
         update = update.password(
             value
@@ -207,6 +204,14 @@ fn update_from_slots<'v, 's>(
     Ok(update)
 }
 
+impl Principal for User {
+    const NAME: &'static str = "user";
+
+    fn sid(&self) -> Option<&dolang_winterop::security::Sid> {
+        self.0.as_ref().map(user::User::sid)
+    }
+}
+
 impl<'v> Object<'v> for User {
     const NAME: &'v str = "User";
     const MODULE: &'v str = "winnet";
@@ -214,6 +219,7 @@ impl<'v> Object<'v> for User {
     type Type = ();
     type TypeAnnex = ();
     fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
+        let builder = rights::build(builder);
         builder
             .get("sid", |this, strand, mut out| {
                 let b = this.borrow(strand)?;
@@ -235,50 +241,6 @@ impl<'v> Object<'v> for User {
                         .into_sys(strand)?
                 };
                 make_info(strand, global, info, out);
-                Ok(())
-            })
-            .method("rights", async move |this, strand, args, out| {
-                let ([], []) = unpack!(strand, args, 0, 0)?;
-                let rights = this
-                    .borrow(strand)?
-                    .0
-                    .as_ref()
-                    .ok_or_else(|| Error::state_error(strand, "user was deleted"))?
-                    .rights()
-                    .await
-                    .into_sys(strand)?;
-                make_rights(strand, rights, out)
-            })
-            .method("grant_right", async move |this, strand, args, out| {
-                let ([right], []) = unpack!(strand, args, 1, 0)?;
-                let right = right
-                    .as_str(strand)
-                    .ok_or_else(|| Error::type_error(strand, "right must be a Str"))?
-                    .to_string();
-                this.borrow(strand)?
-                    .0
-                    .as_ref()
-                    .ok_or_else(|| Error::state_error(strand, "user was deleted"))?
-                    .grant_right(right)
-                    .await
-                    .into_sys(strand)?;
-                Output::set(strand, out, Nil);
-                Ok(())
-            })
-            .method("revoke_right", async move |this, strand, args, out| {
-                let ([right], []) = unpack!(strand, args, 1, 0)?;
-                let right = right
-                    .as_str(strand)
-                    .ok_or_else(|| Error::type_error(strand, "right must be a Str"))?
-                    .to_string();
-                this.borrow(strand)?
-                    .0
-                    .as_ref()
-                    .ok_or_else(|| Error::state_error(strand, "user was deleted"))?
-                    .revoke_right(right)
-                    .await
-                    .into_sys(strand)?;
-                Output::set(strand, out, Nil);
                 Ok(())
             })
             .method("update", async move |this, strand, args, out| {
@@ -413,7 +375,7 @@ impl<'v> Object<'v> for Users {
 impl<'v> Object<'v> for UserFlags {
     const NAME: &'v str = "UserFlags";
     const MODULE: &'v str = "winnet";
-    type Annex = dolang_vfs_winnet::UserFlags;
+    type Annex = user::Flags;
     type Type = ();
     type TypeAnnex = ();
     fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
@@ -479,7 +441,7 @@ impl<'v> Object<'v> for UserInfo {
                     this.annex()
                         .info
                         .flags()
-                        .contains(dolang_vfs_winnet::UserFlags::ACCOUNT_DISABLED),
+                        .contains(user::Flags::ACCOUNT_DISABLED),
                 );
                 Ok(())
             })
@@ -490,7 +452,7 @@ impl<'v> Object<'v> for UserInfo {
                     this.annex()
                         .info
                         .flags()
-                        .contains(dolang_vfs_winnet::UserFlags::PASSWORD_NEVER_EXPIRES),
+                        .contains(user::Flags::PASSWORD_NEVER_EXPIRES),
                 );
                 Ok(())
             })
@@ -501,7 +463,7 @@ impl<'v> Object<'v> for UserInfo {
                     this.annex()
                         .info
                         .flags()
-                        .contains(dolang_vfs_winnet::UserFlags::PASSWORD_CANNOT_CHANGE),
+                        .contains(user::Flags::PASSWORD_CANNOT_CHANGE),
                 );
                 Ok(())
             })
@@ -557,7 +519,7 @@ fn principal<'v, 's>(
 enum ResultPrincipal {
     Name(String),
     Sid(dolang_winterop::security::Sid),
-    Info(Box<dolang_vfs_winnet::UserInfo>),
+    Info(Box<user::Info>),
 }
 
 pub(crate) fn configure_module<'v, 'a>(
@@ -572,9 +534,9 @@ pub(crate) fn configure_module<'v, 'a>(
             let ([value], []) = unpack!(strand, args, 1, 0)?;
             let vfs = dolang_ext_shell::vfs(strand);
             let user = match principal(strand, global, &value)? {
-                ResultPrincipal::Name(name) => dolang_vfs_winnet::User::by_name(&vfs, &name).await,
-                ResultPrincipal::Sid(sid) => dolang_vfs_winnet::User::by_sid(&vfs, &sid).await,
-                ResultPrincipal::Info(info) => Ok(dolang_vfs_winnet::User::from_info(&vfs, &info)),
+                ResultPrincipal::Name(name) => user::by_name(&vfs, &name).await,
+                ResultPrincipal::Sid(sid) => user::by_sid(&vfs, &sid).await,
+                ResultPrincipal::Info(info) => Ok(user::from_info(&vfs, &info)),
             }
             .into_sys(strand)?;
             make_user(strand, global, user, out);
@@ -584,9 +546,7 @@ pub(crate) fn configure_module<'v, 'a>(
             let ([], []) = unpack!(strand, args, 0, 0)?;
             global.users.create_with_annex(
                 strand,
-                Users(dolang_vfs_winnet::Users::new(&dolang_ext_shell::vfs(
-                    strand,
-                ))),
+                Users(user::enumerate(&dolang_ext_shell::vfs(strand))),
                 global,
                 out,
             );
@@ -664,9 +624,9 @@ pub(crate) fn configure_module<'v, 'a>(
                 password_never_expires,
                 password_cannot_change,
             )?;
-            let user = dolang_vfs_winnet::User::create(
+            let user = user::create(
                 &dolang_ext_shell::vfs(strand),
-                UserCreate::new(name, password).update(update),
+                user::Create::new(name, password).update(update),
             )
             .await
             .into_sys(strand)?;

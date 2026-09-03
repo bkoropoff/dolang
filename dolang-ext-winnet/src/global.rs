@@ -1,6 +1,7 @@
 use crate::{
     group::{Group, GroupInfo, GroupMembers, Groups},
     policy::AccountPolicy,
+    share::{Share, ShareInfo, Shares},
     user::{User, UserFlags, UserInfo, Users},
 };
 use dolang::runtime::{
@@ -18,6 +19,9 @@ pub(crate) struct Global<'v> {
     pub(crate) groups: Type<'v, Groups>,
     pub(crate) group_members: Type<'v, GroupMembers>,
     pub(crate) account_policy: Type<'v, AccountPolicy>,
+    pub(crate) share: Type<'v, Share>,
+    pub(crate) share_info: Type<'v, ShareInfo>,
+    pub(crate) shares: Type<'v, Shares>,
     pub(crate) name: Sym<'v, 'v>,
     pub(crate) password: Sym<'v, 'v>,
     pub(crate) full_name: Sym<'v, 'v>,
@@ -39,6 +43,16 @@ pub(crate) struct Global<'v> {
     pub(crate) lockout_duration: Sym<'v, 'v>,
     pub(crate) lockout_observation_window: Sym<'v, 'v>,
     pub(crate) lockout_threshold: Sym<'v, 'v>,
+    pub(crate) path: Sym<'v, 'v>,
+    pub(crate) kind: Sym<'v, 'v>,
+    pub(crate) max_uses: Sym<'v, 'v>,
+    pub(crate) special: Sym<'v, 'v>,
+    pub(crate) temporary: Sym<'v, 'v>,
+    pub(crate) sec_desc: Sym<'v, 'v>,
+    pub(crate) disktree: Sym<'v, 'v>,
+    pub(crate) printq: Sym<'v, 'v>,
+    pub(crate) device: Sym<'v, 'v>,
+    pub(crate) ipc: Sym<'v, 'v>,
 }
 pub struct Tag;
 impl<'v> Stateful<'v> for Global<'v> {
@@ -56,6 +70,9 @@ impl<'v> Global<'v> {
             groups: builder.register_type(),
             group_members: builder.register_type(),
             account_policy: builder.register_type(),
+            share: builder.register_type(),
+            share_info: builder.register_type(),
+            shares: builder.register_type(),
             name: builder.sym("name"),
             password: builder.sym("password"),
             full_name: builder.sym("full_name"),
@@ -77,6 +94,16 @@ impl<'v> Global<'v> {
             lockout_duration: builder.sym("lockout_duration"),
             lockout_observation_window: builder.sym("lockout_observation_window"),
             lockout_threshold: builder.sym("lockout_threshold"),
+            path: builder.sym("path"),
+            kind: builder.sym("kind"),
+            max_uses: builder.sym("max_uses"),
+            special: builder.sym("special"),
+            temporary: builder.sym("temporary"),
+            sec_desc: builder.sym("sec_desc"),
+            disktree: builder.sym("DISKTREE"),
+            printq: builder.sym("PRINTQ"),
+            device: builder.sym("DEVICE"),
+            ipc: builder.sym("IPC"),
         }
     }
 }

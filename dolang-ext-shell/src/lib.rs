@@ -377,6 +377,16 @@ pub async fn sec_desc_from_args<'v, 's>(
     security::sec_desc_from_args(strand, global, args, &security::SpecPath::root(name)).await
 }
 
+/// Coerce a descriptor value accepted by the Windows security APIs.
+pub async fn sec_desc_from_value<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    value: &dolang::runtime::Value<'v>,
+    name: &str,
+) -> Result<'v, 's, dolang_winterop::security::SecDesc> {
+    let global = strand.state::<Global<'v>>();
+    security::sec_desc_from_value(strand, global, value, name).await
+}
+
 /// The `security.windows.AccessMask` type object.
 ///
 /// A domain-specific access mask — registry key rights, service rights —

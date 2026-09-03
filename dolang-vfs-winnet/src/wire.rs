@@ -3,12 +3,139 @@ use dolang_vfs::{
     extension::{ExtContext, VfsExtension},
     path::WirePath,
 };
-use dolang_winterop::security::Sid;
+use dolang_winterop::security::{SecDesc, Sid};
 use serde::{Deserialize, Serialize};
 use typed_path::{Utf8TypedPath, Utf8WindowsPath, Utf8WindowsPathBuf};
 
 #[cfg(windows)]
 use crate::backend;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ShareKind {
+    #[default]
+    DiskTree,
+    PrintQueue,
+    Device,
+    Ipc,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShareInfo {
+    pub(crate) name: String,
+    pub(crate) kind: ShareKind,
+    pub(crate) special: bool,
+    pub(crate) temporary: bool,
+    pub(crate) comment: Option<String>,
+    pub(crate) max_uses: Option<u32>,
+    pub(crate) current_uses: u32,
+    pub(crate) path: WirePath,
+    pub(crate) sec_desc: Option<SecDesc>,
+}
+impl ShareInfo {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn kind(&self) -> ShareKind {
+        self.kind
+    }
+    pub fn special(&self) -> bool {
+        self.special
+    }
+    pub fn temporary(&self) -> bool {
+        self.temporary
+    }
+    pub fn comment(&self) -> Option<&str> {
+        self.comment.as_deref()
+    }
+    pub fn max_uses(&self) -> Option<u32> {
+        self.max_uses
+    }
+    pub fn current_uses(&self) -> u32 {
+        self.current_uses
+    }
+    pub fn path(&self) -> Option<&Utf8WindowsPath> {
+        match (&self.path).into() {
+            Utf8TypedPath::Windows(path) => Some(path),
+            Utf8TypedPath::Unix(_) => None,
+        }
+    }
+    /// The share's security descriptor, or `None` when the share uses the
+    /// server service's default security.
+    pub fn sec_desc(&self) -> Option<&SecDesc> {
+        self.sec_desc.as_ref()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShareCreate {
+    pub(crate) name: String,
+    pub(crate) path: WirePath,
+    pub(crate) kind: ShareKind,
+    pub(crate) comment: Option<String>,
+    pub(crate) max_uses: Option<u32>,
+    pub(crate) special: bool,
+    pub(crate) temporary: bool,
+    pub(crate) sec_desc: Option<SecDesc>,
+}
+impl ShareCreate {
+    pub fn new(name: String, path: Utf8WindowsPathBuf) -> Self {
+        Self {
+            name,
+            path: WirePath::from(Utf8TypedPath::Windows(&path)),
+            kind: ShareKind::default(),
+            comment: None,
+            max_uses: None,
+            special: false,
+            temporary: false,
+            sec_desc: None,
+        }
+    }
+    pub fn kind(mut self, value: ShareKind) -> Self {
+        self.kind = value;
+        self
+    }
+    pub fn comment(mut self, value: Option<String>) -> Self {
+        self.comment = value;
+        self
+    }
+    pub fn max_uses(mut self, value: Option<u32>) -> Self {
+        self.max_uses = value;
+        self
+    }
+    pub fn special(mut self, value: bool) -> Self {
+        self.special = value;
+        self
+    }
+    pub fn temporary(mut self, value: bool) -> Self {
+        self.temporary = value;
+        self
+    }
+    pub fn sec_desc(mut self, value: SecDesc) -> Self {
+        self.sec_desc = Some(value);
+        self
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShareUpdate {
+    pub(crate) comment: Option<Option<String>>,
+    pub(crate) max_uses: Option<Option<u32>>,
+    pub(crate) sec_desc: Option<SecDesc>,
+}
+impl ShareUpdate {
+    pub fn comment(mut self, value: Option<String>) -> Self {
+        self.comment = Some(value);
+        self
+    }
+    pub fn max_uses(mut self, value: Option<u32>) -> Self {
+        self.max_uses = Some(value);
+        self
+    }
+    pub fn sec_desc(mut self, value: SecDesc) -> Self {
+        self.sec_desc = Some(value);
+        self
+    }
+}
 
 bitflags::bitflags! {
     /// Native `USER_INFO_4::usri4_flags`, including unknown bits.
@@ -430,6 +557,20 @@ pub(crate) enum WinNetRequest {
     },
     AccountPolicy,
     UpdateAccountPolicy(AccountPolicyUpdate),
+    ShareInfo {
+        name: String,
+    },
+    SharesPage {
+        resume: u64,
+    },
+    CreateShare(ShareCreate),
+    UpdateShare {
+        name: String,
+        update: ShareUpdate,
+    },
+    DeleteShare {
+        name: String,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -463,6 +604,12 @@ pub(crate) enum WinNetResponse {
     Unit,
     AccountRights(Vec<String>),
     AccountPolicy(AccountPolicy),
+    ShareInfo(Box<ShareInfo>),
+    SharesPage {
+        shares: Vec<ShareInfo>,
+        resume: u64,
+        done: bool,
+    },
 }
 
 pub(crate) struct WinNetExt;
@@ -470,7 +617,7 @@ impl VfsExtension for WinNetExt {
     type Request = WinNetRequest;
     type Response = Result<WinNetResponse, Error>;
     const NAME: &'static str = "dolang-vfs-winnet";
-    const VERSION: u16 = 3;
+    const VERSION: u16 = 4;
     const AVAILABLE: bool = cfg!(windows);
     async fn handle(&self, ctx: &mut ExtContext<'_>, request: WinNetRequest) -> Self::Response {
         #[cfg(windows)]
@@ -532,6 +679,35 @@ mod tests {
         assert_eq!(
             postcard::from_bytes::<AccountPolicyUpdate>(&bytes).unwrap(),
             update
+        );
+    }
+    #[test]
+    fn shares_round_trip() {
+        let descriptor = SecDesc::from_bytes(&[
+            1, 0, 0, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ])
+        .unwrap();
+        let create = ShareCreate::new("docs".into(), Utf8WindowsPathBuf::from(r"C:\docs"))
+            .kind(ShareKind::Ipc)
+            .comment(Some("comment".into()))
+            .max_uses(Some(7))
+            .special(true)
+            .temporary(true)
+            .sec_desc(descriptor.clone());
+        let bytes = postcard::to_stdvec(&create).unwrap();
+        assert_eq!(postcard::from_bytes::<ShareCreate>(&bytes).unwrap(), create);
+        let update = ShareUpdate::default()
+            .comment(None)
+            .max_uses(None)
+            .sec_desc(descriptor);
+        let bytes = postcard::to_stdvec(&update).unwrap();
+        assert_eq!(postcard::from_bytes::<ShareUpdate>(&bytes).unwrap(), update);
+        let request = WinNetRequest::SharesPage {
+            resume: u64::MAX - 1,
+        };
+        let bytes = postcard::to_stdvec(&request).unwrap();
+        assert!(
+            matches!(postcard::from_bytes::<WinNetRequest>(&bytes).unwrap(), WinNetRequest::SharesPage { resume } if resume == u64::MAX - 1)
         );
     }
 }
