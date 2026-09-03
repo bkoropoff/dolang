@@ -1362,19 +1362,6 @@ impl Direct {
         }
     }
 
-    fn windows_parse_stream_name(name: &str) -> Result<(String, String)> {
-        let rest = name
-            .strip_prefix(':')
-            .ok_or_else(|| Error::new(ErrorKind::InvalidData, "stream name missing `:` prefix"))?;
-        let split = rest
-            .rfind(':')
-            .ok_or_else(|| Error::new(ErrorKind::InvalidData, "stream name missing type suffix"))?;
-        let stream_type = rest[split + 1..]
-            .strip_prefix('$')
-            .ok_or_else(|| Error::new(ErrorKind::InvalidData, "stream type missing `$` prefix"))?;
-        Ok((rest[..split].to_owned(), stream_type.to_owned()))
-    }
-
     fn windows_parse_streams(buf: &[u8]) -> Result<Vec<StreamEntry>> {
         let mut streams = Vec::new();
         let mut offset = 0usize;
@@ -1398,7 +1385,7 @@ impl Direct {
                 unsafe { slice::from_raw_parts(info.StreamName.as_ptr(), name_len / 2) };
             let raw_name = String::from_utf16(name_slice)
                 .map_err(|_| Error::new(ErrorKind::InvalidData, "stream name is not UTF-16"))?;
-            let (name, r#type) = Self::windows_parse_stream_name(&raw_name)?;
+            let (name, r#type) = crate::path::stream::parse_raw_name(&raw_name)?;
             let size = u64::try_from(info.StreamSize)
                 .map_err(|_| Error::new(ErrorKind::InvalidData, "stream size out of range"))?;
             let alloc_size = u64::try_from(info.StreamAllocationSize).map_err(|_| {

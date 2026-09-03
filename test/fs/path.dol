@@ -321,3 +321,14 @@ def windows_path_stream_fields()
 
   assert_throws $ValueError do windows_fs.Path "file.txt:zone:DATA"
   assert_throws $ValueError do windows_fs.Path "file.txt:a:b:c"
+
+  # Name operations apply to the file name and leave the stream attached.
+  assert_eq (str (typed_stream.add_ext "gz")) r"file.txt.gz:zone:$DATA"
+  assert_eq (str (typed_stream.with_ext "md")) r"file.md:zone:$DATA"
+  assert_eq (str (typed_stream.without_ext())) r"file:zone:$DATA"
+  assert_eq (str (typed_stream.with_stem "notes")) r"notes.txt:zone:$DATA"
+  assert_eq (str (typed_stream.with_name "other.log")) r"other.log:zone:$DATA"
+  assert_eq (str (named_stream.add_ext "gz")) "file.txt.gz:zone"
+
+  # `/` names a different file, so the stream does not follow it.
+  assert_eq (str (typed_stream / "child")) r"file.txt\child"

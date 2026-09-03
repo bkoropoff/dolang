@@ -243,7 +243,9 @@ pub async fn set_program<'v, 's>(
 pub fn as_path<'v, 's>(strand: &mut Strand<'v, 's>, value: &Value<'v>) -> Option<PathBuf> {
     let global = strand.state::<Global<'v>>();
     if let Some(path) = global.types.unix_path.cast(value) {
-        path.enter_sync(strand, |_strand, inst| inst.annex().inner.to_native().ok())
+        path.enter_sync(strand, |_strand, inst| {
+            inst.annex().path_buf().to_native().ok()
+        })
     } else if let Some(path) = global.types.windows_path.cast(value) {
         path.enter_sync(strand, |_strand, inst| {
             inst.annex().path_buf().to_native().ok()
@@ -261,8 +263,8 @@ pub fn as_unix_path<'v, 's>(
     let global = strand.state::<Global<'v>>();
     let path = global.types.unix_path.cast(value)?;
     path.enter_sync(strand, |_strand, inst| {
-        let inner = &inst.annex().inner;
-        (inner.kind() == vfs_path::Kind::Unix).then(|| inner.clone())
+        let path = &inst.annex().path;
+        (path.kind() == vfs_path::Kind::Unix).then(|| path.clone())
     })
 }
 
@@ -274,8 +276,8 @@ pub fn as_windows_path<'v, 's>(
     let global = strand.state::<Global<'v>>();
     let path = global.types.windows_path.cast(value)?;
     path.enter_sync(strand, |_strand, inst| {
-        let inner = &inst.annex().inner;
-        (inner.kind() == vfs_path::Kind::Windows).then(|| inner.clone())
+        let path = &inst.annex().path;
+        (path.kind() == vfs_path::Kind::Windows).then(|| path.clone())
     })
 }
 

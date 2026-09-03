@@ -4,6 +4,12 @@
 //! in, so a path built for a Windows target keeps Windows semantics even when it
 //! is manipulated on a Unix host. They are the only path types that appear in
 //! this crate's public API.
+//!
+//! Knowing the syntax is also what lets the component accessors handle a
+//! Windows alternate data stream suffix (`file.txt:zone:$DATA`) as the two
+//! things it is — a file name and a [`StreamSpec`] — rather than as one opaque
+//! component. On a Unix path `:` is an ordinary filename character, so the
+//! stream accessors are all no-ops there.
 
 use serde::{Deserialize, Serialize};
 use typed_path::{Utf8TypedPath, Utf8TypedPathBuf, Utf8UnixPath, Utf8WindowsPath};
@@ -11,8 +17,10 @@ use typed_path::{Utf8TypedPath, Utf8TypedPathBuf, Utf8UnixPath, Utf8WindowsPath}
 use crate::error::{Error, ErrorKind, Result};
 
 mod components;
+pub(crate) mod stream;
 
 pub use components::{Component, Components, WindowsPrefix};
+pub use stream::{StreamSpec, StreamSpecBuf};
 
 /// A standard location resolved by a VFS target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,19 +224,97 @@ impl<'a> Path<'a> {
         .map(Self)
     }
 
-    /// Returns the final component.
+    /// Returns the final component, excluding any alternate data stream
+    /// suffix.
     pub fn file_name(&self) -> Option<&'a str> {
+        self.split_stream().0
+    }
+
+    /// Returns the final component exactly as it is spelled, including any
+    /// alternate data stream suffix.
+    pub fn file_name_raw(&self) -> Option<&'a str> {
         project!(self, |path| path.file_name())
     }
 
-    /// Returns the final component without its extension.
+    /// Returns the final component without its extension or its alternate data
+    /// stream suffix.
     pub fn file_stem(&self) -> Option<&'a str> {
+        match self.split_stream() {
+            (Some(base), Some(_)) => Path::new(base, self.kind()).file_stem_raw(),
+            _ => self.file_stem_raw(),
+        }
+    }
+
+    /// Returns the extension of the final component, ignoring any alternate
+    /// data stream suffix.
+    pub fn extension(&self) -> Option<&'a str> {
+        match self.split_stream() {
+            (Some(base), Some(_)) => Path::new(base, self.kind()).extension_raw(),
+            _ => self.extension_raw(),
+        }
+    }
+
+    fn file_stem_raw(&self) -> Option<&'a str> {
         project!(self, |path| path.file_stem())
     }
 
-    /// Returns the extension of the final component.
-    pub fn extension(&self) -> Option<&'a str> {
+    fn extension_raw(&self) -> Option<&'a str> {
         project!(self, |path| path.extension())
+    }
+
+    /// Splits the final component into its base name and alternate data stream
+    /// specifier.
+    ///
+    /// A malformed suffix reads here as no stream at all, which is what keeps
+    /// the component accessors infallible; [`Path::stream`] is the accessor
+    /// that reports the difference.
+    fn split_stream(&self) -> (Option<&'a str>, Option<StreamSpec<'a>>) {
+        let Some(name) = self.file_name_raw() else {
+            return (None, None);
+        };
+        if self.kind() != Kind::Windows {
+            return (Some(name), None);
+        }
+        match stream::split_suffix(name) {
+            Ok((base, spec)) => (Some(base), spec),
+            Err(_) => (Some(name), None),
+        }
+    }
+
+    /// Returns the alternate data stream specified by the final component.
+    ///
+    /// Always `None` for a Unix path.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the final component carries a suffix that does not follow the
+    /// `name:stream[:$TYPE]` grammar.
+    pub fn stream(&self) -> Result<Option<StreamSpec<'a>>> {
+        if self.kind() != Kind::Windows {
+            return Ok(None);
+        }
+        match self.file_name_raw() {
+            Some(name) => Ok(stream::split_suffix(name)?.1),
+            None => Ok(None),
+        }
+    }
+
+    /// Returns this path with its alternate data stream specifier replaced.
+    ///
+    /// Has no effect on a Unix path.
+    pub fn with_stream(&self, spec: Option<StreamSpec<'_>>) -> PathBuf {
+        let (Some(base), _) = self.split_stream() else {
+            return self.to_path_buf();
+        };
+        if self.kind() != Kind::Windows {
+            return self.to_path_buf();
+        }
+        self.with_file_name_raw(stream::join_suffix(base, spec))
+    }
+
+    /// Returns this path with any alternate data stream specifier removed.
+    pub fn without_stream(&self) -> PathBuf {
+        self.with_stream(None)
     }
 
     /// Returns an iterator over the path's components.
@@ -255,14 +341,31 @@ impl<'a> Path<'a> {
         PathBuf(self.0.join(path))
     }
 
-    /// Returns this path with its final component replaced.
+    /// Returns this path with its final component replaced, keeping any
+    /// alternate data stream suffix.
     pub fn with_file_name(&self, file_name: impl AsRef<str>) -> PathBuf {
+        match self.split_stream() {
+            (_, Some(spec)) => {
+                self.with_file_name_raw(stream::join_suffix(file_name.as_ref(), Some(spec)))
+            }
+            _ => self.with_file_name_raw(file_name),
+        }
+    }
+
+    /// Returns this path with its final component replaced verbatim, dropping
+    /// any alternate data stream suffix along with the name it was attached to.
+    pub fn with_file_name_raw(&self, file_name: impl AsRef<str>) -> PathBuf {
         PathBuf(self.0.with_file_name(file_name))
     }
 
-    /// Returns this path with the extension of its final component replaced.
+    /// Returns this path with the extension of its final component replaced,
+    /// keeping any alternate data stream suffix.
     pub fn with_extension(&self, extension: impl AsRef<str>) -> PathBuf {
-        PathBuf(self.0.with_extension(extension))
+        let (Some(base), Some(spec)) = self.split_stream() else {
+            return PathBuf(self.0.with_extension(extension));
+        };
+        let base = Path::new(base, self.kind()).0.with_extension(extension);
+        self.with_file_name_raw(stream::join_suffix(base.as_str(), Some(spec)))
     }
 
     /// Returns this path with `.` components removed and `..` components
@@ -349,15 +452,30 @@ impl PathBuf {
         self.0.pop()
     }
 
-    /// Replaces the final component.
+    /// Replaces the final component, keeping any alternate data stream suffix.
     pub fn set_file_name(&mut self, file_name: impl AsRef<str>) {
-        self.0.set_file_name(file_name);
+        let next = self.to_path().with_file_name(file_name);
+        *self = next;
     }
 
-    /// Replaces the extension of the final component, returning whether the
-    /// path had a final component to modify.
+    /// Replaces the extension of the final component, keeping any alternate
+    /// data stream suffix, and returns whether the path had a final component
+    /// to modify.
     pub fn set_extension(&mut self, extension: impl AsRef<str>) -> bool {
-        self.0.set_extension(extension)
+        if self.to_path().split_stream().1.is_none() {
+            return self.0.set_extension(extension);
+        }
+        let next = self.to_path().with_extension(extension);
+        *self = next;
+        true
+    }
+
+    /// Replaces the alternate data stream specifier of the final component.
+    ///
+    /// Has no effect on a Unix path.
+    pub fn set_stream(&mut self, spec: Option<StreamSpec<'_>>) {
+        let next = self.to_path().with_stream(spec);
+        *self = next;
     }
 }
 
@@ -430,19 +548,42 @@ impl PathBuf {
         self.0.parent().map(Path)
     }
 
-    /// Returns the final component.
+    /// Returns the final component, excluding any alternate data stream
+    /// suffix.
     pub fn file_name(&self) -> Option<&str> {
+        self.to_path().file_name()
+    }
+
+    /// Returns the final component exactly as it is spelled, including any
+    /// alternate data stream suffix.
+    pub fn file_name_raw(&self) -> Option<&str> {
         self.0.file_name()
     }
 
-    /// Returns the final component without its extension.
+    /// Returns the final component without its extension or its alternate data
+    /// stream suffix.
     pub fn file_stem(&self) -> Option<&str> {
-        self.0.file_stem()
+        self.to_path().file_stem()
     }
 
-    /// Returns the extension of the final component.
+    /// Returns the extension of the final component, ignoring any alternate
+    /// data stream suffix.
     pub fn extension(&self) -> Option<&str> {
-        self.0.extension()
+        self.to_path().extension()
+    }
+
+    /// Returns the alternate data stream specified by the final component.
+    ///
+    /// # Errors
+    ///
+    /// See [`Path::stream`].
+    pub fn stream(&self) -> Result<Option<StreamSpec<'_>>> {
+        self.to_path().stream()
+    }
+
+    /// Returns this path with any alternate data stream specifier removed.
+    pub fn without_stream(&self) -> Self {
+        self.to_path().without_stream()
     }
 
     /// Returns an iterator over the path's components.
@@ -455,9 +596,16 @@ impl PathBuf {
         self.to_path().join(path)
     }
 
-    /// Returns this path with its final component replaced.
+    /// Returns this path with its final component replaced, keeping any
+    /// alternate data stream suffix.
     pub fn with_file_name(&self, file_name: impl AsRef<str>) -> Self {
         self.to_path().with_file_name(file_name)
+    }
+
+    /// Returns this path with the extension of its final component replaced,
+    /// keeping any alternate data stream suffix.
+    pub fn with_extension(&self, extension: impl AsRef<str>) -> Self {
+        self.to_path().with_extension(extension)
     }
 
     /// Returns this path with `.` components removed and `..` components

@@ -953,13 +953,11 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         )
         .object("env", env_ty, EnvObject { global })
         .get("exe", move |strand, out| {
-            let annex = PathAnnex::new(
-                vfs_path::PathBuf::from_native(
-                    std::env::current_exe().expect("could not get current exe"),
-                )
-                .expect("current executable path is UTF-8"),
-                global,
-            );
+            let exe = vfs_path::PathBuf::from_native(
+                std::env::current_exe().expect("could not get current exe"),
+            )
+            .expect("current executable path is UTF-8");
+            let annex = PathAnnex::try_new(strand, exe, global)?;
             create_path_annex(strand, annex, out);
             Ok(())
         })

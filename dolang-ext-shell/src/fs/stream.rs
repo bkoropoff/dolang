@@ -58,17 +58,8 @@ pub(crate) fn stream_path(
     base_path: vfs_path::Path<'_>,
     entry: &VfsStreamEntry,
 ) -> vfs_path::PathBuf {
-    let mut path = base_path.to_path_buf();
-    let mut name = path
-        .file_name()
-        .expect("stream base path must have a file name")
-        .to_string();
-    name.push(':');
-    name.push_str(entry.name());
-    name.push_str(":$");
-    name.push_str(entry.stream_type());
-    path.set_file_name(name);
-    path
+    let spec = vfs_path::StreamSpecBuf::from(entry);
+    base_path.with_stream(Some(spec.to_spec()))
 }
 
 pub(crate) fn path_with_stream<'v, 's>(
