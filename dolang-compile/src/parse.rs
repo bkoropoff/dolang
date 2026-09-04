@@ -1787,7 +1787,9 @@ impl<'a> Parser<'a> {
             } else {
                 decay_ident!(token)
             } {
-                Some(token!(Literal, span)) => Ok(Expr::Literal(span)),
+                Some(token!(Literal, span)) if matches!(mode, ExprMode::Shell) => {
+                    Ok(Expr::Literal(span))
+                }
                 Some(token!(Escape(c), span)) => Ok(Expr::Escape(c, span)),
                 Some(token!(Ident, span)) => Ok(Expr::Ident(Ident::new(span))),
                 Some(token!(Int(v), span)) => {
