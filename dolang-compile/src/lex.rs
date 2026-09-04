@@ -347,9 +347,12 @@ struct RawLexer<'a, I: Iterator<Item = u8>> {
     offset: Offset,
     defer: Option<Defer>,
     iter: I,
+    // Integer accumulator
     acc: u128,
     diags: &'a Diags,
     comment: Option<&'a mut dyn Comment>,
+    // Last character was a `_` in a number literal
+    underline: bool,
     // Raw string tracking fields
     target_hashes: u8,
     current_hashes: u8,
@@ -372,6 +375,7 @@ impl<'a, I: Iterator<Item = u8>> RawLexer<'a, I> {
             acc: 0,
             diags,
             comment,
+            underline: false,
             target_hashes: 0,
             current_hashes: 0,
             quote_offset: 0,
@@ -609,11 +613,13 @@ macro_rules! lex {
                 #[allow(unreachable_patterns)]
                 Some(b'0') => {
                     $self.acc = 0;
+                    $self.underline = false;
                     emit!($self.$method, $token, LeadingZero { negative: false });
                 }
                 #[allow(unreachable_patterns)]
                 Some(c @ b'1'..=b'9') => {
                     $self.acc = (c - b'0') as u128;
+                    $self.underline = false;
                     emit!($self.$method, $token, Integer { negative: false, radix: 10 });
                 }
             };
@@ -950,7 +956,9 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                     match Some(_) => (),
                 }),
                 Integer { negative, radix } => number!(self,
-                    if negative {
+                    if self.underline {
+                        RawToken::Literal
+                    } else if negative {
                         match 0i128.checked_sub_unsigned(self.acc) {
                             Some(v) => RawToken::Int(v),
                             None => {
@@ -979,9 +987,16 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                     } else {
                         RawToken::Int(self.acc as i128)
                     }, {
+                        match Some(b'_') => {
+                            if self.underline {
+                                self.trans(Literal)
+                            }
+                            self.underline = true;
+                        },
                         match Some(c @ (b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F'))
                             if (c.is_ascii_digit() && c - b'0' < radix)
                                 || (radix == 16 && c.is_ascii_hexdigit()) => {
+                            self.underline = false;
                             let digit = match c {
                                 b'0'..=b'9' => c - b'0',
                                 b'a'..=b'f' => c - b'a' + 10,
@@ -1002,11 +1017,17 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                                 }
                             }
                         },
-                        match Some(b'.') if radix == 10 => {
+                        match Some(b'.') if radix == 10 => if self.underline {
+                            self.trans(Literal)
+                        } else {
+                            self.underline = false;
                             self.defer = None;
                             self.trans(PostDot { negative })
                         },
-                        match Some(b'e') if radix == 10 => {
+                        match Some(b'e') if radix == 10 => if self.underline {
+                            self.trans(Literal)
+                        } else {
+                            self.underline = false;
                             self.defer = None;
                             self.trans(ExponentStart)
                         },
@@ -1018,29 +1039,38 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                     }
                 ),
                 LeadingZero { negative } => {
-                    number!(self, RawToken::Int(0), {
+                    number!(self, if self.underline { RawToken::Literal } else { RawToken::Int(0) }, {
                         match Some(b'x' | b'X') => {
                             self.acc = 0;
+                            self.underline = true;
                             self.trans(Integer { negative, radix: 16 })
                         },
                         match Some(b'o' | b'O') => {
                             self.acc = 0;
+                            self.underline = true;
                             self.trans(Integer { negative, radix: 8 })
                         },
                         match Some(b'b' | b'B') => {
                             self.acc = 0;
+                            self.underline = true;
                             self.trans(Integer { negative, radix: 2 })
                         },
                         match Some(c @ b'0'..=b'9') => {
                             self.acc = (c - b'0') as u128;
+                            self.underline = false;
+                            self.trans(Integer { negative, radix: 10 })
+                        },
+                        match Some(b'_') => {
+                            self.acc = 0;
+                            self.underline = true;
                             self.trans(Integer { negative, radix: 10 })
                         },
                         match Some(b'.') => {
-                            self.defer = None;
+                            self.underline = false;
                             self.trans(PostDot { negative })
                         },
                         match Some(b'e') => {
-                            self.defer = None;
+                            self.underline = false;
                             self.trans(ExponentStart)
                         },
                     }, {})
@@ -1081,10 +1111,23 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                         match Some(b'e') => self.trans(ExponentStartAfterDot { negative }),
                     })
                 }
-                Float => number!(self, RawToken::F64, {
-                    match Some(b'0'..=b'9') => (),
-                    match Some(b'e') => self.trans(ExponentStart),
-                }),
+                Float => {
+                    number!(self, if self.underline { RawToken::Literal } else { RawToken::F64 }, {
+                        match Some(b'_') => {
+                            if self.underline {
+                                self.trans(Literal)
+                            }
+                            self.underline = true;
+                        },
+                        match Some(b'0'..=b'9') => {
+                            self.underline = false;
+                        },
+                        match Some(b'e') => {
+                            self.underline = false;
+                            self.trans(ExponentStart)
+                        },
+                    })
+                }
                 ExponentStart => number!(self, RawToken::F64, {
                     match Some(b'+' | b'-' | b'0'..=b'9') => self.trans(Exponent),
                 }, {
@@ -1121,10 +1164,20 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                         match Some(..) => self.trans(Literal),
                     })
                 }
-                Exponent => number!(self, RawToken::F64, {
-                    match Some(b'0'..=b'9') => (),
-                    match Some(..) => self.trans(Literal),
-                }),
+                Exponent => {
+                    number!(self, if self.underline { RawToken::Literal } else { RawToken::F64 }, {
+                        match Some(b'_') => {
+                            if self.underline {
+                                self.trans(Literal)
+                            }
+                            self.underline = true;
+                        },
+                        match Some(b'0'..=b'9') => {
+                            self.underline = false;
+                        },
+                        match Some(..) => self.trans(Literal),
+                    })
+                }
                 // A `\` was seen while its enclosing mode could still turn out to be
                 // Shell (or switch to Shell/RawHeredoc by the time we get here, since
                 // this token may have been buffered as lookahead under a since-replaced
