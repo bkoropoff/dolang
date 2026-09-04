@@ -325,6 +325,7 @@ enum RawState {
 }
 
 enum Defer {
+    #[expect(dead_code)]
     Error(ErrorDiagKind),
     Warn(WarnDiagKind),
 }
@@ -555,7 +556,16 @@ macro_rules! lex {
         $self: ident : $token: expr => match { , $($m: tt)* };
         {}
     } => {
-        match $self.advance() { $($m)* }
+        match $self.advance() {
+            $($m)*,
+            #[allow(unreachable_patterns)]
+            _ => {
+                if $self.mode == Mode::FullExpr {
+                    return $self.error(ErrorDiagKind::BadIdent)
+                }
+                emit!($self.emit, $token, Literal)
+            }
+        }
     };
     // Recursive rules: adds one explicit pattern match
     {
@@ -573,16 +583,16 @@ macro_rules! lex {
     // Recursive rule: common (end of stream, comments, whitespace, escapes)
     {
         $self: ident : $token: expr => match { $($m:tt)* };
-        { enum common, $($rest: tt)* }
+        { enum common($method: ident), $($rest: tt)* }
     } => {
         lex!{
             $self: $token => match {
                 $($m)*,
-                None => return $self.token($token, End),
-                Some(b' ' | b'\t') => return $self.token($token, Space),
-                Some(b'\r') => return $self.token($token, Cr),
-                Some(b'\n') => return $self.token($token, Indent),
-                Some(b'\\') if matches!($self.mode, Mode::Shell | Mode::String | Mode::Heredoc | Mode::RawHeredoc) => return $self.token($token, Backslash)
+                None => emit!($self.$method, $token, End),
+                Some(b' ' | b'\t') => emit!($self.$method, $token, Space),
+                Some(b'\r') => emit!($self.$method, $token, Cr),
+                Some(b'\n') => emit!($self.$method, $token, Indent),
+                Some(b'\\') if matches!($self.mode, Mode::Shell | Mode::String | Mode::Heredoc | Mode::RawHeredoc) => emit!($self.$method, $token, Backslash)
             };
             { $($rest)* }
         }
@@ -693,11 +703,11 @@ macro_rules! literal {
     };
     ($self: ident, $token : expr, { $($mid:tt)* }, { $($low:tt)* } ) => {
         lex! {
-            $self: $token => {
-                enum common,
+            $self: Some($token) => {
+                enum common(emit),
                 $($mid)*
-                enum symbol_free(token),
-                enum symbol_reserved(token),
+                enum symbol_free(emit),
+                enum symbol_reserved(emit),
                 $($low)*
             }
         }
@@ -711,12 +721,12 @@ macro_rules! number {
     };
     ($self: ident, $token : expr, { $($mid:tt)* }, { $($low:tt)* } ) => {
         lex! {
-            $self: $token => {
-                enum common,
+            $self: Some($token) => {
+                enum common(emit),
                 $($mid)*
                 match Some(b':') => emit!($self.token, $token, Colon),
-                enum symbol_free(token),
-                enum symbol_reserved(token),
+                enum symbol_free(emit),
+                enum symbol_reserved(emit),
                 $($low)*
             }
         }
@@ -727,19 +737,15 @@ macro_rules! number {
 macro_rules! symbol {
     ($self: ident, $token : expr, { $($arms:tt)* }) => {
         lex! {
-            $self: $token => {
-                enum common,
+            $self: Some($token) => {
+                enum common(emit),
                 $($arms)*
                 match Some(b'r') if matches!($self.mode, Mode::Shell | Mode::FullExpr) => {
                     return $self.token($token, R)
                 },
-                enum alphanum(token),
-                enum symbol_free(token),
-                enum symbol_reserved(token),
-                match Some(_) => match $self.mode {
-                    Mode::FullExpr => return $self.error(ErrorDiagKind::BadIdent),
-                    Mode::Shell | Mode::String | Mode::Heredoc | Mode::RawHeredoc => return $self.token($token, Literal),
-                },
+                enum alphanum(emit),
+                enum symbol_free(emit),
+                enum symbol_reserved(emit),
             }
         }
     };
@@ -845,12 +851,6 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                             enum alphanum(emit),
                             enum symbol_free(emit),
                             enum symbol_reserved(emit),
-                            match Some(_) => match self.mode {
-                                Mode::Shell | Mode::String | Mode::Heredoc | Mode::RawHeredoc => {
-                                    emit!(self.emit, token, Literal)
-                                }
-                                Mode::FullExpr => return self.error(ErrorDiagKind::BadIdent),
-                            },
                         }
                     }
                 }
@@ -862,12 +862,6 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                     match Some(b':') => self.trans(Key),
                 }, {
                     match Some(b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_') => (),
-                    match Some(_) => match self.mode {
-                        Mode::Shell | Mode::String | Mode::Heredoc | Mode::RawHeredoc => {
-                            return self.token(RawToken::Ident, Literal)
-                        }
-                        _ => return self.error(ErrorDiagKind::BadIdent),
-                    },
                 }),
                 Key => symbol!(self, RawToken::Key, {}),
                 Bang => symbol!(self, RawToken::Op(Op::Bang), {
@@ -906,13 +900,11 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                 Comma => return self.token(RawToken::Comma, Empty),
                 Colon => literal!(self, RawToken::Colon, {
                     match Some(b'A'..=b'Z' | b'a'..=b'z' | b'_') => self.trans(DittoKey),
-                    match Some(_) => self.trans(Literal),
                 }),
                 DittoKey => literal!(self, RawToken::DittoKey, {
                     match Some(b':') => return self.token(RawToken::Sym, Empty),
                 }, {
                     match Some(b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_') => (),
-                    match Some(_) => self.trans(Literal),
                 }),
                 Lt => symbol!(self, RawToken::Op(Op::Lt), {
                     match Some(b'=') => self.trans(LtEq),
@@ -978,7 +970,7 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                                 if self.mode == Mode::FullExpr {
                                     return self.error_adj(ErrorDiagKind::Overflow, 0, -1)
                                 }
-                                if self.mode != Mode::String {
+                                if !matches!(self.mode, Mode::String | Mode::Heredoc | Mode::RawHeredoc) {
                                     self.warn_adj(WarnDiagKind::OverflowLit, 0, -1);
                                 }
                                 RawToken::Literal
@@ -1001,12 +993,11 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                                 None => {
                                     if self.mode == Mode::FullExpr {
                                         self.acc = 0;
-                                        self.defer(Defer::Error(ErrorDiagKind::Overflow));
+                                        return self.error(ErrorDiagKind::Overflow);
                                     } else {
-                                        if self.mode != Mode::String {
+                                        if !matches!(self.mode, Mode::String | Mode::Heredoc | Mode::RawHeredoc) && self.defer.is_none() {
                                             self.defer(Defer::Warn(WarnDiagKind::OverflowLit));
                                         }
-                                        self.trans(Literal)
                                     }
                                 }
                             }
@@ -1052,11 +1043,7 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                             self.defer = None;
                             self.trans(ExponentStart)
                         },
-                    }, {
-                        match Some(..) => {
-                            self.trans(Literal)
-                        },
-                    })
+                    }, {})
                 }
                 PostDot { negative } => {
                     number!(self, RawToken::F64, {
@@ -1074,7 +1061,7 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                                         if self.mode == Mode::FullExpr {
                                             return self.error_adj(ErrorDiagKind::Overflow, 0, -1)
                                         }
-                                        if self.mode != Mode::String {
+                                        if !matches!(self.mode, Mode::String | Mode::Heredoc | Mode::RawHeredoc) {
                                             self.warn_adj(WarnDiagKind::OverflowLit, 0, -1);
                                         }
                                         RawToken::Literal
@@ -1092,53 +1079,51 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                     }, {
                         match Some(b'0'..=b'9') => self.trans(Float),
                         match Some(b'e') => self.trans(ExponentStartAfterDot { negative }),
-                        match Some(..) => self.trans(Literal),
                     })
                 }
                 Float => number!(self, RawToken::F64, {
-                        match Some(b'0'..=b'9') => (),
-                        match Some(b'e') => self.trans(ExponentStart),
-                        match Some(..) => self.trans(Literal),
+                    match Some(b'0'..=b'9') => (),
+                    match Some(b'e') => self.trans(ExponentStart),
                 }),
                 ExponentStart => number!(self, RawToken::F64, {
-                        match Some(b'+' | b'-' | b'0'..=b'9') => self.trans(Exponent),
+                    match Some(b'+' | b'-' | b'0'..=b'9') => self.trans(Exponent),
                 }, {
-                        match Some(..) => self.trans(Literal),
+                    match Some(..) => self.trans(Literal),
                 }),
                 ExponentStartAfterDot { negative } => {
                     number!(self, RawToken::F64, {
-                            match Some(b'+' | b'-' | b'0'..=b'9') => self.trans(Exponent),
+                        match Some(b'+' | b'-' | b'0'..=b'9') => self.trans(Exponent),
                     }, {
-                            match Some(b'a'..=b'z' | b'A'..=b'Z' | b'_') => {
-                                let res = self.token_adj(
-                                    match if negative {
-                                        0i128.checked_sub_unsigned(self.acc)
-                                    } else {
-                                        i128::try_from(self.acc).ok()
-                                    } {
-                                        Some(v) => RawToken::Int(v),
-                                        None => {
-                                            if self.mode == Mode::FullExpr {
-                                                return self.error_adj(ErrorDiagKind::Overflow, 0, -2)
-                                            }
-                                            if self.mode != Mode::String {
-                                                self.warn_adj(WarnDiagKind::OverflowLit, 0, -2);
-                                            }
-                                            RawToken::Literal
+                        match Some(b'a'..=b'z' | b'A'..=b'Z' | b'_') => {
+                            let res = self.token_adj(
+                                match if negative {
+                                    0i128.checked_sub_unsigned(self.acc)
+                                } else {
+                                    i128::try_from(self.acc).ok()
+                                } {
+                                    Some(v) => RawToken::Int(v),
+                                    None => {
+                                        if self.mode == Mode::FullExpr {
+                                            return self.error_adj(ErrorDiagKind::Overflow, 0, -2)
                                         }
-                                    },
-                                    EmitDotBeforeE,
-                                    0,
-                                    -3,
-                                );
-                                return res;
-                            },
-                            match Some(..) => self.trans(Literal),
+                                        if !matches!(self.mode, Mode::String | Mode::Heredoc | Mode::RawHeredoc) {
+                                            self.warn_adj(WarnDiagKind::OverflowLit, 0, -2);
+                                        }
+                                        RawToken::Literal
+                                    }
+                                },
+                                EmitDotBeforeE,
+                                0,
+                                -3,
+                            );
+                            return res;
+                        },
+                        match Some(..) => self.trans(Literal),
                     })
                 }
                 Exponent => number!(self, RawToken::F64, {
-                        match Some(b'0'..=b'9') => (),
-                        match Some(..) => self.trans(Literal),
+                    match Some(b'0'..=b'9') => (),
+                    match Some(..) => self.trans(Literal),
                 }),
                 // A `\` was seen while its enclosing mode could still turn out to be
                 // Shell (or switch to Shell/RawHeredoc by the time we get here, since
@@ -1204,10 +1189,6 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                         }, {
                             // Lower patterns - keyword continuation or identifier/literal fallback
                             match Some(b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_') => self.trans(Ident),
-                            match Some(_) => match self.mode {
-                                Mode::FullExpr => return self.error(ErrorDiagKind::BadIdent),
-                                _ => self.trans(Literal),
-                            },
                         })
                     } else {
                         self.trans(Ident)
@@ -1223,10 +1204,6 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                             match Some(b':') => self.trans(Key),
                         }, {
                             match Some(b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_') => self.trans(Ident),
-                            match Some(_) => match self.mode {
-                                Mode::FullExpr => return self.error(ErrorDiagKind::BadIdent),
-                                _ => self.trans(Literal),
-                            },
                         })
                     } else {
                         self.trans(Ident)
