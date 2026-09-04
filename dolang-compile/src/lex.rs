@@ -247,6 +247,8 @@ enum RawToken {
     RawQuote,
     BQuote,
     RBar,
+    TQuote,
+    TBar,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -314,6 +316,7 @@ enum RawState {
     GtGt,
     R,
     B,
+    T,
     // Raw string states
     RawHash,           // Counting #s in opening delimiter (count stored in current_hashes)
     RawBody,           // Inside raw string content
@@ -854,6 +857,9 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                             match Some(b'b') if matches!(self.mode, Mode::Shell | Mode::FullExpr) => {
                                 emit!(self.emit, token, B)
                             },
+                            match Some(b't') if matches!(self.mode, Mode::Shell | Mode::FullExpr) => {
+                                emit!(self.emit, token, T)
+                            },
                             enum alphanum(emit),
                             enum symbol_free(emit),
                             enum symbol_reserved(emit),
@@ -1262,6 +1268,24 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                         self.trans(Ident)
                     }
                 }
+                T => {
+                    if self.mode != Mode::String {
+                        literal!(self, RawToken::Ident, {
+                            // Handle t" formatted sequence start
+                            match Some(b'"') => {
+                                return self.token_adj(RawToken::TQuote, Empty, 0, 0);
+                            },
+                            match Some(b':') => self.trans(Key),
+                            match Some(b'|') if matches!(self.mode, Mode::Shell) => {
+                                return self.token(RawToken::TBar, RawState::Empty);
+                            },
+                        }, {
+                            match Some(b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_') => self.trans(Ident),
+                        })
+                    } else {
+                        self.trans(Ident)
+                    }
+                }
                 // Raw string states
                 RawHash => match self.advance() {
                     Some(b'#') => {
@@ -1413,6 +1437,8 @@ pub(crate) enum TokenInfo {
     RawQuote,
     BQuote,
     RBar,
+    TQuote,
+    TBar,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -1787,6 +1813,8 @@ impl<'a> Iterator for Lexer<'a> {
                 Ok((RawQuote, span)) => self.token(TokenInfo::RawQuote, span),
                 Ok((BQuote, span)) => self.token(TokenInfo::BQuote, span),
                 Ok((RBar, span)) => self.token(TokenInfo::RBar, span),
+                Ok((TQuote, span)) => self.token(TokenInfo::TQuote, span),
+                Ok((TBar, span)) => self.token(TokenInfo::TBar, span),
             }));
         }
     }

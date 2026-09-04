@@ -217,6 +217,39 @@ Binary strings (`b"..."`) additionally support hex byte escapes:
 `\xNN` is only valid inside binary strings; using it in a regular string is a
 syntax error.
 
+### Formatted Sequences
+
+Prefixing a quoted string or here string introducer with `t` — `t"..."`,
+`t|`, `t|-` — produces a [`Fmt`](../api/std/fmt.md) instead of a `Str`. The
+interpolation syntax is exactly the same; what differs is that the segments
+are kept apart rather than concatenated, so a consumer sees each interpolated
+value instead of only the text it produced.
+
+```
+let name = "Alice"
+let seq = t"hello ${name:>8}!"
+
+# Expanding gives what the equivalent `"..."` would have.
+assert_eq $seq.format() "hello    Alice!"
+
+# But the interpolated value is still there.
+assert_eq $seq.len 3
+assert_eq $seq[1].value $name
+```
+
+Every interpolation is a [`FmtValue`](../api/std/fmt-value.md), whether or not
+it states a specification, and each records the text it was written as. The
+literal text between them is an ordinary `Str`.
+
+A sequence never expands implicitly: `str` and `"$seq"` raise rather than
+flattening it, and expansion has to be asked for with
+[`format`](../api/std/fmt.md#format). See
+[Trust](../api/std/fmt.md#trust) — the distinction between literal text and
+interpolated values is what a consumer such as a query builder acts on.
+
+As with `r"..."`, the prefix shadows a juxtaposition call: `t"x"` is a
+sequence, not a call to `t`.
+
 See [Here Strings](basic-types.md#here-strings) for multi-line string literals
 that use the same interpolation syntax.
 

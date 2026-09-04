@@ -3041,6 +3041,8 @@ pub enum TypeObject {
     Setter,
     /// `std.FmtValue`, a value bound to a format specification
     FmtValue,
+    /// `std.Fmt`, a sequence of literal text and bound interpolations
+    Fmt,
 }
 
 impl<'v> Input<'v> for TypeObject {
@@ -3048,9 +3050,12 @@ impl<'v> Input<'v> for TypeObject {
     #[inline]
     fn input_take<'a>(&'a mut self, vm: &'a Vm<'v>, _: private::Sealed) -> InputBy<'v, 'a> {
         let builtins = vm.singletons();
+        // Not builtin singletons: registered by the `std.fmt` module, which owns them.
         if matches!(self, TypeObject::FmtValue) {
-            // Not a builtin singleton: registered by the `std.fmt` module, which owns it.
             return InputBy::Borrow(crate::stdlib::fmt::fmt_value_singleton(vm));
+        }
+        if matches!(self, TypeObject::Fmt) {
+            return InputBy::Borrow(crate::stdlib::fmt::fmt_singleton(vm));
         }
         InputBy::Borrow(match self {
             TypeObject::Value => &builtins.value,
@@ -3083,7 +3088,7 @@ impl<'v> Input<'v> for TypeObject {
             TypeObject::Sink => &builtins.output_iter,
             TypeObject::Getter => &builtins.getter,
             TypeObject::Setter => &builtins.setter,
-            TypeObject::FmtValue => unreachable!("handled above"),
+            TypeObject::FmtValue | TypeObject::Fmt => unreachable!("handled above"),
         })
     }
 }

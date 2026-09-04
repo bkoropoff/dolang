@@ -77,6 +77,7 @@ macro_rules! decay_shell {
             | TokenInfo::Keyword(_)
             | TokenInfo::Op(_)
             | TokenInfo::RBar
+            | TokenInfo::TBar
             | TokenInfo::DecoratorOpen => TokenInfo::Literal)
     }
 }
@@ -89,6 +90,7 @@ macro_rules! expr_start_not_left_bracket {
             | TokenInfo::DQuote
             | TokenInfo::RawQuote
             | TokenInfo::BQuote
+            | TokenInfo::TQuote
             | TokenInfo::Sym
             | TokenInfo::Int(_)
             | TokenInfo::F64
@@ -144,10 +146,30 @@ macro_rules! decay_string {
             | TokenInfo::DQuote
             | TokenInfo::RawQuote
             | TokenInfo::BQuote
+            | TokenInfo::TQuote
             | TokenInfo::RBar
+            | TokenInfo::TBar
             | TokenInfo::ArgSep
             | TokenInfo::DecoratorOpen => TokenInfo::Literal)
     }
+}
+
+/// Which flavor of string literal is being parsed.
+///
+/// The flavors differ in more than their delimiters: `b"..."` builds bytes,
+/// `r|` takes its content literally, and `t"..."` keeps its interpolations
+/// apart instead of concatenating them, so the parse has to know which one it
+/// is from the opening token onward.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub(crate) enum StrKind {
+    /// `"..."` and `|`
+    Str,
+    /// `b"..."`
+    Bin,
+    /// `r|`
+    Raw,
+    /// `t"..."` and `t|`
+    Fmt,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -184,6 +206,8 @@ pub(crate) enum ExpectKind {
     RawQuote,
     BQuote,
     RBar,
+    TQuote,
+    TBar,
 }
 
 impl ExpectKind {
@@ -229,6 +253,8 @@ impl Display for ExpectKind {
             RawQuote => &"<raw quote>",
             BQuote => &"<binary quote>",
             RBar => &"r|",
+            TQuote => &"<formatted quote>",
+            TBar => &"t|",
         }
         .fmt(f)
     }
@@ -271,6 +297,8 @@ impl From<&TokenInfo> for ExpectKind {
             RawQuote => ExpectKind::RawQuote,
             BQuote => ExpectKind::BQuote,
             RBar => ExpectKind::RBar,
+            TQuote => ExpectKind::TQuote,
+            TBar => ExpectKind::TBar,
         }
     }
 }
@@ -1135,8 +1163,15 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_quoted_string(&mut self, scope: &mut Scope, open: Span, bin: bool) -> Result<Expr> {
+    fn parse_quoted_string(
+        &mut self,
+        scope: &mut Scope,
+        open: Span,
+        kind: StrKind,
+    ) -> Result<Expr> {
         use TokenInfo::*;
+
+        let bin = kind == StrKind::Bin;
 
         let expr = self.with_mode(lex::Mode::String, |this| {
             let mut exprs = Vec::new();
@@ -1160,7 +1195,15 @@ impl<'a> Parser<'a> {
                             }
                             this.parse_fmt_interp(scope, dollar_span)?
                         } else {
-                            this.parse_expr_primary(scope, ExprMode::Compact)?
+                            let expr = this.parse_expr_primary(scope, ExprMode::Compact)?;
+                            // A sequence keeps every interpolation as its own
+                            // segment, and the sigil is part of how it was
+                            // written, so keep it in the segment's span.
+                            if kind == StrKind::Fmt {
+                                Self::dollar_group(expr, dollar_span)
+                            } else {
+                                expr
+                            }
                         }
                     }
                     Some(token!(DQuote)) => break this.advance(),
@@ -1199,14 +1242,18 @@ impl<'a> Parser<'a> {
                 };
                 exprs.push(expr);
             };
-            if bin {
-                Ok(Expr::BinConcat { exprs, open, close })
-            } else {
-                Ok(Expr::Concat {
+            match kind {
+                StrKind::Bin => Ok(Expr::BinConcat { exprs, open, close }),
+                StrKind::Fmt => Ok(Expr::FmtSeq {
+                    exprs,
+                    open,
+                    close: Some(close),
+                }),
+                StrKind::Str | StrKind::Raw => Ok(Expr::Concat {
                     exprs,
                     delim_span: Some(open | close),
                     verbatim: false,
-                })
+                }),
             }
         })?;
         Ok(expr.optimize())
@@ -1557,6 +1604,15 @@ impl<'a> Parser<'a> {
 
     /// After consuming `|`, optionally consume `-` for strip mode.
     /// Returns `(intro_span, strip)` where `intro_span` covers `|` or `|-`.
+    /// Classifies the here-string about to be parsed from its opening bar.
+    fn heredoc_kind(&mut self) -> Result<StrKind> {
+        Ok(match self.peek()? {
+            Some(token!(TokenInfo::RBar)) => StrKind::Raw,
+            Some(token!(TokenInfo::TBar)) => StrKind::Fmt,
+            _ => StrKind::Str,
+        })
+    }
+
     fn parse_heredoc_intro(&mut self, pipe_span: Span) -> Result<(Span, bool)> {
         use self::Op;
         use TokenInfo::*;
@@ -1573,10 +1629,12 @@ impl<'a> Parser<'a> {
         scope: &mut Scope,
         pipe_span: Span,
         strip: bool,
-        raw: bool,
+        kind: StrKind,
     ) -> Result<Expr> {
         use self::Ident;
         use TokenInfo::*;
+
+        let raw = kind == StrKind::Raw;
 
         let mut exprs = Vec::new();
         self.with_mode(
@@ -1599,14 +1657,28 @@ impl<'a> Parser<'a> {
                                 exprs.push(this.parse_fmt_interp(scope, dollar_span)?);
                                 continue;
                             }
-                            match this.peek()? {
+                            let expr = match this.peek()? {
                                 Some(token!(Key)) => {
                                     let span = this.advance();
-                                    exprs.push(Expr::Ident(Ident::new(span)));
-                                    exprs.push(Expr::Literal(span.after_right_char()));
+                                    let expr = Expr::Ident(Ident::new(span));
+                                    let expr = if kind == StrKind::Fmt {
+                                        Self::dollar_group(expr, dollar_span)
+                                    } else {
+                                        expr
+                                    };
+                                    exprs.push(expr);
+                                    Expr::Literal(span.after_right_char())
                                 }
-                                _ => exprs.push(this.parse_expr_primary(scope, ExprMode::Compact)?),
-                            }
+                                _ => {
+                                    let expr = this.parse_expr_primary(scope, ExprMode::Compact)?;
+                                    if kind == StrKind::Fmt {
+                                        Self::dollar_group(expr, dollar_span)
+                                    } else {
+                                        expr
+                                    }
+                                }
+                            };
+                            exprs.push(expr);
                         }
                         Some(token!(Literal)) => {
                             let span = this.advance();
@@ -1656,10 +1728,17 @@ impl<'a> Parser<'a> {
                 span.end -= 2;
             }
         }
-        Ok(Expr::Concat {
-            exprs,
-            delim_span: Some(pipe_span),
-            verbatim: false,
+        Ok(match kind {
+            StrKind::Fmt => Expr::FmtSeq {
+                exprs,
+                open: pipe_span,
+                close: None,
+            },
+            _ => Expr::Concat {
+                exprs,
+                delim_span: Some(pipe_span),
+                verbatim: false,
+            },
         }
         .optimize())
     }
@@ -1747,8 +1826,9 @@ impl<'a> Parser<'a> {
                 Self::dollar_group(self.parse_expr(scope, ExprMode::Compact)?, span),
             ),
             Some(token!(Sym, span)) => Ok(Expr::Sym(span)),
-            Some(token!(DQuote, span)) => self.parse_quoted_string(scope, span, false),
-            Some(token!(BQuote, open)) => self.parse_quoted_string(scope, open, true),
+            Some(token!(DQuote, span)) => self.parse_quoted_string(scope, span, StrKind::Str),
+            Some(token!(BQuote, open)) => self.parse_quoted_string(scope, open, StrKind::Bin),
+            Some(token!(TQuote, open)) => self.parse_quoted_string(scope, open, StrKind::Fmt),
             Some(token!(RawQuote, start)) => {
                 let content = self.expect(scope, &[ExpectKind::Literal])?;
                 let end = self.expect_matching(scope, ExpectKind::RawQuote, start);
@@ -2024,7 +2104,7 @@ impl<'a> Parser<'a> {
                 Some(token!(ArgSep)) if matches!(mode, UnquotedMode::Shell) => break,
                 Some(token!(DQuote)) if matches!(mode, UnquotedMode::Shell) => {
                     let span = self.advance();
-                    self.parse_quoted_string(scope, span, false)?
+                    self.parse_quoted_string(scope, span, StrKind::Str)?
                 }
                 Some(token!(Dollar)) => self.parse_expr_primary(scope, ExprMode::Shell)?,
                 Some(_) => match decay_string!(self.next()?) {
@@ -2608,13 +2688,13 @@ impl<'a> Parser<'a> {
                     }
                 }
             }
-            Some(token!(TokenInfo::Op(Op::Bar) | TokenInfo::RBar)) => {
-                let raw = matches!(self.peek()?, Some(token!(RBar)));
+            Some(token!(TokenInfo::Op(Op::Bar) | TokenInfo::RBar | TokenInfo::TBar)) => {
+                let kind = self.heredoc_kind()?;
                 let open_span = self.advance();
                 let (intro_span, strip) = self.parse_heredoc_intro(open_span)?;
                 if let Some(token!(Indent)) = self.peek()? {
                     self.advance();
-                    self.parse_heredoc(scope, intro_span, strip, raw)
+                    self.parse_heredoc(scope, intro_span, strip, kind)
                 } else {
                     self.parse_implicit_concat(
                         scope,
@@ -3563,13 +3643,13 @@ impl<'a> Parser<'a> {
             Some(token!(Keyword(Keyword::Do))) => {
                 Ok((self.parse_do_block(scope, allow_trailing)?, true))
             }
-            Some(token!(Op(Op::Bar) | RBar)) => {
-                let raw = matches!(self.peek()?, Some(token!(RBar)));
+            Some(token!(Op(Op::Bar) | RBar | TBar)) => {
+                let kind = self.heredoc_kind()?;
                 let open_span = self.advance();
                 let (intro_span, strip) = self.parse_heredoc_intro(open_span)?;
                 if let Some(token!(Indent)) = self.peek()? {
                     self.advance();
-                    return Ok((self.parse_heredoc(scope, intro_span, strip, raw)?, true));
+                    return Ok((self.parse_heredoc(scope, intro_span, strip, kind)?, true));
                 }
                 Ok((
                     self.parse_implicit_concat(
@@ -3580,7 +3660,9 @@ impl<'a> Parser<'a> {
                     false,
                 ))
             }
-            Some(token!(LeftParen | LeftBracket | LeftBrace | DQuote | RawQuote | BQuote)) => {
+            Some(
+                token!(LeftParen | LeftBracket | LeftBrace | DQuote | RawQuote | BQuote | TQuote),
+            ) => {
                 let expr = self.parse_expr(scope, ExprMode::Shell)?;
                 if !matches!(
                     self.peek()?,
@@ -3713,12 +3795,14 @@ impl<'a> Parser<'a> {
             Some(token!(TokenInfo::Keyword(Keyword::Do))) => {
                 return self.parse_do_block(scope, allow_trailing);
             }
-            Some(token!(TokenInfo::Op(Op::Bar) | TokenInfo::RBar)) if allow_trailing => {
-                let raw = matches!(self.peek()?, Some(token!(TokenInfo::RBar)));
+            Some(token!(TokenInfo::Op(Op::Bar) | TokenInfo::RBar | TokenInfo::TBar))
+                if allow_trailing =>
+            {
+                let kind = self.heredoc_kind()?;
                 let open_span = self.advance();
                 let (intro_span, strip) = self.parse_heredoc_intro(open_span)?;
                 self.expect(scope, &[ExpectKind::Indent])?;
-                return self.parse_heredoc(scope, intro_span, strip, raw);
+                return self.parse_heredoc(scope, intro_span, strip, kind);
             }
             Some(token!(TokenInfo::Dollar)) if allow_trailing => {
                 let dollar_span = self.advance();

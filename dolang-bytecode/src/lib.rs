@@ -276,6 +276,7 @@ pub enum Builtin {
     ConcatBin,
     Range,
     FmtValue,
+    Fmt,
     _LEN,
 }
 
@@ -294,6 +295,7 @@ pub mod builtin {
     pub const CONCAT_BIN: usize = ConcatBin as usize;
     pub const RANGE: usize = Range as usize;
     pub const FMT_VALUE: usize = FmtValue as usize;
+    pub const FMT: usize = Fmt as usize;
 }
 
 pub const BUILTINS: [&str; Builtin::_LEN as usize] = [
@@ -310,6 +312,7 @@ pub const BUILTINS: [&str; Builtin::_LEN as usize] = [
     "concat_bin",
     "range",
     "fmt_value",
+    "fmt",
 ];
 
 trait Encode {

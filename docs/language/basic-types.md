@@ -57,6 +57,11 @@ echo "padded: ${count:05d}"
 See [Expressions](expressions.md) for details on string interpolation behavior.
 Strings support a wide variety of [methods](../api/std/str.md) as well.
 
+Prefixing the opening quote with `t` produces a [`Fmt`](../api/std/fmt.md)
+instead, which keeps its interpolations apart from its literal text rather
+than concatenating them. See [Formatted
+Sequences](expressions.md#formatted-sequences).
+
 ### Raw Strings
 
 Raw strings disable escape sequences and interpolation, making them useful for
@@ -179,6 +184,21 @@ let pattern = r|-
 ```
 
 All the same indentation rules apply as for regular here strings.
+
+### Formatted Here Strings
+
+Prefixing the introducer with `t` gives the multi-line form of a
+[`t"..."` string](expressions.md#formatted-sequences): `t|` and `t|-` build a
+[`Fmt`](../api/std/fmt.md) rather than a `Str`, interpolating as an ordinary
+here string does.
+
+```
+let name = "Alice"
+let doc = t|-
+  hello $name
+
+# doc[1].value == "Alice"
+```
 
 ## Binary Strings (`Bin`)
 

@@ -106,7 +106,7 @@ pub fn spec_of<'v, 's>(strand: &mut Strand<'v, 's>, value: &Value<'v>) -> Result
 }
 
 /// Fill behavior for a formatted value.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum Fill {
     /// Use the default space fill.
     #[default]
@@ -118,7 +118,7 @@ pub enum Fill {
 }
 
 /// Alignment within the requested width.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Align {
     Left,
     Right,
@@ -126,14 +126,14 @@ pub enum Align {
 }
 
 /// Sign behavior for numeric values.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Sign {
     Plus,
     Space,
 }
 
 /// Representation requested for a formatted value.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Kind {
     Str,
     Dbg,
@@ -167,7 +167,7 @@ impl Kind {
 }
 
 /// A formatting request.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct Spec {
     pub fill: Fill,
     pub align: Option<Align>,

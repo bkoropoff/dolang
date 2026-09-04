@@ -837,6 +837,15 @@ impl<'v> Vm<'v> {
                             )
                             .await
                         }
+                        builtin::FMT => {
+                            let global = strand.vm().state::<crate::stdlib::fmt::Global<'v>>();
+                            crate::stdlib::fmt::create_fmt(
+                                strand,
+                                global,
+                                args,
+                                Slot::reborrow(&mut res),
+                            )
+                        }
                         _ => unreachable_unchecked(),
                     })
                     .await?;

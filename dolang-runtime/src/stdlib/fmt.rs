@@ -1,12 +1,19 @@
+use std::hash::{Hash, Hasher};
+
 use crate::{
-    arg::Args,
+    arg::{Arg, Args},
     error::{Error, Result},
-    object::native::{Instance, Mut, Object, Ref, Type, TypeBuilder},
+    object::{
+        array_view::{ArrayLike, ArrayView},
+        kv,
+        native::{Instance, Mut, Object, Ref, Type, TypeBuilder, Unpack},
+        protocol::{Spread, SpreadContext},
+    },
     strand::Strand,
     sym::Sym,
     unpack,
     value::{
-        Input, Output, Slot, StrEmbryo, Value,
+        Empty, Input, Output, Slot, StrEmbryo, Value,
         fmt::{Align, Fill, Format, Kind, Pad, Sign, Spec},
     },
     vm::{Builder, State, Stateful, Vm},
@@ -125,6 +132,7 @@ impl<'v, T: Copy, const N: usize> Table<'v, T, N> {
 pub(crate) struct Types<'v> {
     pub(crate) spec: Type<'v, FmtSpec>,
     pub(crate) value: Type<'v, FmtValue>,
+    pub(crate) fmt: Type<'v, Fmt>,
 }
 
 pub(crate) struct Global<'v> {
@@ -180,6 +188,12 @@ pub(crate) fn fmt_value_singleton<'v, 'a>(vm: &'a Vm<'v>) -> &'a Value<'v> {
     vm.state::<Global<'v>>().types.value.singleton(vm)
 }
 
+/// Returns the [`Fmt`] type object singleton, for
+/// [`TypeObject::Fmt`](crate::value::TypeObject).
+pub(crate) fn fmt_singleton<'v, 'a>(vm: &'a Vm<'v>) -> &'a Value<'v> {
+    vm.state::<Global<'v>>().types.fmt.singleton(vm)
+}
+
 /// Immutable per-instance data shared by [`FmtSpec`] and [`FmtValue`].
 ///
 /// Carrying the specification alongside the global keeps both types unit
@@ -192,6 +206,17 @@ pub(crate) struct SpecAnnex<'v> {
 pub(crate) struct FmtSpec;
 
 pub(crate) struct FmtValue;
+
+/// One `t"..."` sequence: literal text and bound interpolations, in order.
+///
+/// Every element of the segment array in slot 0 is either a `Str` of literal
+/// text or a [`FmtValue`]; [`create_fmt`] admits nothing else.
+pub(crate) struct Fmt;
+
+/// Immutable per-instance data for [`Fmt`].
+pub(crate) struct FmtAnnex<'v> {
+    global: State<'v, Global<'v>>,
+}
 
 impl<'v> Object<'v> for FmtSpec {
     const MODULE: &'v str = "std";
@@ -291,6 +316,430 @@ impl<'v> Object<'v> for FmtValue {
     ) -> Result<'v, 's, ()> {
         format_bound(this, strand, Kind::Dbg, out)
     }
+
+    /// Two bindings are equal when they bind equal values to the same
+    /// specification. `source` is how one was written, not what it means, so
+    /// it does not enter into it.
+    fn eq<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        other: &Value<'v>,
+    ) -> Result<'v, 's, bool> {
+        let Some(other) = this.annex().global.types.value.cast(other) else {
+            return Ok(false);
+        };
+        if other.enter_sync(strand, |_, other| other.annex().spec) != this.annex().spec {
+            return Ok(false);
+        }
+        let this_borrow = this.borrow(strand)?;
+        other.enter_sync(strand, |strand, other| {
+            let other_borrow = other.borrow(strand)?;
+            Ok(Ref::slot::<0>(&this_borrow)
+                .op_eq(strand, Ref::slot::<0>(&other_borrow))
+                .to_bool(strand))
+        })
+    }
+
+    fn hash<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        hasher: &mut impl Hasher,
+    ) -> Result<'v, 's, ()> {
+        this.annex().spec.hash(hasher);
+        let borrow = this.borrow(strand)?;
+        hasher.write_u64(kv::hash(strand, Ref::slot::<0>(&borrow))?);
+        Ok(())
+    }
+}
+
+/// The segments of a [`Fmt`], viewed as a read-only array.
+///
+/// Only `len` and `get` are given: every mutator inherits the trait's
+/// `ImmutableError`, which is the whole point of the view.
+struct Segments;
+
+impl<'v> ArrayLike<'v> for Segments {
+    type Object = Fmt;
+
+    const MODULE: &'v str = "std";
+    const NAME: &'v str = "Segments";
+
+    fn len(&self, this: Instance<'v, '_, Fmt>, strand: &mut Strand<'v, '_>) -> usize {
+        Ref::slot::<0>(&this.borrow_unwrap())
+            .as_array(strand)
+            .unwrap()
+            .len(strand)
+            .expect("conflicting Fmt segment borrow")
+    }
+
+    fn get<'a, 's>(
+        &self,
+        this: Instance<'v, '_, Fmt>,
+        strand: &'a mut Strand<'v, 's>,
+        index: usize,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        let found = Ref::slot::<0>(&this.borrow(strand)?)
+            .as_array(strand)
+            .unwrap()
+            .get(strand, index, out)?;
+        debug_assert!(found);
+        Ok(())
+    }
+}
+
+impl<'v> Object<'v> for Fmt {
+    const MODULE: &'v str = "std";
+    const NAME: &'v str = "Fmt";
+    /// Slot 0 is the segment array.
+    const SLOTS: usize = 1;
+
+    type Annex = FmtAnnex<'v>;
+    type Type = ();
+    type TypeAnnex = ();
+
+    /// Builds a sequence from an iterable of segments.
+    ///
+    /// # Trust
+    ///
+    /// A sequence written as `t"..."` carries a guarantee its consumers rely
+    /// on: the literal segments came from the program text and everything
+    /// interpolated is a [`FmtValue`]. This constructor cannot make that
+    /// guarantee — it accepts whatever segments it is given — so a `Str`
+    /// built from untrusted input becomes literal text, indistinguishable
+    /// from text the programmer wrote. Bind such a value as a [`FmtValue`]
+    /// instead of splicing it in as a `Str`.
+    async fn new<'a, 's>(
+        _this: Type<'v, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        args: Args<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        let global = strand.vm().state::<Global<'v>>();
+        let ([items], []) = unpack!(strand, args, 1, 0)?;
+        strand
+            .with_slots(async move |strand, [mut segments, mut iter, mut item]| {
+                Output::set(strand, &mut segments, Empty::Array);
+                items.iter(strand, &mut iter).await?;
+                while iter.next(strand, &mut item).await? {
+                    append_segment(strand, global, &segments, &item)?;
+                }
+                create_from_segments(strand, global, &segments, out);
+                Ok(())
+            })
+            .await
+    }
+
+    fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
+        builder
+            .get("len", |this, strand, out| {
+                let len = Segments.len(this, strand);
+                Output::set(strand, out, len);
+                Ok(())
+            })
+            // The way to ask for the expansion. A sequence has no implicit
+            // string conversion, so this is the explicit one.
+            .method("format", async |this, strand, args, out| {
+                let ([], []) = unpack!(strand, args, 0, 0)?;
+                let mut embryo = StrEmbryo::new();
+                render(this, strand, &mut embryo)?;
+                embryo.finish(strand, out);
+                Ok(())
+            })
+    }
+
+    /// A sequence has no implicit string conversion.
+    ///
+    /// The point of keeping the segments apart is that a consumer can tell
+    /// literal text from interpolated values and quote, bind, or style the
+    /// latter. Expanding at a bare `str` or `"$x"` would hand that consumer a
+    /// flat string with the distinction already lost — the shape of an
+    /// injection bug — so expansion has to be asked for by name, with
+    /// `format`.
+    fn display<'a, 's>(
+        _this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        _w: &mut dyn Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        Err(Error::type_error(
+            strand,
+            "Fmt: no implicit string conversion; use .format()",
+        ))
+    }
+
+    /// The verbatim conversion gives the source form, exactly as `dbg` does.
+    ///
+    /// No conversion expands a sequence. Expansion is what
+    /// [`format`](Self::build) is for, and it has to be asked for by name.
+    fn verbatim<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        w: &mut dyn Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        Self::debug(this, strand, w)
+    }
+
+    /// Writes the sequence back in the form it was written: literal text as
+    /// it stands, each interpolation by its recorded source.
+    fn debug<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        w: &mut dyn Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        let _depth = strand.inner.push_call_depth()?;
+        let global = this.annex().global;
+        w.write_str(strand, "t\"")?;
+        each_segment(this, strand, |strand, segment| {
+            debug_segment(strand, global, segment, w)
+        })?;
+        w.write_str(strand, "\"")
+    }
+
+    fn index<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        index: &Value<'v>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        ArrayView::index(this, Segments, strand, index, out)
+    }
+
+    /// A sequence is fixed once built, so a segment cannot be replaced.
+    fn assign<'a, 's>(
+        _this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        _index: Slot<'v, 'a>,
+        _value: Slot<'v, '_>,
+    ) -> Result<'v, 's, ()> {
+        Err(Error::immutable(strand))
+    }
+
+    async fn iter<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        ArrayView::iter(this, Segments, strand, out)
+    }
+
+    async fn spread<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        context: SpreadContext,
+        sink: &'a mut dyn Spread<'v, 's>,
+    ) -> Result<'v, 's, ()> {
+        ArrayView::spread(this, Segments, strand, context, sink)
+    }
+
+    async fn unpack<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        unpack: Unpack<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        ArrayView::unpack(this, Segments, strand, unpack)
+    }
+
+    /// Two sequences are equal when their segments are, so how a sequence was
+    /// assembled — one `t"..."` or several spliced together — does not show.
+    fn eq<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        other: &Value<'v>,
+    ) -> Result<'v, 's, bool> {
+        let Some(other) = this.annex().global.types.fmt.cast(other) else {
+            return Ok(false);
+        };
+        other.enter_sync(strand, |strand, other| eq_segments(this, other, strand))
+    }
+
+    fn hash<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        hasher: &mut impl Hasher,
+    ) -> Result<'v, 's, ()> {
+        hasher.write_usize(Segments.len(this, strand));
+        each_segment(this, strand, |strand, segment| {
+            hasher.write_u64(kv::hash(strand, segment)?);
+            Ok(())
+        })
+    }
+}
+
+/// Expands the sequence: literal text as it stands, and each interpolation
+/// through its own specification.
+fn render<'v, 's>(
+    this: Instance<'v, '_, Fmt>,
+    strand: &mut Strand<'v, 's>,
+    w: &mut dyn Format<'v>,
+) -> Result<'v, 's, ()> {
+    // A segment may bind a sequence of its own, so expansion recurses. Bound
+    // by the ordinary call depth rather than a mechanism of its own.
+    let _depth = strand.inner.push_call_depth()?;
+    let global = this.annex().global;
+    each_segment(this, strand, |strand, segment| {
+        render_segment(strand, global, segment, w)
+    })
+}
+
+/// Expands one segment.
+fn render_segment<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    segment: &Value<'v>,
+    w: &mut dyn Format<'v>,
+) -> Result<'v, 's, ()> {
+    if let Some(text) = segment.as_str_raw(strand) {
+        let text = text.to_string();
+        return w.write_str(strand, &text);
+    }
+    let bound = global
+        .types
+        .value
+        .cast(segment)
+        .expect("a segment is a Str or a FmtValue");
+    bound.enter_sync(strand, |strand, bound| {
+        let mut spec = bound.annex().spec;
+        let kind = *spec.kind.get_or_insert(Kind::Str);
+        let borrow = bound.borrow(strand)?;
+        let value = Ref::slot::<0>(&borrow);
+        if kind == Kind::Str
+            && let Some(nested) = global.types.fmt.cast(value)
+        {
+            // A sequence bound inside a sequence expands too, and the binding
+            // lays out what it expanded to. Asking for another kind — the
+            // source form, say — is the bound value's business as usual.
+            let mut buffer = String::new();
+            nested.enter_sync(strand, |strand, nested| render(nested, strand, &mut buffer))?;
+            let mut pad = Pad::new(spec, w);
+            pad.write_str(strand, &buffer)?;
+            return pad.finish(strand);
+        }
+        value.fmt(strand, &spec, w)
+    })
+}
+
+/// Writes one segment as it was written: literal text as it stands, an
+/// interpolation by its recorded source, or — when it was built at runtime and
+/// so has none — the bound value's debug form.
+fn debug_segment<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    segment: &Value<'v>,
+    w: &mut dyn Format<'v>,
+) -> Result<'v, 's, ()> {
+    if let Some(text) = segment.as_str_raw(strand) {
+        let text = text.to_string();
+        return w.write_str(strand, &text);
+    }
+    if let Some(cast) = global.types.value.cast(segment) {
+        let source = cast.enter_sync(strand, |strand, this| {
+            let borrow = this.borrow(strand)?;
+            Ok(Ref::slot::<1>(&borrow)
+                .as_str_raw(strand)
+                .map(str::to_string))
+        })?;
+        if let Some(source) = source {
+            return w.write_str(strand, &source);
+        }
+    }
+    segment.debug(strand, w)
+}
+
+/// Visits each segment in order, one rooted slot at a time.
+fn each_segment<'v, 's>(
+    this: Instance<'v, '_, Fmt>,
+    strand: &mut Strand<'v, 's>,
+    mut visit: impl FnMut(&mut Strand<'v, 's>, &Value<'v>) -> Result<'v, 's, ()>,
+) -> Result<'v, 's, ()> {
+    let borrow = this.borrow(strand)?;
+    let segments = Ref::slot::<0>(&borrow).as_array(strand).unwrap();
+    strand.with_slots_sync(|strand, [mut item]| {
+        for index in 0..segments.len(strand)? {
+            segments.get(strand, index, &mut item)?;
+            visit(strand, &item)?;
+        }
+        Ok(())
+    })
+}
+
+fn eq_segments<'v, 's>(
+    this: Instance<'v, '_, Fmt>,
+    other: Instance<'v, '_, Fmt>,
+    strand: &mut Strand<'v, 's>,
+) -> Result<'v, 's, bool> {
+    let this_borrow = this.borrow(strand)?;
+    let other_borrow = other.borrow(strand)?;
+    let this_segments = Ref::slot::<0>(&this_borrow).as_array(strand).unwrap();
+    let other_segments = Ref::slot::<0>(&other_borrow).as_array(strand).unwrap();
+    let len = this_segments.len(strand)?;
+    if len != other_segments.len(strand)? {
+        return Ok(false);
+    }
+    strand.with_slots_sync(|strand, [mut left, mut right]| {
+        for index in 0..len {
+            this_segments.get(strand, index, &mut left)?;
+            other_segments.get(strand, index, &mut right)?;
+            if !left.op_eq(strand, &right).to_bool(strand) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    })
+}
+
+/// Builds a sequence from the arguments the `fmt` builtin was handed.
+///
+/// This is the path a `t"..."` takes: the compiler emits one argument per
+/// segment, with runs of literal text already folded into single constants,
+/// so there is nothing here to normalize.
+pub(crate) fn create_fmt<'v, 'a, 's>(
+    strand: &'a mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    args: Args<'v, 'a>,
+    out: Slot<'v, 'a>,
+) -> Result<'v, 's, ()> {
+    strand.with_slots_sync(|strand, [mut segments]| {
+        Output::set(strand, &mut segments, Empty::Array);
+        for arg in args {
+            match arg {
+                Arg::Pos(segment) => append_segment(strand, global, &segments, &segment)?,
+                Arg::Key(key, _) => return Err(Error::unexpected_key(strand, key)),
+            }
+        }
+        create_from_segments(strand, global, &segments, out);
+        Ok(())
+    })
+}
+
+/// Appends one segment to the array under construction.
+///
+/// A segment is literal text or a bound value, and nothing else. Which of the
+/// two it is is exactly what a consumer acts on, so a value that is neither is
+/// a mistake to report rather than something to coerce into one or the other.
+fn append_segment<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    segments: &Value<'v>,
+    segment: &Value<'v>,
+) -> Result<'v, 's, ()> {
+    if segment.as_str_raw(strand).is_none() && global.types.value.cast(segment).is_none() {
+        return Err(Error::type_error(strand, "Fmt: expected Str or FmtValue"));
+    }
+    segments.as_array(strand).unwrap().push(strand, segment)
+}
+
+fn create_from_segments<'v>(
+    strand: &mut Strand<'v, '_>,
+    global: State<'v, Global<'v>>,
+    segments: &Value<'v>,
+    mut out: Slot<'v, '_>,
+) {
+    let ty = global.types.fmt;
+    ty.create_with_annex(strand, Fmt, FmtAnnex { global }, &mut out);
+    ty.cast(&out).unwrap().enter_sync(strand, |strand, this| {
+        let mut borrow = this.borrow_mut_unwrap();
+        Output::set(strand, Mut::slot_mut::<0>(&mut borrow), segments);
+    });
 }
 
 /// Formats the bound value, letting the surrounding conversion supply an unset kind.
@@ -398,7 +847,8 @@ pub(crate) fn register<'v>(builder: &mut Builder<'v>) -> State<'v, Global<'v>> {
             Ok(())
         })
         .build();
-    let global = Global::new(builder, Types { spec, value });
+    let fmt = builder.build_type::<Fmt>((), ()).build();
+    let global = Global::new(builder, Types { spec, value, fmt });
     builder.register_state(global)
 }
 
