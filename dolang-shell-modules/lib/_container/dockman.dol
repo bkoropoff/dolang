@@ -563,14 +563,11 @@ pub class Runtime
     let _ = [self, args]
     throw "Runtime.cli not implemented"
 
-  # `term.mute` drops stderr unconditionally, so a routine cleanup/tagging
-  # command that starts failing leaves no trace of why. This captures stderr
-  # into a buffer instead -- silent on success, same as `term.mute` -- and
-  # prints it before rethrowing on failure.
+  # Run CLI with output captured, printing it only on failure
   pub def quiet_cli self ...args
     let output = StrBuf()
     try
-      self.cli ...args stderr: $output
+      self.cli ...args stdout: $output stderr: $output
     catch proc.Error: e
       if output.len
         print $output.freeze()
