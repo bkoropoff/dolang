@@ -1,19 +1,9 @@
 import
   std:
     - Iter
-    - RuntimeError
     - TypeError
     - UnexpectedKeyError
     - ValueError
-
-def assert_err_type ty block
-  let res = try
-    block()
-    false
-  catch e
-    assert (type e ty)
-    true
-  assert $res
 
 assert_eq [...[1, 2, 3].iter().take 0] []
 assert_eq [...[1, 2, 3].iter().take 2] [1, 2]
@@ -53,13 +43,13 @@ assert_eq (it.next()) 4
 assert_eq ([1, 2].iter().find (do |x| x > 5) default: 42) 42
 assert_eq ([1, 2].iter().find (do |x| x > 5) else: do 43) 43
 
-assert_err_type $RuntimeError do [1, 2].iter().find do |x| (x > 5)
-assert_err_type $UnexpectedKeyError do [1, 2].iter().find (do |_| false) default: 1 else: do 2
+assert_throws $std.RuntimeError do [1, 2].iter().find do |x| (x > 5)
+assert_throws $UnexpectedKeyError do [1, 2].iter().find (do |_| false) default: 1 else: do 2
 
-assert_err_type $TypeError do [1, 2].iter().take "bad"
-assert_err_type $TypeError do [1, 2].iter().skip "bad"
-assert_err_type $ValueError do [1, 2].iter().take (0 - 1)
-assert_err_type $ValueError do [1, 2].iter().skip (0 - 1)
+assert_throws $TypeError do [1, 2].iter().take "bad"
+assert_throws $TypeError do [1, 2].iter().skip "bad"
+assert_throws $ValueError do [1, 2].iter().take (0 - 1)
+assert_throws $ValueError do [1, 2].iter().skip (0 - 1)
 
 class MyInput: Iter
   pub field inner = nil

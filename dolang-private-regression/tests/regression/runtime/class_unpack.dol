@@ -3,15 +3,6 @@ import
     - FieldError
     - Tuple
 
-def assert_err msg block
-  let caught = false
-  try
-    block()
-  catch error
-    assert_eq (str error) $msg
-    caught = true
-  assert $caught
-
 class Base
   pub field inherited = 2
 
@@ -45,7 +36,7 @@ bind example
   - positional = 7
   ..._
 assert_eq $positional 7
-assert_err "missing positional item: 0" do
+assert_throws $std.RuntimeError str: "missing positional item: 0" do
   let _positional ..._ = example
 
 # Missing keys use defaults, and missing required keys fail.
@@ -53,15 +44,15 @@ bind example
   :missing = 8
   ..._
 assert_eq $missing 8
-assert_err "missing key item: missing" do
+assert_throws $std.RuntimeError str: "missing key item: missing" do
   let missing: _missing ..._ = example
 
 # Methods, setter-only properties, and private fields are not fields for unpack.
-assert_err "missing key item: method" do
+assert_throws $std.RuntimeError str: "missing key item: method" do
   let method: _method ..._ = example
-assert_err "missing key item: write_only" do
+assert_throws $std.RuntimeError str: "missing key item: write_only" do
   let write_only: _write_only ..._ = example
-assert_err "missing key item: private" do
+assert_throws $std.RuntimeError str: "missing key item: private" do
   let private: _private ..._ = example
 
 # A captured tail contains unmatched names, reads values lazily, and supports
@@ -116,7 +107,7 @@ class Present
     present_hits = (present_hits + 1)
     1
 
-assert_err "unexpected key item: present" do
+assert_throws $std.RuntimeError str: "unexpected key item: present" do
   let anchor: _anchor = Present()
 assert_eq $present_hits 1
 
@@ -127,7 +118,7 @@ class Failure
   pub def bad _self
     throw "boom"
 
-assert_err boom do
+assert_throws $Str str: boom do
   let anchor: _anchor = Failure()
 
 # Explicit (unpack) still takes precedence over default field unpack.

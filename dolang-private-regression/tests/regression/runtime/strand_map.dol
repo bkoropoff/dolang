@@ -11,15 +11,6 @@ import
     - Iter
     - ValueError
 
-def assert_err_type ty block
-  let res = try
-    block()
-    false
-  catch e
-    assert (type e ty)
-    true
-  assert $res
-
 # Explicit input and output are consumed lazily by a bounded set of workers.
 class Counting: Iter
   pub field count = 0
@@ -119,5 +110,5 @@ pipeline
 pooled.sort()
 assert_eq $pooled [1, 2, 3, 4]
 
-assert_err_type $ValueError do map 0 input: [] output: [] do |value| value
-assert_err_type $ValueError do pool 0 [] do |value| value
+assert_throws $ValueError do map 0 input: [] output: [] do |value| value
+assert_throws $ValueError do pool 0 [] do |value| value

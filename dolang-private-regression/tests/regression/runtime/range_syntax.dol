@@ -77,34 +77,25 @@ let same_arr = [1, 2, 3]
 same_arr[1..2] = same_arr
 assert_eq $same_arr [1, 1, 2, 3, 3]
 
-def assert_err msg block
-  let ok = try
-    block()
-    false
-  catch e
-    assert_eq (str e) $msg
-    true
-  assert $ok
-
-assert_err "index out of range or invalid" do
+assert_throws $std.RuntimeError str: "index out of range or invalid" do
   arr[Range 0 4 0]
-assert_err "index out of range or invalid" do
+assert_throws $std.RuntimeError str: "index out of range or invalid" do
   text[Range 0 4 2]
-assert_err "index out of range or invalid" do
+assert_throws $std.RuntimeError str: "index out of range or invalid" do
   edit[Range 0 4 2] = [1, 2]
 
 # Only an array or a tuple replaces a slice. Anything else -- a range, an
 # iterator, a string, a lone value -- is a type error rather than being
 # quietly drained or wrapped.
 let strict = [0, 1, 2, 3]
-assert_err "type error: range assignment requires an array or tuple" do
+assert_throws $std.RuntimeError str: "type error: range assignment requires an array or tuple" do
   strict[1..2] = Range 4 7
-assert_err "type error: range assignment requires an array or tuple" do
+assert_throws $std.RuntimeError str: "type error: range assignment requires an array or tuple" do
   strict[1..2] = [4, 5].iter()
-assert_err "type error: range assignment requires an array or tuple" do
+assert_throws $std.RuntimeError str: "type error: range assignment requires an array or tuple" do
   strict[1..2] = "xy"
-assert_err "type error: range assignment requires an array or tuple" do
+assert_throws $std.RuntimeError str: "type error: range assignment requires an array or tuple" do
   strict[1..2] = 9
-assert_err "type error: range assignment requires an array or tuple" do
+assert_throws $std.RuntimeError str: "type error: range assignment requires an array or tuple" do
   strict[1..2] = nil
 assert_eq $strict [0, 1, 2, 3]

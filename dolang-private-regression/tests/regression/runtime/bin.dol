@@ -102,22 +102,13 @@ assert_eq (b"\x00\xffdata\xff\x00".trim b"\x00\xff") b"data"
 assert_eq (b"\xff\xfe".trim b"\xff\xfe") b""
 assert_eq (b"foobar".trim b"") b"foobar"
 
-def assert_err msg block
-  let res = try
-    block()
-    false
-  catch e
-    assert_eq (str e) $msg
-    true
-  assert $res
-
-assert_err "index out of range or invalid" do b"foobar"[-99..]
-assert_err "index out of range or invalid" do b"foobar"[0..-99]
-assert_err "type error: iteration protocol not supported" do
+assert_throws $std.RuntimeError str: "index out of range or invalid" do b"foobar"[-99..]
+assert_throws $std.RuntimeError str: "index out of range or invalid" do b"foobar"[0..-99]
+assert_throws $std.RuntimeError str: "type error: iteration protocol not supported" do
   b"foobar".trim 1
-assert_err "type error: invalid pattern: not binary data" do
+assert_throws $std.RuntimeError str: "type error: invalid pattern: not binary data" do
   b"foobar".trim [1]
 # A `Str` pattern would have to be encoded to bytes first, and a multi-byte
 # character means nothing byte by byte, so it is rejected outright.
-assert_err "type error: invalid pattern: not binary data" do
+assert_throws $std.RuntimeError str: "type error: invalid pattern: not binary data" do
   b"foobar".trim "x"

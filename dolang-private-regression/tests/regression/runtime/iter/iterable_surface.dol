@@ -3,15 +3,6 @@ import std:
   - Iterable
   - Sinkable
 
-def assert_err_type ty block
-  let res = try
-    block()
-    false
-  catch e
-    assert (type e ty)
-    true
-  assert $res
-
 # `x.foo(..)` on an Iterable means `x.iter().foo(..)`, so every forwarded
 # method works directly on a container.
 assert_eq [...[1, 2, 3].map (do |x| x * 2)] [2, 4, 6]
@@ -54,10 +45,10 @@ assert_eq (count_variadic 1 2) 2
 # Methods deliberately withheld from Iterable stay withheld: `next` would mint
 # a fresh iterator per call, `count` is `len` spelled expensively, and `kv` is
 # the iterable's own business.
-assert_err_type $FieldError do [1, 2, 3].next()
-assert_err_type $FieldError do [1, 2, 3].kv()
-assert_err_type $FieldError do [1, 2, 3].count()
-assert_err_type $FieldError do (Range start: 1 end: 4).next()
+assert_throws $FieldError do [1, 2, 3].next()
+assert_throws $FieldError do [1, 2, 3].kv()
+assert_throws $FieldError do [1, 2, 3].count()
+assert_throws $FieldError do (Range start: 1 end: 4).next()
 
 # ...and dict keeps its own unrelated `count`.
 assert_eq ({"a": 1}.count "a") 1
@@ -98,7 +89,7 @@ assert_eq $direct [9]
 let rec = record(a: 1, b: 2)
 assert (!(type rec Iterable))
 assert_eq ([...rec].len) 2
-assert_err_type $FieldError do rec.map (do |kv| kv)
+assert_throws $FieldError do rec.map (do |kv| kv)
 
 # User classes inherit the forwarded methods from the abstract supertype.
 # MyIterable supplies only `(iter)` -- no `(next)` of its own.

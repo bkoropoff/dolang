@@ -1,13 +1,3 @@
-pub def assert_err func type: ty :msg ...rest
-    let res = try
-      func ...rest
-      false
-    catch e
-      assert (type e ty)
-      assert_eq (str e) $msg
-      true
-    assert $res
-
 pub def cases run ...cases
   for i case = cases
     assert $ type $i $Int

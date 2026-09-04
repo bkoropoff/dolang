@@ -28,17 +28,9 @@ let items = ["one", "two", "three"]
 assert_eq [...items.iter().crimp().chomp()] $items
 
 # Non-Str/Bin items are a type error rather than being coerced.
-def assert_throws block
-  let threw = try
-    block()
-    false
-  catch _
-    true
-  assert $threw
-
-assert_throws do [...[1].iter().chomp()]
-assert_throws do [...[1].iter().crimp()]
-assert_throws do [...["a"].iter().crimp(1)]
+assert_throws $std.TypeError do [...[1].iter().chomp()]
+assert_throws $std.TypeError do [...[1].iter().crimp()]
+assert_throws $std.TypeError do [...["a"].iter().crimp(1)]
 
 # ── Sink direction ──────────────────────────────────────────────────────
 
