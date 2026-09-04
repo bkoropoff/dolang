@@ -15,6 +15,6 @@ Creates a SHA-1 digest state handle.
 ```
 let state = Sha1()
 state.update "abc"
-assert_eq (str (fmt (state.digest()) kind: :HEX:))
+assert_eq "${state.digest():x}"
   a9993e364706816aba3e25717850c26c9cd0d89d
 ```

@@ -26,8 +26,8 @@ terminal cells rather than extended grapheme clusters, the same measure
 one at a cluster boundary, and SGR sequences consume neither.
 
 Formatting produces a [`Str`](../std/str.md), so it drops the styling along
-with every other `str` conversion — `str $ fmt label width: 6` and
-`"${label:6}"` are laid out in cells and plain.
+with every other `str` conversion: `"${label:6}"` is laid out in cells and
+plain.
 
 The console is where the layout and the styling arrive together. Given a
 [`FmtValue`](../std/fmt-value.md) bound to a `Text`,
@@ -38,8 +38,8 @@ the styling:
 
 ```
 let label = text("界a", fg: :RED:)
-echo (fmt label width: 6)          # padded and still red
-str $ fmt label width: 6           # padded and plain
+echo (std.FmtValue label width: 6)     # padded and still red
+echo "${label:6}"                      # padded and plain
 ```
 
 A specification asking for a debug or numeric rendering is no longer a request

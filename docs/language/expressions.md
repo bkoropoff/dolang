@@ -178,8 +178,7 @@ Conversions select the representation:
 
 Without a conversion, quoted strings and here strings use display (`:STR:`)
 conversion. The options and validation are the same as
-[`fmt`](../api/std/index.md),
-[`FmtValue`](../api/std/fmt-value.md), and
+[`FmtValue`](../api/std/fmt-value.md) and
 [`FmtSpec`](../api/std/fmt-spec.md).
 
 Width and precision may use `$name` or `$(expression)` instead of a decimal

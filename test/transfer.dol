@@ -5,6 +5,7 @@ import digest http http.mock json tar transfer zip
     - Path
     - symlink_file
   std:
+    - FmtValue
     - ValueError
   sys:
     - os_info
@@ -104,7 +105,7 @@ let HELLO_SHA256 = "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043
 # can plant one directly. That is the only way to produce a partial download:
 # the mock server cannot cut a response short mid-body.
 def cache_entry cache url
-  let entry = (cache / (str (fmt (digest.blake3(str url)) kind: :HEX:)))
+  let entry = (cache / (str (FmtValue (digest.blake3(str url)) kind: :HEX:)))
   entry.create_dir all: true
   entry
 

@@ -108,35 +108,6 @@ data](../../language/vertical-layout.md#vertical-data) instead.
 
 Coerces or parses a value as a [`Float`](./float.md).
 
-### `fmt value? :fill? :align? :sign? :width? :precision? :alt? :kind?`
-
-Creates reusable formatting options, optionally bound to a value.
-
-#### Parameters
-
-| Name        | Type  | Description                             |
-| ----------- | ----- | --------------------------------------- |
-| `value`     | ?     | Value to bind                           |
-| `fill`      | ?     | Fill character, `:ZERO:`, or nil        |
-| `align`     | Sym?  | `:LEFT:`, `:RIGHT:`, or `:CENTER:`      |
-| `sign`      | Sym?  | `:PLUS:` or `:SPACE:`                   |
-| `width`     | Int?  | Minimum width in grapheme clusters      |
-| `precision` | Int?  | Numeric precision or maximum graphemes  |
-| `alt`       | Bool? | Enables alternate formatting            |
-| `kind`      | Sym?  | Representation kind                     |
-
-#### Returns
-
-[`FmtSpec`](./fmt-spec.md) when `value` is omitted; otherwise
-[`FmtValue`](./fmt-value.md).
-
-#### Example
-
-```
-let money = fmt precision: 2 kind: :FIXED:
-echo "total: $(money $amount)"
-```
-
 ### `getter func`
 
 Builds a getter object from a function.

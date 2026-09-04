@@ -15,6 +15,6 @@ Creates an MD5 digest state handle.
 ```
 let state = Md5()
 state.update "abc"
-assert_eq (str (fmt (state.digest()) kind: :HEX:))
+assert_eq "${state.digest():x}"
   900150983cd24fb0d6963f7d28e17f72
 ```

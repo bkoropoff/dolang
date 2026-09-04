@@ -8,6 +8,7 @@ import shell term strand
     - skip
     - test
   std:
+    - FmtValue
     - TypeError
     - UnsupportedError
     - ValueError
@@ -195,27 +196,27 @@ def text_format_measures_cells()
   # Width, alignment and precision are terminal cells, not grapheme clusters:
   # "界a" is two clusters but three cells.
   let wide = term.text "界a"
-  assert_eq (str $ fmt wide width: 5) "界a  "
-  assert_eq (str $ fmt wide width: 5 align: :RIGHT:) "  界a"
+  assert_eq (str $ FmtValue wide width: 5) "界a  "
+  assert_eq (str $ FmtValue wide width: 5 align: :RIGHT:) "  界a"
 
   # SGR sequences do not consume the budget, and the fill is measured the
   # same way the content is.
   # Formatting a `Text` lays it out in cells and then drops the styling, the
   # same as any other `str` conversion of one.
   let red = term.text("界a", fg: :RED:)
-  assert_eq (str $ fmt red width: 5) "界a  "
-  assert_eq (std.verbatim $ fmt red width: 5) "界a  "
-  assert_eq (str $ fmt wide fill: "界" width: 7 align: :RIGHT:) "界界界a"
+  assert_eq (str $ FmtValue red width: 5) "界a  "
+  assert_eq (std.verbatim $ FmtValue red width: 5) "界a  "
+  assert_eq (str $ FmtValue wide fill: "界" width: 7 align: :RIGHT:) "界界界a"
 
   # Precision clips at a cluster boundary in cells and leaves the styling
   # terminated, as `clip` does.
-  assert_eq (str $ fmt red precision: 2) 界
-  assert_eq (str $ fmt red precision: 1) ""
+  assert_eq (str $ FmtValue red precision: 2) 界
+  assert_eq (str $ FmtValue red precision: 1) ""
 
   # Numeric options remain unsupported, as for any other text value.
-  assert_throws $std.RuntimeError do str $ fmt red kind: :HEX:
-  assert_throws $std.RuntimeError do str $ fmt red sign: :PLUS:
-  assert_throws $std.RuntimeError do str $ fmt red fill: :ZERO: width: 5
+  assert_throws $std.RuntimeError do str $ FmtValue red kind: :HEX:
+  assert_throws $std.RuntimeError do str $ FmtValue red sign: :PLUS:
+  assert_throws $std.RuntimeError do str $ FmtValue red fill: :ZERO: width: 5
 
 #[test]
 def console_formats_bound_text()
@@ -224,29 +225,31 @@ def console_formats_bound_text()
   # encoded form and keep the styling.
   let red = term.text("red", fg: :RED:)
   let padded = "$ESC[31mred$ESC[0m  "
-  assert_eq (term.sub can_style: true do echo (fmt red width: 5)) $padded
-  assert_eq (term.sub can_style: true do print (fmt red width: 5)) $padded
-  assert_eq (term.text(fmt red width: 5).encode()) $padded
+  assert_eq (term.sub can_style: true do echo (FmtValue red width: 5)) $padded
+  assert_eq (term.sub can_style: true do print (FmtValue red width: 5)) $padded
+  assert_eq (term.text(FmtValue red width: 5).encode()) $padded
 
   # Applying a style is the same path, so it composes too: the inner styling
   # survives inside the outer one.
   let framed = term.Style bold: true
   assert_eq (
-    framed(fmt red width: 5).encode()
+    framed(FmtValue red width: 5).encode()
   ) "$ESC[1m$ESC[31mred$ESC[0m$ESC[1m  $ESC[0m"
 
   # Unstyled output drops the escapes but keeps the layout.
-  assert_eq (term.sub do echo (fmt red width: 5)) "red  "
+  assert_eq (term.sub do echo (FmtValue red width: 5)) "red  "
 
   # A specification asking for a debug rendering is no longer a request for
   # terminal presentation, and takes the ordinary sanitized path.
-  let debugged = (term.sub can_style: true do echo (fmt red kind: :DBG:))
+  let debugged = (term.sub can_style: true do echo (FmtValue red kind: :DBG:))
   assert (debugged.contains "term.Text")
   assert (debugged.contains(ESC) == false)
 
   # A `Str` that merely contains escapes is still untrusted, however it was
   # produced — including by `encode` on the very same `Text`.
-  assert_eq (term.sub can_style: true do echo (fmt (red.encode()) width: 5)) red
+  assert_eq
+    - (term.sub can_style: true do echo (FmtValue (red.encode()) width: 5))
+    - red
 
 # --- Terminal output capture ----------------------------------------------
 

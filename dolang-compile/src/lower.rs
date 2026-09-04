@@ -706,6 +706,11 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
             );
             sig.push(sig::Arg::Key(self.symtab.id(&self.bintab.id_str("kind"))));
         }
+        // The interpolation keeps the text it was written as, sigil and
+        // delimiters included, so a consumer can reproduce the source form.
+        let cid = self.consttab.str(self.bintab.id_str(self.file.str(span)));
+        self.block.insts.push(Inst(InstInfo::LoadConst(cid), span));
+        sig.push(sig::Arg::Key(self.symtab.id(&self.bintab.id_str("source"))));
         let pack = sig::Pack::new(sig.into_iter());
         self.block.insts.push(Inst(
             InstInfo::Builtin(builtin::FMT_VALUE, self.packtab.id(&pack)),

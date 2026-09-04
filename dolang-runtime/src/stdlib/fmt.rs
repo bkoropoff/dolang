@@ -22,6 +22,7 @@ struct Symbols<'v> {
     precision: Sym<'v, 'v>,
     alt: Sym<'v, 'v>,
     kind: Sym<'v, 'v>,
+    source: Sym<'v, 'v>,
     zero: Sym<'v, 'v>,
     left: Sym<'v, 'v>,
     right: Sym<'v, 'v>,
@@ -49,6 +50,7 @@ impl<'v> Symbols<'v> {
             precision: builder.sym("precision"),
             alt: builder.sym("alt"),
             kind: builder.sym("kind"),
+            source: builder.sym("source"),
             zero: builder.sym("ZERO"),
             left: builder.sym("LEFT"),
             right: builder.sym("RIGHT"),
@@ -199,6 +201,20 @@ impl<'v> Object<'v> for FmtSpec {
     type Type = ();
     type TypeAnnex = ();
 
+    /// Constructs a specification from keyword options alone. Binding a value
+    /// is [`FmtValue`]'s job, so no positional is accepted here.
+    async fn new<'a, 's>(
+        _this: Type<'v, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        args: Args<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        let global = strand.vm().state::<Global<'v>>();
+        let spec = merge_spec(strand, global, Spec::default(), args)?;
+        create_spec(strand, global, spec, out);
+        Ok(())
+    }
+
     async fn call<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
@@ -213,12 +229,31 @@ impl<'v> Object<'v> for FmtSpec {
 impl<'v> Object<'v> for FmtValue {
     const MODULE: &'v str = "std";
     const NAME: &'v str = "FmtValue";
-    const SLOTS: usize = 1;
+    /// Slot 0 is the bound value; slot 1 the source text, or nil.
+    const SLOTS: usize = 2;
 
     type Annex = SpecAnnex<'v>;
     type Type = ();
     type TypeAnnex = ();
 
+    /// Binds a value to keyword options. `source:` is accepted so a caller
+    /// that has the originating text — the compiler, above all — can record it.
+    async fn new<'a, 's>(
+        _this: Type<'v, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        args: Args<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        let global = strand.vm().state::<Global<'v>>();
+        let source_sym = global.symbols.source;
+        let ([value], [source], rest) = unpack!(strand, args, 1, 0, source_sym = None, ...)?;
+        let spec = merge_spec(strand, global, Spec::default(), rest)?;
+        create_value(strand, global, spec, value, source.as_deref(), out);
+        Ok(())
+    }
+
+    /// Re-merges options over the bound value. The result is synthetic rather
+    /// than source-derived, so it carries no `source`.
     async fn call<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
@@ -229,7 +264,7 @@ impl<'v> Object<'v> for FmtValue {
         let global = annex.global;
         let spec = merge_spec(strand, global, annex.spec, args)?;
         let borrow = this.borrow(strand)?;
-        create_value(strand, global, spec, Ref::slot::<0>(&borrow), out);
+        create_value(strand, global, spec, Ref::slot::<0>(&borrow), None, out);
         Ok(())
     }
 
@@ -357,8 +392,9 @@ pub(crate) fn register<'v>(builder: &mut Builder<'v>) -> State<'v, Global<'v>> {
             Output::set(strand, out, Ref::slot::<0>(&borrow));
             Ok(())
         })
-        .get("source", |_this, _strand, mut out| {
-            out.store(Value::NIL);
+        .get("source", |this, strand, out| {
+            let borrow = this.borrow(strand)?;
+            Output::set(strand, out, Ref::slot::<1>(&borrow));
             Ok(())
         })
         .build();
@@ -375,13 +411,20 @@ pub(crate) async fn create<'v, 'a, 's>(
     args: Args<'v, 'a>,
     out: Slot<'v, 'a>,
 ) -> Result<'v, 's, ()> {
-    let ([], [value], rest) = unpack!(strand, args, 0, 1, ...)?;
+    let source_sym = global.symbols.source;
+    let ([], [value, source], rest) = unpack!(strand, args, 0, 1, source_sym = None, ...)?;
     let spec = merge_spec(strand, global, base, rest)?;
     let Some(value) = value else {
+        if source.is_some() {
+            return Err(Error::type_error(
+                strand,
+                "source: requires a value to bind it to",
+            ));
+        }
         create_spec(strand, global, spec, out);
         return Ok(());
     };
-    create_value(strand, global, spec, value, out);
+    create_value(strand, global, spec, value, source.as_deref(), out);
     Ok(())
 }
 
@@ -429,6 +472,7 @@ fn create_value<'v>(
     global: State<'v, Global<'v>>,
     spec: Spec,
     value: impl Input<'v>,
+    source: Option<&Value<'v>>,
     mut out: Slot<'v, '_>,
 ) {
     let ty = global.types.value;
@@ -438,6 +482,9 @@ fn create_value<'v>(
         .enter_sync(strand, |strand, instance| {
             let mut borrow = instance.borrow_mut_unwrap();
             Output::set(strand, Mut::slot_mut::<0>(&mut borrow), value);
+            if let Some(source) = source {
+                Output::set(strand, Mut::slot_mut::<1>(&mut borrow), source);
+            }
         });
 }
 

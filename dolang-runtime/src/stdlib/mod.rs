@@ -5,7 +5,7 @@ use crate::{
     error::Error,
     object::{array::Array, class, dict::Dict, float, int, record::Record, tuple},
     unpack,
-    value::{Output, StrEmbryo, Value, fmt::Spec},
+    value::{Output, StrEmbryo, Value},
     vm::Builder,
 };
 
@@ -210,9 +210,6 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
             } else {
                 Err(Error::type_error(strand, "sym: expected Str or Sym"))
             }
-        })
-        .function("fmt", async move |strand, args, out| {
-            fmt::create(strand, fmt, Spec::default(), args, out).await
         })
         // Core functions
         .function("verbatim", async move |strand, args, out| {

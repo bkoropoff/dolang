@@ -1,25 +1,28 @@
+import std:
+  - FmtValue
+
 # Immediate integers
-assert_eq (str (fmt 0 kind: :BIN:)) "0"
-assert_eq (str (fmt 10 kind: :BIN:)) "1010"
-assert_eq (str (fmt 10 kind: :OCT:)) "12"
-assert_eq (str (fmt 255 kind: :HEX:)) "ff"
+assert_eq (str (FmtValue 0 kind: :BIN:)) "0"
+assert_eq (str (FmtValue 10 kind: :BIN:)) "1010"
+assert_eq (str (FmtValue 10 kind: :OCT:)) "12"
+assert_eq (str (FmtValue 255 kind: :HEX:)) "ff"
 
 # Negative integers use a leading minus sign
-assert_eq (str (fmt (-10) kind: :BIN:)) "-1010"
-assert_eq (str (fmt (-10) kind: :OCT:)) "-12"
-assert_eq (str (fmt (-255) kind: :HEX:)) "-ff"
+assert_eq (str (FmtValue (-10) kind: :BIN:)) "-1010"
+assert_eq (str (FmtValue (-10) kind: :OCT:)) "-12"
+assert_eq (str (FmtValue (-255) kind: :HEX:)) "-ff"
 
 # The minimum Int formats without overflowing
 let min = -170141183460469231731687303715884105728
-assert_eq (str (fmt min kind: :HEX:)) "-80000000000000000000000000000000"
+assert_eq (str (FmtValue min kind: :HEX:)) "-80000000000000000000000000000000"
 
 # Large integers take the boxed representation
 let large = (1 << 100)
-assert_eq (str (fmt large kind: :HEX:)) "10000000000000000000000000"
+assert_eq (str (FmtValue large kind: :HEX:)) "10000000000000000000000000"
 
 # Statement-level verbatim integers format from their value, not their text
 def identity value
   value
 
 let verbatim = identity 0255
-assert_eq (str (fmt verbatim kind: :HEX:)) "ff"
+assert_eq (str (FmtValue verbatim kind: :HEX:)) "ff"
