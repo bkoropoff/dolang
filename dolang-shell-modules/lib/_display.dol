@@ -17,12 +17,12 @@
 import std sys term
 import security.unix
 
-let section_style = term.style fg: :BRIGHT_BLUE: bold: true
-let key_style = term.style fg: :CYAN:
-let value_style = term.style fg: :GREEN:
-let note_style = term.style dim: true
-let bullet_style = term.style dim: true
-let absent_style = term.style dim: true
+let section_style = term.Style fg: :BRIGHT_BLUE: bold: true
+let key_style = term.Style fg: :CYAN:
+let value_style = term.Style fg: :GREEN:
+let note_style = term.Style dim: true
+let bullet_style = term.Style dim: true
+let absent_style = term.Style dim: true
 
 def spaces n
   " ".repeat(n)
@@ -150,8 +150,9 @@ pub class Map: Node
     let width = 0
     for pair = self.entries
       let key node = pair
-      if (node.inline() && key.width() > width)
-        width = key.width()
+      let key_width = (key_style key).width()
+      if (node.inline() && key_width > width)
+        width = key_width
     # The `:` is part of what gets laid out, hence the extra column.
     let key_column = fmt width: (width + 1)
     let first = true

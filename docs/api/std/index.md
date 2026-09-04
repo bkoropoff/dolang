@@ -120,8 +120,8 @@ Creates reusable formatting options, optionally bound to a value.
 | `fill`      | ?     | Fill character, `:ZERO:`, or nil        |
 | `align`     | Sym?  | `:LEFT:`, `:RIGHT:`, or `:CENTER:`      |
 | `sign`      | Sym?  | `:PLUS:` or `:SPACE:`                   |
-| `width`     | Int?  | Minimum display width                   |
-| `precision` | Int?  | Numeric precision or maximum text width |
+| `width`     | Int?  | Minimum width in grapheme clusters      |
+| `precision` | Int?  | Numeric precision or maximum graphemes  |
 | `alt`       | Bool? | Enables alternate formatting            |
 | `kind`      | Sym?  | Representation kind                     |
 

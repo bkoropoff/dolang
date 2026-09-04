@@ -48,27 +48,38 @@ to `term.default`.
 
 ## Styled Text
 
-[`term.style`](../api/term/index.md#style-options-args) returns
+[`term.text`](../api/term/index.md#text-options-args) returns
 [`term.Text`](../api/term/text.md), which can contain terminal styling:
 
 ```
 import term
 
-let warning = term.style WARNING fg: :YELLOW: bold: true
+let warning = term.text WARNING fg: :YELLOW: bold: true
 echo $warning "disk space is low"
 ```
 
-`Text` values may be nested in further `style` calls, with outer style
-attributes inherited.
+`Text` values may be nested in further `text` calls, with outer style
+attributes inherited. Nesting means passing the value as an argument:
+interpolating it into a string converts it with `str` first, which drops the
+styling.
 
 ```
-let key = term.style important bold: true
-let message = term.style "check $key now" fg: :YELLOW:
+let key = term.text important bold: true
+let message = term.text "check " $key " now" fg: :YELLOW:
 echo $message
 ```
 
-Coercing `Text` with `str` returns its ANSI representation. Passing it
-directly to `echo` or `print` displays it with its styling.
+Coercing `Text` with `str` returns its content with the styling dropped;
+[`encode`](../api/term/text.md#encode) returns the ANSI representation.
+Passing it directly to `echo` or `print` displays it with its styling.
+
+A reusable style with no text of its own is a
+[`term.Style`](../api/term/style.md):
+
+```
+let warning = term.Style fg: :YELLOW: bold: true
+echo $warning("disk space is low")
+```
 
 ## Existing ANSI Output
 

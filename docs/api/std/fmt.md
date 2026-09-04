@@ -10,7 +10,7 @@ a new `Fmt` retaining the original value.
 
 ### `value`
 
-The bound value.
+The bound value. Never a `Fmt`: binding one is a `TypeError`.
 
 ### `source`
 
@@ -28,6 +28,11 @@ not accepted.
 ```
 let money = fmt precision: 2 kind: :FIXED:
 echo "total: $(money $amount)"
+
+# Laying a bound value out again restates the options over its `value`,
+# rather than binding the `Fmt` itself.
+let bound = money amount
+let column = fmt bound.value width: 10 align: :RIGHT: precision: 2 kind: :FIXED:
 ```
 
 When `kind` is nil, interpolation in an ordinary quoted string or here string

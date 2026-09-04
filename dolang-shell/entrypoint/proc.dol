@@ -3,11 +3,11 @@
 import args proc shell std term
 import _display: display
 
-let heading_style = term.style fg: :BRIGHT_BLUE: bold: true
-let pid_style = term.style fg: :CYAN: bold: true
-let dim_style = term.style dim: true
-let absent_style = term.style dim: true
-let error_style = term.style fg: :BRIGHT_RED: bold: true
+let heading_style = term.Style fg: :BRIGHT_BLUE: bold: true
+let pid_style = term.Style fg: :CYAN: bold: true
+let dim_style = term.Style dim: true
+let absent_style = term.Style dim: true
+let error_style = term.Style fg: :BRIGHT_RED: bold: true
 
 # Layout width to assume when the console has none to report: output is being
 # piped, or the terminal would not say how wide it is.
@@ -50,10 +50,10 @@ def list_processes _p
     let ppid = (info.parent_pid != nil && str(info.parent_pid) || "~")
     let name = process_name $info
     rows.push [pid, ppid, name]
-    if (pid.width() > pid_width)
-      pid_width = pid.width()
-    if (ppid.width() > ppid_width)
-      ppid_width = ppid.width()
+    if (pid.len > pid_width)
+      pid_width = pid.len
+    if (ppid.len > ppid_width)
+      ppid_width = ppid.len
 
   # The PID columns are sized to their contents and the name takes whatever is
   # left of the line, clipped rather than wrapped. A name is arbitrary text an
@@ -80,7 +80,7 @@ def list_processes _p
       print $ absent_style $ppid_cell
     else
       print $ppid_cell
-    print "  " (name.clip(name_width, suffix: "…")) "\n"
+    print "  " ((term.text name).clip(name_width, suffix: "…")) "\n"
 
 def unix_node identity
   let groups = display.List $

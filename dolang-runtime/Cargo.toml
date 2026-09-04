@@ -14,7 +14,6 @@ bstr = "1.12.1"
 futures = "0.3.31"
 hex = "0.4.3"
 unicode-segmentation.workspace = true
-unicode-width.workspace = true
 
 [dependencies.dolang-util]
 package = "dolang-private-util"

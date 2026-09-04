@@ -77,20 +77,6 @@ async fn value_to_pattern<'v, 's>(
         .await
 }
 
-fn clip_prefix(value: &str, width: usize) -> &str {
-    let mut used: usize = 0;
-    let mut end = 0;
-    for grapheme in value.graphemes(true) {
-        let grapheme_width = crate::display_width(grapheme);
-        if used.saturating_add(grapheme_width) > width {
-            break;
-        }
-        used += grapheme_width;
-        end += grapheme.len();
-    }
-    &value[..end]
-}
-
 impl<'v> Protocol<'v> for str {
     fn op_type<'a, 's>(
         _this: Recv<'v, 'a, Self>,
@@ -221,39 +207,6 @@ impl<'v> Protocol<'v> for str {
                     ));
                 }
                 Output::set(strand, out, scalar as u32 as usize);
-                Ok(())
-            }
-            sym::WIDTH => {
-                let ([], []) = unpack!(strand, args, 0, 0)?;
-                Output::set(strand, out, crate::display_width(me));
-                Ok(())
-            }
-            sym::CLIP => {
-                let suffix_sym = Sym::well_known(sym::SUFFIX);
-                let ([width], [suffix]) = unpack!(strand, args, 1, 0, suffix_sym = None)?;
-                let width = width.to_index(strand)?;
-                if crate::display_width(me) <= width {
-                    Output::set(strand, out, &this);
-                    return Ok(());
-                }
-                let suffix = suffix
-                    .map(|value| {
-                        value
-                            .as_str_raw(strand)
-                            .map(str::to_owned)
-                            .ok_or_else(|| Error::type_error(strand, "suffix: expected `Str`"))
-                    })
-                    .transpose()?;
-                let suffix = suffix
-                    .as_deref()
-                    .map(|value| clip_prefix(value, width))
-                    .unwrap_or("");
-                let source_width = width.saturating_sub(crate::display_width(suffix));
-                let prefix = clip_prefix(me, source_width);
-                let mut result = String::with_capacity(prefix.len() + suffix.len());
-                result.push_str(prefix);
-                result.push_str(suffix);
-                Output::set(strand, out, result.as_str());
                 Ok(())
             }
             sym::STARTS_WITH => {
@@ -506,8 +459,6 @@ impl<'v> Protocol<'v> for str {
             | sym::SCALARS
             | sym::SCALAR
             | sym::GRAPHEMES
-            | sym::WIDTH
-            | sym::CLIP
             | sym::WITHOUT_PREFIX
             | sym::ENDS_WITH
             | sym::WITHOUT_SUFFIX
@@ -1172,8 +1123,6 @@ impl<'v> Protocol<'v> for Type {
                 Method(sym::SCALARS),
                 Method(sym::SCALAR),
                 Method(sym::GRAPHEMES),
-                Method(sym::WIDTH),
-                Method(sym::CLIP),
                 Method(sym::STARTS_WITH),
                 Method(sym::WITHOUT_PREFIX),
                 Method(sym::ENDS_WITH),
@@ -1212,8 +1161,6 @@ impl<'v> Protocol<'v> for Type {
             | sym::SCALARS
             | sym::SCALAR
             | sym::GRAPHEMES
-            | sym::WIDTH
-            | sym::CLIP
             | sym::STARTS_WITH
             | sym::WITHOUT_PREFIX
             | sym::ENDS_WITH

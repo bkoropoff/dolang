@@ -1,7 +1,7 @@
 pub use dolang_runtime::{
     BYTE_STREAM_CHUNK_SIZE,
     arg::{Arg, Args},
-    call, display_width, method,
+    call, method,
     sym::Sym,
     unpack,
 };

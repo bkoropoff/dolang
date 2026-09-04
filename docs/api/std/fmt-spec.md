@@ -22,12 +22,14 @@ The fill character, `:ZERO:` for numeric zero padding, or nil for spaces.
 
 ### `width`
 
-The minimum display width, or nil when no minimum is set.
+The minimum width in extended grapheme clusters, or nil when unset. A value
+may measure itself differently: [`term.Text`](../term/text.md) measures
+terminal cells.
 
 ### `precision`
 
-The precision or maximum display width, depending on the formatted value, or
-nil when unset.
+The numeric precision or maximum number of extended grapheme clusters,
+depending on the formatted value, or nil when unset.
 
 ### `alt`
 
@@ -45,6 +47,10 @@ Supported values are `:STR:`, `:DBG:`, `:VERBATIM:`, `:HEX:`, `:OCT:`,
 
 Returns a new specification, or a bound [`Fmt`](./fmt.md) when `value` is
 provided. Omitted options retain their current values; nil resets an option.
+
+Binding a [`Fmt`](./fmt.md) is a `TypeError`: a bound value stays one level
+deep, so a consumer never has to unwrap a chain of specifications. Bind
+[`value`](./fmt.md#value) and state the combined options explicitly instead.
 
 ### `pad value`
 

@@ -45,12 +45,12 @@ def list_rules rules
 
 def highlight_prog prog
   prog = std.verbatim $prog
-  term.style bold: true "▶ " $ term.style fg: :BLUE: $prog
+  term.text bold: true "▶ " $ term.text fg: :BLUE: $prog
 
 def highlight_arg arg
   arg = std.verbatim $arg
   if arg.starts_with "-"
-    term.style fg: :YELLOW: $arg
+    term.text fg: :YELLOW: $arg
   else
     arg
 

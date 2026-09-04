@@ -5,9 +5,9 @@ use std::fmt;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
-    display_width,
     error::{Error, Result},
     strand::Strand,
+    value::Value,
 };
 
 use super::prim::Prim;
@@ -94,6 +94,17 @@ impl<'v, W: fmt::Write + ?Sized> Format<'v> for W {
     }
 }
 
+/// Recovers the specification carried by a `std.FmtSpec` or `std.Fmt`.
+///
+/// A native formatter that needs to apply a bound layout itself — rather than
+/// letting the value format itself — reads it from here.
+///
+/// # Errors
+/// Returns a type error if `value` is neither of those types.
+pub fn spec_of<'v, 's>(strand: &mut Strand<'v, 's>, value: &Value<'v>) -> Result<'v, 's, Spec> {
+    crate::stdlib::fmt::spec_of(strand, value)
+}
+
 /// Fill behavior for a formatted value.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Fill {
@@ -177,9 +188,9 @@ pub struct Pad<'a, 'v> {
 }
 
 impl<'a, 'v> Pad<'a, 'v> {
-    /// Creates a padding adapter using terminal-cell display width.
+    /// Creates a padding adapter using extended grapheme count.
     pub fn new(spec: Spec, sink: &'a mut dyn Format<'v>) -> Self {
-        Self::with_measure(spec, sink, display_width)
+        Self::with_measure(spec, sink, grapheme_count)
     }
 
     /// Creates a padding adapter using a custom width measurement function.
@@ -218,7 +229,7 @@ impl<'a, 'v> Pad<'a, 'v> {
             }
             let split = numeric_prefix_len(content);
             self.sink.write_str(strand, &content[..split])?;
-            write_fill(strand, self.sink, Fill::Zero, padding)?;
+            write_fill(strand, self.sink, Fill::Zero, padding, self.measure)?;
             return self.sink.write_str(strand, &content[split..]);
         }
         let (left, right) = match align {
@@ -226,9 +237,9 @@ impl<'a, 'v> Pad<'a, 'v> {
             Align::Right => (padding, 0),
             Align::Center => (padding / 2, padding - padding / 2),
         };
-        write_fill(strand, self.sink, self.spec.fill, left)?;
+        write_fill(strand, self.sink, self.spec.fill, left, self.measure)?;
         self.sink.write_str(strand, content)?;
-        write_fill(strand, self.sink, self.spec.fill, right)
+        write_fill(strand, self.sink, self.spec.fill, right, self.measure)
     }
 }
 
@@ -262,13 +273,18 @@ fn clip_prefix_by(value: &str, width: usize, measure: fn(&str) -> usize) -> &str
     &value[..end]
 }
 
+fn grapheme_count(value: &str) -> usize {
+    value.graphemes(true).count()
+}
+
 fn write_fill<'v, 's>(
     strand: &mut Strand<'v, 's>,
     sink: &mut dyn Format<'v>,
     fill: Fill,
-    cells: usize,
+    width: usize,
+    measure: fn(&str) -> usize,
 ) -> Result<'v, 's, ()> {
-    if cells == 0 {
+    if width == 0 {
         return Ok(());
     }
     let ch = match fill {
@@ -276,9 +292,10 @@ fn write_fill<'v, 's>(
         Fill::Char(ch) => ch,
         Fill::Zero => '0',
     };
-    let width = display_width(ch.encode_utf8(&mut [0; 4]));
-    let repeats = cells.checked_div(width).unwrap_or(0);
-    let remainder = cells.checked_rem(width).unwrap_or(cells);
+    let mut buffer = [0; 4];
+    let fill_width = measure(ch.encode_utf8(&mut buffer));
+    let repeats = width.checked_div(fill_width).unwrap_or(0);
+    let remainder = width.checked_rem(fill_width).unwrap_or(width);
     for _ in 0..repeats {
         sink.write_char(strand, ch)?;
     }
@@ -420,7 +437,7 @@ pub(crate) fn finish_numeric<'v, 's>(
             ));
         }
         let width = spec.width.map_or(0, |width| width as usize);
-        let zeroes = width.saturating_sub(display_width(&rendered));
+        let zeroes = width.saturating_sub(grapheme_count(&rendered));
         rendered = format!("{sign}{prefix}{}{digits}", "0".repeat(zeroes));
         pad_spec.width = None;
         pad_spec.fill = Fill::Default;
@@ -450,7 +467,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pad_buffers_clips_and_aligns_in_display_cells() {
+    fn pad_buffers_clips_and_aligns_in_graphemes() {
         with_vm(async |strand, []| {
             let mut out = String::new();
             let mut pad = Pad::new(
@@ -467,12 +484,12 @@ mod tests {
             pad.write_str(strand, "a").unwrap();
             pad.write_str(strand, "界b").unwrap();
             pad.finish(strand).unwrap();
-            assert_eq!(out, "..a界..");
+            assert_eq!(out, "..a界b..");
         });
     }
 
     #[test]
-    fn pad_uses_custom_measure_and_completes_wide_fill_with_spaces() {
+    fn pad_uses_custom_measure_for_fill() {
         with_vm(async |strand, []| {
             let mut out = String::new();
             let mut pad = Pad::with_measure(
@@ -487,7 +504,7 @@ mod tests {
             );
             pad.write_str(strand, "ab").unwrap();
             pad.finish(strand).unwrap();
-            assert_eq!(out, "ab界");
+            assert_eq!(out, "ab  ");
         });
     }
 

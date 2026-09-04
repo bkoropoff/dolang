@@ -9,7 +9,7 @@ use crate::{
         Input, Output, Slot, StrEmbryo, Value,
         fmt::{Align, Fill, Format, Kind, Pad, Sign, Spec},
     },
-    vm::{Builder, State, Stateful},
+    vm::{Builder, State, Stateful, Vm},
 };
 
 /// Every symbol this module needs: the keyword parameter names, and the symbol
@@ -170,6 +170,11 @@ pub(crate) struct Tag;
 
 impl<'v> Stateful<'v> for Global<'v> {
     type Tag = Tag;
+}
+
+/// Returns the [`Fmt`] type object singleton, for [`TypeObject::Fmt`](crate::value::TypeObject).
+pub(crate) fn fmt_singleton<'v, 'a>(vm: &'a Vm<'v>) -> &'a Value<'v> {
+    vm.state::<Global<'v>>().types.fmt.singleton(vm)
 }
 
 /// Immutable per-instance data shared by [`FmtSpec`] and [`Fmt`].
@@ -369,11 +374,23 @@ pub(crate) async fn create<'v, 'a, 's>(
 ) -> Result<'v, 's, ()> {
     let ([], [value], rest) = unpack!(strand, args, 0, 1, ...)?;
     let spec = merge_spec(strand, global, base, rest)?;
-    if let Some(value) = value {
-        create_fmt(strand, global, spec, value, out);
-    } else {
+    let Some(value) = value else {
         create_spec(strand, global, spec, out);
+        return Ok(());
+    };
+    // A `Fmt` bound to a `Fmt` would format the inner rendering as opaque
+    // text — its own layout applied, then padded and clipped a second time —
+    // and every consumer would have to unwrap an arbitrarily deep chain to
+    // find the value. Refusing keeps a bound value one level deep. How two
+    // specifications ought to combine is a question this does not answer: a
+    // caller that wants that says so explicitly, over `Fmt.value`.
+    if global.types.fmt.cast(&value).is_some() {
+        return Err(Error::type_error(
+            strand,
+            "cannot bind a Fmt: bind its `value` instead",
+        ));
     }
+    create_fmt(strand, global, spec, value, out);
     Ok(())
 }
 

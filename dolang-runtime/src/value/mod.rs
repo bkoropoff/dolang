@@ -3039,6 +3039,8 @@ pub enum TypeObject {
     Getter,
     /// `std.Setter`
     Setter,
+    /// `std.Fmt`, a value bound to a format specification
+    Fmt,
 }
 
 impl<'v> Input<'v> for TypeObject {
@@ -3046,6 +3048,10 @@ impl<'v> Input<'v> for TypeObject {
     #[inline]
     fn input_take<'a>(&'a mut self, vm: &'a Vm<'v>, _: private::Sealed) -> InputBy<'v, 'a> {
         let builtins = vm.singletons();
+        if matches!(self, TypeObject::Fmt) {
+            // Not a builtin singleton: registered by the `std.fmt` module, which owns it.
+            return InputBy::Borrow(crate::stdlib::fmt::fmt_singleton(vm));
+        }
         InputBy::Borrow(match self {
             TypeObject::Value => &builtins.value,
             TypeObject::Type => &builtins.type_obj,
@@ -3077,6 +3083,7 @@ impl<'v> Input<'v> for TypeObject {
             TypeObject::Sink => &builtins.output_iter,
             TypeObject::Getter => &builtins.getter,
             TypeObject::Setter => &builtins.setter,
+            TypeObject::Fmt => unreachable!("handled above"),
         })
     }
 }

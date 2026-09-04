@@ -11,8 +11,8 @@ import admin args fs fs.unix fs.windows sys term time uuid
 import security.macos security.unix security.windows
 import _display: display
 
-let head_style = term.style bold: true
-let error_style = term.style fg: :BRIGHT_RED: bold: true
+let head_style = term.Style bold: true
+let error_style = term.Style fg: :BRIGHT_RED: bold: true
 
 # Metadata fields that belong to each section, in the order they are printed.
 # Anything the runtime reports that isn't listed here is a platform attribute

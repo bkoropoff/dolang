@@ -1,7 +1,7 @@
 # Text
 
 Validated terminal presentation produced by
-[`term.style`](./index.md#style-options-args)
+[`term.text`](./index.md#text-options-args)
 or a [`Style`](./style.md)
 or [`term.preformat`](./index.md#preformat-text).
 
@@ -9,10 +9,89 @@ Nested `Text` values are flattened when composed. ANSI reset codes in a nested
 value restore the enclosing style.
 
 Terminal output functions render `Text` with ANSI styling when stderr is a
-terminal and as plain text otherwise. Converting it with `str` returns its full
-ANSI representation.
+terminal and as plain text otherwise.
+
+Converting it with `str` returns the content with the styling dropped: the
+escape sequences are terminal instructions, and a `Str` holding them counts
+them in its length, matches them in a search, and writes them into whatever
+file or pipe it reaches. Ask for them with [`encode`](#encode). `verbatim`
+reproduces a value as it would have been written in source, and styled text
+has no source form, so it gives the same content `str` does.
+
+## Formatting
+
+A [format specification](../std/fmt-spec.md) applied to `Text` measures
+terminal cells rather than extended grapheme clusters, the same measure
+[`width()`](#width) reports: `width` pads to a cell count, `precision` clips to
+one at a cluster boundary, and SGR sequences consume neither.
+
+Formatting produces a [`Str`](../std/str.md), so it drops the styling along
+with every other `str` conversion — `str $ fmt label width: 6` and
+`"${label:6}"` are laid out in cells and plain.
+
+The console is where the layout and the styling arrive together. Given a
+[`Fmt`](../std/fmt.md) bound to a `Text`,
+[`echo`](./index.md#echo-args), [`print`](./index.md#print-options-args),
+[`text`](./index.md#text-options-args) and a [`Style`](./style.md) apply the
+layout to the encoded form themselves, in the same terminal cells, and keep
+the styling:
+
+```
+let label = text("界a", fg: :RED:)
+echo (fmt label width: 6)          # padded and still red
+str $ fmt label width: 6           # padded and plain
+```
+
+A specification asking for a debug or numeric rendering is no longer a request
+for terminal presentation, and is sanitized like any other value.
 
 ## Methods
+
+### `clip width :suffix?`
+
+Clips the text to a terminal-cell width at an extended grapheme boundary.
+
+SGR sequences do not contribute to the width. If the text already fits, it is
+returned unchanged and `suffix` is ignored. Otherwise, the suffix is clipped
+to the total budget, its width is reserved, and the longest fitting source
+prefix is prepended. Styling remains valid across the cut.
+
+#### Parameters
+
+| Name     | Type                                         | Description                          |
+| -------- | -------------------------------------------- | ------------------------------------ |
+| `width`  | [`Int`](../std/index.md)                     | Non-negative terminal-cell budget    |
+| `suffix` | [`Str`](../std/str.md)\|[`Text`](./text.md)? | Suffix appended only when truncating |
+
+#### Returns
+
+`Text`
+
+#### Example
+
+```
+let warning = text("abcdef", fg: :YELLOW:)
+echo $warning.clip(4, suffix: "…")
+```
+
+### `encode()`
+
+Returns the ANSI representation: exactly the bytes a terminal write emits.
+
+This is the inverse of [`term.preformat`](./index.md#preformat-text), so
+`preformat` takes the result back (canonicalizing the SGR it re-emits).
+
+#### Returns
+
+[`Str`](../std/str.md)
+
+#### Example
+
+```
+let label = text ERROR fg: :RED:
+assert_eq (str label) ERROR
+fs.write $path $label.encode()
+```
 
 ### `indent spaces`
 
@@ -36,12 +115,55 @@ let diagnostic = result.diagnostics[0].render()
 echo $diagnostic.indent(4)
 ```
 
+### `join iter?`
+
+Concatenates values with this text between them, taking each the way
+[`text`](./index.md#text-options-args) takes an argument of its own: a `Text`
+keeps its styling, and anything else is converted and sanitized.
+
+#### Parameters
+
+| Name   | Type | Description                                      |
+| ------ | ---- | ------------------------------------------------ |
+| `iter` |      | Iterable to join (uses default input if omitted) |
+
+#### Returns
+
+`Text`
+
+#### Example
+
+```
+let sep = text " | " fg: :YELLOW:
+echo $sep.join([text("ok", fg: :GREEN:), "then", 3])
+```
+
+### `width()`
+
+Returns the visible terminal-cell width of the text.
+
+SGR sequences do not contribute to the width. Widths are summed within each
+extended grapheme cluster and capped at two cells per cluster. C0 control
+characters contribute zero.
+
+#### Returns
+
+[`Int`](../std/index.md)
+
+#### Example
+
+```
+assert_eq ((text "é").width()) 1
+assert_eq ((text "👩‍💻").width()) 2
+assert_eq ((text "界").width()) 2
+```
+
 ## Example
 
 ```
-let label = term.style ERROR fg: :RED: bold: true
+let label = term.text ERROR fg: :RED: bold: true
 echo $label " request failed"
 
 # Preserve ANSI escapes for a file or another process.
-let encoded = str $label
+let encoded = $label.encode()
 ```

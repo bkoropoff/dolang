@@ -105,32 +105,6 @@ assert_eq ("z  \n".trim_end()) "z"
 [`Iter.chomp`](./iter.md#chomp) lifts this over an iterator — it is exactly
 `.map do |x| x.chomp()`, with the mapping done inline.
 
-### `clip width suffix: str?`
-
-Clips the string to a terminal-cell width at an extended grapheme boundary.
-
-If the string already fits, it is returned unchanged and `suffix` is ignored.
-Otherwise, the suffix is first clipped to the total budget, its display width
-is reserved, and the longest fitting source prefix is prepended.
-
-#### Parameters
-
-| Name     | Type                | Description                          |
-| -------- | ------------------- | ------------------------------------ |
-| `width`  | [`Int`](./index.md) | non-negative terminal-cell budget    |
-| `suffix` | [`Str`](./str.md)?  | suffix appended only when truncating |
-
-#### Returns
-
-[`Str`](./str.md)
-
-#### Example
-
-```
-assert_eq ("abcdef".clip 4 suffix: "…") "abc…"
-assert_eq ("界a".clip 2) "界"
-```
-
 ### `contains needle`
 
 Tests whether the string contains the given substring.
@@ -490,26 +464,6 @@ the original string.
 
 ```
 assert_eq ("foobar".without_suffix "bar") "foo"
-```
-
-### `width()`
-
-Returns the terminal-cell width of the string.
-
-Widths are summed within each extended grapheme cluster and capped at two
-cells per cluster. C0 control characters contribute zero. ANSI escape
-sequences are measured as literal text.
-
-#### Returns
-
-[`Int`](./index.md)
-
-#### Example
-
-```
-assert_eq ("é".width()) 1
-assert_eq ("👩‍💻".width()) 2
-assert_eq ("界".width()) 2
 ```
 
 ## Operations
