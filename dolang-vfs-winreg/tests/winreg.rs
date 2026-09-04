@@ -451,7 +451,7 @@ mod live {
                 .await
                 .unwrap();
 
-            let wow32 = parent
+            let wow32 = scratch
                 .create("view-probe", View::Wow32, Access::READ_WRITE)
                 .await
                 .unwrap();
@@ -459,7 +459,7 @@ mod live {
                 .set_value(Some("marker"), Value::Dword(1))
                 .await
                 .unwrap();
-            let wow64 = parent
+            let wow64 = scratch
                 .open("view-probe", View::Wow64, Access::READ, Resolve::Target)
                 .await
                 .unwrap();
@@ -469,7 +469,7 @@ mod live {
             );
             wow32.close().await.unwrap();
             wow64.close().await.unwrap();
-            parent
+            scratch
                 .delete("view-probe", View::Wow32, false, false)
                 .await
                 .unwrap();
