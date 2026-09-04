@@ -1,0 +1,21 @@
+def assert_type t v
+  assert $ type $v $t
+
+# Success cases
+assert_type $Int 1_000 
+assert_type $Int 0_1
+assert_type $Int 0x5_0
+assert_type $Float 1_000.
+assert_type $Float 1_000.0
+assert_type $Float 1_000.1_000
+assert_type $Float 1_000.1_000e0_1
+assert_type $Float 1_000e0_1
+
+# Failure (decay to literal) cases
+assert_type $Str _1000
+assert_type $Str 1000_
+assert_type $Str 1__0
+assert_type $Str 1_000._1
+assert_type $Str 1_000_.
+assert_type $Str 1_000_e1
+assert_type $Str 0x_5

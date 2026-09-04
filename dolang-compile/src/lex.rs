@@ -273,8 +273,7 @@ enum RawState {
     Error,
     Exponent,
     ExponentStart,
-    ExponentStartAfterUnsignedDot,
-    ExponentStartAfterSignedDot,
+    ExponentStartAfterDot { negative: bool },
     Float,
     Gt,
     GtEq,
@@ -298,7 +297,7 @@ enum RawState {
     RightBrace,
     RightBracket,
     RightParen,
-    Signed,
+    Integer { negative: bool, radix: u8 },
     Slash,
     SlashSlash,
     Space,
@@ -308,18 +307,9 @@ enum RawState {
     EmitDotBeforeParen,
     EmitDotDot,
     Tilde,
-    SignedDot,
-    Unsigned,
-    UnsignedDot,
-    Zero,
-    SignedZero,
-    Hex,
+    PostDot { negative: bool },
+    LeadingZero { negative: bool },
     Hash,
-    SignedHex,
-    Octal,
-    SignedOctal,
-    Binary,
-    SignedBinary,
     LtLt,
     GtGt,
     R,
@@ -335,6 +325,7 @@ enum RawState {
 }
 
 enum Defer {
+    #[expect(dead_code)]
     Error(ErrorDiagKind),
     Warn(WarnDiagKind),
 }
@@ -356,9 +347,12 @@ struct RawLexer<'a, I: Iterator<Item = u8>> {
     offset: Offset,
     defer: Option<Defer>,
     iter: I,
+    // Integer accumulator
     acc: u128,
     diags: &'a Diags,
     comment: Option<&'a mut dyn Comment>,
+    // Last character was a `_` in a number literal
+    underline: bool,
     // Raw string tracking fields
     target_hashes: u8,
     current_hashes: u8,
@@ -381,6 +375,7 @@ impl<'a, I: Iterator<Item = u8>> RawLexer<'a, I> {
             acc: 0,
             diags,
             comment,
+            underline: false,
             target_hashes: 0,
             current_hashes: 0,
             quote_offset: 0,
@@ -565,7 +560,16 @@ macro_rules! lex {
         $self: ident : $token: expr => match { , $($m: tt)* };
         {}
     } => {
-        match $self.advance() { $($m)* }
+        match $self.advance() {
+            $($m)*,
+            #[allow(unreachable_patterns)]
+            _ => {
+                if $self.mode == Mode::FullExpr {
+                    return $self.error(ErrorDiagKind::BadIdent)
+                }
+                emit!($self.emit, $token, Literal)
+            }
+        }
     };
     // Recursive rules: adds one explicit pattern match
     {
@@ -583,16 +587,16 @@ macro_rules! lex {
     // Recursive rule: common (end of stream, comments, whitespace, escapes)
     {
         $self: ident : $token: expr => match { $($m:tt)* };
-        { enum common, $($rest: tt)* }
+        { enum common($method: ident), $($rest: tt)* }
     } => {
         lex!{
             $self: $token => match {
                 $($m)*,
-                None => return $self.token($token, End),
-                Some(b' ' | b'\t') => return $self.token($token, Space),
-                Some(b'\r') => return $self.token($token, Cr),
-                Some(b'\n') => return $self.token($token, Indent),
-                Some(b'\\') if matches!($self.mode, Mode::Shell | Mode::String | Mode::Heredoc | Mode::RawHeredoc) => return $self.token($token, Backslash)
+                None => emit!($self.$method, $token, End),
+                Some(b' ' | b'\t') => emit!($self.$method, $token, Space),
+                Some(b'\r') => emit!($self.$method, $token, Cr),
+                Some(b'\n') => emit!($self.$method, $token, Indent),
+                Some(b'\\') if matches!($self.mode, Mode::Shell | Mode::String | Mode::Heredoc | Mode::RawHeredoc) => emit!($self.$method, $token, Backslash)
             };
             { $($rest)* }
         }
@@ -609,12 +613,14 @@ macro_rules! lex {
                 #[allow(unreachable_patterns)]
                 Some(b'0') => {
                     $self.acc = 0;
-                    emit!($self.$method, $token, Zero);
+                    $self.underline = false;
+                    emit!($self.$method, $token, LeadingZero { negative: false });
                 }
                 #[allow(unreachable_patterns)]
                 Some(c @ b'1'..=b'9') => {
                     $self.acc = (c - b'0') as u128;
-                    emit!($self.$method, $token, Unsigned);
+                    $self.underline = false;
+                    emit!($self.$method, $token, Integer { negative: false, radix: 10 });
                 }
             };
             { $($rest)* }
@@ -703,11 +709,11 @@ macro_rules! literal {
     };
     ($self: ident, $token : expr, { $($mid:tt)* }, { $($low:tt)* } ) => {
         lex! {
-            $self: $token => {
-                enum common,
+            $self: Some($token) => {
+                enum common(emit),
                 $($mid)*
-                enum symbol_free(token),
-                enum symbol_reserved(token),
+                enum symbol_free(emit),
+                enum symbol_reserved(emit),
                 $($low)*
             }
         }
@@ -721,12 +727,12 @@ macro_rules! number {
     };
     ($self: ident, $token : expr, { $($mid:tt)* }, { $($low:tt)* } ) => {
         lex! {
-            $self: $token => {
-                enum common,
+            $self: Some($token) => {
+                enum common(emit),
                 $($mid)*
                 match Some(b':') => emit!($self.token, $token, Colon),
-                enum symbol_free(token),
-                enum symbol_reserved(token),
+                enum symbol_free(emit),
+                enum symbol_reserved(emit),
                 $($low)*
             }
         }
@@ -737,19 +743,15 @@ macro_rules! number {
 macro_rules! symbol {
     ($self: ident, $token : expr, { $($arms:tt)* }) => {
         lex! {
-            $self: $token => {
-                enum common,
+            $self: Some($token) => {
+                enum common(emit),
                 $($arms)*
                 match Some(b'r') if matches!($self.mode, Mode::Shell | Mode::FullExpr) => {
                     return $self.token($token, R)
                 },
-                enum alphanum(token),
-                enum symbol_free(token),
-                enum symbol_reserved(token),
-                match Some(_) => match $self.mode {
-                    Mode::FullExpr => return $self.error(ErrorDiagKind::BadIdent),
-                    Mode::Shell | Mode::String | Mode::Heredoc | Mode::RawHeredoc => return $self.token($token, Literal),
-                },
+                enum alphanum(emit),
+                enum symbol_free(emit),
+                enum symbol_reserved(emit),
             }
         }
     };
@@ -772,7 +774,7 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
     /// - **Whitespace/neutral states**: `Init`, `Indent`, `Space`, `Empty` - handle whitespace
     ///   prior to next "real" token
     /// - **Identifier states**: `Ident`, `Key`, etc. - mostly alphanumeric tokens
-    /// - **Number states**: `Signed`, `Unsigned`, `Float`, `Hex`, etc. - parse numeric literals
+    /// - **Number states**: `Integer`, `LeadingZero`, `PostDot`, `Float`, etc. - parse numeric literals
     /// - **Operator states**: `Bang`, `Minus`, `Slash`, etc. - recognize operators
     /// - **String states**: `DQuote`, `Backslash`, etc. - handle string literals
     /// - **Raw string states**: `RawHash`, `RawBody`, `RawCloseHash` - raw string handling
@@ -855,12 +857,6 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                             enum alphanum(emit),
                             enum symbol_free(emit),
                             enum symbol_reserved(emit),
-                            match Some(_) => match self.mode {
-                                Mode::Shell | Mode::String | Mode::Heredoc | Mode::RawHeredoc => {
-                                    emit!(self.emit, token, Literal)
-                                }
-                                Mode::FullExpr => return self.error(ErrorDiagKind::BadIdent),
-                            },
                         }
                     }
                 }
@@ -872,12 +868,6 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                     match Some(b':') => self.trans(Key),
                 }, {
                     match Some(b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_') => (),
-                    match Some(_) => match self.mode {
-                        Mode::Shell | Mode::String | Mode::Heredoc | Mode::RawHeredoc => {
-                            return self.token(RawToken::Ident, Literal)
-                        }
-                        _ => return self.error(ErrorDiagKind::BadIdent),
-                    },
                 }),
                 Key => symbol!(self, RawToken::Key, {}),
                 Bang => symbol!(self, RawToken::Op(Op::Bang), {
@@ -887,11 +877,11 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                 Minus => symbol!(self, RawToken::Op(Op::Minus), {
                     match Some(b'0') => {
                         self.acc = 0;
-                        self.trans(SignedZero)
+                        self.trans(LeadingZero { negative: true })
                     },
                     match Some(c@b'1'..=b'9') => {
                         self.acc = (c - b'0') as u128;
-                        self.trans(Signed)
+                        self.trans(Integer { negative: true, radix: 10 })
                     },
                 }),
                 Plus => symbol!(self, RawToken::Op(Op::Plus), {}),
@@ -916,13 +906,11 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                 Comma => return self.token(RawToken::Comma, Empty),
                 Colon => literal!(self, RawToken::Colon, {
                     match Some(b'A'..=b'Z' | b'a'..=b'z' | b'_') => self.trans(DittoKey),
-                    match Some(_) => self.trans(Literal),
                 }),
                 DittoKey => literal!(self, RawToken::DittoKey, {
                     match Some(b':') => return self.token(RawToken::Sym, Empty),
                 }, {
                     match Some(b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_') => (),
-                    match Some(_) => self.trans(Literal),
                 }),
                 Lt => symbol!(self, RawToken::Op(Op::Lt), {
                     match Some(b'=') => self.trans(LtEq),
@@ -967,55 +955,79 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                 Literal => literal!(self, RawToken::Literal, {
                     match Some(_) => (),
                 }),
-                Unsigned | Signed => number!(self,
-                    if self.state == Unsigned {
-                        match i128::try_from(self.acc) {
-                            Ok(v) => RawToken::Int(v),
-                            Err(_) => {
-                                if self.mode == Mode::FullExpr {
-                                    return self.error_adj(ErrorDiagKind::Overflow, 0, -1)
-                                }
-                                if self.mode != Mode::String {
-                                    self.warn_adj(WarnDiagKind::OverflowLit, 0, -1);
-                                }
-                                RawToken::Literal
-                            }
-                        }
-                    } else {
+                Integer { negative, radix } => number!(self,
+                    if self.underline {
+                        RawToken::Literal
+                    } else if negative {
                         match 0i128.checked_sub_unsigned(self.acc) {
                             Some(v) => RawToken::Int(v),
                             None => {
                                 if self.mode == Mode::FullExpr {
                                     return self.error_adj(ErrorDiagKind::Overflow, 0, -1)
                                 }
-                                if self.mode != Mode::String {
+                                if self.mode != Mode::String || radix == 8 {
                                     self.warn_adj(WarnDiagKind::OverflowLit, 0, -1);
                                 }
                                 RawToken::Literal
                             }
                         }
+                    } else if radix == 10 {
+                        match i128::try_from(self.acc) {
+                            Ok(v) => RawToken::Int(v),
+                            Err(_) => {
+                                if self.mode == Mode::FullExpr {
+                                    return self.error_adj(ErrorDiagKind::Overflow, 0, -1)
+                                }
+                                if !matches!(self.mode, Mode::String | Mode::Heredoc | Mode::RawHeredoc) {
+                                    self.warn_adj(WarnDiagKind::OverflowLit, 0, -1);
+                                }
+                                RawToken::Literal
+                            }
+                        }
+                    } else {
+                        RawToken::Int(self.acc as i128)
                     }, {
-                        match Some(c@b'0'..=b'9') => {
-                            match self.acc.checked_mul(10).and_then(|v| v.checked_add((c - b'0') as u128)) {
+                        match Some(b'_') => {
+                            if self.underline {
+                                self.trans(Literal)
+                            }
+                            self.underline = true;
+                        },
+                        match Some(c @ (b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F'))
+                            if (c.is_ascii_digit() && c - b'0' < radix)
+                                || (radix == 16 && c.is_ascii_hexdigit()) => {
+                            self.underline = false;
+                            let digit = match c {
+                                b'0'..=b'9' => c - b'0',
+                                b'a'..=b'f' => c - b'a' + 10,
+                                b'A'..=b'F' => c - b'A' + 10,
+                                _ => unreachable!(),
+                            };
+                            match self.acc.checked_mul(radix.into()).and_then(|v| v.checked_add(digit.into())) {
                                 Some(v) => self.acc = v,
                                 None => {
                                     if self.mode == Mode::FullExpr {
                                         self.acc = 0;
-                                        self.defer(Defer::Error(ErrorDiagKind::Overflow));
+                                        return self.error(ErrorDiagKind::Overflow);
                                     } else {
-                                        if self.mode != Mode::String {
+                                        if !matches!(self.mode, Mode::String | Mode::Heredoc | Mode::RawHeredoc) && self.defer.is_none() {
                                             self.defer(Defer::Warn(WarnDiagKind::OverflowLit));
                                         }
-                                        self.trans(Literal)
                                     }
                                 }
                             }
                         },
-                        match Some(b'.') => {
+                        match Some(b'.') if radix == 10 => if self.underline {
+                            self.trans(Literal)
+                        } else {
+                            self.underline = false;
                             self.defer = None;
-                            self.trans(if self.state == Signed { SignedDot } else { UnsignedDot } )
+                            self.trans(PostDot { negative })
                         },
-                        match Some(b'e') => {
+                        match Some(b'e') if radix == 10 => if self.underline {
+                            self.trans(Literal)
+                        } else {
+                            self.underline = false;
                             self.defer = None;
                             self.trans(ExponentStart)
                         },
@@ -1026,47 +1038,50 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                         },
                     }
                 ),
-                Zero | SignedZero => {
-                    let signed = self.state == SignedZero;
-                    number!(self, RawToken::Int(0), {
+                LeadingZero { negative } => {
+                    number!(self, if self.underline { RawToken::Literal } else { RawToken::Int(0) }, {
                         match Some(b'x' | b'X') => {
                             self.acc = 0;
-                            self.trans(if signed { SignedHex } else { Hex })
+                            self.underline = true;
+                            self.trans(Integer { negative, radix: 16 })
                         },
                         match Some(b'o' | b'O') => {
                             self.acc = 0;
-                            self.trans(if signed { SignedOctal } else { Octal })
+                            self.underline = true;
+                            self.trans(Integer { negative, radix: 8 })
                         },
                         match Some(b'b' | b'B') => {
                             self.acc = 0;
-                            self.trans(if signed { SignedBinary } else { Binary })
+                            self.underline = true;
+                            self.trans(Integer { negative, radix: 2 })
                         },
                         match Some(c @ b'0'..=b'9') => {
                             self.acc = (c - b'0') as u128;
-                            self.trans(if signed { Signed } else { Unsigned })
+                            self.underline = false;
+                            self.trans(Integer { negative, radix: 10 })
+                        },
+                        match Some(b'_') => {
+                            self.acc = 0;
+                            self.underline = true;
+                            self.trans(Integer { negative, radix: 10 })
                         },
                         match Some(b'.') => {
-                            self.defer = None;
-                            self.trans(if signed { SignedDot } else { UnsignedDot })
+                            self.underline = false;
+                            self.trans(PostDot { negative })
                         },
                         match Some(b'e') => {
-                            self.defer = None;
+                            self.underline = false;
                             self.trans(ExponentStart)
                         },
-                    }, {
-                        match Some(..) => {
-                            self.trans(Literal)
-                        },
-                    })
+                    }, {})
                 }
-                UnsignedDot | SignedDot => {
-                    let signed = self.state == SignedDot;
+                PostDot { negative } => {
                     number!(self, RawToken::F64, {
                         // Anything after a floating point other than `e` or numbers
                         // means we misinterpreted a field/method expression
                         match Some(c@(b'.' | b'A'..=b'Z' | b'a'..=b'z' | b'_' | b'(')) if c != b'e' => {
                             return self.token_adj(
-                                match if signed {
+                                match if negative {
                                     0i128.checked_sub_unsigned(self.acc)
                                 } else {
                                     i128::try_from(self.acc).ok()
@@ -1076,7 +1091,7 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                                         if self.mode == Mode::FullExpr {
                                             return self.error_adj(ErrorDiagKind::Overflow, 0, -1)
                                         }
-                                        if self.mode != Mode::String {
+                                        if !matches!(self.mode, Mode::String | Mode::Heredoc | Mode::RawHeredoc) {
                                             self.warn_adj(WarnDiagKind::OverflowLit, 0, -1);
                                         }
                                         RawToken::Literal
@@ -1093,195 +1108,76 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                         },
                     }, {
                         match Some(b'0'..=b'9') => self.trans(Float),
-                        match Some(b'e') => self.trans(if signed {
-                            ExponentStartAfterSignedDot
-                        } else {
-                            ExponentStartAfterUnsignedDot
-                        }),
-                        match Some(..) => self.trans(Literal),
+                        match Some(b'e') => self.trans(ExponentStartAfterDot { negative }),
                     })
                 }
-                Hex | SignedHex => {
-                    let signed = self.state == SignedHex;
-                    number!(self,
-                        if signed {
-                            match 0i128.checked_sub_unsigned(self.acc) {
-                                Some(v) => RawToken::Int(v),
-                                None => {
-                                    if self.mode == Mode::FullExpr {
-                                        return self.error_adj(ErrorDiagKind::Overflow, 0, -1)
-                                    }
-                                    if self.mode != Mode::String {
-                                        self.warn_adj(WarnDiagKind::OverflowLit, 0, -1);
-                                    }
-                                    RawToken::Literal
-                                }
-                            }
-                        } else {
-                            RawToken::Int(self.acc as i128)
-                        }, {
-                            match Some(c) if c.is_ascii_hexdigit() => {
-                                let digit = match c {
-                                    b'0'..=b'9' => c - b'0',
-                                    b'a'..=b'f' => c - b'a' + 10,
-                                    b'A'..=b'F' => c - b'A' + 10,
-                                    _ => unreachable!(),
-                                };
-                                match self.acc.checked_mul(16).and_then(|v| v.checked_add(digit as u128)) {
-                                    Some(v) => self.acc = v,
-                                    None => {
-                                        if self.mode == Mode::FullExpr {
-                                            self.acc = 0;
-                                            self.defer(Defer::Error(ErrorDiagKind::Overflow));
-                                        } else {
-                                            if self.mode != Mode::String {
-                                                self.defer(Defer::Warn(WarnDiagKind::OverflowLit));
-                                            }
-                                            self.trans(Literal)
-                                        }
-                                    }
-                                }
-                            },
-                        }, {
-                            match Some(..) => {
-                                self.defer = None;
+                Float => {
+                    number!(self, if self.underline { RawToken::Literal } else { RawToken::F64 }, {
+                        match Some(b'_') => {
+                            if self.underline {
                                 self.trans(Literal)
-                            },
-                        }
-                    )
-                }
-                Octal | SignedOctal => {
-                    let signed = self.state == SignedOctal;
-                    number!(self,
-                        if signed {
-                            match 0i128.checked_sub_unsigned(self.acc) {
-                                Some(v) => RawToken::Int(v),
-                                None => {
-                                    if self.mode == Mode::FullExpr {
-                                        return self.error_adj(ErrorDiagKind::Overflow, 0, -1)
-                                    }
-                                    self.warn_adj(WarnDiagKind::OverflowLit, 0, -1);
-                                    RawToken::Literal
-                                }
                             }
-                        } else {
-                            RawToken::Int(self.acc as i128)
-                        }, {
-                            match Some(c @ b'0'..=b'7') => {
-                                let digit = (c - b'0') as u128;
-                                match self.acc.checked_mul(8).and_then(|v| v.checked_add(digit)) {
-                                    Some(v) => self.acc = v,
-                                    None => {
-                                        if self.mode == Mode::FullExpr {
-                                            self.acc = 0;
-                                            self.defer(Defer::Error(ErrorDiagKind::Overflow));
-                                        } else {
-                                            if self.mode != Mode::String {
-                                                self.defer(Defer::Warn(WarnDiagKind::OverflowLit));
-                                            }
-                                            self.trans(Literal)
-                                        }
-                                    }
-                                }
-                            },
-                        }, {
-                            match Some(..) => {
-                                self.defer = None;
-                                self.trans(Literal)
-                            },
-                        }
-                    )
+                            self.underline = true;
+                        },
+                        match Some(b'0'..=b'9') => {
+                            self.underline = false;
+                        },
+                        match Some(b'e') => {
+                            self.underline = false;
+                            self.trans(ExponentStart)
+                        },
+                    })
                 }
-                Binary | SignedBinary => {
-                    let signed = self.state == SignedBinary;
-                    number!(self,
-                        if signed {
-                            match 0i128.checked_sub_unsigned(self.acc) {
-                                Some(v) => RawToken::Int(v),
-                                None => {
-                                    if self.mode == Mode::FullExpr {
-                                        return self.error_adj(ErrorDiagKind::Overflow, 0, -1)
-                                    }
-                                    if self.mode != Mode::String {
-                                        self.warn_adj(WarnDiagKind::OverflowLit, 0, -1);
-                                    }
-                                    RawToken::Literal
-                                }
-                            }
-                        } else {
-                            RawToken::Int(self.acc as i128)
-                        }, {
-                            match Some(c @ b'0'..=b'1') => {
-                                let digit = (c - b'0') as u128;
-                                match self.acc.checked_mul(2).and_then(|v| v.checked_add(digit)) {
-                                    Some(v) => self.acc = v,
-                                    None => {
-                                        if self.mode == Mode::FullExpr {
-                                            self.acc = 0;
-                                            self.defer(Defer::Error(ErrorDiagKind::Overflow));
-                                        } else {
-                                            if self.mode != Mode::String {
-                                                self.defer(Defer::Warn(WarnDiagKind::OverflowLit));
-                                            }
-                                            self.trans(Literal)
-                                        }
-                                    }
-                                }
-                            },
-                        }, {
-                            match Some(..) => {
-                                self.defer = None;
-                                self.trans(Literal)
-                            },
-                        }
-                    )
-                }
-                Float => number!(self, RawToken::F64, {
-                        match Some(b'0'..=b'9') => (),
-                        match Some(b'e') => self.trans(ExponentStart),
-                        match Some(..) => self.trans(Literal),
-                }),
                 ExponentStart => number!(self, RawToken::F64, {
-                        match Some(b'+' | b'-' | b'0'..=b'9') => self.trans(Exponent),
+                    match Some(b'+' | b'-' | b'0'..=b'9') => self.trans(Exponent),
                 }, {
-                        match Some(..) => self.trans(Literal),
+                    match Some(..) => self.trans(Literal),
                 }),
-                ExponentStartAfterSignedDot | ExponentStartAfterUnsignedDot => {
+                ExponentStartAfterDot { negative } => {
                     number!(self, RawToken::F64, {
-                            match Some(b'+' | b'-' | b'0'..=b'9') => self.trans(Exponent),
+                        match Some(b'+' | b'-' | b'0'..=b'9') => self.trans(Exponent),
                     }, {
-                            match Some(b'a'..=b'z' | b'A'..=b'Z' | b'_') => {
-                                let signed = self.state == ExponentStartAfterSignedDot;
-                                let res = self.token_adj(
-                                    match if signed {
-                                        0i128.checked_sub_unsigned(self.acc)
-                                    } else {
-                                        i128::try_from(self.acc).ok()
-                                    } {
-                                        Some(v) => RawToken::Int(v),
-                                        None => {
-                                            if self.mode == Mode::FullExpr {
-                                                return self.error_adj(ErrorDiagKind::Overflow, 0, -2)
-                                            }
-                                            if self.mode != Mode::String {
-                                                self.warn_adj(WarnDiagKind::OverflowLit, 0, -2);
-                                            }
-                                            RawToken::Literal
+                        match Some(b'a'..=b'z' | b'A'..=b'Z' | b'_') => {
+                            let res = self.token_adj(
+                                match if negative {
+                                    0i128.checked_sub_unsigned(self.acc)
+                                } else {
+                                    i128::try_from(self.acc).ok()
+                                } {
+                                    Some(v) => RawToken::Int(v),
+                                    None => {
+                                        if self.mode == Mode::FullExpr {
+                                            return self.error_adj(ErrorDiagKind::Overflow, 0, -2)
                                         }
-                                    },
-                                    EmitDotBeforeE,
-                                    0,
-                                    -3,
-                                );
-                                return res;
-                            },
-                            match Some(..) => self.trans(Literal),
+                                        if !matches!(self.mode, Mode::String | Mode::Heredoc | Mode::RawHeredoc) {
+                                            self.warn_adj(WarnDiagKind::OverflowLit, 0, -2);
+                                        }
+                                        RawToken::Literal
+                                    }
+                                },
+                                EmitDotBeforeE,
+                                0,
+                                -3,
+                            );
+                            return res;
+                        },
+                        match Some(..) => self.trans(Literal),
                     })
                 }
-                Exponent => number!(self, RawToken::F64, {
-                        match Some(b'0'..=b'9') => (),
+                Exponent => {
+                    number!(self, if self.underline { RawToken::Literal } else { RawToken::F64 }, {
+                        match Some(b'_') => {
+                            if self.underline {
+                                self.trans(Literal)
+                            }
+                            self.underline = true;
+                        },
+                        match Some(b'0'..=b'9') => {
+                            self.underline = false;
+                        },
                         match Some(..) => self.trans(Literal),
-                }),
+                    })
+                }
                 // A `\` was seen while its enclosing mode could still turn out to be
                 // Shell (or switch to Shell/RawHeredoc by the time we get here, since
                 // this token may have been buffered as lookahead under a since-replaced
@@ -1346,10 +1242,6 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                         }, {
                             // Lower patterns - keyword continuation or identifier/literal fallback
                             match Some(b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_') => self.trans(Ident),
-                            match Some(_) => match self.mode {
-                                Mode::FullExpr => return self.error(ErrorDiagKind::BadIdent),
-                                _ => self.trans(Literal),
-                            },
                         })
                     } else {
                         self.trans(Ident)
@@ -1365,10 +1257,6 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                             match Some(b':') => self.trans(Key),
                         }, {
                             match Some(b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_') => self.trans(Ident),
-                            match Some(_) => match self.mode {
-                                Mode::FullExpr => return self.error(ErrorDiagKind::BadIdent),
-                                _ => self.trans(Literal),
-                            },
                         })
                     } else {
                         self.trans(Ident)

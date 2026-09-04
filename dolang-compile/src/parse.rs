@@ -1799,6 +1799,11 @@ impl<'a> Parser<'a> {
                 }
                 Some(token!(F64, span)) => {
                     let str = self.file.str(span);
+                    let str = if str.contains('_') {
+                        Cow::Owned(str.replace('_', ""))
+                    } else {
+                        Cow::Borrowed(str)
+                    };
                     let value = match str.parse::<f64>() {
                         Ok(value) => value,
                         Err(_) => {
