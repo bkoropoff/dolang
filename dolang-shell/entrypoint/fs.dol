@@ -74,72 +74,70 @@ let WINDOWS_AUDIT = $
 
 # --- Value conversion -------------------------------------------------------
 #
-# Everything reported about a path is rendered by turning it into a `display`
-# node: a value that reads better as a single line becomes a leaf, and anything
-# else is destructured into its fields or iterated into a list.
+# Everything reported about a path is rendered by turning it into the shape
+# `display` prints: a value that reads better as a single line is rendered to
+# one, and anything else is destructured into a dict of its fields or iterated
+# into an array.
 
 # True when `value` is a flag-set-shaped iterable rather than a sequence of
 # structured values.
 def all_syms items
-  if (items.len == 0)
-    return false
-  for item = items
-    if !(type item Sym)
-      return false
-  true
+  items.all(do |i| type i Sym)
 
 # Destructures an object into its fields. Answers `nil` for a value that
 # doesn't unpack into key/value pairs at all.
-def unpack_pairs value depth
+def unpack_fields value depth
   try
-    bind value
-      ...rest
-    let entries = []
-    for item = rest
-      let key item_value = item
-      entries.push [str key, node item_value (depth + 1)]
-    entries
-  catch std.RuntimeError: _
+    let ...rest = value
+    $
+      for key value = rest
+        (str key): (node value (depth + 1))
+  catch std.UnsupportedError: _
     nil
 
 # Materializes an iterable, or answers `nil` when the value isn't one.
 def collect value
   try
-    let items = []
-    for item = value
-      items.push $item
-    items
-  catch std.RuntimeError: _
+    [...value]
+  catch std.UnsupportedError: _
     nil
 
 def structure_node value depth
-  let entries = unpack_pairs $value $depth
-  if (entries != nil && entries.len > 0)
-    return display.Map $entries
+  let fields = unpack_fields $value $depth
+  if (fields != nil && fields.len > 0)
+    return fields
   let raw = collect $value
   if (raw == nil)
     return display.text $value
   if all_syms(raw)
     return display.flags $raw
-  display.List $
+  $
     for item = raw
-      - $ node $item (depth + 1)
+      $ node $item (depth + 1)
 
-# Converts an arbitrary value into a node, special-casing the types that
-# read better as a single line than as their component fields.
+# Converts an arbitrary value into the shape it is printed as, special-casing
+# the types that read better as a single line than as their component fields.
+#
+# A value the renderer already prints correctly is answered as it is; only a
+# value that would print as something else has to be rendered here.
 def node value depth = 0
   if (value == nil)
-    return display.text nil
+    return nil
+  # Past the depth limit, a structured value is flattened onto the one line it
+  # would otherwise open a block on.
   if (depth > MAX_DEPTH)
     return display.text $value
-  if ((type value Sym) || (type value Bool))
-    return display.enum $value
-  if ((type value Int) || (type value Float) || (type value Str))
-    return display.text $value
-  if ((type value time.DateTime) || (type value fs.Path) || (type value uuid.Uuid))
-    return display.text $value
+  if (type value Sym || type value Bool || type value Int || type value Float)
+    return value
+  # These print as themselves, but they are iterable or unpackable, so each has
+  # to be claimed before `structure_node` takes it apart -- a `Str` into its
+  # characters, a `Path` into its components.
+  if (type value Str || type value time.DateTime || type value fs.Path || type value uuid.Uuid)
+    return value
+  # Binary content is described rather than shown, and the description is not
+  # a string the file holds.
   if (type value Bin)
-    return display.Scalar "<$(value.len) bytes>"
+    return display.plain "<$(value.len) bytes>"
   if (type value fs.unix.Mode)
     return mode_node $value
   if (type value security.windows.Sid)
@@ -151,9 +149,9 @@ def node value depth = 0
 # `rwx`, with the set-uid/set-gid/sticky bit folded into the execute slot the
 # way `ls` writes it.
 def triad permissions special special_char
-  let r = (permissions.contains(:READ:) && "r" || "-")
-  let w = (permissions.contains(:WRITE:) && "w" || "-")
-  let executable = permissions.contains(:EXECUTE:)
+  let r = (permissions.contains :READ: && "r" || "-")
+  let w = (permissions.contains :WRITE: && "w" || "-")
+  let executable = permissions.contains :EXECUTE:
   let x = if special
     (executable && special_char || special_char.upper)
   else
@@ -164,12 +162,12 @@ def mode_node mode
   let owner = triad $mode.owner $mode.contains(:SET_UID:) s
   let group = triad $mode.group $mode.contains(:SET_GID:) s
   let other = triad $mode.other $mode.contains(:STICKY:) t
-  display.Scalar "${(mode.int & 0o7777):#o}" "$owner$group$other"
+  display.number "${(mode.int & 0o7777):#o}" "$owner$group$other"
 
 def hex_node value
   if (value == nil)
-    return display.text nil
-  display.Scalar "${value:#x}"
+    return nil
+  display.number "${value:#x}"
 
 def uuid_node principal
   let name = display.opt do
@@ -194,17 +192,17 @@ def posix_ace_node ace
   let kind = ace.type
   let permissions = display.flags $ace.permissions
   if (kind == :USER_OBJ:)
-    return display.Map [["user_obj", permissions]]
+    return {user_obj: permissions}
   if (kind == :GROUP_OBJ:)
-    return display.Map [["group_obj", permissions]]
+    return {group_obj: permissions}
   if (kind == :MASK:)
-    return display.Map [["mask", permissions]]
+    return {mask: permissions}
   if (kind == :OTHER:)
-    return display.Map [["other", permissions]]
+    return {other: permissions}
   let key = ((kind == :USER:) && "user" || "group")
-  display.Map $
-    - [key, display.id ace.id kind]
-    - ["permissions", permissions]
+  $
+    "$key": $ display.id $ace.id $kind
+    permissions: $permissions
 
 def nfs4_ace_node ace
   let key = if (ace.type == :ALLOW:)
@@ -217,29 +215,28 @@ def nfs4_ace_node ace
     "alarm"
   let principal = ace.principal
   let trustee = if (principal == :USER:)
-    display.Map [["user", display.id ace.id :USER:]]
+    {user: display.id(ace.id, :USER:)}
   else if (principal == :GROUP:)
-    display.Map [["group", display.id ace.id :GROUP:]]
+    {group: display.id(ace.id, :GROUP:)}
   else
-    display.enum $principal
-  let entries = [[key, trustee], ["mask", display.flags ace.mask]]
+    principal
   let flags = collect $ace.flags
-  if (flags != nil && flags.len > 0)
-    entries.push ["flags", display.flags flags]
-  display.Map $entries
+  $
+    "$key": $trustee
+    mask: $ display.flags $ace.mask
+    if (flags != nil && flags.len > 0)
+      flags: $ display.flags $flags
 
 def macos_ace_node ace
-  let key = ((ace.type == :ALLOW:) && "allow" || "deny")
-  let entries = $
-    - [key, uuid_node ace.principal]
-    - ["mask", display.flags ace.mask]
+  let key = (ace.type == :ALLOW: && "allow" || "deny")
   let flags = collect $ace.flags
-  if (flags != nil && flags.len > 0)
-    entries.push ["flags", display.flags flags]
-  display.Map $entries
+  $
+    "$key": $ uuid_node $ace.principal
+    mask: $ display.flags $ace.mask
+    if (flags != nil && flags.len > 0)
+      flags: $ display.flags $flags
 
 def windows_ace_node ace
-  let entries = []
   let kind = ace.type
   let sid = display.opt do ace.sid
   let key = if WINDOWS_ALLOW.contains(kind)
@@ -250,72 +247,78 @@ def windows_ace_node ace
     "audit"
   else
     nil
-  if (key != nil && sid != nil)
-    entries.push [key, display.sid sid]
-  else
-    entries.push ["type", display.enum kind]
-    if (sid != nil)
-      entries.push ["sid", display.sid sid]
   let mask = display.opt do ace.mask
-  if (mask != nil)
-    entries.push ["mask", display.flags mask]
   let flags = display.opt do collect(ace.flags)
-  if (flags != nil && flags.len > 0)
-    entries.push ["flags", display.flags flags]
   let object_type = display.opt do ace.object_type
-  if (object_type != nil)
-    entries.push ["object_type", node object_type]
   let inherited_object_type = display.opt do ace.inherited_object_type
-  if (inherited_object_type != nil)
-    entries.push ["inherited_object_type", node inherited_object_type]
+  # Only an audit entry is asked about the accesses it audits, so that the
+  # question is never put to an ACE that has no answer to it.
+  let successful = nil
+  let failed = nil
   if (key == "audit")
-    entries.push ["successful", node (display.opt do ace.successful_access)]
-    entries.push ["failed", node (display.opt do ace.failed_access)]
+    successful = display.opt do ace.successful_access
+    failed = display.opt do ace.failed_access
   let data = display.opt do ace.application_data
-  if (data != nil && data.len > 0)
-    entries.push ["application_data", node data]
-  display.Map $entries
+  $
+    if (key != nil && sid != nil)
+      "$key": $ display.sid $sid
+    else
+      type: $kind
+      if (sid != nil)
+        sid: $ display.sid $sid
+    if (mask != nil)
+      mask: $ display.flags $mask
+    if (flags != nil && flags.len > 0)
+      flags: $ display.flags $flags
+    if (object_type != nil)
+      object_type: $ node $object_type
+    if (inherited_object_type != nil)
+      inherited_object_type: $ node $inherited_object_type
+    if (key == "audit")
+      successful: $ node $successful
+      failed: $ node $failed
+    if (data != nil && data.len > 0)
+      application_data: $ node $data
 
 # Renders an ACL's entries as a list of specs, dispatching on the flavor the
 # ACL was fetched as.
 def acl_node acl kind
-  display.List $
+  $
     for ace = acl.aces
       if (kind == :POSIX:)
-        - $ posix_ace_node $ace
+        $ posix_ace_node $ace
       else if (kind == :NFS4:)
-        - $ nfs4_ace_node $ace
+        $ nfs4_ace_node $ace
       else if (kind == :MACOS:)
-        - $ macos_ace_node $ace
+        $ macos_ace_node $ace
       else
-        - $ windows_ace_node $ace
+        $ windows_ace_node $ace
 
 # --- Windows security descriptors -------------------------------------------
 
 def sec_desc_node desc
-  let entries = []
   let revision = display.opt do desc.revision
-  if (revision != nil)
-    entries.push ["revision", node revision]
   let control = display.opt do desc.control
-  if (control != nil)
-    entries.push ["control", display.flags control]
   let owner = display.opt do desc.owner
-  if (owner != nil)
-    entries.push ["owner", display.sid owner]
   let group = display.opt do desc.group
-  if (group != nil)
-    entries.push ["group", display.sid group]
   let dacl = display.opt do desc.dacl
-  if (dacl != nil)
-    entries.push ["dacl", acl_node dacl :WINDOWS:]
   let sacl = display.opt do desc.sacl
-  if (sacl != nil)
-    entries.push ["sacl", acl_node sacl :WINDOWS:]
   let rm_control = display.opt do desc.rm_control
-  if (rm_control != nil)
-    entries.push ["rm_control", node rm_control]
-  display.Map $entries
+  $
+    if (revision != nil)
+      revision: $ node $revision
+    if (control != nil)
+      control: $ display.flags $control
+    if (owner != nil)
+      owner: $ display.sid $owner
+    if (group != nil)
+      group: $ display.sid $group
+    if (dacl != nil)
+      dacl: $ acl_node $dacl :WINDOWS:
+    if (sacl != nil)
+      sacl: $ acl_node $sacl :WINDOWS:
+    if (rm_control != nil)
+      rm_control: $ node $rm_control
 
 # --- Sections ---------------------------------------------------------------
 
@@ -323,24 +326,23 @@ def sec_desc_node desc
 # order it arrived. Objects report their fields in registration order, which
 # isn't always the order that reads best.
 def order_entries wanted entries
-  let ordered = []
+  let ordered = {}
   for name = wanted
-    for entry = entries
-      if (entry[0] == name)
-        ordered.push $entry
-  for entry = entries
-    if !wanted.contains(entry[0])
-      ordered.push $entry
+    if entries.contains(name)
+      ordered[name] = entries[name]
+  for key value = entries
+    if !wanted.contains(key)
+      ordered[key] = value
   ordered
 
 # Splits `fs.Metadata` into the general/unix/attribute groups. Every reported
 # field lands somewhere: unrecognized booleans are treated as platform
 # attributes, and anything else falls through to `other`.
 def metadata_sections meta all raw
-  let general = []
-  let unix = []
-  let attributes = []
-  let other = []
+  let general = {}
+  let unix = {}
+  let attributes = {}
+  let other = {}
   bind meta
     ...rest
   for name value = rest
@@ -349,28 +351,28 @@ def metadata_sections meta all raw
       continue
     if GENERAL_FIELDS.contains(key)
       if SIZE_FIELDS.contains(key)
-        general.push [key, display.Size value raw]
+        general[key] = (display.size value raw)
       else
-        general.push [key, node value]
+        general[key] = (node value)
     else if UNIX_FIELDS.contains(key)
       if (key == "uid")
-        unix.push [key, display.id value :USER:]
+        unix[key] = (display.id value :USER:)
       else if (key == "gid")
-        unix.push [key, display.id value :GROUP:]
+        unix[key] = (display.id value :GROUP:)
       else
-        unix.push [key, node value]
+        unix[key] = (node value)
     else if RAW_MASK_FIELDS.contains(key)
       # A raw attribute mask reads as `nil` when the filesystem or file type
       # can't be asked for one, which is the common case for symlinks.
       if (value != nil || all)
-        attributes.push [key, hex_node value]
+        attributes[key] = (hex_node value)
     else if ((type value Bool) || (value == nil))
       # Platform attribute flags: `false` when the file doesn't have the
       # attribute, `nil` when this filesystem can't be asked about it.
       if ((value == true) || all)
-        attributes.push [key, node value]
+        attributes[key] = (node value)
     else
-      other.push [key, node value]
+      other[key] = (node value)
   let general_ordered = order_entries $GENERAL_FIELDS $general
   let unix_ordered = order_entries $UNIX_FIELDS $unix
   [general_ordered, unix_ordered, attributes, other]
@@ -381,7 +383,7 @@ def link_section path meta
   let target = display.opt do fs.read_link $path
   if (target == nil)
     return nil
-  display.Map [["target", node target]]
+  {target: node(target)}
 
 def acl_section path kind default resolve
   let acl = display.opt do
@@ -394,13 +396,12 @@ def xattr_section path resolve
   let listing = display.opt do
     [...fs.xattrs path namespace: :ANY: resolve: resolve]
   let attrs = if (listing == nil)
-    display.opt do
-      [...fs.xattrs path resolve: resolve]
+    display.opt do [...fs.xattrs path resolve: resolve]
   else
     listing
   if (attrs == nil)
     return nil
-  let entries = []
+  let entries = {}
   for attr = attrs
     let namespace = display.opt do attr.namespace
     let name = if (namespace == nil)
@@ -415,10 +416,12 @@ def xattr_section path resolve
     else
       size
     if (value == nil)
-      entries.push [name, display.text nil]
+      entries[name] = nil
     else
-      entries.push [name, display.Scalar "$value bytes"]
-  display.Map $entries
+      # An attribute's size is reported as it is: these are small enough that a
+      # binary unit would only cost precision.
+      entries[name] = (display.size value true)
+  entries
 
 def sec_desc_section path resolve
   # Reading a SACL needs SE_SECURITY_NAME, and asking for one without it fails
@@ -439,36 +442,36 @@ def stream_section path resolve
     [...(fs.streams path resolve: resolve).skip(1)]
   if (streams == nil)
     return nil
-  display.Map $
+  $
     for stream = streams
-      - [str stream.name, stream_node stream]
+      "$(stream.name)": $ stream_node $stream
 
 # A stream's own `name` is the key it is filed under, so drop it from the body.
 def stream_node stream
-  let nd = node $stream
-  if !(type nd display.Map)
-    return nd
-  display.Map $
-    for entry = nd.entries
-      if (entry[0] != "name")
-        - $entry
+  let fields = node $stream
+  if !(type fields Dict)
+    return fields
+  $
+    for key value = fields
+      if (key != "name")
+        "$key": $value
 
 def filesystem_section path raw
   let fs_meta = display.opt do fs.fs_metadata $path
   if (fs_meta == nil)
     return nil
-  let entries = []
+  let entries = {}
   bind fs_meta
     ...rest
   for name value = rest
     let key = (str name)
     if RAW_MASK_FIELDS.contains(key)
-      entries.push [key, hex_node value]
+      entries[key] = (hex_node value)
     else if SIZE_FIELDS.contains(key)
-      entries.push [key, display.Size value raw]
+      entries[key] = (display.size value raw)
     else
-      entries.push [key, node value]
-  display.Map $ order_entries $FS_FIELDS $entries
+      entries[key] = (node value)
+  order_entries $FS_FIELDS $entries
 
 # --- Driver -----------------------------------------------------------------
 
@@ -477,11 +480,11 @@ def dump path resolve all raw
   let general unix attributes other = metadata_sections $meta $all $raw
   let os = display.opt do sys.os_info().os
 
-  display.section general $ display.Map $general
+  display.section general $general
   display.section link $ link_section $path $meta
-  display.section unix $ display.Map $unix
-  display.section attributes $ display.Map $attributes
-  display.section other $ display.Map $other
+  display.section unix $unix
+  display.section attributes $attributes
+  display.section other $other
 
   display.section acl $ acl_section $path :POSIX: false $resolve
   if (meta.type == :DIR:)

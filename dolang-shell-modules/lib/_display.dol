@@ -1,38 +1,45 @@
 # Shared rendering for the YAML-shaped dumps the shell's inspection
 # entrypoints print.
 #
-# A dump is built as a tree of nodes and then emitted, rather than printed as
-# it is discovered: a section that turns out to have no content can be dropped
-# whole, and a block can align its keys against the widest one it holds.
+# A dump is an ordinary value, built whole and then emitted rather than printed
+# as it is discovered: a section that turns out to have no content can be
+# dropped entirely, and a block can align its keys against the widest one it
+# holds.
 #
-# A node is one of
-#
-#   Scalar   one `key: value` payload, plus an optional dim aside
-#   Map      a nested block of `key: value` entries
-#   List     a nested block of `- item` entries
-#
-# and renders itself in whichever of the three positions it turns up in: as
-# the value of a key, as an item of a list, or as a whole section.
+# The shape of the value is the shape of the output. A dict is a block of
+# `key: value` lines, an array or tuple a block of `- item` lines, and anything
+# else is one line, so most of a dump is written as vertical layout. A value
+# that needs presenting some other way than its own string conversion is
+# rendered ahead of time into a `term.Text` -- by one of the leaves here, or by
+# the caller -- and the renderer prints that as the finished line it is.
 
 import std sys term
 import security.unix
 
+# A dump reads as the spec that would recreate what it describes, so it is
+# colored as that source would be: the shell's own syntax highlighting, with
+# keys and structural punctuation yellow, string literals green, numbers cyan,
+# constants magenta, and the parenthetical asides dim as comments are.
+#
+# A value with no counterpart in source -- a timestamp, a UUID, a path, or a
+# description this module wrote itself -- is left uncolored rather than being
+# passed off as the string its rendering happens to be.
+#
+# The section heading has no counterpart in source, and answers to nothing.
 let section_style = term.Style fg: :BRIGHT_BLUE: bold: true
-let key_style = term.Style fg: :CYAN:
-let value_style = term.Style fg: :GREEN:
-let note_style = term.Style dim: true
-let bullet_style = term.Style dim: true
+let key_style = term.Style fg: :YELLOW:
+let delim_style = term.Style fg: :YELLOW:
+let literal_style = term.Style fg: :GREEN:
+let number_style = term.Style fg: :CYAN:
+let constant_style = term.Style fg: :MAGENTA:
+let note_style = term.Style fg: :WHITE: dim: true
 let absent_style = term.Style dim: true
 
 def spaces n
   " ".repeat(n)
 
 def bullet indent
-  bullet_style "$(spaces indent)- "
-
-# Lays a key out plainly, for a key that leads into a block rather than
-# sharing a column with its siblings.
-let free_column = fmt()
+  delim_style "$(spaces indent)- "
 
 let SIZE_UNITS = ["KiB", "MiB", "GiB", "TiB", "PiB", "EiB"]
 # A unit only takes over from the one below it once the count is half again
@@ -40,194 +47,154 @@ let SIZE_UNITS = ["KiB", "MiB", "GiB", "TiB", "PiB", "EiB"]
 # bytes as `1.00 KiB`, which says less than the number it replaced.
 let SIZE_STEP = 1536.0
 
-# --- Nodes ------------------------------------------------------------------
+# --- Renderer ---------------------------------------------------------------
 
-pub class Node
-  # True when the node has nothing to print. An empty branch renders as `{}`
-  # or `[]` inline, and a section holding one is skipped entirely.
-  pub def empty _self
-    false
+# True when `value` is a sequence of items rather than a keyed block. A tuple
+# is one as much as an array is: an object that reports a fixed-shape field as
+# a tuple is reporting a sequence, not a value that prints on one line.
+def is_sequence value
+  (type value Array || type value Tuple)
 
-  # True when the node renders on the same line as its key, which is what
-  # decides whether that key takes part in a block's alignment.
-  pub def inline self
-    self.empty()
+# True when `value` opens a block beneath the line that introduces it. An empty
+# block has nothing to open, so it reads as `{}` or `[]` in place.
+def is_block value
+  ((type value Dict || is_sequence value) && value.len > 0)
 
-  # Emits the node as the value of `key`, or as a bare value when `key` is
-  # `nil`. `start` is what precedes the line -- indentation, or a bullet
-  # leading into a block -- and `column` is the `FmtSpec` that lays the key
-  # out against the block it appears in.
-  pub def entry self key indent start column
-    let _ = [self, key, indent, start, column]
-    throw "Node.entry not implemented"
+# Renders a value that occupies a single line, colored as the token it would
+# be in source. A `Text` has already decided how it looks and is left alone.
+def scalar value
+  if (value == nil)
+    absent_style "~"
+  else if (type value term.Text)
+    value
+  else if (type value Sym || type value Bool)
+    constant_style (str value)
+  else if (type value Int || type value Float)
+    number_style (str value)
+  else if (type value Str)
+    literal_style $value
+  else
+    term.text $value
 
-  # Emits the node as an item of an enclosing list.
-  pub def item self indent
-    let _ = [self, indent]
-    throw "Node.item not implemented"
+# Prints the one-line form of `value`, which for an empty block is the marker
+# it reads as in place.
+def print_inline value
+  if (type value Dict)
+    print (absent_style "{}")
+  else if is_sequence(value)
+    print (absent_style "[]")
+  else
+    print $ scalar $value
 
-  # Emits the node's children, one per line. `start` precedes the first line,
-  # so a caller can lead into a block with a key or a bullet.
-  pub def block self indent start
-    let _ = [self, indent, start]
-    throw "Node.block not implemented"
-
-# A single payload. `text` is already styled; `note` is a dim parenthetical
-# aside naming what the payload resolves to.
-pub class Scalar: Node
-  pub field text = ""
-  pub field note = nil
-
-  def (init) self text note = nil
-    self.text = text
-    self.note = note
-
-  pub def inline _self
-    true
-
-  pub def entry self key _indent start column
-    if (key == nil)
-      print $start $self.text
-    else
-      print $start (key_style(column("$key:"))) " " $self.text
-    if self.note
-      print " " (note_style "($(self.note))")
+# Emits `value` as the body of `key`. `start` is what precedes the line --
+# indentation, or a bullet leading into a block -- and `column` is the
+# `FmtSpec` that lays the key out against the block it appears in.
+def print_entry key value indent start column
+  if !is_block(value)
+    print $start (key_style(column("$key:"))) " "
+    print_inline $value
     print "\n"
+    return nil
+  # A key that leads into a block is on a line of its own, so it takes no part
+  # in the alignment of the keys that share a column with their values.
+  print $start (key_style "$key:") "\n"
+  print_block $value (indent + 2) (spaces (indent + 2))
 
-  pub def item self indent
-    self.entry nil $indent (bullet indent) $free_column
+# Emits `value` as an item of an enclosing list.
+def print_item value indent
+  if !is_block(value)
+    print $ bullet $indent
+    print_inline $value
+    print "\n"
+    return nil
+  if is_sequence(value)
+    # Every item of the nested list carries its own bullet, so this one has
+    # nothing to lead into and the block opens on the line below.
+    print (bullet indent) "\n"
+    print_block $value (indent + 2) nil
+    return nil
+  print_block $value (indent + 2) (bullet indent)
+
+# Emits the children of `value`, one line each. `lead` precedes the first line
+# in place of the indentation, so a caller can lead into the block with a key
+# or a bullet. A sequence ignores it: every item carries its own bullet.
+def print_block value indent lead
+  if is_sequence(value)
+    for item = value
+      print_item $item $indent
+    return nil
+  let width = 0
+  for key item = value
+    if !is_block(item)
+      let key_width = (key_style (str key)).width()
+      if (key_width > width)
+        width = key_width
+  # The `:` is part of what gets laid out, hence the extra column.
+  let column = fmt width: (width + 1)
+  let first = true
+  for key item = value
+    let start = if first
+      lead
+    else
+      spaces $indent
+    first = false
+    print_entry $key $item $indent $start $column
+
+# --- Leaves -----------------------------------------------------------------
+
+# Renders `value` on one line, with a dim parenthetical aside naming what it
+# resolves to.
+#
+# Ordinary values need no help from this -- the renderer handles them where
+# they sit -- so this is for a caller that wants the aside, or that wants a
+# structured value flattened to the single line it would otherwise open a
+# block on.
+pub def text value note = nil
+  if (note == nil)
+    return scalar $value
+  term.text (scalar value) " " (note_style "($note)")
+
+# Renders any iterable of symbols -- every flag type, and every mask a
+# security descriptor reports -- as the set of names it holds.
+#
+# The names are separated the way a mask is usually written rather than the way
+# a Do array is: each is an enumerated value in its own right, and reads as one.
+pub def flags value
+  if (value == nil)
+    return scalar nil
+  let names = [...value.map(constant_style)]
+  if (names.len == 0)
+    return absent_style "[]"
+  delim_style(" | ").join(names)
+
+# Renders a value that answers to none of the colors: a description this module
+# composed, or a string standing in for something that is not one.
+pub def plain value note = nil
+  text (term.text value) $note
+
+# A number the caller has already written out -- in hex or octal, say -- so
+# that it is colored as the number it is rather than the string it arrives as.
+pub def number value note = nil
+  text (number_style (str value)) $note
 
 # A byte count, scaled to the largest binary unit it fills, with the exact
 # number kept as the aside so the size is still readable off the line it is
 # scaled on. A count small enough that a unit would only cost it precision is
 # left as it is, as is one the caller asked for `raw`.
-pub class Size: Scalar
-  def (init) self value raw = false
-    let text note = if (value == nil)
-      [absent_style "~", nil]
-    else if (raw || value < SIZE_STEP)
-      ["$value bytes", nil]
-    else
-      let scaled = float $value
-      let unit = nil
-      for candidate = SIZE_UNITS
-        scaled = (scaled / 1024.0)
-        unit = candidate
-        if (scaled < SIZE_STEP)
-          break
-      ["$value bytes", "${scaled:.2f} $unit"]
-    Scalar.(init) $self $text $note
-
-# A block of keyed entries, held as `[key, node]` pairs.
-pub class Map: Node
-  pub field entries = nil
-
-  def (init) self entries = nil
-    self.entries = (entries || [])
-
-  # Appends an entry, answering the map so building can be chained.
-  pub def set self key node
-    self.entries.push [key, node]
-    self
-
-  pub def empty self
-    (self.entries.len == 0)
-
-  pub def entry self key indent start column
-    if self.empty()
-      print $start (key_style(column("$key:"))) " " (absent_style "{}") "\n"
-      return nil
-    print $start (key_style "$key:") "\n"
-    self.block (indent + 2) (spaces (indent + 2))
-
-  pub def item self indent
-    if self.empty()
-      print (bullet indent) (absent_style "{}") "\n"
-      return nil
-    self.block (indent + 2) (bullet indent)
-
-  pub def block self indent start
-    let width = 0
-    for pair = self.entries
-      let key node = pair
-      let key_width = (key_style key).width()
-      if (node.inline() && key_width > width)
-        width = key_width
-    # The `:` is part of what gets laid out, hence the extra column.
-    let key_column = fmt width: (width + 1)
-    let first = true
-    for pair = self.entries
-      let key node = pair
-      let lead = if first
-        start
-      else
-        spaces $indent
-      first = false
-      let column = if node.inline()
-        key_column
-      else
-        free_column
-      node.entry $key $indent $lead $column
-
-# A block of bulleted items.
-pub class List: Node
-  pub field items = nil
-
-  def (init) self items = nil
-    self.items = (items || [])
-
-  # Appends an item, answering the list so building can be chained.
-  pub def push self node
-    self.items.push $node
-    self
-
-  pub def empty self
-    (self.items.len == 0)
-
-  pub def entry self key indent start column
-    if self.empty()
-      print $start (key_style(column("$key:"))) " " (absent_style "[]") "\n"
-      return nil
-    print $start (key_style "$key:") "\n"
-    self.block (indent + 2) nil
-
-  pub def item self indent
-    if self.empty()
-      print (bullet indent) (absent_style "[]") "\n"
-      return nil
-    print (bullet indent) "\n"
-    self.block (indent + 2) nil
-
-  # Every item carries its own bullet, so there is no lead-in to honor.
-  pub def block self indent _start
-    for item = self.items
-      item.item $indent
-
-# --- Leaves -----------------------------------------------------------------
-
-# Renders `value` as plain text, or as `~` when it is absent.
-pub def text value note = nil
+pub def size value raw = false
   if (value == nil)
-    Scalar (absent_style "~")
-  else
-    Scalar (str value) $note
-
-# Renders an enumerated value -- a symbol or a boolean -- in the value color.
-pub def enum value note = nil
-  Scalar (value_style (str value)) $note
-
-# Renders any iterable of symbols -- every flag type does this -- as the
-# bracketed list its constructor would accept back.
-pub def flags value
-  if (value == nil)
-    return text nil
-  let names = []
-  for bit = value
-    names.push $ str $bit
-  if (names.len == 0)
-    return Scalar (absent_style "[]")
-  let joined = (", ".join(names))
-  Scalar (value_style "[$joined]")
+    return scalar nil
+  let count = term.text (number_style "$value") " bytes"
+  if (raw || value < SIZE_STEP)
+    return count
+  let scaled = float $value
+  let unit = nil
+  for candidate = SIZE_UNITS
+    scaled = (scaled / 1024.0)
+    unit = candidate
+    if (scaled < SIZE_STEP)
+      break
+  text $count "${scaled:.2f} $unit"
 
 # --- Sections ---------------------------------------------------------------
 
@@ -235,10 +202,10 @@ pub def flags value
 # to show. A section that could not be read at all arrives as `nil` and reads
 # the same way as one that came back empty.
 pub def section name node
-  if (node == nil || node.empty())
+  if !is_block(node)
     return nil
   print "  " (section_style "▸ $name") "\n"
-  node.block 6 (spaces 6)
+  print_block $node 6 (spaces 6)
 
 # --- System values ----------------------------------------------------------
 
@@ -258,7 +225,7 @@ pub def opt func
 # A uid or gid, annotated with the name it resolves to.
 pub def id value kind
   if (value == nil)
-    return text nil
+    return scalar nil
   let name = opt do
     if (kind == :USER:)
       security.unix.user_name $value
@@ -269,7 +236,7 @@ pub def id value kind
 # A Windows SID, annotated with the account it names.
 pub def sid value
   if (value == nil)
-    return text nil
+    return scalar nil
   let name = opt do
     let :kind :qualified_name ... = value.lookup()
     "$kind: $qualified_name"

@@ -83,41 +83,30 @@ def list_processes _p
     print "  " ((term.text name).clip(name_width, suffix: "…")) "\n"
 
 def unix_node identity
-  let groups = display.List $
-    for gid = identity.groups
-      - $ display.id $gid :GROUP:
-  display.Map $
-    - ["uid", display.id identity.uid :USER:]
-    - ["gid", display.id identity.gid :GROUP:]
-    - ["euid", display.id identity.euid :USER:]
-    - ["egid", display.id identity.egid :GROUP:]
-    - ["groups", groups]
+  $
+    uid: $ display.id $identity.uid :USER:
+    gid: $ display.id $identity.gid :GROUP:
+    euid: $ display.id $identity.euid :USER:
+    egid: $ display.id $identity.egid :GROUP:
+    groups:
+      for gid = identity.groups
+        - $ display.id $gid :GROUP:
+
+def token_group_node group
+  $
+    sid: $ display.sid $group.sid
+    attributes: $ display.flags $group.attributes
 
 def token_node token
-  let groups = display.List $
-    for group = token.groups
-      $ display.Map $
-        - ["sid", display.sid group.sid]
-        - ["attributes", display.flags group.attributes]
-  display.Map $
-    - ["elevated", display.enum token.is_elevated]
-    - ["user_sid", display.sid token.user_sid]
-    - ["owner_sid", display.sid token.owner_sid]
-    - ["primary_group_sid", display.sid token.primary_group_sid]
-    - ["logon_sid", display.sid token.logon_sid]
-    - ["groups", groups]
-
-# Renders the argument vector, distinguishing an absent one from an empty one.
-#
-# A `List` built from no arguments is empty, so building the node
-# unconditionally would render a command line the target could not report the
-# same as one that is genuinely empty.
-def cmdline_node info
-  if (info.cmdline == nil)
-    return display.text nil
-  display.List $
-    for arg = info.cmdline
-      - $ display.text $arg
+  $
+    elevated: $token.is_elevated
+    user_sid: $ display.sid $token.user_sid
+    owner_sid: $ display.sid $token.owner_sid
+    primary_group_sid: $ display.sid $token.primary_group_sid
+    logon_sid: $ display.sid $token.logon_sid
+    groups:
+      for group = token.groups
+        - $ token_group_node $group
 
 # Describes how a process ended, or that it has not.
 def status_text info
@@ -135,23 +124,26 @@ def dump_info info
   # rather than informative, and only a field that survived earns a row.
   let ended = (info.status != nil)
   print (heading_style "● process $(info.pid)") "\n"
-  let general_rows = []
-  if (info.name.len > 0)
-    general_rows.push ["name", display.text info.name]
-  general_rows.push ["status", display.text (status_text info)]
-  general_rows.push ["parent_pid", display.text info.parent_pid]
-  if (!ended || info.exe != nil)
-    general_rows.push ["exe", display.text info.exe]
-  if (!ended || info.cwd != nil)
-    general_rows.push ["cwd", display.text info.cwd]
-  if (!ended || info.cmdline != nil)
-    general_rows.push ["cmdline", cmdline_node info]
-  # Windows keeps the command line as one string and the split above is a
+  # Windows keeps the command line as one string and the split below is a
   # reconstruction of it, so show the original where there is one.
   let raw = display.opt do info.cmdline_win
-  if (raw != nil)
-    general_rows.push ["cmdline_win", display.text raw]
-  display.section general $ display.Map $general_rows
+  display.section general $
+    if (info.name.len > 0)
+      name: $info.name
+    # How the process ended is this file's own words for it, not something the
+    # process reported as text.
+    status: $ display.plain $ status_text $info
+    parent_pid: $info.parent_pid
+    if (!ended || info.exe != nil)
+      exe: $info.exe
+    if (!ended || info.cwd != nil)
+      cwd: $info.cwd
+    if (!ended || info.cmdline != nil)
+      # An absent command line reads as `~` and one the process left empty as
+      # `[]`, which are different things to learn about a process.
+      cmdline: $info.cmdline
+    if (raw != nil)
+      cmdline_win: $raw
 
   let identity = display.opt do info.unix_id
   if (identity != nil)
