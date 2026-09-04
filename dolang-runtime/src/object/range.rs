@@ -262,32 +262,36 @@ impl<'v> Protocol<'v> for Range<'v> {
         out: Slot<'v, 'a>,
     ) -> Result<'v, 's, ()> {
         let borrow = this.get();
-        if borrow.start.is_nil() {
-            return Err(Error::runtime(
+        strand.with_slots_sync(|strand, [mut start, mut step]| {
+            Output::set(strand, &mut start, &borrow.start);
+            Output::set(strand, &mut step, &borrow.step);
+            if start.is_nil() {
+                Output::set(strand, &mut start, 0);
+            }
+            if step.is_nil() {
+                Output::set(strand, &mut step, 1);
+            }
+            let direction = if borrow.end.is_nil() {
+                Direction::Unbounded
+            } else if start.op_lt(strand, &borrow.end)?.to_bool(strand) {
+                Direction::Increasing
+            } else if start.op_gt(strand, &borrow.end)?.to_bool(strand) {
+                Direction::Decreasing
+            } else {
+                Direction::Empty
+            };
+            strand.builtin_types().range_iter.create(
                 strand,
-                "cannot iterate range without a start",
-            ));
-        }
-        let direction = if borrow.end.is_nil() {
-            Direction::Unbounded
-        } else if borrow.start.op_lt(strand, &borrow.end)?.to_bool(strand) {
-            Direction::Increasing
-        } else if borrow.start.op_gt(strand, &borrow.end)?.to_bool(strand) {
-            Direction::Decreasing
-        } else {
-            Direction::Empty
-        };
-        strand.builtin_types().range_iter.create(
-            strand,
-            Iter {
-                cur: borrow.start.dup(),
-                step: borrow.step.dup(),
-                end: borrow.end.dup(),
-                direction,
-            },
-            out,
-        );
-        Ok(())
+                Iter {
+                    cur: start.take(),
+                    end: borrow.end.dup(),
+                    step: step.take(),
+                    direction,
+                },
+                out,
+            );
+            Ok(())
+        })
     }
 
     async fn op_mcall<'a, 's>(
@@ -538,14 +542,9 @@ impl<'v> Protocol<'v> for Type {
         strand.builtin_types().range.create(
             strand,
             Range::new(
-                start
-                    .as_mut()
-                    .map(Slot::take)
-                    .unwrap_or_else(|| Value::from_i64(strand, 0)),
+                start.as_mut().map(Slot::take).unwrap_or_else(|| Value::NIL),
                 end,
-                step.as_mut()
-                    .map(Slot::take)
-                    .unwrap_or_else(|| Value::from_i64(strand, 1)),
+                step.as_mut().map(Slot::take).unwrap_or_else(|| Value::NIL),
             ),
             out,
         );

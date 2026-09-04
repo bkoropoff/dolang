@@ -264,14 +264,9 @@ impl<'v> Vm<'v> {
         out: Slot<'v, '_>,
     ) -> Result<'v, 's, ()> {
         let ([mut start, mut end, mut step], []) = unpack!(strand, args, 3, 0)?;
-        let step = if step.is_nil() {
-            Value::from_i64(strand, 1)
-        } else {
-            step.take()
-        };
         strand.builtin_types().range.create(
             strand,
-            range::Range::new(start.take(), end.take(), step),
+            range::Range::new(start.take(), end.take(), step.take()),
             out,
         );
         Ok(())

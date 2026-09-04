@@ -77,8 +77,11 @@ fn byte_range<'v, 's>(
             Slot::reborrow(&mut step),
         ],
     );
-    if step.as_int(strand) != Some(1) {
-        return Err(Error::value(strand, format!("{what} step must be 1")));
+    if !step.is_nil() && step.as_int(strand) != Some(1) {
+        return Err(Error::value(
+            strand,
+            format!("{what} step must be 1 or unspecified"),
+        ));
     }
     let start = lock_endpoint(strand, &start, &format!("{what} start"))?.unwrap_or(0);
     let end = lock_endpoint(strand, &end, &format!("{what} end"))?;
