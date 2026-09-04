@@ -41,8 +41,10 @@ fn token_style(token: Token, origin: Option<&Origin>, context: Context) -> Optio
         Token::Keyword => AnsiColor::Red,
         Token::Literal => AnsiColor::Green,
         Token::Operator | Token::Delim | Token::Escape | Token::Key => AnsiColor::Yellow,
-        Token::StringDelim | Token::ModuleItem => AnsiColor::Cyan,
-        Token::Number | Token::Constant | Token::ModuleName => AnsiColor::Magenta,
+        Token::StringDelim | Token::ModuleItem | Token::Number => AnsiColor::Cyan,
+        // `true`, `nil` and symbols name a value rather than compute one, which
+        // is what a number does, so the two do not share a color.
+        Token::Constant | Token::ModuleName => AnsiColor::Magenta,
         Token::Field => match context {
             Context::Call => AnsiColor::Blue,
             Context::None => AnsiColor::Cyan,
@@ -148,7 +150,7 @@ mod tests {
         );
         assert_eq!(
             highlight_range(source, &tokens, 0..source.len(), true),
-            "\u{1b}[31mlet\u{1b}[0m answer \u{1b}[33m=\u{1b}[0m \u{1b}[35m42\u{1b}[0m"
+            "\u{1b}[31mlet\u{1b}[0m answer \u{1b}[33m=\u{1b}[0m \u{1b}[36m42\u{1b}[0m"
         );
     }
 }
