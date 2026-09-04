@@ -474,31 +474,36 @@ pub def assert cond msg = nil
 
 # Assert that `cond` is falsy, throwing an error with optional `msg` on failure.
 pub def assert_not cond msg = nil
-  if !cond
+  if cond
     throw Assert $msg
 
 # Assert that `left == right`, throwing an error with optional `msg` on failure.
 pub def assert_eq left right msg = nil
   if (left != right)
     if msg
-      throw Assert "$(dbg left) == $(dbg right): $msg"
+      throw Assert "${left:?} == ${right:?}: $msg"
     else
-      throw Assert "$(dbg left) == $(dbg right)"
+      throw Assert "${left:?} == ${right:?}"
 
 # Assert that `left != right`, throwing an error with optional `msg` on failure.
 pub def assert_ne left right msg = nil
   if (left == right)
     if msg
-      throw Assert "$(dbg left) != $(dbg right): $msg"
+      throw Assert "${left:?} != ${right:?}: $msg"
     else
-      throw Assert "$(dbg left) != $(dbg right)"
+      throw Assert "${left:?} != ${right:?}"
 
 # Assert that `block` throws an error of `type`, throwing an error with optional `msg`
 # otherwise.  The caught error is returned for further inspection if desired.
-pub def assert_throws type :msg = nil block
+pub def assert_throws type :str = nil :msg = nil block
   try
     block()
   catch type: e
+    if (str != nil && std.str e != str)
+      if msg
+        throw Assert "$msg (error str ${std.str(e):?} == ${str:?})"
+      else
+        throw Assert "error str ${std.str(e):?} == ${str:?}"
     return e
   if msg
     throw Assert "$msg ($type thrown)"
@@ -510,9 +515,9 @@ pub def assert_throws type :msg = nil block
 pub def assert_type expected value msg = nil
   if !(type value expected)
     if msg
-      throw Assert "$msg ($value @ $(type value) <: $expected)"
+      throw Assert "$msg (${value:?} @ $(type value) <: $expected)"
     else
-      throw Assert "$value @ $(type value) <: $expected"
+      throw Assert "${value:?} @ $(type value) <: $expected"
 
 # Discovers and runs tests under the trailing file and directory paths.
 #

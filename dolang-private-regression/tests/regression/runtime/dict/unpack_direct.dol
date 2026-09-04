@@ -2,22 +2,13 @@ import
   std:
     - Iter
 
-def assert_err msg block
-  let res = try
-    block()
-    false
-  catch e
-    assert_eq (str e) $msg
-    true
-  assert $res
-
 # Positional unpack against integer keys (dict-as-array style)
 let x y = {0: "zero", 1: "one"}
 assert_eq $x zero
 assert_eq $y one
-assert_err "unexpected positional item: 2" do
+assert_throws $std.RuntimeError str: "unexpected positional item: 2" do
   let _a _b = {0: "zero", 1: "one", 2: "two"}
-assert_err "missing positional item: 1" do
+assert_throws $std.RuntimeError str: "missing positional item: 1" do
   let _a _b = {0: "only-zero"}
 
 # str() of the values/keys iterator types themselves
@@ -68,26 +59,26 @@ assert_eq $b 2
 assert_eq $missing fallback
 
 # a key satisfied by a default does not excuse a pair nobody claimed
-assert_err "unexpected key item: c" do
+assert_throws $std.RuntimeError str: "unexpected key item: c" do
   let a: _a ...rest5b = {a: 1, b: 2, c: 3}
   bind rest5b
     b: _b
     missing: _missing = "fallback"
 
 # the leftover key is named when unpacking a dict directly, too
-assert_err "unexpected key item: c" do
+assert_throws $std.RuntimeError str: "unexpected key item: c" do
   let b: _b = {b: 2, c: 3}
-assert_err "unexpected key item: 5" do
+assert_throws $std.RuntimeError str: "unexpected key item: 5" do
   let b: _b = {5: "five", b: 2}
 
-assert_err "missing key item: zzz" do
+assert_throws $std.RuntimeError str: "missing key item: zzz" do
   let a: _a ...rest6 = {a: 1, b: 2, c: 3}
   let zzz: _zzz = rest6
 
-assert_err "unexpected key item: c" do
+assert_throws $std.RuntimeError str: "unexpected key item: c" do
   let a: _a ...rest7 = {a: 1, b: 2, c: 3}
   let b: _b = rest7
 
-assert_err "unexpected positional item: 2" do
+assert_throws $std.RuntimeError str: "unexpected positional item: 2" do
   let a: _a ...rest8 = {a: 1, 0: "zero", 1: "one", 2: "two"}
   let _d _e = rest8

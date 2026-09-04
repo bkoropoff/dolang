@@ -1,12 +1,3 @@
-def assert_err msg block
-  let res = try
-    block()
-    false
-  catch e
-    assert_eq (str e) $msg
-    true
-  assert $res
-
 assert_eq $"foo".len 3
 assert_eq ("foobar"[2..]) "obar"
 assert_eq ("foobar"[2..4]) "ob"
@@ -60,15 +51,15 @@ assert (!"foobar".contains "foobarbar")
 assert (!"".contains "foo")
 assert ("".contains "")
 
-assert_err "type error: Str.len is a field, not a method" do "foo".len()
-assert_err "numeric overflow" do "ab".repeat -1
-assert_err "index out of range or invalid" do "foobar"[-99..]
-assert_err "index out of range or invalid" do "foobar"[0..-99]
-assert_err "invalid UTF-8 substring boundaries" do "é"[0..1]
-assert_err "type error: iteration protocol not supported" do
+assert_throws $std.RuntimeError str: "type error: Str.len is a field, not a method" do "foo".len()
+assert_throws $std.RuntimeError str: "numeric overflow" do "ab".repeat -1
+assert_throws $std.RuntimeError str: "index out of range or invalid" do "foobar"[-99..]
+assert_throws $std.RuntimeError str: "index out of range or invalid" do "foobar"[0..-99]
+assert_throws $std.RuntimeError str: "invalid UTF-8 substring boundaries" do "é"[0..1]
+assert_throws $std.RuntimeError str: "type error: iteration protocol not supported" do
   "foobar".trim 1
-assert_err "type error: invalid pattern: not a string" do
+assert_throws $std.RuntimeError str: "type error: invalid pattern: not a string" do
   "foobar".trim [1]
 # Bytes only become characters through a decode the caller should ask for.
-assert_err "type error: invalid pattern: not a string" do
+assert_throws $std.RuntimeError str: "type error: invalid pattern: not a string" do
   "foobar".trim b"x"

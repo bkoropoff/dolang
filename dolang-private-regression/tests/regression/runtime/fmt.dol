@@ -2,14 +2,6 @@ import std:
   - Fmt
   - FmtSpec
 
-def assert_fails block
-  let failed = try
-    block()
-    false
-  catch _
-    true
-  assert $failed
-
 # fmt is a bare prelude item, while the types are explicit std imports.
 let empty = fmt()
 assert $ type $empty $FmtSpec
@@ -62,7 +54,7 @@ assert_eq (str applied) "*+1.50"
 let rebound = applied width: 8 fill: :ZERO:
 assert_eq $rebound.value 1.5
 assert_eq (str rebound) "+0001.50"
-assert_fails do applied 2
+assert_throws $std.RuntimeError do applied 2
 
 # The surrounding conversion supplies kind only when none was explicit.
 let inherited = fmt "x" width: 5
@@ -76,14 +68,14 @@ let centered = fmt fill: . align: :CENTER: width: 7 precision: 3
 assert_eq $centered.pad("a界b") "..a界.."
 
 # Keyword validation is strict.
-assert_fails do fmt fill: ""
-assert_fails do fmt fill: ab
-assert_fails do fmt align: :SIDEWAYS:
-assert_fails do fmt sign: true
-assert_fails do fmt width: -1
-assert_fails do fmt precision: 1.5
-assert_fails do fmt alt: 1
-assert_fails do fmt kind: :UNKNOWN:
+assert_throws $std.RuntimeError do fmt fill: ""
+assert_throws $std.RuntimeError do fmt fill: ab
+assert_throws $std.RuntimeError do fmt align: :SIDEWAYS:
+assert_throws $std.RuntimeError do fmt sign: true
+assert_throws $std.RuntimeError do fmt width: -1
+assert_throws $std.RuntimeError do fmt precision: 1.5
+assert_throws $std.RuntimeError do fmt alt: 1
+assert_throws $std.RuntimeError do fmt kind: :UNKNOWN:
 
 # Core formatting implementations are reachable from Do code.
 assert_eq (str $ fmt 42 fill: :ZERO: width: 6 alt: true kind: :HEX:) "0x002a"
@@ -118,14 +110,14 @@ assert_eq (str $ fmt p fill: "-" width: 7) "(1,2)--"
 assert_eq (str $ fmt p precision: 3) "(1,"
 
 # A numeric kind is a type error rather than being silently ignored.
-assert_fails do str $ fmt p kind: :HEX:
-assert_fails do str $ fmt p sign: :PLUS:
-assert_fails do str $ fmt p fill: :ZERO: width: 9
+assert_throws $std.RuntimeError do str $ fmt p kind: :HEX:
+assert_throws $std.RuntimeError do str $ fmt p sign: :PLUS:
+assert_throws $std.RuntimeError do str $ fmt p fill: :ZERO: width: 9
 
 # Symbols, bools and nil use the text kinds only.
 assert_eq (str $ fmt :sym: width: 5) "sym  "
 assert_eq (dbg $ fmt true width: 6 align: :RIGHT:) "  true"
-assert_fails do str $ fmt true kind: :DEC:
+assert_throws $std.RuntimeError do str $ fmt true kind: :DEC:
 
 # A specification is reusable across values.
 let money = fmt precision: 2 kind: :FIXED:

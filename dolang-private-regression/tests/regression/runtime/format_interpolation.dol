@@ -63,18 +63,6 @@ assert_eq "${mark(1.25, :value:):$(mark(6, :width:)).$(mark(1, :precision:))f}" 
 assert_eq $events [:value:, :width:, :precision:]
 
 # Dynamic validation is shared with the public `fmt` function.
-def assert_fails block
-  let failed = try
-    block()
-    false
-  catch _
-    true
-  assert $failed
-assert_fails do "${42:$(0 - 1)}"
-assert_fails do "${42:$(1.5)}"
-assert_fails do "${42:$(4294967296)}"
-assert_fails do "${"x":+s}"
-
 def failure block
   try
     block()

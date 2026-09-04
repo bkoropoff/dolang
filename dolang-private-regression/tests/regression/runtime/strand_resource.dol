@@ -8,15 +8,6 @@ import
   std:
     - ValueError
 
-def assert_err_type ty block
-  let res = try
-    block()
-    false
-  catch e
-    assert (type e ty)
-    true
-  assert $res
-
 # Resource scopes cap explicitly admitted work.
 let resource = Resource 2
 let release_send release_recv = channel 8
@@ -92,4 +83,4 @@ catch _
   nil
 assert_eq (one.with do 7) 7
 
-assert_err_type $ValueError do Resource 0
+assert_throws $ValueError do Resource 0

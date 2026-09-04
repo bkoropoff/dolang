@@ -3,15 +3,6 @@ import std:
   - UnexpectedKeyError
   - UnexpectedPosError
 
-def assert_err_type ty block
-  let res = try
-    block()
-    false
-  catch e
-    assert (type e ty)
-    true
-  assert $res
-
 let data = $
   - 1
   ...[2, 3]
@@ -77,13 +68,13 @@ assert_eq (Tuple [1, 2, 3]) (tuple 1 2 3)
 assert_eq (Dict {1, 2, foo: 3}) {1, 2, foo: 3}
 assert_eq (Record {1, 2, foo: 3}) (record 1 2 foo: 3)
 
-assert_err_type $UnexpectedKeyError do array foo: 1
-assert_err_type $UnexpectedKeyError do tuple foo: 1
-assert_err_type $MissingPosError do Array()
-assert_err_type $UnexpectedPosError do Array [] []
-assert_err_type $MissingPosError do Dict()
-assert_err_type $UnexpectedPosError do Dict {} {}
-assert_err_type $MissingPosError do Tuple()
-assert_err_type $UnexpectedPosError do Tuple [] []
-assert_err_type $MissingPosError do Record()
-assert_err_type $UnexpectedPosError do Record {} {}
+assert_throws $UnexpectedKeyError do array foo: 1
+assert_throws $UnexpectedKeyError do tuple foo: 1
+assert_throws $MissingPosError do Array()
+assert_throws $UnexpectedPosError do Array [] []
+assert_throws $MissingPosError do Dict()
+assert_throws $UnexpectedPosError do Dict {} {}
+assert_throws $MissingPosError do Tuple()
+assert_throws $UnexpectedPosError do Tuple [] []
+assert_throws $MissingPosError do Record()
+assert_throws $UnexpectedPosError do Record {} {}

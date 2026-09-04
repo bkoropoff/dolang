@@ -4,15 +4,6 @@ import
     - IterStop
     - MissingPosError
 
-def assert_err_type ty block
-  let res = try
-    block()
-    false
-  catch e
-    assert_eq (type e) $ty
-    true
-  assert $res
-
 # Record.contains tests - Record.contains is a class method taking record as first arg
 assert (!(bool (record())))
 assert (bool (record(a: 1)))
@@ -108,7 +99,7 @@ catch _
   true
 assert $failed
 assert_eq (failed_unpack.next()) "Alice"
-assert_err_type $IterStop do failed_unpack.next()
+assert_throws $IterStop do failed_unpack.next()
 
 let failed_key_unpack = Record.keys(record(name: "Alice"))
 failed = try
@@ -118,15 +109,15 @@ catch _
   true
 assert $failed
 assert_eq (failed_key_unpack.next()) :name:
-assert_err_type $IterStop do failed_key_unpack.next()
+assert_throws $IterStop do failed_key_unpack.next()
 
 let keyed_source = record(name: "Alice", age: 30, name: "Bob")
 let keyed_iter = Record.values $keyed_source :name:
-assert_err_type $MissingPosError do
+assert_throws $MissingPosError do
   let _x _y _z = keyed_iter
 assert_eq (keyed_iter.next()) "Alice"
 assert_eq (keyed_iter.next()) "Bob"
-assert_err_type $IterStop do keyed_iter.next()
+assert_throws $IterStop do keyed_iter.next()
 
 let concurrent_source = record(a: 1, a: 2)
 let concurrent_iter = Record.values $concurrent_source

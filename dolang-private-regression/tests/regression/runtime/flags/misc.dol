@@ -2,15 +2,6 @@ import
   std:
     - hash
 
-def assert_err msg block
-  let res = try
-    block()
-    false
-  catch e
-    assert_eq (str e) $msg
-    true
-  assert $res
-
 let empty = TestFlags()
 assert_eq $empty (TestFlags())
 assert (!(empty.contains(:READ:)))
@@ -66,13 +57,13 @@ assert_eq (~empty) $all
 
 assert_eq (hash rw) (hash rw_seq)
 
-assert_err "value error: unrecognized flag: BOGUS" do TestFlags(:BOGUS:)
-assert_err "value error: unrecognized flag: BOGUS" do TestFlags([:READ:, :BOGUS:])
+assert_throws $std.RuntimeError str: "value error: unrecognized flag: BOGUS" do TestFlags(:BOGUS:)
+assert_throws $std.RuntimeError str: "value error: unrecognized flag: BOGUS" do TestFlags([:READ:, :BOGUS:])
 
 assert_eq (coerce_flags rw) $rw
 assert_eq (coerce_flags :READ:) $r
 assert_eq (coerce_flags [:READ:, :WRITE:]) $rw
 assert_eq (coerce_flags []) $empty
-assert_err "value error: unrecognized flag: BOGUS" do coerce_flags :BOGUS:
-assert_err "value error: unrecognized flag: BOGUS" do coerce_flags [:BOGUS:]
-assert_err "type error: iteration protocol not supported" do coerce_flags 42
+assert_throws $std.RuntimeError str: "value error: unrecognized flag: BOGUS" do coerce_flags :BOGUS:
+assert_throws $std.RuntimeError str: "value error: unrecognized flag: BOGUS" do coerce_flags [:BOGUS:]
+assert_throws $std.RuntimeError str: "type error: iteration protocol not supported" do coerce_flags 42

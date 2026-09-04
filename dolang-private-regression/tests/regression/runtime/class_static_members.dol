@@ -1,14 +1,6 @@
 # Class members live on the type object and are inherited; static members live
 # there too but are not.
 
-def assert_err block
-  let threw = false
-  try
-    block()
-  catch _
-    threw = true
-  assert $threw
-
 let thunk_runs = []
 
 class Counter
@@ -56,10 +48,10 @@ assert_eq $thunk_runs.len 3
 
 # `static` is not inherited.
 assert_eq $Counter.tag "counter"
-assert_err $ do Derived.tag
+assert_throws $std.RuntimeError do Derived.tag
 
 # Class members do not leak into the instance namespace, and vice versa.
 let c = Counter()
 assert_eq $c.instance_only "inst"
-assert_err $ do c.count
-assert_err $ do Counter.instance_only
+assert_throws $std.RuntimeError do c.count
+assert_throws $std.RuntimeError do Counter.instance_only

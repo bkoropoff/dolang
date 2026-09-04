@@ -2,14 +2,6 @@ import std:
   - FmtSpec
   - verbatim
 
-def assert_fails block
-  let failed = try
-    block()
-    false
-  catch _
-    true
-  assert $failed
-
 # A class implementing (fmt) receives a reified FmtSpec and does its own layout.
 class Field
   pub field name = ""
@@ -85,7 +77,7 @@ assert_eq (str $ fmt (Tag "abcdef") precision: 3) "abc"
 # A specification used this way must name a kind: there is no surrounding
 # conversion to supply one.
 assert_eq (Str.(fmt) (Tag "abcdef") (fmt precision: 3 kind: :STR:)) "abc"
-assert_fails do Str.(fmt) (Tag "abc") (fmt())
+assert_throws $std.RuntimeError do Str.(fmt) (Tag "abc") (fmt())
 
 # An overriding (fmt) wins over the native delegate.
 class Loud2: Str

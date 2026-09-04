@@ -1,7 +1,6 @@
 import
   std: error
   test:
-    - assert_err
     - cases
 
 def func a b :key1 :key2
@@ -10,7 +9,7 @@ def func a b :key1 :key2
 
 cases
   do |:type :msg :args|
-    assert_err :type :msg $func ...args
+    assert_throws $type str: $msg do func ...args
   - type: $error.MissingPosError
     msg: "missing positional item: 0"
     args: {}

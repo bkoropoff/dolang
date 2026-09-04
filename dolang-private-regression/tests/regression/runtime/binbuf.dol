@@ -1,14 +1,5 @@
 # BinBuf: mutable byte buffer
 
-def assert_err msg block
-  let res = try
-    block()
-    false
-  catch e
-    assert_eq (str e) $msg
-    true
-  assert $res
-
 # Construction
 let buf = BinBuf()
 assert_eq $buf.len 0
@@ -37,7 +28,7 @@ let buf5 = BinBuf()
 buf5.extend b"abc"
 buf5.extend "def"
 assert_eq $buf5.freeze() b"abcdef"
-assert_err "type error: not binary data: unknown" do
+assert_throws $std.RuntimeError str: "type error: not binary data: unknown" do
   let b = BinBuf()
   b.extend 42
 
@@ -151,7 +142,7 @@ for chunk = d2.drain()
 assert_eq $chunks2 [b"small"]
 
 # chunk size must be positive
-assert_err "value error: chunk size must be positive" do
+assert_throws $std.RuntimeError str: "value error: chunk size must be positive" do
   let b = BinBuf(b"x")
   b.drain 0
 

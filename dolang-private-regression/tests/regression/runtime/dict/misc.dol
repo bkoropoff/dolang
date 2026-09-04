@@ -4,24 +4,6 @@ import
     - IterStop
     - MissingPosError
 
-def assert_err msg block
-  let res = try
-    block()
-    false
-  catch e
-    assert_eq (str e) $msg
-    true
-  assert $res
-
-def assert_err_type ty block
-  let res = try
-    block()
-    false
-  catch e
-    assert_eq (type e) $ty
-    true
-  assert $res
-
 let foo = {"foo": 42, 42: "bar"}
 assert (!(bool {}))
 assert (bool {a: 1})
@@ -151,7 +133,7 @@ catch _
   true
 assert $failed
 assert_eq (failed_unpack.next()) 1
-assert_err_type $IterStop do failed_unpack.next()
+assert_throws $IterStop do failed_unpack.next()
 
 let failed_key_unpack = {a: 1}.keys()
 failed = try
@@ -161,14 +143,14 @@ catch _
   true
 assert $failed
 assert_eq (failed_key_unpack.next()) :a:
-assert_err_type $IterStop do failed_key_unpack.next()
+assert_throws $IterStop do failed_key_unpack.next()
 
 let failed_keyed_unpack = {a: 1, b: 2, a: 3}.values :a:
-assert_err_type $MissingPosError do
+assert_throws $MissingPosError do
   let _x _y _z = failed_keyed_unpack
 assert_eq (failed_keyed_unpack.next()) 1
 assert_eq (failed_keyed_unpack.next()) 3
-assert_err_type $IterStop do failed_keyed_unpack.next()
+assert_throws $IterStop do failed_keyed_unpack.next()
 
 let mapped = ({a: 1, b: 2, a: 3}.values()).map do |value| (value * 10)
 assert_eq [...mapped] [10, 20, 30]
@@ -186,6 +168,6 @@ items.push 2
 assert_eq $shared_inner [1, 2]
 assert_eq $items [1, 2]
 
-assert_err "unexpected positional item: 0" do {}.copy 1
+assert_throws $std.RuntimeError str: "unexpected positional item: 0" do {}.copy 1
 
-assert_err "type error: Str.len is a field, not a method" do "foo".len()
+assert_throws $std.RuntimeError str: "type error: Str.len is a field, not a method" do "foo".len()

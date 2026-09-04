@@ -5,8 +5,6 @@ import
     - spawn
   std:
     - RuntimeError
-  test:
-    - assert_err
 
 let scoped_parent = if DEBUG
   120
@@ -55,8 +53,9 @@ def background_ok n
   else
     background_ok (n - 1)
 
-assert_err $recurse type: $RuntimeError msg: "maximum call depth exceeded" 2000
-assert_err $is_even_deep type: $RuntimeError msg: "maximum call depth exceeded" 2000
-assert_err $redirect_recurse type: $RuntimeError msg: "maximum call depth exceeded" 2000
-assert_err $scoped_overflow type: $RuntimeError msg: "maximum call depth exceeded" $scoped_parent $scoped_child
+assert_throws $RuntimeError str: "maximum call depth exceeded" do recurse 2000
+assert_throws $RuntimeError str: "maximum call depth exceeded" do is_even_deep 2000
+assert_throws $RuntimeError str: "maximum call depth exceeded" do redirect_recurse 2000
+assert_throws $RuntimeError str: "maximum call depth exceeded" do
+  scoped_overflow $scoped_parent $scoped_child
 assert_eq (background_ok 40) 0
