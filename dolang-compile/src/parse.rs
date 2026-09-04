@@ -1318,6 +1318,28 @@ impl<'a> Parser<'a> {
     fn parse_fmt_interp(&mut self, scope: &mut Scope, dollar_span: Span) -> Result<Expr> {
         let left = self.expect(scope, &[ExpectKind::LeftBrace])?;
         let value = self.parse_expr(scope, ExprMode::Compact)?;
+        let mut spec = FormatSpec {
+            fill: None,
+            zero: None,
+            align: None,
+            sign: None,
+            alt: None,
+            width: None,
+            precision: None,
+            kind: None,
+        };
+        // An interpolation need not state a specification at all: `${x}` binds
+        // the value to nothing, leaving the kind to the surrounding conversion.
+        if let Some(token!(TokenInfo::RightBrace, right)) = self.peek()? {
+            self.advance();
+            return Ok(Expr::Fmt {
+                value: Box::new(value),
+                spec: Box::new(spec),
+                dollar_span,
+                brace_span: left | right,
+                colon_span: None,
+            });
+        }
         let colon_span = match self.next()? {
             Some(token!(TokenInfo::Colon, span)) => span,
             Some(token!(TokenInfo::DittoKey, span)) => {
@@ -1365,27 +1387,6 @@ impl<'a> Parser<'a> {
             }
         };
 
-        if atoms.is_empty() {
-            return Err(self.syntax_error(
-                scope,
-                Some(Token {
-                    info: TokenInfo::Literal,
-                    span: colon_span,
-                }),
-                "format specification must not be empty",
-            ));
-        }
-
-        let mut spec = FormatSpec {
-            fill: None,
-            zero: None,
-            align: None,
-            sign: None,
-            alt: None,
-            width: None,
-            precision: None,
-            kind: None,
-        };
         let align = |ch| match ch {
             '<' => Some(FormatAlign::Left),
             '>' => Some(FormatAlign::Right),
@@ -1509,7 +1510,7 @@ impl<'a> Parser<'a> {
             spec: Box::new(spec),
             dollar_span,
             brace_span: left | right,
-            colon_span,
+            colon_span: Some(colon_span),
         })
     }
 

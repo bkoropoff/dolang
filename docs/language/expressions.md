@@ -151,6 +151,9 @@ echo "count: ${count:05d}"
 echo "total: ${(subtotal + tax):8.2f}"
 ```
 
+The specification may be omitted, along with its `:`, to interpolate with no
+options: `"${count}"`.
+
 The format specification is:
 
 ```
@@ -191,9 +194,9 @@ echo "${amount:$(width).$(precision)f}"
 ```
 
 A bare substitution consumes its full identifier. Use parentheses when a
-conversion immediately follows it: `$(width)f`, not `$widthf`. The format
-specification is required and must not contain a newline. Formatted
-interpolation is not available in binary or raw strings.
+conversion immediately follows it: `$(width)f`, not `$widthf`. A format
+specification must not contain a newline. Formatted interpolation is not
+available in binary or raw strings.
 
 Escape sequences in quoted strings:
 

@@ -503,7 +503,8 @@ pub(crate) enum Expr {
         spec: Box<FormatSpec>,
         dollar_span: Span,
         brace_span: Span,
-        colon_span: Span,
+        /// Absent when the interpolation states no specification.
+        colon_span: Option<Span>,
     },
     Escape(char, Span),
     BinConcat {
@@ -972,7 +973,9 @@ impl Node for Expr {
                 visit.token(Token::Sigil, *dollar_span, None)?;
                 visit.token(Token::Delim, brace_span.left_char(), None)?;
                 visit.node(&**value)?;
-                visit.token(Token::Delim, *colon_span, None)?;
+                if let Some(colon_span) = colon_span {
+                    visit.token(Token::Delim, *colon_span, None)?;
+                }
                 for span in [
                     spec.fill.as_ref().map(|v| v.span),
                     spec.zero,

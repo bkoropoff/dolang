@@ -1,23 +1,9 @@
-echo "${42}"
-# error: expected `:`
-#   --> format_interpolation.dol:LL:LL
-#    |
-# LL | echo "${42}"
-#    |           ^
-
 echo "${:s}"
 # error: invalid expression
 #   --> format_interpolation.dol:LL:LL
 #    |
 # LL | echo "${:s}"
 #    |          ^
-
-echo "${42:}"
-# error: format specification must not be empty
-#   --> format_interpolation.dol:LL:LL
-#    |
-# LL | echo "${42:}"
-#    |           ^
 
 echo "${42:5+}"
 # error: invalid format specification
