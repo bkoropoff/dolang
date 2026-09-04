@@ -265,6 +265,9 @@ fn format_bound<'v, 's>(
     kind: Kind,
     out: &mut dyn Format<'v>,
 ) -> Result<'v, 's, ()> {
+    // A bound value may itself be bound, so rendering recurses. Bound by the
+    // ordinary call depth rather than a mechanism of its own.
+    let _depth = strand.inner.push_call_depth()?;
     let mut spec = this.annex().spec;
     spec.kind.get_or_insert(kind);
     let borrow = this.borrow(strand)?;
@@ -378,18 +381,6 @@ pub(crate) async fn create<'v, 'a, 's>(
         create_spec(strand, global, spec, out);
         return Ok(());
     };
-    // A `FmtValue` bound to a `FmtValue` would format the inner rendering as
-    // opaque text — its own layout applied, then padded and clipped a second
-    // time — and every consumer would have to unwrap an arbitrarily deep chain
-    // to find the value. Refusing keeps a bound value one level deep. How two
-    // specifications ought to combine is a question this does not answer: a
-    // caller that wants that says so explicitly, over `FmtValue.value`.
-    if global.types.value.cast(&value).is_some() {
-        return Err(Error::type_error(
-            strand,
-            "cannot bind a FmtValue: bind its `value` instead",
-        ));
-    }
     create_value(strand, global, spec, value, out);
     Ok(())
 }

@@ -984,8 +984,6 @@ fn bound_text_layout<'v, 's>(
         return Ok(None);
     }
     strand.with_slots_sync(|strand, [mut bound]| {
-        // One level is the whole story: binding a `FmtValue` to a `FmtValue`
-        // is refused at construction, so what one carries is never another one.
         value.get(strand, global.syms.value, &mut bound)?;
         let Some(text) = global.types.text.cast(&bound) else {
             return Ok(None);

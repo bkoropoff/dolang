@@ -50,10 +50,9 @@ Returns a new specification, or a bound [`FmtValue`](./fmt-value.md) when
 `value` is provided. Omitted options retain their current values; nil resets
 an option.
 
-Binding a [`FmtValue`](./fmt-value.md) is a `TypeError`: a bound value stays
-one level deep, so a consumer never has to unwrap a chain of specifications.
-Bind [`value`](./fmt-value.md#value) and state the combined options
-explicitly instead.
+Binding a [`FmtValue`](./fmt-value.md) nests it: the inner specification
+renders the value and this one lays that rendering out. See
+[Sequencing](./fmt-value.md#sequencing).
 
 ### `pad value`
 

@@ -125,11 +125,36 @@ assert_throws $std.RuntimeError do str $ fmt true kind: :DEC:
 let money = fmt precision: 2 kind: :FIXED:
 assert_eq "$(money 1.5)/$(money 2.25)" "1.50/2.25"
 
-# A bound value stays one level deep: binding a `FmtValue` is refused rather than
-# nested or silently merged, so a consumer never walks a chain to find the
-# value. Combining two specifications is spelled out over `value` instead.
+# Binding a bound value sequences the two specifications rather than merging
+# them: the inner one renders, and the outer one lays that rendering out.
 let bound = money 1.5
-assert_throws $std.RuntimeError do fmt $bound width: 8
-assert_throws $std.RuntimeError do (fmt width: 8) $bound
-assert_throws $std.RuntimeError do str "${bound:>8}"
+assert_eq (str $ fmt bound width: 8) "1.50    "
+assert_eq (str $ (fmt width: 8) bound) "1.50    "
+assert_eq (str "${bound:>8}") "    1.50"
 assert_eq (str $ fmt bound.value width: 8 precision: 2 kind: :FIXED:) "    1.50"
+
+# `value` descends exactly one level, so the outer wrapper carries the inner
+# one rather than the datum.
+let outer = fmt $bound width: 8
+assert_eq (type outer.value) $FmtValue
+assert_eq (str outer.value) "1.50"
+
+# Width under width pads what the inner layout produced, and precision clips
+# it — both operate on text, not on the original number.
+assert_eq (str $ fmt (fmt "x" width: 3) width: 6 fill: "-") "x  ---"
+assert_eq (str $ fmt (fmt 1.5 precision: 2 kind: :FIXED:) precision: 2) "1."
+assert_eq
+  - (str $ fmt (fmt (fmt "x" width: 3) width: 5 fill: "-") width: 9 fill: "=")
+  - "x  --===="
+
+# An outer specification the inner rendering cannot honor is rejected by
+# domain rather than skipped down to the datum.
+assert_throws $std.RuntimeError do str $ fmt $bound kind: :HEX:
+
+# Nesting is bounded by the ordinary call depth.
+let deep = fmt "x"
+let depth = 0
+while (depth < 5000)
+  deep = (fmt deep)
+  depth = (depth + 1)
+assert_throws $std.RuntimeError do str $deep
