@@ -18,7 +18,7 @@ use std::{
     ops::{BitAnd, BitOr, BitXor, Not},
 };
 
-use crate::value::fmt::Format;
+use crate::value::{TypeObject, fmt::Format};
 
 use crate::{
     arg::{Arg, Args},
@@ -465,18 +465,20 @@ impl<'v, F: FlagLike> Object<'v> for Flags<F> {
     }
 
     fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
-        let builder = builder.method("contains", async move |this, strand, args, mut out| {
-            let ([sym], []) = unpack!(strand, args, 1, 0)?;
-            let sym = sym
-                .as_sym(strand.vm())
-                .ok_or_else(|| Error::type_error(strand, "expected symbol"))?;
-            let vm = strand.vm();
-            let table = this.ty(vm).annex(vm);
-            let bit = resolve_sym(strand, table, sym)?;
-            Output::set(strand, &mut out, (*this.annex() & bit) == bit);
-            Ok(())
-        });
-        F::build(builder)
+        F::build(builder.supertype(TypeObject::Iterable).method(
+            "contains",
+            async move |this, strand, args, mut out| {
+                let ([sym], []) = unpack!(strand, args, 1, 0)?;
+                let sym = sym
+                    .as_sym(strand.vm())
+                    .ok_or_else(|| Error::type_error(strand, "expected symbol"))?;
+                let vm = strand.vm();
+                let table = this.ty(vm).annex(vm);
+                let bit = resolve_sym(strand, table, sym)?;
+                Output::set(strand, &mut out, (*this.annex() & bit) == bit);
+                Ok(())
+            },
+        ))
     }
 }
 

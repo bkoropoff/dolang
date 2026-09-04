@@ -445,8 +445,11 @@ fn parse_expect<'v, 's>(
                 Slot::reborrow(&mut step),
             ],
         );
-        if step.as_int(strand) != Some(1) {
-            return Err(Error::value(strand, "expect range step must be 1"));
+        if !step.is_nil() && step.as_int(strand) != Some(1) {
+            return Err(Error::value(
+                strand,
+                "expect range step must be 1 or unspecified",
+            ));
         }
         let min = if start.is_nil() {
             0
