@@ -32,63 +32,79 @@ def console_geometry()
 
 #[test]
 def text_string_coercion()
-  let text = term.style("red", fg: :RED:, bold: true)
+  let text = term.text("red", fg: :RED:, bold: true)
   assert_eq (type text) $term.Text
-  assert_eq (str text) "$ESC[1;31mred$ESC[0m"
-  assert_eq (str $ term.style :VALUE:) VALUE
 
-  assert_eq (str $ term.style("indexed", fg: 123)) "$ESC[38;5;123mindexed$ESC[0m"
-  assert_eq (str $ term.style("rgb", fg: [1, 2, 3])) "$ESC[38;2;1;2;3mrgb$ESC[0m"
+  # `str` is the content; the escapes are terminal instructions, and asking
+  # for them is what `encode` is. `verbatim` reproduces a value as it would
+  # have been written in source, and styled text has no source form, so it
+  # falls through to the same content.
+  assert_eq (str text) red
+  assert_eq (text.encode()) "$ESC[1;31mred$ESC[0m"
+  assert_eq (std.verbatim text) (str text)
+  assert_eq (str $ term.text :VALUE:) VALUE
+
+  # `preformat` takes the encoded form back, canonicalizing the SGR it emits
+  # — so the content survives and re-encoding is then a fixed point.
+  let round = term.preformat(text.encode())
+  assert_eq (str round) red
+  assert_eq (term.preformat(round.encode()).encode()) (round.encode())
+
+  assert_eq (term.text("indexed", fg: 123).encode()) "$ESC[38;5;123mindexed$ESC[0m"
+  assert_eq (term.text("rgb", fg: [1, 2, 3]).encode()) "$ESC[38;2;1;2;3mrgb$ESC[0m"
   assert_eq (
-    str $ term.style("rgb", bg: Tuple([4, 5, 6]))
+    term.text("rgb", bg: Tuple([4, 5, 6])).encode()
   ) "$ESC[48;2;4;5;6mrgb$ESC[0m"
 
-  assert_throws $ValueError do term.style fg: 256 text
-  assert_throws $ValueError do term.style fg: [1, 2] text
-  assert_throws $TypeError do term.style fg: [1, "x", 3] text
+  assert_throws $ValueError do term.text fg: 256 text
+  assert_throws $ValueError do term.text fg: [1, 2] text
+  assert_throws $TypeError do term.text fg: [1, "x", 3] text
 
 #[test]
 def reusable_styles()
-  let warning = term.style fg: :YELLOW: bold: true
+  let warning = term.Style fg: :YELLOW: bold: true
   assert_eq (type warning) $term.Style
-  assert_eq (str $ warning("Warning")) "$ESC[1;33mWarning$ESC[0m"
+  assert_eq (warning("Warning").encode()) "$ESC[1;33mWarning$ESC[0m"
 
   let urgent = warning fg: :RED: underline: true
   assert_eq (type urgent) $term.Style
-  assert_eq (str $ urgent("Failure")) "$ESC[1;4;31mFailure$ESC[0m"
+  assert_eq (urgent("Failure").encode()) "$ESC[1;4;31mFailure$ESC[0m"
 
   let ambient = urgent fg: :INHERIT: bold: :INHERIT:
-  assert_eq (str $ ambient("Notice")) "$ESC[4mNotice$ESC[0m"
+  assert_eq (ambient("Notice").encode()) "$ESC[4mNotice$ESC[0m"
 
   let plain = ambient underline: :INHERIT:
   assert_eq (str $ plain("plain")) plain
-  assert_eq (str $ term.style("text", fg: :INHERIT:)) text
+  assert_eq (str $ term.text("text", fg: :INHERIT:)) text
 
   assert_throws $ValueError do warning bold: false
 
 #[test]
 def nested_styles()
   let inner = term.preformat("$ESC[31minner$ESC[0m after")
-  let text = term.style("outer ", inner, " outer", bold: true)
+  let text = term.text("outer ", inner, " outer", bold: true)
   assert_eq (
-    str text
+    text.encode()
   ) "$ESC[1mouter $ESC[31minner$ESC[0m$ESC[1m after outer$ESC[0m"
+  # Stripping leaves the content of every layer, in order.
+  assert_eq (str text) "outer inner after outer"
 
-  assert_throws $ValueError do term.style bold: false text
-  assert_throws $TypeError do term.style fg: RED text
+  assert_throws $ValueError do term.text bold: false text
+  assert_throws $TypeError do term.text fg: RED text
 
 #[test]
 def preformatted_text()
   let text = term.preformat("$ESC[38;5;123mindexed$ESC[0m plain")
   assert_eq (type text) $term.Text
-  assert_eq (str text) "$ESC[38;5;123mindexed$ESC[0m plain"
+  assert_eq (text.encode()) "$ESC[38;5;123mindexed$ESC[0m plain"
+  assert_eq (str text) "indexed plain"
 
 #[test]
 def text_indent()
   let text = term.preformat("$ESC[31mred\nblue$ESC[0m\n")
   let indented = text.indent(2)
   assert_eq (type indented) $term.Text
-  assert_eq (str indented) "  $ESC[31mred\n  blue$ESC[0m\n"
+  assert_eq (indented.encode()) "  $ESC[31mred\n  blue$ESC[0m\n"
   assert_eq (text.indent(0)) $text
 
   let blank = term.preformat("a\n\nb").indent(2)
@@ -96,6 +112,141 @@ def text_indent()
 
   assert_throws $ValueError do text.indent(-1)
   assert_throws $TypeError do text.indent("2")
+
+#[test]
+def text_join()
+  let sep = term.text(" | ", fg: :YELLOW:)
+  let red = term.text("a", fg: :RED:)
+
+  # Values are taken the way `text` takes its own arguments: a `Text` keeps its
+  # styling, anything else is converted, and the separator keeps its own.
+  let joined = sep.join([red, "b", 3])
+  assert_eq (type joined) $term.Text
+  assert_eq (str joined) "a | b | 3"
+  assert_eq (joined.encode()) (
+    "$ESC[31ma$ESC[0m$ESC[33m | $ESC[0mb$ESC[33m | $ESC[0m3"
+  )
+
+  # Nothing to separate: no separator is written.
+  assert_eq (str $ sep.join([])) ""
+  assert_eq (sep.join([red]).encode()) (red.encode())
+
+  # An ordinary value is sanitized, so a `Str` carrying escapes cannot smuggle
+  # styling in through a join.
+  assert_eq (str $ sep.join(["$ESC[31mx"])) x
+
+  # Any iterable will do, and the separator need not be styled.
+  assert_eq (str $ (term.text ", ").join(1..4)) "1, 2, 3"
+
+  # Measured in cells, like everything else a `Text` reports.
+  assert_eq ((term.text "|").join(["界", "a"]).width()) 4
+
+  assert_throws $TypeError do sep.join(7)
+
+#[test]
+def text_width()
+  assert_eq ((term.text "abc").width()) 3
+  assert_eq ((term.text "é").width()) 1
+  assert_eq ((term.text "👩‍💻").width()) 2
+  assert_eq ((term.text "界").width()) 2
+  assert_eq ((term.text "👩👩").width()) 4
+  assert_eq ((term.text "ab\n界").width()) 4
+
+  let nested = term.text(
+    "outer ",
+    term.text("👩‍💻", fg: :RED:),
+    " end",
+    bold: true,
+  )
+  assert_eq (nested.width()) 12
+
+#[test]
+def text_clip()
+  let plain = term.text "abcdef"
+  assert_eq (plain.clip(6, suffix: "ignored")) $plain
+  assert_eq (str(plain.clip(2))) ab
+  assert_eq (str(plain.clip(0))) ""
+  assert_eq (str(term.text("界a").clip(1))) ""
+  assert_eq (str(term.text("界a").clip(2))) 界
+  assert_eq (str(term.text("́a").clip(0))) "́"
+  assert_eq (str(plain.clip(4, suffix: "…"))) "abc…"
+  assert_eq (str(plain.clip(2, suffix: "界x"))) 界
+  assert_eq (str(plain.clip(1, suffix: "界x"))) a
+
+  let red = term.text("a界b", fg: :RED:)
+  assert_eq (red.clip(3).encode()) "$ESC[31ma界$ESC[0m"
+
+  let blue_bang = term.text("!", fg: :BLUE:)
+  assert_eq (plain.clip(4, suffix: blue_bang).encode()) "abc$ESC[34m!$ESC[0m"
+
+  # Style transitions inside a grapheme do not make it a clipping boundary.
+  let joined = term.preformat("$ESC[31m👩$ESC[34m‍💻$ESC[0mX")
+  assert_eq (joined.width()) 3
+  assert_eq (joined.clip(2).encode()) "$ESC[31m👩$ESC[34m‍💻$ESC[0m"
+
+  # Multiline text retains the former accumulated-width behavior.
+  assert_eq (str(term.text("ab\n界x").clip(4))) "ab\n界"
+
+  assert_throws $ValueError do plain.clip(-1)
+  assert_throws $TypeError do plain.clip(2, suffix: 1)
+
+#[test]
+def text_format_measures_cells()
+  # Width, alignment and precision are terminal cells, not grapheme clusters:
+  # "界a" is two clusters but three cells.
+  let wide = term.text "界a"
+  assert_eq (str $ fmt wide width: 5) "界a  "
+  assert_eq (str $ fmt wide width: 5 align: :RIGHT:) "  界a"
+
+  # SGR sequences do not consume the budget, and the fill is measured the
+  # same way the content is.
+  # Formatting a `Text` lays it out in cells and then drops the styling, the
+  # same as any other `str` conversion of one.
+  let red = term.text("界a", fg: :RED:)
+  assert_eq (str $ fmt red width: 5) "界a  "
+  assert_eq (std.verbatim $ fmt red width: 5) "界a  "
+  assert_eq (str $ fmt wide fill: "界" width: 7 align: :RIGHT:) "界界界a"
+
+  # Precision clips at a cluster boundary in cells and leaves the styling
+  # terminated, as `clip` does.
+  assert_eq (str $ fmt red precision: 2) 界
+  assert_eq (str $ fmt red precision: 1) ""
+
+  # Numeric options remain unsupported, as for any other text value.
+  assert_throws $std.RuntimeError do str $ fmt red kind: :HEX:
+  assert_throws $std.RuntimeError do str $ fmt red sign: :PLUS:
+  assert_throws $std.RuntimeError do str $ fmt red fill: :ZERO: width: 5
+
+#[test]
+def console_formats_bound_text()
+  # The console is where a `Fmt` bound to a `Text` is terminal presentation
+  # rather than a string: `echo`, `print` and `text` apply the layout to the
+  # encoded form and keep the styling.
+  let red = term.text("red", fg: :RED:)
+  let padded = "$ESC[31mred$ESC[0m  "
+  assert_eq (term.sub can_style: true do echo (fmt red width: 5)) $padded
+  assert_eq (term.sub can_style: true do print (fmt red width: 5)) $padded
+  assert_eq (term.text(fmt red width: 5).encode()) $padded
+
+  # Applying a style is the same path, so it composes too: the inner styling
+  # survives inside the outer one.
+  let framed = term.Style bold: true
+  assert_eq (
+    framed(fmt red width: 5).encode()
+  ) "$ESC[1m$ESC[31mred$ESC[0m$ESC[1m  $ESC[0m"
+
+  # Unstyled output drops the escapes but keeps the layout.
+  assert_eq (term.sub do echo (fmt red width: 5)) "red  "
+
+  # A specification asking for a debug rendering is no longer a request for
+  # terminal presentation, and takes the ordinary sanitized path.
+  let debugged = (term.sub can_style: true do echo (fmt red kind: :DBG:))
+  assert (debugged.contains "term.Text")
+  assert (debugged.contains(ESC) == false)
+
+  # A `Str` that merely contains escapes is still untrusted, however it was
+  # produced — including by `encode` on the very same `Text`.
+  assert_eq (term.sub can_style: true do echo (fmt (red.encode()) width: 5)) red
 
 # --- Terminal output capture ----------------------------------------------
 
@@ -169,7 +320,7 @@ def capture_flushes_partial_line()
 def capture_is_unstyled_by_default()
   # A capture is not a terminal, so styling is off inside one — otherwise this
   # would pass piped and fail on a developer's terminal.
-  assert_eq (term.sub do echo (term.style "warn" fg: :YELLOW:)) warn
+  assert_eq (term.sub do echo (term.text "warn" fg: :YELLOW:)) warn
   # And the console says so, which is what `echo` consulted to decide.
   let out = []
   term.capture $out do
@@ -181,13 +332,13 @@ def capture_can_style_opt_in()
   # specifically *about* styled output can ask for it — something a global tty
   # check could never express.
   let styled = "$ESC[33mwarn$ESC[0m"
-  assert_eq (term.sub can_style: true do echo (term.style "warn" fg: :YELLOW:)) $styled
+  assert_eq (term.sub can_style: true do echo (term.text "warn" fg: :YELLOW:)) $styled
 
   # The same opt-in on the sink adapter, which is the route `capture` takes.
   let out = []
   term.capture (term.SinkConsole(out, can_style: true)) do
     assert_eq (term.output().can_style) true
-    echo (term.style "warn" fg: :YELLOW:)
+    echo (term.text "warn" fg: :YELLOW:)
   assert_eq $out ["$styled\n"]
 
 #[test]
@@ -455,7 +606,7 @@ def do_console_declares_capabilities()
       MyGeometry 24 80
 
   let fancy = Fancy()
-  term.capture $fancy do echo (term.style "warn" fg: :YELLOW:)
+  term.capture $fancy do echo (term.text "warn" fg: :YELLOW:)
   assert_eq $fancy.lines ["$ESC[33mwarn$ESC[0m\n"]
 
   let g = fancy.geometry()

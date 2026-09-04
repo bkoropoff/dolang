@@ -126,7 +126,9 @@ assert_eq $out ["hi"]
 ### `echo ...args`
 
 Prints arguments separated by spaces, followed by a newline. Ordinary values
-are sanitized; direct [`Text`](./text.md) arguments retain their styling.
+are sanitized; [`Text`](./text.md) arguments retain their styling, as does a
+[`Fmt`](../std/fmt.md) bound to one — see
+[Formatting](./text.md#formatting).
 
 #### Parameters
 
@@ -249,35 +251,10 @@ catch error: e
 ```
 
 Ordinary values preserve newlines and tabs but remove other C0/C1 controls and
-escape sequences. Raw stdout and stderr sinks are unchanged and are not
-sanitized by this module.
-
-### `style :...options ...args`
-
-Constructs styled terminal text from concatenated values. With no positional
-arguments, it returns a reusable [`Style`](./style.md) instead.
-
-#### Parameters
-
-| Name      | Type | Description                         |
-| --------- | ---- | ----------------------------------- |
-| `...args` | *    | Values converted to display strings |
-
-Also accepts the module's [style options](#style-options). `:INHERIT:` leaves
-a setting to the surrounding style. This is normally the default, but clears
-a saved setting when deriving a [`Style`](./style.md).
-
-#### Returns
-
-[`Text`](./text.md) when positional arguments are provided;
-otherwise [`Style`](./style.md)
-
-#### Example
-
-```
-let warning = style Warning fg: :YELLOW: bold: true
-echo $warning
-```
+escape sequences. A [`Text`](./text.md) keeps its styling, and so does a
+[`Fmt`](../std/fmt.md) bound to one, whose layout is applied to the encoded
+form — see [Formatting](./text.md#formatting). Raw stdout and stderr sinks are
+unchanged and are not sanitized by this module.
 
 ### `sub func :chomp? :can_style? ...args`
 
@@ -306,4 +283,37 @@ Verbatim output is captured, which must be valid UTF-8. One final line ending
 ```
 let greeting = term.sub do greet Alice
 assert_eq $greeting "Hello, Alice!"
+```
+
+### `text :...options ...args`
+
+Constructs terminal text from concatenated values, styled or not. This is the
+general entry point for [`Text`](./text.md): styling is optional, and a plain
+`text` value is still what measures itself in terminal cells.
+
+For a reusable style with no text of its own, construct a
+[`Style`](./style.md) directly.
+
+#### Parameters
+
+| Name      | Type | Description                         |
+| --------- | ---- | ----------------------------------- |
+| `...args` | *    | Values converted to display strings |
+
+Also accepts the module's [style options](#style-options). `:INHERIT:` leaves
+a setting to the surrounding style.
+
+#### Returns
+
+[`Text`](./text.md)
+
+#### Example
+
+```
+let warning = text Warning fg: :YELLOW: bold: true
+echo $warning
+
+# Unstyled, for its measurement and layout methods.
+let column = text $name
+echo $column.clip(20, suffix: "…")
 ```

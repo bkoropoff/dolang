@@ -2437,11 +2437,19 @@ impl<'v, T: Object<'v>> Clone for Type<'v, T> {
 impl<'v, T: Object<'v>> Input<'v> for Type<'v, T> {
     #[allow(private_interfaces)]
     fn input_take<'b>(&'b mut self, vm: &'b Vm<'v>, _: Sealed) -> InputBy<'v, 'b> {
-        InputBy::Borrow(&vm.type_singletons[self.singleton_idx])
+        InputBy::Borrow(self.singleton(vm))
     }
 }
 
 impl<'v, T: Object<'v>> Type<'v, T> {
+    /// Returns the type object singleton value.
+    ///
+    /// Unlike [`Input::input_take`], the returned reference borrows only from `vm`, so this
+    /// may be called on a temporary handle (e.g. one just fetched from VM state).
+    pub(crate) fn singleton<'b>(&self, vm: &'b Vm<'v>) -> &'b Value<'v> {
+        &vm.type_singletons[self.singleton_idx]
+    }
+
     pub(crate) fn create_raw(&self, vm: &Vm<'v>, value: T, annex: T::Annex) -> Value<'v> {
         Value::from_object(protocol::GcObj::new_annex(
             vm.arena(),

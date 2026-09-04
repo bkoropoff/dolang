@@ -144,7 +144,7 @@ def ansi_style value
     else
       let options = SGR_OPTIONS.get $code else: do return nil
       args.push ...options
-  term.style ...args
+  term.Style ...args
 
 def fancy_value value
   if (value == nil)

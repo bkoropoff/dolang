@@ -32,16 +32,13 @@ use std::{
     ops::{ControlFlow, Range},
 };
 
-use dolang_bytecode::{self as bytecode, Phase};
-use dolang_util::alias;
-use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthChar;
-
 use crate::{
     object::{protocol::GcObj, sym::SymObj},
     sym::Sym,
     value::Value,
 };
+use dolang_bytecode::{self as bytecode, Phase};
+use dolang_util::alias;
 
 /// How often (in iterations) to check for interrupts in inner loops.
 pub(crate) const INTERRUPT_INTERVAL: usize = 1024;
@@ -52,26 +49,6 @@ pub(crate) const INTERRUPT_INTERVAL: usize = 1024;
 /// still applying backpressure between individual [`Iter`](crate::value::TypeObject::Iter)
 /// and [`Sink`](crate::value::TypeObject::Sink) operations.
 pub const BYTE_STREAM_CHUNK_SIZE: usize = 512 * 1024;
-
-/// Returns the terminal-cell width of literal Unicode text.
-pub fn display_width(value: &str) -> usize {
-    value
-        .graphemes(true)
-        .map(|grapheme| {
-            grapheme
-                .chars()
-                .map(|ch| {
-                    if ('\0'..='\u{1f}').contains(&ch) {
-                        0
-                    } else {
-                        UnicodeWidthChar::width(ch).unwrap_or(0)
-                    }
-                })
-                .sum::<usize>()
-                .min(2)
-        })
-        .sum()
-}
 
 pub(crate) struct Runtime;
 

@@ -1039,6 +1039,8 @@ dependencies = [
  "shlex 2.0.1",
  "time",
  "tokio",
+ "unicode-segmentation",
+ "unicode-width",
 ]
 
 [[package]]
@@ -1286,7 +1288,6 @@ dependencies = [
  "futures",
  "hex",
  "unicode-segmentation",
- "unicode-width",
 ]
 
 [[package]]

@@ -49,10 +49,12 @@ def os_release_projections()
     assert_eq $rel.vendor_url nil
     let color = rel.ansi_color
     let reverse = rel.ansi_color_reverse
-    assert_eq (str(color "x")) "$ESC[1;38;2;1;2;3mx$ESC[0m"
-    assert_eq (str(reverse "x")) "$ESC[97;44mx$ESC[0m"
-    assert_eq (str rel.fancy_name) "Fancy $ESC[31mOS$ESC[0m"
-    assert_eq (str rel.display_name) "Fancy $ESC[31mOS$ESC[0m"
+    assert_eq (color("x").encode()) "$ESC[1;38;2;1;2;3mx$ESC[0m"
+    assert_eq (reverse("x").encode()) "$ESC[97;44mx$ESC[0m"
+    assert_eq (rel.fancy_name.encode()) "Fancy $ESC[31mOS$ESC[0m"
+    assert_eq (rel.display_name.encode()) "Fancy $ESC[31mOS$ESC[0m"
+    # `str` is the content, styling dropped.
+    assert_eq (str rel.display_name) "Fancy OS"
 
 #[test]
 def os_release_defaults()

@@ -57,7 +57,7 @@ use crate::{
     shell::{Stderr, Stdin, Stdout, Vfs},
     shell_args::ArgsData,
     sys::{CpuInfo, OsInfo},
-    term::{StyleObject, Text},
+    term::{StyleKeys, StyleObject, Text},
     time::{Calendar, Date, DateTime, Duration, Month, Weekday},
 };
 
@@ -180,6 +180,8 @@ pub(crate) struct Types<'v> {
 pub(crate) struct Syms<'v> {
     pub(crate) any: Sym<'v, 'v>,
     pub(crate) code: Sym<'v, 'v>,
+    /// `Fmt.value`, the value a format specification is bound to
+    pub(crate) value: Sym<'v, 'v>,
     pub(crate) block_device: Sym<'v, 'v>,
     pub(crate) char_device: Sym<'v, 'v>,
     pub(crate) chunk: Sym<'v, 'v>,
@@ -275,6 +277,8 @@ pub(crate) struct Global<'v> {
     pub(crate) types: Types<'v>,
     pub(crate) calendar: Calendar<'v>,
     pub(crate) syms: Syms<'v>,
+    /// The symbols naming `term`'s style options.
+    pub(crate) style_keys: StyleKeys<'v>,
     pub(crate) local: LocalKey<'v, Local>,
     /// The console installed by an enclosing `term.capture`, or `nil` for none.
     ///
@@ -720,9 +724,11 @@ impl<'v> Global<'v> {
                 permission: Permission::register_type(builder),
             },
             calendar,
+            style_keys: crate::term::style_keys(builder),
             syms: Syms {
                 any: builder.sym("ANY"),
                 code: builder.sym("code"),
+                value: builder.sym("value"),
                 block_device: builder.sym("BLOCK_DEVICE"),
                 char_device: builder.sym("CHAR_DEVICE"),
                 chunk: builder.sym("CHUNK"),

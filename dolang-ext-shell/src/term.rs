@@ -1,5 +1,5 @@
 use dolang::runtime::object::fmt;
-use dolang::runtime::value::fmt::Format;
+use dolang::runtime::value::fmt::{self as fmt_spec, Fill, Format, Kind, Pad, Spec};
 use dolang::{
     compile::Compiler,
     runtime::{
@@ -8,7 +8,7 @@ use dolang::{
         object::{Mut, Ref, TypeBuilder},
         strand::Redirect,
         unpack,
-        value::{Singleton, StrEmbryo, View},
+        value::{Singleton, StrEmbryo, TypeObject, View},
         vm::Builder,
     },
 };
@@ -18,6 +18,8 @@ use crate::{
     global::Global,
     io_mode::{IoMode, strip_line_ending},
 };
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthChar;
 
 /// Runs `f` with `console` installed as the ambient console for this strand.
 ///
@@ -221,6 +223,14 @@ impl<'v> Object<'v> for Text {
     type Type = ();
     type TypeAnnex = ();
 
+    /// Converts to a plain string, dropping the styling.
+    ///
+    /// The escape sequences are terminal instructions, not content: a `Str`
+    /// carrying them counts them in its length, matches them in a search, and
+    /// writes them into whatever file or pipe it reaches. Producing the
+    /// content and leaving the encoding to `encode` keeps the common
+    /// conversion the safe one — and `verbatim` falls through to here, since
+    /// styled text has no source form to reproduce.
     fn display<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
@@ -228,7 +238,9 @@ impl<'v> Object<'v> for Text {
     ) -> Result<'v, 's, ()> {
         let borrow = this.borrow(strand)?;
         let text = Ref::slot::<0>(&borrow).as_str(strand).unwrap().pin();
-        out.write_str(strand, &text)
+        let mut filter = Filter::new(out, FilterMode::Plain);
+        filter.write_str(strand, &text)?;
+        filter.finish(strand)
     }
 
     fn debug<'a, 's>(
@@ -241,33 +253,155 @@ impl<'v> Object<'v> for Text {
         dolang::runtime::object::fmt!(strand, out, "<term.Text {:?}>", &*text)
     }
 
-    fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
-        builder.method("indent", async move |this, strand, args, out| {
-            let ([spaces], []) = unpack!(strand, args, 1, 0)?;
-            let spaces = spaces.to_usize(strand)?;
-            if spaces == 0 {
-                Output::set(strand, out, this);
-                return Ok(());
-            }
+    /// Formats according to `spec`, measuring in terminal cells rather than
+    /// grapheme clusters.
+    ///
+    /// The default implementation would measure and clip the encoded form,
+    /// counting the bytes of every escape sequence and potentially cutting one
+    /// in half. Rendering first and then applying the specification with
+    /// [`encoded_width`]/[`clip_encoding`] measures what the terminal will
+    /// actually display and keeps the styling well-formed.
+    fn fmt<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        spec: &Spec,
+        w: &mut dyn Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        let kind = spec
+            .kind
+            .ok_or_else(|| Error::type_error(strand, "unresolved format kind"))?;
+        if spec.sign.is_some() || spec.alt || spec.fill == Fill::Zero {
+            return Err(Error::type_error(strand, "unsupported format option"));
+        }
+        let mut rendered = String::new();
+        match kind {
+            Kind::Str | Kind::Verbatim => Self::display(this, strand, &mut rendered)?,
+            Kind::Dbg => Self::debug(this, strand, &mut rendered)?,
+            _ => return Err(Error::type_error(strand, "unsupported format option")),
+        }
+        lay_out(strand, spec, &rendered, w)
+    }
 
-            let borrow = this.borrow(strand)?;
-            let text = Ref::slot::<0>(&borrow).as_str(strand).unwrap().pin();
-            if text.is_empty() {
-                Output::set(strand, out, this);
-                return Ok(());
-            }
+    fn build<'a>(mut builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
+        let suffix_sym = builder.sym("suffix");
+        builder
+            .method("encode", async move |this, strand, args, out| {
+                let ([], []) = unpack!(strand, args, 0, 0)?;
+                let borrow = this.borrow(strand)?;
+                let text = Ref::slot::<0>(&borrow).as_str(strand).unwrap().pin();
+                let mut encoded = StrEmbryo::new();
+                encoded.write_str(strand, &text)?;
+                drop(text);
+                drop(borrow);
+                encoded.finish(strand, out);
+                Ok(())
+            })
+            .method("width", async move |this, strand, args, out| {
+                let ([], []) = unpack!(strand, args, 0, 0)?;
+                let borrow = this.borrow(strand)?;
+                let text = Ref::slot::<0>(&borrow).as_str(strand).unwrap().pin();
+                let width = TextLayout::new(&text).width();
+                drop(text);
+                drop(borrow);
+                Output::set(strand, out, width);
+                Ok(())
+            })
+            .method("clip", async move |this, strand, args, out| {
+                let ([width], [suffix]) = unpack!(strand, args, 1, 0, suffix_sym = None)?;
+                let width = width.to_usize(strand)?;
 
-            let mut indented = StrEmbryo::new();
-            for line in text.split_inclusive('\n') {
-                write_spaces(strand, &mut indented, spaces)?;
-                indented.write_str(strand, line)?;
-            }
-            drop(text);
-            drop(borrow);
-            let global = strand.state::<Global<'v>>();
-            create_text(strand, global, indented, out);
-            Ok(())
-        })
+                let borrow = this.borrow(strand)?;
+                let text = Ref::slot::<0>(&borrow).as_str(strand).unwrap().pin();
+                let source = String::from(&*text);
+                let source_width = TextLayout::new(&source).width();
+                drop(text);
+                drop(borrow);
+                if source_width <= width {
+                    Output::set(strand, out, this);
+                    return Ok(());
+                }
+
+                let global = strand.state::<Global<'v>>();
+                let suffix = suffix
+                    .as_ref()
+                    .map(|suffix| text_encoding(strand, global, suffix))
+                    .transpose()?
+                    .unwrap_or_default();
+                let suffix = clip_encoding(&suffix, width);
+                let suffix_width = TextLayout::new(&suffix).width();
+                let prefix = clip_encoding(&source, width.saturating_sub(suffix_width));
+
+                let mut clipped = StrEmbryo::new();
+                clipped.write_str(strand, &prefix)?;
+                clipped.write_str(strand, &suffix)?;
+                create_text(strand, global, clipped, out);
+                Ok(())
+            })
+            .method("indent", async move |this, strand, args, out| {
+                let ([spaces], []) = unpack!(strand, args, 1, 0)?;
+                let spaces = spaces.to_usize(strand)?;
+                if spaces == 0 {
+                    Output::set(strand, out, this);
+                    return Ok(());
+                }
+
+                let borrow = this.borrow(strand)?;
+                let text = Ref::slot::<0>(&borrow).as_str(strand).unwrap().pin();
+                if text.is_empty() {
+                    Output::set(strand, out, this);
+                    return Ok(());
+                }
+
+                let mut indented = StrEmbryo::new();
+                for line in text.split_inclusive('\n') {
+                    write_spaces(strand, &mut indented, spaces)?;
+                    indented.write_str(strand, line)?;
+                }
+                drop(text);
+                drop(borrow);
+                let global = strand.state::<Global<'v>>();
+                create_text(strand, global, indented, out);
+                Ok(())
+            })
+            .method_with_slots(
+                "join",
+                async move |this, strand, args, out, [mut items, mut item]| {
+                    let ([], [source]) = unpack!(strand, args, 0, 1)?;
+                    match source {
+                        Some(source) => source.iter(strand, &mut items).await?,
+                        None => strand.input(&mut items),
+                    }
+
+                    let borrow = this.borrow(strand)?;
+                    let separator = Ref::slot::<0>(&borrow).as_str(strand).unwrap().to_string();
+                    drop(borrow);
+
+                    let global = strand.state::<Global<'v>>();
+                    let mut joined = StrEmbryo::new();
+                    let mut first = true;
+                    while items.next(strand, &mut item).await? {
+                        if !first {
+                            joined.write_str(strand, &separator)?;
+                        }
+                        first = false;
+                        // Each value is taken the way `text` takes an argument
+                        // of its own: styling kept where there is any, and
+                        // everything else converted and sanitized.
+                        append_value(
+                            strand,
+                            global,
+                            &mut joined,
+                            Style::default(),
+                            true,
+                            false,
+                            &item,
+                        )?;
+                        strand.check_trap_gc()?;
+                    }
+                    create_text(strand, global, joined, out);
+                    Ok(())
+                },
+            )
     }
 }
 
@@ -286,6 +420,17 @@ impl<'v> Object<'v> for StyleObject {
     type Annex = StyleAnnex<'v>;
     type Type = ();
     type TypeAnnex = ();
+
+    async fn new<'a, 's>(
+        _this: dolang::runtime::Type<'v, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        args: Args<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        let global = strand.state::<Global<'v>>();
+        let keys = global.style_keys;
+        make_style(strand, global, keys, Style::default(), args, out)
+    }
 
     async fn call<'a, 's>(
         this: Instance<'v, 'a, Self>,
@@ -550,6 +695,174 @@ impl Iterator for SgrParser<'_> {
     }
 }
 
+#[derive(Clone, Copy)]
+struct TextOffset {
+    plain_end: usize,
+    encoded_end: usize,
+    style: Style,
+}
+
+struct TextLayout {
+    plain: String,
+    offsets: Vec<TextOffset>,
+}
+
+impl TextLayout {
+    fn new(encoded: &str) -> Self {
+        let mut plain = String::new();
+        let mut offsets = Vec::new();
+        let mut style = Style::default();
+        let mut at = 0;
+        while at < encoded.len() {
+            if let Some((end, params)) = sgr_at(encoded, at) {
+                for op in SgrParser::new(params) {
+                    style.apply(op);
+                }
+                at = end;
+                continue;
+            }
+            let ch = encoded[at..].chars().next().unwrap();
+            at += ch.len_utf8();
+            plain.push(ch);
+            offsets.push(TextOffset {
+                plain_end: plain.len(),
+                encoded_end: at,
+                style,
+            });
+        }
+        Self { plain, offsets }
+    }
+
+    fn width(&self) -> usize {
+        display_width(&self.plain)
+    }
+
+    fn prefix(&self, encoded: &str, width: usize) -> String {
+        let mut used: usize = 0;
+        let mut plain_end = 0;
+        for grapheme in self.plain.graphemes(true) {
+            let grapheme_width = display_width(grapheme);
+            if used.saturating_add(grapheme_width) > width {
+                break;
+            }
+            used += grapheme_width;
+            plain_end += grapheme.len();
+        }
+        let Some(offset) = self
+            .offsets
+            .iter()
+            .find(|offset| offset.plain_end == plain_end)
+        else {
+            return String::new();
+        };
+        let mut clipped = encoded[..offset.encoded_end].to_owned();
+        if offset.style != Style::default() {
+            clipped.push_str("\x1b[0m");
+        }
+        clipped
+    }
+}
+
+fn sgr_at(value: &str, at: usize) -> Option<(usize, &str)> {
+    let rest = value.get(at..)?;
+    let body = rest.strip_prefix("\x1b[")?;
+    for (offset, ch) in body.char_indices() {
+        if ('\u{40}'..='\u{7e}').contains(&ch) {
+            if ch != 'm' {
+                return None;
+            }
+            let params_start = at + 2;
+            let params_end = params_start + offset;
+            return Some((params_end + ch.len_utf8(), &value[params_start..params_end]));
+        }
+    }
+    None
+}
+
+fn display_width(value: &str) -> usize {
+    value
+        .graphemes(true)
+        .map(|grapheme| {
+            grapheme
+                .chars()
+                .map(|ch| {
+                    if ('\0'..='\u{1f}').contains(&ch) {
+                        0
+                    } else {
+                        UnicodeWidthChar::width(ch).unwrap_or(0)
+                    }
+                })
+                .sum::<usize>()
+                .min(2)
+        })
+        .sum()
+}
+
+/// Applies `spec`'s layout to already-rendered text, measuring terminal cells.
+///
+/// Shared by [`Text`]'s own formatting, which lays out its stripped content,
+/// and by `echo`/`print`, which lay out the encoded form of a `Fmt` bound to
+/// a `Text`. Escape sequences measure zero either way, so the two agree on
+/// every column.
+fn lay_out<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    spec: &Spec,
+    content: &str,
+    out: &mut dyn Format<'v>,
+) -> Result<'v, 's, ()> {
+    let clipped;
+    let content = match spec.precision {
+        Some(precision) => {
+            clipped = clip_encoding(content, precision as usize);
+            clipped.as_str()
+        }
+        None => content,
+    };
+    // Precision is applied above: left to `Pad`, it would clip the already
+    // clipped text a second time, splitting an escape sequence in half.
+    let mut spec = *spec;
+    spec.precision = None;
+    let mut pad = Pad::with_measure(spec, out, encoded_width);
+    pad.write_str(strand, content)?;
+    pad.finish(strand)
+}
+
+/// Measures `encoded` in terminal cells, skipping its escape sequences.
+fn encoded_width(encoded: &str) -> usize {
+    TextLayout::new(encoded).width()
+}
+
+fn clip_encoding(encoded: &str, width: usize) -> String {
+    let layout = TextLayout::new(encoded);
+    if layout.width() <= width {
+        encoded.to_owned()
+    } else {
+        layout.prefix(encoded, width)
+    }
+}
+
+fn text_encoding<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    value: &Value<'v>,
+) -> Result<'v, 's, String> {
+    if let Some(value) = value.as_str(strand) {
+        let value = value.to_string();
+        return filter_preformatted(strand, &value, false);
+    }
+    let Some(text) = global.types.text.cast(value) else {
+        return Err(Error::type_error(
+            strand,
+            "suffix: expected `Str` or `term.Text`",
+        ));
+    };
+    text.enter_sync(strand, |strand, text| {
+        let borrow = text.borrow(strand)?;
+        let text = Ref::slot::<0>(&borrow).as_str(strand).unwrap().pin();
+        Ok(String::from(&*text))
+    })
+}
+
 fn write_sgr_op<'v, 's>(
     strand: &mut Strand<'v, 's>,
     out: &mut dyn Format<'v>,
@@ -615,28 +928,77 @@ fn append_value<'v, 's>(
     argument: bool,
     value: &Value<'v>,
 ) -> Result<'v, 's, ()> {
+    let mode = if ansi {
+        FilterMode::Child(parent)
+    } else {
+        FilterMode::Plain
+    };
     if let Some(text) = global.types.text.cast(value) {
-        text.enter_sync(strand, |strand, text| {
+        return text.enter_sync(strand, |strand, text| {
             let borrow = text.borrow(strand)?;
             let text = Ref::slot::<0>(&borrow).as_str(strand).unwrap().pin();
-            let mode = if ansi {
-                FilterMode::Child(parent)
-            } else {
-                FilterMode::Plain
-            };
             let mut filter = Filter::new(out, mode);
             filter.write_str(strand, &text)?;
             filter.finish(strand)
-        })
-    } else {
-        let mut filter = Filter::new(out, FilterMode::Plain);
-        if argument {
-            value.verbatim(strand, &mut filter)?;
-        } else {
-            value.display(strand, &mut filter)?;
-        }
-        filter.finish(strand)
+        });
     }
+    if let Some(encoded) = bound_text_layout(strand, global, value)? {
+        let mut filter = Filter::new(out, mode);
+        filter.write_str(strand, &encoded)?;
+        return filter.finish(strand);
+    }
+    let mut filter = Filter::new(out, FilterMode::Plain);
+    if argument {
+        value.verbatim(strand, &mut filter)?;
+    } else {
+        value.display(strand, &mut filter)?;
+    }
+    filter.finish(strand)
+}
+
+/// Lays out the encoded form of a `Fmt` bound to a [`Text`], or returns
+/// `None` when `value` is not one.
+///
+/// A `Fmt` renders through the bound value's own conversions, and a `Text`
+/// converts to its content — right for a `Str`, wrong for the console. So the
+/// console applies the layout itself, to the encoding, in the same terminal
+/// cells [`Text`] measures itself in.
+///
+/// A specification asking for something else — a debug or numeric rendering —
+/// is left to the ordinary path: it is no longer a request for terminal
+/// presentation.
+fn bound_text_layout<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    value: &Value<'v>,
+) -> Result<'v, 's, Option<String>> {
+    if !value.is_instance_of(strand, TypeObject::Fmt) {
+        return Ok(None);
+    }
+    let spec = fmt_spec::spec_of(strand, value)?;
+    if !matches!(spec.kind, None | Some(Kind::Str) | Some(Kind::Verbatim))
+        || spec.sign.is_some()
+        || spec.alt
+        || spec.fill == Fill::Zero
+    {
+        return Ok(None);
+    }
+    strand.with_slots_sync(|strand, [mut bound]| {
+        // One level is the whole story: binding a `Fmt` to a `Fmt` is refused
+        // at construction, so what one carries is never another one.
+        value.get(strand, global.syms.value, &mut bound)?;
+        let Some(text) = global.types.text.cast(&bound) else {
+            return Ok(None);
+        };
+        let encoded = text.enter_sync(strand, |strand, text| {
+            let borrow = text.borrow(strand)?;
+            let text = Ref::slot::<0>(&borrow).as_str(strand).unwrap().pin();
+            Ok(String::from(&*text))
+        })?;
+        let mut laid_out = String::new();
+        lay_out(strand, &spec, &encoded, &mut laid_out)?;
+        Ok(Some(laid_out))
+    })
 }
 
 fn append_key<'v, 's>(
@@ -650,7 +1012,7 @@ fn append_key<'v, 's>(
 }
 
 #[derive(Clone, Copy)]
-struct StyleKeys<'v> {
+pub(crate) struct StyleKeys<'v> {
     fg: Sym<'v, 'v>,
     bg: Sym<'v, 'v>,
     attrs: [Sym<'v, 'v>; ATTR_COUNT],
@@ -659,7 +1021,7 @@ struct StyleKeys<'v> {
 }
 
 #[derive(Clone, Copy)]
-struct ColorKeys<'v> {
+pub(crate) struct ColorKeys<'v> {
     values: [(Sym<'v, 'v>, Color); 16],
 }
 
@@ -859,14 +1221,14 @@ where
     Ok(())
 }
 
-fn apply_style<'v, 's, 'a>(
+/// Resolves the style options in `args` against `base`, returning the
+/// resolved style and the positional arguments left over.
+fn parse_style<'v, 's, 'a>(
     strand: &mut Strand<'v, 's>,
-    global: State<'v, Global<'v>>,
     keys: StyleKeys<'v>,
     base: Style,
     args: Args<'v, 'a>,
-    out: Slot<'v, 'a>,
-) -> Result<'v, 's, ()>
+) -> Result<'v, 's, (Style, Args<'v, 'a>)>
 where
     'v: 'a,
 {
@@ -951,6 +1313,64 @@ where
             )?,
         ],
     };
+    Ok((style, args))
+}
+
+/// Builds a [`Text`] from `args`, whether or not any styling is applied.
+fn make_text<'v, 's, 'a>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    keys: StyleKeys<'v>,
+    base: Style,
+    args: Args<'v, 'a>,
+    out: Slot<'v, 'a>,
+) -> Result<'v, 's, ()>
+where
+    'v: 'a,
+{
+    let (style, args) = parse_style(strand, keys, base, args)?;
+    let mut text = StrEmbryo::new();
+    render_args(strand, global, &mut text, style, true, args)?;
+    create_text(strand, global, text, out);
+    Ok(())
+}
+
+/// Builds a reusable [`Style`](StyleObject) from `args`, which are keywords
+/// only: a positional argument is text to style, which is
+/// [`text`](make_text)'s job.
+fn make_style<'v, 's, 'a>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    keys: StyleKeys<'v>,
+    base: Style,
+    args: Args<'v, 'a>,
+    out: Slot<'v, 'a>,
+) -> Result<'v, 's, ()>
+where
+    'v: 'a,
+{
+    let (style, args) = parse_style(strand, keys, base, args)?;
+    if args.len() != 0 {
+        return Err(Error::unexpected_positional(strand, 0));
+    }
+    create_style(strand, global, keys, style, out);
+    Ok(())
+}
+
+/// Applies an existing style: to positional arguments, producing [`Text`], or
+/// to nothing, deriving a new [`Style`](StyleObject) from it.
+fn apply_style<'v, 's, 'a>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    keys: StyleKeys<'v>,
+    base: Style,
+    args: Args<'v, 'a>,
+    out: Slot<'v, 'a>,
+) -> Result<'v, 's, ()>
+where
+    'v: 'a,
+{
+    let (style, args) = parse_style(strand, keys, base, args)?;
     if args.len() == 0 {
         create_style(strand, global, keys, style, out);
     } else {
@@ -961,16 +1381,11 @@ where
     Ok(())
 }
 
-pub(crate) fn configure_compiler(compiler: &mut Compiler<'_>) {
-    compiler
-        .prelude()
-        .import_module("term")
-        .import_items("term")
-        .items(["echo", "print"])
-        .commit();
-}
-
-pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Global<'v>>) {
+/// Interns every symbol the style options are named by.
+///
+/// These live on the global rather than in a closure because the `Style`
+/// constructor is a type-level hook with no captured environment.
+pub(crate) fn style_keys<'v>(builder: &mut Builder<'v>) -> StyleKeys<'v> {
     let color_names = [
         "BLACK",
         "RED",
@@ -992,7 +1407,7 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
     let mut colors =
         std::array::from_fn(|index| (builder.sym(color_names[index]), Color::Ansi(index as u8)));
     colors.sort_unstable_by_key(|(symbol, _)| *symbol);
-    let keys = StyleKeys {
+    StyleKeys {
         fg: builder.sym("fg"),
         bg: builder.sym("bg"),
         attrs: [
@@ -1007,7 +1422,20 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
         ],
         colors: ColorKeys { values: colors },
         inherit: builder.sym("INHERIT"),
-    };
+    }
+}
+
+pub(crate) fn configure_compiler(compiler: &mut Compiler<'_>) {
+    compiler
+        .prelude()
+        .import_module("term")
+        .import_items("term")
+        .items(["echo", "print"])
+        .commit();
+}
+
+pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Global<'v>>) {
+    let keys = global.style_keys;
     let StyleKeys {
         fg,
         bg,
@@ -1271,8 +1699,8 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             )?;
             console::write(strand, output.as_bytes()).await
         })
-        .function("style", async move |strand, args, out| {
-            apply_style(strand, global, keys, Style::default(), args, out)
+        .function("text", async move |strand, args, out| {
+            make_text(strand, global, keys, Style::default(), args, out)
         })
         .function("preformat", async move |strand, args, out| {
             let ([value], []) = unpack!(strand, args, 1, 0)?;
