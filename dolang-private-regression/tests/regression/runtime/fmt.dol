@@ -1,5 +1,5 @@
 import std:
-  - Fmt
+  - FmtValue
   - FmtSpec
 
 # fmt is a bare prelude item, while the types are explicit std imports.
@@ -15,8 +15,10 @@ assert_eq $empty.kind nil
 
 # A positional nil is still a bound value.
 let nil_fmt = fmt nil
-assert_eq (type nil_fmt) $Fmt
-assert $ type $nil_fmt $FmtSpec
+assert_eq (type nil_fmt) $FmtValue
+# `FmtValue` shares the reflection surface with `FmtSpec` structurally,
+# not by subtyping.
+assert (!(type nil_fmt FmtSpec))
 assert_eq $nil_fmt.value nil
 assert_eq $nil_fmt.source nil
 assert_eq (str nil_fmt) "nil"
@@ -48,7 +50,7 @@ assert_eq $reset.precision nil
 assert_eq $reset.width 8
 
 let applied = base 1.5
-assert_eq (type applied) $Fmt
+assert_eq (type applied) $FmtValue
 assert_eq (str applied) "*+1.50"
 
 let rebound = applied width: 8 fill: :ZERO:
@@ -123,7 +125,7 @@ assert_throws $std.RuntimeError do str $ fmt true kind: :DEC:
 let money = fmt precision: 2 kind: :FIXED:
 assert_eq "$(money 1.5)/$(money 2.25)" "1.50/2.25"
 
-# A bound value stays one level deep: binding a `Fmt` is refused rather than
+# A bound value stays one level deep: binding a `FmtValue` is refused rather than
 # nested or silently merged, so a consumer never walks a chain to find the
 # value. Combining two specifications is spelled out over `value` instead.
 let bound = money 1.5

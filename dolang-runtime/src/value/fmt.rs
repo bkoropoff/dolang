@@ -94,7 +94,7 @@ impl<'v, W: fmt::Write + ?Sized> Format<'v> for W {
     }
 }
 
-/// Recovers the specification carried by a `std.FmtSpec` or `std.Fmt`.
+/// Recovers the specification carried by a `std.FmtSpec` or `std.FmtValue`.
 ///
 /// A native formatter that needs to apply a bound layout itself — rather than
 /// letting the value format itself — reads it from here.

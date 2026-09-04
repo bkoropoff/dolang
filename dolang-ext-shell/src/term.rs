@@ -801,7 +801,7 @@ fn display_width(value: &str) -> usize {
 /// Applies `spec`'s layout to already-rendered text, measuring terminal cells.
 ///
 /// Shared by [`Text`]'s own formatting, which lays out its stripped content,
-/// and by `echo`/`print`, which lay out the encoded form of a `Fmt` bound to
+/// and by `echo`/`print`, which lay out the encoded form of a `FmtValue` bound to
 /// a `Text`. Escape sequences measure zero either way, so the two agree on
 /// every column.
 fn lay_out<'v, 's>(
@@ -956,10 +956,10 @@ fn append_value<'v, 's>(
     filter.finish(strand)
 }
 
-/// Lays out the encoded form of a `Fmt` bound to a [`Text`], or returns
+/// Lays out the encoded form of a `FmtValue` bound to a [`Text`], or returns
 /// `None` when `value` is not one.
 ///
-/// A `Fmt` renders through the bound value's own conversions, and a `Text`
+/// A `FmtValue` renders through the bound value's own conversions, and a `Text`
 /// converts to its content — right for a `Str`, wrong for the console. So the
 /// console applies the layout itself, to the encoding, in the same terminal
 /// cells [`Text`] measures itself in.
@@ -972,7 +972,7 @@ fn bound_text_layout<'v, 's>(
     global: State<'v, Global<'v>>,
     value: &Value<'v>,
 ) -> Result<'v, 's, Option<String>> {
-    if !value.is_instance_of(strand, TypeObject::Fmt) {
+    if !value.is_instance_of(strand, TypeObject::FmtValue) {
         return Ok(None);
     }
     let spec = fmt_spec::spec_of(strand, value)?;
@@ -984,8 +984,8 @@ fn bound_text_layout<'v, 's>(
         return Ok(None);
     }
     strand.with_slots_sync(|strand, [mut bound]| {
-        // One level is the whole story: binding a `Fmt` to a `Fmt` is refused
-        // at construction, so what one carries is never another one.
+        // One level is the whole story: binding a `FmtValue` to a `FmtValue`
+        // is refused at construction, so what one carries is never another one.
         value.get(strand, global.syms.value, &mut bound)?;
         let Some(text) = global.types.text.cast(&bound) else {
             return Ok(None);

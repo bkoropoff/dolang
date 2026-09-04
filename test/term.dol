@@ -219,7 +219,7 @@ def text_format_measures_cells()
 
 #[test]
 def console_formats_bound_text()
-  # The console is where a `Fmt` bound to a `Text` is terminal presentation
+  # The console is where a `FmtValue` bound to a `Text` is terminal presentation
   # rather than a string: `echo`, `print` and `text` apply the layout to the
   # encoded form and keep the styling.
   let red = term.text("red", fg: :RED:)

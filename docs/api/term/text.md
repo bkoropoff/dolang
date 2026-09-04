@@ -30,7 +30,7 @@ with every other `str` conversion — `str $ fmt label width: 6` and
 `"${label:6}"` are laid out in cells and plain.
 
 The console is where the layout and the styling arrive together. Given a
-[`Fmt`](../std/fmt.md) bound to a `Text`,
+[`FmtValue`](../std/fmt-value.md) bound to a `Text`,
 [`echo`](./index.md#echo-args), [`print`](./index.md#print-options-args),
 [`text`](./index.md#text-options-args) and a [`Style`](./style.md) apply the
 layout to the encoded form themselves, in the same terminal cells, and keep

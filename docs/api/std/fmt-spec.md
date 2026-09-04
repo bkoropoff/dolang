@@ -3,7 +3,8 @@
 Stores reusable formatting options.
 
 `FmtSpec` values are immutable. Calling one returns a new specification with
-the supplied options merged, or a bound [`Fmt`](./fmt.md) when given a
+the supplied options merged, or a bound [`FmtValue`](./fmt-value.md) when
+given a
 positional value.
 
 ## Fields
@@ -45,12 +46,14 @@ Supported values are `:STR:`, `:DBG:`, `:VERBATIM:`, `:HEX:`, `:OCT:`,
 
 ### `call value? :fill? :align? :sign? :width? :precision? :alt? :kind?`
 
-Returns a new specification, or a bound [`Fmt`](./fmt.md) when `value` is
-provided. Omitted options retain their current values; nil resets an option.
+Returns a new specification, or a bound [`FmtValue`](./fmt-value.md) when
+`value` is provided. Omitted options retain their current values; nil resets
+an option.
 
-Binding a [`Fmt`](./fmt.md) is a `TypeError`: a bound value stays one level
-deep, so a consumer never has to unwrap a chain of specifications. Bind
-[`value`](./fmt.md#value) and state the combined options explicitly instead.
+Binding a [`FmtValue`](./fmt-value.md) is a `TypeError`: a bound value stays
+one level deep, so a consumer never has to unwrap a chain of specifications.
+Bind [`value`](./fmt-value.md#value) and state the combined options
+explicitly instead.
 
 ### `pad value`
 

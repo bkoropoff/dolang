@@ -127,7 +127,7 @@ assert_eq $out ["hi"]
 
 Prints arguments separated by spaces, followed by a newline. Ordinary values
 are sanitized; [`Text`](./text.md) arguments retain their styling, as does a
-[`Fmt`](../std/fmt.md) bound to one — see
+[`FmtValue`](../std/fmt-value.md) bound to one — see
 [Formatting](./text.md#formatting).
 
 #### Parameters
@@ -252,9 +252,9 @@ catch error: e
 
 Ordinary values preserve newlines and tabs but remove other C0/C1 controls and
 escape sequences. A [`Text`](./text.md) keeps its styling, and so does a
-[`Fmt`](../std/fmt.md) bound to one, whose layout is applied to the encoded
-form — see [Formatting](./text.md#formatting). Raw stdout and stderr sinks are
-unchanged and are not sanitized by this module.
+[`FmtValue`](../std/fmt-value.md) bound to one, whose layout is applied to
+the encoded form — see [Formatting](./text.md#formatting). Raw stdout and
+stderr sinks are unchanged and are not sanitized by this module.
 
 ### `sub func :chomp? :can_style? ...args`
 

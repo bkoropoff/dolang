@@ -21,7 +21,7 @@ The `std` module provides core language facilities.
 | [`Error`](./error.md)                             | Abstract base error type                   |
 | [`FieldError`](./field-error.md)                  | Nonexistent field access                   |
 | [`Float`](./float.md)                             | 64-bit floating point                      |
-| [`Fmt`](./fmt.md)                                 | Value bound to formatting options          |
+| [`FmtValue`](./fmt-value.md)                      | Value bound to formatting options          |
 | [`FmtSpec`](./fmt-spec.md)                        | Reusable formatting options                |
 | [`Func`](./func.md)                               | Function value                             |
 | [`Getter`](./getter.md)                           | Abstract getter protocol type              |
@@ -128,7 +128,7 @@ Creates reusable formatting options, optionally bound to a value.
 #### Returns
 
 [`FmtSpec`](./fmt-spec.md) when `value` is omitted; otherwise
-[`Fmt`](./fmt.md).
+[`FmtValue`](./fmt-value.md).
 
 #### Example
 

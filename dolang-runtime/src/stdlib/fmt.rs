@@ -122,7 +122,7 @@ impl<'v, T: Copy, const N: usize> Table<'v, T, N> {
 
 pub(crate) struct Types<'v> {
     pub(crate) spec: Type<'v, FmtSpec>,
-    pub(crate) fmt: Type<'v, Fmt>,
+    pub(crate) value: Type<'v, FmtValue>,
 }
 
 pub(crate) struct Global<'v> {
@@ -172,12 +172,13 @@ impl<'v> Stateful<'v> for Global<'v> {
     type Tag = Tag;
 }
 
-/// Returns the [`Fmt`] type object singleton, for [`TypeObject::Fmt`](crate::value::TypeObject).
-pub(crate) fn fmt_singleton<'v, 'a>(vm: &'a Vm<'v>) -> &'a Value<'v> {
-    vm.state::<Global<'v>>().types.fmt.singleton(vm)
+/// Returns the [`FmtValue`] type object singleton, for
+/// [`TypeObject::FmtValue`](crate::value::TypeObject).
+pub(crate) fn fmt_value_singleton<'v, 'a>(vm: &'a Vm<'v>) -> &'a Value<'v> {
+    vm.state::<Global<'v>>().types.value.singleton(vm)
 }
 
-/// Immutable per-instance data shared by [`FmtSpec`] and [`Fmt`].
+/// Immutable per-instance data shared by [`FmtSpec`] and [`FmtValue`].
 ///
 /// Carrying the specification alongside the global keeps both types unit
 /// structs with nothing to borrow-check at runtime.
@@ -188,7 +189,7 @@ pub(crate) struct SpecAnnex<'v> {
 
 pub(crate) struct FmtSpec;
 
-pub(crate) struct Fmt;
+pub(crate) struct FmtValue;
 
 impl<'v> Object<'v> for FmtSpec {
     const MODULE: &'v str = "std";
@@ -209,9 +210,9 @@ impl<'v> Object<'v> for FmtSpec {
     }
 }
 
-impl<'v> Object<'v> for Fmt {
+impl<'v> Object<'v> for FmtValue {
     const MODULE: &'v str = "std";
-    const NAME: &'v str = "Fmt";
+    const NAME: &'v str = "FmtValue";
     const SLOTS: usize = 1;
 
     type Annex = SpecAnnex<'v>;
@@ -228,7 +229,7 @@ impl<'v> Object<'v> for Fmt {
         let global = annex.global;
         let spec = merge_spec(strand, global, annex.spec, args)?;
         let borrow = this.borrow(strand)?;
-        create_fmt(strand, global, spec, Ref::slot::<0>(&borrow), out);
+        create_value(strand, global, spec, Ref::slot::<0>(&borrow), out);
         Ok(())
     }
 
@@ -259,7 +260,7 @@ impl<'v> Object<'v> for Fmt {
 
 /// Formats the bound value, letting the surrounding conversion supply an unset kind.
 fn format_bound<'v, 's>(
-    this: Instance<'v, '_, Fmt>,
+    this: Instance<'v, '_, FmtValue>,
     strand: &mut Strand<'v, 's>,
     kind: Kind,
     out: &mut dyn Format<'v>,
@@ -347,8 +348,7 @@ where
 
 pub(crate) fn register<'v>(builder: &mut Builder<'v>) -> State<'v, Global<'v>> {
     let spec = build_spec_members(builder.build_type::<FmtSpec>((), ())).build();
-    let fmt = build_spec_members(builder.build_type::<Fmt>((), ()))
-        .nominal_supertype(spec)
+    let value = build_spec_members(builder.build_type::<FmtValue>((), ()))
         .get("value", |this, strand, out| {
             let borrow = this.borrow(strand)?;
             Output::set(strand, out, Ref::slot::<0>(&borrow));
@@ -359,12 +359,12 @@ pub(crate) fn register<'v>(builder: &mut Builder<'v>) -> State<'v, Global<'v>> {
             Ok(())
         })
         .build();
-    let global = Global::new(builder, Types { spec, fmt });
+    let global = Global::new(builder, Types { spec, value });
     builder.register_state(global)
 }
 
 /// Merges keyword options over `base`, producing a new `FmtSpec` or, when a
-/// positional value is supplied, a `Fmt` bound to it.
+/// positional value is supplied, a `FmtValue` bound to it.
 pub(crate) async fn create<'v, 'a, 's>(
     strand: &'a mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
@@ -378,23 +378,23 @@ pub(crate) async fn create<'v, 'a, 's>(
         create_spec(strand, global, spec, out);
         return Ok(());
     };
-    // A `Fmt` bound to a `Fmt` would format the inner rendering as opaque
-    // text — its own layout applied, then padded and clipped a second time —
-    // and every consumer would have to unwrap an arbitrarily deep chain to
-    // find the value. Refusing keeps a bound value one level deep. How two
+    // A `FmtValue` bound to a `FmtValue` would format the inner rendering as
+    // opaque text — its own layout applied, then padded and clipped a second
+    // time — and every consumer would have to unwrap an arbitrarily deep chain
+    // to find the value. Refusing keeps a bound value one level deep. How two
     // specifications ought to combine is a question this does not answer: a
-    // caller that wants that says so explicitly, over `Fmt.value`.
-    if global.types.fmt.cast(&value).is_some() {
+    // caller that wants that says so explicitly, over `FmtValue.value`.
+    if global.types.value.cast(&value).is_some() {
         return Err(Error::type_error(
             strand,
-            "cannot bind a Fmt: bind its `value` instead",
+            "cannot bind a FmtValue: bind its `value` instead",
         ));
     }
-    create_fmt(strand, global, spec, value, out);
+    create_value(strand, global, spec, value, out);
     Ok(())
 }
 
-/// Extracts the specification carried by a Do [`FmtSpec`] or [`Fmt`].
+/// Extracts the specification carried by a Do [`FmtSpec`] or [`FmtValue`].
 ///
 /// This is the inverse of [`reify_spec`]: it accepts the value a Do `(fmt)`
 /// method was handed and recovers the specification for a native formatter.
@@ -406,7 +406,7 @@ pub(crate) fn spec_of<'v, 's>(
     if let Some(cast) = global.types.spec.cast(value) {
         return Ok(cast.enter_sync(strand, |_, this| this.annex().spec));
     }
-    if let Some(cast) = global.types.fmt.cast(value) {
+    if let Some(cast) = global.types.value.cast(value) {
         return Ok(cast.enter_sync(strand, |_, this| this.annex().spec));
     }
     Err(Error::type_error(strand, "expected FmtSpec"))
@@ -433,16 +433,16 @@ fn create_spec<'v>(
         .create_with_annex(strand, FmtSpec, SpecAnnex { global, spec }, out);
 }
 
-fn create_fmt<'v>(
+fn create_value<'v>(
     strand: &mut Strand<'v, '_>,
     global: State<'v, Global<'v>>,
     spec: Spec,
     value: impl Input<'v>,
     mut out: Slot<'v, '_>,
 ) {
-    let fmt = global.types.fmt;
-    fmt.create_with_annex(strand, Fmt, SpecAnnex { global, spec }, &mut out);
-    fmt.cast(&out)
+    let ty = global.types.value;
+    ty.create_with_annex(strand, FmtValue, SpecAnnex { global, spec }, &mut out);
+    ty.cast(&out)
         .unwrap()
         .enter_sync(strand, |strand, instance| {
             let mut borrow = instance.borrow_mut_unwrap();

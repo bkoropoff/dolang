@@ -708,7 +708,7 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
         }
         let pack = sig::Pack::new(sig.into_iter());
         self.block.insts.push(Inst(
-            InstInfo::Builtin(builtin::FMT, self.packtab.id(&pack)),
+            InstInfo::Builtin(builtin::FMT_VALUE, self.packtab.id(&pack)),
             span,
         ));
         Ok(())
