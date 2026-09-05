@@ -29,7 +29,7 @@ use crate::{
             Delegated, Dispatch, GcObj, Header, Inspect, Protocol, Spread, SpreadContext,
             TypeHandle,
         },
-        tuple,
+        set, tuple,
     },
     sig::Unpack,
     strand::Strand,
@@ -39,7 +39,7 @@ use crate::{
 
 use prim::Prim;
 use repr::{Decode, Repr};
-use view::{Array, Bin, Dict, ObjectView, Range, Record, Str, Tuple, View};
+use view::{Array, Bin, Dict, ObjectView, Range, Record, Set, Str, Tuple, View};
 
 use self::fmt::{Format, Spec};
 
@@ -1474,6 +1474,12 @@ impl<'v> Value<'v> {
         Some(Dict(self.downcast_ref(vm.builtin_types().dict)?))
     }
 
+    /// Downcast value to set
+    #[inline]
+    pub fn as_set(&self, vm: &Vm<'v>) -> Option<Set<'v, '_>> {
+        Some(Set(self.downcast_ref(vm.builtin_types().set)?))
+    }
+
     /// Downcast value to a read-only `range` view.
     #[inline]
     pub fn as_range(&self, vm: &Vm<'v>) -> Option<Range<'v, '_>> {
@@ -1533,6 +1539,10 @@ impl<'v> Value<'v> {
                 // Dict
                 if let Some(dict) = self.downcast_native(vm, bt.dict) {
                     return View::Dict(Dict::from_borrow(dict));
+                }
+                // Set
+                if let Some(set) = self.downcast_native(vm, bt.set) {
+                    return View::Set(Set::from_borrow(set));
                 }
                 // Record
                 if let Some(record) = self.downcast_native(vm, bt.record) {
@@ -3111,6 +3121,8 @@ pub enum Empty {
     Array,
     /// Empty dict
     Dict,
+    /// Empty set
+    Set,
 }
 
 impl<'v> Input<'v> for Empty {
@@ -3128,6 +3140,11 @@ impl<'v> Input<'v> for Empty {
                     vm.arena(),
                     vm.builtin_types().dict,
                     dict::Dict::new(),
+                )),
+                Empty::Set => Value::from_object(GcObj::new(
+                    vm.arena(),
+                    vm.builtin_types().set,
+                    set::Set::new(),
                 )),
             },
             None,

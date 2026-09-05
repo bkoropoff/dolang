@@ -15,7 +15,7 @@ use crate::{
         array, dict,
         kv::{self, Entry, EntryValue},
         protocol::{GcObjBorrow, Header},
-        range, record,
+        range, record, set,
     },
     strand::{Access, Strand},
     sym::Sym,
@@ -540,6 +540,94 @@ impl<'v, 'a> Dict<'v, 'a> {
     }
 }
 
+/// Set view
+pub struct Set<'v, 'a>(pub(crate) GcObjBorrow<'v, 'a, set::Set<'v>>);
+
+impl<'v, 'a> Set<'v, 'a> {
+    pub(crate) fn from_borrow(borrow: gc::Borrow<'v, 'a, Header, set::Set<'v>>) -> Self {
+        Self(borrow)
+    }
+
+    /// Return the opaque identity of this set for cycle detection.
+    pub fn id(&self) -> ObjectId<'v, 'a> {
+        ObjectId(self.0.into_raw().cast(), PhantomData)
+    }
+
+    /// Number of members.
+    pub fn len<'s>(&self, strand: &mut Strand<'v, 's>) -> Result<'v, 's, usize> {
+        let borrow = match self.0.borrow() {
+            Some(b) => b,
+            None => return Err(Error::concurrency(strand)),
+        };
+        Ok(borrow.len())
+    }
+
+    /// Return a stateful cursor over the members in insertion order.
+    pub fn members(&self) -> SetMembers<'v, 'a> {
+        SetMembers {
+            borrow: self.0,
+            pos: 0,
+        }
+    }
+
+    /// Is `value` a member?
+    pub fn contains<'s>(
+        &self,
+        strand: &mut Strand<'v, 's>,
+        value: impl Input<'v>,
+    ) -> Result<'v, 's, bool> {
+        let value = Value::from_input(strand, value);
+        let hash = kv::hash(strand, &value)?;
+        let borrow = match self.0.borrow() {
+            Some(b) => b,
+            None => return Err(Error::concurrency(strand)),
+        };
+        borrow.contains(strand, &value, hash)
+    }
+
+    /// Add `value`. Returns `false` if it was already a member, leaving the
+    /// position it was first added in alone.
+    pub fn add<'s>(
+        &self,
+        strand: &mut Strand<'v, 's>,
+        value: impl Input<'v>,
+    ) -> Result<'v, 's, bool> {
+        // Build the value and hash it before taking the exclusive borrow.
+        let value = Value::from_input(strand, value);
+        let hash = kv::hash(strand, &value)?;
+        let mut borrow = match self.0.borrow_mut() {
+            Some(b) => b,
+            None => return Err(Error::concurrency(strand)),
+        };
+        borrow.insert(strand, value, hash)
+    }
+
+    /// Remove `value`. Returns `false` if it was not a member.
+    pub fn delete<'s>(
+        &self,
+        strand: &mut Strand<'v, 's>,
+        value: impl Input<'v>,
+    ) -> Result<'v, 's, bool> {
+        let value = Value::from_input(strand, value);
+        let hash = kv::hash(strand, &value)?;
+        let mut borrow = match self.0.borrow_mut() {
+            Some(b) => b,
+            None => return Err(Error::concurrency(strand)),
+        };
+        borrow.delete(strand, &value, hash)
+    }
+
+    /// Remove every member.
+    pub fn clear<'s>(&self, strand: &mut Strand<'v, 's>) -> Result<'v, 's, ()> {
+        let mut borrow = match self.0.borrow_mut() {
+            Some(b) => b,
+            None => return Err(Error::concurrency(strand)),
+        };
+        borrow.clear();
+        Ok(())
+    }
+}
+
 /// Record view
 pub struct Record<'v, 'a>(gc::Borrow<'v, 'a, Header, record::Record<'v>>);
 
@@ -611,6 +699,11 @@ impl<'v, 'a> Tuple<'v, 'a> {
 }
 
 /// Type-discriminating view of a [`Value`].
+///
+/// New variants may be added as more types gain a view, so a consumer outside
+/// this crate must decide what an unrecognized one means rather than being
+/// silently broken by it.
+#[non_exhaustive]
 pub enum View<'v, 'a> {
     /// Nil
     Nil,
@@ -630,6 +723,8 @@ pub enum View<'v, 'a> {
     Array(Array<'v, 'a>),
     /// Dict
     Dict(Dict<'v, 'a>),
+    /// Set
+    Set(Set<'v, 'a>),
     /// Record
     Record(Record<'v, 'a>),
     /// Tuple
@@ -658,6 +753,34 @@ impl<'v, 'a> DictPairs<'v, 'a> {
             None => return Err(Error::concurrency(strand)),
         };
         Ok(kv_next_pair(&borrow.0, &mut self.pos, strand, key, value))
+    }
+}
+
+/// Iterator over a [`Set`].
+pub struct SetMembers<'v, 'a> {
+    borrow: gc::Borrow<'v, 'a, Header, set::Set<'v>>,
+    pos: usize,
+}
+
+impl<'v, 'a> SetMembers<'v, 'a> {
+    /// Get the next member.
+    /// Returns `false` when all members have been yielded.
+    pub fn next<'s>(
+        &mut self,
+        strand: &mut Strand<'v, 's>,
+        value: impl Output<'v>,
+    ) -> Result<'v, 's, bool> {
+        let borrow = match self.borrow.borrow() {
+            Some(b) => b,
+            None => return Err(Error::concurrency(strand)),
+        };
+        match borrow.next_from(&mut self.pos) {
+            Some(member) => {
+                Output::set(strand, value, member);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
     }
 }
 

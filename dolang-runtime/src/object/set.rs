@@ -47,8 +47,20 @@ impl<'v> Set<'v> {
         }
     }
 
-    fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.inner.len()
+    }
+
+    /// Yield the member at or after `pos` in insertion order, advancing `pos`
+    /// past it. Returns [`None`] once the order is exhausted.
+    pub(crate) fn next_from(&self, pos: &mut usize) -> Option<&Value<'v>> {
+        while let Some(entry) = self.order.get(*pos) {
+            *pos += 1;
+            if let Some(bucket) = entry {
+                return Some(unsafe { &bucket.as_ref().value });
+            }
+        }
+        None
     }
 
     fn accept(&self, visit: &mut dyn Visit) -> ControlFlow<()> {
@@ -60,7 +72,7 @@ impl<'v> Set<'v> {
         ControlFlow::Continue(())
     }
 
-    fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         if self.inner.is_empty() {
             return;
         }
@@ -128,7 +140,7 @@ impl<'v> Set<'v> {
         *self = next;
     }
 
-    fn contains<'s>(
+    pub(crate) fn contains<'s>(
         &self,
         strand: &mut Strand<'v, 's>,
         value: &Value<'v>,
@@ -170,7 +182,7 @@ impl<'v> Set<'v> {
         }
     }
 
-    fn insert<'s>(
+    pub(crate) fn insert<'s>(
         &mut self,
         strand: &mut Strand<'v, 's>,
         value: Value<'v>,
@@ -190,7 +202,7 @@ impl<'v> Set<'v> {
         }
     }
 
-    fn delete<'s>(
+    pub(crate) fn delete<'s>(
         &mut self,
         strand: &mut Strand<'v, 's>,
         value: &Value<'v>,
