@@ -249,6 +249,7 @@ enum RawToken {
     RBar,
     TQuote,
     TBar,
+    Hash,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -673,7 +674,19 @@ macro_rules! lex {
                 #[allow(unreachable_patterns)]
                 Some(b'&') => emit!($self.$method, $token, Amp),
                 Some(b'{') => emit!($self.$method, $token, LeftBrace),
-                Some(b'}') => emit!($self.$method, $token, RightBrace)
+                Some(b'}') => emit!($self.$method, $token, RightBrace),
+                // Only in the modes that have no comments. Elsewhere `#` mid
+                // literal is ordinary text (`echo foo#bar`), and routing it to
+                // `Hash` would start a comment there.
+                #[allow(unreachable_patterns)]
+                Some(b'#')
+                    if matches!(
+                        $self.mode,
+                        Mode::String | Mode::Heredoc | Mode::RawHeredoc
+                    ) =>
+                {
+                    emit!($self.$method, $token, Hash)
+                }
             };
             { $($rest)* }
         }
@@ -844,9 +857,7 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                             match Some(b' ' | b'\t') => if self.state == Empty {
                                 emit!(self.emit, token, Space)
                             },
-                            match Some(b'#') if self.mode != Mode::String => {
-                                emit!(self.emit, token, Hash)
-                            },
+                            match Some(b'#') => emit!(self.emit, token, Hash),
                             match Some(b':') => emit!(self.emit, token, Colon),
                             match Some(b'\\') if matches!(self.mode, Mode::Shell | Mode::String | Mode::Heredoc) => {
                                 emit!(self.emit, token, Backslash)
@@ -1207,6 +1218,13 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                     }
                     _ => return self.error(ErrorDiagKind::BadEscape),
                 },
+                // Inside a string or here string there are no comments, so `#`
+                // is a token of its own. The parser decays it back to literal
+                // text everywhere but a formatted interpolation, where it
+                // introduces a parameter.
+                Hash if matches!(self.mode, Mode::String | Mode::Heredoc | Mode::RawHeredoc) => {
+                    return self.token(RawToken::Hash, Empty);
+                }
                 Hash => match self.advance() {
                     Some(b'[') => return self.token(RawToken::DecoratorOpen, Empty),
                     None => self.comment(End),
@@ -1214,13 +1232,6 @@ impl<'a, I: Iterator<Item = u8>> Iterator for RawLexer<'a, I> {
                     Some(b'\n') => self.comment(Indent),
                     _ => self.trans(Comment),
                 },
-                Comment if matches!(self.mode, Mode::Heredoc | Mode::RawHeredoc) => {
-                    match self.advance() {
-                        None => return self.token(RawToken::Literal, End),
-                        Some(b'\n') => return self.token(RawToken::Literal, Indent),
-                        _ => (),
-                    }
-                }
                 Comment => match self.advance() {
                     None => self.comment(End),
                     Some(b'\r') => self.comment(Cr),
@@ -1439,6 +1450,7 @@ pub(crate) enum TokenInfo {
     RBar,
     TQuote,
     TBar,
+    Hash,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -1815,6 +1827,7 @@ impl<'a> Iterator for Lexer<'a> {
                 Ok((RBar, span)) => self.token(TokenInfo::RBar, span),
                 Ok((TQuote, span)) => self.token(TokenInfo::TQuote, span),
                 Ok((TBar, span)) => self.token(TokenInfo::TBar, span),
+                Ok((Hash, span)) => self.token(TokenInfo::Hash, span),
             }));
         }
     }

@@ -77,11 +77,13 @@ assert_throws $std.TypeError do Fmt ["a", t"b"]
 # A segment built at runtime has no source, so it falls back to its debug form.
 assert_eq (dbg built) r#"t"a42b""#
 
-# Two sequences are equal when their segments are; how a segment was written
-# is not part of what it means.
+# Two sequences are equal when their segments are, and a segment records the
+# text it was written as, so the written form is part of what it is.
 assert_eq t"a$n" t"a$n"
-assert_eq t"a$n" (Fmt ["a", (FmtValue n)])
 assert $ (t"a$n" != t"a$(41)")
+assert $ (t"a$n" != t"a${n}")
+assert $ (t"a$n" != (Fmt ["a", (FmtValue n)]))
+assert_eq t"a$n" (Fmt ["a", (FmtValue n source: r"$n")])
 
 let keyed = dict()
 keyed[t"a$n"] = 1

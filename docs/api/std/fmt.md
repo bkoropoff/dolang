@@ -1,6 +1,7 @@
 # Fmt
 
-An immutable sequence of literal text and bound interpolations, produced by a
+An immutable sequence of literal text, bound interpolations, and unbound
+parameters, produced by a
 [`t"..."` string](../../language/expressions.md#formatted-sequences).
 
 An ordinary quoted string concatenates its interpolations into one
@@ -9,9 +10,10 @@ time anything sees the result. A `t"..."` keeps the segments apart, so a
 consumer can act on each interpolated value — quoting it, binding it as a
 parameter, styling it — rather than only on the text it produced.
 
-Every segment is either a [`Str`](./str.md) of literal text or a
-[`FmtValue`](./fmt-value.md) interpolation; nothing else may be one. Segments
-are indexable, iterable, spreadable, and destructurable.
+Every segment is a [`Str`](./str.md) of literal text, a
+[`FmtValue`](./fmt-value.md) interpolation, or a
+[`FmtParam`](./fmt-param.md) still waiting to be filled; nothing else may be
+one. Segments are indexable, iterable, spreadable, and destructurable.
 
 ## Trust
 
@@ -50,6 +52,14 @@ let assembled = Fmt ["select * from users where name = ", (FmtValue name)]
 let injected = Fmt ["select * from users where name = $name"]
 ```
 
+**Filling parameters stays inside it.** Neither [`call`](#call-bindings) nor
+[`bind`](#bind-bindings) can produce a literal segment: a filled
+[`FmtParam`](./fmt-param.md) becomes a `FmtValue`, whatever was bound to it.
+So a template written as a `t"..."` and filled at runtime keeps the
+guarantee — the literal text is still program text, and everything supplied
+from outside is still bound. That is what makes them the way to assemble a
+sequence at runtime, and the constructor the way not to.
+
 ## Constructor
 
 ### `Fmt segments`
@@ -63,9 +73,9 @@ case, so its interpolations have no [`source`](./fmt-value.md#source). See
 
 #### Parameters
 
-| Name       | Type | Description                               |
-| ---------- | ---- | ----------------------------------------- |
-| `segments` |      | Iterable of `Str` and `FmtValue` segments |
+| Name       | Type | Description                                            |
+| ---------- | ---- | ------------------------------------------------------ |
+| `segments` |      | Iterable of `Str`, `FmtValue`, and `FmtParam` segments |
 
 #### Returns
 
@@ -73,9 +83,9 @@ case, so its interpolations have no [`source`](./fmt-value.md#source). See
 
 #### Errors
 
-| Exception                      | Condition                                 |
-| ------------------------------ | ----------------------------------------- |
-| [`TypeError`](./type-error.md) | A segment is neither `Str` nor `FmtValue` |
+| Exception                      | Condition                                           |
+| ------------------------------ | --------------------------------------------------- |
+| [`TypeError`](./type-error.md) | A segment is not a `Str`, `FmtValue`, or `FmtParam` |
 
 #### Example
 
@@ -107,9 +117,19 @@ the expansion — see [Trust](#trust).
 A sequence bound inside a sequence expands with it, and the binding lays out
 what it expanded to.
 
+An unfilled hole has no rendering, so a sequence still containing a
+[`FmtParam`](./fmt-param.md) raises rather than emitting anything
+hole-shaped.
+
 #### Returns
 
 [`Str`](./str.md)
+
+#### Errors
+
+| Exception                        | Condition                              |
+| -------------------------------- | -------------------------------------- |
+| [`ValueError`](./value-error.md) | A segment is an unfilled `FmtParam`    |
 
 #### Example
 
@@ -118,12 +138,99 @@ let count = 3
 assert_eq $(t"n=${count:03d}").format() "n=003"
 ```
 
+### `call ...bindings`
+
+Fills every parameter at once and insists the two sides match exactly: each
+parameter is filled, and each argument is used.
+
+Positional arguments are sugar for integer keys — argument *i* fills parameter
+`i` — so `call` and [`bind`](#bind-bindings) substitute identically and differ
+only in their checks.
+
+#### Returns
+
+`Fmt`
+
+#### Errors
+
+| Exception                                         | Condition                     |
+| ------------------------------------------------- | ----------------------------- |
+| [`MissingPosError`](./missing-pos-error.md)       | A numbered parameter unfilled |
+| [`MissingKeyError`](./missing-key-error.md)       | A named parameter unfilled    |
+| [`UnexpectedPosError`](./unexpected-pos-error.md) | A positional argument unused  |
+| [`UnexpectedKeyError`](./unexpected-key-error.md) | A keyword argument unused     |
+
+#### Example
+
+```
+let stmt = t"select * from t where a = ${#0} and c = ${#name}"
+assert_eq $(stmt 1 name: "n").format() "select * from t where a = 1 and c = n"
+```
+
+### `params`
+
+The [parameter](./fmt-param.md) names, in the order binding reaches them:
+first occurrence, and depth first through a bound sequence. This is the
+template's signature — what [`call`](#call-bindings) requires — without having
+to bind badly and read the error to find out.
+
+#### Returns
+
+[`Set`](./set.md)
+
+#### Example
+
+```
+let stmt = t"select * from t where a = ${#0} and c = ${#name}"
+assert_eq $stmt.params() (Set([0, :name:]))
+assert_eq $(t"no holes").params() (Set([]))
+```
+
+### `bind bindings`
+
+Fills the [parameters](./fmt-param.md) `bindings` names and returns the
+result. A parameter it does not name stays a parameter, so a template can be
+filled in stages.
+
+Binding is keyed lookup: a parameter written `${#0}` is filled by key `0`, and
+`${#name}` by key `name`. A dict is what `bind` takes because only a dict can
+name a sparse set of positions.
+
+A binding descends into a sequence bound inside the sequence, so a template
+pasted into another is filled along with it.
+
+#### Parameters
+
+| Name       | Type                | Description                    |
+| ---------- | ------------------- | ------------------------------ |
+| `bindings` | [`dict`](./dict.md) | Values keyed by parameter name |
+
+#### Returns
+
+`Fmt`
+
+#### Errors
+
+| Exception                                         | Condition                        |
+| ------------------------------------------------- | -------------------------------- |
+| [`TypeError`](./type-error.md)                    | `bindings` is not a dict         |
+| [`UnexpectedKeyError`](./unexpected-key-error.md) | A named key no parameter uses    |
+| [`UnexpectedPosError`](./unexpected-pos-error.md) | An integer key no parameter uses |
+
+#### Example
+
+```
+let stmt = t"select * from t where a = ${#0} and c = ${#name}"
+let partial = stmt.bind {name: "n"}
+assert_eq $(partial.bind {0: 1}).format() "select * from t where a = 1 and c = n"
+```
+
 ## Operators
 
 ### Indexing
 
-`seq[i]` returns segment `i`: a [`Str`](./str.md) of literal text or a
-[`FmtValue`](./fmt-value.md).
+`seq[i]` returns segment `i`: a [`Str`](./str.md) of literal text, a
+[`FmtValue`](./fmt-value.md), or a [`FmtParam`](./fmt-param.md).
 
 ```
 let greeting = t"hello $name!"
@@ -151,7 +258,9 @@ to the terminal.
 ### Equality
 
 Two sequences are equal when their segments are. How a sequence was assembled
-does not show, and neither does the source text an interpolation recorded.
+does not show. The text each interpolation records does: a segment carries its
+[`source`](./fmt-value.md#source), so `t"$name"` and `t"${name}"` are not
+equal.
 
 ## Formatting
 

@@ -4,6 +4,11 @@ let foo = "bar"
 assert_eq "" ""
 assert_eq "$hello:$foo:$world" "Hello:bar:world"
 assert_eq "$hello, (world)!" "Hello, (world)!"
+# A string has no comments, so a `#` is ordinary text and does not end the
+# interpolating part of the string.
+assert_eq "# $hello" "# Hello"
+assert_eq "a#b $hello" "a#b Hello"
+assert_eq "#[$hello]" "#[Hello]"
 echo "\"$(hello)\"\n\"World\""
 # output: END
 # "Hello"

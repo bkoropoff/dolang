@@ -987,11 +987,24 @@ fn append_segments<'v, 's>(
     argument: bool,
     value: &Value<'v>,
 ) -> Result<'v, 's, ()> {
-    strand.with_slots_sync(|strand, [mut len, mut segment]| {
+    strand.with_slots_sync(|strand, [mut len, mut segment, mut name]| {
         value.get(strand, global.syms.len, &mut len)?;
         let len = len.to_usize(strand)?;
         for index in 0..len {
             value.index(strand, index, &mut segment)?;
+            // A parameter shows itself readily enough on its own, but one
+            // still standing in a sequence means the template was never
+            // finished. `Fmt.format()` refuses that, and the console agrees
+            // rather than printing a hole where a value was meant to go.
+            if segment.is_instance_of(strand, TypeObject::FmtParam) {
+                segment.get(strand, global.syms.name, &mut name)?;
+                let mut text = String::new();
+                name.display(strand, &mut text)?;
+                return Err(Error::value(
+                    strand,
+                    format!("Fmt: parameter `{text}` is unbound"),
+                ));
+            }
             append_value(strand, global, out, parent, ansi, argument, &segment)?;
         }
         Ok(())

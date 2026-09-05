@@ -252,6 +252,7 @@ nav:
       - api/std/fmt.md
       - api/std/fmt-spec.md
       - api/std/fmt-value.md
+      - api/std/fmt-param.md
       - api/std/func.md
       - api/std/getter.md
       - api/std/immutable-error.md

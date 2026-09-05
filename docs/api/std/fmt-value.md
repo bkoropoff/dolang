@@ -90,6 +90,19 @@ let outer = (FmtValue bound width: 8)
 assert_eq (str outer.value) "1.50"
 ```
 
+## Operators
+
+### Equality
+
+Two bindings are equal when they bind equal values to the same specification
+and record the same [`source`](#source). `source` is readable and `dbg`
+renders through it, so bindings that differ in it are distinguishable.
+
+```
+assert (FmtValue 42 width: 4) == (FmtValue 42 width: 4)
+assert (FmtValue 42 source: r"${x}") != (FmtValue 42)
+```
+
 ## Example
 
 ```

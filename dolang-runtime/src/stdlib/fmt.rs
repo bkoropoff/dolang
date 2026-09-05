@@ -5,6 +5,7 @@ use crate::{
     error::{Error, Result},
     object::{
         array_view::{ArrayLike, ArrayView},
+        dict::Dict,
         kv,
         native::{Instance, Mut, Object, Ref, Type, TypeBuilder, Unpack},
         protocol::{Spread, SpreadContext},
@@ -132,6 +133,7 @@ impl<'v, T: Copy, const N: usize> Table<'v, T, N> {
 pub(crate) struct Types<'v> {
     pub(crate) spec: Type<'v, FmtSpec>,
     pub(crate) value: Type<'v, FmtValue>,
+    pub(crate) param: Type<'v, FmtParam>,
     pub(crate) fmt: Type<'v, Fmt>,
 }
 
@@ -188,6 +190,12 @@ pub(crate) fn fmt_value_singleton<'v, 'a>(vm: &'a Vm<'v>) -> &'a Value<'v> {
     vm.state::<Global<'v>>().types.value.singleton(vm)
 }
 
+/// Returns the [`FmtParam`] type object singleton, for
+/// [`TypeObject::FmtParam`](crate::value::TypeObject).
+pub(crate) fn fmt_param_singleton<'v, 'a>(vm: &'a Vm<'v>) -> &'a Value<'v> {
+    vm.state::<Global<'v>>().types.param.singleton(vm)
+}
+
 /// Returns the [`Fmt`] type object singleton, for
 /// [`TypeObject::Fmt`](crate::value::TypeObject).
 pub(crate) fn fmt_singleton<'v, 'a>(vm: &'a Vm<'v>) -> &'a Value<'v> {
@@ -207,10 +215,18 @@ pub(crate) struct FmtSpec;
 
 pub(crate) struct FmtValue;
 
-/// One `t"..."` sequence: literal text and bound interpolations, in order.
+/// An unbound position in a [`Fmt`]: a hole waiting to be filled.
 ///
-/// Every element of the segment array in slot 0 is either a `Str` of literal
-/// text or a [`FmtValue`]; [`create_fmt`] admits nothing else.
+/// Named by an `Int` or a `Sym` — binding is keyed lookup either way, and an
+/// explicit position is never renumbered, so a number is a name that happens
+/// to be an integer.
+pub(crate) struct FmtParam;
+
+/// One `t"..."` sequence: literal text, bound interpolations, and unbound
+/// parameters, in order.
+///
+/// Every element of the segment array in slot 0 is a `Str` of literal text, a
+/// [`FmtValue`], or a [`FmtParam`]; [`create_fmt`] admits nothing else.
 pub(crate) struct Fmt;
 
 /// Immutable per-instance data for [`Fmt`].
@@ -318,8 +334,11 @@ impl<'v> Object<'v> for FmtValue {
     }
 
     /// Two bindings are equal when they bind equal values to the same
-    /// specification. `source` is how one was written, not what it means, so
-    /// it does not enter into it.
+    /// specification and record the same `source`.
+    ///
+    /// `source` is readable, and `dbg` renders through it, so two bindings that
+    /// differ in it are already distinguishable — leaving it out would make
+    /// equality disagree with what can be observed.
     fn eq<'a, 's>(
         this: Instance<'v, 'a, Self>,
         strand: &'a mut Strand<'v, 's>,
@@ -334,6 +353,12 @@ impl<'v> Object<'v> for FmtValue {
         let this_borrow = this.borrow(strand)?;
         other.enter_sync(strand, |strand, other| {
             let other_borrow = other.borrow(strand)?;
+            if !Ref::slot::<1>(&this_borrow)
+                .op_eq(strand, Ref::slot::<1>(&other_borrow))
+                .to_bool(strand)
+            {
+                return Ok(false);
+            }
             Ok(Ref::slot::<0>(&this_borrow)
                 .op_eq(strand, Ref::slot::<0>(&other_borrow))
                 .to_bool(strand))
@@ -348,7 +373,146 @@ impl<'v> Object<'v> for FmtValue {
         this.annex().spec.hash(hasher);
         let borrow = this.borrow(strand)?;
         hasher.write_u64(kv::hash(strand, Ref::slot::<0>(&borrow))?);
+        hasher.write_u64(kv::hash(strand, Ref::slot::<1>(&borrow))?);
         Ok(())
+    }
+}
+
+impl<'v> Object<'v> for FmtParam {
+    const MODULE: &'v str = "std";
+    const NAME: &'v str = "FmtParam";
+    /// Slot 0 is the name; slot 1 the source text, or nil.
+    const SLOTS: usize = 2;
+
+    type Annex = SpecAnnex<'v>;
+    type Type = ();
+    type TypeAnnex = ();
+
+    /// Names a hole and the options it will impose once filled. `source:` is
+    /// accepted for the same reason [`FmtValue`] accepts it.
+    async fn new<'a, 's>(
+        _this: Type<'v, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        args: Args<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        let global = strand.vm().state::<Global<'v>>();
+        create_fmt_param(strand, global, args, out)
+    }
+
+    /// Re-merges options over the named hole, as [`FmtValue::call`] does over a
+    /// bound value. The result is synthetic, so it carries no `source`.
+    async fn call<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        args: Args<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        let annex = this.annex();
+        let global = annex.global;
+        let spec = merge_spec(strand, global, annex.spec, args)?;
+        let borrow = this.borrow(strand)?;
+        let name = Ref::slot::<0>(&borrow).dup();
+        create_param(strand, global, spec, &name, None, out)
+    }
+
+    /// A hole shows itself as the text it was written as.
+    ///
+    /// Unlike [`Fmt`], a parameter does not refuse conversion. The reason a
+    /// sequence refuses is that flattening it yields text with its
+    /// interpolations already substituted and nothing left to tell them from
+    /// the literal skeleton; a parameter carries no bound value at all, so
+    /// there is nothing to leak by showing it.
+    fn display<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        out: &mut dyn Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        write_param(this, strand, out)
+    }
+
+    fn verbatim<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        out: &mut dyn Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        write_param(this, strand, out)
+    }
+
+    fn debug<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        out: &mut dyn Format<'v>,
+    ) -> Result<'v, 's, ()> {
+        write_param(this, strand, out)
+    }
+
+    /// Two holes are equal when they name the same parameter under the same
+    /// specification and were written the same way.
+    fn eq<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        other: &Value<'v>,
+    ) -> Result<'v, 's, bool> {
+        let Some(other) = this.annex().global.types.param.cast(other) else {
+            return Ok(false);
+        };
+        if other.enter_sync(strand, |_, other| other.annex().spec) != this.annex().spec {
+            return Ok(false);
+        }
+        let this_borrow = this.borrow(strand)?;
+        other.enter_sync(strand, |strand, other| {
+            let other_borrow = other.borrow(strand)?;
+            if !Ref::slot::<1>(&this_borrow)
+                .op_eq(strand, Ref::slot::<1>(&other_borrow))
+                .to_bool(strand)
+            {
+                return Ok(false);
+            }
+            Ok(Ref::slot::<0>(&this_borrow)
+                .op_eq(strand, Ref::slot::<0>(&other_borrow))
+                .to_bool(strand))
+        })
+    }
+
+    fn hash<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        hasher: &mut impl Hasher,
+    ) -> Result<'v, 's, ()> {
+        this.annex().spec.hash(hasher);
+        let borrow = this.borrow(strand)?;
+        hasher.write_u64(kv::hash(strand, Ref::slot::<0>(&borrow))?);
+        hasher.write_u64(kv::hash(strand, Ref::slot::<1>(&borrow))?);
+        Ok(())
+    }
+}
+
+/// Writes a parameter as it was written, or — when it was built at runtime and
+/// so has no source — in the form it would have been.
+fn write_param<'v, 's>(
+    this: Instance<'v, '_, FmtParam>,
+    strand: &mut Strand<'v, 's>,
+    out: &mut dyn Format<'v>,
+) -> Result<'v, 's, ()> {
+    let borrow = this.borrow(strand)?;
+    if let Some(source) = Ref::slot::<1>(&borrow).as_str_raw(strand) {
+        let source = source.to_string();
+        return out.write_str(strand, &source);
+    }
+    let name = Ref::slot::<0>(&borrow).dup();
+    let name = param_name(strand, &name);
+    out.write_str(strand, &format!("${{#{name}}}"))
+}
+
+/// Renders a parameter's name for a message or a synthesized source form.
+fn param_name<'v>(strand: &mut Strand<'v, '_>, name: &Value<'v>) -> String {
+    if let Some(sym) = name.as_sym(strand.vm()) {
+        sym.as_str(strand.vm()).to_string()
+    } else if let Some(int) = name.as_int(strand) {
+        int.to_string()
+    } else {
+        "?".to_string()
     }
 }
 
@@ -430,6 +594,37 @@ impl<'v> Object<'v> for Fmt {
             .await
     }
 
+    /// Fills every parameter, and insists the two sides match exactly.
+    ///
+    /// Positional arguments are sugar: argument *i* binds the parameter named
+    /// `i`. That is not a rule of its own — it is what materializing an
+    /// argument pack into a dict already does — so `call` and
+    /// [`bind`](Self::build) differ in their checks alone, not in how they
+    /// substitute.
+    async fn call<'a, 's>(
+        this: Instance<'v, 'a, Self>,
+        strand: &'a mut Strand<'v, 's>,
+        args: Args<'v, 'a>,
+        out: Slot<'v, 'a>,
+    ) -> Result<'v, 's, ()> {
+        let global = this.annex().global;
+        strand
+            .with_slots(async move |strand, [mut bindings, mut result]| {
+                let dict = Dict::from_args(strand, args)?;
+                strand
+                    .builtin_types()
+                    .dict
+                    .create(strand, dict, &mut bindings);
+                bind_segments(strand, global, this, &bindings, &mut result)?;
+                // Every hole had to be filled, so one still standing is an
+                // argument the caller did not supply.
+                reject_unfilled(strand, global, &result)?;
+                Output::set(strand, out, &result);
+                Ok(())
+            })
+            .await
+    }
+
     fn build<'a>(builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
         builder
             .get("len", |this, strand, out| {
@@ -445,6 +640,28 @@ impl<'v> Object<'v> for Fmt {
                 render(this, strand, &mut embryo)?;
                 embryo.finish(strand, out);
                 Ok(())
+            })
+            // Partial filling. A dict rather than an argument pack because only
+            // a dict can name a sparse set of positions.
+            .method("bind", async |this, strand, args, out| {
+                let global = this.annex().global;
+                let ([bindings], []) = unpack!(strand, args, 1, 0)?;
+                if bindings.as_dict(strand).is_none() {
+                    return Err(Error::type_error(strand, "bind: expected Dict"));
+                }
+                bind_segments(strand, global, this, &bindings, out)
+            })
+            // The template's signature: what a caller has to supply, without
+            // having to bind badly and read the error to find out.
+            .method("params", async |this, strand, args, out| {
+                let ([], []) = unpack!(strand, args, 0, 0)?;
+                let global = this.annex().global;
+                strand.with_slots_sync(|strand, [mut names]| {
+                    Output::set(strand, &mut names, Empty::Set);
+                    collect_params(strand, global, this, &names)?;
+                    Output::set(strand, out, &names);
+                    Ok(())
+                })
             })
     }
 
@@ -592,11 +809,25 @@ fn render_segment<'v, 's>(
         let text = text.to_string();
         return w.write_str(strand, &text);
     }
+    if let Some(param) = global.types.param.cast(segment) {
+        // An unfilled hole has no rendering. The template is unfinished, so
+        // there is nothing to emit that would not be a guess at what belongs
+        // there.
+        let name = param.enter_sync(strand, |strand, param| {
+            let borrow = param.borrow(strand)?;
+            let name = Ref::slot::<0>(&borrow).dup();
+            Ok(param_name(strand, &name))
+        })?;
+        return Err(Error::value(
+            strand,
+            format!("Fmt: parameter `{name}` is unbound"),
+        ));
+    }
     let bound = global
         .types
         .value
         .cast(segment)
-        .expect("a segment is a Str or a FmtValue");
+        .expect("a segment is a Str, a FmtValue, or a FmtParam");
     bound.enter_sync(strand, |strand, bound| {
         let mut spec = bound.annex().spec;
         let kind = *spec.kind.get_or_insert(Kind::Str);
@@ -687,6 +918,234 @@ fn eq_segments<'v, 's>(
     })
 }
 
+/// Substitutes into the sequence and rejects a binding nothing consumed.
+///
+/// This is all `bind` does and most of what [`call`](Fmt::call) does; the two
+/// differ only in whether a hole left unfilled is an error.
+fn bind_segments<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    this: Instance<'v, '_, Fmt>,
+    bindings: &Value<'v>,
+    out: impl Output<'v>,
+) -> Result<'v, 's, ()> {
+    strand.with_slots_sync(|strand, [mut consumed, mut bound]| {
+        Output::set(strand, &mut consumed, Empty::Set);
+        substitute(strand, global, this, bindings, &consumed, &mut bound)?;
+        reject_unused(strand, bindings, &consumed)?;
+        Output::set(strand, out, &bound);
+        Ok(())
+    })
+}
+
+/// Fills the parameters `bindings` names, and leaves the rest as they are.
+///
+/// The routine decides nothing. It substitutes what it can, copies through what
+/// it cannot, and adds each name it consumed to `consumed`; whether a hole
+/// left over or a binding unused is an error is the caller's rule. Substitution
+/// is functional, so a pass abandoned partway leaves the original untouched.
+fn substitute<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    this: Instance<'v, '_, Fmt>,
+    bindings: &Value<'v>,
+    consumed: &Value<'v>,
+    out: impl Output<'v>,
+) -> Result<'v, 's, ()> {
+    // A bound value may carry a sequence of its own, so substitution recurses.
+    // Bound by the ordinary call depth rather than a mechanism of its own.
+    strand.recursion_guard_sync(|strand| {
+        strand.with_slots_sync(|strand, [mut segments, mut built]| {
+            Output::set(strand, &mut segments, Empty::Array);
+            each_segment(this, strand, |strand, segment| {
+                substitute_segment(strand, global, bindings, consumed, &segments, segment)
+            })?;
+            create_from_segments(strand, global, &segments, Slot::reborrow(&mut built));
+            Output::set(strand, out, &built);
+            Ok(())
+        })
+    })
+}
+
+/// Substitutes one segment, appending the result to the array under construction.
+fn substitute_segment<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    bindings: &Value<'v>,
+    consumed: &Value<'v>,
+    segments: &Value<'v>,
+    segment: &Value<'v>,
+) -> Result<'v, 's, ()> {
+    if let Some(param) = global.types.param.cast(segment) {
+        return strand.with_slots_sync(|strand, [mut name, mut source, mut value, mut filled]| {
+            let spec = param.enter_sync(strand, |strand, param| {
+                let borrow = param.borrow(strand)?;
+                Output::set(strand, &mut name, Ref::slot::<0>(&borrow));
+                Output::set(strand, &mut source, Ref::slot::<1>(&borrow));
+                Ok(param.annex().spec)
+            })?;
+            let found = bindings
+                .as_dict(strand)
+                .unwrap()
+                .get(strand, &name, None, &mut value)?;
+            if !found {
+                return append_segment(strand, global, segments, segment);
+            }
+            consumed.as_set(strand).unwrap().add(strand, &name)?;
+            // The filled hole keeps the parameter's own specification and
+            // source: how it is laid out, and how it was written, belong to the
+            // template rather than to the value that arrived late.
+            create_value(
+                strand,
+                global,
+                spec,
+                &value,
+                Some(&source),
+                Slot::reborrow(&mut filled),
+            );
+            append_segment(strand, global, segments, &filled)
+        });
+    }
+    let Some(bound) = global.types.value.cast(segment) else {
+        return append_segment(strand, global, segments, segment);
+    };
+    strand.with_slots_sync(
+        |strand, [mut inner, mut source, mut rebuilt, mut wrapped]| {
+            let spec = bound.enter_sync(strand, |strand, bound| {
+                let borrow = bound.borrow(strand)?;
+                Output::set(strand, &mut inner, Ref::slot::<0>(&borrow));
+                Output::set(strand, &mut source, Ref::slot::<1>(&borrow));
+                Ok(bound.annex().spec)
+            })?;
+            // A sequence bound inside a sequence has holes of its own, and they are
+            // reached before anything past the binding — so the order holes are
+            // visited is depth first, matching the order they read in.
+            let Some(nested) = global.types.fmt.cast(&inner) else {
+                return append_segment(strand, global, segments, segment);
+            };
+            nested.enter_sync(strand, |strand, nested| {
+                substitute(strand, global, nested, bindings, consumed, &mut rebuilt)
+            })?;
+            create_value(
+                strand,
+                global,
+                spec,
+                &rebuilt,
+                Some(&source),
+                Slot::reborrow(&mut wrapped),
+            );
+            append_segment(strand, global, segments, &wrapped)
+        },
+    )
+}
+
+/// Collects the parameter names into `names`, in the order binding reaches
+/// them: depth first through a bound sequence.
+///
+/// The set drops a repeat, so what is left is each distinct name in the order
+/// it was first reached.
+fn collect_params<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    this: Instance<'v, '_, Fmt>,
+    names: &Value<'v>,
+) -> Result<'v, 's, ()> {
+    strand.recursion_guard_sync(|strand| {
+        each_segment(this, strand, |strand, segment| {
+            if let Some(param) = global.types.param.cast(segment) {
+                return strand.with_slots_sync(|strand, [mut name]| {
+                    param.enter_sync(strand, |strand, param| {
+                        let borrow = param.borrow(strand)?;
+                        Output::set(strand, &mut name, Ref::slot::<0>(&borrow));
+                        Ok(())
+                    })?;
+                    names.as_set(strand).unwrap().add(strand, &name)?;
+                    Ok(())
+                });
+            }
+            let Some(bound) = global.types.value.cast(segment) else {
+                return Ok(());
+            };
+            strand.with_slots_sync(|strand, [mut inner]| {
+                bound.enter_sync(strand, |strand, bound| {
+                    let borrow = bound.borrow(strand)?;
+                    Output::set(strand, &mut inner, Ref::slot::<0>(&borrow));
+                    Ok(())
+                })?;
+                // A bound sequence has parameters of its own, and they are
+                // reached before anything past the binding — the order binding
+                // visits them in.
+                let Some(nested) = global.types.fmt.cast(&inner) else {
+                    return Ok(());
+                };
+                nested.enter_sync(strand, |strand, nested| {
+                    collect_params(strand, global, nested, names)
+                })
+            })
+        })
+    })
+}
+
+/// Reports the first binding no parameter consumed.
+///
+/// Naming the binding rather than the hole it failed to reach describes the
+/// whole picture: a caller who misspelled a name wants to hear about the name
+/// it wrote, not about a parameter it has never heard of.
+fn reject_unused<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    bindings: &Value<'v>,
+    consumed: &Value<'v>,
+) -> Result<'v, 's, ()> {
+    let mut pairs = bindings.as_dict(strand).unwrap().pairs();
+    strand.with_slots_sync(|strand, [mut key, mut value]| {
+        while pairs.next(strand, &mut key, &mut value)? {
+            if !consumed.as_set(strand).unwrap().contains(strand, &key)? {
+                return Err(unmatched_error(strand, &key, false));
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Rejects a sequence that still carries an unfilled hole.
+fn reject_unfilled<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    value: &Value<'v>,
+) -> Result<'v, 's, ()> {
+    let this = global.types.fmt.cast(value).unwrap();
+    this.enter_sync(strand, |strand, this| {
+        each_segment(this, strand, |strand, segment| {
+            let Some(param) = global.types.param.cast(segment) else {
+                return Ok(());
+            };
+            let name = param.enter_sync(strand, |strand, param| {
+                let borrow = param.borrow(strand)?;
+                Ok(Ref::slot::<0>(&borrow).dup())
+            })?;
+            Err(unmatched_error(strand, &name, true))
+        })
+    })
+}
+
+/// Names an unmatched parameter or binding, positionally when its name is an
+/// integer and by key otherwise.
+fn unmatched_error<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    name: &Value<'v>,
+    missing: bool,
+) -> Error<'v, 's> {
+    match name
+        .as_int(strand)
+        .and_then(|index| usize::try_from(index).ok())
+    {
+        Some(index) if missing => Error::missing_positional(strand, index),
+        Some(index) => Error::unexpected_positional(strand, index),
+        None if missing => Error::missing_key(strand, name),
+        None => Error::unexpected_key(strand, name),
+    }
+}
+
 /// Builds a sequence from the arguments the `fmt` builtin was handed.
 ///
 /// This is the path a `t"..."` takes: the compiler emits one argument per
@@ -713,17 +1172,24 @@ pub(crate) fn create_fmt<'v, 'a, 's>(
 
 /// Appends one segment to the array under construction.
 ///
-/// A segment is literal text or a bound value, and nothing else. Which of the
-/// two it is is exactly what a consumer acts on, so a value that is neither is
-/// a mistake to report rather than something to coerce into one or the other.
+/// A segment is literal text, a bound value, or an unbound parameter, and
+/// nothing else. Which of the three it is is exactly what a consumer acts on,
+/// so a value that is none of them is a mistake to report rather than
+/// something to coerce into one.
 fn append_segment<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
     segments: &Value<'v>,
     segment: &Value<'v>,
 ) -> Result<'v, 's, ()> {
-    if segment.as_str_raw(strand).is_none() && global.types.value.cast(segment).is_none() {
-        return Err(Error::type_error(strand, "Fmt: expected Str or FmtValue"));
+    if segment.as_str_raw(strand).is_none()
+        && global.types.value.cast(segment).is_none()
+        && global.types.param.cast(segment).is_none()
+    {
+        return Err(Error::type_error(
+            strand,
+            "Fmt: expected Str, FmtValue, or FmtParam",
+        ));
     }
     segments.as_array(strand).unwrap().push(strand, segment)
 }
@@ -847,8 +1313,28 @@ pub(crate) fn register<'v>(builder: &mut Builder<'v>) -> State<'v, Global<'v>> {
             Ok(())
         })
         .build();
+    let param = build_spec_members(builder.build_type::<FmtParam>((), ()))
+        .get("name", |this, strand, out| {
+            let borrow = this.borrow(strand)?;
+            Output::set(strand, out, Ref::slot::<0>(&borrow));
+            Ok(())
+        })
+        .get("source", |this, strand, out| {
+            let borrow = this.borrow(strand)?;
+            Output::set(strand, out, Ref::slot::<1>(&borrow));
+            Ok(())
+        })
+        .build();
     let fmt = builder.build_type::<Fmt>((), ()).build();
-    let global = Global::new(builder, Types { spec, value, fmt });
+    let global = Global::new(
+        builder,
+        Types {
+            spec,
+            value,
+            param,
+            fmt,
+        },
+    );
     builder.register_state(global)
 }
 
@@ -915,6 +1401,53 @@ fn create_spec<'v>(
         .types
         .spec
         .create_with_annex(strand, FmtSpec, SpecAnnex { global, spec }, out);
+}
+
+/// Builds a [`FmtParam`] from a name, an optional `source:`, and options.
+///
+/// This is both the `FmtParam` constructor and the path a `${#...}` takes.
+pub(crate) fn create_fmt_param<'v, 'a, 's>(
+    strand: &'a mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    args: Args<'v, 'a>,
+    out: Slot<'v, 'a>,
+) -> Result<'v, 's, ()> {
+    let source_sym = global.symbols.source;
+    let ([name], [source], rest) = unpack!(strand, args, 1, 0, source_sym = None, ...)?;
+    let spec = merge_spec(strand, global, Spec::default(), rest)?;
+    create_param(strand, global, spec, &name, source.as_deref(), out)
+}
+
+/// Builds a [`FmtParam`], rejecting a name that is neither `Int` nor `Sym`.
+///
+/// Nothing else can be a name: binding is keyed lookup, and those are the two
+/// key kinds an argument pack and a dict literal can supply.
+fn create_param<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    spec: Spec,
+    name: &Value<'v>,
+    source: Option<&Value<'v>>,
+    mut out: Slot<'v, '_>,
+) -> Result<'v, 's, ()> {
+    if name.as_sym(strand.vm()).is_none() && !name.is_int(strand) {
+        return Err(Error::type_error(
+            strand,
+            "FmtParam: expected Int or Sym name",
+        ));
+    }
+    let ty = global.types.param;
+    ty.create_with_annex(strand, FmtParam, SpecAnnex { global, spec }, &mut out);
+    ty.cast(&out)
+        .unwrap()
+        .enter_sync(strand, |strand, instance| {
+            let mut borrow = instance.borrow_mut_unwrap();
+            Output::set(strand, Mut::slot_mut::<0>(&mut borrow), name);
+            if let Some(source) = source {
+                Output::set(strand, Mut::slot_mut::<1>(&mut borrow), source);
+            }
+        });
+    Ok(())
 }
 
 fn create_value<'v>(

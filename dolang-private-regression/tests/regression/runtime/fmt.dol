@@ -185,3 +185,17 @@ assert_eq (str sourced) "  42"
 assert_eq $(sourced width: 6).source nil
 # There is nothing to attach a source to without a value.
 assert_throws $std.RuntimeError do FmtSpec source: r"${x}"
+
+# `source` is observable, so it is part of what a binding is: two bindings that
+# differ only in it are distinguishable by `source` and `dbg` alike, and
+# equality agrees.
+assert_eq (FmtValue 42 width: 4) (FmtValue 42 width: 4)
+assert $ (sourced != (FmtValue 42 width: 4))
+assert $ (sourced != (FmtValue 42 width: 4 source: r"${x}"))
+assert_eq $sourced (FmtValue 42 width: 4 source: r"${x:>4}")
+
+let by_source = dict()
+by_source[sourced] = 1
+by_source[(FmtValue 42 width: 4)] = 2
+assert_eq $by_source[sourced] 1
+assert_eq $by_source.len 2

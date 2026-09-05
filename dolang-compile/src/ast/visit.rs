@@ -113,6 +113,7 @@ pub enum NodeKind {
     Sym,
     Concat,
     Fmt,
+    FmtParam,
     Escape,
     FmtSeq,
     BinConcat,

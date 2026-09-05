@@ -1421,6 +1421,7 @@ impl<'a> Elaborater<'a> {
                 | Expr::Dict { .. }
                 | Expr::Concat { .. }
                 | Expr::FmtSeq { .. }
+                | Expr::FmtParam { .. }
                 | Expr::BinConcat { .. } = &**arg0
                 {
                     self.diags.push(Uncallable {
@@ -1486,6 +1487,14 @@ impl<'a> Elaborater<'a> {
             }
             Expr::Fmt { value, spec, .. } => {
                 self.visit_expr(scope, value, is_arg)?;
+                for expr in [&mut spec.width, &mut spec.precision].into_iter().flatten() {
+                    self.visit_expr(scope, expr, is_arg)?;
+                }
+                Ok(())
+            }
+            // A parameter's name is a symbol, not a reference to anything in
+            // scope, so only the dynamic counts are resolved.
+            Expr::FmtParam { spec, .. } => {
                 for expr in [&mut spec.width, &mut spec.precision].into_iter().flatten() {
                     self.visit_expr(scope, expr, is_arg)?;
                 }

@@ -247,6 +247,47 @@ flattening it, and expansion has to be asked for with
 [Trust](../api/std/fmt.md#trust) — the distinction between literal text and
 interpolated values is what a consumer such as a query builder acts on.
 
+#### Parameters
+
+A `${#...}` writes an *unbound* position — a hole — instead of interpolating a
+value. `${#0}` names a position, `${#name}` names it by word, and both take a
+specification like any other interpolation:
+
+```
+let stmt = t"select * from t where a = ${#0} and b = ${#name:>8}"
+assert_eq $stmt[1].name 0
+assert_eq $stmt[3].name :name:
+```
+
+The `#` introduces a name, never something to evaluate — which is why it is
+not `$`, whose job everywhere else is the opposite. Inside a specification `#`
+keeps its own meaning of alternate formatting, so `${#0:#x}` is a hole
+rendered in alternate hex.
+
+A number is a name that happens to be an integer: it is never renumbered, so
+`${#0}` means parameter `0` even in a sequence pasted inside another. Filling
+holes is [`Fmt.call`](../api/std/fmt.md#call-bindings) and
+[`Fmt.bind`](../api/std/fmt.md#bind-bindings); an unfilled one has no
+rendering, so
+[`format`](../api/std/fmt.md#format) raises rather than emitting anything
+hole-shaped.
+
+```
+let stmt = t"select * from t where a = ${#0} and c = ${#name}"
+
+# Call fills every hole at once; bind fills some and returns the rest.
+assert_eq $(stmt 1 name: "n").format() "select * from t where a = 1 and c = n"
+assert_eq $stmt.bind({name: "n"}).len 4
+```
+
+A filled hole becomes a [`FmtValue`](../api/std/fmt-value.md), never literal
+text, so a template assembled this way keeps the guarantee its literal
+segments came from the program.
+
+Parameters are valid only in a `t` string. A hole in a `Str` would have
+nothing to keep it separate from the text around it, so `"${#0}"` is a compile
+error.
+
 As with `r"..."`, the prefix shadows a juxtaposition call: `t"x"` is a
 sequence, not a call to `t`.
 

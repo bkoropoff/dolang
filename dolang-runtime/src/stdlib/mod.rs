@@ -107,6 +107,7 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>) {
         .value("Args", &args)
         .value("FmtSpec", fmt.types.spec)
         .value("FmtValue", fmt.types.value)
+        .value("FmtParam", fmt.types.param)
         .value("Fmt", fmt.types.fmt)
         // Iterator protocol types
         .value("Iterable", &iterable_type)

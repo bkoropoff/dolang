@@ -8,10 +8,10 @@ use crate::{
     Mode, PreludeImport,
     ast::{
         Arg, ArrayElem, Assign, Bind, Block, Class, ClassMember, ClassSuper, Const, Decorator, Def,
-        DictElem, Expand, Expr, ExprBody, FieldInit, For, FormatAlign, FormatKind, FormatSign,
-        FormatSpec, Function, GetVariant, Ident, If, Import, ImportElement, ImportItem, Key,
-        LValue, Let, MemberScope, Method, NlGuard, Pair, Param, ParamDefault, Pattern, PatternBind,
-        PrimStmt, Res, Return, Single, Stmt, Try, Unit, While, visit::Node,
+        DictElem, Expand, Expr, ExprBody, FieldInit, FmtParamName, For, FormatAlign, FormatKind,
+        FormatSign, FormatSpec, Function, GetVariant, Ident, If, Import, ImportElement, ImportItem,
+        Key, LValue, Let, MemberScope, Method, NlGuard, Pair, Param, ParamDefault, Pattern,
+        PatternBind, PrimStmt, Res, Return, Single, Stmt, Try, Unit, While, visit::Node,
     },
     cfg::{self, BlockRefMut, Inst, InstInfo, Term, TermInfo},
     constant::{self, ConstantExt},
@@ -373,7 +373,7 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
                         count += 1;
                     }
                     self.lower_expr(other)?;
-                    if !matches!(other, Expr::Fmt { .. }) {
+                    if !matches!(other, Expr::Fmt { .. } | Expr::FmtParam { .. }) {
                         // An interpolation stating no specification is an
                         // interpolation all the same: bind it, so every
                         // segment is either literal text or a bound value.
@@ -481,6 +481,7 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
                 verbatim,
             } => self.lower_concat(exprs, *delim_span, *verbatim)?,
             Expr::Fmt { value, spec, .. } => self.lower_fmt(value, spec, expr.span())?,
+            Expr::FmtParam { name, spec, .. } => self.lower_fmt_param(name, spec, expr.span())?,
             Expr::Escape(char, span) => {
                 let cid = self.consttab.str(self.bintab.id_str(&format!("{char}")));
                 self.block.insts.push(Inst(InstInfo::LoadConst(cid), *span));
@@ -707,6 +708,50 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
 
     fn lower_fmt(&mut self, value: &'a Expr, spec: &'a FormatSpec, span: Span) -> Result<()> {
         self.lower_expr(value)?;
+        let pack = self.lower_fmt_spec(spec, span)?;
+        self.block.insts.push(Inst(
+            InstInfo::Builtin(builtin::FMT_VALUE, self.packtab.id(&pack)),
+            span,
+        ));
+        Ok(())
+    }
+
+    /// Lowers a `${#0}` or `${#foo}`: the name as the positional, then the
+    /// same specification pack an interpolation builds.
+    fn lower_fmt_param(
+        &mut self,
+        name: &'a FmtParamName,
+        spec: &'a FormatSpec,
+        span: Span,
+    ) -> Result<()> {
+        match name {
+            FmtParamName::Pos(value, name_span) => {
+                let cid = self.lower_const(&Const::Int(*value as i128));
+                self.block
+                    .insts
+                    .push(Inst(InstInfo::LoadConst(cid), *name_span));
+            }
+            FmtParamName::Named(name_span) => {
+                let id = self
+                    .symtab
+                    .id(&self.bintab.id_str(self.file.str(*name_span)));
+                let cid = self.consttab.sym(id);
+                self.block
+                    .insts
+                    .push(Inst(InstInfo::LoadConst(cid), *name_span));
+            }
+        }
+        let pack = self.lower_fmt_spec(spec, span)?;
+        self.block.insts.push(Inst(
+            InstInfo::Builtin(builtin::FMT_PARAM, self.packtab.id(&pack)),
+            span,
+        ));
+        Ok(())
+    }
+
+    /// Lowers a specification as keyword arguments over a value already on the
+    /// stack, ending with the `source:` text, and returns the argument pack.
+    fn lower_fmt_spec(&mut self, spec: &'a FormatSpec, span: Span) -> Result<sig::Pack> {
         let mut sig = vec![sig::Arg::Value];
 
         if let Some(fill) = &spec.fill {
@@ -781,12 +826,7 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
         let cid = self.consttab.str(self.bintab.id_str(self.file.str(span)));
         self.block.insts.push(Inst(InstInfo::LoadConst(cid), span));
         sig.push(sig::Arg::Key(self.symtab.id(&self.bintab.id_str("source"))));
-        let pack = sig::Pack::new(sig.into_iter());
-        self.block.insts.push(Inst(
-            InstInfo::Builtin(builtin::FMT_VALUE, self.packtab.id(&pack)),
-            span,
-        ));
-        Ok(())
+        Ok(sig::Pack::new(sig.into_iter()))
     }
 
     fn lower_known_sym(&mut self, value: &str, span: Span) {
