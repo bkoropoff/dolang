@@ -32,6 +32,7 @@ use crate::{
         set, tuple,
     },
     sig::Unpack,
+    stdlib::fmt as fmt_obj,
     strand::Strand,
     sym::{self, Sym},
     vm::{Alloc, Vm},
@@ -39,7 +40,9 @@ use crate::{
 
 use prim::Prim;
 use repr::{Decode, Repr};
-use view::{Array, Bin, Dict, ObjectView, Range, Record, Set, Str, Tuple, View};
+use view::{
+    Array, Bin, Dict, Fmt, FmtParam, FmtValue, ObjectView, Range, Record, Set, Str, Tuple, View,
+};
 
 use self::fmt::{Format, Spec};
 
@@ -1480,6 +1483,42 @@ impl<'v> Value<'v> {
         Some(Set(self.downcast_ref(vm.builtin_types().set)?))
     }
 
+    /// Downcast value to a formatted sequence
+    #[inline]
+    pub fn as_fmt(&self, vm: &Vm<'v>) -> Option<Fmt<'v, '_>> {
+        let global = vm.state::<fmt_obj::Global<'v>>();
+        Some(Fmt::from_cast(global.types.fmt.cast(self)?))
+    }
+
+    /// Downcast value to a bound interpolation
+    #[inline]
+    pub fn as_fmt_value(&self, vm: &Vm<'v>) -> Option<FmtValue<'v, '_>> {
+        let global = vm.state::<fmt_obj::Global<'v>>();
+        Some(FmtValue::from_cast(global.types.value.cast(self)?))
+    }
+
+    /// Downcast value to an unbound parameter
+    #[inline]
+    pub fn as_fmt_param(&self, vm: &Vm<'v>) -> Option<FmtParam<'v, '_>> {
+        let global = vm.state::<fmt_obj::Global<'v>>();
+        Some(FmtParam::from_cast(global.types.param.cast(self)?))
+    }
+
+    /// Downcast value to a formatting specification.
+    ///
+    /// A specification is plain data, so it needs no view of its own.
+    #[inline]
+    pub fn as_fmt_spec(&self, vm: &Vm<'v>) -> Option<Spec> {
+        let global = vm.state::<fmt_obj::Global<'v>>();
+        Some(
+            global
+                .types
+                .spec
+                .cast(self)?
+                .enter_finalize(fmt_obj::view_spec),
+        )
+    }
+
     /// Downcast value to a read-only `range` view.
     #[inline]
     pub fn as_range(&self, vm: &Vm<'v>) -> Option<Range<'v, '_>> {
@@ -1551,6 +1590,22 @@ impl<'v> Value<'v> {
                 // Tuple
                 if let Some(tuple) = self.downcast_native(vm, bt.tuple) {
                     return View::Tuple(Tuple::from_borrow(tuple));
+                }
+                // Format types. These live in stdlib state rather than the
+                // builtin table, so they come last: one lookup covers the
+                // four, and only a value that is none of the above pays it.
+                let fmt = vm.state::<fmt_obj::Global<'v>>();
+                if let Some(seq) = fmt.types.fmt.cast(self) {
+                    return View::Fmt(Fmt::from_cast(seq));
+                }
+                if let Some(value) = fmt.types.value.cast(self) {
+                    return View::FmtValue(FmtValue::from_cast(value));
+                }
+                if let Some(param) = fmt.types.param.cast(self) {
+                    return View::FmtParam(FmtParam::from_cast(param));
+                }
+                if let Some(spec) = fmt.types.spec.cast(self) {
+                    return View::FmtSpec(spec.enter_finalize(fmt_obj::view_spec));
                 }
                 // Fallback: unknown GC object
                 View::Object(unsafe { ObjectView::from_ptr(obj.into_raw()) })

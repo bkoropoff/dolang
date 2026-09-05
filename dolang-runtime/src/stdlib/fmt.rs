@@ -1581,3 +1581,76 @@ fn parse_size<'v, 's>(
         value.to_u32(strand).map(Some)
     }
 }
+
+// Accessors backing the format views in `crate::value::view`. The views are
+// the public surface; these keep slot numbering and the annex layout in this
+// module, as the container views keep their storage details in `object`.
+
+/// Number of segments in a sequence.
+pub(crate) fn view_fmt_len<'v, 's>(
+    this: Instance<'v, '_, Fmt>,
+    strand: &mut Strand<'v, 's>,
+) -> Result<'v, 's, usize> {
+    Ref::slot::<0>(&this.borrow(strand)?)
+        .as_array(strand)
+        .unwrap()
+        .len(strand)
+}
+
+/// Writes segment `index` to `out`, reporting `false` when out of bounds.
+pub(crate) fn view_fmt_segment<'v, 's>(
+    this: Instance<'v, '_, Fmt>,
+    strand: &mut Strand<'v, 's>,
+    index: usize,
+    out: impl Output<'v>,
+) -> Result<'v, 's, bool> {
+    Ref::slot::<0>(&this.borrow(strand)?)
+        .as_array(strand)
+        .unwrap()
+        .get(strand, index, out)
+}
+
+/// Writes the bound value of an interpolation to `out`.
+pub(crate) fn view_value_bound<'v, 's>(
+    this: Instance<'v, '_, FmtValue>,
+    strand: &mut Strand<'v, 's>,
+    out: impl Output<'v>,
+) -> Result<'v, 's, ()> {
+    let borrow = this.borrow(strand)?;
+    Output::set(strand, out, Ref::slot::<0>(&borrow));
+    Ok(())
+}
+
+/// Writes the name of a parameter to `out`.
+pub(crate) fn view_param_name<'v, 's>(
+    this: Instance<'v, '_, FmtParam>,
+    strand: &mut Strand<'v, 's>,
+    out: impl Output<'v>,
+) -> Result<'v, 's, ()> {
+    let borrow = this.borrow(strand)?;
+    Output::set(strand, out, Ref::slot::<0>(&borrow));
+    Ok(())
+}
+
+/// The specification carried by an interpolation or a parameter.
+pub(crate) fn view_spec<'v, T>(this: Instance<'v, '_, T>) -> Spec
+where
+    T: Object<'v, Annex = SpecAnnex<'v>>,
+{
+    this.annex().spec
+}
+
+/// The source text an interpolation or a parameter was written as, if it came
+/// from program text rather than being built at runtime.
+pub(crate) fn view_source<'v, 's, T>(
+    this: Instance<'v, '_, T>,
+    strand: &mut Strand<'v, 's>,
+) -> Result<'v, 's, Option<String>>
+where
+    T: Object<'v, Annex = SpecAnnex<'v>>,
+{
+    let borrow = this.borrow(strand)?;
+    Ok(Ref::slot::<1>(&borrow)
+        .as_str_raw(strand)
+        .map(str::to_string))
+}

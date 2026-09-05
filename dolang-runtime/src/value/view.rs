@@ -14,12 +14,14 @@ use crate::{
     object::{
         array, dict,
         kv::{self, Entry, EntryValue},
+        native::Cast,
         protocol::{GcObjBorrow, Header},
         range, record, set,
     },
+    stdlib::fmt as stdfmt,
     strand::{Access, Strand},
     sym::Sym,
-    value::{Input, Output, Slot, Value},
+    value::{Input, Output, Slot, Value, fmt::Spec},
     vm::Alloc,
 };
 
@@ -698,6 +700,108 @@ impl<'v, 'a> Tuple<'v, 'a> {
     }
 }
 
+/// Formatted sequence view
+///
+/// A sequence is an immutable, ordered run of segments, each of which is a
+/// `Str` of literal program text, a [`FmtValue`], or a [`FmtParam`]. Nothing
+/// else can appear, so a consumer that recognizes those three has covered the
+/// sequence.
+pub struct Fmt<'v, 'a>(Cast<'v, 'a, stdfmt::Fmt>);
+
+impl<'v, 'a> Fmt<'v, 'a> {
+    pub(crate) fn from_cast(cast: Cast<'v, 'a, stdfmt::Fmt>) -> Self {
+        Self(cast)
+    }
+
+    /// Number of segments.
+    pub fn len<'s>(&self, strand: &mut Strand<'v, 's>) -> Result<'v, 's, usize> {
+        self.0
+            .enter_sync(strand, |strand, this| stdfmt::view_fmt_len(this, strand))
+    }
+
+    /// Write segment `index` to `out`. Returns `false` if out of bounds.
+    pub fn get<'s>(
+        &self,
+        strand: &mut Strand<'v, 's>,
+        index: usize,
+        out: impl Output<'v>,
+    ) -> Result<'v, 's, bool> {
+        self.0.enter_sync(strand, |strand, this| {
+            stdfmt::view_fmt_segment(this, strand, index, out)
+        })
+    }
+}
+
+/// Bound interpolation view
+///
+/// One segment of a [`Fmt`]: a value to be formatted, and the specification to
+/// format it under.
+pub struct FmtValue<'v, 'a>(Cast<'v, 'a, stdfmt::FmtValue>);
+
+impl<'v, 'a> FmtValue<'v, 'a> {
+    pub(crate) fn from_cast(cast: Cast<'v, 'a, stdfmt::FmtValue>) -> Self {
+        Self(cast)
+    }
+
+    /// Write the bound value to `out`.
+    pub fn value<'s>(
+        &self,
+        strand: &mut Strand<'v, 's>,
+        out: impl Output<'v>,
+    ) -> Result<'v, 's, ()> {
+        self.0.enter_sync(strand, |strand, this| {
+            stdfmt::view_value_bound(this, strand, out)
+        })
+    }
+
+    /// The formatting specification.
+    pub fn spec(&self, strand: &mut Strand<'v, '_>) -> Spec {
+        self.0.enter_sync(strand, |_, this| stdfmt::view_spec(this))
+    }
+
+    /// The text this was written as, or [`None`] when it was built at runtime
+    /// and so has no source.
+    pub fn source<'s>(&self, strand: &mut Strand<'v, 's>) -> Result<'v, 's, Option<String>> {
+        self.0
+            .enter_sync(strand, |strand, this| stdfmt::view_source(this, strand))
+    }
+}
+
+/// Unbound parameter view
+///
+/// One segment of a [`Fmt`]: a hole named by an `Int` or a `Sym`, and the
+/// specification it will impose once filled.
+pub struct FmtParam<'v, 'a>(Cast<'v, 'a, stdfmt::FmtParam>);
+
+impl<'v, 'a> FmtParam<'v, 'a> {
+    pub(crate) fn from_cast(cast: Cast<'v, 'a, stdfmt::FmtParam>) -> Self {
+        Self(cast)
+    }
+
+    /// Write the parameter's name to `out`.
+    pub fn name<'s>(
+        &self,
+        strand: &mut Strand<'v, 's>,
+        out: impl Output<'v>,
+    ) -> Result<'v, 's, ()> {
+        self.0.enter_sync(strand, |strand, this| {
+            stdfmt::view_param_name(this, strand, out)
+        })
+    }
+
+    /// The formatting specification.
+    pub fn spec(&self, strand: &mut Strand<'v, '_>) -> Spec {
+        self.0.enter_sync(strand, |_, this| stdfmt::view_spec(this))
+    }
+
+    /// The text this was written as, or [`None`] when it was built at runtime
+    /// and so has no source.
+    pub fn source<'s>(&self, strand: &mut Strand<'v, 's>) -> Result<'v, 's, Option<String>> {
+        self.0
+            .enter_sync(strand, |strand, this| stdfmt::view_source(this, strand))
+    }
+}
+
 /// Type-discriminating view of a [`Value`].
 ///
 /// New variants may be added as more types gain a view, so a consumer outside
@@ -729,6 +833,14 @@ pub enum View<'v, 'a> {
     Record(Record<'v, 'a>),
     /// Tuple
     Tuple(Tuple<'v, 'a>),
+    /// Formatted sequence
+    Fmt(Fmt<'v, 'a>),
+    /// Bound interpolation
+    FmtValue(FmtValue<'v, 'a>),
+    /// Unbound parameter
+    FmtParam(FmtParam<'v, 'a>),
+    /// Formatting specification
+    FmtSpec(Spec),
     /// Any value which not match the standard types above.
     Object(ObjectView<'v, 'a>),
 }
