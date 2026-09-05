@@ -94,7 +94,7 @@ def read_fedora_packages()
   let runtime = runtime()
   let pkgs = runtime.with fedora:43 do
     sqlite.open /var/lib/rpm/rpmdb.sqlite do |conn|
-      conn.prepare "SELECT key from Name" do |stmt|
+      conn.prepare t"SELECT key from Name" do |stmt|
         [...stmt.query().map do |row| row[0]]
   assert $ pkgs.contains bash
   assert $ pkgs.contains sudo

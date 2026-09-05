@@ -17,7 +17,8 @@ use dolang::runtime::{
 #[cfg(unix)]
 use dolang_vfs::Vfs;
 use libsqlite3_sys::{
-    SQLITE_OK, sqlite3, sqlite3_exec, sqlite3_prepare_v2, sqlite3_randomness, sqlite3_stmt,
+    SQLITE_OK, sqlite3, sqlite3_exec, sqlite3_finalize, sqlite3_prepare_v2, sqlite3_randomness,
+    sqlite3_stmt,
 };
 
 unsafe extern "C" {
@@ -28,7 +29,7 @@ use crate::global::Global;
 
 use super::{
     AssertSend, Epoch, map_sqlite_error,
-    statement::{Statement, StatementAnnex},
+    statement::{Statement, StatementAnnex, Template, bind_template, compile_template},
 };
 
 /// Returns a random `u32` drawn from SQLite's internal PRNG.
@@ -242,13 +243,11 @@ impl<'v> Object<'v> for Connection {
                 "prepare",
                 async move |this, strand, args, out, [mut wrapper, mut tmp]| {
                     let ([sql], [block]) = unpack!(strand, args, 1, 1)?;
-                    let sql = sql
-                        .as_str(strand)
-                        .ok_or_else(|| Error::type_error(strand, "expected string"))?;
+                    let template = compile_template(strand, &sql)?;
 
-                    let stmt = create_statement(strand, &this.annex(), &sql.pin()).await?;
+                    let stmt = create_statement(strand, &this.annex(), &template.sql).await?;
 
-                    wrap_statement(this, strand, stmt, Slot::reborrow(&mut wrapper));
+                    wrap_statement(this, strand, stmt, template, Slot::reborrow(&mut wrapper))?;
 
                     if let Some(block) = block {
                         // Call the block with the statement handle
@@ -272,13 +271,11 @@ impl<'v> Object<'v> for Connection {
                 "execute",
                 async move |this, strand, args, out, [mut wrapper, tmp]| {
                     let ([sql], [], args) = unpack!(strand, args, 1, 0, ...)?;
-                    let sql = sql
-                        .as_str(strand)
-                        .ok_or_else(|| Error::type_error(strand, "expected string"))?;
+                    let template = compile_template(strand, &sql)?;
 
-                    let stmt = create_statement(strand, &this.annex(), &sql.pin()).await?;
+                    let stmt = create_statement(strand, &this.annex(), &template.sql).await?;
 
-                    wrap_statement(this, strand, stmt, Slot::reborrow(&mut wrapper));
+                    wrap_statement(this, strand, stmt, template, Slot::reborrow(&mut wrapper))?;
                     let res = wrapper.method(strand, execute, args, out).await;
                     let _ = strand
                         .with_interrupt_mask(InterruptMask::all(), async move |strand| {
@@ -353,17 +350,30 @@ impl<'v> Object<'v> for Connection {
     }
 }
 
+/// Binds the template's own values into the fresh statement and wraps it.
+///
+/// Binding happens here rather than at each call because these values belong to
+/// the statement, not to the caller: they came from the template's text.
 fn wrap_statement<'v, 's>(
     this: Instance<'v, '_, Connection>,
     strand: &mut Strand<'v, 's>,
     stmt: *mut sqlite3_stmt,
+    template: Template,
     mut wrapper: Slot<'v, '_>,
-) {
+) -> Result<'v, 's, ()> {
     let global = this.annex().global;
+    // Nothing owns the statement yet, so a rejected template has to release it.
+    let (prebound, param_count) = match unsafe { bind_template(strand, stmt, template) } {
+        Ok(bound) => bound,
+        Err(e) => {
+            unsafe { sqlite3_finalize(stmt) };
+            return Err(e);
+        }
+    };
     global.types.statement.create_with_annex(
         strand,
         Statement::new(),
-        StatementAnnex::new(global, stmt),
+        StatementAnnex::new(global, stmt, prebound, param_count),
         Slot::reborrow(&mut wrapper),
     );
 
@@ -380,6 +390,8 @@ fn wrap_statement<'v, 's>(
                 this,
             );
         });
+
+    Ok(())
 }
 
 async fn create_statement<'v, 's>(
@@ -411,6 +423,12 @@ async fn create_statement<'v, 's>(
         })
         .await?
         .into_inner();
+    // SQLite reports success and hands back nothing at all for SQL that is
+    // empty or only a comment. Saying so here beats the "statement closed" the
+    // null pointer would otherwise provoke on first use.
+    if stmt.is_null() {
+        return Err(Error::value(strand, "SQL contains no statement"));
+    }
     Ok(stmt)
 }
 

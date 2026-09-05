@@ -15,8 +15,8 @@ Commits the transaction, making all changes permanent.
 ```
 open "mydb.sqlite" do |conn|
   conn.transaction do |tx|
-    conn.execute "UPDATE accounts SET balance = balance - 100 WHERE id = 1"
-    conn.execute "UPDATE accounts SET balance = balance + 100 WHERE id = 2"
+    conn.execute t"UPDATE accounts SET balance = balance - 100 WHERE id = 1"
+    conn.execute t"UPDATE accounts SET balance = balance + 100 WHERE id = 2"
     tx.commit()
 ```
 
@@ -29,7 +29,7 @@ Rolls back the transaction, discarding all changes.
 ```
 open "mydb.sqlite" do |conn|
   conn.transaction do |tx|
-    conn.execute "INSERT INTO audit (action) VALUES ('attempt')"
+    conn.execute t"INSERT INTO audit (action) VALUES ('attempt')"
     if should_cancel
       tx.rollback()
 ```
