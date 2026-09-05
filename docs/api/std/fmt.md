@@ -143,6 +143,11 @@ for segment = greeting
   echo $ type $segment
 ```
 
+The console is the worked example of such a consumer:
+[`term`](../term/text.md#sequences) walks a sequence segment by segment rather
+than converting it, which is what lets styling interpolated into one survive
+to the terminal.
+
 ### Equality
 
 Two sequences are equal when their segments are. How a sequence was assembled

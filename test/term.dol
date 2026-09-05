@@ -251,6 +251,48 @@ def console_formats_bound_text()
     - (term.sub can_style: true do echo (FmtValue (red.encode()) width: 5))
     - red
 
+#[test]
+def console_walks_sequences()
+  # A `t"..."` reaches the console with its interpolations still separate, so
+  # the console can render each one for itself. That is what a `"..."` cannot
+  # offer: it concatenated its interpolations when it was built, and a `Text`
+  # among them had already been flattened to its content by then.
+  let red = term.text("red", fg: :RED:)
+  assert_eq
+    - (term.sub can_style: true do echo t"s: ${red:>5}|")
+    - "s:   $ESC[31mred$ESC[0m|"
+  assert_eq
+    - (term.sub can_style: true do echo "s: ${red:>5}|")
+    - "s:   red|"
+
+  # Expanding is the console's own decision, not a conversion: no conversion
+  # expands a sequence.
+  assert_throws $TypeError do str t"s: $red"
+
+  # Every level lays out what the level inside it rendered to, and the
+  # styling comes through all of them.
+  let inner = t"[${red:^7}]"
+  assert_eq
+    - (term.sub can_style: true do echo t"<${inner:>12}>")
+    - "<   [  $ESC[31mred$ESC[0m  ]>"
+
+  # Unstyled output drops the escapes and keeps the layout, as it does for a
+  # bound `Text` on its own.
+  assert_eq (term.sub do echo t"<${inner:>12}>") "<   [  red  ]>"
+
+  # Inside a `Text` the walk is the same one, so the sequence composes with
+  # the style around it.
+  let framed = term.Style bold: true
+  assert_eq
+    - $framed(t"x ${red:>5}").encode()
+    - "$ESC[1mx   $ESC[31mred$ESC[0m$ESC[1m$ESC[0m"
+
+  # A specification asking for a debug rendering is not a request for terminal
+  # presentation, here as anywhere: it takes the ordinary sanitized path.
+  let debugged = (term.sub can_style: true do echo t"${red:?}")
+  assert (debugged.contains "term.Text")
+  assert (debugged.contains(ESC) == false)
+
 # --- Terminal output capture ----------------------------------------------
 
 # Writes `source` into the temp dir and returns the script path, so tests can

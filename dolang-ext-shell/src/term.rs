@@ -919,6 +919,18 @@ fn write_color<'v, 's>(
     }
 }
 
+/// Renders one value for the console.
+///
+/// Three shapes carry terminal structure and are walked rather than converted:
+/// a [`Text`] is written with its styling rewritten relative to `parent`, a
+/// `Fmt` is walked segment by segment, and a `FmtValue` bound to either of
+/// those is rendered by this same walk and then laid out. Everything else is
+/// converted — `verbatim` in argument position, `display` inside a `Text` —
+/// and sanitized.
+///
+/// Walking, rather than converting, is what lets styling survive interpolation:
+/// a `Text` inside a `t"..."` inside another still arrives here as a `Text`,
+/// with every enclosing specification laying out what it rendered to.
 fn append_value<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
@@ -942,7 +954,10 @@ fn append_value<'v, 's>(
             filter.finish(strand)
         });
     }
-    if let Some(encoded) = bound_text_layout(strand, global, value)? {
+    if value.is_instance_of(strand, TypeObject::Fmt) {
+        return append_segments(strand, global, out, parent, ansi, argument, value);
+    }
+    if let Some(encoded) = bound_layout(strand, global, ansi, argument, value)? {
         let mut filter = Filter::new(out, mode);
         filter.write_str(strand, &encoded)?;
         return filter.finish(strand);
@@ -956,20 +971,51 @@ fn append_value<'v, 's>(
     filter.finish(strand)
 }
 
-/// Lays out the encoded form of a `FmtValue` bound to a [`Text`], or returns
-/// `None` when `value` is not one.
+/// Appends each segment of a `Fmt` in turn.
 ///
-/// A `FmtValue` renders through the bound value's own conversions, and a `Text`
-/// converts to its content — right for a `Str`, wrong for the console. So the
-/// console applies the layout itself, to the encoding, in the same terminal
-/// cells [`Text`] measures itself in.
+/// Expanding a sequence is the console's own decision, not a conversion: no
+/// conversion expands one, precisely so that a consumer which cannot act on
+/// the segments never receives them already flattened. The console can act on
+/// them — that is what this walk is — so it expands, and each segment is taken
+/// exactly as an argument in its own right would be.
+fn append_segments<'v, 's>(
+    strand: &mut Strand<'v, 's>,
+    global: State<'v, Global<'v>>,
+    out: &mut dyn Format<'v>,
+    parent: Style,
+    ansi: bool,
+    argument: bool,
+    value: &Value<'v>,
+) -> Result<'v, 's, ()> {
+    strand.with_slots_sync(|strand, [mut len, mut segment]| {
+        value.get(strand, global.syms.len, &mut len)?;
+        let len = len.to_usize(strand)?;
+        for index in 0..len {
+            value.index(strand, index, &mut segment)?;
+            append_value(strand, global, out, parent, ansi, argument, &segment)?;
+        }
+        Ok(())
+    })
+}
+
+/// Lays out a `FmtValue` bound to something the console renders structurally —
+/// a [`Text`] or a `Fmt` — or returns `None` when `value` is neither.
+///
+/// A `FmtValue` renders through the bound value's own conversions, and neither
+/// of those two converts the way the console needs: a `Text` converts to its
+/// content, which is right for a `Str` and wrong for the console, and a
+/// sequence refuses to convert at all. So the console renders the bound value
+/// by the same walk and applies the layout itself, in the same terminal cells
+/// [`Text`] measures itself in.
 ///
 /// A specification asking for something else — a debug or numeric rendering —
 /// is left to the ordinary path: it is no longer a request for terminal
 /// presentation.
-fn bound_text_layout<'v, 's>(
+fn bound_layout<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
+    ansi: bool,
+    argument: bool,
     value: &Value<'v>,
 ) -> Result<'v, 's, Option<String>> {
     if !value.is_instance_of(strand, TypeObject::FmtValue) {
@@ -985,14 +1031,23 @@ fn bound_text_layout<'v, 's>(
     }
     strand.with_slots_sync(|strand, [mut bound]| {
         value.get(strand, global.syms.value, &mut bound)?;
-        let Some(text) = global.types.text.cast(&bound) else {
+        if global.types.text.cast(&bound).is_none()
+            && !bound.is_instance_of(strand, TypeObject::Fmt)
+        {
             return Ok(None);
-        };
-        let encoded = text.enter_sync(strand, |strand, text| {
-            let borrow = text.borrow(strand)?;
-            let text = Ref::slot::<0>(&borrow).as_str(strand).unwrap().pin();
-            Ok(String::from(&*text))
-        })?;
+        }
+        // Rendered as it would be standing alone — styling stated in full — so
+        // that the caller can rewrite it against whatever style encloses it.
+        let mut encoded = String::new();
+        append_value(
+            strand,
+            global,
+            &mut encoded,
+            Style::default(),
+            ansi,
+            argument,
+            &bound,
+        )?;
         let mut laid_out = String::new();
         lay_out(strand, &spec, &encoded, &mut laid_out)?;
         Ok(Some(laid_out))
