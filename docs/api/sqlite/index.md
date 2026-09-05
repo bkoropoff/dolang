@@ -3,6 +3,12 @@
 The `sqlite` module provides functions and types for working with SQLite
 databases.
 
+Every SQL argument is a [formatted sequence](../std/fmt.md) — a `t"..."` — and
+never a plain [`Str`](../std/str.md). Only a template's literal text becomes
+SQL; an interpolated value is bound as a parameter, and `${#name}` writes a hole
+for a prepared statement to fill. See
+[Parameter Binding](./statement.md#parameter-binding).
+
 This API is partially VFS-aware. It can successfully open databases via the
 Unix socket transport on Unix hosts, such as `docker.with` or `sudo.with`.
 Remote transports and Windows UAC elevation are not presently supported.
@@ -42,7 +48,7 @@ conn2.close()
 # Using block form (auto-closes)
 open mydb.sqlite do |conn|
   conn.execute
-    "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT)"
+    t"CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT)"
 ```
 
 ## Types
@@ -58,10 +64,10 @@ open mydb.sqlite do |conn|
 ```
 open "mydb.sqlite" do |conn|
   conn.execute
-    "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT)"
-  conn.execute "INSERT INTO users (name) VALUES (:name)"
+    t"CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT)"
+  conn.execute t"INSERT INTO users (name) VALUES (${#name})"
     name: "Alice"
-  conn.execute "INSERT INTO users (name) VALUES (:name)"
+  conn.execute t"INSERT INTO users (name) VALUES (${#name})"
     name: "Bob"
 ```
 
@@ -69,7 +75,7 @@ open "mydb.sqlite" do |conn|
 
 ```
 open "mydb.sqlite" do |conn|
-  conn.prepare "SELECT * FROM users WHERE name = :name" do |stmt|
+  conn.prepare t"SELECT * FROM users WHERE name = ${#name}" do |stmt|
     for row = stmt.query name: "Alice"
       echo "Found: $(row["name"])"
 ```
@@ -80,7 +86,7 @@ open "mydb.sqlite" do |conn|
 open "mydb.sqlite" do |conn|
   conn.transaction do |_|
     conn.execute
-      "UPDATE accounts SET balance = balance - 100 WHERE id = 1"
+      t"UPDATE accounts SET balance = balance - 100 WHERE id = 1"
     conn.execute
-      "UPDATE accounts SET balance = balance + 100 WHERE id = 2"
+      t"UPDATE accounts SET balance = balance + 100 WHERE id = 2"
 ```

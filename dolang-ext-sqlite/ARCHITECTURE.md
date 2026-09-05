@@ -8,12 +8,12 @@ runtime, and supporting file I/O through the shell VFS on Unix.
 
 Four object types are exposed to Do programs:
 
-- **Connection** - Database connection. Methods: `prepare`, `query`, `execute`,
-  `close`, `transaction`. Has a strand-level `in_use` flag that prevents
-  concurrent access from multiple strands.
+- **Connection** - Database connection. Methods: `prepare`, `execute`, `close`,
+  `transaction`. Has a strand-level `in_use` flag that prevents concurrent
+  access from multiple strands.
 - **Statement** - Prepared SQL statement. Methods: `query`, `execute`, `close`.
-  Supports named parameters (`:name` syntax) bound from a Do keyword-argument
-  dict.
+  Holds the values its template carried and rebinds them on every call; the
+  holes the template left are filled from the call's arguments.
 - **Rows** - Lazy iterator over result rows. Invalidated if its statement is
   reused.
 - **Row** - Single result row. Fields are accessible by name or integer index.
@@ -21,6 +21,34 @@ Four object types are exposed to Do programs:
   depending on how the row is being consumed (see Epoch Counters below).
 - **Transaction** - Handle returned by `connection.transaction()`. Commits or
   rolls back when the enclosing block returns.
+
+## SQL Templates
+
+SQL arrives as a `Fmt` — a `t"..."` — never as a `Str`, which cannot say which
+of its text is program text and which is data. `compile_template` walks the
+sequence once and turns it into statement text: a literal `Str` segment is
+appended verbatim, and every other segment becomes a placeholder.
+
+Every placeholder is a **named** SQLite parameter, mangled where the language's
+own name would be ambiguous: an interpolated value becomes `:0v<k>`, a `${#0}`
+becomes `:0p<0>`, and a `${#name}` stays `:name`. Naming them all is what makes
+the scheme correct rather than merely tidy. SQLite gives a named wildcard the
+next free index while `?NNN` takes NNN literally, so mixing the forms aliases
+them in text order — `select :a, ?1` is one parameter, not two. With everything
+named, SQLite assigns dense indices and owns the hole-to-index mapping, which
+the extension therefore never has to store. The mangled forms begin with a
+digit, which no `${#...}` name can, so a template cannot collide with one.
+
+The parameter count SQLite reports after preparing must match what the walk
+emitted. Anything more is a placeholder of SQLite's own left in literal text: a
+real parameter nothing will fill, which would step as NULL.
+
+Each call clears every binding and rebinds from scratch — the statement's own
+values from `StatementAnnex::prebound`, the rest from the call's arguments. That
+is what makes exhaustiveness a count rather than bookkeeping: each argument
+names one parameter and the prebound indices are disjoint, so a bind total short
+of the parameter count means a hole nobody filled, and the culprit's name comes
+back from `sqlite3_bind_parameter_name`.
 
 ## Async Bridging
 

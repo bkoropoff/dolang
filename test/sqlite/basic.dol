@@ -9,16 +9,21 @@ import sqlite
   fs:
     - Path
   std:
+    - MissingKeyError
+    - MissingPosError
+    - TypeError
     - UnexpectedKeyError
+    - UnexpectedPosError
+    - ValueError
 
 #[test]
 #[vfs windows: false remote: false]
 def basic()
   sqlite.open (Path "test.db") do |conn|
-    conn.execute "CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)"
-    conn.execute "INSERT INTO test (name) VALUES ('Alice')"
+    conn.execute t"CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)"
+    conn.execute t"INSERT INTO test (name) VALUES ('Alice')"
 
-    conn.prepare "SELECT name FROM test" do |stmt|
+    conn.prepare t"SELECT name FROM test" do |stmt|
       let rows = [...stmt.query()]
       assert_eq $rows.len 1
       assert_eq $rows[0]["name"] "Alice"
@@ -28,9 +33,9 @@ def basic()
 def transaction()
   sqlite.open "test.db" do |conn|
     conn.transaction do |tx|
-      conn.execute "CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)"
+      conn.execute t"CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)"
 
-      conn.prepare "INSERT INTO test (name) VALUES (:name)" do |stmt|
+      conn.prepare t"INSERT INTO test (name) VALUES (${#name})" do |stmt|
         let insert_count = stmt.execute name: "Alice"
         assert_eq $insert_count 1
 
@@ -39,7 +44,7 @@ def transaction()
 
       tx.commit()
 
-    conn.prepare "SELECT name FROM test WHERE name = :name" do |stmt|
+    conn.prepare t"SELECT name FROM test WHERE name = ${#name}" do |stmt|
       let rows = [...stmt.query name: "Alice"]
       assert_eq $rows.len 1
       assert_eq $rows[0]["name"] "Alice"
@@ -50,13 +55,13 @@ def transaction()
 def boolean_round_trip()
   sqlite.open ":memory:" do |conn|
     conn.execute
-      "CREATE TABLE test (id INTEGER PRIMARY KEY, flag BOOLEAN, count INTEGER)"
+      t"CREATE TABLE test (id INTEGER PRIMARY KEY, flag BOOLEAN, count INTEGER)"
 
-    conn.prepare "INSERT INTO test (flag, count) VALUES (:flag, :count)" do |stmt|
+    conn.prepare t"INSERT INTO test (flag, count) VALUES (${#flag}, ${#count})" do |stmt|
       stmt.execute flag: true count: 42
       stmt.execute flag: false count: 0
 
-    conn.prepare "SELECT flag, count FROM test ORDER BY id" do |stmt|
+    conn.prepare t"SELECT flag, count FROM test ORDER BY id" do |stmt|
       let rows = [...stmt.query()]
 
       let first_flag = rows[0]["flag"]
@@ -75,10 +80,10 @@ def boolean_round_trip()
 #[test]
 def boolean()
   sqlite.open ":memory:" do |conn|
-    conn.execute "CREATE TABLE t (v BOOLEAN)"
-    conn.execute "INSERT INTO t VALUES (2)"
+    conn.execute t"CREATE TABLE t (v BOOLEAN)"
+    conn.execute t"INSERT INTO t VALUES (2)"
 
-    conn.prepare "SELECT v FROM t" do |stmt|
+    conn.prepare t"SELECT v FROM t" do |stmt|
       for row = stmt.query()
         let value = row["v"]
         assert_type $Bool $value
@@ -87,11 +92,11 @@ def boolean()
 #[test]
 def unpack_by_name()
   sqlite.open ":memory:" do |conn|
-    conn.execute "CREATE TABLE t (name TEXT, active BOOLEAN)"
-    conn.execute "INSERT INTO t VALUES ('Alice', 1)"
-    conn.execute "INSERT INTO t VALUES ('Bob', 0)"
+    conn.execute t"CREATE TABLE t (name TEXT, active BOOLEAN)"
+    conn.execute t"INSERT INTO t VALUES ('Alice', 1)"
+    conn.execute t"INSERT INTO t VALUES ('Bob', 0)"
 
-    conn.prepare "SELECT name, active FROM t ORDER BY name" do |stmt|
+    conn.prepare t"SELECT name, active FROM t ORDER BY name" do |stmt|
       for row = stmt.query()
         let :name :active = row
         assert_type $Bool $active
@@ -103,10 +108,10 @@ def unpack_by_name()
 #[test]
 def exhaustive_unpack()
   sqlite.open ":memory:" do |conn|
-    conn.execute "CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT, value REAL)"
-    conn.execute "INSERT INTO test VALUES (1, 'test', 3.14)"
+    conn.execute t"CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT, value REAL)"
+    conn.execute t"INSERT INTO test VALUES (1, 'test', 3.14)"
 
-    conn.prepare "SELECT * FROM test" do |stmt|
+    conn.prepare t"SELECT * FROM test" do |stmt|
       for row = stmt.query()
         assert_throws $UnexpectedKeyError do
           let id: _ = row
@@ -114,10 +119,10 @@ def exhaustive_unpack()
 #[test]
 def partial_unpack()
   sqlite.open ":memory:" do |conn|
-    conn.execute "CREATE TABLE test (a INTEGER, b TEXT, c REAL, d INTEGER)"
-    conn.execute "INSERT INTO test VALUES (1, 'two', 3.0, 4)"
+    conn.execute t"CREATE TABLE test (a INTEGER, b TEXT, c REAL, d INTEGER)"
+    conn.execute t"INSERT INTO test VALUES (1, 'two', 3.0, 4)"
 
-    conn.prepare "SELECT * FROM test" do |stmt|
+    conn.prepare t"SELECT * FROM test" do |stmt|
       for row = stmt.query()
         let :a ...rest = row
         assert_eq $a 1
@@ -131,10 +136,10 @@ def partial_unpack()
 #[test]
 def repeat_unpack_consumes()
   sqlite.open ":memory:" do |conn|
-    conn.execute "CREATE TABLE test (x INTEGER, y TEXT, z REAL)"
-    conn.execute "INSERT INTO test VALUES (10, 'twenty', 30.0)"
+    conn.execute t"CREATE TABLE test (x INTEGER, y TEXT, z REAL)"
+    conn.execute t"INSERT INTO test VALUES (10, 'twenty', 30.0)"
 
-    conn.prepare "SELECT * FROM test" do |stmt|
+    conn.prepare t"SELECT * FROM test" do |stmt|
       for row = stmt.query()
         let :x ...rest = row
         assert_eq $x 10
@@ -145,3 +150,162 @@ def repeat_unpack_consumes()
         let remaining = [...rest]
         assert_eq $remaining.len 1
         assert_eq $remaining[0] 30.0
+
+#[test]
+def interpolation_binds()
+  # The point of the exercise: an interpolated value reaches SQLite through
+  # `sqlite3_bind_*`, so it is data no matter what it looks like as text.
+  sqlite.open ":memory:" do |conn|
+    conn.execute t"CREATE TABLE t (name TEXT)"
+
+    let evil = "'); DROP TABLE t; --"
+    conn.execute t"INSERT INTO t (name) VALUES ($evil)"
+
+    conn.prepare t"SELECT name FROM t" do |stmt|
+      let rows = [...stmt.query()]
+      assert_eq $rows.len 1
+      assert_eq $rows[0]["name"] $evil
+
+#[test]
+def interpolated_types()
+  sqlite.open ":memory:" do |conn|
+    conn.execute t"CREATE TABLE t (a, b, c, d, e, f)"
+
+    let nothing = nil
+    let flag = true
+    let count = 42
+    let ratio = 1.5
+    let text = "hello"
+    let bytes = b"\x01\x02"
+    conn.execute
+      t"INSERT INTO t VALUES ($nothing, $flag, $count, $ratio, $text, $bytes)"
+
+    conn.prepare t"SELECT * FROM t" do |stmt|
+      for row = stmt.query()
+        assert_eq $row[0] nil
+        assert_eq $row[1] 1
+        assert_eq $row[2] 42
+        assert_eq $row[3] 1.5
+        assert_eq $row[4] "hello"
+        assert_eq $row[5] b"\x01\x02"
+
+#[test]
+def positional_parameters()
+  sqlite.open ":memory:" do |conn|
+    conn.execute t"CREATE TABLE t (a INTEGER, b TEXT)"
+
+    conn.prepare t"INSERT INTO t VALUES (${#0}, ${#1})" do |stmt|
+      assert_eq (stmt.execute 1 "one") 1
+      assert_eq (stmt.execute 2 "two") 1
+
+    conn.prepare t"SELECT b FROM t WHERE a = ${#0}" do |stmt|
+      let rows = [...stmt.query 2]
+      assert_eq $rows.len 1
+      assert_eq $rows[0]["b"] "two"
+
+#[test]
+def repeated_parameter()
+  # One hole used twice is one parameter, filled once.
+  sqlite.open ":memory:" do |conn|
+    conn.execute t"CREATE TABLE t (a INTEGER, b INTEGER)"
+    conn.execute t"INSERT INTO t VALUES (3, 3)"
+    conn.execute t"INSERT INTO t VALUES (3, 4)"
+
+    conn.prepare t"SELECT a FROM t WHERE a = ${#n} AND b = ${#n}" do |stmt|
+      let rows = [...stmt.query n: 3]
+      assert_eq $rows.len 1
+
+#[test]
+def prebound_parameter()
+  # `Fmt.bind` fills some holes before the statement is prepared; what it fills
+  # becomes the statement's own and is no longer asked for.
+  sqlite.open ":memory:" do |conn|
+    conn.execute t"CREATE TABLE t (a INTEGER, b TEXT)"
+
+    let template = t"INSERT INTO t VALUES (${#a}, ${#b})"
+    conn.prepare (template.bind {a: 7}) do |stmt|
+      assert_eq (stmt.execute b: "seven") 1
+      assert_throws $UnexpectedKeyError do
+        stmt.execute a: 8 b: "eight"
+
+    conn.prepare t"SELECT a, b FROM t" do |stmt|
+      let rows = [...stmt.query()]
+      assert_eq $rows[0]["a"] 7
+      assert_eq $rows[0]["b"] "seven"
+
+#[test]
+def parameter_mismatch()
+  sqlite.open ":memory:" do |conn|
+    conn.execute t"CREATE TABLE t (a INTEGER, b INTEGER)"
+
+    conn.prepare t"INSERT INTO t VALUES (${#0}, ${#name})" do |stmt|
+      assert_throws $MissingPosError do
+        stmt.execute name: 1
+      assert_throws $MissingKeyError do
+        stmt.execute 1
+      assert_throws $UnexpectedPosError do
+        stmt.execute 1 2 name: 3
+      assert_throws $UnexpectedKeyError do
+        stmt.execute 1 name: 2 other: 3
+
+#[test]
+def rejects_plain_string()
+  # A `Str` is not accepted as a fallback: the fallback would be the shorter
+  # spelling of the injection-shaped path.
+  sqlite.open ":memory:" do |conn|
+    assert_throws $TypeError do
+      conn.execute "CREATE TABLE t (a INTEGER)"
+
+#[test]
+def rejects_native_placeholder()
+  # A placeholder of SQLite's own is opaque to the binder, so it would step as
+  # NULL rather than being filled.
+  sqlite.open ":memory:" do |conn|
+    conn.execute t"CREATE TABLE t (a INTEGER)"
+
+    assert_throws $ValueError do
+      conn.prepare t"INSERT INTO t VALUES (:a)"
+    assert_throws $ValueError do
+      conn.prepare t"INSERT INTO t VALUES (?)"
+
+#[test]
+def rejects_specification()
+  sqlite.open ":memory:" do |conn|
+    conn.execute t"CREATE TABLE t (a TEXT)"
+
+    let value = "x"
+    assert_throws $ValueError do
+      conn.prepare t"INSERT INTO t VALUES (${#0:>10})"
+    assert_throws $ValueError do
+      conn.prepare t"INSERT INTO t VALUES (${value:>10})"
+
+#[test]
+def rejects_empty()
+  sqlite.open ":memory:" do |conn|
+    assert_throws $ValueError do
+      conn.execute t""
+
+#[test]
+def placeholder_is_its_own_token()
+  # A SQLite parameter name runs to the first non-identifier character, so a
+  # placeholder abutting literal text must not absorb it.
+  sqlite.open ":memory:" do |conn|
+    conn.execute t"CREATE TABLE t (a TEXT)"
+
+    let prefix = "pre"
+    conn.execute t"INSERT INTO t VALUES ($prefix)"
+
+    conn.prepare t"SELECT a FROM t WHERE a = ${#a}" do |stmt|
+      let rows = [...stmt.query a: "pre"]
+      assert_eq $rows.len 1
+
+#[test]
+def quoted_interpolation_rejected()
+  # Quoting an interpolation puts the placeholder inside a string literal, where
+  # it binds nothing. The parameter count catches it at prepare.
+  sqlite.open ":memory:" do |conn|
+    conn.execute t"CREATE TABLE t (a TEXT)"
+
+    let name = "Alice"
+    assert_throws $ValueError do
+      conn.execute t"INSERT INTO t VALUES ('$name')"

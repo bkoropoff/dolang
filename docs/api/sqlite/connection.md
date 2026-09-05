@@ -20,10 +20,17 @@ need to be reused.
 
 #### Parameters
 
-| Name  | Type                   | Description                         |
-| ----- | ---------------------- | ----------------------------------- |
-| `sql` | [`Str`](../std/str.md) | SQL statement to execute            |
-| `...` | any                    | Key arguments for parameter binding |
+| Name  | Type                   | Description                                  |
+| ----- | ---------------------- | -------------------------------------------- |
+| `sql` | [`Fmt`](../std/fmt.md) | SQL template                                 |
+| `...` | any                    | Values for the template's parameters         |
+
+##### SQL Is a Template
+
+`sql` is a [formatted sequence](../std/fmt.md) — a `t"..."` — and a
+[`Str`](../std/str.md) raises. Only the literal text of the template becomes
+SQL; an interpolated value is bound as a parameter, so it is data whatever it
+looks like. See [Parameter Binding](./statement.md#parameter-binding).
 
 #### Returns
 
@@ -33,9 +40,10 @@ need to be reused.
 
 ```
 open "mydb.sqlite" do |conn|
-  conn.execute "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)"
-  conn.execute "INSERT INTO users (name) VALUES (:name)"
-    name: "Alice"
+  conn.execute t"CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)"
+
+  let name = "Alice"
+  conn.execute t"INSERT INTO users (name) VALUES ($name)"
 ```
 
 ### `prepare sql func?`
@@ -46,8 +54,13 @@ Prepares a SQL statement for repeated execution.
 
 | Name   | Type                   | Description                                               |
 | ------ | ---------------------- | --------------------------------------------------------- |
-| `sql`  | [`Str`](../std/str.md) | SQL statement to prepare                                  |
+| `sql`  | [`Fmt`](../std/fmt.md) | SQL template                                              |
 | `func` | `Func`                 | Function to run with the statement; auto-closes when done |
+
+A parameter written `${#name}` or `${#0}` stays unfilled and is supplied at each
+[`query`](./statement.md#query-args) or
+[`execute`](./statement.md#execute-args). An interpolated value is bound once,
+when the statement is prepared.
 
 #### Returns
 
@@ -59,12 +72,12 @@ the result of calling `func`
 ```
 open "mydb.sqlite" do |conn|
   # Using block form (auto-closes)
-  conn.prepare "SELECT * FROM users WHERE id = :id" do |stmt|
+  conn.prepare t"SELECT * FROM users WHERE id = ${#id}" do |stmt|
     for row = stmt.query id: 1
       echo "User: $(row["name"])"
 
   # Manual management
-  let stmt = conn.prepare "INSERT INTO users (name) VALUES (:name)"
+  let stmt = conn.prepare t"INSERT INTO users (name) VALUES (${#name})"
   stmt.execute name: "Charlie"
   stmt.close()
 ```
@@ -99,12 +112,12 @@ until it succeeds, is explicitly rolled back, or retries are exhausted.
 ```
 open "mydb.sqlite" do |conn|
   conn.transaction do |_|
-    conn.execute "UPDATE accounts SET balance = balance - 100 WHERE id = 1"
-    conn.execute "UPDATE accounts SET balance = balance + 100 WHERE id = 2"
+    conn.execute t"UPDATE accounts SET balance = balance - 100 WHERE id = 1"
+    conn.execute t"UPDATE accounts SET balance = balance + 100 WHERE id = 2"
 
   # Explicit rollback example
   conn.transaction do |tx|
-    conn.execute "INSERT INTO audit (action) VALUES ('attempt')"
+    conn.execute t"INSERT INTO audit (action) VALUES ('attempt')"
     if should_cancel
       tx.rollback()
 ```
@@ -132,12 +145,12 @@ entire transaction is retried. See [Transaction](./transaction.md) for details.
 ```
 # High-contention scenario: retry up to 20 times, wait up to 5s
 open "mydb.sqlite" retries: 20 max_wait: 5000 do |conn|
-  conn.execute "UPDATE counters SET value = value + 1"
+  conn.execute t"UPDATE counters SET value = value + 1"
 
 # Disable automatic retry
 open "mydb.sqlite" retries: 0 do |conn|
   do
-    conn.execute "UPDATE counters SET value = value + 1"
+    conn.execute t"UPDATE counters SET value = value + 1"
   catch Busy
     echo "Database is busy"
 ```

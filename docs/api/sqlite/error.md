@@ -8,7 +8,7 @@ Catching `Error` also catches [`Busy`](./busy.md).
 ```
 open "mydb.sqlite" do |conn|
   do
-    conn.execute "INSERT INTO users (name) VALUES (:name)" name: "Alice"
+    conn.execute t"INSERT INTO users (name) VALUES (${#name})" name: "Alice"
   catch Busy
     echo "Database is busy"
   catch Error: e

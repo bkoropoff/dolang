@@ -20,8 +20,10 @@ one. Segments are indexable, iterable, spreadable, and destructurable.
 A sequence written as `t"..."` carries a guarantee: its `Str` segments are
 program text, and everything interpolated into it is a `FmtValue`. That is
 what lets a consumer treat the literal segments as the trusted skeleton of a
-command — the SQL around the parameters, say — and each interpolation as data
-to be bound or quoted.
+command and each interpolation as data to be bound or quoted.
+[`sqlite`](../sqlite/index.md) is the consumer that acts on it: it takes SQL
+only as a sequence, compiles the literal segments to statement text, and binds
+everything else as a parameter.
 
 Two rules keep that guarantee usable.
 
