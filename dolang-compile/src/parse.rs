@@ -2755,20 +2755,20 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_cmd_vert_line_expr(&mut self, scope: &mut Scope) -> Result<Expr> {
+    fn parse_cmd_vert_line_expr(&mut self, scope: &mut Scope, allow_object: bool) -> Result<Expr> {
         use self::Keyword;
         use self::Op;
         use TokenInfo::*;
         match self.peek()? {
             Some(token!(expr_start!())) => {
                 let expr = self.parse_expr(scope, ExprMode::Shell)?;
-                if let Some(token!(Colon)) = self.peek()? {
+                if allow_object && let Some(token!(Colon)) = self.peek()? {
                     let colon_span = self.advance();
                     let sep = self.expect(scope, &[ExpectKind::ArgSep])?;
                     self.add_indent(sep.end);
                     let arg = Arg::DynamicKey(Pair {
                         key: expr,
-                        value: self.parse_cmd_vert_line_expr(scope)?,
+                        value: self.parse_cmd_vert_line_expr(scope, false)?,
                         colon_span: Some(colon_span),
                         delim_span: None,
                     });
@@ -2926,7 +2926,7 @@ impl<'a> Parser<'a> {
                 self.parse_data(scope, vec![], false)?
             } else {
                 self.expect(scope, &[ExpectKind::ArgSep])?;
-                self.parse_cmd_vert_line_expr(scope)?
+                self.parse_cmd_vert_line_expr(scope, false)?
             };
             args.push(Arg::DynamicKey(Pair {
                 key,
@@ -2986,7 +2986,7 @@ impl<'a> Parser<'a> {
                         let expr = if let Some(token!(Keyword(Keyword::Do))) = self.peek()? {
                             self.parse_do_block(scope, true)?
                         } else {
-                            self.parse_cmd_vert_line_expr(scope)?
+                            self.parse_cmd_vert_line_expr(scope, false)?
                         };
                         args.push(Arg::Key(Key {
                             key_span: span,
@@ -3161,7 +3161,7 @@ impl<'a> Parser<'a> {
                         self.advance();
                         // Parse first item on this line
                         let arg = Arg::Key(Key {
-                            expr: self.parse_cmd_vert_line_expr(scope)?,
+                            expr: self.parse_cmd_vert_line_expr(scope, false)?,
                             key_span: span,
                             colon_span: span.after_right_char(),
                             delim_span: None,
@@ -3181,7 +3181,7 @@ impl<'a> Parser<'a> {
                     )?,
                 }
             }
-            _ => self.parse_cmd_vert_line_expr(scope)?,
+            _ => self.parse_cmd_vert_line_expr(scope, true)?,
         };
         self.expect(scope, &[ExpectKind::Dedent])?;
         Ok(Arg::Pos(Single {
