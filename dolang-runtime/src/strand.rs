@@ -1084,6 +1084,26 @@ impl<'v, 's> Strand<'v, 's> {
         self.pin_future_call(f).await
     }
 
+    /// Run `f` one call level deeper.
+    #[inline]
+    pub async fn recursion_guard<R>(
+        &mut self,
+        f: impl AsyncFnOnce(&mut Strand<'v, 's>) -> Result<'v, 's, R>,
+    ) -> Result<'v, 's, R> {
+        let _depth = self.inner.push_call_depth()?;
+        self.pin_future_call(f).await
+    }
+
+    /// Run `f` one call level deeper, synchronous variant.
+    #[inline]
+    pub fn recursion_guard_sync<R>(
+        &mut self,
+        f: impl FnOnce(&mut Strand<'v, 's>) -> Result<'v, 's, R>,
+    ) -> Result<'v, 's, R> {
+        let _depth = self.inner.push_call_depth()?;
+        f(self)
+    }
+
     /// Run `f` with `interrupt` as the strand's selected token.
     ///
     /// The selection is dynamically scoped: interrupt polling and futures
