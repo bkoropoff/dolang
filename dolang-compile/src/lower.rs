@@ -353,6 +353,72 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
         Ok(())
     }
 
+    /// Lowers a `t"..."` sequence: one argument per segment.
+    ///
+    /// A run of literal text folds to a single constant, exactly as
+    /// concatenation folds one, so the segments a consumer sees are the
+    /// literal runs and the interpolations between them.
+    fn lower_fmt_seq(&mut self, exprs: &'a [Expr], span: Span) -> Result<()> {
+        let mut acc = String::new();
+        let mut count = 0;
+
+        for expr in exprs.iter() {
+            match expr {
+                Expr::Literal(span) => acc.push_str(self.file.str(*span)),
+                Expr::Escape(char, _) => acc.push(*char),
+                other => {
+                    if !acc.is_empty() {
+                        self.lower_fmt_seq_literal(&acc, span);
+                        acc.clear();
+                        count += 1;
+                    }
+                    self.lower_expr(other)?;
+                    if !matches!(other, Expr::Fmt { .. }) {
+                        // An interpolation stating no specification is an
+                        // interpolation all the same: bind it, so every
+                        // segment is either literal text or a bound value.
+                        self.lower_bare_interp(other.span());
+                    }
+                    count += 1;
+                }
+            }
+        }
+        if !acc.is_empty() {
+            self.lower_fmt_seq_literal(&acc, span);
+            count += 1;
+        }
+
+        let sig = sig::Pack::new(vec![sig::Arg::Value; count].into_iter());
+        self.block.insts.push(Inst(
+            InstInfo::Builtin(builtin::FMT, self.packtab.id(&sig)),
+            span,
+        ));
+        Ok(())
+    }
+
+    /// Binds the value just lowered to an empty specification, recording the
+    /// text it was written as.
+    fn lower_bare_interp(&mut self, span: Span) {
+        let cid = self.consttab.str(self.bintab.id_str(self.file.str(span)));
+        self.block.insts.push(Inst(InstInfo::LoadConst(cid), span));
+        let sig = sig::Pack::new(
+            [
+                sig::Arg::Value,
+                sig::Arg::Key(self.symtab.id(&self.bintab.id_str("source"))),
+            ]
+            .into_iter(),
+        );
+        self.block.insts.push(Inst(
+            InstInfo::Builtin(builtin::FMT_VALUE, self.packtab.id(&sig)),
+            span,
+        ));
+    }
+
+    fn lower_fmt_seq_literal(&mut self, text: &str, span: Span) {
+        let cid = self.consttab.str(self.bintab.id_str(text));
+        self.block.insts.push(Inst(InstInfo::LoadConst(cid), span));
+    }
+
     fn lower_bin_concat(&mut self, exprs: &'a [Expr], span: Span) -> Result<()> {
         let mut acc: Vec<u8> = Vec::new();
         let mut count = 0usize;
@@ -418,6 +484,10 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
             Expr::Escape(char, span) => {
                 let cid = self.consttab.str(self.bintab.id_str(&format!("{char}")));
                 self.block.insts.push(Inst(InstInfo::LoadConst(cid), *span));
+            }
+            Expr::FmtSeq { exprs, open, close } => {
+                let span = close.map_or(*open, |close| *open | close);
+                self.lower_fmt_seq(exprs, span)?;
             }
             Expr::BinConcat { exprs, open, close } => {
                 let span = *open | *close;
@@ -706,9 +776,14 @@ impl<'a, 'c, 'q> Scope<'a, 'c, 'q> {
             );
             sig.push(sig::Arg::Key(self.symtab.id(&self.bintab.id_str("kind"))));
         }
+        // The interpolation keeps the text it was written as, sigil and
+        // delimiters included, so a consumer can reproduce the source form.
+        let cid = self.consttab.str(self.bintab.id_str(self.file.str(span)));
+        self.block.insts.push(Inst(InstInfo::LoadConst(cid), span));
+        sig.push(sig::Arg::Key(self.symtab.id(&self.bintab.id_str("source"))));
         let pack = sig::Pack::new(sig.into_iter());
         self.block.insts.push(Inst(
-            InstInfo::Builtin(builtin::FMT, self.packtab.id(&pack)),
+            InstInfo::Builtin(builtin::FMT_VALUE, self.packtab.id(&pack)),
             span,
         ));
         Ok(())

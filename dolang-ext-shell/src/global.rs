@@ -180,8 +180,10 @@ pub(crate) struct Types<'v> {
 pub(crate) struct Syms<'v> {
     pub(crate) any: Sym<'v, 'v>,
     pub(crate) code: Sym<'v, 'v>,
-    /// `Fmt.value`, the value a format specification is bound to
+    /// `FmtValue.value`, the value a format specification is bound to
     pub(crate) value: Sym<'v, 'v>,
+    /// `Fmt.len`, the number of segments in a sequence
+    pub(crate) len: Sym<'v, 'v>,
     pub(crate) block_device: Sym<'v, 'v>,
     pub(crate) char_device: Sym<'v, 'v>,
     pub(crate) chunk: Sym<'v, 'v>,
@@ -729,6 +731,7 @@ impl<'v> Global<'v> {
                 any: builder.sym("ANY"),
                 code: builder.sym("code"),
                 value: builder.sym("value"),
+                len: builder.sym("len"),
                 block_device: builder.sym("BLOCK_DEVICE"),
                 char_device: builder.sym("CHAR_DEVICE"),
                 chunk: builder.sym("CHUNK"),

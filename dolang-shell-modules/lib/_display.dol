@@ -130,7 +130,7 @@ def print_block value indent lead
       if (key_width > width)
         width = key_width
   # The `:` is part of what gets laid out, hence the extra column.
-  let column = fmt width: (width + 1)
+  let column = std.FmtSpec width: (width + 1)
   let first = true
   for key item = value
     let start = if first

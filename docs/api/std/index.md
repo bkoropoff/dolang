@@ -21,7 +21,8 @@ The `std` module provides core language facilities.
 | [`Error`](./error.md)                             | Abstract base error type                   |
 | [`FieldError`](./field-error.md)                  | Nonexistent field access                   |
 | [`Float`](./float.md)                             | 64-bit floating point                      |
-| [`Fmt`](./fmt.md)                                 | Value bound to formatting options          |
+| [`Fmt`](./fmt.md)                                 | Sequence of text and interpolations        |
+| [`FmtValue`](./fmt-value.md)                      | Value bound to formatting options          |
 | [`FmtSpec`](./fmt-spec.md)                        | Reusable formatting options                |
 | [`Func`](./func.md)                               | Function value                             |
 | [`Getter`](./getter.md)                           | Abstract getter protocol type              |
@@ -107,35 +108,6 @@ data](../../language/vertical-layout.md#vertical-data) instead.
 ### `float value`
 
 Coerces or parses a value as a [`Float`](./float.md).
-
-### `fmt value? :fill? :align? :sign? :width? :precision? :alt? :kind?`
-
-Creates reusable formatting options, optionally bound to a value.
-
-#### Parameters
-
-| Name        | Type  | Description                             |
-| ----------- | ----- | --------------------------------------- |
-| `value`     | ?     | Value to bind                           |
-| `fill`      | ?     | Fill character, `:ZERO:`, or nil        |
-| `align`     | Sym?  | `:LEFT:`, `:RIGHT:`, or `:CENTER:`      |
-| `sign`      | Sym?  | `:PLUS:` or `:SPACE:`                   |
-| `width`     | Int?  | Minimum width in grapheme clusters      |
-| `precision` | Int?  | Numeric precision or maximum graphemes  |
-| `alt`       | Bool? | Enables alternate formatting            |
-| `kind`      | Sym?  | Representation kind                     |
-
-#### Returns
-
-[`FmtSpec`](./fmt-spec.md) when `value` is omitted; otherwise
-[`Fmt`](./fmt.md).
-
-#### Example
-
-```
-let money = fmt precision: 2 kind: :FIXED:
-echo "total: $(money $amount)"
-```
 
 ### `getter func`
 

@@ -1,3 +1,6 @@
+import std:
+  - FmtValue
+
 # BinBuf: mutable byte buffer
 
 # Construction
@@ -97,7 +100,7 @@ assert (buf17.ends_with b"bar")
 assert (buf17.contains b"oob")
 assert_eq $buf17[2..] b"obar"
 assert_eq $buf17[2..4] b"ob"
-assert_eq (str (fmt (buf17[0..]) kind: :HEX:)) "666f6f626172"
+assert_eq (str (FmtValue (buf17[0..]) kind: :HEX:)) "666f6f626172"
 
 # equality/ordering compare BinBuf to BinBuf only
 assert_eq (BinBuf(b"abc")) (BinBuf(b"abc"))

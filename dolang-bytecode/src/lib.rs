@@ -275,6 +275,7 @@ pub enum Builtin {
     Throw,
     ConcatBin,
     Range,
+    FmtValue,
     Fmt,
     _LEN,
 }
@@ -293,6 +294,7 @@ pub mod builtin {
     pub const THROW: usize = Throw as usize;
     pub const CONCAT_BIN: usize = ConcatBin as usize;
     pub const RANGE: usize = Range as usize;
+    pub const FMT_VALUE: usize = FmtValue as usize;
     pub const FMT: usize = Fmt as usize;
 }
 
@@ -309,6 +311,7 @@ pub const BUILTINS: [&str; Builtin::_LEN as usize] = [
     "throw",
     "concat_bin",
     "range",
+    "fmt_value",
     "fmt",
 ];
 

@@ -114,6 +114,7 @@ pub enum NodeKind {
     Concat,
     Fmt,
     Escape,
+    FmtSeq,
     BinConcat,
     EscapeByte,
     Group,

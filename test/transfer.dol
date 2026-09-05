@@ -104,7 +104,7 @@ let HELLO_SHA256 = "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043
 # can plant one directly. That is the only way to produce a partial download:
 # the mock server cannot cut a response short mid-body.
 def cache_entry cache url
-  let entry = (cache / (str (fmt (digest.blake3(str url)) kind: :HEX:)))
+  let entry = (cache / "${digest.blake3(str url):x}")
   entry.create_dir all: true
   entry
 

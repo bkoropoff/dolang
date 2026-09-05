@@ -1,0 +1,97 @@
+import std:
+  - Fmt
+  - FmtValue
+
+let name = "world"
+let n = 42
+
+# A `t"..."` string keeps its literal text and its interpolations apart
+# instead of concatenating them into one string.
+let greeting = t"hello $name!"
+assert_eq (type greeting) $Fmt
+assert_eq $greeting.len 3
+assert_eq $greeting.format() "hello world!"
+
+# The debug form is the source form, reconstructed from the literal text and
+# each interpolation's recorded source.
+assert_eq (dbg greeting) r#"t"hello $name!""#
+
+# No conversion expands a sequence: `str` and display interpolation raise,
+# and the verbatim conversion gives the source form as `dbg` does. Expansion
+# has to be asked for by name, so it cannot happen silently on the way to a
+# consumer that was meant to see the segments.
+assert_throws $std.TypeError do str $greeting
+assert_throws $std.TypeError do "$(greeting)"
+assert_throws $std.TypeError do "${greeting:s}"
+assert_eq (std.verbatim greeting) (dbg greeting)
+assert_eq "${greeting:!}" (dbg greeting)
+assert_eq "${greeting:?}" (dbg greeting)
+
+# Segments are addressable: literal text is a Str, an interpolation is a
+# FmtValue bound to whatever specification it stated.
+assert_eq $greeting[0] "hello "
+assert_eq (type greeting[1]) $FmtValue
+assert_eq $greeting[1].value $name
+assert_eq $greeting[1].source r"$name"
+assert_eq $greeting[2] "!"
+
+let rendered = $
+  for segment = greeting
+    - (str segment)
+assert_eq $rendered ["hello ", "world", "!"]
+
+let head mid tail = greeting
+assert_eq $head "hello "
+assert_eq (str mid) "world"
+assert_eq $tail "!"
+let spread = [...greeting]
+assert_eq $spread.len 3
+
+# Every interpolation form is a segment, differing only in what it records.
+assert_eq $(t"${n:x}").format() "2a"
+assert_eq (dbg t"${n:x}") r#"t"${n:x}""#
+assert_eq $(t"$(n)").format() "42"
+assert_eq (dbg t"$(n)") r#"t"$(n)""#
+assert_eq $(t"${n}").format() "42"
+
+let empty = t""
+assert_eq $empty.len 0
+assert_eq $empty.format() ""
+assert_eq (dbg empty) r#"t"""#
+
+# Here strings come in the same flavor.
+let doc = t|-
+  a=$n
+assert_eq $doc.format() "a=42"
+assert_eq $doc.len 2
+
+# The constructor takes an iterable of segments, and a segment is literal text
+# or a bound value — nothing else, since which of the two it is is exactly
+# what a consumer acts on.
+let built = Fmt ["a", (FmtValue n), "b"]
+assert_eq $built.len 3
+assert_eq $built.format() "a42b"
+assert_throws $std.TypeError do Fmt ["a", n]
+assert_throws $std.TypeError do Fmt ["a", t"b"]
+
+# A segment built at runtime has no source, so it falls back to its debug form.
+assert_eq (dbg built) r#"t"a42b""#
+
+# Two sequences are equal when their segments are; how a segment was written
+# is not part of what it means.
+assert_eq t"a$n" t"a$n"
+assert_eq t"a$n" (Fmt ["a", (FmtValue n)])
+assert $ (t"a$n" != t"a$(41)")
+
+let keyed = dict()
+keyed[t"a$n"] = 1
+assert_eq $keyed[t"a$n"] 1
+
+# A sequence is read-only.
+assert_throws $std.ImmutableError do
+  greeting[0] = "x"
+
+# A sequence bound inside a sequence expands with it, and the binding lays
+# out what it expanded to.
+let nested = t"[${greeting:>14}]"
+assert_eq $nested.format() "[  hello world!]"

@@ -1420,6 +1420,7 @@ impl<'a> Elaborater<'a> {
                 | Expr::Array { .. }
                 | Expr::Dict { .. }
                 | Expr::Concat { .. }
+                | Expr::FmtSeq { .. }
                 | Expr::BinConcat { .. } = &**arg0
                 {
                     self.diags.push(Uncallable {
@@ -1490,7 +1491,7 @@ impl<'a> Elaborater<'a> {
                 }
                 Ok(())
             }
-            Expr::BinConcat { exprs, .. } => {
+            Expr::FmtSeq { exprs, .. } | Expr::BinConcat { exprs, .. } => {
                 for expr in exprs.iter_mut() {
                     self.visit_expr(scope, expr, is_arg)?;
                 }

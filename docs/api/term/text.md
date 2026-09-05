@@ -26,11 +26,11 @@ terminal cells rather than extended grapheme clusters, the same measure
 one at a cluster boundary, and SGR sequences consume neither.
 
 Formatting produces a [`Str`](../std/str.md), so it drops the styling along
-with every other `str` conversion — `str $ fmt label width: 6` and
-`"${label:6}"` are laid out in cells and plain.
+with every other `str` conversion: `"${label:6}"` is laid out in cells and
+plain.
 
 The console is where the layout and the styling arrive together. Given a
-[`Fmt`](../std/fmt.md) bound to a `Text`,
+[`FmtValue`](../std/fmt-value.md) bound to a `Text`,
 [`echo`](./index.md#echo-args), [`print`](./index.md#print-options-args),
 [`text`](./index.md#text-options-args) and a [`Style`](./style.md) apply the
 layout to the encoded form themselves, in the same terminal cells, and keep
@@ -38,12 +38,38 @@ the styling:
 
 ```
 let label = text("界a", fg: :RED:)
-echo (fmt label width: 6)          # padded and still red
-str $ fmt label width: 6           # padded and plain
+echo (std.FmtValue label width: 6)     # padded and still red
+echo "${label:6}"                      # padded and plain
 ```
 
 A specification asking for a debug or numeric rendering is no longer a request
 for terminal presentation, and is sanitized like any other value.
+
+## Sequences
+
+A `"..."` concatenates its interpolations as it is built, so a `Text` among
+them is already flattened to its content by the time the console sees the
+result. A [`t"..."`](../std/fmt.md) keeps them apart, and the console renders
+each one for itself — so styling survives interpolation, at any depth:
+
+```
+let label = text("界a", fg: :RED:)
+echo t"tag: ${label:6}|"     # padded in cells and still red
+echo "tag: ${label:6}|"      # padded and plain
+
+let framed = t"[${label:^8}]"
+echo t"<${framed:>12}>"      # each level lays out what the one inside rendered
+```
+
+Expanding a sequence this way is the console's own decision, not a conversion:
+no conversion expands one, which is what stops a sequence from arriving at a
+consumer already flattened. See [Trust](../std/fmt.md#trust).
+
+Each segment is taken exactly as an argument in its own right would be, so the
+rules above apply to it unchanged: a `Text` keeps its styling, a specification
+asking for a debug or numeric rendering is sanitized, and everything else is
+converted — [`verbatim`](../std/index.md) in argument position, `str` inside a
+`Text` — and sanitized.
 
 ## Methods
 

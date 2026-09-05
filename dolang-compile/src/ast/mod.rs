@@ -503,9 +503,18 @@ pub(crate) enum Expr {
         spec: Box<FormatSpec>,
         dollar_span: Span,
         brace_span: Span,
-        colon_span: Span,
+        /// Absent when the interpolation states no specification.
+        colon_span: Option<Span>,
     },
     Escape(char, Span),
+    /// A `t"..."` sequence: literal text and interpolations kept apart rather
+    /// than concatenated. `close` is absent for the `t|` here-string form,
+    /// which a dedent ends.
+    FmtSeq {
+        exprs: Vec<Expr>,
+        open: Span,
+        close: Option<Span>,
+    },
     BinConcat {
         exprs: Vec<Expr>,
         open: Span,
@@ -902,6 +911,11 @@ impl Expr {
                 ),
             ),
 
+            // A sequence formats each of its segments, as concatenation does
+            Expr::FmtSeq { exprs, .. } => {
+                Self::combine_iter(exprs.iter().map(|e| e.side_effect().unlikely()))
+            }
+
             // Binary concatenation - similar to string concatenation
             Expr::BinConcat { exprs, .. } => {
                 Self::combine_iter(exprs.iter().map(|e| e.side_effect().unlikely()))
@@ -972,7 +986,9 @@ impl Node for Expr {
                 visit.token(Token::Sigil, *dollar_span, None)?;
                 visit.token(Token::Delim, brace_span.left_char(), None)?;
                 visit.node(&**value)?;
-                visit.token(Token::Delim, *colon_span, None)?;
+                if let Some(colon_span) = colon_span {
+                    visit.token(Token::Delim, *colon_span, None)?;
+                }
                 for span in [
                     spec.fill.as_ref().map(|v| v.span),
                     spec.zero,
@@ -992,6 +1008,14 @@ impl Node for Expr {
                 visit.token(Token::Delim, brace_span.right_char(), None)
             }
             Expr::Escape(_, span) => visit.token(Token::Escape, *span, None),
+            Expr::FmtSeq { exprs, open, close } => {
+                visit.token(Token::StringDelim, *open, None)?;
+                exprs.accept(visit)?;
+                match close {
+                    Some(close) => visit.token(Token::StringDelim, *close, None),
+                    None => ControlFlow::Continue(()),
+                }
+            }
             Expr::BinConcat { exprs, open, close } => {
                 visit.token(Token::StringDelim, *open, None)?;
                 exprs.accept(visit)?;
@@ -1123,6 +1147,7 @@ impl Node for Expr {
             Expr::Concat { .. } => NodeKind::Concat,
             Expr::Fmt { .. } => NodeKind::Fmt,
             Expr::Escape(_, _) => NodeKind::Escape,
+            Expr::FmtSeq { .. } => NodeKind::FmtSeq,
             Expr::BinConcat { .. } => NodeKind::BinConcat,
             Expr::EscapeByte(_, _) => NodeKind::EscapeByte,
             Expr::Group { .. } => NodeKind::Group,

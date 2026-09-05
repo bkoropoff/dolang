@@ -3,8 +3,38 @@
 Stores reusable formatting options.
 
 `FmtSpec` values are immutable. Calling one returns a new specification with
-the supplied options merged, or a bound [`Fmt`](./fmt.md) when given a
-positional value.
+the supplied options merged, or a bound [`FmtValue`](./fmt-value.md) when
+given a positional value.
+
+## Constructor
+
+### `FmtSpec :fill? :align? :sign? :width? :precision? :alt? :kind?`
+
+Binding a value is [`FmtValue`](./fmt-value.md)'s job, so no positional
+argument is accepted here.
+
+#### Parameters
+
+| Name        | Type  | Description                            |
+| ----------- | ----- | -------------------------------------- |
+| `fill`      | ?     | Fill character, `:ZERO:`, or nil       |
+| `align`     | Sym?  | `:LEFT:`, `:RIGHT:`, or `:CENTER:`     |
+| `sign`      | Sym?  | `:PLUS:` or `:SPACE:`                  |
+| `width`     | Int?  | Minimum width in grapheme clusters     |
+| `precision` | Int?  | Numeric precision or maximum graphemes |
+| `alt`       | Bool? | Enables alternate formatting           |
+| `kind`      | Sym?  | Representation kind                    |
+
+#### Returns
+
+`FmtSpec`
+
+#### Example
+
+```
+let money = FmtSpec precision: 2 kind: :FIXED:
+assert_eq "$(money 1.5)/$(money 2.25)" "1.50/2.25"
+```
 
 ## Fields
 
@@ -45,12 +75,13 @@ Supported values are `:STR:`, `:DBG:`, `:VERBATIM:`, `:HEX:`, `:OCT:`,
 
 ### `call value? :fill? :align? :sign? :width? :precision? :alt? :kind?`
 
-Returns a new specification, or a bound [`Fmt`](./fmt.md) when `value` is
-provided. Omitted options retain their current values; nil resets an option.
+Returns a new specification, or a bound [`FmtValue`](./fmt-value.md) when
+`value` is provided. Omitted options retain their current values; nil resets
+an option.
 
-Binding a [`Fmt`](./fmt.md) is a `TypeError`: a bound value stays one level
-deep, so a consumer never has to unwrap a chain of specifications. Bind
-[`value`](./fmt.md#value) and state the combined options explicitly instead.
+Binding a [`FmtValue`](./fmt-value.md) nests it: the inner specification
+renders the value and this one lays that rendering out. See
+[Sequencing](./fmt-value.md#sequencing).
 
 ### `pad value`
 
@@ -69,6 +100,6 @@ Applies fill, alignment, width, and truncation to a string.
 #### Example
 
 ```
-let column = fmt fill: . align: :CENTER: width: 8
+let column = FmtSpec fill: . align: :CENTER: width: 8
 echo $column.pad("name")
 ```

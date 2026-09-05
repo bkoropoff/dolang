@@ -66,8 +66,8 @@ def list_processes _p
   # Each column is laid out by a specification the header and every cell
   # share, so a column is described once rather than at each use. The name
   # ends the line, so it is clipped but not padded.
-  let pid_column = fmt align: :RIGHT: width: $pid_width
-  let ppid_column = fmt align: :RIGHT: width: $ppid_width
+  let pid_column = std.FmtSpec align: :RIGHT: width: $pid_width
+  let ppid_column = std.FmtSpec align: :RIGHT: width: $ppid_width
 
   print (heading_style(pid_column("PID"))) "  "
   print (heading_style(ppid_column("PPID"))) "  "

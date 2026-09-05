@@ -249,8 +249,9 @@ nav:
       - api/std/error.md
       - api/std/field-error.md
       - api/std/float.md
-      - api/std/fmt-spec.md
       - api/std/fmt.md
+      - api/std/fmt-spec.md
+      - api/std/fmt-value.md
       - api/std/func.md
       - api/std/getter.md
       - api/std/immutable-error.md

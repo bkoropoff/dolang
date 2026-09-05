@@ -18,12 +18,12 @@ def test_state func ty expected_abc
   let first = state.digest()
   let second = state.digest()
   assert_eq $first $second
-  assert_eq (str (fmt first kind: :HEX:)) $expected_abc
+  assert_eq "${first:x}" $expected_abc
 
   state.update "def"
   let third = state.digest()
   assert_eq $third (func "abcdef")
-  assert_eq (str (fmt third kind: :HEX:)) (str (fmt (func "abcdef") kind: :HEX:))
+  assert_eq "${third:x}" "${func("abcdef"):x}"
 
   let sink = ty()
   sink.put "ab"
@@ -32,7 +32,7 @@ def test_state func ty expected_abc
 
 #[test]
 def blake3()
-  assert_eq (str (fmt (digest.blake3 "abc") kind: :HEX:))
+  assert_eq "${digest.blake3("abc"):x}"
     "6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85"
   assert_eq (digest.blake3 b"abc") (digest.blake3 "abc")
   test_state $digest.blake3 $digest.Blake3
@@ -40,24 +40,24 @@ def blake3()
 
 #[test]
 def md5()
-  assert_eq (str (fmt (digest.md5 "abc") kind: :HEX:)) "900150983cd24fb0d6963f7d28e17f72"
+  assert_eq "${digest.md5("abc"):x}" "900150983cd24fb0d6963f7d28e17f72"
   test_state $digest.md5 $digest.Md5 "900150983cd24fb0d6963f7d28e17f72"
 
 #[test]
 def sha1()
-  assert_eq (str (fmt (digest.sha1 "abc") kind: :HEX:)) "a9993e364706816aba3e25717850c26c9cd0d89d"
+  assert_eq "${digest.sha1("abc"):x}" "a9993e364706816aba3e25717850c26c9cd0d89d"
   test_state $digest.sha1 $digest.Sha1 "a9993e364706816aba3e25717850c26c9cd0d89d"
 
 #[test]
 def sha256()
-  assert_eq (str (fmt (digest.sha256 "abc") kind: :HEX:))
+  assert_eq "${digest.sha256("abc"):x}"
     "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
   test_state $digest.sha256 $digest.Sha256
     "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
 
 #[test]
 def sha512_hashes_expected_values()
-  assert_eq (str (fmt (digest.sha512 "abc") kind: :HEX:))
+  assert_eq "${digest.sha512("abc"):x}"
     "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
   test_state $digest.sha512 $digest.Sha512
     "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"

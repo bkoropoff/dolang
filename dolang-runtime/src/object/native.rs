@@ -3490,7 +3490,7 @@ impl<'v, T: Object<'v>> Protocol<'v> for TypeObjectWrap<'v, T> {
         strand: &'a mut Strand<'v, 's>,
         w: &mut dyn Format<'v>,
     ) -> Result<'v, 's, ()> {
-        crate::fmt!(strand, w, "<type: {}.{}>", T::MODULE, T::NAME)
+        crate::fmt!(strand, w, "<type {}.{}>", T::MODULE, T::NAME)
     }
 
     fn op_inspect<'a>(this: Recv<'v, 'a, Self>, _vm: &Vm<'v>) -> Option<Inspect<'v, 'a>> {

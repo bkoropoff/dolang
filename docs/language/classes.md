@@ -823,9 +823,10 @@ class Path
 
 ### `(fmt)`: Formatted Conversion
 
-Called when an instance is formatted with a specification, as produced by
-[`fmt`](../api/std/index.md#fmt-value-fill-align-sign-width-precision-alt-kind).
-Receives a [`FmtSpec`](../api/std/fmt-spec.md) and must return a `Str`.
+Called when an instance is formatted with a specification, as written by a
+[formatted interpolation](./expressions.md#formatted-interpolation) or built
+with [`FmtSpec`](../api/std/fmt-spec.md). Receives a
+[`FmtSpec`](../api/std/fmt-spec.md) and must return a `Str`.
 
 The `kind` field of the specification says which conversion the surrounding
 operation asked for, and [`FmtSpec.pad`](../api/std/fmt-spec.md#pad-value)
@@ -842,7 +843,8 @@ class Field
   def (fmt) self spec
     spec.pad(self.name)
 
-assert_eq (str $ fmt (Field "id") width: 6) "id    "
+let field = Field "id"
+assert_eq "${field:6}" "id    "
 ```
 
 A class that defines no `(fmt)` still gets width and alignment: the default
@@ -855,7 +857,8 @@ class Money: Float
   def (init) self value
     Float.(init) $self $value
 
-assert_eq (str $ fmt (Money 1.5) sign: :PLUS: precision: 2 kind: :FIXED:) "+1.50"
+let price = Money 1.5
+assert_eq "${price:+.2f}" "+1.50"
 ```
 
 Defining `(fmt)` replaces both, including the default's rejection of numeric
