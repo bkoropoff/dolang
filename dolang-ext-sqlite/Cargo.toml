@@ -12,6 +12,7 @@ test = false
 doctest = false
 
 [dependencies]
+bitvec = "1.0.1"
 libc = "0.2"
 nix = { version = "0.31", features = ["fs"] }
 libsqlite3-sys = { version = "0.38", features = ["bundled-windows"] }

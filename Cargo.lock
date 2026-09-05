@@ -1048,6 +1048,7 @@ name = "dolang-ext-sqlite"
 version = "0.1.1"
 dependencies = [
  "bindgen",
+ "bitvec",
  "dolang",
  "dolang-ext-shell",
  "dolang-vfs",
