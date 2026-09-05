@@ -1,5 +1,6 @@
 use std::ffi::CStr;
 
+use bitvec::slice::BitSlice;
 use dolang::runtime::{
     Error, Instance, Object, Output, Result, Slot, State, Strand, Value,
     object::{Mut, Ref, Spread, SpreadContext, TypeBuilder, Unpack, UnpackItem},
@@ -708,8 +709,7 @@ unsafe fn get<'v, 's>(
                         if stmt_annex
                             .bool_columns
                             .get(idx as usize)
-                            .copied()
-                            .unwrap_or(false)
+                            .is_some_and(|flag| *flag)
                         {
                             Output::set(strand, out, val != 0);
                         } else {
@@ -762,13 +762,17 @@ enum SqliteValue {
     Blob(Vec<u8>),
 }
 
-unsafe fn column_to_value(raw: *mut sqlite3_stmt, idx: i32, bool_columns: &[bool]) -> SqliteValue {
+unsafe fn column_to_value(
+    raw: *mut sqlite3_stmt,
+    idx: i32,
+    bool_columns: &BitSlice,
+) -> SqliteValue {
     unsafe {
         match sqlite3_column_type(raw, idx) {
             SQLITE_NULL => SqliteValue::Null,
             SQLITE_INTEGER => {
                 let val = sqlite3_column_int64(raw, idx);
-                if bool_columns.get(idx as usize).copied().unwrap_or(false) {
+                if bool_columns.get(idx as usize).is_some_and(|flag| *flag) {
                     SqliteValue::Bool(val != 0)
                 } else {
                     SqliteValue::Integer(val)

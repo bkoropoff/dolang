@@ -5,6 +5,7 @@ use std::{
     ptr,
 };
 
+use bitvec::boxed::BitBox;
 use dolang::runtime::{
     Arg, Args, Error, Instance, Object, Output, Result, State, Strand, Value,
     error::ResultExt,
@@ -47,7 +48,7 @@ pub(crate) struct StatementAnnex<'v> {
     /// Row epoch bumped on each next()
     pub(super) row_epoch: Cell<Epoch>,
     /// Per-column flag: true if the column was declared BOOLEAN or BOOL
-    pub(super) bool_columns: Box<[bool]>,
+    pub(super) bool_columns: BitBox,
     /// Values the template carried, with the bind index each resolved to.
     ///
     /// These are the statement's own: they are rebound from here on every call,
@@ -276,9 +277,9 @@ impl<'v> Object<'v> for Statement {
 }
 
 /// Scans the declared types of all columns in a freshly prepared statement and
-/// returns a boxed slice indicating which columns have a BOOLEAN or BOOL declared
+/// returns a bitmap indicating which columns have a BOOLEAN or BOOL declared
 /// type.  Must be called before any `sqlite3_step`.
-unsafe fn scan_bool_columns(raw: *mut sqlite3_stmt) -> Box<[bool]> {
+unsafe fn scan_bool_columns(raw: *mut sqlite3_stmt) -> BitBox {
     unsafe {
         let count = sqlite3_column_count(raw);
         (0..count)
