@@ -71,6 +71,13 @@ asking for a debug or numeric rendering is sanitized, and everything else is
 converted — [`verbatim`](../std/index.md) in argument position, `str` inside a
 `Text` — and sanitized.
 
+The exception is an unfilled [`FmtParam`](../std/fmt-param.md). A parameter
+printed on its own is just a name and shows itself as such, but one still
+standing in a sequence means the template was never finished, so the console
+raises a [`ValueError`](../std/value-error.md) as
+[`format`](../std/fmt.md#format) does rather than printing a hole where a
+value was meant to go.
+
 ## Methods
 
 ### `clip width :suffix?`

@@ -155,7 +155,7 @@ impl<'v, 's, 'a> Serialize for SerializeValue<'v, 's, 'a> {
                 seq.end()
             }
 
-            View::Object(_) => Err(ser::Error::custom("unsupported JSON type")),
+            _ => Err(ser::Error::custom("unsupported JSON type")),
         }
     }
 }

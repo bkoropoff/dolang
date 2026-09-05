@@ -28,6 +28,21 @@ assert_eq $doc "# this doc is a comment"
 
 # Interpolation
 let foo = 42
+
+# A here doc has no comments, so a `#` is ordinary text wherever it falls and
+# never ends the interpolating part of a line.
+doc = |-
+  # $foo
+  x $foo #$foo
+  #[not a decorator] $foo
+assert_eq $doc "# 42\nx 42 #42\n#[not a decorator] 42"
+
+# Raw here docs interpolate nothing at all, `#` included.
+doc = r|-
+  # $foo
+  a#b
+assert_eq $doc "# \$foo\na#b"
+
 doc = |-
   $foo $(foo + 1) \\\$foo
 # Neat

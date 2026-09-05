@@ -11,10 +11,11 @@ use crate::{
     ast::{
         Arg, ArrayElem, Assign, Bind, Block, CatchHandler, Class, ClassBody, ClassMember,
         ClassSuper, Const, Decorator, Def, DictElem, Expand, Expr, ExprBody, FieldDecl, FieldInit,
-        FieldName, For, FormatAlign, FormatKind, FormatSign, FormatSpec, FormatValue, Function,
-        GetVariant, GroupDelim, Ident, If, IfBranch, Import, ImportElement, ImportItem, Key, Let,
-        MemberScope, Method, Pair, Param, ParamDefault, Pattern, PatternBind, PatternBindKind,
-        PrimStmt, Return, Single, SpecialMethod, Stmt, Throw, Try, Unit, While, visit::Node,
+        FieldName, FmtParamName, For, FormatAlign, FormatKind, FormatSign, FormatSpec, FormatValue,
+        Function, GetVariant, GroupDelim, Ident, If, IfBranch, Import, ImportElement, ImportItem,
+        Key, Let, MemberScope, Method, Pair, Param, ParamDefault, Pattern, PatternBind,
+        PatternBindKind, PrimStmt, Return, Single, SpecialMethod, Stmt, Throw, Try, Unit, While,
+        visit::Node,
     },
     diag::{AnnotationKind, NoteKind, Severity},
     lex::{self, Keyword, Lexer, Mode, Op, Token, TokenInfo},
@@ -150,6 +151,7 @@ macro_rules! decay_string {
             | TokenInfo::RBar
             | TokenInfo::TBar
             | TokenInfo::ArgSep
+            | TokenInfo::Hash
             | TokenInfo::DecoratorOpen => TokenInfo::Literal)
     }
 }
@@ -208,6 +210,7 @@ pub(crate) enum ExpectKind {
     RBar,
     TQuote,
     TBar,
+    Hash,
 }
 
 impl ExpectKind {
@@ -255,6 +258,7 @@ impl Display for ExpectKind {
             RBar => &"r|",
             TQuote => &"<formatted quote>",
             TBar => &"t|",
+            Hash => &"#",
         }
         .fmt(f)
     }
@@ -299,6 +303,7 @@ impl From<&TokenInfo> for ExpectKind {
             RBar => ExpectKind::RBar,
             TQuote => ExpectKind::TQuote,
             TBar => ExpectKind::TBar,
+            Hash => ExpectKind::Hash,
         }
     }
 }
@@ -488,6 +493,42 @@ impl Diagnose for BadFloat {
             w,
             "invalid floating point constant: {}",
             compiler.file.str(self.0)
+        )
+    }
+
+    fn span(&self) -> Span {
+        self.0
+    }
+}
+
+struct BadFmtParamName(Span);
+
+impl Diagnose for BadFmtParamName {
+    fn severity(&self) -> Severity {
+        Severity::Error
+    }
+
+    fn message(&self, _compiler: &Compiler<'_>, w: &mut dyn Write) -> fmt::Result {
+        write!(w, "parameter position must be a non-negative integer")
+    }
+
+    fn span(&self) -> Span {
+        self.0
+    }
+}
+
+struct FmtParamOutsideSeq(Span);
+
+impl Diagnose for FmtParamOutsideSeq {
+    fn severity(&self) -> Severity {
+        Severity::Error
+    }
+
+    fn message(&self, _compiler: &Compiler<'_>, w: &mut dyn Write) -> fmt::Result {
+        write!(
+            w,
+            "a parameter is only valid in a `t\"...\"` sequence, which keeps \
+             its segments apart to fill in later"
         )
     }
 
@@ -1193,7 +1234,7 @@ impl<'a> Parser<'a> {
                                     "formatted interpolation is not valid in binary strings",
                                 ));
                             }
-                            this.parse_fmt_interp(scope, dollar_span)?
+                            this.parse_fmt_interp(scope, dollar_span, kind)?
                         } else {
                             let expr = this.parse_expr_primary(scope, ExprMode::Compact)?;
                             // A sequence keeps every interpolation as its own
@@ -1362,9 +1403,62 @@ impl<'a> Parser<'a> {
         Ok(Some(FormatAtom::Static(FormatValue { value: ch, span })))
     }
 
-    fn parse_fmt_interp(&mut self, scope: &mut Scope, dollar_span: Span) -> Result<Expr> {
+    /// Parses the name of a `${#...}` parameter.
+    ///
+    /// A name is an integer or an identifier, and either way it is a name: an
+    /// explicit position is never renumbered, so `#0` means parameter `0`
+    /// wherever the sequence it sits in ends up.
+    fn parse_fmt_param_name(&mut self, scope: &mut Scope) -> Result<FmtParamName> {
+        match self.next()? {
+            Some(token!(TokenInfo::Int(value), span)) => match u32::try_from(value) {
+                Ok(value) => Ok(FmtParamName::Pos(value, span)),
+                Err(_) => {
+                    self.fail = true;
+                    self.diags.push(BadFmtParamName(span));
+                    Ok(FmtParamName::Pos(0, span))
+                }
+            },
+            Some(token!(TokenInfo::Ident, span)) => Ok(FmtParamName::Named(span)),
+            // The lexer glues a name to a following `:`, so `${#foo:>8}` hands
+            // back a `Key`. Its span excludes the colon; put the colon back and
+            // the shared specification path runs unchanged.
+            Some(token!(TokenInfo::Key, span)) => {
+                self.push_colon(span.after_right_char());
+                Ok(FmtParamName::Named(span))
+            }
+            other => Err(self.syntax_error(
+                scope,
+                other,
+                "expected a parameter name or number after `#`",
+            )),
+        }
+    }
+
+    fn parse_fmt_interp(
+        &mut self,
+        scope: &mut Scope,
+        dollar_span: Span,
+        kind: StrKind,
+    ) -> Result<Expr> {
         let left = self.expect(scope, &[ExpectKind::LeftBrace])?;
-        let value = self.parse_expr(scope, ExprMode::Compact)?;
+        // `${#0}` and `${#foo}` name an unbound position rather than
+        // interpolating a value. A hole only means something in a sequence,
+        // which is what keeps the segments apart to fill in later.
+        let param = match self.peek()? {
+            Some(token!(TokenInfo::Hash, hash_span)) => {
+                self.advance();
+                if kind != StrKind::Fmt {
+                    self.fail = true;
+                    self.diags.push(FmtParamOutsideSeq(hash_span));
+                }
+                Some((hash_span, self.parse_fmt_param_name(scope)?))
+            }
+            _ => None,
+        };
+        let value = match param {
+            Some(_) => Expr::Error,
+            None => self.parse_expr(scope, ExprMode::Compact)?,
+        };
         let mut spec = FormatSpec {
             fill: None,
             zero: None,
@@ -1379,13 +1473,14 @@ impl<'a> Parser<'a> {
         // the value to nothing, leaving the kind to the surrounding conversion.
         if let Some(token!(TokenInfo::RightBrace, right)) = self.peek()? {
             self.advance();
-            return Ok(Expr::Fmt {
-                value: Box::new(value),
-                spec: Box::new(spec),
+            return Ok(Self::fmt_interp(
+                param,
+                value,
+                spec,
                 dollar_span,
-                brace_span: left | right,
-                colon_span: None,
-            });
+                left | right,
+                None,
+            ));
         }
         let colon_span = match self.next()? {
             Some(token!(TokenInfo::Colon, span)) => span,
@@ -1552,13 +1647,43 @@ impl<'a> Parser<'a> {
             ));
         }
 
-        Ok(Expr::Fmt {
-            value: Box::new(value),
-            spec: Box::new(spec),
+        Ok(Self::fmt_interp(
+            param,
+            value,
+            spec,
             dollar_span,
-            brace_span: left | right,
-            colon_span: Some(colon_span),
-        })
+            left | right,
+            Some(colon_span),
+        ))
+    }
+
+    /// Builds the interpolation just parsed: a hole when one was named, an
+    /// ordinary bound interpolation otherwise.
+    fn fmt_interp(
+        param: Option<(Span, FmtParamName)>,
+        value: Expr,
+        spec: FormatSpec,
+        dollar_span: Span,
+        brace_span: Span,
+        colon_span: Option<Span>,
+    ) -> Expr {
+        match param {
+            Some((hash_span, name)) => Expr::FmtParam {
+                name,
+                spec: Box::new(spec),
+                dollar_span,
+                hash_span,
+                brace_span,
+                colon_span,
+            },
+            None => Expr::Fmt {
+                value: Box::new(value),
+                spec: Box::new(spec),
+                dollar_span,
+                brace_span,
+                colon_span,
+            },
+        }
     }
 
     fn parse_format_count(
@@ -1654,7 +1779,7 @@ impl<'a> Parser<'a> {
                         Some(token!(Dollar, dollar_span)) if !raw => {
                             this.advance();
                             if let Some(token!(LeftBrace)) = this.peek()? {
-                                exprs.push(this.parse_fmt_interp(scope, dollar_span)?);
+                                exprs.push(this.parse_fmt_interp(scope, dollar_span, kind)?);
                                 continue;
                             }
                             let expr = match this.peek()? {

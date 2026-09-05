@@ -1,0 +1,189 @@
+import std:
+  - Fmt
+  - FmtValue
+  - FmtParam
+  - Set
+
+# A parameter names an unbound position. The name is an Int or a Sym, and
+# nothing else: binding is keyed lookup, and those are the two kinds of key an
+# argument pack and a dict literal can supply.
+let positional = FmtParam 0
+let named = FmtParam :user:
+assert_eq (type positional) $FmtParam
+assert_eq $positional.name 0
+assert_eq $named.name :user:
+assert_throws $std.TypeError do FmtParam "user"
+assert_throws $std.TypeError do FmtParam 1.5
+assert_throws $std.TypeError do FmtParam nil
+
+# It carries a specification like any other interpolation, and exposes it
+# through the same fields as FmtSpec.
+let padded = FmtParam :user: width: 8 align: :RIGHT:
+assert_eq $padded.width 8
+assert_eq $padded.align :RIGHT:
+assert_eq $padded.kind nil
+
+# Calling it re-merges options over the same name. The result is synthetic, so
+# it carries no source.
+let widened = padded width: 12
+assert_eq $widened.name :user:
+assert_eq $widened.width 12
+assert_eq $widened.source nil
+
+# A parameter shows itself as the text it was written as. Unlike a sequence it
+# does not refuse conversion: there is no bound value to leak by showing it,
+# only a name.
+assert_eq (str positional) r"${#0}"
+assert_eq (str named) r"${#user}"
+assert_eq (dbg named) r"${#user}"
+assert_eq (std.verbatim named) r"${#user}"
+let sourced = FmtParam 2 source: r"${#2:>3}"
+assert_eq $sourced.source r"${#2:>3}"
+assert_eq (str sourced) r"${#2:>3}"
+
+# A parameter is a segment, alongside literal text and bound values.
+let stmt = Fmt ["a=", positional, ";"]
+assert_eq $stmt.len 3
+assert_eq (type stmt[1]) $FmtParam
+assert_eq (dbg stmt) r#"t"a=${#0};""#
+
+# An unfilled hole has no rendering: the sequence is unfinished, so there is
+# nothing to emit that would not be a guess at what belongs there.
+assert_throws $std.ValueError do stmt.format()
+
+# The refusal is about the hole, not about conversion in general -- a sequence
+# with no holes still expands.
+assert_eq $(Fmt ["a=", (FmtValue 42)]).format() "a=42"
+
+# Two parameters are equal when they name the same parameter under the same
+# specification and were written the same way.
+assert_eq (FmtParam 0) (FmtParam 0)
+assert_eq (FmtParam :user: width: 8) $ FmtParam :user: width: 8
+assert $ ((FmtParam 0) != (FmtParam 1))
+assert $ ((FmtParam :user:) != (FmtParam :host:))
+assert $ ((FmtParam 0) != (FmtParam 0 width: 3))
+assert $ ((FmtParam 0) != (FmtParam 0 source: r"${#0}"))
+assert $ ((FmtParam 0) != (FmtValue 0))
+
+let keyed = dict()
+keyed[(FmtParam 0)] = 1
+keyed[(FmtParam 1)] = 2
+assert_eq $keyed[(FmtParam 0)] 1
+assert_eq $keyed.len 2
+
+# `${#0}` and `${#foo}` write a hole into a sequence. The `#` is unambiguous:
+# it introduces a name, never a value to evaluate.
+let query = t"select * from t where a = ${#0} and c = ${#name}"
+assert_eq $query.len 4
+assert_eq (type query[1]) $FmtParam
+assert_eq $query[1].name 0
+assert_eq $query[1].source r"${#0}"
+assert_eq (type query[3]) $FmtParam
+assert_eq $query[3].name :name:
+assert_throws $std.ValueError do query.format()
+
+# A hole states a specification like any other interpolation, and the whole
+# thing round-trips through `dbg`.
+let laid_out = t"[${#0:>6}]"
+assert_eq $laid_out[1].width 6
+assert_eq $laid_out[1].align :RIGHT:
+assert_eq (dbg laid_out) r##"t"[${#0:>6}]""##
+
+# A dynamic count is an expression, and it is evaluated where it stands even
+# though the value it will lay out is not there yet.
+let n = 3
+let dynamic = t"${#x:$(n)d}"
+assert_eq $dynamic[0].width 3
+assert_eq $dynamic[0].kind :DEC:
+
+# Here strings take holes too.
+let doc = t|-
+  a=${#k}
+assert_eq $doc.len 2
+assert_eq $doc[1].name :k:
+
+# `#` keeps its own meaning inside a specification: this is `alt`, not a hole.
+assert_eq $(t"${5:#x}").format() "0x5"
+
+# Calling the sequence fills every hole at once. Positional arguments are sugar
+# for integer keys, so `call` and `bind` substitute the same way and differ only
+# in what they insist on.
+let stmt = t"select * from t where a = ${#0} and c = ${#name}"
+assert_eq $(stmt 1 name: "n").format() "select * from t where a = 1 and c = n"
+assert_eq $(stmt.bind {0: 1, name: "n"}).format() $(stmt 1 name: "n").format()
+
+# A filled hole is a bound value, never literal text: that is what keeps a
+# template assembled at runtime inside the guarantee its literal segments came
+# from the program.
+let filled = stmt 1 name: "n"
+assert_eq (type filled[1]) $FmtValue
+assert_eq $filled[1].value 1
+
+# It also keeps the parameter's specification and the text it was written as,
+# both of which belong to the template rather than to the value that arrived
+# late.
+let layout = t"[${#0:>4}]"
+let laid = layout 7
+assert_eq $laid[1].width 4
+assert_eq $laid.format() "[   7]"
+assert_eq (dbg laid) r##"t"[${#0:>4}]""##
+
+# `bind` fills what it names and leaves the rest, so a template can be filled in
+# stages. A dict is what it takes because only a dict can name a sparse set of
+# positions.
+let sparse = t"${#0}-${#2}-${#name}"
+let partial = sparse.bind {2: "z", name: "n"}
+assert_eq $partial.len 5
+assert_eq (type partial[0]) $FmtParam
+assert_eq (type partial[2]) $FmtValue
+assert_eq $(partial.bind {0: "x"}).format() "x-z-n"
+assert_throws $std.TypeError do sparse.bind [1, 2]
+
+# Binding nothing is allowed and changes nothing.
+assert_eq $sparse.bind({}) $sparse
+
+# A name that no hole uses is an error either way round -- a misspelled key is
+# reported as the key that was written, not as a parameter nothing has heard of.
+assert_throws $std.UnexpectedKeyError do sparse.bind {nope: 1}
+assert_throws $std.UnexpectedPosError do sparse.bind {7: 1}
+assert_throws $std.UnexpectedKeyError do sparse.bind {0: "x", 2: "z", nope: 1}
+
+# `call` alone insists every hole is filled.
+assert_throws $std.MissingPosError do stmt name: "n"
+assert_throws $std.MissingKeyError do stmt 1
+assert_throws $std.UnexpectedPosError do stmt 1 2 name: "n"
+
+# A hole may be filled more than once over: repeating a name fills every hole
+# that bears it.
+let twice = t"${#k}/${#k}"
+assert_eq $(twice.bind {k: 9}).format() "9/9"
+
+# A sequence bound inside a sequence has holes of its own, and they are reached
+# before anything past the binding.
+let inner = t"${#k}-x"
+let outer = t"[${inner}]"
+assert_eq $(outer.bind {k: 5}).format() "[5-x]"
+let joined = outer.bind {k: 5}
+assert_eq (type joined[1]) $FmtValue
+
+# A sequence with no holes takes an empty binding and rejects anything else.
+let plain = t"a$n"
+assert_eq $plain.bind({}) $plain
+assert_throws $std.UnexpectedPosError do plain "x"
+
+# `params` is the template's signature: the names, in the order binding reaches
+# them. The set drops a repeat and keeps where the name was first reached.
+assert_eq $stmt.params() (Set([0, :name:]))
+assert_eq $sparse.params() (Set([0, 2, :name:]))
+assert_eq $twice.params() (Set([:k:]))
+assert_eq $outer.params() (Set([:k:]))
+assert_eq $plain.params() (Set([]))
+assert_eq $(stmt 1 name: "n").params() (Set([]))
+
+# The set keeps where each name was first reached, so iterating it gives the
+# order the template reads in.
+let repeated = t"${#b}${#a}${#b}"
+let order = $
+  for name = repeated.params()
+    - $name
+assert_eq $order [:b:, :a:]

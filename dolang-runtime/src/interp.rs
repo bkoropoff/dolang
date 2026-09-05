@@ -837,6 +837,15 @@ impl<'v> Vm<'v> {
                             )
                             .await
                         }
+                        builtin::FMT_PARAM => {
+                            let global = strand.vm().state::<crate::stdlib::fmt::Global<'v>>();
+                            crate::stdlib::fmt::create_fmt_param(
+                                strand,
+                                global,
+                                args,
+                                Slot::reborrow(&mut res),
+                            )
+                        }
                         builtin::FMT => {
                             let global = strand.vm().state::<crate::stdlib::fmt::Global<'v>>();
                             crate::stdlib::fmt::create_fmt(

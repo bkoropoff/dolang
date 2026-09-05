@@ -12,8 +12,8 @@ pub mod value {
         AsBoundFunction, AsFunction, AsTuple, BinEmbryo, Empty, Input, Nil, Output, Root,
         Singleton, Slot, StrEmbryo, TypeObject, Value, fmt,
         view::{
-            Array, Bin, Dict, DictPairs, ObjectId, ObjectView, PinBin, PinStr, Record, RecordPairs,
-            Str, Tuple, View,
+            Array, Bin, Dict, DictPairs, Fmt, FmtParam, FmtValue, ObjectId, ObjectView, PinBin,
+            PinStr, Record, RecordPairs, Set, SetMembers, Str, Tuple, View,
         },
     };
 }

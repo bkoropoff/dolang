@@ -130,7 +130,7 @@ async fn default_from_do<'v, 's>(
 ) -> Result<'v, 's, Value> {
     match input.view(strand.vm()) {
         View::Str(_) => Ok(Value::Sz(expect_str(strand, input)?)),
-        View::Array(_) | View::Tuple(_) | View::Object(_) => {
+        View::Array(_) | View::Tuple(_) | View::Set(_) | View::Object(_) => {
             Ok(Value::MultiSz(expect_str_iterable(strand, input).await?))
         }
         View::Bool(value) => Ok(Value::Dword(u32::from(value))),

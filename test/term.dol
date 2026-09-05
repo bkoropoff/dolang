@@ -293,6 +293,20 @@ def console_walks_sequences()
   assert (debugged.contains "term.Text")
   assert (debugged.contains(ESC) == false)
 
+#[test]
+def console_refuses_unbound_parameters()
+  # A parameter on its own is just a name, and prints as the text it was
+  # written as.
+  let hole = std.FmtParam :user:
+  assert_eq (term.sub do echo hole) r"${#user}"
+
+  # Reaching the console inside a sequence is different: the template was
+  # never finished, so the console refuses it exactly as `format` does rather
+  # than printing a hole where a value was meant to go.
+  let stmt = std.Fmt ["user: ", hole]
+  assert_throws $ValueError do stmt.format()
+  assert_throws $ValueError do term.sub do echo $stmt
+
 # --- Terminal output capture ----------------------------------------------
 
 # Writes `source` into the temp dir and returns the script path, so tests can

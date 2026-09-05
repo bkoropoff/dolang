@@ -483,6 +483,17 @@ pub(crate) struct FormatSpec {
     pub(crate) kind: Option<FormatValue<FormatKind>>,
 }
 
+/// What a `${#...}` names.
+///
+/// Both are names; a positional one is simply a name that happens to be an
+/// integer, so neither is ever renumbered against the sequence it sits in.
+pub(crate) enum FmtParamName {
+    /// `${#0}` — the span covers the digits.
+    Pos(u32, Span),
+    /// `${#foo}` — the span covers the identifier.
+    Named(Span),
+}
+
 pub(crate) enum Expr {
     Literal(Span),
     Ident(Ident),
@@ -504,6 +515,20 @@ pub(crate) enum Expr {
         dollar_span: Span,
         brace_span: Span,
         /// Absent when the interpolation states no specification.
+        colon_span: Option<Span>,
+    },
+    /// A `${#0}` or `${#foo}`: an unbound position in a `t"..."` sequence.
+    ///
+    /// The name is a key, not an offset — an explicit number is never
+    /// renumbered — so it lowers to an `Int` or `Sym` constant rather than to
+    /// anything positional.
+    FmtParam {
+        name: FmtParamName,
+        spec: Box<FormatSpec>,
+        dollar_span: Span,
+        hash_span: Span,
+        brace_span: Span,
+        /// Absent when the parameter states no specification.
         colon_span: Option<Span>,
     },
     Escape(char, Span),
@@ -634,7 +659,7 @@ impl Expr {
                 }
                 Some(Const::Str(acc))
             }
-            Expr::Fmt { .. } => None,
+            Expr::Fmt { .. } | Expr::FmtParam { .. } => None,
             Expr::Escape(v, _) => Some(Const::Str(v.to_string())),
             Expr::BinConcat { exprs, .. } => {
                 let mut acc = Vec::new();
@@ -715,7 +740,7 @@ impl Expr {
                     verbatim,
                 }
             }
-            Expr::Fmt { .. } => self,
+            Expr::Fmt { .. } | Expr::FmtParam { .. } => self,
             Expr::BinConcat { exprs, open, close } if !exprs.is_empty() => {
                 let mut new_exprs = vec![];
                 let mut exprs = VecDeque::from(exprs);
@@ -911,6 +936,14 @@ impl Expr {
                 ),
             ),
 
+            // A parameter names a hole, so only its dynamic counts can do
+            // anything.
+            Expr::FmtParam { spec, .. } => Self::combine_iter(
+                [&spec.width, &spec.precision]
+                    .into_iter()
+                    .filter_map(|count| count.as_ref().map(|expr| expr.side_effect())),
+            ),
+
             // A sequence formats each of its segments, as concatenation does
             Expr::FmtSeq { exprs, .. } => {
                 Self::combine_iter(exprs.iter().map(|e| e.side_effect().unlikely()))
@@ -986,6 +1019,44 @@ impl Node for Expr {
                 visit.token(Token::Sigil, *dollar_span, None)?;
                 visit.token(Token::Delim, brace_span.left_char(), None)?;
                 visit.node(&**value)?;
+                if let Some(colon_span) = colon_span {
+                    visit.token(Token::Delim, *colon_span, None)?;
+                }
+                for span in [
+                    spec.fill.as_ref().map(|v| v.span),
+                    spec.zero,
+                    spec.align.as_ref().map(|v| v.span),
+                    spec.sign.as_ref().map(|v| v.span),
+                    spec.alt,
+                    spec.kind.as_ref().map(|v| v.span),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    visit.token(Token::Operator, span, None)?;
+                }
+                for count in [&spec.width, &spec.precision].into_iter().flatten() {
+                    visit.node(count)?;
+                }
+                visit.token(Token::Delim, brace_span.right_char(), None)
+            }
+            Expr::FmtParam {
+                name,
+                spec,
+                dollar_span,
+                hash_span,
+                brace_span,
+                colon_span,
+            } => {
+                visit.token(Token::Sigil, *dollar_span, None)?;
+                visit.token(Token::Delim, brace_span.left_char(), None)?;
+                visit.token(Token::Sigil, *hash_span, None)?;
+                // A positional name is a literal number; a bare one reads as a
+                // name, so it highlights like one.
+                match name {
+                    FmtParamName::Pos(_, span) => visit.token(Token::Number, *span, None)?,
+                    FmtParamName::Named(span) => visit.token(Token::Variable, *span, None)?,
+                }
                 if let Some(colon_span) = colon_span {
                     visit.token(Token::Delim, *colon_span, None)?;
                 }
@@ -1146,6 +1217,7 @@ impl Node for Expr {
             Expr::Sym(_) => NodeKind::Sym,
             Expr::Concat { .. } => NodeKind::Concat,
             Expr::Fmt { .. } => NodeKind::Fmt,
+            Expr::FmtParam { .. } => NodeKind::FmtParam,
             Expr::Escape(_, _) => NodeKind::Escape,
             Expr::FmtSeq { .. } => NodeKind::FmtSeq,
             Expr::BinConcat { .. } => NodeKind::BinConcat,

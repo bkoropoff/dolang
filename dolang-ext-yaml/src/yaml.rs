@@ -127,7 +127,7 @@ fn value_to_yaml<'v, 's>(
             seen.remove(&id.addr());
             Ok(Yaml::Sequence(seq))
         }
-        View::Object(_) => Err(Error::type_error(strand, "unsupported YAML type")),
+        _ => Err(Error::type_error(strand, "unsupported YAML type")),
     }
 }
 

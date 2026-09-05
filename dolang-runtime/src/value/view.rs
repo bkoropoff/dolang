@@ -14,12 +14,14 @@ use crate::{
     object::{
         array, dict,
         kv::{self, Entry, EntryValue},
+        native::Cast,
         protocol::{GcObjBorrow, Header},
-        range, record,
+        range, record, set,
     },
+    stdlib::fmt as stdfmt,
     strand::{Access, Strand},
     sym::Sym,
-    value::{Input, Output, Slot, Value},
+    value::{Input, Output, Slot, Value, fmt::Spec},
     vm::Alloc,
 };
 
@@ -540,6 +542,94 @@ impl<'v, 'a> Dict<'v, 'a> {
     }
 }
 
+/// Set view
+pub struct Set<'v, 'a>(pub(crate) GcObjBorrow<'v, 'a, set::Set<'v>>);
+
+impl<'v, 'a> Set<'v, 'a> {
+    pub(crate) fn from_borrow(borrow: gc::Borrow<'v, 'a, Header, set::Set<'v>>) -> Self {
+        Self(borrow)
+    }
+
+    /// Return the opaque identity of this set for cycle detection.
+    pub fn id(&self) -> ObjectId<'v, 'a> {
+        ObjectId(self.0.into_raw().cast(), PhantomData)
+    }
+
+    /// Number of members.
+    pub fn len<'s>(&self, strand: &mut Strand<'v, 's>) -> Result<'v, 's, usize> {
+        let borrow = match self.0.borrow() {
+            Some(b) => b,
+            None => return Err(Error::concurrency(strand)),
+        };
+        Ok(borrow.len())
+    }
+
+    /// Return a stateful cursor over the members in insertion order.
+    pub fn members(&self) -> SetMembers<'v, 'a> {
+        SetMembers {
+            borrow: self.0,
+            pos: 0,
+        }
+    }
+
+    /// Is `value` a member?
+    pub fn contains<'s>(
+        &self,
+        strand: &mut Strand<'v, 's>,
+        value: impl Input<'v>,
+    ) -> Result<'v, 's, bool> {
+        let value = Value::from_input(strand, value);
+        let hash = kv::hash(strand, &value)?;
+        let borrow = match self.0.borrow() {
+            Some(b) => b,
+            None => return Err(Error::concurrency(strand)),
+        };
+        borrow.contains(strand, &value, hash)
+    }
+
+    /// Add `value`. Returns `false` if it was already a member, leaving the
+    /// position it was first added in alone.
+    pub fn add<'s>(
+        &self,
+        strand: &mut Strand<'v, 's>,
+        value: impl Input<'v>,
+    ) -> Result<'v, 's, bool> {
+        // Build the value and hash it before taking the exclusive borrow.
+        let value = Value::from_input(strand, value);
+        let hash = kv::hash(strand, &value)?;
+        let mut borrow = match self.0.borrow_mut() {
+            Some(b) => b,
+            None => return Err(Error::concurrency(strand)),
+        };
+        borrow.insert(strand, value, hash)
+    }
+
+    /// Remove `value`. Returns `false` if it was not a member.
+    pub fn delete<'s>(
+        &self,
+        strand: &mut Strand<'v, 's>,
+        value: impl Input<'v>,
+    ) -> Result<'v, 's, bool> {
+        let value = Value::from_input(strand, value);
+        let hash = kv::hash(strand, &value)?;
+        let mut borrow = match self.0.borrow_mut() {
+            Some(b) => b,
+            None => return Err(Error::concurrency(strand)),
+        };
+        borrow.delete(strand, &value, hash)
+    }
+
+    /// Remove every member.
+    pub fn clear<'s>(&self, strand: &mut Strand<'v, 's>) -> Result<'v, 's, ()> {
+        let mut borrow = match self.0.borrow_mut() {
+            Some(b) => b,
+            None => return Err(Error::concurrency(strand)),
+        };
+        borrow.clear();
+        Ok(())
+    }
+}
+
 /// Record view
 pub struct Record<'v, 'a>(gc::Borrow<'v, 'a, Header, record::Record<'v>>);
 
@@ -610,7 +700,114 @@ impl<'v, 'a> Tuple<'v, 'a> {
     }
 }
 
+/// Formatted sequence view
+///
+/// A sequence is an immutable, ordered run of segments, each of which is a
+/// `Str` of literal program text, a [`FmtValue`], or a [`FmtParam`]. Nothing
+/// else can appear, so a consumer that recognizes those three has covered the
+/// sequence.
+pub struct Fmt<'v, 'a>(Cast<'v, 'a, stdfmt::Fmt>);
+
+impl<'v, 'a> Fmt<'v, 'a> {
+    pub(crate) fn from_cast(cast: Cast<'v, 'a, stdfmt::Fmt>) -> Self {
+        Self(cast)
+    }
+
+    /// Number of segments.
+    pub fn len<'s>(&self, strand: &mut Strand<'v, 's>) -> Result<'v, 's, usize> {
+        self.0
+            .enter_sync(strand, |strand, this| stdfmt::view_fmt_len(this, strand))
+    }
+
+    /// Write segment `index` to `out`. Returns `false` if out of bounds.
+    pub fn get<'s>(
+        &self,
+        strand: &mut Strand<'v, 's>,
+        index: usize,
+        out: impl Output<'v>,
+    ) -> Result<'v, 's, bool> {
+        self.0.enter_sync(strand, |strand, this| {
+            stdfmt::view_fmt_segment(this, strand, index, out)
+        })
+    }
+}
+
+/// Bound interpolation view
+///
+/// One segment of a [`Fmt`]: a value to be formatted, and the specification to
+/// format it under.
+pub struct FmtValue<'v, 'a>(Cast<'v, 'a, stdfmt::FmtValue>);
+
+impl<'v, 'a> FmtValue<'v, 'a> {
+    pub(crate) fn from_cast(cast: Cast<'v, 'a, stdfmt::FmtValue>) -> Self {
+        Self(cast)
+    }
+
+    /// Write the bound value to `out`.
+    pub fn value<'s>(
+        &self,
+        strand: &mut Strand<'v, 's>,
+        out: impl Output<'v>,
+    ) -> Result<'v, 's, ()> {
+        self.0.enter_sync(strand, |strand, this| {
+            stdfmt::view_value_bound(this, strand, out)
+        })
+    }
+
+    /// The formatting specification.
+    pub fn spec(&self, strand: &mut Strand<'v, '_>) -> Spec {
+        self.0.enter_sync(strand, |_, this| stdfmt::view_spec(this))
+    }
+
+    /// The text this was written as, or [`None`] when it was built at runtime
+    /// and so has no source.
+    pub fn source<'s>(&self, strand: &mut Strand<'v, 's>) -> Result<'v, 's, Option<String>> {
+        self.0
+            .enter_sync(strand, |strand, this| stdfmt::view_source(this, strand))
+    }
+}
+
+/// Unbound parameter view
+///
+/// One segment of a [`Fmt`]: a hole named by an `Int` or a `Sym`, and the
+/// specification it will impose once filled.
+pub struct FmtParam<'v, 'a>(Cast<'v, 'a, stdfmt::FmtParam>);
+
+impl<'v, 'a> FmtParam<'v, 'a> {
+    pub(crate) fn from_cast(cast: Cast<'v, 'a, stdfmt::FmtParam>) -> Self {
+        Self(cast)
+    }
+
+    /// Write the parameter's name to `out`.
+    pub fn name<'s>(
+        &self,
+        strand: &mut Strand<'v, 's>,
+        out: impl Output<'v>,
+    ) -> Result<'v, 's, ()> {
+        self.0.enter_sync(strand, |strand, this| {
+            stdfmt::view_param_name(this, strand, out)
+        })
+    }
+
+    /// The formatting specification.
+    pub fn spec(&self, strand: &mut Strand<'v, '_>) -> Spec {
+        self.0.enter_sync(strand, |_, this| stdfmt::view_spec(this))
+    }
+
+    /// The text this was written as, or [`None`] when it was built at runtime
+    /// and so has no source.
+    pub fn source<'s>(&self, strand: &mut Strand<'v, 's>) -> Result<'v, 's, Option<String>> {
+        self.0
+            .enter_sync(strand, |strand, this| stdfmt::view_source(this, strand))
+    }
+}
+
 /// Type-discriminating view of a [`Value`].
+///
+/// New variants may be added as more types gain a view, so a consumer outside
+/// this crate must decide what an unrecognized one means rather than being
+/// silently broken by it.
+#[non_exhaustive]
 pub enum View<'v, 'a> {
     /// Nil
     Nil,
@@ -630,10 +827,20 @@ pub enum View<'v, 'a> {
     Array(Array<'v, 'a>),
     /// Dict
     Dict(Dict<'v, 'a>),
+    /// Set
+    Set(Set<'v, 'a>),
     /// Record
     Record(Record<'v, 'a>),
     /// Tuple
     Tuple(Tuple<'v, 'a>),
+    /// Formatted sequence
+    Fmt(Fmt<'v, 'a>),
+    /// Bound interpolation
+    FmtValue(FmtValue<'v, 'a>),
+    /// Unbound parameter
+    FmtParam(FmtParam<'v, 'a>),
+    /// Formatting specification
+    FmtSpec(Spec),
     /// Any value which not match the standard types above.
     Object(ObjectView<'v, 'a>),
 }
@@ -658,6 +865,34 @@ impl<'v, 'a> DictPairs<'v, 'a> {
             None => return Err(Error::concurrency(strand)),
         };
         Ok(kv_next_pair(&borrow.0, &mut self.pos, strand, key, value))
+    }
+}
+
+/// Iterator over a [`Set`].
+pub struct SetMembers<'v, 'a> {
+    borrow: gc::Borrow<'v, 'a, Header, set::Set<'v>>,
+    pos: usize,
+}
+
+impl<'v, 'a> SetMembers<'v, 'a> {
+    /// Get the next member.
+    /// Returns `false` when all members have been yielded.
+    pub fn next<'s>(
+        &mut self,
+        strand: &mut Strand<'v, 's>,
+        value: impl Output<'v>,
+    ) -> Result<'v, 's, bool> {
+        let borrow = match self.borrow.borrow() {
+            Some(b) => b,
+            None => return Err(Error::concurrency(strand)),
+        };
+        match borrow.next_from(&mut self.pos) {
+            Some(member) => {
+                Output::set(strand, value, member);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
     }
 }
 

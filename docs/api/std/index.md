@@ -23,6 +23,7 @@ The `std` module provides core language facilities.
 | [`Float`](./float.md)                             | 64-bit floating point                      |
 | [`Fmt`](./fmt.md)                                 | Sequence of text and interpolations        |
 | [`FmtValue`](./fmt-value.md)                      | Value bound to formatting options          |
+| [`FmtParam`](./fmt-param.md)                      | Unbound position in a sequence             |
 | [`FmtSpec`](./fmt-spec.md)                        | Reusable formatting options                |
 | [`Func`](./func.md)                               | Function value                             |
 | [`Getter`](./getter.md)                           | Abstract getter protocol type              |
