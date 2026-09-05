@@ -125,7 +125,7 @@ ctr.start()
 try
   ctr.wait()
 catch docker.ContainerExitError: err
-  echo "container exited with status $err.rc"
+  echo "container exited with status $(err.rc)"
 finally
   ctr.remove force: true
 ```

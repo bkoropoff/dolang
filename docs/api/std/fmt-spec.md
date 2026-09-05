@@ -3,31 +3,24 @@
 Stores reusable formatting options.
 
 `FmtSpec` values are immutable. Calling one returns a new specification with
-the supplied options merged, or a bound [`FmtValue`](./fmt-value.md) when
+the supplied options overridden, or a bound [`FmtValue`](./fmt-value.md) when
 given a positional value.
 
 ## Constructor
 
 ### `FmtSpec :fill? :align? :sign? :width? :precision? :alt? :kind?`
 
-Binding a value is [`FmtValue`](./fmt-value.md)'s job, so no positional
-argument is accepted here.
-
 #### Parameters
 
 | Name        | Type  | Description                            |
 | ----------- | ----- | -------------------------------------- |
-| `fill`      | ?     | Fill character, `:ZERO:`, or nil       |
+| `fill`      | Str?  | Fill character, `:ZERO:`, or nil       |
 | `align`     | Sym?  | `:LEFT:`, `:RIGHT:`, or `:CENTER:`     |
 | `sign`      | Sym?  | `:PLUS:` or `:SPACE:`                  |
 | `width`     | Int?  | Minimum width in grapheme clusters     |
 | `precision` | Int?  | Numeric precision or maximum graphemes |
 | `alt`       | Bool? | Enables alternate formatting           |
 | `kind`      | Sym?  | Representation kind                    |
-
-#### Returns
-
-`FmtSpec`
 
 #### Example
 
@@ -68,12 +61,25 @@ Whether alternate formatting is enabled.
 ### `kind`
 
 The requested representation, or nil to inherit the surrounding conversion.
-Supported values are `:STR:`, `:DBG:`, `:VERBATIM:`, `:HEX:`, `:OCT:`,
-`:BIN:`, `:DEC:`, `:EXP:`, and `:FIXED:`.
 
-## Methods
+| Kind         | Representation     | Conversion |
+| ------------ | ------------------ | ---------- |
+| `:STR:`      | string             | `s`        |
+| `:DBG:`      | debug              | `?`        |
+| `:VERBATIM:` | verbatim           | `!`        |
+| `:HEX:`      | integer (hex)      | `x`        |
+| `:OCT:`      | integer (octal)    | `o`        |
+| `:BIN:`      | integer (binary)   | `b`        |
+| `:DEC:`      | integer (decimal)  | `d`        |
+| `:EXP:`      | float (scientific) | `e`        |
+| `:FIXED:`    | float (fixed)      | `f`        |
 
-### `call value? :fill? :align? :sign? :width? :precision? :alt? :kind?`
+The Conversion column gives the equivalent character in a [formatted
+interpolation](../../language/strings.md#formatted-interpolation).
+
+## Operators
+
+### `(call) value? :fill? :align? :sign? :width? :precision? :alt? :kind?`
 
 Returns a new specification, or a bound [`FmtValue`](./fmt-value.md) when
 `value` is provided. Omitted options retain their current values; nil resets
@@ -82,6 +88,8 @@ an option.
 Binding a [`FmtValue`](./fmt-value.md) nests it: the inner specification
 renders the value and this one lays that rendering out. See
 [Sequencing](./fmt-value.md#sequencing).
+
+## Methods
 
 ### `pad value`
 

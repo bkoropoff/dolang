@@ -1235,6 +1235,9 @@ impl<'a> Parser<'a> {
                                 ));
                             }
                             this.parse_fmt_interp(scope, dollar_span, kind)?
+                        } else if let Some(token!(Hash, hash_span)) = this.peek()? {
+                            this.advance();
+                            this.parse_fmt_param_short(scope, dollar_span, hash_span, kind)?
                         } else {
                             let expr = this.parse_expr_primary(scope, ExprMode::Compact)?;
                             // A sequence keeps every interpolation as its own
@@ -1432,6 +1435,46 @@ impl<'a> Parser<'a> {
                 "expected a parameter name or number after `#`",
             )),
         }
+    }
+
+    /// Parses a `$#0` or `$#foo`: the shorthand for a parameter that states no
+    /// specification.
+    ///
+    /// A name ends at the first character that cannot be part of one, so the
+    /// braces have nothing left to delimit. `${#...}` remains the form that
+    /// takes a specification.
+    fn parse_fmt_param_short(
+        &mut self,
+        scope: &mut Scope,
+        dollar_span: Span,
+        hash_span: Span,
+        kind: StrKind,
+    ) -> Result<Expr> {
+        if kind != StrKind::Fmt {
+            self.fail = true;
+            self.diags.push(FmtParamOutsideSeq(hash_span));
+        }
+        // A name glued to a `:` comes back as a `Key`, and the name parser puts
+        // the colon back. Outside a specification it is ordinary text, which is
+        // what the string loop makes of it.
+        let name = self.parse_fmt_param_name(scope)?;
+        Ok(Expr::FmtParam {
+            name,
+            spec: Box::new(FormatSpec {
+                fill: None,
+                zero: None,
+                align: None,
+                sign: None,
+                alt: None,
+                width: None,
+                precision: None,
+                kind: None,
+            }),
+            dollar_span,
+            hash_span,
+            brace_span: None,
+            colon_span: None,
+        })
     }
 
     fn parse_fmt_interp(
@@ -1673,7 +1716,7 @@ impl<'a> Parser<'a> {
                 spec: Box::new(spec),
                 dollar_span,
                 hash_span,
-                brace_span,
+                brace_span: Some(brace_span),
                 colon_span,
             },
             None => Expr::Fmt {
@@ -1780,6 +1823,16 @@ impl<'a> Parser<'a> {
                             this.advance();
                             if let Some(token!(LeftBrace)) = this.peek()? {
                                 exprs.push(this.parse_fmt_interp(scope, dollar_span, kind)?);
+                                continue;
+                            }
+                            if let Some(token!(Hash, hash_span)) = this.peek()? {
+                                this.advance();
+                                exprs.push(this.parse_fmt_param_short(
+                                    scope,
+                                    dollar_span,
+                                    hash_span,
+                                    kind,
+                                )?);
                                 continue;
                             }
                             let expr = match this.peek()? {

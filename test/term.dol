@@ -9,6 +9,7 @@ import shell term strand
     - test
   std:
     - FmtValue
+    - MissingKeyError
     - TypeError
     - UnsupportedError
     - ValueError
@@ -304,8 +305,8 @@ def console_refuses_unbound_parameters()
   # never finished, so the console refuses it exactly as `format` does rather
   # than printing a hole where a value was meant to go.
   let stmt = std.Fmt ["user: ", hole]
-  assert_throws $ValueError do stmt.format()
-  assert_throws $ValueError do term.sub do echo $stmt
+  assert_throws $MissingKeyError do stmt.format()
+  assert_throws $MissingKeyError do term.sub do echo $stmt
 
 # --- Terminal output capture ----------------------------------------------
 

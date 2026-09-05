@@ -102,7 +102,7 @@ conn.prepare t"UPDATE users SET status = ${#status} WHERE created < $cutoff"
 Filling is exhaustive: every parameter must be supplied on every call, and an
 argument naming no parameter raises. Use
 [`Fmt.bind`](../std/fmt.md#bind-bindings) to fill some holes before preparing,
-and [`Fmt.params`](../std/fmt.md#params) to ask what a template still wants.
+and [`Fmt.params()`](../std/fmt.md#params) to ask what a template still wants.
 
 Neither form ever becomes SQL text — only the template's literal text does — so
 an interpolated value cannot alter the statement it appears in, whatever it
