@@ -18,6 +18,7 @@ fn make_policy<'v>(
     out: impl Output<'v>,
 ) {
     global
+        .types
         .account_policy
         .create_with_annex(strand, AccountPolicy, policy, out);
 }
@@ -122,7 +123,7 @@ pub(crate) fn configure_module<'v, 'a>(
     global: State<'v, Global<'v>>,
 ) -> ModuleBuilder<'v, 'a> {
     module
-        .value("AccountPolicy", global.account_policy)
+        .value("AccountPolicy", global.types.account_policy)
         .function("account_policy", async move |strand, args, out| {
             let ([], []) = unpack!(strand, args, 0, 0)?;
             let policy = policy::get(&dolang_ext_shell::vfs(strand))
@@ -132,14 +133,14 @@ pub(crate) fn configure_module<'v, 'a>(
             Ok(())
         })
         .function("update_account_policy", async move |strand, args, out| {
-            let min_password_length_sym = global.min_password_length;
-            let max_password_age_sym = global.max_password_age;
-            let min_password_age_sym = global.min_password_age;
-            let force_logoff_sym = global.force_logoff;
-            let password_history_length_sym = global.password_history_length;
-            let lockout_duration_sym = global.lockout_duration;
-            let lockout_observation_window_sym = global.lockout_observation_window;
-            let lockout_threshold_sym = global.lockout_threshold;
+            let min_password_length_sym = global.syms.min_password_length;
+            let max_password_age_sym = global.syms.max_password_age;
+            let min_password_age_sym = global.syms.min_password_age;
+            let force_logoff_sym = global.syms.force_logoff;
+            let password_history_length_sym = global.syms.password_history_length;
+            let lockout_duration_sym = global.syms.lockout_duration;
+            let lockout_observation_window_sym = global.syms.lockout_observation_window;
+            let lockout_threshold_sym = global.syms.lockout_threshold;
             let (
                 [],
                 [

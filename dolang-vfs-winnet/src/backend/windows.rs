@@ -1,4 +1,4 @@
-use std::{ffi::OsStr, os::windows::ffi::OsStrExt, ptr, slice};
+use std::{ffi::OsStr, mem, os::windows::ffi::OsStrExt, ptr, slice};
 
 use dolang_vfs::target::OperatingSystem;
 use dolang_vfs::{
@@ -9,10 +9,15 @@ use dolang_vfs::{
 use dolang_winterop::security::{SecDesc, Sid};
 use windows_sys::Win32::{
     Foundation::{
-        ERROR_ACCESS_DENIED, ERROR_ALIAS_EXISTS, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_HANDLE,
-        ERROR_INVALID_PARAMETER, ERROR_INVALID_PASSWORD, ERROR_MEMBER_IN_ALIAS,
-        ERROR_MEMBER_NOT_IN_ALIAS, ERROR_MORE_DATA, ERROR_NO_SUCH_ALIAS, ERROR_NO_SUCH_PRIVILEGE,
-        ERROR_NONE_MAPPED, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS,
+        ERROR_ACCESS_DENIED, ERROR_ALIAS_EXISTS, ERROR_ALREADY_ASSIGNED, ERROR_BAD_DEV_TYPE,
+        ERROR_BAD_NET_NAME, ERROR_BAD_NETPATH, ERROR_CONNECTION_UNAVAIL,
+        ERROR_DEVICE_ALREADY_REMEMBERED, ERROR_DEVICE_IN_USE, ERROR_EXTENDED_ERROR,
+        ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_ADDRESS, ERROR_INVALID_HANDLE,
+        ERROR_INVALID_PARAMETER, ERROR_INVALID_PASSWORD, ERROR_LOGON_FAILURE,
+        ERROR_MEMBER_IN_ALIAS, ERROR_MEMBER_NOT_IN_ALIAS, ERROR_MORE_DATA, ERROR_NO_MORE_ITEMS,
+        ERROR_NO_NET_OR_BAD_PATH, ERROR_NO_SUCH_ALIAS, ERROR_NO_SUCH_PRIVILEGE, ERROR_NONE_MAPPED,
+        ERROR_NOT_CONNECTED, ERROR_NOT_FOUND, ERROR_OPEN_FILES, FILETIME, GetLastError, NO_ERROR,
+        STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS,
     },
     NetworkManagement::NetManagement::{
         FILTER_NORMAL_ACCOUNT, LOCALGROUP_INFO_0, LOCALGROUP_INFO_1, LOCALGROUP_MEMBERS_INFO_0,
@@ -34,11 +39,21 @@ use windows_sys::Win32::{
         USER_MODALS_INFO_1002, USER_MODALS_INFO_1003, USER_MODALS_INFO_1004, USER_MODALS_INFO_1005,
         WKSTA_INFO_100,
     },
+    NetworkManagement::WNet::{
+        CONNECT_UPDATE_PROFILE, NETRESOURCEW, RESOURCE_CONNECTED, RESOURCE_REMEMBERED,
+        RESOURCETYPE_ANY, RESOURCETYPE_DISK, RESOURCETYPE_PRINT, UNIVERSAL_NAME_INFO_LEVEL,
+        UNIVERSAL_NAME_INFOW, WNetAddConnection2W, WNetCancelConnection2W, WNetCloseEnum,
+        WNetEnumResourceW, WNetGetLastErrorW, WNetGetUniversalNameW, WNetGetUserW, WNetOpenEnumW,
+    },
     Security::{
         Authentication::Identity::{
             LSA_HANDLE, LSA_OBJECT_ATTRIBUTES, LSA_UNICODE_STRING, LsaAddAccountRights, LsaClose,
             LsaEnumerateAccountRights, LsaFreeMemory, LsaNtStatusToWinError, LsaOpenPolicy,
             LsaRemoveAccountRights, POLICY_CREATE_ACCOUNT, POLICY_LOOKUP_NAMES,
+        },
+        Credentials::{
+            CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_DOMAIN_PASSWORD, CREDENTIALW, CredDeleteW,
+            CredWriteW,
         },
         GetLengthSid, GetSecurityDescriptorLength, LookupAccountNameW, SID_NAME_USE,
     },
@@ -50,10 +65,11 @@ use windows_sys::Win32::{
 };
 
 use crate::wire::{
-    AccountPolicy, AccountPolicyUpdate, GroupCreate, GroupInfo, GroupUpdate, JoinInfo, JoinKind,
-    JoinRequest, MachineInfo, OfflineJoinRequest, ProvisionRequest, RenameRequest, ServerType,
-    ShareCreate, ShareInfo, ShareKind, ShareUpdate, UnjoinRequest, UserCreate, UserFlags, UserInfo,
-    UserUpdate, WinNetRequest, WinNetResponse,
+    AccountPolicy, AccountPolicyUpdate, ConnectionCreate, ConnectionInfo, ConnectionKind,
+    ConnectionState, GroupCreate, GroupInfo, GroupUpdate, JoinInfo, JoinKind, JoinRequest,
+    MachineInfo, OfflineJoinRequest, ProvisionRequest, RenameRequest, ServerType, ShareCreate,
+    ShareInfo, ShareKind, ShareUpdate, UnjoinRequest, UserCreate, UserFlags, UserInfo, UserUpdate,
+    WinNetRequest, WinNetResponse,
 };
 
 struct NetBuffer(*mut u8);
@@ -102,6 +118,10 @@ fn status(operation: &str, code: u32) -> Error {
         || code == NERR_NetNameNotFound
         || code == NERR_UnknownDevDir
         || code == NERR_SetupNotJoined
+        || code == ERROR_BAD_NET_NAME
+        || code == ERROR_BAD_NETPATH
+        || code == ERROR_NO_NET_OR_BAD_PATH
+        || code == ERROR_NOT_FOUND
     {
         ErrorKind::NotFound
     } else if code == NERR_UserExists
@@ -110,12 +130,18 @@ fn status(operation: &str, code: u32) -> Error {
         || code == ERROR_MEMBER_IN_ALIAS
         || code == NERR_DuplicateShare
         || code == NERR_SetupAlreadyJoined
+        || code == ERROR_ALREADY_ASSIGNED
+        || code == ERROR_DEVICE_ALREADY_REMEMBERED
     {
         ErrorKind::AlreadyExists
     } else if code == ERROR_MEMBER_NOT_IN_ALIAS {
         ErrorKind::NotFound
-    } else if code == ERROR_ACCESS_DENIED {
+    } else if code == ERROR_ACCESS_DENIED || code == ERROR_LOGON_FAILURE {
         ErrorKind::PermissionDenied
+    } else if code == ERROR_NOT_CONNECTED || code == ERROR_CONNECTION_UNAVAIL {
+        ErrorKind::NotConnected
+    } else if code == ERROR_DEVICE_IN_USE || code == ERROR_OPEN_FILES {
+        ErrorKind::ResourceBusy
     } else if code == ERROR_INVALID_PARAMETER
         || code == ERROR_INVALID_PASSWORD
         || code == ERROR_NO_SUCH_PRIVILEGE
@@ -124,6 +150,8 @@ fn status(operation: &str, code: u32) -> Error {
         || code == NERR_InvalidComputer
         || code == NERR_InvalidWorkgroupName
         || code == NERR_DefaultJoinRequired
+        || code == ERROR_BAD_DEV_TYPE
+        || code == ERROR_INVALID_ADDRESS
     {
         ErrorKind::InvalidInput
     } else {
@@ -939,6 +967,397 @@ fn optional_ptr(value: &Option<Vec<u16>>) -> *const u16 {
     value.as_ref().map_or(ptr::null(), |v| v.as_ptr())
 }
 
+/// A buffer aligned for the pointer-bearing structures the MPR writes into it.
+struct WideBuffer(Vec<usize>);
+impl WideBuffer {
+    fn new(bytes: usize) -> Self {
+        Self(vec![0; bytes.div_ceil(mem::size_of::<usize>()).max(1)])
+    }
+    fn bytes(&self) -> u32 {
+        // Sized from a constant below u32::MAX and only ever grown to a size
+        // the MPR itself asked for, so this cannot overflow in practice.
+        u32::try_from(self.0.len() * mem::size_of::<usize>()).unwrap_or(u32::MAX)
+    }
+    fn grow(&mut self, bytes: u32) {
+        let want = (bytes as usize).div_ceil(mem::size_of::<usize>()).max(1);
+        if want > self.0.len() {
+            self.0.resize(want, 0);
+        } else {
+            // The MPR reported a size that does not actually advance; grow
+            // anyway so a retry loop cannot spin forever.
+            self.0.resize(self.0.len() * 2, 0);
+        }
+    }
+    fn as_mut_ptr(&mut self) -> *mut core::ffi::c_void {
+        self.0.as_mut_ptr().cast()
+    }
+    fn as_ptr(&self) -> *const core::ffi::c_void {
+        self.0.as_ptr().cast()
+    }
+}
+
+/// An open MPR enumeration, closed on drop.
+struct EnumHandle(*mut core::ffi::c_void);
+impl Drop for EnumHandle {
+    fn drop(&mut self) {
+        unsafe { WNetCloseEnum(self.0) };
+    }
+}
+
+/// Reports a failed `WNet*` call.
+///
+/// The provider-specific detail behind `ERROR_EXTENDED_ERROR` is only available
+/// from `WNetGetLastErrorW`, and only on the thread that made the call, so it
+/// has to be collected here rather than left to the caller.
+fn wnet_status(operation: &str, code: u32) -> Error {
+    if code == ERROR_EXTENDED_ERROR {
+        let mut provider_code = 0;
+        let mut message = [0u16; 512];
+        let mut provider = [0u16; 256];
+        let fetched = unsafe {
+            WNetGetLastErrorW(
+                &mut provider_code,
+                message.as_mut_ptr(),
+                message.len() as u32,
+                provider.as_mut_ptr(),
+                provider.len() as u32,
+            )
+        };
+        if fetched == NO_ERROR {
+            let message = unsafe { string(message.as_ptr()) };
+            let provider = unsafe { string(provider.as_ptr()) };
+            return Error::from_system_code(
+                ErrorKind::Other,
+                format!("{operation}: {provider} reported error {provider_code}: {message}"),
+                OperatingSystem::Windows,
+                provider_code as i32,
+            );
+        }
+    }
+    status(operation, code)
+}
+
+fn connection_kind(value: u32) -> ConnectionKind {
+    // Providers may report resource types this binding does not model; they are
+    // still real connections, so they enumerate as `Any` rather than failing the
+    // whole listing.
+    match value {
+        RESOURCETYPE_DISK => ConnectionKind::Disk,
+        RESOURCETYPE_PRINT => ConnectionKind::Print,
+        _ => ConnectionKind::Any,
+    }
+}
+fn connection_type(kind: ConnectionKind) -> u32 {
+    match kind {
+        ConnectionKind::Disk => RESOURCETYPE_DISK,
+        ConnectionKind::Print => RESOURCETYPE_PRINT,
+        ConnectionKind::Any => RESOURCETYPE_ANY,
+    }
+}
+
+/// The account a connection authenticated as, when the provider reports one.
+///
+/// Best effort: a remembered connection that is not currently established has no
+/// user to report, which is not an error.
+fn connection_user(name: &str) -> Option<String> {
+    let name = wide(name);
+    let mut buffer = vec![0u16; 256];
+    loop {
+        let mut len = buffer.len() as u32;
+        let code = unsafe { WNetGetUserW(name.as_ptr(), buffer.as_mut_ptr(), &mut len) };
+        if code == ERROR_MORE_DATA && len as usize > buffer.len() {
+            buffer.resize(len as usize, 0);
+            continue;
+        }
+        if code != NO_ERROR {
+            return None;
+        }
+        return unsafe { optional(buffer.as_ptr()) };
+    }
+}
+
+/// Enumerates one connection scope.
+fn connection_scope(scope: u32, state: ConnectionState) -> Result<Vec<ConnectionInfo>, Error> {
+    let mut raw = ptr::null_mut();
+    let code = unsafe { WNetOpenEnumW(scope, RESOURCETYPE_ANY, 0, ptr::null(), &mut raw) };
+    if code != NO_ERROR {
+        return Err(wnet_status("WNetOpenEnumW", code));
+    }
+    let handle = EnumHandle(raw);
+    let mut buffer = WideBuffer::new(16 * 1024);
+    let mut entries = Vec::new();
+    loop {
+        // `u32::MAX` asks for as many entries as the buffer will hold.
+        let mut count = u32::MAX;
+        let mut size = buffer.bytes();
+        let code =
+            unsafe { WNetEnumResourceW(handle.0, &mut count, buffer.as_mut_ptr(), &mut size) };
+        if code == ERROR_NO_MORE_ITEMS {
+            return Ok(entries);
+        }
+        if code == ERROR_MORE_DATA {
+            buffer.grow(size);
+            continue;
+        }
+        if code != NO_ERROR {
+            return Err(wnet_status("WNetEnumResourceW", code));
+        }
+        let rows = unsafe {
+            slice::from_raw_parts(buffer.as_ptr().cast::<NETRESOURCEW>(), count as usize)
+        };
+        for row in rows {
+            entries.push(ConnectionInfo {
+                local: unsafe { optional(row.lpLocalName) },
+                remote: unsafe { string(row.lpRemoteName) },
+                provider: unsafe { optional(row.lpProvider) },
+                user: None,
+                kind: connection_kind(row.dwType),
+                state,
+                persistent: state == ConnectionState::Remembered,
+            });
+        }
+    }
+}
+
+/// Whether two enumerated entries name the same connection.
+///
+/// A device-redirecting connection is identified by its device; a deviceless one
+/// only by its remote name.
+fn same_connection(left: &ConnectionInfo, right: &ConnectionInfo) -> bool {
+    match (&left.local, &right.local) {
+        (Some(left), Some(right)) => left.eq_ignore_ascii_case(right),
+        (None, None) => left.remote.eq_ignore_ascii_case(&right.remote),
+        _ => false,
+    }
+}
+
+/// Every connection, live or merely remembered.
+///
+/// The two scopes overlap: a persistent mapping whose server is reachable
+/// appears in both. Connected wins, and presence in the remembered scope is what
+/// sets `persistent`.
+fn connections() -> Result<Vec<ConnectionInfo>, Error> {
+    let mut entries = connection_scope(RESOURCE_CONNECTED, ConnectionState::Connected)?;
+    for remembered in connection_scope(RESOURCE_REMEMBERED, ConnectionState::Remembered)? {
+        match entries
+            .iter_mut()
+            .find(|entry| same_connection(entry, &remembered))
+        {
+            Some(entry) => entry.persistent = true,
+            None => entries.push(remembered),
+        }
+    }
+    for entry in &mut entries {
+        entry.user = connection_user(entry.name());
+    }
+    Ok(entries)
+}
+
+/// Looks up one connection by local device or remote name.
+///
+/// Resolved from the enumeration rather than `WNetGetConnectionW`, which reports
+/// only the remote name and so cannot fill in provider, state or persistence.
+fn connection_get(name: &str) -> Result<ConnectionInfo, Error> {
+    connections()?
+        .into_iter()
+        .find(|entry| {
+            entry
+                .local
+                .as_deref()
+                .is_some_and(|local| local.eq_ignore_ascii_case(name))
+                || entry.remote.eq_ignore_ascii_case(name)
+        })
+        .ok_or_else(|| Error::new(ErrorKind::NotFound, format!("no connection named {name}")))
+}
+
+/// The Credential Manager target for a remote resource: its server.
+fn credential_target(remote: &str) -> Result<&str, Error> {
+    let invalid = || {
+        Error::new(
+            ErrorKind::InvalidInput,
+            format!(r"remote must be a UNC name of the form \\server\share, got {remote}"),
+        )
+    };
+    let rest = remote
+        .strip_prefix(r"\\")
+        .or_else(|| remote.strip_prefix("//"))
+        .ok_or_else(invalid)?;
+    let server = rest.split(['\\', '/']).next().unwrap_or_default();
+    if server.is_empty() {
+        return Err(invalid());
+    }
+    Ok(server)
+}
+
+/// Saves credentials for a server so a persistent connection can reconnect.
+///
+/// `WNetAddConnection2W` does not do this itself, so without it a mapping
+/// restored at logon has nothing to authenticate with.
+fn credential_store(target: &str, user: &str, password: &str) -> Result<(), Error> {
+    let mut target_w = wide(target);
+    let mut user_w = wide(user);
+    // The blob is the password's UTF-16 code units, without the terminator.
+    let mut blob: Vec<u16> = password.encode_utf16().collect();
+    let size = u32::try_from(blob.len() * mem::size_of::<u16>())
+        .map_err(|_| Error::new(ErrorKind::InvalidInput, "password is too long to store"))?;
+    let credential = CREDENTIALW {
+        Flags: 0,
+        Type: CRED_TYPE_DOMAIN_PASSWORD,
+        TargetName: target_w.as_mut_ptr(),
+        Comment: ptr::null_mut(),
+        LastWritten: FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        },
+        CredentialBlobSize: size,
+        CredentialBlob: blob.as_mut_ptr().cast(),
+        // Local machine rather than enterprise: a CI credential should stay on
+        // the box instead of roaming with the profile.
+        Persist: CRED_PERSIST_LOCAL_MACHINE,
+        AttributeCount: 0,
+        Attributes: ptr::null_mut(),
+        TargetAlias: ptr::null_mut(),
+        UserName: user_w.as_mut_ptr(),
+    };
+    if unsafe { CredWriteW(&credential, 0) } == 0 {
+        return Err(status("CredWriteW", unsafe { GetLastError() }));
+    }
+    Ok(())
+}
+
+/// Removes saved credentials for a server, tolerating their absence.
+fn credential_forget(target: &str) -> Result<(), Error> {
+    let target = wide(target);
+    if unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_DOMAIN_PASSWORD, 0) } != 0 {
+        return Ok(());
+    }
+    let code = unsafe { GetLastError() };
+    if code == ERROR_NOT_FOUND {
+        return Ok(());
+    }
+    Err(status("CredDeleteW", code))
+}
+
+fn connection_add(create: ConnectionCreate) -> Result<ConnectionInfo, Error> {
+    // Windows only remembers connections that redirect a local device, and
+    // silently ignores CONNECT_UPDATE_PROFILE otherwise, so the mapping would
+    // evaporate at the next logon rather than fail here.
+    if create.persistent && create.local.is_none() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "a persistent connection must redirect a local device",
+        ));
+    }
+    let store = create.stores_credentials();
+    if store && create.user.is_none() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "saving credentials requires a user name",
+        ));
+    }
+    let mut remote_w = wide(&create.remote);
+    let mut local_w = create.local.as_deref().map(wide);
+    let user_w = create.user.as_deref().map(wide);
+    let password_w = create.password.as_deref().map(wide);
+    let resource = NETRESOURCEW {
+        dwScope: 0,
+        dwType: connection_type(create.kind),
+        dwDisplayType: 0,
+        dwUsage: 0,
+        lpLocalName: local_w
+            .as_mut()
+            .map_or(ptr::null_mut(), |value| value.as_mut_ptr()),
+        lpRemoteName: remote_w.as_mut_ptr(),
+        lpComment: ptr::null_mut(),
+        lpProvider: ptr::null_mut(),
+    };
+    let flags = if create.persistent {
+        CONNECT_UPDATE_PROFILE
+    } else {
+        0
+    };
+    let code = unsafe {
+        WNetAddConnection2W(
+            &resource,
+            optional_ptr(&password_w),
+            optional_ptr(&user_w),
+            flags,
+        )
+    };
+    if code != NO_ERROR {
+        return Err(wnet_status("WNetAddConnection2W", code));
+    }
+    let name = create
+        .local
+        .clone()
+        .unwrap_or_else(|| create.remote.clone());
+    let finish = || -> Result<ConnectionInfo, Error> {
+        if store {
+            let user = create.user.as_deref().unwrap_or_default();
+            let password = create.password.as_deref().unwrap_or_default();
+            credential_store(credential_target(&create.remote)?, user, password)?;
+        }
+        connection_get(&name)
+    };
+    match finish() {
+        Ok(info) => Ok(info),
+        Err(error) => {
+            let name = wide(&name);
+            unsafe { WNetCancelConnection2W(name.as_ptr(), flags, 1) };
+            Err(error)
+        }
+    }
+}
+
+fn connection_cancel(
+    name: &str,
+    force: bool,
+    forget_credentials: Option<bool>,
+) -> Result<(), Error> {
+    let info = connection_get(name)?;
+    // Removing the profile entry is what makes a persistent mapping stay gone.
+    let flags = if info.persistent {
+        CONNECT_UPDATE_PROFILE
+    } else {
+        0
+    };
+    let name_w = wide(name);
+    let code = unsafe { WNetCancelConnection2W(name_w.as_ptr(), flags, i32::from(force)) };
+    if code != NO_ERROR {
+        return Err(wnet_status("WNetCancelConnection2W", code));
+    }
+    if forget_credentials.unwrap_or(info.persistent) {
+        credential_forget(credential_target(&info.remote)?)?;
+    }
+    Ok(())
+}
+
+fn connection_universal_name(path: &path::PathBuf) -> Result<String, Error> {
+    let value = windows_path(Some(path), "path")?;
+    let path_w = wide(value);
+    let mut buffer = WideBuffer::new(1024);
+    loop {
+        let mut size = buffer.bytes();
+        let code = unsafe {
+            WNetGetUniversalNameW(
+                path_w.as_ptr(),
+                UNIVERSAL_NAME_INFO_LEVEL,
+                buffer.as_mut_ptr(),
+                &mut size,
+            )
+        };
+        if code == ERROR_MORE_DATA {
+            buffer.grow(size);
+            continue;
+        }
+        if code != NO_ERROR {
+            return Err(wnet_status("WNetGetUniversalNameW", code));
+        }
+        let info = unsafe { &*buffer.as_ptr().cast::<UNIVERSAL_NAME_INFOW>() };
+        return Ok(unsafe { string(info.lpUniversalName) });
+    }
+}
+
 fn join_info() -> Result<JoinInfo, Error> {
     let mut raw = ptr::null_mut();
     let mut native = 0;
@@ -1437,6 +1856,39 @@ fn dispatch(request: WinNetRequest) -> Result<WinNetResponse, Error> {
             apply_offline_join(*request)?;
             Ok(WinNetResponse::Unit)
         }
+        WinNetRequest::ConnectionInfo { name } => Ok(WinNetResponse::ConnectionInfo(Box::new(
+            connection_get(&name)?,
+        ))),
+        WinNetRequest::ConnectionsPage { resume } => {
+            // The MPR enumerates through an open handle rather than a resume
+            // cookie, so the whole listing is drained here and returned as a
+            // single page. Connection counts are bounded by drive letters.
+            if resume != 0 {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "connection enumeration does not resume",
+                ));
+            }
+            Ok(WinNetResponse::ConnectionsPage {
+                connections: connections()?,
+                resume: 0,
+                done: true,
+            })
+        }
+        WinNetRequest::AddConnection(create) => Ok(WinNetResponse::ConnectionInfo(Box::new(
+            connection_add(*create)?,
+        ))),
+        WinNetRequest::CancelConnection {
+            name,
+            force,
+            forget_credentials,
+        } => {
+            connection_cancel(&name, force, forget_credentials)?;
+            Ok(WinNetResponse::Deleted)
+        }
+        WinNetRequest::UniversalName { path } => Ok(WinNetResponse::UniversalName(
+            connection_universal_name(&path)?,
+        )),
     }
 }
 

@@ -34,7 +34,7 @@ fn make_user<'v>(
     user: user::User,
     out: impl Output<'v>,
 ) {
-    global.user.create(strand, User(Some(user)), out);
+    global.types.user.create(strand, User(Some(user)), out);
 }
 
 fn make_info<'v>(
@@ -44,6 +44,7 @@ fn make_info<'v>(
     out: impl Output<'v>,
 ) {
     global
+        .types
         .info
         .create_with_annex(strand, UserInfo, UserInfoAnnex { global, info }, out);
 }
@@ -245,19 +246,19 @@ impl<'v> Object<'v> for User {
             })
             .method("update", async move |this, strand, args, out| {
                 let global = strand.state::<Global<'v>>();
-                let name_sym = global.name;
-                let password_sym = global.password;
-                let full_name_sym = global.full_name;
-                let comment_sym = global.comment;
-                let user_comment_sym = global.user_comment;
-                let home_dir_sym = global.home_dir;
-                let home_dir_drive_sym = global.home_dir_drive;
-                let profile_sym = global.profile;
-                let script_path_sym = global.script_path;
-                let account_expires_sym = global.account_expires;
-                let disabled_sym = global.disabled;
-                let password_never_expires_sym = global.password_never_expires;
-                let password_cannot_change_sym = global.password_cannot_change;
+                let name_sym = global.syms.name;
+                let password_sym = global.syms.password;
+                let full_name_sym = global.syms.full_name;
+                let comment_sym = global.syms.comment;
+                let user_comment_sym = global.syms.user_comment;
+                let home_dir_sym = global.syms.home_dir;
+                let home_dir_drive_sym = global.syms.home_dir_drive;
+                let profile_sym = global.syms.profile;
+                let script_path_sym = global.syms.script_path;
+                let account_expires_sym = global.syms.account_expires;
+                let disabled_sym = global.syms.disabled;
+                let password_never_expires_sym = global.syms.password_never_expires;
+                let password_cannot_change_sym = global.syms.password_cannot_change;
                 let (
                     [],
                     [
@@ -430,6 +431,7 @@ impl<'v> Object<'v> for UserInfo {
             .get("flags", |this, strand, out| {
                 let a = this.annex();
                 a.global
+                    .types
                     .flags
                     .create_with_annex(strand, UserFlags, a.info.flags(), out);
                 Ok(())
@@ -500,7 +502,7 @@ fn principal<'v, 's>(
     global: State<'v, Global<'v>>,
     value: &Value<'v>,
 ) -> Result<'v, 's, ResultPrincipal> {
-    if let Some(info) = global.info.cast(value) {
+    if let Some(info) = global.types.info.cast(value) {
         return Ok(ResultPrincipal::Info(Box::new(
             info.enter_sync(strand, |_, info| info.annex().info.clone()),
         )));
@@ -527,9 +529,9 @@ pub(crate) fn configure_module<'v, 'a>(
     global: State<'v, Global<'v>>,
 ) -> ModuleBuilder<'v, 'a> {
     module
-        .value("User", global.user)
-        .value("UserInfo", global.info)
-        .value("UserFlags", global.flags)
+        .value("User", global.types.user)
+        .value("UserInfo", global.types.info)
+        .value("UserFlags", global.types.flags)
         .function("user", async move |strand, args, out| {
             let ([value], []) = unpack!(strand, args, 1, 0)?;
             let vfs = dolang_ext_shell::vfs(strand);
@@ -544,7 +546,7 @@ pub(crate) fn configure_module<'v, 'a>(
         })
         .function("users", async move |strand, args, out| {
             let ([], []) = unpack!(strand, args, 0, 0)?;
-            global.users.create_with_annex(
+            global.types.users.create_with_annex(
                 strand,
                 Users(user::enumerate(&dolang_ext_shell::vfs(strand))),
                 global,
@@ -553,19 +555,18 @@ pub(crate) fn configure_module<'v, 'a>(
             Ok(())
         })
         .function("create_user", async move |strand, args, out| {
-            let name_sym = global.name;
-            let password_sym = global.password;
-            let full_name_sym = global.full_name;
-            let comment_sym = global.comment;
-            let user_comment_sym = global.user_comment;
-            let home_dir_sym = global.home_dir;
-            let home_dir_drive_sym = global.home_dir_drive;
-            let profile_sym = global.profile;
-            let script_path_sym = global.script_path;
-            let account_expires_sym = global.account_expires;
-            let disabled_sym = global.disabled;
-            let password_never_expires_sym = global.password_never_expires;
-            let password_cannot_change_sym = global.password_cannot_change;
+            let password_sym = global.syms.password;
+            let full_name_sym = global.syms.full_name;
+            let comment_sym = global.syms.comment;
+            let user_comment_sym = global.syms.user_comment;
+            let home_dir_sym = global.syms.home_dir;
+            let home_dir_drive_sym = global.syms.home_dir_drive;
+            let profile_sym = global.syms.profile;
+            let script_path_sym = global.syms.script_path;
+            let account_expires_sym = global.syms.account_expires;
+            let disabled_sym = global.syms.disabled;
+            let password_never_expires_sym = global.syms.password_never_expires;
+            let password_cannot_change_sym = global.syms.password_cannot_change;
             let (
                 [name, password],
                 [
@@ -584,9 +585,8 @@ pub(crate) fn configure_module<'v, 'a>(
             ) = unpack!(
                 strand,
                 args,
+                1,
                 0,
-                0,
-                name_sym,
                 password_sym,
                 full_name_sym = None,
                 comment_sym = None,

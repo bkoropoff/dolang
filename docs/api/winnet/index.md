@@ -1,22 +1,24 @@
 # winnet
 
-Windows NetAPI bindings.
+Windows NetAPI and related bindings.
 
 ## Types
 
-| Type                                   | Description                        |
-| -------------------------------------- | ---------------------------------- |
-| [`User`](./user.md)                    | SID-stable local user principal    |
-| [`UserInfo`](./user-info.md)           | Fresh account-information snapshot |
-| [`UserFlags`](./user-flags.md)         | Native account flag mask           |
-| [`Group`](./group.md)                  | SID-stable local group principal   |
-| [`GroupInfo`](./group-info.md)         | Fresh local-group snapshot         |
-| [`AccountPolicy`](./account-policy.md) | Local password and lockout policy  |
-| [`Share`](./share.md)                  | Local SMB share capability         |
-| [`ShareInfo`](./share-info.md)         | Fresh local SMB share snapshot     |
-| [`JoinStatus`](./join-status.md)       | Workgroup or domain membership     |
-| [`MachineInfo`](./machine-info.md)     | Machine identity and server role   |
-| [`ServerType`](./server-type.md)       | Native server role mask            |
+| Type                                     | Description                        |
+| ---------------------------------------- | ---------------------------------- |
+| [`User`](./user.md)                      | SID-stable local user principal    |
+| [`UserInfo`](./user-info.md)             | Fresh account-information snapshot |
+| [`UserFlags`](./user-flags.md)           | Native account flag mask           |
+| [`Group`](./group.md)                    | SID-stable local group principal   |
+| [`GroupInfo`](./group-info.md)           | Fresh local-group snapshot         |
+| [`AccountPolicy`](./account-policy.md)   | Local password and lockout policy  |
+| [`Share`](./share.md)                    | Local SMB share capability         |
+| [`ShareInfo`](./share-info.md)           | Fresh local SMB share snapshot     |
+| [`Connection`](./connection.md)          | Remote SMB connection capability   |
+| [`ConnectionInfo`](./connection-info.md) | Fresh SMB connection snapshot      |
+| [`JoinStatus`](./join-status.md)         | Workgroup or domain membership     |
+| [`MachineInfo`](./machine-info.md)       | Machine identity and server role   |
+| [`ServerType`](./server-type.md)         | Native server role mask            |
 
 ## User Options
 
@@ -121,7 +123,7 @@ Iterates local user accounts.
 
 `Iter` over [`UserInfo`](./user-info.md)
 
-### `create_user :name :password ...options`
+### `create_user name :password ...options`
 
 Creates a normal enabled local user and returns its SID-stable `User`.
 
@@ -141,7 +143,7 @@ See [User options](#user-options) for supported keyword options.
 #### Example
 
 ```
-let user = create_user name: "build-user" password: $password
+let user = create_user build-user password: $password
   full_name: "Build User"
   comment: "Automation account"
   disabled: true
@@ -202,7 +204,7 @@ Iterates every local SMB share, including administrative and non-disk shares.
 
 `Iter` over [`ShareInfo`](./share-info.md)
 
-### `create_share :name :path ...options`
+### `create_share name :path ...options`
 
 Creates a local SMB share. The default kind is `:DISKTREE:`, usage is
 unlimited, and Windows supplies the default security descriptor. `kind`
@@ -225,6 +227,133 @@ accepts `:DISKTREE:`, `:PRINTQ:`, `:DEVICE:`, or `:IPC:`.
 
 [`Share`](./share.md)
 
+### `connect remote ...options func?`
+
+Connects to a remote SMB resource, optionally redirecting a local device.
+
+With a trailing `func`, the connection is scoped: it is disconnected when
+`func` returns, including when `func` throws, so a failure partway through does
+not leave a mapping behind. Without one the connection is returned and the
+caller decides when — or whether — to disconnect it.
+
+Connections belong to a logon session. One made under a given account is not
+visible to a process running as another.
+
+#### Parameters
+
+| Name               | Type                      | Description                                                |
+| ------------------ | ------------------------- | ---------------------------------------------------------- |
+| `remote`           | [`Str`](../std/str.md)    | Remote resource in UNC form, such as `r"\\server\share"`   |
+| `local`            | [`Str`](../std/str.md)?   | Local device to redirect, such as `"Z:"`                   |
+| `user`             | [`Str`](../std/str.md)?   | Account to authenticate as                                 |
+| `password`         | [`Str`](../std/str.md)?   | Password for `user`                                        |
+| `kind`             | [`Sym`](../std/sym.md)?   | Resource kind: `:DISK:`, `:PRINT:`, or `:ANY:`             |
+| `persistent`       | [`Bool`](../std/bool.md)? | Records the connection so it is restored at logon          |
+| `save_credentials` | [`Bool`](../std/bool.md)? | Overrides whether credentials are saved for the server     |
+| `func`             | `Func`?                   | Function to run with the connection; disconnects when done |
+
+##### Persistence
+
+A persistent connection must redirect a local device: Windows only remembers
+connections that redirect one. Asking for `persistent` without `local` raises
+`ValueError` rather than silently producing a mapping that disappears at the
+next logon.
+
+Supplied credentials are saved for the target server by default when the
+connection is persistent, because a restored connection has nothing to
+authenticate with otherwise. `save_credentials: false` suppresses that;
+`save_credentials: true` saves them for a non-persistent connection. Saving
+requires `user`. Saved credentials are per-account, the same way the connection
+itself is, so a connection provisioned for a service account must be made under
+that account to be restored for it.
+
+#### Returns
+
+[`Connection`](./connection.md) when no `func` is given, otherwise the result
+of calling `func`
+
+#### Errors
+
+| Exception                                                    | Condition                              |
+| ------------------------------------------------------------ | -------------------------------------- |
+| [`ValueError`](../std/value-error.md)                        | `persistent` requested without `local` |
+| [`AlreadyExistsError`](../sys/already-exists-error.md)       | The local device is already redirected |
+| [`PermissionDeniedError`](../sys/permission-denied-error.md) | Credentials were rejected              |
+| [`NotFoundError`](../sys/not-found-error.md)                 | The remote resource does not exist     |
+
+#### Example
+
+```
+# Scoped: disconnected however the block exits
+connect \\build\artifacts local: Z: do |conn|
+  fs.copy $release $conn.path()
+
+# Unbound: the caller owns teardown
+let conn = connect r"\\build\artifacts"
+try
+  publish $conn.remote
+finally
+  conn.disconnect()
+
+# Persistent, surviving a reboot
+connect \\build\artifacts
+  local: Z:
+  user: r"CORP\ci"
+  password: $secret
+  persistent: true
+```
+
+### `connection name_or_info`
+
+Obtains a connection capability from a local device, a remote name, or a
+[`ConnectionInfo`](./connection-info.md).
+
+#### Parameters
+
+| Name           | Type                                                             | Description                              |
+| -------------- | ---------------------------------------------------------------- | ---------------------------------------- |
+| `name_or_info` | [`Str`](../std/str.md)\|[`ConnectionInfo`](./connection-info.md) | Device, remote name, or prior snapshot   |
+
+#### Returns
+
+[`Connection`](./connection.md)
+
+### `connections()`
+
+Iterates every connection, including ones saved in the profile that are not
+currently connected.
+
+#### Returns
+
+`Iter` over [`ConnectionInfo`](./connection-info.md)
+
+#### Example
+
+```
+for entry = connections()
+  echo $entry.local $entry.remote $entry.state
+```
+
+### `universal_name path`
+
+Resolves a path on a redirected device to its UNC form.
+
+#### Parameters
+
+| Name   | Type                                       | Description                     |
+| ------ | ------------------------------------------ | ------------------------------- |
+| `path` | [`fs.windows.Path`](../fs/windows/path.md) | Path on a redirected device     |
+
+#### Returns
+
+[`Str`](../std/str.md)
+
+#### Example
+
+```
+assert_eq (universal_name (Path r"Z:\release")) r"\\build\artifacts\release"
+```
+
 ### `join_status()`
 
 Returns the machine's current workgroup or domain membership.
@@ -241,7 +370,7 @@ Returns the computer name, domain membership, OS level and server role.
 
 [`MachineInfo`](./machine-info.md)
 
-### `join_domain :domain ...options`
+### `join_domain domain ...options`
 
 Joins the machine to a domain. **Takes effect only after a restart.**
 
@@ -286,8 +415,7 @@ password leaves no room for a user account.
 #### Example
 
 ```
-winnet.join_domain
-  domain: corp.example.com
+winnet.join_domain corp.example.com
   ou: "OU=Servers,DC=corp,DC=example,DC=com"
   account: r"CORP\joiner"
   password: $password
@@ -336,7 +464,7 @@ Renames the machine within its domain. **Takes effect only after a restart.**
 
 `nil`
 
-### `provision_computer :domain :machine ...options`
+### `provision_computer domain :machine ...options`
 
 Creates a computer account in the domain and returns the blob that joins a
 machine to it. Run this where a domain controller is reachable, then apply the
@@ -367,8 +495,7 @@ holding it can join a machine as that account.
 #### Example
 
 ```
-let blob = winnet.provision_computer
-  domain: corp.example.com
+let blob = winnet.provision_computer corp.example.com
   machine: WS01
   ou: "OU=Workstations,DC=corp,DC=example,DC=com"
 fs.Path("ws01.blob").write $blob

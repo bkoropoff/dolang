@@ -25,6 +25,7 @@ impl Extension for WinnetExt {
         let module = crate::policy::configure_module(module, global);
         let module = crate::group::configure_module(module, global);
         let module = crate::share::configure_module(module, global);
+        let module = crate::connection::configure_module(module, global);
         let module = crate::domain::configure_module(module, global);
         crate::machine::configure_module(module, global).commit();
         Ok(())

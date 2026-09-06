@@ -1,4 +1,5 @@
 #![deny(warnings)]
+mod connection;
 mod domain;
 mod extension;
 mod global;

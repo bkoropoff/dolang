@@ -3,7 +3,7 @@
 #[cfg(not(windows))]
 mod stub {
     use dolang_vfs::{Vfs, error::ErrorKind, path, server::Server};
-    use dolang_vfs_winnet::{domain, group, machine, policy, share, user};
+    use dolang_vfs_winnet::{connection, domain, group, machine, policy, share, user};
     use tempfile::tempdir;
 
     /// Every entry point reports the extension as unsupported off Windows.
@@ -88,6 +88,35 @@ mod stub {
             .err()
             .unwrap()
             .kind(),
+            ErrorKind::Unsupported
+        );
+        assert_eq!(
+            connection::by_name(vfs, "Z:").await.err().unwrap().kind(),
+            ErrorKind::Unsupported
+        );
+        assert_eq!(
+            connection::enumerate(vfs)
+                .next_entry()
+                .await
+                .err()
+                .unwrap()
+                .kind(),
+            ErrorKind::Unsupported
+        );
+        assert_eq!(
+            connection::add(vfs, connection::Create::new(r"\\srv\share".into()))
+                .await
+                .err()
+                .unwrap()
+                .kind(),
+            ErrorKind::Unsupported
+        );
+        assert_eq!(
+            connection::universal_name(vfs, path::PathBuf::from_windows(r"Z:\build").to_path())
+                .await
+                .err()
+                .unwrap()
+                .kind(),
             ErrorKind::Unsupported
         );
     }

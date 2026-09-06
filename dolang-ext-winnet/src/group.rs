@@ -32,7 +32,7 @@ fn make_group<'v>(
     group: group::Group,
     out: impl Output<'v>,
 ) {
-    global.group.create(strand, Group(Some(group)), out);
+    global.types.group.create(strand, Group(Some(group)), out);
 }
 fn make_info<'v>(
     strand: &mut Strand<'v, '_>,
@@ -41,6 +41,7 @@ fn make_info<'v>(
     out: impl Output<'v>,
 ) {
     global
+        .types
         .group_info
         .create_with_annex(strand, GroupInfo, GroupInfoAnnex(info), out);
 }
@@ -49,7 +50,7 @@ fn principal<'v, 's>(
     global: State<'v, Global<'v>>,
     value: &Value<'v>,
 ) -> Result<'v, 's, ResultPrincipal> {
-    if let Some(info) = global.group_info.cast(value) {
+    if let Some(info) = global.types.group_info.cast(value) {
         return Ok(ResultPrincipal::Info(
             info.enter_sync(strand, |_, info| info.annex().0.clone()),
         ));
@@ -122,8 +123,8 @@ impl<'v> Object<'v> for Group {
             })
             .method("update", async move |this, strand, args, out| {
                 let global = strand.state::<Global<'v>>();
-                let name_sym = global.name;
-                let comment_sym = global.comment;
+                let name_sym = global.syms.name;
+                let comment_sym = global.syms.comment;
                 let ([], [name, comment]) =
                     unpack!(strand, args, 0, 0, name_sym = None, comment_sym = None)?;
                 let mut update = group::Update::default();
@@ -167,9 +168,12 @@ impl<'v> Object<'v> for Group {
                     .as_ref()
                     .ok_or_else(|| Error::state_error(strand, "group was deleted"))?
                     .members();
-                global
-                    .group_members
-                    .create_with_annex(strand, GroupMembers(members), global, out);
+                global.types.group_members.create_with_annex(
+                    strand,
+                    GroupMembers(members),
+                    global,
+                    out,
+                );
                 Ok(())
             })
             .method("add_member", async move |this, strand, args, out| {
@@ -314,8 +318,8 @@ pub(crate) fn configure_module<'v, 'a>(
     global: State<'v, Global<'v>>,
 ) -> ModuleBuilder<'v, 'a> {
     module
-        .value("Group", global.group)
-        .value("GroupInfo", global.group_info)
+        .value("Group", global.types.group)
+        .value("GroupInfo", global.types.group_info)
         .function("group", async move |strand, args, out| {
             let ([value], []) = unpack!(strand, args, 1, 0)?;
             let vfs = dolang_ext_shell::vfs(strand);
@@ -330,7 +334,7 @@ pub(crate) fn configure_module<'v, 'a>(
         })
         .function("groups", async move |strand, args, out| {
             let ([], []) = unpack!(strand, args, 0, 0)?;
-            global.groups.create_with_annex(
+            global.types.groups.create_with_annex(
                 strand,
                 Groups(group::enumerate(&dolang_ext_shell::vfs(strand))),
                 global,
@@ -339,7 +343,7 @@ pub(crate) fn configure_module<'v, 'a>(
             Ok(())
         })
         .function("create_group", async move |strand, args, out| {
-            let comment_sym = global.comment;
+            let comment_sym = global.syms.comment;
             let ([name], [comment]) = unpack!(strand, args, 1, 0, comment_sym = None)?;
             let name = name
                 .as_str(strand)

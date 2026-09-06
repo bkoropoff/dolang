@@ -142,6 +142,135 @@ impl ShareUpdate {
     }
 }
 
+/// The resource type of a client connection.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConnectionKind {
+    #[default]
+    Disk,
+    Print,
+    Any,
+}
+
+/// Whether a connection is live or only recorded in the user's profile.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConnectionState {
+    /// Currently connected.
+    #[default]
+    Connected,
+    /// Saved in the profile but not connected, which is what `net use` shows as
+    /// `Unavailable`.
+    Remembered,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectionInfo {
+    pub(crate) local: Option<String>,
+    pub(crate) remote: String,
+    pub(crate) provider: Option<String>,
+    pub(crate) user: Option<String>,
+    pub(crate) kind: ConnectionKind,
+    pub(crate) state: ConnectionState,
+    pub(crate) persistent: bool,
+}
+impl ConnectionInfo {
+    /// The redirected local device, or `None` for a deviceless connection.
+    pub fn local(&self) -> Option<&str> {
+        self.local.as_deref()
+    }
+    /// The remote resource in UNC form.
+    pub fn remote(&self) -> &str {
+        &self.remote
+    }
+    pub fn provider(&self) -> Option<&str> {
+        self.provider.as_deref()
+    }
+    /// The account the connection authenticated as, when the provider reports
+    /// one.
+    pub fn user(&self) -> Option<&str> {
+        self.user.as_deref()
+    }
+    pub fn kind(&self) -> ConnectionKind {
+        self.kind
+    }
+    pub fn state(&self) -> ConnectionState {
+        self.state
+    }
+    /// Whether the connection is recorded in the profile and restored at logon.
+    ///
+    /// Independent of [`state`](Self::state): a restored mapping whose server is
+    /// currently reachable is both [`Connected`](ConnectionState::Connected) and
+    /// persistent.
+    pub fn persistent(&self) -> bool {
+        self.persistent
+    }
+    /// The name this connection is addressed by, preferring the local device.
+    pub fn name(&self) -> &str {
+        self.local.as_deref().unwrap_or(&self.remote)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectionCreate {
+    pub(crate) remote: String,
+    pub(crate) local: Option<String>,
+    pub(crate) user: Option<String>,
+    pub(crate) password: Option<String>,
+    pub(crate) kind: ConnectionKind,
+    pub(crate) persistent: bool,
+    pub(crate) save_credentials: Option<bool>,
+}
+impl ConnectionCreate {
+    pub fn new(remote: String) -> Self {
+        Self {
+            remote,
+            local: None,
+            user: None,
+            password: None,
+            kind: ConnectionKind::default(),
+            persistent: false,
+            save_credentials: None,
+        }
+    }
+    /// Redirects a local device, such as `Z:`.
+    ///
+    /// Required for a [`persistent`](Self::persistent) connection: Windows only
+    /// remembers connections that redirect a device.
+    pub fn local(mut self, value: Option<String>) -> Self {
+        self.local = value;
+        self
+    }
+    pub fn user(mut self, value: Option<String>) -> Self {
+        self.user = value;
+        self
+    }
+    pub fn password(mut self, value: Option<String>) -> Self {
+        self.password = value;
+        self
+    }
+    pub fn kind(mut self, value: ConnectionKind) -> Self {
+        self.kind = value;
+        self
+    }
+    /// Records the connection in the profile so it is restored at logon.
+    pub fn persistent(mut self, value: bool) -> Self {
+        self.persistent = value;
+        self
+    }
+    /// Overrides whether supplied credentials are saved for the target server.
+    ///
+    /// Unset means saving them for a persistent connection and not otherwise: a
+    /// persistent mapping has nothing to authenticate with at logon unless its
+    /// credentials were stored.
+    pub fn save_credentials(mut self, value: bool) -> Self {
+        self.save_credentials = Some(value);
+        self
+    }
+    /// Whether credentials will be stored, resolving the unset default.
+    pub fn stores_credentials(&self) -> bool {
+        self.save_credentials.unwrap_or(self.persistent) && self.password.is_some()
+    }
+}
+
 bitflags::bitflags! {
     /// Native `USER_INFO_4::usri4_flags`, including unknown bits.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -939,6 +1068,21 @@ pub(crate) enum WinNetRequest {
     RenameMachine(RenameRequest),
     ProvisionComputer(Box<ProvisionRequest>),
     ApplyOfflineJoin(Box<OfflineJoinRequest>),
+    ConnectionInfo {
+        name: String,
+    },
+    ConnectionsPage {
+        resume: u64,
+    },
+    AddConnection(Box<ConnectionCreate>),
+    CancelConnection {
+        name: String,
+        force: bool,
+        forget_credentials: Option<bool>,
+    },
+    UniversalName {
+        path: path::PathBuf,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -981,6 +1125,13 @@ pub(crate) enum WinNetResponse {
     JoinInfo(JoinInfo),
     MachineInfo(Box<MachineInfo>),
     Blob(Vec<u8>),
+    ConnectionInfo(Box<ConnectionInfo>),
+    ConnectionsPage {
+        connections: Vec<ConnectionInfo>,
+        resume: u64,
+        done: bool,
+    },
+    UniversalName(String),
 }
 
 pub(crate) struct WinNetExt;
@@ -988,7 +1139,7 @@ impl VfsExtension for WinNetExt {
     type Request = WinNetRequest;
     type Response = Result<WinNetResponse, Error>;
     const NAME: &'static str = "dolang-vfs-winnet";
-    const VERSION: u16 = 5;
+    const VERSION: u16 = 6;
     const AVAILABLE: bool = cfg!(windows);
     async fn handle(&self, ctx: &mut ExtContext<'_>, request: WinNetRequest) -> Self::Response {
         #[cfg(windows)]
@@ -1079,6 +1230,62 @@ mod tests {
         let bytes = postcard::to_stdvec(&request).unwrap();
         assert!(
             matches!(postcard::from_bytes::<WinNetRequest>(&bytes).unwrap(), WinNetRequest::SharesPage { resume } if resume == u64::MAX - 1)
+        );
+    }
+    #[test]
+    fn connections_round_trip() {
+        let create = ConnectionCreate::new(r"\\srv\build".into())
+            .local(Some("Z:".into()))
+            .user(Some(r"CORP\svc".into()))
+            .password(Some("secret".into()))
+            .kind(ConnectionKind::Any)
+            .persistent(true);
+        let bytes = postcard::to_stdvec(&create).unwrap();
+        assert_eq!(
+            postcard::from_bytes::<ConnectionCreate>(&bytes).unwrap(),
+            create
+        );
+        let info = ConnectionInfo {
+            local: None,
+            remote: r"\\srv\build".into(),
+            provider: Some("Microsoft Windows Network".into()),
+            user: None,
+            kind: ConnectionKind::Disk,
+            state: ConnectionState::Remembered,
+            persistent: true,
+        };
+        let response = WinNetResponse::ConnectionsPage {
+            connections: vec![info.clone()],
+            resume: 0,
+            done: true,
+        };
+        let bytes = postcard::to_stdvec(&response).unwrap();
+        match postcard::from_bytes::<WinNetResponse>(&bytes).unwrap() {
+            WinNetResponse::ConnectionsPage { connections, .. } => {
+                assert_eq!(connections, vec![info]);
+            }
+            _ => panic!("wrong response variant"),
+        }
+    }
+    #[test]
+    fn credential_storage_defaults_to_persistence() {
+        let base = ConnectionCreate::new(r"\\srv\build".into()).password(Some("secret".into()));
+        assert!(!base.clone().stores_credentials());
+        assert!(base.clone().persistent(true).stores_credentials());
+        assert!(
+            !base
+                .clone()
+                .persistent(true)
+                .save_credentials(false)
+                .stores_credentials()
+        );
+        assert!(base.save_credentials(true).stores_credentials());
+        // Nothing to store without a password, however it is asked for.
+        assert!(
+            !ConnectionCreate::new(r"\\srv\build".into())
+                .persistent(true)
+                .save_credentials(true)
+                .stores_credentials()
         );
     }
     #[test]

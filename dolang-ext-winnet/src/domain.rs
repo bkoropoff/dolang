@@ -20,7 +20,7 @@ fn make_status<'v>(
     status: domain::Status,
     out: impl Output<'v>,
 ) {
-    global.join_status.create_with_annex(
+    global.types.join_status.create_with_annex(
         strand,
         JoinStatus,
         JoinStatusAnnex { global, status },
@@ -106,10 +106,10 @@ impl<'v> Object<'v> for JoinStatus {
                 let annex = this.annex();
                 let global = annex.global;
                 let kind = match annex.status.kind() {
-                    domain::Kind::Unjoined => global.kind_unjoined,
-                    domain::Kind::Workgroup => global.kind_workgroup,
-                    domain::Kind::Domain => global.kind_domain,
-                    domain::Kind::Unknown => global.kind_unknown,
+                    domain::Kind::Unjoined => global.syms.kind_unjoined,
+                    domain::Kind::Workgroup => global.syms.kind_workgroup,
+                    domain::Kind::Domain => global.syms.kind_domain,
+                    domain::Kind::Unknown => global.syms.kind_unknown,
                 };
                 Output::set(strand, out, kind);
                 Ok(())
@@ -129,7 +129,7 @@ pub(crate) fn configure_module<'v, 'a>(
     global: State<'v, Global<'v>>,
 ) -> ModuleBuilder<'v, 'a> {
     module
-        .value("JoinStatus", global.join_status)
+        .value("JoinStatus", global.types.join_status)
         .function("join_status", async move |strand, args, out| {
             let ([], []) = unpack!(strand, args, 0, 0)?;
             let status = domain::status(&dolang_ext_shell::vfs(strand))
@@ -139,22 +139,21 @@ pub(crate) fn configure_module<'v, 'a>(
             Ok(())
         })
         .function("join_domain", async move |strand, args, out| {
-            let domain_sym = global.domain;
-            let ou_sym = global.ou;
-            let account_sym = global.account;
-            let password_sym = global.password;
-            let machine_password_sym = global.machine_password;
-            let create_account_sym = global.create_account;
-            let join_if_joined_sym = global.join_if_joined;
-            let unsecure_sym = global.unsecure;
-            let defer_spn_sym = global.defer_spn;
-            let force_spn_sym = global.force_spn;
-            let dc_account_sym = global.dc_account;
-            let with_new_name_sym = global.with_new_name;
-            let readonly_sym = global.readonly;
-            let ambiguous_dc_sym = global.ambiguous_dc;
-            let no_netlogon_cache_sym = global.no_netlogon_cache;
-            let no_account_reuse_sym = global.no_account_reuse;
+            let ou_sym = global.syms.ou;
+            let account_sym = global.syms.account;
+            let password_sym = global.syms.password;
+            let machine_password_sym = global.syms.machine_password;
+            let create_account_sym = global.syms.create_account;
+            let join_if_joined_sym = global.syms.join_if_joined;
+            let unsecure_sym = global.syms.unsecure;
+            let defer_spn_sym = global.syms.defer_spn;
+            let force_spn_sym = global.syms.force_spn;
+            let dc_account_sym = global.syms.dc_account;
+            let with_new_name_sym = global.syms.with_new_name;
+            let readonly_sym = global.syms.readonly;
+            let ambiguous_dc_sym = global.syms.ambiguous_dc;
+            let no_netlogon_cache_sym = global.syms.no_netlogon_cache;
+            let no_account_reuse_sym = global.syms.no_account_reuse;
             let (
                 [name],
                 [
@@ -177,9 +176,8 @@ pub(crate) fn configure_module<'v, 'a>(
             ) = unpack!(
                 strand,
                 args,
+                1,
                 0,
-                0,
-                domain_sym,
                 ou_sym = None,
                 account_sym = None,
                 password_sym = None,
@@ -241,9 +239,9 @@ pub(crate) fn configure_module<'v, 'a>(
             Ok(())
         })
         .function("unjoin_domain", async move |strand, args, out| {
-            let account_sym = global.account;
-            let password_sym = global.password;
-            let delete_account_sym = global.delete_account;
+            let account_sym = global.syms.account;
+            let password_sym = global.syms.password;
+            let delete_account_sym = global.syms.delete_account;
             let ([], [account, password, delete_account]) = unpack!(
                 strand,
                 args,
@@ -269,9 +267,9 @@ pub(crate) fn configure_module<'v, 'a>(
             Ok(())
         })
         .function("rename_machine", async move |strand, args, out| {
-            let account_sym = global.account;
-            let password_sym = global.password;
-            let create_account_sym = global.create_account;
+            let account_sym = global.syms.account;
+            let password_sym = global.syms.password;
+            let create_account_sym = global.syms.create_account;
             let ([name], [account, password, create_account]) = unpack!(
                 strand,
                 args,
@@ -297,15 +295,14 @@ pub(crate) fn configure_module<'v, 'a>(
             Ok(())
         })
         .function("provision_computer", async move |strand, args, out| {
-            let domain_sym = global.domain;
-            let machine_sym = global.machine;
-            let ou_sym = global.ou;
-            let dc_sym = global.dc;
-            let reuse_sym = global.reuse;
-            let default_password_sym = global.default_password;
-            let skip_account_search_sym = global.skip_account_search;
-            let root_ca_certs_sym = global.root_ca_certs;
-            let downlevel_priv_support_sym = global.downlevel_priv_support;
+            let machine_sym = global.syms.machine;
+            let ou_sym = global.syms.ou;
+            let dc_sym = global.syms.dc;
+            let reuse_sym = global.syms.reuse;
+            let default_password_sym = global.syms.default_password;
+            let skip_account_search_sym = global.syms.skip_account_search;
+            let root_ca_certs_sym = global.syms.root_ca_certs;
+            let downlevel_priv_support_sym = global.syms.downlevel_priv_support;
             let (
                 [domain_name, machine],
                 [
@@ -320,9 +317,8 @@ pub(crate) fn configure_module<'v, 'a>(
             ) = unpack!(
                 strand,
                 args,
+                1,
                 0,
-                0,
-                domain_sym,
                 machine_sym,
                 ou_sym = None,
                 dc_sym = None,
@@ -358,8 +354,8 @@ pub(crate) fn configure_module<'v, 'a>(
             Ok(())
         })
         .function("apply_offline_join", async move |strand, args, out| {
-            let windows_path_sym = global.windows_path;
-            let online_sym = global.online;
+            let windows_path_sym = global.syms.windows_path;
+            let online_sym = global.syms.online;
             let ([blob, path], [online]) =
                 unpack!(strand, args, 1, 0, windows_path_sym, online_sym = None)?;
             let bytes = blob

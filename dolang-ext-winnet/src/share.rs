@@ -26,7 +26,7 @@ fn make_share<'v>(
     share: share::Share,
     out: impl Output<'v>,
 ) {
-    global.share.create(strand, Share(Some(share)), out);
+    global.types.share.create(strand, Share(Some(share)), out);
 }
 
 fn make_info<'v>(
@@ -35,9 +35,12 @@ fn make_info<'v>(
     info: share::Info,
     out: impl Output<'v>,
 ) {
-    global
-        .share_info
-        .create_with_annex(strand, ShareInfo, ShareInfoAnnex { global, info }, out);
+    global.types.share_info.create_with_annex(
+        strand,
+        ShareInfo,
+        ShareInfoAnnex { global, info },
+        out,
+    );
 }
 
 /// The share capability of a borrowed receiver that has not been deleted.
@@ -99,10 +102,10 @@ fn kind<'v, 's>(
     value: &Value<'v>,
 ) -> Result<'v, 's, share::Kind> {
     match value.as_sym(strand) {
-        Some(v) if v == global.disktree => Ok(share::Kind::DiskTree),
-        Some(v) if v == global.printq => Ok(share::Kind::PrintQueue),
-        Some(v) if v == global.device => Ok(share::Kind::Device),
-        Some(v) if v == global.ipc => Ok(share::Kind::Ipc),
+        Some(v) if v == global.syms.disktree => Ok(share::Kind::DiskTree),
+        Some(v) if v == global.syms.printq => Ok(share::Kind::PrintQueue),
+        Some(v) if v == global.syms.device => Ok(share::Kind::Device),
+        Some(v) if v == global.syms.ipc => Ok(share::Kind::Ipc),
         _ => Err(Error::value(
             strand,
             "kind must be :DISKTREE:, :PRINTQ:, :DEVICE:, or :IPC:",
@@ -134,9 +137,9 @@ impl<'v> Object<'v> for Share {
             })
             .method("update", async move |this, strand, args, out| {
                 let global = strand.state::<Global<'v>>();
-                let comment_sym = global.comment;
-                let max_uses_sym = global.max_uses;
-                let sec_desc_sym = global.sec_desc;
+                let comment_sym = global.syms.comment;
+                let max_uses_sym = global.syms.max_uses;
+                let sec_desc_sym = global.syms.sec_desc;
                 let ([], [comment, maximum, descriptor]) = unpack!(
                     strand,
                     args,
@@ -194,10 +197,10 @@ impl<'v> Object<'v> for ShareInfo {
             .get("kind", |this, strand, out| {
                 let a = this.annex();
                 let v = match a.info.kind() {
-                    share::Kind::DiskTree => a.global.disktree,
-                    share::Kind::PrintQueue => a.global.printq,
-                    share::Kind::Device => a.global.device,
-                    share::Kind::Ipc => a.global.ipc,
+                    share::Kind::DiskTree => a.global.syms.disktree,
+                    share::Kind::PrintQueue => a.global.syms.printq,
+                    share::Kind::Device => a.global.syms.device,
+                    share::Kind::Ipc => a.global.syms.ipc,
                 };
                 Output::set(strand, out, v);
                 Ok(())
@@ -285,12 +288,12 @@ pub(crate) fn configure_module<'v, 'a>(
     global: State<'v, Global<'v>>,
 ) -> ModuleBuilder<'v, 'a> {
     module
-        .value("Share", global.share)
-        .value("ShareInfo", global.share_info)
+        .value("Share", global.types.share)
+        .value("ShareInfo", global.types.share_info)
         .function("share", async move |strand, args, out| {
             let ([value], []) = unpack!(strand, args, 1, 0)?;
             let vfs = dolang_ext_shell::vfs(strand);
-            let share = if let Some(info) = global.share_info.cast(&value) {
+            let share = if let Some(info) = global.types.share_info.cast(&value) {
                 Ok(info.enter_sync(strand, |_, v| share::from_info(&vfs, &v.annex().info)))
             } else if let Some(name) = value.as_str(strand) {
                 let name = name.to_string();
@@ -309,25 +312,23 @@ pub(crate) fn configure_module<'v, 'a>(
             let ([], []) = unpack!(strand, args, 0, 0)?;
             let shares = share::enumerate(&dolang_ext_shell::vfs(strand));
             global
-                .shares
+                .types.shares
                 .create_with_annex(strand, Shares(shares), global, out);
             Ok(())
         })
         .function("create_share", async move |strand, args, out| {
-            let name_sym = global.name;
-            let path_sym = global.path;
-            let kind_sym = global.kind;
-            let comment_sym = global.comment;
-            let max_uses_sym = global.max_uses;
-            let special_sym = global.special;
-            let temporary_sym = global.temporary;
-            let sec_desc_sym = global.sec_desc;
+            let path_sym = global.syms.path;
+            let kind_sym = global.syms.kind;
+            let comment_sym = global.syms.comment;
+            let max_uses_sym = global.syms.max_uses;
+            let special_sym = global.syms.special;
+            let temporary_sym = global.syms.temporary;
+            let sec_desc_sym = global.syms.sec_desc;
             let ([name, path], [kind_arg, comment, maximum, special, temporary, descriptor]) = unpack!(
                 strand,
                 args,
+                1,
                 0,
-                0,
-                name_sym,
                 path_sym,
                 kind_sym = None,
                 comment_sym = None,
