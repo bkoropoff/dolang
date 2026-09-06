@@ -58,7 +58,6 @@ static NEXT_PIPE: AtomicU64 = AtomicU64::new(0);
 
 async fn stop_pair(client: Vfs, server: JoinHandle<VfsResult<()>>) {
     client.stop().await.unwrap();
-    client.close().await;
     server.await.unwrap().unwrap();
 }
 

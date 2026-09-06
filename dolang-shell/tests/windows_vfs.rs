@@ -48,7 +48,6 @@ async fn embedded_vfs_mode_serves_and_stops() {
     assert!(!metadata.is_empty());
 
     client.stop().await.unwrap();
-    client.close().await;
     let status = tokio::task::spawn_blocking(move || child.wait())
         .await
         .unwrap()
@@ -76,6 +75,5 @@ async fn embedded_vfs_stdio_mode_serves_and_stops() {
     );
 
     client.stop().await.unwrap();
-    client.close().await;
     assert!(child.wait().await.unwrap().success());
 }

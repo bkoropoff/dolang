@@ -52,7 +52,6 @@ async fn connected_split_pair() -> (Vfs, tokio::task::JoinHandle<VfsResult<()>>)
 
 async fn stop_pair(vfs: Vfs, server: tokio::task::JoinHandle<VfsResult<()>>) {
     vfs.stop().await.unwrap();
-    vfs.close().await;
     server.await.unwrap().unwrap();
 }
 
@@ -201,7 +200,6 @@ async fn opaque_session_chains_to_unix_vfs() {
     assert!(child.wait().await.unwrap().success());
 
     inner.stop().await.unwrap();
-    drop(inner);
     inner_task.await.unwrap().unwrap();
     assert_eq!(outer.target(), &dolang_vfs::target::TargetInfo::current());
     stop_pair(outer, outer_task).await;
@@ -230,10 +228,8 @@ async fn opaque_session_supports_multiple_vfs_hops() {
     assert_eq!(inner.target(), &dolang_vfs::target::TargetInfo::current());
 
     inner.stop().await.unwrap();
-    drop(inner);
     inner_task.await.unwrap().unwrap();
     middle.stop().await.unwrap();
-    drop(middle);
     middle_task.await.unwrap().unwrap();
     stop_pair(outer, outer_task).await;
 }
@@ -634,8 +630,6 @@ async fn pipe_relays_between_two_remote_sessions() {
 
     first.stop().await.unwrap();
     second.stop().await.unwrap();
-    first.close().await;
-    second.close().await;
     first_server.await.unwrap().unwrap();
     second_server.await.unwrap().unwrap();
 }
@@ -676,8 +670,6 @@ async fn file_relays_between_two_remote_sessions() {
 
     first.stop().await.unwrap();
     second.stop().await.unwrap();
-    first.close().await;
-    second.close().await;
     first_server.await.unwrap().unwrap();
     second_server.await.unwrap().unwrap();
 }
@@ -736,8 +728,6 @@ async fn pipeline_relays_across_three_domains() {
 
     a.stop().await.unwrap();
     b.stop().await.unwrap();
-    a.close().await;
-    b.close().await;
     a_server.await.unwrap().unwrap();
     b_server.await.unwrap().unwrap();
 }
@@ -1203,7 +1193,7 @@ async fn stop_drains_outstanding_pipe_endpoints() {
         .expect("stop did not complete after endpoints were closed")
         .unwrap()
         .expect("stop should succeed");
-    client.close().await;
+    drop(client);
     server_task.await.unwrap().unwrap();
 }
 
