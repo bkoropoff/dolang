@@ -40,3 +40,17 @@ echo t"${#0:q}"
 #    |
 # LL | echo t"${#0:q}"
 #    |             ^
+
+echo "$#0"
+# error: a parameter is only valid in a `t"..."` sequence, which keeps its segments apart to fill in later
+#   --> fmt_param.dol:LL:LL
+#    |
+# LL | echo "$#0"
+#    |        ^
+
+echo t"$#"
+# error: expected a parameter name or number after `#`
+#   --> fmt_param.dol:LL:LL
+#    |
+# LL | echo t"$#"
+#    |          ^

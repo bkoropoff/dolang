@@ -2,45 +2,33 @@
 
 An immutable sequence of literal text, bound interpolations, and unbound
 parameters, produced by a
-[`t"..."` string](../../language/expressions.md#formatted-sequences).
-
-An ordinary quoted string concatenates its interpolations into one
-[`Str`](./str.md) as it is built, and what was interpolated is gone by the
-time anything sees the result. A `t"..."` keeps the segments apart, so a
-consumer can act on each interpolated value — quoting it, binding it as a
-parameter, styling it — rather than only on the text it produced.
+[`t"..."` string](../../language/strings.md#formatted-sequences).
 
 Every segment is a [`Str`](./str.md) of literal text, a
-[`FmtValue`](./fmt-value.md) interpolation, or a
-[`FmtParam`](./fmt-param.md) still waiting to be filled; nothing else may be
-one. Segments are indexable, iterable, spreadable, and destructurable.
+[`FmtValue`](./fmt-value.md) interpolation, or a [`FmtParam`](./fmt-param.md)
+still waiting to be filled. This type behaves like an immutable array:
+indexable, iterable, spreadable, and destructurable.
 
 ## Trust
 
 A sequence written as `t"..."` carries a guarantee: its `Str` segments are
-program text, and everything interpolated into it is a `FmtValue`. That is
-what lets a consumer treat the literal segments as the trusted skeleton of a
-command and each interpolation as data to be bound or quoted.
-[`sqlite`](../sqlite/index.md) is the consumer that acts on it: it takes SQL
-only as a sequence, compiles the literal segments to statement text, and binds
-everything else as a parameter.
+program text, and everything interpolated into it is a `FmtValue` or
+`FmtParam`. That is what lets a consumer treat the literal segments as the
+trusted skeleton of a command and each interpolation as data to be bound or
+quoted. [`sqlite`](../sqlite/index.md) is a prime example, as it relies on
+this guarantee to exclude SQL injection vulnerabilities.
 
-Two rules keep that guarantee usable.
+Toward that end, **no conversion implicitly expands a sequence.** `str` and
+plain interpolation (`"$seq"`, `"${seq}"`, `"${seq:s}"`) raise a
+[`TypeError`](./type-error.md); `verbatim` and `dbg` give the source form
+This avoids accidental expansion before the sequences reaches its consumer
+for safe structural quoting or binding of interpolations.
+[`format()`](#format-bindings) must be used to explicitly expand a sequence.
 
-**No conversion expands a sequence.** `str` and plain interpolation
-(`"$seq"`, `"${seq}"`, `"${seq:s}"`) raise a
-[`TypeError`](./type-error.md); `verbatim` and `dbg` give the source form.
-Were any of them to expand, a sequence handed to a consumer that flattens its
-argument would arrive as one string with the values already substituted into
-it and no way left to tell them from the text around them — which is what an
-injection bug is. Expansion has to be asked for by name, with
-[`format`](#format).
-
-**Building a sequence yourself steps outside the guarantee.** The
+**Building a sequence yourself must uphold this guarantee.** The
 [constructor](#fmt-segments) accepts whatever segments it is given, so a
-`Str` built from untrusted input becomes literal text, indistinguishable from
-text the programmer wrote. Never make a `Str` segment out of data from
-outside the program: bind it as a [`FmtValue`](./fmt-value.md) instead.
+`Str` built from untrusted input would subsequently be treated as trusted.
+Programmatic construction of `Fmt` must be done with care.
 
 ```
 # Fine: the query text is literal, the value is bound.
@@ -49,18 +37,9 @@ let query = t"select * from users where name = $name"
 # Fine: assembled at runtime, but the untrusted value is still bound.
 let assembled = Fmt ["select * from users where name = ", (FmtValue name)]
 
-# Wrong: an ordinary string flattens the value into the literal text, and
-# the segment it becomes is indistinguishable from query text.
-let injected = Fmt ["select * from users where name = $name"]
+# Danger: untrusted input is treated as a trusted string literal
+let injected = Fmt ["select * from users where name = ", name]
 ```
-
-**Filling parameters stays inside it.** Neither [`call`](#call-bindings) nor
-[`bind`](#bind-bindings) can produce a literal segment: a filled
-[`FmtParam`](./fmt-param.md) becomes a `FmtValue`, whatever was bound to it.
-So a template written as a `t"..."` and filled at runtime keeps the
-guarantee — the literal text is still program text, and everything supplied
-from outside is still bound. That is what makes them the way to assemble a
-sequence at runtime, and the constructor the way not to.
 
 ## Constructor
 
@@ -69,19 +48,13 @@ sequence at runtime, and the constructor the way not to.
 Builds a sequence from an iterable of segments.
 
 Writing a `t"..."` is the usual way to get one; the constructor is for
-assembling a sequence at runtime. There is no source text to record in that
-case, so its interpolations have no [`source`](./fmt-value.md#source). See
-[Trust](#trust) before using it.
+assembling a sequence at runtime.
 
 #### Parameters
 
 | Name       | Type | Description                                            |
 | ---------- | ---- | ------------------------------------------------------ |
 | `segments` |      | Iterable of `Str`, `FmtValue`, and `FmtParam` segments |
-
-#### Returns
-
-`Fmt`
 
 #### Errors
 
@@ -110,48 +83,19 @@ assert_eq $greeting.len 3
 
 ## Methods
 
-### `format`
+### `format ...bindings`
 
 Expands the sequence and returns the result: literal text as it stands, and
 each interpolation through its own specification. This is the only way to get
 the expansion — see [Trust](#trust).
 
-A sequence bound inside a sequence expands with it, and the binding lays out
-what it expanded to.
-
-An unfilled hole has no rendering, so a sequence still containing a
-[`FmtParam`](./fmt-param.md) raises rather than emitting anything
-hole-shaped.
+Given arguments, it fills the [parameters](./fmt-param.md) first, on the same
+exhaustive terms as [`(call)`](#call-bindings). Use `(call)` when the filled
+sequence is what a consumer wants.
 
 #### Returns
 
 [`Str`](./str.md)
-
-#### Errors
-
-| Exception                        | Condition                              |
-| -------------------------------- | -------------------------------------- |
-| [`ValueError`](./value-error.md) | A segment is an unfilled `FmtParam`    |
-
-#### Example
-
-```
-let count = 3
-assert_eq $(t"n=${count:03d}").format() "n=003"
-```
-
-### `call ...bindings`
-
-Fills every parameter at once and insists the two sides match exactly: each
-parameter is filled, and each argument is used.
-
-Positional arguments are sugar for integer keys — argument *i* fills parameter
-`i` — so `call` and [`bind`](#bind-bindings) substitute identically and differ
-only in their checks.
-
-#### Returns
-
-`Fmt`
 
 #### Errors
 
@@ -165,16 +109,17 @@ only in their checks.
 #### Example
 
 ```
+let count = 3
+assert_eq $(t"n=${count:03d}").format() "n=003"
+
 let stmt = t"select * from t where a = ${#0} and c = ${#name}"
-assert_eq $(stmt 1 name: "n").format() "select * from t where a = 1 and c = n"
+assert_eq $stmt.format(1, name: "n") "select * from t where a = 1 and c = n"
 ```
 
-### `params`
+### `params()`
 
-The [parameter](./fmt-param.md) names, in the order binding reaches them:
-first occurrence, and depth first through a bound sequence. This is the
-template's signature — what [`call`](#call-bindings) requires — without having
-to bind badly and read the error to find out.
+The unbound [parameter](./fmt-param.md) names, in depth-first, parent-first
+order.
 
 #### Returns
 
@@ -229,6 +174,35 @@ assert_eq $(partial.bind {0: 1}).format() "select * from t where a = 1 and c = n
 
 ## Operators
 
+### `(call) ...bindings`
+
+Fills every parameter at once and insists the two sides match exactly: each
+parameter is filled, and each argument is used.
+
+Positional arguments are sugar for integer keys — argument *i* fills parameter
+`i` — so `(call)` and [`bind`](#bind-bindings) substitute identically and differ
+only in their checks.
+
+#### Returns
+
+`Fmt`
+
+#### Errors
+
+| Exception                                         | Condition                     |
+| ------------------------------------------------- | ----------------------------- |
+| [`MissingPosError`](./missing-pos-error.md)       | A numbered parameter unfilled |
+| [`MissingKeyError`](./missing-key-error.md)       | A named parameter unfilled    |
+| [`UnexpectedPosError`](./unexpected-pos-error.md) | A positional argument unused  |
+| [`UnexpectedKeyError`](./unexpected-key-error.md) | A keyword argument unused     |
+
+#### Example
+
+```
+let stmt = t"select * from t where a = ${#0} and c = ${#name}"
+assert_eq $(stmt 1 name: "n").format() "select * from t where a = 1 and c = n"
+```
+
 ### Indexing
 
 `seq[i]` returns segment `i`: a [`Str`](./str.md) of literal text, a
@@ -273,7 +247,7 @@ runtime has no source, so its bound value's debug form stands in.
 `verbatim` — and with it the `!` conversion and command-argument position —
 gives the same source form, since that is what the sequence was written as.
 `str` and the display conversion raise a [`TypeError`](./type-error.md).
-[`format`](#format) is the only expansion. See [Trust](#trust).
+[`format()`](#format-bindings) is the only expansion. See [Trust](#trust).
 
 ```
 let count = 3

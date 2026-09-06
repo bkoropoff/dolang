@@ -998,12 +998,15 @@ fn append_segments<'v, 's>(
             // rather than printing a hole where a value was meant to go.
             if segment.is_instance_of(strand, TypeObject::FmtParam) {
                 segment.get(strand, global.syms.name, &mut name)?;
-                let mut text = String::new();
-                name.display(strand, &mut text)?;
-                return Err(Error::value(
-                    strand,
-                    format!("Fmt: parameter `{text}` is unbound"),
-                ));
+                // A hole nobody filled is a parameter nobody supplied, and is
+                // reported as one: positionally when its name is an integer,
+                // by key otherwise.
+                return Err(
+                    match name.as_int(strand).and_then(|i| usize::try_from(i).ok()) {
+                        Some(index) => Error::missing_positional(strand, index),
+                        None => Error::missing_key(strand, &name),
+                    },
+                );
             }
             append_value(strand, global, out, parent, ansi, argument, &segment)?;
         }

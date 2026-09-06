@@ -527,7 +527,9 @@ pub(crate) enum Expr {
         spec: Box<FormatSpec>,
         dollar_span: Span,
         hash_span: Span,
-        brace_span: Span,
+        /// Absent for the `$#0` shorthand, which states no specification and
+        /// so needs no braces to delimit one.
+        brace_span: Option<Span>,
         /// Absent when the parameter states no specification.
         colon_span: Option<Span>,
     },
@@ -1049,7 +1051,9 @@ impl Node for Expr {
                 colon_span,
             } => {
                 visit.token(Token::Sigil, *dollar_span, None)?;
-                visit.token(Token::Delim, brace_span.left_char(), None)?;
+                if let Some(brace_span) = brace_span {
+                    visit.token(Token::Delim, brace_span.left_char(), None)?;
+                }
                 visit.token(Token::Sigil, *hash_span, None)?;
                 // A positional name is a literal number; a bare one reads as a
                 // name, so it highlights like one.
@@ -1076,7 +1080,12 @@ impl Node for Expr {
                 for count in [&spec.width, &spec.precision].into_iter().flatten() {
                     visit.node(count)?;
                 }
-                visit.token(Token::Delim, brace_span.right_char(), None)
+                match brace_span {
+                    Some(brace_span) => visit.token(Token::Delim, brace_span.right_char(), None),
+                    // The shorthand has no closing delimiter: it ends at the
+                    // name, which is already visited above.
+                    None => ControlFlow::Continue(()),
+                }
             }
             Expr::Escape(_, span) => visit.token(Token::Escape, *span, None),
             Expr::FmtSeq { exprs, open, close } => {

@@ -824,7 +824,7 @@ class Path
 ### `(fmt)`: Formatted Conversion
 
 Called when an instance is formatted with a specification, as written by a
-[formatted interpolation](./expressions.md#formatted-interpolation) or built
+[formatted interpolation](./strings.md#formatted-interpolation) or built
 with [`FmtSpec`](../api/std/fmt-spec.md). Receives a
 [`FmtSpec`](../api/std/fmt-spec.md) and must return a `Str`.
 

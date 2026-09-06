@@ -37,207 +37,25 @@ floats, meaning that `//` always returns an `Int` while `%` returns a `Float`.
 
 ## Strings (`Str`)
 
-Immutable UTF-8 strings. Created with double quotes or as bare literals at
-statement level:
+Immutable UTF-8 strings, written as bare literals at statement level, as
+quoted strings, or as multi-line here strings:
 
 ```
 echo "Quoted strings" or bare literals
 ```
 
-Quoted strings support escape sequences (`\n`, `\t`, `\\`, `\"`, `\$`) and
-interpolation with `$`:
-
-```
-let name = Alice
-echo "Hello, $name!"
-echo "2 + 2 = $(2 + 2)"
-echo "padded: ${count:05d}"
-```
-
-See [Expressions](expressions.md) for details on string interpolation behavior.
-Strings support a wide variety of [methods](../api/std/str.md) as well.
-
-Prefixing the opening quote with `t` produces a [`Fmt`](../api/std/fmt.md)
-instead, which keeps its interpolations apart from its literal text rather
-than concatenating them. See [Formatted
-Sequences](expressions.md#formatted-sequences).
-
-### Raw Strings
-
-Raw strings disable escape sequences and interpolation, making them useful for
-anything where literal characters such as `$` or `\` must appear frequently:
-regular expressions, Windows file paths, etc. Internal newlines are also
-permitted.
-
-```
-# Simple raw string - no escapes, no interpolation
-let pattern = r"^\d+$"
-echo $pattern  # ^\d+$
-
-# Raw strings can contain unescaped backslashes
-let path = r"C:\Users\Alice\Documents"
-
-# Raw strings don't interpolate
-let value = 42
-echo r"The value is $value"  # The value is $value
-```
-
-To include a double quote inside a raw string, use hashes around the delimiter:
-
-```
-let quoted = r#"She said, "Hello!""#
-echo $quoted  # She said, "Hello!"
-```
-
-The number of `#` characters must match on both sides of the string.
-
-### Here Strings
-
-Here strings are multi-line string literals introduced by `|` (or `|-`). Like
-quoted strings, they support `$` interpolation and `\$` escaping, but span
-multiple indented lines instead of a pair of delimiters.
-
-```
-let doc = |
-  Hello,
-  world!
-echo $doc  # Hello,\nworld!\n
-```
-
-The indentation of the first content line establishes the **baseline**. That
-many leading spaces are stripped from every subsequent content line. The here
-string ends when indentation drops below the baseline.
-
-```
-let msg = |
-  line one
-  line two
-# msg == "line one\nline two\n"
-```
-
-`|` is **clip mode**: a final newline is appended after the last content line,
-matching YAML `|` behavior.
-
-`|-` is **strip mode**: no final newline is added, matching YAML `|-` behavior.
-
-```
-let clipped = |
-  hello
-# clipped == "hello\n"
-
-let stripped = |-
-  hello
-# stripped == "hello"
-```
-
-Blank lines within the content are preserved (with any indentation stripped per
-usual):
-
-```
-let with_gap = |-
-  first
-
-  third
-# with_gap == "first\n\nthird"
-```
-
-Interpolation works the same way as in quoted strings:
-
-```
-let name = Alice
-let greeting = |
-  Hello, $name!
-  You have $(3 + 1) messages.
-  Total: ${total:8.2f}
-```
-
-Use `\$` to suppress interpolation:
-
-```
-let literal = |-
-  Price: \$42
-# literal == "Price: $42"
-```
-
-Use `\\` for a literal backslash.
-
-### Raw Here Strings
-
-Prefixing the introducer with `r` disables interpolation and escape processing
-entirely, making `r|` and `r|-` the multi-line equivalents of raw strings.
-Every character in the content — including `$` and `\` — is taken literally.
-
-```
-let script = r|
-  #!/bin/bash
-  echo $HOME
-  echo $'\n'
-# script == "#!/bin/bash\necho \$HOME\necho \$'\\n'\n"
-```
-
-Strip mode works the same way:
-
-```
-let pattern = r|-
-  ^\d+\.\d+$
-# pattern == "^\d+\.\d+$"
-```
-
-All the same indentation rules apply as for regular here strings.
-
-### Formatted Here Strings
-
-Prefixing the introducer with `t` gives the multi-line form of a
-[`t"..."` string](expressions.md#formatted-sequences): `t|` and `t|-` build a
-[`Fmt`](../api/std/fmt.md) rather than a `Str`, interpolating as an ordinary
-here string does.
-
-```
-let name = "Alice"
-let doc = t|-
-  hello $name
-
-# doc[1].value == "Alice"
-```
-
 ## Binary Strings (`Bin`)
 
-Immutable byte sequences that may contain arbitrary (non-UTF-8) data. Created
+Immutable byte sequences that may contain arbitrary (non-UTF-8) data, written
 with a `b"..."` prefix:
 
 ```
 let data = b"\x01\x02\x03"
-let text = b"hello"
 ```
 
-### Escapes and Interpolation
-
-Binary strings support the same escape sequences as regular strings,
-plus hex byte escapes (`\xNN`):
-
-```
-let crlf   = b"\r\n"
-let bullet = b"\xe2\x80\xa2"   # UTF-8 encoding of •
-```
-
-Interpolation works the same way as in regular strings, using `$`:
-
-```
-let prefix = b"foo"
-let result = b"$(prefix)bar"   # b"foobar"
-```
-
-Both `Str` and `Bin` values can be interpolated into a binary string. `Str`
-values contribute their UTF-8 bytes; `Bin` values contribute their raw bytes.
-
-### Comparison with `Str`
-
-Binary strings and regular strings are distinct types and are never equal,
-even when their byte content matches:
-
-```
-assert_ne b"hello" "hello"
-```
+See [Strings](strings.md) for every literal form of both types, along with
+escaping and interpolation. `Str` and `Bin` also support a wide variety of
+methods ([`Str`](../api/std/str.md), [`Bin`](../api/std/bin.md)).
 
 ## Booleans (`Bool`)
 

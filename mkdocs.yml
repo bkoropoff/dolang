@@ -45,6 +45,7 @@ nav:
     - language/data-structures.md
     - language/commands.md
     - language/expressions.md
+    - language/strings.md
     - language/variables.md
     - language/flow-control.md
     - language/vertical-layout.md

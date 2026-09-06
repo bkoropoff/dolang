@@ -634,12 +634,37 @@ impl<'v> Object<'v> for Fmt {
             })
             // The way to ask for the expansion. A sequence has no implicit
             // string conversion, so this is the explicit one.
+            //
+            // Arguments fill the parameters first, on the same terms as
+            // [`call`](Self::call): a template that is filled only to be
+            // expanded says so in one step, and the two-phase form stays for
+            // when the filled sequence is what a consumer wants.
             .method("format", async |this, strand, args, out| {
-                let ([], []) = unpack!(strand, args, 0, 0)?;
-                let mut embryo = StrEmbryo::new();
-                render(this, strand, &mut embryo)?;
-                embryo.finish(strand, out);
-                Ok(())
+                let global = this.annex().global;
+                if args.len() == 0 {
+                    let mut embryo = StrEmbryo::new();
+                    render(this, strand, &mut embryo)?;
+                    embryo.finish(strand, out);
+                    return Ok(());
+                }
+                strand
+                    .with_slots(async move |strand, [mut bindings, mut result]| {
+                        let dict = Dict::from_args(strand, args)?;
+                        strand
+                            .builtin_types()
+                            .dict
+                            .create(strand, dict, &mut bindings);
+                        bind_segments(strand, global, this, &bindings, &mut result)?;
+                        reject_unfilled(strand, global, &result)?;
+                        let bound = global.types.fmt.cast(&result).unwrap();
+                        bound.enter_sync(strand, |strand, bound| {
+                            let mut embryo = StrEmbryo::new();
+                            render(bound, strand, &mut embryo)?;
+                            embryo.finish(strand, out);
+                            Ok(())
+                        })
+                    })
+                    .await
             })
             // Partial filling. A dict rather than an argument pack because only
             // a dict can name a sparse set of positions.
@@ -812,16 +837,13 @@ fn render_segment<'v, 's>(
     if let Some(param) = global.types.param.cast(segment) {
         // An unfilled hole has no rendering. The template is unfinished, so
         // there is nothing to emit that would not be a guess at what belongs
-        // there.
+        // there. That is a parameter the caller never supplied, and it is
+        // reported as one, exactly as filling reports it.
         let name = param.enter_sync(strand, |strand, param| {
             let borrow = param.borrow(strand)?;
-            let name = Ref::slot::<0>(&borrow).dup();
-            Ok(param_name(strand, &name))
+            Ok(Ref::slot::<0>(&borrow).dup())
         })?;
-        return Err(Error::value(
-            strand,
-            format!("Fmt: parameter `{name}` is unbound"),
-        ));
+        return Err(unmatched_error(strand, &name, true));
     }
     let bound = global
         .types

@@ -48,8 +48,9 @@ assert_eq (type stmt[1]) $FmtParam
 assert_eq (dbg stmt) r#"t"a=${#0};""#
 
 # An unfilled hole has no rendering: the sequence is unfinished, so there is
-# nothing to emit that would not be a guess at what belongs there.
-assert_throws $std.ValueError do stmt.format()
+# nothing to emit that would not be a guess at what belongs there. It is a
+# parameter nobody supplied, and is reported as one.
+assert_throws $std.MissingPosError do stmt.format()
 
 # The refusal is about the hole, not about conversion in general -- a sequence
 # with no holes still expands.
@@ -80,7 +81,7 @@ assert_eq $query[1].name 0
 assert_eq $query[1].source r"${#0}"
 assert_eq (type query[3]) $FmtParam
 assert_eq $query[3].name :name:
-assert_throws $std.ValueError do query.format()
+assert_throws $std.MissingPosError do query.format()
 
 # A hole states a specification like any other interpolation, and the whole
 # thing round-trips through `dbg`.
@@ -104,6 +105,27 @@ assert_eq $doc[1].name :k:
 
 # `#` keeps its own meaning inside a specification: this is `alt`, not a hole.
 assert_eq $(t"${5:#x}").format() "0x5"
+
+# `$#name` is the shorthand for a hole with no specification.
+let short = t"a=$#0 b=$#name"
+assert_eq $short.len 4
+assert_eq $short[1].name 0
+assert_eq $short[3].name :name:
+assert_eq $short[1].source r"$#0"
+assert_eq $short.format(1, name: "n") "a=1 b=n"
+assert_eq $(t"x$#k").params() (Set([:k:]))
+
+# The shorthand takes the name and nothing else, so a `:` after one is text.
+let labeled = t"$#name: $#0"
+assert_eq $labeled.len 3
+assert_eq $labeled[0].name :name:
+assert_eq $labeled[1] ": "
+assert_eq $labeled.format(0, name: "n") "n: 0"
+
+# Here strings take the shorthand too.
+let short_doc = t|-
+  a=$#k
+assert_eq $short_doc[1].name :k:
 
 # Calling the sequence fills every hole at once. Positional arguments are sugar
 # for integer keys, so `call` and `bind` substitute the same way and differ only
@@ -152,6 +174,19 @@ assert_throws $std.UnexpectedKeyError do sparse.bind {0: "x", 2: "z", nope: 1}
 assert_throws $std.MissingPosError do stmt name: "n"
 assert_throws $std.MissingKeyError do stmt 1
 assert_throws $std.UnexpectedPosError do stmt 1 2 name: "n"
+
+# `format` takes the same arguments, filling and expanding in one step rather
+# than two. Filling is on `call`'s terms, so the same checks apply.
+assert_eq $stmt.format(1, name: "n") $(stmt 1 name: "n").format()
+assert_eq $layout.format(7) "[   7]"
+assert_throws $std.MissingPosError do stmt.format(name: "n")
+assert_throws $std.MissingKeyError do stmt.format(1)
+assert_throws $std.UnexpectedPosError do stmt.format(1, 2, name: "n")
+assert_throws $std.UnexpectedKeyError do stmt.format(1, name: "n", nope: 2)
+
+# An argument to a template with nothing to fill is unused like any other.
+let bare = t"plain"
+assert_throws $std.UnexpectedPosError do bare.format(1)
 
 # A hole may be filled more than once over: repeating a name fills every hole
 # that bears it.

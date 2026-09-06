@@ -74,9 +74,10 @@ converted — [`verbatim`](../std/index.md) in argument position, `str` inside a
 The exception is an unfilled [`FmtParam`](../std/fmt-param.md). A parameter
 printed on its own is just a name and shows itself as such, but one still
 standing in a sequence means the template was never finished, so the console
-raises a [`ValueError`](../std/value-error.md) as
-[`format`](../std/fmt.md#format) does rather than printing a hole where a
-value was meant to go.
+raises a [`MissingPosError`](../std/missing-pos-error.md) or
+[`MissingKeyError`](../std/missing-key-error.md) as
+[`format()`](../std/fmt.md#format-bindings) does rather than printing a hole
+where a value was meant to go.
 
 ## Methods
 
@@ -198,5 +199,5 @@ let label = term.text ERROR fg: :RED: bold: true
 echo $label " request failed"
 
 # Preserve ANSI escapes for a file or another process.
-let encoded = $label.encode()
+let encoded = label.encode()
 ```

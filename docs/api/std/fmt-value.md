@@ -3,7 +3,7 @@
 Binds a value to reusable formatting options.
 
 A [formatted
-interpolation](../../language/expressions.md#formatted-interpolation) produces
+interpolation](../../language/strings.md#formatted-interpolation) produces
 one for each `${...}` it contains; the constructor is for binding a value
 where no interpolation is being written.
 
@@ -20,19 +20,15 @@ the original value.
 
 | Name        | Type  | Description                            |
 | ----------- | ----- | -------------------------------------- |
-| `value`     |       | Value to bind                          |
-| `fill`      | ?     | Fill character, `:ZERO:`, or nil       |
+| `value`     | Value | Value to bind                          |
+| `fill`      | Str?  | Fill character, `:ZERO:`, or nil       |
 | `align`     | Sym?  | `:LEFT:`, `:RIGHT:`, or `:CENTER:`     |
 | `sign`      | Sym?  | `:PLUS:` or `:SPACE:`                  |
 | `width`     | Int?  | Minimum width in grapheme clusters     |
 | `precision` | Int?  | Numeric precision or maximum graphemes |
 | `alt`       | Bool? | Enables alternate formatting           |
 | `kind`      | Sym?  | Representation kind                    |
-| `source`    | Str?  | Text this was written as               |
-
-#### Returns
-
-`FmtValue`
+| `source`    | Str?  | Interpolation as written in source     |
 
 #### Example
 
@@ -59,14 +55,6 @@ let sourced = FmtValue 42 width: 4 source: r"${x:>4}"
 assert_eq $sourced.source r"${x:>4}"
 ```
 
-## Methods
-
-### `call :fill? :align? :sign? :width? :precision? :alt? :kind?`
-
-Returns a new `FmtValue` with the supplied options merged. Positional
-arguments are not accepted. The result is synthetic rather than
-source-derived, so its [`source`](#source) is nil.
-
 ## Sequencing
 
 Binding a `FmtValue` sequences the two specifications rather than merging
@@ -91,6 +79,12 @@ assert_eq (str outer.value) "1.50"
 ```
 
 ## Operators
+
+### `(call) :fill? :align? :sign? :width? :precision? :alt? :kind?`
+
+Returns a new `FmtValue` with the supplied options merged. Positional
+arguments are not accepted. The result is synthetic rather than
+source-derived, so its [`source`](#source) is nil.
 
 ### Equality
 
