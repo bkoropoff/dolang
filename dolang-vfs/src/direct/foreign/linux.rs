@@ -178,8 +178,12 @@ fn read_info(session: Uuid, pid: u32) -> Result<Option<ProcessInfo>> {
             if matches!(
                 error.kind(),
                 IoErrorKind::NotFound | IoErrorKind::PermissionDenied
-            ) =>
+            ) || error.raw_os_error() == Some(libc::ESRCH) =>
         {
+            // A process that exits between the `/proc` listing and this read
+            // can surface as `ESRCH` rather than `ENOENT` — e.g. reading a
+            // zombie's `stat` file after its parent reaps it. Rust does not
+            // map that errno to `NotFound`, so it needs a check of its own.
             return Ok(None);
         }
         Err(error) => return Err(error.into()),
