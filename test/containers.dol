@@ -238,6 +238,7 @@ def image_build_untagged()
   let img = runtime.build
     from: ubuntu:24.04
     run: do run touch /untagged-marker
+    commit: nil
 
   assert (img.id.starts_with "sha256:")
   let same = runtime.image $img.id
