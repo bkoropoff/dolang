@@ -614,45 +614,37 @@ impl<'v> Object<'v> for Vfs {
             (builder, elevate_sym, cd_sym, env_sym)
         };
         let builder = builder.method("stop", async move |this, strand, _args, _out| {
-            if matches!(&this.annex().source, VfsSource::Stream) {
-                // Closing the RPC session releases the stdio pipe handles
-                // after a successful Stop response. A failed request may mean
-                // the peer will never close its output, so abort in that case.
-                // Joining always waits for the launcher to observe the
-                // helper's exit.
-                let vfs = this.annex().vfs.clone();
-                let global = this.annex().global;
-                let stop_result = vfs.stop().await;
-                if stop_result.is_ok() {
-                    vfs.close().await;
-                } else {
-                    vfs.abort().await;
-                }
-                let join_result = strand
+            // Closing the RPC session releases the stdio pipe handles
+            // after a successful Stop response. A failed request may mean
+            // the peer will never close its output, so abort in that case.
+            // Joining always waits for the launcher to observe the
+            // helper's exit.
+            let annex = this.annex();
+            let stop_result = annex.vfs.stop().await;
+            if stop_result.is_ok() {
+                annex.vfs.clone().close().await;
+            } else {
+                annex.vfs.clone().abort().await;
+            }
+            let join_result = if matches!(&annex.source, VfsSource::Stream) {
+                strand
                     .with_slots(async move |strand, [mut stream, mut output]| {
                         let borrow = this.borrow(strand)?;
                         Output::set(strand, &mut stream, Ref::slot::<0>(&borrow));
                         drop(borrow);
-                        method!(strand, &stream, global.syms.join, &mut output).await
+                        method!(strand, &stream, annex.global.syms.join, &mut output).await
                     })
-                    .await;
-
-                return match (stop_result, join_result) {
-                    // Joining is cleanup, so it must happen even when the
-                    // stop request failed. Preserve that request's error when
-                    // both operations fail.
-                    (Err(error), _) => Err(error.into_sys(strand)),
-                    (Ok(()), result) => result,
-                };
+                    .await
+            } else {
+                Ok(())
+            };
+            match (stop_result, join_result) {
+                // Joining is cleanup, so it must happen even when the
+                // stop request failed. Preserve that request's error when
+                // both operations fail.
+                (Err(error), _) => Err(error.into_sys(strand)),
+                (Ok(()), result) => result,
             }
-
-            let borrow = this.annex();
-            match &borrow.source {
-                VfsSource::Stream => unreachable!("stream VFS returned without joining"),
-                VfsSource::Unix(_) => error::io_result(strand, borrow.vfs.stop().await)?,
-                VfsSource::WindowsAdmin => error::io_result(strand, borrow.vfs.stop().await)?,
-            }
-            Ok(())
         });
 
         builder.type_method("windows_admin", async move |_this, strand, args, out| {
