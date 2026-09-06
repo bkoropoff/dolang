@@ -483,6 +483,368 @@ impl AccountPolicyUpdate {
     }
 }
 
+/// How the machine is currently named on the network.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum JoinKind {
+    /// The join state could not be determined.
+    #[default]
+    Unknown,
+    /// The machine belongs to neither a workgroup nor a domain.
+    Unjoined,
+    /// The name is a workgroup.
+    Workgroup,
+    /// The name is a domain.
+    Domain,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JoinInfo {
+    pub(crate) kind: JoinKind,
+    pub(crate) name: Option<String>,
+}
+impl JoinInfo {
+    pub fn kind(&self) -> JoinKind {
+        self.kind
+    }
+    /// The workgroup or domain name, absent when unjoined or unknown.
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+}
+
+bitflags::bitflags! {
+    /// Native `SERVER_INFO_101::sv101_type`, including unknown bits.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    pub struct ServerType: u32 {
+        const WORKSTATION = 0x0000_0001;
+        const SERVER = 0x0000_0002;
+        const SQLSERVER = 0x0000_0004;
+        const DOMAIN_CTRL = 0x0000_0008;
+        const DOMAIN_BAKCTRL = 0x0000_0010;
+        const TIME_SOURCE = 0x0000_0020;
+        const AFP = 0x0000_0040;
+        const NOVELL = 0x0000_0080;
+        const DOMAIN_MEMBER = 0x0000_0100;
+        const PRINTQ_SERVER = 0x0000_0200;
+        const DIALIN_SERVER = 0x0000_0400;
+        const SERVER_UNIX = 0x0000_0800;
+        const NT = 0x0000_1000;
+        const WFW = 0x0000_2000;
+        const SERVER_MFPN = 0x0000_4000;
+        const SERVER_NT = 0x0000_8000;
+        const POTENTIAL_BROWSER = 0x0001_0000;
+        const BACKUP_BROWSER = 0x0002_0000;
+        const MASTER_BROWSER = 0x0004_0000;
+        const DOMAIN_MASTER = 0x0008_0000;
+        const SERVER_OSF = 0x0010_0000;
+        const SERVER_VMS = 0x0020_0000;
+        const WINDOWS = 0x0040_0000;
+        const DFS = 0x0080_0000;
+        const CLUSTER_NT = 0x0100_0000;
+        const TERMINALSERVER = 0x0200_0000;
+        const CLUSTER_VS_NT = 0x0400_0000;
+        const DCE = 0x1000_0000;
+        const ALTERNATE_XPORT = 0x2000_0000;
+        const LOCAL_LIST_ONLY = 0x4000_0000;
+        const DOMAIN_ENUM = 0x8000_0000;
+    }
+}
+
+/// Machine identity from `NetWkstaGetInfo` and `NetServerGetInfo`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineInfo {
+    pub(crate) name: String,
+    pub(crate) domain: String,
+    pub(crate) version_major: u32,
+    pub(crate) version_minor: u32,
+    pub(crate) comment: Option<String>,
+    pub(crate) server_type: ServerType,
+    pub(crate) server_started: bool,
+}
+impl MachineInfo {
+    /// The NetBIOS computer name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    /// The domain or workgroup the machine belongs to.
+    pub fn domain(&self) -> &str {
+        &self.domain
+    }
+    pub fn version_major(&self) -> u32 {
+        self.version_major
+    }
+    pub fn version_minor(&self) -> u32 {
+        self.version_minor
+    }
+    /// The server comment, absent when unset or when the server service is
+    /// not running.
+    pub fn comment(&self) -> Option<&str> {
+        self.comment.as_deref()
+    }
+    /// The advertised server role mask, empty when the server service is not
+    /// running.
+    pub fn server_type(&self) -> ServerType {
+        self.server_type
+    }
+    /// Whether the server service supplied the role mask and comment.
+    ///
+    /// Machine identity comes from the workstation service, so a stopped
+    /// server service leaves only the server-side fields unpopulated rather
+    /// than failing the whole query.
+    pub fn server_started(&self) -> bool {
+        self.server_started
+    }
+}
+
+bitflags::bitflags! {
+    /// Native `NetJoinDomain` option flags.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    pub struct JoinOptions: u32 {
+        const JOIN_DOMAIN = 0x0000_0001;
+        const ACCT_CREATE = 0x0000_0002;
+        const DOMAIN_JOIN_IF_JOINED = 0x0000_0020;
+        const JOIN_UNSECURE = 0x0000_0040;
+        const MACHINE_PWD_PASSED = 0x0000_0080;
+        const DEFER_SPN_SET = 0x0000_0100;
+        const JOIN_DC_ACCOUNT = 0x0000_0200;
+        const JOIN_WITH_NEW_NAME = 0x0000_0400;
+        const JOIN_READONLY = 0x0000_0800;
+        const AMBIGUOUS_DC = 0x0000_1000;
+        const NO_NETLOGON_CACHE = 0x0000_2000;
+        const FORCE_SPN_SET = 0x0001_0000;
+        const NO_ACCT_REUSE = 0x0002_0000;
+    }
+}
+
+/// A request to join a domain.
+///
+/// The join does not take effect until the machine is restarted.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JoinRequest {
+    pub(crate) domain: String,
+    pub(crate) ou: Option<String>,
+    pub(crate) account: Option<String>,
+    pub(crate) password: Option<String>,
+    pub(crate) options: JoinOptions,
+}
+impl JoinRequest {
+    pub fn new(domain: String) -> Self {
+        Self {
+            domain,
+            ou: None,
+            account: None,
+            password: None,
+            options: JoinOptions::JOIN_DOMAIN,
+        }
+    }
+    /// The organizational unit to create the computer account in.
+    pub fn ou(mut self, value: Option<String>) -> Self {
+        self.ou = value;
+        self
+    }
+    /// Domain credentials authorized to perform the join.
+    pub fn credentials(mut self, account: String, password: String) -> Self {
+        self.account = Some(account);
+        self.password = Some(password);
+        self.options.remove(JoinOptions::MACHINE_PWD_PASSED);
+        self
+    }
+    /// Joins with a pre-created computer account password instead of user
+    /// credentials.
+    pub fn machine_password(mut self, value: String) -> Self {
+        self.account = None;
+        self.password = Some(value);
+        self.options.insert(JoinOptions::MACHINE_PWD_PASSED);
+        self
+    }
+    fn flag(mut self, flag: JoinOptions, value: bool) -> Self {
+        self.options.set(flag, value);
+        self
+    }
+    pub fn create_account(self, value: bool) -> Self {
+        self.flag(JoinOptions::ACCT_CREATE, value)
+    }
+    pub fn join_if_joined(self, value: bool) -> Self {
+        self.flag(JoinOptions::DOMAIN_JOIN_IF_JOINED, value)
+    }
+    pub fn unsecure(self, value: bool) -> Self {
+        self.flag(JoinOptions::JOIN_UNSECURE, value)
+    }
+    pub fn defer_spn(self, value: bool) -> Self {
+        self.flag(JoinOptions::DEFER_SPN_SET, value)
+    }
+    pub fn force_spn(self, value: bool) -> Self {
+        self.flag(JoinOptions::FORCE_SPN_SET, value)
+    }
+    pub fn dc_account(self, value: bool) -> Self {
+        self.flag(JoinOptions::JOIN_DC_ACCOUNT, value)
+    }
+    pub fn with_new_name(self, value: bool) -> Self {
+        self.flag(JoinOptions::JOIN_WITH_NEW_NAME, value)
+    }
+    pub fn readonly(self, value: bool) -> Self {
+        self.flag(JoinOptions::JOIN_READONLY, value)
+    }
+    pub fn ambiguous_dc(self, value: bool) -> Self {
+        self.flag(JoinOptions::AMBIGUOUS_DC, value)
+    }
+    pub fn no_netlogon_cache(self, value: bool) -> Self {
+        self.flag(JoinOptions::NO_NETLOGON_CACHE, value)
+    }
+    pub fn no_account_reuse(self, value: bool) -> Self {
+        self.flag(JoinOptions::NO_ACCT_REUSE, value)
+    }
+    pub fn options(&self) -> JoinOptions {
+        self.options
+    }
+}
+
+/// A request to leave the current domain.
+///
+/// The change does not take effect until the machine is restarted.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnjoinRequest {
+    pub(crate) account: Option<String>,
+    pub(crate) password: Option<String>,
+    pub(crate) delete_account: bool,
+}
+impl UnjoinRequest {
+    /// Domain credentials authorized to disable the computer account.
+    pub fn credentials(mut self, account: String, password: String) -> Self {
+        self.account = Some(account);
+        self.password = Some(password);
+        self
+    }
+    /// Disables the computer account in the domain as part of the unjoin.
+    pub fn delete_account(mut self, value: bool) -> Self {
+        self.delete_account = value;
+        self
+    }
+}
+
+/// A request to rename the machine within its domain.
+///
+/// The rename does not take effect until the machine is restarted.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenameRequest {
+    pub(crate) name: String,
+    pub(crate) account: Option<String>,
+    pub(crate) password: Option<String>,
+    pub(crate) create_account: bool,
+}
+impl RenameRequest {
+    pub fn new(name: String) -> Self {
+        Self {
+            name,
+            account: None,
+            password: None,
+            create_account: false,
+        }
+    }
+    /// Domain credentials authorized to rename the computer account.
+    pub fn credentials(mut self, account: String, password: String) -> Self {
+        self.account = Some(account);
+        self.password = Some(password);
+        self
+    }
+    /// Creates the renamed computer account if it does not already exist.
+    pub fn create_account(mut self, value: bool) -> Self {
+        self.create_account = value;
+        self
+    }
+}
+
+bitflags::bitflags! {
+    /// Native `NetProvisionComputerAccount` option flags.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    pub struct ProvisionOptions: u32 {
+        const DOWNLEVEL_PRIV_SUPPORT = 0x0000_0001;
+        const REUSE_ACCOUNT = 0x0000_0002;
+        const USE_DEFAULT_PASSWORD = 0x0000_0004;
+        const SKIP_ACCOUNT_SEARCH = 0x0000_0008;
+        const ROOT_CA_CERTS = 0x0000_0010;
+    }
+}
+
+/// A request to mint an offline domain join blob.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProvisionRequest {
+    pub(crate) domain: String,
+    pub(crate) machine: String,
+    pub(crate) ou: Option<String>,
+    pub(crate) dc: Option<String>,
+    pub(crate) options: ProvisionOptions,
+}
+impl ProvisionRequest {
+    pub fn new(domain: String, machine: String) -> Self {
+        Self {
+            domain,
+            machine,
+            ou: None,
+            dc: None,
+            options: ProvisionOptions::empty(),
+        }
+    }
+    /// The organizational unit to create the computer account in.
+    pub fn ou(mut self, value: Option<String>) -> Self {
+        self.ou = value;
+        self
+    }
+    /// The domain controller to provision against.
+    pub fn dc(mut self, value: Option<String>) -> Self {
+        self.dc = value;
+        self
+    }
+    fn flag(mut self, flag: ProvisionOptions, value: bool) -> Self {
+        self.options.set(flag, value);
+        self
+    }
+    pub fn reuse(self, value: bool) -> Self {
+        self.flag(ProvisionOptions::REUSE_ACCOUNT, value)
+    }
+    pub fn default_password(self, value: bool) -> Self {
+        self.flag(ProvisionOptions::USE_DEFAULT_PASSWORD, value)
+    }
+    pub fn skip_account_search(self, value: bool) -> Self {
+        self.flag(ProvisionOptions::SKIP_ACCOUNT_SEARCH, value)
+    }
+    pub fn root_ca_certs(self, value: bool) -> Self {
+        self.flag(ProvisionOptions::ROOT_CA_CERTS, value)
+    }
+    pub fn downlevel_priv_support(self, value: bool) -> Self {
+        self.flag(ProvisionOptions::DOWNLEVEL_PRIV_SUPPORT, value)
+    }
+    pub fn options(&self) -> ProvisionOptions {
+        self.options
+    }
+}
+
+/// A request to apply an offline domain join blob to a Windows installation.
+///
+/// The join does not take effect until the target installation is started or
+/// restarted.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OfflineJoinRequest {
+    pub(crate) blob: Vec<u8>,
+    pub(crate) windows_path: path::PathBuf,
+    pub(crate) online: bool,
+}
+impl OfflineJoinRequest {
+    /// Applies `blob` to the Windows directory at `windows_path`.
+    pub fn new(blob: Vec<u8>, windows_path: path::PathBuf) -> Self {
+        Self {
+            blob,
+            windows_path,
+            online: false,
+        }
+    }
+    /// Marks the target installation as the running system.
+    pub fn online(mut self, value: bool) -> Self {
+        self.online = value;
+        self
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub(crate) enum WinNetRequest {
     UserByName {
@@ -570,6 +932,13 @@ pub(crate) enum WinNetRequest {
     DeleteShare {
         name: String,
     },
+    JoinStatus,
+    MachineInfo,
+    JoinDomain(Box<JoinRequest>),
+    UnjoinDomain(UnjoinRequest),
+    RenameMachine(RenameRequest),
+    ProvisionComputer(Box<ProvisionRequest>),
+    ApplyOfflineJoin(Box<OfflineJoinRequest>),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -609,6 +978,9 @@ pub(crate) enum WinNetResponse {
         resume: u64,
         done: bool,
     },
+    JoinInfo(JoinInfo),
+    MachineInfo(Box<MachineInfo>),
+    Blob(Vec<u8>),
 }
 
 pub(crate) struct WinNetExt;
@@ -616,7 +988,7 @@ impl VfsExtension for WinNetExt {
     type Request = WinNetRequest;
     type Response = Result<WinNetResponse, Error>;
     const NAME: &'static str = "dolang-vfs-winnet";
-    const VERSION: u16 = 4;
+    const VERSION: u16 = 5;
     const AVAILABLE: bool = cfg!(windows);
     async fn handle(&self, ctx: &mut ExtContext<'_>, request: WinNetRequest) -> Self::Response {
         #[cfg(windows)]
@@ -707,6 +1079,107 @@ mod tests {
         let bytes = postcard::to_stdvec(&request).unwrap();
         assert!(
             matches!(postcard::from_bytes::<WinNetRequest>(&bytes).unwrap(), WinNetRequest::SharesPage { resume } if resume == u64::MAX - 1)
+        );
+    }
+    #[test]
+    fn machine_info_round_trips() {
+        let info = MachineInfo {
+            name: "DC01".into(),
+            domain: "CORP".into(),
+            version_major: 10,
+            version_minor: 0,
+            comment: Some("primary".into()),
+            server_type: ServerType::from_bits_retain(ServerType::DOMAIN_CTRL.bits() | 0x0800_0000),
+            server_started: true,
+        };
+        let bytes = postcard::to_stdvec(&info).unwrap();
+        assert_eq!(postcard::from_bytes::<MachineInfo>(&bytes).unwrap(), info);
+    }
+    #[test]
+    fn join_info_round_trips() {
+        for info in [
+            JoinInfo {
+                kind: JoinKind::Domain,
+                name: Some("corp.example.com".into()),
+            },
+            JoinInfo {
+                kind: JoinKind::Unjoined,
+                name: None,
+            },
+        ] {
+            let bytes = postcard::to_stdvec(&info).unwrap();
+            assert_eq!(postcard::from_bytes::<JoinInfo>(&bytes).unwrap(), info);
+        }
+    }
+    /// Machine-password mode and user credentials are mutually exclusive, so
+    /// each builder clears the other rather than leaving a request that names
+    /// an account the flag says is absent.
+    #[test]
+    fn join_credentials_are_exclusive() {
+        let request = JoinRequest::new("corp".into())
+            .credentials("admin".into(), "pw".into())
+            .machine_password("mpw".into());
+        assert!(request.options().contains(JoinOptions::MACHINE_PWD_PASSED));
+        assert_eq!(request.account, None);
+        assert_eq!(request.password.as_deref(), Some("mpw"));
+
+        let request = JoinRequest::new("corp".into())
+            .machine_password("mpw".into())
+            .credentials("admin".into(), "pw".into());
+        assert!(!request.options().contains(JoinOptions::MACHINE_PWD_PASSED));
+        assert_eq!(request.account.as_deref(), Some("admin"));
+    }
+    #[test]
+    fn join_requests_round_trip() {
+        let request = JoinRequest::new("corp.example.com".into())
+            .ou(Some("OU=Servers,DC=corp,DC=example,DC=com".into()))
+            .credentials("CORP\\joiner".into(), "pw".into())
+            .create_account(true)
+            .defer_spn(true)
+            .no_account_reuse(true);
+        assert!(request.options().contains(JoinOptions::JOIN_DOMAIN));
+        let bytes = postcard::to_stdvec(&request).unwrap();
+        assert_eq!(
+            postcard::from_bytes::<JoinRequest>(&bytes).unwrap(),
+            request
+        );
+
+        let request = UnjoinRequest::default()
+            .credentials("CORP\\joiner".into(), "pw".into())
+            .delete_account(true);
+        let bytes = postcard::to_stdvec(&request).unwrap();
+        assert_eq!(
+            postcard::from_bytes::<UnjoinRequest>(&bytes).unwrap(),
+            request
+        );
+
+        let request = RenameRequest::new("NEWNAME".into())
+            .credentials("CORP\\joiner".into(), "pw".into())
+            .create_account(true);
+        let bytes = postcard::to_stdvec(&request).unwrap();
+        assert_eq!(
+            postcard::from_bytes::<RenameRequest>(&bytes).unwrap(),
+            request
+        );
+
+        let request = ProvisionRequest::new("corp.example.com".into(), "WS01".into())
+            .ou(Some("OU=Servers".into()))
+            .dc(Some("dc01.corp.example.com".into()))
+            .reuse(true)
+            .root_ca_certs(true);
+        let bytes = postcard::to_stdvec(&request).unwrap();
+        assert_eq!(
+            postcard::from_bytes::<ProvisionRequest>(&bytes).unwrap(),
+            request
+        );
+
+        let request =
+            OfflineJoinRequest::new(vec![0, 1, 2, 3], path::PathBuf::from_windows(r"C:\Windows"))
+                .online(true);
+        let bytes = postcard::to_stdvec(&request).unwrap();
+        assert_eq!(
+            postcard::from_bytes::<OfflineJoinRequest>(&bytes).unwrap(),
+            request
         );
     }
 }

@@ -10,8 +10,11 @@ import winnet rand shell strand sys
     - Sid
     - SidName
   std:
+    - Bin
     - Bool
     - Int
+    - Str
+    - ValueError
   sys:
     - AlreadyExistsError
     - NotFoundError
@@ -91,6 +94,138 @@ def unsupported_without_windows_backend()
     [...winnet.shares()]
   assert_throws $UnsupportedError do
     winnet.share r"C$"
+  assert_throws $UnsupportedError do
+    winnet.join_status()
+  assert_throws $UnsupportedError do
+    winnet.machine_info()
+  assert_throws $UnsupportedError do
+    winnet.join_domain domain: corp.example.com
+  assert_throws $UnsupportedError do
+    winnet.unjoin_domain()
+  assert_throws $UnsupportedError do
+    winnet.rename_machine WS01
+  assert_throws $UnsupportedError do
+    winnet.provision_computer domain: corp.example.com machine: WS01
+  assert_throws $UnsupportedError do
+    winnet.apply_offline_join b"\x01\x02" windows_path: (Path r"C:\Windows")
+
+# Credential shapes are rejected before the NetAPI call, so this runs
+# everywhere rather than only on a domain-joined Windows machine.
+#[test]
+#[vfs]
+def join_credentials_are_validated()
+  assert_throws $ValueError do
+    winnet.join_domain domain: corp.example.com account: r"CORP\joiner"
+  assert_throws $ValueError do
+    winnet.join_domain domain: corp.example.com password: secret
+  assert_throws $ValueError do
+    winnet.unjoin_domain account: r"CORP\joiner"
+  assert_throws $ValueError do
+    winnet.rename_machine WS01 password: secret
+
+  # NETSETUP_MACHINE_PWD_PASSED requires a null account, so the two credential
+  # forms cannot be combined.
+  assert_throws $ValueError do
+    winnet.join_domain
+      domain: corp.example.com
+      account: r"CORP\joiner"
+      password: secret
+      machine_password: other
+
+#[test]
+#[vfs]
+def domain_membership_is_readable()
+  if (sys.os_info().family != :WINDOWS:)
+    skip "requires Windows NetAPI"
+  if sys.os_info().is_wine
+    skip "Wine does not implement NetGetJoinInformation or NetWkstaGetInfo"
+  let status = winnet.join_status()
+  let named = [:DOMAIN:, :WORKGROUP:]
+  assert_type $winnet.JoinStatus $status
+  assert ([:UNJOINED:, :UNKNOWN:].contains(status.kind) || named.contains(status.kind))
+  # The name is present exactly when the machine is named on a network.
+  if named.contains(status.kind)
+    assert_type $Str $status.name
+  else
+    assert_eq $status.name nil
+
+  let machine = winnet.machine_info()
+  assert_type $winnet.MachineInfo $machine
+  assert_type $Str $machine.name
+  assert_type $Str $machine.domain
+  assert_type $Int $machine.version_major
+  assert_type $Int $machine.version_minor
+  assert_type $Bool $machine.server_started
+  assert_type $winnet.ServerType $machine.server_type
+  assert_type $Int $machine.server_type.int
+  assert_type $Bool $machine.workstation
+  assert_type $Bool $machine.domain_controller
+
+  # A stopped server service costs only the server-side fields.
+  if machine.server_started
+    assert (machine.server_type.int != 0)
+  else
+    assert_eq $machine.server_type.int 0
+    assert_eq $machine.comment nil
+
+  # The workstation service and the join state agree that there is a name.
+  if named.contains(status.kind)
+    assert (machine.domain.len > 0)
+
+# Joining, unjoining and renaming re-identify the machine on the network and
+# require a reboot to take effect, so they cannot run unattended. Opt in with
+# a domain that exists and a machine that can be thrown away afterwards.
+#[fixture]
+def domain_mutation block ...rest
+  if (sys.os_info().family != :WINDOWS:)
+    skip "requires Windows NetAPI"
+  if sys.os_info().is_wine
+    skip "Wine does not implement NetJoinDomain"
+  if (shell.env.get("DOLANG_WINNET_JOIN_MUTATION_TEST") != "1")
+    skip "set DOLANG_WINNET_JOIN_MUTATION_TEST=1 to re-identify this machine"
+  let domain = shell.env.get "DOLANG_WINNET_TEST_DOMAIN"
+  let account = shell.env.get "DOLANG_WINNET_TEST_ACCOUNT"
+  let password = shell.env.get "DOLANG_WINNET_TEST_PASSWORD"
+  if (domain == nil || account == nil || password == nil)
+    skip "set DOLANG_WINNET_TEST_DOMAIN, _ACCOUNT and _PASSWORD"
+  block domain: $domain account: $account password: $password ...rest
+
+#[test]
+#[vfs]
+#[domain_mutation]
+def domain_join_lifecycle :domain :account :password
+  let before = winnet.join_status()
+  if (before.kind == :DOMAIN:)
+    skip "machine is already domain-joined; unjoin it first"
+  try
+    winnet.join_domain
+      domain: $domain
+      account: $account
+      password: $password
+      create_account: true
+  catch PermissionDeniedError: _
+    skip "requires permission to join the machine to a domain"
+  let after = winnet.join_status()
+  assert_eq $after.kind :DOMAIN:
+  assert_eq (after.name.lower()) (domain.lower())
+  winnet.unjoin_domain account: $account password: $password delete_account: true
+  # The join is recorded immediately even though it needs a reboot to work,
+  # so the unjoin must be observable the same way.
+  assert (winnet.join_status().kind != :DOMAIN:)
+
+#[test]
+#[vfs]
+#[domain_mutation]
+def offline_join_provisioning :domain ..._credentials
+  # NetProvisionComputerAccount runs as the calling user, so the fixture's
+  # credentials do not apply here.
+  let machine = "DO-$(rand.string(8).upper())"
+  let blob = try
+    winnet.provision_computer domain: $domain machine: $machine
+  catch PermissionDeniedError: _
+    skip "requires permission to create computer accounts"
+  assert_type $Bin $blob
+  assert (blob.len > 0)
 
 #[fixture]
 def scratch_share block ...rest
