@@ -363,8 +363,8 @@ pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Glob
             Ok(())
         })
         .function("info", async move |strand, args, out| {
-            let ([pid], []) = unpack!(strand, args, 1, 0)?;
-            foreign::describe(strand, global, &pid, out).await
+            let ([], [pid]) = unpack!(strand, args, 0, 1)?;
+            foreign::describe(strand, global, pid.as_deref(), out).await
         })
         .function("open", async move |strand, args, out| {
             let ([target], [block]) = unpack!(strand, args, 1, 1)?;

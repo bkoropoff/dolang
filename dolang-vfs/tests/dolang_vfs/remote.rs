@@ -1673,6 +1673,21 @@ async fn session_identity_is_per_session_not_per_host() {
     stop_pair(client, server_task).await;
 }
 
+/// The target's own PID travels with the rest of the session context, so a
+/// client reports the agent serving it rather than the process asking. Both
+/// ends live in this test binary, so the two agree here — what is under test is
+/// that the query carries the server's answer at all, not a locally substituted
+/// one.
+#[tokio::test]
+async fn query_reports_the_target_process_id() {
+    let (client, server_task) = connected_pair().await;
+    assert_eq!(Vfs::direct().unwrap().pid(), std::process::id());
+    assert_eq!(client.pid(), std::process::id());
+    let info = client.describe_process(client.pid()).await.unwrap();
+    assert_eq!(info.pid(), client.pid());
+    stop_pair(client, server_task).await;
+}
+
 #[tokio::test]
 async fn process_enumeration_round_trips_and_pages() {
     let (client, server_task) = connected_pair().await;

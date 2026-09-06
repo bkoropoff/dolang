@@ -24,6 +24,12 @@ pub(crate) struct Query {
     /// either. A direct target generates one too, so the local path is not a
     /// special case that skips the check.
     pub session: Uuid,
+    /// Process ID of the target process itself.
+    ///
+    /// The process that serves this VFS: the interpreter for a direct target,
+    /// the remote agent for a client. Interpreted against
+    /// [`session`](Self::session) like any other PID from this target.
+    pub pid: u32,
     /// Environment variables from the target process.
     pub env: HashMap<String, String>,
     /// Target process's current working directory.
@@ -43,6 +49,7 @@ impl Query {
     pub fn current() -> Result<Self> {
         Ok(Self {
             session: Uuid::new_v4(),
+            pid: std::process::id(),
             env: current_environment().collect(),
             cwd: path::PathBuf::from_native(std::env::current_dir()?)?,
             current_exe: path::PathBuf::from_native(std::env::current_exe()?)?,

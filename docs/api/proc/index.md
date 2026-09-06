@@ -57,18 +57,25 @@ let mine = $
       - $info
 ```
 
-### `info pid`
+### `info pid?`
 
-Describes the process that currently owns `pid`.
+Describes the process that currently owns `pid`, or the target process itself
+when `pid` is omitted.
 
 Because this bypasses `open`, it will work on protected processes on Windows
 that would otherwise result in permission errors.
 
 #### Parameters
 
-| Name  | Type                         | Description |
-| ----- | ---------------------------- | ----------- |
-| `pid` | [`Int`](../std/int.md)       | Process ID  |
+| Name  | Type                    | Description                          |
+| ----- | ----------------------- | ------------------------------------ |
+| `pid` | [`Int`](../std/int.md)? | Process ID, or the target by default |
+
+The target process is the one serving the current VFS: the process running
+this interpreter when none is connected, otherwise the agent at the far end of
+the connection. Pair it with
+[`shell.with_host`](../shell/index.md#with_host-func-args) to reach this
+interpreter while a target is selected.
 
 #### Returns
 
@@ -85,6 +92,10 @@ that would otherwise result in permission errors.
 ```
 let info = info $pid
 echo "$(info.name) started as $(info.cmdline)"
+
+# The PID of this interpreter, whatever target is selected
+let mine = shell.with_host do info()
+echo $mine.pid
 ```
 
 ### `open target func?`

@@ -1465,6 +1465,7 @@ fn ack_write(cursor: &mut u64, response: ResponseKind) -> io::Result<usize> {
 fn query_from_wire(response: QueryResponse) -> Query {
     let QueryResponse {
         session,
+        pid,
         env,
         cwd,
         current_exe,
@@ -1474,6 +1475,7 @@ fn query_from_wire(response: QueryResponse) -> Query {
     } = response;
     Query {
         session,
+        pid,
         env,
         cwd,
         current_exe,
@@ -2777,6 +2779,10 @@ impl Client {
 
     pub fn session(&self) -> uuid::Uuid {
         self.shared.query.session
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.shared.query.pid
     }
 
     pub fn current_exe(&self) -> path::Path<'_> {

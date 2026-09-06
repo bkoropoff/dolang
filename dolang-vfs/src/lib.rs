@@ -303,6 +303,20 @@ impl Vfs {
         }
     }
 
+    /// Returns the process ID of the target process itself.
+    ///
+    /// The process serving this VFS — the local interpreter for a direct
+    /// target, the remote agent for a client — and for a chained target, the
+    /// one at the far end that actually performs the work. Like any other PID
+    /// from this target, it is only meaningful against
+    /// [`session`](Self::session).
+    pub fn pid(&self) -> u32 {
+        match &self.inner {
+            VfsInner::Client(vfs) => vfs.pid(),
+            VfsInner::Direct(vfs) => vfs.pid(),
+        }
+    }
+
     /// Enumerates the target's process table.
     ///
     /// Entries are produced lazily, and a process that exits partway through is

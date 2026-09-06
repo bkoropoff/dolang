@@ -71,6 +71,7 @@ pub(crate) struct Request {
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct QueryResponse {
     pub(crate) session: Uuid,
+    pub(crate) pid: u32,
     pub(crate) env: HashMap<String, String>,
     pub(crate) cwd: path::PathBuf,
     pub(crate) current_exe: path::PathBuf,

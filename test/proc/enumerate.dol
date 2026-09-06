@@ -1,4 +1,4 @@
-import proc sys uuid
+import proc shell sys uuid
   testlib.vfs:
     - vfs
   testlib.polyfill:
@@ -200,6 +200,39 @@ def describe_a_process_by_pid_without_opening_it()
       assert_eq $listed.unix_id.uid $info.unix_id.uid
   finally
     stop_marked_process $worker
+
+#[test]
+#[vfs]
+def describe_the_target_process_without_a_pid()
+  let target = proc.info()
+  assert_type $proc.Info $target
+  assert_eq $target.status nil
+
+  # `with_host` steps back to the local interpreter, which is how a script
+  # reaches its own process while a target is selected. Paths are canonicalized
+  # on both sides: what the kernel reports for a process and what the process
+  # was launched as need not be spelled the same way.
+  let host = shell.with_host do
+    let info = proc.info()
+    assert_eq (str(info.exe.canonical())) (str(shell.exe.canonical()))
+    info
+
+  let target_exe = shell.vfs_exe()
+  if (target_exe == nil)
+    # Nothing is connected, so the target *is* this interpreter.
+    assert_eq $host.pid $target.pid
+  else
+    # The agent serving the connection is another process entirely.
+    assert (host.pid != target.pid)
+    if !is_windows
+      # Reading the executable path of a process running as another user needs
+      # rights the Windows service does not hand back.
+      assert_eq (str(target.exe.canonical())) (str(target_exe.canonical()))
+
+  # The same record `info` produces for that PID explicitly.
+  let again = proc.info $target.pid
+  assert_eq $again.pid $target.pid
+  assert_eq $again.name $target.name
 
 #[test]
 #[vfs]
