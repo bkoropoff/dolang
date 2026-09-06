@@ -386,18 +386,29 @@ pub(crate) async fn open_value<'v, 's>(
 /// re-reading one by PID could not confirm it still describes the same process
 /// anyway — that is what a handle is for. Nothing is opened here, which is why
 /// this reaches processes `open` cannot.
+///
+/// Without a PID it describes the target itself: the interpreter under a direct
+/// target, the agent serving a remote one. Combined with `shell.with_host` that
+/// is also how a script reaches the local interpreter while a remote target is
+/// selected.
 pub(crate) async fn describe<'v, 's>(
     strand: &mut Strand<'v, 's>,
     global: State<'v, Global<'v>>,
-    pid: &Value<'v>,
+    pid: Option<&Value<'v>>,
     out: Slot<'v, '_>,
 ) -> Result<'v, 's, ()> {
-    let Some(pid) = pid.as_int(strand) else {
-        return Err(Error::type_error(strand, "info: expected an Int pid"));
-    };
-    let pid = u32::try_from(pid)
-        .map_err(|_| Error::value(strand, "info: pid must fit in an unsigned 32-bit integer"))?;
     let vfs = global.local.get(strand).vfs();
+    let pid = match pid {
+        Some(pid) => {
+            let Some(pid) = pid.as_int(strand) else {
+                return Err(Error::type_error(strand, "info: expected an Int pid"));
+            };
+            u32::try_from(pid).map_err(|_| {
+                Error::value(strand, "info: pid must fit in an unsigned 32-bit integer")
+            })?
+        }
+        None => vfs.pid(),
+    };
     let info = vfs.describe_process(pid).await.into_sys(strand)?;
     create_info(strand, global, info, out);
     Ok(())

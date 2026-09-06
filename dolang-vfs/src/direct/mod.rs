@@ -1595,6 +1595,10 @@ impl Direct {
         self.initial.session
     }
 
+    pub(crate) fn pid(&self) -> u32 {
+        self.initial.pid
+    }
+
     pub(crate) fn security(&self) -> &SecurityInfo {
         &self.initial.security
     }

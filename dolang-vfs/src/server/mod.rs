@@ -1251,6 +1251,7 @@ impl Connection {
         let vfs = &self.server.vfs;
         Ok(ResponseKind::Query(QueryResponse {
             session: vfs.session(),
+            pid: vfs.pid(),
             env: vfs.env().collect(),
             cwd: vfs.cwd().into(),
             current_exe: vfs.current_exe().into(),
