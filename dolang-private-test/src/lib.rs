@@ -1,11 +1,11 @@
 #![deny(warnings)]
 
-use std::{cell::RefCell, fs::File, io::Read, mem, ops::ControlFlow, path::Path};
+use std::{cell::RefCell, fs::File, io::Read, mem, path::Path};
 
 use annotate_snippets::{AnnotationKind, Group, Level, Patch, Renderer, Snippet};
 
 use dolang::{
-    compile::{self, Compiler, Diag, Mode},
+    compile::{self, Config, Diag, Mode},
     extension::{CompilerExt, VmExt},
     runtime::{
         Arg, Args, Bytecode, Error, Frame, Slot, Strand, Sym, call, unpack,
@@ -34,18 +34,16 @@ pub fn compile_standard(
     module: Option<&str>,
 ) -> (Vec<u8>, Option<Bytecode>, Vec<Diag>, Vec<Directive>) {
     let content = read_file(path);
-    let mut compiler = Compiler::new(path, &content);
-    apply_compiler_extensions(&mut compiler);
-    let directives = configure_compiler(&mut compiler, &content);
+    let mut config = Config::new();
+    apply_compiler_extensions(&mut config);
+    let directives = configure_compiler(&mut config, &content);
     if let Some(name) = module {
-        compiler.mode(Mode::Module { name });
+        config.mode(Mode::Module { name });
     }
     let mut out = Vec::new();
-    let mut diags = Vec::new();
-    let res = compiler.compile(&mut out, &mut |diag| {
-        diags.push(diag);
-        ControlFlow::<(), _>::Continue(())
-    });
+    let unit = config.unit(path, &content);
+    let diags: Vec<_> = unit.diagnostics().collect();
+    let res = unit.emit(&mut out);
     let bytecode = res.ok().map(|_| Bytecode::new(out));
     (content, bytecode, diags, directives)
 }
@@ -554,18 +552,18 @@ pub fn print_error_backtrace<'v, 's>(strand: &mut Strand<'v, 's>, error: &Error<
     }
 }
 
-pub fn apply_compiler_extensions(compiler: &mut Compiler) {
-    for ext in compiler.extensions() {
-        ext.apply(compiler).unwrap();
+pub fn apply_compiler_extensions(config: &mut Config) {
+    for ext in config.extensions() {
+        ext.apply(config).unwrap();
     }
 }
 
-pub fn configure_compiler(compiler: &mut Compiler, content: &[u8]) -> Vec<Directive> {
+pub fn configure_compiler(config: &mut Config, content: &[u8]) -> Vec<Directive> {
     // Parse directives from source
     let directives = parse_directives(content);
 
     // Set up standard regression prelude
-    compiler
+    config
         .prelude()
         .import_module("regression")
         .import_items("regression")

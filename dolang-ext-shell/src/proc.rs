@@ -1,5 +1,5 @@
 use dolang::{
-    compile::Compiler,
+    compile::Config,
     runtime::{
         Error, Instance, Object, Output, Result, Slot, State, Strand, Value,
         object::{TypeBuilder, fmt},
@@ -282,8 +282,8 @@ impl<'v> Object<'v> for WindowsArguments {
     }
 }
 
-pub(crate) fn configure_compiler<'a>(compiler: &mut Compiler<'a>) {
-    compiler
+pub(crate) fn configure_compiler<'a>(config: &mut Config<'a>) {
+    config
         .prelude()
         .import_items("proc")
         .items(["sub", "run"])

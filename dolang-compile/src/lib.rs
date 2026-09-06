@@ -16,6 +16,7 @@ pub mod source;
 pub(crate) mod sym;
 
 use std::{
+    convert::Infallible,
     error,
     fmt::{self, Display},
     io::{self, Write},
@@ -51,10 +52,9 @@ const STD_PRELUDE: &[&str] = &[
 ];
 
 #[derive(Debug)]
-enum ErrorInfo<B> {
+enum ErrorInfo {
     Fail,
     Io(io::Error),
-    Break(B),
 }
 
 /// Kind of compilation error.
@@ -65,21 +65,18 @@ pub enum ErrorKind {
     Fail,
     /// I/O error emitting bytecode.
     Io,
-    /// Diagnostic or token visitor stopped execution.
-    Break,
 }
 
 /// Compile error
 #[derive(Debug)]
-pub struct Error<B>(ErrorInfo<B>);
+pub struct Error(ErrorInfo);
 
-impl<B> Error<B> {
+impl Error {
     /// Get kind of error
     pub fn kind(&self) -> ErrorKind {
         match &self.0 {
             ErrorInfo::Fail => ErrorKind::Fail,
             ErrorInfo::Io(_) => ErrorKind::Io,
-            ErrorInfo::Break(_) => ErrorKind::Break,
         }
     }
 
@@ -90,78 +87,35 @@ impl<B> Error<B> {
             _ => None,
         }
     }
-
-    /// Get underlying `B`, if applicable
-    pub fn as_break(&self) -> Option<&B> {
-        match &self.0 {
-            ErrorInfo::Break(b) => Some(b),
-            _ => None,
-        }
-    }
 }
 
-impl<B> From<io::Error> for Error<B> {
+impl From<io::Error> for Error {
     fn from(value: io::Error) -> Self {
         Error(ErrorInfo::Io(value))
     }
 }
 
-impl<B: Display> Display for Error<B> {
+impl Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.0 {
             ErrorInfo::Fail => "compilation failed".fmt(f),
             ErrorInfo::Io(e) => e.fmt(f),
-            ErrorInfo::Break(b) => b.fmt(f),
         }
     }
 }
 
-impl<B: error::Error> error::Error for Error<B> {
+impl error::Error for Error {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match &self.0 {
             ErrorInfo::Fail => None,
             ErrorInfo::Io(error) => Some(error),
-            ErrorInfo::Break(b) => b.source(),
         }
     }
 }
 
-impl<B> From<parse::Error> for Error<B> {
-    fn from(_: parse::Error) -> Self {
-        Self(ErrorInfo::Fail)
-    }
-}
-
-impl<B> From<elab::Error> for Error<B> {
-    fn from(_: elab::Error) -> Self {
-        Self(ErrorInfo::Fail)
-    }
-}
-
-impl<B> From<lower::Error> for Error<B> {
+impl From<lower::Error> for Error {
     fn from(_: lower::Error) -> Self {
         Self(ErrorInfo::Fail)
-    }
-}
-
-/// Diagnostic emitter
-pub trait EmitDiag {
-    /// Information supplied when stopping compilation
-    type Break;
-
-    /// Emit diagnostic
-    fn emit(&mut self, diag: diag::Diag) -> ControlFlow<Self::Break>;
-}
-
-/// Callback function as diagnostic emitter
-impl<F, B> EmitDiag for F
-where
-    F: FnMut(diag::Diag) -> ControlFlow<B>,
-{
-    type Break = B;
-
-    fn emit(&mut self, diag: diag::Diag) -> ControlFlow<Self::Break> {
-        self(diag)
     }
 }
 
@@ -170,9 +124,6 @@ pub use diag::Origin;
 
 /// Token emitter
 pub trait EmitToken {
-    /// Information supplied when stopping analysis
-    type Break;
-
     /// Emit token
     fn emit(
         &mut self,
@@ -180,42 +131,40 @@ pub trait EmitToken {
         span: diag::Span,
         origin: Option<diag::Origin>,
         context: Context,
-    ) -> ControlFlow<Self::Break>;
+    );
 }
 
 /// Callback function as token emitter
-impl<F, B> EmitToken for F
+impl<F> EmitToken for F
 where
-    F: FnMut(Token, diag::Span, Option<diag::Origin>, Context) -> ControlFlow<B>,
+    F: FnMut(Token, diag::Span, Option<diag::Origin>, Context),
 {
-    type Break = B;
-
     fn emit(
         &mut self,
         token: Token,
         span: diag::Span,
         origin: Option<diag::Origin>,
         context: Context,
-    ) -> ControlFlow<Self::Break> {
+    ) {
         self(token, span, origin, context)
     }
 }
 
-struct VisitAdapter<'a, 'e, B> {
+struct VisitAdapter<'a, 'e> {
     file: &'a File<'a>,
     origintab: &'a origin::Table,
-    emit: &'e mut dyn EmitToken<Break = B>,
+    emit: &'e mut dyn EmitToken,
 }
 
-struct CallAdapter<'a, 'b, 'e, B> {
-    parent: &'b mut VisitAdapter<'a, 'e, B>,
+struct CallAdapter<'a, 'b, 'e> {
+    parent: &'b mut VisitAdapter<'a, 'e>,
     seen_arg0: bool,
 }
 
-struct CallIdentAdapter<'a, 'b, 'e, B>(&'b mut VisitAdapter<'a, 'e, B>);
+struct CallIdentAdapter<'a, 'b, 'e>(&'b mut VisitAdapter<'a, 'e>);
 
-impl<'a, 'b, 'e, B> visit::Visit for CallIdentAdapter<'a, 'b, 'e, B> {
-    type Break = B;
+impl visit::Visit for CallIdentAdapter<'_, '_, '_> {
+    type Break = Infallible;
 
     fn node<T: Node + ?Sized>(&mut self, node: &T) -> ControlFlow<Self::Break> {
         self.0.node(node)
@@ -232,10 +181,10 @@ impl<'a, 'b, 'e, B> visit::Visit for CallIdentAdapter<'a, 'b, 'e, B> {
     }
 }
 
-struct MethodAdapter<'a, 'b, 'e, B>(&'b mut VisitAdapter<'a, 'e, B>);
+struct MethodAdapter<'a, 'b, 'e>(&'b mut VisitAdapter<'a, 'e>);
 
-impl<'a, 'b, 'e, B> visit::Visit for MethodAdapter<'a, 'b, 'e, B> {
-    type Break = B;
+impl visit::Visit for MethodAdapter<'_, '_, '_> {
+    type Break = Infallible;
 
     fn node<T: Node + ?Sized>(&mut self, node: &T) -> ControlFlow<Self::Break> {
         self.0.node(node)
@@ -255,8 +204,8 @@ impl<'a, 'b, 'e, B> visit::Visit for MethodAdapter<'a, 'b, 'e, B> {
     }
 }
 
-impl<'a, 'b, 'e, B> visit::Visit for CallAdapter<'a, 'b, 'e, B> {
-    type Break = B;
+impl visit::Visit for CallAdapter<'_, '_, '_> {
+    type Break = Infallible;
 
     fn node<T: Node + ?Sized>(&mut self, node: &T) -> ControlFlow<Self::Break> {
         if self.seen_arg0 {
@@ -340,22 +289,23 @@ fn convert_origin(file: &File, internal: &origin::Origin) -> Option<diag::Origin
     }
 }
 
-impl<'a, 'e, B> VisitAdapter<'a, 'e, B> {
+impl VisitAdapter<'_, '_> {
     fn emit_token(
         &mut self,
         token: Token,
         span: source::Span,
         origin: Option<origin::Id>,
         context: Context,
-    ) -> ControlFlow<B> {
+    ) -> ControlFlow<Infallible> {
         let diag_span = convert_span(self.file, span);
         let diag_origin = origin.and_then(|id| convert_origin(self.file, &self.origintab[id]));
-        self.emit.emit(token, diag_span, diag_origin, context)
+        self.emit.emit(token, diag_span, diag_origin, context);
+        ControlFlow::Continue(())
     }
 }
 
-impl<'a, 'e, B> visit::Visit for VisitAdapter<'a, 'e, B> {
-    type Break = B;
+impl visit::Visit for VisitAdapter<'_, '_> {
+    type Break = Infallible;
 
     fn node<T: Node + ?Sized>(&mut self, node: &T) -> ControlFlow<Self::Break> {
         if matches!(node.kind(), NodeKind::Call) {
@@ -393,14 +343,14 @@ pub enum Mode<'a> {
     Repl,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct PreludeItem {
     item: String,
     bind: String,
     res: Option<Res>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum PreludeImport {
     Items {
         module: String,
@@ -421,7 +371,7 @@ pub(crate) enum PreludeImport {
 
 /// Prelude configurer
 pub struct Prelude<'a, 'b> {
-    compiler: &'b mut Compiler<'a>,
+    config: &'b mut Config<'a>,
 }
 
 impl<'a, 'b> Prelude<'a, 'b> {
@@ -435,7 +385,7 @@ impl<'a, 'b> Prelude<'a, 'b> {
 
     /// Clear the prelude, including any default imports
     pub fn clear(self) -> Self {
-        self.compiler.prelude.clear();
+        self.config.prelude.clear();
         self
     }
 
@@ -447,7 +397,7 @@ impl<'a, 'b> Prelude<'a, 'b> {
         let module = module.into();
         let bind = Self::module_name_first(&module).to_owned();
 
-        self.compiler.prelude.push(PreludeImport::ModuleAsIs {
+        self.config.prelude.push(PreludeImport::ModuleAsIs {
             module,
             bind,
             res: None,
@@ -465,7 +415,7 @@ impl<'a, 'b> Prelude<'a, 'b> {
         module: impl Into<String>,
         name: impl Into<String>,
     ) -> Self {
-        self.compiler.prelude.push(PreludeImport::ModuleRenamed {
+        self.config.prelude.push(PreludeImport::ModuleRenamed {
             module: module.into(),
             bind: name.into(),
             res: None,
@@ -475,12 +425,12 @@ impl<'a, 'b> Prelude<'a, 'b> {
 
     /// Import items from a module.  Returns a builder object to configure individual items.
     pub fn import_items(self, module: impl Into<String>) -> Items<'a, 'b> {
-        self.compiler.prelude.push(PreludeImport::Items {
+        self.config.prelude.push(PreludeImport::Items {
             module: module.into(),
             items: Vec::new(),
         });
         Items {
-            compiler: self.compiler,
+            config: self.config,
         }
     }
 }
@@ -488,7 +438,7 @@ impl<'a, 'b> Prelude<'a, 'b> {
 /// Item import builder.
 #[must_use]
 pub struct Items<'a, 'b> {
-    compiler: &'b mut Compiler<'a>,
+    config: &'b mut Config<'a>,
 }
 
 impl<'a, 'b> Items<'a, 'b> {
@@ -499,7 +449,7 @@ impl<'a, 'b> Items<'a, 'b> {
     /// ```
     pub fn item(self, item: impl Into<String>) -> Self {
         let item = item.into();
-        match self.compiler.prelude.last_mut().unwrap() {
+        match self.config.prelude.last_mut().unwrap() {
             PreludeImport::Items { items, .. } => items.push(PreludeItem {
                 item: item.clone(),
                 bind: item,
@@ -529,7 +479,7 @@ impl<'a, 'b> Items<'a, 'b> {
     ///   item: name
     /// ```
     pub fn item_with_name(self, item: impl Into<String>, name: impl Into<String>) -> Self {
-        match self.compiler.prelude.last_mut().unwrap() {
+        match self.config.prelude.last_mut().unwrap() {
             PreludeImport::Items { items, .. } => items.push(PreludeItem {
                 item: item.into(),
                 bind: name.into(),
@@ -545,41 +495,34 @@ impl<'a, 'b> Items<'a, 'b> {
     /// Calling this method may be necessary to ensure changes take effect.
     pub fn commit(self) -> Prelude<'a, 'b> {
         Prelude {
-            compiler: self.compiler,
+            config: self.config,
         }
     }
 }
 
-/// Compiles Do source to bytecode.
-pub struct Compiler<'a> {
-    file: File<'a>,
-    origintab: origin::Table,
-    symtab: sym::Table,
-    bintab: BinTable,
-    consttab: constant::Table,
-    packtab: sig::PackTable,
-    unpacktab: sig::UnpackTable,
+/// Compiler configuration.
+///
+/// A configuration carries no source, so it may be reused to build any number of
+/// [`Unit`]s.
+pub struct Config<'a> {
     mode: Mode<'a>,
     prelude: Vec<PreludeImport>,
+    recover: bool,
 }
 
-impl<'a> Compiler<'a> {
-    /// Create new compiler instance
-    ///
-    /// # Arguments
-    /// - `path`: The path of the source file; used in backtraces
-    /// - `content`: The source as a byte slice
-    pub fn new(path: &'a Path, content: &'a [u8]) -> Self {
+impl Default for Config<'_> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'a> Config<'a> {
+    /// Create a new configuration with the default prelude
+    pub fn new() -> Self {
         let mut this = Self {
-            file: File::new(path, content),
-            origintab: Default::default(),
-            symtab: sym::Table::new(),
-            bintab: BinTable::new(),
-            consttab: constant::Table::new(),
-            packtab: sig::PackTable::new(),
-            unpacktab: sig::UnpackTable::new(),
             mode: Mode::Script,
             prelude: Default::default(),
+            recover: false,
         };
         this.prelude()
             .import_module("std")
@@ -601,26 +544,126 @@ impl<'a> Compiler<'a> {
         self
     }
 
+    /// Recover from errors to the greatest extent possible, retaining a partial tree so
+    /// that diagnostics and tokens remain available for malformed source.
+    ///
+    /// A [`Unit`] which recovered from an error cannot be emitted; [`Unit::emit`] will
+    /// fail with [`ErrorKind::Fail`].
+    ///
+    /// Default: `false`
+    pub fn recover(&mut self, recover: bool) -> &mut Self {
+        self.recover = recover;
+        self
+    }
+
     /// Configure a prelude, a collection of standard imports which are injected into the code.
     ///
     /// Note that prelude imports which are not referenced by the code are omitted from compilation, even
     /// if importing them would have side effects.
     pub fn prelude(&mut self) -> Prelude<'a, '_> {
-        Prelude { compiler: self }
+        Prelude { config: self }
     }
 
-    fn feed_comments<B>(
-        &self,
-        tokens: &mut dyn EmitToken<Break = B>,
-        comments: impl IntoIterator<Item = source::Span>,
-    ) -> Result<(), Error<B>> {
-        for comment in comments.into_iter() {
-            let content = self.file.str(comment);
+    /// Parse and elaborate source into a [`Unit`].
+    ///
+    /// This operation is infallible: errors are recorded in the unit and surfaced through
+    /// [`Unit::diagnostics`] and [`Unit::emit`].
+    ///
+    /// # Arguments
+    /// - `path`: The path of the source file; used in backtraces
+    /// - `content`: The source as a byte slice
+    pub fn unit<'b>(&self, path: &'b Path, content: &'b [u8]) -> Unit<'b>
+    where
+        'a: 'b,
+    {
+        let mut compiler = Compiler {
+            file: File::new(path, content),
+            origintab: Default::default(),
+            symtab: sym::Table::new(),
+            bintab: BinTable::new(),
+            consttab: constant::Table::new(),
+            packtab: sig::PackTable::new(),
+            unpacktab: sig::UnpackTable::new(),
+            mode: self.mode.clone(),
+            prelude: self.prelude.clone(),
+        };
+        let mut prelude = mem::take(&mut compiler.prelude);
+        let diags = Diags::new();
+        let mut comments = vec![];
+
+        let (mut ast, mut failed) = {
+            let mut collect = |span| comments.push(span);
+            let mut parser = compiler.parser(&diags, Some(&mut collect as &mut dyn Comment));
+            let ast = parser.parse(self.recover);
+            let failed = parser.failed();
+            (ast, failed)
+        };
+        #[cfg(feature = "debug")]
+        if let Err(e) = compiler.export_ast_dot(&ast, false) {
+            debug_eprintln!("AST DOT export failed: {e}")
+        }
+
+        {
+            let mut elab = compiler.elaborater(&diags);
+            elab.elaborate(&mut ast, &mut prelude);
+            failed |= elab.failed();
+        }
+        #[cfg(feature = "debug")]
+        if let Err(e) = compiler.export_ast_dot(&ast, true) {
+            debug_eprintln!("Resolved AST DOT export failed: {e}")
+        }
+
+        compiler.prelude = prelude;
+        Unit {
+            compiler,
+            ast,
+            comments,
+            diags,
+            failed,
+        }
+    }
+}
+
+/// A parsed and elaborated compilation unit.
+///
+/// A unit retains the compiler state which produced it, so diagnostics are resolved
+/// lazily as they are iterated.
+pub struct Unit<'a> {
+    compiler: Compiler<'a>,
+    ast: ast::Root,
+    comments: Vec<source::Span>,
+    diags: Diags,
+    failed: bool,
+}
+
+impl Unit<'_> {
+    /// Iterate diagnostics generated while building the unit.
+    ///
+    /// Diagnostics are yielded in the order they were generated.
+    pub fn diagnostics(&self) -> impl Iterator<Item = diag::Diag> + '_ {
+        self.diags.iter().map(|diag| diag.resolve(&self.compiler))
+    }
+
+    /// Emit semantic tokens for the unit.
+    ///
+    /// The precise order of emitted tokens is not specified, but will be approximately in
+    /// textual order.
+    ///
+    /// # Arguments
+    /// - `tokens`: Where to send semantic tokens.
+    pub fn tokens(&self, tokens: &mut impl EmitToken) {
+        let ControlFlow::Continue(()) = self.ast.accept(&mut VisitAdapter {
+            file: &self.compiler.file,
+            origintab: &self.compiler.origintab,
+            emit: tokens,
+        });
+        for comment in self.comments.iter() {
+            let content = self.compiler.file.str(*comment);
             let slice = content.trim_end();
-            if let ControlFlow::Break(b) = tokens.emit(
+            tokens.emit(
                 Token::Comment,
                 convert_span(
-                    &self.file,
+                    &self.compiler.file,
                     source::Span {
                         start: comment.start,
                         end: comment.start + slice.len() as u32,
@@ -628,129 +671,53 @@ impl<'a> Compiler<'a> {
                 ),
                 None,
                 ast::Context::None,
-            ) {
-                return Err(Error(ErrorInfo::Break(b)));
-            }
-        }
-        Ok(())
-    }
-
-    fn run<D: EmitDiag>(
-        mut self,
-        diags: &mut D,
-        tokens: Option<&mut dyn EmitToken<Break = D::Break>>,
-        write: Option<&mut dyn Write>,
-        ignore_errors: bool,
-    ) -> Result<(), Error<D::Break>> {
-        let mut prelude = mem::take(&mut self.prelude);
-        let mut ds = Diags::new();
-        let mut comments = vec![];
-        let comment = if tokens.is_some() {
-            Some((&mut |span| comments.push(span)) as &mut dyn Comment)
-        } else {
-            None
-        };
-        let mut parser = self.parser(&ds, comment);
-        let ast = parser.parse(ignore_errors);
-        self.drain_diags(&mut ds, diags)?;
-        let mut ast = ast?;
-        #[cfg(feature = "debug")]
-        if let Err(e) = self.export_ast_dot(&ast, false) {
-            debug_eprintln!("AST DOT export failed: {e}")
-        }
-        let mut elab = self.elaborater(&ds);
-        let res = elab.elaborate(&mut ast, &mut prelude, ignore_errors);
-        #[cfg(feature = "debug")]
-        if let Err(e) = self.export_ast_dot(&ast, true) {
-            debug_eprintln!("Resolved AST DOT export failed: {e}")
-        }
-        self.drain_diags(&mut ds, diags)?;
-        res?;
-        self.prelude = prelude;
-        if let Some(tokens) = tokens {
-            if let ControlFlow::Break(e) = ast.accept(&mut VisitAdapter {
-                file: &self.file,
-                origintab: &self.origintab,
-                emit: tokens,
-            }) {
-                return Err(Error(ErrorInfo::Break(e)));
-            }
-            self.feed_comments(tokens, comments)?;
-        }
-        if let Some(write) = write {
-            let mut lowerer = self.lowerer();
-            let graph = lowerer.run(&ast)?;
-            #[cfg(feature = "debug")]
-            {
-                // Export DOT file if environment variable is set
-                if let Ok(output) = std::env::var("DOLANG_EXPORT_DOT")
-                    && let Err(e) = self.export_cfg_dot(&graph, output)
-                {
-                    debug_eprintln!("DOT export failed: {e}");
-                }
-            }
-            let mut emitter = self.emitter(&graph);
-            Ok(emitter.emit(write)?)
-        } else {
-            Ok(())
+            );
         }
     }
 
-    /// Analyze source code, generating diagnostics and semantic tokens.
-    /// Ignores errors to the greatest extent possible, other than a request
-    /// by either emitter to stop analysis.  The two emitters must share a common
-    /// `Break` type.
-    ///
-    /// The precise order of emitted tokens is not specified, but will be approximately in
-    /// textual order.  The precise interleaving of diagnostics and tokens is not specified.
-    ///
-    /// # Arguments
-    /// - `diags`: Where to send generated diagnostics.
-    /// - `tokens`: Where to send semantic tokens.
-    ///
-    /// # Errors
-    /// - [`ErrorKind::Fail`]: Compilation failed due to at least one fatal error.  This should
-    ///   nearly never occur unless the source code is too severely malformed to process.
-    /// - [`ErrorKind::Break`]: Compilation was stopped by the diagnostic emitter.
-    pub fn analyze<D: EmitDiag, T: EmitToken<Break = D::Break>>(
-        self,
-        diags: &mut D,
-        tokens: &mut T,
-    ) -> Result<(), Error<D::Break>> {
-        self.run(diags, Some(tokens), None, true)
-    }
-
-    /// Compile the source
+    /// Compile the unit, writing bytecode.
     ///
     /// # Arguments
     /// - `write`: Where to write bytecode.
-    /// - `diags`: Where to send generated diagnostics.
     ///
     /// # Errors
-    /// - [`ErrorKind::Fail`]: Compilation failed due to at least one fatal error.
-    /// - [`ErrorKind::Break`]: Compilation was stopped by the diagnostic emitter.
+    /// - [`ErrorKind::Fail`]: The unit contains at least one error; consult
+    ///   [`Unit::diagnostics`].
     /// - [`ErrorKind::Io`]: Writing bytecode failed with an [`io::Error`].
-    pub fn compile<E: EmitDiag>(
-        self,
-        write: &mut impl Write,
-        diags: &mut E,
-    ) -> Result<(), Error<E::Break>> {
-        self.run(diags, None, Some(write), false)
-    }
-
-    fn drain_diags<E: EmitDiag>(
-        &self,
-        diags: &mut Diags,
-        emit: &mut E,
-    ) -> Result<(), Error<E::Break>> {
-        for diag in diags.drain() {
-            if let ControlFlow::Break(b) = emit.emit(diag.resolve(self)) {
-                return Err(Error(ErrorInfo::Break(b)));
+    pub fn emit(mut self, write: &mut impl Write) -> Result<(), Error> {
+        if self.failed {
+            return Err(Error(ErrorInfo::Fail));
+        }
+        let mut lowerer = self.compiler.lowerer();
+        let graph = lowerer.run(&self.ast)?;
+        #[cfg(feature = "debug")]
+        {
+            // Export DOT file if environment variable is set
+            if let Ok(output) = std::env::var("DOLANG_EXPORT_DOT")
+                && let Err(e) = self.compiler.export_cfg_dot(&graph, output)
+            {
+                debug_eprintln!("DOT export failed: {e}");
             }
         }
-        Ok(())
+        let mut emitter = self.compiler.emitter(&graph);
+        Ok(emitter.emit(write)?)
     }
+}
 
+/// Compiler state backing a [`Unit`].
+pub(crate) struct Compiler<'a> {
+    file: File<'a>,
+    origintab: origin::Table,
+    symtab: sym::Table,
+    bintab: BinTable,
+    consttab: constant::Table,
+    packtab: sig::PackTable,
+    unpacktab: sig::UnpackTable,
+    mode: Mode<'a>,
+    prelude: Vec<PreludeImport>,
+}
+
+impl Compiler<'_> {
     fn parser<'b>(
         &'b mut self,
         diags: &'b Diags,
@@ -785,10 +752,7 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn emitter<'b>(&'a self, graph: &'b cfg::Graph) -> Emitter<'b>
-    where
-        'a: 'b,
-    {
+    fn emitter<'b>(&'b self, graph: &'b cfg::Graph) -> Emitter<'b> {
         Emitter {
             file: &self.file,
             graph,
@@ -879,5 +843,69 @@ impl Compiler<'_> {
         let out = Path::new(&output).join(&name).with_extension("cfg.dot");
         let mut file = fs::File::create(&out)?;
         graph.dot(self, &mut file)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config<'a>() -> Config<'a> {
+        let mut config = Config::new();
+        // The default prelude imports modules which are not available here
+        config.prelude().clear();
+        config
+    }
+
+    #[test]
+    fn valid_source_emits_bytecode() {
+        let unit = config().unit(Path::new("<test>"), b"let x = 1\nx\n");
+        assert!(
+            !unit
+                .diagnostics()
+                .any(|d| d.severity() == diag::Severity::Error)
+        );
+        let mut tokens = 0;
+        unit.tokens(&mut |_, _, _, _| tokens += 1);
+        assert!(tokens != 0);
+        let mut out = Vec::new();
+        unit.emit(&mut out).unwrap();
+        assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn recovered_unit_reports_diagnostics_and_refuses_to_emit() {
+        let source = b"let x = 1\nlet = 2\n";
+        let unit = config().recover(true).unit(Path::new("<test>"), source);
+
+        let diags: Vec<_> = unit.diagnostics().collect();
+        assert!(diags.iter().any(|d| d.severity() == diag::Severity::Error));
+
+        // Tokens remain available despite the error
+        let mut tokens = 0;
+        unit.tokens(&mut |_, _, _, _| tokens += 1);
+        assert!(tokens != 0);
+
+        let mut out = Vec::new();
+        assert!(matches!(
+            unit.emit(&mut out).unwrap_err().kind(),
+            ErrorKind::Fail
+        ));
+    }
+
+    #[test]
+    fn unrecovered_unit_reports_diagnostics() {
+        let source = b"let x = 1\nlet = 2\n";
+        let unit = config().unit(Path::new("<test>"), source);
+
+        assert!(
+            unit.diagnostics()
+                .any(|d| d.severity() == diag::Severity::Error)
+        );
+        let mut out = Vec::new();
+        assert!(matches!(
+            unit.emit(&mut out).unwrap_err().kind(),
+            ErrorKind::Fail
+        ));
     }
 }

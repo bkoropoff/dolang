@@ -1,7 +1,7 @@
 use std::error;
 
 use dolang::{
-    compile::Compiler,
+    compile::Config,
     extension::{Extension, Version},
     runtime::vm::Builder,
 };
@@ -14,7 +14,7 @@ impl Extension for ExampleExtension {
     const DESCRIPTION: &str = "Example extension linked from a custom shell binary";
     const VERSION: Version = dolang::package_version!();
 
-    fn apply_compiler(&self, _compiler: &mut Compiler) -> Result<(), Self::Error> {
+    fn apply_compiler(&self, _config: &mut Config) -> Result<(), Self::Error> {
         Ok(())
     }
 

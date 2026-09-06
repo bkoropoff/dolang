@@ -10,7 +10,7 @@ use dolang::runtime::object::fmt;
 
 use dolang::runtime::strand::InterruptMask;
 use dolang::{
-    compile::Compiler,
+    compile::Config,
     runtime::{
         Error, Instance, Object, Output, Result, Slot, State, Strand, Type, call, error::ResultExt,
         object::TypeBuilder, unpack, value::Root, vm::Builder,
@@ -1057,7 +1057,7 @@ impl<'v> Object<'v> for Duration {
     }
 }
 
-pub(crate) fn configure_compiler<'a>(_compiler: &mut Compiler<'a>) {}
+pub(crate) fn configure_compiler<'a>(_config: &mut Config<'a>) {}
 
 pub(crate) fn configure_vm<'v>(builder: &mut Builder<'v>, global: State<'v, Global<'v>>) {
     builder

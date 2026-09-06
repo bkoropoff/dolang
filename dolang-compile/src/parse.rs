@@ -14,7 +14,7 @@ use crate::{
         FieldName, FmtParamName, For, FormatAlign, FormatKind, FormatSign, FormatSpec, FormatValue,
         Function, GetVariant, GroupDelim, Ident, If, IfBranch, Import, ImportElement, ImportItem,
         Key, Let, MemberScope, Method, Pair, Param, ParamDefault, Pattern, PatternBind,
-        PatternBindKind, PrimStmt, Return, Single, SpecialMethod, Stmt, Throw, Try, Unit, While,
+        PatternBindKind, PrimStmt, Return, Root, Single, SpecialMethod, Stmt, Throw, Try, While,
         visit::Node,
     },
     diag::{AnnotationKind, NoteKind, Severity},
@@ -5034,28 +5034,36 @@ impl<'a> Parser<'a> {
         })
     }
 
-    pub(crate) fn parse(&mut self, ignore_error: bool) -> Result<Unit> {
+    /// Parse the source into a root AST node.
+    ///
+    /// Always yields a tree: if parsing fails outright, or if errors were recorded and
+    /// `recover` is not set, the tree is an empty block.  Consult [`Parser::failed`] to
+    /// determine whether errors occurred.
+    pub(crate) fn parse(&mut self, recover: bool) -> Root {
         let mut scope = Scope::new();
 
-        let body = match self.parse_block(&mut scope).and_then(|ast| {
-            if self.fail && !ignore_error {
-                Err(Error)
-            } else {
-                Ok(ast)
+        let body = match self.parse_block(&mut scope) {
+            Ok(body) if recover || !self.fail => body,
+            res => {
+                if res.is_err() {
+                    self.fail = true;
+                }
+                Block {
+                    stmts: vec![],
+                    vars: vec![],
+                    repl: None,
+                }
             }
-        }) {
-            Ok(body) => Ok(body),
-            Err(_) if ignore_error => Ok(Block {
-                stmts: vec![],
-                vars: vec![],
-                repl: None,
-            }),
-            Err(e) => Err(e),
-        }?;
+        };
 
-        Ok(Unit(Function {
+        Root(Function {
             params: vec![],
             body,
-        }))
+        })
+    }
+
+    /// Whether any error was recorded during parsing
+    pub(crate) fn failed(&self) -> bool {
+        self.fail
     }
 }

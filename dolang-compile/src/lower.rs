@@ -11,7 +11,7 @@ use crate::{
         DictElem, Expand, Expr, ExprBody, FieldInit, FmtParamName, For, FormatAlign, FormatKind,
         FormatSign, FormatSpec, Function, GetVariant, Ident, If, Import, ImportElement, ImportItem,
         Key, LValue, Let, MemberScope, Method, NlGuard, Pair, Param, ParamDefault, Pattern,
-        PatternBind, PrimStmt, Res, Return, Single, Stmt, Try, Unit, While, visit::Node,
+        PatternBind, PrimStmt, Res, Return, Root, Single, Stmt, Try, While, visit::Node,
     },
     cfg::{self, BlockRefMut, Inst, InstInfo, Term, TermInfo},
     constant::{self, ConstantExt},
@@ -3220,7 +3220,7 @@ impl<'c> Lowerer<'c> {
         }
     }
 
-    pub(crate) fn run(&mut self, root: &Unit) -> Result<cfg::Graph> {
+    pub(crate) fn run(&mut self, root: &Root) -> Result<cfg::Graph> {
         let mut graph = cfg::Graph::new();
         let empty = sig::Unpack::new(0, [], [], dolang_bytecode::Variadic::None);
         let sig = self.unpacktab.id(&empty);

@@ -6,7 +6,7 @@
 use std::mem;
 
 use dolang::{
-    compile::Compiler,
+    compile::Config,
     runtime::{
         Error, Instance, Object, Output, Result, Slot, Strand,
         error::ResultExt,
@@ -70,7 +70,7 @@ impl<'v> Object<'v> for Iter<'v> {
     }
 }
 
-pub(crate) fn configure_compiler<'a>(_compiler: &mut Compiler<'a>) {
+pub(crate) fn configure_compiler<'a>(_config: &mut Config<'a>) {
     // Not added to prelude
 }
 

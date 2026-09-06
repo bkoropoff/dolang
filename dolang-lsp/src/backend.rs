@@ -2,7 +2,6 @@ use std::{
     borrow::Cow,
     collections::{HashMap, hash_map::Entry},
     fs, mem,
-    ops::ControlFlow,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
@@ -13,7 +12,7 @@ use tower_lsp_server::{
     Client, ClientSocket, LanguageServer, LspService, jsonrpc::Result, ls_types::*,
 };
 
-use dolang_compile::{Compiler, Context, Origin, Token, diag};
+use dolang_compile::{Config as CompileConfig, Context, Origin, Token, diag};
 
 const TOKEN_MODIFIERS: &[SemanticTokenModifier] = &[SemanticTokenModifier::DEFAULT_LIBRARY];
 const CONFIG_FILE_NAME: &str = ".dolang-lsp.toml";
@@ -428,9 +427,10 @@ impl Backend {
 
             let content = guard.content.as_str();
             let index = DocumentIndex::new(content, self.position_encoding());
-            let mut compiler = Compiler::new(&path, content.as_bytes());
+            let mut config = CompileConfig::new();
+            config.recover(true);
             if let Some(settings) = settings {
-                let mut prelude = compiler.prelude();
+                let mut prelude = config.prelude();
                 for import in settings.prelude.iter() {
                     match import {
                         Import::Module(module) => {
@@ -450,96 +450,84 @@ impl Backend {
                     }
                 }
             }
-            compiler
-                .analyze(
-                    &mut |diag: diag::Diag| -> ControlFlow<()> {
-                        let mut out = Diagnostic::new_simple(
-                            index.range_from_span(&diag.span()),
-                            diag.message().to_string(),
-                        );
-                        out.severity = Some(match diag.severity() {
-                            diag::Severity::Error => DiagnosticSeverity::ERROR,
-                            diag::Severity::Warning => DiagnosticSeverity::WARNING,
-                            _ => DiagnosticSeverity::INFORMATION,
-                        });
-                        let mut related = Vec::new();
-                        for ann in diag.annotations() {
-                            related.push(DiagnosticRelatedInformation {
-                                location: Location::new(
-                                    uri.clone(),
-                                    index.range_from_span(&ann.span()),
-                                ),
-                                message: ann.message().to_string(),
-                            });
-                        }
-                        out.related_information = Some(related);
-                        diags.push(out);
-                        for note in diag.notes() {
-                            let mut out = Diagnostic::new_simple(
-                                index.range_from_span(&diag.span()),
-                                note.message().to_string(),
-                            );
-                            out.severity = Some(match note.kind() {
-                                diag::NoteKind::Help => DiagnosticSeverity::HINT,
-                                _ => DiagnosticSeverity::INFORMATION,
-                            });
-                            diags.push(out);
-                        }
+            let unit = config.unit(&path, content.as_bytes());
+            for diag in unit.diagnostics() {
+                let mut out = Diagnostic::new_simple(
+                    index.range_from_span(&diag.span()),
+                    diag.message().to_string(),
+                );
+                out.severity = Some(match diag.severity() {
+                    diag::Severity::Error => DiagnosticSeverity::ERROR,
+                    diag::Severity::Warning => DiagnosticSeverity::WARNING,
+                    _ => DiagnosticSeverity::INFORMATION,
+                });
+                let mut related = Vec::new();
+                for ann in diag.annotations() {
+                    related.push(DiagnosticRelatedInformation {
+                        location: Location::new(uri.clone(), index.range_from_span(&ann.span())),
+                        message: ann.message().to_string(),
+                    });
+                }
+                out.related_information = Some(related);
+                diags.push(out);
+                for note in diag.notes() {
+                    let mut out = Diagnostic::new_simple(
+                        index.range_from_span(&diag.span()),
+                        note.message().to_string(),
+                    );
+                    out.severity = Some(match note.kind() {
+                        diag::NoteKind::Help => DiagnosticSeverity::HINT,
+                        _ => DiagnosticSeverity::INFORMATION,
+                    });
+                    diags.push(out);
+                }
 
-                        let diagnostic_range = index.range_from_span(&diag.span());
-                        let diagnostic_message = diag.message().to_string();
-                        let diagnostic_severity = match diag.severity() {
-                            diag::Severity::Error => DiagnosticSeverity::ERROR,
-                            diag::Severity::Warning => DiagnosticSeverity::WARNING,
-                            _ => DiagnosticSeverity::INFORMATION,
-                        };
+                let diagnostic_range = index.range_from_span(&diag.span());
+                let diagnostic_message = diag.message().to_string();
+                let diagnostic_severity = match diag.severity() {
+                    diag::Severity::Error => DiagnosticSeverity::ERROR,
+                    diag::Severity::Warning => DiagnosticSeverity::WARNING,
+                    _ => DiagnosticSeverity::INFORMATION,
+                };
 
-                        for patch in diag.patches() {
-                            patches.push(Patch {
-                                diagnostic_range,
-                                diagnostic_severity,
-                                diagnostic_message: diagnostic_message.clone(),
-                                patch_range: index.range_from_span(&patch.span()),
-                                replacement: patch.sub().to_string(),
-                                title: patch.message().to_string(),
-                            });
-                        }
-
-                        ControlFlow::Continue(())
-                    },
-                    &mut |leaf, span: diag::Span, origin: Option<Origin>, context: Context| {
-                        if span.start().byte_offset() != span.end().byte_offset()
-                            && !matches!(leaf, Token::Delim)
-                        {
-                            let (token_type, modifiers) =
-                                classify_token(leaf, origin.as_ref(), context);
-                            if let Some(origin) = origin
-                                && let Some(def) = match origin {
-                                    Origin::ImportItem { name, .. } => Some(name),
-                                    Origin::ImportModule { name, .. } => Some(name),
-                                    Origin::PreludeModule { .. } => None,
-                                    Origin::PreludeItem { .. } => None,
-                                    Origin::Class { span } => Some(span),
-                                    Origin::Def { span }
-                                    | Origin::Bind { span }
-                                    | Origin::Method { span, .. }
-                                    | Origin::Field { span, .. } => Some(span),
-                                    Origin::Param { span } | Origin::SelfParam { span } => {
-                                        Some(span)
-                                    }
-                                }
-                            {
-                                defs.push((
-                                    index.range_from_span(&span),
-                                    index.range_from_span(&def),
-                                ))
+                for patch in diag.patches() {
+                    patches.push(Patch {
+                        diagnostic_range,
+                        diagnostic_severity,
+                        diagnostic_message: diagnostic_message.clone(),
+                        patch_range: index.range_from_span(&patch.span()),
+                        replacement: patch.sub().to_string(),
+                        title: patch.message().to_string(),
+                    });
+                }
+            }
+            unit.tokens(
+                &mut |leaf, span: diag::Span, origin: Option<Origin>, context: Context| {
+                    if span.start().byte_offset() != span.end().byte_offset()
+                        && !matches!(leaf, Token::Delim)
+                    {
+                        let (token_type, modifiers) =
+                            classify_token(leaf, origin.as_ref(), context);
+                        if let Some(origin) = origin
+                            && let Some(def) = match origin {
+                                Origin::ImportItem { name, .. } => Some(name),
+                                Origin::ImportModule { name, .. } => Some(name),
+                                Origin::PreludeModule { .. } => None,
+                                Origin::PreludeItem { .. } => None,
+                                Origin::Class { span } => Some(span),
+                                Origin::Def { span }
+                                | Origin::Bind { span }
+                                | Origin::Method { span, .. }
+                                | Origin::Field { span, .. } => Some(span),
+                                Origin::Param { span } | Origin::SelfParam { span } => Some(span),
                             }
-                            tokens.push((token_type, modifiers, span));
+                        {
+                            defs.push((index.range_from_span(&span), index.range_from_span(&def)))
                         }
-                        ControlFlow::Continue(())
-                    },
-                )
-                .unwrap();
+                        tokens.push((token_type, modifiers, span));
+                    }
+                },
+            );
 
             let mut pre_line = 0;
             let mut pre_start = 0;

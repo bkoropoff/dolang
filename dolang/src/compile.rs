@@ -1,4 +1,4 @@
 pub use dolang_compile::{
-    Compiler, Context, EmitDiag, EmitToken, Error, ErrorKind, Items, Mode, Origin, Prelude, Token,
+    Config, Context, EmitToken, Error, ErrorKind, Items, Mode, Origin, Prelude, Token, Unit,
     diag::{Annotation, AnnotationKind, Diag, Note, NoteKind, Patch, Pos, Severity, Span},
 };

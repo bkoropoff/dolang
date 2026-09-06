@@ -2,10 +2,10 @@
 
 extern crate dolang_ext_shell;
 
-use std::{fs, io::Write, ops::ControlFlow, path::Path, path::PathBuf};
+use std::{fs, io::Write, path::Path, path::PathBuf};
 
 use dolang::{
-    compile::{Compiler, Mode, Severity},
+    compile::{Config, Mode, Severity},
     extension::CompilerExt,
 };
 
@@ -93,35 +93,32 @@ pub fn bundle(spec: &Bundle<'_>) {
         let relative = path.strip_prefix(spec.source_root).unwrap();
         let compiler_path = Path::new(spec.virtual_root).join(relative);
 
-        let mut compiler = Compiler::new(&compiler_path, source.as_bytes());
+        let mut config = Config::new();
         match spec.compile_mode {
-            CompileMode::Module => compiler.mode(Mode::Module { name: &name }),
-            CompileMode::Script => compiler.mode(Mode::Script),
+            CompileMode::Module => config.mode(Mode::Module { name: &name }),
+            CompileMode::Script => config.mode(Mode::Script),
         };
-        for ext in compiler.extensions() {
-            ext.apply(&mut compiler).unwrap();
+        for ext in config.extensions() {
+            ext.apply(&mut config).unwrap();
         }
 
         let mut bytecode = Vec::new();
         let mut had_error = false;
         let mut had_warning = false;
         let compiler_path_str = compiler_path.display().to_string();
-        compiler
-            .compile(
-                &mut bytecode,
-                &mut |diag: dolang::compile::Diag| -> ControlFlow<()> {
-                    match diag.severity() {
-                        Severity::Error => had_error = true,
-                        Severity::Warning => had_warning = true,
-                        _ => {}
-                    }
-                    eprintln!(
-                        "{}",
-                        render::render_diag(&compiler_path_str, &source, &diag)
-                    );
-                    ControlFlow::Continue(())
-                },
-            )
+        let unit = config.unit(&compiler_path, source.as_bytes());
+        for diag in unit.diagnostics() {
+            match diag.severity() {
+                Severity::Error => had_error = true,
+                Severity::Warning => had_warning = true,
+                _ => {}
+            }
+            eprintln!(
+                "{}",
+                render::render_diag(&compiler_path_str, &source, &diag)
+            );
+        }
+        unit.emit(&mut bytecode)
             .unwrap_or_else(|_| panic!("failed to compile {}", compiler_path.display()));
 
         if had_error {

@@ -5,7 +5,7 @@ use std::{
 
 use dolang::runtime::value::fmt::Format;
 use dolang::{
-    compile::Compiler,
+    compile::Config,
     runtime::{
         Arg, Args, Error, Instance, Object, Output, Result, Slot, State, Strand, Sym, Type, Value,
         object::{
@@ -47,7 +47,7 @@ use dolang_winterop::{
 
 use crate::{error, global::Global, util};
 
-pub(crate) fn configure_compiler<'a>(_compiler: &mut Compiler<'a>) {}
+pub(crate) fn configure_compiler<'a>(_config: &mut Config<'a>) {}
 
 macro_rules! flags_ops {
     ($name:ident) => {

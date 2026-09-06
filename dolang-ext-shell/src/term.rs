@@ -1,7 +1,7 @@
 use dolang::runtime::object::fmt;
 use dolang::runtime::value::fmt::{self as fmt_spec, Fill, Format, Kind, Pad, Spec};
 use dolang::{
-    compile::Compiler,
+    compile::Config,
     runtime::{
         Arg, Args, Error, Instance, Object, Output, Result, Slot, State, Strand, Sym, Value,
         method,
@@ -1494,8 +1494,8 @@ pub(crate) fn style_keys<'v>(builder: &mut Builder<'v>) -> StyleKeys<'v> {
     }
 }
 
-pub(crate) fn configure_compiler(compiler: &mut Compiler<'_>) {
-    compiler
+pub(crate) fn configure_compiler(config: &mut Config<'_>) {
+    config
         .prelude()
         .import_module("term")
         .import_items("term")

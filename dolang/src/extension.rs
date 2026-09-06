@@ -33,7 +33,7 @@ pub mod __private {
 
 use linkme::distributed_slice;
 
-use crate::{compile::Compiler, runtime::vm::Builder};
+use crate::{compile::Config, runtime::vm::Builder};
 
 /// Version specifier.
 ///
@@ -90,7 +90,7 @@ pub trait Extension: Send + Sync + 'static {
     const DEPENDS: &'static [&'static str] = &[];
 
     /// Apply extension to compiler, such as by registering prelude imports.
-    fn apply_compiler<'a>(&self, compiler: &mut Compiler<'a>) -> Result<(), Self::Error>;
+    fn apply_compiler<'a>(&self, config: &mut Config<'a>) -> Result<(), Self::Error>;
     /// Apply extension to VM, such as by registering native modules
     fn apply_vm<'v>(&self, builder: &mut Builder<'v>) -> Result<(), Self::Error>;
 }
@@ -102,7 +102,7 @@ pub struct Vtbl {
     version: Version,
     depends: &'static [&'static str],
 
-    apply_compiler: unsafe fn(this: NonNull<()>, compiler: &mut Compiler) -> Result<(), Error>,
+    apply_compiler: unsafe fn(this: NonNull<()>, config: &mut Config) -> Result<(), Error>,
     apply_vm: for<'v> unsafe fn(this: NonNull<()>, builder: &mut Builder<'v>) -> Result<(), Error>,
 }
 
@@ -124,10 +124,10 @@ impl Vtbl {
                 description: T::DESCRIPTION,
                 version: T::VERSION,
                 depends: T::DEPENDS,
-                apply_compiler: |this, compiler| unsafe {
+                apply_compiler: |this, config| unsafe {
                     this.cast::<T>()
                         .as_ref()
-                        .apply_compiler(compiler)
+                        .apply_compiler(config)
                         .map_err(|e| e.into())
                 },
                 apply_vm: |this, builder| unsafe {
@@ -162,7 +162,7 @@ impl Extension for Anchor {
         patch: 0,
     };
 
-    fn apply_compiler(&self, _compiler: &mut Compiler<'_>) -> Result<(), Self::Error> {
+    fn apply_compiler(&self, _config: &mut Config<'_>) -> Result<(), Self::Error> {
         Ok(())
     }
 
@@ -292,8 +292,8 @@ impl CompilerExtension {
     }
 
     /// Apply extension to compiler, such as by registering prelude imports.
-    pub fn apply(&self, compiler: &mut Compiler) -> Result<(), Error> {
-        unsafe { (self.vtbl.apply_compiler)(self.ext, compiler) }
+    pub fn apply(&self, config: &mut Config) -> Result<(), Error> {
+        unsafe { (self.vtbl.apply_compiler)(self.ext, config) }
     }
 }
 
@@ -305,7 +305,7 @@ pub trait CompilerExt {
     fn extensions(&mut self) -> impl Iterator<Item = CompilerExtension> + 'static;
 }
 
-impl<'a> CompilerExt for Compiler<'a> {
+impl<'a> CompilerExt for Config<'a> {
     fn extensions(&mut self) -> impl Iterator<Item = CompilerExtension> + 'static {
         extensions().map(|Erased { vtbl, ext }| CompilerExtension { vtbl, ext: *ext })
     }

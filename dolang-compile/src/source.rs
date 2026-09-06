@@ -310,7 +310,7 @@ impl Diags {
         self.vec.push(Diag::new(info))
     }
 
-    pub(crate) fn drain(&mut self) -> impl Iterator<Item = Diag> {
-        self.vec.drain()
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &Diag> {
+        self.vec.iter()
     }
 }

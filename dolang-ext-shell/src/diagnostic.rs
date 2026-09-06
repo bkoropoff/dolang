@@ -2,13 +2,13 @@ use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
     fs,
-    ops::{ControlFlow, Range},
+    ops::Range,
     path::Path,
 };
 
 use anstyle::{AnsiColor, Style};
 use dolang::{
-    compile::{Compiler, Diag},
+    compile::{Config, Diag},
     runtime::{Error, Frame, Result, Strand, Value},
 };
 
@@ -34,13 +34,12 @@ impl SourceFile {
     fn open(path: &Path) -> Option<Self> {
         let source = fs::read_to_string(path).ok()?;
         let mut tokens = Vec::new();
-        let _ = Compiler::new(path, source.as_bytes()).analyze(
-            &mut |_: Diag| ControlFlow::<()>::Continue(()),
-            &mut |token, span, origin, context| {
+        Config::new()
+            .recover(true)
+            .unit(path, source.as_bytes())
+            .tokens(&mut |token, span, origin, context| {
                 tokens.push((token, span, origin, context));
-                ControlFlow::<()>::Continue(())
-            },
-        );
+            });
         Some(Self { source, tokens })
     }
 

@@ -4,7 +4,7 @@ use std::{
 };
 
 use dolang::{
-    compile::Compiler,
+    compile::Config,
     extension,
     extension::{Extension, Version},
     runtime::vm::Builder,
@@ -30,7 +30,7 @@ impl Extension for TomlExt {
     const VERSION: Version = dolang::package_version!();
     const DESCRIPTION: &str = "Do TOML Extension";
 
-    fn apply_compiler(&self, _compiler: &mut Compiler) -> Result<(), Infallible> {
+    fn apply_compiler(&self, _config: &mut Config) -> Result<(), Infallible> {
         Ok(())
     }
 

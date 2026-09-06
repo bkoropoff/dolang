@@ -4,7 +4,7 @@ use std::{
 };
 
 use dolang::{
-    compile::Compiler,
+    compile::Config,
     extension,
     extension::{Extension, Version},
     runtime::vm::Builder,
@@ -33,7 +33,7 @@ impl Extension for WinscmExt {
     const DESCRIPTION: &str = "Do Windows Service Control Manager Extension";
     const DEPENDS: &'static [&'static str] = &[<dolang_ext_shell::Shell as Extension>::NAME];
 
-    fn apply_compiler(&self, _compiler: &mut Compiler) -> Result<(), Infallible> {
+    fn apply_compiler(&self, _config: &mut Config) -> Result<(), Infallible> {
         Ok(())
     }
 

@@ -11,7 +11,7 @@ use tokio::io::AsyncWriteExt;
 use dolang::runtime::object::fmt;
 
 use dolang::{
-    compile::Compiler,
+    compile::Config,
     runtime::{
         Arg, Error, Instance, Object, Output, Result, Slot, State, Strand, Value, call, method,
         object::{Mut, Ref, TypeBuilder},
@@ -735,8 +735,8 @@ fn bytes_from_value<'v, 's>(
     }
 }
 
-pub(crate) fn configure_compiler<'a>(compiler: &mut Compiler<'a>) {
-    compiler
+pub(crate) fn configure_compiler<'a>(config: &mut Config<'a>) {
+    config
         .prelude()
         .import_module("shell")
         .import_items("shell")
