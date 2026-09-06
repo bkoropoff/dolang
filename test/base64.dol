@@ -34,10 +34,76 @@ def encode_type_error()
 def decode_type_error()
   let err = assert_throws $TypeError do
     decode 123
-  assert_eq (str err) "type error: expected Str"
+  assert_eq (str err) "type error: expected Str or Bin"
 
 #[test]
 def decode_invalid()
   let err = assert_throws $ValueError do
     decode "%%%not base64%%%"
   assert $ (str err).contains "Invalid"
+
+#[test]
+def encode_url_alphabet()
+  # 0xfb 0xff encodes to "+/8=" in the standard alphabet
+  assert_eq (encode b"\xfb\xff") "+/8="
+  assert_eq (encode b"\xfb\xff" alphabet: :URL:) "-_8"
+  assert_eq (encode b"\xfb\xff" alphabet: :STANDARD:) "+/8="
+
+#[test]
+def encode_pad()
+  assert_eq (encode "hello" pad: false) "aGVsbG8"
+  assert_eq (encode "hello" pad: true) "aGVsbG8="
+  assert_eq (encode b"\xfb\xff" alphabet: :URL: pad: true) "-_8="
+  assert_eq (encode b"\xfb\xff" alphabet: :STANDARD: pad: false) "+/8"
+
+#[test]
+def decode_auto_alphabet()
+  assert_eq (decode "-_8") b"\xfb\xff"
+  assert_eq (decode "-_8=") b"\xfb\xff"
+  assert_eq (decode "+/8=") b"\xfb\xff"
+  assert_eq (decode "+/8") b"\xfb\xff"
+  # No alphabet-specific characters: identical under both
+  assert_eq (decode "aGVsbG8=") b"hello"
+
+#[test]
+def decode_strict_alphabet()
+  assert_eq (decode "-_8" alphabet: :URL:) b"\xfb\xff"
+  assert_eq (decode "+/8" alphabet: :STANDARD:) b"\xfb\xff"
+  assert_throws $ValueError do
+    decode "-_8" alphabet: :STANDARD:
+  assert_throws $ValueError do
+    decode "+/8" alphabet: :URL:
+
+#[test]
+def decode_ambiguous_alphabet()
+  let err = assert_throws $ValueError do
+    decode "-/8"
+  assert $ (str err).contains "mixes standard and URL-safe"
+
+#[test]
+def decode_strict_pad()
+  assert_eq (decode "aGVsbG8=" pad: true) b"hello"
+  assert_eq (decode "aGVsbG8" pad: false) b"hello"
+  assert_throws $ValueError do
+    decode "aGVsbG8" pad: true
+  assert_throws $ValueError do
+    decode "aGVsbG8=" pad: false
+
+#[test]
+def decode_bin_input()
+  assert_eq (decode b"aGVsbG8=") b"hello"
+
+#[test]
+def option_errors()
+  let err = assert_throws $ValueError do
+    encode "hello" alphabet: :AUTO:
+  assert_eq (str err) "value error: alphabet: expected :STANDARD: or :URL:"
+  let err = assert_throws $ValueError do
+    decode "aGVsbG8=" alphabet: :NOPE:
+  assert_eq (str err) "value error: alphabet: expected :STANDARD:, :URL:, or :AUTO:"
+  let err = assert_throws $TypeError do
+    encode "hello" alphabet: "STANDARD"
+  assert_eq (str err) "type error: alphabet: expected Sym"
+  let err = assert_throws $TypeError do
+    encode "hello" pad: 1
+  assert_eq (str err) "type error: pad: expected Bool"
