@@ -16,17 +16,23 @@ use windows_sys::Win32::{
     },
     NetworkManagement::NetManagement::{
         FILTER_NORMAL_ACCOUNT, LOCALGROUP_INFO_0, LOCALGROUP_INFO_1, LOCALGROUP_MEMBERS_INFO_0,
-        MAX_PREFERRED_LENGTH, NERR_DuplicateShare, NERR_GroupExists, NERR_GroupNotFound,
-        NERR_NetNameNotFound, NERR_PasswordTooShort, NERR_Success, NERR_UnknownDevDir,
-        NERR_UserExists, NERR_UserNotFound, NetApiBufferFree, NetLocalGroupAdd,
-        NetLocalGroupAddMember, NetLocalGroupDel, NetLocalGroupDelMember, NetLocalGroupEnum,
-        NetLocalGroupGetInfo, NetLocalGroupGetMembers, NetLocalGroupSetInfo, NetUserAdd,
-        NetUserDel, NetUserEnum, NetUserGetInfo, NetUserModalsGet, NetUserModalsSet,
-        NetUserSetInfo, USER_INFO_0, USER_INFO_1, USER_INFO_4, USER_INFO_1003, USER_INFO_1006,
-        USER_INFO_1007, USER_INFO_1008, USER_INFO_1009, USER_INFO_1011, USER_INFO_1012,
-        USER_INFO_1017, USER_INFO_1052, USER_INFO_1053, USER_MODALS_INFO_0, USER_MODALS_INFO_3,
-        USER_MODALS_INFO_1001, USER_MODALS_INFO_1002, USER_MODALS_INFO_1003, USER_MODALS_INFO_1004,
-        USER_MODALS_INFO_1005,
+        MAX_PREFERRED_LENGTH, NERR_DefaultJoinRequired, NERR_DuplicateShare, NERR_GroupExists,
+        NERR_GroupNotFound, NERR_InvalidComputer, NERR_InvalidWorkgroupName, NERR_NetNameNotFound,
+        NERR_PasswordTooShort, NERR_ServerNotStarted, NERR_SetupAlreadyJoined,
+        NERR_SetupDomainController, NERR_SetupNotJoined, NERR_Success, NERR_UnknownDevDir,
+        NERR_UserExists, NERR_UserNotFound, NETSETUP_ACCT_CREATE, NETSETUP_ACCT_DELETE,
+        NETSETUP_PROVISION_ONLINE_CALLER, NetApiBufferFree, NetGetJoinInformation, NetJoinDomain,
+        NetLocalGroupAdd, NetLocalGroupAddMember, NetLocalGroupDel, NetLocalGroupDelMember,
+        NetLocalGroupEnum, NetLocalGroupGetInfo, NetLocalGroupGetMembers, NetLocalGroupSetInfo,
+        NetProvisionComputerAccount, NetRenameMachineInDomain, NetRequestOfflineDomainJoin,
+        NetServerGetInfo, NetSetupDomainName, NetSetupUnjoined, NetSetupWorkgroupName,
+        NetUnjoinDomain, NetUserAdd, NetUserDel, NetUserEnum, NetUserGetInfo, NetUserModalsGet,
+        NetUserModalsSet, NetUserSetInfo, NetWkstaGetInfo, SERVER_INFO_101, USER_INFO_0,
+        USER_INFO_1, USER_INFO_4, USER_INFO_1003, USER_INFO_1006, USER_INFO_1007, USER_INFO_1008,
+        USER_INFO_1009, USER_INFO_1011, USER_INFO_1012, USER_INFO_1017, USER_INFO_1052,
+        USER_INFO_1053, USER_MODALS_INFO_0, USER_MODALS_INFO_3, USER_MODALS_INFO_1001,
+        USER_MODALS_INFO_1002, USER_MODALS_INFO_1003, USER_MODALS_INFO_1004, USER_MODALS_INFO_1005,
+        WKSTA_INFO_100,
     },
     Security::{
         Authentication::Identity::{
@@ -44,9 +50,10 @@ use windows_sys::Win32::{
 };
 
 use crate::wire::{
-    AccountPolicy, AccountPolicyUpdate, GroupCreate, GroupInfo, GroupUpdate, ShareCreate,
-    ShareInfo, ShareKind, ShareUpdate, UserCreate, UserFlags, UserInfo, UserUpdate, WinNetRequest,
-    WinNetResponse,
+    AccountPolicy, AccountPolicyUpdate, GroupCreate, GroupInfo, GroupUpdate, JoinInfo, JoinKind,
+    JoinRequest, MachineInfo, OfflineJoinRequest, ProvisionRequest, RenameRequest, ServerType,
+    ShareCreate, ShareInfo, ShareKind, ShareUpdate, UnjoinRequest, UserCreate, UserFlags, UserInfo,
+    UserUpdate, WinNetRequest, WinNetResponse,
 };
 
 struct NetBuffer(*mut u8);
@@ -94,6 +101,7 @@ fn status(operation: &str, code: u32) -> Error {
         || code == ERROR_NONE_MAPPED
         || code == NERR_NetNameNotFound
         || code == NERR_UnknownDevDir
+        || code == NERR_SetupNotJoined
     {
         ErrorKind::NotFound
     } else if code == NERR_UserExists
@@ -101,6 +109,7 @@ fn status(operation: &str, code: u32) -> Error {
         || code == ERROR_ALIAS_EXISTS
         || code == ERROR_MEMBER_IN_ALIAS
         || code == NERR_DuplicateShare
+        || code == NERR_SetupAlreadyJoined
     {
         ErrorKind::AlreadyExists
     } else if code == ERROR_MEMBER_NOT_IN_ALIAS {
@@ -111,6 +120,10 @@ fn status(operation: &str, code: u32) -> Error {
         || code == ERROR_INVALID_PASSWORD
         || code == ERROR_NO_SUCH_PRIVILEGE
         || code == NERR_PasswordTooShort
+        || code == NERR_SetupDomainController
+        || code == NERR_InvalidComputer
+        || code == NERR_InvalidWorkgroupName
+        || code == NERR_DefaultJoinRequired
     {
         ErrorKind::InvalidInput
     } else {
@@ -921,6 +934,206 @@ fn share_create(create: ShareCreate) -> Result<ShareInfo, Error> {
     }
 }
 
+/// The pointer NetAPI wants for an optional wide-string argument.
+fn optional_ptr(value: &Option<Vec<u16>>) -> *const u16 {
+    value.as_ref().map_or(ptr::null(), |v| v.as_ptr())
+}
+
+fn join_info() -> Result<JoinInfo, Error> {
+    let mut raw = ptr::null_mut();
+    let mut native = 0;
+    let code = unsafe { NetGetJoinInformation(ptr::null(), &mut raw, &mut native) };
+    if code != NERR_Success {
+        return Err(status("NetGetJoinInformation", code));
+    }
+    let buffer = NetBuffer(raw.cast());
+    let name = unsafe { optional(buffer.0.cast::<u16>()) };
+    let kind = if native == NetSetupUnjoined {
+        JoinKind::Unjoined
+    } else if native == NetSetupWorkgroupName {
+        JoinKind::Workgroup
+    } else if native == NetSetupDomainName {
+        JoinKind::Domain
+    } else {
+        JoinKind::Unknown
+    };
+    // The name is only meaningful as a workgroup or domain name; an unjoined
+    // machine reports its own name here, which would read as membership.
+    let name = matches!(kind, JoinKind::Workgroup | JoinKind::Domain)
+        .then_some(name)
+        .flatten();
+    Ok(JoinInfo { kind, name })
+}
+
+fn machine_info() -> Result<MachineInfo, Error> {
+    let mut raw = ptr::null_mut();
+    let code = unsafe { NetWkstaGetInfo(ptr::null(), 100, &mut raw) };
+    if code != NERR_Success {
+        return Err(status("NetWkstaGetInfo level 100", code));
+    }
+    let buffer = NetBuffer(raw);
+    let wksta = unsafe { &*buffer.0.cast::<WKSTA_INFO_100>() };
+    let name = unsafe { string(wksta.wki100_computername) };
+    let domain = unsafe { string(wksta.wki100_langroup) };
+    let version_major = wksta.wki100_ver_major;
+    let version_minor = wksta.wki100_ver_minor;
+    drop(buffer);
+
+    // Machine identity comes from the workstation service. A stopped server
+    // service costs only the role mask and comment, so it is reported as a
+    // missing half rather than failing the whole query.
+    let mut raw = ptr::null_mut();
+    let code = unsafe { NetServerGetInfo(ptr::null(), 101, &mut raw) };
+    let (comment, server_type, server_started) = if code == NERR_Success {
+        let buffer = NetBuffer(raw);
+        let server = unsafe { &*buffer.0.cast::<SERVER_INFO_101>() };
+        (
+            unsafe { optional(server.sv101_comment) },
+            ServerType::from_bits_retain(server.sv101_type),
+            true,
+        )
+    } else if code == NERR_ServerNotStarted {
+        (None, ServerType::empty(), false)
+    } else {
+        return Err(status("NetServerGetInfo level 101", code));
+    };
+
+    Ok(MachineInfo {
+        name,
+        domain,
+        version_major,
+        version_minor,
+        comment,
+        server_type,
+        server_started,
+    })
+}
+
+fn join_domain(request: JoinRequest) -> Result<(), Error> {
+    let domain = wide(&request.domain);
+    let ou = request.ou.as_deref().map(wide);
+    let account = request.account.as_deref().map(wide);
+    let password = request.password.as_deref().map(wide);
+    let code = unsafe {
+        NetJoinDomain(
+            ptr::null(),
+            domain.as_ptr(),
+            optional_ptr(&ou),
+            optional_ptr(&account),
+            optional_ptr(&password),
+            request.options.bits(),
+        )
+    };
+    if code != NERR_Success {
+        return Err(status("NetJoinDomain", code));
+    }
+    Ok(())
+}
+
+fn unjoin_domain(request: UnjoinRequest) -> Result<(), Error> {
+    let account = request.account.as_deref().map(wide);
+    let password = request.password.as_deref().map(wide);
+    let options = if request.delete_account {
+        NETSETUP_ACCT_DELETE
+    } else {
+        0
+    };
+    let code = unsafe {
+        NetUnjoinDomain(
+            ptr::null(),
+            optional_ptr(&account),
+            optional_ptr(&password),
+            options,
+        )
+    };
+    if code != NERR_Success {
+        return Err(status("NetUnjoinDomain", code));
+    }
+    Ok(())
+}
+
+fn rename_machine(request: RenameRequest) -> Result<(), Error> {
+    let name = wide(&request.name);
+    let account = request.account.as_deref().map(wide);
+    let password = request.password.as_deref().map(wide);
+    let options = if request.create_account {
+        NETSETUP_ACCT_CREATE
+    } else {
+        0
+    };
+    let code = unsafe {
+        NetRenameMachineInDomain(
+            ptr::null(),
+            name.as_ptr(),
+            optional_ptr(&account),
+            optional_ptr(&password),
+            options,
+        )
+    };
+    if code != NERR_Success {
+        return Err(status("NetRenameMachineInDomain", code));
+    }
+    Ok(())
+}
+
+fn provision_computer(request: ProvisionRequest) -> Result<Vec<u8>, Error> {
+    let domain = wide(&request.domain);
+    let machine = wide(&request.machine);
+    let ou = request.ou.as_deref().map(wide);
+    let dc = request.dc.as_deref().map(wide);
+    let mut raw = ptr::null_mut();
+    let mut length = 0;
+    let code = unsafe {
+        NetProvisionComputerAccount(
+            domain.as_ptr(),
+            machine.as_ptr(),
+            optional_ptr(&ou),
+            optional_ptr(&dc),
+            request.options.bits(),
+            &mut raw,
+            &mut length,
+            // Only the binary form applies an offline join; asking for the
+            // text form as well would leave a second buffer to free.
+            ptr::null_mut(),
+        )
+    };
+    if code != NERR_Success {
+        return Err(status("NetProvisionComputerAccount", code));
+    }
+    let buffer = NetBuffer(raw);
+    if buffer.0.is_null() || length == 0 {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "NetProvisionComputerAccount returned an empty blob",
+        ));
+    }
+    Ok(unsafe { slice::from_raw_parts(buffer.0, length as usize) }.to_vec())
+}
+
+fn apply_offline_join(request: OfflineJoinRequest) -> Result<(), Error> {
+    if request.blob.is_empty() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "offline join blob must not be empty",
+        ));
+    }
+    let length = u32::try_from(request.blob.len())
+        .map_err(|_| Error::new(ErrorKind::InvalidInput, "offline join blob is too large"))?;
+    let path = wide(windows_path(Some(&request.windows_path), "windows_path")?);
+    let options = if request.online {
+        NETSETUP_PROVISION_ONLINE_CALLER
+    } else {
+        0
+    };
+    let code = unsafe {
+        NetRequestOfflineDomainJoin(request.blob.as_ptr(), length, options, path.as_ptr())
+    };
+    if code != NERR_Success {
+        return Err(status("NetRequestOfflineDomainJoin", code));
+    }
+    Ok(())
+}
+
 fn dispatch(request: WinNetRequest) -> Result<WinNetResponse, Error> {
     match request {
         WinNetRequest::UserByName { name } => {
@@ -1202,6 +1415,27 @@ fn dispatch(request: WinNetRequest) -> Result<WinNetResponse, Error> {
                 return Err(status("NetShareDel", code));
             }
             Ok(WinNetResponse::Deleted)
+        }
+        WinNetRequest::JoinStatus => Ok(WinNetResponse::JoinInfo(join_info()?)),
+        WinNetRequest::MachineInfo => Ok(WinNetResponse::MachineInfo(Box::new(machine_info()?))),
+        WinNetRequest::JoinDomain(request) => {
+            join_domain(*request)?;
+            Ok(WinNetResponse::Unit)
+        }
+        WinNetRequest::UnjoinDomain(request) => {
+            unjoin_domain(request)?;
+            Ok(WinNetResponse::Unit)
+        }
+        WinNetRequest::RenameMachine(request) => {
+            rename_machine(request)?;
+            Ok(WinNetResponse::Unit)
+        }
+        WinNetRequest::ProvisionComputer(request) => {
+            Ok(WinNetResponse::Blob(provision_computer(*request)?))
+        }
+        WinNetRequest::ApplyOfflineJoin(request) => {
+            apply_offline_join(*request)?;
+            Ok(WinNetResponse::Unit)
         }
     }
 }

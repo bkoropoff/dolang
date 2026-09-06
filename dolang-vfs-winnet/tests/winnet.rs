@@ -2,8 +2,8 @@
 
 #[cfg(not(windows))]
 mod stub {
-    use dolang_vfs::{Vfs, error::ErrorKind, server::Server};
-    use dolang_vfs_winnet::{group, policy, share, user};
+    use dolang_vfs::{Vfs, error::ErrorKind, path, server::Server};
+    use dolang_vfs_winnet::{domain, group, machine, policy, share, user};
     use tempfile::tempdir;
 
     /// Every entry point reports the extension as unsupported off Windows.
@@ -31,6 +31,63 @@ mod stub {
                 .err()
                 .unwrap()
                 .kind(),
+            ErrorKind::Unsupported
+        );
+        assert_eq!(
+            domain::status(vfs).await.err().unwrap().kind(),
+            ErrorKind::Unsupported
+        );
+        assert_eq!(
+            machine::info(vfs).await.err().unwrap().kind(),
+            ErrorKind::Unsupported
+        );
+        assert_eq!(
+            domain::join(vfs, domain::Join::new("corp.example.com".into()))
+                .await
+                .err()
+                .unwrap()
+                .kind(),
+            ErrorKind::Unsupported
+        );
+        assert_eq!(
+            domain::unjoin(vfs, domain::Unjoin::default())
+                .await
+                .err()
+                .unwrap()
+                .kind(),
+            ErrorKind::Unsupported
+        );
+        assert_eq!(
+            domain::rename(vfs, domain::Rename::new("NEWNAME".into()))
+                .await
+                .err()
+                .unwrap()
+                .kind(),
+            ErrorKind::Unsupported
+        );
+        assert_eq!(
+            domain::provision(
+                vfs,
+                domain::Provision::new("corp.example.com".into(), "WS01".into())
+            )
+            .await
+            .err()
+            .unwrap()
+            .kind(),
+            ErrorKind::Unsupported
+        );
+        assert_eq!(
+            domain::apply_offline(
+                vfs,
+                domain::OfflineJoin::new(
+                    vec![0, 1, 2, 3],
+                    path::PathBuf::from_windows(r"C:\Windows")
+                )
+            )
+            .await
+            .err()
+            .unwrap()
+            .kind(),
             ErrorKind::Unsupported
         );
     }
