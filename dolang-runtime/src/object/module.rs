@@ -643,7 +643,7 @@ impl<'v> Protocol<'v> for Type {
 mod tests {
     use std::path::Path;
 
-    use dolang_compile::{Compiler, Mode};
+    use dolang_compile::{Config, Mode};
 
     use crate::{
         error::ErrorKind,
@@ -664,11 +664,12 @@ mod tests {
         source: &str,
         out: impl Output<'v>,
     ) {
-        let mut compiler = Compiler::new(Path::new("<test>"), source.as_bytes());
-        compiler.mode(Mode::Module { name });
+        let mut config = Config::new();
+        config.mode(Mode::Module { name });
         let mut bytes = Vec::new();
-        compiler
-            .compile(&mut bytes, &mut |_diag| ControlFlow::<()>::Continue(()))
+        config
+            .unit(Path::new("<test>"), source.as_bytes())
+            .emit(&mut bytes)
             .unwrap();
         Bytecode::new(bytes).run(strand, out).await.unwrap();
     }

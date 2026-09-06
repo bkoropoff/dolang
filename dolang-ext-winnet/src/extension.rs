@@ -1,6 +1,6 @@
 use crate::global::Global;
 use dolang::{
-    compile::Compiler,
+    compile::Config,
     extension,
     extension::{Extension, Version},
     runtime::vm::Builder,
@@ -14,7 +14,7 @@ impl Extension for WinnetExt {
     const VERSION: Version = dolang::package_version!();
     const DESCRIPTION: &str = "Do Windows NetAPI Extension";
     const DEPENDS: &'static [&'static str] = &[<dolang_ext_shell::Shell as Extension>::NAME];
-    fn apply_compiler(&self, _compiler: &mut Compiler) -> Result<(), Self::Error> {
+    fn apply_compiler(&self, _config: &mut Config) -> Result<(), Self::Error> {
         Ok(())
     }
     fn apply_vm<'v>(&self, builder: &mut Builder<'v>) -> Result<(), Self::Error> {

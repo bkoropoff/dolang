@@ -1,12 +1,10 @@
 use std::{
-    convert::Infallible,
     hash::{Hash, Hasher},
-    ops::ControlFlow,
     path::Path,
 };
 
 use dolang::{
-    compile::{self, Compiler, Diag, ErrorKind, Mode},
+    compile::{self, Config, Diag, ErrorKind, Mode},
     extension::CompilerExt,
     runtime::{
         Error, Input, Instance, Object, Output, Result, Slot, State, Strand, Sym, Type, Value,
@@ -372,7 +370,7 @@ fn create_result<'v, 's>(
 
 fn apply_prelude_module_items<'v, 's>(
     strand: &mut Strand<'v, 's>,
-    compiler: &mut Compiler,
+    config: &mut Config,
     module_name: &str,
     arr: &Array<'v, '_>,
 ) -> std::result::Result<(), Error<'v, 's>> {
@@ -390,7 +388,7 @@ fn apply_prelude_module_items<'v, 's>(
                 }
             },
         )?;
-        let _prelude = compiler
+        let _prelude = config
             .prelude()
             .import_items(module_name)
             .item(item_name)
@@ -401,13 +399,13 @@ fn apply_prelude_module_items<'v, 's>(
 
 fn apply_prelude_dict_items<'v, 's>(
     strand: &mut Strand<'v, 's>,
-    compiler: &mut Compiler,
+    config: &mut Config,
     module_name: &str,
     dict: &Dict<'v, '_>,
 ) -> std::result::Result<(), Error<'v, 's>> {
     let vm = strand.vm();
     let mut pairs = dict.pairs();
-    let mut items_builder = Some(compiler.prelude().import_items(module_name));
+    let mut items_builder = Some(config.prelude().import_items(module_name));
 
     strand.with_slots_sync(
         |strand, [mut k, mut v]| -> std::result::Result<_, Error<'v, 's>> {
@@ -456,16 +454,16 @@ fn apply_prelude_dict_items<'v, 's>(
 
 fn apply_prelude_value<'v, 's>(
     strand: &mut Strand<'v, 's>,
-    compiler: &mut Compiler,
+    config: &mut Config,
     value: &Value<'v>,
 ) -> Result<'v, 's, ()> {
     strand.with_slots_sync(|strand, [mut elem, mut k, mut v]| {
         match value.view(strand.vm()) {
             View::Str(module) => {
-                strand.access(|access| compiler.prelude().import_module(module.as_str(access)));
+                strand.access(|access| config.prelude().import_module(module.as_str(access)));
             }
             View::Sym(sym) => {
-                compiler.prelude().import_module(sym.as_str(strand));
+                config.prelude().import_module(sym.as_str(strand));
             }
             View::Array(arr) => {
                 let len = arr.len(strand)?;
@@ -481,7 +479,7 @@ fn apply_prelude_value<'v, 's>(
                             ));
                         }
                     };
-                    compiler.prelude().import_module(name);
+                    config.prelude().import_module(name);
                 }
             }
             View::Dict(dict) => {
@@ -506,21 +504,21 @@ fn apply_prelude_value<'v, 's>(
                     match v.view(strand.vm()) {
                         View::Str(bind) => {
                             strand.access(|access| {
-                                compiler
+                                config
                                     .prelude()
                                     .import_module_with_name(&module, bind.as_str(access));
                             });
                         }
                         View::Sym(bind) => {
-                            compiler
+                            config
                                 .prelude()
                                 .import_module_with_name(&module, bind.as_str(strand));
                         }
                         View::Array(arr) => {
-                            apply_prelude_module_items(strand, compiler, &module, &arr)?;
+                            apply_prelude_module_items(strand, config, &module, &arr)?;
                         }
                         View::Dict(dict) => {
-                            apply_prelude_dict_items(strand, compiler, &module, &dict)?;
+                            apply_prelude_dict_items(strand, config, &module, &dict)?;
                         }
                         _ => {
                             return Err(Error::type_error(
@@ -924,27 +922,25 @@ pub(crate) fn configure<'v>(builder: &mut Builder<'v>, global: State<'v, Global<
             };
 
             let path = path.to_string(strand)?;
-            let mut compiler = Compiler::new(Path::new(&path), &source_vec);
-            compiler.mode(if let Some(module) = &module {
+            let mut config = Config::new();
+            config.mode(if let Some(module) = &module {
                 Mode::Module { name: module }
             } else {
                 Mode::Script
             });
 
             if let Some(prelude) = prelude {
-                apply_prelude_value(strand, &mut compiler, &prelude)?;
+                apply_prelude_value(strand, &mut config, &prelude)?;
             }
 
-            for ext in compiler.extensions() {
-                ext.apply(&mut compiler).unwrap();
+            for ext in config.extensions() {
+                ext.apply(&mut config).unwrap();
             }
 
             let mut bytecode = Vec::new();
-            let mut diagnostics = Vec::new();
-            let compile_result = compiler.compile(&mut bytecode, &mut |diag| {
-                diagnostics.push(diag);
-                ControlFlow::<Infallible>::Continue(())
-            });
+            let unit = config.unit(Path::new(&path), &source_vec);
+            let diagnostics: Vec<_> = unit.diagnostics().collect();
+            let compile_result = unit.emit(&mut bytecode);
 
             let bytecode = match compile_result {
                 Ok(()) => Some(bytecode),

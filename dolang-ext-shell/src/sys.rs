@@ -1,12 +1,12 @@
 use dolang::{
-    compile::Compiler,
+    compile::Config,
     runtime::{Error, Object, Output, State, Sym, object::TypeBuilder, unpack, vm::Builder},
 };
 use dolang_vfs::target::{Architecture, OperatingSystem, OperatingSystemFamily};
 
 use crate::global::Global;
 
-pub(crate) fn configure_compiler<'a>(_compiler: &mut Compiler<'a>) {}
+pub(crate) fn configure_compiler<'a>(_config: &mut Config<'a>) {}
 
 pub(crate) struct OsInfo;
 

@@ -2267,9 +2267,9 @@ impl Node for Function {
     }
 }
 
-pub struct Unit(pub(crate) Function);
+pub struct Root(pub(crate) Function);
 
-impl Node for Unit {
+impl Node for Root {
     fn accept<'a, V: Visit>(&'a self, visit: &'a mut V) -> ControlFlow<V::Break> {
         self.0.accept(visit)
     }

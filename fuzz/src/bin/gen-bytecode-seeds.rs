@@ -1,11 +1,9 @@
 use std::{
-    convert::Infallible,
     fs,
-    ops::ControlFlow,
     path::{Path, PathBuf},
 };
 
-use dolang_compile::{Compiler, diag::Diag};
+use dolang_compile::Config;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fuzz_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -41,21 +39,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn compile_seed(path: &Path, source: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut bytecode = Vec::new();
-    let mut diagnostics = Vec::new();
-    let compiler = Compiler::new(path, source.as_bytes());
+    let unit = Config::new().unit(path, source.as_bytes());
+    let diagnostics: Vec<_> = unit.diagnostics().collect();
 
-    compiler
-        .compile(&mut bytecode, &mut |diag: Diag| {
-            diagnostics.push(diag);
-            ControlFlow::<Infallible>::Continue(())
-        })
-        .map_err(|err| {
-            let mut message = format!("failed to compile {}: {err}", path.display());
-            for diag in &diagnostics {
-                message.push_str(&format!("\n{}: {}", diag.severity(), diag.message()));
-            }
-            message
-        })?;
+    unit.emit(&mut bytecode).map_err(|err| {
+        let mut message = format!("failed to compile {}: {err}", path.display());
+        for diag in &diagnostics {
+            message.push_str(&format!("\n{}: {}", diag.severity(), diag.message()));
+        }
+        message
+    })?;
 
     Ok(bytecode)
 }

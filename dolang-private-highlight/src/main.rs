@@ -1,27 +1,13 @@
 use std::{
-    error,
-    fmt::{self, Display, Formatter},
     fs,
     io::{self, Read},
-    ops::ControlFlow,
     path::{Path, PathBuf},
 };
 
 use clap::Parser;
-use dolang::compile::{Compiler, Context, Diag, Origin, Pos, Severity, Span, Token};
+use dolang::compile::{Config, Context, Origin, Pos, Severity, Span, Token};
 
 use serde_json::{Value, json};
-
-#[derive(Debug)]
-struct Stop;
-
-impl Display for Stop {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "compilation stopped due to too many errors")
-    }
-}
-
-impl error::Error for Stop {}
 
 #[derive(Parser)]
 struct Cli {
@@ -105,39 +91,34 @@ fn main() -> io::Result<()> {
         io::stdin().read_to_end(&mut content)?;
         (Path::new("<stdin>"), content)
     };
-    let compiler = Compiler::new(path, &content);
+    let unit = Config::new().recover(true).unit(path, &content);
     let mut tokens = vec![];
-    let mut diagnostics = vec![];
-    compiler
-        .analyze(
-            &mut |diag: Diag| -> ControlFlow<Stop> {
-                let obj = json!({
-                    "kind": severity_kind(&diag.severity()),
-                    "span": span_repr(&diag.span()),
-                });
-                diagnostics.push(obj);
-                ControlFlow::Continue(())
-            },
-            &mut |token, span, origin, context| -> ControlFlow<Stop> {
-                let mut obj = json!({
-                    "kind": token_kind(&token),
-                    "span": span_repr(&span),
-                });
-                if let Some(origin) = origin {
-                    obj.as_object_mut()
-                        .unwrap()
-                        .insert("origin".into(), origin_kind(&origin).into());
-                }
-                if let Some(context) = context_kind(&context) {
-                    obj.as_object_mut()
-                        .unwrap()
-                        .insert("context".into(), context.into());
-                }
-                tokens.push(obj);
-                ControlFlow::Continue(())
-            },
-        )
-        .map_err(io::Error::other)?;
+    unit.tokens(&mut |token, span, origin, context| {
+        let mut obj = json!({
+            "kind": token_kind(&token),
+            "span": span_repr(&span),
+        });
+        if let Some(origin) = origin {
+            obj.as_object_mut()
+                .unwrap()
+                .insert("origin".into(), origin_kind(&origin).into());
+        }
+        if let Some(context) = context_kind(&context) {
+            obj.as_object_mut()
+                .unwrap()
+                .insert("context".into(), context.into());
+        }
+        tokens.push(obj);
+    });
+    let diagnostics: Vec<_> = unit
+        .diagnostics()
+        .map(|diag| {
+            json!({
+                "kind": severity_kind(&diag.severity()),
+                "span": span_repr(&diag.span()),
+            })
+        })
+        .collect();
     let result: Vec<_> = tokens.into_iter().chain(diagnostics).collect();
     serde_json::to_writer_pretty(io::stdout(), &result)?;
     Ok(())

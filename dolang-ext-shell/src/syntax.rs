@@ -127,9 +127,9 @@ pub fn highlight_range(
 
 #[cfg(test)]
 mod tests {
-    use std::{ops::ControlFlow, path::Path};
+    use std::path::Path;
 
-    use dolang::compile::{Compiler, Diag};
+    use dolang::compile::Config;
 
     use super::*;
 
@@ -137,13 +137,12 @@ mod tests {
     fn highlights_a_source_range_without_changing_plain_text() {
         let source = "let answer = 42";
         let mut tokens = Vec::new();
-        let _ = Compiler::new(Path::new("example.dol"), source.as_bytes()).analyze(
-            &mut |_: Diag| ControlFlow::<()>::Continue(()),
-            &mut |token, span, origin, context| {
+        Config::new()
+            .recover(true)
+            .unit(Path::new("example.dol"), source.as_bytes())
+            .tokens(&mut |token, span, origin, context| {
                 tokens.push((token, span, origin, context));
-                ControlFlow::<()>::Continue(())
-            },
-        );
+            });
         assert_eq!(
             highlight_range(source, &tokens, 0..source.len(), false),
             source

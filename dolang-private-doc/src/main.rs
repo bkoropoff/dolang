@@ -3,12 +3,11 @@
 use std::{
     fs,
     io::{self, Read},
-    ops::ControlFlow,
     path::{Path, PathBuf},
 };
 
 use clap::Parser;
-use dolang::compile::{Compiler, Context, Origin, Token};
+use dolang::compile::{Config, Context, Origin, Token};
 use serde_json::{Value, json};
 
 #[derive(Parser)]
@@ -38,11 +37,10 @@ struct TokEntry {
 }
 
 fn collect_tokens(path: &Path, content: &[u8]) -> Vec<TokEntry> {
-    let compiler = Compiler::new(path, content);
+    let unit = Config::new().recover(true).unit(path, content);
     let mut entries: Vec<TokEntry> = Vec::new();
-    let _ = compiler.analyze(
-        &mut |_diag| ControlFlow::Continue(()),
-        &mut |token, span: dolang::compile::Span, origin, _ctx: Context| -> ControlFlow<()> {
+    unit.tokens(
+        &mut |token, span: dolang::compile::Span, origin, _ctx: Context| {
             entries.push(TokEntry {
                 token,
                 start: span.start().byte_offset(),
@@ -51,7 +49,6 @@ fn collect_tokens(path: &Path, content: &[u8]) -> Vec<TokEntry> {
                 end: span.end().byte_offset(),
                 origin,
             });
-            ControlFlow::Continue(())
         },
     );
     // Sort by start offset; tokens are not guaranteed to be in source order

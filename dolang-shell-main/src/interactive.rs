@@ -1,9 +1,9 @@
-use std::{borrow::Cow, ops::ControlFlow, path::Path, string::String};
+use std::{borrow::Cow, path::Path, string::String};
 
 use dolang::runtime::value::fmt::Format;
 
 use dolang::{
-    compile::{Context, Diag, Mode, Origin, Span, Token},
+    compile::{Context, Mode, Origin, Span, Token},
     runtime::{
         Bytecode, Error, Instance, Object, Result, Slot, Strand, Sym, error::ResultExt, value::Root,
     },
@@ -152,21 +152,18 @@ impl Hinter for DoHelper {
 impl Highlighter for DoHelper {
     fn highlight<'l>(&self, line: &'l str, _pos: usize) -> Cow<'l, str> {
         let mut tokens = Vec::new();
-        let _ = load::analyze(
+        load::unit(
             Path::new("<repl>"),
             line,
             Some(&self.dynamic_prelude),
             &self.prelude,
-            &mut |_: Diag| ControlFlow::<()>::Continue(()),
-            &mut |token: Token,
-                  span: Span,
-                  origin: Option<Origin>,
-                  context: Context|
-             -> ControlFlow<()> {
-                tokens.push((token, span, origin, context));
-                ControlFlow::Continue(())
-            },
-        );
+        )
+        .tokens(&mut |token: Token,
+                               span: Span,
+                               origin: Option<Origin>,
+                               context: Context| {
+            tokens.push((token, span, origin, context));
+        });
 
         if tokens.is_empty() {
             return Cow::Borrowed(line);

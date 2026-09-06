@@ -12,8 +12,8 @@ use crate::{
     ast::{
         self, Arg, ArrayElem, Assign, Bind, Block, Class, Def, DictElem, Expand, Expr, ExprBody,
         For, Function, GetVariant, Ident, If, Import, ImportElement, ImportItem, Key, LValue, Let,
-        Method, NlGuard, NlInfo, Pair, Param, Pattern, PatternBind, PrimStmt, Res, Return,
-        SideEffect, Single, Stmt, Try, Unit, Var, While, visit::Node,
+        Method, NlGuard, NlInfo, Pair, Param, Pattern, PatternBind, PrimStmt, Res, Return, Root,
+        SideEffect, Single, Stmt, Try, Var, While, visit::Node,
     },
     diag::{AnnotationKind, Severity},
     origin::{self, Origin},
@@ -2699,15 +2699,16 @@ impl<'a> Elaborater<'a> {
         }
     }
 
-    pub(crate) fn elaborate(
-        &mut self,
-        root: &mut Unit,
-        prelude: &mut [PreludeImport],
-        ignore_error: bool,
-    ) -> Result<()> {
-        let res = self
+    /// Elaborate the AST in place.
+    ///
+    /// Errors are recorded rather than returned; consult [`Elaborater::failed`].
+    pub(crate) fn elaborate(&mut self, root: &mut Root, prelude: &mut [PreludeImport]) {
+        if self
             .visit_function(&mut Scope::new(), &mut root.0, Some(prelude))
-            .and(if self.fail { Err(Error) } else { Ok(()) });
+            .is_err()
+        {
+            self.fail = true;
+        }
         if matches!(self.mode, Mode::Module { .. } | Mode::Repl) {
             // Mark all exports as captured if not already
             for var in root.0.body.vars.iter_mut() {
@@ -2724,9 +2725,10 @@ impl<'a> Elaborater<'a> {
                 }
             }
         }
-        if !ignore_error {
-            res?
-        }
-        Ok(())
+    }
+
+    /// Whether any error was recorded during elaboration
+    pub(crate) fn failed(&self) -> bool {
+        self.fail
     }
 }

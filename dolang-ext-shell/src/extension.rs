@@ -4,7 +4,7 @@ use std::{
 };
 
 use dolang::{
-    compile::Compiler,
+    compile::Config,
     extension,
     extension::{Extension, Version},
     runtime::vm::Builder,
@@ -34,14 +34,14 @@ impl Extension for Shell {
     const VERSION: Version = dolang::package_version!();
     const DESCRIPTION: &str = "Do Shell Extension";
 
-    fn apply_compiler(&self, compiler: &mut Compiler) -> Result<(), Infallible> {
-        shell::configure_compiler(compiler);
-        term::configure_compiler(compiler);
-        security::configure_compiler(compiler);
-        sys::configure_compiler(compiler);
-        proc::configure_compiler(compiler);
-        shlex::configure_compiler(compiler);
-        time::configure_compiler(compiler);
+    fn apply_compiler(&self, config: &mut Config) -> Result<(), Infallible> {
+        shell::configure_compiler(config);
+        term::configure_compiler(config);
+        security::configure_compiler(config);
+        sys::configure_compiler(config);
+        proc::configure_compiler(config);
+        shlex::configure_compiler(config);
+        time::configure_compiler(config);
         Ok(())
     }
 

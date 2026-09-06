@@ -1,15 +1,10 @@
-use std::{
-    error,
-    fmt::{self, Debug, Display, Formatter},
-    ops::ControlFlow,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use directories::ProjectDirs;
 use tokio::fs;
 
 use dolang::{
-    compile::{self, Compiler, Diag, EmitDiag, EmitToken, Mode, Severity},
+    compile::{self, Config, Mode, Severity},
     extension::CompilerExt,
     runtime::{
         Bytecode, Error, Result, Slot, Strand,
@@ -19,16 +14,8 @@ use dolang::{
 
 use crate::{cli::PreludeImport, interactive::DYNAMIC_PRELUDE};
 
-#[derive(Debug)]
-struct Stop;
-
-impl Display for Stop {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "compilation stopped due to too many errors")
-    }
-}
-
-impl error::Error for Stop {}
+/// Maximum number of errors reported for a single compilation
+const MAX_ERRORS: usize = 10;
 
 pub(crate) async fn compile<'v, 's, 'a>(
     strand: &mut Strand<'v, 's>,
@@ -44,21 +31,20 @@ pub(crate) async fn compile<'v, 's, 'a>(
     let mut warnings = 0usize;
     let mut diagnostics = Vec::new();
 
-    let compiler = compile_setup(path, source, dynamic, prelude, mode);
+    let unit = compile_setup(dynamic, prelude, mode).unit(path, source.as_bytes());
 
-    let result = compiler.compile(&mut out, &mut |diag: Diag| -> ControlFlow<Stop> {
+    for diag in unit.diagnostics() {
         match diag.severity() {
             Severity::Error => errors += 1,
             Severity::Warning => warnings += 1,
             _ => (),
         }
         diagnostics.push(diag);
-        if errors > 10 {
-            ControlFlow::Break(Stop)
-        } else {
-            ControlFlow::Continue(())
+        if errors > MAX_ERRORS {
+            break;
         }
-    });
+    }
+    let result = unit.emit(&mut out);
     let disp = path.display().to_string();
     for diag in &diagnostics {
         dolang_ext_shell::print_compile_diag_stderr(strand, &disp, source, diag).await?;
@@ -77,42 +63,40 @@ pub(crate) async fn compile<'v, 's, 'a>(
 }
 
 fn compile_setup<'a>(
-    path: &'a Path,
-    source: &'a str,
-    dynamic: Option<&'a [String]>,
+    dynamic: Option<&[String]>,
     prelude: &[PreludeImport],
     mode: Mode<'a>,
-) -> Compiler<'a> {
-    let mut compiler = Compiler::new(Path::new(path), source.as_bytes());
+) -> Config<'a> {
+    let mut config = Config::new();
 
-    compiler.mode(mode);
-    for ext in compiler.extensions() {
-        ext.apply(&mut compiler).unwrap();
+    config.mode(mode);
+    for ext in config.extensions() {
+        ext.apply(&mut config).unwrap();
     }
     for import in prelude {
         match import {
             PreludeImport::Module { module, bind: None } => {
-                compiler.prelude().import_module(module);
+                config.prelude().import_module(module);
             }
             PreludeImport::Module {
                 module,
                 bind: Some(bind),
             } => {
-                compiler.prelude().import_module_with_name(module, bind);
+                config.prelude().import_module_with_name(module, bind);
             }
             PreludeImport::Item {
                 module,
                 item,
                 bind: None,
             } => {
-                compiler.prelude().import_items(module).item(item).commit();
+                config.prelude().import_items(module).item(item).commit();
             }
             PreludeImport::Item {
                 module,
                 item,
                 bind: Some(bind),
             } => {
-                compiler
+                config
                     .prelude()
                     .import_items(module)
                     .item_with_name(item, bind)
@@ -121,26 +105,27 @@ fn compile_setup<'a>(
         }
     }
     if let Some(dynamic) = dynamic {
-        compiler
+        config
             .prelude()
             .import_items(DYNAMIC_PRELUDE)
             .items(dynamic)
             .commit();
     }
 
-    compiler
+    config
 }
 
-pub(crate) fn analyze<'a, D: EmitDiag, T: EmitToken<Break = D::Break>>(
+/// Build a REPL compilation unit for analysis, recovering from errors so that tokens
+/// remain available for incomplete input.
+pub(crate) fn unit<'a>(
     path: &'a Path,
     source: &'a str,
     dynamic: Option<&[String]>,
     prelude: &[PreludeImport],
-    diags: &mut D,
-    tokens: &mut T,
-) -> std::result::Result<(), compile::Error<D::Break>> {
-    let compiler = compile_setup(path, source, dynamic, prelude, Mode::Repl);
-    compiler.analyze(diags, tokens)
+) -> compile::Unit<'a> {
+    let mut config = compile_setup(dynamic, prelude, Mode::Repl);
+    config.recover(true);
+    config.unit(path, source.as_bytes())
 }
 
 async fn file_is_newer(older: &Path, newer: &Path) -> bool {

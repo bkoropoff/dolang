@@ -4,7 +4,7 @@ mod detail {
     use dolang::runtime::object::fmt;
 
     use dolang::{
-        compile::{self, Compiler, Mode},
+        compile::{self, Config, Mode},
         runtime::{
             self, Args, Bytecode, Error, Instance, Object, Output, Slot, Sym, call,
             object::{FlagLike, FlagLikeExt, Flags, FlagsInstanceExt, FlagsTypeExt, TypeBuilder},
@@ -14,8 +14,7 @@ mod detail {
     };
     use dolang_runtime::strand::Strand;
     use std::{
-        io,
-        ops::{BitAnd, BitOr, BitXor, ControlFlow, Not},
+        ops::{BitAnd, BitOr, BitXor, Not},
         path::{Path, PathBuf},
         pin::Pin,
         task::{Context as TaskContext, Poll},
@@ -53,14 +52,14 @@ mod detail {
         content: &'a [u8],
         module: Option<&'a str>,
     ) -> (
-        Result<Bytecode, compile::Error<io::Error>>,
+        Result<Bytecode, compile::Error>,
         Vec<dolang::compile::Diag>,
         Vec<dolang_private_test::Directive>,
     ) {
-        let mut compiler = Compiler::new(path, content);
-        let directives = dolang_private_test::configure_compiler(&mut compiler, content);
+        let mut config = Config::new();
+        let directives = dolang_private_test::configure_compiler(&mut config, content);
         // Add extra prelude items specific to dolang tests (from regression2 module)
-        compiler
+        config
             .prelude()
             .import_items("regression2")
             .items([
@@ -75,14 +74,12 @@ mod detail {
             ])
             .commit();
         if let Some(name) = module {
-            compiler.mode(Mode::Module { name });
+            config.mode(Mode::Module { name });
         }
         let mut out = Vec::new();
-        let mut diags = Vec::new();
-        let res = compiler.compile(&mut out, &mut |diag| {
-            diags.push(diag);
-            ControlFlow::Continue(())
-        });
+        let unit = config.unit(path, content);
+        let diags: Vec<_> = unit.diagnostics().collect();
+        let res = unit.emit(&mut out);
         (res.map(|_| Bytecode::new(out)), diags, directives)
     }
 
