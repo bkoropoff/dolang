@@ -37,7 +37,6 @@ async fn connect_client(socket_path: &Path) -> Vfs {
 
 async fn stop_server(client: Vfs, server: JoinHandle<()>) {
     client.stop().await.unwrap();
-    client.close().await;
     server.await.unwrap();
 }
 
@@ -510,7 +509,6 @@ async fn unix_vfs_connects_to_another_server() {
     assert_eq!(inner.target(), &TargetInfo::current());
 
     inner.stop().await.unwrap();
-    drop(inner);
     inner_task.await.unwrap();
     stop_server(client, outer_task).await;
 }

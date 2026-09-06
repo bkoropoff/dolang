@@ -68,7 +68,6 @@ async fn spawn_and_query_without(args: &[std::ffi::OsString], without_env: &[&st
         security: client.security().clone(),
     };
     client.stop().await.expect("stop should succeed");
-    client.close().await;
     let _ = child.wait().await;
     query
 }
@@ -281,12 +280,12 @@ async fn stock_binary_registers_vfs_extensions() {
             .unwrap();
     }
 
-    client.stop().await.unwrap();
     // `vfs` owns another client clone, including the child's piped
-    // stdin/stdout handles. Drop it, then explicitly close the shared client
-    // before waiting so the server observes transport EOF.
+    // stdin/stdout handles. Drop it before stopping, so that the close
+    // stopping performs leaves nothing holding the transport open and the
+    // server observes EOF.
     drop(vfs);
-    client.close().await;
+    client.stop().await.unwrap();
     let status = timeout(Duration::from_secs(5), child.wait())
         .await
         .expect("VFS helper did not exit after stop")
@@ -338,7 +337,6 @@ mod listen_mode {
             .expect("timeout connecting to daemon")
             .expect("failed to connect");
         client.stop().await.expect("stop should succeed");
-        client.close().await;
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
@@ -598,7 +596,6 @@ mod listen_mode {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         let result = tokio::net::UnixStream::connect(&socket_path).await;
-        client.close().await;
         assert!(
             result.is_err(),
             "socket should no longer accept connections"
@@ -1017,7 +1014,6 @@ mod accept_mode {
         );
 
         client.stop().await.expect("stop");
-        client.close().await;
         let status = wait_for_exit(&mut child).await;
         assert!(status.success(), "agent exited with {status}");
     }
@@ -1040,7 +1036,6 @@ mod accept_mode {
             .await
             .expect("the intended client should still be served");
         client.stop().await.expect("stop");
-        client.close().await;
         let status = wait_for_exit(&mut child).await;
         assert!(status.success(), "agent exited with {status}");
     }
@@ -1058,7 +1053,6 @@ mod accept_mode {
             .await
             .expect("a stalled peer must not block the accept loop");
         client.stop().await.expect("stop");
-        client.close().await;
         let status = wait_for_exit(&mut child).await;
         assert!(status.success(), "agent exited with {status}");
     }

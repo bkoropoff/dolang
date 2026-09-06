@@ -208,9 +208,21 @@ impl Vfs {
         matches!(&self.inner, VfsInner::Direct(_))
     }
 
-    /// Stops a remote backend. Direct backends require no shutdown.
-    pub async fn stop(&self) -> error::Result<()> {
-        match &self.inner {
+    /// Stops a remote backend and ends the connection to it. Direct backends
+    /// require no shutdown.
+    ///
+    /// The peer finishes shutting down once its incoming transport ends, so
+    /// this consumes the VFS and closes the connection itself; a bare request
+    /// would leave the peer waiting on a client with nothing left to say.
+    /// When the request fails the connection is aborted instead, since a peer
+    /// that could not answer may never close its own output. Nested sessions
+    /// stop the whole chain: the peer closes its connection to the far end as
+    /// it services the request.
+    ///
+    /// Clones share one session, so any that outlive this call can no longer
+    /// issue requests.
+    pub async fn stop(self) -> error::Result<()> {
+        match self.inner {
             VfsInner::Client(client) => client.stop().await,
             VfsInner::Direct(_) => Ok(()),
         }

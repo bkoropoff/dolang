@@ -507,7 +507,6 @@ mod live {
         match exercise_result {
             Ok(vfs) => {
                 vfs.stop().await.unwrap();
-                vfs.close().await;
                 server.await.unwrap().unwrap();
             }
             Err(exercise_panic) => {

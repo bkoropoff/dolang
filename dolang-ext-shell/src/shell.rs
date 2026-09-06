@@ -563,169 +563,157 @@ impl<'v> Object<'v> for Vfs {
 
     fn build<'a>(mut builder: TypeBuilder<'v, 'a, Self>) -> TypeBuilder<'v, 'a, Self> {
         let key_sym = builder.sym("key");
-        let builder = builder.type_method("unix_socket", async move |_this, strand, args, out| {
-            let ([path], [key]) = unpack!(strand, args, 1, 0, key_sym = None)?;
-            let global = strand.vm().state::<Global<'v>>();
-            let path = path_from_value(strand, global, &path)?;
-            let key = key
-                .map(|key| bytes_from_value(strand, &key, "key"))
-                .transpose()?;
-            let vfs = global.local.get(strand).vfs();
-            let vfs = error::io_result(
-                strand,
-                vfs.unix_socket(path.to_path(), key.as_deref()).await,
-            )?;
-            let source = VfsSource::Unix(path.clone());
+        let elevate_sym = builder.sym("elevate");
+        let cd_sym = builder.sym("cd");
+        let env_sym = builder.sym("env");
 
-            global.types.vfs.create_with_annex(
-                strand,
-                Vfs,
-                VfsAnnex {
-                    vfs,
-                    source,
-                    global,
-                },
-                out,
-            );
-            Ok(())
-        });
+        builder
+            .type_method("unix_socket", async move |_this, strand, args, out| {
+                let ([path], [key]) = unpack!(strand, args, 1, 0, key_sym = None)?;
+                let global = strand.vm().state::<Global<'v>>();
+                let path = path_from_value(strand, global, &path)?;
+                let key = key
+                    .map(|key| bytes_from_value(strand, &key, "key"))
+                    .transpose()?;
+                let vfs = global.local.get(strand).vfs();
+                let vfs = error::io_result(
+                    strand,
+                    vfs.unix_socket(path.to_path(), key.as_deref()).await,
+                )?;
+                let source = VfsSource::Unix(path.clone());
 
-        let builder = builder.method("with", async move |this, strand, mut args, out| {
-            let func = match args.next() {
-                None => return Err(Error::missing_positional(strand, 0)),
-                Some(Arg::Pos(slot)) => slot,
-                Some(Arg::Key(sym, _)) => return Err(Error::unexpected_key(strand, sym)),
-            };
-            let borrow = this.annex();
-            Local::with_vfs(
-                strand,
-                borrow.global,
-                borrow.vfs.clone(),
-                async move |strand| func.call(strand, args, out).await,
-            )
-            .await
-        });
-
-        let (builder, elevate_sym, cd_sym, env_sym) = {
-            let mut builder = builder;
-            let elevate_sym = builder.sym("elevate");
-            let cd_sym = builder.sym("cd");
-            let env_sym = builder.sym("env");
-            (builder, elevate_sym, cd_sym, env_sym)
-        };
-        let builder = builder.method("stop", async move |this, strand, _args, _out| {
-            // Closing the RPC session releases the stdio pipe handles
-            // after a successful Stop response. A failed request may mean
-            // the peer will never close its output, so abort in that case.
-            // Joining always waits for the launcher to observe the
-            // helper's exit.
-            let annex = this.annex();
-            let stop_result = annex.vfs.stop().await;
-            if stop_result.is_ok() {
-                annex.vfs.clone().close().await;
-            } else {
-                annex.vfs.clone().abort().await;
-            }
-            let join_result = if matches!(&annex.source, VfsSource::Stream) {
-                strand
-                    .with_slots(async move |strand, [mut stream, mut output]| {
-                        let borrow = this.borrow(strand)?;
-                        Output::set(strand, &mut stream, Ref::slot::<0>(&borrow));
-                        drop(borrow);
-                        method!(strand, &stream, annex.global.syms.join, &mut output).await
-                    })
-                    .await
-            } else {
+                global.types.vfs.create_with_annex(
+                    strand,
+                    Vfs,
+                    VfsAnnex {
+                        vfs,
+                        source,
+                        global,
+                    },
+                    out,
+                );
                 Ok(())
-            };
-            match (stop_result, join_result) {
-                // Joining is cleanup, so it must happen even when the
-                // stop request failed. Preserve that request's error when
-                // both operations fail.
-                (Err(error), _) => Err(error.into_sys(strand)),
-                (Ok(()), result) => result,
-            }
-        });
-
-        builder.type_method("windows_admin", async move |_this, strand, args, out| {
-            let ([], [elevate, cd, env_value]) = unpack!(
-                strand,
-                args,
-                0,
-                0,
-                elevate_sym = None,
-                cd_sym = None,
-                env_sym = None
-            )?;
-            let elevate = match elevate {
-                Some(elevate) => util::bool(strand, elevate, "elevate")?,
-                None => true,
-            };
-            let global = strand.vm().state::<Global<'v>>();
-            let current_cwd = global.local.get(strand).cwd().clone();
-            let cwd = if let Some(cd) = cd {
-                let cd = path_from_value(strand, global, &cd)?;
-                if cd.is_absolute() {
-                    cd
-                } else {
-                    current_cwd.join(cd.as_str())
-                }
-            } else {
-                current_cwd
-            };
-            let mut env_overrides = HashMap::new();
-            if let Some(env_value) = env_value {
-                let View::Dict(env_value) = env_value.view(strand) else {
-                    return Err(Error::type_error(strand, "env: expected Dict"));
+            })
+            .method("with", async move |this, strand, mut args, out| {
+                let func = match args.next() {
+                    None => return Err(Error::missing_positional(strand, 0)),
+                    Some(Arg::Pos(slot)) => slot,
+                    Some(Arg::Key(sym, _)) => return Err(Error::unexpected_key(strand, sym)),
                 };
-                let mut pairs = env_value.pairs();
-                strand.with_slots_sync(|strand, [mut key, mut value]| {
-                    while pairs.next(strand, &mut key, &mut value)? {
-                        let key = match key.view(strand) {
-                            View::Str(key) => key.to_string(),
-                            View::Sym(key) => key.as_str(strand).to_string(),
-                            _ => {
-                                return Err(Error::type_error(
-                                    strand,
-                                    "env key: expected Str or Sym",
-                                ));
-                            }
-                        };
-                        let value = if value.is_nil() {
-                            None
-                        } else if value.as_sym(strand) == Some(global.syms.inherit) {
-                            global
-                                .local
-                                .get(strand)
-                                .env()
-                                .get(&key)
-                                .map(|value| value.into_owned())
-                        } else {
-                            Some(value.to_string(strand)?)
-                        };
-                        env_overrides.insert(key, value);
-                    }
+                let borrow = this.annex();
+                Local::with_vfs(
+                    strand,
+                    borrow.global,
+                    borrow.vfs.clone(),
+                    async move |strand| func.call(strand, args, out).await,
+                )
+                .await
+            })
+            .method("stop", async move |this, strand, _args, _out| {
+                // Stopping ends the RPC session too, which releases the stdio
+                // pipe handles. Joining always waits for the launcher to observe
+                // the helper's exit.
+                let annex = this.annex();
+                let stop_result = annex.vfs.clone().stop().await;
+                let join_result = if matches!(&annex.source, VfsSource::Stream) {
+                    strand
+                        .with_slots(async move |strand, [mut stream, mut output]| {
+                            let borrow = this.borrow(strand)?;
+                            Output::set(strand, &mut stream, Ref::slot::<0>(&borrow));
+                            drop(borrow);
+                            method!(strand, &stream, annex.global.syms.join, &mut output).await
+                        })
+                        .await
+                } else {
                     Ok(())
-                })?;
-            }
-            let vfs = global.local.get(strand).vfs();
-            let vfs = error::io_result(
-                strand,
-                vfs.windows_admin(cwd.to_path(), env_overrides, elevate)
-                    .await,
-            )?;
-            global.types.vfs.create_with_annex(
-                strand,
-                Vfs,
-                VfsAnnex {
-                    vfs,
-                    source: VfsSource::WindowsAdmin,
-                    global,
-                },
-                out,
-            );
-            Ok(())
-        })
+                };
+                match (stop_result, join_result) {
+                    // Joining is cleanup, so it must happen even when the
+                    // stop request failed. Preserve that request's error when
+                    // both operations fail.
+                    (Err(error), _) => Err(error.into_sys(strand)),
+                    (Ok(()), result) => result,
+                }
+            })
+            .type_method("windows_admin", async move |_this, strand, args, out| {
+                let ([], [elevate, cd, env_value]) = unpack!(
+                    strand,
+                    args,
+                    0,
+                    0,
+                    elevate_sym = None,
+                    cd_sym = None,
+                    env_sym = None
+                )?;
+                let elevate = match elevate {
+                    Some(elevate) => util::bool(strand, elevate, "elevate")?,
+                    None => true,
+                };
+                let global = strand.vm().state::<Global<'v>>();
+                let current_cwd = global.local.get(strand).cwd().clone();
+                let cwd = if let Some(cd) = cd {
+                    let cd = path_from_value(strand, global, &cd)?;
+                    if cd.is_absolute() {
+                        cd
+                    } else {
+                        current_cwd.join(cd.as_str())
+                    }
+                } else {
+                    current_cwd
+                };
+                let mut env_overrides = HashMap::new();
+                if let Some(env_value) = env_value {
+                    let View::Dict(env_value) = env_value.view(strand) else {
+                        return Err(Error::type_error(strand, "env: expected Dict"));
+                    };
+                    let mut pairs = env_value.pairs();
+                    strand.with_slots_sync(|strand, [mut key, mut value]| {
+                        while pairs.next(strand, &mut key, &mut value)? {
+                            let key = match key.view(strand) {
+                                View::Str(key) => key.to_string(),
+                                View::Sym(key) => key.as_str(strand).to_string(),
+                                _ => {
+                                    return Err(Error::type_error(
+                                        strand,
+                                        "env key: expected Str or Sym",
+                                    ));
+                                }
+                            };
+                            let value = if value.is_nil() {
+                                None
+                            } else if value.as_sym(strand) == Some(global.syms.inherit) {
+                                global
+                                    .local
+                                    .get(strand)
+                                    .env()
+                                    .get(&key)
+                                    .map(|value| value.into_owned())
+                            } else {
+                                Some(value.to_string(strand)?)
+                            };
+                            env_overrides.insert(key, value);
+                        }
+                        Ok(())
+                    })?;
+                }
+                let vfs = global.local.get(strand).vfs();
+                let vfs = error::io_result(
+                    strand,
+                    vfs.windows_admin(cwd.to_path(), env_overrides, elevate)
+                        .await,
+                )?;
+                global.types.vfs.create_with_annex(
+                    strand,
+                    Vfs,
+                    VfsAnnex {
+                        vfs,
+                        source: VfsSource::WindowsAdmin,
+                        global,
+                    },
+                    out,
+                );
+                Ok(())
+            })
     }
 }
 

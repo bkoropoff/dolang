@@ -1761,22 +1761,43 @@ impl Client {
         }
     }
 
-    /// Signal the daemon to stop accepting new connections.
-    pub async fn stop(&self) -> Result<()> {
+    /// Signals the peer to stop, then ends this client's connection to it.
+    ///
+    /// The request alone only tells the peer to stop accepting work; it
+    /// finishes shutting down when its incoming transport ends, so the close
+    /// is part of stopping rather than a separate step a caller may forget.
+    /// A failed request may mean the peer will never close its own output, so
+    /// that case aborts instead of waiting for it.
+    ///
+    /// A nested VFS rides its parent's connection and has no transport of its
+    /// own: the one that has to end is the connection the peer holds to the
+    /// far end, which the peer closes while servicing this request. Closing
+    /// here would take the parent session down with it.
+    pub async fn stop(self) -> Result<()> {
         let stop_result = match self.request(RequestKind::Stop).await {
             Ok(ResponseKind::Stop) => Ok(()),
             Ok(response) => Err(Error::from(unexpected(response))),
             Err(error) => Err(error),
         };
+        let owns_transport = self.vfs.is_none();
         #[cfg(windows)]
-        if let Some(process) = &self.process {
+        if let Some(process) = self.process.clone() {
             if stop_result.is_ok() {
-                self.clone().close().await;
+                if owns_transport {
+                    self.close().await;
+                }
             } else {
                 process.terminate();
             }
             let wait_result = process.stop().await.map_err(Error::from);
             return stop_result.and(wait_result);
+        }
+        if owns_transport {
+            if stop_result.is_ok() {
+                self.close().await;
+            } else {
+                self.abort().await;
+            }
         }
         stop_result
     }
@@ -3481,7 +3502,6 @@ mod tests {
         assert_eq!(second.to_string(), first.to_string());
 
         client.stop().await.unwrap();
-        client.close().await;
         server.await.unwrap().unwrap();
     }
 }
